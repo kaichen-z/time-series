@@ -1,7 +1,23 @@
 ### Report by: Iliass Khoutaibi. 07/31/2026 for paper about time series + LLM agents
-## Which datasets we will use:
 
-Since the task at hand is one of context extraction, we can utilize the following datasets:
+## Dr-CiK Dataset — Retrieval & Context Extraction
+
+**Dataset:** Dr-CiK will be used as the primary dataset. The hardest task is retrieving the important information from the dictionary.
+
+### Plan
+
+- **Time series agents for retrieval**: Use time series agents to retrieve the relevant information — possibly CORAL.
+- **Understand existing retrieval approaches**: Look at LLM agents that have already tackled similar (not necessarily identical) retrieval tasks problems.
+- **Literature review on retrieval methods**: Survey retrieval methods more broadly, not limited to time series.
+- **Other datasets**: Look beyond Dr-CiK at other datasets, though Dr-CiK alone may be sufficient.
+- **Context extraction for generation**: Use these agents to extract context for time series generation. This is important because the approach could generalize to other tasks requiring context, such as news retrieval.
+- **Presentations**: Prepare presentations of the ideas, concise, no rambling, html.
+- **What method ?**: Propose some methods to solve this problem, be critical. Single agent or multi agent ? Probably multi agent. we will need a shared memory: -One that evolves and other fixed one. In Dr-Cik can be improved regarding the recall one. 
+- **Take a look at the time series papers**: Predicting y based on x. 
+- **Claude Code**: Use it for coding but be careful of the otput.
+
+
+<!-- Since the task at hand is one of context extraction, we can utilize the following datasets:
 
 ### 1. Dr-CiK: https://huggingface.co/datasets/ServiceNow/Dr-CiK: 
 
@@ -20,4 +36,4 @@ Since the task at hand is one of context extraction, we can utilize the followin
 ### 3. GIFT-CTX: https://huggingface.co/datasets/Salesforce/GIFT-CTX
 
     - Updated version of Context-is-key, however I did not find contextual information in it.
-
+ -->
