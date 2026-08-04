@@ -120,12 +120,94 @@ class ForecastAdjustment:
 
 
 @dataclass(frozen=True)
+class RevisionAction:
+    """A restricted, evidence-backed edit to the forecast horizon."""
+
+    action_id: str
+    action_type: str
+    start_index: int
+    end_index: int
+    value: float | None
+    values: tuple[float, ...] = ()
+    lower_bound: float | None = None
+    upper_bound: float | None = None
+    source_document_ids: tuple[str, ...] = ()
+    event_type: str = "general"
+    evidence: str = ""
+    confidence: float = 0.0
+    rationale: str = ""
+    memory_entry_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RevisionRecord:
+    action: RevisionAction
+    accepted: bool
+    reason: str
+    affected_steps: int
+    mean_absolute_change: float
+
+
+@dataclass
+class ForecastWorkspace:
+    """Shared state with an immutable baseline and an editable final forecast."""
+
+    benchmark_id: str
+    history_timestamps: tuple[str, ...]
+    history_values: tuple[float, ...]
+    future_timestamps: tuple[str, ...]
+    baseline_method: str
+    baseline_values: tuple[float, ...]
+    final_values: list[float]
+    evidence_proposals: list[RevisionAction] = field(default_factory=list)
+    revision_records: list[RevisionRecord] = field(default_factory=list)
+    memory_entry_ids: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        horizon = len(self.future_timestamps)
+        if len(self.baseline_values) != horizon or len(self.final_values) != horizon:
+            raise ValueError("workspace forecasts must match the future horizon")
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "benchmark_id": self.benchmark_id,
+            "history": {
+                "timestamps": list(self.history_timestamps),
+                "values": list(self.history_values),
+            },
+            "future_timestamps": list(self.future_timestamps),
+            "baseline_method": self.baseline_method,
+            "y_baseline": list(self.baseline_values),
+            "y_final": list(self.final_values),
+            "baseline_immutable": True,
+            "evidence_proposals": [asdict(item) for item in self.evidence_proposals],
+            "revision_records": [asdict(item) for item in self.revision_records],
+            "memory_entry_ids": list(self.memory_entry_ids),
+        }
+
+
+@dataclass(frozen=True)
+class ForecastMemoryEntry:
+    entry_id: str
+    source_task_id: str
+    event_type: str
+    action_type: str
+    proposed_value: float | None
+    recommended_value: float | None
+    baseline_mae: float
+    revised_mae: float
+    lesson: str
+
+
+@dataclass(frozen=True)
 class Forecast:
     mean: tuple[float, ...]
     samples: tuple[tuple[float, ...], ...]
     baseline_method: str
     context_points: dict[str, float] = field(default_factory=dict)
     impact_adjustments: tuple[ForecastAdjustment, ...] = ()
+    baseline_mean: tuple[float, ...] = ()
+    revision_records: tuple[RevisionRecord, ...] = ()
 
 
 @dataclass
@@ -181,6 +263,7 @@ class RunResult:
     metrics: dict[str, float] | None = None
     belief_state: AgentBeliefState | None = None
     loop_trace: list[dict[str, Any]] = field(default_factory=list)
+    workspace: ForecastWorkspace | None = None
 
     def report_dict(self) -> dict[str, Any]:
         return {
@@ -197,13 +280,18 @@ class RunResult:
             "evidence": [asdict(item) for item in self.evidence],
             "forecast": {
                 "mean": list(self.forecast.mean),
+                "baseline_mean": list(self.forecast.baseline_mean),
                 "baseline_method": self.forecast.baseline_method,
                 "context_points": self.forecast.context_points,
                 "impact_adjustments": [
                     asdict(item) for item in self.forecast.impact_adjustments
                 ],
+                "revision_records": [
+                    asdict(item) for item in self.forecast.revision_records
+                ],
                 "num_samples": len(self.forecast.samples),
             },
+            "forecast_workspace": self.workspace.public_dict() if self.workspace else None,
             "metrics": self.metrics,
             "belief_state": self.belief_state.public_dict() if self.belief_state else None,
             "loop_steps": len(self.loop_trace),
@@ -228,4 +316,5 @@ class RunResult:
             "benchmark_id": self.benchmark_id,
             "steps": self.loop_trace,
             "belief_state": self.belief_state.public_dict() if self.belief_state else None,
+            "forecast_workspace": self.workspace.public_dict() if self.workspace else None,
         }

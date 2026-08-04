@@ -8,6 +8,7 @@ from datetime import datetime
 
 from .agents import EvidenceSynthesisAgent, ProbabilisticForecastAgent, RetrievalAgent, tokenize
 from .impacts import EvidenceToForecastAgent
+from .memory import ForecastMemoryBank
 from .metrics import forecast_metrics, retrieval_metrics
 from .models import (
     AgentBeliefState,
@@ -21,6 +22,7 @@ from .models import (
     RetrievedDocument,
     RunResult,
 )
+from .workspace import ForecastWorkspaceExecutor, RevisionPlannerAgent
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,9 @@ class LoopConfig:
     max_no_progress: int = 4
     convergence_tolerance: float = 0.002
     seed: int = 7
+    memory_path: str | None = None
+    memory_weight: float = 0.25
+    learn_from_public_outcomes: bool = False
 
     def __post_init__(self) -> None:
         if self.max_steps <= 0:
@@ -40,6 +45,8 @@ class LoopConfig:
             raise ValueError("documents_per_step must be positive")
         if self.max_no_progress <= 0:
             raise ValueError("max_no_progress must be positive")
+        if not 0.0 <= self.memory_weight <= 1.0:
+            raise ValueError("memory_weight must be between 0 and 1")
 
 
 class QueryPlannerAgent:
@@ -421,7 +428,7 @@ class ForecastCriticAgent:
 
 
 class IterativeAgentSystem:
-    """Plan → retrieve → verify → update beliefs → forecast → critique."""
+    """Retrieve evidence, then revise an immutable baseline through restricted actions."""
 
     def __init__(self, config: LoopConfig | None = None) -> None:
         from .agents import TimeSeriesDiagnosisAgent
@@ -434,6 +441,11 @@ class IterativeAgentSystem:
         self.updater_agent = BeliefUpdaterAgent()
         self.impact_agent = EvidenceToForecastAgent()
         self.forecast_agent = ProbabilisticForecastAgent()
+        self.memory = ForecastMemoryBank(self.config.memory_path)
+        self.revision_planner = RevisionPlannerAgent(
+            self.memory, memory_weight=self.config.memory_weight
+        )
+        self.workspace_executor = ForecastWorkspaceExecutor()
         self.critic_agent = ForecastCriticAgent()
 
     def run(self, task: ForecastTask) -> RunResult:
@@ -442,6 +454,10 @@ class IterativeAgentSystem:
         accepted_items: dict[str, RetrievedDocument] = {}
         trace: list[dict[str, object]] = []
         task_seed = self.config.seed + sum(ord(character) for character in task.benchmark_id)
+        baseline_values, baseline_method = self.forecast_agent.baseline(task, diagnosis)
+        workspace = self.workspace_executor.initialize(
+            task, baseline_values, baseline_method
+        )
         final_forecast: Forecast | None = None
 
         for step in range(1, self.config.max_steps + 1):
@@ -473,15 +489,54 @@ class IterativeAgentSystem:
                 accepted_ranked,
                 state.accepted_evidence,
             )
+            known_action_ids = {
+                record.action.action_id for record in workspace.revision_records
+            }
+            step_revision_records = []
+            for proposal in self.revision_planner.propose(
+                task, diagnosis, state.evidence_impacts
+            ):
+                if proposal.action_id in known_action_ids:
+                    continue
+                record = self.workspace_executor.apply(workspace, proposal)
+                step_revision_records.append(record)
+                known_action_ids.add(proposal.action_id)
+
+            # Explicit future values in verified documents are represented as
+            # point overrides, so every numerical edit still passes through
+            # the same restricted action interface.
+            context_points = self.forecast_agent._extract_context_points(
+                task.future_timestamps, accepted_ranked
+            )
+            source_ids = tuple(item.document.document_id for item in accepted_ranked)
+            for index, timestamp in enumerate(task.future_timestamps):
+                if timestamp not in context_points:
+                    continue
+                proposal = self.revision_planner.point_override(
+                    workspace,
+                    index,
+                    context_points[timestamp],
+                    self.config.context_weight,
+                    source_ids,
+                )
+                if proposal.action_id in known_action_ids:
+                    continue
+                record = self.workspace_executor.apply(workspace, proposal)
+                step_revision_records.append(record)
+                known_action_ids.add(proposal.action_id)
+
             previous_forecast = state.forecast_history[-1] if state.forecast_history else None
-            final_forecast = self.forecast_agent.forecast(
+            final_forecast = self.forecast_agent.forecast_from_mean(
                 task=task,
                 diagnosis=diagnosis,
-                retrieved=accepted_ranked,
+                mean=tuple(workspace.final_values),
+                baseline_mean=workspace.baseline_values,
+                baseline_method=workspace.baseline_method,
                 num_samples=self.config.num_samples,
                 seed=task_seed,
-                context_weight=self.config.context_weight,
-                impacts=state.evidence_impacts,
+                context_points=context_points,
+                impact_adjustments=self.workspace_executor.adjustments(workspace),
+                revision_records=workspace.revision_records,
             )
             state.forecast_history.append(final_forecast)
             forecast_change = self.critic_agent.relative_change(previous_forecast, final_forecast)
@@ -514,8 +569,15 @@ class IterativeAgentSystem:
                     "evidence_impacts": [
                         asdict(impact) for impact in state.evidence_impacts
                     ],
+                    "revision_proposals": [
+                        asdict(record.action) for record in step_revision_records
+                    ],
+                    "revision_results": [
+                        asdict(record) for record in step_revision_records
+                    ],
                     "forecast": {
                         "baseline_method": final_forecast.baseline_method,
+                        "baseline_head": list(workspace.baseline_values[:5]),
                         "mean_head": list(final_forecast.mean[:5]),
                         "mean_tail": list(final_forecast.mean[-5:]),
                         "context_point_count": len(final_forecast.context_points),
@@ -533,13 +595,16 @@ class IterativeAgentSystem:
                 break
 
         if final_forecast is None:
-            final_forecast = self.forecast_agent.forecast(
-                task,
-                diagnosis,
-                [],
-                self.config.num_samples,
-                task_seed,
-                self.config.context_weight,
+            final_forecast = self.forecast_agent.forecast_from_mean(
+                task=task,
+                diagnosis=diagnosis,
+                mean=tuple(workspace.final_values),
+                baseline_mean=workspace.baseline_values,
+                baseline_method=workspace.baseline_method,
+                num_samples=self.config.num_samples,
+                seed=task_seed,
+                impact_adjustments=self.workspace_executor.adjustments(workspace),
+                revision_records=workspace.revision_records,
             )
             state.forecast_history.append(final_forecast)
             state.stop_reason = "no_loop_iteration"
@@ -561,7 +626,20 @@ class IterativeAgentSystem:
             metrics=metrics or None,
             belief_state=state,
             loop_trace=trace,
+            workspace=workspace,
         )
 
     def run_many(self, tasks: list[ForecastTask]) -> list[RunResult]:
-        return [self.run(task) for task in tasks]
+        results: list[RunResult] = []
+        for task in tasks:
+            result = self.run(task)
+            results.append(result)
+            if self.config.learn_from_public_outcomes and task.future_values is not None:
+                self.record_outcome(task, result)
+        return results
+
+    def record_outcome(self, task: ForecastTask, result: RunResult):
+        """Update memory after resolution; never called inside inference for a task."""
+        if result.workspace is None:
+            raise ValueError("post-hoc learning requires a forecast workspace")
+        return self.memory.record_outcome(task, result.workspace)

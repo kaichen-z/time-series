@@ -16,6 +16,7 @@ from .models import (
     ForecastAdjustment,
     ForecastTask,
     RetrievedDocument,
+    RevisionRecord,
 )
 
 
@@ -299,6 +300,11 @@ class ProbabilisticForecastAgent:
         slope = diagnosis.slope_per_step
         return [values[-1] + slope * (step + 1) for step in range(horizon)], "damped_linear_trend"
 
+    def baseline(self, task: ForecastTask, diagnosis: Diagnosis) -> tuple[tuple[float, ...], str]:
+        """Generate the forecasting backbone output exactly once."""
+        values, method = self._baseline(task, diagnosis)
+        return tuple(values), method
+
     @staticmethod
     def _extract_context_points(
         future_timestamps: tuple[str, ...], retrieved: list[RetrievedDocument]
@@ -411,6 +417,37 @@ class ProbabilisticForecastAgent:
             if timestamp in context_points:
                 mean[index] = (1 - context_weight) * mean[index] + context_weight * context_points[timestamp]
 
+        return self.forecast_from_mean(
+            task=task,
+            diagnosis=diagnosis,
+            mean=tuple(mean),
+            baseline_mean=tuple(baseline),
+            baseline_method=method,
+            num_samples=num_samples,
+            seed=seed,
+            context_points=context_points,
+            impact_adjustments=impact_adjustments,
+        )
+
+    def forecast_from_mean(
+        self,
+        task: ForecastTask,
+        diagnosis: Diagnosis,
+        mean: tuple[float, ...],
+        baseline_mean: tuple[float, ...],
+        baseline_method: str,
+        num_samples: int,
+        seed: int,
+        context_points: dict[str, float] | None = None,
+        impact_adjustments: tuple[ForecastAdjustment, ...] = (),
+        revision_records: tuple[RevisionRecord, ...] | list[RevisionRecord] = (),
+    ) -> Forecast:
+        """Attach uncertainty samples to an already audited workspace forecast."""
+        if num_samples < 2:
+            raise ValueError("num_samples must be at least 2")
+        if len(mean) != task.prediction_length or len(baseline_mean) != task.prediction_length:
+            raise ValueError("forecast means must match prediction_length")
+
         nonnegative = min(task.history_values) >= 0
         random_generator = random.Random(seed)
         samples: list[tuple[float, ...]] = []
@@ -425,7 +462,9 @@ class ProbabilisticForecastAgent:
         return Forecast(
             mean=tuple(mean),
             samples=tuple(samples),
-            baseline_method=method,
-            context_points=context_points,
+            baseline_method=baseline_method,
+            context_points=context_points or {},
             impact_adjustments=impact_adjustments,
+            baseline_mean=tuple(baseline_mean),
+            revision_records=tuple(revision_records),
         )

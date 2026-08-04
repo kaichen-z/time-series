@@ -60,7 +60,7 @@ def forecast_metrics(task: ForecastTask, forecast: Forecast) -> dict[str, float]
     mae = _mean_absolute_error(truth, forecast.mean)
     rmse = _root_mean_squared_error(truth, forecast.mean)
     crps = crps_ensemble(truth, forecast.samples)
-    return {
+    metrics = {
         "mae": mae,
         "rmse": rmse,
         "crps": crps,
@@ -69,6 +69,21 @@ def forecast_metrics(task: ForecastTask, forecast: Forecast) -> dict[str, float]
         "srmse_proxy": min(5.0, rmse / scale),
         "scrps_proxy": min(5.0, crps / scale),
     }
+    if forecast.baseline_mean:
+        baseline_mae = _mean_absolute_error(truth, forecast.baseline_mean)
+        baseline_rmse = _root_mean_squared_error(truth, forecast.baseline_mean)
+        metrics.update(
+            {
+                "baseline_mae": baseline_mae,
+                "baseline_rmse": baseline_rmse,
+                "revision_value_mae": baseline_mae - mae,
+                "relative_revision_gain": (
+                    (baseline_mae - mae) / baseline_mae if baseline_mae > 1e-12 else 0.0
+                ),
+                "harmful_revision": float(mae > baseline_mae),
+            }
+        )
+    return metrics
 
 
 def retrieval_metrics(
@@ -94,4 +109,3 @@ def retrieval_metrics(
             len(predicted_tokens & gold_tokens) / len(gold_tokens) if gold_tokens else 0.0
         )
     return metrics
-
