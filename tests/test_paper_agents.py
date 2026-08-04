@@ -119,7 +119,12 @@ class PaperInspiredAgentTest(unittest.TestCase):
 
     def test_loop_exposes_blf_beliefs_nexus_outlooks_and_retrieval_scores(self) -> None:
         result = IterativeAgentSystem(
-            LoopConfig(max_steps=6, documents_per_step=1, seed=1)
+            LoopConfig(
+                max_steps=6,
+                documents_per_step=1,
+                seed=1,
+                backbone="statistical",
+            )
         ).run(future_impact_task())
 
         self.assertIsNotNone(result.workspace.macro_outlook)

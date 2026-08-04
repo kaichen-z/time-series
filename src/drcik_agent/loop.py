@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 
 from .agents import EvidenceSynthesisAgent, ProbabilisticForecastAgent, RetrievalAgent, tokenize
+from .backbones import TimesFMBackboneConfig, build_forecast_backbone
 from .context import ImportanceAwareContextAgent, RetrievalProcessRewardAgent
 from .impacts import EvidenceToForecastAgent
 from .memory import ForecastMemoryBank
@@ -43,6 +44,13 @@ class LoopConfig:
     retrieval_candidate_multiplier: int = 3
     context_character_budget: int = 12000
     revision_utility_threshold: float = 0.60
+    backbone: str = "timesfm"
+    timesfm_model_id: str = "google/timesfm-2.5-200m-pytorch"
+    timesfm_max_context: int = 4096
+    timesfm_max_horizon: int = 1024
+    timesfm_cache_dir: str | None = None
+    timesfm_local_files_only: bool = False
+    allow_statistical_fallback: bool = False
 
     def __post_init__(self) -> None:
         if self.max_steps <= 0:
@@ -59,6 +67,8 @@ class LoopConfig:
             raise ValueError("context_character_budget must be positive")
         if not 0.0 <= self.revision_utility_threshold <= 1.0:
             raise ValueError("revision_utility_threshold must be between 0 and 1")
+        if self.backbone not in {"timesfm", "statistical"}:
+            raise ValueError("backbone must be 'timesfm' or 'statistical'")
 
 
 class QueryPlannerAgent:
@@ -499,7 +509,18 @@ class IterativeAgentSystem:
         self.verifier_agent = EvidenceVerifierAgent()
         self.updater_agent = BeliefUpdaterAgent()
         self.impact_agent = EvidenceToForecastAgent()
-        self.forecast_agent = ProbabilisticForecastAgent()
+        backbone = build_forecast_backbone(
+            self.config.backbone,
+            timesfm_config=TimesFMBackboneConfig(
+                model_id=self.config.timesfm_model_id,
+                max_context=self.config.timesfm_max_context,
+                max_horizon=self.config.timesfm_max_horizon,
+                cache_dir=self.config.timesfm_cache_dir,
+                local_files_only=self.config.timesfm_local_files_only,
+            ),
+            allow_statistical_fallback=self.config.allow_statistical_fallback,
+        )
+        self.forecast_agent = ProbabilisticForecastAgent(backbone)
         self.context_agent = ImportanceAwareContextAgent(
             total_character_budget=self.config.context_character_budget
         )

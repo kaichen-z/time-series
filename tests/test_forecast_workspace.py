@@ -101,7 +101,7 @@ class ForecastWorkspaceTest(unittest.TestCase):
 
     def test_iterative_result_exposes_baseline_final_and_actions(self) -> None:
         result = IterativeAgentSystem(
-            LoopConfig(max_steps=5, documents_per_step=1, seed=1)
+            LoopConfig(max_steps=5, documents_per_step=1, seed=1, backbone="statistical")
         ).run(future_impact_task())
 
         self.assertIsNotNone(result.workspace)
@@ -122,7 +122,13 @@ class ForecastWorkspaceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "memory.jsonl"
             system = IterativeAgentSystem(
-                LoopConfig(max_steps=5, documents_per_step=1, seed=1, memory_path=str(path))
+                LoopConfig(
+                    max_steps=5,
+                    documents_per_step=1,
+                    seed=1,
+                    memory_path=str(path),
+                    backbone="statistical",
+                )
             )
             result = system.run(task)
             self.assertFalse(path.exists())

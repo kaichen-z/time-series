@@ -7,6 +7,7 @@ import statistics
 from collections import Counter
 from dataclasses import dataclass
 
+from .backbones import ForecastBackbone, StatisticalForecastBackbone
 from .models import (
     Diagnosis,
     Document,
@@ -280,25 +281,14 @@ class EvidenceSynthesisAgent:
 
 
 class ProbabilisticForecastAgent:
+    def __init__(self, backbone: ForecastBackbone | None = None) -> None:
+        # Direct construction remains lightweight for unit tests and the
+        # one-pass legacy API. Systems explicitly select their backbone.
+        self.backbone = backbone or StatisticalForecastBackbone()
+
     def _baseline(self, task: ForecastTask, diagnosis: Diagnosis) -> tuple[list[float], str]:
-        values = task.history_values
-        period = diagnosis.seasonal_period
-        horizon = task.prediction_length
-        if period and 0 < period <= len(values):
-            last_cycle = values[-period:]
-            drift = [0.0] * period
-            if len(values) >= 2 * period:
-                previous_cycle = values[-2 * period : -period]
-                drift = [current - previous for current, previous in zip(last_cycle, previous_cycle)]
-            baseline = []
-            for step in range(horizon):
-                phase = step % period
-                cycle = step // period + 1
-                baseline.append(last_cycle[phase] + 0.75 * cycle * drift[phase])
-            method = "drifted_seasonal_naive" if any(abs(value) > 1e-12 for value in drift) else "seasonal_naive"
-            return baseline, method
-        slope = diagnosis.slope_per_step
-        return [values[-1] + slope * (step + 1) for step in range(horizon)], "damped_linear_trend"
+        values, method = self.backbone.forecast(task, diagnosis)
+        return list(values), method
 
     def baseline(self, task: ForecastTask, diagnosis: Diagnosis) -> tuple[tuple[float, ...], str]:
         """Generate the forecasting backbone output exactly once."""

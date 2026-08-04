@@ -12,6 +12,7 @@ from .agents import (
     RetrievalAgent,
     TimeSeriesDiagnosisAgent,
 )
+from .backbones import TimesFMBackboneConfig, build_forecast_backbone
 from .metrics import forecast_metrics, retrieval_metrics
 from .models import ForecastTask, RunResult
 
@@ -22,6 +23,17 @@ class SystemConfig:
     num_samples: int = 100
     context_weight: float = 0.75
     seed: int = 7
+    backbone: str = "timesfm"
+    timesfm_model_id: str = "google/timesfm-2.5-200m-pytorch"
+    timesfm_max_context: int = 4096
+    timesfm_max_horizon: int = 1024
+    timesfm_cache_dir: str | None = None
+    timesfm_local_files_only: bool = False
+    allow_statistical_fallback: bool = False
+
+    def __post_init__(self) -> None:
+        if self.backbone not in {"timesfm", "statistical"}:
+            raise ValueError("backbone must be 'timesfm' or 'statistical'")
 
 
 class MinimalAgentSystem:
@@ -32,7 +44,18 @@ class MinimalAgentSystem:
         self.diagnosis_agent = TimeSeriesDiagnosisAgent()
         self.retrieval_agent = RetrievalAgent()
         self.evidence_agent = EvidenceSynthesisAgent()
-        self.forecast_agent = ProbabilisticForecastAgent()
+        backbone = build_forecast_backbone(
+            self.config.backbone,
+            timesfm_config=TimesFMBackboneConfig(
+                model_id=self.config.timesfm_model_id,
+                max_context=self.config.timesfm_max_context,
+                max_horizon=self.config.timesfm_max_horizon,
+                cache_dir=self.config.timesfm_cache_dir,
+                local_files_only=self.config.timesfm_local_files_only,
+            ),
+            allow_statistical_fallback=self.config.allow_statistical_fallback,
+        )
+        self.forecast_agent = ProbabilisticForecastAgent(backbone)
 
     def run(self, task: ForecastTask) -> RunResult:
         diagnosis = self.diagnosis_agent.diagnose(task)

@@ -54,6 +54,29 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
         default=0.60,
         help="Minimum predicted utility required to revise the numerical prior",
     )
+    parser.add_argument(
+        "--backbone",
+        choices=("timesfm", "statistical"),
+        default="timesfm",
+        help="Numerical forecasting backbone; TimesFM 2.5 is the default",
+    )
+    parser.add_argument(
+        "--timesfm-model-id",
+        default="google/timesfm-2.5-200m-pytorch",
+    )
+    parser.add_argument("--timesfm-max-context", type=int, default=4096)
+    parser.add_argument("--timesfm-max-horizon", type=int, default=1024)
+    parser.add_argument("--timesfm-cache-dir", default=None)
+    parser.add_argument(
+        "--timesfm-local-files-only",
+        action="store_true",
+        help="Do not download a checkpoint; require it in the local Hugging Face cache",
+    )
+    parser.add_argument(
+        "--allow-statistical-fallback",
+        action="store_true",
+        help="Explicitly fall back to the statistical ablation if TimesFM cannot load",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -111,6 +134,13 @@ def main(argv: list[str] | None = None) -> None:
                 num_samples=arguments.samples,
                 context_weight=arguments.context_weight,
                 seed=arguments.seed,
+                backbone=arguments.backbone,
+                timesfm_model_id=arguments.timesfm_model_id,
+                timesfm_max_context=arguments.timesfm_max_context,
+                timesfm_max_horizon=arguments.timesfm_max_horizon,
+                timesfm_cache_dir=arguments.timesfm_cache_dir,
+                timesfm_local_files_only=arguments.timesfm_local_files_only,
+                allow_statistical_fallback=arguments.allow_statistical_fallback,
             )
         )
     else:
@@ -128,6 +158,13 @@ def main(argv: list[str] | None = None) -> None:
                 retrieval_candidate_multiplier=arguments.candidate_multiplier,
                 context_character_budget=arguments.context_character_budget,
                 revision_utility_threshold=arguments.revision_threshold,
+                backbone=arguments.backbone,
+                timesfm_model_id=arguments.timesfm_model_id,
+                timesfm_max_context=arguments.timesfm_max_context,
+                timesfm_max_horizon=arguments.timesfm_max_horizon,
+                timesfm_cache_dir=arguments.timesfm_cache_dir,
+                timesfm_local_files_only=arguments.timesfm_local_files_only,
+                allow_statistical_fallback=arguments.allow_statistical_fallback,
             )
         )
     results = system.run_many(tasks)

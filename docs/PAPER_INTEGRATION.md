@@ -2,7 +2,8 @@
 
 This document records which ideas are used in the Dr-CiK system and where they belong.
 The primary constraint is leakage-safe forecasting: task outcomes and Dr-CiK labels are
-never available to an online agent.
+never available to an online agent. TimesFM 2.5 supplies the numerical prior by default;
+the agents operate only on a copied final forecast.
 
 ## Selected online agents
 
@@ -57,7 +58,7 @@ to the revision gate and are saved in the forecast workspace.
 Sources: PostTime and *Bridging the Last Mile of Time Series Forecasting with LLM Agents*.
 
 The agent does not forecast from scratch. It evaluates whether a proposed edit has enough
-evidence to improve a strong numerical prior. Its score uses evidence confidence, belief
+evidence to improve the TimesFM prior. Its score uses evidence confidence, belief
 sufficiency, source corroboration, magnitude specificity, horizon validity, prior memory,
 and weak macro/micro conflicts. A proposal below the threshold becomes an explicit
 `preserve` action rather than a guessed numerical intervention.

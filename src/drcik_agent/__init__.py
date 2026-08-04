@@ -1,6 +1,12 @@
 """Forecast-aware iterative retrieval system for Dr-CiK."""
 
 from .loop import IterativeAgentSystem, LoopConfig
+from .backbones import (
+    BackboneUnavailableError,
+    StatisticalForecastBackbone,
+    TimesFMBackboneConfig,
+    TimesFMForecastBackbone,
+)
 from .context import ImportanceAwareContextAgent, RetrievalProcessRewardAgent
 from .impacts import EvidenceToForecastAgent
 from .memory import ForecastMemoryBank
@@ -11,6 +17,7 @@ from .workspace import ForecastWorkspaceExecutor, RevisionPlannerAgent
 
 __all__ = [
     "Document",
+    "BackboneUnavailableError",
     "EvidenceImpact",
     "EvidenceToForecastAgent",
     "ForecastTask",
@@ -28,5 +35,8 @@ __all__ = [
     "RevisionPlannerAgent",
     "RevisionUtilityAgent",
     "SystemConfig",
+    "StatisticalForecastBackbone",
+    "TimesFMBackboneConfig",
+    "TimesFMForecastBackbone",
 ]
-__version__ = "0.5.0"
+__version__ = "0.6.0"

@@ -2,14 +2,15 @@
 
 Repository: <https://github.com/kaichen-z/time-series>
 
-This repository contains a dependency-free, auditable agent loop for the
+This repository contains an auditable agent loop for the
 [Dr-CiK](https://github.com/ServiceNow/Dr-CiK) contextual time-series forecasting
 benchmark. The forecasting architecture now follows the central idea of
 [Bridging the Last Mile of Time Series Forecasting with LLM Agents](https://arxiv.org/pdf/2606.02497):
 a numerical forecasting backbone creates an immutable baseline, while an agent may
 revise only the future forecast through a small, evidence-backed action language.
 
-The paper's forecast workspace and restricted actions are combined with this project's
+The numerical backbone is now Google Research TimesFM 2.5 by default. The paper's
+forecast workspace and restricted actions are combined with this project's
 existing iterative Dr-CiK retrieval, evidence verification, and evidence-to-impact
 translation. All components remain deterministic so every retrieval decision and
 numerical revision can be inspected before substituting LLM or TSFM components.
@@ -19,7 +20,7 @@ numerical revision can be inspected before substituting LLM or TSFM components.
 ```text
 historical values + noisy document corpus
           |
-          +--> TS diagnosis --> forecast backbone --> immutable y_baseline
+          +--> TS diagnosis --> TimesFM 2.5 backbone --> immutable y_baseline
           |                                           copy to y_final
           |
           +--> Query Planner --> BM25 candidate pool
@@ -59,7 +60,7 @@ historical values + noisy document corpus
 actual outcomes (after resolution only) --> post-hoc memory --> later tasks
 ```
 
-The baseline is generated exactly once. Retrieval cannot rewrite historical values or
+The TimesFM baseline is generated exactly once. Retrieval cannot rewrite historical values or
 `y_baseline`; it can only propose changes to `y_final`. This makes it possible to ask
 whether context improved the forecast instead of hiding the backbone and the contextual
 revision inside one opaque prompt.
@@ -79,7 +80,8 @@ together:
 | [CORAL](https://arxiv.org/pdf/2604.01658) | Shared persistent artifacts and evaluator separation inform the architecture | Long-running autonomous evolution belongs outside task inference to prevent leakage and uncontrolled benchmark search |
 
 See [`docs/PAPER_INTEGRATION.md`](docs/PAPER_INTEGRATION.md) for the module mapping and
-recommended ablations.
+recommended ablations, and [`docs/TIMESFM_BACKBONE.md`](docs/TIMESFM_BACKBONE.md) for
+backbone configuration.
 
 Each loop iteration asks one forecast-relevant question:
 
@@ -135,20 +137,25 @@ Clone Dr-CiK and run its three official sample tasks:
 git clone https://github.com/ServiceNow/Dr-CiK.git external/Dr-CiK
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e '.[timesfm]'
 
 drcik-agent run-sample \
   --sample-dir external/Dr-CiK/sample \
   --output-dir outputs/agent-loop
 ```
 
-The same run works without installation:
+The project entrypoint can run directly from source after installing the TimesFM runtime:
 
 ```bash
+pip install 'timesfm[torch]>=2.0.2'
 PYTHONPATH=src python3 -m drcik_agent run-sample \
   --sample-dir external/Dr-CiK/sample \
   --output-dir outputs/agent-loop
 ```
+
+The package and the `google/timesfm-2.5-200m-pytorch` checkpoint are loaded lazily on
+the first forecast. `timesfm[torch]` installs PyTorch; the checkpoint is downloaded from
+Hugging Face unless it is already cached.
 
 Useful loop controls:
 
@@ -165,6 +172,23 @@ drcik-agent run-sample \
   --context-character-budget 12000 \
   --revision-threshold 0.60
 ```
+
+TimesFM controls:
+
+```bash
+drcik-agent run-sample \
+  --sample-dir external/Dr-CiK/sample \
+  --backbone timesfm \
+  --timesfm-model-id google/timesfm-2.5-200m-pytorch \
+  --timesfm-max-context 4096 \
+  --timesfm-max-horizon 1024 \
+  --timesfm-cache-dir outputs/model-cache
+```
+
+TimesFM is the default and failure is explicit. The system does not silently switch to
+the old statistical model. For an intentional degraded-mode run, add
+`--allow-statistical-fallback`; the recorded baseline method will begin with
+`statistical_fallback:`. For a clean ablation, use `--backbone statistical`.
 
 `--top-k 5 --candidate-multiplier 3` retrieves 15 candidates, scores all 15 for
 forecasting utility, and sends only the best 5 to the verifier. The ranking and
@@ -218,7 +242,7 @@ actually improved the forecasting backbone. It also reports `revision_accept_rat
 ## Public development split
 
 ```bash
-pip install -e '.[huggingface]'
+pip install -e '.[timesfm,huggingface]'
 drcik-agent run-hf --public-dev --output-dir outputs/public-dev
 ```
 
@@ -243,7 +267,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 | Working memory | BLF-inspired linguistic belief state plus unified forecast workspace | Multi-trial continuous-trajectory aggregation |
 | Evidence impact | Event window, direction, permanence, explicit magnitude, and conservative fallback | LLM causal-impact estimator with calibrated uncertainty |
 | Reasoning | NEXUS-style macro numerical and micro event outlooks | LLM outlook agents with schema-constrained outputs |
-| Forecast backbone | Drifted seasonal or trend baseline with uncertainty samples | TimesFM/Chronos backbone |
+| Forecast backbone | TimesFM 2.5 200M point forecast; statistical backbone retained only for explicit ablation/fallback | Use TimesFM quantiles directly for calibrated trajectory sampling |
 | Last-mile revision | PostTime-style revise/preserve gate plus restricted workspace actions | Post-train a compact reviser with SFT and improvement-ratio RLVR |
 | Outcome memory | Optional post-resolution calibration lessons in JSONL | Event embeddings and leakage-safe chronological retrieval |
 | Control | Convergence, no-progress, exhaustion, and step-budget stopping | CORAL-style offline strategy evolution on isolated development runs |
