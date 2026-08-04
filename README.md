@@ -1,44 +1,60 @@
-# time-series
+# Dr-CiK Iterative Forecasting Agent
 
-## Minimal Dr-CiK Forecasting Agent
+Repository: <https://github.com/kaichen-z/time-series>
 
-This repository contains a dependency-free vertical slice for the Dr-CiK task:
+This repository contains a dependency-free, auditable agent loop for the
+[Dr-CiK](https://github.com/ServiceNow/Dr-CiK) contextual time-series forecasting
+benchmark. It is a small research baseline: the components are deterministic so that
+retrieval, verification, memory updates, forecasting, and stopping behavior can be
+inspected before LLM-based components are introduced.
+
+## System flow
 
 ```text
-historical time series + noisy document corpus
-                    |
-                    v
-        Time-Series Diagnosis Agent
-                    |
-                    v
-             Retrieval Agent
-                    |
-                    v
-         Evidence Synthesis Agent
-                    |
-                    v
-       Probabilistic Forecast Agent
-                    |
-                    v
- retrieval metrics + forecast metrics + official submission files
+historical values + noisy document corpus
+                  |
+                  v
+         Time-Series Diagnosis
+                  |
+                  v
+     +------ persistent belief state <------------------+
+     |                                                   |
+     v                                                   |
+Query Planner -> BM25 Retrieval -> Evidence Verifier     |
+                                      |                  |
+                                      v                  |
+                               Belief Updater            |
+                                      |                  |
+                                      v                  |
+                          Probabilistic Forecaster       |
+                                      |                  |
+                                      v                  |
+                              Forecast Critic -----------+
+                                      |
+                              stop when resolved,
+                              converged, exhausted,
+                              or budget reached
 ```
 
-The baseline is intentionally small and deterministic. It establishes a runnable
-evaluation harness before Nexus-, BLF-, or CORAL-style components are introduced.
-Benchmark role/subtype labels are stripped before retrieval, so the agent cannot use
-ground-truth document labels during inference.
+Each loop iteration asks one forecast-relevant question:
 
-### What it produces
+1. What caused historical anomalies or regime changes?
+2. Was the disruption resolved, and was its effect temporary or permanent?
+3. Which external events changed the target and over what time window?
+4. Which trend or seasonal regime should govern the forecast horizon?
 
-- `forecasts.jsonl`: Dr-CiK forecasting-track format with 100 sample trajectories per task.
-- `deep_research.jsonl`: cited document IDs and extracted evidence.
-- `run_report.jsonl`: diagnosis, retrieval scores, forecast mean, and per-task metrics.
-- `summary.json`: aggregate development metrics.
+The verifier checks entity identity, temporal alignment, target relevance, whether the
+document answers the current question, and whether textual claims conflict with the
+observed numerical pattern. A document rejected only because it answers a different
+question remains available to later iterations.
 
-Local `sMAE`, `sRMSE`, and `sCRPS` are explicitly labeled as development proxies. The
-official hidden-test scores are computed by the Dr-CiK maintainers.
+Dr-CiK's `role`, `subtype`, `future_values`, and `gt_evidence` fields are never exposed
+to the inference loop. Public labels are used only after a run to calculate development
+metrics.
 
-### Quick start with the official sample
+## Quick start
+
+Clone Dr-CiK and run its three official sample tasks:
 
 ```bash
 git clone https://github.com/ServiceNow/Dr-CiK.git external/Dr-CiK
@@ -48,44 +64,81 @@ pip install -e .
 
 drcik-agent run-sample \
   --sample-dir external/Dr-CiK/sample \
-  --output-dir outputs/official-sample
+  --output-dir outputs/agent-loop
 ```
 
-The same command can be run without installation:
+The same run works without installation:
 
 ```bash
 PYTHONPATH=src python3 -m drcik_agent run-sample \
   --sample-dir external/Dr-CiK/sample \
-  --output-dir outputs/official-sample
+  --output-dir outputs/agent-loop
 ```
 
-### Run the full public development split
+Useful loop controls:
+
+```bash
+drcik-agent run-sample \
+  --sample-dir external/Dr-CiK/sample \
+  --output-dir outputs/agent-loop \
+  --system iterative \
+  --max-steps 10 \
+  --top-k 5 \
+  --max-no-progress 4 \
+  --convergence-tolerance 0.002
+```
+
+`--top-k` is the number of new documents inspected at each iteration. The original
+one-pass baseline is preserved for ablations:
+
+```bash
+drcik-agent run-sample \
+  --sample-dir external/Dr-CiK/sample \
+  --output-dir outputs/one-pass \
+  --system one-pass \
+  --top-k 8
+```
+
+## Outputs
+
+- `forecasts.jsonl`: Dr-CiK forecasting submission format with 100 trajectories per task.
+- `deep_research.jsonl`: accepted document IDs and extracted evidence.
+- `loop_trace.jsonl`: every query, candidate, verifier verdict, belief update, forecast
+  summary, and stop decision.
+- `run_report.jsonl`: per-task diagnosis, belief state, forecast, and development metrics.
+- `summary.json`: aggregate development metrics.
+
+Local `sMAE`, `sRMSE`, and `sCRPS` values are explicitly development proxies. Official
+hidden-test scores are calculated by the Dr-CiK maintainers.
+
+## Public development split
 
 ```bash
 pip install -e '.[huggingface]'
 drcik-agent run-hf --public-dev --output-dir outputs/public-dev
 ```
 
-Use `--limit 5` while developing. The hidden test split can be executed with
-`--hidden-test`; because its labels are withheld, the system creates submission files
-but no forecast scores.
+Use `--limit 5` for a short development run. `--hidden-test` creates submission files
+without local forecast scores because the hidden labels are unavailable.
 
-### Test
+## Tests
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-### Current baseline and next replacements
+## Current scope
 
-| Module | v0.1 implementation | Planned upgrade |
+| Component | Current implementation | Natural next experiment |
 |---|---|---|
-| Diagnosis | Trend, seasonality, residual scale, information needs | LLM time-series diagnosis |
-| Retrieval | BM25 over the task corpus | Multi-hop forecast-aware retrieval |
-| Evidence | Extractive structured claims | Evidence verifier with conflict checks |
-| Forecast | Seasonal naive + exact contextual values + uncertainty samples | Nexus-style macro/micro synthesis |
-| Memory/loop | One pass | BLF-style belief state and forecast-feedback loop |
+| Diagnosis | Trend, robust residual scale, conservative seasonality inference | Specialized TSFM diagnostics |
+| Planning | Four explicit unresolved information needs | LLM query planner |
+| Retrieval | Iterative BM25 with per-question document memory | Agentic multi-hop or hybrid retrieval |
+| Verification | Entity/time/question/numerical consistency checks | LLM verifier plus cross-document corroboration |
+| Memory | Structured persistent belief state and audit trail | BLF-style linguistic probability beliefs |
+| Forecast | Drifted seasonal or trend baseline with uncertainty samples | Nexus-style macro/micro synthesis |
+| Control | Convergence, no-progress, exhaustion, and step-budget stopping | CORAL-style reflection and strategy evolution |
 
-The next scientifically meaningful experiment is not to add every component at once.
-It is to compare `no context`, `oracle context`, this one-pass retrieval baseline, and a
-forecast-aware iterative retrieval variant under the same forecaster.
+The first controlled comparison should be `no context` vs. `oracle context` vs.
+`one-pass retrieval` vs. `iterative retrieval`, all using the same forecaster. This
+separates retrieval gains from forecasting-model gains.

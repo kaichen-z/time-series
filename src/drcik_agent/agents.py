@@ -52,6 +52,48 @@ def _correlation(left: list[float], right: list[float]) -> float:
     return numerator / (scale_left * scale_right)
 
 
+def _infer_seasonal_period(values: tuple[float, ...]) -> tuple[int | None, float]:
+    """Infer a short repeated cycle after removing a linear trend.
+
+    Dr-CiK occasionally stores pandas frequency aliases (for example ``D`` or
+    ``5T``) in the seasonal-period field.  Those aliases are not step counts,
+    so the agent needs a conservative numerical fallback.
+    """
+    if len(values) < 12:
+        return None, 0.0
+    candidates: list[tuple[float, int]] = []
+    # Smooth trends have high autocorrelation at lags 2, 3, 4, ... even when
+    # they are not periodic.  Look for an interior autocorrelation peak across
+    # several recent windows instead of blindly selecting the smallest lag.
+    for requested_window in (48, 72, 96, 180):
+        window = min(len(values), requested_window)
+        if window < 12:
+            continue
+        recent = values[-window:]
+        slope = _linear_slope(recent)
+        intercept = statistics.fmean(recent) - slope * (len(recent) - 1) / 2
+        detrended = [value - (intercept + slope * index) for index, value in enumerate(recent)]
+        maximum_lag = min(60, len(detrended) // 2)
+        correlations = [
+            (lag, _correlation(detrended[lag:], detrended[:-lag]))
+            for lag in range(3, maximum_lag + 1)
+        ]
+        for index in range(1, len(correlations) - 1):
+            lag, correlation = correlations[index]
+            if correlation >= correlations[index - 1][1] and correlation >= correlations[index + 1][1]:
+                candidates.append((correlation, lag))
+        if correlations:
+            lag, correlation = correlations[-1]
+            if correlation >= correlations[-2][1]:
+                candidates.append((correlation, lag))
+    if not candidates:
+        return None, 0.0
+    strength, period = max(candidates, key=lambda item: (item[0], -item[1]))
+    if strength < 0.45:
+        return None, max(0.0, strength)
+    return period, max(0.0, strength)
+
+
 class TimeSeriesDiagnosisAgent:
     def diagnose(self, task: ForecastTask) -> Diagnosis:
         values = task.history_values
@@ -65,7 +107,8 @@ class TimeSeriesDiagnosisAgent:
         else:
             trend = "stable"
 
-        period = task.seasonal_period
+        inferred_period, inferred_strength = _infer_seasonal_period(values)
+        period = task.seasonal_period or inferred_period
         seasonal_strength = 0.0
         seasonal_errors: list[float] = []
         if period and 0 < period < len(values):
@@ -74,9 +117,21 @@ class TimeSeriesDiagnosisAgent:
                 _correlation(list(values[period:]), list(values[:-period])),
             )
             seasonal_errors = [values[index] - values[index - period] for index in range(period, len(values))]
+        if task.seasonal_period is None and inferred_period == period:
+            seasonal_strength = max(seasonal_strength, inferred_strength)
         first_differences = [values[index] - values[index - 1] for index in range(1, len(values))]
         residuals = seasonal_errors or first_differences or [0.0]
-        residual_scale = statistics.pstdev(residuals)
+        recent_count = 2 * period if period else 50
+        recent_residuals = residuals[-min(len(residuals), recent_count) :]
+        residual_std = statistics.pstdev(recent_residuals)
+        residual_median = statistics.median(recent_residuals)
+        residual_mad = 1.4826 * statistics.median(
+            abs(value - residual_median) for value in recent_residuals
+        )
+        # Historical anomalies can make the raw standard deviation unusably
+        # large.  A recent robust scale retains uncertainty without allowing a
+        # resolved incident to dominate every future sample trajectory.
+        residual_scale = min(residual_std, max(residual_mad, 0.1 * residual_std))
         if residual_scale <= 1e-12:
             residual_scale = max(statistics.pstdev(values) * 0.05, abs(values[-1]) * 0.01, 1e-6)
 
@@ -123,15 +178,22 @@ class RetrievalAgent:
         task: ForecastTask,
         diagnosis: Diagnosis,
         top_k: int,
+        query: str | None = None,
+        exclude_ids: set[str] | None = None,
     ) -> list[RetrievedDocument]:
-        documents = [document.agent_view() for document in task.documents]
+        excluded = exclude_ids or set()
+        documents = [
+            document.agent_view()
+            for document in task.documents
+            if document.document_id not in excluded
+        ]
         if not documents or top_k <= 0:
             return []
         tokenized = [tokenize(document.text) for document in documents]
         document_frequency: Counter[str] = Counter()
         for tokens in tokenized:
             document_frequency.update(set(tokens))
-        query_counts = Counter(tokenize(diagnosis.retrieval_query))
+        query_counts = Counter(tokenize(query or diagnosis.retrieval_query))
         average_length = statistics.fmean([len(tokens) for tokens in tokenized]) or 1.0
         total_documents = len(documents)
 
@@ -211,11 +273,21 @@ class EvidenceSynthesisAgent:
 class ProbabilisticForecastAgent:
     def _baseline(self, task: ForecastTask, diagnosis: Diagnosis) -> tuple[list[float], str]:
         values = task.history_values
-        period = task.seasonal_period
+        period = diagnosis.seasonal_period
         horizon = task.prediction_length
         if period and 0 < period <= len(values):
-            baseline = [values[-period + (step % period)] for step in range(horizon)]
-            return baseline, "seasonal_naive"
+            last_cycle = values[-period:]
+            drift = [0.0] * period
+            if len(values) >= 2 * period:
+                previous_cycle = values[-2 * period : -period]
+                drift = [current - previous for current, previous in zip(last_cycle, previous_cycle)]
+            baseline = []
+            for step in range(horizon):
+                phase = step % period
+                cycle = step // period + 1
+                baseline.append(last_cycle[phase] + 0.75 * cycle * drift[phase])
+            method = "drifted_seasonal_naive" if any(abs(value) > 1e-12 for value in drift) else "seasonal_naive"
+            return baseline, method
         slope = diagnosis.slope_per_step
         return [values[-1] + slope * (step + 1) for step in range(horizon)], "damped_linear_trend"
 

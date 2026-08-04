@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "drcik-minimal-agent"
-version = "0.1.0"
-description = "A minimal, modular forecasting-agent baseline for Dr-CiK"
+version = "0.2.0"
+description = "A forecast-aware iterative retrieval and forecasting agent for Dr-CiK"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
@@ -19,4 +19,3 @@ drcik-agent = "drcik_agent.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
