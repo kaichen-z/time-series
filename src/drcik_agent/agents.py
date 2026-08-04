@@ -7,11 +7,19 @@ import statistics
 from collections import Counter
 from dataclasses import dataclass
 
-from .models import Diagnosis, Document, Evidence, Forecast, ForecastTask, RetrievedDocument
+from .models import (
+    Diagnosis,
+    Document,
+    Evidence,
+    EvidenceImpact,
+    Forecast,
+    ForecastAdjustment,
+    ForecastTask,
+    RetrievedDocument,
+)
 
 
 TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]{1,}|\d{4}-\d{2}-\d{2}|\d+(?:\.\d+)?")
-NUMBER_RE = re.compile(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?")
 STOPWORDS = {
     "about", "after", "again", "also", "among", "and", "are", "been", "before",
     "being", "between", "both", "but", "can", "could", "does", "each", "for",
@@ -299,21 +307,86 @@ class ProbabilisticForecastAgent:
         for item in retrieved:
             text = item.document.text
             for timestamp in future_timestamps:
-                start = 0
-                while True:
-                    position = text.find(timestamp, start)
-                    if position < 0:
-                        break
-                    following = text[position + len(timestamp) : position + len(timestamp) + 64]
-                    match = NUMBER_RE.search(following)
-                    if match:
-                        values_by_timestamp[timestamp].append(float(match.group(0).replace(",", "")))
-                    start = position + len(timestamp)
+                pattern = re.compile(
+                    re.escape(timestamp)
+                    + r"\s*[),|:=]\s*(?:value\s*[=:]\s*)?"
+                    + r"([-+]?\d+(?:,\d{3})*(?:\.\d+)?)",
+                    re.IGNORECASE,
+                )
+                for match in pattern.finditer(text):
+                    values_by_timestamp[timestamp].append(
+                        float(match.group(1).replace(",", ""))
+                    )
         return {
             timestamp: statistics.median(values)
             for timestamp, values in values_by_timestamp.items()
             if values
         }
+
+    @staticmethod
+    def _affected_indices(task: ForecastTask, impact: EvidenceImpact) -> list[int]:
+        if impact.forecast_relation == "forecast_relevant_undated":
+            return list(range(task.prediction_length))
+        if impact.forecast_relation != "overlaps_forecast":
+            return []
+        start = impact.start_timestamp
+        end = impact.end_timestamp
+        if impact.permanence == "permanent" and start and end is None:
+            end = task.future_timestamps[-1]
+        indices: list[int] = []
+        for index, timestamp in enumerate(task.future_timestamps):
+            date_or_timestamp = timestamp[: len(start)] if start else timestamp
+            after_start = start is None or date_or_timestamp >= start
+            date_or_timestamp = timestamp[: len(end)] if end else timestamp
+            before_end = end is None or date_or_timestamp <= end
+            if after_start and before_end:
+                indices.append(index)
+        return indices
+
+    @staticmethod
+    def _apply_impacts(
+        task: ForecastTask,
+        diagnosis: Diagnosis,
+        baseline: list[float],
+        impacts: list[EvidenceImpact],
+    ) -> tuple[list[float], tuple[ForecastAdjustment, ...]]:
+        adjusted = list(baseline)
+        audit: list[ForecastAdjustment] = []
+        for impact in impacts:
+            indices = ProbabilisticForecastAgent._affected_indices(task, impact)
+            before = [adjusted[index] for index in indices]
+            value = impact.adjustment_value
+            if impact.adjustment_kind == "multiplier" and value is not None:
+                for index in indices:
+                    adjusted[index] *= value
+            elif impact.adjustment_kind == "percentage" and value is not None:
+                for index in indices:
+                    adjusted[index] *= 1.0 + value
+            elif impact.adjustment_kind == "standardized_additive" and value is not None:
+                for index in indices:
+                    adjusted[index] += value * diagnosis.residual_scale
+            elif impact.adjustment_kind == "absolute_additive" and value is not None:
+                for index in indices:
+                    adjusted[index] += value
+            mean_change = (
+                statistics.fmean(
+                    abs(adjusted[index] - old_value)
+                    for index, old_value in zip(indices, before)
+                )
+                if indices
+                else 0.0
+            )
+            audit.append(
+                ForecastAdjustment(
+                    source_document_ids=impact.source_document_ids,
+                    adjustment_kind=impact.adjustment_kind,
+                    adjustment_value=impact.adjustment_value,
+                    affected_steps=len(indices),
+                    mean_absolute_change=mean_change,
+                    rationale=impact.rationale,
+                )
+            )
+        return adjusted, tuple(audit)
 
     def forecast(
         self,
@@ -323,14 +396,17 @@ class ProbabilisticForecastAgent:
         num_samples: int,
         seed: int,
         context_weight: float,
+        impacts: list[EvidenceImpact] | None = None,
     ) -> Forecast:
         if num_samples < 2:
             raise ValueError("num_samples must be at least 2")
         if not 0.0 <= context_weight <= 1.0:
             raise ValueError("context_weight must be between 0 and 1")
         baseline, method = self._baseline(task, diagnosis)
+        mean, impact_adjustments = self._apply_impacts(
+            task, diagnosis, baseline, impacts or []
+        )
         context_points = self._extract_context_points(task.future_timestamps, retrieved)
-        mean = list(baseline)
         for index, timestamp in enumerate(task.future_timestamps):
             if timestamp in context_points:
                 mean[index] = (1 - context_weight) * mean[index] + context_weight * context_points[timestamp]
@@ -351,4 +427,5 @@ class ProbabilisticForecastAgent:
             samples=tuple(samples),
             baseline_method=method,
             context_points=context_points,
+            impact_adjustments=impact_adjustments,
         )
