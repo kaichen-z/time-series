@@ -164,7 +164,13 @@ class MinimalSystemTest(unittest.TestCase):
             task, diagnosis, [], 100, 1, 0.75
         )
         result = IterativeAgentSystem(
-            LoopConfig(max_steps=10, documents_per_step=1, max_no_progress=4, seed=1)
+            LoopConfig(
+                max_steps=10,
+                documents_per_step=1,
+                max_no_progress=4,
+                seed=1,
+                backbone="statistical",
+            )
         ).run(task)
 
         self.assertIn("external_drivers", result.belief_state.answered_question_ids)
@@ -246,7 +252,13 @@ class MinimalSystemTest(unittest.TestCase):
     def test_end_to_end_uses_context_without_label_leakage(self) -> None:
         task = example_task()
         system = MinimalAgentSystem(
-            SystemConfig(top_k=1, num_samples=100, context_weight=1.0, seed=1)
+            SystemConfig(
+                top_k=1,
+                num_samples=100,
+                context_weight=1.0,
+                seed=1,
+                backbone="statistical",
+            )
         )
         result = system.run(task)
 
@@ -258,7 +270,12 @@ class MinimalSystemTest(unittest.TestCase):
 
     def test_outputs_match_submission_shapes(self) -> None:
         result = MinimalAgentSystem(
-            SystemConfig(top_k=1, num_samples=100, context_weight=1.0)
+            SystemConfig(
+                top_k=1,
+                num_samples=100,
+                context_weight=1.0,
+                backbone="statistical",
+            )
         ).run(example_task())
         with tempfile.TemporaryDirectory() as temporary_directory:
             write_outputs([result], temporary_directory)
@@ -278,6 +295,7 @@ class MinimalSystemTest(unittest.TestCase):
                 num_samples=100,
                 max_no_progress=4,
                 seed=3,
+                backbone="statistical",
             )
         ).run(iterative_task())
 
@@ -293,7 +311,12 @@ class MinimalSystemTest(unittest.TestCase):
 
     def test_iterative_outputs_include_auditable_trace(self) -> None:
         result = IterativeAgentSystem(
-            LoopConfig(max_steps=4, documents_per_step=1, num_samples=100)
+            LoopConfig(
+                max_steps=4,
+                documents_per_step=1,
+                num_samples=100,
+                backbone="statistical",
+            )
         ).run(iterative_task())
         with tempfile.TemporaryDirectory() as temporary_directory:
             write_outputs([result], temporary_directory)
