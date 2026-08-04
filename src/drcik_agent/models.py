@@ -110,6 +110,79 @@ class EvidenceImpact:
 
 
 @dataclass(frozen=True)
+class LinguisticBelief:
+    """BLF-inspired compact belief about whether an information need is resolved."""
+
+    question_id: str
+    evidence_sufficiency: float
+    evidence_summary: tuple[str, ...] = ()
+    counterevidence_summary: tuple[str, ...] = ()
+    update_count: int = 0
+
+
+@dataclass(frozen=True)
+class RetrievalCandidateAssessment:
+    document_id: str
+    bm25_score: float
+    utility_score: float
+    relevance_score: float
+    causal_score: float
+    temporal_score: float
+    novelty_score: float
+    rationale: str
+
+
+@dataclass(frozen=True)
+class ContextCompressionRecord:
+    document_id: str
+    utility_score: float
+    original_characters: int
+    retained_characters: int
+    allocated_characters: int
+    retained_sentences: int
+
+
+@dataclass(frozen=True)
+class MacroOutlook:
+    direction: str
+    slope_per_step: float
+    seasonal_period: int | None
+    seasonal_strength: float
+    baseline_method: str
+    confidence: float
+    summary: str
+
+
+@dataclass(frozen=True)
+class MicroEventOutlook:
+    event_type: str
+    direction: str
+    start_timestamp: str | None
+    end_timestamp: str | None
+    forecast_relation: str
+    adjustment_kind: str
+    confidence: float
+    source_document_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class MicroOutlook:
+    events: tuple[MicroEventOutlook, ...]
+    confidence: float
+    summary: str
+
+
+@dataclass(frozen=True)
+class RevisionDecision:
+    action_id: str
+    revise: bool
+    utility_score: float
+    threshold: float
+    reasons: tuple[str, ...]
+    fallback_action_id: str | None = None
+
+
+@dataclass(frozen=True)
 class ForecastAdjustment:
     source_document_ids: tuple[str, ...]
     adjustment_kind: str
@@ -161,6 +234,10 @@ class ForecastWorkspace:
     final_values: list[float]
     evidence_proposals: list[RevisionAction] = field(default_factory=list)
     revision_records: list[RevisionRecord] = field(default_factory=list)
+    revision_decisions: list[RevisionDecision] = field(default_factory=list)
+    context_compression: list[ContextCompressionRecord] = field(default_factory=list)
+    macro_outlook: MacroOutlook | None = None
+    micro_outlook: MicroOutlook | None = None
     memory_entry_ids: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -182,6 +259,10 @@ class ForecastWorkspace:
             "baseline_immutable": True,
             "evidence_proposals": [asdict(item) for item in self.evidence_proposals],
             "revision_records": [asdict(item) for item in self.revision_records],
+            "revision_decisions": [asdict(item) for item in self.revision_decisions],
+            "context_compression": [asdict(item) for item in self.context_compression],
+            "macro_outlook": asdict(self.macro_outlook) if self.macro_outlook else None,
+            "micro_outlook": asdict(self.micro_outlook) if self.micro_outlook else None,
             "memory_entry_ids": list(self.memory_entry_ids),
         }
 
@@ -224,6 +305,7 @@ class AgentBeliefState:
     evidence_impacts: list[EvidenceImpact] = field(default_factory=list)
     rejected_reasons: dict[str, list[str]] = field(default_factory=dict)
     beliefs: dict[str, list[str]] = field(default_factory=dict)
+    linguistic_beliefs: dict[str, LinguisticBelief] = field(default_factory=dict)
     query_history: list[QueryAction] = field(default_factory=list)
     forecast_history: list[Forecast] = field(default_factory=list)
     no_progress_steps: int = 0
@@ -246,6 +328,9 @@ class AgentBeliefState:
             "evidence_impacts": [asdict(item) for item in self.evidence_impacts],
             "rejected_reasons": {key: list(value) for key, value in self.rejected_reasons.items()},
             "beliefs": {key: list(value) for key, value in self.beliefs.items()},
+            "linguistic_beliefs": {
+                key: asdict(value) for key, value in self.linguistic_beliefs.items()
+            },
             "query_history": [asdict(item) for item in self.query_history],
             "forecast_count": len(self.forecast_history),
             "no_progress_steps": self.no_progress_steps,

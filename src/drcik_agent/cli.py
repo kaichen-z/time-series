@@ -36,6 +36,24 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Research-only: write memory after each labeled task resolves; never used for hidden test",
     )
+    parser.add_argument(
+        "--candidate-multiplier",
+        type=int,
+        default=3,
+        help="Retrieve this multiple of top-k before forecast-utility reranking",
+    )
+    parser.add_argument(
+        "--context-character-budget",
+        type=int,
+        default=12000,
+        help="Total importance-aware context budget across accepted documents",
+    )
+    parser.add_argument(
+        "--revision-threshold",
+        type=float,
+        default=0.60,
+        help="Minimum predicted utility required to revise the numerical prior",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -107,6 +125,9 @@ def main(argv: list[str] | None = None) -> None:
                 seed=arguments.seed,
                 memory_path=arguments.memory_file,
                 learn_from_public_outcomes=arguments.learn_from_public_outcomes,
+                retrieval_candidate_multiplier=arguments.candidate_multiplier,
+                context_character_budget=arguments.context_character_budget,
+                revision_utility_threshold=arguments.revision_threshold,
             )
         )
     results = system.run_many(tasks)

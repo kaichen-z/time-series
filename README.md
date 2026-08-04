@@ -22,26 +22,39 @@ historical values + noisy document corpus
           +--> TS diagnosis --> forecast backbone --> immutable y_baseline
           |                                           copy to y_final
           |
-          +--> Query Planner --> BM25 Retrieval --> Evidence Verifier
-                                      ^                    |
-                                      |                    v
-                              persistent belief <-- Belief Updater
-                                                           |
-                                                           v
-                                                  Evidence-to-Impact
-                                                           |
-                                                           v
-                                                Structured Proposals
-                                                           |
-                                                           v
-                              Forecast Workspace + Restricted Action Executor
-                              preserve | multiply | add | clip | point override
-                                                           |
-                                                           v
-                                            y_final + uncertainty samples
-                                                           |
-                                                           v
-                                              Forecast Critic --> next query/stop
+          +--> Query Planner --> BM25 candidate pool
+                                      |
+                                      v
+                         Retrieval Utility Ranker (PRM proxy)
+                                      |
+                                      v
+                              Evidence Verifier
+                                      |
+                                      v
+                        Bayesian Linguistic Belief State
+                                      |
+                                      v
+                      Importance-Aware Context Compression
+                                      |
+                                      v
+                              Evidence-to-Impact
+                                      |
+                         +------------+------------+
+                         v                         v
+                 Macro Outlook              Micro Outlook
+                         +------------+------------+
+                                      v
+                         Revision Utility Gate
+                           revise or preserve
+                                      |
+                                      v
+                  Forecast Workspace + Restricted Actions
+                                      |
+                                      v
+                       y_final + uncertainty samples
+                                      |
+                                      v
+                         Forecast Critic --> next query/stop
 
 actual outcomes (after resolution only) --> post-hoc memory --> later tasks
 ```
@@ -50,6 +63,23 @@ The baseline is generated exactly once. Retrieval cannot rewrite historical valu
 `y_baseline`; it can only propose changes to `y_final`. This makes it possible to ask
 whether context improved the forecast instead of hiding the backbone and the contextual
 revision inside one opaque prompt.
+
+## Paper-derived design
+
+The runtime is deliberately a synthesis rather than five complete frameworks stacked
+together:
+
+| Work | What is integrated now | What is not placed in online inference |
+|---|---|---|
+| [Last-Mile Forecasting](https://arxiv.org/pdf/2606.02497) | Immutable baseline, forecast workspace, evidence-backed restricted actions | None of its case-specific prompts are required |
+| [PostTime](https://arxiv.org/pdf/2605.29401) | LLM-as-reviser role, explicit revise-or-preserve gate, improvement-over-baseline metrics, hard-case fallback behavior | SFT/RLVR weight training requires a separate training corpus and GPUs |
+| [From Long News to Accurate Forecast](https://arxiv.org/abs/2606.03097) | Candidate-pool utility reranking and forecast-aware long-document compression | The current scorer is a frozen label-free proxy; learned RM/PRM training is an offline next step |
+| [BLF](https://arxiv.org/pdf/2604.18576) | Compact linguistic belief state updated in log-odds space instead of accumulating raw text | Binary Platt calibration and logit aggregation do not directly apply to continuous trajectories |
+| [NEXUS](https://arxiv.org/pdf/2605.14389) | Separate macro numerical outlook and micro event outlook before final synthesis | LLM prompts can replace the deterministic agents after controlled ablations |
+| [CORAL](https://arxiv.org/pdf/2604.01658) | Shared persistent artifacts and evaluator separation inform the architecture | Long-running autonomous evolution belongs outside task inference to prevent leakage and uncontrolled benchmark search |
+
+See [`docs/PAPER_INTEGRATION.md`](docs/PAPER_INTEGRATION.md) for the module mapping and
+recommended ablations.
 
 Each loop iteration asks one forecast-relevant question:
 
@@ -68,8 +98,9 @@ window, direction, permanence, forecast-horizon overlap, magnitude, confidence, 
 auditable adjustment rule. Explicit effects such as `increase by 20%` or `2 times the
 usual demand` change the affected forecast steps directly. An event that ended before
 the horizon produces a `return_to_baseline` instruction and is not extrapolated. A
-future directional claim without a magnitude receives only a conservative
-quarter-residual adjustment, rather than an invented large effect.
+future directional claim without a magnitude produces a conservative candidate, but the
+revision utility gate normally falls back to the numerical prior unless other evidence
+raises its predicted utility.
 
 Each impact then becomes a proposal with an event type, affected range, action type,
 value, source documents, confidence, rationale, and any retrieved memory IDs. The
@@ -129,8 +160,15 @@ drcik-agent run-sample \
   --max-steps 10 \
   --top-k 5 \
   --max-no-progress 4 \
-  --convergence-tolerance 0.002
+  --convergence-tolerance 0.002 \
+  --candidate-multiplier 3 \
+  --context-character-budget 12000 \
+  --revision-threshold 0.60
 ```
+
+`--top-k 5 --candidate-multiplier 3` retrieves 15 candidates, scores all 15 for
+forecasting utility, and sends only the best 5 to the verifier. The ranking and
+compression modules never see `future_values`.
 
 Optional outcome memory for sequential research runs:
 
@@ -162,8 +200,8 @@ drcik-agent run-sample \
 - `forecasts.jsonl`: Dr-CiK forecasting submission format with 100 trajectories per task.
 - `deep_research.jsonl`: accepted document IDs and extracted evidence.
 - `loop_trace.jsonl`: every query, candidate, verifier verdict, structured evidence
-  impact, revision proposal, accepted/rejected action, belief update, forecast summary,
-  and stop decision.
+  utility score, compression decision, macro/micro outlook, revision decision,
+  accepted/rejected action, belief update, forecast summary, and stop decision.
 - `run_report.jsonl`: per-task diagnosis, belief state, development metrics, and the full
   forecast workspace containing historical observations, immutable `y_baseline`, editable
   `y_final`, proposals, action results, and memory references.
@@ -173,7 +211,9 @@ Local `sMAE`, `sRMSE`, and `sCRPS` values are explicitly development proxies. Of
 hidden-test scores are calculated by the Dr-CiK maintainers. When a workspace is used,
 the report also includes `baseline_mae`, `revision_value_mae`,
 `relative_revision_gain`, and `harmful_revision` to measure whether the last-mile agent
-actually improved the forecasting backbone.
+actually improved the forecasting backbone. It also reports `revision_accept_rate`,
+`revision_fallback_rate`, `mean_predicted_revision_utility`,
+`context_retention_ratio`, and `mean_belief_sufficiency`.
 
 ## Public development split
 
@@ -197,14 +237,16 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 |---|---|---|
 | Diagnosis | Trend, robust residual scale, conservative seasonality inference | Specialized TSFM diagnostics |
 | Planning | Four explicit unresolved information needs | LLM query planner |
-| Retrieval | Iterative BM25 with per-question document memory | Agentic multi-hop or hybrid retrieval |
+| Retrieval | BM25 candidate pool plus label-free forecast-utility reranking | Train the long-news PRM on chronological development trajectories |
 | Verification | Entity/time/question/numerical consistency checks | LLM verifier plus cross-document corroboration |
-| Working memory | Structured belief state plus unified forecast workspace | BLF-style linguistic probability beliefs |
+| Context | Importance-aware sentence retention under a global character budget | Learned article reward model and pairwise fusion |
+| Working memory | BLF-inspired linguistic belief state plus unified forecast workspace | Multi-trial continuous-trajectory aggregation |
 | Evidence impact | Event window, direction, permanence, explicit magnitude, and conservative fallback | LLM causal-impact estimator with calibrated uncertainty |
-| Forecast backbone | Drifted seasonal or trend baseline with uncertainty samples | TimesFM/Chronos/Nexus macro-micro backbone |
-| Last-mile revision | Immutable baseline, structured proposals, restricted actions, duplicate and safety checks | Learned proposal ranking and counterfactual revision scoring |
+| Reasoning | NEXUS-style macro numerical and micro event outlooks | LLM outlook agents with schema-constrained outputs |
+| Forecast backbone | Drifted seasonal or trend baseline with uncertainty samples | TimesFM/Chronos backbone |
+| Last-mile revision | PostTime-style revise/preserve gate plus restricted workspace actions | Post-train a compact reviser with SFT and improvement-ratio RLVR |
 | Outcome memory | Optional post-resolution calibration lessons in JSONL | Event embeddings and leakage-safe chronological retrieval |
-| Control | Convergence, no-progress, exhaustion, and step-budget stopping | CORAL-style reflection and strategy evolution |
+| Control | Convergence, no-progress, exhaustion, and step-budget stopping | CORAL-style offline strategy evolution on isolated development runs |
 
 The first controlled comparison should be `backbone only` vs. `oracle context` vs.
 `one-pass retrieval` vs. `iterative retrieval + unrestricted revision` vs. `iterative

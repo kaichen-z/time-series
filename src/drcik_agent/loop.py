@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 
 from .agents import EvidenceSynthesisAgent, ProbabilisticForecastAgent, RetrievalAgent, tokenize
+from .context import ImportanceAwareContextAgent, RetrievalProcessRewardAgent
 from .impacts import EvidenceToForecastAgent
 from .memory import ForecastMemoryBank
 from .metrics import forecast_metrics, retrieval_metrics
@@ -18,10 +19,12 @@ from .models import (
     EvidenceVerdict,
     Forecast,
     ForecastTask,
+    LinguisticBelief,
     QueryAction,
     RetrievedDocument,
     RunResult,
 )
+from .reasoning import MacroReasoningAgent, MicroReasoningAgent, RevisionUtilityAgent
 from .workspace import ForecastWorkspaceExecutor, RevisionPlannerAgent
 
 
@@ -37,6 +40,9 @@ class LoopConfig:
     memory_path: str | None = None
     memory_weight: float = 0.25
     learn_from_public_outcomes: bool = False
+    retrieval_candidate_multiplier: int = 3
+    context_character_budget: int = 12000
+    revision_utility_threshold: float = 0.60
 
     def __post_init__(self) -> None:
         if self.max_steps <= 0:
@@ -47,6 +53,12 @@ class LoopConfig:
             raise ValueError("max_no_progress must be positive")
         if not 0.0 <= self.memory_weight <= 1.0:
             raise ValueError("memory_weight must be between 0 and 1")
+        if self.retrieval_candidate_multiplier <= 0:
+            raise ValueError("retrieval_candidate_multiplier must be positive")
+        if self.context_character_budget <= 0:
+            raise ValueError("context_character_budget must be positive")
+        if not 0.0 <= self.revision_utility_threshold <= 1.0:
+            raise ValueError("revision_utility_threshold must be between 0 and 1")
 
 
 class QueryPlannerAgent:
@@ -85,7 +97,13 @@ class QueryPlannerAgent:
             available = list(self.QUESTIONS)
         question_id, question, keywords = min(
             available,
-            key=lambda item: (state.attempt_counts.get(item[0], 0), self.question_ids.index(item[0])),
+            key=lambda item: (
+                state.attempt_counts.get(item[0], 0),
+                state.linguistic_beliefs.get(
+                    item[0], LinguisticBelief(item[0], 0.5)
+                ).evidence_sufficiency,
+                self.question_ids.index(item[0]),
+            ),
         )
         query = " ".join(
             (
@@ -319,6 +337,44 @@ class EvidenceVerifierAgent:
 
 
 class BeliefUpdaterAgent:
+    @staticmethod
+    def _update_linguistic_belief(
+        state: AgentBeliefState,
+        action: QueryAction,
+        verdicts: list[EvidenceVerdict],
+    ) -> None:
+        previous = state.linguistic_beliefs.get(
+            action.question_id,
+            LinguisticBelief(action.question_id, 0.5),
+        )
+        probability = min(0.999, max(0.001, previous.evidence_sufficiency))
+        log_odds = math.log(probability / (1.0 - probability))
+        accepted = [verdict for verdict in verdicts if verdict.accepted]
+        if accepted:
+            log_odds += sum(0.35 + 1.5 * max(0.0, verdict.score - 0.43) for verdict in accepted)
+        else:
+            log_odds -= 0.30
+        posterior = 1.0 / (1.0 + math.exp(-log_odds))
+        evidence_summary = list(previous.evidence_summary)
+        counterevidence = list(previous.counterevidence_summary)
+        for verdict in accepted:
+            for evidence in verdict.evidence:
+                if evidence.claim not in evidence_summary:
+                    evidence_summary.append(evidence.claim)
+        for verdict in verdicts:
+            if verdict.accepted:
+                continue
+            summary = f"{verdict.document_id}: {', '.join(verdict.reasons[:-1])}"
+            if summary not in counterevidence:
+                counterevidence.append(summary)
+        state.linguistic_beliefs[action.question_id] = LinguisticBelief(
+            question_id=action.question_id,
+            evidence_sufficiency=posterior,
+            evidence_summary=tuple(evidence_summary[-8:]),
+            counterevidence_summary=tuple(counterevidence[-8:]),
+            update_count=previous.update_count + 1,
+        )
+
     def update(
         self,
         state: AgentBeliefState,
@@ -374,6 +430,8 @@ class BeliefUpdaterAgent:
                 if not soft_question_mismatch and verdict.document_id not in state.rejected_document_ids:
                     state.rejected_document_ids.append(verdict.document_id)
                 state.rejected_reasons[verdict.document_id] = list(verdict.reasons)
+
+        self._update_linguistic_belief(state, action, verdicts)
 
         if question_supported:
             if action.question_id in state.open_question_ids:
@@ -437,10 +495,19 @@ class IterativeAgentSystem:
         self.diagnosis_agent = TimeSeriesDiagnosisAgent()
         self.planner_agent = QueryPlannerAgent()
         self.retrieval_agent = RetrievalAgent()
+        self.retrieval_reward_agent = RetrievalProcessRewardAgent()
         self.verifier_agent = EvidenceVerifierAgent()
         self.updater_agent = BeliefUpdaterAgent()
         self.impact_agent = EvidenceToForecastAgent()
         self.forecast_agent = ProbabilisticForecastAgent()
+        self.context_agent = ImportanceAwareContextAgent(
+            total_character_budget=self.config.context_character_budget
+        )
+        self.macro_agent = MacroReasoningAgent()
+        self.micro_agent = MicroReasoningAgent()
+        self.revision_utility_agent = RevisionUtilityAgent(
+            self.config.revision_utility_threshold
+        )
         self.memory = ForecastMemoryBank(self.config.memory_path)
         self.revision_planner = RevisionPlannerAgent(
             self.memory, memory_weight=self.config.memory_weight
@@ -450,7 +517,13 @@ class IterativeAgentSystem:
 
     def run(self, task: ForecastTask) -> RunResult:
         diagnosis = self.diagnosis_agent.diagnose(task)
-        state = AgentBeliefState(open_question_ids=self.planner_agent.question_ids)
+        state = AgentBeliefState(
+            open_question_ids=self.planner_agent.question_ids,
+            linguistic_beliefs={
+                question_id: LinguisticBelief(question_id, 0.5)
+                for question_id in self.planner_agent.question_ids
+            },
+        )
         accepted_items: dict[str, RetrievedDocument] = {}
         trace: list[dict[str, object]] = []
         task_seed = self.config.seed + sum(ord(character) for character in task.benchmark_id)
@@ -458,19 +531,29 @@ class IterativeAgentSystem:
         workspace = self.workspace_executor.initialize(
             task, baseline_values, baseline_method
         )
+        workspace.macro_outlook = self.macro_agent.analyze(
+            task, diagnosis, baseline_method
+        )
         final_forecast: Forecast | None = None
 
         for step in range(1, self.config.max_steps + 1):
             action = self.planner_agent.plan(task, state)
-            candidates = self.retrieval_agent.retrieve(
+            candidate_pool = self.retrieval_agent.retrieve(
                 task,
                 diagnosis,
-                self.config.documents_per_step,
+                self.config.documents_per_step * self.config.retrieval_candidate_multiplier,
                 query=action.query,
                 exclude_ids=(
                     set(state.rejected_document_ids)
                     | set(state.reviewed_document_ids_by_question.get(action.question_id, []))
                 ),
+            )
+            candidates, candidate_assessments = self.retrieval_reward_agent.rank(
+                task,
+                action,
+                candidate_pool,
+                state,
+                self.config.documents_per_step,
             )
             verdicts = self.verifier_agent.verify(task, diagnosis, action, candidates)
             new_accepted = self.updater_agent.update(state, action, verdicts)
@@ -483,30 +566,49 @@ class IterativeAgentSystem:
                 RetrievedDocument(document=item.document, score=item.score, rank=index)
                 for index, item in enumerate(accepted_items.values(), start=1)
             ]
+            compressed_ranked, compression_records = self.context_agent.compress(
+                task, diagnosis, accepted_ranked
+            )
+            workspace.context_compression = compression_records
             state.evidence_impacts = self.impact_agent.translate(
                 task,
                 diagnosis,
-                accepted_ranked,
+                compressed_ranked,
                 state.accepted_evidence,
             )
+            workspace.micro_outlook = self.micro_agent.analyze(state.evidence_impacts)
             known_action_ids = {
                 record.action.action_id for record in workspace.revision_records
             }
             step_revision_records = []
+            step_revision_decisions = []
             for proposal in self.revision_planner.propose(
                 task, diagnosis, state.evidence_impacts
             ):
                 if proposal.action_id in known_action_ids:
                     continue
-                record = self.workspace_executor.apply(workspace, proposal)
+                revision_decision = self.revision_utility_agent.evaluate(
+                    proposal,
+                    workspace.macro_outlook,
+                    workspace.micro_outlook,
+                    state,
+                )
+                selected_action = self.revision_utility_agent.fallback(
+                    proposal, revision_decision
+                )
+                if selected_action.action_id in known_action_ids:
+                    continue
+                workspace.revision_decisions.append(revision_decision)
+                step_revision_decisions.append(revision_decision)
+                record = self.workspace_executor.apply(workspace, selected_action)
                 step_revision_records.append(record)
-                known_action_ids.add(proposal.action_id)
+                known_action_ids.add(selected_action.action_id)
 
             # Explicit future values in verified documents are represented as
             # point overrides, so every numerical edit still passes through
             # the same restricted action interface.
             context_points = self.forecast_agent._extract_context_points(
-                task.future_timestamps, accepted_ranked
+                task.future_timestamps, compressed_ranked
             )
             source_ids = tuple(item.document.document_id for item in accepted_ranked)
             for index, timestamp in enumerate(task.future_timestamps):
@@ -521,9 +623,22 @@ class IterativeAgentSystem:
                 )
                 if proposal.action_id in known_action_ids:
                     continue
-                record = self.workspace_executor.apply(workspace, proposal)
+                revision_decision = self.revision_utility_agent.evaluate(
+                    proposal,
+                    workspace.macro_outlook,
+                    workspace.micro_outlook,
+                    state,
+                )
+                selected_action = self.revision_utility_agent.fallback(
+                    proposal, revision_decision
+                )
+                if selected_action.action_id in known_action_ids:
+                    continue
+                workspace.revision_decisions.append(revision_decision)
+                step_revision_decisions.append(revision_decision)
+                record = self.workspace_executor.apply(workspace, selected_action)
                 step_revision_records.append(record)
-                known_action_ids.add(proposal.action_id)
+                known_action_ids.add(selected_action.action_id)
 
             previous_forecast = state.forecast_history[-1] if state.forecast_history else None
             final_forecast = self.forecast_agent.forecast_from_mean(
@@ -561,6 +676,12 @@ class IterativeAgentSystem:
                 {
                     "step": step,
                     "action": asdict(action),
+                    "retrieval_candidate_pool_ids": [
+                        item.document.document_id for item in candidate_pool
+                    ],
+                    "retrieval_candidate_assessments": [
+                        asdict(item) for item in candidate_assessments
+                    ],
                     "candidate_document_ids": [item.document.document_id for item in candidates],
                     "verdicts": [asdict(verdict) for verdict in verdicts],
                     "new_accepted_documents": new_accepted,
@@ -568,6 +689,14 @@ class IterativeAgentSystem:
                     "open_question_ids": list(state.open_question_ids),
                     "evidence_impacts": [
                         asdict(impact) for impact in state.evidence_impacts
+                    ],
+                    "context_compression": [
+                        asdict(item) for item in compression_records
+                    ],
+                    "macro_outlook": asdict(workspace.macro_outlook),
+                    "micro_outlook": asdict(workspace.micro_outlook),
+                    "revision_decisions": [
+                        asdict(item) for item in step_revision_decisions
                     ],
                     "revision_proposals": [
                         asdict(record.action) for record in step_revision_records
@@ -617,6 +746,26 @@ class IterativeAgentSystem:
         ]
         metrics = retrieval_metrics(task, retrieved, state.accepted_evidence)
         metrics.update(forecast_metrics(task, final_forecast))
+        if workspace.revision_decisions:
+            metrics["revision_accept_rate"] = statistics.fmean(
+                float(item.revise) for item in workspace.revision_decisions
+            )
+            metrics["revision_fallback_rate"] = 1.0 - metrics["revision_accept_rate"]
+            metrics["mean_predicted_revision_utility"] = statistics.fmean(
+                item.utility_score for item in workspace.revision_decisions
+            )
+        original_characters = sum(
+            item.original_characters for item in workspace.context_compression
+        )
+        retained_characters = sum(
+            item.retained_characters for item in workspace.context_compression
+        )
+        if original_characters:
+            metrics["context_retention_ratio"] = retained_characters / original_characters
+        if state.linguistic_beliefs:
+            metrics["mean_belief_sufficiency"] = statistics.fmean(
+                item.evidence_sufficiency for item in state.linguistic_beliefs.values()
+            )
         return RunResult(
             benchmark_id=task.benchmark_id,
             diagnosis=diagnosis,
