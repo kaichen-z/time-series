@@ -95,11 +95,37 @@ class Evidence:
 
 
 @dataclass(frozen=True)
+class EvidenceImpact:
+    source_document_ids: tuple[str, ...]
+    event_type: str
+    start_timestamp: str | None
+    end_timestamp: str | None
+    direction: str
+    permanence: str
+    forecast_relation: str
+    adjustment_kind: str
+    adjustment_value: float | None
+    confidence: float
+    rationale: str
+
+
+@dataclass(frozen=True)
+class ForecastAdjustment:
+    source_document_ids: tuple[str, ...]
+    adjustment_kind: str
+    adjustment_value: float | None
+    affected_steps: int
+    mean_absolute_change: float
+    rationale: str
+
+
+@dataclass(frozen=True)
 class Forecast:
     mean: tuple[float, ...]
     samples: tuple[tuple[float, ...], ...]
     baseline_method: str
     context_points: dict[str, float] = field(default_factory=dict)
+    impact_adjustments: tuple[ForecastAdjustment, ...] = ()
 
 
 @dataclass
@@ -113,6 +139,7 @@ class AgentBeliefState:
     seen_document_ids: list[str] = field(default_factory=list)
     reviewed_document_ids_by_question: dict[str, list[str]] = field(default_factory=dict)
     accepted_evidence: list[Evidence] = field(default_factory=list)
+    evidence_impacts: list[EvidenceImpact] = field(default_factory=list)
     rejected_reasons: dict[str, list[str]] = field(default_factory=dict)
     beliefs: dict[str, list[str]] = field(default_factory=dict)
     query_history: list[QueryAction] = field(default_factory=list)
@@ -134,6 +161,7 @@ class AgentBeliefState:
                 key: list(value) for key, value in self.reviewed_document_ids_by_question.items()
             },
             "accepted_evidence": [asdict(item) for item in self.accepted_evidence],
+            "evidence_impacts": [asdict(item) for item in self.evidence_impacts],
             "rejected_reasons": {key: list(value) for key, value in self.rejected_reasons.items()},
             "beliefs": {key: list(value) for key, value in self.beliefs.items()},
             "query_history": [asdict(item) for item in self.query_history],
@@ -171,6 +199,9 @@ class RunResult:
                 "mean": list(self.forecast.mean),
                 "baseline_method": self.forecast.baseline_method,
                 "context_points": self.forecast.context_points,
+                "impact_adjustments": [
+                    asdict(item) for item in self.forecast.impact_adjustments
+                ],
                 "num_samples": len(self.forecast.samples),
             },
             "metrics": self.metrics,

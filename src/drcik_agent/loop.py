@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 
 from .agents import EvidenceSynthesisAgent, ProbabilisticForecastAgent, RetrievalAgent, tokenize
+from .impacts import EvidenceToForecastAgent
 from .metrics import forecast_metrics, retrieval_metrics
 from .models import (
     AgentBeliefState,
@@ -431,6 +432,7 @@ class IterativeAgentSystem:
         self.retrieval_agent = RetrievalAgent()
         self.verifier_agent = EvidenceVerifierAgent()
         self.updater_agent = BeliefUpdaterAgent()
+        self.impact_agent = EvidenceToForecastAgent()
         self.forecast_agent = ProbabilisticForecastAgent()
         self.critic_agent = ForecastCriticAgent()
 
@@ -465,6 +467,12 @@ class IterativeAgentSystem:
                 RetrievedDocument(document=item.document, score=item.score, rank=index)
                 for index, item in enumerate(accepted_items.values(), start=1)
             ]
+            state.evidence_impacts = self.impact_agent.translate(
+                task,
+                diagnosis,
+                accepted_ranked,
+                state.accepted_evidence,
+            )
             previous_forecast = state.forecast_history[-1] if state.forecast_history else None
             final_forecast = self.forecast_agent.forecast(
                 task=task,
@@ -473,10 +481,20 @@ class IterativeAgentSystem:
                 num_samples=self.config.num_samples,
                 seed=task_seed,
                 context_weight=self.config.context_weight,
+                impacts=state.evidence_impacts,
             )
             state.forecast_history.append(final_forecast)
             forecast_change = self.critic_agent.relative_change(previous_forecast, final_forecast)
-            remaining_documents = len(task.documents) - len(state.seen_document_ids)
+            remaining_documents = sum(
+                1
+                for document in task.documents
+                if document.document_id not in state.rejected_document_ids
+                and any(
+                    document.document_id
+                    not in state.reviewed_document_ids_by_question.get(question_id, [])
+                    for question_id in state.open_question_ids
+                )
+            )
             decision = self.critic_agent.decide(
                 state,
                 step,
@@ -493,11 +511,18 @@ class IterativeAgentSystem:
                     "new_accepted_documents": new_accepted,
                     "accepted_document_ids": list(state.accepted_document_ids),
                     "open_question_ids": list(state.open_question_ids),
+                    "evidence_impacts": [
+                        asdict(impact) for impact in state.evidence_impacts
+                    ],
                     "forecast": {
                         "baseline_method": final_forecast.baseline_method,
                         "mean_head": list(final_forecast.mean[:5]),
                         "mean_tail": list(final_forecast.mean[-5:]),
                         "context_point_count": len(final_forecast.context_points),
+                        "impact_adjustments": [
+                            asdict(adjustment)
+                            for adjustment in final_forecast.impact_adjustments
+                        ],
                         "relative_change": forecast_change,
                     },
                     "decision": decision,

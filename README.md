@@ -26,6 +26,9 @@ Query Planner -> BM25 Retrieval -> Evidence Verifier     |
                                Belief Updater            |
                                       |                  |
                                       v                  |
+                         Evidence-to-Impact Agent        |
+                                      |                  |
+                                      v                  |
                           Probabilistic Forecaster       |
                                       |                  |
                                       v                  |
@@ -47,6 +50,14 @@ The verifier checks entity identity, temporal alignment, target relevance, wheth
 document answers the current question, and whether textual claims conflict with the
 observed numerical pattern. A document rejected only because it answers a different
 question remains available to later iterations.
+
+Accepted evidence is translated into structured forecast impacts containing the event
+window, direction, permanence, forecast-horizon overlap, magnitude, confidence, and an
+auditable adjustment rule. Explicit effects such as `increase by 20%` or `2 times the
+usual demand` change the affected forecast steps directly. An event that ended before
+the horizon produces a `return_to_baseline` instruction and is not extrapolated. A
+future directional claim without a magnitude receives only a conservative
+quarter-residual adjustment, rather than an invented large effect.
 
 Dr-CiK's `role`, `subtype`, `future_values`, and `gt_evidence` fields are never exposed
 to the inference loop. Public labels are used only after a run to calculate development
@@ -103,8 +114,8 @@ drcik-agent run-sample \
 
 - `forecasts.jsonl`: Dr-CiK forecasting submission format with 100 trajectories per task.
 - `deep_research.jsonl`: accepted document IDs and extracted evidence.
-- `loop_trace.jsonl`: every query, candidate, verifier verdict, belief update, forecast
-  summary, and stop decision.
+- `loop_trace.jsonl`: every query, candidate, verifier verdict, structured evidence
+  impact, numerical adjustment, belief update, forecast summary, and stop decision.
 - `run_report.jsonl`: per-task diagnosis, belief state, forecast, and development metrics.
 - `summary.json`: aggregate development metrics.
 
@@ -136,6 +147,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 | Retrieval | Iterative BM25 with per-question document memory | Agentic multi-hop or hybrid retrieval |
 | Verification | Entity/time/question/numerical consistency checks | LLM verifier plus cross-document corroboration |
 | Memory | Structured persistent belief state and audit trail | BLF-style linguistic probability beliefs |
+| Evidence impact | Event window, direction, permanence, explicit magnitude, and conservative fallback | LLM causal-impact estimator with calibrated uncertainty |
 | Forecast | Drifted seasonal or trend baseline with uncertainty samples | Nexus-style macro/micro synthesis |
 | Control | Convergence, no-progress, exhaustion, and step-budget stopping | CORAL-style reflection and strategy evolution |
 
