@@ -26,6 +26,16 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--samples", type=int, default=100)
     parser.add_argument("--context-weight", type=float, default=0.75)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument(
+        "--memory-file",
+        default=None,
+        help="Optional JSONL post-hoc memory used to calibrate later tasks",
+    )
+    parser.add_argument(
+        "--learn-from-public-outcomes",
+        action="store_true",
+        help="Research-only: write memory after each labeled task resolves; never used for hidden test",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,6 +75,10 @@ def _select_tasks(tasks, task_ids: list[str] | None, limit: int | None):
 
 def main(argv: list[str] | None = None) -> None:
     arguments = build_parser().parse_args(argv)
+    if getattr(arguments, "hidden_test", False) and arguments.learn_from_public_outcomes:
+        raise SystemExit("--learn-from-public-outcomes cannot be used on hidden test tasks")
+    if arguments.system == "one-pass" and arguments.learn_from_public_outcomes:
+        raise SystemExit("--learn-from-public-outcomes requires --system iterative")
     if arguments.command == "run-sample":
         tasks = load_sample_tasks(arguments.sample_dir)
     else:
@@ -91,6 +105,8 @@ def main(argv: list[str] | None = None) -> None:
                 max_no_progress=arguments.max_no_progress,
                 convergence_tolerance=arguments.convergence_tolerance,
                 seed=arguments.seed,
+                memory_path=arguments.memory_file,
+                learn_from_public_outcomes=arguments.learn_from_public_outcomes,
             )
         )
     results = system.run_many(tasks)
