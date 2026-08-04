@@ -5,7 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from drcik_agent.agents import _infer_seasonal_period
 from drcik_agent.metrics import crps_ensemble
+from drcik_agent.loop import IterativeAgentSystem, LoopConfig
 from drcik_agent.models import Document, ForecastTask
 from drcik_agent.pipeline import MinimalAgentSystem, SystemConfig, write_outputs
 
@@ -50,7 +52,65 @@ def example_task() -> ForecastTask:
     )
 
 
+def iterative_task() -> ForecastTask:
+    base = example_task()
+    return ForecastTask(
+        benchmark_id="task_loop",
+        entity_name=base.entity_name,
+        target_name=base.target_name,
+        target_description=base.target_description,
+        frequency=base.frequency,
+        prediction_length=base.prediction_length,
+        seasonal_period=base.seasonal_period,
+        history_timestamps=base.history_timestamps,
+        history_values=base.history_values,
+        future_timestamps=base.future_timestamps,
+        future_values=base.future_values,
+        documents=(
+            Document(
+                "doc_anomaly",
+                "Alpha Station energy demand anomaly was caused by a meter software bug in 2024.",
+                "supporting",
+            ),
+            Document(
+                "doc_resolution",
+                "Alpha Station energy demand software patch permanently resolved the error and restored normal operation in 2024.",
+                "supporting",
+            ),
+            Document(
+                "doc_event",
+                "Alpha Station energy demand increased during a temporary 2024 promotion event, which later ended.",
+                "supporting",
+            ),
+            Document(
+                "doc_regime",
+                "Alpha Station energy demand forecast should follow the normal two-step seasonal cycle and baseline.",
+                "supporting",
+            ),
+            Document(
+                "doc_wrong_entity",
+                "Beta Harbor energy demand will grow linearly after a permanent policy change.",
+                "distractor",
+                "profile",
+            ),
+        ),
+        gt_evidence=(
+            "A software bug caused an anomaly.",
+            "A patch permanently restored normal operation.",
+            "A temporary event ended.",
+            "The normal seasonal cycle should govern the forecast.",
+        ),
+    )
+
+
 class MinimalSystemTest(unittest.TestCase):
+    def test_seasonality_inference_distinguishes_cycle_from_smooth_trend(self) -> None:
+        smooth_trend = tuple(float(index * index) for index in range(120))
+        repeated_cycle = tuple(float(index % 12) for index in range(120))
+
+        self.assertIsNone(_infer_seasonal_period(smooth_trend)[0])
+        self.assertEqual(_infer_seasonal_period(repeated_cycle)[0], 12)
+
     def test_perfect_ensemble_has_zero_crps(self) -> None:
         score = crps_ensemble((1.0, 2.0), ((1.0, 2.0), (1.0, 2.0)))
         self.assertAlmostEqual(score, 0.0)
@@ -81,6 +141,40 @@ class MinimalSystemTest(unittest.TestCase):
             self.assertEqual(len(forecast["samples"]), 100)
             self.assertEqual(len(forecast["samples"][0]), 2)
             self.assertEqual(research["cited_document_ids"], ["doc_support"])
+
+    def test_iterative_loop_plans_verifies_updates_and_stops(self) -> None:
+        result = IterativeAgentSystem(
+            LoopConfig(
+                max_steps=10,
+                documents_per_step=1,
+                num_samples=100,
+                max_no_progress=4,
+                seed=3,
+            )
+        ).run(iterative_task())
+
+        self.assertGreaterEqual(len(result.loop_trace), 3)
+        self.assertIsNotNone(result.belief_state)
+        self.assertGreaterEqual(len(result.belief_state.answered_question_ids), 3)
+        self.assertTrue(result.belief_state.stop_reason)
+        self.assertIn("doc_event", result.belief_state.accepted_document_ids)
+        self.assertNotIn("doc_wrong_entity", result.belief_state.accepted_document_ids)
+        self.assertTrue(
+            all(item.document.role is None and item.document.subtype is None for item in result.retrieved)
+        )
+
+    def test_iterative_outputs_include_auditable_trace(self) -> None:
+        result = IterativeAgentSystem(
+            LoopConfig(max_steps=4, documents_per_step=1, num_samples=100)
+        ).run(iterative_task())
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            write_outputs([result], temporary_directory)
+            trace_path = Path(temporary_directory) / "loop_trace.jsonl"
+            trace = json.loads(trace_path.read_text(encoding="utf-8"))
+            self.assertEqual(trace["benchmark_id"], "task_loop")
+            self.assertGreaterEqual(len(trace["steps"]), 1)
+            self.assertNotIn("future_values", trace["belief_state"])
+            self.assertNotIn("gt_evidence", trace["belief_state"])
 
 
 if __name__ == "__main__":

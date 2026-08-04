@@ -70,6 +70,8 @@ def write_outputs(results: list[RunResult], output_dir: str | Path) -> None:
         "deep_research.jsonl": [result.research_submission() for result in results],
         "run_report.jsonl": [result.report_dict() for result in results],
     }
+    if any(result.loop_trace for result in results):
+        files["loop_trace.jsonl"] = [result.trace_submission() for result in results]
     for filename, rows in files.items():
         with (output / filename).open("w", encoding="utf-8") as handle:
             for row in rows:
@@ -90,4 +92,3 @@ def write_outputs(results: list[RunResult], output_dir: str | Path) -> None:
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-
