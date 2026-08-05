@@ -55,6 +55,12 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
         help="Minimum predicted utility required to revise the numerical prior",
     )
     parser.add_argument(
+        "--min-information-gain",
+        type=float,
+        default=0.05,
+        help="Stop when the controller expects less marginal value from another retrieval turn",
+    )
+    parser.add_argument(
         "--backbone",
         choices=("timesfm", "statistical"),
         default="timesfm",
@@ -158,6 +164,7 @@ def main(argv: list[str] | None = None) -> None:
                 retrieval_candidate_multiplier=arguments.candidate_multiplier,
                 context_character_budget=arguments.context_character_budget,
                 revision_utility_threshold=arguments.revision_threshold,
+                min_expected_information_gain=arguments.min_information_gain,
                 backbone=arguments.backbone,
                 timesfm_model_id=arguments.timesfm_model_id,
                 timesfm_max_context=arguments.timesfm_max_context,

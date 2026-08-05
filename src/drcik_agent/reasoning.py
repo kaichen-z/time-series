@@ -88,7 +88,7 @@ class RevisionUtilityAgent:
     """PostTime-style revise-or-preserve gate using only inference-time signals."""
 
     EVENT_QUESTION = {
-        "anomaly": "anomaly_cause",
+        "anomaly": "historical_regime",
         "resolution": "resolution_permanence",
         "promotion": "external_drivers",
         "external_driver": "external_drivers",

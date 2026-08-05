@@ -8,7 +8,8 @@ from datetime import datetime
 
 from .agents import EvidenceSynthesisAgent, ProbabilisticForecastAgent, RetrievalAgent, tokenize
 from .backbones import TimesFMBackboneConfig, build_forecast_backbone
-from .context import ImportanceAwareContextAgent, RetrievalProcessRewardAgent
+from .context import ForecastUtilityRetriever, ImportanceAwareContextAgent
+from .control import ForecastGapControllerAgent
 from .impacts import EvidenceToForecastAgent
 from .memory import ForecastMemoryBank
 from .metrics import forecast_metrics, retrieval_metrics
@@ -24,6 +25,7 @@ from .models import (
     QueryAction,
     RetrievedDocument,
     RunResult,
+    SufficiencyDecision,
 )
 from .reasoning import MacroReasoningAgent, MicroReasoningAgent, RevisionUtilityAgent
 from .workspace import ForecastWorkspaceExecutor, RevisionPlannerAgent
@@ -44,6 +46,7 @@ class LoopConfig:
     retrieval_candidate_multiplier: int = 3
     context_character_budget: int = 12000
     revision_utility_threshold: float = 0.60
+    min_expected_information_gain: float = 0.05
     backbone: str = "timesfm"
     timesfm_model_id: str = "google/timesfm-2.5-200m-pytorch"
     timesfm_max_context: int = 4096
@@ -67,72 +70,10 @@ class LoopConfig:
             raise ValueError("context_character_budget must be positive")
         if not 0.0 <= self.revision_utility_threshold <= 1.0:
             raise ValueError("revision_utility_threshold must be between 0 and 1")
+        if not 0.0 <= self.min_expected_information_gain <= 1.0:
+            raise ValueError("min_expected_information_gain must be between 0 and 1")
         if self.backbone not in {"timesfm", "statistical"}:
             raise ValueError("backbone must be 'timesfm' or 'statistical'")
-
-
-class QueryPlannerAgent:
-    """Choose the next unresolved forecast-relevant information need."""
-
-    QUESTIONS = (
-        (
-            "anomaly_cause",
-            "What caused the largest historical anomalies or regime changes?",
-            "anomaly spike drop abnormal error bug incident cause malfunction inflated",
-        ),
-        (
-            "resolution_permanence",
-            "Was the historical disruption resolved, and is its effect temporary or permanent?",
-            "resolution fix patch update deployment ended recurrence permanent temporary stabilized restored",
-        ),
-        (
-            "external_drivers",
-            "Which events or interventions changed the target, and over what time window?",
-            "event promotion policy maintenance weather intervention impact increase decrease start end",
-        ),
-        (
-            "forecast_regime",
-            "Which numerical regime, trend, and seasonal pattern should govern the forecast horizon?",
-            "forecast future baseline normal seasonality periodic cycle trend trajectory regime pattern",
-        ),
-    )
-
-    @property
-    def question_ids(self) -> list[str]:
-        return [item[0] for item in self.QUESTIONS]
-
-    def plan(self, task: ForecastTask, state: AgentBeliefState) -> QueryAction:
-        available = [item for item in self.QUESTIONS if item[0] in state.open_question_ids]
-        if not available:
-            available = list(self.QUESTIONS)
-        question_id, question, keywords = min(
-            available,
-            key=lambda item: (
-                state.attempt_counts.get(item[0], 0),
-                state.linguistic_beliefs.get(
-                    item[0], LinguisticBelief(item[0], 0.5)
-                ).evidence_sufficiency,
-                self.question_ids.index(item[0]),
-            ),
-        )
-        query = " ".join(
-            (
-                task.entity_name,
-                task.target_name,
-                task.target_description,
-                task.history_timestamps[0],
-                task.history_timestamps[-1],
-                task.future_timestamps[0],
-                task.future_timestamps[-1],
-                keywords,
-            )
-        )
-        return QueryAction(
-            question_id=question_id,
-            question=question,
-            query=query,
-            rationale=f"Resolve {question_id} using evidence not examined in prior steps.",
-        )
 
 
 class EvidenceVerifierAgent:
@@ -163,9 +104,10 @@ class EvidenceVerifierAgent:
         "forecast_regime": {"baseline", "seasonality", "periodic", "cycle", "forecast", "normal", "trajectory"},
     }
     QUESTION_EVENT_TYPES = {
-        "anomaly_cause": {"anomaly"},
+        "historical_regime": {"anomaly", "resolution", "forecast_regime"},
         "resolution_permanence": {"resolution"},
         "external_drivers": {"temporary_event", "external_driver"},
+        "event_magnitude": {"temporary_event", "external_driver", "forecast_regime"},
         "forecast_regime": {"forecast_regime"},
     }
     NON_PERIODIC_PHRASES = (
@@ -209,6 +151,37 @@ class EvidenceVerifierAgent:
     @staticmethod
     def _years(text: str) -> set[int]:
         return {int(year) for year in re.findall(r"\b(?:19|20)\d{2}\b", text)}
+
+    @staticmethod
+    def _magnitude(text: str) -> str | None:
+        match = re.search(
+            r"\b\d+(?:\.\d+)?\s*(?:%|percent|times?|x|units?|points?)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if match:
+            return match.group(0)
+        word = re.search(r"\b(?:double|twice|triple)\b", text, re.IGNORECASE)
+        return word.group(0) if word else None
+
+    @staticmethod
+    def _persistence(text: str) -> str:
+        lower = text.lower()
+        if any(term in lower for term in ("resolved", "fixed", "ended", "returned to baseline")):
+            return "resolved"
+        if any(term in lower for term in ("permanent", "persist", "structural", "long-term")):
+            return "permanent"
+        if any(term in lower for term in ("temporary", "promotion", "campaign", "until")):
+            return "temporary"
+        return "unspecified"
+
+    @staticmethod
+    def _event_dates(text: str) -> tuple[str | None, str | None]:
+        dates = re.findall(r"\b(?:19|20)\d{2}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2})?\b", text)
+        if not dates:
+            return None, None
+        ordered = sorted(dict.fromkeys(dates))
+        return ordered[0], ordered[-1] if len(ordered) > 1 else None
 
     @staticmethod
     def _fallback_evidence(document: Document, query: str, score: float) -> Evidence:
@@ -329,6 +302,26 @@ class EvidenceVerifierAgent:
             )
             if accepted and not evidence:
                 evidence = [self._fallback_evidence(document, action.query, score)]
+            if accepted:
+                event_start, event_end = self._event_dates(document.text)
+                evidence = [
+                    replace(
+                        item,
+                        gap_id=action.question_id,
+                        entity=task.entity_name,
+                        target_variable=task.target_name,
+                        publication_date=(
+                            publication_date.date().isoformat() if publication_date else None
+                        ),
+                        event_start=event_start,
+                        event_end=event_end,
+                        magnitude=self._magnitude(item.claim),
+                        persistence=self._persistence(document.text),
+                        evidence_quote=item.claim,
+                        provenance_valid=True,
+                    )
+                    for item in evidence
+                ]
             verdicts.append(
                 EvidenceVerdict(
                     document_id=document.document_id,
@@ -347,6 +340,20 @@ class EvidenceVerifierAgent:
 
 
 class BeliefUpdaterAgent:
+    @staticmethod
+    def _answers_gap(action: QueryAction, verdict: EvidenceVerdict) -> bool:
+        """Require the evidence to contain the field requested by the gap."""
+        if not verdict.accepted:
+            return False
+        if action.question_id == "event_magnitude":
+            return any(item.magnitude is not None for item in verdict.evidence)
+        if action.question_id == "resolution_permanence":
+            return any(
+                item.persistence in {"resolved", "permanent", "temporary"}
+                for item in verdict.evidence
+            )
+        return True
+
     @staticmethod
     def _update_linguistic_belief(
         state: AgentBeliefState,
@@ -406,7 +413,7 @@ class BeliefUpdaterAgent:
             if verdict.document_id not in reviewed_for_question:
                 reviewed_for_question.append(verdict.document_id)
             if verdict.accepted:
-                question_supported = True
+                question_supported = question_supported or self._answers_gap(action, verdict)
                 if verdict.document_id not in state.accepted_document_ids:
                     state.accepted_document_ids.append(verdict.document_id)
                     accepted_count += 1
@@ -476,15 +483,22 @@ class ForecastCriticAgent:
         config: LoopConfig,
         remaining_documents: int,
         forecast_change: float | None,
+        sufficiency: SufficiencyDecision,
     ) -> str:
-        if not state.open_question_ids:
-            return "questions_resolved"
+        if sufficiency.sufficient:
+            return sufficiency.stop_reason or "evidence_sufficient"
         if remaining_documents <= 0:
             return "document_corpus_exhausted"
         if state.no_progress_steps >= config.max_no_progress:
             return "no_new_verified_evidence"
         if step >= config.max_steps:
             return "max_steps_reached"
+        if (
+            step >= 2
+            and sufficiency.expected_information_gain
+            < config.min_expected_information_gain
+        ):
+            return "low_expected_information_gain"
         if (
             forecast_change is not None
             and forecast_change <= config.convergence_tolerance
@@ -503,9 +517,12 @@ class IterativeAgentSystem:
 
         self.config = config or LoopConfig()
         self.diagnosis_agent = TimeSeriesDiagnosisAgent()
-        self.planner_agent = QueryPlannerAgent()
+        self.controller_agent = ForecastGapControllerAgent()
+        # Compatibility attribute for external callers. Planning is now done
+        # by the structured sufficiency-and-gap controller.
+        self.planner_agent = self.controller_agent
         self.retrieval_agent = RetrievalAgent()
-        self.retrieval_reward_agent = RetrievalProcessRewardAgent()
+        self.retrieval_reward_agent = ForecastUtilityRetriever()
         self.verifier_agent = EvidenceVerifierAgent()
         self.updater_agent = BeliefUpdaterAgent()
         self.impact_agent = EvidenceToForecastAgent()
@@ -538,12 +555,14 @@ class IterativeAgentSystem:
 
     def run(self, task: ForecastTask) -> RunResult:
         diagnosis = self.diagnosis_agent.diagnose(task)
+        forecast_gaps = self.controller_agent.initial_gaps(task, diagnosis)
         state = AgentBeliefState(
-            open_question_ids=self.planner_agent.question_ids,
+            open_question_ids=list(forecast_gaps),
             linguistic_beliefs={
                 question_id: LinguisticBelief(question_id, 0.5)
-                for question_id in self.planner_agent.question_ids
+                for question_id in forecast_gaps
             },
+            forecast_gaps=forecast_gaps,
         )
         accepted_items: dict[str, RetrievedDocument] = {}
         trace: list[dict[str, object]] = []
@@ -558,7 +577,11 @@ class IterativeAgentSystem:
         final_forecast: Forecast | None = None
 
         for step in range(1, self.config.max_steps + 1):
-            action = self.planner_agent.plan(task, state)
+            sufficiency_before, action = self.controller_agent.decide(task, state)
+            state.sufficiency_history.append(sufficiency_before)
+            if action is None:
+                state.stop_reason = sufficiency_before.stop_reason or "evidence_sufficient"
+                break
             candidate_pool = self.retrieval_agent.retrieve(
                 task,
                 diagnosis,
@@ -578,6 +601,10 @@ class IterativeAgentSystem:
             )
             verdicts = self.verifier_agent.verify(task, diagnosis, action, candidates)
             new_accepted = self.updater_agent.update(state, action, verdicts)
+            self.controller_agent.expand_from_verdicts(
+                task, action, verdicts, state
+            )
+            self.controller_agent.refresh_gap_priorities(state)
             accepted_ids = {verdict.document_id for verdict in verdicts if verdict.accepted}
             for item in candidates:
                 if item.document.document_id in accepted_ids:
@@ -686,16 +713,19 @@ class IterativeAgentSystem:
                     for question_id in state.open_question_ids
                 )
             )
+            sufficiency_after, _next_action = self.controller_agent.decide(task, state)
             decision = self.critic_agent.decide(
                 state,
                 step,
                 self.config,
                 remaining_documents,
                 forecast_change,
+                sufficiency_after,
             )
             trace.append(
                 {
                     "step": step,
+                    "sufficiency_before": asdict(sufficiency_before),
                     "action": asdict(action),
                     "retrieval_candidate_pool_ids": [
                         item.document.document_id for item in candidate_pool
@@ -708,6 +738,9 @@ class IterativeAgentSystem:
                     "new_accepted_documents": new_accepted,
                     "accepted_document_ids": list(state.accepted_document_ids),
                     "open_question_ids": list(state.open_question_ids),
+                    "forecast_gaps": {
+                        key: asdict(value) for key, value in state.forecast_gaps.items()
+                    },
                     "evidence_impacts": [
                         asdict(impact) for impact in state.evidence_impacts
                     ],
@@ -737,6 +770,7 @@ class IterativeAgentSystem:
                         ],
                         "relative_change": forecast_change,
                     },
+                    "sufficiency_after": asdict(sufficiency_after),
                     "decision": decision,
                 }
             )
@@ -757,7 +791,8 @@ class IterativeAgentSystem:
                 revision_records=workspace.revision_records,
             )
             state.forecast_history.append(final_forecast)
-            state.stop_reason = "no_loop_iteration"
+            if state.stop_reason is None:
+                state.stop_reason = "no_loop_iteration"
         elif state.stop_reason is None:
             state.stop_reason = "max_steps_reached"
 
@@ -787,6 +822,15 @@ class IterativeAgentSystem:
             metrics["mean_belief_sufficiency"] = statistics.fmean(
                 item.evidence_sufficiency for item in state.linguistic_beliefs.values()
             )
+        total_gaps = len(state.forecast_gaps)
+        if total_gaps:
+            metrics["gap_coverage"] = len(state.answered_question_ids) / total_gaps
+        if state.sufficiency_history:
+            metrics["mean_expected_information_gain"] = statistics.fmean(
+                item.expected_information_gain for item in state.sufficiency_history
+            )
+        metrics["retrieval_turns"] = float(len(trace))
+        metrics["documents_inspected"] = float(len(state.seen_document_ids))
         return RunResult(
             benchmark_id=task.benchmark_id,
             diagnosis=diagnosis,

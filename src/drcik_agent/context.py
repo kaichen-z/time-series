@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Protocol
 from .agents import tokenize
 from .models import (
     AgentBeliefState,
@@ -28,8 +29,32 @@ DATE_RE = re.compile(r"\b(?:19|20)\d{2}(?:-\d{2}-\d{2})?\b")
 NUMBER_RE = re.compile(r"\b\d+(?:\.\d+)?\s*(?:%|percent|times?|x|units?|points?)?\b")
 
 
-class RetrievalProcessRewardAgent:
-    """Frozen, label-free proxy for a learned supplementary-retrieval PRM."""
+class ForecastUtilityScorer(Protocol):
+    """Adapter interface for an offline-trained forecast-utility model."""
+
+    kind: str
+
+    def score(
+        self,
+        task: ForecastTask,
+        action: QueryAction,
+        document: Document,
+        features: dict[str, float],
+    ) -> float:
+        """Return expected downstream forecast gain on a normalized 0-1 scale."""
+
+
+class ForecastUtilityRetriever:
+    """Rank passages by expected downstream value, not lexical similarity alone.
+
+    Without a supplied scorer this class runs a transparent label-free proxy,
+    which is useful as an ablation and never presented as a trained PRM.  A
+    scorer trained from historical ``error_before - error_after`` labels can be
+    injected without changing the online loop.
+    """
+
+    def __init__(self, scorer: ForecastUtilityScorer | None = None) -> None:
+        self.scorer = scorer
 
     def rank(
         self,
@@ -45,6 +70,20 @@ class RetrievalProcessRewardAgent:
         entity_terms = set(tokenize(task.entity_name))
         target_terms = set(tokenize(task.target_name + " " + task.target_description))
         query_terms = set(tokenize(action.query))
+        gap = state.forecast_gaps.get(action.question_id)
+        gap_terms = set(
+            tokenize(
+                " ".join(
+                    (
+                        gap.category if gap else "",
+                        gap.target if gap else "",
+                        gap.time_scope if gap else "",
+                        gap.description if gap else action.question,
+                        " ".join(gap.query_terms) if gap else "",
+                    )
+                )
+            )
+        )
         task_years = set(re.findall(r"\b(?:19|20)\d{2}\b", " ".join(
             (*task.history_timestamps, *task.future_timestamps)
         )))
@@ -57,6 +96,7 @@ class RetrievalProcessRewardAgent:
             entity_overlap = len(terms & entity_terms) / max(len(entity_terms), 1)
             target_overlap = len(terms & target_terms) / max(len(target_terms), 1)
             query_overlap = len(terms & query_terms) / max(len(query_terms), 1)
+            gap_overlap = len(terms & gap_terms) / max(len(gap_terms), 1)
             relevance = min(
                 1.0,
                 0.45 * max(float(exact_entity), entity_overlap)
@@ -66,32 +106,67 @@ class RetrievalProcessRewardAgent:
             causal = min(1.0, len(terms & CAUSAL_TERMS) / 3.0)
             years = set(re.findall(r"\b(?:19|20)\d{2}\b", item.document.text))
             temporal = 1.0 if years & task_years else 0.65 if not years else 0.1
-            if not prior_terms:
-                novelty = 1.0
-            else:
-                novelty = 1.0 - len(terms & prior_terms) / max(len(terms), 1)
+            redundancy = (
+                len(terms & prior_terms) / max(len(terms), 1) if prior_terms else 0.0
+            )
+            novelty = 1.0 - redundancy
             bm25 = max(item.score, 0.0) / maximum_bm25
-            utility = (
-                0.35 * bm25
-                + 0.25 * relevance
-                + 0.15 * causal
-                + 0.15 * temporal
-                + 0.10 * novelty
+            token_cost = min(1.0, len(tokenize(item.document.text)) / 2000.0)
+            features = {
+                "bm25": bm25,
+                "relevance": relevance,
+                "gap": min(1.0, 4.0 * gap_overlap),
+                "causal": causal,
+                "temporal": temporal,
+                "novelty": novelty,
+                "redundancy": redundancy,
+                "token_cost": token_cost,
+            }
+            if self.scorer is None:
+                predicted_gain = (
+                    0.30 * relevance
+                    + 0.22 * features["gap"]
+                    + 0.18 * causal
+                    + 0.20 * temporal
+                    + 0.10 * novelty
+                )
+                scorer_kind = "label_free_proxy"
+            else:
+                predicted_gain = min(
+                    1.0,
+                    max(0.0, self.scorer.score(task, action, item.document, features)),
+                )
+                scorer_kind = self.scorer.kind
+            net_utility = max(
+                0.0,
+                min(
+                    1.0,
+                    0.25 * bm25
+                    + 0.75 * predicted_gain
+                    - 0.10 * redundancy
+                    - 0.03 * token_cost,
+                ),
             )
             assessment = RetrievalCandidateAssessment(
                 document_id=item.document.document_id,
                 bm25_score=item.score,
-                utility_score=utility,
+                utility_score=net_utility,
                 relevance_score=relevance,
                 causal_score=causal,
                 temporal_score=temporal,
                 novelty_score=novelty,
                 rationale=(
-                    "Forecast-utility proxy combining retrieval relevance, causal signal, "
-                    "temporal alignment, and novelty; no outcome labels are used."
+                    "Expected downstream forecast gain minus redundancy and context cost. "
+                    f"Scorer={scorer_kind}; no current-task outcomes or benchmark labels are used."
                 ),
+                gap_score=features["gap"],
+                redundancy_penalty=redundancy,
+                token_cost=token_cost,
+                predicted_forecast_gain=predicted_gain,
+                net_utility=net_utility,
+                scorer_kind=scorer_kind,
             )
-            scored.append((utility, item, assessment))
+            scored.append((net_utility, item, assessment))
 
         scored.sort(key=lambda row: (-row[0], row[1].document.document_id))
         selected = [
@@ -100,6 +175,11 @@ class RetrievalProcessRewardAgent:
         ]
         assessments = [row[2] for row in scored]
         return selected, assessments
+
+
+# Compatibility alias for existing experiments.  New code should use the name
+# that states the actual objective rather than implying an already-trained PRM.
+RetrievalProcessRewardAgent = ForecastUtilityRetriever
 
 
 class ImportanceAwareContextAgent:
