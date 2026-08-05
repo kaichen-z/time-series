@@ -1,64 +1,60 @@
-# Dr-CiK Last-Mile Forecasting Agent
+# Foresight-Driven Retrieval for Time-Series Forecasting
 
 Repository: <https://github.com/kaichen-z/time-series>
 
-This repository contains an auditable agent loop for the
+This repository contains an auditable, gap-guided agent loop for the
 [Dr-CiK](https://github.com/ServiceNow/Dr-CiK) contextual time-series forecasting
-benchmark. The forecasting architecture now follows the central idea of
-[Bridging the Last Mile of Time Series Forecasting with LLM Agents](https://arxiv.org/pdf/2606.02497):
-a numerical forecasting backbone creates an immutable baseline, while an agent may
-revise only the future forecast through a small, evidence-backed action language.
+benchmark. Its research hypothesis is that a passage should be retrieved because it is
+expected to improve the downstream forecast—not merely because it is lexically similar
+to a query. A numerical forecasting backbone creates an immutable baseline; a structured
+retrieval controller fills explicit information gaps; and a reviser may change only the
+future forecast through a small, evidence-backed action language.
 
 The numerical backbone is now Google Research TimesFM 2.5 by default. The paper's
 forecast workspace and restricted actions are combined with this project's
-existing iterative Dr-CiK retrieval, evidence verification, and evidence-to-impact
-translation. All components remain deterministic so every retrieval decision and
-numerical revision can be inspected before substituting LLM or TSFM components.
+structured gap judging, forecast-utility retrieval, evidence grounding, and
+evidence-to-impact translation. The current runtime remains deterministic and exposes
+interfaces for learned retrievers, judges, and PostTime-style revisers. It does not claim
+that its label-free utility proxy is an already trained PRM.
 
 ## System flow
 
 ```text
-historical values + noisy document corpus
-          |
-          +--> TS diagnosis --> TimesFM 2.5 backbone --> immutable y_baseline
-          |                                           copy to y_final
-          |
-          +--> Query Planner --> BM25 candidate pool
-                                      |
-                                      v
-                         Retrieval Utility Ranker (PRM proxy)
-                                      |
-                                      v
-                              Evidence Verifier
-                                      |
-                                      v
-                        Bayesian Linguistic Belief State
-                                      |
-                                      v
-                      Importance-Aware Context Compression
-                                      |
-                                      v
-                              Evidence-to-Impact
-                                      |
-                         +------------+------------+
-                         v                         v
-                 Macro Outlook              Micro Outlook
-                         +------------+------------+
-                                      v
-                         Revision Utility Gate
-                           revise or preserve
-                                      |
-                                      v
-                  Forecast Workspace + Restricted Actions
-                                      |
-                                      v
-                       y_final + uncertainty samples
-                                      |
-                                      v
-                         Forecast Critic --> next query/stop
+history ──> diagnosis ──> TimesFM 2.5 ──> immutable y_baseline
+   │
+documents ──> gap judge ──> next query ──> BM25 candidate pool
+                                │                    │
+                                │                    v
+                                │        forecast-utility reranker
+                                │                    │
+                                │                    v
+                                └──── insufficient ─ evidence grounding
+                                                     │
+                                                     v
+                                       sentence-level Evidence State
+                                                     │
+                                          sufficient / missing gaps
+                                                     │
+                                                     v
+                       importance compression ──> macro + micro outlook
+                                                     │
+                                                     v
+                                      PostTime-style revise/preserve
+                                                     │
+                                                     v
+                                     Last-Mile restricted workspace
+                                                     │
+                                                     v
+                                    y_final + trajectories + audit trace
 
-actual outcomes (after resolution only) --> post-hoc memory --> later tasks
+resolved training tasks ──> forecast-utility labels ──> frozen learned scorer
+realized outcomes ──> post-hoc memory ──> later chronological tasks
 ```
+
+The complete English architecture diagram, including the online inference path and
+offline learning/evolution path, is available in two standalone formats:
+[`docs/architecture.html`](docs/architecture.html) and
+[`docs/architecture.svg`](docs/architecture.svg).
 
 The TimesFM baseline is generated exactly once. Retrieval cannot rewrite historical values or
 `y_baseline`; it can only propose changes to `y_final`. This makes it possible to ask
@@ -67,7 +63,7 @@ revision inside one opaque prompt.
 
 ## Paper-derived design
 
-The runtime is deliberately a synthesis rather than five complete frameworks stacked
+The runtime is deliberately a synthesis rather than many complete frameworks stacked
 together:
 
 | Work | What is integrated now | What is not placed in online inference |
@@ -75,6 +71,9 @@ together:
 | [Last-Mile Forecasting](https://arxiv.org/pdf/2606.02497) | Immutable baseline, forecast workspace, evidence-backed restricted actions | None of its case-specific prompts are required |
 | [PostTime](https://arxiv.org/pdf/2605.29401) | LLM-as-reviser role, explicit revise-or-preserve gate, improvement-over-baseline metrics, hard-case fallback behavior | SFT/RLVR weight training requires a separate training corpus and GPUs |
 | [From Long News to Accurate Forecast](https://arxiv.org/abs/2606.03097) | Candidate-pool utility reranking and forecast-aware long-document compression | The current scorer is a frozen label-free proxy; learned RM/PRM training is an offline next step |
+| [S2G-RAG](https://aclanthology.org/2026.acl-long.1185/) | Explicit evidence sufficiency, structured missing gaps, and gap-guided queries | Its QA-specific gap labels are replaced with forecast gaps |
+| [ReflectiveRAG](https://aclanthology.org/2026.eacl-industry.27/) | Adaptive stopping and relevance-minus-redundancy filtering | Its QA answer controller is not reused as a forecast judge |
+| [Agentic-R](https://aclanthology.org/2026.findings-acl.785/) | Trainable retriever interface combining local relevance with global task utility | Global answer correctness becomes downstream forecast improvement |
 | [BLF](https://arxiv.org/pdf/2604.18576) | Compact linguistic belief state updated in log-odds space instead of accumulating raw text | Binary Platt calibration and logit aggregation do not directly apply to continuous trajectories |
 | [NEXUS](https://arxiv.org/pdf/2605.14389) | Separate macro numerical outlook and micro event outlook before final synthesis | LLM prompts can replace the deterministic agents after controlled ablations |
 | [CORAL](https://arxiv.org/pdf/2604.01658) | Shared persistent artifacts and evaluator separation inform the architecture | Long-running autonomous evolution belongs outside task inference to prevent leakage and uncontrolled benchmark search |
@@ -83,12 +82,12 @@ See [`docs/PAPER_INTEGRATION.md`](docs/PAPER_INTEGRATION.md) for the module mapp
 recommended ablations, and [`docs/TIMESFM_BACKBONE.md`](docs/TIMESFM_BACKBONE.md) for
 backbone configuration.
 
-Each loop iteration asks one forecast-relevant question:
-
-1. What caused historical anomalies or regime changes?
-2. Was the disruption resolved, and was its effect temporary or permanent?
-3. Which external events changed the target and over what time window?
-4. Which trend or seasonal regime should govern the forecast horizon?
+Each loop iteration begins with a structured sufficiency decision. The controller
+selects the highest-value unresolved gap, constructs the next query, and can create new
+follow-up gaps from grounded evidence. For example, finding an anomaly dynamically
+creates a `resolution_permanence` gap; finding an unquantified future event creates an
+`event_magnitude` gap. The loop stops when gaps are resolved, the corpus is exhausted,
+progress stalls, or expected information gain falls below the configured cost threshold.
 
 The verifier checks entity identity, temporal alignment, target relevance, whether the
 document answers the current question, and whether textual claims conflict with the
@@ -170,6 +169,7 @@ drcik-agent run-sample \
   --convergence-tolerance 0.002 \
   --candidate-multiplier 3 \
   --context-character-budget 12000 \
+  --min-information-gain 0.05 \
   --revision-threshold 0.60
 ```
 
@@ -237,7 +237,8 @@ the report also includes `baseline_mae`, `revision_value_mae`,
 `relative_revision_gain`, and `harmful_revision` to measure whether the last-mile agent
 actually improved the forecasting backbone. It also reports `revision_accept_rate`,
 `revision_fallback_rate`, `mean_predicted_revision_utility`,
-`context_retention_ratio`, and `mean_belief_sufficiency`.
+`context_retention_ratio`, `mean_belief_sufficiency`, `gap_coverage`,
+`mean_expected_information_gain`, `retrieval_turns`, and `documents_inspected`.
 
 ## Public development split
 
@@ -260,9 +261,9 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 | Component | Current implementation | Natural next experiment |
 |---|---|---|
 | Diagnosis | Trend, robust residual scale, conservative seasonality inference | Specialized TSFM diagnostics |
-| Planning | Four explicit unresolved information needs | LLM query planner |
-| Retrieval | BM25 candidate pool plus label-free forecast-utility reranking | Train the long-news PRM on chronological development trajectories |
-| Verification | Entity/time/question/numerical consistency checks | LLM verifier plus cross-document corroboration |
+| Control | Structured sufficiency decision, dynamic forecast gaps, gap-guided query, marginal-gain stopping | Distill a lightweight S2G-style judge from chronological traces |
+| Retrieval | BM25 candidate pool plus injectable forecast-utility scorer; label-free proxy is the default ablation | Train the Agentic-R/long-news scorer on chronological forecast-gain labels |
+| Grounding | Entity/time/target checks plus sentence-level claims with provenance, magnitude, and persistence | LLM entailment and cross-document corroboration |
 | Context | Importance-aware sentence retention under a global character budget | Learned article reward model and pairwise fusion |
 | Working memory | BLF-inspired linguistic belief state plus unified forecast workspace | Multi-trial continuous-trajectory aggregation |
 | Evidence impact | Event window, direction, permanence, explicit magnitude, and conservative fallback | LLM causal-impact estimator with calibrated uncertainty |
@@ -270,7 +271,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 | Forecast backbone | TimesFM 2.5 200M point forecast; statistical backbone retained only for explicit ablation/fallback | Use TimesFM quantiles directly for calibrated trajectory sampling |
 | Last-mile revision | PostTime-style revise/preserve gate plus restricted workspace actions | Post-train a compact reviser with SFT and improvement-ratio RLVR |
 | Outcome memory | Optional post-resolution calibration lessons in JSONL | Event embeddings and leakage-safe chronological retrieval |
-| Control | Convergence, no-progress, exhaustion, and step-budget stopping | CORAL-style offline strategy evolution on isolated development runs |
+| Offline evolution | Evaluator-separated memory and outcome label interfaces | CORAL-style policy evolution on isolated development runs |
 
 The first controlled comparison should be `backbone only` vs. `oracle context` vs.
 `one-pass retrieval` vs. `iterative retrieval + unrestricted revision` vs. `iterative

@@ -7,7 +7,13 @@ from .backbones import (
     TimesFMBackboneConfig,
     TimesFMForecastBackbone,
 )
-from .context import ImportanceAwareContextAgent, RetrievalProcessRewardAgent
+from .context import (
+    ForecastUtilityRetriever,
+    ImportanceAwareContextAgent,
+    RetrievalProcessRewardAgent,
+)
+from .control import ForecastGapControllerAgent
+from .forecast_utility import ForecastUtilityLabel, ForecastUtilityLabeler
 from .impacts import EvidenceToForecastAgent
 from .memory import ForecastMemoryBank
 from .models import Document, EvidenceImpact, ForecastTask, ForecastWorkspace, RevisionAction
@@ -21,6 +27,10 @@ __all__ = [
     "EvidenceImpact",
     "EvidenceToForecastAgent",
     "ForecastTask",
+    "ForecastGapControllerAgent",
+    "ForecastUtilityLabel",
+    "ForecastUtilityLabeler",
+    "ForecastUtilityRetriever",
     "ForecastWorkspace",
     "ForecastWorkspaceExecutor",
     "ForecastMemoryBank",
@@ -39,4 +49,4 @@ __all__ = [
     "TimesFMBackboneConfig",
     "TimesFMForecastBackbone",
 ]
-__version__ = "0.6.0"
+__version__ = "0.7.0"

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "drcik-minimal-agent"
-version = "0.6.0"
-description = "A TimesFM-backed, utility-ranked multimodal forecasting agent for Dr-CiK"
+version = "0.7.0"
+description = "A gap-guided, forecast-utility retrieval agent for contextual time-series forecasting"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []

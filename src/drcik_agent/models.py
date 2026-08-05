@@ -64,6 +64,39 @@ class QueryAction:
 
 
 @dataclass(frozen=True)
+class ForecastGap:
+    """A structured, forecast-specific information need.
+
+    The schema is intentionally independent of any particular retriever.  A
+    controller can turn the gap into a lexical query, a dense query, or a web
+    search without changing the rest of the forecasting loop.
+    """
+
+    gap_id: str
+    category: str
+    target: str
+    time_scope: str
+    description: str
+    query_terms: tuple[str, ...]
+    priority: float
+    created_from: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SufficiencyDecision:
+    """S2G-style controller output for one retrieval decision."""
+
+    sufficient: bool
+    resolved_gap_ids: tuple[str, ...]
+    unresolved_gap_ids: tuple[str, ...]
+    selected_gap_id: str | None
+    next_query: str | None
+    expected_information_gain: float
+    rationale: str
+    stop_reason: str | None = None
+
+
+@dataclass(frozen=True)
 class EvidenceVerdict:
     document_id: str
     accepted: bool
@@ -92,6 +125,16 @@ class Evidence:
     confidence: float
     effect_direction: str
     effect_window: str
+    gap_id: str | None = None
+    entity: str | None = None
+    target_variable: str | None = None
+    publication_date: str | None = None
+    event_start: str | None = None
+    event_end: str | None = None
+    magnitude: str | None = None
+    persistence: str = "unspecified"
+    evidence_quote: str = ""
+    provenance_valid: bool = True
 
 
 @dataclass(frozen=True)
@@ -130,6 +173,12 @@ class RetrievalCandidateAssessment:
     temporal_score: float
     novelty_score: float
     rationale: str
+    gap_score: float = 0.0
+    redundancy_penalty: float = 0.0
+    token_cost: float = 0.0
+    predicted_forecast_gain: float = 0.0
+    net_utility: float = 0.0
+    scorer_kind: str = "label_free_proxy"
 
 
 @dataclass(frozen=True)
@@ -308,6 +357,8 @@ class AgentBeliefState:
     linguistic_beliefs: dict[str, LinguisticBelief] = field(default_factory=dict)
     query_history: list[QueryAction] = field(default_factory=list)
     forecast_history: list[Forecast] = field(default_factory=list)
+    forecast_gaps: dict[str, ForecastGap] = field(default_factory=dict)
+    sufficiency_history: list[SufficiencyDecision] = field(default_factory=list)
     no_progress_steps: int = 0
     stop_reason: str | None = None
 
@@ -332,6 +383,12 @@ class AgentBeliefState:
                 key: asdict(value) for key, value in self.linguistic_beliefs.items()
             },
             "query_history": [asdict(item) for item in self.query_history],
+            "forecast_gaps": {
+                key: asdict(value) for key, value in self.forecast_gaps.items()
+            },
+            "sufficiency_history": [
+                asdict(item) for item in self.sufficiency_history
+            ],
             "forecast_count": len(self.forecast_history),
             "no_progress_steps": self.no_progress_steps,
             "stop_reason": self.stop_reason,

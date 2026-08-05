@@ -1,116 +1,192 @@
 # Paper-to-System Integration
 
-This document records which ideas are used in the Dr-CiK system and where they belong.
-The primary constraint is leakage-safe forecasting: task outcomes and Dr-CiK labels are
-never available to an online agent. TimesFM 2.5 supplies the numerical prior by default;
-the agents operate only on a copied final forecast.
+This document records the design boundary of the Dr-CiK system. The online loop is
+leakage-safe: `future_values`, `gt_evidence`, document `role`, and document `subtype`
+never enter retrieval, grounding, or revision. Resolved outcomes are available only to
+offline training and post-hoc chronological memory.
 
-## Selected online agents
+The research target is **foresight-driven retrieval**: rank evidence by its expected
+downstream forecast value, not just by text similarity.
 
-### 1. Retrieval Process Reward Agent
+## Online inference architecture
 
-Source: *From Long News to Accurate Forecast*.
+### 1. Numerical prior and forecast workspace
 
-The BM25 retriever first returns a larger candidate pool. A frozen utility ranker scores
-each document using retrieval relevance, entity/target alignment, causal content,
-temporal alignment, and novelty relative to the current linguistic belief. It then sends
-only the highest-utility candidates to the verifier.
+Sources: *PostTime* and *Bridging the Last Mile of Time Series Forecasting with LLM
+Agents*.
 
-The current implementation is a deterministic proxy for a learned PRM. It is explicitly
-named as a proxy because it has not been trained on forecast-error trajectories.
+TimesFM 2.5 generates `y_baseline` exactly once from historical values. The baseline is
+stored as an immutable tuple. Contextual reasoning modifies only `y_final` through
+validated `preserve`, `multiply`, `add`, `clip`, or `override` actions. Every accepted or
+rejected action is written to the audit trace.
 
-### 2. Importance-Aware Context Agent
+### 2. Structured sufficiency and gap controller
 
-Source: *From Long News to Accurate Forecast* and the NEXUS historical context agent.
+Sources: S2G-RAG and ReflectiveRAG.
 
-After verification, the agent allocates a shared character budget across accepted
-documents using their retrieval utility. Within each document it prioritizes sentences
-that preserve the entity, target, causal language, dates, quantified effects, forecast
-language, and relevant time-series regime information. The original document ID is
-preserved for auditing.
-
-### 3. Bayesian Linguistic Belief Updater
-
-Source: BLF.
-
-Every retrieval question owns a compact state:
-
-- evidence-sufficiency probability;
-- short supporting evidence summaries;
-- short counterevidence/rejection summaries;
-- update count.
-
-The probability is updated in log-odds space after each verifier step. It represents
-whether the information need is sufficiently resolved, not the probability of a binary
-world event. Raw documents therefore do not accumulate indefinitely in the belief state.
-
-### 4. Macro and Micro Reasoning Agents
-
-Source: NEXUS.
-
-The macro agent summarizes the numerical trajectory, slope, periodicity, baseline model,
-and confidence. The micro agent summarizes localized events, their windows, directions,
-permanence, explicit magnitude type, sources, and confidence. Both are structured inputs
-to the revision gate and are saved in the forecast workspace.
-
-### 5. Revision Utility Agent
-
-Sources: PostTime and *Bridging the Last Mile of Time Series Forecasting with LLM Agents*.
-
-The agent does not forecast from scratch. It evaluates whether a proposed edit has enough
-evidence to improve the TimesFM prior. Its score uses evidence confidence, belief
-sufficiency, source corroboration, magnitude specificity, horizon validity, prior memory,
-and weak macro/micro conflicts. A proposal below the threshold becomes an explicit
-`preserve` action rather than a guessed numerical intervention.
-
-All accepted edits still pass through the restricted workspace executor.
-
-## Offline-only ideas
-
-### PostTime SFT and RLVR
-
-The repository now produces the ingredients needed for future training: baseline,
-context, reasoning state, revision proposal, revise/preserve decision, final forecast,
-and improvement over baseline. Actual SFT/RLVR is not simulated by heuristics. It should
-be trained separately using chronological splits and an improvement-ratio reward.
-
-### Long-news reward model and PRM training
-
-Historical resolved tasks can be used to label article retention utility and step-wise
-retrieval gain. The resulting models must be frozen before test-time deployment. Ground
-truth must never be used to rank documents for the same unresolved task.
-
-### CORAL autonomous evolution
-
-CORAL is appropriate for searching over agent policies, prompts, thresholds, query
-strategies, and compression budgets on an isolated development environment. It is not an
-online forecasting agent. A long-running CORAL loop on a benchmark task could repeatedly
-optimize against its evaluator and compromise the intended forecast cutoff.
-
-The safe future design is:
+The controller maintains explicit `ForecastGap` objects and returns a
+`SufficiencyDecision` before every retrieval:
 
 ```text
-development tasks -> isolated policy proposals -> evaluator -> shared strategy memory
-                                                        |
-                                                        v
-                                      select and freeze one policy
-                                                        |
-                                                        v
-                                              hidden-test inference
+sufficient
+resolved_gap_ids
+unresolved_gap_ids
+selected_gap_id
+next_query
+expected_information_gain
+stop_reason
 ```
 
-## Recommended ablations
+Initial gaps cover historical regime, future drivers, and future regime. Follow-up gaps
+are evidence-dependent: anomaly evidence creates a resolution/recurrence gap, while an
+unquantified future event creates an effect-magnitude gap. This replaces the previous
+fixed four-query schedule.
 
-Keep the numerical backbone fixed and compare:
+The current judge is deterministic. Its interface is intended for a distilled small
+model trained from chronological retrieval traces.
 
-1. backbone only;
-2. BM25 retrieval without utility reranking;
-3. utility reranking without compression;
-4. reranking plus importance-aware compression;
-5. add linguistic belief updates;
-6. add macro/micro reasoning;
-7. add the revise-or-preserve gate;
-8. oracle context as an upper bound.
+### 3. Forecast-utility retrieval
 
-Report retrieval precision/recall, evidence recall, baseline MAE, final MAE, revision
-gain, harmful-revision rate, fallback rate, context retention, and latency.
+Sources: Agentic-R and *From Long News to Accurate Forecast*.
+
+BM25 generates a candidate pool. `ForecastUtilityRetriever` then combines lexical
+retrieval with gap alignment, entity/target relevance, causal content, temporal
+alignment, novelty, redundancy, and token cost. The default scorer is explicitly named
+`label_free_proxy`.
+
+The retriever accepts an injected `ForecastUtilityScorer`. A learned scorer should be
+trained offline with labels of the form:
+
+```text
+forecast_gain = error_before_document - error_after_document
+
+net_utility = forecast_gain
+              - latency_cost
+              - redundancy_cost
+              - token_cost
+```
+
+`ForecastUtilityLabeler` implements this leakage-sensitive label construction but is not
+imported by the online loop.
+
+### 4. Grounded Evidence State
+
+Sources: S2G-RAG, ReflectiveRAG, and BLF.
+
+Accepted documents are reduced to sentence-level claims and stored with document IDs,
+gap IDs, entity, target variable, publication date, occurrence dates, direction,
+magnitude, persistence, verbatim evidence quote, and confidence. Hard gates reject
+post-cutoff publication, wrong entity, wrong target, and contradictions with strong
+numerical seasonality. Raw documents do not accumulate in the belief state.
+
+The BLF-inspired linguistic belief records compact supporting and counter-evidence for
+each gap. It is an evidence-sufficiency state, not a binary forecast probability.
+
+### 5. Importance-aware context and macro/micro outlooks
+
+Sources: *From Long News to Accurate Forecast* and NEXUS.
+
+The context module allocates a shared character budget according to retrieval utility
+and prioritizes sentences containing the entity, target, causal language, dates,
+quantified effects, and forecast-horizon information. NEXUS-style macro and micro views
+remain separate structured inputs:
+
+- macro: numerical trend, baseline model, seasonality, confidence;
+- micro: local events, dates, direction, permanence, magnitude type, sources.
+
+They do not independently emit competing full forecasts.
+
+### 6. Contextual revision and restricted execution
+
+Sources: PostTime and Last-Mile Forecasting.
+
+The current deterministic revision policy decides whether each proposal has enough
+support to revise or preserve the TimesFM prior. It is a baseline—not a trained PostTime
+model. The target replacement is a compact reviser trained with verified forecast-time
+traces and a reward relative to the TimesFM baseline.
+
+Regardless of the reviser implementation, the Last-Mile executor remains the final
+safety boundary.
+
+## Offline-only architecture
+
+### Forecast-utility retriever training
+
+For each resolved training task, run controlled counterfactual retrieval ablations:
+
+```text
+forecast without document d -> error_before
+forecast with document d    -> error_after
+```
+
+Use positive-gain passages as positives. Passages with high semantic similarity but
+negative forecast gain are hard negatives. Following Agentic-R, later iterations should
+co-train the query-producing controller and retriever using improved multi-turn traces.
+
+### PostTime-style reviser training
+
+Generate several forecast-time revision candidates without showing the generator the
+future target. Use the resolved future only to retain candidates that improve the
+TimesFM prior; insert preserve targets when none improve. SFT supplies the initial
+revision policy, followed by baseline-relative RLVR.
+
+### Continuous uncertainty and calibration
+
+BLF's logit averaging and Platt scaling are binary-specific and are not applied to a
+continuous trajectory. The target design runs independent revision trials, aggregates
+trajectories or quantiles, and uses horizon/domain-aware conformal or quantile
+calibration. Dr-CiK sCRPS is the primary probabilistic metric.
+
+### CORAL-style evolution
+
+CORAL belongs outside hidden-test inference. Isolated agents may propose controller,
+retriever, grounding, compression, or reviser changes on development tasks. A separate
+evaluator accepts changes only when held-out forecast, retrieval, and cost metrics
+improve. Accepted lessons enter shared strategy memory; one frozen policy is deployed to
+test.
+
+## Required experiment matrix
+
+Keep splits chronological and compare both retrieval and forecasting components:
+
+| Context source | Forecast policy |
+|---|---|
+| none | TimesFM only |
+| oracle supporting evidence | TimesFM + reviser |
+| one-pass BM25 | TimesFM + reviser |
+| gap controller + BM25 | TimesFM + reviser |
+| gap controller + learned forecast-utility retriever | TimesFM + reviser |
+| utility retriever + importance compression | trained PostTime-style reviser |
+
+Report:
+
+- retrieval: supporting recall/precision, distractor citation rate, gap coverage,
+  forecast-utility ranking quality;
+- forecast: sCRPS, MASE, MAE/RMSE, interval coverage, harmful-revision rate;
+- system: turns, documents inspected, tokens, latency, fallback rate, invalid actions.
+
+Oracle context is essential: if oracle evidence does not improve the baseline, the
+bottleneck is the reviser rather than retrieval.
+
+## Current implementation status
+
+Implemented now:
+
+- structured gaps and sufficiency traces;
+- gap-derived queries and dynamic follow-up gaps;
+- injectable forecast-utility scorer plus transparent proxy;
+- offline forecast-utility label construction;
+- sentence-level grounded evidence schema;
+- importance-aware compression;
+- TimesFM immutable prior and Last-Mile workspace;
+- deterministic macro/micro reasoning and revise/preserve baseline;
+- chronological post-outcome memory.
+
+Not yet implemented or trained:
+
+- dense retriever and learned forecast-utility checkpoint;
+- distilled S2G-style controller;
+- LLM entailment verifier;
+- PostTime SFT/RLVR reviser;
+- continuous multi-trial calibration;
+- autonomous CORAL development runner.

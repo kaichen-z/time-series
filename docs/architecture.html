@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Foresight-Driven Time-Series Forecasting Agent</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #132238;
+      --muted: #5b6b7f;
+      --paper: #f5f7fb;
+      --panel: #ffffff;
+      --core: #0f766e;
+      --core-soft: #e6f5f2;
+      --learned: #b45309;
+      --learned-soft: #fff4df;
+      --offline: #6d28d9;
+      --offline-soft: #f1ebff;
+      --prior: #1d4ed8;
+      --prior-soft: #e9f0ff;
+      --line: #52647a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+    }
+    .page {
+      width: min(1680px, 100%);
+      margin: 0 auto;
+      padding: 28px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      gap: 28px;
+      align-items: flex-end;
+      margin-bottom: 18px;
+    }
+    h1 { margin: 0 0 6px; font-size: clamp(28px, 3vw, 48px); letter-spacing: -0.035em; }
+    .subtitle { margin: 0; color: var(--muted); font-size: 16px; }
+    .repo {
+      color: var(--prior);
+      text-decoration: none;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .diagram-shell {
+      overflow-x: auto;
+      border: 1px solid #d8e0ea;
+      border-radius: 22px;
+      background: #fff;
+      box-shadow: 0 22px 60px rgba(31, 50, 81, 0.09);
+    }
+    svg { display: block; width: 100%; min-width: 1180px; height: auto; }
+    .caption {
+      margin: 16px 4px 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+    @media print {
+      body { background: #fff; }
+      .page { width: 100%; padding: 0; }
+      .diagram-shell { box-shadow: none; border: 0; }
+      svg { min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+<main class="page">
+  <header>
+    <div>
+      <h1>Foresight-Driven Time-Series Forecasting Agent</h1>
+      <p class="subtitle">Gap-guided retrieval · forecast-utility evidence · TSFM-anchored revision · auditable execution</p>
+    </div>
+    <a class="repo" href="https://github.com/kaichen-z/time-series">github.com/kaichen-z/time-series</a>
+  </header>
+
+  <div class="diagram-shell">
+    <svg viewBox="0 0 1600 1740" role="img" aria-labelledby="diagram-title diagram-desc">
+      <title id="diagram-title">Architecture of the foresight-driven time-series forecasting agent</title>
+      <desc id="diagram-desc">An online inference loop combines TimesFM, structured gap judging, forecast-utility retrieval, grounded evidence, contextual revision, and a restricted forecast workspace. An offline lane trains retrievers and revisers and evolves policies on resolved chronological tasks.</desc>
+      <defs>
+        <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="7" stdDeviation="8" flood-color="#23364f" flood-opacity="0.12"/>
+        </filter>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#52647a"/>
+        </marker>
+        <marker id="arrowCore" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f766e"/>
+        </marker>
+        <marker id="arrowOffline" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#6d28d9"/>
+        </marker>
+        <style>
+          .lane { fill: #f8fafc; stroke: #d8e0ea; stroke-width: 2; }
+          .lane-offline { fill: #fbf9ff; stroke: #d8cafd; stroke-width: 2; }
+          .lane-title { font: 800 20px Inter, sans-serif; letter-spacing: 1.8px; fill: #41536a; }
+          .lane-note { font: 500 14px Inter, sans-serif; fill: #738298; }
+          .box { filter: url(#shadow); stroke-width: 2.4; rx: 18; }
+          .core { fill: #e6f5f2; stroke: #0f766e; }
+          .learned { fill: #fff4df; stroke: #b45309; }
+          .offline { fill: #f1ebff; stroke: #6d28d9; }
+          .prior { fill: #e9f0ff; stroke: #1d4ed8; }
+          .neutral { fill: #ffffff; stroke: #8da0b6; }
+          .title { font: 800 18px Inter, sans-serif; fill: #132238; }
+          .title.long { font-size: 16px; }
+          .body { font: 500 14px Inter, sans-serif; fill: #405269; }
+          .small { font: 600 12px Inter, sans-serif; fill: #68798f; }
+          .tag-core { fill: #0f766e; }
+          .tag-learned { fill: #b45309; }
+          .tag-offline { fill: #6d28d9; }
+          .tag-prior { fill: #1d4ed8; }
+          .tag-text { font: 800 11px Inter, sans-serif; fill: white; letter-spacing: .7px; }
+          .arrow { fill: none; stroke: #52647a; stroke-width: 3; marker-end: url(#arrow); }
+          .arrow-core { fill: none; stroke: #0f766e; stroke-width: 3.5; marker-end: url(#arrowCore); }
+          .arrow-offline { fill: none; stroke: #6d28d9; stroke-width: 3; marker-end: url(#arrowOffline); }
+          .dashed { stroke-dasharray: 10 8; }
+          .connector-label { font: 700 12px Inter, sans-serif; fill: #52647a; }
+          .section-label { font: 800 13px Inter, sans-serif; letter-spacing: .8px; fill: #718197; }
+        </style>
+      </defs>
+
+      <!-- Legend -->
+      <g transform="translate(54,28)">
+        <text class="section-label" x="0" y="17">STATUS LEGEND</text>
+        <rect x="136" y="0" width="18" height="18" rx="5" fill="#e6f5f2" stroke="#0f766e" stroke-width="2"/>
+        <text class="body" x="164" y="15">Implemented runtime / safety boundary</text>
+        <rect x="440" y="0" width="18" height="18" rx="5" fill="#fff4df" stroke="#b45309" stroke-width="2"/>
+        <text class="body" x="468" y="15">Trainable interface; proxy currently used</text>
+        <rect x="788" y="0" width="18" height="18" rx="5" fill="#f1ebff" stroke="#6d28d9" stroke-width="2"/>
+        <text class="body" x="816" y="15">Offline training / evolution</text>
+        <rect x="1055" y="0" width="18" height="18" rx="5" fill="#e9f0ff" stroke="#1d4ed8" stroke-width="2"/>
+        <text class="body" x="1083" y="15">Immutable numerical prior</text>
+      </g>
+
+      <!-- Online lane -->
+      <rect class="lane" x="38" y="82" width="1524" height="1120" rx="28"/>
+      <text class="lane-title" x="70" y="122">ONLINE INFERENCE · NO FUTURE LABELS</text>
+      <text class="lane-note" x="70" y="148">future_values, gt_evidence, document role, and subtype are hidden from every module in this lane</text>
+
+      <!-- 1 Input -->
+      <g transform="translate(75,195)">
+        <rect class="box neutral" width="245" height="166"/>
+        <rect class="tag-core" x="18" y="18" width="60" height="23" rx="11"/>
+        <text class="tag-text" x="32" y="34">INPUT</text>
+        <text class="title" x="18" y="70">Dr-CiK Forecast Task</text>
+        <text class="body" x="18" y="98">• historical values + timestamps</text>
+        <text class="body" x="18" y="121">• forecast horizon + metadata</text>
+        <text class="body" x="18" y="144">• noisy document corpus</text>
+      </g>
+
+      <!-- 2 TSFM -->
+      <g transform="translate(388,185)">
+        <rect class="box prior" width="255" height="186"/>
+        <rect class="tag-prior" x="18" y="18" width="104" height="23" rx="11"/>
+        <text class="tag-text" x="31" y="34">NUMERICAL</text>
+        <text class="title" x="18" y="70">TimesFM 2.5 Backbone</text>
+        <text class="body" x="18" y="98">Numerical history only</text>
+        <text class="body" x="18" y="123">→ point / quantile prior</text>
+        <text class="body" x="18" y="148">→ immutable y_baseline</text>
+        <text class="small" x="18" y="171">Generated exactly once</text>
+      </g>
+
+      <!-- 3 Diagnosis -->
+      <g transform="translate(710,185)">
+        <rect class="box core" width="260" height="186"/>
+        <rect class="tag-core" x="18" y="18" width="98" height="23" rx="11"/>
+        <text class="tag-text" x="31" y="34">DIAGNOSIS</text>
+        <text class="title" x="18" y="70">Forecast State Builder</text>
+        <text class="body" x="18" y="98">trend · seasonal period</text>
+        <text class="body" x="18" y="121">residual scale · anomalies</text>
+        <text class="body" x="18" y="144">macro / micro information needs</text>
+        <text class="small" x="18" y="169">NEXUS-inspired decomposition</text>
+      </g>
+
+      <!-- 4 Controller -->
+      <g transform="translate(1040,175)">
+        <rect class="box core" width="275" height="206"/>
+        <rect class="tag-core" x="18" y="18" width="109" height="23" rx="11"/>
+        <text class="tag-text" x="31" y="34">CONTROLLER</text>
+        <text class="title" x="18" y="70">Sufficiency + Gap Judge</text>
+        <text class="body" x="18" y="99">sufficient?</text>
+        <text class="body" x="18" y="122">resolved / unresolved gaps</text>
+        <text class="body" x="18" y="145">next query + expected gain</text>
+        <text class="body" x="18" y="168">dynamic follow-up gaps</text>
+        <text class="small" x="18" y="193">S2G-RAG + ReflectiveRAG</text>
+      </g>
+
+      <!-- Arrows top -->
+      <path class="arrow" d="M320 265 H388"/>
+      <path class="arrow" d="M320 315 C470 430, 610 335, 710 300"/>
+      <path class="arrow" d="M970 278 H1040"/>
+
+      <!-- Retrieval loop group -->
+      <text class="section-label" x="76" y="450">ADAPTIVE RETRIEVAL LOOP</text>
+
+      <g transform="translate(75,485)">
+        <rect class="box core" width="245" height="180"/>
+        <rect class="tag-core" x="18" y="18" width="83" height="23" rx="11"/>
+        <text class="tag-text" x="31" y="34">SEARCH</text>
+        <text class="title" x="18" y="70">Candidate Generator</text>
+        <text class="body" x="18" y="99">BM25 baseline</text>
+        <text class="body" x="18" y="122">dense / web adapter ready</text>
+        <text class="body" x="18" y="145">larger top-k candidate pool</text>
+        <text class="small" x="18" y="169">Never reads benchmark labels</text>
+      </g>
+
+      <g transform="translate(388,475)">
+        <rect class="box learned" width="270" height="200"/>
+        <rect class="tag-learned" x="18" y="18" width="123" height="23" rx="11"/>
+        <text class="tag-text" x="31" y="34">UTILITY RANKER</text>
+        <text class="title" x="18" y="70">Forecast-Utility Retriever</text>
+        <text class="body" x="18" y="99">local relevance + gap fit</text>
+        <text class="body" x="18" y="122">expected forecast improvement</text>
+        <text class="body" x="18" y="145">− redundancy − token/latency cost</text>
+        <text class="small" x="18" y="174">Agentic-R framework + forecast reward</text>
+        <text class="small" x="18" y="191">Current: explicit label-free proxy</text>
+      </g>
+
+      <g transform="translate(728,475)">
+        <rect class="box core" width="280" height="200"/>
+        <rect class="tag-core" x="18" y="18" width="108" height="23" rx="11"/>
+        <text class="tag-text" x="31" y="34">GROUNDING</text>
+        <text class="title" x="18" y="70">Temporal Evidence Gate</text>
+        <text class="body" x="18" y="99">entity · target · cutoff date</text>
+        <text class="body" x="18" y="122">occurrence window · direction</text>
+        <text class="body" x="18" y="145">magnitude · persistence · quote</text>
+        <text class="small" x="18" y="174">Hard gates + sentence extraction</text>
+        <text class="small" x="18" y="191">No role/subtype access</text>
+      </g>
+
+      <g transform="translate(1078,465)">
+        <rect class="box core" width="300" height="220"/>
+        <rect class="tag-core" x="18" y="18" width="119" height="23" rx="11"/>
+        <text class="tag-text" x="31" y="34">BELIEF STATE</text>
+        <text class="title long" x="18" y="70">Grounded Evidence Memory</text>
+        <text class="body" x="18" y="99">sentence-level evidence + provenance</text>
+        <text class="body" x="18" y="122">support / contradiction summaries</text>
+        <text class="body" x="18" y="145">gap coverage + confidence</text>
+        <text class="body" x="18" y="168">compact context, not raw accumulation</text>
+        <text class="small" x="18" y="197">S2G evidence context + BLF belief state</text>
+      </g>
+
+      <path class="arrow" d="M1178 381 V420 H198 V485"/>
+      <text class="connector-label" x="735" y="414">next gap-guided query</text>
+      <path class="arrow" d="M320 575 H388"/>
+      <path class="arrow" d="M658 575 H728"/>
+      <path class="arrow" d="M1008 575 H1078"/>
+      <path class="arrow-core dashed" d="M1228 465 V425 C1228 404, 1190 404, 1178 381"/>
+      <text class="connector-label" x="1242" y="429">insufficient → search again</text>
+
+      <!-- Context and reasoning -->
+      <text class="section-label" x="76" y="750">CONTEXT-TO-FORECAST REVISION</text>
+
+      <g transform="translate(75,785)">
+        <rect class="box core" width="270" height="185"/>
+        <rect class="tag-core" x="18" y="18" width="111" height="23" rx="11"/>
+        <text class="tag-text" x="31" y="34">COMPRESSION</text>
+        <text class="title" x="18" y="70">Importance-Aware Fusion</text>
+        <text class="body" x="18" y="99">utility-weighted context budget</text>
+        <text class="body" x="18" y="122">preserve dates, causes, magnitudes</text>
+        <text class="body" x="18" y="145">remove redundant detail</text>
+        <text class="small" x="18" y="170">Long News</text>
+      </g>
+
+      <g transform="translate(405,785)">
+        <rect class="box core" width="270" height="185"/>
+        <rect class="tag-core" x="18" y="18" width="89" height="23" rx="11"/>
+        <text class="tag-text" x="31" y="34">OUTLOOKS</text>
+        <text class="title" x="18" y="70">Macro + Micro Reasoning</text>
+        <text class="body" x="18" y="99">macro: trend / cycle / baseline</text>
+        <text class="body" x="18" y="122">micro: event / dates / impact</text>
+        <text class="body" x="18" y="145">structured, not competing forecasts</text>
+        <text class="small" x="18" y="170">NEXUS</text>
+      </g>
+
+      <g transform="translate(735,775)">
+        <rect class="box learned" width="280" height="205"/>
+        <rect class="tag-learned" x="18" y="18" width="93" height="23" rx="11"/>
+        <text class="tag-text" x="31" y="34">REVISER</text>
+        <text class="title" x="18" y="70">Contextual Forecast Reviser</text>
+        <text class="body" x="18" y="99">TimesFM prior + grounded context</text>
+        <text class="body" x="18" y="122">preserve or revise</text>
+        <text class="body" x="18" y="145">direction · window · magnitude</text>
+        <text class="small" x="18" y="174">Target: PostTime SFT + RLVR</text>
+        <text class="small" x="18" y="192">Current: deterministic baseline</text>
+      </g>
+
+      <g transform="translate(1078,765)">
+        <rect class="box core" width="300" height="225"/>
+        <rect class="tag-core" x="18" y="18" width="118" height="23" rx="11"/>
+        <text class="tag-text" x="31" y="34">SAFE EXECUTION</text>
+        <text class="title long" x="18" y="70">Last-Mile Forecast Workspace</text>
+        <text class="body" x="18" y="99">immutable y_baseline</text>
+        <text class="body" x="18" y="122">editable y_final</text>
+        <text class="body" x="18" y="145">preserve · multiply · add</text>
+        <text class="body" x="18" y="168">clip · override</text>
+        <text class="small" x="18" y="197">range checks · evidence IDs · audit log</text>
+      </g>
+
+      <path class="arrow" d="M1145 685 C1060 735, 275 705, 210 785"/>
+      <text class="connector-label" x="578" y="728">sufficient grounded context</text>
+      <path class="arrow" d="M345 878 H405"/>
+      <path class="arrow" d="M675 878 H735"/>
+      <path class="arrow" d="M1015 878 H1078"/>
+      <path class="arrow" d="M515 371 V735 H540 V785"/>
+      <text class="connector-label" x="528" y="710">numerical prior</text>
+      <path class="arrow" d="M643 280 C1020 285, 1435 600, 1378 834"/>
+      <text class="connector-label" x="1360" y="682">immutable baseline</text>
+
+      <!-- Output -->
+      <g transform="translate(390,1040)">
+        <rect class="box core" width="855" height="115"/>
+        <rect class="tag-core" x="18" y="18" width="77" height="23" rx="11"/>
+        <text class="tag-text" x="31" y="34">OUTPUT</text>
+        <text class="title" x="120" y="42">Decision-ready probabilistic forecast</text>
+        <text class="body" x="120" y="70">y_baseline · y_final · 100 trajectories / quantiles · prediction intervals</text>
+        <text class="body" x="120" y="94">cited evidence · missing-gap trace · revision actions · confidence · latency/cost metrics</text>
+      </g>
+      <path class="arrow-core" d="M1228 990 C1228 1022, 1170 1025, 1145 1040"/>
+
+      <!-- Online metrics -->
+      <g transform="translate(1280,1035)">
+        <rect class="box neutral" width="230" height="125"/>
+        <text class="title" x="16" y="32">Evaluation</text>
+        <text class="body" x="16" y="59">sCRPS · MASE · MAE</text>
+        <text class="body" x="16" y="82">evidence recall · distractors</text>
+        <text class="body" x="16" y="105">turns · tokens · latency</text>
+      </g>
+      <path class="arrow" d="M1245 1098 H1280"/>
+
+      <!-- Offline lane -->
+      <rect class="lane-offline" x="38" y="1235" width="1524" height="455" rx="28"/>
+      <text class="lane-title" x="70" y="1278">OFFLINE LEARNING + CONTROLLED EVOLUTION · RESOLVED CHRONOLOGICAL TASKS ONLY</text>
+      <text class="lane-note" x="70" y="1304">ground truth supervises training and evaluation here; learned artifacts are frozen before deployment</text>
+
+      <g transform="translate(75,1340)">
+        <rect class="box offline" width="250" height="140"/>
+        <rect class="tag-offline" x="18" y="18" width="79" height="23" rx="11"/>
+        <text class="tag-text" x="31" y="34">OUTCOMES</text>
+        <text class="title" x="18" y="70">Resolved Backtests</text>
+        <text class="body" x="18" y="99">chronological train / validation</text>
+        <text class="body" x="18" y="122">actual future values available</text>
+      </g>
+
+      <g transform="translate(385,1330)">
+        <rect class="box offline" width="280" height="160"/>
+        <text class="title" x="18" y="38">Forecast-Utility Labels</text>
+        <text class="body" x="18" y="69">error before − error after</text>
+        <text class="body" x="18" y="94">− latency − redundancy − tokens</text>
+        <text class="body" x="18" y="119">positive + hard-negative passages</text>
+        <text class="small" x="18" y="145">Agentic-R × Long News</text>
+      </g>
+
+      <g transform="translate(725,1330)">
+        <rect class="box offline" width="285" height="160"/>
+        <text class="title" x="18" y="38">Train Task-Specific Policies</text>
+        <text class="body" x="18" y="69">forecast-utility retriever / PRM</text>
+        <text class="body" x="18" y="94">distilled gap judge</text>
+        <text class="body" x="18" y="119">PostTime reviser: SFT + RLVR</text>
+        <text class="small" x="18" y="145">No test-task outcomes</text>
+      </g>
+
+      <g transform="translate(1070,1330)">
+        <rect class="box learned" width="285" height="160"/>
+        <text class="title" x="18" y="38">Freeze + Deploy</text>
+        <text class="body" x="18" y="69">versioned scorer checkpoint</text>
+        <text class="body" x="18" y="94">versioned judge + reviser</text>
+        <text class="body" x="18" y="119">fixed thresholds / budgets</text>
+        <text class="small" x="18" y="145">Replaces orange online proxies</text>
+      </g>
+
+      <path class="arrow-offline" d="M325 1410 H385"/>
+      <path class="arrow-offline" d="M665 1410 H725"/>
+      <path class="arrow-offline" d="M1010 1410 H1070"/>
+      <path class="arrow-offline dashed" d="M1212 1330 V1205 C1212 1180, 910 1190, 880 980"/>
+      <text class="connector-label" x="1012" y="1207">frozen learned modules</text>
+
+      <!-- CORAL row -->
+      <g transform="translate(75,1530)">
+        <rect class="box offline" width="250" height="115"/>
+        <text class="title" x="18" y="38">CORAL-Style Proposers</text>
+        <text class="body" x="18" y="67">queries · schemas · policies</text>
+        <text class="body" x="18" y="91">isolated workspaces</text>
+      </g>
+      <g transform="translate(385,1530)">
+        <rect class="box offline" width="280" height="115"/>
+        <text class="title" x="18" y="38">Separated Evaluator</text>
+        <text class="body" x="18" y="67">held-out forecast + retrieval + cost</text>
+        <text class="body" x="18" y="91">reject harmful changes</text>
+      </g>
+      <g transform="translate(725,1530)">
+        <rect class="box offline" width="285" height="115"/>
+        <text class="title" x="18" y="38">Shared Strategy Memory</text>
+        <text class="body" x="18" y="67">accepted lessons only</text>
+        <text class="body" x="18" y="91">versioned, replayable experiments</text>
+      </g>
+      <g transform="translate(1070,1530)">
+        <rect class="box offline" width="285" height="115"/>
+        <text class="title" x="18" y="38">Final Hidden-Test Policy</text>
+        <text class="body" x="18" y="67">one frozen configuration</text>
+        <text class="body" x="18" y="91">no online evolution or label access</text>
+      </g>
+      <path class="arrow-offline" d="M325 1587 H385"/>
+      <path class="arrow-offline" d="M665 1587 H725"/>
+      <path class="arrow-offline" d="M1010 1587 H1070"/>
+    </svg>
+  </div>
+  <p class="caption">
+    Solid arrows are online data flow. Dashed arrows are feedback or deployment boundaries.
+    Green modules and the blue TimesFM prior exist in the current codebase. Orange modules expose
+    trainable interfaces but currently use deterministic baselines. Purple modules are explicitly
+    offline to prevent future-label leakage and uncontrolled hidden-test optimization.
+  </p>
+</main>
+</body>
+</html>
