@@ -1,0 +1,113 @@
+"""A local Qwen client (via transformers), for when the Gemini API is rate-limited/unavailable."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Any
+
+from .llm import LLMResponse
+
+DEFAULT_CACHE_DIR = "/raid/home/air/khoutaibi/models"
+# Qwen2.5 (released Sept 2024): a well-documented, non-bleeding-edge checkpoint, chosen
+# specifically so its pretraining cutoff sits safely before Dr-CiK's more recent task windows.
+DEFAULT_MODEL_ID = "Qwen/Qwen2.5-14B-Instruct"
+
+
+class LocalModelUnavailableError(RuntimeError):
+    """Raised when transformers/torch, the checkpoint, or a GPU can't be loaded."""
+
+
+def _pick_device() -> str:
+    """Return the CUDA device with the most free memory right now, or 'cpu' if none."""
+    import torch
+
+    if not torch.cuda.is_available():
+        return "cpu"
+    best_index, best_free = 0, -1
+    for index in range(torch.cuda.device_count()):
+        free_bytes, _total_bytes = torch.cuda.mem_get_info(index)
+        if free_bytes > best_free:
+            best_index, best_free = index, free_bytes
+    return f"cuda:{best_index}"
+
+
+@dataclass(frozen=True)
+class QwenConfig:
+    """Local Qwen checkpoint and generation configuration."""
+
+    model_id: str = DEFAULT_MODEL_ID
+    device: str | None = None  # None -> auto-pick the freest GPU at load time
+    dtype: str = "bfloat16"
+    cache_dir: str | None = DEFAULT_CACHE_DIR
+    max_new_tokens: int = 1024
+
+
+class QwenClient:
+    """Runs a local Qwen chat model via transformers; no API key or network calls per-request."""
+
+    def __init__(self, config: QwenConfig | None = None, runtime_module: Any | None = None) -> None:
+        self.config = config or QwenConfig()
+        self._runtime_module = runtime_module
+        self._tokenizer: Any | None = None
+        self._model: Any | None = None
+        self._resolved_device: str | None = None
+
+    def _load_runtime(self) -> Any:
+        if self._runtime_module is not None:
+            return self._runtime_module
+        try:
+            import transformers
+        except ImportError as exc:
+            raise LocalModelUnavailableError("transformers is not installed; pip install 'dr-cik[qwen]'") from exc
+        return transformers
+
+    def _ensure_model(self) -> tuple[Any, Any, str]:
+        if self._model is not None:
+            return self._tokenizer, self._model, self._resolved_device
+        import torch
+
+        transformers = self._load_runtime()
+        device = self.config.device or _pick_device()
+        if self.config.cache_dir:
+            os.makedirs(os.path.expanduser(self.config.cache_dir), exist_ok=True)
+        try:
+            tokenizer = transformers.AutoTokenizer.from_pretrained(self.config.model_id, cache_dir=self.config.cache_dir)
+            model = transformers.AutoModelForCausalLM.from_pretrained(
+                self.config.model_id,
+                cache_dir=self.config.cache_dir,
+                dtype=getattr(torch, self.config.dtype),
+            ).to(device)
+            model.eval()
+        except Exception as exc:
+            raise LocalModelUnavailableError(f"Failed to load {self.config.model_id} on {device}: {exc}") from exc
+        self._tokenizer, self._model, self._resolved_device = tokenizer, model, device
+        return tokenizer, model, device
+
+    def complete(
+        self,
+        *,
+        system: str,
+        messages: list[dict[str, str]],
+        temperature: float = 0.0,
+        max_output_tokens: int | None = None,
+    ) -> LLMResponse:
+        import torch
+
+        tokenizer, model, device = self._ensure_model()
+        chat = [{"role": "system", "content": system}] + [
+            {"role": "user" if m.get("role", "user") != "assistant" else "assistant", "content": m["content"]} for m in messages
+        ]
+        prompt = tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
+        inputs = tokenizer(prompt, return_tensors="pt").to(device)
+        with torch.no_grad():
+            output_ids = model.generate(
+                **inputs,
+                max_new_tokens=max_output_tokens or self.config.max_new_tokens,
+                do_sample=temperature > 0.0,
+                temperature=temperature if temperature > 0.0 else None,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+        generated = output_ids[0][inputs["input_ids"].shape[1] :]
+        text = tokenizer.decode(generated, skip_special_tokens=True)
+        return LLMResponse(text=text, raw=output_ids)

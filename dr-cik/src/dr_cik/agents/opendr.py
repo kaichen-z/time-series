@@ -1,0 +1,144 @@
+"""OpenDR reproduction: plan, then a ReAct search/finish loop, then a report."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from ..llm import JsonExtractionError, LLMClient, parse_json_object
+from ..models import AgentReport, AgentResult, AgentStep, TaskView
+from ..retrieval import build_index
+from .common import AGENT_SYSTEM_PREAMBLE, parse_evidence_list, render_task_brief
+
+PLAN_SCHEMA = (
+    'Respond with exactly one JSON object: {"sub_questions": ["..."], "initial_queries": ["..."]}'
+)
+REACT_SCHEMA = (
+    "Respond with exactly one JSON object, either:\n"
+    '{"thought": "...", "action": {"name": "search", "args": {"query": "..."}}}\n'
+    "or, once you have enough evidence:\n"
+    '{"thought": "...", "action": {"name": "finish", "args": {"report": "<markdown>", '
+    '"evidence": [{"claim": "...", "source_doc_ids": ["doc_id", ...]}]}}}'
+)
+FORCED_FINISH_INSTRUCTION = (
+    "Step budget exhausted. Call finish now using only the evidence you have already found."
+)
+DEGRADED_REPORT = "Step budget exhausted; no verified evidence was produced."
+
+
+@dataclass(frozen=True)
+class OpenDRConfig:
+    """Tunables for the OpenDR ReAct loop."""
+
+    max_steps: int = 6
+    max_search_results: int = 5
+    temperature: float = 0.0
+
+
+class OpenDRAgent:
+    """Plan -> ReAct search/finish loop -> report, matching Dr-CiK's OpenDR description."""
+
+    def __init__(self, llm: LLMClient, config: OpenDRConfig | None = None) -> None:
+        self.llm = llm
+        self.config = config or OpenDRConfig()
+
+    def run(self, task_view: TaskView) -> AgentResult:
+        index = build_index(task_view.documents)
+        valid_ids = {document.document_id for document in task_view.documents}
+        brief = render_task_brief(task_view)
+        steps: list[AgentStep] = []
+        call_count = 0
+
+        plan_prompt = f"{brief}\n\nPlan your research before searching.\n{PLAN_SCHEMA}"
+        response = self.llm.complete(system=AGENT_SYSTEM_PREAMBLE, messages=[{"role": "user", "content": plan_prompt}], temperature=self.config.temperature)
+        call_count += 1
+        try:
+            plan = parse_json_object(response.text)
+        except JsonExtractionError:
+            plan = {"sub_questions": [], "initial_queries": [task_view.target_name + " " + task_view.entity_name]}
+        steps.append(AgentStep(step_index=0, kind="plan", payload=plan))
+
+        transcript_lines: list[str] = []
+        seen_queries: set[str] = set()
+        consecutive_parse_failures = 0
+        finished_report: AgentReport | None = None
+        stop_reason = "max_steps_reached"
+
+        for step_index in range(1, self.config.max_steps + 1):
+            remaining = self.config.max_steps - step_index + 1
+            prompt = (
+                f"{brief}\n\nPlan: {plan}\n\nTranscript so far:\n"
+                + ("\n".join(transcript_lines) if transcript_lines else "(nothing yet)")
+                + f"\n\nYou have {remaining} step(s) left.\n{REACT_SCHEMA}"
+            )
+            response = self.llm.complete(system=AGENT_SYSTEM_PREAMBLE, 
+                                         messages=[{"role": "user", "content": prompt}], 
+                                         temperature=self.config.temperature)
+            call_count += 1
+            try:
+                turn = parse_json_object(response.text)
+            except JsonExtractionError:
+                consecutive_parse_failures += 1
+                steps.append(AgentStep(step_index=step_index, kind="parse_failure", payload={"raw": response.text}))
+                if consecutive_parse_failures >= 2:
+                    stop_reason = "parse_failure"
+                    break
+                continue
+            consecutive_parse_failures = 0
+
+            action = turn.get("action") or {}
+            name = action.get("name")
+            args = action.get("args") or {}
+
+            if name == "finish":
+                evidence = parse_evidence_list(args.get("evidence") or [], valid_ids)
+                finished_report = AgentReport(report_markdown=str(args.get("report", "")), evidence=evidence)
+                steps.append(AgentStep(step_index=step_index, kind="finish", payload=turn))
+                stop_reason = "finished"
+                break
+
+            if name == "search":
+                query = str(args.get("query", "")).strip()
+                normalized = query.lower()
+                document_ids: list[str] = []
+                if not query or normalized in seen_queries:
+                    observation = "That query is empty or already searched. Try a different query or call finish."
+                else:
+                    seen_queries.add(normalized)
+                    results = index.search(query, top_k=self.config.max_search_results)
+                    document_ids = list(dict.fromkeys(chunk.document_id for chunk, _score in results))
+                    observation = "\n".join(
+                        f"[{chunk.document_id} | {chunk.chunk_id} | bm25={score:.3f}] {chunk.text[:280]}"
+                        for chunk, score in results
+                    ) or "No matching documents."
+                steps.append(AgentStep(step_index=step_index, kind="search", payload={"query": query, "document_ids": document_ids, "observation": observation}))
+                transcript_lines.append(f"Thought: {turn.get('thought', '')}")
+                transcript_lines.append(f"Action: search({query!r})")
+                transcript_lines.append(f"Observation: {observation}")
+                continue
+
+            steps.append(AgentStep(step_index=step_index, kind="unknown_action", payload=turn))
+            transcript_lines.append("Observation: Unknown action. Only 'search' and 'finish' are available.")
+
+        if finished_report is None and stop_reason == "parse_failure":
+            finished_report = AgentReport(report_markdown=DEGRADED_REPORT, evidence=())
+
+        if finished_report is None:
+            response = self.llm.complete(
+                system=AGENT_SYSTEM_PREAMBLE,
+                messages=[{"role": "user", "content": f"{brief}\n\n{FORCED_FINISH_INSTRUCTION}\n{REACT_SCHEMA}"}],
+                temperature=self.config.temperature,
+            )
+            call_count += 1
+            try:
+                turn = parse_json_object(response.text)
+                args = (turn.get("action") or {}).get("args") or {}
+                evidence = parse_evidence_list(args.get("evidence") or [], valid_ids)
+                finished_report = AgentReport(report_markdown=str(args.get("report", "")), evidence=evidence)
+                steps.append(AgentStep(step_index=self.config.max_steps + 1, kind="forced_finish", payload=turn))
+                stop_reason = "step_budget_exhausted_forced_finish"
+            except JsonExtractionError:
+                finished_report = AgentReport(report_markdown=DEGRADED_REPORT, evidence=())
+                steps.append(AgentStep(step_index=self.config.max_steps + 1, kind="forced_finish_failed", payload={"raw": response.text}))
+                stop_reason = "step_budget_exhausted_forced_finish_failed"
+
+        return AgentResult(report=finished_report, steps=tuple(steps), stop_reason=stop_reason, llm_call_count=call_count)
