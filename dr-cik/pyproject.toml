@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dr-cik"
+version = "0.1.0"
+description = "OpenDR and DRBench deep-research agent reproductions for the Dr-CiK benchmark, forecasting with Chronos"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["huggingface_hub>=0.25", "python-dotenv>=1.0"]
+
+[project.optional-dependencies]
+chronos = ["chronos-forecasting>=2.3.1", "torch"]
+gemini = ["google-genai>=1.0"]
+qwen = ["transformers>=4.46", "torch"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+dr-cik = "dr_cik.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+markers = ["live: requires network/GEMINI_API_KEY/GPU; excluded by default"]
+addopts = "-m \"not live\""
