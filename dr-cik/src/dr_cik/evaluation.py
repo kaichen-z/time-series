@@ -110,7 +110,7 @@ def evidence_recall(
     judge: LLMClient,
     judge_model_id: str = "gemini-3-flash-preview",
 ) -> EvidenceRecallResult:
-    """Approximate Dr-CiK's evidence-recall metric with our own Gemini-judge prompt (a proxy, not the official scorer)."""
+    """Approximate Dr-CiK's evidence-recall metric with our own LLM-judge prompt (a proxy, not the official scorer)."""
     if not gt_evidence:
         return EvidenceRecallResult(recall=None, matched_gt_ids=(), judge_raw_text="")
     gt_block = "\n".join(f"{item['id']}: {item['evidence']}" for item in gt_evidence)

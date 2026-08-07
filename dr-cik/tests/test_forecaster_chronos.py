@@ -1,14 +1,15 @@
-"""Chronos backbone against fake pipelines covering both the SAMPLES and QUANTILES APIs."""
+"""Chronos forecaster against fake pipelines covering both the SAMPLES and QUANTILES APIs."""
 
 from __future__ import annotations
 
+import sys
 from enum import Enum
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from dr_cik.backbone import BackboneUnavailableError, ChronosBackboneConfig, ChronosForecastBackbone
+from dr_cik.forecasters.chronos import ChronosUnavailableError, ChronosConfig, ChronosForecaster
 
 from .conftest import requires_sample
 
@@ -47,8 +48,8 @@ class _FakeQuantilesPipeline:
 def test_samples_branch_returns_correct_shape(sample_tasks) -> None:
     view = sample_tasks[0].agent_view()
     fake_module = SimpleNamespace(BaseChronosPipeline=_FakeSamplesPipeline, ForecastType=_FakeForecastType)
-    backbone = ChronosForecastBackbone(ChronosBackboneConfig(num_samples=10), runtime_module=fake_module)
-    forecast = backbone.forecast(view)
+    forecaster = ChronosForecaster(ChronosConfig(num_samples=10), runtime_module=fake_module)
+    forecast = forecaster.forecast(view)
     assert len(forecast.mean) == view.prediction_length
     assert len(forecast.samples) == 10
     assert all(len(sample) == view.prediction_length for sample in forecast.samples)
@@ -60,8 +61,8 @@ def test_samples_branch_returns_correct_shape(sample_tasks) -> None:
 def test_quantiles_branch_returns_correct_shape(sample_tasks) -> None:
     view = sample_tasks[0].agent_view()
     fake_module = SimpleNamespace(BaseChronosPipeline=_FakeQuantilesPipeline, ForecastType=_FakeForecastType)
-    backbone = ChronosForecastBackbone(ChronosBackboneConfig(num_samples=25), runtime_module=fake_module)
-    forecast = backbone.forecast(view)
+    forecaster = ChronosForecaster(ChronosConfig(num_samples=25), runtime_module=fake_module)
+    forecast = forecaster.forecast(view)
     assert len(forecast.mean) == view.prediction_length
     assert len(forecast.samples) == 25
     assert "quantile-ensemble" in forecast.method
@@ -73,17 +74,18 @@ def test_forecast_never_calls_a_fit_or_train_method(sample_tasks) -> None:
 
     class _StrictPipeline(_FakeSamplesPipeline):
         def fit(self, *args, **kwargs):
-            raise AssertionError("backbone must never fine-tune")
+            raise AssertionError("forecaster must never fine-tune")
 
         def train(self, *args, **kwargs):
-            raise AssertionError("backbone must never fine-tune")
+            raise AssertionError("forecaster must never fine-tune")
 
     fake_module = SimpleNamespace(BaseChronosPipeline=_StrictPipeline, ForecastType=_FakeForecastType)
-    backbone = ChronosForecastBackbone(ChronosBackboneConfig(num_samples=5), runtime_module=fake_module)
-    backbone.forecast(view)  # would raise via the overrides above if fit/train were ever called
+    forecaster = ChronosForecaster(ChronosConfig(num_samples=5), runtime_module=fake_module)
+    forecaster.forecast(view)  # would raise via the overrides above if fit/train were ever called
 
 
-def test_missing_chronos_package_raises_backbone_unavailable() -> None:
-    backbone = ChronosForecastBackbone(ChronosBackboneConfig())
-    with pytest.raises(BackboneUnavailableError):
-        backbone._load_runtime()
+def test_missing_chronos_package_raises_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "chronos", None)  # forces ImportError regardless of what's actually installed
+    forecaster = ChronosForecaster(ChronosConfig())
+    with pytest.raises(ChronosUnavailableError):
+        forecaster._load_runtime()

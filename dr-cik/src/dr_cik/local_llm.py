@@ -41,6 +41,9 @@ class QwenConfig:
     dtype: str = "bfloat16"
     cache_dir: str | None = DEFAULT_CACHE_DIR
     max_new_tokens: int = 1024
+    enable_thinking: bool = False  # Qwen3+ reasoning models emit a <think> block by default, burning the token budget
+    max_batch_size: int = 8  # cap on num_return_sequences per generate() call; complete_many() chunks above this to bound peak GPU memory on a shared cluster
+    seed: int | None = None  # seeds torch once at load, making a fixed sequence of sampled calls reproducible
 
 
 class QwenClient:
@@ -69,6 +72,10 @@ class QwenClient:
 
         transformers = self._load_runtime()
         device = self.config.device or _pick_device()
+        if self.config.seed is not None:
+            # Seed once here, not per call: re-seeding before each generate() would make every
+            # sampled draw identical, collapsing the S trajectories the forecaster needs.
+            torch.manual_seed(self.config.seed)
         if self.config.cache_dir:
             os.makedirs(os.path.expanduser(self.config.cache_dir), exist_ok=True)
         try:
@@ -84,6 +91,15 @@ class QwenClient:
         self._tokenizer, self._model, self._resolved_device = tokenizer, model, device
         return tokenizer, model, device
 
+    def _prepare(self, system: str, messages: list[dict[str, str]]):
+        tokenizer, model, device = self._ensure_model()
+        chat = [{"role": "system", "content": system}] + [
+            {"role": "user" if m.get("role", "user") != "assistant" else "assistant", "content": m["content"]} for m in messages
+        ]
+        prompt = tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False, enable_thinking=self.config.enable_thinking)
+        inputs = tokenizer(prompt, return_tensors="pt").to(device)
+        return tokenizer, model, inputs
+
     def complete(
         self,
         *,
@@ -94,12 +110,7 @@ class QwenClient:
     ) -> LLMResponse:
         import torch
 
-        tokenizer, model, device = self._ensure_model()
-        chat = [{"role": "system", "content": system}] + [
-            {"role": "user" if m.get("role", "user") != "assistant" else "assistant", "content": m["content"]} for m in messages
-        ]
-        prompt = tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
-        inputs = tokenizer(prompt, return_tensors="pt").to(device)
+        tokenizer, model, inputs = self._prepare(system, messages)
         with torch.no_grad():
             output_ids = model.generate(
                 **inputs,
@@ -111,3 +122,39 @@ class QwenClient:
         generated = output_ids[0][inputs["input_ids"].shape[1] :]
         text = tokenizer.decode(generated, skip_special_tokens=True)
         return LLMResponse(text=text, raw=output_ids)
+
+    def complete_many(
+        self,
+        *,
+        system: str,
+        messages: list[dict[str, str]],
+        count: int,
+        temperature: float = 1.0,
+        max_output_tokens: int | None = None,
+    ) -> list[LLMResponse]:
+        """Sample `count` independent completions, batched in generate() calls of at most max_batch_size at a time.
+
+        num_return_sequences replicates activations/KV-cache across the batch dimension, so an
+        unbounded count risks CUDA OOM on a shared cluster (seen live: 25-way batch OOM'd on a 9B
+        model with a 90-step horizon). Chunking bounds peak memory while keeping most of the speedup.
+        """
+        import torch
+
+        tokenizer, model, inputs = self._prepare(system, messages)
+        responses: list[LLMResponse] = []
+        remaining = count
+        while remaining > 0:
+            chunk = min(remaining, self.config.max_batch_size)
+            with torch.no_grad():
+                output_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=max_output_tokens or self.config.max_new_tokens,
+                    do_sample=True,
+                    temperature=max(temperature, 1e-4),
+                    num_return_sequences=chunk,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+            prompt_len = inputs["input_ids"].shape[1]
+            responses.extend(LLMResponse(text=tokenizer.decode(row[prompt_len:], skip_special_tokens=True), raw=row) for row in output_ids)
+            remaining -= chunk
+        return responses

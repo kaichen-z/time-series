@@ -70,9 +70,9 @@ class OpenDRAgent:
                 + ("\n".join(transcript_lines) if transcript_lines else "(nothing yet)")
                 + f"\n\nYou have {remaining} step(s) left.\n{REACT_SCHEMA}"
             )
-            response = self.llm.complete(system=AGENT_SYSTEM_PREAMBLE, 
-                                         messages=[{"role": "user", "content": prompt}], 
-                                         temperature=self.config.temperature)
+            response = self.llm.complete(
+                system=AGENT_SYSTEM_PREAMBLE, messages=[{"role": "user", "content": prompt}], temperature=self.config.temperature
+            )
             call_count += 1
             try:
                 turn = parse_json_object(response.text)
