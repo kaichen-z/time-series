@@ -1,4 +1,4 @@
-"""Chronos zero-shot forecast backbone: never fit or fine-tuned on Dr-CiK data."""
+"""Chronos zero-shot forecaster: inference only, never fit or fine-tuned on Dr-CiK data."""
 
 from __future__ import annotations
 
@@ -6,32 +6,32 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .models import Forecast, TaskView
+from ..models import Forecast, TaskView
 
 DEFAULT_CACHE_DIR = "/raid/home/air/khoutaibi/models"
 
 
-class BackboneUnavailableError(RuntimeError):
+class ChronosUnavailableError(RuntimeError):
     """Raised when the chronos-forecasting package or a checkpoint can't be loaded."""
 
 
 @dataclass(frozen=True)
-class ChronosBackboneConfig:
+class ChronosConfig:
     """Chronos checkpoint and sampling configuration."""
 
     model_id: str = "amazon/chronos-bolt-base"
-    device_map: str = "cuda"
+    device_map: str = "cpu"  # matches the CLI default; bolt-base is small, and CPU always works. Pass "cuda" to speed up.
     torch_dtype: str = "float32"
     cache_dir: str | None = DEFAULT_CACHE_DIR
     local_files_only: bool = False
     num_samples: int = 25
 
 
-class ChronosForecastBackbone:
+class ChronosForecaster:
     """Zero-shot Chronos forecaster; only ever calls predict/predict_quantiles, never fit."""
 
-    def __init__(self, config: ChronosBackboneConfig | None = None, runtime_module: Any | None = None) -> None:
-        self.config = config or ChronosBackboneConfig()
+    def __init__(self, config: ChronosConfig | None = None, runtime_module: Any | None = None) -> None:
+        self.config = config or ChronosConfig()
         self._runtime_module = runtime_module
         self._pipeline: Any | None = None
 
@@ -41,7 +41,7 @@ class ChronosForecastBackbone:
         try:
             import chronos
         except ImportError as exc:
-            raise BackboneUnavailableError("chronos-forecasting is not installed; pip install 'dr-cik[chronos]'") from exc
+            raise ChronosUnavailableError("chronos-forecasting is not installed; pip install 'dr-cik[chronos]'") from exc
         return chronos
 
     def _ensure_pipeline(self) -> Any:
@@ -59,7 +59,7 @@ class ChronosForecastBackbone:
                 local_files_only=self.config.local_files_only,
             )
         except Exception as exc:
-            raise BackboneUnavailableError(f"Failed to load Chronos checkpoint {self.config.model_id}: {exc}") from exc
+            raise ChronosUnavailableError(f"Failed to load Chronos checkpoint {self.config.model_id}: {exc}") from exc
         return self._pipeline
 
     def warm_up(self) -> None:
@@ -81,18 +81,17 @@ class ChronosForecastBackbone:
             samples_array = raw[0].numpy()
             method = f"chronos:{self.config.model_id}:mc-samples(S={sample_count})"
         else:
-
-            # avoid Chronos clamping ?
-    
+            # Chronos-Bolt has no native sampling, so evenly spaced quantile trajectories stand in as
+            # pseudo-samples. Levels stay inside [0.1, 0.9] because Bolt clamps its extreme tails.
             levels = [0.1 + 0.8 * (i + 0.5) / sample_count for i in range(sample_count)]
             quantiles, _mean = pipeline.predict_quantiles(context, prediction_length=horizon, quantile_levels=levels)
             samples_array = quantiles[0].numpy().T
             method = f"chronos:{self.config.model_id}:quantile-ensemble(S={sample_count})"
 
         if samples_array.shape != (sample_count, horizon):
-            raise BackboneUnavailableError(f"Chronos returned shape {samples_array.shape}, expected ({sample_count}, {horizon})")
+            raise ChronosUnavailableError(f"Chronos returned shape {samples_array.shape}, expected ({sample_count}, {horizon})")
         if not (samples_array == samples_array).all():  # NaN check without numpy import at module scope
-            raise BackboneUnavailableError("Chronos produced non-finite forecast values")
+            raise ChronosUnavailableError("Chronos produced non-finite forecast values")
 
         mean = samples_array.mean(axis=0)
         return Forecast(
