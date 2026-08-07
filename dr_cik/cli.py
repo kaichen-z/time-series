@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -30,6 +31,17 @@ def _add_task_source_args(subparser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dr-cik", description="OpenDR/DRBench + Chronos reproduction for Dr-CiK.")
+    parser.add_argument(
+        "--log-level",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        default="INFO",
+        help="INFO shows task/step progress and generation timing; DEBUG also shows prompt/response text",
+    )
+    parser.add_argument(
+        "--log-file",
+        default=None,
+        help="Also write logs here. Defaults to ./logs/<output-dir-name>.log for commands that take --output-dir.",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     download_data = subparsers.add_parser("download-data", help="Download the full ServiceNow/Dr-CiK dataset")
@@ -56,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--num-samples", type=int, default=100)
     run.add_argument("--crps-sample-size", type=int, default=25)
     run.add_argument("--max-react-steps", type=int, default=6)
-    run.add_argument("--drbench-top-k", type=int, default=8)
+    run.add_argument("--drbench-top-k", type=int, default=16, help="Documents retrieved before briefing; corpora average ~37 docs/task, so this is a fraction, not the whole thing (paper doesn't pin a value)")
     run.add_argument("--retriever", choices=RETRIEVERS, default="bm25", help="bm25 (lexical, default) or dense (embeddings, as DRBench itself uses)")
     run.add_argument("--seed", type=int, default=7)
 
@@ -111,9 +123,26 @@ def _select_tasks(tasks, task_ids: list[str] | None, limit: int | None):
     return tasks
 
 
+def _configure_logging(args: argparse.Namespace) -> None:
+    log_file = args.log_file or (
+        str(Path("logs") / f"{Path(args.output_dir).name}.log") if getattr(args, "output_dir", None) else None
+    )
+    formatter = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s", datefmt="%H:%M:%S")
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_file:
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(log_file, mode="a", encoding="utf-8"))
+    for handler in handlers:
+        handler.setFormatter(formatter)
+    logging.basicConfig(level=getattr(logging, args.log_level), handlers=handlers)
+    if log_file:
+        logging.getLogger(__name__).info("logging to %s", log_file)
+
+
 def main(argv: list[str] | None = None) -> None:
     load_dotenv()  # picks up GEMINI_API_KEY etc. from a .env file, walking up from cwd
     args = build_parser().parse_args(argv)
+    _configure_logging(args)
 
     if args.command == "download-data":
         path = download_dataset(local_dir=args.local_dir, revision=args.revision)

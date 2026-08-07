@@ -43,6 +43,12 @@ a reproduction of the *method*, not of that repository's exact behaviour.
 **Agent retrieval strategy.** The Dr-CiK paper does not pin a retriever for the agents'
 internal search tool, so the choice is ours — but it is not arbitrary, see below.
 
+**Retrieval top_k.** Not pinned by the paper either. Full corpora average ~37 documents per
+task (min 30, max 74), so `--drbench-top-k` (default 16, `agents/opendr.py`'s
+`max_search_results` similarly per ReAct search call) is always a fraction of the corpus,
+not the whole thing — tune it if you want to trade recall against LLM-brief call count
+(DRBench issues one brief call per retrieved document).
+
 **EvidenceRecall is a proxy.** The official scorer is private. `evaluation.py` approximates
 it with our own LLM-judge prompt asking whether any predicted claim conveys each
 ground-truth evidence item. It is labelled a proxy in every `summary.json` it appears in,

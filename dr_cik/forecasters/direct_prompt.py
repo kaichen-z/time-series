@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import random
 import statistics
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ from pathlib import Path
 from ..agents.common import render_task_brief
 from ..llm import JsonExtractionError, LLMClient, parse_json_object
 from ..models import Forecast, TaskView
+
+logger = logging.getLogger(__name__)
 
 DIRECT_PROMPT_SYSTEM_PREAMBLE = (
     "You are a probabilistic time-series forecaster. You are given a task's history, target "
@@ -113,17 +116,23 @@ class DirectPromptForecaster:
         horizon = task_view.prediction_length
         budget = _output_token_budget(horizon, floor=self.config.max_output_tokens)
         prompt = _build_prompt(task_view, context_text)
+        logger.info("direct-prompt[%s]: requesting %d trajectory/ies (horizon=%d, token_budget=%d, temperature=%.2f)", task_view.benchmark_id, sample_count, horizon, budget, self.config.temperature)
 
         rows = self._collect_rows(prompt, horizon, sample_count, budget)
+        logger.info("direct-prompt[%s]: %d/%d valid row(s) on first pass", task_view.benchmark_id, len(rows), sample_count)
         missing = sample_count - len(rows)
         if missing > 0:
+            logger.info("direct-prompt[%s]: retrying %d missing row(s) with a stricter reminder", task_view.benchmark_id, missing)
             rows.extend(self._collect_rows(f"{prompt}\n\n{_RETRY_REMINDER}", horizon, missing, budget))
+            logger.info("direct-prompt[%s]: %d/%d valid row(s) after retry", task_view.benchmark_id, len(rows), sample_count)
 
         rng = _stable_rng(task_view.benchmark_id, self.config.seed)
         if not rows:
+            logger.warning("direct-prompt[%s]: no valid rows at all, using degraded jitter fallback", task_view.benchmark_id)
             samples = _jitter_fallback(task_view, sample_count, rng)
             method = f"direct-prompt:{self.config.model_id}:degraded-fallback(S={sample_count})"
         elif len(rows) < sample_count:
+            logger.warning("direct-prompt[%s]: only %d/%d rows, padding by resampling", task_view.benchmark_id, len(rows), sample_count)
             padded = rows + [rng.choice(rows) for _ in range(sample_count - len(rows))]
             samples = tuple(tuple(row) for row in padded)
             method = f"direct-prompt:{self.config.model_id}:padded(S={sample_count},model_rows={len(rows)})"
@@ -148,10 +157,13 @@ class DirectPromptForecaster:
             try:
                 parsed = parse_json_object(response.text)
             except JsonExtractionError:
+                logger.debug("direct-prompt: response was not valid JSON: %r", response.text[:500])
                 continue
             row = _extract_forecast(parsed, horizon)
-            if row is not None:
-                rows.append(row)
+            if row is None:
+                logger.debug("direct-prompt: forecast array missing/wrong length (want %d): %r", horizon, parsed.get("forecast"))
+                continue
+            rows.append(row)
         return rows
 
 

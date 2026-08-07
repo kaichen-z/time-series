@@ -41,19 +41,19 @@ SAMPLE=/raid/home/air/khoutaibi/external/Dr-CiK/sample
 
 # 1. Deep-research agent + Chronos forecaster
 dr-cik run --agent drbench --llm-backend qwen \
-  --sample-dir $SAMPLE --output-dir outputs/drbench-sample
+  --sample-dir $SAMPLE --output-dir results/drbench-sample
 
 # 2. Direct-Prompt baseline, reusing step 1's evidence as context
 dr-cik direct-prompt --sample-dir $SAMPLE \
-  --from-run-dir outputs/drbench-sample \
+  --from-run-dir results/drbench-sample \
   --model-id Qwen/Qwen3.5-4B \
-  --output-dir outputs/dp-qwen3.5-4b-sample
+  --output-dir results/dp-qwen3.5-4b-sample
 
 # 3. Overlay both on the same axes
 dr-cik plot-compare --sample-dir $SAMPLE \
-  --series "Chronos=outputs/drbench-sample/forecasts.jsonl" \
-  --series "Qwen3.5-4B=outputs/dp-qwen3.5-4b-sample/forecasts.jsonl" \
-  --output-dir outputs/compare
+  --series "Chronos=results/drbench-sample/forecasts.jsonl" \
+  --series "Qwen3.5-4B=results/dp-qwen3.5-4b-sample/forecasts.jsonl" \
+  --output-dir results/compare
 ```
 
 ## Full dataset
@@ -64,7 +64,7 @@ dr-cik download-models   # Chronos checkpoint -> /raid/home/air/khoutaibi/models
 
 dr-cik run --agent drbench --llm-backend qwen \
   --data-dir /raid/home/air/khoutaibi/time_series_dataset/Dr-CiK \
-  --split public-dev --output-dir outputs/drbench-dev
+  --split public-dev --output-dir results/drbench-dev
 ```
 
 279 tasks total: 199 `public-dev` (labelled, scored locally) and 80 `hidden-test`
@@ -112,7 +112,7 @@ as *names* the labelled types. It runs on every `pytest` invocation.
 
 ## Results
 
-See **[docs/RESULTS.md](docs/RESULTS.md)** for measured numbers (`outputs/` is gitignored,
+See **[docs/RESULTS.md](docs/RESULTS.md)** for measured numbers (`results/` is gitignored,
 so results are recorded there rather than only on disk).
 
 ## What is faithful to the paper, and what is not

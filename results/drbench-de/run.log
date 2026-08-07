@@ -1,0 +1,20 @@
+12:12:53 INFO    dr_cik.cli: logging to /home/ik832/time-series/outputs/drbench-de/run.log
+12:12:54 INFO    dr_cik.pipeline: === task 1/199: task_42 ===
+12:12:54 INFO    dr_cik.pipeline: task task_42: starting drbench agent
+12:12:54 INFO    dr_cik.agents.drbench: drbench[task_42]: step 0/search - query='sales volume This time series records the sales volume of Nuance Cosmetic Lab, a store. Nuance Cosmetic Lab falling' (retriever=bm25) -> 6 document(s): ['doc_1571', 'doc_1559', 'doc_1575', 'doc_1548', 'doc_1574', 'doc_1554']
+12:12:54 INFO    dr_cik.agents.drbench: drbench[task_42]: step 1/6 - briefing document doc_1571
+12:12:59 INFO    dr_cik.local_llm: loading Qwen/Qwen2.5-14B-Instruct onto cuda:0 (dtype=bfloat16)
+12:13:00 INFO    httpx: HTTP Request: HEAD https://huggingface.co/Qwen/Qwen2.5-14B-Instruct/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+12:13:00 INFO    httpx: HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen2.5-14B-Instruct/cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8/config.json "HTTP/1.1 200 OK"
+12:13:00 INFO    httpx: HTTP Request: HEAD https://huggingface.co/Qwen/Qwen2.5-14B-Instruct/resolve/main/tokenizer_config.json "HTTP/1.1 307 Temporary Redirect"
+12:13:00 INFO    httpx: HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen2.5-14B-Instruct/cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8/tokenizer_config.json "HTTP/1.1 200 OK"
+12:13:00 INFO    httpx: HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen2.5-14B-Instruct/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+12:13:00 INFO    httpx: HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen2.5-14B-Instruct/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+12:13:01 INFO    httpx: HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen2.5-14B-Instruct "HTTP/1.1 200 OK"
+12:13:01 INFO    httpx: HTTP Request: HEAD https://huggingface.co/Qwen/Qwen2.5-14B-Instruct/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+12:13:01 INFO    httpx: HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen2.5-14B-Instruct/cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8/config.json "HTTP/1.1 200 OK"
+12:13:01 INFO    httpx: HTTP Request: HEAD https://huggingface.co/Qwen/Qwen2.5-14B-Instruct/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+12:13:01 INFO    httpx: HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen2.5-14B-Instruct/cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8/config.json "HTTP/1.1 200 OK"
+12:13:01 INFO    httpx: HTTP Request: HEAD https://huggingface.co/Qwen/Qwen2.5-14B-Instruct/resolve/main/generation_config.json "HTTP/1.1 307 Temporary Redirect"
+12:13:01 INFO    httpx: HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen2.5-14B-Instruct/cf98f3b3bbb457ad9e2bb7baf9a0125b6b88caa8/generation_config.json "HTTP/1.1 200 OK"
+12:13:10 INFO    dr_cik.local_llm: loaded Qwen/Qwen2.5-14B-Instruct onto cuda:0

@@ -1,6 +1,6 @@
 # Results
 
-Measured with this package. `outputs/` is gitignored, so numbers are recorded here.
+Measured with this package. `results/` is gitignored, so numbers are recorded here.
 
 All three forecast metrics are **lower-is-better**. Read
 [METHODS.md](METHODS.md) before citing any of these — sCRPS uses S=25 per the paper's
@@ -82,12 +82,12 @@ Two things worth noting rather than over-reading:
 SAMPLE=/raid/home/air/khoutaibi/external/Dr-CiK/sample
 
 dr-cik run --agent drbench --llm-backend qwen --sample-dir $SAMPLE \
-  --output-dir outputs/drbench-qwen-sample
+  --output-dir results/drbench-qwen-sample
 
 for M in Qwen/Qwen3.5-4B Qwen/Qwen3.5-9B; do
   dr-cik direct-prompt --sample-dir $SAMPLE \
-    --from-run-dir outputs/drbench-qwen-sample \
-    --model-id $M --output-dir "outputs/dp-$(basename $M)-sample"
+    --from-run-dir results/drbench-qwen-sample \
+    --model-id $M --output-dir "results/dp-$(basename $M)-sample"
 done
 ```
 

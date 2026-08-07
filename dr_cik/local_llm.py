@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 
 from .llm import LLMResponse
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CACHE_DIR = "/raid/home/air/khoutaibi/models"
 # Qwen2.5 (released Sept 2024): a well-documented, non-bleeding-edge checkpoint, chosen
@@ -72,6 +76,7 @@ class QwenClient:
 
         transformers = self._load_runtime()
         device = self.config.device or _pick_device()
+        logger.info("loading %s onto %s (dtype=%s)", self.config.model_id, device, self.config.dtype)
         if self.config.seed is not None:
             # Seed once here, not per call: re-seeding before each generate() would make every
             # sampled draw identical, collapsing the S trajectories the forecaster needs.
@@ -88,6 +93,7 @@ class QwenClient:
             model.eval()
         except Exception as exc:
             raise LocalModelUnavailableError(f"Failed to load {self.config.model_id} on {device}: {exc}") from exc
+        logger.info("loaded %s onto %s", self.config.model_id, device)
         self._tokenizer, self._model, self._resolved_device = tokenizer, model, device
         return tokenizer, model, device
 
@@ -111,16 +117,22 @@ class QwenClient:
         import torch
 
         tokenizer, model, inputs = self._prepare(system, messages)
+        budget = max_output_tokens or self.config.max_new_tokens
+        prompt_tokens = inputs["input_ids"].shape[1]
+        logger.debug("generate: prompt_tokens=%d max_new_tokens=%d temperature=%.2f", prompt_tokens, budget, temperature)
+        start = time.monotonic()
         with torch.no_grad():
             output_ids = model.generate(
                 **inputs,
-                max_new_tokens=max_output_tokens or self.config.max_new_tokens,
+                max_new_tokens=budget,
                 do_sample=temperature > 0.0,
                 temperature=temperature if temperature > 0.0 else None,
                 pad_token_id=tokenizer.eos_token_id,
             )
         generated = output_ids[0][inputs["input_ids"].shape[1] :]
         text = tokenizer.decode(generated, skip_special_tokens=True)
+        logger.info("generate: produced %d token(s) in %.1fs", len(generated), time.monotonic() - start)
+        logger.debug("generate: response text=%r", text[:2000])
         return LLMResponse(text=text, raw=output_ids)
 
     def complete_many(
@@ -141,20 +153,30 @@ class QwenClient:
         import torch
 
         tokenizer, model, inputs = self._prepare(system, messages)
+        budget = max_output_tokens or self.config.max_new_tokens
+        prompt_len = inputs["input_ids"].shape[1]
+        logger.info(
+            "generate_many: sampling %d completion(s) in batches of <=%d (prompt_tokens=%d max_new_tokens=%d temperature=%.2f)",
+            count, self.config.max_batch_size, prompt_len, budget, temperature,
+        )
         responses: list[LLMResponse] = []
         remaining = count
+        batch_num = 0
         while remaining > 0:
+            batch_num += 1
             chunk = min(remaining, self.config.max_batch_size)
+            start = time.monotonic()
             with torch.no_grad():
                 output_ids = model.generate(
                     **inputs,
-                    max_new_tokens=max_output_tokens or self.config.max_new_tokens,
+                    max_new_tokens=budget,
                     do_sample=True,
                     temperature=max(temperature, 1e-4),
                     num_return_sequences=chunk,
                     pad_token_id=tokenizer.eos_token_id,
                 )
-            prompt_len = inputs["input_ids"].shape[1]
+            logger.debug("generate_many: batch %d (%d completions) done in %.1fs", batch_num, chunk, time.monotonic() - start)
             responses.extend(LLMResponse(text=tokenizer.decode(row[prompt_len:], skip_special_tokens=True), raw=row) for row in output_ids)
             remaining -= chunk
+        logger.info("generate_many: collected %d/%d completion(s)", len(responses), count)
         return responses

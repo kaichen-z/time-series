@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import statistics
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -18,6 +19,8 @@ from .local_llm import DEFAULT_MODEL_ID as DEFAULT_QWEN_MODEL_ID
 from .local_llm import QwenClient, QwenConfig
 from .models import AgentResult, DeepResearchAgent, Forecast, ForecastTask, RunResult
 from .retrieval import RETRIEVERS
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -37,7 +40,7 @@ class RunConfig:
     num_samples: int = 100
     crps_sample_size: int = 25
     max_react_steps: int = 6
-    drbench_top_k: int = 8
+    drbench_top_k: int = 16
     retriever: str = "bm25"  # "bm25" | "dense" (dense mirrors DRBench's own embedding retrieval)
     seed: int = 7
 
@@ -70,6 +73,15 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def _log_task_banner(label: str, i: int, total: int, benchmark_id: str) -> None:
+    """A hard-to-miss block marking where one task's log lines begin, amid hundreds of lines/run."""
+    line = f"{label} {i}/{total}  {benchmark_id}"
+    rule = "#" * max(len(line) + 4, 60)
+    logger.info(rule)
+    logger.info("# %s", line)
+    logger.info(rule)
+
+
 def _retrieved_document_ids(agent_result: AgentResult) -> set[str]:
     """Every document_id any search/brief step actually touched, for the *_retrieved diagnostic."""
     ids: set[str] = set()
@@ -97,13 +109,21 @@ class DrCikPipeline:
         self.forecaster = forecaster
 
     def run(self, task: ForecastTask) -> RunResult:
+        logger.info("task %s: starting %s agent", task.benchmark_id, self.config.agent)
         view = task.agent_view()
         agent_result = self.agent.run(view)
+        logger.info(
+            "task %s: agent stopped (%s) after %d LLM call(s)",
+            task.benchmark_id, agent_result.stop_reason, agent_result.llm_call_count,
+        )
+        logger.info("task %s: forecasting with %s (num_samples=%d)", task.benchmark_id, self.forecaster.__class__.__name__, self.config.num_samples)
         forecast = self.forecaster.forecast(view, num_samples=self.config.num_samples)
+        logger.debug("task %s: forecast method=%s", task.benchmark_id, forecast.method)
         used_doc_ids = _retrieved_document_ids(agent_result)
         metrics = development_metrics(
             task, forecast, agent_result.report.evidence, used_doc_ids, self.judge, self.config.crps_sample_size
         )
+        logger.info("task %s: metrics=%s", task.benchmark_id, metrics)
         return RunResult(
             benchmark_id=task.benchmark_id,
             agent_name=self.config.agent,
@@ -113,7 +133,12 @@ class DrCikPipeline:
         )
 
     def run_many(self, tasks: Iterable[ForecastTask]) -> list[RunResult]:
-        return [self.run(task) for task in tasks]
+        tasks = list(tasks)
+        results = []
+        for i, task in enumerate(tasks, 1):
+            _log_task_banner("TASK", i, len(tasks), task.benchmark_id)
+            results.append(self.run(task))
+        return results
 
 
 def build_pipeline(
@@ -228,11 +253,14 @@ def run_direct_prompt(
     crps_sample_size: int = 25,
 ) -> list[DirectPromptRunResult]:
     """Forecast every task via the Direct-Prompt LLM baseline; score smae/srmse/scrps only (no new evidence to grade)."""
+    tasks = list(tasks)
     results: list[DirectPromptRunResult] = []
-    for task in tasks:
+    for i, task in enumerate(tasks, 1):
+        _log_task_banner("DIRECT-PROMPT TASK", i, len(tasks), task.benchmark_id)
         view = task.agent_view()
         context_text = context_by_id.get(task.benchmark_id, "")
         forecast = forecaster.forecast(view, context_text)
+        logger.info("task %s: forecast method=%s", task.benchmark_id, forecast.method)
         if task.future_values is not None:
             crps_samples = forecast.samples[:crps_sample_size] or forecast.samples
             metrics: dict[str, float | None] = {
@@ -242,6 +270,7 @@ def run_direct_prompt(
             }
         else:
             metrics = {"smae": None, "srmse": None, "scrps": None}
+        logger.info("task %s: metrics=%s", task.benchmark_id, metrics)
         results.append(DirectPromptRunResult(benchmark_id=task.benchmark_id, forecast=forecast, metrics=metrics))
     return results
 

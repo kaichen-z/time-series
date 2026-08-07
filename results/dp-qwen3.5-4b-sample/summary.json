@@ -1,0 +1,11 @@
+{
+  "num_tasks": 3,
+  "model_id": "Qwen/Qwen3.5-4B",
+  "from_run_dir": "outputs/drbench-qwen-sample",
+  "mean_metrics": {
+    "scrps": 0.1311414197815706,
+    "smae": 0.17838240025567628,
+    "srmse": 0.24518255491351526
+  },
+  "note": "Direct-Prompt baseline: the LLM forecasts numbers directly from history + the DR-synthesized context loaded from from_run_dir, no numeric foundation model involved. smae/srmse computed over all samples; scrps over the first crps_sample_size."
+}
