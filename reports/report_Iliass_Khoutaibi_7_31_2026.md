@@ -38,7 +38,7 @@ The used datasets are:
 10. Wikipedia — https://wikipedia.org  
 11. ACLED (Armed Conflict Location & Event Data) — https://acleddata.com
 
-- ## <ins>CORAL: Towards Autonomous Multi-Agent Evolution for Open-Ended Discovery </ins> (https://arxiv.org pdf/2604.18576) <span style="color: red;">Important paper !</span>
+- ## <ins>CORAL: Towards Autonomous Multi-Agent Evolution for Open-Ended Discovery </ins> (https://arxiv.org/pdf/2604.18576) <span style="color: red;">Important paper !</span>
 
 A very recent paper does not deal with time-series generation in particular, but rather with open-ended discovery as a whole. It formulates open-ended discovery as an iterative process consisting of four stages:
 

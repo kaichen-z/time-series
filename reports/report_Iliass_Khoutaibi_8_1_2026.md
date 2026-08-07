@@ -6,7 +6,7 @@
 
 ### Plan
 
-- **Time series agents for retrieval**: Use time series agents to retrieve the relevant information — possibly CORAL.
+- **Time series agents for retrieval**: Use time series agents to retrieve the relevant information — possibly CORAL: Some intersting agents are: Open-Deep-Research (open source), DRBench (open source) and Codex (closed source might want to precise version of it). 
 - **Understand existing retrieval approaches**: Look at LLM agents that have already tackled similar (not necessarily identical) retrieval tasks problems.
 - **Literature review on retrieval methods**: Survey retrieval methods more broadly, not limited to time series.
 - **Other datasets**: Look beyond Dr-CiK at other datasets, though Dr-CiK alone may be sufficient.
@@ -15,6 +15,15 @@
 - **What method ?**: Propose some methods to solve this problem, be critical. Single agent or multi agent ? Probably multi agent. we will need a shared memory: -One that evolves and other fixed one. In Dr-Cik can be improved regarding the recall one. 
 - **Take a look at the time series papers**: Predicting y based on x. 
 - **Claude Code**: Use it for coding but be careful of the otput.
+
+**Dr-CiK** summerize the skill in order to train agents 
+
+Train relation between agents to train | Dr-CiK, the trainable thing would be the relation between the agents instead of neural networks | Other things we can use than time series, shared memory of agents.
+
+- Dataset selection, we need somewhat to have a self evolving harness to find a strategy. Gather hanesses systems with a limited dataset. Harness is not differentiable but discrete, may be doable with a few samples, the self evolving sensory is the the important skill which can be used in the none annotated datasets.
+- 
+
+FIRST FIX THE DATASETS !!!!!!!!!!!!!!!!!!!!!!! PREDICTION TIME SERIES SCIENTIST | AGENTS 
 
 
 <!-- Since the task at hand is one of context extraction, we can utilize the following datasets:
