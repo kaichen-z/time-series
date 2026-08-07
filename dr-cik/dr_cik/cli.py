@@ -15,6 +15,7 @@ from .local_llm import DEFAULT_MODEL_ID as DEFAULT_QWEN_MODEL_ID
 from .local_llm import QwenClient, QwenConfig
 from .pipeline import RunConfig, build_pipeline, run_direct_prompt, write_direct_prompt_outputs, write_outputs
 from .plotting import plot_comparison_files, plot_forecasts_file
+from .retrieval import RETRIEVERS
 
 
 def _add_task_source_args(subparser: argparse.ArgumentParser) -> None:
@@ -56,6 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--crps-sample-size", type=int, default=25)
     run.add_argument("--max-react-steps", type=int, default=6)
     run.add_argument("--drbench-top-k", type=int, default=8)
+    run.add_argument("--retriever", choices=RETRIEVERS, default="bm25", help="bm25 (lexical, default) or dense (embeddings, as DRBench itself uses)")
     run.add_argument("--seed", type=int, default=7)
 
     direct_prompt = subparsers.add_parser("direct-prompt", help="Direct-Prompt LLM baseline: forecast directly from history + a prior run's DR-synthesized context")
@@ -141,11 +143,12 @@ def main(argv: list[str] | None = None) -> None:
             crps_sample_size=args.crps_sample_size,
             max_react_steps=args.max_react_steps,
             drbench_top_k=args.drbench_top_k,
+            retriever=args.retriever,
             seed=args.seed,
         )
         pipeline = build_pipeline(config)
         results = pipeline.run_many(tasks)
-        write_outputs(results, args.output_dir)
+        write_outputs(results, args.output_dir, config=config)
 
         summary_path = Path(args.output_dir).expanduser().resolve() / "summary.json"
         summary = json.loads(summary_path.read_text(encoding="utf-8"))

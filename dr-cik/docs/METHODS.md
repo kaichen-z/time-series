@@ -40,8 +40,8 @@ directionally comparable; exact numbers will not be.
 `langchain-ai/open_deep_research`; we implement the described pattern in-house, so this is
 a reproduction of the *method*, not of that repository's exact behaviour.
 
-**Retrieval.** BM25 over chunked documents. The paper does not pin a retriever for the
-agents' internal search tool.
+**Agent retrieval strategy.** The Dr-CiK paper does not pin a retriever for the agents'
+internal search tool, so the choice is ours — but it is not arbitrary, see below.
 
 **EvidenceRecall is a proxy.** The official scorer is private. `evaluation.py` approximates
 it with our own LLM-judge prompt asking whether any predicted claim conveys each
@@ -51,6 +51,42 @@ and it is not comparable to the leaderboard's EvidenceRecall column.
 **Winsorisation.** `SUBMISSION.md` specifies winsorisation without a per-metric breakdown;
 we apply a cap of 5.0 uniformly across sMAE/sRMSE/sCRPS. This is a documented reading, not
 a quoted rule.
+
+## Ported from the real DRBench implementation
+
+Dr-CiK's baselines are unpublished, but the *upstream* system its DRBench baseline adapts
+is public: [`ServiceNow/drbench`](https://github.com/ServiceNow/drbench) (Apache-2.0,
+arXiv 2510.00172). Its agent retrieves with **dense embeddings**, not lexical matching.
+
+`retrieval/dense.py` reproduces that method from
+`drbench/agents/drbench_agent/vector_store.py`:
+
+- **Encoder** — a SentenceTransformer, via their `_get_embeddings_local` path. We default
+  to `all-MiniLM-L6-v2` so retrieval stays offline and key-free; their other default,
+  `text-embedding-ada-002`, needs an OpenAI key.
+- **Ranking** — cosine similarity then `argsort(similarities)[::-1][:top_k]`, matching
+  their `semantic_search` exactly.
+- **Threshold** — they apply a `0.7` similarity floor, tuned for ada-002 whose
+  similarities sit high. MiniLM similarities spread much lower, so 0.7 would discard
+  nearly every hit; we default to `0.0` and leave the knob exposed. **This is the one
+  place we knowingly diverge from their algorithm**, and it is a consequence of the
+  encoder swap, not a disagreement with the method.
+
+Select it with `--retriever dense`. BM25 (`retrieval/bm25.py`) remains the default because
+it needs no extra dependency and no model download; it is *our* choice, not the paper's or
+DRBench's.
+
+**What this does and does not buy.** It removes a method-level divergence, so retrieval
+quality can be measured under the literature's own approach rather than only under ours.
+Measured, dense retrieval turns out **worse** than BM25 on this benchmark (0.064 vs 0.149
+SuppDocRecall — see [RESULTS.md](RESULTS.md)), most likely because Dr-CiK's invented proper
+nouns favour lexical matching and because we substituted a small local encoder for
+DRBench's `text-embedding-ada-002`. BM25 therefore remains the default, now on evidence.
+
+It does **not** reproduce the paper's table. Dr-CiK's own OpenDR/DRBench adaptations — the
+corpus-as-search-tool wiring, the prompts, the model configuration — are unpublished, and
+`ServiceNow/drbench` is a different benchmark with its own task format that cannot be
+installed here anyway (it requires Python >=3.12; this project targets >=3.10).
 
 ## Deliberate deviations
 

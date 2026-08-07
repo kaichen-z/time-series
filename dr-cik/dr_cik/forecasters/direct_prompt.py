@@ -108,6 +108,7 @@ class DirectPromptForecaster:
         self.config = config
 
     def forecast(self, task_view: TaskView, context_text: str, num_samples: int | None = None) -> Forecast:
+
         sample_count = num_samples or self.config.num_samples
         horizon = task_view.prediction_length
         budget = _output_token_budget(horizon, floor=self.config.max_output_tokens)

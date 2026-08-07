@@ -1,4 +1,4 @@
-"""Dependency-free BM25 retrieval over a task's document corpus."""
+"""Lexical BM25 retrieval: dependency-free, and the default."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Sequence
 
-from .models import AgentDocument
+from . import Chunk
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 
@@ -16,34 +16,6 @@ TOKEN_RE = re.compile(r"[a-z0-9]+")
 def tokenize(text: str) -> list[str]:
     """Lowercase and split text into alphanumeric tokens."""
     return TOKEN_RE.findall(text.lower())
-
-
-@dataclass(frozen=True)
-class Chunk:
-    """One retrievable span of text from a document."""
-
-    document_id: str
-    chunk_id: str
-    text: str
-
-
-def chunk_document(document: AgentDocument, max_chars: int = 1400, overlap: int = 150) -> list[Chunk]:
-    """Split a document into overlapping chunks, or return it whole if short enough."""
-    text = document.text
-    if len(text) <= max_chars:
-        return [Chunk(document_id=document.document_id, chunk_id=f"{document.document_id}:0", text=text)]
-    chunks: list[Chunk] = []
-    start = 0
-    index = 0
-    step = max(1, max_chars - overlap)
-    while start < len(text):
-        end = min(len(text), start + max_chars)
-        chunks.append(Chunk(document_id=document.document_id, chunk_id=f"{document.document_id}:{index}", text=text[start:end]))
-        if end >= len(text):
-            break
-        start += step
-        index += 1
-    return chunks
 
 
 @dataclass(frozen=True)
@@ -89,11 +61,3 @@ class BM25Index:
                 scored.append((score, index))
         scored.sort(key=lambda item: (-item[0], self.chunks[item[1]].chunk_id))
         return [(self.chunks[index], score) for score, index in scored[:top_k]]
-
-
-def build_index(documents: Sequence[AgentDocument], max_chars: int = 1400, overlap: int = 150) -> BM25Index:
-    """Chunk every document and build one BM25 index over the whole corpus."""
-    chunks: list[Chunk] = []
-    for document in documents:
-        chunks.extend(chunk_document(document, max_chars=max_chars, overlap=overlap))
-    return BM25Index(chunks)

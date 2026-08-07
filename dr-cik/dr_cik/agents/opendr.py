@@ -31,6 +31,7 @@ class OpenDRConfig:
 
     max_steps: int = 6
     max_search_results: int = 5
+    retriever: str = "bm25"
     temperature: float = 0.0
 
 
@@ -42,7 +43,7 @@ class OpenDRAgent:
         self.config = config or OpenDRConfig()
 
     def run(self, task_view: TaskView) -> AgentResult:
-        index = build_index(task_view.documents)
+        index = build_index(task_view.documents, retriever=self.config.retriever)
         valid_ids = {document.document_id for document in task_view.documents}
         brief = render_task_brief(task_view)
         steps: list[AgentStep] = []
@@ -107,7 +108,7 @@ class OpenDRAgent:
                     results = index.search(query, top_k=self.config.max_search_results)
                     document_ids = list(dict.fromkeys(chunk.document_id for chunk, _score in results))
                     observation = "\n".join(
-                        f"[{chunk.document_id} | {chunk.chunk_id} | bm25={score:.3f}] {chunk.text[:280]}"
+                        f"[{chunk.document_id} | {chunk.chunk_id} | score={score:.3f}] {chunk.text[:280]}"
                         for chunk, score in results
                     ) or "No matching documents."
                 steps.append(AgentStep(step_index=step_index, kind="search", payload={"query": query, "document_ids": document_ids, "observation": observation}))

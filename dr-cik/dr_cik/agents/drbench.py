@@ -17,6 +17,7 @@ class DRBenchConfig:
     """Tunables for the DRBench search/brief/synthesize cascade."""
 
     top_k_search: int = 8
+    retriever: str = "bm25"
     temperature: float = 0.0
 
 
@@ -32,7 +33,7 @@ class DRBenchAgent:
         self.config = config or DRBenchConfig()
 
     def run(self, task_view: TaskView) -> AgentResult:
-        index = build_index(task_view.documents)
+        index = build_index(task_view.documents, retriever=self.config.retriever)
         by_id = documents_by_id(task_view.documents)
         valid_ids = set(by_id)
         brief_text = render_task_brief(task_view)

@@ -19,12 +19,12 @@ than entangled with in-house method changes.
 
 ```bash
 cd dr-cik
-pip install -e '.[chronos,gemini,qwen,plots,dev]'
+pip install -e '.[chronos,gemini,qwen,dense,plots,dev]'
 ```
 
 Extras are separable on purpose: `chronos` (numeric forecaster), `gemini` (hosted LLM),
-`qwen` (local LLM + GPU), `plots` (matplotlib), `dev` (pytest). The offline test suite
-needs none of the model extras.
+`qwen` (local LLM + GPU), `dense` (embedding retrieval), `plots` (matplotlib), `dev`
+(pytest). The offline test suite needs none of them.
 
 Put credentials in a `.env` at the repo root (gitignored; see `.env.example`):
 
@@ -75,10 +75,12 @@ repeatable `--task-id ID` work on any split.
 ## Repository map
 
 ```
-src/dr_cik/
+dr_cik/
 ├── models.py         Core types. Enforces the leakage split (see below).
 ├── data.py           Loaders: official sample dir, and the full HF dataset.
-├── retrieval.py      Dependency-free BM25 over a task's corpus.
+├── retrieval/        How agents search the corpus.
+│   ├── bm25.py       Lexical, dependency-free. The default.
+│   └── dense.py      Embeddings, ported from DRBench's own vector_store.py.
 ├── llm.py            LLMClient protocol + GeminiClient + FakeLLMClient (tests).
 ├── local_llm.py      QwenClient: local GPU inference, batched sampling.
 ├── agents/           Evidence producers.

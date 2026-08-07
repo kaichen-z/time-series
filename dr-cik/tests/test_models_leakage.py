@@ -7,13 +7,15 @@ from pathlib import Path
 
 from dr_cik.models import Document, ForecastTask
 
-SRC = Path(__file__).resolve().parent.parent / "src" / "dr_cik"
+SRC = Path(__file__).resolve().parent.parent / "dr_cik"
 # Every module that runs at inference time, before ground truth is allowed to be touched.
 AGENT_FACING_FILES = [
     SRC / "agents" / "common.py",
     SRC / "agents" / "opendr.py",
     SRC / "agents" / "drbench.py",
-    SRC / "retrieval.py",
+    SRC / "retrieval" / "__init__.py",
+    SRC / "retrieval" / "bm25.py",
+    SRC / "retrieval" / "dense.py",
     SRC / "llm.py",
     SRC / "local_llm.py",
     SRC / "forecasters" / "chronos.py",

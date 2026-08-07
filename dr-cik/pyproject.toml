@@ -14,6 +14,7 @@ dependencies = ["huggingface_hub>=0.25", "python-dotenv>=1.0"]
 chronos = ["chronos-forecasting>=2.3.1", "torch"]
 gemini = ["google-genai>=1.0"]
 qwen = ["transformers>=4.46", "torch"]
+dense = ["sentence-transformers>=3.0"]  # --retriever dense; the embedding method DRBench itself uses
 plots = ["matplotlib>=3.8"]
 dev = ["pytest>=8.0", "matplotlib>=3.8"]
 
@@ -21,7 +22,7 @@ dev = ["pytest>=8.0", "matplotlib>=3.8"]
 dr-cik = "dr_cik.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+include = ["dr_cik*"]
 
 [tool.pytest.ini_options]
 markers = ["live: requires network/GEMINI_API_KEY/GPU; excluded by default"]

@@ -17,6 +17,7 @@ from .llm import GeminiClient, LLMClient
 from .local_llm import DEFAULT_MODEL_ID as DEFAULT_QWEN_MODEL_ID
 from .local_llm import QwenClient, QwenConfig
 from .models import AgentResult, DeepResearchAgent, Forecast, ForecastTask, RunResult
+from .retrieval import RETRIEVERS
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class RunConfig:
     crps_sample_size: int = 25
     max_react_steps: int = 6
     drbench_top_k: int = 8
+    retriever: str = "bm25"  # "bm25" | "dense" (dense mirrors DRBench's own embedding retrieval)
     seed: int = 7
 
     def __post_init__(self) -> None:
@@ -44,6 +46,8 @@ class RunConfig:
             raise ValueError(f"Unknown agent {self.agent!r}, expected 'opendr' or 'drbench'")
         if self.llm_backend not in ("gemini", "qwen"):
             raise ValueError(f"Unknown llm_backend {self.llm_backend!r}, expected 'gemini' or 'qwen'")
+        if self.retriever not in RETRIEVERS:
+            raise ValueError(f"Unknown retriever {self.retriever!r}, expected one of {RETRIEVERS}")
 
 
 def _mean_metrics(all_metrics: Iterable[dict[str, float | None]]) -> dict[str, float]:
@@ -82,7 +86,11 @@ def _retrieved_document_ids(agent_result: AgentResult) -> set[str]:
 class DrCikPipeline:
     """Runs one deep-research agent and one forecaster over a set of tasks."""
 
-    def __init__(self, config: RunConfig, agent: DeepResearchAgent, judge: LLMClient | None, forecaster: ChronosForecaster) -> None:
+    def __init__(self, config: RunConfig, 
+                agent: DeepResearchAgent, 
+                judge: LLMClient | None, 
+                forecaster: ChronosForecaster) -> None:
+
         self.config = config
         self.agent = agent
         self.judge = judge
@@ -119,14 +127,17 @@ def build_pipeline(
     if llm is not None:
         resolved_llm: LLMClient = llm
     elif config.llm_backend == "qwen":
-        resolved_llm = QwenClient(QwenConfig(model_id=config.qwen_model_id, device=config.qwen_device, seed=config.seed))
+        resolved_llm = QwenClient(QwenConfig(model_id=config.qwen_model_id, 
+                                             device=config.qwen_device, 
+                                             seed=config.seed))
     else:
         resolved_llm = GeminiClient(model_id=config.gemini_model_id)
 
     if config.agent == "opendr":
-        agent: DeepResearchAgent = OpenDRAgent(resolved_llm, OpenDRConfig(max_steps=config.max_react_steps))
+        agent: DeepResearchAgent = OpenDRAgent(resolved_llm, 
+        OpenDRConfig(max_steps=config.max_react_steps, retriever=config.retriever))
     else:
-        agent = DRBenchAgent(resolved_llm, DRBenchConfig(top_k_search=config.drbench_top_k))
+        agent = DRBenchAgent(resolved_llm, DRBenchConfig(top_k_search=config.drbench_top_k, retriever=config.retriever))
 
     if judge is not None:
         resolved_judge: LLMClient | None = judge
@@ -147,12 +158,17 @@ def build_pipeline(
     return DrCikPipeline(config, agent, resolved_judge, resolved_forecaster)
 
 
-def write_outputs(results: list[RunResult], output_dir: str | Path) -> None:
-    """Write forecasts.jsonl, deep_research.jsonl, run_report.jsonl, and summary.json."""
+def write_outputs(results: list[RunResult], output_dir: str | Path, config: RunConfig | None = None) -> None:
+    """Write forecasts.jsonl, deep_research.jsonl, run_report.jsonl, and summary.json.
+
+    Pass `config` to record the exact settings that produced the run into summary.json.
+    """
     output = Path(output_dir).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
 
-    forecasts_rows = [{"benchmark_id": result.benchmark_id, "samples": list(result.forecast.samples)} for result in results]
+    forecasts_rows = [{"benchmark_id": result.benchmark_id, 
+                       "samples": list(result.forecast.samples)} 
+                       for result in results]
     deep_research_rows = [
         {
             "benchmark_id": result.benchmark_id,
@@ -161,6 +177,7 @@ def write_outputs(results: list[RunResult], output_dir: str | Path) -> None:
         }
         for result in results
     ]
+    
     run_report_rows = [
         {
             "benchmark_id": result.benchmark_id,
@@ -184,6 +201,7 @@ def write_outputs(results: list[RunResult], output_dir: str | Path) -> None:
         {
             "num_tasks": len(results),
             "agent": results[0].agent_name if results else None,
+            "config": asdict(config) if config is not None else None,
             "mean_metrics": _mean_metrics(result.metrics for result in results),
             "note": (
                 "smae/srmse/scrps are local development proxies (S=25 per the paper's formula, not the "

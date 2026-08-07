@@ -7,4 +7,8 @@ build/
 *.egg-info/
 outputs/
 external/
+.env
+.env.*
+!.env.example
 
+my_archive/
