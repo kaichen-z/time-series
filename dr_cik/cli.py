@@ -104,6 +104,8 @@ def build_parser() -> argparse.ArgumentParser:
 def _load_tasks(args: argparse.Namespace):
     """Shared --sample-dir/--data-dir/--split/--task-id/--limit resolution for run/direct-prompt/plot-samples."""
     if args.sample_dir:
+        if args.split != "public-dev":
+            raise SystemExit("--split only applies to --data-dir; the sample/ directory has no split metadata")
         tasks = load_sample_tasks(args.sample_dir)
     else:
         labels_public = {"public-dev": True, "hidden-test": False, "all": None}[args.split]

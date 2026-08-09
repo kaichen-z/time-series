@@ -125,4 +125,6 @@ class GeminiClient:
         if max_output_tokens is not None:
             config["max_output_tokens"] = max_output_tokens
         response = client.models.generate_content(model=self.model_id, contents=contents, config=config)
-        return LLMResponse(text=response.text, raw=response)
+        # .text is None when the candidate was blocked or came back empty; callers only guard
+        # against JsonExtractionError, so an empty string keeps that as the failure mode.
+        return LLMResponse(text=response.text or "", raw=response)

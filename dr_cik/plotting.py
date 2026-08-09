@@ -153,6 +153,9 @@ def plot_forecasts_file(tasks: Iterable[ForecastTask], forecasts_path: str | Pat
 
 def plot_comparison_files(tasks: Iterable[ForecastTask], series: list[tuple[str, str | Path]], output_dir: str | Path) -> list[Path]:
     """Overlay several forecasts.jsonl runs (e.g. Chronos vs multiple Direct-Prompt models) per task they all cover."""
+    labels = [label for label, _ in series]
+    if len(set(labels)) != len(labels):
+        raise ValueError(f"--series labels must be unique, got {labels}")
     tasks_by_id = {task.benchmark_id: task for task in tasks}
     samples_by_label = {label: _read_forecasts(path) for label, path in series}
     common_ids = set.intersection(*(set(samples) for samples in samples_by_label.values())) if samples_by_label else set()

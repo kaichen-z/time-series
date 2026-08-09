@@ -11,6 +11,7 @@ from dr_cik.evaluation import (
     scrps,
     smae,
     srmse,
+    subsample,
     supp_doc_recall,
     winsorize,
 )
@@ -75,8 +76,12 @@ def test_distractor_avoidance() -> None:
     documents = (Document("d1", "x", role="supporting"), Document("d3", "x", role="distractor"))
     task = _task(documents)
     assert distractor_avoidance(task, {"d1", "d3"}) == 0.5
-    assert distractor_avoidance(task, set()) == 1.0
     assert distractor_avoidance(task, {"d1"}) == 1.0
+
+
+def test_distractor_avoidance_is_none_when_nothing_was_cited() -> None:
+    task = _task((Document("d1", "x", role="supporting"), Document("d3", "x", role="distractor")))
+    assert distractor_avoidance(task, set()) is None
 
 
 def test_evidence_recall_uses_judge_matches() -> None:
@@ -92,3 +97,32 @@ def test_evidence_recall_is_none_with_no_ground_truth() -> None:
     judge = FakeLLMClient(responses=[])
     result = evidence_recall((), (), judge)
     assert result.recall is None
+
+
+def test_evidence_recall_ignores_duplicate_and_unknown_gt_ids() -> None:
+    gt = ({"id": "E1", "evidence": "fact one"},)
+    matches = [{"gt_id": "E1", "matched": True}, {"gt_id": "E1", "matched": True}, {"gt_id": "E9", "matched": True}]
+    judge = FakeLLMClient(responses=[json.dumps({"matches": matches})])
+    result = evidence_recall(gt, (), judge)
+    assert result.recall == 1.0  # not 3.0
+    assert result.matched_gt_ids == ("E1",)
+
+
+def test_evidence_recall_survives_malformed_match_entries() -> None:
+    gt = ({"id": "E1", "evidence": "fact one"},)
+    judge = FakeLLMClient(responses=[json.dumps({"matches": ["E1", 7, None]})])
+    assert evidence_recall(gt, (), judge).recall == 0.0
+
+
+def test_subsample_spans_the_full_matrix() -> None:
+    matrix = tuple((float(i),) for i in range(100))
+    assert subsample(matrix, 25)[0] == (0.0,)
+    assert subsample(matrix, 25)[-1] == (99.0,)  # a head slice would end at 24.0
+    assert len(subsample(matrix, 25)) == 25
+
+
+def test_subsample_returns_everything_when_it_cannot_shrink() -> None:
+    matrix = tuple((float(i),) for i in range(4))
+    assert subsample(matrix, 10) == matrix
+    assert subsample(matrix, 0) == matrix
+    assert subsample(matrix, 1) == ((2.0,),)

@@ -36,7 +36,8 @@ class BM25Index:
         self._doc_frequency: Counter[str] = Counter()
         for tokens in self._tokenized:
             self._doc_frequency.update(set(tokens))
-        self._avg_length = (sum(len(tokens) for tokens in self._tokenized) / len(self._tokenized)) if self._tokenized else 1.0
+        total_length = sum(len(tokens) for tokens in self._tokenized)
+        self._avg_length = (total_length / len(self._tokenized)) if total_length else 1.0
         self._total = len(self.chunks)
 
     def search(self, query: str, top_k: int = 5) -> list[tuple[Chunk, float]]:

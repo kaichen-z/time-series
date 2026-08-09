@@ -11,7 +11,7 @@ from typing import Iterable
 
 from .agents.drbench import DRBenchAgent, DRBenchConfig
 from .agents.opendr import OpenDRAgent, OpenDRConfig
-from .evaluation import cited_document_ids, development_metrics, scrps, smae, srmse
+from .evaluation import cited_document_ids, development_metrics, scrps, smae, srmse, subsample
 from .forecasters.chronos import ChronosConfig, ChronosForecaster, DEFAULT_CACHE_DIR
 from .forecasters.direct_prompt import DirectPromptForecaster
 from .llm import GeminiClient, LLMClient
@@ -100,6 +100,19 @@ def _retrieved_document_ids(agent_result: AgentResult) -> set[str]:
     return ids
 
 
+def _write_task_plot(task: ForecastTask, samples: tuple[tuple[float, ...], ...], label: str, plot_dir: str | Path) -> None:
+    """Render one task's PNG; failures are logged, never raised, so plotting can't discard a finished task."""
+    path = Path(plot_dir) / f"{task.benchmark_id}.png"
+    try:
+        from .plotting import plot_task_samples  # deferred: matplotlib is an optional extra
+
+        plot_task_samples(task, samples, label=label, output_path=path)
+    except Exception:
+        logger.exception("task %s: plotting failed, continuing without a PNG", task.benchmark_id)
+        return
+    logger.info("task %s: wrote plot to %s", task.benchmark_id, path)
+
+
 class DrCikPipeline:
     """Runs one deep-research agent and one forecaster over a set of tasks."""
 
@@ -140,13 +153,9 @@ class DrCikPipeline:
         for i, task in enumerate(tasks, 1):
             _log_task_banner("TASK", i, len(tasks), task.benchmark_id)
             result = self.run(task)
-            if plot_dir is not None:
-                from .plotting import plot_task_samples  # deferred: matplotlib is an optional extra
-
-                path = Path(plot_dir) / f"{task.benchmark_id}.png"
-                plot_task_samples(task, result.forecast.samples, label=self.config.agent, output_path=path)
-                logger.info("task %s: wrote plot to %s", task.benchmark_id, path)
             results.append(result)
+            if plot_dir is not None:
+                _write_task_plot(task, result.forecast.samples, self.config.agent, plot_dir)
             if output_dir is not None:
                 write_outputs(results, output_dir, config=self.config)
         return results
@@ -268,13 +277,9 @@ def run_direct_prompt(
         forecast = forecaster.forecast(view, context_text)
         logger.info("task %s: forecast method=%s", task.benchmark_id, forecast.method)
         if plot_dir is not None:
-            from .plotting import plot_task_samples  # deferred: matplotlib is an optional extra
-
-            path = Path(plot_dir) / f"{task.benchmark_id}.png"
-            plot_task_samples(task, forecast.samples, label=plot_label, output_path=path)
-            logger.info("task %s: wrote plot to %s", task.benchmark_id, path)
+            _write_task_plot(task, forecast.samples, plot_label, plot_dir)
         if task.future_values is not None:
-            crps_samples = forecast.samples[:crps_sample_size] or forecast.samples
+            crps_samples = subsample(forecast.samples, crps_sample_size)
             metrics: dict[str, float | None] = {
                 "smae": smae(task.future_values, forecast.samples),
                 "srmse": srmse(task.future_values, forecast.samples),

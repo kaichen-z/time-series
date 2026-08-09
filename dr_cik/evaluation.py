@@ -53,6 +53,21 @@ def _crps_at_step(truth: float, samples_at_step: list[float]) -> float:
     return accuracy - pairwise_half
 
 
+def subsample(sample_matrix: tuple[tuple[float, ...], ...], count: int) -> tuple[tuple[float, ...], ...]:
+    """Take `count` evenly spaced rows, preserving spread.
+
+    Chronos-Bolt has no native sampling, so its "samples" are quantile trajectories in ascending
+    level order (see forecasters/chronos.py); a head slice would keep only the lowest quantiles
+    and score sCRPS against the bottom of the predictive distribution instead of all of it.
+    """
+    if count <= 0 or count >= len(sample_matrix):
+        return sample_matrix
+    if count == 1:
+        return (sample_matrix[len(sample_matrix) // 2],)
+    step = (len(sample_matrix) - 1) / (count - 1)
+    return tuple(sample_matrix[round(index * step)] for index in range(count))
+
+
 def scrps(future_values: tuple[float, ...], sample_matrix: tuple[tuple[float, ...], ...]) -> float:
     """Scaled CRPS averaged over the horizon."""
     if not sample_matrix:
@@ -79,10 +94,14 @@ def supp_doc_recall(task: ForecastTask, used_doc_ids: set[str]) -> float | None:
     return len(used_doc_ids & supporting) / len(supporting)
 
 
-def distractor_avoidance(task: ForecastTask, used_doc_ids: set[str]) -> float:
-    """1 - |used cited docs ∩ distractors| / |used cited docs| (1.0 if nothing was cited)."""
+def distractor_avoidance(task: ForecastTask, used_doc_ids: set[str]) -> float | None:
+    """1 - |used cited docs ∩ distractors| / |used cited docs|, or None if nothing was cited.
+
+    None (not 1.0) keeps an agent that cited nothing out of the mean; scoring that as perfect
+    avoidance rewards total failure and silently inflates the aggregate.
+    """
     if not used_doc_ids:
-        return 1.0
+        return None
     distractors = {document.document_id for document in task.documents if document.role == "distractor"}
     return 1.0 - len(used_doc_ids & distractors) / len(used_doc_ids)
 
@@ -117,10 +136,19 @@ def evidence_recall(
     predicted_block = "\n".join(f"- {item.claim}" for item in evidence) or "(no evidence submitted)"
     prompt = f"Ground-truth evidence:\n{gt_block}\n\nPredicted claims:\n{predicted_block}"
     response = judge.complete(system=EVIDENCE_JUDGE_INSTRUCTIONS, messages=[{"role": "user", "content": prompt}], temperature=0.0)
+    known_ids = {str(item["id"]) for item in gt_evidence}
     try:
         parsed = parse_json_object(response.text)
-        matched_ids = tuple(str(entry["gt_id"]) for entry in parsed.get("matches", []) if entry.get("matched"))
-    except (JsonExtractionError, KeyError, TypeError):
+        matches = parsed.get("matches", [])
+        # Dedupe and drop ids the judge invented: either would let recall exceed 1.0.
+        matched_ids = tuple(
+            dict.fromkeys(
+                str(entry["gt_id"])
+                for entry in matches
+                if isinstance(entry, dict) and entry.get("matched") and str(entry.get("gt_id")) in known_ids
+            )
+        )
+    except (JsonExtractionError, KeyError, TypeError, AttributeError):
         matched_ids = ()
     return EvidenceRecallResult(recall=len(matched_ids) / len(gt_evidence), matched_gt_ids=matched_ids, judge_raw_text=response.text)
 
@@ -142,7 +170,7 @@ def development_metrics(
     metrics["distractor_avoidance_retrieved"] = distractor_avoidance(task, used_doc_ids)
 
     if task.future_values is not None:
-        crps_samples = forecast.samples[:crps_sample_size] or forecast.samples
+        crps_samples = subsample(forecast.samples, crps_sample_size)
         metrics["smae"] = smae(task.future_values, forecast.samples)
         metrics["srmse"] = srmse(task.future_values, forecast.samples)
         metrics["scrps"] = scrps(task.future_values, crps_samples)

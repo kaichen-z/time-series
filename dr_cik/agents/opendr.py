@@ -13,9 +13,15 @@ from .common import AGENT_SYSTEM_PREAMBLE, parse_evidence_list, render_task_brie
 logger = logging.getLogger(__name__)
 
 PLAN_SCHEMA = (
+    "initial_queries must be topic/keyword phrases describing what to look for (e.g. "
+    "'scheduled maintenance outages'), never document_id strings — search matches document "
+    "text, not IDs, so an ID as a query always returns nothing.\n"
     'Respond with exactly one JSON object: {"sub_questions": ["..."], "initial_queries": ["..."]}'
 )
 REACT_SCHEMA = (
+    "search's query must be a topic/keyword phrase describing content to look for, never a "
+    "document_id (IDs are only used to cite sources in finish, and searching by ID always "
+    "returns nothing since search matches document text).\n"
     "Respond with exactly one JSON object, either:\n"
     '{"thought": "...", "action": {"name": "search", "args": {"query": "..."}}}\n'
     "or, once you have enough evidence:\n"
@@ -24,6 +30,11 @@ REACT_SCHEMA = (
 )
 FORCED_FINISH_INSTRUCTION = (
     "Step budget exhausted. Call finish now using only the evidence you have already found."
+)
+FORCED_FINISH_SCHEMA = (
+    "search is no longer available. Respond with exactly one JSON object:\n"
+    '{"thought": "...", "action": {"name": "finish", "args": {"report": "<markdown>", '
+    '"evidence": [{"claim": "...", "source_doc_ids": ["doc_id", ...]}]}}}'
 )
 DEGRADED_REPORT = "Step budget exhausted; no verified evidence was produced."
 
@@ -136,15 +147,16 @@ class OpenDRAgent:
 
         if finished_report is None:
             logger.info("opendr[%s]: step budget exhausted, forcing a finish call", task_view.benchmark_id)
-            response = self.llm.complete(
-                system=AGENT_SYSTEM_PREAMBLE,
-                messages=[{"role": "user", "content": f"{brief}\n\n{FORCED_FINISH_INSTRUCTION}\n{REACT_SCHEMA}"}],
-                temperature=self.config.temperature,
-            )
+            transcript = "\n".join(transcript_lines) if transcript_lines else "(nothing yet)"
+            prompt = f"{brief}\n\nTranscript so far:\n{transcript}\n\n{FORCED_FINISH_INSTRUCTION}\n{FORCED_FINISH_SCHEMA}"
+            response = self.llm.complete(system=AGENT_SYSTEM_PREAMBLE, messages=[{"role": "user", "content": prompt}], temperature=self.config.temperature)
             call_count += 1
             try:
                 turn = parse_json_object(response.text)
-                args = (turn.get("action") or {}).get("args") or {}
+                action = turn.get("action") or {}
+                if action.get("name") != "finish":
+                    raise JsonExtractionError("forced finish did not return a finish action")
+                args = action.get("args") or {}
                 evidence = parse_evidence_list(args.get("evidence") or [], valid_ids)
                 finished_report = AgentReport(report_markdown=str(args.get("report", "")), evidence=evidence)
                 steps.append(AgentStep(step_index=self.config.max_steps + 1, kind="forced_finish", payload=turn))

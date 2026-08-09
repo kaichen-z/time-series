@@ -68,6 +68,9 @@ class DRBenchAgent:
                 logger.warning("drbench[%s]: brief for %s failed to parse JSON, skipping", task_view.benchmark_id, document_id)
                 steps.append(AgentStep(step_index=step_index, kind="brief_parse_failure", payload={"document_id": document_id, "raw": response.text}))
                 continue
+            # Trust the id we briefed, not the one the model echoed: a hallucinated id would be
+            # shown to the synthesizer, cited, then dropped by parse_evidence_list as out-of-corpus.
+            parsed["document_id"] = document_id
             steps.append(AgentStep(step_index=step_index, kind="brief", payload=parsed))
             if parsed.get("relevant"):
                 logger.info("drbench[%s]: document %s marked relevant", task_view.benchmark_id, document_id)
