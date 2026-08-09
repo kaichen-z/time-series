@@ -21,7 +21,7 @@ def test_drbench_call_count_matches_retrieved_doc_count_plus_one(sample_tasks) -
 
     def responder(system: str, messages: list[dict[str, str]]) -> str:
         content = messages[0]["content"]
-        if content.startswith("Document"):
+        if "\nDocument " in content:
             document_id = content.split("Document ")[1].split(":")[0]
             return _brief(document_id, relevant=True)
         return json.dumps({"report": "r", "evidence": [{"claim": "c1", "source_doc_ids": []}]})
@@ -40,7 +40,7 @@ def test_drbench_excludes_irrelevant_briefs_from_synthesis_prompt(sample_tasks) 
 
     def responder(system: str, messages: list[dict[str, str]]) -> str:
         content = messages[0]["content"]
-        if content.startswith("Document"):
+        if "\nDocument " in content:
             document_id = content.split("Document ")[1].split(":")[0]
             seen_document_ids.append(document_id)
             relevant = len(seen_document_ids) == 1  # only the first doc is relevant
@@ -63,7 +63,7 @@ def test_drbench_degrades_on_malformed_synthesis(sample_tasks) -> None:
 
     def responder(system: str, messages: list[dict[str, str]]) -> str:
         content = messages[0]["content"]
-        if content.startswith("Document"):
+        if "\nDocument " in content:
             document_id = content.split("Document ")[1].split(":")[0]
             return _brief(document_id, relevant=False)
         return "not valid json"

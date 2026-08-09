@@ -144,12 +144,7 @@ class QwenClient:
         temperature: float = 1.0,
         max_output_tokens: int | None = None,
     ) -> list[LLMResponse]:
-        """Sample `count` independent completions, batched in generate() calls of at most max_batch_size at a time.
-
-        num_return_sequences replicates activations/KV-cache across the batch dimension, so an
-        unbounded count risks CUDA OOM on a shared cluster (seen live: 25-way batch OOM'd on a 9B
-        model with a 90-step horizon). Chunking bounds peak memory while keeping most of the speedup.
-        """
+        """Sample `count` independent completions, chunked into generate() calls of at most max_batch_size to bound peak GPU memory (seen live: an unbounded 25-way batch OOM'd on a 9B model at a 90-step horizon)."""
         import torch
 
         tokenizer, model, inputs = self._prepare(system, messages)

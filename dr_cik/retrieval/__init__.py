@@ -53,11 +53,7 @@ def chunk_corpus(documents: Sequence[AgentDocument], max_chars: int = 1400, over
 
 
 def build_index(documents: Sequence[AgentDocument], retriever: str = "bm25", **kwargs) -> Retriever:
-    """Chunk a corpus and build the requested retriever over it.
-
-    'bm25' is lexical and dependency-free; 'dense' mirrors what DRBench's own agent uses
-    (see retrieval/dense.py) and needs sentence-transformers.
-    """
+    """Chunk a corpus and build the requested retriever over it: 'bm25' (lexical, dependency-free) or 'dense' (see retrieval/dense.py)."""
     if retriever not in RETRIEVERS:
         raise ValueError(f"Unknown retriever {retriever!r}, expected one of {RETRIEVERS}")
     chunks = chunk_corpus(documents)

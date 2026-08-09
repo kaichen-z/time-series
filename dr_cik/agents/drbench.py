@@ -54,8 +54,10 @@ class DRBenchAgent:
             logger.info("drbench[%s]: step %d/%d - briefing document %s", task_view.benchmark_id, step_index, len(retrieved_doc_ids), document_id)
             document = by_id[document_id]
             prompt = (
+                f"{brief_text}\n\n"
                 f'Document {document_id}:\n"""{document.text}"""\n\n'
-                'Respond with exactly one JSON object: {"document_id": "...", "relevant": true|false, '
+                'Is this document relevant to the forecasting task above? Respond with exactly one '
+                'JSON object: {"document_id": "...", "relevant": true|false, '
                 '"brief": "<=400 chars, empty if not relevant>", "key_claims": ["..."]}'
             )
             response = self.llm.complete(system=AGENT_SYSTEM_PREAMBLE, messages=[{"role": "user", "content": prompt}], temperature=self.config.temperature)
@@ -80,6 +82,7 @@ class DRBenchAgent:
             + '\n\nRespond with exactly one JSON object: {"report": "<markdown>", '
             '"evidence": [{"claim": "...", "source_doc_ids": ["doc_id", ...]}]}'
         )
+
         response = self.llm.complete(system=AGENT_SYSTEM_PREAMBLE, messages=[{"role": "user", "content": synthesis_prompt}], temperature=self.config.temperature)
         call_count += 1
         try:

@@ -35,16 +35,24 @@ class JsonExtractionError(ValueError):
 
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
 def parse_json_object(text: str) -> dict[str, Any]:
-    """Strip a ```json fence if present and parse the remaining text as a JSON object."""
+    """Strip a closed <think>...</think> block and a ```json fence, then parse; falls back to the outermost {...} span if untagged reasoning prose surrounds the JSON (seen live with Qwen3.5)."""
+    text = _THINK_RE.sub("", text).strip()
     match = _FENCE_RE.search(text)
     candidate = match.group(1) if match else text
     try:
         parsed = json.loads(candidate)
-    except json.JSONDecodeError as exc:
-        raise JsonExtractionError(text) from exc
+    except json.JSONDecodeError:
+        start, end = candidate.find("{"), candidate.rfind("}")
+        if start == -1 or end == -1 or end < start:
+            raise JsonExtractionError(text) from None
+        try:
+            parsed = json.loads(candidate[start : end + 1])
+        except json.JSONDecodeError as exc:
+            raise JsonExtractionError(text) from exc
     if not isinstance(parsed, dict):
         raise JsonExtractionError(text)
     return parsed

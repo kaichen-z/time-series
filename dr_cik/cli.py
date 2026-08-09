@@ -71,6 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--drbench-top-k", type=int, default=16, help="Documents retrieved before briefing; corpora average ~37 docs/task, so this is a fraction, not the whole thing (paper doesn't pin a value)")
     run.add_argument("--retriever", choices=RETRIEVERS, default="bm25", help="bm25 (lexical, default) or dense (embeddings, as DRBench itself uses)")
     run.add_argument("--seed", type=int, default=7)
+    run.add_argument("--plot", action="store_true", help="Also write one sample-trajectory PNG per task to <output-dir>/plots after generating")
 
     direct_prompt = subparsers.add_parser("direct-prompt", help="Direct-Prompt LLM baseline: forecast directly from history + a prior run's DR-synthesized context")
     _add_task_source_args(direct_prompt)
@@ -83,6 +84,9 @@ def build_parser() -> argparse.ArgumentParser:
     direct_prompt.add_argument("--max-output-tokens", type=int, default=512, help="Floor only; scales up automatically with the task's horizon")
     direct_prompt.add_argument("--crps-sample-size", type=int, default=25)
     direct_prompt.add_argument("--seed", type=int, default=7)
+    direct_prompt.add_argument("--plot", action="store_true", help="Also write one sample-trajectory PNG per task to <output-dir>/plots after generating")
+    direct_prompt.add_argument("--enable-thinking", action="store_true", help="Let a Qwen3+ model reason in a <think> block before answering (off by default: burns tokens fast, see git history)")
+    direct_prompt.add_argument("--thinking-token-budget", type=int, default=3072, help="Extra tokens reserved for the reasoning pass when --enable-thinking is set (measured live: a 4B model can use 1500+ tokens just reasoning)")
 
     plot_samples = subparsers.add_parser("plot-samples", help="Plot history + sample trajectories + mean forecast from a forecasts.jsonl")
     _add_task_source_args(plot_samples)
@@ -92,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     plot_compare = subparsers.add_parser("plot-compare", help="Overlay multiple forecasts.jsonl runs (e.g. Chronos vs several Direct-Prompt models) per task")
     _add_task_source_args(plot_compare)
-    plot_compare.add_argument("--series", action="append", required=True, metavar="LABEL=PATH", help="Repeatable; e.g. --series 'Chronos=outputs/drbench-sample/forecasts.jsonl'")
+    plot_compare.add_argument("--series", action="append", required=True, metavar="LABEL=PATH", help="Repeatable; e.g. --series 'Chronos=results/drbench-sample/forecasts.jsonl'")
     plot_compare.add_argument("--output-dir", required=True)
     return parser
 
@@ -175,22 +179,26 @@ def main(argv: list[str] | None = None) -> None:
             retriever=args.retriever,
             seed=args.seed,
         )
+        output_dir = Path(args.output_dir).expanduser().resolve()
+        plot_dir = output_dir / "plots" if args.plot else None
         pipeline = build_pipeline(config)
-        results = pipeline.run_many(tasks)
-        write_outputs(results, args.output_dir, config=config)
+        results = pipeline.run_many(tasks, plot_dir=plot_dir, output_dir=output_dir)
+        write_outputs(results, output_dir, config=config)
 
-        summary_path = Path(args.output_dir).expanduser().resolve() / "summary.json"
+        summary_path = output_dir / "summary.json"
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         print(f"Completed {len(results)} task(s) with {args.agent}.")
         print(f"Outputs: {summary_path.parent}")
         for name, value in summary["mean_metrics"].items():
-            print(f"  {name}: {value:.6f}")
+            print(f"  {name}: {value:.3f}")
+        if plot_dir is not None:
+            print(f"Plots written incrementally to {plot_dir}")
         return
 
     if args.command == "direct-prompt":
         tasks = _load_tasks(args)
         context_by_id = load_prior_context(args.from_run_dir)
-        llm = QwenClient(QwenConfig(model_id=args.model_id, device=args.qwen_device, seed=args.seed))
+        llm = QwenClient(QwenConfig(model_id=args.model_id, device=args.qwen_device, seed=args.seed, enable_thinking=args.enable_thinking))
         forecaster = DirectPromptForecaster(
             llm,
             DirectPromptConfig(
@@ -199,17 +207,26 @@ def main(argv: list[str] | None = None) -> None:
                 temperature=args.temperature,
                 max_output_tokens=args.max_output_tokens,
                 seed=args.seed,
+                enable_thinking=args.enable_thinking,
+                thinking_token_budget=args.thinking_token_budget,
             ),
         )
-        results = run_direct_prompt(tasks, forecaster, context_by_id, crps_sample_size=args.crps_sample_size)
-        write_direct_prompt_outputs(results, args.output_dir, model_id=args.model_id, from_run_dir=args.from_run_dir)
+        output_dir = Path(args.output_dir).expanduser().resolve()
+        plot_dir = output_dir / "plots" if args.plot else None
+        results = run_direct_prompt(
+            tasks, forecaster, context_by_id, crps_sample_size=args.crps_sample_size, plot_dir=plot_dir, plot_label=args.model_id,
+            output_dir=output_dir, from_run_dir=args.from_run_dir,
+        )
+        write_direct_prompt_outputs(results, output_dir, model_id=args.model_id, from_run_dir=args.from_run_dir)
 
-        summary_path = Path(args.output_dir).expanduser().resolve() / "summary.json"
+        summary_path = output_dir / "summary.json"
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         print(f"Completed {len(results)} task(s) with direct-prompt/{args.model_id}.")
         print(f"Outputs: {summary_path.parent}")
         for name, value in summary["mean_metrics"].items():
-            print(f"  {name}: {value:.6f}")
+            print(f"  {name}: {value:.3f}")
+        if plot_dir is not None:
+            print(f"Plots written incrementally to {plot_dir}")
         return
 
     if args.command == "plot-samples":

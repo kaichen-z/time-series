@@ -10,5 +10,6 @@ external/
 .env
 .env.*
 !.env.example
-
+results/
+outputs/
 my_archive/

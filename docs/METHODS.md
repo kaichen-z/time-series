@@ -49,6 +49,16 @@ task (min 30, max 74), so `--drbench-top-k` (default 16, `agents/opendr.py`'s
 not the whole thing — tune it if you want to trade recall against LLM-brief call count
 (DRBench issues one brief call per retrieved document).
 
+**Why top-k instead of just giving the agent every document.** It's tempting, since the
+corpora are small enough that reading everything is cheap. But Dr-CiK's own retrieval
+metrics — SuppDocRecall, DistractorAvoidance — exist specifically to measure whether the
+agent can find genuine evidence in a corpus deliberately salted with distractors. If the
+agent is handed every document, "retrieval" becomes trivially perfect and those metrics
+stop measuring anything. This isn't an idiosyncratic choice on our part: the real upstream
+`ServiceNow/drbench` retrieves top-k (not full corpus), and so does this repository's own
+`main` branch, on a separate, more mature agent (`src/drcik_agent`) built earlier. Both
+independently converge on the same answer.
+
 **EvidenceRecall is a proxy.** The official scorer is private. `evaluation.py` approximates
 it with our own LLM-judge prompt asking whether any predicted claim conveys each
 ground-truth evidence item. It is labelled a proxy in every `summary.json` it appears in,

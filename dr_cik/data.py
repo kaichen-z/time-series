@@ -100,15 +100,12 @@ def load_tasks(data_dir: str | Path = DEFAULT_DATA_DIR, labels_public: bool | No
         if labels_public is not None and bool(row.get("labels_public")) is not labels_public:
             continue
         benchmark_id = str(row["benchmark_id"])
-        documents = tuple(
-            Document(
-                document_id=str(document_id),
-                text=text_by_id.get(str(document_id), ""),
-                role=role_by_task_doc.get((benchmark_id, str(document_id)), (None, None))[0],
-                subtype=role_by_task_doc.get((benchmark_id, str(document_id)), (None, None))[1],
-            )
-            for document_id in row.get("document_ids", [])
-        )
+        documents = []
+        for document_id in row.get("document_ids", []):
+            document_id = str(document_id)
+            role, subtype = role_by_task_doc.get((benchmark_id, document_id), (None, None))
+            documents.append(Document(document_id=document_id, text=text_by_id.get(document_id, ""), role=role, subtype=subtype))
+        documents = tuple(documents)
         future_values = row.get("future_values")
         gt_items = row.get("gt_evidence") or []
         gt_evidence = tuple(

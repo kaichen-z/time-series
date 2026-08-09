@@ -71,6 +71,9 @@ dr-cik run --agent drbench --llm-backend qwen \
 (unlabelled — ground-truth metrics come back `null`, by design). `--limit N` and
 repeatable `--task-id ID` work on any split.
 
+See **[docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md)** for a full walkthrough of the two
+pipelines, both agents, both forecasters, and how a run is orchestrated.
+
 ## Repository map
 
 ```

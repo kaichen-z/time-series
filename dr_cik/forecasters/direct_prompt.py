@@ -27,9 +27,13 @@ _TOKENS_PER_NUMBER = 8  # generous: digits + comma can each be separate BPE toke
 _JSON_OVERHEAD_TOKENS = 128
 
 
-def _output_token_budget(horizon: int, floor: int) -> int:
-    """Scale the generation budget with the horizon so long-horizon tasks don't get truncated mid-array."""
-    return max(floor, horizon * _TOKENS_PER_NUMBER + _JSON_OVERHEAD_TOKENS)
+def _output_token_budget(horizon: int, floor: int, thinking_token_budget: int = 0) -> int:
+    """Scale the generation budget with the horizon so long-horizon tasks don't get truncated mid-array.
+
+    `thinking_token_budget` is added on top when the model has reasoning enabled (a Qwen3+ <think>
+    block is generated before the JSON, so it needs its own separate allowance, not shared with it).
+    """
+    return max(floor, horizon * _TOKENS_PER_NUMBER + _JSON_OVERHEAD_TOKENS) + thinking_token_budget
 
 
 @dataclass(frozen=True)
@@ -41,6 +45,8 @@ class DirectPromptConfig:
     temperature: float = 1.0  # must be >0: each of the S calls needs to sample, or all S draws come out identical
     max_output_tokens: int = 512  # floor only: forecast() scales this up with horizon (one trajectory per call now, not S at once)
     seed: int = 7
+    enable_thinking: bool = False  # Qwen3+ reasoning: lets the model work through the series before answering, at the cost of more tokens/time per call
+    thinking_token_budget: int = 3072  # extra tokens for the reasoning pass before the JSON; measured live, a 4B model can burn 1500+ tokens on reasoning alone before ever reaching the answer
 
 
 def _render_history_table(view: TaskView) -> str:
@@ -111,10 +117,10 @@ class DirectPromptForecaster:
         self.config = config
 
     def forecast(self, task_view: TaskView, context_text: str, num_samples: int | None = None) -> Forecast:
-
         sample_count = num_samples or self.config.num_samples
         horizon = task_view.prediction_length
-        budget = _output_token_budget(horizon, floor=self.config.max_output_tokens)
+        thinking_budget = self.config.thinking_token_budget if self.config.enable_thinking else 0
+        budget = _output_token_budget(horizon, floor=self.config.max_output_tokens, thinking_token_budget=thinking_budget)
         prompt = _build_prompt(task_view, context_text)
         logger.info("direct-prompt[%s]: requesting %d trajectory/ies (horizon=%d, token_budget=%d, temperature=%.2f)", task_view.benchmark_id, sample_count, horizon, budget, self.config.temperature)
 

@@ -63,6 +63,11 @@ def _mean_metrics(all_metrics: Iterable[dict[str, float | None]]) -> dict[str, f
     return {name: statistics.fmean(values) for name, values in sorted(collected.items())}
 
 
+def _round_metrics(metrics: dict[str, float | None]) -> dict[str, float | None]:
+    """Round metric values to 3 decimals for log display; the full-precision values are still what's written to disk."""
+    return {name: (round(value, 3) if value is not None else None) for name, value in metrics.items()}
+
+
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
@@ -98,11 +103,7 @@ def _retrieved_document_ids(agent_result: AgentResult) -> set[str]:
 class DrCikPipeline:
     """Runs one deep-research agent and one forecaster over a set of tasks."""
 
-    def __init__(self, config: RunConfig, 
-                agent: DeepResearchAgent, 
-                judge: LLMClient | None, 
-                forecaster: ChronosForecaster) -> None:
-
+    def __init__(self, config: RunConfig, agent: DeepResearchAgent, judge: LLMClient | None, forecaster: ChronosForecaster) -> None:
         self.config = config
         self.agent = agent
         self.judge = judge
@@ -123,7 +124,7 @@ class DrCikPipeline:
         metrics = development_metrics(
             task, forecast, agent_result.report.evidence, used_doc_ids, self.judge, self.config.crps_sample_size
         )
-        logger.info("task %s: metrics=%s", task.benchmark_id, metrics)
+        logger.info("task %s: metrics=%s", task.benchmark_id, _round_metrics(metrics))
         return RunResult(
             benchmark_id=task.benchmark_id,
             agent_name=self.config.agent,
@@ -132,12 +133,22 @@ class DrCikPipeline:
             metrics=metrics,
         )
 
-    def run_many(self, tasks: Iterable[ForecastTask]) -> list[RunResult]:
+    def run_many(self, tasks: Iterable[ForecastTask], plot_dir: str | Path | None = None, output_dir: str | Path | None = None) -> list[RunResult]:
+        """Pass `plot_dir`/`output_dir` to write each task's PNG and refresh forecasts/summary.json right after its own forecast, instead of waiting for the whole run."""
         tasks = list(tasks)
         results = []
         for i, task in enumerate(tasks, 1):
             _log_task_banner("TASK", i, len(tasks), task.benchmark_id)
-            results.append(self.run(task))
+            result = self.run(task)
+            if plot_dir is not None:
+                from .plotting import plot_task_samples  # deferred: matplotlib is an optional extra
+
+                path = Path(plot_dir) / f"{task.benchmark_id}.png"
+                plot_task_samples(task, result.forecast.samples, label=self.config.agent, output_path=path)
+                logger.info("task %s: wrote plot to %s", task.benchmark_id, path)
+            results.append(result)
+            if output_dir is not None:
+                write_outputs(results, output_dir, config=self.config)
         return results
 
 
@@ -152,15 +163,12 @@ def build_pipeline(
     if llm is not None:
         resolved_llm: LLMClient = llm
     elif config.llm_backend == "qwen":
-        resolved_llm = QwenClient(QwenConfig(model_id=config.qwen_model_id, 
-                                             device=config.qwen_device, 
-                                             seed=config.seed))
+        resolved_llm = QwenClient(QwenConfig(model_id=config.qwen_model_id, device=config.qwen_device, seed=config.seed))
     else:
         resolved_llm = GeminiClient(model_id=config.gemini_model_id)
 
     if config.agent == "opendr":
-        agent: DeepResearchAgent = OpenDRAgent(resolved_llm, 
-        OpenDRConfig(max_steps=config.max_react_steps, retriever=config.retriever))
+        agent: DeepResearchAgent = OpenDRAgent(resolved_llm, OpenDRConfig(max_steps=config.max_react_steps, retriever=config.retriever))
     else:
         agent = DRBenchAgent(resolved_llm, DRBenchConfig(top_k_search=config.drbench_top_k, retriever=config.retriever))
 
@@ -184,16 +192,11 @@ def build_pipeline(
 
 
 def write_outputs(results: list[RunResult], output_dir: str | Path, config: RunConfig | None = None) -> None:
-    """Write forecasts.jsonl, deep_research.jsonl, run_report.jsonl, and summary.json.
-
-    Pass `config` to record the exact settings that produced the run into summary.json.
-    """
+    """Write forecasts.jsonl, deep_research.jsonl, run_report.jsonl, and summary.json (with `config`, if passed)."""
     output = Path(output_dir).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
 
-    forecasts_rows = [{"benchmark_id": result.benchmark_id, 
-                       "samples": list(result.forecast.samples)} 
-                       for result in results]
+    forecasts_rows = [{"benchmark_id": result.benchmark_id, "samples": list(result.forecast.samples)} for result in results]
     deep_research_rows = [
         {
             "benchmark_id": result.benchmark_id,
@@ -202,7 +205,6 @@ def write_outputs(results: list[RunResult], output_dir: str | Path, config: RunC
         }
         for result in results
     ]
-    
     run_report_rows = [
         {
             "benchmark_id": result.benchmark_id,
@@ -251,8 +253,12 @@ def run_direct_prompt(
     forecaster: DirectPromptForecaster,
     context_by_id: dict[str, str],
     crps_sample_size: int = 25,
+    plot_dir: str | Path | None = None,
+    plot_label: str = "",
+    output_dir: str | Path | None = None,
+    from_run_dir: str = "",
 ) -> list[DirectPromptRunResult]:
-    """Forecast every task via the Direct-Prompt LLM baseline; score smae/srmse/scrps only (no new evidence to grade)."""
+    """Forecast every task via Direct-Prompt (scoring smae/srmse/scrps only); pass `plot_dir`/`output_dir` to write each task's PNG and refresh forecasts/summary.json as it finishes."""
     tasks = list(tasks)
     results: list[DirectPromptRunResult] = []
     for i, task in enumerate(tasks, 1):
@@ -261,6 +267,12 @@ def run_direct_prompt(
         context_text = context_by_id.get(task.benchmark_id, "")
         forecast = forecaster.forecast(view, context_text)
         logger.info("task %s: forecast method=%s", task.benchmark_id, forecast.method)
+        if plot_dir is not None:
+            from .plotting import plot_task_samples  # deferred: matplotlib is an optional extra
+
+            path = Path(plot_dir) / f"{task.benchmark_id}.png"
+            plot_task_samples(task, forecast.samples, label=plot_label, output_path=path)
+            logger.info("task %s: wrote plot to %s", task.benchmark_id, path)
         if task.future_values is not None:
             crps_samples = forecast.samples[:crps_sample_size] or forecast.samples
             metrics: dict[str, float | None] = {
@@ -270,8 +282,10 @@ def run_direct_prompt(
             }
         else:
             metrics = {"smae": None, "srmse": None, "scrps": None}
-        logger.info("task %s: metrics=%s", task.benchmark_id, metrics)
+        logger.info("task %s: metrics=%s", task.benchmark_id, _round_metrics(metrics))
         results.append(DirectPromptRunResult(benchmark_id=task.benchmark_id, forecast=forecast, metrics=metrics))
+        if output_dir is not None:
+            write_direct_prompt_outputs(results, output_dir, model_id=forecaster.config.model_id, from_run_dir=from_run_dir)
     return results
 
 
