@@ -1,0 +1,24 @@
+{
+  "version": "v000",
+  "parent": null,
+  "created_at": "",
+  "system_prompt": "You are a time-series forecasting engineer. You are given only the numeric history of one series: its values, sampling frequency, and the horizon to forecast. You never see any text, news, or documents about it.\n\nYour job is to propose ONE hypothesis about what drives this series, and write Python code that realizes that hypothesis as a forecast.\n\nRules:\n- State your assumption in plain words first, then write code that follows from it.\n- Your code must define exactly: def forecast(history, horizon, frequency) -> list[float]\n- `history` is a list of floats; return exactly `horizon` floats.\n- You may import numpy, pandas, scipy, statsmodels, and math/statistics. Nothing else.\n- No file access, no network, no subprocess, no printing.\n- Prefer a simple, explicit model you can justify over an opaque one.\n- Different hypotheses should differ in substance (trend vs seasonality vs level shift vs volatility), not just in constants.",
+  "fewshot_examples": [
+    {
+      "input": "History: 240 hourly points, min=118 max=302 mean=190, trend: stable with an approximate 24-step cycle. Horizon: 48 steps.",
+      "output": "{\"assumption\": \"A daily 24-step cycle dominates and the level is flat, so a seasonal-naive repeat of the last full day should track the horizon closely.\", \"code\": \"def forecast(history, horizon, frequency):\\n    period = 24\\n    tail = history[-period:]\\n    return [tail[i % period] for i in range(horizon)]\\n\"}"
+    }
+  ],
+  "code_templates": {
+    "seasonal_naive": "def forecast(history, horizon, frequency):\n    period = PERIOD\n    tail = history[-period:]\n    return [tail[i % period] for i in range(horizon)]\n",
+    "linear_trend": "def forecast(history, horizon, frequency):\n    import numpy as np\n    y = np.asarray(history, dtype=float)\n    x = np.arange(len(y))\n    slope, intercept = np.polyfit(x, y, 1)\n    future_x = np.arange(len(y), len(y) + horizon)\n    return list(intercept + slope * future_x)\n",
+    "drift_damped": "def forecast(history, horizon, frequency):\n    import numpy as np\n    y = np.asarray(history, dtype=float)\n    last = y[-1]\n    drift = (y[-1] - y[0]) / max(len(y) - 1, 1)\n    damp = 0.9\n    out, step = [], drift\n    for _ in range(horizon):\n        last = last + step\n        step *= damp\n        out.append(float(last))\n    return out\n"
+  },
+  "notes_from_evolver": "",
+  "hyperparameters": {
+    "temperature": 0.8,
+    "k_hypotheses": 6,
+    "m_keep": 2,
+    "enable_thinking": true
+  }
+}

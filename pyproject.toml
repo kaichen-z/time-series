@@ -16,13 +16,18 @@ gemini = ["google-genai>=1.0"]
 qwen = ["transformers>=4.46", "torch"]
 dense = ["sentence-transformers>=3.0"]  # --retriever dense; the embedding method DRBench itself uses
 plots = ["matplotlib>=3.8"]
+evolve = ["numpy>=1.26", "pandas>=2.0", "scipy>=1.11", "statsmodels>=0.14"]  # the sandbox import allow-list
 dev = ["pytest>=8.0", "matplotlib>=3.8"]
 
 [project.scripts]
 dr-cik = "dr_cik.cli:main"
+evolving-agents = "evolving_agents.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["dr_cik*"]
+include = ["dr_cik*", "evolving_agents*"]
+
+[tool.setuptools.package-data]
+evolving_agents = ["bundles/*/*.json", "harness/*.json"]
 
 [tool.pytest.ini_options]
 markers = ["live: requires network/GEMINI_API_KEY/GPU; excluded by default"]

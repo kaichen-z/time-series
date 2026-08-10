@@ -13,3 +13,9 @@ external/
 results/
 outputs/
 my_archive/
+runs/
+.cache/
+checkpoints/
+# Evolved bundles are run artifacts; only the hand-written v000 seeds are tracked.
+evolving_agents/bundles/*/v[0-9][0-9][0-9].json
+!evolving_agents/bundles/*/v000.json
