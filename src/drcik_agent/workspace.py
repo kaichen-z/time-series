@@ -124,7 +124,12 @@ class RevisionPlannerAgent:
             + context_weight * point_value
         )
         return RevisionAction(
-            action_id=_action_id("explicit_future_value", "override", index, index, value),
+            # Identity is based on the underlying evidence value, not the
+            # workspace-dependent blended value. This prevents the same point
+            # from being applied repeatedly across retrieval turns.
+            action_id=_action_id(
+                "explicit_future_value", "override", index, index, point_value
+            ),
             action_type="override",
             start_index=index,
             end_index=index,
@@ -134,6 +139,37 @@ class RevisionPlannerAgent:
             evidence=f"Explicit value for {workspace.future_timestamps[index]}",
             confidence=max(0.5, context_weight),
             rationale="Blend the accepted explicit future value with the current workspace forecast.",
+        )
+
+    def regime_override(
+        self,
+        workspace: ForecastWorkspace,
+        values: tuple[float, ...],
+        source_document_ids: tuple[str, ...],
+        confidence: float,
+        rationale: str,
+    ) -> RevisionAction:
+        """Create one auditable full-horizon normal-regime projection action."""
+        end_index = len(workspace.final_values) - 1
+        return RevisionAction(
+            action_id=_action_id(
+                "normal_regime_projection",
+                "override",
+                0,
+                end_index,
+                None,
+                values,
+            ),
+            action_type="override",
+            start_index=0,
+            end_index=end_index,
+            value=None,
+            values=values,
+            source_document_ids=source_document_ids,
+            event_type="normal_regime_projection",
+            evidence="Verified normalization evidence plus history-only seasonal backtest.",
+            confidence=confidence,
+            rationale=rationale,
         )
 
 
@@ -148,14 +184,23 @@ class ForecastWorkspaceExecutor:
         baseline_values: tuple[float, ...],
         baseline_method: str,
     ) -> ForecastWorkspace:
+        # Domain constraints belong to baseline construction, not to later
+        # evidence actions.  Applying them here keeps baseline-vs-agent
+        # comparisons fair and makes a ``preserve`` action a true identity.
+        constrained_values = tuple(baseline_values)
+        if min(task.history_values) >= 0:
+            nonnegative_values = tuple(max(0.0, value) for value in constrained_values)
+            if nonnegative_values != constrained_values:
+                constrained_values = nonnegative_values
+                baseline_method = f"{baseline_method}+nonnegative"
         workspace = ForecastWorkspace(
             benchmark_id=task.benchmark_id,
             history_timestamps=task.history_timestamps,
             history_values=task.history_values,
             future_timestamps=task.future_timestamps,
             baseline_method=baseline_method,
-            baseline_values=tuple(baseline_values),
-            final_values=list(baseline_values),
+            baseline_values=constrained_values,
+            final_values=list(constrained_values),
         )
         initialize = RevisionAction(
             action_id=_action_id("workspace", "initialize", 0, task.prediction_length - 1, None),
@@ -212,6 +257,11 @@ class ForecastWorkspaceExecutor:
             return record
 
         indices = list(range(action.start_index, action.end_index + 1))
+        if action.action_type == "preserve":
+            record = RevisionRecord(action, True, "preserved_baseline", 0, 0.0)
+            workspace.revision_records.append(record)
+            return record
+
         before = [workspace.final_values[index] for index in indices]
         nonnegative = min(workspace.history_values) >= 0
         if action.action_type == "multiply":
@@ -255,9 +305,7 @@ class ForecastWorkspaceExecutor:
             abs(workspace.final_values[index] - old)
             for index, old in zip(indices, before)
         )
-        preserved = action.action_type == "preserve"
-        reason = "preserved_baseline" if preserved else "revision_applied"
-        record = RevisionRecord(action, True, reason, 0 if preserved else len(indices), mean_change)
+        record = RevisionRecord(action, True, "revision_applied", len(indices), mean_change)
         workspace.revision_records.append(record)
         for entry_id in action.memory_entry_ids:
             if entry_id not in workspace.memory_entry_ids:

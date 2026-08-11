@@ -3,6 +3,8 @@
 from .loop import IterativeAgentSystem, LoopConfig
 from .backbones import (
     BackboneUnavailableError,
+    ChronosBackboneConfig,
+    ChronosForecastBackbone,
     StatisticalForecastBackbone,
     TimesFMBackboneConfig,
     TimesFMForecastBackbone,
@@ -12,6 +14,7 @@ from .context import (
     ImportanceAwareContextAgent,
     RetrievalProcessRewardAgent,
 )
+from .codex_agents import CodexCLIClient, CodexCLIConfig
 from .control import ForecastGapControllerAgent
 from .forecast_utility import ForecastUtilityLabel, ForecastUtilityLabeler
 from .impacts import EvidenceToForecastAgent
@@ -20,10 +23,22 @@ from .models import Document, EvidenceImpact, ForecastTask, ForecastWorkspace, R
 from .pipeline import MinimalAgentSystem, SystemConfig
 from .reasoning import MacroReasoningAgent, MicroReasoningAgent, RevisionUtilityAgent
 from .workspace import ForecastWorkspaceExecutor, RevisionPlannerAgent
+from .triad import (
+    CodingForecastAgent,
+    DecisionForecastAgent,
+    RetrievalStreamAgent,
+    ThreeAgentForecastSystem,
+    TriadConfig,
+    TriadEvolutionPolicy,
+)
 
 __all__ = [
     "Document",
     "BackboneUnavailableError",
+    "ChronosBackboneConfig",
+    "ChronosForecastBackbone",
+    "CodexCLIClient",
+    "CodexCLIConfig",
     "EvidenceImpact",
     "EvidenceToForecastAgent",
     "ForecastTask",
@@ -48,5 +63,11 @@ __all__ = [
     "StatisticalForecastBackbone",
     "TimesFMBackboneConfig",
     "TimesFMForecastBackbone",
+    "CodingForecastAgent",
+    "RetrievalStreamAgent",
+    "DecisionForecastAgent",
+    "ThreeAgentForecastSystem",
+    "TriadConfig",
+    "TriadEvolutionPolicy",
 ]
-__version__ = "0.7.0"
+__version__ = "0.9.0"

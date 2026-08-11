@@ -4,14 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "drcik-minimal-agent"
-version = "0.7.0"
+version = "0.9.0"
 description = "A gap-guided, forecast-utility retrieval agent for contextual time-series forecasting"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-huggingface = ["datasets>=3.0"]
+huggingface = ["huggingface_hub>=0.25"]
+chronos = ["chronos-forecasting>=2.2.0"]
 timesfm = ["timesfm[torch]>=2.0.2"]
 dev = ["pytest>=8.0"]
 

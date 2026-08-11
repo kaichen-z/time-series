@@ -4,9 +4,11 @@ import argparse
 import json
 from pathlib import Path
 
+from .codex_baseline import CodexContractSystem, CodexDirectBaseline, CodexDirectConfig
 from .data import load_huggingface_tasks, load_sample_tasks
 from .loop import IterativeAgentSystem, LoopConfig
 from .pipeline import MinimalAgentSystem, SystemConfig, write_outputs
+from .triad import ThreeAgentForecastSystem, TriadConfig
 
 
 def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
@@ -15,9 +17,9 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
         "--system",
-        choices=("iterative", "one-pass"),
+        choices=("iterative", "triad", "one-pass", "codex-direct", "codex-contract"),
         default="iterative",
-        help="Run the iterative agent loop (default) or the original one-pass ablation",
+        help="Run our iterative loop, one-pass ablation, or full-corpus Codex baseline",
     )
     parser.add_argument("--top-k", type=int, default=5, help="Documents retrieved per loop step")
     parser.add_argument("--max-steps", type=int, default=10)
@@ -30,6 +32,16 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
         "--memory-file",
         default=None,
         help="Optional JSONL post-hoc memory used to calibrate later tasks",
+    )
+    parser.add_argument(
+        "--feedback-file",
+        default=None,
+        help="Optional JSONL module-level feedback log for --system triad",
+    )
+    parser.add_argument(
+        "--evolution-file",
+        default=None,
+        help="Persisted interpretable policy read and updated by --system triad",
     )
     parser.add_argument(
         "--learn-from-public-outcomes",
@@ -62,9 +74,22 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--backbone",
-        choices=("timesfm", "statistical"),
-        default="timesfm",
-        help="Numerical forecasting backbone; TimesFM 2.5 is the default",
+        choices=("chronos", "timesfm", "statistical"),
+        default="chronos",
+        help="Numerical forecasting backbone; Chronos-Bolt is the default",
+    )
+    parser.add_argument(
+        "--chronos-model-id",
+        default="amazon/chronos-bolt-small",
+    )
+    parser.add_argument("--chronos-device-map", default="cpu")
+    parser.add_argument("--chronos-max-context", type=int, default=2048)
+    parser.add_argument("--chronos-max-horizon", type=int, default=1024)
+    parser.add_argument("--chronos-cache-dir", default=None)
+    parser.add_argument(
+        "--chronos-local-files-only",
+        action="store_true",
+        help="Do not download a Chronos checkpoint; require it in the local Hugging Face cache",
     )
     parser.add_argument(
         "--timesfm-model-id",
@@ -81,7 +106,49 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--allow-statistical-fallback",
         action="store_true",
-        help="Explicitly fall back to the statistical ablation if TimesFM cannot load",
+        help="Explicitly fall back to the statistical ablation if the selected backbone cannot load",
+    )
+    parser.add_argument(
+        "--oracle-evidence",
+        action="store_true",
+        help=(
+            "PUBLIC DEVELOPMENT DIAGNOSTIC ONLY: bypass retrieval with gt_evidence "
+            "to measure the downstream forecasting ceiling"
+        ),
+    )
+    parser.add_argument(
+        "--allow-unvalidated-event-revisions",
+        action="store_true",
+        help=(
+            "Unsafe research ablation: allow generic text-derived multiply/add revisions "
+            "without a history backtest"
+        ),
+    )
+    parser.add_argument(
+        "--reasoning-agent",
+        choices=("rules", "codex"),
+        default="rules",
+        help="Use deterministic text agents (default) or schema-constrained Codex agents",
+    )
+    parser.add_argument(
+        "--codex-stages",
+        default="query,verify,impact",
+        help="Comma-separated Codex stages: query,verify,impact",
+    )
+    parser.add_argument("--codex-binary", default="codex")
+    parser.add_argument(
+        "--codex-model",
+        default=None,
+        help="Optional Codex model override; by default use the Codex CLI default",
+    )
+    parser.add_argument("--codex-cache-dir", default="outputs/codex-cache")
+    parser.add_argument("--codex-timeout", type=int, default=180)
+    parser.add_argument("--codex-max-document-characters", type=int, default=12000)
+    parser.add_argument(
+        "--codex-reasoning-effort",
+        choices=("none", "low", "medium", "high"),
+        default=None,
+        help="Defaults to high for Codex full-corpus systems and low for the hybrid loop",
     )
 
 
@@ -124,8 +191,40 @@ def main(argv: list[str] | None = None) -> None:
     arguments = build_parser().parse_args(argv)
     if getattr(arguments, "hidden_test", False) and arguments.learn_from_public_outcomes:
         raise SystemExit("--learn-from-public-outcomes cannot be used on hidden test tasks")
+    if getattr(arguments, "hidden_test", False) and arguments.oracle_evidence:
+        raise SystemExit("--oracle-evidence is forbidden on hidden test tasks")
     if arguments.system == "one-pass" and arguments.learn_from_public_outcomes:
-        raise SystemExit("--learn-from-public-outcomes requires --system iterative")
+        raise SystemExit("--learn-from-public-outcomes requires --system iterative or triad")
+    if arguments.system == "one-pass" and arguments.oracle_evidence:
+        raise SystemExit("--oracle-evidence requires --system iterative")
+    if arguments.system == "one-pass" and arguments.allow_unvalidated_event_revisions:
+        raise SystemExit(
+            "--allow-unvalidated-event-revisions applies only to --system iterative"
+        )
+    if arguments.system == "one-pass" and arguments.reasoning_agent == "codex":
+        raise SystemExit("--reasoning-agent codex requires --system iterative")
+    if arguments.system in {"codex-direct", "codex-contract"} and (
+        arguments.learn_from_public_outcomes
+        or arguments.oracle_evidence
+        or arguments.allow_unvalidated_event_revisions
+    ):
+        raise SystemExit(
+            f"--system {arguments.system} does not use memory, oracle evidence, or hybrid revision flags"
+        )
+    codex_stages = tuple(
+        stage.strip() for stage in arguments.codex_stages.split(",") if stage.strip()
+    )
+    invalid_codex_stages = set(codex_stages) - {"query", "verify", "impact"}
+    if invalid_codex_stages:
+        raise SystemExit(
+            "Unknown --codex-stages: " + ", ".join(sorted(invalid_codex_stages))
+        )
+    codex_reasoning_effort = arguments.codex_reasoning_effort or (
+        "high"
+        if arguments.system in {"codex-direct", "codex-contract"}
+        or (arguments.system == "triad" and arguments.reasoning_agent == "codex")
+        else "low"
+    )
     if arguments.command == "run-sample":
         tasks = load_sample_tasks(arguments.sample_dir)
     else:
@@ -141,12 +240,100 @@ def main(argv: list[str] | None = None) -> None:
                 context_weight=arguments.context_weight,
                 seed=arguments.seed,
                 backbone=arguments.backbone,
+                chronos_model_id=arguments.chronos_model_id,
+                chronos_device_map=arguments.chronos_device_map,
+                chronos_max_context=arguments.chronos_max_context,
+                chronos_max_horizon=arguments.chronos_max_horizon,
+                chronos_cache_dir=arguments.chronos_cache_dir,
+                chronos_local_files_only=arguments.chronos_local_files_only,
                 timesfm_model_id=arguments.timesfm_model_id,
                 timesfm_max_context=arguments.timesfm_max_context,
                 timesfm_max_horizon=arguments.timesfm_max_horizon,
                 timesfm_cache_dir=arguments.timesfm_cache_dir,
                 timesfm_local_files_only=arguments.timesfm_local_files_only,
                 allow_statistical_fallback=arguments.allow_statistical_fallback,
+            )
+        )
+    elif arguments.system == "triad":
+        system = ThreeAgentForecastSystem(
+            TriadConfig(
+                max_rounds=arguments.max_steps,
+                documents_per_round=arguments.top_k,
+                num_samples=arguments.samples,
+                seed=arguments.seed,
+                feedback_path=arguments.feedback_file,
+                evolution_path=arguments.evolution_file,
+                learn_from_public_outcomes=arguments.learn_from_public_outcomes,
+                backbone=arguments.backbone,
+                chronos_model_id=arguments.chronos_model_id,
+                chronos_device_map=arguments.chronos_device_map,
+                chronos_max_context=arguments.chronos_max_context,
+                chronos_max_horizon=arguments.chronos_max_horizon,
+                chronos_cache_dir=arguments.chronos_cache_dir,
+                chronos_local_files_only=arguments.chronos_local_files_only,
+                timesfm_model_id=arguments.timesfm_model_id,
+                timesfm_max_context=arguments.timesfm_max_context,
+                timesfm_max_horizon=arguments.timesfm_max_horizon,
+                timesfm_cache_dir=arguments.timesfm_cache_dir,
+                timesfm_local_files_only=arguments.timesfm_local_files_only,
+                allow_statistical_fallback=arguments.allow_statistical_fallback,
+                reasoning_agent=arguments.reasoning_agent,
+                codex_binary=arguments.codex_binary,
+                codex_model=arguments.codex_model,
+                codex_cache_dir=arguments.codex_cache_dir,
+                codex_timeout_seconds=arguments.codex_timeout,
+                codex_max_document_characters=arguments.codex_max_document_characters,
+                codex_reasoning_effort=codex_reasoning_effort,
+            )
+        )
+    elif arguments.system == "codex-direct":
+        system = CodexDirectBaseline(
+            CodexDirectConfig(
+                num_samples=arguments.samples,
+                seed=arguments.seed,
+                backbone=arguments.backbone,
+                chronos_model_id=arguments.chronos_model_id,
+                chronos_device_map=arguments.chronos_device_map,
+                chronos_max_context=arguments.chronos_max_context,
+                chronos_max_horizon=arguments.chronos_max_horizon,
+                chronos_cache_dir=arguments.chronos_cache_dir,
+                chronos_local_files_only=arguments.chronos_local_files_only,
+                timesfm_model_id=arguments.timesfm_model_id,
+                timesfm_max_context=arguments.timesfm_max_context,
+                timesfm_max_horizon=arguments.timesfm_max_horizon,
+                timesfm_cache_dir=arguments.timesfm_cache_dir,
+                timesfm_local_files_only=arguments.timesfm_local_files_only,
+                allow_statistical_fallback=arguments.allow_statistical_fallback,
+                codex_binary=arguments.codex_binary,
+                codex_model=arguments.codex_model,
+                codex_cache_dir=arguments.codex_cache_dir,
+                codex_timeout_seconds=arguments.codex_timeout,
+                codex_reasoning_effort=codex_reasoning_effort,
+            )
+        )
+    elif arguments.system == "codex-contract":
+        system = CodexContractSystem(
+            CodexDirectConfig(
+                num_samples=arguments.samples,
+                seed=arguments.seed,
+                backbone=arguments.backbone,
+                chronos_model_id=arguments.chronos_model_id,
+                chronos_device_map=arguments.chronos_device_map,
+                chronos_max_context=arguments.chronos_max_context,
+                chronos_max_horizon=arguments.chronos_max_horizon,
+                chronos_cache_dir=arguments.chronos_cache_dir,
+                chronos_local_files_only=arguments.chronos_local_files_only,
+                timesfm_model_id=arguments.timesfm_model_id,
+                timesfm_max_context=arguments.timesfm_max_context,
+                timesfm_max_horizon=arguments.timesfm_max_horizon,
+                timesfm_cache_dir=arguments.timesfm_cache_dir,
+                timesfm_local_files_only=arguments.timesfm_local_files_only,
+                allow_statistical_fallback=arguments.allow_statistical_fallback,
+                codex_binary=arguments.codex_binary,
+                codex_model=arguments.codex_model,
+                codex_cache_dir=arguments.codex_cache_dir,
+                codex_timeout_seconds=arguments.codex_timeout,
+                codex_reasoning_effort=codex_reasoning_effort,
             )
         )
     else:
@@ -166,12 +353,32 @@ def main(argv: list[str] | None = None) -> None:
                 revision_utility_threshold=arguments.revision_threshold,
                 min_expected_information_gain=arguments.min_information_gain,
                 backbone=arguments.backbone,
+                chronos_model_id=arguments.chronos_model_id,
+                chronos_device_map=arguments.chronos_device_map,
+                chronos_max_context=arguments.chronos_max_context,
+                chronos_max_horizon=arguments.chronos_max_horizon,
+                chronos_cache_dir=arguments.chronos_cache_dir,
+                chronos_local_files_only=arguments.chronos_local_files_only,
                 timesfm_model_id=arguments.timesfm_model_id,
                 timesfm_max_context=arguments.timesfm_max_context,
                 timesfm_max_horizon=arguments.timesfm_max_horizon,
                 timesfm_cache_dir=arguments.timesfm_cache_dir,
                 timesfm_local_files_only=arguments.timesfm_local_files_only,
                 allow_statistical_fallback=arguments.allow_statistical_fallback,
+                oracle_evidence=arguments.oracle_evidence,
+                allow_unvalidated_event_revisions=(
+                    arguments.allow_unvalidated_event_revisions
+                ),
+                reasoning_agent=arguments.reasoning_agent,
+                codex_stages=codex_stages,
+                codex_binary=arguments.codex_binary,
+                codex_model=arguments.codex_model,
+                codex_cache_dir=arguments.codex_cache_dir,
+                codex_timeout_seconds=arguments.codex_timeout,
+                codex_max_document_characters=(
+                    arguments.codex_max_document_characters
+                ),
+                codex_reasoning_effort=codex_reasoning_effort,
             )
         )
     results = system.run_many(tasks)

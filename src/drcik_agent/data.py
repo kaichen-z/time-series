@@ -140,17 +140,43 @@ def task_from_normalized(
 
 
 def load_huggingface_tasks(labels_public: bool | None = True) -> list[ForecastTask]:
-    """Load Dr-CiK from Hugging Face. Requires the optional `datasets` extra."""
+    """Load normalized Dr-CiK rows from Hugging Face.
+
+    Prefer the ``datasets`` package when installed. The official repository
+    also publishes the same configs as JSONL, so a lightweight Hub-only path
+    avoids a heavy Arrow/aiohttp dependency on constrained environments.
+    """
     try:
         from datasets import load_dataset
-    except ImportError as exc:
-        raise RuntimeError(
-            "Hugging Face loading requires: pip install -e '.[huggingface]'"
-        ) from exc
+    except ImportError:
+        try:
+            from huggingface_hub import hf_hub_download
+        except ImportError as exc:
+            raise RuntimeError(
+                "Hugging Face loading requires: pip install -e '.[huggingface]'"
+            ) from exc
 
-    task_rows = load_dataset("ServiceNow/Dr-CiK", "tasks", split="train")
-    document_rows = load_dataset("ServiceNow/Dr-CiK", "documents", split="train")
-    link_rows = load_dataset("ServiceNow/Dr-CiK", "task_documents", split="train")
+        def jsonl_rows(filename: str) -> list[dict[str, Any]]:
+            path = Path(
+                hf_hub_download(
+                    repo_id="ServiceNow/Dr-CiK",
+                    repo_type="dataset",
+                    filename=filename,
+                )
+            )
+            return [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+
+        task_rows = jsonl_rows("data/tasks/train.jsonl")
+        document_rows = jsonl_rows("data/documents/train.jsonl")
+        link_rows = jsonl_rows("data/task_documents/train.jsonl")
+    else:
+        task_rows = load_dataset("ServiceNow/Dr-CiK", "tasks", split="train")
+        document_rows = load_dataset("ServiceNow/Dr-CiK", "documents", split="train")
+        link_rows = load_dataset("ServiceNow/Dr-CiK", "task_documents", split="train")
 
     document_by_id = {str(row["document_id"]): str(row["text"]) for row in document_rows}
     link_by_task: dict[str, dict[str, tuple[str | None, str | None]]] = defaultdict(dict)
@@ -160,7 +186,9 @@ def load_huggingface_tasks(labels_public: bool | None = True) -> list[ForecastTa
             row.get("subtype"),
         )
 
-    selected = task_rows
+    selected = list(task_rows)
     if labels_public is not None:
-        selected = task_rows.filter(lambda row: bool(row["labels_public"]) is labels_public)
+        selected = [
+            row for row in selected if bool(row["labels_public"]) is labels_public
+        ]
     return [task_from_normalized(dict(row), document_by_id, link_by_task) for row in selected]

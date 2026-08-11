@@ -87,6 +87,11 @@ class MicroReasoningAgent:
 class RevisionUtilityAgent:
     """PostTime-style revise-or-preserve gate using only inference-time signals."""
 
+    VALIDATED_ACTION_EVENTS = {
+        "explicit_future_value",
+        "normal_regime_projection",
+    }
+
     EVENT_QUESTION = {
         "anomaly": "historical_regime",
         "resolution": "resolution_permanence",
@@ -94,12 +99,18 @@ class RevisionUtilityAgent:
         "external_driver": "external_drivers",
         "forecast_regime": "forecast_regime",
         "explicit_future_value": "forecast_regime",
+        "normal_regime_projection": "forecast_regime",
     }
 
-    def __init__(self, threshold: float = 0.60) -> None:
+    def __init__(
+        self,
+        threshold: float = 0.60,
+        allow_unvalidated_event_revisions: bool = False,
+    ) -> None:
         if not 0.0 <= threshold <= 1.0:
             raise ValueError("revision threshold must be between 0 and 1")
         self.threshold = threshold
+        self.allow_unvalidated_event_revisions = allow_unvalidated_event_revisions
 
     @staticmethod
     def _belief(state: AgentBeliefState, event_type: str) -> LinguisticBelief | None:
@@ -121,6 +132,24 @@ class RevisionUtilityAgent:
                 threshold=self.threshold,
                 reasons=("The evidence-to-impact stage explicitly recommends preserving the prior.",),
                 fallback_action_id=action.action_id,
+            )
+
+        if (
+            action.event_type not in self.VALIDATED_ACTION_EVENTS
+            and not self.allow_unvalidated_event_revisions
+        ):
+            return RevisionDecision(
+                action_id=action.action_id,
+                revise=False,
+                utility_score=0.0,
+                threshold=self.threshold,
+                reasons=(
+                    "Safe default: this textual event magnitude has no history backtest or "
+                    "explicit timestamp-value grounding.",
+                    "Preserve the forecasting-backbone prior; enable the unsafe ablation "
+                    "explicitly to test generic multiply/add revisions.",
+                ),
+                fallback_action_id=f"{action.action_id}-preserve",
             )
 
         belief = self._belief(state, action.event_type)
