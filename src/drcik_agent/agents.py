@@ -300,6 +300,7 @@ class ProbabilisticForecastAgent:
         future_timestamps: tuple[str, ...], retrieved: list[RetrievedDocument]
     ) -> dict[str, float]:
         values_by_timestamp: dict[str, list[float]] = {timestamp: [] for timestamp in future_timestamps}
+        future_set = set(future_timestamps)
         for item in retrieved:
             text = item.document.text
             for timestamp in future_timestamps:
@@ -313,6 +314,82 @@ class ProbabilisticForecastAgent:
                     values_by_timestamp[timestamp].append(
                         float(match.group(1).replace(",", ""))
                     )
+
+            # Forecast documents often encode a multi-day trajectory as a
+            # wide Markdown table: dates are columns and local times are rows.
+            # Recover those exact timestamp/value pairs instead of requiring
+            # the prose-style ``(timestamp, value)`` representation.
+            header_dates: list[str | None] | None = None
+            active_date: str | None = None
+            verified_exact_quote = False
+            for raw_line in text.splitlines():
+                if raw_line.strip() == "[[VERIFIED_EXACT_QUOTE_START]]":
+                    verified_exact_quote = True
+                    active_date = None
+                    continue
+                if raw_line.strip() == "[[VERIFIED_EXACT_QUOTE_END]]":
+                    verified_exact_quote = False
+                    active_date = None
+                    continue
+                if verified_exact_quote and re.search(
+                    r"\b(?:date|day)\b", raw_line, re.IGNORECASE
+                ):
+                    date_match = re.search(
+                        r"\b((?:19|20)\d{2}-\d{2}-\d{2})\b", raw_line
+                    )
+                    if date_match:
+                        active_date = date_match.group(1)
+                local_value = re.match(
+                    r"^\s*[-*]?\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*[:|=-]\s*"
+                    r"([-+]?\d+(?:,\d{3})*(?:\.\d+)?)\b",
+                    raw_line,
+                )
+                if verified_exact_quote and active_date and local_value:
+                    hour = int(local_value.group(1))
+                    minute = int(local_value.group(2))
+                    second = int(local_value.group(3) or 0)
+                    if hour <= 23 and minute <= 59 and second <= 59:
+                        timestamp = (
+                            f"{active_date} {hour:02d}:{minute:02d}:{second:02d}"
+                        )
+                        if timestamp in future_set:
+                            values_by_timestamp[timestamp].append(
+                                float(local_value.group(4).replace(",", ""))
+                            )
+                if "|" not in raw_line:
+                    continue
+                cells = [cell.strip() for cell in raw_line.strip().strip("|").split("|")]
+                if len(cells) < 2:
+                    continue
+                if cells[0].lower() in {"timestamp", "local time", "time"}:
+                    parsed_dates = [
+                        cell if re.fullmatch(r"(?:19|20)\d{2}-\d{2}-\d{2}", cell) else None
+                        for cell in cells[1:]
+                    ]
+                    header_dates = parsed_dates if any(parsed_dates) else None
+                    continue
+                if header_dates is None:
+                    continue
+                time_match = re.fullmatch(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", cells[0])
+                if not time_match:
+                    continue
+                hour = int(time_match.group(1))
+                minute = int(time_match.group(2))
+                second = int(time_match.group(3) or 0)
+                if hour > 23 or minute > 59 or second > 59:
+                    continue
+                clock = f"{hour:02d}:{minute:02d}:{second:02d}"
+                for date, cell in zip(header_dates, cells[1:]):
+                    if date is None:
+                        continue
+                    timestamp = f"{date} {clock}"
+                    if timestamp not in future_set:
+                        continue
+                    number = re.fullmatch(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?", cell)
+                    if number:
+                        values_by_timestamp[timestamp].append(
+                            float(number.group(0).replace(",", ""))
+                        )
         return {
             timestamp: statistics.median(values)
             for timestamp, values in values_by_timestamp.items()

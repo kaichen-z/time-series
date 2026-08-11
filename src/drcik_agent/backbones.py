@@ -58,6 +58,107 @@ class StatisticalForecastBackbone:
 
 
 @dataclass(frozen=True)
+class ChronosBackboneConfig:
+    model_id: str = "amazon/chronos-bolt-small"
+    device_map: str = "cpu"
+    max_context: int = 2048
+    max_horizon: int = 1024
+    cache_dir: str | None = None
+    local_files_only: bool = False
+
+    def __post_init__(self) -> None:
+        if self.max_context <= 0 or self.max_horizon <= 0:
+            raise ValueError("Chronos context and horizon limits must be positive")
+        if not self.device_map.strip():
+            raise ValueError("Chronos device_map must not be empty")
+
+
+class ChronosForecastBackbone:
+    """Lazy zero-shot Chronos-Bolt adapter using Amazon's official API."""
+
+    def __init__(
+        self,
+        config: ChronosBackboneConfig | None = None,
+        runtime_module: Any | None = None,
+        tensor_module: Any | None = None,
+    ) -> None:
+        self.config = config or ChronosBackboneConfig()
+        self._runtime_module = runtime_module
+        self._tensor_module = tensor_module
+        self._pipeline: Any | None = None
+
+    def _load_runtime(self) -> tuple[Any, Any]:
+        try:
+            chronos = self._runtime_module or importlib.import_module("chronos")
+            torch = self._tensor_module or importlib.import_module("torch")
+        except ImportError as error:
+            raise BackboneUnavailableError(
+                "Chronos is the configured backbone but is not installed. "
+                "Install it with: pip install -e '.[chronos]'"
+            ) from error
+        return chronos, torch
+
+    def _ensure_pipeline(self) -> tuple[Any, Any]:
+        chronos, torch = self._load_runtime()
+        if self._pipeline is not None:
+            return self._pipeline, torch
+        load_kwargs: dict[str, Any] = {
+            "device_map": self.config.device_map,
+            "local_files_only": self.config.local_files_only,
+        }
+        if self.config.cache_dir:
+            load_kwargs["cache_dir"] = str(
+                Path(self.config.cache_dir).expanduser().resolve()
+            )
+        try:
+            self._pipeline = chronos.BaseChronosPipeline.from_pretrained(
+                self.config.model_id,
+                **load_kwargs,
+            )
+        except Exception as error:
+            location = "local cache" if self.config.local_files_only else "Hugging Face or cache"
+            raise BackboneUnavailableError(
+                f"Could not load Chronos checkpoint {self.config.model_id!r} "
+                f"from {location}: {error}"
+            ) from error
+        return self._pipeline, torch
+
+    def forecast(
+        self,
+        task: ForecastTask,
+        diagnosis: Diagnosis,
+    ) -> tuple[tuple[float, ...], str]:
+        del diagnosis  # Chronos consumes the numerical history directly.
+        if task.prediction_length > self.config.max_horizon:
+            raise ValueError(
+                f"Task horizon {task.prediction_length} exceeds Chronos max_horizon "
+                f"{self.config.max_horizon}"
+            )
+        pipeline, torch = self._ensure_pipeline()
+        context = task.history_values[-self.config.max_context :]
+        try:
+            context_tensor = torch.tensor(context, dtype=torch.float32)
+            _quantiles, point_forecast = pipeline.predict_quantiles(
+                inputs=context_tensor,
+                prediction_length=task.prediction_length,
+                quantile_levels=[0.1, 0.5, 0.9],
+            )
+            row = point_forecast[0]
+            if hasattr(row, "tolist"):
+                row = row.tolist()
+            values = tuple(float(value) for value in row)
+        except Exception as error:
+            raise BackboneUnavailableError(f"Chronos inference failed: {error}") from error
+        if len(values) != task.prediction_length:
+            raise BackboneUnavailableError(
+                "Chronos returned a point forecast with the wrong horizon length"
+            )
+        if not all(math.isfinite(value) for value in values):
+            raise BackboneUnavailableError("Chronos returned non-finite point forecasts")
+        return values, f"chronos-bolt:{self.config.model_id}"
+
+
+@dataclass(frozen=True)
 class TimesFMBackboneConfig:
     model_id: str = "google/timesfm-2.5-200m-pytorch"
     max_context: int = 4096
@@ -188,15 +289,19 @@ class FallbackForecastBackbone:
 def build_forecast_backbone(
     name: str,
     *,
+    chronos_config: ChronosBackboneConfig | None = None,
     timesfm_config: TimesFMBackboneConfig | None = None,
     allow_statistical_fallback: bool = False,
 ) -> ForecastBackbone:
     normalized = name.strip().lower()
     if normalized == "statistical":
         return StatisticalForecastBackbone()
-    if normalized != "timesfm":
+    if normalized == "chronos":
+        primary: ForecastBackbone = ChronosForecastBackbone(chronos_config)
+    elif normalized == "timesfm":
+        primary = TimesFMForecastBackbone(timesfm_config)
+    else:
         raise ValueError(f"Unknown forecast backbone: {name}")
-    primary = TimesFMForecastBackbone(timesfm_config)
     if allow_statistical_fallback:
         return FallbackForecastBackbone(primary, StatisticalForecastBackbone())
     return primary

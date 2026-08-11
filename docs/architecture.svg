@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1740" viewBox="0 0 1600 1740" role="img" aria-labelledby="diagram-title diagram-desc">
       <title id="diagram-title">Architecture of the foresight-driven time-series forecasting agent</title>
-      <desc id="diagram-desc">An online inference loop combines TimesFM, structured gap judging, forecast-utility retrieval, grounded evidence, contextual revision, and a restricted forecast workspace. An offline lane trains retrievers and revisers and evolves policies on resolved chronological tasks.</desc>
+      <desc id="diagram-desc">An online inference loop combines Chronos-Bolt, structured gap judging, forecast-utility retrieval, grounded evidence, contextual revision, and a restricted forecast workspace. An offline lane trains retrievers and revisers and evolves policies on resolved chronological tasks.</desc>
       <defs>
         <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
           <feDropShadow dx="0" dy="7" stdDeviation="8" flood-color="#23364f" flood-opacity="0.12"/>
@@ -77,7 +77,7 @@
         <rect class="box prior" width="255" height="186"/>
         <rect class="tag-prior" x="18" y="18" width="104" height="23" rx="11"/>
         <text class="tag-text" x="31" y="34">NUMERICAL</text>
-        <text class="title" x="18" y="70">TimesFM 2.5 Backbone</text>
+        <text class="title" x="18" y="70">Chronos-Bolt Backbone</text>
         <text class="body" x="18" y="98">Numerical history only</text>
         <text class="body" x="18" y="123">→ point / quantile prior</text>
         <text class="body" x="18" y="148">→ immutable y_baseline</text>
@@ -202,7 +202,7 @@
         <rect class="tag-learned" x="18" y="18" width="93" height="23" rx="11"/>
         <text class="tag-text" x="31" y="34">REVISER</text>
         <text class="title" x="18" y="70">Contextual Forecast Reviser</text>
-        <text class="body" x="18" y="99">TimesFM prior + grounded context</text>
+        <text class="body" x="18" y="99">Chronos prior + grounded context</text>
         <text class="body" x="18" y="122">preserve or revise</text>
         <text class="body" x="18" y="145">direction · window · magnitude</text>
         <text class="small" x="18" y="174">Target: PostTime SFT + RLVR</text>

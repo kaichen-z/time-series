@@ -340,6 +340,58 @@ class Forecast:
     revision_records: tuple[RevisionRecord, ...] = ()
 
 
+@dataclass(frozen=True)
+class ForecastCandidate:
+    """One executable numerical hypothesis produced by the Coding Agent."""
+
+    candidate_id: str
+    round_index: int
+    program_id: str
+    values: tuple[float, ...]
+    assumption: str
+    tags: tuple[str, ...]
+    historical_score: float
+    validation_mae: float | None
+    validation_scaled_mae: float | None
+    validation_folds: int
+    parent_candidate_ids: tuple[str, ...] = ()
+    source_document_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CandidateAssessment:
+    """Decision Agent score for one candidate and its supporting reasons."""
+
+    candidate_id: str
+    historical_score: float
+    learned_score: float
+    evidence_compatible: bool
+    final_score: float
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CandidateDecision:
+    """Auditable selection/ensemble decision over numerical candidates."""
+
+    selected_candidate_ids: tuple[str, ...]
+    selected_weights: tuple[float, ...]
+    assessments: tuple[CandidateAssessment, ...]
+    request_more_retrieval: bool
+    request_new_candidates: bool
+    rationale: str
+
+
+@dataclass(frozen=True)
+class AgentFeedback:
+    """Outcome attribution used to train/evolve one component after resolution."""
+
+    agent_name: str
+    reward: float
+    failure_type: str
+    details: dict[str, Any]
+
+
 @dataclass
 class AgentBeliefState:
     open_question_ids: list[str]

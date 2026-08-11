@@ -9,8 +9,6 @@ from drcik_agent.backbones import (
     TimesFMBackboneConfig,
     TimesFMForecastBackbone,
 )
-from drcik_agent.loop import IterativeAgentSystem, LoopConfig
-
 from test_minimal_system import example_task
 
 
@@ -62,11 +60,6 @@ class _BrokenTimesFM:
 
 
 class TimesFMBackboneTest(unittest.TestCase):
-    def test_timesfm_is_the_default_system_backbone(self) -> None:
-        self.assertEqual(LoopConfig().backbone, "timesfm")
-        system = IterativeAgentSystem()
-        self.assertIsInstance(system.forecast_agent.backbone, TimesFMForecastBackbone)
-
     def test_official_timesfm_2p5_api_is_used_for_the_baseline(self) -> None:
         task = example_task()
         diagnosis = TimeSeriesDiagnosisAgent().diagnose(task)

@@ -1,6 +1,7 @@
-# TimesFM 2.5 Backbone
+# Optional TimesFM 2.5 Backbone
 
-The default numerical backbone is Google Research TimesFM 2.5 using the official
+TimesFM is retained as an optional comparison backbone. The default is Chronos-Bolt;
+see [`CHRONOS_BACKBONE.md`](CHRONOS_BACKBONE.md). This adapter uses the official
 `timesfm` Python package and the `google/timesfm-2.5-200m-pytorch` checkpoint.
 
 Official references:
@@ -59,7 +60,7 @@ TimesFM's returned quantiles.
 
 ## Failure and ablation policy
 
-The default behavior is fail-fast. Missing packages, missing checkpoints, invalid model
+When TimesFM is selected, the behavior is fail-fast. Missing packages, missing checkpoints, invalid model
 outputs, and inference failures raise a `BackboneUnavailableError`.
 
 There are two explicit alternatives:

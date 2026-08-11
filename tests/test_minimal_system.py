@@ -138,6 +138,67 @@ def future_impact_task() -> ForecastTask:
 
 
 class MinimalSystemTest(unittest.TestCase):
+    def test_context_point_extractor_reads_wide_markdown_forecast_tables(self) -> None:
+        future = (
+            "2024-01-03 00:00:00",
+            "2024-01-03 01:00:00",
+            "2024-01-04 00:00:00",
+            "2024-01-04 01:00:00",
+        )
+        retrieved = [
+            RetrievedDocument(
+                Document(
+                    "doc_table",
+                    """| Timestamp | 2024-01-03 | 2024-01-04 |
+| :--- | :---: | :---: |
+| 00:00 | 12.0 | 14.0 |
+| 01:00 | 22.0 | 24.0 |""",
+                ),
+                score=1.0,
+                rank=1,
+            )
+        ]
+
+        points = ProbabilisticForecastAgent._extract_context_points(future, retrieved)
+        self.assertEqual(
+            points,
+            {
+                "2024-01-03 00:00:00": 12.0,
+                "2024-01-03 01:00:00": 22.0,
+                "2024-01-04 00:00:00": 14.0,
+                "2024-01-04 01:00:00": 24.0,
+            },
+        )
+
+    def test_context_point_extractor_reads_dated_daily_value_blocks(self) -> None:
+        future = (
+            "2024-01-03 00:00:00",
+            "2024-01-03 03:00:00",
+            "2024-01-03 06:00:00",
+        )
+        retrieved = [
+            RetrievedDocument(
+                Document(
+                    "doc_daily_block",
+                    "[[VERIFIED_EXACT_QUOTE_START]]\n"
+                    "Evaluation Metrics - Final Day (2024-01-03):\n"
+                    "- 00:00: 0\n- 03:00: 12.5\n- 06:00: 27\n"
+                    "[[VERIFIED_EXACT_QUOTE_END]]",
+                ),
+                score=1.0,
+                rank=1,
+            )
+        ]
+
+        self.assertEqual(
+            ProbabilisticForecastAgent._extract_context_points(future, retrieved),
+            {
+                "2024-01-03 00:00:00": 0.0,
+                "2024-01-03 03:00:00": 12.5,
+                "2024-01-03 06:00:00": 27.0,
+            },
+        )
+
     def test_explicit_future_percentage_changes_the_numerical_forecast(self) -> None:
         task = future_impact_task()
         document = task.documents[0]
@@ -170,6 +231,7 @@ class MinimalSystemTest(unittest.TestCase):
                 max_no_progress=4,
                 seed=1,
                 backbone="statistical",
+                allow_unvalidated_event_revisions=True,
             )
         ).run(task)
 

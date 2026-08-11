@@ -217,6 +217,7 @@ class ImportanceAwareContextAgent:
         task: ForecastTask,
         diagnosis: Diagnosis,
         documents: list[RetrievedDocument],
+        pinned_quotes: dict[str, tuple[str, ...]] | None = None,
     ) -> tuple[list[RetrievedDocument], list[ContextCompressionRecord]]:
         if not documents:
             return [], []
@@ -239,30 +240,60 @@ class ImportanceAwareContextAgent:
         records: list[ContextCompressionRecord] = []
         for item, allocation in zip(documents, allocations):
             text = item.document.text
+            exact_pins = tuple(
+                dict.fromkeys(
+                    quote.strip()
+                    for quote in (pinned_quotes or {}).get(item.document.document_id, ())
+                    if quote.strip() and quote.strip() in text
+                )
+            )
+            pinned_text = "\n".join(exact_pins)
+            pinned_block = (
+                "[[VERIFIED_EXACT_QUOTE_START]]\n"
+                + pinned_text
+                + "\n[[VERIFIED_EXACT_QUOTE_END]]"
+                if pinned_text
+                else ""
+            )
+            # A verifier-selected exact quote is evidence, not a generic summary.
+            # Reserve enough local budget to keep it intact (within the verifier's
+            # bounded quote schema) before filling the remainder by sentence score.
+            if pinned_text:
+                allocation = max(allocation, len(pinned_block) + 1)
             sentences = [part.strip() for part in SENTENCE_RE.split(text) if part.strip()]
             if len(text) <= allocation:
-                selected_text = text
-                retained_count = len(sentences)
+                selected_text = (
+                    pinned_block + "\n" + text if pinned_block else text
+                )
+                allocation = max(allocation, len(selected_text))
+                retained_count = len(sentences) + len(exact_pins)
             else:
                 ranked = sorted(
                     enumerate(sentences),
                     key=lambda row: (-self._sentence_score(task, diagnosis, row[1]), row[0]),
                 )
                 selected_indices: list[int] = []
-                used = 0
+                used = len(pinned_block) + (1 if pinned_block else 0)
                 for index, sentence in ranked:
+                    if any(sentence in quote or quote in sentence for quote in exact_pins):
+                        continue
                     cost = len(sentence) + 1
-                    if selected_indices and used + cost > allocation:
+                    if used + cost > allocation:
                         continue
                     selected_indices.append(index)
                     used += cost
                     if used >= allocation:
                         break
                 selected_indices.sort()
-                selected_text = "\n".join(sentences[index] for index in selected_indices)
+                selected_text = "\n".join(
+                    (
+                        *((pinned_block,) if pinned_block else ()),
+                        *(sentences[index] for index in selected_indices),
+                    )
+                )
                 if len(selected_text) > allocation:
                     selected_text = selected_text[:allocation]
-                retained_count = len(selected_indices)
+                retained_count = len(selected_indices) + len(exact_pins)
             compressed.append(
                 RetrievedDocument(
                     document=Document(item.document.document_id, selected_text),
@@ -275,7 +306,9 @@ class ImportanceAwareContextAgent:
                     document_id=item.document.document_id,
                     utility_score=item.score,
                     original_characters=len(text),
-                    retained_characters=len(selected_text),
+                    # Verifier markers and a pinned duplicate are control
+                    # metadata, not additional source-document information.
+                    retained_characters=min(len(text), len(selected_text)),
                     allocated_characters=allocation,
                     retained_sentences=retained_count,
                 )

@@ -12,7 +12,7 @@ from .agents import (
     RetrievalAgent,
     TimeSeriesDiagnosisAgent,
 )
-from .backbones import TimesFMBackboneConfig, build_forecast_backbone
+from .backbones import ChronosBackboneConfig, TimesFMBackboneConfig, build_forecast_backbone
 from .metrics import forecast_metrics, retrieval_metrics
 from .models import ForecastTask, RunResult
 
@@ -23,7 +23,13 @@ class SystemConfig:
     num_samples: int = 100
     context_weight: float = 0.75
     seed: int = 7
-    backbone: str = "timesfm"
+    backbone: str = "chronos"
+    chronos_model_id: str = "amazon/chronos-bolt-small"
+    chronos_device_map: str = "cpu"
+    chronos_max_context: int = 2048
+    chronos_max_horizon: int = 1024
+    chronos_cache_dir: str | None = None
+    chronos_local_files_only: bool = False
     timesfm_model_id: str = "google/timesfm-2.5-200m-pytorch"
     timesfm_max_context: int = 4096
     timesfm_max_horizon: int = 1024
@@ -32,8 +38,8 @@ class SystemConfig:
     allow_statistical_fallback: bool = False
 
     def __post_init__(self) -> None:
-        if self.backbone not in {"timesfm", "statistical"}:
-            raise ValueError("backbone must be 'timesfm' or 'statistical'")
+        if self.backbone not in {"chronos", "timesfm", "statistical"}:
+            raise ValueError("backbone must be 'chronos', 'timesfm', or 'statistical'")
 
 
 class MinimalAgentSystem:
@@ -46,6 +52,14 @@ class MinimalAgentSystem:
         self.evidence_agent = EvidenceSynthesisAgent()
         backbone = build_forecast_backbone(
             self.config.backbone,
+            chronos_config=ChronosBackboneConfig(
+                model_id=self.config.chronos_model_id,
+                device_map=self.config.chronos_device_map,
+                max_context=self.config.chronos_max_context,
+                max_horizon=self.config.chronos_max_horizon,
+                cache_dir=self.config.chronos_cache_dir,
+                local_files_only=self.config.chronos_local_files_only,
+            ),
             timesfm_config=TimesFMBackboneConfig(
                 model_id=self.config.timesfm_model_id,
                 max_context=self.config.timesfm_max_context,
@@ -108,6 +122,23 @@ def write_outputs(results: list[RunResult], output_dir: str | Path) -> None:
         "num_tasks": len(results),
         "mean_metrics": {
             name: statistics.fmean(values) for name, values in sorted(numeric_metrics.items())
+        },
+        "revision_outcomes": {
+            "improved": sum(
+                1
+                for result in results
+                if (result.metrics or {}).get("revision_value_mae", 0.0) > 1e-9
+            ),
+            "unchanged": sum(
+                1
+                for result in results
+                if abs((result.metrics or {}).get("revision_value_mae", 0.0)) <= 1e-9
+            ),
+            "harmed": sum(
+                1
+                for result in results
+                if (result.metrics or {}).get("revision_value_mae", 0.0) < -1e-9
+            ),
         },
         "note": "sMAE/sRMSE/sCRPS values are transparent development proxies; hidden-test official scores are computed by Dr-CiK maintainers.",
     }

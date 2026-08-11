@@ -15,7 +15,7 @@ downstream forecast value, not just by text similarity.
 Sources: *PostTime* and *Bridging the Last Mile of Time Series Forecasting with LLM
 Agents*.
 
-TimesFM 2.5 generates `y_baseline` exactly once from historical values. The baseline is
+Chronos-Bolt generates `y_baseline` exactly once from historical values. The baseline is
 stored as an immutable tuple. Contextual reasoning modifies only `y_final` through
 validated `preserve`, `multiply`, `add`, `clip`, or `override` actions. Every accepted or
 rejected action is written to the audit trace.
@@ -101,9 +101,9 @@ They do not independently emit competing full forecasts.
 Sources: PostTime and Last-Mile Forecasting.
 
 The current deterministic revision policy decides whether each proposal has enough
-support to revise or preserve the TimesFM prior. It is a baseline—not a trained PostTime
+support to revise or preserve the Chronos prior. It is a baseline—not a trained PostTime
 model. The target replacement is a compact reviser trained with verified forecast-time
-traces and a reward relative to the TimesFM baseline.
+traces and a reward relative to the selected numerical baseline.
 
 Regardless of the reviser implementation, the Last-Mile executor remains the final
 safety boundary.
@@ -127,7 +127,7 @@ co-train the query-producing controller and retriever using improved multi-turn 
 
 Generate several forecast-time revision candidates without showing the generator the
 future target. Use the resolved future only to retain candidates that improve the
-TimesFM prior; insert preserve targets when none improve. SFT supplies the initial
+Chronos prior; insert preserve targets when none improve. SFT supplies the initial
 revision policy, followed by baseline-relative RLVR.
 
 ### Continuous uncertainty and calibration
@@ -151,11 +151,11 @@ Keep splits chronological and compare both retrieval and forecasting components:
 
 | Context source | Forecast policy |
 |---|---|
-| none | TimesFM only |
-| oracle supporting evidence | TimesFM + reviser |
-| one-pass BM25 | TimesFM + reviser |
-| gap controller + BM25 | TimesFM + reviser |
-| gap controller + learned forecast-utility retriever | TimesFM + reviser |
+| none | Chronos only |
+| oracle supporting evidence | Chronos + reviser |
+| one-pass BM25 | Chronos + reviser |
+| gap controller + BM25 | Chronos + reviser |
+| gap controller + learned forecast-utility retriever | Chronos + reviser |
 | utility retriever + importance compression | trained PostTime-style reviser |
 
 Report:
@@ -178,7 +178,7 @@ Implemented now:
 - offline forecast-utility label construction;
 - sentence-level grounded evidence schema;
 - importance-aware compression;
-- TimesFM immutable prior and Last-Mile workspace;
+- Chronos immutable prior and Last-Mile workspace;
 - deterministic macro/micro reasoning and revise/preserve baseline;
 - chronological post-outcome memory.
 
