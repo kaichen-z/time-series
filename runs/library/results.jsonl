@@ -14,3 +14,37 @@
 {"task_id": "task_209", "action": "write_skill", "skill_name": "linear_trend_forecast", "smape": 8.214289351461433, "mae": 0.04312450985365782, "error": null}
 {"task_id": "task_110", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 83.33758192147533, "mae": 4.519166666666667, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
 {"task_id": "task_161", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 140.0414641119586, "mae": 283.94798113003105, "error": null}
+{"task_id": "task_208", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 2.817907423222574, "mae": 20.997458333333345, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
+{"task_id": "task_68", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 17.1596544052989, "mae": 12.997100000000007, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
+{"task_id": "task_141", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 40.31231292569765, "mae": 402.224223294, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
+{"task_id": "task_212", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 3.2948531030537267, "mae": 2.8375416666666617, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
+{"task_id": "task_64", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 14.040478006114201, "mae": 24.06, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
+{"task_id": "task_143", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 116.66666666666667, "mae": 380.9166666666667, "error": "no valid JSON object in response: Extra data: line 3 column 1 (char 936)"}
+{"task_id": "task_190", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 94.4665780022586, "mae": 0.7405600003, "error": null}
+{"task_id": "task_151", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 106.45726915488859, "mae": 1.5277777777777777, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
+{"task_id": "task_163", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 161.51416322454895, "mae": 271.7702928617787, "error": null}
+{"task_id": "task_146", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 106.45726915488859, "mae": 1.5277777777777777, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
+{"task_id": "task_74", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 97.58477928487653, "mae": 214.93333333333334, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
+{"task_id": "task_59", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 14.346798001886002, "mae": 53.583333333333336, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
+{"task_id": "task_194", "action": "write_skill", "skill_name": "forecast_with_alpha", "smape": 28.919532211641414, "mae": 229.6484363859621, "error": null}
+{"task_id": "task_148", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 37.40684445338748, "mae": 2.4978020722173997, "error": null}
+{"task_id": "task_71", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 112.75329308762102, "mae": 1.9661333333333333, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
+{"task_id": "task_197", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 8.605322526644615, "mae": 12.064235354174619, "error": null}
+{"task_id": "task_55", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 156.84592955852585, "mae": 104.41216722729033, "error": null}
+{"task_id": "task_135", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 8.605322526644615, "mae": 12.064235354174619, "error": null}
+{"task_id": "task_81", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 77.59635571086235, "mae": 4.61533409266058, "error": null}
+{"task_id": "task_150", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 71.94129495017938, "mae": 3.5510350098862595, "error": null}
+{"task_id": "task_88", "action": "write_skill", "skill_name": "forecast_with_moving_average", "smape": 52.79975652019878, "mae": 12.631081372607854, "error": null}
+{"task_id": "task_165", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 86.48708776050142, "mae": 1.3967590359959758, "error": null}
+{"task_id": "task_230", "action": "write_skill", "skill_name": "forecast_with_seasonal_adjustment", "smape": 5.6673153654904365, "mae": 3.014541195378663, "error": null}
+{"task_id": "task_93", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 33.21787601670487, "mae": 4.027967983087373, "error": null}
+{"task_id": "task_157", "action": "write_skill", "skill_name": "forecast_with_moving_average", "smape": 42.374874568334704, "mae": 1.1247222222222222, "error": null}
+{"task_id": "task_47", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 17.1596544052989, "mae": 12.997100000000007, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
+{"task_id": "task_211", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 8.728880856283103, "mae": 5.50117497763633, "error": null}
+{"task_id": "task_188", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 113.82746937530142, "mae": 5.46756078330181, "error": null}
+{"task_id": "task_228", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 2.817907423222574, "mae": 20.997458333333345, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
+{"task_id": "task_186", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 64.61305369772187, "mae": 0.6749999999999999, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
+{"task_id": "task_220", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 5.1538050044508905, "mae": 0.030495877789576662, "error": null}
+{"task_id": "task_152", "action": "write_skill", "skill_name": "forecast_with_moving_average", "smape": 42.374874568334704, "mae": 1.1247222222222222, "error": null}
+{"task_id": "task_221", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 20.216540674168357, "mae": 34.639969964461486, "error": null}
+{"task_id": "task_43", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 123.26931065691407, "mae": 0.3270500630539555, "error": null}
