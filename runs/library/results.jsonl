@@ -1,0 +1,16 @@
+{"task_id": "task_134", "action": "write_skill", "skill_name": "simple_exponential_smoothing", "smape": 22.48660103732365, "mae": 340.0321269889167, "error": null}
+{"task_id": "task_101", "action": "write_skill", "skill_name": "fixed_exponential_smoothing", "smape": 27.37585490285254, "mae": 8.927798641455105, "error": null}
+{"task_id": "task_215", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 8.091227554999207, "mae": 4.762514933619551, "error": null}
+{"task_id": "task_179", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 98.34174958776465, "mae": 7.017192709021567, "error": null}
+{"task_id": "task_100", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 34.16993436349303, "mae": 5.5070972745134785, "error": null}
+{"task_id": "task_158", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 37.40684445338748, "mae": 2.4978020722173997, "error": null}
+{"task_id": "task_180", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 58.95001523525212, "mae": 0.279386132152653, "error": null}
+{"task_id": "task_201", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 4.5989123329857415, "mae": 0.02714492497451942, "error": null}
+{"task_id": "task_130", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 8.605322526644615, "mae": 12.064235354174619, "error": null}
+{"task_id": "task_48", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 4.875170591493932, "mae": 13.995559825823893, "error": null}
+{"task_id": "task_199", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 8.67995935233335, "mae": 7.028301595255444, "error": null}
+{"task_id": "task_136", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 40.69146700490986, "mae": 406.1556111825493, "error": null}
+{"task_id": "task_142", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 197.79808872192802, "mae": 79.45833333333333, "error": null}
+{"task_id": "task_209", "action": "write_skill", "skill_name": "linear_trend_forecast", "smape": 8.214289351461433, "mae": 0.04312450985365782, "error": null}
+{"task_id": "task_110", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 83.33758192147533, "mae": 4.519166666666667, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
+{"task_id": "task_161", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 140.0414641119586, "mae": 283.94798113003105, "error": null}
