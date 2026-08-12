@@ -10,12 +10,11 @@ from functools import partial
 from pathlib import Path
 
 from dotenv import load_dotenv
-from dr_cik.cli import _configure_logging
 from dr_cik.llm import LLMClient
 from dr_cik.local_llm import QwenClient, QwenConfig
 
 from .bundles import load_bundle
-from .cli_common import add_bundle_args, add_evolve_args, add_llm_args, add_task_source_args, resolve_split_file
+from .cli_common import add_bundle_args, add_evolve_args, add_llm_args, add_logging_args, add_task_source_args, resolve_split_file
 from .evolve.evaluate import TaskResult
 from .evolve.loop import EvolveConfig, evolve, make_task_sampler, select_best
 from .evolve.loops import loop_a_score_fn, loop_b_score_fn, loop_c_score_fn
@@ -26,6 +25,8 @@ from .harness.datasets import load_drcik_splits
 from .harness.run_log import PROXY_NOTE, append_run_record, build_record
 from .harness.trace import configure_tracing
 from .llm_cache import DEFAULT_CACHE_DIR, CachingLLMClient
+from .logging_setup import configure as configure_logging
+from .logging_setup import log_exception
 from .models import Bundle, BundleTriple
 
 logger = logging.getLogger(__name__)
@@ -34,11 +35,10 @@ logger = logging.getLogger(__name__)
 def build_parser() -> argparse.ArgumentParser:
     """Build the argparse tree, mirroring dr_cik/cli.py's subcommand and logging conventions."""
     parser = argparse.ArgumentParser(prog="evolving-agents", description="Self-evolving three-agent forecasting over Dr-CiK.")
-    parser.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO")
-    parser.add_argument("--log-file", default=None, help="Also write logs here; defaults to ./logs/<checkpoint-dir-name>.log")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     evolve_coding = subparsers.add_parser("evolve-coding", help="Loop A: evolve the Coding Agent against hindcast error")
+    add_logging_args(evolve_coding)
     add_task_source_args(evolve_coding)
     add_llm_args(evolve_coding)
     add_evolve_args(evolve_coding)
@@ -47,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     evolve_coding.add_argument("--dev-limit", type=int, default=10, help="Dev tasks scored per generation for early stopping")
 
     evolve_retrieval = subparsers.add_parser("evolve-retrieval", help="Loop B: evolve the Retrieval Agent against document labels")
+    add_logging_args(evolve_retrieval)
     add_task_source_args(evolve_retrieval)
     add_llm_args(evolve_retrieval)
     add_evolve_args(evolve_retrieval)
@@ -58,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     evolve_retrieval.add_argument("--dev-limit", type=int, default=10)
 
     evolve_system = subparsers.add_parser("evolve-system", help="Loop C: evolve all three bundles against end-to-end error")
+    add_logging_args(evolve_system)
     add_task_source_args(evolve_system)
     add_llm_args(evolve_system)
     add_evolve_args(evolve_system)
@@ -67,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     evolve_system.add_argument("--no-judge", action="store_true", help="Skip the LLM-judge evidence_recall term")
 
     run_baselines = subparsers.add_parser("run-baselines", help="Run one reference system over a split")
+    add_logging_args(run_baselines)
     add_task_source_args(run_baselines)
     add_llm_args(run_baselines)
     add_bundle_args(run_baselines)
@@ -289,33 +292,38 @@ def main(argv: list[str] | None = None) -> None:
     """Parse arguments and dispatch to the requested subcommand."""
     load_dotenv()
     args = build_parser().parse_args(argv)
-    # _configure_logging derives a default path from args.output_dir; the evolve commands have no
-    # such flag, so point it at the checkpoint dir without clobbering run-baselines' real one.
-    if not getattr(args, "output_dir", None):
-        args.output_dir = getattr(args, "checkpoint_dir", None)
-    _configure_logging(args)
+    anchor = getattr(args, "checkpoint_dir", None) or getattr(args, "output_dir", None) or args.command
+    log_path = configure_logging(
+        args.log_file or Path("logs") / f"{Path(anchor).name}.log",
+        log_level=args.log_level,
+        console_level=args.console_level,
+        trace_to_console=args.trace_console,
+    )
 
     runners = {"evolve-coding": ("A", run_evolve_coding), "evolve-retrieval": ("B", run_evolve_retrieval), "evolve-system": ("C", run_evolve_system)}
-    if args.command in runners:
-        loop, runner = runners[args.command]
-        records, best = runner(args)
-        print(
-            json.dumps(
-                {
-                    "loop": loop,
-                    "generations_run": len(records),
-                    "best_individual": best,
-                    "dev_scores": [record.dev_score for record in records],
-                    "best_evolve_score": max((item.mean_score for record in records for item in record.eval_results), default=None),
-                },
-                indent=2,
-            )
-        )
-        return
+    try:
+        if args.command in runners:
+            loop, runner = runners[args.command]
+            records, best = runner(args)
+            summary = {
+                "loop": loop,
+                "generations_run": len(records),
+                "best_individual": best,
+                "dev_scores": [record.dev_score for record in records],
+                "best_evolve_score": max((item.mean_score for record in records for item in record.eval_results), default=None),
+                "log_file": str(log_path),
+            }
+        elif args.command == "run-baselines":
+            summary = {**run_baselines(args), "log_file": str(log_path)}
+        else:
+            return
+    except Exception as exc:
+        # Without this the traceback lands only on a terminal the user is trying not to read.
+        log_exception(exc)
+        raise
 
-    if args.command == "run-baselines":
-        print(json.dumps(run_baselines(args), indent=2))
-        return
+    logger.info("summary: %s", json.dumps(summary))
+    print(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":

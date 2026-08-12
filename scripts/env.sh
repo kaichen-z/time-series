@@ -49,8 +49,36 @@ export EA_STALL_PATIENCE="${EA_STALL_PATIENCE:-3}"
 export EA_SEED="${EA_SEED:-7}"
 export EA_TRACE_LEVEL="${EA_TRACE_LEVEL:-summary}"
 
+export EA_LOG_DIR="${EA_LOG_DIR:-$EA_REPO_ROOT/logs}"
+export EA_CONSOLE_LEVEL="${EA_CONSOLE_LEVEL:-INFO}"
+export EA_LOG_LEVEL="${EA_LOG_LEVEL:-INFO}"
+# Off by default: the per-call trace is thousands of lines and always lands in the log file.
+export EA_TRACE_CONSOLE="${EA_TRACE_CONSOLE:-0}"
+
 ea_die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 ea_info() { printf '\033[36m==>\033[0m %s\n' "$*"; }
+
+# Every script logs to its own timestamped file so reruns never overwrite each other.
+ea_log_path() {
+  local run_name="$1"
+  mkdir -p "$EA_LOG_DIR"
+  echo "$EA_LOG_DIR/${run_name}_$(date +%Y%m%d_%H%M%S).log"
+}
+
+ea_log_flags() {
+  local log_file="$1"
+  printf -- '--log-file %s --log-level %s --console-level %s' "$log_file" "$EA_LOG_LEVEL" "$EA_CONSOLE_LEVEL"
+  [[ "$EA_TRACE_CONSOLE" == "1" ]] && printf -- ' --trace-console'
+}
+
+ea_report_log() {
+  local log_file="$1"
+  echo
+  ea_info "full log (every prompt, tool call and reasoning block):"
+  echo "    $log_file"
+  ea_info "watch it live in another terminal with:"
+  echo "    tail -f $log_file"
+}
 
 # Pick the N GPUs with the most free memory right now. This box is shared and its
 # load moves around, so devices are chosen at launch rather than hardcoded.

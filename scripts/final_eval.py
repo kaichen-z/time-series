@@ -22,6 +22,8 @@ from evolving_agents.harness.orchestrator import run_task
 from evolving_agents.harness.run_log import PROXY_NOTE, append_run_record
 from evolving_agents.harness.trace import configure_tracing
 from evolving_agents.llm_cache import DEFAULT_CACHE_DIR, CachingLLMClient
+from evolving_agents.logging_setup import configure as configure_logging
+from evolving_agents.logging_setup import log_exception
 from dr_cik.local_llm import DEFAULT_MODEL_ID as DEFAULT_WORKER_MODEL_ID
 
 logger = logging.getLogger(__name__)
@@ -48,6 +50,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--no-judge", action="store_true")
     parser.add_argument("--force", action="store_true", help="Re-run against an output dir that already holds a summary")
+    parser.add_argument("--log-file", default=None, help="Full log; defaults to ./logs/<output-dir-name>.log")
+    parser.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO")
+    parser.add_argument("--console-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO")
+    parser.add_argument("--trace-console", action="store_true", help="Also stream the per-call trace to the terminal")
     return parser
 
 
@@ -110,8 +116,19 @@ def run_final_eval(args: argparse.Namespace, worker=None) -> dict:
 def main(argv: list[str] | None = None) -> None:
     """Parse arguments, run the frozen evaluation, and print its summary."""
     load_dotenv()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s", datefmt="%H:%M:%S")
-    print(json.dumps(run_final_eval(build_parser().parse_args(argv)), indent=2))
+    args = build_parser().parse_args(argv)
+    log_path = configure_logging(
+        args.log_file or Path("logs") / f"{Path(args.output_dir).name}.log",
+        log_level=args.log_level,
+        console_level=args.console_level,
+        trace_to_console=args.trace_console,
+    )
+    try:
+        summary = {**run_final_eval(args), "log_file": str(log_path)}
+    except Exception as exc:
+        log_exception(exc)
+        raise
+    print(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":

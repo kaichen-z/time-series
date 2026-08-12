@@ -32,7 +32,8 @@ ea_info "split: $SPLIT | baselines: ${BASELINES[*]}"
 
 for baseline in "${BASELINES[@]}"; do
   out="$EA_RESULTS_DIR/baseline_${baseline}_${SPLIT}"
-  ea_info "--- $baseline ---"
+  LOG_FILE="$(ea_log_path "baseline_${baseline}")"
+  ea_info "--- $baseline (log: $LOG_FILE) ---"
   python3 -m evolving_agents.cli run-baselines \
     $(ea_task_source) \
     --baseline "$baseline" \
@@ -46,7 +47,8 @@ for baseline in "${BASELINES[@]}"; do
     --worker-model-id "$EA_WORKER_MODEL" \
     ${EA_WORKER_DEVICE:+--worker-device "$EA_WORKER_DEVICE"} \
     --seed "$EA_SEED" \
-    --trace-level "$EA_TRACE_LEVEL"
+    --trace-level "$EA_TRACE_LEVEL" \
+    $(ea_log_flags "$LOG_FILE") > "$out.summary.json"
 done
 
 ea_info "summaries:"

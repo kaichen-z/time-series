@@ -27,6 +27,8 @@ if [[ "$FROZEN_CODING" == *"/v000.json" ]]; then
   ea_info "      results run Loop A first and point EA_FROZEN_CODING at its winner."
 fi
 
+LOG_FILE="$(ea_log_path "$RUN_NAME")"
+
 ea_resolve_devices
 ea_check_disk "$EA_OUT_ROOT" 20
 ea_show_config
@@ -55,7 +57,12 @@ python3 -m evolving_agents.cli \
   --stall-patience "$EA_STALL_PATIENCE" \
   --seed "$EA_SEED" \
   --trace-level "$EA_TRACE_LEVEL" \
-  "$@" | tee "$EA_RESULTS_DIR/$RUN_NAME.summary.json"
+  $(ea_log_flags "$LOG_FILE") \
+  "$@" > "$EA_RESULTS_DIR/$RUN_NAME.summary.json"
+
+ea_info "summary:"
+cat "$EA_RESULTS_DIR/$RUN_NAME.summary.json"
+ea_report_log "$LOG_FILE"
 
 ea_info "done. feed this winner plus Loop A's into Loop C:"
 ea_info "  EA_CODING_BUNDLE=... EA_RETRIEVAL_BUNDLE=... ./scripts/03_evolve_system.sh"

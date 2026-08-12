@@ -16,6 +16,8 @@ export EA_MINIBATCH=1
 export EA_STALL_PATIENCE=0
 export EA_TRACE_LEVEL="${EA_TRACE_LEVEL:-full}"
 
+LOG_FILE="$(ea_log_path smoke)"
+
 ea_resolve_devices
 ea_check_disk "$EA_OUT_ROOT" 5
 ea_show_config
@@ -45,8 +47,10 @@ python3 -m evolving_agents.cli \
   --dev-limit 1 \
   --n-windows 1 \
   --seed "$EA_SEED" \
-  --trace-level "$EA_TRACE_LEVEL"
+  --trace-level "$EA_TRACE_LEVEL" \
+  $(ea_log_flags "$LOG_FILE")
 
+ea_report_log "$LOG_FILE"
 ea_info "smoke output under $SMOKE_OUT"
 ea_info "run records:   $(wc -l < "$SMOKE_OUT/runs/loop_a.jsonl" 2>/dev/null || echo 0) line(s)"
 ea_info "reasoning:     $(find "$SMOKE_OUT/runs/reasoning" -name '*.txt' 2>/dev/null | wc -l) file(s)"

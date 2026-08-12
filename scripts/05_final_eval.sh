@@ -24,6 +24,8 @@ if [[ "$CODING" == *"/v000.json" && "$RETRIEVAL" == *"/v000.json" && "$DECISION"
   ea_info "         That is a legitimate baseline number, but it is not your result."
 fi
 
+LOG_FILE="$(ea_log_path final_eval)"
+
 ea_resolve_devices
 ea_check_disk "$EA_OUT_ROOT" 10
 ea_show_config
@@ -41,6 +43,8 @@ python3 "$EA_REPO_ROOT/scripts/final_eval.py" \
   --runs-dir "$EA_RUNS_DIR" \
   --seed "$EA_SEED" \
   --trace-level "$EA_TRACE_LEVEL" \
+  $(ea_log_flags "$LOG_FILE") \
   "$@"
 
+ea_report_log "$LOG_FILE"
 ea_info "final summary: $OUT/summary.json"

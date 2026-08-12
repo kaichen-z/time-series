@@ -15,6 +15,27 @@ DEFAULT_EVOLVER_MODEL_ID = "Qwen/Qwen3.5-35B-A3B-FP8"
 DEFAULT_DATA_DIR = "/raid/home/air/khoutaibi/time_series_dataset/Dr-CiK"
 
 
+def add_logging_args(subparser: argparse.ArgumentParser) -> None:
+    """Log destination and the split between file verbosity and terminal verbosity.
+
+    Defined per subcommand rather than globally so `... evolve-coding --log-file X` works;
+    argparse only accepts a top-level flag before the subcommand, which nobody remembers.
+    """
+    subparser.add_argument("--log-file", default=None, help="Full log; defaults to ./logs/<checkpoint-or-output-dir-name>.log")
+    subparser.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO", help="Verbosity of the log FILE")
+    subparser.add_argument(
+        "--console-level",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        default="INFO",
+        help="Verbosity of the TERMINAL; WARNING gives a near-silent run",
+    )
+    subparser.add_argument(
+        "--trace-console",
+        action="store_true",
+        help="Also stream the per-call trace to the terminal; off by default since the log file always has it",
+    )
+
+
 def add_task_source_args(subparser: argparse.ArgumentParser) -> None:
     """--sample-dir / --data-dir, mirroring dr_cik's task-source convention."""
     source = subparser.add_mutually_exclusive_group(required=True)
