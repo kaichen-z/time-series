@@ -18,13 +18,13 @@
     "avg_score": 30.162405264192408
   },
   {
-    "skill_id": "4893bed4-ae4e-4675-b0e1-c9f08fa85da0",
+    "skill_id": "5a5d75eb-5c9d-4cd5-adf7-1893c9b3d113",
     "name": "forecast_with_fixed_exponential_smoothing",
     "description": "Uses fixed exponential smoothing to forecast future values when the history contains zero values.",
-    "code": "import numpy as np\nfrom statsmodels.tsa.holtwinters import SimpleExpSmoothing\n\ndef forecast(history: list[float], horizon: int, frequency: str) -> list[float]:\n    # Convert history to numpy array\n    history_array = np.array(history)\n    # Fit model\n    model = SimpleExpSmoothing(history_array)\n    fit_model = model.fit(smoothing_level=0.2, optimized=False)\n    # Forecast\n    forecast_values = fit_model.forecast(steps=horizon)\n    return list(forecast_values)",
-    "created_from_task": "task_161",
+    "code": "import numpy as np\nfrom statsmodels.tsa.holtwinters import SimpleExpSmoothing\n\ndef forecast(history: list[float], horizon: int, frequency: str) -> list[float]:\n    model = SimpleExpSmoothing(np.array(history))\n    fit_model = model.fit(smoothing_level=0.2, optimized=False)\n    forecast_values = fit_model.forecast(steps=horizon)\n    return list(forecast_values)",
+    "created_from_task": "task_43",
     "uses": 1,
-    "avg_score": 140.0414641119586
+    "avg_score": 123.26931065691407
   },
   {
     "skill_id": "58083c1a-ce6f-4b81-929a-ffcd87d7cce9",
@@ -34,5 +34,32 @@
     "created_from_task": "task_209",
     "uses": 1,
     "avg_score": 8.214289351461433
+  },
+  {
+    "skill_id": "1f3ede64-ba14-4cd8-83ef-f8ed379f4206",
+    "name": "forecast_with_alpha",
+    "description": "Applies exponential smoothing with a fixed alpha to forecast future values.",
+    "code": "import numpy as np\n\ndef forecast(history: list[float], horizon: int, frequency: str) -> list[float]:\n    alpha = 0.2\n    smoothed_values = [history[0]]\n    for actual in history:\n        smoothed = alpha * actual + (1 - alpha) * smoothed_values[-1]\n        smoothed_values.append(smoothed)\n    last_smoothed_value = smoothed_values[-1]\n    forecast_values = [last_smoothed_value] * horizon\n    return forecast_values",
+    "created_from_task": "task_194",
+    "uses": 1,
+    "avg_score": 28.919532211641414
+  },
+  {
+    "skill_id": "489adb40-2ee8-49c7-9549-42acef8be98d",
+    "name": "forecast_with_moving_average",
+    "description": "Forecasts future values using a moving average of the historical data, useful for data with no clear trend or seasonality.",
+    "code": "import numpy as np\n\ndef forecast(history: list[float], horizon: int, frequency: str) -> list[float]:\n    window_size = min(10, len(history))\n    weights = np.repeat(1.0, window_size) / window_size\n    smoothed_history = np.convolve(history, weights, 'valid')\n    last_value = smoothed_history[-1]\n    return [last_value] * horizon",
+    "created_from_task": "task_152",
+    "uses": 1,
+    "avg_score": 42.374874568334704
+  },
+  {
+    "skill_id": "af1caff9-c389-4cab-8836-e060905d4ddd",
+    "name": "forecast_with_seasonal_adjustment",
+    "description": "Forecasts future values by applying seasonal adjustment and then using simple exponential smoothing.",
+    "code": "import numpy as np\nfrom statsmodels.tsa.seasonal import seasonal_decompose\n\ndef forecast(history: list[float], horizon: int, frequency: str) -> list[float]:\n    # Convert history to numpy array\n    history_array = np.array(history)\n    # Perform seasonal decomposition\n    result = seasonal_decompose(history_array, model='additive', period=24)\n    # Extract the seasonal component\n    seasonal_component = result.seasonal\n    # Remove the seasonal component from the original data\n    deseasonalized_data = history_array - seasonal_component\n    # Apply simple exponential smoothing to the deseasonalized data\n    alpha = 0.2  # Smoothing factor\n    smoothed_data = [deseasonalized_data[0]]\n    for point in deseasonalized_data[1:]:\n        new_value = alpha * point + (1 - alpha) * smoothed_data[-1]\n        smoothed_data.append(new_value)\n    # Forecast future values\n    last_smoothed_value = smoothed_data[-1]\n    forecast_values = [last_smoothed_value + seasonal_component[i % len(seasonal_component)] for i in range(len(history), len(history) + horizon)]\n    return forecast_values",
+    "created_from_task": "task_230",
+    "uses": 1,
+    "avg_score": 5.6673153654904365
   }
 ]
