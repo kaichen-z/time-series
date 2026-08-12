@@ -1,0 +1,38 @@
+[
+  {
+    "skill_id": "aebf96d2-c293-4b81-9545-10c8700cba35",
+    "name": "simple_exponential_smoothing",
+    "description": "Applies simple exponential smoothing to forecast future values based on historical data.",
+    "code": "import numpy as np\n\ndef simple_exponential_smoothing(alpha, values):\n    result = [values[0]] # we start with the first observation\n    for n in range(1, len(values)):\n        result.append(alpha * values[n] + (1 - alpha) * result[n-1])\n    return result\n\ndef forecast(history, horizon, frequency):\n    alpha = 0.6 # smoothing factor\n    smoothed_history = simple_exponential_smoothing(alpha, history)\n    last_smoothed_value = smoothed_history[-1]\n    forecast_values = [last_smoothed_value] * horizon\n    return forecast_values",
+    "created_from_task": "task_134",
+    "uses": 1,
+    "avg_score": 22.48660103732365
+  },
+  {
+    "skill_id": "ccd23dd1-1ef2-49d6-a126-b0634b13a61d",
+    "name": "fixed_exponential_smoothing",
+    "description": "Applies simple exponential smoothing to forecast future values based on historical data, ensuring the forecast function is defined.",
+    "code": "import numpy as np\nfrom statsmodels.tsa.holtwinters import SimpleExpSmoothing\n\ndef forecast(history: list[float], horizon: int, frequency: str) -> list[float]:\n    model = SimpleExpSmoothing(np.array(history))\n    fit_model = model.fit(smoothing_level=0.6, optimized=False)\n    forecast_values = fit_model.forecast(steps=horizon)\n    return list(forecast_values)",
+    "created_from_task": "task_101",
+    "uses": 11,
+    "avg_score": 30.162405264192408
+  },
+  {
+    "skill_id": "4893bed4-ae4e-4675-b0e1-c9f08fa85da0",
+    "name": "forecast_with_fixed_exponential_smoothing",
+    "description": "Uses fixed exponential smoothing to forecast future values when the history contains zero values.",
+    "code": "import numpy as np\nfrom statsmodels.tsa.holtwinters import SimpleExpSmoothing\n\ndef forecast(history: list[float], horizon: int, frequency: str) -> list[float]:\n    # Convert history to numpy array\n    history_array = np.array(history)\n    # Fit model\n    model = SimpleExpSmoothing(history_array)\n    fit_model = model.fit(smoothing_level=0.2, optimized=False)\n    # Forecast\n    forecast_values = fit_model.forecast(steps=horizon)\n    return list(forecast_values)",
+    "created_from_task": "task_161",
+    "uses": 1,
+    "avg_score": 140.0414641119586
+  },
+  {
+    "skill_id": "58083c1a-ce6f-4b81-929a-ffcd87d7cce9",
+    "name": "linear_trend_forecast",
+    "description": "Forecasts future values by fitting a linear trend to the historical data and extrapolating it into the future.",
+    "code": "import numpy as np\n\ndef forecast(history: list[float], horizon: int, frequency: str) -> list[float]:\n    # Convert history to numpy array for easier manipulation\n    history_array = np.array(history)\n    \n    # Generate time indices for the historical data\n    time_indices = np.arange(len(history))\n    \n    # Fit a linear trend to the historical data\n    slope, intercept = np.polyfit(time_indices, history_array, 1)\n    \n    # Forecast future values by extrapolating the linear trend\n    future_time_indices = np.arange(len(history), len(history) + horizon)\n    forecast_values = slope * future_time_indices + intercept\n    \n    return forecast_values.tolist()",
+    "created_from_task": "task_209",
+    "uses": 1,
+    "avg_score": 8.214289351461433
+  }
+]
