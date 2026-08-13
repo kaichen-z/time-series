@@ -14,7 +14,9 @@ held-out acceptance. The `evolve` entrypoint has three controlled levels:
 `source` (audited Python source patches generated in isolated Git worktrees). See
 [`docs/EVOLVING_AGENT.md`](docs/EVOLVING_AGENT.md) for the exact information boundaries, flow,
 metrics, and commands. The initial English experiment report is available at
-[`docs/EVOLUTION_METHODS_AND_RESULTS.md`](docs/EVOLUTION_METHODS_AND_RESULTS.md).
+[`docs/EVOLUTION_METHODS_AND_RESULTS.md`](docs/EVOLUTION_METHODS_AND_RESULTS.md). A consolidated
+audit of all earlier baseline families and saved results is available at
+[`docs/BASELINE_METHODS_AND_RESULTS.md`](docs/BASELINE_METHODS_AND_RESULTS.md).
 
 This repository contains an auditable, gap-guided agent loop for the
 [Dr-CiK](https://github.com/ServiceNow/Dr-CiK) contextual time-series forecasting

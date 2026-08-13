@@ -1,0 +1,194 @@
+{
+  "audit_date": "2026-08-13",
+  "artifact_summary_count": 68,
+  "status": "local_development_results_not_official_hidden_test_scores",
+  "public_dev_199_main_runner": [
+    {
+      "method": "chronos_baseline_revision_disabled",
+      "tasks": 199,
+      "mae": 797.6267839452113,
+      "rmse": 1121.978358346764,
+      "smae_proxy": 2.69806100550236,
+      "srmse_proxy": 3.2031609101657827,
+      "scrps_proxy": 2.5370433809561534
+    },
+    {
+      "method": "early_unsafe_contextual_revision",
+      "tasks": 199,
+      "mae": 1289.768757327284,
+      "rmse": 1591.6977280721133,
+      "smae_proxy": 2.8349504392345444,
+      "srmse_proxy": 3.2251968894143146,
+      "scrps_proxy": 2.6919258730092577,
+      "harmful_revision_rate": 0.1457286432160804
+    },
+    {
+      "method": "safe_contextual_gate_final",
+      "tasks": 199,
+      "mae": 797.1784760044166,
+      "rmse": 1121.496913509786,
+      "smae_proxy": 2.6723944347761135,
+      "srmse_proxy": 3.1789391040922936,
+      "scrps_proxy": 2.511722719637846,
+      "harmful_revision_rate": 0.005025125628140704
+    },
+    {
+      "method": "oracle_public_evidence_diagnostic",
+      "tasks": 199,
+      "mae": 797.1506198097092,
+      "rmse": 1121.4599991050068,
+      "smae_proxy": 2.664108983415278,
+      "srmse_proxy": 3.164989991566177,
+      "scrps_proxy": 2.503849412884793,
+      "deployable": false
+    }
+  ],
+  "frozen_30": [
+    {
+      "method": "chronos_baseline_for_codex_contract",
+      "tasks": 30,
+      "mae": 162.6269626887429,
+      "rmse": 301.0116870319553
+    },
+    {
+      "method": "codex_contract",
+      "tasks": 30,
+      "mae": 156.3621141550186,
+      "rmse": 296.4658540582055,
+      "crps": 149.19487315737942,
+      "retrieval_precision": 0.7790873015873016,
+      "supporting_recall": 0.4119726238147291,
+      "distractor_avoidance": 0.7790873015873016,
+      "improved_tasks": 2,
+      "unchanged_tasks": 28,
+      "harmed_tasks": 0
+    },
+    {
+      "method": "codex_triad_weighted_shards",
+      "tasks": 30,
+      "mae": 219.7547731722085,
+      "baseline_mae": 162.97494623023158,
+      "rmse": 335.9286672593714,
+      "baseline_rmse": 301.02808244460545,
+      "retrieval_precision": 0.44666666666666666,
+      "supporting_recall": 0.28046559546559546,
+      "distractor_avoidance": 0.8466666666666668,
+      "harmed_tasks": 11,
+      "recorded_codex_stage_calls": 683,
+      "recorded_codex_stage_failures": 252
+    }
+  ],
+  "sample_3_main_runner": [
+    {
+      "method": "one_pass_statistical",
+      "mae": 9.410065141994219,
+      "rmse": 17.955949190497872,
+      "retrieval_precision": 0.3333333333333333,
+      "supporting_recall": 0.20128205128205132
+    },
+    {
+      "method": "iterative_statistical",
+      "mae": 9.410065141994219,
+      "rmse": 17.955949190497872,
+      "retrieval_precision": 0.41798941798941797,
+      "supporting_recall": 0.25726495726495724
+    },
+    {
+      "method": "chronos_regime_retrieval",
+      "baseline_mae": 27.741550209404277,
+      "mae": 14.045720934726143,
+      "rmse": 23.243905278269647
+    },
+    {
+      "method": "chronos_regime_table_retrieval",
+      "baseline_mae": 27.741550209404277,
+      "mae": 13.559969777720516,
+      "rmse": 22.342360002770913
+    },
+    {
+      "method": "codex_contract",
+      "baseline_mae": 27.741550209404277,
+      "mae": 14.045720934726143,
+      "rmse": 23.243905278269647,
+      "retrieval_precision": 0.9047619047619048
+    },
+    {
+      "method": "codex_contract_validated_explicit_points",
+      "baseline_mae": 27.741550209404277,
+      "mae": 13.679978887098377,
+      "rmse": 22.555905883764115,
+      "retrieval_precision": 0.9047619047619048
+    }
+  ],
+  "separate_dr_cik_reproduction": [
+    {
+      "dataset": "public_dev_199",
+      "method": "drbench_qwen2.5_14b_chronos_bolt_base",
+      "smae": 0.542,
+      "srmse": 0.748,
+      "scrps": 0.421
+    },
+    {
+      "dataset": "public_sample_3",
+      "method": "chronos_bolt_base",
+      "smae": 0.134,
+      "srmse": 0.179,
+      "scrps": 0.263
+    },
+    {
+      "dataset": "public_sample_3",
+      "method": "direct_prompt_qwen3.5_4b",
+      "smae": 0.178,
+      "srmse": 0.245,
+      "scrps": 0.131
+    },
+    {
+      "dataset": "public_sample_3",
+      "method": "direct_prompt_qwen3.5_9b",
+      "smae": 0.161,
+      "srmse": 0.207,
+      "scrps": 0.113
+    }
+  ],
+  "legacy_intermediate_aggregates": [
+    {
+      "method": "initial_official_sample_pipeline",
+      "tasks": 3,
+      "mae": 42.13946466570966,
+      "rmse": 56.07202078684458
+    },
+    {
+      "method": "chronos_contextual_public_subset",
+      "tasks": 20,
+      "baseline_mae": 49.929348699917966,
+      "mae": 50.05770604802228,
+      "baseline_rmse": 84.33324011521776,
+      "rmse": 84.9577683700243,
+      "harmed_tasks": 1
+    }
+  ],
+  "evolution": [
+    {
+      "method": "prompt_only",
+      "run_recorded": false
+    },
+    {
+      "method": "harness_genome",
+      "parent_train_reward": 0.6596747912574514,
+      "child_train_reward": 0.8505893254260103,
+      "parent_dev_reward": 0.8594564038496646,
+      "child_dev_reward": 0.8708628925008746,
+      "accepted": true
+    },
+    {
+      "method": "source_evolution",
+      "parent_train_reward": 0.8980003272768835,
+      "child_train_reward": 0.8745558828324391,
+      "parent_dev_reward": 0.8593629669872531,
+      "child_dev_reward": 0.8472980341328559,
+      "accepted": false,
+      "audit_ok": true,
+      "tests_ok": true
+    }
+  ]
+}
