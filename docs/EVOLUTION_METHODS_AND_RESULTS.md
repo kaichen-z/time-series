@@ -10,6 +10,10 @@
 
 Machine-readable summary: [`results/initial_evolution_results.json`](results/initial_evolution_results.json)
 
+For the complete audit of earlier Chronos, statistical, Codex Contract, Triad, Direct-Prompt, and
+Dr-CiK reproduction baselines, see
+[`BASELINE_METHODS_AND_RESULTS.md`](BASELINE_METHODS_AND_RESULTS.md).
+
 ## 1. Objective
 
 The project separates contextual time-series forecasting into three inference roles:
