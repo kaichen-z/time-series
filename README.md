@@ -106,6 +106,95 @@ documents. `oracle-context` is restricted to public development diagnostics. The
 `evolving-agent run/evolve` and `drcik-agent run-sample/run-hf` interfaces remain supported.
 The two `skill-*` baselines use the original numbers-only JSONL interface through `--tasks-file`.
 
+## Baseline methods and current results
+
+### Method definitions
+
+| Baseline | Numerical forecaster | Uses documents? | Agent behavior |
+|---|---|:---:|---|
+| **Chronos** | Chronos-Bolt Small | No | Numbers-only time-series foundation-model reference. |
+| **TimesFM** | TimesFM 2.5 | No | Numbers-only TSFM alternative to Chronos. |
+| **Statistical** | Trend, robust level, and seasonal-repeat programs | No | Deterministic non-TSFM reference. |
+| **Skill Fresh** | LLM-generated Python forecasting skill | No | Generates a fresh executable skill for every task. |
+| **Skill Library** | LLM-generated or previously saved Python skill | No | May create, save, retrieve, and reuse forecasting skills across tasks. |
+| **One Pass** | Configured numerical backbone | Yes | Retrieves context once, then forecasts without iterative gap resolution. |
+| **Iterative** | Configured numerical backbone | Yes | Repeatedly diagnoses gaps, retrieves and verifies evidence, and applies restricted revisions. |
+| **Iterative Unsafe** | Configured numerical backbone | Yes | Allows weakly validated textual multiply/add revisions; retained as a negative ablation. |
+| **Oracle Context** | Configured numerical backbone | GT evidence | Bypasses retrieval and supplies public ground-truth evidence; diagnostic only and not deployable. |
+| **Rules Triad** | Chronos/Python candidates | Yes | Deterministic Coding, Retrieval, and Decision roles. |
+| **Codex Direct** | Chronos prior plus a directly generated trajectory | Yes | Codex reads the complete task and directly emits the final forecast. |
+| **Codex Contract** | Chronos plus Python-generated contract-compatible candidates | Yes | Codex emits a structured regime contract; Python hindcasts candidates and applies restricted revisions. |
+| **Codex Triad** | Chronos/Python executable candidates | Yes | Separate Codex Coding, Retrieval, and Decision roles propose, investigate, and select candidates. |
+| **Evolving Harness** | Coding-Agent-generated executable candidates | Yes | Current three-agent system before Prompt/Genome/Source evolution. |
+
+### Full 199-task public-development results
+
+These rows use the same public task set and the same Chronos backbone. Lower is better for all
+forecasting metrics. The scaled metrics are local development proxies, not official hidden-test
+scores.
+
+| Method | Tasks | MAE | RMSE | sMAE proxy | sCRPS proxy | Improved | Harmed | Interpretation |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| **Chronos only** | 199 | 797.6268 | 1121.9784 | 2.6981 | 2.5370 | -- | -- | Numerical reference. |
+| **Iterative Unsafe** | 199 | 1289.7688 | 1591.6977 | 2.8350 | 2.6919 | 12 | 29 | MAE worsened by 61.70%; relevant text was converted into harmful numerical edits. |
+| **Safe grounded Iterative** | 199 | **797.1767** | **1121.4952** | **2.6687** | **2.5075** | 7 | 0 | Sparse conservative revisions; all seven accepted changes improved MAE. |
+| **Oracle Context** | 199 | 797.1506 | 1121.4600 | 2.6641 | 2.5038 | -- | -- | Uses public GT evidence and is not deployable. |
+
+### Frozen 30-task Codex results
+
+| Method | Tasks | Baseline MAE | Final MAE | Baseline RMSE | Final RMSE | Improved / unchanged / harmed | Retrieval precision | Supporting recall |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **Codex Contract** | 30 | 162.6270 | **156.3621** (-3.85%) | 301.0117 | **296.4659** (-1.51%) | 2 / 28 / 0 | 0.7791 | 0.4120 |
+| **Codex Triad** | 30 | 162.9749 | **219.7548** (+34.84%) | 301.0281 | **335.9287** (+11.59%) | 11 / 8 / 11 | 0.4467 | 0.2805 |
+
+The earlier Codex Triad generated useful candidates on some tasks, but its Decision role and runtime
+were unreliable: the saved run records 683 Codex-stage calls and 252 stage failures. This negative
+result motivated citation-constrained selection, fallback rules, and the current evolution work.
+
+### Three-task development results
+
+These runs use the three official public samples (`task_42`, `task_163`, and `task_201`) and are
+mechanism checks rather than unbiased benchmark results.
+
+| Method | Tasks | Baseline MAE | Final MAE | Final RMSE | Retrieval precision | Improved / unchanged / harmed |
+|---|---:|---:|---:|---:|---:|---:|
+| **One-Pass Statistical** | 3 | 9.4101 | 9.4101 | 17.9559 | 0.3333 | 0 / 3 / 0 |
+| **Iterative Statistical** | 3 | 9.4101 | 9.4101 | 17.9559 | 0.4180 | 0 / 3 / 0 |
+| **Chronos + Regime Retrieval** | 3 | 27.7416 | 14.0457 | 23.2439 | 0.4180 | 1 / 2 / 0 |
+| **Chronos + Regime-Table Retrieval** | 3 | 27.7416 | **13.5600** | **22.3424** | 0.4180 | 2 / 1 / 0 |
+| **Codex Contract** | 3 | 27.7416 | 14.0457 | 23.2439 | 0.9048 | 1 / 2 / 0 |
+| **Contract + validated explicit points** | 3 | 27.7416 | 13.6800 | 22.5559 | 0.9048 | 2 / 1 / 0 |
+
+### Additional saved diagnostics and missing comparisons
+
+| Method/run | Scope | Recorded result | Status |
+|---|---|---|---|
+| **Codex Direct** | `task_42` | MAE 72.7346 -> 72.7346; retrieval precision 1.0000 | Found clean evidence but did not convert it into an effective numerical change. |
+| **Rules Triad** | `task_42` | MAE 72.7346 -> 31.6472 | Single-task mechanism result. |
+| **Codex Contract / improved Codex Triad** | `task_42` | MAE 72.7346 -> 31.6472 | Single-task mechanism result; strongly exposed during development. |
+| **Numbers-only Coding self-evolution** | `task_42` | Initial best MAE 47.3090; post-mutation MAE 47.3090 | Mutation was rejected; validates the inner gate but shows no evolution gain. |
+| **Initial Evolving Harness replay** | `task_42` | MAE 104.4267; sMAPE 23.6486 | Different candidate system; smoke test only. |
+| **Skill Library** | 50 tasks | Mean sMAPE 53.6033; first half 53.6158; second half 53.5908 | 25 skill writes, 10 reuses, and 15 fallbacks; no matched Skill-Fresh comparison. |
+| **Skill Fresh** | -- | Not yet recorded on a matched task set | Implemented, but no complete comparable result. |
+| **TimesFM** | -- | No complete comparable aggregate recorded | Implemented numbers-only alternative. |
+| **Prompt/Genome/Source evolution** | New matched 30-task pilot | Running | Not reported as a completed result. |
+
+The main comparison for the current project is therefore:
+
+```text
+Chronos
+vs Codex Direct
+vs Codex Contract
+vs Codex Triad
+vs the evolved three-agent harness
+```
+
+These numbers come from local public-development experiments, not the official Dr-CiK hidden-test
+leaderboard. Results from different task sets are not directly comparable. The new matched
+Prompt/Genome/Source evolution pilot is still running and is intentionally not reported here as a
+completed result. See [`docs/BASELINE_METHODS_AND_RESULTS.md`](docs/BASELINE_METHODS_AND_RESULTS.md)
+for the complete audit and artifact-level details.
+
 ## System flow
 
 ### Experimental co-evolving three-agent loop
