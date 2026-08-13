@@ -18,7 +18,7 @@ from evolving_agent.data import ContextTask, DEFAULT_TASKS_FILE, load_context_ta
 from evolving_agent.decision_agent.agent import DecisionAgent
 from evolving_agent.decision_agent.skill_library import DecisionSkillLibrary
 from evolving_agent.harness import EvolvingForecastHarness, HarnessRuntimeConfig
-from evolving_agent.llm import CodexCLIClient, CodexCLIConfig, QwenClient
+from evolving_agent.llm import ClaudeCLIClient, ClaudeCLIConfig, CodexCLIClient, CodexCLIConfig, QwenClient
 from evolving_agent.retrieval_agent.agent import RetrievalAgent
 from evolving_agent.retrieval_agent.skill_library import RetrievalSkillLibrary
 from evolving_agent.skill_learning import OutcomeSkillLearner
@@ -87,12 +87,15 @@ def _add_unified_baseline_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--codex-reasoning-effort", choices=("none", "low", "medium", "high"), default=None)
     parser.add_argument("--codex-cache-dir", default=None)
     parser.add_argument("--codex-timeout", type=int, default=None)
+    parser.add_argument("--claude-model", default=None)
+    parser.add_argument("--claude-cache-dir", default=None)
+    parser.add_argument("--claude-timeout", type=int, default=None)
 
 
 def _add_unified_evolution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tasks-file", default=str(DEFAULT_TASKS_FILE))
     parser.add_argument("--setting", choices=("llm_only", "statistics", "tsfm", "combined"), default="statistics")
-    parser.add_argument("--llm-backend", choices=("codex", "qwen"), default="codex")
+    parser.add_argument("--llm-backend", choices=("codex", "qwen", "claude"), default="codex")
     parser.add_argument("--model-id", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--coding-initial-programs", type=int, default=3)
@@ -149,7 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
         child.add_argument("--device", default=None)
         child.add_argument(
             "--llm-backend",
-            choices=("codex", "qwen"),
+            choices=("codex", "qwen", "claude"),
             default="codex",
             help="LLM used by all three agents; defaults to this machine's Codex CLI.",
         )
@@ -157,6 +160,9 @@ def build_parser() -> argparse.ArgumentParser:
         child.add_argument("--codex-reasoning-effort", default="high")
         child.add_argument("--codex-timeout", type=int, default=900)
         child.add_argument("--codex-cache-dir", default="runs/evolving/codex-cache")
+        child.add_argument("--claude-model", default=None)
+        child.add_argument("--claude-timeout", type=int, default=900)
+        child.add_argument("--claude-cache-dir", default="runs/evolving/claude-cache")
         child.add_argument("--coding-initial-programs", type=int, default=3)
         child.add_argument("--coding-mutations", type=int, default=1)
         child.add_argument("--coding-validation-folds", type=int, default=3)
@@ -352,6 +358,8 @@ def baseline_command(args: argparse.Namespace) -> dict | None:
         args.codex_reasoning_effort = args.codex_reasoning_effort or "high"
         args.codex_timeout = args.codex_timeout or 900
         args.codex_cache_dir = args.codex_cache_dir or "runs/evolving/codex-cache"
+        args.claude_timeout = args.claude_timeout or 900
+        args.claude_cache_dir = args.claude_cache_dir or "runs/evolving/claude-cache"
         args.results_path = str(
             Path(args.output_dir or "outputs/baselines/evolving-harness") / "results.jsonl"
         )
@@ -383,6 +391,14 @@ def _components(args):
                 reasoning_effort=args.codex_reasoning_effort,
                 timeout_seconds=args.codex_timeout,
                 cache_dir=args.codex_cache_dir,
+            )
+        )
+    elif args.llm_backend == "claude":
+        llm = ClaudeCLIClient(
+            ClaudeCLIConfig(
+                model=args.claude_model,
+                timeout_seconds=args.claude_timeout,
+                cache_dir=args.claude_cache_dir,
             )
         )
     else:
@@ -608,6 +624,9 @@ def _source_evolve_command(
         "codex_reasoning_effort",
         "codex_timeout",
         "codex_cache_dir",
+        "claude_model",
+        "claude_timeout",
+        "claude_cache_dir",
         "coding_initial_programs",
         "coding_mutations",
         "coding_validation_folds",
@@ -618,6 +637,7 @@ def _source_evolve_command(
     )
     runtime = {key: getattr(args, key) for key in runtime_keys}
     runtime["codex_cache_dir"] = str((repo_root / args.codex_cache_dir).resolve())
+    runtime["claude_cache_dir"] = str((repo_root / args.claude_cache_dir).resolve())
     if args.chronos_cache_dir:
         runtime["chronos_cache_dir"] = str(
             (repo_root / args.chronos_cache_dir).resolve()
@@ -711,6 +731,8 @@ def main(argv: list[str] | None = None) -> None:
         args.codex_reasoning_effort = args.codex_reasoning_effort or "high"
         args.codex_timeout = args.codex_timeout or 900
         args.codex_cache_dir = args.codex_cache_dir or "runs/evolving/codex-cache"
+        args.claude_timeout = args.claude_timeout or 900
+        args.claude_cache_dir = args.claude_cache_dir or "runs/evolving/claude-cache"
         result = evolve_command(args)
         print(json.dumps(result, indent=2))
         return
