@@ -148,10 +148,15 @@ def load_tasks(tasks_file: str | Path = DEFAULT_TASKS_FILE) -> list[Task]:
 
 
 def load_context_tasks(tasks_file: str | Path = DEFAULT_TASKS_FILE) -> list[ContextTask]:
-    """Load full tasks from a Dr-CiK JSON object or JSONL file."""
+    """Load full tasks from a Dr-CiK task directory, JSON object, or JSONL file."""
     tasks: list[ContextTask] = []
     path = Path(tasks_file)
-    if path.suffix.lower() == ".json":
+    if path.is_dir():
+        records = [
+            json.loads(item.read_text(encoding="utf-8"))
+            for item in sorted(path.glob("*.json"))
+        ]
+    elif path.suffix.lower() == ".json":
         payload = json.loads(path.read_text(encoding="utf-8"))
         records = payload if isinstance(payload, list) else [payload]
     else:
