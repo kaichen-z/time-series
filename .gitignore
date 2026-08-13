@@ -229,3 +229,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local model-call caches and smoke-test outputs
+runs/evolving/codex-cache/
+runs/evolving/codex_test/
