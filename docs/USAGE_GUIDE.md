@@ -739,6 +739,28 @@ three compared modes:
 --split-manifest-path runs/<mode>/split_manifest.json
 ```
 
+The repository provides a wrapper that enforces these shared settings and isolates all outputs:
+
+```bash
+evolving_agent/scripts/run_llm_only_evolutions.sh \
+  external/Dr-CiK/full-download/Dr-CiK_public/tasks all
+```
+
+The requested `evolving_agent/scripts/` entrypoint delegates to the maintained implementation at
+`scripts/run_llm_only_evolutions.sh`, matching the repository's current script layout.
+
+Run only one condition by replacing `all` with `prompt`, `genome`, or `source`. Common overrides are
+environment variables, for example:
+
+```bash
+EA_GENERATIONS=1 EA_CHILDREN=1 EA_LIMIT=5 EA_DRY_RUN=1 \
+  evolving_agent/scripts/run_llm_only_evolutions.sh /path/to/tasks all
+```
+
+The main controls are `EA_CODEX_MODEL`, `EA_REASONING_EFFORT`, `EA_GENERATIONS`, `EA_CHILDREN`,
+`EA_SEED`, `EA_DEV_FRACTION`, `EA_HOLDOUT_FRACTION`, `EA_LIMIT`, and `EA_RUNS_DIR`. Source mode
+requires a clean tracked worktree. Run artifacts remain untracked.
+
 ### 9.2 `--evolution prompt`
 
 The weakest training module is identified, and exactly one complete prompt belonging to that role
