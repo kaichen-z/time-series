@@ -20,7 +20,7 @@ from .forecast_utility import ForecastUtilityLabel, ForecastUtilityLabeler
 from .impacts import EvidenceToForecastAgent
 from .memory import ForecastMemoryBank
 from .models import Document, EvidenceImpact, ForecastTask, ForecastWorkspace, RevisionAction
-from .pipeline import MinimalAgentSystem, SystemConfig
+from .pipeline import MinimalAgentSystem, NumericalBaselineSystem, SystemConfig
 from .reasoning import MacroReasoningAgent, MicroReasoningAgent, RevisionUtilityAgent
 from .workspace import ForecastWorkspaceExecutor, RevisionPlannerAgent
 from .triad import (
@@ -53,6 +53,7 @@ __all__ = [
     "ImportanceAwareContextAgent",
     "LoopConfig",
     "MinimalAgentSystem",
+    "NumericalBaselineSystem",
     "MacroReasoningAgent",
     "MicroReasoningAgent",
     "RetrievalProcessRewardAgent",

@@ -33,6 +33,50 @@ evidence-to-impact translation. The current runtime remains deterministic and ex
 interfaces for learned retrievers, judges, and PostTime-style revisers. It does not claim
 that its label-free utility proxy is an already trained PRM.
 
+## Unified experiment command
+
+All executable baselines and evolution levels now share one Python entrypoint. List the names with:
+
+```bash
+python -m evolving_agent --list-methods
+```
+
+Run a baseline by name:
+
+```bash
+python -m evolving_agent \
+  --baseline chronos \
+  --sample-dir external/Dr-CiK/sample \
+  --task-id task_42 \
+  --output-dir outputs/baselines/chronos-task42
+
+python -m evolving_agent \
+  --baseline codex-triad \
+  --sample-dir external/Dr-CiK/sample \
+  --task-id task_42 \
+  --codex-model gpt-5.6-sol \
+  --codex-reasoning-effort high \
+  --output-dir outputs/baselines/codex-triad-task42
+```
+
+Run one evolution level by name:
+
+```bash
+python -m evolving_agent \
+  --evolution genome \
+  --tasks-file external/Dr-CiK/full-download/Dr-CiK_public/tasks \
+  --generations 3 \
+  --children 2
+```
+
+Baseline names are `skill-fresh`, `skill-library`, `chronos`, `timesfm`, `statistical`, `one-pass`, `iterative`,
+`iterative-unsafe`, `oracle-context`, `rules-triad`, `codex-triad`, `codex-direct`,
+`codex-contract`, and `evolving-harness`. Evolution names are `prompt`, `genome`, and `source`.
+`chronos`, `timesfm`, and `statistical` are true numbers-only runs: they do not retrieve or consume
+documents. `oracle-context` is restricted to public development diagnostics. The previous
+`evolving-agent run/evolve` and `drcik-agent run-sample/run-hf` interfaces remain supported.
+The two `skill-*` baselines use the original numbers-only JSONL interface through `--tasks-file`.
+
 ## System flow
 
 ### Experimental co-evolving three-agent loop

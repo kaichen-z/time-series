@@ -30,9 +30,112 @@ from evolving_agent.source_evolution import (
 )
 from evolving_agent.tsfm import ChronosConfig, ChronosForecaster
 
+BASELINE_CHOICES = (
+    "skill-fresh",
+    "skill-library",
+    "chronos",
+    "timesfm",
+    "statistical",
+    "one-pass",
+    "iterative",
+    "iterative-unsafe",
+    "oracle-context",
+    "rules-triad",
+    "codex-triad",
+    "codex-direct",
+    "codex-contract",
+    "evolving-harness",
+)
+EVOLUTION_CHOICES = ("prompt", "genome", "source")
+
+
+def _add_data_source_arguments(parser: argparse.ArgumentParser) -> None:
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--sample-dir", help="Path to the Dr-CiK sample directory.")
+    source.add_argument(
+        "--public-dev",
+        action="store_true",
+        help="Run the Hugging Face public-development split.",
+    )
+    source.add_argument(
+        "--hidden-test",
+        action="store_true",
+        help="Run the Hugging Face hidden-test split.",
+    )
+
+
+def _add_unified_baseline_arguments(parser: argparse.ArgumentParser) -> None:
+    _add_data_source_arguments(parser)
+    parser.add_argument("--task-id", action="append", help="Repeatable benchmark_id filter.")
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--max-steps", type=int, default=10)
+    parser.add_argument("--samples", type=int, default=100)
+    parser.add_argument("--context-weight", type=float, default=0.75)
+    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--backbone", choices=("chronos", "timesfm", "statistical"), default="chronos")
+    parser.add_argument("--chronos-model-id", default="amazon/chronos-bolt-small")
+    parser.add_argument("--chronos-device-map", default="cpu")
+    parser.add_argument("--chronos-cache-dir", default=None)
+    parser.add_argument("--chronos-local-files-only", action="store_true")
+    parser.add_argument("--timesfm-model-id", default="google/timesfm-2.5-200m-pytorch")
+    parser.add_argument("--timesfm-cache-dir", default=None)
+    parser.add_argument("--timesfm-local-files-only", action="store_true")
+    parser.add_argument("--allow-statistical-fallback", action="store_true")
+    parser.add_argument("--codex-model", default=None)
+    parser.add_argument("--codex-reasoning-effort", choices=("none", "low", "medium", "high"), default=None)
+    parser.add_argument("--codex-cache-dir", default=None)
+    parser.add_argument("--codex-timeout", type=int, default=None)
+
+
+def _add_unified_evolution_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--tasks-file", default=str(DEFAULT_TASKS_FILE))
+    parser.add_argument("--setting", choices=("llm_only", "statistics", "tsfm", "combined"), default="statistics")
+    parser.add_argument("--llm-backend", choices=("codex", "qwen"), default="codex")
+    parser.add_argument("--model-id", default=None)
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--coding-initial-programs", type=int, default=3)
+    parser.add_argument("--coding-mutations", type=int, default=1)
+    parser.add_argument("--coding-validation-folds", type=int, default=3)
+    parser.add_argument("--seed-policy-path", default=None)
+    parser.add_argument("--library-path", default="runs/evolving/skills.json")
+    parser.add_argument("--retrieval-library-path", default="runs/evolving/retrieval_skills.json")
+    parser.add_argument("--decision-library-path", default="runs/evolving/decision_skills.json")
+    parser.add_argument("--chronos-device", default="cpu")
+    parser.add_argument("--generations", type=int, default=3)
+    parser.add_argument("--children", type=int, default=2)
+    parser.add_argument("--dev-fraction", type=float, default=0.25)
+    parser.add_argument("--policy-path", default="runs/evolving/best_policy.json")
+    parser.add_argument("--trace-path", default="runs/evolving/evolution_trace.json")
+    parser.add_argument("--source-patch-path", default="runs/evolving/best_source.patch")
+    parser.add_argument("--seed-source-patch", default=None)
+    parser.add_argument("--source-engineer-timeout", type=int, default=1800)
+    parser.add_argument("--source-test-timeout", type=int, default=300)
+    parser.add_argument("--source-eval-timeout", type=int, default=7200)
+
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the evolving time-series agent harness.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run contextual forecasting baselines and self-evolution modes from one entrypoint. "
+            "Use --baseline NAME or --evolution NAME for the unified interface; legacy run/evolve "
+            "subcommands remain supported."
+        )
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--baseline", choices=BASELINE_CHOICES, metavar="NAME")
+    mode.add_argument("--evolution", choices=EVOLUTION_CHOICES, metavar="NAME")
+    parser.add_argument(
+        "--list-methods",
+        action="store_true",
+        help="Print all unified baseline and evolution names, then exit.",
+    )
+
+    # The unified options live on the root parser. argparse still permits the
+    # older subcommand grammar because all legacy options remain below.
+    _add_unified_baseline_arguments(parser)
+    _add_unified_evolution_arguments(parser)
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("run", "evolve"):
         child = subparsers.add_parser(command)
@@ -112,6 +215,8 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--source-engineer-timeout", type=int, default=1800)
     evolve.add_argument("--source-test-timeout", type=int, default=300)
     evolve.add_argument("--source-eval-timeout", type=int, default=7200)
+    # Root-mode invocations have no subcommand, while legacy calls require one.
+    subparsers.required = False
     return parser
 
 
@@ -119,6 +224,142 @@ def _task_subset(tasks: list[ContextTask], seed: int, limit: int | None) -> list
     tasks = list(tasks)
     random.Random(seed).shuffle(tasks)
     return tasks if limit is None else tasks[:limit]
+
+
+def _baseline_argv(args: argparse.Namespace) -> list[str]:
+    """Translate one friendly baseline name into the established Dr-CiK runner."""
+    if args.sample_dir:
+        argv = ["run-sample", "--sample-dir", args.sample_dir]
+    elif args.public_dev:
+        argv = ["run-hf", "--public-dev"]
+    elif args.hidden_test:
+        argv = ["run-hf", "--hidden-test"]
+    else:
+        raise SystemExit(
+            "A baseline requires one data source: --sample-dir, --public-dev, or --hidden-test"
+        )
+
+    system = {
+        "chronos": "backbone-only",
+        "timesfm": "backbone-only",
+        "statistical": "backbone-only",
+        "one-pass": "one-pass",
+        "iterative": "iterative",
+        "iterative-unsafe": "iterative",
+        "oracle-context": "iterative",
+        "rules-triad": "triad",
+        "codex-triad": "triad",
+        "codex-direct": "codex-direct",
+        "codex-contract": "codex-contract",
+    }.get(args.baseline)
+    if system is None:
+        raise SystemExit(
+            "--baseline evolving-harness uses --tasks-file or --sample-dir and is routed internally"
+        )
+    backbone = {
+        "chronos": "chronos",
+        "timesfm": "timesfm",
+        "statistical": "statistical",
+    }.get(args.baseline, args.backbone)
+    output_dir = args.output_dir or f"outputs/baselines/{args.baseline}"
+    argv.extend(
+        [
+            "--system", system,
+            "--backbone", backbone,
+            "--output-dir", output_dir,
+            "--top-k", str(args.top_k),
+            "--max-steps", str(args.max_steps),
+            "--samples", str(args.samples),
+            "--context-weight", str(args.context_weight),
+            "--seed", str(args.seed),
+            "--chronos-model-id", args.chronos_model_id,
+            "--chronos-device-map", args.chronos_device_map,
+            "--timesfm-model-id", args.timesfm_model_id,
+            "--codex-cache-dir", args.codex_cache_dir or "outputs/codex-cache",
+            "--codex-timeout", str(args.codex_timeout or 180),
+        ]
+    )
+    for task_id in args.task_id or ():
+        argv.extend(("--task-id", task_id))
+    if args.limit is not None:
+        argv.extend(("--limit", str(args.limit)))
+    if args.chronos_cache_dir:
+        argv.extend(("--chronos-cache-dir", args.chronos_cache_dir))
+    if args.chronos_local_files_only:
+        argv.append("--chronos-local-files-only")
+    if args.timesfm_cache_dir:
+        argv.extend(("--timesfm-cache-dir", args.timesfm_cache_dir))
+    if args.timesfm_local_files_only:
+        argv.append("--timesfm-local-files-only")
+    if args.allow_statistical_fallback:
+        argv.append("--allow-statistical-fallback")
+    if args.codex_model:
+        argv.extend(("--codex-model", args.codex_model))
+    if args.codex_reasoning_effort:
+        argv.extend(("--codex-reasoning-effort", args.codex_reasoning_effort))
+    if args.baseline == "codex-triad":
+        argv.extend(("--reasoning-agent", "codex"))
+    elif args.baseline == "rules-triad":
+        argv.extend(("--reasoning-agent", "rules"))
+    if args.baseline == "iterative-unsafe":
+        argv.append("--allow-unvalidated-event-revisions")
+    if args.baseline == "oracle-context":
+        argv.append("--oracle-evidence")
+    return argv
+
+
+def baseline_command(args: argparse.Namespace) -> dict | None:
+    """Run one named baseline without duplicating the established implementations."""
+    if args.baseline in {"skill-fresh", "skill-library"}:
+        if args.sample_dir:
+            raise SystemExit(
+                f"{args.baseline} consumes a JSONL numeric task file; use --tasks-file, not --sample-dir"
+            )
+        if args.public_dev or args.hidden_test:
+            raise SystemExit(
+                f"{args.baseline} consumes --tasks-file and does not directly load a Hugging Face split"
+            )
+        from evolving_agent.coding_agent.baseline import main as coding_baseline_main
+
+        mode = "fresh" if args.baseline == "skill-fresh" else "library"
+        output_dir = Path(args.output_dir or f"outputs/baselines/{args.baseline}")
+        argv = [
+            "--mode", mode,
+            "--tasks-file", args.tasks_file,
+            "--results-path", str(output_dir / "results.jsonl"),
+            "--log-file", str(output_dir / "run.log"),
+            "--seed", str(args.seed),
+            "--library-path", args.library_path,
+        ]
+        if args.limit is not None:
+            argv.extend(("--limit", str(args.limit)))
+        if args.model_id:
+            argv.extend(("--model-id", args.model_id))
+        if args.device:
+            argv.extend(("--device", args.device))
+        coding_baseline_main(argv)
+        return None
+    if args.baseline == "evolving-harness":
+        if args.public_dev or args.hidden_test:
+            raise SystemExit(
+                "evolving-harness currently requires --tasks-file or --sample-dir, not a Hugging Face split"
+            )
+        if args.sample_dir:
+            sample_path = Path(args.sample_dir)
+            task_directory = sample_path / "tasks"
+            args.tasks_file = str(task_directory if task_directory.is_dir() else sample_path)
+        args.learn_from_public_outcomes = False
+        args.codex_reasoning_effort = args.codex_reasoning_effort or "high"
+        args.codex_timeout = args.codex_timeout or 900
+        args.codex_cache_dir = args.codex_cache_dir or "runs/evolving/codex-cache"
+        args.results_path = str(
+            Path(args.output_dir or "outputs/baselines/evolving-harness") / "results.jsonl"
+        )
+        return run_command(args)
+    from drcik_agent.cli import main as drcik_main
+
+    drcik_main(_baseline_argv(args))
+    return None
 
 
 def _entity_split(
@@ -452,6 +693,29 @@ def _source_evolve_command(
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if args.list_methods:
+        print(
+            json.dumps(
+                {"baselines": list(BASELINE_CHOICES), "evolutions": list(EVOLUTION_CHOICES)},
+                indent=2,
+            )
+        )
+        return
+    if args.baseline:
+        result = baseline_command(args)
+        if result is not None:
+            print(json.dumps(result, indent=2))
+        return
+    if args.evolution:
+        args.evolution_mode = args.evolution
+        args.codex_reasoning_effort = args.codex_reasoning_effort or "high"
+        args.codex_timeout = args.codex_timeout or 900
+        args.codex_cache_dir = args.codex_cache_dir or "runs/evolving/codex-cache"
+        result = evolve_command(args)
+        print(json.dumps(result, indent=2))
+        return
+    if args.command is None:
+        raise SystemExit("Choose --baseline NAME, --evolution NAME, or a legacy run/evolve command")
     result = run_command(args) if args.command == "run" else evolve_command(args)
     print(json.dumps(result, indent=2))
 

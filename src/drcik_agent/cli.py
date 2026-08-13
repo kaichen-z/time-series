@@ -7,7 +7,7 @@ from pathlib import Path
 from .codex_baseline import CodexContractSystem, CodexDirectBaseline, CodexDirectConfig
 from .data import load_huggingface_tasks, load_sample_tasks
 from .loop import IterativeAgentSystem, LoopConfig
-from .pipeline import MinimalAgentSystem, SystemConfig, write_outputs
+from .pipeline import MinimalAgentSystem, NumericalBaselineSystem, SystemConfig, write_outputs
 from .triad import ThreeAgentForecastSystem, TriadConfig
 
 
@@ -17,9 +17,19 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
         "--system",
-        choices=("iterative", "triad", "one-pass", "codex-direct", "codex-contract"),
+        choices=(
+            "backbone-only",
+            "iterative",
+            "triad",
+            "one-pass",
+            "codex-direct",
+            "codex-contract",
+        ),
         default="iterative",
-        help="Run our iterative loop, one-pass ablation, or full-corpus Codex baseline",
+        help=(
+            "Run a numbers-only backbone, iterative loop, one-pass ablation, "
+            "three-agent system, or full-corpus Codex baseline"
+        ),
     )
     parser.add_argument("--top-k", type=int, default=5, help="Documents retrieved per loop step")
     parser.add_argument("--max-steps", type=int, default=10)
@@ -193,15 +203,15 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--learn-from-public-outcomes cannot be used on hidden test tasks")
     if getattr(arguments, "hidden_test", False) and arguments.oracle_evidence:
         raise SystemExit("--oracle-evidence is forbidden on hidden test tasks")
-    if arguments.system == "one-pass" and arguments.learn_from_public_outcomes:
+    if arguments.system in {"backbone-only", "one-pass"} and arguments.learn_from_public_outcomes:
         raise SystemExit("--learn-from-public-outcomes requires --system iterative or triad")
-    if arguments.system == "one-pass" and arguments.oracle_evidence:
+    if arguments.system in {"backbone-only", "one-pass"} and arguments.oracle_evidence:
         raise SystemExit("--oracle-evidence requires --system iterative")
-    if arguments.system == "one-pass" and arguments.allow_unvalidated_event_revisions:
+    if arguments.system in {"backbone-only", "one-pass"} and arguments.allow_unvalidated_event_revisions:
         raise SystemExit(
             "--allow-unvalidated-event-revisions applies only to --system iterative"
         )
-    if arguments.system == "one-pass" and arguments.reasoning_agent == "codex":
+    if arguments.system in {"backbone-only", "one-pass"} and arguments.reasoning_agent == "codex":
         raise SystemExit("--reasoning-agent codex requires --system iterative")
     if arguments.system in {"codex-direct", "codex-contract"} and (
         arguments.learn_from_public_outcomes
@@ -232,7 +242,27 @@ def main(argv: list[str] | None = None) -> None:
         tasks = load_huggingface_tasks(labels_public=labels_public)
     tasks = _select_tasks(tasks, arguments.task_id, arguments.limit)
 
-    if arguments.system == "one-pass":
+    if arguments.system == "backbone-only":
+        system = NumericalBaselineSystem(
+            SystemConfig(
+                num_samples=arguments.samples,
+                seed=arguments.seed,
+                backbone=arguments.backbone,
+                chronos_model_id=arguments.chronos_model_id,
+                chronos_device_map=arguments.chronos_device_map,
+                chronos_max_context=arguments.chronos_max_context,
+                chronos_max_horizon=arguments.chronos_max_horizon,
+                chronos_cache_dir=arguments.chronos_cache_dir,
+                chronos_local_files_only=arguments.chronos_local_files_only,
+                timesfm_model_id=arguments.timesfm_model_id,
+                timesfm_max_context=arguments.timesfm_max_context,
+                timesfm_max_horizon=arguments.timesfm_max_horizon,
+                timesfm_cache_dir=arguments.timesfm_cache_dir,
+                timesfm_local_files_only=arguments.timesfm_local_files_only,
+                allow_statistical_fallback=arguments.allow_statistical_fallback,
+            )
+        )
+    elif arguments.system == "one-pass":
         system = MinimalAgentSystem(
             SystemConfig(
                 top_k=arguments.top_k,
