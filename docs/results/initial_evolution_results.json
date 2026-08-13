@@ -1,0 +1,60 @@
+{
+  "report_date": "2026-08-13",
+  "status": "mechanism_smoke_test_not_benchmark_claim",
+  "dataset": {
+    "name": "Dr-CiK public samples",
+    "tasks": ["task_42", "task_163", "task_201"],
+    "split": {
+      "train": ["task_163", "task_201"],
+      "dev": ["task_42"],
+      "entity_disjoint": true,
+      "seed": 7,
+      "dev_fraction": 0.34
+    }
+  },
+  "model": {
+    "llm": "gpt-5.6-sol",
+    "reasoning_effort": "high"
+  },
+  "prompt_mode": {
+    "implemented": true,
+    "forecasting_run_recorded": false,
+    "result": null
+  },
+  "genome_mode": {
+    "generation": 0,
+    "parent_version": "v000",
+    "child_version": "v001",
+    "parent_train_reward": 0.6596747912574514,
+    "child_train_reward": 0.8505893254260103,
+    "parent_dev_reward": 0.8594564038496646,
+    "child_dev_reward": 0.8708628925008746,
+    "accepted": true,
+    "accepted_workflow": ["retrieve", "decide", "retrieve", "decide"]
+  },
+  "source_mode": {
+    "generation": 0,
+    "candidate_id": "source_g000_c000",
+    "parent_train_reward": 0.8980003272768835,
+    "child_train_reward": 0.8745558828324391,
+    "parent_dev_reward": 0.8593629669872531,
+    "child_dev_reward": 0.8472980341328559,
+    "audit_ok": true,
+    "tests_ok": true,
+    "test_count": 163,
+    "accepted": false,
+    "accepted_patch_bytes": 0
+  },
+  "task_42_standalone_parent_replay": {
+    "note": "Fresh empty skill libraries; not identical to the sequential source-evolution dev state.",
+    "final_smape": 23.648640300938652,
+    "final_mae": 104.42670767999998,
+    "coding_hindcast_smape": 12.059662209743216,
+    "retrieval_precision": 0.75,
+    "supporting_recall": 0.23076923076923078,
+    "distractor_avoidance": 0.96,
+    "decision_selection_regret": 0.0,
+    "selected_candidate_id": "validated_seasonal_repeat__evidence_3",
+    "retrieved_document_ids": ["doc_1548", "doc_1552", "doc_1560", "doc_1562"]
+  }
+}

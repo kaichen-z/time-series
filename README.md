@@ -13,7 +13,8 @@ held-out acceptance. The `evolve` entrypoint has three controlled levels:
 `--evolution-mode prompt` (one prompt only), `genome` (prompts, budgets, and topology), and
 `source` (audited Python source patches generated in isolated Git worktrees). See
 [`docs/EVOLVING_AGENT.md`](docs/EVOLVING_AGENT.md) for the exact information boundaries, flow,
-metrics, and commands.
+metrics, and commands. The initial English experiment report is available at
+[`docs/EVOLUTION_METHODS_AND_RESULTS.md`](docs/EVOLUTION_METHODS_AND_RESULTS.md).
 
 This repository contains an auditable, gap-guided agent loop for the
 [Dr-CiK](https://github.com/ServiceNow/Dr-CiK) contextual time-series forecasting

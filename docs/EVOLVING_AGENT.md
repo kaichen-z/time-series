@@ -1,5 +1,9 @@
 # Evolving Agent: Integrated Experimental System
 
+For the complete English description of the three evolution levels and the first Genome, Source,
+and `task_42` results, see
+[`EVOLUTION_METHODS_AND_RESULTS.md`](EVOLUTION_METHODS_AND_RESULTS.md).
+
 This directory is now the canonical implementation of the new experiment. It preserves the
 collaborator's Voyager-style `CodingSkillAgent` baseline and adds a controlled three-agent
 forecasting harness.
