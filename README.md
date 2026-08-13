@@ -17,6 +17,8 @@ metrics, and commands. The initial English experiment report is available at
 [`docs/EVOLUTION_METHODS_AND_RESULTS.md`](docs/EVOLUTION_METHODS_AND_RESULTS.md). A consolidated
 audit of all earlier baseline families and saved results is available at
 [`docs/BASELINE_METHODS_AND_RESULTS.md`](docs/BASELINE_METHODS_AND_RESULTS.md).
+The complete installation, baseline, Coding-setting, skill-learning, and evolution manual is
+available at [`docs/USAGE_GUIDE.md`](docs/USAGE_GUIDE.md).
 
 This repository contains an auditable, gap-guided agent loop for the
 [Dr-CiK](https://github.com/ServiceNow/Dr-CiK) contextual time-series forecasting
