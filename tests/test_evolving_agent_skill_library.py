@@ -70,6 +70,16 @@ class SkillLibraryTests(unittest.TestCase):
         self.assertEqual(len(library), 1)
         self.assertEqual(library.get("detect_trend").description, "a different description")
 
+    def test_nonpersistent_clone_does_not_contaminate_parent_or_disk(self):
+        library = SkillLibrary.load(self.path)
+        library.add(_skill())
+        clone = library.clone(persist=False)
+        clone.add(_skill(name="new_skill"))
+
+        self.assertEqual(len(clone), 2)
+        self.assertEqual(len(library), 1)
+        self.assertEqual(len(SkillLibrary.load(self.path)), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

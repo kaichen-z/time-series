@@ -1,0 +1,187 @@
+"""CLI for one-pass harness evaluation and held-out co-evolution."""
+from __future__ import annotations
+
+import argparse
+import json
+import random
+from dataclasses import asdict
+from pathlib import Path
+
+from evolving_agent.co_evolution import CoEvolutionConfig, CoEvolutionEngine, HarnessPolicy
+from evolving_agent.coding_agent.evolution import CodingEvolutionAgent, CodingEvolutionConfig
+from evolving_agent.coding_agent.skill_library import SkillLibrary
+from evolving_agent.data import ContextTask, DEFAULT_TASKS_FILE, load_context_tasks
+from evolving_agent.decision_agent.agent import DecisionAgent
+from evolving_agent.harness import EvolvingForecastHarness
+from evolving_agent.llm import QwenClient
+from evolving_agent.retrieval_agent.agent import RetrievalAgent
+from evolving_agent.tsfm import ChronosConfig, ChronosForecaster
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the evolving time-series agent harness.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    for command in ("run", "evolve"):
+        child = subparsers.add_parser(command)
+        child.add_argument("--tasks-file", default=str(DEFAULT_TASKS_FILE))
+        child.add_argument(
+            "--setting",
+            choices=("llm_only", "statistics", "tsfm", "combined"),
+            default="statistics",
+        )
+        child.add_argument("--model-id", default=None)
+        child.add_argument("--device", default=None)
+        child.add_argument("--seed", type=int, default=7)
+        child.add_argument("--limit", type=int, default=None)
+        child.add_argument("--library-path", default="runs/evolving/skills.json")
+        child.add_argument("--chronos-model-id", default="amazon/chronos-bolt-small")
+        child.add_argument("--chronos-device", default="cpu")
+        child.add_argument("--chronos-cache-dir", default=None)
+        child.add_argument("--chronos-local-files-only", action="store_true")
+    run = subparsers.choices["run"]
+    run.add_argument("--results-path", default="runs/evolving/harness_results.jsonl")
+    evolve = subparsers.choices["evolve"]
+    evolve.add_argument("--generations", type=int, default=3)
+    evolve.add_argument("--children", type=int, default=2)
+    evolve.add_argument("--dev-fraction", type=float, default=0.25)
+    evolve.add_argument("--policy-path", default="runs/evolving/best_policy.json")
+    evolve.add_argument("--trace-path", default="runs/evolving/evolution_trace.json")
+    return parser
+
+
+def _task_subset(tasks: list[ContextTask], seed: int, limit: int | None) -> list[ContextTask]:
+    tasks = list(tasks)
+    random.Random(seed).shuffle(tasks)
+    return tasks if limit is None else tasks[:limit]
+
+
+def _entity_split(
+    tasks: list[ContextTask], seed: int, dev_fraction: float
+) -> tuple[list[ContextTask], list[ContextTask]]:
+    entities = sorted({task.numeric.entity_name for task in tasks})
+    random.Random(seed).shuffle(entities)
+    count = max(1, round(len(entities) * dev_fraction))
+    dev_entities = set(entities[:count])
+    return (
+        [task for task in tasks if task.numeric.entity_name not in dev_entities],
+        [task for task in tasks if task.numeric.entity_name in dev_entities],
+    )
+
+
+def _components(args):
+    kwargs = {}
+    if args.model_id:
+        kwargs["model_id"] = args.model_id
+    if args.device:
+        kwargs["device"] = args.device
+    llm = QwenClient(**kwargs)
+    library = SkillLibrary.load(args.library_path)
+    tsfm = None
+    if args.setting in {"tsfm", "combined"}:
+        tsfm = ChronosForecaster(
+            ChronosConfig(
+                model_id=args.chronos_model_id,
+                device_map=args.chronos_device,
+                cache_dir=args.chronos_cache_dir,
+                local_files_only=args.chronos_local_files_only,
+            )
+        )
+    return llm, library, tsfm
+
+
+def _factory(args, llm, library, tsfm, *, isolate_library: bool = False):
+    def build(policy: HarnessPolicy) -> EvolvingForecastHarness:
+        task_library = library.clone(persist=False) if isolate_library else library
+        coding = CodingEvolutionAgent(
+            llm,
+            task_library,
+            CodingEvolutionConfig(setting=args.setting),
+            tsfm_forecaster=tsfm,
+            generation_prompt=policy.coding_generation_prompt,
+            revision_prompt=policy.coding_revision_prompt,
+        )
+        return EvolvingForecastHarness(
+            coding,
+            RetrievalAgent(llm, prompt=policy.retrieval_prompt),
+            DecisionAgent(llm, prompt=policy.decision_prompt),
+        )
+    return build
+
+
+def run_command(args) -> dict:
+    tasks = _task_subset(load_context_tasks(args.tasks_file), args.seed, args.limit)
+    llm, library, tsfm = _components(args)
+    harness = _factory(args, llm, library, tsfm)(HarnessPolicy())
+    destination = Path(args.results_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    outcomes = []
+    with destination.open("w", encoding="utf-8") as output:
+        for task in tasks:
+            result = harness.run(task)
+            outcome = harness.score_after_resolution(task, result)
+            outcomes.append(outcome)
+            output.write(
+                json.dumps(
+                    {
+                        "outcome": asdict(outcome),
+                        "selected_candidate_id": result.decision.selected.candidate_id,
+                        "host_default_id": result.decision.host_default_id,
+                        "retrieved_document_ids": list(result.retrieval.selected_document_ids),
+                        "retrieval_rejections": list(result.retrieval.rejected),
+                        "coding_candidates": [
+                            {
+                                "name": item.program.name,
+                                "assumption": item.program.assumption,
+                                "failure_condition": item.program.failure_condition,
+                                "hindcast_smape": item.hindcast_smape,
+                            }
+                            for item in result.coding.candidates
+                        ],
+                    },
+                    ensure_ascii=False,
+                ) + "\n"
+            )
+    return {
+        "n_tasks": len(outcomes),
+        "mean_final_smape": sum(item.final_smape for item in outcomes) / len(outcomes),
+        "results_path": str(destination),
+        "skills_saved": len(library),
+    }
+
+
+def evolve_command(args) -> dict:
+    tasks = _task_subset(load_context_tasks(args.tasks_file), args.seed, args.limit)
+    train, dev = _entity_split(tasks, args.seed, args.dev_fraction)
+    if not train or not dev:
+        raise ValueError("entity split produced an empty train or dev set")
+    llm, library, tsfm = _components(args)
+    engine = CoEvolutionEngine(
+        llm,
+        _factory(args, llm, library, tsfm, isolate_library=True),
+        CoEvolutionConfig(
+            generations=args.generations,
+            children_per_generation=args.children,
+        ),
+    )
+    best, trace = engine.evolve(HarnessPolicy(), train, dev)
+    best.save(args.policy_path)
+    trace_path = Path(args.trace_path)
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    trace_path.write_text(json.dumps([asdict(item) for item in trace], indent=2))
+    return {
+        "best_policy": best.version,
+        "policy_path": args.policy_path,
+        "trace_path": str(trace_path),
+        "train_tasks": len(train),
+        "dev_tasks": len(dev),
+    }
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
+    result = run_command(args) if args.command == "run" else evolve_command(args)
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()
