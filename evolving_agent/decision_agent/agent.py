@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from evolving_agent.llm import JsonExtractionError, LLMClient, parse_json_object
 from evolving_agent.retrieval_agent.agent import RetrievalResult
+from evolving_agent.decision_agent.skill_library import DecisionSkillLibrary
 
 DECISION_PROMPT = """You are the Decision Agent in a time-series forecasting harness.
 Choose among candidates that were already executed and historically hindcast. You cannot write
@@ -22,7 +23,10 @@ time window. A resolved historical event is not a reason to apply a future multi
 Return exactly one JSON object:
 {"selected_candidate_id": "candidate_name", "supporting_document_ids": ["doc_1"],
 "rationale": "why verified evidence justifies this selection",
-"request_more_retrieval": false}
+"request_more_retrieval": false, "used_skill_names": []}
+
+If validated decision skills are supplied, use only applicable rules and report their exact names
+in used_skill_names. A skill never overrides citation, provenance, or safe-host validation.
 """
 
 
@@ -46,11 +50,19 @@ class DecisionResult:
     supporting_document_ids: tuple[str, ...]
     llm_override_accepted: bool
     rejection_reason: str | None = None
+    used_skill_names: tuple[str, ...] = ()
 
 
 class DecisionAgent:
-    def __init__(self, llm: LLMClient, *, prompt: str = DECISION_PROMPT) -> None:
+    def __init__(
+        self,
+        llm: LLMClient,
+        library: DecisionSkillLibrary | None = None,
+        *,
+        prompt: str = DECISION_PROMPT,
+    ) -> None:
         self.llm = llm
+        self.library = library
         self.prompt = prompt
 
     def run(
@@ -78,6 +90,11 @@ class DecisionAgent:
             "host_default_id": host_default.candidate_id,
             "verified_evidence": [item.__dict__ for item in retrieval.evidence],
             "verified_impacts": [item.__dict__ for item in retrieval.impacts],
+            "validated_decision_skills": (
+                self.library.list_for_prompt()
+                if self.library is not None
+                else "(decision skill library disabled)"
+            ),
         }
         response = self.llm.complete(
             system=self.prompt,
@@ -102,6 +119,14 @@ class DecisionAgent:
             return self._fallback(host_default, "override_requires_task_evidence")
         if chosen.source_document_ids and not set(chosen.source_document_ids).issubset(cited):
             return self._fallback(host_default, "adjusted_candidate_requires_matching_citations")
+        used_skills = []
+        unknown_skills = []
+        for name in choice.get("used_skill_names", ()):
+            name = str(name)
+            if self.library is not None and self.library.get(name) is not None:
+                used_skills.append(name)
+            else:
+                unknown_skills.append(name)
         return DecisionResult(
             selected=chosen,
             host_default_id=host_default.candidate_id,
@@ -109,6 +134,12 @@ class DecisionAgent:
             rationale=str(choice.get("rationale", "")),
             supporting_document_ids=cited,
             llm_override_accepted=override,
+            used_skill_names=tuple(used_skills),
+            rejection_reason=(
+                "unknown_decision_skills:" + ",".join(unknown_skills)
+                if unknown_skills
+                else None
+            ),
         )
 
     @staticmethod
@@ -121,4 +152,5 @@ class DecisionAgent:
             supporting_document_ids=(),
             llm_override_accepted=False,
             rejection_reason=reason,
+            used_skill_names=(),
         )

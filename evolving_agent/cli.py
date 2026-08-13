@@ -12,9 +12,12 @@ from evolving_agent.coding_agent.evolution import CodingEvolutionAgent, CodingEv
 from evolving_agent.coding_agent.skill_library import SkillLibrary
 from evolving_agent.data import ContextTask, DEFAULT_TASKS_FILE, load_context_tasks
 from evolving_agent.decision_agent.agent import DecisionAgent
+from evolving_agent.decision_agent.skill_library import DecisionSkillLibrary
 from evolving_agent.harness import EvolvingForecastHarness
 from evolving_agent.llm import QwenClient
 from evolving_agent.retrieval_agent.agent import RetrievalAgent
+from evolving_agent.retrieval_agent.skill_library import RetrievalSkillLibrary
+from evolving_agent.skill_learning import OutcomeSkillLearner
 from evolving_agent.tsfm import ChronosConfig, ChronosForecaster
 
 
@@ -34,12 +37,25 @@ def build_parser() -> argparse.ArgumentParser:
         child.add_argument("--seed", type=int, default=7)
         child.add_argument("--limit", type=int, default=None)
         child.add_argument("--library-path", default="runs/evolving/skills.json")
+        child.add_argument(
+            "--retrieval-library-path",
+            default="runs/evolving/retrieval_skills.json",
+        )
+        child.add_argument(
+            "--decision-library-path",
+            default="runs/evolving/decision_skills.json",
+        )
         child.add_argument("--chronos-model-id", default="amazon/chronos-bolt-small")
         child.add_argument("--chronos-device", default="cpu")
         child.add_argument("--chronos-cache-dir", default=None)
         child.add_argument("--chronos-local-files-only", action="store_true")
     run = subparsers.choices["run"]
     run.add_argument("--results-path", default="runs/evolving/harness_results.jsonl")
+    run.add_argument(
+        "--learn-from-public-outcomes",
+        action="store_true",
+        help="After each public label resolves, generate/update all three skill libraries.",
+    )
     evolve = subparsers.choices["evolve"]
     evolve.add_argument("--generations", type=int, default=3)
     evolve.add_argument("--children", type=int, default=2)
@@ -76,6 +92,8 @@ def _components(args):
         kwargs["device"] = args.device
     llm = QwenClient(**kwargs)
     library = SkillLibrary.load(args.library_path)
+    retrieval_library = RetrievalSkillLibrary.load(args.retrieval_library_path)
+    decision_library = DecisionSkillLibrary.load(args.decision_library_path)
     tsfm = None
     if args.setting in {"tsfm", "combined"}:
         tsfm = ChronosForecaster(
@@ -86,12 +104,27 @@ def _components(args):
                 local_files_only=args.chronos_local_files_only,
             )
         )
-    return llm, library, tsfm
+    return llm, library, retrieval_library, decision_library, tsfm
 
 
-def _factory(args, llm, library, tsfm, *, isolate_library: bool = False):
+def _factory(
+    args,
+    llm,
+    library,
+    retrieval_library,
+    decision_library,
+    tsfm,
+    *,
+    isolate_library: bool = False,
+):
     def build(policy: HarnessPolicy) -> EvolvingForecastHarness:
         task_library = library.clone(persist=False) if isolate_library else library
+        task_retrieval_library = (
+            retrieval_library.clone(persist=False) if isolate_library else retrieval_library
+        )
+        task_decision_library = (
+            decision_library.clone(persist=False) if isolate_library else decision_library
+        )
         coding = CodingEvolutionAgent(
             llm,
             task_library,
@@ -102,23 +135,50 @@ def _factory(args, llm, library, tsfm, *, isolate_library: bool = False):
         )
         return EvolvingForecastHarness(
             coding,
-            RetrievalAgent(llm, prompt=policy.retrieval_prompt),
-            DecisionAgent(llm, prompt=policy.decision_prompt),
+            RetrievalAgent(
+                llm,
+                task_retrieval_library,
+                prompt=policy.retrieval_prompt,
+            ),
+            DecisionAgent(
+                llm,
+                task_decision_library,
+                prompt=policy.decision_prompt,
+            ),
+            OutcomeSkillLearner(
+                llm,
+                task_retrieval_library,
+                task_decision_library,
+            ),
         )
     return build
 
 
 def run_command(args) -> dict:
     tasks = _task_subset(load_context_tasks(args.tasks_file), args.seed, args.limit)
-    llm, library, tsfm = _components(args)
-    harness = _factory(args, llm, library, tsfm)(HarnessPolicy())
+    llm, library, retrieval_library, decision_library, tsfm = _components(args)
+    factory = _factory(
+        args,
+        llm,
+        library,
+        retrieval_library,
+        decision_library,
+        tsfm,
+        isolate_library=not args.learn_from_public_outcomes,
+    )
+    harness = factory(HarnessPolicy()) if args.learn_from_public_outcomes else None
     destination = Path(args.results_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     outcomes = []
     with destination.open("w", encoding="utf-8") as output:
         for task in tasks:
-            result = harness.run(task)
-            outcome = harness.score_after_resolution(task, result)
+            task_harness = harness or factory(HarnessPolicy())
+            result = task_harness.run(task)
+            if args.learn_from_public_outcomes:
+                outcome, learning = task_harness.record_outcome(task, result)
+            else:
+                outcome = task_harness.score_after_resolution(task, result)
+                learning = None
             outcomes.append(outcome)
             output.write(
                 json.dumps(
@@ -128,6 +188,9 @@ def run_command(args) -> dict:
                         "host_default_id": result.decision.host_default_id,
                         "retrieved_document_ids": list(result.retrieval.selected_document_ids),
                         "retrieval_rejections": list(result.retrieval.rejected),
+                        "used_retrieval_skills": list(result.retrieval.used_skill_names),
+                        "used_decision_skills": list(result.decision.used_skill_names),
+                        "learned_skills": asdict(learning) if learning is not None else None,
                         "coding_candidates": [
                             {
                                 "name": item.program.name,
@@ -146,6 +209,9 @@ def run_command(args) -> dict:
         "mean_final_smape": sum(item.final_smape for item in outcomes) / len(outcomes),
         "results_path": str(destination),
         "skills_saved": len(library),
+        "retrieval_skills_saved": len(retrieval_library),
+        "decision_skills_saved": len(decision_library),
+        "online_skill_learning": args.learn_from_public_outcomes,
     }
 
 
@@ -154,10 +220,18 @@ def evolve_command(args) -> dict:
     train, dev = _entity_split(tasks, args.seed, args.dev_fraction)
     if not train or not dev:
         raise ValueError("entity split produced an empty train or dev set")
-    llm, library, tsfm = _components(args)
+    llm, library, retrieval_library, decision_library, tsfm = _components(args)
     engine = CoEvolutionEngine(
         llm,
-        _factory(args, llm, library, tsfm, isolate_library=True),
+        _factory(
+            args,
+            llm,
+            library,
+            retrieval_library,
+            decision_library,
+            tsfm,
+            isolate_library=True,
+        ),
         CoEvolutionConfig(
             generations=args.generations,
             children_per_generation=args.children,

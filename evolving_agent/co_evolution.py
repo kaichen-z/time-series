@@ -73,16 +73,22 @@ def evaluate_policy(
     policy: HarnessPolicy,
     tasks: Sequence[ContextTask],
     harness_factory: HarnessFactory,
+    *,
+    learn_skills: bool,
+    harness: EvolvingForecastHarness | None = None,
 ) -> PolicyEvaluation:
     """Run label-free inference first, then expose resolved labels only to scoring."""
     if not tasks:
         raise ValueError("policy evaluation needs at least one resolved task")
-    harness = harness_factory(policy)
+    harness = harness or harness_factory(policy)
     outcomes = []
     traces = []
     for task in tasks:
         inference = harness.run(task)
-        outcome = harness.score_after_resolution(task, inference)
+        if learn_skills:
+            outcome, _learning = harness.record_outcome(task, inference)
+        else:
+            outcome = harness.score_after_resolution(task, inference)
         outcomes.append(outcome)
         candidate_scores = {
             candidate.candidate_id: harness.score_after_resolution(
@@ -227,18 +233,46 @@ class CoEvolutionEngine:
         incumbent = seed
         history = []
         for generation in range(self.config.generations):
-            parent_train = evaluate_policy(incumbent, train_tasks, self.harness_factory)
-            parent_dev = evaluate_policy(incumbent, dev_tasks, self.harness_factory)
+            parent_harness = self.harness_factory(incumbent)
+            parent_train = evaluate_policy(
+                incumbent,
+                train_tasks,
+                self.harness_factory,
+                learn_skills=True,
+                harness=parent_harness,
+            )
+            parent_dev = evaluate_policy(
+                incumbent,
+                dev_tasks,
+                self.harness_factory,
+                learn_skills=False,
+                harness=parent_harness,
+            )
             children = [
                 self.mutate(incumbent, parent_train)
                 for _ in range(self.config.children_per_generation)
             ]
+            child_harnesses = {
+                child.version: self.harness_factory(child) for child in children
+            }
             train_evaluations = {
-                child.version: evaluate_policy(child, train_tasks, self.harness_factory)
+                child.version: evaluate_policy(
+                    child,
+                    train_tasks,
+                    self.harness_factory,
+                    learn_skills=True,
+                    harness=child_harnesses[child.version],
+                )
                 for child in children
             }
             train_best = max(children, key=lambda child: train_evaluations[child.version].system_reward)
-            child_dev = evaluate_policy(train_best, dev_tasks, self.harness_factory)
+            child_dev = evaluate_policy(
+                train_best,
+                dev_tasks,
+                self.harness_factory,
+                learn_skills=False,
+                harness=child_harnesses[train_best.version],
+            )
             accepted = (
                 train_best
                 if child_dev.system_reward > parent_dev.system_reward

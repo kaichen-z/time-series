@@ -9,8 +9,8 @@ forecasting harness.
 | Role | Allowed input | Forbidden input | Output |
 |---|---|---|---|
 | Coding Agent | Historical numbers, horizon, frequency, prior numeric skills, historical hindcast errors | Documents, retrieved evidence, GT evidence, future values | Falsifiable assumption, failure condition, executable Python program, hindcast score |
-| Retrieval Agent | Candidate assumptions, task identity/time window, corpus documents | Future values and GT evidence | Exact cited evidence and typed mechanism/impact |
-| Decision Agent | Executed forecasts, hindcast scores, verified evidence | Future values | Candidate ID and matching citations; it cannot invent values |
+| Retrieval Agent | Candidate assumptions, task identity/time window, corpus documents, validated retrieval-skill summaries | Future values and GT evidence | Exact cited evidence and typed mechanism/impact |
+| Decision Agent | Executed forecasts, hindcast scores, verified evidence, validated decision-skill summaries | Future values | Candidate ID and matching citations; it cannot invent values |
 | Harness Evolver | Aggregate resolved-task failures on the training split | Labels during task inference | One full prompt replacement for the weakest role |
 
 ## Runtime flow
@@ -42,9 +42,23 @@ After the true future becomes available, the system computes separate diagnostic
 - Decision: regret between the selected candidate and the best generated candidate.
 - Whole system: final forecast score plus retrieval quality.
 
+Successful public training trajectories may also produce two persistent, generalized libraries:
+
+- `retrieval_skills.json`: query and verification strategies learned only from retrieval runs that
+  pass the configured precision/recall/avoidance threshold.
+- `decision_skills.json`: candidate-selection rules learned only when Decision has negligible
+  regret relative to the best available executed candidate.
+
+These skills contain reusable applicability and failure conditions, not raw task answers. The host
+rejects generated skills containing task IDs, document IDs, entity names, or exact timestamps.
+Skills remain advice: Retrieval still needs exact quotes, and Decision still needs matching evidence
+citations. Hidden labels can neither score nor write skills.
+
 The weakest role is eligible for one prompt mutation. Children are ranked on training tasks and
-accepted only if the best child improves a disjoint, entity-level development split. This is
-prompt/skill/harness evolution, not neural weight training.
+accepted only if the best child improves a disjoint, entity-level development split. All three
+skill libraries are cloned per child. Training tasks may grow those isolated libraries sequentially;
+development tasks are strictly read-only and cannot generate skills. This is prompt/skill/harness
+evolution, not neural weight training.
 
 ## Coding Agent ablations
 
@@ -74,8 +88,27 @@ evolving-agent run \
   --tasks-file /path/to/Dr-CiK/data/tasks/train.jsonl \
   --setting statistics \
   --limit 30 \
+  --learn-from-public-outcomes \
   --results-path runs/evolving/statistics_30.jsonl
 ```
+
+By default, this writes:
+
+```text
+runs/evolving/skills.json
+runs/evolving/retrieval_skills.json
+runs/evolving/decision_skills.json
+```
+
+Use `--library-path`, `--retrieval-library-path`, and `--decision-library-path` to isolate
+experimental runs.
+
+`--learn-from-public-outcomes` is intentionally explicit. Without it, every task receives an
+isolated in-memory clone and `run` is read-only with respect to all three libraries, so an
+evaluation task cannot teach later evaluation tasks. Use the
+flag only on a chronological public training stream. The `evolve` command enables learning inside
+each isolated training evaluation. A child carries the skills learned on its training sequence into
+development evaluation, but development remains read-only and cannot add or update skills.
 
 Run the held-out co-evolution loop:
 

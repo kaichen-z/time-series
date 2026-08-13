@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import Any, Protocol
 
 from evolving_agent.coding_agent.evolution import CodingEvolutionAgent, CodingEvolutionResult
 from evolving_agent.data import ContextTask
@@ -33,16 +34,24 @@ class ResolvedOutcome:
     decision_selection_regret: float
 
 
+class OutcomeLearner(Protocol):
+    def learn(
+        self, task: ContextTask, result: HarnessResult, outcome: ResolvedOutcome
+    ) -> Any: ...
+
+
 class EvolvingForecastHarness:
     def __init__(
         self,
         coding: CodingEvolutionAgent,
         retrieval: RetrievalAgent,
         decision: DecisionAgent,
+        outcome_learner: OutcomeLearner | None = None,
     ) -> None:
         self.coding = coding
         self.retrieval = retrieval
         self.decision = decision
+        self.outcome_learner = outcome_learner
 
     def run(self, task: ContextTask) -> HarnessResult:
         # Enforce the information boundary structurally, not only by prompt:
@@ -136,6 +145,18 @@ class EvolvingForecastHarness:
             distractor_avoidance=avoidance,
             decision_selection_regret=selected_score - oracle,
         )
+
+    def record_outcome(
+        self, task: ContextTask, result: HarnessResult
+    ) -> tuple[ResolvedOutcome, Any | None]:
+        """Score a resolved public task, then optionally generate validated reusable skills."""
+        outcome = self.score_after_resolution(task, result)
+        learning = (
+            self.outcome_learner.learn(task, result, outcome)
+            if self.outcome_learner is not None
+            else None
+        )
+        return outcome, learning
 
 
 def _future_window(
