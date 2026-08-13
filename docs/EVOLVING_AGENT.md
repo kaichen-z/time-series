@@ -8,6 +8,20 @@ This directory is now the canonical implementation of the new experiment. It pre
 collaborator's Voyager-style `CodingSkillAgent` baseline and adds a controlled three-agent
 forecasting harness.
 
+## Unified CLI
+
+The same entrypoint selects either a fixed baseline or an evolution mechanism:
+
+```text
+python -m evolving_agent --baseline <name> [data and runtime options]
+python -m evolving_agent --evolution <prompt|genome|source> [data and runtime options]
+```
+
+Use `python -m evolving_agent --list-methods` for the complete machine-readable name list. A baseline
+is evaluated without modifying the harness; an evolution mode performs a train/entity-held-out-dev
+search and accepts a child only under its mode-specific validation gate. Output directories must be
+kept separate when comparing methods.
+
 ## What each agent sees
 
 | Role | Allowed input | Forbidden input | Output |

@@ -12,6 +12,17 @@ distinct method family once and preserves notable failure trajectories separatel
 
 Machine-readable catalogue: [`results/baseline_results_catalogue.json`](results/baseline_results_catalogue.json)
 
+All currently executable methods use one entrypoint:
+
+```bash
+python -m evolving_agent --list-methods
+python -m evolving_agent --baseline <name> [data options]
+python -m evolving_agent --evolution <prompt|genome|source> [data options]
+```
+
+The baseline names distinguish fixed methods and never trigger evolution. The evolution names run
+train/entity-held-out-dev search and apply their respective acceptance gate.
+
 ## 1. Metric and comparability rules
 
 - **MAE and RMSE:** lower is better. These are directly comparable only when the task set and

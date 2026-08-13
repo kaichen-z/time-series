@@ -14,7 +14,12 @@ from drcik_agent.impacts import EvidenceToForecastAgent
 from drcik_agent.metrics import crps_ensemble
 from drcik_agent.loop import IterativeAgentSystem, LoopConfig
 from drcik_agent.models import Document, ForecastTask, RetrievedDocument
-from drcik_agent.pipeline import MinimalAgentSystem, SystemConfig, write_outputs
+from drcik_agent.pipeline import (
+    MinimalAgentSystem,
+    NumericalBaselineSystem,
+    SystemConfig,
+    write_outputs,
+)
 
 
 def example_task() -> ForecastTask:
@@ -138,6 +143,17 @@ def future_impact_task() -> ForecastTask:
 
 
 class MinimalSystemTest(unittest.TestCase):
+    def test_numerical_baseline_never_retrieves_or_uses_documents(self) -> None:
+        result = NumericalBaselineSystem(
+            SystemConfig(backbone="statistical", num_samples=25)
+        ).run(example_task())
+
+        self.assertEqual(result.retrieved, [])
+        self.assertEqual(result.evidence, [])
+        self.assertEqual(result.forecast.context_points, {})
+        self.assertEqual(result.forecast.mean, result.forecast.baseline_mean)
+        self.assertNotIn("retrieval_precision", result.metrics)
+
     def test_context_point_extractor_reads_wide_markdown_forecast_tables(self) -> None:
         future = (
             "2024-01-03 00:00:00",

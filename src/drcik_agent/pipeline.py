@@ -99,6 +99,31 @@ class MinimalAgentSystem:
         return [self.run(task) for task in tasks]
 
 
+class NumericalBaselineSystem(MinimalAgentSystem):
+    """Numbers-only backbone baseline with no document retrieval or text revision."""
+
+    def run(self, task: ForecastTask) -> RunResult:
+        diagnosis = self.diagnosis_agent.diagnose(task)
+        task_seed = self.config.seed + sum(ord(character) for character in task.benchmark_id)
+        forecast = self.forecast_agent.forecast(
+            task=task,
+            diagnosis=diagnosis,
+            retrieved=[],
+            num_samples=self.config.num_samples,
+            seed=task_seed,
+            context_weight=0.0,
+        )
+        metrics = forecast_metrics(task, forecast)
+        return RunResult(
+            benchmark_id=task.benchmark_id,
+            diagnosis=diagnosis,
+            retrieved=[],
+            evidence=[],
+            forecast=forecast,
+            metrics=metrics or None,
+        )
+
+
 def write_outputs(results: list[RunResult], output_dir: str | Path) -> None:
     output = Path(output_dir).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
