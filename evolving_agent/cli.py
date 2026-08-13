@@ -14,7 +14,7 @@ from evolving_agent.data import ContextTask, DEFAULT_TASKS_FILE, load_context_ta
 from evolving_agent.decision_agent.agent import DecisionAgent
 from evolving_agent.decision_agent.skill_library import DecisionSkillLibrary
 from evolving_agent.harness import EvolvingForecastHarness
-from evolving_agent.llm import QwenClient
+from evolving_agent.llm import CodexCLIClient, CodexCLIConfig, QwenClient
 from evolving_agent.retrieval_agent.agent import RetrievalAgent
 from evolving_agent.retrieval_agent.skill_library import RetrievalSkillLibrary
 from evolving_agent.skill_learning import OutcomeSkillLearner
@@ -34,6 +34,19 @@ def build_parser() -> argparse.ArgumentParser:
         )
         child.add_argument("--model-id", default=None)
         child.add_argument("--device", default=None)
+        child.add_argument(
+            "--llm-backend",
+            choices=("codex", "qwen"),
+            default="codex",
+            help="LLM used by all three agents; defaults to this machine's Codex CLI.",
+        )
+        child.add_argument("--codex-model", default=None)
+        child.add_argument("--codex-reasoning-effort", default="high")
+        child.add_argument("--codex-timeout", type=int, default=900)
+        child.add_argument("--codex-cache-dir", default="runs/evolving/codex-cache")
+        child.add_argument("--coding-initial-programs", type=int, default=3)
+        child.add_argument("--coding-mutations", type=int, default=1)
+        child.add_argument("--coding-validation-folds", type=int, default=3)
         child.add_argument("--seed", type=int, default=7)
         child.add_argument("--limit", type=int, default=None)
         child.add_argument("--library-path", default="runs/evolving/skills.json")
@@ -85,12 +98,22 @@ def _entity_split(
 
 
 def _components(args):
-    kwargs = {}
-    if args.model_id:
-        kwargs["model_id"] = args.model_id
-    if args.device:
-        kwargs["device"] = args.device
-    llm = QwenClient(**kwargs)
+    if args.llm_backend == "codex":
+        llm = CodexCLIClient(
+            CodexCLIConfig(
+                model=args.codex_model,
+                reasoning_effort=args.codex_reasoning_effort,
+                timeout_seconds=args.codex_timeout,
+                cache_dir=args.codex_cache_dir,
+            )
+        )
+    else:
+        kwargs = {}
+        if args.model_id:
+            kwargs["model_id"] = args.model_id
+        if args.device:
+            kwargs["device"] = args.device
+        llm = QwenClient(**kwargs)
     library = SkillLibrary.load(args.library_path)
     retrieval_library = RetrievalSkillLibrary.load(args.retrieval_library_path)
     decision_library = DecisionSkillLibrary.load(args.decision_library_path)
@@ -128,7 +151,12 @@ def _factory(
         coding = CodingEvolutionAgent(
             llm,
             task_library,
-            CodingEvolutionConfig(setting=args.setting),
+            CodingEvolutionConfig(
+                setting=args.setting,
+                initial_programs=args.coding_initial_programs,
+                mutations=args.coding_mutations,
+                validation_folds=args.coding_validation_folds,
+            ),
             tsfm_forecaster=tsfm,
             generation_prompt=policy.coding_generation_prompt,
             revision_prompt=policy.coding_revision_prompt,

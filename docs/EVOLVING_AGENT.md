@@ -86,11 +86,29 @@ Run the complete harness:
 ```bash
 evolving-agent run \
   --tasks-file /path/to/Dr-CiK/data/tasks/train.jsonl \
+  --llm-backend codex \
+  --codex-model gpt-5.6-sol \
+  --codex-reasoning-effort high \
   --setting statistics \
   --limit 30 \
   --learn-from-public-outcomes \
   --results-path runs/evolving/statistics_30.jsonl
 ```
+
+`codex` is the default LLM backend. Each agent call uses the authenticated local Codex CLI in an
+ephemeral, read-only temporary workspace and receives only its role-specific prompt payload. Qwen
+is retained only as an explicit ablation via `--llm-backend qwen`; selecting Codex never imports or
+loads Qwen weights. A single Dr-CiK JSON task can be passed directly as `--tasks-file` in addition
+to the normal JSONL dataset.
+
+The first real Codex smoke test used `gpt-5.6-sol` with high reasoning on public `task_42`, three
+statistics-guided Coding candidates, no Coding mutation, and outcome skill learning. The full
+Coding → Retrieval → Decision → skill-learning path completed. Final sMAPE was 23.6486 and
+retrieval precision was 0.8333. The best available Coding trajectory would have achieved sMAPE
+5.2417, but Decision applied a `+5.2%` candidate supported by a confounding document, producing
+selection regret 18.4070. This is a useful failure trajectory: the Codex integration is operational,
+while temporal/source verification and conservative Decision gating remain the immediate accuracy
+bottleneck. It is one mechanism test, not an aggregate benchmark result.
 
 By default, this writes:
 

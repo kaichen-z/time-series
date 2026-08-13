@@ -148,16 +148,21 @@ def load_tasks(tasks_file: str | Path = DEFAULT_TASKS_FILE) -> list[Task]:
 
 
 def load_context_tasks(tasks_file: str | Path = DEFAULT_TASKS_FILE) -> list[ContextTask]:
-    """Load full tasks for the three-agent harness while preserving role projections."""
+    """Load full tasks from a Dr-CiK JSON object or JSONL file."""
     tasks: list[ContextTask] = []
-    with open(tasks_file, encoding="utf-8") as source:
-        for line in source:
-            line = line.strip()
-            if not line:
-                continue
-            record = json.loads(line)
-            if _is_labeled(record):
-                tasks.append(_to_context_task(record))
+    path = Path(tasks_file)
+    if path.suffix.lower() == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        records = payload if isinstance(payload, list) else [payload]
+    else:
+        records = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    for record in records:
+        if _is_labeled(record):
+            tasks.append(_to_context_task(record))
     return tasks
 
 
