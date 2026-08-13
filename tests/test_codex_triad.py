@@ -175,3 +175,31 @@ def test_ungrounded_codex_quote_is_rejected() -> None:
     assert result.retrieved == []
     assert result.evidence == []
     assert result.forecast.mean == result.forecast.baseline_mean
+def test_codex_decision_rejects_adjusted_candidate_without_matching_citation() -> None:
+    client = FakeTriadCodexClient()
+    original_complete = client.complete
+
+    def complete(stage, prompt, schema, workspace_files=None):
+        result = original_complete(stage, prompt, schema, workspace_files)
+        if stage.startswith("triad_decision"):
+            result["supporting_document_ids"] = []
+        return result
+
+    client.complete = complete
+    system = ThreeAgentForecastSystem(
+        TriadConfig(
+            backbone="statistical",
+            max_rounds=1,
+            documents_per_round=2,
+            num_samples=20,
+            reasoning_agent="codex",
+        ),
+        codex_client=client,
+    )
+    result = system.run(_task())
+
+    # The host's deterministic decision remains authoritative when Codex does
+    # not satisfy the stricter provenance contract.
+    assert result.loop_trace[-1]["decision"]["rationale"].startswith(
+        "Select the highest historically validated compatible hypothesis"
+    )
