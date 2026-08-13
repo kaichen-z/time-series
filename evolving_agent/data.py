@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 DEFAULT_TASKS_FILE = Path(
@@ -46,6 +46,10 @@ class ContextTask:
     documents: tuple[Document, ...]
     gt_evidence: tuple[str, ...] = ()
     labels_public: bool = True
+
+    def numeric_view(self) -> Task:
+        """Return the numbers-only inference view, with resolved future labels removed."""
+        return replace(self.numeric, future_values=())
 
     def retrieval_view(self) -> dict:
         """Return the label-free view that may be shown to the Retrieval Agent."""

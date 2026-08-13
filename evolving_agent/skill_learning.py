@@ -8,7 +8,8 @@ from dataclasses import asdict, dataclass
 
 from evolving_agent.data import ContextTask
 from evolving_agent.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
-from evolving_agent.harness import HarnessResult, ResolvedOutcome
+from evolving_agent.evaluation import ResolvedOutcome
+from evolving_agent.harness import HarnessResult
 from evolving_agent.llm import JsonExtractionError, LLMClient, parse_json_object
 from evolving_agent.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
 
