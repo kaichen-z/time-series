@@ -117,3 +117,53 @@ def test_accepted_genome_round_trips_for_later_evolution() -> None:
         policy.save(path)
         restored = HarnessPolicy.load(path)
     assert restored == policy
+
+
+def test_mutation_transport_failure_becomes_rejected_candidate() -> None:
+    class BrokenClient:
+        def complete(self, **_kwargs):
+            raise RuntimeError("temporary model failure")
+
+    evaluation = PolicyEvaluation(
+        version="v000",
+        system_reward=0.2,
+        module_rewards={"coding": 0.1, "retrieval": 0.2, "decision": 0.3},
+        outcomes=(),
+    )
+    child = CoEvolutionEngine(BrokenClient(), lambda _policy: None).mutate(
+        HarnessPolicy(), evaluation
+    )
+    assert child.version == "v001"
+    assert child.parent == "v000"
+    assert "Mutation call failed" in child.changelog
+
+
+def test_checkpoint_round_trip_resumes_next_generation() -> None:
+    from evolving_agent.co_evolution import CoEvolutionConfig, EvolutionStep
+
+    with tempfile.TemporaryDirectory() as directory:
+        checkpoint = Path(directory) / "checkpoint.json"
+        config = CoEvolutionConfig(
+            mode="prompt", checkpoint_path=checkpoint, progress_path=Path(directory) / "progress.jsonl"
+        )
+        engine = CoEvolutionEngine(FakeLLMClient([]), lambda _policy: None, config)
+        policy = HarnessPolicy(version="v004", parent="v003")
+        step = EvolutionStep(
+            mode="prompt",
+            generation=0,
+            parent_version="v000",
+            child_versions=("v004",),
+            target_agent="coding",
+            parent_train_reward=0.1,
+            child_train_rewards={"v004": 0.2},
+            parent_dev_reward=0.1,
+            best_child_dev_reward=0.2,
+            accepted_version="v004",
+        )
+        engine._save_checkpoint(policy, [step], 1)
+        restored, history, start = engine._load_checkpoint(HarnessPolicy())
+
+    assert restored == policy
+    assert history == [step]
+    assert start == 1
+    assert engine._version == 5

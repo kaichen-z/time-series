@@ -135,3 +135,24 @@ def test_source_engine_audits_an_external_seed_patch_before_evaluation() -> None
             assert "seed patch failed audit: protected_paths_changed" in str(exc)
         else:
             raise AssertionError("protected seed patch should have been rejected")
+
+
+def test_source_checkpoint_round_trip() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        checkpoint = Path(directory) / "checkpoint.json"
+        progress = Path(directory) / "progress.jsonl"
+        engine = SourceEvolutionEngine(
+            directory,
+            lambda _worktree: None,
+            SourceEvolutionConfig(checkpoint_path=checkpoint, progress_path=progress),
+        )
+        evaluation = SourceEvaluation(0.4, 0.5, {"coding": 0.4}, {"coding": 0.5}, ())
+        engine._save_checkpoint("patch-data", evaluation, [], 2)
+        restored = engine._load_checkpoint()
+
+    assert restored is not None
+    patch, restored_evaluation, trace, start = restored
+    assert patch == "patch-data"
+    assert restored_evaluation == evaluation
+    assert trace == []
+    assert start == 2

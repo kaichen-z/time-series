@@ -154,6 +154,13 @@ def _add_unified_evolution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--source-engineer-timeout", type=int, default=1800)
     parser.add_argument("--source-test-timeout", type=int, default=300)
     parser.add_argument("--source-eval-timeout", type=int, default=7200)
+    parser.add_argument("--checkpoint-path", default=None)
+    parser.add_argument("--progress-path", default=None)
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Ignore an existing evolution checkpoint and start from the seed artifact.",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -269,6 +276,9 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--source-engineer-timeout", type=int, default=1800)
     evolve.add_argument("--source-test-timeout", type=int, default=300)
     evolve.add_argument("--source-eval-timeout", type=int, default=7200)
+    evolve.add_argument("--checkpoint-path", default=None)
+    evolve.add_argument("--progress-path", default=None)
+    evolve.add_argument("--no-resume", action="store_true")
     # Root-mode invocations have no subcommand, while legacy calls require one.
     subparsers.required = False
     return parser
@@ -716,8 +726,17 @@ def evolve_command(args) -> dict:
         dev=dev,
         holdout=holdout,
     )
+    trace_path = Path(args.trace_path)
+    checkpoint_path = Path(args.checkpoint_path) if args.checkpoint_path else trace_path.with_name("checkpoint.json")
+    progress_path = Path(args.progress_path) if args.progress_path else trace_path.with_name("progress.jsonl")
     if args.evolution_mode == "source":
-        result = _source_evolve_command(args, train, dev)
+        result = _source_evolve_command(
+            args,
+            train,
+            dev,
+            checkpoint_path=checkpoint_path,
+            progress_path=progress_path,
+        )
         return {
             **result,
             "holdout_tasks": len(holdout),
@@ -740,12 +759,14 @@ def evolve_command(args) -> dict:
             generations=args.generations,
             children_per_generation=args.children,
             mode=args.evolution_mode,
+            checkpoint_path=checkpoint_path,
+            progress_path=progress_path,
+            resume=not args.no_resume,
         ),
     )
     seed_policy = _seed_policy(args)
     best, trace = engine.evolve(seed_policy, train, dev)
     best.save(args.policy_path)
-    trace_path = Path(args.trace_path)
     trace_path.parent.mkdir(parents=True, exist_ok=True)
     trace_path.write_text(json.dumps([asdict(item) for item in trace], indent=2))
     return {
@@ -753,6 +774,8 @@ def evolve_command(args) -> dict:
         "evolution_mode": args.evolution_mode,
         "policy_path": args.policy_path,
         "trace_path": str(trace_path),
+        "checkpoint_path": str(checkpoint_path),
+        "progress_path": str(progress_path),
         "train_tasks": len(train),
         "dev_tasks": len(dev),
         "holdout_tasks": len(holdout),
@@ -881,6 +904,9 @@ def _source_evolve_command(
     args,
     train: list[ContextTask],
     dev: list[ContextTask],
+    *,
+    checkpoint_path: Path,
+    progress_path: Path,
 ) -> dict:
     """Run source candidates in detached worktrees; keep the current checkout immutable."""
     repo_root = Path.cwd().resolve()
@@ -965,6 +991,9 @@ def _source_evolve_command(
             reasoning_effort=args.codex_reasoning_effort,
             codex_timeout_seconds=args.source_engineer_timeout,
             test_timeout_seconds=args.source_test_timeout,
+            checkpoint_path=checkpoint_path,
+            progress_path=progress_path,
+            resume=not args.no_resume,
         ),
     )
     seed_patch = ""
@@ -982,6 +1011,8 @@ def _source_evolve_command(
         "evolution_mode": "source",
         "source_patch_path": str(patch_path),
         "trace_path": args.trace_path,
+        "checkpoint_path": str(checkpoint_path),
+        "progress_path": str(progress_path),
         "train_tasks": len(train),
         "dev_tasks": len(dev),
         "accepted_generations": sum(item.accepted_candidate is not None for item in trace),

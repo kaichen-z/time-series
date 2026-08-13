@@ -758,6 +758,13 @@ The main controls are `EA_CODEX_MODEL`, `EA_REASONING_EFFORT`, `EA_GENERATIONS`,
 `EA_SEED`, `EA_DEV_FRACTION`, `EA_HOLDOUT_FRACTION`, `EA_LIMIT`, and `EA_RUNS_DIR`. Source mode
 requires a clean tracked worktree. Run artifacts remain untracked.
 
+The wrapper's formal-pilot default is **2 generations × 3 children**. Every mode writes
+`checkpoint.json` and append-only `progress.jsonl` beside its final trace. Re-running the same
+command resumes from the last completed generation and reuses validated Codex call caches. Use
+`--no-resume` only when intentionally starting a new lineage. Malformed model JSON is parsed
+leniently and then sent through at most two syntax-only repair calls; an unrepaired response or a
+failed child is rejected without terminating the other candidates.
+
 ### 9.2 `--evolution prompt`
 
 The weakest training module is identified, and exactly one complete prompt belonging to that role

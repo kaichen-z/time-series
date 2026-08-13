@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import statistics
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal, Sequence
 
@@ -119,6 +120,9 @@ class CoEvolutionConfig:
     children_per_generation: int = 2
     max_workflow_stages: int = 8
     mode: EvolutionMode = "genome"
+    checkpoint_path: str | Path | None = None
+    progress_path: str | Path | None = None
+    resume: bool = True
 
 
 HarnessFactory = Callable[[HarnessPolicy], EvolvingForecastHarness]
@@ -131,6 +135,7 @@ def evaluate_policy(
     *,
     learn_skills: bool,
     harness: EvolvingForecastHarness | None = None,
+    progress: Callable[[str, dict], None] | None = None,
 ) -> PolicyEvaluation:
     """Run label-free inference first, then expose resolved labels only to scoring."""
     if not tasks:
@@ -139,6 +144,8 @@ def evaluate_policy(
     outcomes = []
     traces = []
     for task in tasks:
+        if progress:
+            progress("task_started", {"task_id": task.numeric.task_id})
         # This firewall lives outside all source-mutable agent/orchestration files.
         # A source-evolved child receives no labels even if it rewrites harness.py.
         inference_task = replace(
@@ -197,6 +204,11 @@ def evaluate_policy(
                 "retrieval_rejections": list(inference.retrieval.rejected),
             }
         )
+        if progress:
+            progress(
+                "task_completed",
+                {"task_id": task.numeric.task_id, "final_smape": outcome.final_smape},
+            )
     coding = statistics.fmean(1.0 - min(item.coding_coverage_regret, 200.0) / 200.0 for item in outcomes)
     retrieval = statistics.fmean(
         statistics.fmean(
@@ -253,17 +265,25 @@ class CoEvolutionEngine:
                 "Redesign any mutually dependent genome fields needed to improve the whole system."
             ),
         }
-        response = self.llm.complete(
-            system=(
-                PROMPT_ONLY_EVOLVER_PROMPT
-                if self.config.mode == "prompt"
-                else META_HARNESS_PROMPT
-            ),
-            messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
-            temperature=0.4,
-        )
         version = f"v{self._version:03d}"
         self._version += 1
+        try:
+            response = self.llm.complete(
+                system=(
+                    PROMPT_ONLY_EVOLVER_PROMPT
+                    if self.config.mode == "prompt"
+                    else META_HARNESS_PROMPT
+                ),
+                messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+                temperature=0.4,
+            )
+        except Exception as exc:
+            return replace(
+                parent,
+                version=version,
+                parent=parent.version,
+                changelog=f"Mutation call failed; unchanged: {type(exc).__name__}: {exc}"[:500],
+            )
         try:
             proposal = parse_json_object(response.text)
         except JsonExtractionError:
@@ -381,52 +401,86 @@ class CoEvolutionEngine:
     ) -> tuple[HarnessPolicy, tuple[EvolutionStep, ...]]:
         if not dev_tasks:
             raise ValueError("a held-out dev split is required to accept harness mutations")
-        incumbent = seed
-        history = []
-        for generation in range(self.config.generations):
+        incumbent, history, start_generation = self._load_checkpoint(seed)
+        for generation in range(start_generation, self.config.generations):
+            self._progress("generation_started", generation=generation, parent=incumbent.version)
             parent_harness = self.harness_factory(incumbent)
-            parent_train = evaluate_policy(
+            parent_train = self._evaluate(
                 incumbent,
                 train_tasks,
-                self.harness_factory,
+                stage="parent_train",
+                generation=generation,
                 learn_skills=True,
                 harness=parent_harness,
             )
-            parent_dev = evaluate_policy(
+            parent_dev = self._evaluate(
                 incumbent,
                 dev_tasks,
-                self.harness_factory,
+                stage="parent_dev",
+                generation=generation,
                 learn_skills=False,
                 harness=parent_harness,
             )
-            children = [
-                self.mutate(incumbent, parent_train)
-                for _ in range(self.config.children_per_generation)
-            ]
-            child_harnesses = {
-                child.version: self.harness_factory(child) for child in children
-            }
-            train_evaluations = {
-                child.version: evaluate_policy(
-                    child,
-                    train_tasks,
-                    self.harness_factory,
-                    learn_skills=True,
-                    harness=child_harnesses[child.version],
-                )
-                for child in children
-            }
-            train_best = max(children, key=lambda child: train_evaluations[child.version].system_reward)
-            child_dev = evaluate_policy(
-                train_best,
-                dev_tasks,
-                self.harness_factory,
-                learn_skills=False,
-                harness=child_harnesses[train_best.version],
+            children: list[HarnessPolicy] = []
+            child_harnesses: dict[str, EvolvingForecastHarness] = {}
+            train_evaluations: dict[str, PolicyEvaluation] = {}
+            for child_index in range(self.config.children_per_generation):
+                self._progress("candidate_started", generation=generation, child=child_index)
+                child = self.mutate(incumbent, parent_train)
+                children.append(child)
+                try:
+                    child_harness = self.harness_factory(child)
+                    child_harnesses[child.version] = child_harness
+                    train_evaluations[child.version] = self._evaluate(
+                        child,
+                        train_tasks,
+                        stage="child_train",
+                        generation=generation,
+                        learn_skills=True,
+                        harness=child_harness,
+                    )
+                    self._progress(
+                        "candidate_completed",
+                        generation=generation,
+                        child=child.version,
+                        train_reward=train_evaluations[child.version].system_reward,
+                    )
+                except Exception as exc:
+                    self._progress(
+                        "candidate_failed",
+                        generation=generation,
+                        child=child.version,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+            valid_children = [child for child in children if child.version in train_evaluations]
+            train_best = (
+                max(valid_children, key=lambda item: train_evaluations[item.version].system_reward)
+                if valid_children
+                else None
             )
+            child_dev = None
+            if train_best is not None:
+                try:
+                    child_dev = self._evaluate(
+                        train_best,
+                        dev_tasks,
+                        stage="child_dev",
+                        generation=generation,
+                        learn_skills=False,
+                        harness=child_harnesses[train_best.version],
+                    )
+                except Exception as exc:
+                    self._progress(
+                        "candidate_dev_failed",
+                        generation=generation,
+                        child=train_best.version,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
             accepted = (
                 train_best
-                if child_dev.system_reward > parent_dev.system_reward
+                if train_best is not None
+                and child_dev is not None
+                and child_dev.system_reward > parent_dev.system_reward
                 else incumbent
             )
             history.append(
@@ -441,10 +495,135 @@ class CoEvolutionEngine:
                         version: item.system_reward for version, item in train_evaluations.items()
                     },
                     parent_dev_reward=parent_dev.system_reward,
-                    best_child_dev_reward=child_dev.system_reward,
+                    best_child_dev_reward=(child_dev.system_reward if child_dev else None),
                     accepted_version=accepted.version,
                     child_changelogs={child.version: child.changelog for child in children},
                 )
             )
             incumbent = accepted
+            self._save_checkpoint(incumbent, history, generation + 1)
+            self._progress(
+                "generation_completed",
+                generation=generation,
+                accepted=incumbent.version,
+                parent_dev_reward=parent_dev.system_reward,
+                child_dev_reward=(child_dev.system_reward if child_dev else None),
+            )
         return incumbent, tuple(history)
+
+    def _evaluate(
+        self,
+        policy: HarnessPolicy,
+        tasks: Sequence[ContextTask],
+        *,
+        stage: str,
+        generation: int,
+        learn_skills: bool,
+        harness: EvolvingForecastHarness,
+    ) -> PolicyEvaluation:
+        self._progress(
+            "evaluation_started",
+            generation=generation,
+            stage=stage,
+            policy=policy.version,
+            task_count=len(tasks),
+        )
+
+        def task_progress(event: str, payload: dict) -> None:
+            self._progress(
+                event,
+                generation=generation,
+                stage=stage,
+                policy=policy.version,
+                **payload,
+            )
+
+        result = evaluate_policy(
+            policy,
+            tasks,
+            self.harness_factory,
+            learn_skills=learn_skills,
+            harness=harness,
+            progress=task_progress,
+        )
+        self._progress(
+            "evaluation_completed",
+            generation=generation,
+            stage=stage,
+            policy=policy.version,
+            reward=result.system_reward,
+        )
+        return result
+
+    def _progress(self, event: str, **payload) -> None:
+        if self.config.progress_path is None:
+            return
+        destination = Path(self.config.progress_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "time": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            **payload,
+        }
+        with destination.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+
+    def _save_checkpoint(
+        self,
+        incumbent: HarnessPolicy,
+        history: list[EvolutionStep],
+        next_generation: int,
+    ) -> None:
+        if self.config.checkpoint_path is None:
+            return
+        destination = Path(self.config.checkpoint_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_suffix(destination.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "mode": self.config.mode,
+                    "next_generation": next_generation,
+                    "incumbent": asdict(incumbent),
+                    "history": [asdict(item) for item in history],
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        temporary.replace(destination)
+
+    def _load_checkpoint(
+        self, seed: HarnessPolicy
+    ) -> tuple[HarnessPolicy, list[EvolutionStep], int]:
+        if (
+            not self.config.resume
+            or self.config.checkpoint_path is None
+            or not Path(self.config.checkpoint_path).exists()
+        ):
+            return seed, [], 0
+        payload = json.loads(Path(self.config.checkpoint_path).read_text(encoding="utf-8"))
+        if payload.get("mode") != self.config.mode:
+            raise ValueError("checkpoint evolution mode does not match this run")
+        incumbent_payload = dict(payload["incumbent"])
+        incumbent_payload["workflow"] = tuple(incumbent_payload["workflow"])
+        incumbent = HarnessPolicy(**incumbent_payload)
+        history = []
+        for raw in payload.get("history", []):
+            item = dict(raw)
+            item["child_versions"] = tuple(item["child_versions"])
+            history.append(EvolutionStep(**item))
+        versions = [incumbent.version]
+        for item in history:
+            versions.extend(item.child_versions)
+        numeric_versions = [
+            int(value[1:])
+            for value in versions
+            if value.startswith("v") and value[1:].isdigit()
+        ]
+        self._version = max(numeric_versions, default=0) + 1
+        start = int(payload.get("next_generation", len(history)))
+        self._progress("checkpoint_resumed", next_generation=start, incumbent=incumbent.version)
+        return incumbent, history, start
