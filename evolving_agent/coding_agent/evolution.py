@@ -31,11 +31,15 @@ STATISTICAL_SKILL_DICTIONARY = """Available statistical ideas (choose only when 
 Every method is a hypothesis, not a guaranteed rule. State how historical holdouts could falsify it.
 """
 
-GENERATION_PROMPT = """You are the numbers-only Coding Agent in a time-series harness.
+GENERATION_PROMPT = """You are the open-ended numbers-only Coding Meta-Agent in a time-series harness.
 You may see historical numbers, horizon, frequency, and optionally a reusable skill summary.
 You must not request or infer documents, retrieved evidence, ground-truth evidence, or future values.
 
-Generate diverse, deterministic Python forecasting programs. Every program must define exactly:
+Design any numerical forecasting framework that can be expressed inside the executable contract:
+single models, adaptive model selection, decomposition, change-point logic, ensembles, internal
+validation, or a newly invented method are all allowed. Do not assume the supplied method dictionary
+is exhaustive. Generate multiple structurally diverse, falsifiable implementations. Every program
+must define exactly:
     def forecast(history: list[float], horizon: int, frequency: str) -> list[float]
 It must return exactly horizon finite numbers. Allowed imports are numpy, math, statistics,
 itertools, functools, and collections. Do not access files/network, use randomness, eval/exec,
@@ -48,9 +52,12 @@ Return exactly one JSON object:
 "code": "def forecast(...): ..."}]}
 """
 
-REVISION_PROMPT = """You are revising one failed numbers-only forecasting skill.
-The parent program was evaluated on rolling historical holdouts. Use the fold scores and errors
-to make one targeted, general correction. Do not use future labels or textual context. Preserve
+REVISION_PROMPT = """You are the inner Coding Harness Engineer.
+The parent numerical framework was evaluated on rolling historical holdouts. You may rewrite the
+entire algorithm, create a different internal model-selection or ensemble framework, or generate
+multiple competing descendants. Use only the fold scores, execution errors, and historical numbers;
+do not use future labels or textual context. Each descendant must state a falsifiable assumption and
+why it addresses the observed failure. Preserve
 the required forecast(history, horizon, frequency) signature and return exactly one JSON object:
 {"programs": [{"name": "short_snake_case", "description": "when to use it",
 "assumption": "falsifiable numeric assumption", "failure_condition": "when it fails",
@@ -94,6 +101,7 @@ class CodingEvolutionConfig:
     setting: CodingSetting = "statistics"
     initial_programs: int = 3
     mutations: int = 1
+    mutation_children: int = 1
     validation_folds: int = 3
     validation_horizon: int = 8
     minimum_validation_history: int = 16
@@ -240,7 +248,7 @@ class CodingEvolutionAgent:
             self.revision_prompt,
             json.dumps(payload, ensure_ascii=False),
             generation=generation,
-            limit=1,
+            limit=self.config.mutation_children,
         )
         return [replace(program, source="mutation") for program in programs]
 

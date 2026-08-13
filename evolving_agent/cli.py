@@ -13,7 +13,7 @@ from evolving_agent.coding_agent.skill_library import SkillLibrary
 from evolving_agent.data import ContextTask, DEFAULT_TASKS_FILE, load_context_tasks
 from evolving_agent.decision_agent.agent import DecisionAgent
 from evolving_agent.decision_agent.skill_library import DecisionSkillLibrary
-from evolving_agent.harness import EvolvingForecastHarness
+from evolving_agent.harness import EvolvingForecastHarness, HarnessRuntimeConfig
 from evolving_agent.llm import CodexCLIClient, CodexCLIConfig, QwenClient
 from evolving_agent.retrieval_agent.agent import RetrievalAgent
 from evolving_agent.retrieval_agent.skill_library import RetrievalSkillLibrary
@@ -47,6 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
         child.add_argument("--coding-initial-programs", type=int, default=3)
         child.add_argument("--coding-mutations", type=int, default=1)
         child.add_argument("--coding-validation-folds", type=int, default=3)
+        child.add_argument(
+            "--seed-policy-path",
+            default=None,
+            help="Load a previously accepted Harness Genome and continue from it.",
+        )
         child.add_argument("--seed", type=int, default=7)
         child.add_argument("--limit", type=int, default=None)
         child.add_argument("--library-path", default="runs/evolving/skills.json")
@@ -130,6 +135,19 @@ def _components(args):
     return llm, library, retrieval_library, decision_library, tsfm
 
 
+def _seed_policy(args) -> HarnessPolicy:
+    if args.seed_policy_path:
+        path = Path(args.seed_policy_path)
+        if not path.exists():
+            raise FileNotFoundError(f"seed Harness Genome does not exist: {path}")
+        return HarnessPolicy.load(path)
+    return HarnessPolicy(
+        coding_initial_programs=args.coding_initial_programs,
+        coding_mutations=args.coding_mutations,
+        coding_validation_folds=args.coding_validation_folds,
+    )
+
+
 def _factory(
     args,
     llm,
@@ -153,9 +171,11 @@ def _factory(
             task_library,
             CodingEvolutionConfig(
                 setting=args.setting,
-                initial_programs=args.coding_initial_programs,
-                mutations=args.coding_mutations,
-                validation_folds=args.coding_validation_folds,
+                initial_programs=policy.coding_initial_programs,
+                mutations=policy.coding_mutations,
+                mutation_children=policy.coding_mutation_children,
+                validation_folds=policy.coding_validation_folds,
+                validation_horizon=policy.coding_validation_horizon,
             ),
             tsfm_forecaster=tsfm,
             generation_prompt=policy.coding_generation_prompt,
@@ -178,6 +198,12 @@ def _factory(
                 task_retrieval_library,
                 task_decision_library,
             ),
+            HarnessRuntimeConfig(
+                workflow=policy.workflow,
+                enable_evidence_adjustments=policy.enable_evidence_adjustments,
+                max_evidence_adjustments=policy.max_evidence_adjustments,
+                decision_aggregation=policy.decision_aggregation,
+            ),
         )
     return build
 
@@ -194,13 +220,14 @@ def run_command(args) -> dict:
         tsfm,
         isolate_library=not args.learn_from_public_outcomes,
     )
-    harness = factory(HarnessPolicy()) if args.learn_from_public_outcomes else None
+    seed_policy = _seed_policy(args)
+    harness = factory(seed_policy) if args.learn_from_public_outcomes else None
     destination = Path(args.results_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     outcomes = []
     with destination.open("w", encoding="utf-8") as output:
         for task in tasks:
-            task_harness = harness or factory(HarnessPolicy())
+            task_harness = harness or factory(seed_policy)
             result = task_harness.run(task)
             if args.learn_from_public_outcomes:
                 outcome, learning = task_harness.record_outcome(task, result)
@@ -265,7 +292,8 @@ def evolve_command(args) -> dict:
             children_per_generation=args.children,
         ),
     )
-    best, trace = engine.evolve(HarnessPolicy(), train, dev)
+    seed_policy = _seed_policy(args)
+    best, trace = engine.evolve(seed_policy, train, dev)
     best.save(args.policy_path)
     trace_path = Path(args.trace_path)
     trace_path.parent.mkdir(parents=True, exist_ok=True)

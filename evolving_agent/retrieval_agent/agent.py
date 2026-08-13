@@ -87,7 +87,12 @@ class RetrievalAgent:
         self.prompt = prompt
 
     def run(
-        self, task: ContextTask, candidates: tuple[ValidatedProgram, ...]
+        self,
+        task: ContextTask,
+        candidates: tuple[ValidatedProgram, ...],
+        *,
+        prior: RetrievalResult | None = None,
+        round_index: int = 0,
     ) -> RetrievalResult:
         assumptions = [
             {
@@ -99,6 +104,15 @@ class RetrievalAgent:
             for candidate in candidates
         ]
         payload = task.retrieval_view()
+        payload["retrieval_round"] = round_index + 1
+        if prior is not None:
+            payload["prior_retrieval"] = {
+                "selected_document_ids": list(prior.selected_document_ids),
+                "claims": [item.claim for item in prior.evidence],
+                "missing_information": list(prior.missing_information),
+                "rejections": list(prior.rejected),
+                "instruction": "Fill unresolved gaps, seek counterevidence, and avoid duplicating prior claims.",
+            }
         payload["coding_hypotheses"] = assumptions
         payload["validated_retrieval_skills"] = (
             self.library.list_for_prompt()
