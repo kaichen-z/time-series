@@ -78,8 +78,7 @@ evolving_agent/scripts/run_llm_only_evolutions.sh \
   external/Dr-CiK/full-download/Dr-CiK_public/tasks all
 ```
 
-This compatibility path delegates to the maintained `scripts/run_llm_only_evolutions.sh`. The
-script gives `prompt`, `genome`, and `source` the same model, seed, entity split, generations,
+The script gives `prompt`, `genome`, and `source` the same model, seed, entity split, generations,
 children, and timeouts while keeping every artifact in a separate subdirectory under
 `runs/llm_only_evolution/`. Use `EA_DRY_RUN=1` to print the three commands without executing them.
 

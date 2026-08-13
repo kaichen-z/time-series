@@ -746,9 +746,6 @@ evolving_agent/scripts/run_llm_only_evolutions.sh \
   external/Dr-CiK/full-download/Dr-CiK_public/tasks all
 ```
 
-The requested `evolving_agent/scripts/` entrypoint delegates to the maintained implementation at
-`scripts/run_llm_only_evolutions.sh`, matching the repository's current script layout.
-
 Run only one condition by replacing `all` with `prompt`, `genome`, or `source`. Common overrides are
 environment variables, for example:
 
