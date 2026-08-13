@@ -71,6 +71,22 @@ python -m evolving_agent \
   --children 2
 ```
 
+Evolution now reserves entity-disjoint Train, Dev, and Public Holdout partitions and writes a split
+manifest. After freezing the artifact, run label-free Hidden Test inference separately:
+
+```bash
+python -m evolving_agent \
+  --inference genome \
+  --hidden-test \
+  --policy-path runs/evolving/best_policy.json \
+  --setting llm_only \
+  --output-dir outputs/evolving-hidden
+```
+
+Use `--inference prompt` for a prompt policy or `--inference source
+--source-patch-path runs/evolving/best_source.patch` for an accepted source patch. Hidden inference
+writes submission-format files and never scores, learns skills, or evolves the harness.
+
 Baseline names are `skill-fresh`, `skill-library`, `chronos`, `timesfm`, `statistical`, `one-pass`, `iterative`,
 `iterative-unsafe`, `oracle-context`, `rules-triad`, `codex-triad`, `codex-direct`,
 `codex-contract`, and `evolving-harness`. Evolution names are `prompt`, `genome`, and `source`.
