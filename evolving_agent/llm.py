@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -175,6 +176,125 @@ class CodexCLIClient:
             "Return only the exact JSON object requested by the role instructions.\n\n"
             f"[SYSTEM / ROLE INSTRUCTIONS]\n{system}\n\n{conversation}"
         )
+
+# Claude Code, use the subscriiption and not API as to not to pay
+@dataclass(frozen=True)
+class ClaudeCLIConfig:
+    """Configuration for one isolated, non-interactive Claude Code call."""
+
+    binary: str = "claude"
+    model: str | None = None
+    timeout_seconds: int = 900
+    cache_dir: str | Path | None = "runs/evolving/claude-cache"
+
+
+class ClaudeCLIClient:
+    """Use this machine's authenticated Claude Code CLI (subscription login) as an ``LLMClient``.
+
+    Never sets ``--permission-mode plan``: that mode forces Claude Code's own built-in
+    planning persona on top of any custom ``--system-prompt``, which was verified to make
+    the model treat the supplied role instructions as untrusted injected text rather than
+    real system configuration. ``--allowedTools ""`` alone is the safety boundary instead --
+    zero tools registered means zero possible side effects, regardless of permission mode.
+    """
+
+    def __init__(self, config: ClaudeCLIConfig | None = None) -> None:
+        self.config = config or ClaudeCLIConfig()
+        self.calls = 0
+        self.cache_hits = 0
+
+    def complete(self, *, system: str, messages: list[dict], temperature: float = 0.0) -> LLMResponse:
+        del temperature  # Claude Code CLI print mode does not expose sampling temperature.
+        prompt = self._prompt(messages)
+        cache_key = self._cache_key(system, prompt)
+        cache_path = self._cache_path(cache_key)
+        if cache_path is not None and cache_path.exists():
+            self.cache_hits += 1
+            return LLMResponse(text=cache_path.read_text(encoding="utf-8"))
+
+        with tempfile.TemporaryDirectory(prefix="evolving-agent-claude-") as directory:
+            workdir = Path(directory)
+            command = [
+                self.config.binary,
+                "-p",
+                "--output-format",
+                "json",
+                "--system-prompt",
+                system,
+                "--allowedTools",
+                "",
+                "--setting-sources",
+                "",
+            ]
+            if self.config.model:
+                command.extend(["--model", self.config.model])
+            try:
+                completed = subprocess.run(
+                    command,
+                    input=prompt,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.config.timeout_seconds,
+                    check=False,
+                    cwd=workdir,
+                    env=self._subprocess_env(),
+                )
+            except FileNotFoundError as exc:
+                raise RuntimeError(f"Claude Code CLI was not found: {self.config.binary}") from exc
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    f"Claude Code CLI timed out after {self.config.timeout_seconds} seconds"
+                ) from exc
+            self.calls += 1
+            if completed.returncode != 0:
+                details = (completed.stderr or completed.stdout).strip()[-2000:]
+                raise RuntimeError(
+                    f"Claude Code CLI failed with exit code {completed.returncode}: {details}"
+                )
+            try:
+                envelope = json.loads(completed.stdout)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Claude Code CLI produced non-JSON output: {exc}") from exc
+            if envelope.get("is_error"):
+                raise RuntimeError(f"Claude Code CLI reported an error result: {envelope}")
+            text = str(envelope.get("result", "")).strip()
+
+        # Every evolving-agent prompt has a JSON contract. Fail immediately instead
+        # of silently feeding prose or an error message to a downstream agent.
+        parse_json_object(text)
+        if cache_path is not None:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(text, encoding="utf-8")
+        return LLMResponse(text=text)
+
+    def _cache_key(self, system: str, prompt: str) -> str:
+        identity = json.dumps(
+            {"model": self.config.model, "system": system, "prompt": prompt},
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+    def _cache_path(self, digest: str) -> Path | None:
+        if self.config.cache_dir is None:
+            return None
+        return Path(self.config.cache_dir) / f"{digest}.json"
+
+    @staticmethod
+    def _prompt(messages: list[dict]) -> str:
+        return "\n\n".join(
+            f"[{str(message.get('role', 'user')).upper()}]\n{message.get('content', '')}"
+            for message in messages
+        )
+
+    @staticmethod
+    def _subprocess_env() -> dict[str, str]:
+        # Strip every CLAUDE*-prefixed variable: when this process is itself run inside a
+        # Claude Code session, those leak into the child and make it behave as a "child
+        # session" (inheriting the parent's mode/state) instead of a clean, isolated call --
+        # verified directly: the same call produced a suspicious-injection refusal with them
+        # present, and a clean JSON answer with them stripped.
+        return {key: value for key, value in os.environ.items() if not key.startswith("CLAUDE")}
 
 
 def pick_free_gpu() -> str:
