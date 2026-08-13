@@ -11,7 +11,7 @@ forecasting harness.
 | Coding Agent | Historical numbers, horizon, frequency, prior numeric skills, historical hindcast errors | Documents, retrieved evidence, GT evidence, future values | Falsifiable assumption, failure condition, executable Python program, hindcast score |
 | Retrieval Agent | Candidate assumptions, task identity/time window, corpus documents, validated retrieval-skill summaries | Future values and GT evidence | Exact cited evidence and typed mechanism/impact |
 | Decision Agent | Executed forecasts, hindcast scores, verified evidence, validated decision-skill summaries | Future values | Candidate ID and matching citations; it cannot invent values |
-| Harness Evolver | Aggregate resolved-task failures on the training split | Labels during task inference | One full prompt replacement for the weakest role |
+| Harness Evolver | Aggregate resolved-task failures on the training split | Labels during task inference | A complete child Harness Genome: prompts, Coding search, workflow/topology, evidence policy, and aggregation |
 
 ## Runtime flow
 
@@ -54,11 +54,20 @@ rejects generated skills containing task IDs, document IDs, entity names, or exa
 Skills remain advice: Retrieval still needs exact quotes, and Decision still needs matching evidence
 citations. Hidden labels can neither score nor write skills.
 
-The weakest role is eligible for one prompt mutation. Children are ranked on training tasks and
-accepted only if the best child improves a disjoint, entity-level development split. All three
+The weakest role is reported as a diagnosis, but it no longer restricts what may evolve. A child
+may jointly rewrite all role prompts, Coding candidate/mutation budgets, hindcast folds and horizon,
+the ordered multi-round Retrieval/Decision topology, evidence-adjustment policy, and Decision
+aggregation. It may invent any numerical framework that compiles to the sandboxed `forecast()`
+contract, including adaptive selectors, decompositions, ensembles, or new algorithms. Children are
+ranked on training tasks and accepted only if the best child improves a disjoint, entity-level
+development split. All three
 skill libraries are cloned per child. Training tasks may grow those isolated libraries sequentially;
 development tasks are strictly read-only and cannot generate skills. This is prompt/skill/harness
 evolution, not neural weight training.
+
+The scorer, split, label firewall, citation verifier, forecast-code sandbox, executable interface,
+and resource ceilings are deliberately immutable. Allowing a model to rewrite those would reward
+leakage or unsafe execution rather than forecasting progress.
 
 ## Coding Agent ablations
 
@@ -135,6 +144,19 @@ evolving-agent evolve \
   --tasks-file /path/to/Dr-CiK/data/tasks/train.jsonl \
   --setting combined \
   --limit 50 \
+  --generations 3 \
+  --children 2
+```
+
+The accepted genome is written to `runs/evolving/best_policy.json`. Continue evolution from that
+exact inherited framework with:
+
+```bash
+evolving-agent evolve \
+  --tasks-file /path/to/Dr-CiK/data/tasks/train.jsonl \
+  --llm-backend codex \
+  --seed-policy-path runs/evolving/best_policy.json \
+  --policy-path runs/evolving/best_policy_next.json \
   --generations 3 \
   --children 2
 ```

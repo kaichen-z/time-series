@@ -1,6 +1,7 @@
 """End-to-end Coding -> Retrieval -> Decision forecasting harness."""
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
@@ -19,6 +20,16 @@ class HarnessResult:
     decision: DecisionResult
     candidates: tuple[DecisionCandidate, ...]
     forecast: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class HarnessRuntimeConfig:
+    """Executable topology controls exposed to the outer Meta-Harness."""
+
+    workflow: tuple[str, ...] = ("retrieve", "decide")
+    enable_evidence_adjustments: bool = True
+    max_evidence_adjustments: int = 3
+    decision_aggregation: str = "last"
 
 
 @dataclass(frozen=True)
@@ -47,20 +58,57 @@ class EvolvingForecastHarness:
         retrieval: RetrievalAgent,
         decision: DecisionAgent,
         outcome_learner: OutcomeLearner | None = None,
+        runtime: HarnessRuntimeConfig | None = None,
     ) -> None:
         self.coding = coding
         self.retrieval = retrieval
         self.decision = decision
         self.outcome_learner = outcome_learner
+        self.runtime = runtime or HarnessRuntimeConfig()
 
     def run(self, task: ContextTask) -> HarnessResult:
         # Enforce the information boundary structurally, not only by prompt:
         # the object passed to Coding has no realized future labels.
         coding_input = replace(task.numeric, future_values=())
         coding = self.coding.run_task(coding_input)
-        retrieval = self.retrieval.run(task, coding.candidates)
+        retrieval_runs = []
+        retrieval = _empty_retrieval()
         candidates = self._decision_candidates(task, coding, retrieval)
-        decision = self.decision.run(candidates, retrieval)
+        decisions = []
+        for stage in self.runtime.workflow:
+            if stage == "retrieve":
+                current = self.retrieval.run(
+                    task,
+                    coding.candidates,
+                    prior=retrieval if retrieval.evidence else None,
+                    round_index=len(retrieval_runs),
+                )
+                retrieval_runs.append(current)
+                retrieval = _merge_retrieval(retrieval_runs)
+                candidates = self._decision_candidates(
+                    task,
+                    coding,
+                    retrieval,
+                    enable_evidence_adjustments=self.runtime.enable_evidence_adjustments,
+                    max_evidence_adjustments=self.runtime.max_evidence_adjustments,
+                )
+            elif stage == "decide":
+                decision = self.decision.run(
+                    candidates,
+                    retrieval,
+                    prior_decisions=tuple(decisions),
+                    round_index=len(decisions),
+                )
+                decisions.append(decision)
+            else:
+                raise ValueError(f"Unknown harness stage: {stage}")
+        if not decisions:
+            decisions.append(self.decision.run(candidates, retrieval))
+        decision = _aggregate_decisions(
+            tuple(decisions),
+            candidates,
+            self.runtime.decision_aggregation,
+        )
         return HarnessResult(
             task_id=task.numeric.task_id,
             coding=coding,
@@ -75,6 +123,9 @@ class EvolvingForecastHarness:
         task: ContextTask,
         coding: CodingEvolutionResult,
         retrieval: RetrievalResult,
+        *,
+        enable_evidence_adjustments: bool = True,
+        max_evidence_adjustments: int = 3,
     ) -> tuple[DecisionCandidate, ...]:
         candidates = [
             DecisionCandidate(
@@ -87,7 +138,12 @@ class EvolvingForecastHarness:
             )
             for item in coding.candidates
         ]
+        if not enable_evidence_adjustments:
+            return tuple(candidates)
+        if max_evidence_adjustments <= 0:
+            return tuple(candidates)
         best = min(candidates, key=lambda item: item.hindcast_smape)
+        adjustments = 0
         for index, impact in enumerate(retrieval.impacts):
             if impact.temporal_relation != "overlaps_future":
                 continue
@@ -113,6 +169,9 @@ class EvolvingForecastHarness:
                     tags=("evidence_adjusted", impact.mechanism_layer),
                 )
             )
+            adjustments += 1
+            if adjustments >= max_evidence_adjustments:
+                break
         return tuple(candidates)
 
     @staticmethod
@@ -170,3 +229,76 @@ def _future_window(
         if start_timestamp <= timestamp <= end_timestamp
     ]
     return (min(indexes), max(indexes)) if indexes else (None, None)
+
+
+def _merge_retrieval(results: list[RetrievalResult]) -> RetrievalResult:
+    evidence = []
+    evidence_keys = set()
+    impacts = []
+    impact_keys = set()
+    for result in results:
+        for item in result.evidence:
+            key = (item.document_id, item.exact_quote)
+            if key not in evidence_keys:
+                evidence_keys.add(key)
+                evidence.append(item)
+        for item in result.impacts:
+            key = (
+                item.source_document_ids,
+                item.mechanism_layer,
+                item.temporal_relation,
+                item.adjustment_kind,
+                item.adjustment_value,
+                item.start_timestamp,
+                item.end_timestamp,
+            )
+            if key not in impact_keys:
+                impact_keys.add(key)
+                impacts.append(item)
+    return RetrievalResult(
+        query=" | ".join(item.query for item in results if item.query),
+        selected_document_ids=tuple(
+            dict.fromkeys(value for item in results for value in item.selected_document_ids)
+        ),
+        evidence=tuple(evidence),
+        impacts=tuple(impacts),
+        sufficient=any(item.sufficient for item in results),
+        missing_information=tuple(
+            dict.fromkeys(value for item in results for value in item.missing_information)
+        ),
+        rejected=tuple(dict.fromkeys(value for item in results for value in item.rejected)),
+        used_skill_names=tuple(
+            dict.fromkeys(value for item in results for value in item.used_skill_names)
+        ),
+    )
+
+
+def _empty_retrieval() -> RetrievalResult:
+    return RetrievalResult(
+        query="",
+        selected_document_ids=(),
+        evidence=(),
+        impacts=(),
+        sufficient=False,
+        missing_information=("No retrieval stage has run.",),
+    )
+
+
+def _aggregate_decisions(
+    decisions: tuple[DecisionResult, ...],
+    candidates: tuple[DecisionCandidate, ...],
+    strategy: str,
+) -> DecisionResult:
+    if not decisions:
+        raise RuntimeError("Harness requires at least one Decision round")
+    if strategy == "last" or len(decisions) == 1:
+        return decisions[-1]
+    votes = Counter(item.selected.candidate_id for item in decisions)
+    largest = max(votes.values())
+    finalists = {candidate_id for candidate_id, count in votes.items() if count == largest}
+    chosen = min(
+        (candidate for candidate in candidates if candidate.candidate_id in finalists),
+        key=lambda item: item.hindcast_smape,
+    )
+    source = next(item for item in reversed(decisions) if item.selected.candidate_id == chosen.candidate_id)
+    return replace(source, selected=chosen, rationale=f"Panel aggregation ({strategy}): {source.rationale}")

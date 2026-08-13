@@ -233,3 +233,4 @@ __marimo__/
 # Local model-call caches and smoke-test outputs
 runs/evolving/codex-cache/
 runs/evolving/codex_test/
+runs/evolving/meta_smoke/

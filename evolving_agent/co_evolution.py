@@ -15,9 +15,35 @@ from evolving_agent.llm import JsonExtractionError, LLMClient, parse_json_object
 from evolving_agent.retrieval_agent.agent import RETRIEVAL_PROMPT
 
 
+META_HARNESS_PROMPT = """You are an open-ended Meta-Harness Engineer for contextual time-series
+forecasting. Propose a complete child Harness Genome, not merely a local prompt tweak. You may
+redesign all mutable inference and search components together: Coding hypothesis generation and
+revision prompts, Retrieval and Decision prompts, candidate/search budgets, historical hindcast
+configuration, evidence-adjustment policy, multi-round workflow, and decision aggregation.
+
+The child must remain executable by the supplied host primitives. The workflow is a list containing
+only "retrieve" and "decide", must include both, and may contain at most 8 stages. You may create
+multiple instances of these roles by repeating stages. Return every field, even if unchanged:
+{"coding_generation_prompt": "...", "coding_revision_prompt": "...",
+"retrieval_prompt": "...", "decision_prompt": "...",
+"coding_initial_programs": 3, "coding_mutations": 1, "coding_mutation_children": 1,
+"coding_validation_folds": 3, "coding_validation_horizon": 8,
+"workflow": ["retrieve", "decide"], "enable_evidence_adjustments": true,
+"max_evidence_adjustments": 3, "decision_aggregation": "last|majority",
+"changelog": "testable rationale for this child"}
+
+Immutable scientific and safety boundaries: Coding sees only historical numbers and historical
+hindcast diagnostics; Retrieval and Decision never see future values or GT evidence during
+inference; only verified quotes may support contextual changes; generated code keeps the existing
+forecast(history, horizon, frequency) contract and sandbox restrictions; no agent may edit the
+scorer, data split, label boundary, sandbox, acceptance test, or resource caps. The child will be
+executed on train tasks and accepted only if it improves a disjoint held-out development split.
+"""
+
+
 @dataclass(frozen=True)
 class HarnessPolicy:
-    """Versioned prompts; a child may replace exactly one field."""
+    """A complete, inheritable genome for both Coding search and the whole harness."""
 
     version: str = "v000"
     parent: str | None = None
@@ -25,6 +51,15 @@ class HarnessPolicy:
     coding_revision_prompt: str = REVISION_PROMPT
     retrieval_prompt: str = RETRIEVAL_PROMPT
     decision_prompt: str = DECISION_PROMPT
+    coding_initial_programs: int = 3
+    coding_mutations: int = 1
+    coding_mutation_children: int = 1
+    coding_validation_folds: int = 3
+    coding_validation_horizon: int = 8
+    workflow: tuple[str, ...] = ("retrieve", "decide")
+    enable_evidence_adjustments: bool = True
+    max_evidence_adjustments: int = 3
+    decision_aggregation: str = "last"
     changelog: str = "Hand-written seed policy."
 
     def save(self, path: str | Path) -> None:
@@ -35,7 +70,12 @@ class HarnessPolicy:
     @classmethod
     def load(cls, path: str | Path) -> "HarnessPolicy":
         source = Path(path)
-        return cls(**json.loads(source.read_text())) if source.exists() else cls()
+        if not source.exists():
+            return cls()
+        payload = json.loads(source.read_text())
+        if "workflow" in payload:
+            payload["workflow"] = tuple(payload["workflow"])
+        return cls(**payload)
 
 
 @dataclass(frozen=True)
@@ -58,12 +98,14 @@ class EvolutionStep:
     parent_dev_reward: float | None
     best_child_dev_reward: float | None
     accepted_version: str
+    child_changelogs: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
 class CoEvolutionConfig:
     generations: int = 3
     children_per_generation: int = 2
+    max_workflow_stages: int = 8
 
 
 HarnessFactory = Callable[[HarnessPolicy], EvolvingForecastHarness]
@@ -152,13 +194,7 @@ def evaluate_policy(
 
 
 class CoEvolutionEngine:
-    """Evolve one failure-attributed prompt at a time with train/dev elitism."""
-
-    _FIELDS = {
-        "coding": {"coding_generation_prompt", "coding_revision_prompt"},
-        "retrieval": {"retrieval_prompt"},
-        "decision": {"decision_prompt"},
-    }
+    """Evolve complete, inheritable Harness Genomes with train/dev elitism."""
 
     def __init__(
         self,
@@ -187,20 +223,13 @@ class CoEvolutionEngine:
             "module_rewards": evaluation.module_rewards,
             "worst_failure_trajectories": worst,
             "current_policy": asdict(parent),
-            "constraints": {
-                "change_exactly_one_prompt": True,
-                "coding_sees": "historical numbers and historical hindcast diagnostics only",
-                "retrieval_sees": "documents and coding assumptions, never labels",
-                "decision_sees": "executed candidates and verified evidence, never labels",
-            },
+            "instruction": (
+                "The weakest observed module is a diagnosis, not a mutation restriction. "
+                "Redesign any mutually dependent genome fields needed to improve the whole system."
+            ),
         }
         response = self.llm.complete(
-            system=(
-                "You are the Harness Evolver. Diagnose the resolved failure metrics and replace "
-                f"exactly one full prompt belonging to the {target} agent. Preserve all role "
-                "information boundaries. Return JSON with prompt_field, replacement_prompt, "
-                "and changelog. Do not patch source code or expose future labels at inference."
-            ),
+            system=META_HARNESS_PROMPT,
             messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
             temperature=0.4,
         )
@@ -210,16 +239,79 @@ class CoEvolutionEngine:
             proposal = parse_json_object(response.text)
         except JsonExtractionError:
             return replace(parent, version=version, parent=parent.version, changelog="Invalid mutation; unchanged.")
-        field = str(proposal.get("prompt_field", ""))
-        replacement = str(proposal.get("replacement_prompt", "")).strip()
-        if field not in self._FIELDS[target] or not replacement:
-            return replace(parent, version=version, parent=parent.version, changelog="Illegal mutation; unchanged.")
-        return replace(
-            parent,
-            version=version,
-            parent=parent.version,
-            changelog=str(proposal.get("changelog", ""))[:500],
-            **{field: replacement},
+        candidate, reason = self._proposal(parent, proposal, version)
+        if candidate is None:
+            return replace(parent, version=version, parent=parent.version, changelog=reason)
+        return candidate
+
+    def _proposal(
+        self,
+        parent: HarnessPolicy,
+        proposal: dict,
+        version: str,
+    ) -> tuple[HarnessPolicy | None, str]:
+        prompt_fields = (
+            "coding_generation_prompt",
+            "coding_revision_prompt",
+            "retrieval_prompt",
+            "decision_prompt",
+        )
+        prompts = {}
+        for field in prompt_fields:
+            value = str(proposal.get(field, getattr(parent, field))).strip()
+            if not value:
+                return None, f"Illegal empty field: {field}."
+            prompts[field] = value
+
+        workflow = tuple(str(item) for item in proposal.get("workflow", parent.workflow))
+        if (
+            not workflow
+            or len(workflow) > self.config.max_workflow_stages
+            or set(workflow) - {"retrieve", "decide"}
+            or "retrieve" not in workflow
+            or "decide" not in workflow
+        ):
+            return None, "Illegal workflow mutation; unchanged."
+        aggregation = str(proposal.get("decision_aggregation", parent.decision_aggregation))
+        if aggregation not in {"last", "majority"}:
+            return None, "Illegal decision aggregation; unchanged."
+
+        integer_ranges = {
+            "coding_initial_programs": (1, 12),
+            "coding_mutations": (0, 6),
+            "coding_mutation_children": (1, 6),
+            "coding_validation_folds": (1, 8),
+            "coding_validation_horizon": (1, 64),
+            "max_evidence_adjustments": (0, 12),
+        }
+        integers = {}
+        for field, (lower, upper) in integer_ranges.items():
+            try:
+                value = int(proposal.get(field, getattr(parent, field)))
+            except (TypeError, ValueError):
+                return None, f"Illegal integer field: {field}."
+            if value < lower or value > upper:
+                return None, f"Out-of-budget field: {field}."
+            integers[field] = value
+
+        return (
+            replace(
+                parent,
+                version=version,
+                parent=parent.version,
+                changelog=str(proposal.get("changelog", "Open-ended genome mutation."))[:500],
+                workflow=workflow,
+                decision_aggregation=aggregation,
+                enable_evidence_adjustments=bool(
+                    proposal.get(
+                        "enable_evidence_adjustments",
+                        parent.enable_evidence_adjustments,
+                    )
+                ),
+                **prompts,
+                **integers,
+            ),
+            "",
         )
 
     def evolve(
@@ -291,6 +383,7 @@ class CoEvolutionEngine:
                     parent_dev_reward=parent_dev.system_reward,
                     best_child_dev_reward=child_dev.system_reward,
                     accepted_version=accepted.version,
+                    child_changelogs={child.version: child.changelog for child in children},
                 )
             )
             incumbent = accepted

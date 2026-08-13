@@ -69,6 +69,9 @@ class DecisionAgent:
         self,
         candidates: tuple[DecisionCandidate, ...],
         retrieval: RetrievalResult,
+        *,
+        prior_decisions: tuple[DecisionResult, ...] = (),
+        round_index: int = 0,
     ) -> DecisionResult:
         if not candidates:
             raise ValueError("Decision Agent requires at least one executed candidate")
@@ -95,6 +98,16 @@ class DecisionAgent:
                 if self.library is not None
                 else "(decision skill library disabled)"
             ),
+            "decision_round": round_index + 1,
+            "prior_decisions": [
+                {
+                    "selected_candidate_id": item.selected.candidate_id,
+                    "rationale": item.rationale,
+                    "supporting_document_ids": list(item.supporting_document_ids),
+                    "rejection_reason": item.rejection_reason,
+                }
+                for item in prior_decisions
+            ],
         }
         response = self.llm.complete(
             system=self.prompt,
