@@ -1,0 +1,14 @@
+[
+  {
+    "skill_id": "72056ed1-bf92-46a8-b31a-ccc96da8740e",
+    "name": "layered_regime_normalization",
+    "description": "Retrieve and separate observation artifacts, temporary interventions, and enduring regime changes before forming forecasting assumptions.",
+    "applicability": "When a historical time series may contain recording anomalies, promotions, pricing interventions, or other conditions that differ from the forecast horizon.",
+    "query_strategy": "Search the forecast window and relevant preceding history for named mechanisms, start and end boundaries, permanence statements, incentive changes, and explicit planning assumptions; classify each verified claim by mechanism layer and determine whether it affects measurement, behavior, or the future regime.",
+    "verification_rule": "Accept a normalization claim only when reliable evidence identifies the mechanism, establishes its temporal boundary or permanence, and supports whether it continues into the forecast horizon; preserve exact quotations and provenance when required, and do not infer recurrence or normalization from silence.",
+    "created_from_task": "task_42",
+    "validation_score": 0.7692307692307692,
+    "uses": 0,
+    "avg_score": null
+  }
+]

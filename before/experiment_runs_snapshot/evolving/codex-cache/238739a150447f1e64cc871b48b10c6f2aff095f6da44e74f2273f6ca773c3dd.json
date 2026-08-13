@@ -1,0 +1,1 @@
+{"selected_candidate_id":"validated_seasonal_naive__evidence_3","supporting_document_ids":["doc_1562"],"rationale":"The candidate preserves the lowest-error seasonal baseline and applies the verified 5.2% demand uplift across the exact forecast horizon specified in doc_1562.","request_more_retrieval":false,"used_skill_names":[]}

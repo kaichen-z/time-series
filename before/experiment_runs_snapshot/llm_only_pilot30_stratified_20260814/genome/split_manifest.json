@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "seed": 7,
+  "dev_fraction": 0.25,
+  "holdout_fraction": 0.2,
+  "train": {
+    "task_ids": [
+      "task_120",
+      "task_94",
+      "task_146",
+      "task_100",
+      "task_149",
+      "task_76",
+      "task_238",
+      "task_194",
+      "task_43",
+      "task_44",
+      "task_134",
+      "task_170",
+      "task_209",
+      "task_108",
+      "task_105",
+      "task_114"
+    ],
+    "entities": [
+      "Arbor Ridge Facility",
+      "Arboreal Perimeter Segment",
+      "Arid Heights Research Annex",
+      "Arterial Segment ID-4822 (The Cedar Glen Overpass)",
+      "Central-Hub-005",
+      "Golden Gate Gallant",
+      "Illumination Hardware Suite",
+      "Interim Valley Monitoring Site",
+      "Kiosk-Sigma-9",
+      "Lumina Springs",
+      "MV Aurelia Blue",
+      "Meridian Point Center",
+      "Nexus-Entry-Z",
+      "Port Solas",
+      "Station-Indigo-4",
+      "Summit Outdoor Supplies"
+    ]
+  },
+  "dev": {
+    "task_ids": [
+      "task_227",
+      "task_84",
+      "task_156",
+      "task_62",
+      "task_217",
+      "task_57",
+      "task_111",
+      "task_181"
+    ],
+    "entities": [
+      "Arbor & Quill Literary Archive",
+      "Connector Route R-14 (The Marigold Perimeter)",
+      "Ironclad Integrity",
+      "Ironwood Commerce Center",
+      "Safety Barrier Configuration",
+      "The Obsidian Archway",
+      "ThermalCore-88"
+    ]
+  },
+  "holdout": {
+    "task_ids": [
+      "task_205",
+      "task_186",
+      "task_206",
+      "task_213",
+      "task_220",
+      "task_161"
+    ],
+    "entities": [
+      "Basalt Tier Campus",
+      "Coastal Meridian Station",
+      "Echo-Guard Unit 7",
+      "Sterling Gate Facility",
+      "Unit 402 - Skyline Plaza",
+      "Vista-Point Node 4"
+    ]
+  }
+}

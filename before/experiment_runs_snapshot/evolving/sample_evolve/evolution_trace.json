@@ -1,0 +1,20 @@
+[
+  {
+    "generation": 0,
+    "parent_version": "v000",
+    "child_versions": [
+      "v001"
+    ],
+    "target_agent": "retrieval",
+    "parent_train_reward": 0.6596747912574514,
+    "child_train_rewards": {
+      "v001": 0.8505893254260103
+    },
+    "parent_dev_reward": 0.8594564038496646,
+    "best_child_dev_reward": 0.8708628925008746,
+    "accepted_version": "v001",
+    "child_changelogs": {
+      "v001": "Targets the weakest retrieval module with a two-pass contrastive workflow: the first pass searches by entity, metric, time, mechanism, and candidate assumption; the first decision exposes a precise evidence gap; the second pass audits counterevidence and temporal endpoints; and the final decision uses the completed record. Quote-level verification, explicit rejection criteria, and conservative sufficiency rules should reduce distractor selection in task_163-like cases, while runner-up and regime"
+    }
+  }
+]
