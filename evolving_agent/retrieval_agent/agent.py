@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from evolving_agent.coding_agent.evolution import ValidatedProgram
 from evolving_agent.data import ContextTask
 from evolving_agent.llm import JsonExtractionError, LLMClient, parse_json_object
+from evolving_agent.retrieval_agent.skill_library import RetrievalSkillLibrary
 
 RETRIEVAL_PROMPT = """You are the Retrieval Agent for contextual time-series forecasting.
 Read the task corpus and the Coding Agent's competing, numbers-only assumptions. Retrieve only
@@ -30,10 +31,13 @@ only when the quote explicitly gives its magnitude and time window. Return exact
 "direction": "up|down|stable|unknown", "permanence": "temporary|permanent|unknown",
 "adjustment_kind": "preserve|multiply|add|none", "adjustment_value": null,
 "start_timestamp": null, "end_timestamp": null, "rationale": "..."}],
-"sufficient": true, "missing_information": []}
+"sufficient": true, "missing_information": [], "used_skill_names": []}
 
 For multiply, adjustment_value is the signed fractional change: 0.20 means +20 percent and
 -0.20 means -20 percent. For add, it is an absolute change in target units.
+
+If validated retrieval skills are supplied, use only those that apply. Report their exact names
+in used_skill_names. Skills are advice, not evidence; every claim still needs a document quote.
 """
 
 
@@ -67,11 +71,19 @@ class RetrievalResult:
     sufficient: bool
     missing_information: tuple[str, ...]
     rejected: tuple[str, ...] = ()
+    used_skill_names: tuple[str, ...] = ()
 
 
 class RetrievalAgent:
-    def __init__(self, llm: LLMClient, *, prompt: str = RETRIEVAL_PROMPT) -> None:
+    def __init__(
+        self,
+        llm: LLMClient,
+        library: RetrievalSkillLibrary | None = None,
+        *,
+        prompt: str = RETRIEVAL_PROMPT,
+    ) -> None:
         self.llm = llm
+        self.library = library
         self.prompt = prompt
 
     def run(
@@ -88,6 +100,11 @@ class RetrievalAgent:
         ]
         payload = task.retrieval_view()
         payload["coding_hypotheses"] = assumptions
+        payload["validated_retrieval_skills"] = (
+            self.library.list_for_prompt()
+            if self.library is not None
+            else "(retrieval skill library disabled)"
+        )
         response = self.llm.complete(
             system=self.prompt,
             messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
@@ -96,7 +113,7 @@ class RetrievalAgent:
         try:
             result = parse_json_object(response.text)
         except JsonExtractionError as error:
-            return RetrievalResult("", (), (), (), False, ("invalid_agent_response",), (str(error),))
+            return RetrievalResult("", (), (), (), False, ("invalid_agent_response",), (str(error),), ())
         return self._verify(task, result)
 
     def _verify(self, task: ContextTask, result: dict) -> RetrievalResult:
@@ -156,6 +173,13 @@ class RetrievalAgent:
             for document_id in result.get("selected_document_ids", ())
             if document_id in accepted_ids
         )
+        used_skills = []
+        for name in result.get("used_skill_names", ()):
+            name = str(name)
+            if self.library is not None and self.library.get(name) is not None:
+                used_skills.append(name)
+            else:
+                rejected.append(f"unknown_retrieval_skill:{name}")
         return RetrievalResult(
             query=str(result.get("query", "")),
             selected_document_ids=selected,
@@ -164,6 +188,7 @@ class RetrievalAgent:
             sufficient=bool(result.get("sufficient", False)) and bool(accepted),
             missing_information=tuple(str(value) for value in result.get("missing_information", ())),
             rejected=tuple(rejected),
+            used_skill_names=tuple(used_skills),
         )
 
 
