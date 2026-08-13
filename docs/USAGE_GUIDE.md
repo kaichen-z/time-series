@@ -710,12 +710,13 @@ python -m evolving_agent \
   --children 2
 ```
 
-### 9.1 Shared train/dev acceptance protocol
+### 9.1 Shared train/dev/holdout protocol
 
 All three modes:
 
 1. shuffle entities using `--seed`;
-2. hold out complete entities according to `--dev-fraction`;
+2. reserve complete entities for Dev and untouched Public Holdout according to
+   `--dev-fraction` and `--holdout-fraction`;
 3. run the parent on Train;
 4. strip `future_values`, `gt_evidence`, and document role/subtype before every inference call;
 5. score only after label-free inference completes;
@@ -723,9 +724,20 @@ All three modes:
 7. evaluate all children on Train and retain the Train-best child;
 8. evaluate only that child on held-out Dev;
 9. accept it only when its Dev reward is strictly greater than the parent's Dev reward;
-10. otherwise preserve the parent.
+10. otherwise preserve the parent;
+11. after evolution is frozen, evaluate the accepted artifact once on Public Holdout.
 
-An LLM-proposed change is therefore not an accepted evolution until it passes the held-out gate.
+An LLM-proposed change is therefore not an accepted evolution until it passes the Dev gate. Public
+Holdout never generates a child, selects a child, or changes the accepted artifact. Every evolution
+run writes `--split-manifest-path`, which records task IDs and entities for all three partitions.
+
+For the full 199-task public set, do not pass `--limit`. Use the same seed and fractions for all
+three compared modes:
+
+```bash
+--seed 7 --dev-fraction 0.25 --holdout-fraction 0.20 \
+--split-manifest-path runs/<mode>/split_manifest.json
+```
 
 ### 9.2 `--evolution prompt`
 
@@ -854,7 +866,60 @@ python -m evolving_agent \
   --children 1
 ```
 
-## 10. Inner Coding evolution versus outer harness evolution
+## 10. Frozen public/hidden inference
+
+Evolution and inference are separate operations. `--evolution` may read resolved public outcomes;
+`--inference` never learns skills, mutates an artifact, or invokes the scorer unless
+`--score-public` is explicitly requested.
+
+Evaluate a frozen prompt/genome artifact on the untouched Public Holdout:
+
+```bash
+python -m evolving_agent \
+  --inference genome \
+  --tasks-file external/Dr-CiK/full-download/Dr-CiK_public/tasks \
+  --split-manifest runs/genome/split_manifest.json \
+  --split-name holdout \
+  --policy-path runs/genome/best_policy.json \
+  --setting llm_only \
+  --score-public \
+  --output-dir outputs/genome-public-holdout
+```
+
+Generate the official-format Hidden Test files without local scores:
+
+```bash
+python -m evolving_agent \
+  --inference genome \
+  --hidden-test \
+  --policy-path runs/genome/best_policy.json \
+  --setting llm_only \
+  --samples 100 \
+  --output-dir outputs/genome-hidden
+```
+
+For source evolution, run the accepted cumulative patch in an isolated worktree:
+
+```bash
+python -m evolving_agent \
+  --inference source \
+  --hidden-test \
+  --source-patch-path runs/source/best_source.patch \
+  --setting llm_only \
+  --samples 100 \
+  --output-dir outputs/source-hidden
+```
+
+Hidden rows are retained by the inference loader but their `future_values`, `gt_evidence`, document
+`role`, and document `subtype` fields are cleared before mutable code runs. `--score-public` is
+rejected for Hidden Test. The output contains `forecasts.jsonl`, `deep_research.jsonl`,
+`run_report.jsonl`, and `summary.json`.
+
+The current evolving harness emits a point forecast. For schema compatibility it exports that point
+forecast 100 times, producing a degenerate empirical distribution. This supports submission plumbing
+but is not a complete probabilistic model; calibrated trajectory generation remains future work.
+
+## 11. Inner Coding evolution versus outer harness evolution
 
 | Level | Runs per task? | Mutable object | Feedback | Persists across tasks? |
 |---|---:|---|---|---:|
@@ -867,7 +932,7 @@ python -m evolving_agent \
 Mutating a forecasting program inside one task does not mean the whole three-agent harness has
 changed. Outer evolution changes the framework inherited by later tasks.
 
-## 11. Output files
+## 12. Output files
 
 ### 11.1 Most fixed Dr-CiK baselines
 

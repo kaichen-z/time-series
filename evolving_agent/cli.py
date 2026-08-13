@@ -11,12 +11,22 @@ import tempfile
 from dataclasses import asdict
 from pathlib import Path
 
-from evolving_agent.co_evolution import CoEvolutionConfig, CoEvolutionEngine, HarnessPolicy
+from evolving_agent.co_evolution import (
+    CoEvolutionConfig,
+    CoEvolutionEngine,
+    HarnessPolicy,
+)
 from evolving_agent.coding_agent.evolution import CodingEvolutionAgent, CodingEvolutionConfig
 from evolving_agent.coding_agent.skill_library import SkillLibrary
-from evolving_agent.data import ContextTask, DEFAULT_TASKS_FILE, load_context_tasks
+from evolving_agent.data import (
+    ContextTask,
+    DEFAULT_TASKS_FILE,
+    load_context_tasks,
+    load_huggingface_context_tasks,
+)
 from evolving_agent.decision_agent.agent import DecisionAgent
 from evolving_agent.decision_agent.skill_library import DecisionSkillLibrary
+from evolving_agent.frozen_inference import run_frozen_inference
 from evolving_agent.harness import EvolvingForecastHarness, HarnessRuntimeConfig
 from evolving_agent.llm import ClaudeCLIClient, ClaudeCLIConfig, CodexCLIClient, CodexCLIConfig, QwenClient
 from evolving_agent.retrieval_agent.agent import RetrievalAgent
@@ -28,6 +38,7 @@ from evolving_agent.source_evolution import (
     SourceEvolutionEngine,
     save_source_trace,
 )
+from evolving_agent.source_inference import run_source_inference
 from evolving_agent.tsfm import ChronosConfig, ChronosForecaster
 
 BASELINE_CHOICES = (
@@ -47,6 +58,7 @@ BASELINE_CHOICES = (
     "evolving-harness",
 )
 EVOLUTION_CHOICES = ("prompt", "genome", "source")
+INFERENCE_CHOICES = EVOLUTION_CHOICES
 
 
 def _add_data_source_arguments(parser: argparse.ArgumentParser) -> None:
@@ -109,6 +121,32 @@ def _add_unified_evolution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--generations", type=int, default=3)
     parser.add_argument("--children", type=int, default=2)
     parser.add_argument("--dev-fraction", type=float, default=0.25)
+    parser.add_argument(
+        "--holdout-fraction",
+        type=float,
+        default=0.20,
+        help="Entity-disjoint public holdout reserved from all evolution decisions.",
+    )
+    parser.add_argument(
+        "--split-manifest-path",
+        default="runs/evolving/split_manifest.json",
+        help="Reproducible train/dev/holdout task manifest written by evolution.",
+    )
+    parser.add_argument(
+        "--split-manifest",
+        default=None,
+        help="Frozen-inference manifest used with --split-name.",
+    )
+    parser.add_argument(
+        "--split-name",
+        choices=("all", "train", "dev", "holdout"),
+        default="all",
+    )
+    parser.add_argument(
+        "--score-public",
+        action="store_true",
+        help="Score a labeled frozen run; forbidden if any selected task is hidden.",
+    )
     parser.add_argument("--policy-path", default="runs/evolving/best_policy.json")
     parser.add_argument("--trace-path", default="runs/evolving/evolution_trace.json")
     parser.add_argument("--source-patch-path", default="runs/evolving/best_source.patch")
@@ -129,6 +167,12 @@ def build_parser() -> argparse.ArgumentParser:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--baseline", choices=BASELINE_CHOICES, metavar="NAME")
     mode.add_argument("--evolution", choices=EVOLUTION_CHOICES, metavar="NAME")
+    mode.add_argument(
+        "--inference",
+        choices=INFERENCE_CHOICES,
+        metavar="NAME",
+        help="Run one frozen prompt/genome/source artifact without learning.",
+    )
     parser.add_argument(
         "--list-methods",
         action="store_true",
@@ -206,6 +250,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     evolve.add_argument("--dev-fraction", type=float, default=0.25)
+    evolve.add_argument("--holdout-fraction", type=float, default=0.20)
+    evolve.add_argument(
+        "--split-manifest-path", default="runs/evolving/split_manifest.json"
+    )
     evolve.add_argument("--policy-path", default="runs/evolving/best_policy.json")
     evolve.add_argument("--trace-path", default="runs/evolving/evolution_trace.json")
     evolve.add_argument(
@@ -381,6 +429,98 @@ def _entity_split(
         [task for task in tasks if task.numeric.entity_name not in dev_entities],
         [task for task in tasks if task.numeric.entity_name in dev_entities],
     )
+
+
+def _three_way_entity_split(
+    tasks: list[ContextTask],
+    seed: int,
+    dev_fraction: float,
+    holdout_fraction: float,
+) -> tuple[list[ContextTask], list[ContextTask], list[ContextTask]]:
+    """Create deterministic entity-disjoint train/dev/holdout partitions."""
+    if not 0 < dev_fraction < 1:
+        raise ValueError("--dev-fraction must be between 0 and 1")
+    if not 0 < holdout_fraction < 1:
+        raise ValueError("--holdout-fraction must be between 0 and 1")
+    if dev_fraction + holdout_fraction >= 1:
+        raise ValueError("dev and holdout fractions must sum to less than 1")
+    entities = sorted({task.numeric.entity_name for task in tasks})
+    required = 3
+    if len(entities) < required:
+        raise ValueError(
+            f"entity split needs at least {required} distinct entities; got {len(entities)}"
+        )
+    random.Random(seed).shuffle(entities)
+    dev_count = max(1, round(len(entities) * dev_fraction))
+    holdout_count = max(1, round(len(entities) * holdout_fraction))
+    while dev_count + holdout_count >= len(entities):
+        if dev_count >= holdout_count and dev_count > 1:
+            dev_count -= 1
+        elif holdout_count > 1:
+            holdout_count -= 1
+        else:
+            raise ValueError("entity split cannot keep train/dev/holdout non-empty")
+    holdout_entities = set(entities[:holdout_count])
+    dev_entities = set(entities[holdout_count : holdout_count + dev_count])
+    train, dev, holdout = [], [], []
+    for task in tasks:
+        entity = task.numeric.entity_name
+        if entity in holdout_entities:
+            holdout.append(task)
+        elif entity in dev_entities:
+            dev.append(task)
+        else:
+            train.append(task)
+    return train, dev, holdout
+
+
+def _write_split_manifest(
+    path: str | Path,
+    *,
+    seed: int,
+    dev_fraction: float,
+    holdout_fraction: float,
+    train: list[ContextTask],
+    dev: list[ContextTask],
+    holdout: list[ContextTask],
+) -> Path:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    def partition(tasks: list[ContextTask]) -> dict:
+        return {
+            "task_ids": [task.numeric.task_id for task in tasks],
+            "entities": sorted({task.numeric.entity_name for task in tasks}),
+        }
+
+    payload = {
+        "schema_version": 1,
+        "seed": seed,
+        "dev_fraction": dev_fraction,
+        "holdout_fraction": holdout_fraction,
+        "train": partition(train),
+        "dev": partition(dev),
+        "holdout": partition(holdout),
+    }
+    destination.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return destination
+
+
+def _select_manifest_split(
+    tasks: list[ContextTask], manifest_path: str | Path, split_name: str
+) -> list[ContextTask]:
+    if split_name == "all":
+        return tasks
+    payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    requested = set(payload[split_name]["task_ids"])
+    selected = [task for task in tasks if task.numeric.task_id in requested]
+    missing = requested - {task.numeric.task_id for task in selected}
+    if missing:
+        raise ValueError(
+            f"split manifest references {len(missing)} unavailable task(s): "
+            + ", ".join(sorted(missing)[:5])
+        )
+    return selected
 
 
 def _components(args):
@@ -561,11 +701,29 @@ def run_command(args) -> dict:
 
 def evolve_command(args) -> dict:
     tasks = _task_subset(load_context_tasks(args.tasks_file), args.seed, args.limit)
-    train, dev = _entity_split(tasks, args.seed, args.dev_fraction)
-    if not train or not dev:
-        raise ValueError("entity split produced an empty train or dev set")
+    train, dev, holdout = _three_way_entity_split(
+        tasks,
+        args.seed,
+        args.dev_fraction,
+        args.holdout_fraction,
+    )
+    manifest_path = _write_split_manifest(
+        args.split_manifest_path,
+        seed=args.seed,
+        dev_fraction=args.dev_fraction,
+        holdout_fraction=args.holdout_fraction,
+        train=train,
+        dev=dev,
+        holdout=holdout,
+    )
     if args.evolution_mode == "source":
-        return _source_evolve_command(args, train, dev)
+        result = _source_evolve_command(args, train, dev)
+        return {
+            **result,
+            "holdout_tasks": len(holdout),
+            "split_manifest_path": str(manifest_path),
+            "holdout_status": "reserved_unscored_run_frozen_inference_to_evaluate",
+        }
     llm, library, retrieval_library, decision_library, tsfm = _components(args)
     engine = CoEvolutionEngine(
         llm,
@@ -597,7 +755,126 @@ def evolve_command(args) -> dict:
         "trace_path": str(trace_path),
         "train_tasks": len(train),
         "dev_tasks": len(dev),
+        "holdout_tasks": len(holdout),
+        "split_manifest_path": str(manifest_path),
+        "holdout_status": "reserved_unscored_run_frozen_inference_to_evaluate",
     }
+
+
+def _inference_tasks(args) -> tuple[list[ContextTask], str]:
+    if args.hidden_test:
+        tasks = load_huggingface_context_tasks(labels_public=False)
+        source = "hidden_test"
+    elif args.public_dev:
+        tasks = load_huggingface_context_tasks(labels_public=True)
+        source = "public_dev"
+    else:
+        tasks = load_context_tasks(args.tasks_file, include_unlabeled=True)
+        source = "tasks_file"
+    if args.split_name != "all":
+        if not args.split_manifest:
+            raise ValueError("--split-name requires --split-manifest")
+        tasks = _select_manifest_split(tasks, args.split_manifest, args.split_name)
+    if args.task_id:
+        requested = set(args.task_id)
+        tasks = [task for task in tasks if task.numeric.task_id in requested]
+        missing = requested - {task.numeric.task_id for task in tasks}
+        if missing:
+            raise ValueError("unknown task IDs: " + ", ".join(sorted(missing)))
+    return _task_subset(tasks, args.seed, args.limit), source
+
+
+def inference_command(args) -> dict:
+    """Run one accepted artifact with every learner and scorer disabled by default."""
+    if args.hidden_test and args.score_public:
+        raise ValueError("--score-public is forbidden with --hidden-test")
+    if args.inference in {"prompt", "genome"}:
+        tasks, _data_source = _inference_tasks(args)
+        if not args.policy_path or not Path(args.policy_path).exists():
+            raise FileNotFoundError(
+                f"frozen {args.inference} inference requires an existing --policy-path"
+            )
+        llm, library, retrieval_library, decision_library, tsfm = _components(args)
+        policy = HarnessPolicy.load(args.policy_path)
+        return run_frozen_inference(
+            policy,
+            tasks,
+            _factory(
+                args,
+                llm,
+                library,
+                retrieval_library,
+                decision_library,
+                tsfm,
+                isolate_library=True,
+            ),
+            output_dir=args.output_dir or f"outputs/inference/{args.inference}",
+            samples=args.samples,
+            score_public=args.score_public,
+            artifact_kind=args.inference,
+        )
+
+    data_source = "hidden_test" if args.hidden_test else "public_dev" if args.public_dev else "tasks_file"
+    patch_path = Path(args.source_patch_path)
+    if not patch_path.exists():
+        raise FileNotFoundError(
+            f"frozen source inference requires an existing --source-patch-path: {patch_path}"
+        )
+    repo_root = Path.cwd().resolve()
+    runtime_keys = (
+        "setting",
+        "llm_backend",
+        "model_id",
+        "device",
+        "codex_model",
+        "codex_reasoning_effort",
+        "codex_timeout",
+        "codex_cache_dir",
+        "coding_initial_programs",
+        "coding_mutations",
+        "coding_validation_folds",
+        "library_path",
+        "retrieval_library_path",
+        "decision_library_path",
+        "chronos_model_id",
+        "chronos_device",
+        "chronos_cache_dir",
+        "chronos_local_files_only",
+        "seed",
+        "limit",
+    )
+    runtime = {key: getattr(args, key) for key in runtime_keys}
+    for key in (
+        "codex_cache_dir",
+        "library_path",
+        "retrieval_library_path",
+        "decision_library_path",
+        "chronos_cache_dir",
+    ):
+        if runtime.get(key):
+            runtime[key] = str(Path(runtime[key]).resolve())
+    config = {
+        "runtime": runtime,
+        "data_source": data_source,
+        "tasks_file": str(Path(args.tasks_file).resolve()),
+        "manifest_path": (
+            str(Path(args.split_manifest).resolve()) if args.split_manifest else None
+        ),
+        "split_name": args.split_name,
+        "task_ids": list(args.task_id or ()),
+        "policy_path": None,
+        "output_dir": str(
+            Path(args.output_dir or "outputs/inference/source").resolve()
+        ),
+        "samples": args.samples,
+        "score_public": args.score_public,
+    }
+    return run_source_inference(
+        repo_root=repo_root,
+        patch_path=patch_path,
+        config=config,
+        timeout_seconds=args.source_eval_timeout,
+    )
 
 
 def _source_evolve_command(
@@ -716,7 +993,11 @@ def main(argv: list[str] | None = None) -> None:
     if args.list_methods:
         print(
             json.dumps(
-                {"baselines": list(BASELINE_CHOICES), "evolutions": list(EVOLUTION_CHOICES)},
+                {
+                    "baselines": list(BASELINE_CHOICES),
+                    "evolutions": list(EVOLUTION_CHOICES),
+                    "frozen_inference": list(INFERENCE_CHOICES),
+                },
                 indent=2,
             )
         )
@@ -734,6 +1015,13 @@ def main(argv: list[str] | None = None) -> None:
         args.claude_timeout = args.claude_timeout or 900
         args.claude_cache_dir = args.claude_cache_dir or "runs/evolving/claude-cache"
         result = evolve_command(args)
+        print(json.dumps(result, indent=2))
+        return
+    if args.inference:
+        args.codex_reasoning_effort = args.codex_reasoning_effort or "high"
+        args.codex_timeout = args.codex_timeout or 900
+        args.codex_cache_dir = args.codex_cache_dir or "runs/evolving/codex-cache"
+        result = inference_command(args)
         print(json.dumps(result, indent=2))
         return
     if args.command is None:

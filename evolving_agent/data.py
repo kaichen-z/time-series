@@ -84,7 +84,21 @@ def _showcase(record: dict) -> dict:
 def _is_labeled(record: dict) -> bool:
     """A record is usable only if it has real, non-null ground-truth future values."""
     future = _series(record).get("future_values")
-    return bool(future) and future[0] is not None
+    return (
+        record.get("labels_public", True) is not False
+        and bool(future)
+        and future[0] is not None
+    )
+
+
+def _future_values(record: dict) -> tuple[float, ...]:
+    """Return only genuine numeric labels; hidden rows become an empty tuple."""
+    if record.get("labels_public", True) is False:
+        return ()
+    raw = _series(record).get("future_values") or ()
+    if not raw or raw[0] is None:
+        return ()
+    return tuple(float(value) for value in raw)
 
 
 def _to_task(record: dict) -> Task:
@@ -97,7 +111,7 @@ def _to_task(record: dict) -> Task:
     return Task(
         task_id=record["benchmark_id"],
         history_values=tuple(float(value) for value in series["history_values"]),
-        future_values=tuple(float(value) for value in series["future_values"]),
+        future_values=_future_values(record),
         prediction_length=int(metadata["prediction_length"]),
         frequency=str(metadata["frequency"]),
         seasonal_period=metadata.get("seasonal_period"),
@@ -116,12 +130,15 @@ def _to_context_task(record: dict) -> ContextTask:
         str(item.get("evidence", "")) if isinstance(item, dict) else str(item)
         for item in raw_evidence
     )
+    labels_public = bool(record.get("labels_public", _is_labeled(record))) and _is_labeled(record)
     documents = tuple(
         Document(
             document_id=str(item["document_id"]),
             content=str(item.get("content", "")),
-            role=item.get("role"),
-            subtype=item.get("subtype"),
+            # Hidden inference never needs evaluator-only relevance labels, even
+            # if a local export accidentally retained them.
+            role=item.get("role") if labels_public else None,
+            subtype=item.get("subtype") if labels_public else None,
         )
         for item in record.get("documents", ())
     )
@@ -132,8 +149,8 @@ def _to_context_task(record: dict) -> ContextTask:
         history_timestamps=tuple(str(value) for value in series.get("history_timestamps", ())),
         future_timestamps=tuple(str(value) for value in series.get("future_timestamps", ())),
         documents=documents,
-        gt_evidence=tuple(item for item in evidence if item),
-        labels_public=bool(record.get("labels_public", True)),
+        gt_evidence=tuple(item for item in evidence if item) if labels_public else (),
+        labels_public=labels_public,
     )
 
 
@@ -151,8 +168,16 @@ def load_tasks(tasks_file: str | Path = DEFAULT_TASKS_FILE) -> list[Task]:
     return tasks
 
 
-def load_context_tasks(tasks_file: str | Path = DEFAULT_TASKS_FILE) -> list[ContextTask]:
-    """Load full tasks from a Dr-CiK task directory, JSON object, or JSONL file."""
+def load_context_tasks(
+    tasks_file: str | Path = DEFAULT_TASKS_FILE,
+    *,
+    include_unlabeled: bool = False,
+) -> list[ContextTask]:
+    """Load Dr-CiK tasks, optionally retaining hidden rows without labels.
+
+    Evolution and local scoring keep the default ``include_unlabeled=False``.
+    Frozen inference is the only caller that should enable it.
+    """
     tasks: list[ContextTask] = []
     path = Path(tasks_file)
     if path.is_dir():
@@ -170,9 +195,51 @@ def load_context_tasks(tasks_file: str | Path = DEFAULT_TASKS_FILE) -> list[Cont
             if line.strip()
         ]
     for record in records:
-        if _is_labeled(record):
+        if _is_labeled(record) or include_unlabeled:
             tasks.append(_to_context_task(record))
     return tasks
+
+
+def load_huggingface_context_tasks(*, labels_public: bool) -> list[ContextTask]:
+    """Reuse the official normalized Dr-CiK loader and enforce our label boundary."""
+    from drcik_agent.data import load_huggingface_tasks
+
+    converted = []
+    for task in load_huggingface_tasks(labels_public=labels_public):
+        public = bool(task.labels_public and task.future_values)
+        converted.append(
+            ContextTask(
+                numeric=Task(
+                    task_id=task.benchmark_id,
+                    history_values=tuple(task.history_values),
+                    future_values=tuple(task.future_values or ()) if public else (),
+                    prediction_length=task.prediction_length,
+                    frequency=task.frequency,
+                    seasonal_period=(
+                        str(task.seasonal_period)
+                        if task.seasonal_period is not None
+                        else None
+                    ),
+                    entity_name=task.entity_name,
+                ),
+                target_name=task.target_name,
+                target_description=task.target_description,
+                history_timestamps=tuple(task.history_timestamps),
+                future_timestamps=tuple(task.future_timestamps),
+                documents=tuple(
+                    Document(
+                        document_id=item.document_id,
+                        content=item.text,
+                        role=item.role if public else None,
+                        subtype=item.subtype if public else None,
+                    )
+                    for item in task.documents
+                ),
+                gt_evidence=tuple(task.gt_evidence) if public else (),
+                labels_public=public,
+            )
+        )
+    return converted
 
 
 def split_tasks(
