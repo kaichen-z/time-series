@@ -9,7 +9,9 @@ self-evolving experiment. The original Fresh-vs-Skill-Library baseline is preser
 version adds numbers-only program evolution with historical hindcasting, outcome-validated
 Retrieval and Decision skill libraries, verified contextual retrieval, a citation-constrained
 Decision Agent, a real Chronos ablation, and failure-attributed three-agent co-evolution with
-held-out acceptance. See
+held-out acceptance. The `evolve` entrypoint has three controlled levels:
+`--evolution-mode prompt` (one prompt only), `genome` (prompts, budgets, and topology), and
+`source` (audited Python source patches generated in isolated Git worktrees). See
 [`docs/EVOLVING_AGENT.md`](docs/EVOLVING_AGENT.md) for the exact information boundaries, flow,
 metrics, and commands.
 

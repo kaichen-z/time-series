@@ -1,0 +1,509 @@
+"""Source-level harness evolution in isolated Git worktrees."""
+from __future__ import annotations
+
+import json
+import ast
+import subprocess
+import sys
+import tempfile
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Callable
+
+
+SOURCE_ENGINEER_PROMPT = """You are the Source Harness Engineer for a contextual time-series
+forecasting system. Work directly in the provided isolated Git worktree. Inspect the current
+implementation and the supplied resolved training failure summary, then implement one coherent,
+testable child architecture. You may rewrite the mutable Coding, Retrieval, Decision, and Harness
+implementation, create new Python agent modules under evolving_agent/generated/, and wire them into
+the runtime. You may invent new agent roles, validation/ranking algorithms, communication patterns,
+memory use, stopping rules, or orchestration rather than merely tuning constants.
+
+Do not edit tests, the CLI, data loading, metrics/scorer, LLM transport, code sandbox, outcome skill
+learner, co-evolution/source-evolution host, or any file outside the explicit mutable paths. Never
+read or introduce future_values, gt_evidence, role/subtype labels, or resolved outcomes into
+inference. Do not weaken citation verification or execute shell/network/file operations from
+generated forecasting code. Do not commit. Keep public interfaces compatible and finish with a
+brief JSON final message: {"summary": "...", "hypothesis": "..."}.
+"""
+
+_EXACT_MUTABLE = frozenset(
+    {
+        "evolving_agent/harness.py",
+        "evolving_agent/coding_agent/evolution.py",
+        "evolving_agent/retrieval_agent/agent.py",
+        "evolving_agent/decision_agent/agent.py",
+    }
+)
+_GENERATED_PREFIX = "evolving_agent/generated/"
+_FORBIDDEN_ADDED_TEXT = (
+    "future_values",
+    "gt_evidence",
+    "annotations",
+    "document.role",
+    "document.subtype",
+    "import subprocess",
+    "from subprocess",
+    "import os",
+    "from os",
+    "import pathlib",
+    "from pathlib",
+    "import sys",
+    "from sys",
+    "import shutil",
+    "from shutil",
+    "os.system",
+    "import socket",
+    "import requests",
+    "import urllib",
+    "eval(",
+    "exec(",
+    "compile(",
+    "__import__(",
+    "open(",
+    "getattr(",
+    "setattr(",
+    "evolving_agent.data",
+    "evolving_agent.evaluation",
+    "evolving_agent.metrics",
+    "evolving_agent.co_evolution",
+    "evolving_agent.source_evolution",
+    "evolving_agent.skill_learning",
+    "evolving_agent.cli",
+)
+_FORBIDDEN_IMPORTS = frozenset(
+    {"os", "pathlib", "subprocess", "socket", "requests", "urllib", "sys", "shutil"}
+)
+_FORBIDDEN_NAMES = frozenset(
+    {"open", "eval", "exec", "compile", "__import__", "getattr", "setattr", "vars", "globals", "locals"}
+)
+_FORBIDDEN_ATTRIBUTES = frozenset(
+    {"future_values", "gt_evidence", "annotations", "role", "subtype", "__dict__"}
+)
+
+
+@dataclass(frozen=True)
+class SourceEvaluation:
+    train_reward: float
+    dev_reward: float
+    train_module_rewards: dict[str, float]
+    dev_module_rewards: dict[str, float]
+    failure_traces: tuple[dict, ...]
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "SourceEvaluation":
+        return cls(
+            train_reward=float(payload["train"]["system_reward"]),
+            dev_reward=float(payload["dev"]["system_reward"]),
+            train_module_rewards=dict(payload["train"]["module_rewards"]),
+            dev_module_rewards=dict(payload["dev"]["module_rewards"]),
+            failure_traces=tuple(payload["train"].get("failure_traces", ())),
+        )
+
+
+@dataclass(frozen=True)
+class SourceCandidate:
+    candidate_id: str
+    patch: str
+    evaluation: SourceEvaluation | None
+    audit_ok: bool
+    tests_ok: bool
+    rejection_reason: str | None
+    changed_files: tuple[str, ...] = ()
+    engineer_summary: str = ""
+
+
+@dataclass(frozen=True)
+class SourceEvolutionStep:
+    generation: int
+    parent_train_reward: float
+    parent_dev_reward: float
+    candidates: tuple[dict, ...]
+    accepted_candidate: str | None
+    accepted_dev_reward: float
+
+
+@dataclass(frozen=True)
+class SourceEvolutionConfig:
+    generations: int = 1
+    children_per_generation: int = 1
+    model: str | None = None
+    reasoning_effort: str = "high"
+    codex_timeout_seconds: int = 1800
+    test_timeout_seconds: int = 300
+
+
+EvaluationCallback = Callable[[Path], SourceEvaluation]
+
+
+class SourceEvolutionEngine:
+    """Generate, audit, test, and evaluate source patches without touching the parent checkout."""
+
+    def __init__(
+        self,
+        repo_root: str | Path,
+        evaluator: EvaluationCallback,
+        config: SourceEvolutionConfig | None = None,
+    ) -> None:
+        self.repo_root = Path(repo_root).resolve()
+        self.evaluator = evaluator
+        self.config = config or SourceEvolutionConfig()
+
+    def evolve(self, seed_patch: str = "") -> tuple[str, tuple[SourceEvolutionStep, ...]]:
+        incumbent_patch = seed_patch
+        incumbent_evaluation = self._evaluate_patch(incumbent_patch)
+        trace = []
+        for generation in range(self.config.generations):
+            parent_train_reward = incumbent_evaluation.train_reward
+            parent_dev_reward = incumbent_evaluation.dev_reward
+            candidates = [
+                self._child(generation, index, incumbent_patch, incumbent_evaluation)
+                for index in range(self.config.children_per_generation)
+            ]
+            valid = [item for item in candidates if item.evaluation is not None]
+            train_best = (
+                max(valid, key=lambda item: item.evaluation.train_reward)
+                if valid
+                else None
+            )
+            accepted = (
+                train_best
+                if train_best is not None
+                and train_best.evaluation.dev_reward > incumbent_evaluation.dev_reward
+                else None
+            )
+            if accepted is not None:
+                incumbent_patch = accepted.patch
+                incumbent_evaluation = accepted.evaluation
+            trace.append(
+                SourceEvolutionStep(
+                    generation=generation,
+                    parent_train_reward=parent_train_reward,
+                    parent_dev_reward=parent_dev_reward,
+                    candidates=tuple(self._candidate_summary(item) for item in candidates),
+                    accepted_candidate=accepted.candidate_id if accepted else None,
+                    accepted_dev_reward=incumbent_evaluation.dev_reward,
+                )
+            )
+        return incumbent_patch, tuple(trace)
+
+    def _evaluate_patch(self, patch: str) -> SourceEvaluation:
+        with self._worktree("source-parent-") as worktree:
+            if patch:
+                self._apply_patch(worktree, patch)
+                changed = self._changed_files(worktree)
+                audit_error = self.audit(worktree, changed)
+                if audit_error:
+                    raise RuntimeError(f"seed patch failed audit: {audit_error}")
+                tests_ok, test_error = self._tests(worktree)
+                if not tests_ok:
+                    raise RuntimeError(f"seed patch failed tests: {test_error}")
+            return self.evaluator(worktree)
+
+    def _child(
+        self,
+        generation: int,
+        index: int,
+        incumbent_patch: str,
+        parent: SourceEvaluation,
+    ) -> SourceCandidate:
+        candidate_id = f"source_g{generation:03d}_c{index:03d}"
+        with self._worktree(f"{candidate_id}-") as worktree:
+            if incumbent_patch:
+                self._apply_patch(worktree, incumbent_patch)
+            baseline_patch = self._diff(worktree)
+            try:
+                summary = self._run_engineer(worktree, candidate_id, parent)
+            except (RuntimeError, subprocess.TimeoutExpired) as exc:
+                return SourceCandidate(
+                    candidate_id,
+                    baseline_patch,
+                    None,
+                    False,
+                    False,
+                    f"source_engineer_failed:{exc}",
+                )
+            changed = self._changed_files(worktree)
+            audit_error = self.audit(worktree, changed)
+            if audit_error:
+                return SourceCandidate(
+                    candidate_id, baseline_patch, None, False, False, audit_error, changed, summary
+                )
+            tests_ok, test_error = self._tests(worktree)
+            if not tests_ok:
+                return SourceCandidate(
+                    candidate_id, baseline_patch, None, True, False, test_error, changed, summary
+                )
+            patch = self._diff(worktree)
+            if not patch.strip() or patch == incumbent_patch:
+                return SourceCandidate(
+                    candidate_id,
+                    incumbent_patch,
+                    None,
+                    True,
+                    True,
+                    "no_source_change",
+                    changed,
+                    summary,
+                )
+            try:
+                evaluation = self.evaluator(worktree)
+            except Exception as exc:
+                return SourceCandidate(
+                    candidate_id,
+                    patch,
+                    None,
+                    True,
+                    True,
+                    f"evaluation_failed:{exc}",
+                    changed,
+                    summary,
+                )
+            return SourceCandidate(
+                candidate_id, patch, evaluation, True, True, None, changed, summary
+            )
+
+    def _run_engineer(
+        self,
+        worktree: Path,
+        candidate_id: str,
+        parent: SourceEvaluation,
+    ) -> str:
+        payload = {
+            "candidate_id": candidate_id,
+            "parent_train_reward": parent.train_reward,
+            "parent_dev_reward": parent.dev_reward,
+            "module_rewards": parent.train_module_rewards,
+            "worst_training_failures": [
+                self._sanitized_failure(item)
+                for item in sorted(
+                    parent.failure_traces,
+                    key=lambda item: item.get("final_smape", 0.0),
+                    reverse=True,
+                )[:5]
+            ],
+            "mutable_files": sorted(_EXACT_MUTABLE),
+            "new_module_directory": _GENERATED_PREFIX,
+        }
+        prompt = SOURCE_ENGINEER_PROMPT + "\n\nFailure payload:\n" + json.dumps(
+            payload, ensure_ascii=False
+        )
+        with tempfile.TemporaryDirectory(prefix="source-engineer-output-") as directory:
+            output = Path(directory) / "final.json"
+            command = [
+                "codex",
+                "exec",
+                "--ephemeral",
+                "--sandbox",
+                "workspace-write",
+                "--skip-git-repo-check",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--color",
+                "never",
+                "--output-last-message",
+                str(output),
+                "--cd",
+                str(worktree),
+                "-c",
+                f'model_reasoning_effort="{self.config.reasoning_effort}"',
+            ]
+            if self.config.model:
+                command.extend(["--model", self.config.model])
+            command.append("-")
+            completed = subprocess.run(
+                command,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=self.config.codex_timeout_seconds,
+                check=False,
+            )
+            if completed.returncode != 0:
+                details = (completed.stderr or completed.stdout)[-2000:]
+                raise RuntimeError(f"source engineer failed: {details}")
+            return output.read_text(encoding="utf-8") if output.exists() else ""
+
+    @staticmethod
+    def audit(worktree: Path, changed_files: tuple[str, ...]) -> str | None:
+        if not changed_files:
+            return "no_changed_files"
+        illegal = [
+            path
+            for path in changed_files
+            if path not in _EXACT_MUTABLE
+            and not (path.startswith(_GENERATED_PREFIX) and path.endswith(".py"))
+        ]
+        if illegal:
+            return "protected_paths_changed:" + ",".join(illegal)
+        git_diff = subprocess.run(
+            ["git", "diff", "--unified=0", "HEAD", "--", *changed_files],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        added_lines = "\n".join(
+            line[1:]
+            for line in git_diff.stdout.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        ).lower()
+        forbidden_text = [
+            value for value in _FORBIDDEN_ADDED_TEXT if value.lower() in added_lines
+        ]
+        if forbidden_text:
+            return "forbidden_added_code:" + ",".join(forbidden_text)
+
+        for relative in changed_files:
+            path = worktree / relative
+            if not path.exists() or path.suffix != ".py":
+                continue
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except SyntaxError as exc:
+                return f"invalid_python:{relative}:{exc}"
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name.split(".")[0] in _FORBIDDEN_IMPORTS:
+                            return f"forbidden_import:{relative}:{alias.name}"
+                elif isinstance(node, ast.ImportFrom):
+                    root = (node.module or "").split(".")[0]
+                    if root in _FORBIDDEN_IMPORTS:
+                        return f"forbidden_import:{relative}:{node.module}"
+                elif isinstance(node, ast.Name) and node.id in _FORBIDDEN_NAMES:
+                    return f"forbidden_name:{relative}:{node.id}"
+                elif isinstance(node, ast.Attribute) and (
+                    node.attr in _FORBIDDEN_ATTRIBUTES
+                    or (node.attr.startswith("__") and node.attr.endswith("__"))
+                ):
+                    return f"forbidden_attribute:{relative}:{node.attr}"
+        return None
+
+    @staticmethod
+    def _sanitized_failure(failure: dict) -> dict:
+        """Give the engineer useful error structure without task/document identifiers."""
+        hidden = {
+            "task_id",
+            "retrieved_document_ids",
+            "supporting_document_ids",
+            "distractor_document_ids",
+        }
+        return {key: value for key, value in failure.items() if key not in hidden}
+
+    def _tests(self, worktree: Path) -> tuple[bool, str | None]:
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-m", "pytest", "-q"],
+                cwd=worktree,
+                capture_output=True,
+                text=True,
+                timeout=self.config.test_timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "tests_timed_out"
+        if completed.returncode != 0:
+            return False, "tests_failed:" + (completed.stdout + completed.stderr)[-2000:]
+        return True, None
+
+    def _changed_files(self, worktree: Path) -> tuple[str, ...]:
+        subprocess.run(
+            ["git", "add", "-N", "evolving_agent"],
+            cwd=worktree,
+            capture_output=True,
+            check=False,
+        )
+        output = subprocess.run(
+            ["git", "diff", "--name-only"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        return tuple(line.strip() for line in output.splitlines() if line.strip())
+
+    @staticmethod
+    def _diff(worktree: Path) -> str:
+        subprocess.run(
+            ["git", "add", "-N", "evolving_agent"],
+            cwd=worktree,
+            capture_output=True,
+            check=False,
+        )
+        return subprocess.run(
+            ["git", "diff", "--binary", "HEAD"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+
+    @staticmethod
+    def _apply_patch(worktree: Path, patch: str) -> None:
+        completed = subprocess.run(
+            ["git", "apply", "--binary", "-"],
+            cwd=worktree,
+            input=patch,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(f"could not apply incumbent patch: {completed.stderr[-2000:]}")
+
+    def _worktree(self, prefix: str):
+        return _Worktree(self.repo_root, prefix)
+
+    @staticmethod
+    def _candidate_summary(candidate: SourceCandidate) -> dict:
+        return {
+            "candidate_id": candidate.candidate_id,
+            "audit_ok": candidate.audit_ok,
+            "tests_ok": candidate.tests_ok,
+            "rejection_reason": candidate.rejection_reason,
+            "changed_files": list(candidate.changed_files),
+            "train_reward": candidate.evaluation.train_reward if candidate.evaluation else None,
+            "dev_reward": candidate.evaluation.dev_reward if candidate.evaluation else None,
+            "engineer_summary": candidate.engineer_summary[:1000],
+        }
+
+
+class _Worktree:
+    def __init__(self, repo_root: Path, prefix: str) -> None:
+        self.repo_root = repo_root
+        self.prefix = prefix
+        self._temporary: tempfile.TemporaryDirectory | None = None
+        self.path: Path | None = None
+
+    def __enter__(self) -> Path:
+        self._temporary = tempfile.TemporaryDirectory(prefix=self.prefix)
+        self.path = Path(self._temporary.name)
+        completed = subprocess.run(
+            ["git", "worktree", "add", "--detach", str(self.path), "HEAD"],
+            cwd=self.repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            self._temporary.cleanup()
+            raise RuntimeError(f"could not create source worktree: {completed.stderr[-2000:]}")
+        return self.path
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        if self.path is not None:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(self.path)],
+                cwd=self.repo_root,
+                capture_output=True,
+                check=False,
+            )
+        if self._temporary is not None:
+            self._temporary.cleanup()
+
+
+def save_source_trace(path: str | Path, trace: tuple[SourceEvolutionStep, ...]) -> None:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps([asdict(item) for item in trace], indent=2))

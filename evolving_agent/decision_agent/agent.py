@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from evolving_agent.llm import JsonExtractionError, LLMClient, parse_json_object
 from evolving_agent.retrieval_agent.agent import RetrievalResult
@@ -91,8 +91,8 @@ class DecisionAgent:
                 for item in candidates
             ],
             "host_default_id": host_default.candidate_id,
-            "verified_evidence": [item.__dict__ for item in retrieval.evidence],
-            "verified_impacts": [item.__dict__ for item in retrieval.impacts],
+            "verified_evidence": [asdict(item) for item in retrieval.evidence],
+            "verified_impacts": [asdict(item) for item in retrieval.impacts],
             "validated_decision_skills": (
                 self.library.list_for_prompt()
                 if self.library is not None

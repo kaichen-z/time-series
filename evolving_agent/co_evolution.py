@@ -5,12 +5,13 @@ import json
 import statistics
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Literal, Sequence
 
 from evolving_agent.coding_agent.evolution import GENERATION_PROMPT, REVISION_PROMPT
-from evolving_agent.data import ContextTask
+from evolving_agent.data import ContextTask, Document
 from evolving_agent.decision_agent.agent import DECISION_PROMPT
-from evolving_agent.harness import EvolvingForecastHarness, ResolvedOutcome
+from evolving_agent.evaluation import ResolvedOutcome, score_after_resolution
+from evolving_agent.harness import EvolvingForecastHarness
 from evolving_agent.llm import JsonExtractionError, LLMClient, parse_json_object
 from evolving_agent.retrieval_agent.agent import RETRIEVAL_PROMPT
 
@@ -39,6 +40,16 @@ forecast(history, horizon, frequency) contract and sandbox restrictions; no agen
 scorer, data split, label boundary, sandbox, acceptance test, or resource caps. The child will be
 executed on train tasks and accepted only if it improves a disjoint held-out development split.
 """
+
+PROMPT_ONLY_EVOLVER_PROMPT = """You are a constrained Prompt Evolver for a time-series agent
+harness. Use resolved training failures to replace exactly one complete prompt owned by the
+diagnosed weakest role. You may not change another role, any numeric/search budget, topology,
+source code, scorer, data boundary, or safety mechanism. Return exactly:
+{"prompt_field": "coding_generation_prompt|coding_revision_prompt|retrieval_prompt|decision_prompt",
+"replacement_prompt": "complete replacement prompt", "changelog": "testable rationale"}
+"""
+
+EvolutionMode = Literal["prompt", "genome"]
 
 
 @dataclass(frozen=True)
@@ -89,6 +100,7 @@ class PolicyEvaluation:
 
 @dataclass(frozen=True)
 class EvolutionStep:
+    mode: str
     generation: int
     parent_version: str
     child_versions: tuple[str, ...]
@@ -106,6 +118,7 @@ class CoEvolutionConfig:
     generations: int = 3
     children_per_generation: int = 2
     max_workflow_stages: int = 8
+    mode: EvolutionMode = "genome"
 
 
 HarnessFactory = Callable[[HarnessPolicy], EvolvingForecastHarness]
@@ -126,14 +139,26 @@ def evaluate_policy(
     outcomes = []
     traces = []
     for task in tasks:
-        inference = harness.run(task)
+        # This firewall lives outside all source-mutable agent/orchestration files.
+        # A source-evolved child receives no labels even if it rewrites harness.py.
+        inference_task = replace(
+            task,
+            numeric=replace(task.numeric, future_values=()),
+            documents=tuple(
+                Document(document.document_id, document.content)
+                for document in task.documents
+            ),
+            gt_evidence=(),
+            labels_public=False,
+        )
+        inference = harness.run(inference_task)
         if learn_skills:
             outcome, _learning = harness.record_outcome(task, inference)
         else:
-            outcome = harness.score_after_resolution(task, inference)
+            outcome = score_after_resolution(task, inference)
         outcomes.append(outcome)
         candidate_scores = {
-            candidate.candidate_id: harness.score_after_resolution(
+            candidate.candidate_id: score_after_resolution(
                 task,
                 replace(
                     inference,
@@ -229,7 +254,11 @@ class CoEvolutionEngine:
             ),
         }
         response = self.llm.complete(
-            system=META_HARNESS_PROMPT,
+            system=(
+                PROMPT_ONLY_EVOLVER_PROMPT
+                if self.config.mode == "prompt"
+                else META_HARNESS_PROMPT
+            ),
             messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
             temperature=0.4,
         )
@@ -239,10 +268,40 @@ class CoEvolutionEngine:
             proposal = parse_json_object(response.text)
         except JsonExtractionError:
             return replace(parent, version=version, parent=parent.version, changelog="Invalid mutation; unchanged.")
-        candidate, reason = self._proposal(parent, proposal, version)
+        if self.config.mode == "prompt":
+            candidate, reason = self._prompt_proposal(parent, proposal, version, target)
+        else:
+            candidate, reason = self._proposal(parent, proposal, version)
         if candidate is None:
             return replace(parent, version=version, parent=parent.version, changelog=reason)
         return candidate
+
+    @staticmethod
+    def _prompt_proposal(
+        parent: HarnessPolicy,
+        proposal: dict,
+        version: str,
+        target: str,
+    ) -> tuple[HarnessPolicy | None, str]:
+        allowed = {
+            "coding": {"coding_generation_prompt", "coding_revision_prompt"},
+            "retrieval": {"retrieval_prompt"},
+            "decision": {"decision_prompt"},
+        }
+        field = str(proposal.get("prompt_field", ""))
+        replacement_prompt = str(proposal.get("replacement_prompt", "")).strip()
+        if field not in allowed[target] or not replacement_prompt:
+            return None, "Illegal prompt-only mutation; unchanged."
+        return (
+            replace(
+                parent,
+                version=version,
+                parent=parent.version,
+                changelog=str(proposal.get("changelog", "Prompt-only mutation."))[:500],
+                **{field: replacement_prompt},
+            ),
+            "",
+        )
 
     def _proposal(
         self,
@@ -372,6 +431,7 @@ class CoEvolutionEngine:
             )
             history.append(
                 EvolutionStep(
+                    mode=self.config.mode,
                     generation=generation,
                     parent_version=incumbent.version,
                     child_versions=tuple(child.version for child in children),

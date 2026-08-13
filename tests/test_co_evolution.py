@@ -55,6 +55,36 @@ def test_mutation_can_redesign_the_complete_harness_genome() -> None:
     assert child.enable_evidence_adjustments is False
 
 
+def test_prompt_mode_changes_only_one_prompt() -> None:
+    evaluation = PolicyEvaluation(
+        version="v000",
+        system_reward=0.2,
+        module_rewards={"coding": 0.8, "retrieval": 0.2, "decision": 0.7},
+        outcomes=(),
+    )
+    client = FakeLLMClient(
+        [
+            json.dumps(
+                {
+                    "prompt_field": "retrieval_prompt",
+                    "replacement_prompt": "Retrieve contrastive exact evidence.",
+                    "changelog": "Improve retrieval precision.",
+                }
+            )
+        ]
+    )
+    from evolving_agent.co_evolution import CoEvolutionConfig
+
+    child = CoEvolutionEngine(
+        client,
+        harness_factory=lambda _policy: None,
+        config=CoEvolutionConfig(mode="prompt"),
+    ).mutate(HarnessPolicy(), evaluation)
+    assert child.retrieval_prompt == "Retrieve contrastive exact evidence."
+    assert child.workflow == HarnessPolicy().workflow
+    assert child.coding_initial_programs == HarnessPolicy().coding_initial_programs
+
+
 def test_illegal_unbounded_workflow_mutation_is_rejected() -> None:
     evaluation = PolicyEvaluation(
         version="v000",

@@ -13,6 +13,24 @@ forecasting harness.
 | Decision Agent | Executed forecasts, hindcast scores, verified evidence, validated decision-skill summaries | Future values | Candidate ID and matching citations; it cannot invent values |
 | Harness Evolver | Aggregate resolved-task failures on the training split | Labels during task inference | A complete child Harness Genome: prompts, Coding search, workflow/topology, evidence policy, and aggregation |
 
+## Three evolution modes
+
+The same `evolving-agent evolve` entrypoint now exposes three progressively more expressive
+experiments through `--evolution-mode`:
+
+| Mode | What the LLM may change | Artifact | Acceptance rule |
+|---|---|---|---|
+| `prompt` | Exactly one full prompt belonging to the diagnosed weakest role | `best_policy.json` | Rank children on train; accept the train winner only if it improves entity-disjoint dev |
+| `genome` (default) | All four role prompts, Coding search/hindcast budgets, Retrieval/Decision workflow, evidence adjustment policy, and aggregation | `best_policy.json` | The same train selection and held-out dev gate |
+| `source` | Mutable Coding, Retrieval, Decision, and Harness Python; it may also create new agent modules under `evolving_agent/generated/` | `best_source.patch` | Static audit, full tests, train selection, then held-out dev gate |
+
+`prompt` recreates the original conservative baseline. `genome` is the current structured
+Meta-Harness. `source` is the full source-level option: each candidate is generated and executed in
+a detached temporary Git worktree, so rejected mutations never touch the user's checkout. The
+scorer, task split, label-removal boundary, CLI, sandbox, and source-evolution host are outside the
+mutable set. The Source Engineer sees sanitized training failure structure but not task/document
+identifiers, future values, GT evidence, or development results.
+
 ## Runtime flow
 
 ```text
@@ -137,16 +155,47 @@ flag only on a chronological public training stream. The `evolve` command enable
 each isolated training evaluation. A child carries the skills learned on its training sequence into
 development evaluation, but development remains read-only and cannot add or update skills.
 
-Run the held-out co-evolution loop:
+Run the original prompt-only baseline:
 
 ```bash
 evolving-agent evolve \
   --tasks-file /path/to/Dr-CiK/data/tasks/train.jsonl \
+  --evolution-mode prompt \
   --setting combined \
   --limit 50 \
   --generations 3 \
   --children 2
 ```
+
+Run the structured Harness Genome loop (the default):
+
+```bash
+evolving-agent evolve \
+  --tasks-file /path/to/Dr-CiK/data/tasks/train.jsonl \
+  --evolution-mode genome \
+  --setting combined \
+  --limit 50 \
+  --generations 3 \
+  --children 2
+```
+
+Run full source-level evolution from a clean tracked checkout:
+
+```bash
+evolving-agent evolve \
+  --tasks-file /path/to/Dr-CiK/data/tasks/train.jsonl \
+  --evolution-mode source \
+  --setting combined \
+  --limit 50 \
+  --generations 1 \
+  --children 2 \
+  --source-patch-path runs/evolving/best_source.patch
+```
+
+Source mode is deliberately more expensive: every child invokes a Source Engineer, runs the test
+suite, and evaluates the complete three-agent system. The accepted output is a cumulative patch;
+inspect or apply it explicitly with `git apply runs/evolving/best_source.patch`. Continue from an
+accepted source generation with `--seed-source-patch runs/evolving/best_source.patch`.
 
 The accepted genome is written to `runs/evolving/best_policy.json`. Continue evolution from that
 exact inherited framework with:
@@ -155,6 +204,7 @@ exact inherited framework with:
 evolving-agent evolve \
   --tasks-file /path/to/Dr-CiK/data/tasks/train.jsonl \
   --llm-backend codex \
+  --evolution-mode genome \
   --seed-policy-path runs/evolving/best_policy.json \
   --policy-path runs/evolving/best_policy_next.json \
   --generations 3 \

@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
+import subprocess
+import sys
+import tempfile
 from dataclasses import asdict
 from pathlib import Path
 
@@ -18,6 +22,12 @@ from evolving_agent.llm import CodexCLIClient, CodexCLIConfig, QwenClient
 from evolving_agent.retrieval_agent.agent import RetrievalAgent
 from evolving_agent.retrieval_agent.skill_library import RetrievalSkillLibrary
 from evolving_agent.skill_learning import OutcomeSkillLearner
+from evolving_agent.source_evolution import (
+    SourceEvaluation,
+    SourceEvolutionConfig,
+    SourceEvolutionEngine,
+    save_source_trace,
+)
 from evolving_agent.tsfm import ChronosConfig, ChronosForecaster
 
 
@@ -77,9 +87,31 @@ def build_parser() -> argparse.ArgumentParser:
     evolve = subparsers.choices["evolve"]
     evolve.add_argument("--generations", type=int, default=3)
     evolve.add_argument("--children", type=int, default=2)
+    evolve.add_argument(
+        "--evolution-mode",
+        choices=("prompt", "genome", "source"),
+        default="genome",
+        help=(
+            "prompt changes one role prompt; genome co-evolves prompts/budgets/topology; "
+            "source edits agent/orchestration Python in isolated Git worktrees."
+        ),
+    )
     evolve.add_argument("--dev-fraction", type=float, default=0.25)
     evolve.add_argument("--policy-path", default="runs/evolving/best_policy.json")
     evolve.add_argument("--trace-path", default="runs/evolving/evolution_trace.json")
+    evolve.add_argument(
+        "--source-patch-path",
+        default="runs/evolving/best_source.patch",
+        help="Accepted cumulative source patch for source evolution mode.",
+    )
+    evolve.add_argument(
+        "--seed-source-patch",
+        default=None,
+        help="Previously accepted source patch from which source evolution continues.",
+    )
+    evolve.add_argument("--source-engineer-timeout", type=int, default=1800)
+    evolve.add_argument("--source-test-timeout", type=int, default=300)
+    evolve.add_argument("--source-eval-timeout", type=int, default=7200)
     return parser
 
 
@@ -275,6 +307,8 @@ def evolve_command(args) -> dict:
     train, dev = _entity_split(tasks, args.seed, args.dev_fraction)
     if not train or not dev:
         raise ValueError("entity split produced an empty train or dev set")
+    if args.evolution_mode == "source":
+        return _source_evolve_command(args, train, dev)
     llm, library, retrieval_library, decision_library, tsfm = _components(args)
     engine = CoEvolutionEngine(
         llm,
@@ -290,6 +324,7 @@ def evolve_command(args) -> dict:
         CoEvolutionConfig(
             generations=args.generations,
             children_per_generation=args.children,
+            mode=args.evolution_mode,
         ),
     )
     seed_policy = _seed_policy(args)
@@ -300,10 +335,118 @@ def evolve_command(args) -> dict:
     trace_path.write_text(json.dumps([asdict(item) for item in trace], indent=2))
     return {
         "best_policy": best.version,
+        "evolution_mode": args.evolution_mode,
         "policy_path": args.policy_path,
         "trace_path": str(trace_path),
         "train_tasks": len(train),
         "dev_tasks": len(dev),
+    }
+
+
+def _source_evolve_command(
+    args,
+    train: list[ContextTask],
+    dev: list[ContextTask],
+) -> dict:
+    """Run source candidates in detached worktrees; keep the current checkout immutable."""
+    repo_root = Path.cwd().resolve()
+    tracked_dirty = subprocess.run(
+        ["git", "diff", "--quiet", "HEAD", "--"],
+        cwd=repo_root,
+        check=False,
+    ).returncode
+    if tracked_dirty:
+        raise RuntimeError("source evolution requires a clean tracked worktree")
+
+    runtime_keys = (
+        "setting",
+        "llm_backend",
+        "model_id",
+        "device",
+        "codex_model",
+        "codex_reasoning_effort",
+        "codex_timeout",
+        "codex_cache_dir",
+        "coding_initial_programs",
+        "coding_mutations",
+        "coding_validation_folds",
+        "chronos_model_id",
+        "chronos_device",
+        "chronos_cache_dir",
+        "chronos_local_files_only",
+    )
+    runtime = {key: getattr(args, key) for key in runtime_keys}
+    runtime["codex_cache_dir"] = str((repo_root / args.codex_cache_dir).resolve())
+    if args.chronos_cache_dir:
+        runtime["chronos_cache_dir"] = str(
+            (repo_root / args.chronos_cache_dir).resolve()
+        )
+    evaluation_config = {
+        "tasks_file": str(Path(args.tasks_file).resolve()),
+        "train_ids": [task.numeric.task_id for task in train],
+        "dev_ids": [task.numeric.task_id for task in dev],
+        "runtime": runtime,
+    }
+
+    def evaluate(worktree: Path) -> SourceEvaluation:
+        with tempfile.TemporaryDirectory(prefix="source-eval-config-") as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps(evaluation_config), encoding="utf-8")
+            environment = dict(os.environ)
+            existing = environment.get("PYTHONPATH", "")
+            environment["PYTHONPATH"] = str(worktree) + (os.pathsep + existing if existing else "")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "evolving_agent.source_eval",
+                    "--config",
+                    str(config_path),
+                ],
+                cwd=worktree,
+                capture_output=True,
+                text=True,
+                timeout=args.source_eval_timeout,
+                env=environment,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError((completed.stderr or completed.stdout)[-2000:])
+            lines = [line for line in completed.stdout.splitlines() if line.strip()]
+            if not lines:
+                raise RuntimeError("source evaluator produced no result")
+            return SourceEvaluation.from_dict(json.loads(lines[-1]))
+
+    engine = SourceEvolutionEngine(
+        repo_root,
+        evaluate,
+        SourceEvolutionConfig(
+            generations=args.generations,
+            children_per_generation=args.children,
+            model=args.codex_model,
+            reasoning_effort=args.codex_reasoning_effort,
+            codex_timeout_seconds=args.source_engineer_timeout,
+            test_timeout_seconds=args.source_test_timeout,
+        ),
+    )
+    seed_patch = ""
+    if args.seed_source_patch:
+        source = Path(args.seed_source_patch)
+        if not source.exists():
+            raise FileNotFoundError(f"seed source patch does not exist: {source}")
+        seed_patch = source.read_text(encoding="utf-8")
+    best_patch, trace = engine.evolve(seed_patch)
+    patch_path = Path(args.source_patch_path)
+    patch_path.parent.mkdir(parents=True, exist_ok=True)
+    patch_path.write_text(best_patch, encoding="utf-8")
+    save_source_trace(args.trace_path, trace)
+    return {
+        "evolution_mode": "source",
+        "source_patch_path": str(patch_path),
+        "trace_path": args.trace_path,
+        "train_tasks": len(train),
+        "dev_tasks": len(dev),
+        "accepted_generations": sum(item.accepted_candidate is not None for item in trace),
     }
 
 
