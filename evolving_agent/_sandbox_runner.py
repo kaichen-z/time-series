@@ -10,7 +10,17 @@ import sys
 def _apply_memory_limit(memory_mb: int) -> None:
     """Cap this process's address space so a runaway allocation gets killed, not the host."""
     limit_bytes = memory_mb * 1024 * 1024
-    resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
+    current_soft, current_hard = resource.getrlimit(resource.RLIMIT_AS)
+    target = limit_bytes if current_hard == resource.RLIM_INFINITY else min(limit_bytes, current_hard)
+    # macOS may launch the child under a hard cap lower than the requested
+    # default. Never try to raise that cap: doing so aborts every valid skill.
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (target, current_hard))
+    except (OSError, ValueError):
+        # Some macOS/Python combinations report an inherited hard limit that
+        # cannot be reapplied. The subprocess timeout and AST gate still hold;
+        # skip only the incompatible address-space cap.
+        return
 
 
 def main() -> None:

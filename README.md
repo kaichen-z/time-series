@@ -2,6 +2,16 @@
 
 Repository: <https://github.com/kaichen-z/time-series>
 
+## New canonical evolving-agent implementation
+
+The collaborator's top-level [`evolving_agent/`](evolving_agent/) package is now the base for the
+self-evolving experiment. The original Fresh-vs-Skill-Library baseline is preserved. The integrated
+version adds numbers-only program evolution with historical hindcasting, verified contextual
+retrieval, a citation-constrained Decision Agent, a real Chronos ablation, and failure-attributed
+three-agent co-evolution with held-out acceptance. See
+[`docs/EVOLVING_AGENT.md`](docs/EVOLVING_AGENT.md) for the exact information boundaries, flow,
+metrics, and commands.
+
 This repository contains an auditable, gap-guided agent loop for the
 [Dr-CiK](https://github.com/ServiceNow/Dr-CiK) contextual time-series forecasting
 benchmark. Its research hypothesis is that a passage should be retrieved because it is

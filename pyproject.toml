@@ -18,6 +18,8 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 drcik-agent = "drcik_agent.cli:main"
+evolving-agent = "evolving_agent.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["drcik_agent*", "evolving_agent*"]

@@ -16,16 +16,26 @@ class Skill:
     description: str
     code: str
     created_from_task: str
-    uses: int = 0   
+    assumption: str = ""
+    failure_condition: str = ""
+    validation_score: float | None = None
+    uses: int = 0
     avg_score: float | None = None
 
 
 class SkillLibrary:
     """In-memory skill set backed by a single JSON file, written atomically on every change."""
 
-    def __init__(self, path: str | Path, skills: list[Skill] | None = None) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        skills: list[Skill] | None = None,
+        *,
+        persist: bool = True,
+    ) -> None:
         self.path = Path(path)
         self._skills: dict[str, Skill] = {s.name: s for s in (skills or [])}
+        self.persist = persist
 
     @classmethod
     def load(cls, path: str | Path) -> "SkillLibrary":
@@ -38,6 +48,8 @@ class SkillLibrary:
 
     def save(self) -> None:
         """Write the whole library out atomically (tmp file + rename)."""
+        if not self.persist:
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
         tmp_path.write_text(json.dumps([asdict(s) for s in self._skills.values()], indent=2))
@@ -55,7 +67,21 @@ class SkillLibrary:
         """Name + one-line description only (never full code) so the prompt stays small as the library grows."""
         if not self._skills:
             return "(no skills saved yet)"
-        return "\n".join(f"- {s.name}: {s.description}" for s in self._skills.values())
+        return "\n".join(
+            f"- {skill.name}: {skill.description} "
+            f"[hindcast_sMAPE={skill.validation_score:.4f}]"
+            if skill.validation_score is not None
+            else f"- {skill.name}: {skill.description}"
+            for skill in self._skills.values()
+        )
+
+    def all(self) -> tuple[Skill, ...]:
+        """Return an immutable snapshot for validated candidate execution."""
+        return tuple(self._skills.values())
+
+    def clone(self, *, persist: bool = False) -> "SkillLibrary":
+        """Create an evaluation-local snapshot so competing policies cannot contaminate each other."""
+        return SkillLibrary(self.path, list(self._skills.values()), persist=persist)
 
     def record_use(self, name: str, score: float) -> None:
         """Update a skill's running average score after it was used on a task."""
