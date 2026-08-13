@@ -136,7 +136,7 @@ programs is deferred until out-of-fold stacking weights can demonstrate a valida
 Run the loop on a public Dr-CiK sample and write the delayed-feedback records:
 
 ```bash
-PYTHONPATH=src python3 -m drcik_agent run-sample \
+python3 -m drcik_agent run-sample \
   --sample-dir external/Dr-CiK/sample \
   --system triad \
   --backbone chronos \
@@ -158,7 +158,7 @@ selection regret for Decision.
 All three reasoning roles can instead be backed by schema-constrained Codex calls:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m drcik_agent run-sample \
+.venv/bin/python -m drcik_agent run-sample \
   --sample-dir external/Dr-CiK/sample \
   --task-id task_42 \
   --system triad \
@@ -307,7 +307,7 @@ candidate stage, verifier, evidence-to-impact translator, memory, or restricted 
 workspace:
 
 ```bash
-PYTHONPATH=src python3 -m drcik_agent run-hf \
+python3 -m drcik_agent run-hf \
   --public-dev \
   --task-id task_117 \
   --system codex-direct \
@@ -347,7 +347,7 @@ validates it on historical holdouts, blends it with Chronos according to validat
 applies the result through the restricted workspace:
 
 ```bash
-PYTHONPATH=src python3 -m drcik_agent run-sample \
+python3 -m drcik_agent run-sample \
   --sample-dir external/Dr-CiK/sample \
   --task-id task_42 \
   --system codex-contract \
@@ -474,7 +474,7 @@ The project entrypoint can run directly from source after installing the Chronos
 
 ```bash
 pip install 'chronos-forecasting>=2.2.0'
-PYTHONPATH=src python3 -m drcik_agent run-sample \
+python3 -m drcik_agent run-sample \
   --sample-dir external/Dr-CiK/sample \
   --output-dir outputs/agent-loop
 ```
@@ -637,7 +637,7 @@ multiply/add actions are now opt-in rather than the default.
 ## Tests
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s tests -v
 ```
 
 ## Current scope

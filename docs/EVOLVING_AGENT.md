@@ -120,7 +120,7 @@ skill during inference.
 
 ## Commands
 
-Install both the original `src/drcik_agent` and top-level `evolving_agent` packages:
+Install both the original `drcik_agent` and top-level `evolving_agent` packages:
 
 ```bash
 pip install -e '.[dev]'
