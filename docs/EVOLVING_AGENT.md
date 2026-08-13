@@ -235,5 +235,7 @@ The old one-shot comparison remains runnable with
 ## Important experiment boundary
 
 Dr-CiK has public labels that make stage-wise diagnosis possible. These labels are suitable for
-training/evolution splits, but reported claims must use entity-disjoint dev/test tasks. The hidden
-test set must never be used to generate prompts, skills, or acceptance decisions.
+entity-disjoint Train/Dev evolution, while a third Public Holdout is reserved from every mutation
+and acceptance decision. The frozen artifact can then run with `--inference prompt|genome|source`.
+Hidden Test creates submission files only and must never generate prompts, skills, scores, or
+acceptance decisions.
