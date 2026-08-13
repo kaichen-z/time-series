@@ -171,14 +171,23 @@ may contain eligible information about the future window. Do not read outside th
 
 DECISION_AGENT_PROMPT = """You are the Decision Agent in a contextual time-series forecasting
 system. Read candidates.json and evidence.json. Select exactly one existing candidate_id; never
-invent or directly edit forecast values. Rolling-validation scores measure historical numerical
-fit, while verified evidence tests whether a candidate's assumptions remain valid in the future.
-Prefer a candidate only when both sources of information support it. Treat unsupported narrative
-predictions and unverified magnitudes as weak evidence. If the current evidence cannot distinguish
-plausible candidates, request more retrieval. Evidence that only explains historical anomalies is
-not sufficient when no evidence yet addresses the forecast window and documents remain. If verified
-active evidence has no executable candidate, request new candidates. Cite only supplied document
-IDs. The hidden future and benchmark labels are unavailable and must never be inferred."""
+invent or directly edit forecast values.
+
+Use the host's highest-scoring evidence-compatible candidate as the conservative default. Override
+that default only when verified evidence directly distinguishes the selected candidate's falsifiable
+assumption for the forecast window. Rolling validation measures historical numerical fit; textual
+plausibility alone is not a substitute for it. A document explaining a historical anomaly, a
+resolved event, or an effect already embedded in the history cannot justify a future override.
+Qualitative evidence without a defensible magnitude cannot justify a quantified adjustment.
+
+For an evidence-adjusted candidate, supporting_document_ids must overlap that candidate's own
+source_document_ids and must support the exact active numerical adjustment. For a numbers-only
+candidate that is not the host default, cite the forecast-window documents that invalidate the
+default assumption and support the selected assumption. If no such evidence exists, retain the host
+default. If evidence is insufficient and documents remain, request more retrieval. If verified
+active evidence has no executable candidate, request new candidates instead of selecting a merely
+plausible approximation. Cite only supplied document IDs. The hidden future and benchmark labels
+are unavailable and must never be inferred."""
 
 
 def _candidate_family(candidate: ForecastCandidate) -> str:
@@ -587,6 +596,29 @@ class CodexDecisionForecastAgent(DecisionForecastAgent):
         }
         selected_id = str(result.get("selected_candidate_id", ""))
         if selected_id not in compatible:
+            return fallback
+        by_id = {item.candidate_id: item for item in candidates}
+        selected = by_id[selected_id]
+        fallback_id = fallback.selected_candidate_ids[0]
+        cited_ids = {
+            str(value) for value in result.get("supporting_document_ids", [])
+        }
+        current_source_ids = {
+            source_id for impact in impacts for source_id in impact.source_document_ids
+        }
+
+        # Codex may only override the host's validation-based default when it
+        # cites evidence belonging to this task.  This keeps qualitative
+        # reasoning useful while making an unsupported override fail closed.
+        if selected_id != fallback_id and not (cited_ids & current_source_ids):
+            return fallback
+
+        # A numerical evidence adjustment has a stricter provenance contract:
+        # the Decision Agent must cite a document that is attached to the
+        # executable candidate itself, not merely another document in context.
+        if "evidence_adjusted" in selected.tags and not (
+            cited_ids & set(selected.source_document_ids)
+        ):
             return fallback
         can_continue = round_index < max_rounds and documents_remaining
         return CandidateDecision(

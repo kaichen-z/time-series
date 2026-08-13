@@ -118,6 +118,30 @@ def _affected_indices(task: ForecastTask, impact: EvidenceImpact) -> list[int]:
     return indices
 
 
+def _is_executable_quantitative_impact(impact: EvidenceImpact) -> bool:
+    """Return whether a textual impact is precise enough to change numbers.
+
+    Temporary effects need both temporal boundaries.  Treating a missing start
+    or end as the edge of the forecast silently expands a bounded event and can
+    be much more harmful than retaining the numerical baseline.
+    """
+
+    if impact.adjustment_kind not in {
+        "multiplier",
+        "percentage",
+        "absolute_additive",
+        "standardized_additive",
+    }:
+        return False
+    if impact.adjustment_value is None:
+        return False
+    if impact.permanence == "temporary" and (
+        not impact.start_timestamp or not impact.end_timestamp
+    ):
+        return False
+    return True
+
+
 @dataclass
 class TriadEvolutionPolicy:
     """Small persisted policy updated only after outcomes become available.
@@ -456,16 +480,10 @@ class CodingForecastAgent:
         round_index: int,
     ) -> list[ForecastCandidate]:
         output = list(candidates)
-        modifiable = {
-            "multiplier",
-            "percentage",
-            "absolute_additive",
-            "standardized_additive",
-        }
         active = [
             impact
             for impact in impacts
-            if impact.adjustment_kind in modifiable
+            if _is_executable_quantitative_impact(impact)
             and impact.forecast_relation in {"overlaps_forecast", "forecast_relevant_undated"}
         ]
         parents = [
@@ -598,8 +616,7 @@ class DecisionForecastAgent:
         active_impacts = [
             impact
             for impact in impacts
-            if impact.adjustment_kind
-            in {"multiplier", "percentage", "absolute_additive", "standardized_additive"}
+            if _is_executable_quantitative_impact(impact)
             and impact.forecast_relation in {"overlaps_forecast", "forecast_relevant_undated"}
         ]
         resolved_impacts = [

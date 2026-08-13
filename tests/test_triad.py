@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 from drcik_agent.agents import TimeSeriesDiagnosisAgent
 from drcik_agent.models import Document, ForecastTask
+from drcik_agent.models import EvidenceImpact
 from drcik_agent.triad import (
     CodingForecastAgent,
     DecisionForecastAgent,
@@ -153,3 +154,31 @@ def test_decision_uses_rolling_backtest_instead_of_model_family_prior() -> None:
         > by_id["c_backbone"].historical_score
     )
     assert decision.selected_candidate_ids == ("c_statistical",)
+
+
+def test_temporary_quantitative_impact_requires_complete_time_window() -> None:
+    task = _task()
+    system = _system(max_rounds=1)
+    diagnosis = system.diagnosis_agent.diagnose(task)
+    candidates, _method = system.coding_agent.initial_candidates(task, diagnosis)
+    incomplete = EvidenceImpact(
+        source_document_ids=("doc_future_event",),
+        event_type="promotion",
+        start_timestamp=None,
+        end_timestamp="2024-01-03 01:00:00",
+        direction="up",
+        permanence="temporary",
+        forecast_relation="overlaps_forecast",
+        adjustment_kind="percentage",
+        adjustment_value=0.5,
+        confidence=0.99,
+        rationale="The source does not establish when the temporary event starts.",
+    )
+
+    expanded = system.coding_agent.expand_candidates(
+        task, candidates, [incomplete], 1
+    )
+    decision = system.decision_agent.decide(expanded, [incomplete], 1, 1, False)
+
+    assert not any("evidence_adjusted" in item.tags for item in expanded)
+    assert decision.selected_candidate_ids == ("c_backbone",)
