@@ -742,7 +742,7 @@ three compared modes:
 The repository provides a wrapper that enforces these shared settings and isolates all outputs:
 
 ```bash
-evolving_agent/scripts/run_llm_only_evolutions.sh \
+scripts/run_llm_only_evolutions.sh \
   external/Dr-CiK/full-download/Dr-CiK_public/tasks all
 ```
 
@@ -751,12 +751,19 @@ environment variables, for example:
 
 ```bash
 EA_GENERATIONS=1 EA_CHILDREN=1 EA_LIMIT=5 EA_DRY_RUN=1 \
-  evolving_agent/scripts/run_llm_only_evolutions.sh /path/to/tasks all
+  scripts/run_llm_only_evolutions.sh /path/to/tasks all
 ```
 
 The main controls are `EA_CODEX_MODEL`, `EA_REASONING_EFFORT`, `EA_GENERATIONS`, `EA_CHILDREN`,
 `EA_SEED`, `EA_DEV_FRACTION`, `EA_HOLDOUT_FRACTION`, `EA_LIMIT`, and `EA_RUNS_DIR`. Source mode
 requires a clean tracked worktree. Run artifacts remain untracked.
+
+The wrapper's formal-pilot default is **2 generations × 3 children**. Every mode writes
+`checkpoint.json` and append-only `progress.jsonl` beside its final trace. Re-running the same
+command resumes from the last completed generation and reuses validated Codex call caches. Use
+`--no-resume` only when intentionally starting a new lineage. Malformed model JSON is parsed
+leniently and then sent through at most two syntax-only repair calls; an unrepaired response or a
+failed child is rejected without terminating the other candidates.
 
 ### 9.2 `--evolution prompt`
 

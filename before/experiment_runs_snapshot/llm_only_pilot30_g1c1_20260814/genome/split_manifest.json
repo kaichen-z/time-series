@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "seed": 7,
+  "dev_fraction": 0.25,
+  "holdout_fraction": 0.2,
+  "train": {
+    "task_ids": [
+      "task_128",
+      "task_104",
+      "task_181",
+      "task_164",
+      "task_221",
+      "task_106",
+      "task_175",
+      "task_194",
+      "task_205",
+      "task_129",
+      "task_66",
+      "task_125",
+      "task_228",
+      "task_101",
+      "task_166",
+      "task_58"
+    ],
+    "entities": [
+      "Acoustic Barrier Zone A-12",
+      "Ardentia City",
+      "Basalt Tier Campus",
+      "Blue Creek Technical Site",
+      "Central-Hub-005",
+      "Geological Bedrock Corridor freeway",
+      "Lumina Springs",
+      "Node-Coastal-West",
+      "Oakhaven Basin",
+      "Portal-X-88",
+      "SN-XJ-990-Alpha",
+      "Starlight Sentinel",
+      "Terra Kitchenware",
+      "The Willow Creek Bungalow",
+      "ThermalCore-88"
+    ]
+  },
+  "dev": {
+    "task_ids": [
+      "task_141",
+      "task_51",
+      "task_220",
+      "task_186",
+      "task_167",
+      "task_103",
+      "task_133",
+      "task_132",
+      "task_215"
+    ],
+    "entities": [
+      "Point-Omega-01",
+      "Port Solas",
+      "Sterling Gate Facility",
+      "Sub-Surface Drainage Network",
+      "Vanguard North Complex",
+      "Vesper Heights",
+      "Vista-Point Node 4"
+    ]
+  },
+  "holdout": {
+    "task_ids": [
+      "task_202",
+      "task_57",
+      "task_113",
+      "task_214",
+      "task_98"
+    ],
+    "entities": [
+      "Cerulean Home Decor",
+      "Grid-Unit-P4",
+      "High Plateau Observatory Complex",
+      "Ironclad Integrity",
+      "The Birchwood Residence"
+    ]
+  }
+}

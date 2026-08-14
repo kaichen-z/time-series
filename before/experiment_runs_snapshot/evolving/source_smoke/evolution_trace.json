@@ -1,0 +1,28 @@
+[
+  {
+    "generation": 0,
+    "parent_train_reward": 0.8980003272768835,
+    "parent_dev_reward": 0.8593629669872531,
+    "candidates": [
+      {
+        "candidate_id": "source_g000_c000",
+        "audit_ok": true,
+        "tests_ok": true,
+        "rejection_reason": null,
+        "changed_files": [
+          "evolving_agent/coding_agent/evolution.py",
+          "evolving_agent/decision_agent/agent.py",
+          "evolving_agent/generated/__init__.py",
+          "evolving_agent/generated/cutoff_tournament.py",
+          "evolving_agent/harness.py",
+          "evolving_agent/retrieval_agent/agent.py"
+        ],
+        "train_reward": 0.8745558828324391,
+        "dev_reward": 0.8472980341328559,
+        "engineer_summary": "{\"summary\":\"Implemented a cutoff-stability tournament with sandboxed adaptive challengers, recency-robust validation, stability-aware decisions, and stricter retrieval coverage. All 163 tests pass.\",\"hypothesis\":\"Robust recent-cutoff scoring plus deterministic seasonal/regime challengers will prevent obsolete hindcasts from dominating while verified evidence coverage improves contextual retrieval.\"}"
+      }
+    ],
+    "accepted_candidate": null,
+    "accepted_dev_reward": 0.8593629669872531
+  }
+]

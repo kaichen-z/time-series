@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -131,6 +132,9 @@ class SourceEvolutionConfig:
     reasoning_effort: str = "high"
     codex_timeout_seconds: int = 1800
     test_timeout_seconds: int = 300
+    checkpoint_path: str | Path | None = None
+    progress_path: str | Path | None = None
+    resume: bool = True
 
 
 EvaluationCallback = Callable[[Path], SourceEvaluation]
@@ -150,10 +154,22 @@ class SourceEvolutionEngine:
         self.config = config or SourceEvolutionConfig()
 
     def evolve(self, seed_patch: str = "") -> tuple[str, tuple[SourceEvolutionStep, ...]]:
-        incumbent_patch = seed_patch
-        incumbent_evaluation = self._evaluate_patch(incumbent_patch)
-        trace = []
-        for generation in range(self.config.generations):
+        restored = self._load_checkpoint()
+        if restored is None:
+            incumbent_patch = seed_patch
+            self._progress("seed_evaluation_started")
+            incumbent_evaluation = self._evaluate_patch(incumbent_patch)
+            self._progress(
+                "seed_evaluation_completed",
+                train_reward=incumbent_evaluation.train_reward,
+                dev_reward=incumbent_evaluation.dev_reward,
+            )
+            trace: list[SourceEvolutionStep] = []
+            start_generation = 0
+        else:
+            incumbent_patch, incumbent_evaluation, trace, start_generation = restored
+        for generation in range(start_generation, self.config.generations):
+            self._progress("generation_started", generation=generation)
             parent_train_reward = incumbent_evaluation.train_reward
             parent_dev_reward = incumbent_evaluation.dev_reward
             candidates = [
@@ -185,6 +201,18 @@ class SourceEvolutionEngine:
                     accepted_dev_reward=incumbent_evaluation.dev_reward,
                 )
             )
+            self._save_checkpoint(
+                incumbent_patch,
+                incumbent_evaluation,
+                trace,
+                generation + 1,
+            )
+            self._progress(
+                "generation_completed",
+                generation=generation,
+                accepted=(accepted.candidate_id if accepted else None),
+                dev_reward=incumbent_evaluation.dev_reward,
+            )
         return incumbent_patch, tuple(trace)
 
     def _evaluate_patch(self, patch: str) -> SourceEvaluation:
@@ -208,13 +236,21 @@ class SourceEvolutionEngine:
         parent: SourceEvaluation,
     ) -> SourceCandidate:
         candidate_id = f"source_g{generation:03d}_c{index:03d}"
+        self._progress("candidate_started", generation=generation, candidate=candidate_id)
         with self._worktree(f"{candidate_id}-") as worktree:
             if incumbent_patch:
                 self._apply_patch(worktree, incumbent_patch)
             baseline_patch = self._diff(worktree)
             try:
+                self._progress("engineer_started", generation=generation, candidate=candidate_id)
                 summary = self._run_engineer(worktree, candidate_id, parent)
             except (RuntimeError, subprocess.TimeoutExpired) as exc:
+                self._progress(
+                    "engineer_failed",
+                    generation=generation,
+                    candidate=candidate_id,
+                    error=str(exc),
+                )
                 return SourceCandidate(
                     candidate_id,
                     baseline_patch,
@@ -223,17 +259,34 @@ class SourceEvolutionEngine:
                     False,
                     f"source_engineer_failed:{exc}",
                 )
+            self._progress("engineer_completed", generation=generation, candidate=candidate_id)
             changed = self._changed_files(worktree)
+            self._progress("audit_started", generation=generation, candidate=candidate_id)
             audit_error = self.audit(worktree, changed)
             if audit_error:
+                self._progress(
+                    "audit_failed",
+                    generation=generation,
+                    candidate=candidate_id,
+                    error=audit_error,
+                )
                 return SourceCandidate(
                     candidate_id, baseline_patch, None, False, False, audit_error, changed, summary
                 )
+            self._progress("audit_completed", generation=generation, candidate=candidate_id)
+            self._progress("tests_started", generation=generation, candidate=candidate_id)
             tests_ok, test_error = self._tests(worktree)
             if not tests_ok:
+                self._progress(
+                    "tests_failed",
+                    generation=generation,
+                    candidate=candidate_id,
+                    error=test_error,
+                )
                 return SourceCandidate(
                     candidate_id, baseline_patch, None, True, False, test_error, changed, summary
                 )
+            self._progress("tests_completed", generation=generation, candidate=candidate_id)
             patch = self._diff(worktree)
             if not patch.strip() or patch == incumbent_patch:
                 return SourceCandidate(
@@ -247,8 +300,15 @@ class SourceEvolutionEngine:
                     summary,
                 )
             try:
+                self._progress("evaluation_started", generation=generation, candidate=candidate_id)
                 evaluation = self.evaluator(worktree)
             except Exception as exc:
+                self._progress(
+                    "evaluation_failed",
+                    generation=generation,
+                    candidate=candidate_id,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
                 return SourceCandidate(
                     candidate_id,
                     patch,
@@ -259,6 +319,13 @@ class SourceEvolutionEngine:
                     changed,
                     summary,
                 )
+            self._progress(
+                "candidate_completed",
+                generation=generation,
+                candidate=candidate_id,
+                train_reward=evaluation.train_reward,
+                dev_reward=evaluation.dev_reward,
+            )
             return SourceCandidate(
                 candidate_id, patch, evaluation, True, True, None, changed, summary
             )
@@ -467,6 +534,80 @@ class SourceEvolutionEngine:
             "dev_reward": candidate.evaluation.dev_reward if candidate.evaluation else None,
             "engineer_summary": candidate.engineer_summary[:1000],
         }
+
+    def _progress(self, event: str, **payload) -> None:
+        if self.config.progress_path is None:
+            return
+        destination = Path(self.config.progress_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("a", encoding="utf-8") as stream:
+            stream.write(
+                json.dumps(
+                    {
+                        "time": datetime.now(timezone.utc).isoformat(),
+                        "event": event,
+                        **payload,
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                )
+                + "\n"
+            )
+
+    def _save_checkpoint(
+        self,
+        incumbent_patch: str,
+        evaluation: SourceEvaluation,
+        trace: list[SourceEvolutionStep],
+        next_generation: int,
+    ) -> None:
+        if self.config.checkpoint_path is None:
+            return
+        destination = Path(self.config.checkpoint_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_suffix(destination.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "next_generation": next_generation,
+                    "incumbent_patch": incumbent_patch,
+                    "incumbent_evaluation": asdict(evaluation),
+                    "trace": [asdict(item) for item in trace],
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        temporary.replace(destination)
+
+    def _load_checkpoint(
+        self,
+    ) -> tuple[str, SourceEvaluation, list[SourceEvolutionStep], int] | None:
+        if (
+            not self.config.resume
+            or self.config.checkpoint_path is None
+            or not Path(self.config.checkpoint_path).exists()
+        ):
+            return None
+        payload = json.loads(Path(self.config.checkpoint_path).read_text(encoding="utf-8"))
+        raw_evaluation = payload["incumbent_evaluation"]
+        evaluation = SourceEvaluation(
+            train_reward=float(raw_evaluation["train_reward"]),
+            dev_reward=float(raw_evaluation["dev_reward"]),
+            train_module_rewards=dict(raw_evaluation["train_module_rewards"]),
+            dev_module_rewards=dict(raw_evaluation["dev_module_rewards"]),
+            failure_traces=tuple(raw_evaluation.get("failure_traces", ())),
+        )
+        trace = []
+        for raw in payload.get("trace", []):
+            item = dict(raw)
+            item["candidates"] = tuple(item["candidates"])
+            trace.append(SourceEvolutionStep(**item))
+        start = int(payload.get("next_generation", len(trace)))
+        self._progress("checkpoint_resumed", next_generation=start)
+        return str(payload.get("incumbent_patch", "")), evaluation, trace, start
 
 
 class _Worktree:

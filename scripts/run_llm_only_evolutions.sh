@@ -3,7 +3,7 @@
 # LLM-only protocol.
 #
 # Usage:
-#   evolving_agent/scripts/run_llm_only_evolutions.sh /path/to/Dr-CiK_public/tasks [all|prompt|genome|source]
+#   scripts/run_llm_only_evolutions.sh /path/to/Dr-CiK_public/tasks [all|prompt|genome|source]
 #
 # Important environment overrides:
 #   EA_RUNS_DIR, EA_CODEX_MODEL, EA_GENERATIONS, EA_CHILDREN, EA_SEED,
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 PYTHON="${PYTHON:-python3}"
 TASKS_FILE="${1:-${EA_TASKS_FILE:-}}"
@@ -20,8 +20,8 @@ MODE="${2:-all}"
 EA_RUNS_DIR="${EA_RUNS_DIR:-$REPO_ROOT/runs/llm_only_evolution}"
 EA_CODEX_MODEL="${EA_CODEX_MODEL:-gpt-5.6-sol}"
 EA_REASONING_EFFORT="${EA_REASONING_EFFORT:-high}"
-EA_GENERATIONS="${EA_GENERATIONS:-3}"
-EA_CHILDREN="${EA_CHILDREN:-2}"
+EA_GENERATIONS="${EA_GENERATIONS:-2}"
+EA_CHILDREN="${EA_CHILDREN:-3}"
 EA_SEED="${EA_SEED:-7}"
 EA_DEV_FRACTION="${EA_DEV_FRACTION:-0.25}"
 EA_HOLDOUT_FRACTION="${EA_HOLDOUT_FRACTION:-0.20}"
@@ -35,7 +35,7 @@ EA_SOURCE_EVAL_TIMEOUT="${EA_SOURCE_EVAL_TIMEOUT:-7200}"
 usage() {
     cat <<'EOF'
 Usage:
-  evolving_agent/scripts/run_llm_only_evolutions.sh TASKS_FILE [all|prompt|genome|source]
+  scripts/run_llm_only_evolutions.sh TASKS_FILE [all|prompt|genome|source]
 
 The default mode is "all". All selected modes use the same:
   - Coding setting: llm_only
@@ -44,10 +44,10 @@ The default mode is "all". All selected modes use the same:
   - generations and children per generation
 
 Examples:
-  evolving_agent/scripts/run_llm_only_evolutions.sh external/Dr-CiK/Dr-CiK_public/tasks
+  scripts/run_llm_only_evolutions.sh external/Dr-CiK/Dr-CiK_public/tasks
   EA_GENERATIONS=1 EA_CHILDREN=1 EA_LIMIT=5 \
-    evolving_agent/scripts/run_llm_only_evolutions.sh external/Dr-CiK/Dr-CiK_public/tasks prompt
-  EA_DRY_RUN=1 evolving_agent/scripts/run_llm_only_evolutions.sh /data/tasks all
+    scripts/run_llm_only_evolutions.sh external/Dr-CiK/Dr-CiK_public/tasks prompt
+  EA_DRY_RUN=1 scripts/run_llm_only_evolutions.sh /data/tasks all
 EOF
 }
 
@@ -141,6 +141,8 @@ for evolution_mode in "${MODES[@]}"; do
         --holdout-fraction "$EA_HOLDOUT_FRACTION"
         --split-manifest-path "$run_dir/split_manifest.json"
         --trace-path "$run_dir/evolution_trace.json"
+        --checkpoint-path "$run_dir/checkpoint.json"
+        --progress-path "$run_dir/progress.jsonl"
         --library-path "$run_dir/coding_skills.json"
         --retrieval-library-path "$run_dir/retrieval_skills.json"
         --decision-library-path "$run_dir/decision_skills.json"

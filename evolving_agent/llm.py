@@ -37,14 +37,32 @@ class JsonExtractionError(ValueError):
 
 
 def parse_json_object(text: str) -> dict:
-    """Strip a <think> block and any ```json fence, then parse the remaining text as JSON."""
+    """Extract the first valid JSON object from common model response wrappers."""
     stripped = _THINK_RE.sub("", text).strip()
-    fence_match = _FENCE_RE.search(stripped)
-    candidate = fence_match.group(1) if fence_match else stripped
-    try:
-        return json.loads(candidate)
-    except json.JSONDecodeError as exc:
-        raise JsonExtractionError(f"no valid JSON object in response: {exc}") from exc
+    candidates = [match.group(1).strip() for match in _FENCE_RE.finditer(stripped)]
+    candidates.append(stripped)
+    last_error: json.JSONDecodeError | None = None
+    decoder = json.JSONDecoder()
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError as exc:
+            last_error = exc
+        # Models occasionally wrap an otherwise valid object in one sentence.
+        for index, character in enumerate(candidate):
+            if character != "{":
+                continue
+            try:
+                parsed, _end = decoder.raw_decode(candidate[index:])
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+    detail = str(last_error) if last_error is not None else "response contained no JSON object"
+    raise JsonExtractionError(f"no valid JSON object in response: {detail}")
 
 
 class FakeLLMClient:
@@ -70,6 +88,7 @@ class CodexCLIConfig:
     reasoning_effort: str = "high"
     timeout_seconds: int = 900
     cache_dir: str | Path | None = "runs/evolving/codex-cache"
+    json_repair_attempts: int = 2
 
 
 class CodexCLIClient:
@@ -90,9 +109,28 @@ class CodexCLIClient:
         prompt = self._prompt(system, messages)
         cache_path = self._cache_path(prompt)
         if cache_path is not None and cache_path.exists():
-            self.cache_hits += 1
-            return LLMResponse(text=cache_path.read_text(encoding="utf-8"))
+            cached = cache_path.read_text(encoding="utf-8")
+            try:
+                parse_json_object(cached)
+            except JsonExtractionError:
+                # A partial write or an older buggy run must never poison retries.
+                pass
+            else:
+                self.cache_hits += 1
+                return LLMResponse(text=cached)
 
+        text = self._execute(prompt)
+        try:
+            parsed = parse_json_object(text)
+        except JsonExtractionError as initial_error:
+            parsed = self._repair_json(text, initial_error)
+        normalized = json.dumps(parsed, ensure_ascii=False)
+        if cache_path is not None:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(normalized, encoding="utf-8")
+        return LLMResponse(text=normalized)
+
+    def _execute(self, prompt: str) -> str:
         with tempfile.TemporaryDirectory(prefix="evolving-agent-codex-") as directory:
             workdir = Path(directory)
             result_path = workdir / "response.json"
@@ -141,14 +179,25 @@ class CodexCLIClient:
             if not result_path.exists():
                 raise RuntimeError("Codex CLI completed without writing its final response")
             text = result_path.read_text(encoding="utf-8").strip()
+        return text
 
-        # Every evolving-agent prompt has a JSON contract. Fail immediately instead
-        # of silently feeding prose or an error message to a downstream agent.
-        parse_json_object(text)
-        if cache_path is not None:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(text, encoding="utf-8")
-        return LLMResponse(text=text)
+    def _repair_json(self, broken: str, initial_error: Exception) -> dict:
+        error: Exception = initial_error
+        candidate = broken
+        for attempt in range(1, max(self.config.json_repair_attempts, 0) + 1):
+            repair_prompt = (
+                "Repair only the JSON syntax in the text below. Preserve every key and semantic "
+                "value. Do not add analysis, markdown, or new claims. Return exactly one valid "
+                f"JSON object. Repair attempt {attempt}.\n\nBROKEN JSON:\n{candidate}"
+            )
+            candidate = self._execute(repair_prompt)
+            try:
+                return parse_json_object(candidate)
+            except JsonExtractionError as exc:
+                error = exc
+        raise JsonExtractionError(
+            f"JSON remained invalid after {self.config.json_repair_attempts} repair attempts: {error}"
+        ) from error
 
     def _cache_path(self, prompt: str) -> Path | None:
         if self.config.cache_dir is None:
