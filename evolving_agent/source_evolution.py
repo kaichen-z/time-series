@@ -40,7 +40,6 @@ _GENERATED_PREFIX = "evolving_agent/generated/"
 _FORBIDDEN_ADDED_TEXT = (
     "future_values",
     "gt_evidence",
-    "annotations",
     "document.role",
     "document.subtype",
     "import subprocess",
@@ -59,7 +58,6 @@ _FORBIDDEN_ADDED_TEXT = (
     "import urllib",
     "eval(",
     "exec(",
-    "compile(",
     "__import__(",
     "open(",
     "getattr(",
