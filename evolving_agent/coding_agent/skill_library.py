@@ -20,6 +20,7 @@ class Skill:
     failure_condition: str = ""
     validation_score: float | None = None
     uses: int = 0
+    failures: int = 0
     avg_score: float | None = None
 
 
@@ -64,16 +65,26 @@ class SkillLibrary:
         return self._skills.get(name)
 
     def list_for_prompt(self) -> str:
-        """Name + one-line description only (never full code) so the prompt stays small as the library grows."""
+        """Name + description (never full code), plus usage stats once a skill has actually been tried."""
         if not self._skills:
             return "(no skills saved yet)"
-        return "\n".join(
-            f"- {skill.name}: {skill.description} "
-            f"[hindcast_sMAPE={skill.validation_score:.4f}]"
-            if skill.validation_score is not None
-            else f"- {skill.name}: {skill.description}"
-            for skill in self._skills.values()
-        )
+        return "\n".join(self._line_for_prompt(skill) for skill in self._skills.values())
+
+    @staticmethod
+    def _line_for_prompt(skill: Skill) -> str:
+        line = f"- {skill.name}: {skill.description}"
+        stats = []
+        if skill.validation_score is not None:
+            stats.append(f"hindcast_sMAPE={skill.validation_score:.4f}")
+        if skill.uses > 0:
+            ok_rate = (skill.uses - skill.failures) / skill.uses
+            mean_smape = f"{skill.avg_score:.4f}" if skill.avg_score is not None else "n/a"
+            stats.append(f"uses={skill.uses}")
+            stats.append(f"ok_rate={ok_rate:.2f}")
+            stats.append(f"mean_smape={mean_smape}")
+        if stats:
+            line += " [" + ", ".join(stats) + "]"
+        return line
 
     def all(self) -> tuple[Skill, ...]:
         """Return an immutable snapshot for validated candidate execution."""
@@ -83,12 +94,23 @@ class SkillLibrary:
         """Create an evaluation-local snapshot so competing policies cannot contaminate each other."""
         return SkillLibrary(self.path, list(self._skills.values()), persist=persist)
 
-    def record_use(self, name: str, score: float) -> None:
-        """Update a skill's running average score after it was used on a task."""
+    def record_use(self, name: str, ok: bool, score: float | None = None) -> None:
+        """Record one use attempt; only successful attempts feed the running average score."""
         skill = self._skills[name]
         new_uses = skill.uses + 1
-        new_avg = score if skill.avg_score is None else (skill.avg_score * skill.uses + score) / new_uses
+        if not ok:
+            self._skills[name] = replace(skill, uses=new_uses, failures=skill.failures + 1)
+            self.save()
+            return
+        successes_before = skill.uses - skill.failures
+        new_avg = score if skill.avg_score is None else (skill.avg_score * successes_before + score) / (successes_before + 1)
         self._skills[name] = replace(skill, uses=new_uses, avg_score=new_avg)
+        self.save()
+
+    def revise(self, name: str, new_code: str) -> None:
+        """Replace a skill's code; reset usage stats since the new code is functionally different."""
+        skill = self._skills[name]
+        self._skills[name] = replace(skill, code=new_code, uses=0, failures=0, avg_score=None)
         self.save()
 
     def __len__(self) -> int:

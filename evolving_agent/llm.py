@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Protocol
 
 # Qwen remains available as an explicit local ablation; the harness CLI defaults to Codex.
-DEFAULT_MODEL_ID = "Qwen/Qwen2.5-32B-Instruct"
+DEFAULT_MODEL_ID = "Qwen/Qwen3-32B"
 DEFAULT_CACHE_DIR = "/raid/home/air/khoutaibi/models"
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
@@ -376,7 +376,7 @@ class QwenClient:
         model_id: str = DEFAULT_MODEL_ID,
         device: str | None = None,
         cache_dir: str = DEFAULT_CACHE_DIR,
-        max_new_tokens: int = 1024,
+        max_new_tokens: int = 8192,
     ) -> None:
         self.model_id = model_id
         self.device = device or pick_free_gpu()

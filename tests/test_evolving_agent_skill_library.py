@@ -57,11 +57,60 @@ class SkillLibraryTests(unittest.TestCase):
     def test_record_use_updates_running_average(self):
         library = SkillLibrary.load(self.path)
         library.add(_skill())
-        library.record_use("detect_trend", 10.0)
-        library.record_use("detect_trend", 20.0)
+        library.record_use("detect_trend", ok=True, score=10.0)
+        library.record_use("detect_trend", ok=True, score=20.0)
         skill = library.get("detect_trend")
         self.assertEqual(skill.uses, 2)
+        self.assertEqual(skill.failures, 0)
         self.assertEqual(skill.avg_score, 15.0)
+
+    def test_record_use_failure_updates_failures_not_avg_score(self):
+        library = SkillLibrary.load(self.path)
+        library.add(_skill())
+        library.record_use("detect_trend", ok=True, score=10.0)
+        library.record_use("detect_trend", ok=False)
+        skill = library.get("detect_trend")
+        self.assertEqual(skill.uses, 2)
+        self.assertEqual(skill.failures, 1)
+        self.assertEqual(skill.avg_score, 10.0)  # unaffected by the failed attempt
+
+    def test_list_for_prompt_shows_stats_once_used(self):
+        library = SkillLibrary.load(self.path)
+        library.add(_skill())
+        library.record_use("detect_trend", ok=True, score=12.5)
+        library.record_use("detect_trend", ok=False)
+        text = library.list_for_prompt()
+        self.assertIn("uses=2", text)
+        self.assertIn("ok_rate=0.50", text)
+        self.assertIn("mean_smape=12.5000", text)
+
+    def test_list_for_prompt_omits_stats_for_a_never_used_skill(self):
+        library = SkillLibrary.load(self.path)
+        library.add(_skill())
+        text = library.list_for_prompt()
+        self.assertNotIn("uses=", text)
+        self.assertNotIn("ok_rate", text)
+
+    def test_revise_replaces_code_and_resets_stats(self):
+        library = SkillLibrary.load(self.path)
+        library.add(_skill())
+        library.record_use("detect_trend", ok=True, score=10.0)
+        new_code = "def forecast(history, horizon, frequency): return [1.0] * horizon"
+        library.revise("detect_trend", new_code)
+        skill = library.get("detect_trend")
+        self.assertEqual(skill.code, new_code)
+        self.assertEqual(skill.uses, 0)
+        self.assertEqual(skill.failures, 0)
+        self.assertIsNone(skill.avg_score)
+        self.assertEqual(skill.description, "fits a linear trend")  # identity preserved
+
+    def test_revise_persists_to_disk(self):
+        library = SkillLibrary.load(self.path)
+        library.add(_skill())
+        new_code = "def forecast(history, horizon, frequency): return [2.0] * horizon"
+        library.revise("detect_trend", new_code)
+        reloaded = SkillLibrary.load(self.path)
+        self.assertEqual(reloaded.get("detect_trend").code, new_code)
 
     def test_add_overwrites_existing_skill_with_the_same_name(self):
         library = SkillLibrary.load(self.path)

@@ -1,50 +1,110 @@
-{"task_id": "task_134", "action": "write_skill", "skill_name": "simple_exponential_smoothing", "smape": 22.48660103732365, "mae": 340.0321269889167, "error": null}
-{"task_id": "task_101", "action": "write_skill", "skill_name": "fixed_exponential_smoothing", "smape": 27.37585490285254, "mae": 8.927798641455105, "error": null}
-{"task_id": "task_215", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 8.091227554999207, "mae": 4.762514933619551, "error": null}
-{"task_id": "task_179", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 98.34174958776465, "mae": 7.017192709021567, "error": null}
-{"task_id": "task_100", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 34.16993436349303, "mae": 5.5070972745134785, "error": null}
-{"task_id": "task_158", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 37.40684445338748, "mae": 2.4978020722173997, "error": null}
-{"task_id": "task_180", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 58.95001523525212, "mae": 0.279386132152653, "error": null}
-{"task_id": "task_201", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 4.5989123329857415, "mae": 0.02714492497451942, "error": null}
-{"task_id": "task_130", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 8.605322526644615, "mae": 12.064235354174619, "error": null}
-{"task_id": "task_48", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 4.875170591493932, "mae": 13.995559825823893, "error": null}
-{"task_id": "task_199", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 8.67995935233335, "mae": 7.028301595255444, "error": null}
-{"task_id": "task_136", "action": "use_skill", "skill_name": "fixed_exponential_smoothing", "smape": 40.69146700490986, "mae": 406.1556111825493, "error": null}
-{"task_id": "task_142", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 197.79808872192802, "mae": 79.45833333333333, "error": null}
-{"task_id": "task_209", "action": "write_skill", "skill_name": "linear_trend_forecast", "smape": 8.214289351461433, "mae": 0.04312450985365782, "error": null}
-{"task_id": "task_110", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 83.33758192147533, "mae": 4.519166666666667, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
-{"task_id": "task_161", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 140.0414641119586, "mae": 283.94798113003105, "error": null}
-{"task_id": "task_208", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 2.817907423222574, "mae": 20.997458333333345, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
-{"task_id": "task_68", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 17.1596544052989, "mae": 12.997100000000007, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
-{"task_id": "task_141", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 40.31231292569765, "mae": 402.224223294, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
-{"task_id": "task_212", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 3.2948531030537267, "mae": 2.8375416666666617, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
-{"task_id": "task_64", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 14.040478006114201, "mae": 24.06, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
-{"task_id": "task_143", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 116.66666666666667, "mae": 380.9166666666667, "error": "no valid JSON object in response: Extra data: line 3 column 1 (char 936)"}
-{"task_id": "task_190", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 94.4665780022586, "mae": 0.7405600003, "error": null}
-{"task_id": "task_151", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 106.45726915488859, "mae": 1.5277777777777777, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
-{"task_id": "task_163", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 161.51416322454895, "mae": 271.7702928617787, "error": null}
-{"task_id": "task_146", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 106.45726915488859, "mae": 1.5277777777777777, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
-{"task_id": "task_74", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 97.58477928487653, "mae": 214.93333333333334, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
-{"task_id": "task_59", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 14.346798001886002, "mae": 53.583333333333336, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
-{"task_id": "task_194", "action": "write_skill", "skill_name": "forecast_with_alpha", "smape": 28.919532211641414, "mae": 229.6484363859621, "error": null}
-{"task_id": "task_148", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 37.40684445338748, "mae": 2.4978020722173997, "error": null}
-{"task_id": "task_71", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 112.75329308762102, "mae": 1.9661333333333333, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
-{"task_id": "task_197", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 8.605322526644615, "mae": 12.064235354174619, "error": null}
-{"task_id": "task_55", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 156.84592955852585, "mae": 104.41216722729033, "error": null}
-{"task_id": "task_135", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 8.605322526644615, "mae": 12.064235354174619, "error": null}
-{"task_id": "task_81", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 77.59635571086235, "mae": 4.61533409266058, "error": null}
-{"task_id": "task_150", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 71.94129495017938, "mae": 3.5510350098862595, "error": null}
-{"task_id": "task_88", "action": "write_skill", "skill_name": "forecast_with_moving_average", "smape": 52.79975652019878, "mae": 12.631081372607854, "error": null}
-{"task_id": "task_165", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 86.48708776050142, "mae": 1.3967590359959758, "error": null}
-{"task_id": "task_230", "action": "write_skill", "skill_name": "forecast_with_seasonal_adjustment", "smape": 5.6673153654904365, "mae": 3.014541195378663, "error": null}
-{"task_id": "task_93", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 33.21787601670487, "mae": 4.027967983087373, "error": null}
-{"task_id": "task_157", "action": "write_skill", "skill_name": "forecast_with_moving_average", "smape": 42.374874568334704, "mae": 1.1247222222222222, "error": null}
-{"task_id": "task_47", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 17.1596544052989, "mae": 12.997100000000007, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
-{"task_id": "task_211", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 8.728880856283103, "mae": 5.50117497763633, "error": null}
-{"task_id": "task_188", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 113.82746937530142, "mae": 5.46756078330181, "error": null}
-{"task_id": "task_228", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 2.817907423222574, "mae": 20.997458333333345, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
-{"task_id": "task_186", "action": "fallback", "skill_name": "__fallback_repeat_last_value__", "smape": 64.61305369772187, "mae": 0.6749999999999999, "error": "ValueError: code did not define a forecast(history, horizon, frequency) function"}
-{"task_id": "task_220", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 5.1538050044508905, "mae": 0.030495877789576662, "error": null}
-{"task_id": "task_152", "action": "write_skill", "skill_name": "forecast_with_moving_average", "smape": 42.374874568334704, "mae": 1.1247222222222222, "error": null}
-{"task_id": "task_221", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 20.216540674168357, "mae": 34.639969964461486, "error": null}
-{"task_id": "task_43", "action": "write_skill", "skill_name": "forecast_with_fixed_exponential_smoothing", "smape": 123.26931065691407, "mae": 0.3270500630539555, "error": null}
+{"task_id": "task_134", "action": "write_skill", "skill_name": "moving_average_forecast", "smape": 22.579219664737092, "mae": 341.19520129971363, "error": null}
+{"task_id": "task_101", "action": "write_skill", "skill_name": "daily_moving_average_forecast", "smape": 28.92193852205892, "mae": 9.48330352259821, "error": null}
+{"task_id": "task_215", "action": "write_skill", "skill_name": "five_minute_moving_average_forecast", "smape": 6.444907062054522, "mae": 3.743649999999996, "error": null}
+{"task_id": "task_179", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 73.89688191121961, "mae": 6.395833333333332, "error": null}
+{"task_id": "task_100", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 33.820838680587926, "mae": 5.322371800583929, "error": null}
+{"task_id": "task_158", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 40.48173785453001, "mae": 2.943518518518518, "error": null}
+{"task_id": "task_180", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 59.47358714285599, "mae": 0.2715277777777778, "error": null}
+{"task_id": "task_201", "action": "use_skill", "skill_name": "five_minute_moving_average_forecast", "smape": 5.5667595228999796, "mae": 0.03295185185185186, "error": null}
+{"task_id": "task_130", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 7.187731299332268, "mae": 10.734478322088888, "error": null}
+{"task_id": "task_48", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 4.922925556442693, "mae": 14.135000000000005, "error": null}
+{"task_id": "task_199", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 9.467544707395968, "mae": 7.66720982142857, "error": null}
+{"task_id": "task_136", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 40.90357117753877, "mae": 403.9446318498555, "error": null}
+{"task_id": "task_142", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 146.58047078423078, "mae": 140.65277777777774, "error": null}
+{"task_id": "task_209", "action": "use_skill", "skill_name": "five_minute_moving_average_forecast", "smape": 4.862049196646345, "mae": 0.02621999999999998, "error": null}
+{"task_id": "task_110", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 85.92544311296935, "mae": 4.117777777777777, "error": null}
+{"task_id": "task_161", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 135.02566303145431, "mae": 323.03125, "error": null}
+{"task_id": "task_208", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 2.5551893437198143, "mae": 18.966741666666675, "error": null}
+{"task_id": "task_68", "action": "write_skill", "skill_name": "one_minute_moving_average_forecast", "smape": 16.207042257175917, "mae": 12.24930666666667, "error": null}
+{"task_id": "task_141", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 40.90357117753877, "mae": 403.9446318498555, "error": null}
+{"task_id": "task_212", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 4.216625496618123, "mae": 3.6544034722222127, "error": null}
+{"task_id": "task_64", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 13.193840341924613, "mae": 22.46666666666667, "error": null}
+{"task_id": "task_143", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 111.9723170590499, "mae": 356.6666666666667, "error": null}
+{"task_id": "task_190", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 85.44890315093062, "mae": 0.5878901187708331, "error": null}
+{"task_id": "task_151", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 85.68249821926288, "mae": 1.4175925925925923, "error": null}
+{"task_id": "task_163", "action": "write_skill", "skill_name": "daily_seasonal_average_forecast", "smape": 6.801835766885482, "mae": 18.895833333333332, "error": null}
+{"task_id": "task_146", "action": "use_skill", "skill_name": "daily_seasonal_average_forecast", "smape": 24.774209102356163, "mae": 0.2986111111111114, "error": null}
+{"task_id": "task_74", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 75.32079962001181, "mae": 128.40833333333333, "error": null}
+{"task_id": "task_59", "action": "use_skill", "skill_name": "daily_seasonal_average_forecast", "smape": 70.18777953511692, "mae": 185.99722222222223, "error": null}
+{"task_id": "task_194", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 29.04256307591595, "mae": 230.0784763129708, "error": null}
+{"task_id": "task_148", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 40.48173785453001, "mae": 2.943518518518518, "error": null}
+{"task_id": "task_71", "action": "write_skill", "skill_name": "secondly_moving_average_forecast", "smape": 135.93195515582292, "mae": 3.594516666666666, "error": null}
+{"task_id": "task_197", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 7.187731299332268, "mae": 10.734478322088888, "error": null}
+{"task_id": "task_55", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 160.6730741766681, "mae": 145.5611111111111, "error": null}
+{"task_id": "task_135", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 7.187731299332268, "mae": 10.734478322088888, "error": null}
+{"task_id": "task_81", "action": "use_skill", "skill_name": "secondly_moving_average_forecast", "smape": 109.89971772312695, "mae": 9.836266666666672, "error": null}
+{"task_id": "task_150", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 73.076409369991, "mae": 4.738541666666667, "error": null}
+{"task_id": "task_88", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 53.84135188377403, "mae": 13.339905875539031, "error": null}
+{"task_id": "task_165", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 85.68249821926288, "mae": 1.4175925925925923, "error": null}
+{"task_id": "task_230", "action": "use_skill", "skill_name": "daily_seasonal_average_forecast", "smape": 13.43154372274976, "mae": 6.611869444444443, "error": null}
+{"task_id": "task_93", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 31.233521885039202, "mae": 3.748507104506377, "error": null}
+{"task_id": "task_157", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 43.24174478642222, "mae": 1.166319444444444, "error": null}
+{"task_id": "task_47", "action": "use_skill", "skill_name": "one_minute_moving_average_forecast", "smape": 16.207042257175917, "mae": 12.24930666666667, "error": null}
+{"task_id": "task_211", "action": "use_skill", "skill_name": "five_minute_moving_average_forecast", "smape": 5.816950772217234, "mae": 3.6191022222222236, "error": null}
+{"task_id": "task_188", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 34.93823825144934, "mae": 2.3999999999999995, "error": null}
+{"task_id": "task_228", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 2.5551893437198143, "mae": 18.966741666666675, "error": null}
+{"task_id": "task_186", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 43.700074951119554, "mae": 0.3489583333333334, "error": null}
+{"task_id": "task_220", "action": "use_skill", "skill_name": "five_minute_moving_average_forecast", "smape": 5.5667595228999796, "mae": 0.03295185185185186, "error": null}
+{"task_id": "task_152", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 43.24174478642222, "mae": 1.166319444444444, "error": null}
+{"task_id": "task_221", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 24.757822167545015, "mae": 44.175824999999996, "error": null}
+{"task_id": "task_43", "action": "use_skill", "skill_name": "secondly_moving_average_forecast", "smape": 158.45260557619312, "mae": 0.8858099999999998, "error": null}
+{"task_id": "task_233", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 2.4447983229767583, "mae": 8.980330952380935, "error": null}
+{"task_id": "task_85", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 70.10613861691365, "mae": 12.7067307346574, "error": null}
+{"task_id": "task_80", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 20.19243401328104, "mae": 752.1874676190475, "error": null}
+{"task_id": "task_113", "action": "use_skill", "skill_name": "daily_seasonal_average_forecast", "smape": 36.05447902737198, "mae": 61.270833333333336, "error": null}
+{"task_id": "task_203", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 4.002432865885269, "mae": 3.506349999999993, "error": null}
+{"task_id": "task_184", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 90.49399801132888, "mae": 8.180555555555555, "error": null}
+{"task_id": "task_227", "action": "use_skill", "skill_name": "one_minute_moving_average_forecast", "smape": 20.135137998923355, "mae": 852.2704266666674, "error": null}
+{"task_id": "task_225", "action": "use_skill", "skill_name": "five_minute_moving_average_forecast", "smape": 0.5048579250922921, "mae": 0.2629333333333309, "error": null}
+{"task_id": "task_112", "action": "use_skill", "skill_name": "daily_seasonal_average_forecast", "smape": 24.30737272305292, "mae": 35.479166666666664, "error": null}
+{"task_id": "task_86", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 61.685385651706625, "mae": 7.740773417760715, "error": null}
+{"task_id": "task_107", "action": "use_skill", "skill_name": "daily_seasonal_average_forecast", "smape": 18.269526743675527, "mae": 2.6387499999999995, "error": null}
+{"task_id": "task_51", "action": "use_skill", "skill_name": "one_minute_moving_average_forecast", "smape": 12.706564916014088, "mae": 3.811083333333338, "error": null}
+{"task_id": "task_240", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 3.2143677315772714, "mae": 1.9311347222222217, "error": null}
+{"task_id": "task_54", "action": "use_skill", "skill_name": "one_minute_moving_average_forecast", "smape": 2.4194595791271816, "mae": 1.4498633333333375, "error": null}
+{"task_id": "task_49", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 44.42759591290079, "mae": 285.43996666666675, "error": null}
+{"task_id": "task_96", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 33.820838680587926, "mae": 5.322371800583929, "error": null}
+{"task_id": "task_177", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 81.60270868303026, "mae": 4.146527777777777, "error": null}
+{"task_id": "task_63", "action": "use_skill", "skill_name": "one_minute_moving_average_forecast", "smape": 38.596510127435714, "mae": 11.466866666666665, "error": null}
+{"task_id": "task_89", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 34.90127368007409, "mae": 3.9747295367607145, "error": null}
+{"task_id": "task_70", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 44.42759591290079, "mae": 285.43996666666675, "error": null}
+{"task_id": "task_217", "action": "use_skill", "skill_name": "one_minute_moving_average_forecast", "smape": 3.2694324239457595, "mae": 3.6891719444444604, "error": null}
+{"task_id": "task_76", "action": "use_skill", "skill_name": "secondly_moving_average_forecast", "smape": 133.34030845995068, "mae": 3.0252416666666657, "error": null}
+{"task_id": "task_44", "action": "use_skill", "skill_name": "one_minute_moving_average_forecast", "smape": 38.596510127435714, "mae": 11.466866666666665, "error": null}
+{"task_id": "task_173", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 35.9594781019983, "mae": 5.100387772185203, "error": null}
+{"task_id": "task_159", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 92.26929272947, "mae": 1.48912037037037, "error": null}
+{"task_id": "task_84", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 16.536012710059932, "mae": 60.541666666666664, "error": null}
+{"task_id": "task_139", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 22.579219664737092, "mae": 341.19520129971363, "error": null}
+{"task_id": "task_229", "action": "use_skill", "skill_name": "five_minute_moving_average_forecast", "smape": 4.862049196646345, "mae": 0.02621999999999998, "error": null}
+{"task_id": "task_56", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 20.19243401328104, "mae": 752.1874676190475, "error": null}
+{"task_id": "task_169", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 57.30549225967105, "mae": 25.63443401404133, "error": null}
+{"task_id": "task_83", "action": "use_skill", "skill_name": "one_minute_moving_average_forecast", "smape": 13.48151700505983, "mae": 11.859809999999982, "error": null}
+{"task_id": "task_234", "action": "use_skill", "skill_name": "five_minute_moving_average_forecast", "smape": 5.816950772217234, "mae": 3.6191022222222236, "error": null}
+{"task_id": "task_87", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 45.46961222604153, "mae": 6.0625650573829075, "error": null}
+{"task_id": "task_124", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 22.579219664737092, "mae": 341.19520129971363, "error": null}
+{"task_id": "task_154", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 92.26929272947, "mae": 1.48912037037037, "error": null}
+{"task_id": "task_105", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 53.84135188377403, "mae": 13.339905875539031, "error": null}
+{"task_id": "task_99", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 40.63897334009709, "mae": 10.02985894346607, "error": null}
+{"task_id": "task_137", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 29.04256307591595, "mae": 230.0784763129708, "error": null}
+{"task_id": "task_174", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 130.64346282407016, "mae": 9.880555555555558, "error": null}
+{"task_id": "task_95", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 70.5673784132728, "mae": 10.331354819661225, "error": null}
+{"task_id": "task_117", "action": "use_skill", "skill_name": "daily_seasonal_average_forecast", "smape": 60.69085032607719, "mae": 242.54166666666666, "error": null}
+{"task_id": "task_238", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 1.7114106837856764, "mae": 12.943954761904767, "error": null}
+{"task_id": "task_176", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 64.37207525566579, "mae": 0.43645833333333356, "error": null}
+{"task_id": "task_213", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 4.753949033156697, "mae": 3.8216516666666664, "error": null}
+{"task_id": "task_222", "action": "use_skill", "skill_name": "one_minute_moving_average_forecast", "smape": 13.676453430558462, "mae": 36.64923000000001, "error": null}
+{"task_id": "task_224", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 4.0925667388941624, "mae": 33.61378452380953, "error": null}
+{"task_id": "task_109", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 54.807046143795525, "mae": 0.3993750000000001, "error": null}
+{"task_id": "task_210", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 1.637718437598791, "mae": 1.2554087500000035, "error": null}
+{"task_id": "task_92", "action": "use_skill", "skill_name": "daily_moving_average_forecast", "smape": 28.92193852205892, "mae": 9.48330352259821, "error": null}
+{"task_id": "task_129", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 22.579219664737092, "mae": 341.19520129971363, "error": null}
+{"task_id": "task_111", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 41.37067973295287, "mae": 2.455833333333333, "error": null}
+{"task_id": "task_131", "action": "use_skill", "skill_name": "daily_seasonal_average_forecast", "smape": 24.93675202322655, "mae": 288.51056355431456, "error": null}
+{"task_id": "task_237", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 4.753949033156697, "mae": 3.8216516666666664, "error": null}
+{"task_id": "task_207", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 14.597397924496997, "mae": 9.939738888888893, "error": null}
+{"task_id": "task_61", "action": "use_skill", "skill_name": "secondly_moving_average_forecast", "smape": 158.45260557619312, "mae": 0.8858099999999998, "error": null}
+{"task_id": "task_189", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 122.69674601178752, "mae": 17.014629419642713, "error": null}
+{"task_id": "task_138", "action": "use_skill", "skill_name": "daily_seasonal_average_forecast", "smape": 26.002361123993026, "mae": 1898.4560490058022, "error": null}
+{"task_id": "task_128", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 41.498833901528634, "mae": 2298.1884349793577, "error": null}
+{"task_id": "task_193", "action": "use_skill", "skill_name": "moving_average_forecast", "smape": 75.66493020337744, "mae": 7.778581567267011, "error": null}
+{"task_id": "task_50", "action": "use_skill", "skill_name": "secondly_moving_average_forecast", "smape": 135.93195515582292, "mae": 3.594516666666666, "error": null}

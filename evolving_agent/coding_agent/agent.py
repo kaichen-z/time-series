@@ -16,6 +16,7 @@ from evolving_agent.coding_agent.skill_library import Skill, SkillLibrary
 from evolving_agent.data import Task
 from evolving_agent.llm import JsonExtractionError, LLMClient, parse_json_object
 from evolving_agent.sandbox import SandboxResult, run_forecast_code
+from evolving_agent.tracing import TraceEvent, emit
 
 Mode = Literal["library", "fresh"]
 
@@ -100,6 +101,14 @@ class CodingSkillAgent:
         system = build_system_prompt(has_library=library_text is not None)
         user = build_user_message(task, library_text, retry_error=retry_error)
         response_text = self.llm.complete(system=system, messages=[{"role": "user", "content": user}]).text
+        emit(
+            TraceEvent(
+                task_id=task.task_id,
+                mode=self.mode,
+                event_type="llm_response",
+                detail={"is_retry": retry_error is not None, "response_text": response_text},
+            )
+        )
 
         try:
             response = parse_json_object(response_text)
