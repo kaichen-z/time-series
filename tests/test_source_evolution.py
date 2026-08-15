@@ -5,10 +5,17 @@ import subprocess
 from pathlib import Path
 
 from evolving_agent.source_evolution import (
+    SOURCE_ENGINEER_PROMPT,
     SourceEvaluation,
     SourceEvolutionConfig,
     SourceEvolutionEngine,
 )
+
+
+def test_source_engineer_must_edit_without_requesting_confirmation() -> None:
+    assert "Do not ask for confirmation" in SOURCE_ENGINEER_PROMPT
+    assert "make at least one concrete source change" in SOURCE_ENGINEER_PROMPT
+    assert '"changed_files"' in SOURCE_ENGINEER_PROMPT
 
 
 def test_source_audit_accepts_new_safe_agent_module() -> None:

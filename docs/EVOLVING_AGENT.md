@@ -78,8 +78,51 @@ After the true future becomes available, the system computes separate diagnostic
 - Decision: regret between the selected candidate and the best generated candidate.
 - Whole system: final forecast score plus retrieval quality.
 
-Successful public training trajectories may also produce two persistent, generalized libraries:
+Every policy evaluation also reports:
 
+- `mean_best_of_k_smape`: whether Coding generated at least one strong candidate;
+- `mean_selection_regret`: how much Decision lost relative to that candidate;
+- `mean_candidate_count`: the executed candidate budget actually available;
+- `mean_hindcast_future_rank_correlation`: whether historical hindcast ordering predicted the
+  resolved-future ordering.
+
+These fields are diagnostics, not alternate acceptance objectives. A child still has to improve the
+end-to-end training reward and then strictly improve disjoint development reward.
+
+### Successive-halving acceleration
+
+`--successive-halving` preserves child diversity without fully evaluating every weak genome. The
+engine first trains every child on a deterministic prefix of the Train split and evaluates it on a
+deterministic prefix of Dev. Children below the equivalently screened parent by more than
+`--screen-tolerance` are pruned; among the survivors, only the top `--screen-promote` children
+continue through the remaining Train tasks and the complete Dev split. The screened Train work is
+reused rather than rerun. Public Holdout remains outside both screening and final acceptance.
+
+Every trace records the parent and child screening rewards, promoted versions, and explicit prune
+reasons (`below_parent_tolerance`, `not_top_k`, or an execution failure). Checkpoints also store all
+screening controls and refuse to resume under a different successive-halving configuration.
+
+Example:
+
+```bash
+evolving-agent evolve \
+  --tasks-file /path/to/Dr-CiK_public/tasks \
+  --evolution-mode genome \
+  --setting llm_only \
+  --evolve-target auto \
+  --limit 30 \
+  --generations 1 \
+  --children 4 \
+  --successive-halving \
+  --screen-train-tasks 6 \
+  --screen-dev-tasks 2 \
+  --screen-promote 1 \
+  --screen-tolerance 0.01
+```
+
+Successful public training trajectories may also produce three persistent, generalized libraries:
+
+- embedded Coding skills: validated executable numerical forecasting programs;
 - `retrieval_skills.json`: query and verification strategies learned only from retrieval runs that
   pass the configured precision/recall/avoidance threshold.
 - `decision_skills.json`: candidate-selection rules learned only when Decision has negligible
@@ -89,6 +132,13 @@ These skills contain reusable applicability and failure conditions, not raw task
 rejects generated skills containing task IDs, document IDs, entity names, or exact timestamps.
 Skills remain advice: Retrieval still needs exact quotes, and Decision still needs matching evidence
 citations. Hidden labels can neither score nor write skills.
+
+An accepted `best_policy.json` is a complete reproducible bundle. It contains the four prompts,
+Coding search/hindcast budgets, Retrieval/Decision topology, evidence-adjustment and aggregation
+settings, plus immutable snapshots of all validated Coding, Retrieval, and Decision skills learned
+on the training split. Development inference uses this exact snapshot read-only. A later generation
+hydrates the same snapshots before continuing evolution, so the artifact does not lose the skills
+that produced its reported development score.
 
 The weakest role is reported as a diagnosis, but it no longer restricts what may evolve. A child
 may jointly rewrite all role prompts, Coding candidate/mutation budgets, hindcast folds and horizon,
@@ -117,6 +167,20 @@ All settings use identical data splits, LLM, output schema, hindcasting budget, 
 Generated skills enter `SkillLibrary` only when they execute successfully and beat repeat-last on
 historical hindcasts. Actual future labels update evaluation/evolution only; they never approve a
 skill during inference.
+
+## Targeted and alternating evolution
+
+`--evolve-target` separates a controlled role experiment from whole-harness co-evolution:
+
+- `coding` mutates only Coding prompts and, in Genome mode, Coding search/hindcast budgets;
+- `retrieval` mutates Retrieval while preserving Coding and Decision ownership;
+- `decision` mutates Decision selection/evidence policy while preserving Coding and Retrieval;
+- `auto` diagnoses the weakest role from module rewards and remains the alternating controller.
+
+The Coding knowledge setting is independent from this target. For example,
+`--setting llm_only --evolve-target coding` studies a numbers-only LLM that invents executable
+forecast skills, while `--setting llm_only --evolve-target auto` lets all three roles improve over
+successive generations without injecting a statistical dictionary or TSFM into Coding.
 
 ## Commands
 
@@ -180,6 +244,7 @@ evolving-agent evolve \
   --tasks-file /path/to/Dr-CiK/data/tasks/train.jsonl \
   --evolution-mode prompt \
   --setting combined \
+  --evolve-target auto \
   --limit 50 \
   --generations 3 \
   --children 2
@@ -191,11 +256,26 @@ Run the structured Harness Genome loop (the default):
 evolving-agent evolve \
   --tasks-file /path/to/Dr-CiK/data/tasks/train.jsonl \
   --evolution-mode genome \
-  --setting combined \
+  --setting llm_only \
   --limit 50 \
   --generations 3 \
   --children 2
 ```
+
+Run the frozen first 30-task LLM-only co-evolution pilot:
+
+```bash
+evolving_agent/scripts/run_coevolution_pilot30.sh \
+  /path/to/Dr-CiK/Dr-CiK_public/tasks
+```
+
+The pilot defaults to `genome + auto`, one generation, four structurally distinct screened
+children, one promotion, 30 tasks, and an entity-disjoint 60%/20%/20%
+Train/Dev/Public-Holdout split. Screening uses 6 Train and 2 Dev tasks with a `0.01` tolerance.
+Each child receives a different child index and exploration directive so Codex caching cannot
+collapse the generation into duplicate proposals. Use `EA_DRY_RUN=1` to inspect the complete
+command without running it. Scale only after the policy bundle and diagnostics are present in the
+smoke artifacts.
 
 Run full source-level evolution from a clean tracked checkout:
 

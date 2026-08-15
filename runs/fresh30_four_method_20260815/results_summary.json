@@ -1,0 +1,54 @@
+{
+  "experiment": "fresh30_four_method_20260815",
+  "dataset": "ServiceNow/Dr-CiK public development split",
+  "num_tasks": 30,
+  "notes": [
+    "The manifest was not used to generate either frozen Genome.",
+    "v003 was evaluated as an exploratory frozen child and was not the accepted incumbent of the original retry2 run.",
+    "Genome inference currently exports deterministic point trajectories, so official probabilistic sCRPS is not reported."
+  ],
+  "methods": {
+    "retry2_v003": {
+      "mean_mae": 23.057969282294334,
+      "median_mae": 9.09887383729895,
+      "mean_smape": 24.519262703036965,
+      "median_smape": 15.857966094902865
+    },
+    "retry2_v000": {
+      "mean_mae": 33.068265470832806,
+      "median_mae": 7.246025143390653,
+      "mean_smape": 32.40986414391656,
+      "median_smape": 24.614433668425516
+    },
+    "codex_direct": {
+      "mean_mae": 64.25537764472367,
+      "median_mae": 7.667381520865813,
+      "mean_rmse": 83.16062935257419,
+      "median_rmse": 12.492413869737309,
+      "mean_srmse_proxy": 2.725105766080413,
+      "median_srmse_proxy": 2.2485266527735015
+    },
+    "codex_contract": {
+      "mean_mae": 50.186415480996246,
+      "median_mae": 8.383004974245011,
+      "mean_rmse": 68.5613803275369,
+      "median_rmse": 13.341496175850278,
+      "mean_srmse_proxy": 2.932819289929627,
+      "median_srmse_proxy": 2.685910734024829
+    },
+    "chronos": {
+      "mean_mae": 51.56617463688135,
+      "median_mae": 8.383004974245011,
+      "mean_rmse": 70.186650109751,
+      "median_rmse": 13.341496175850278,
+      "mean_srmse_proxy": 2.95456631139698,
+      "median_srmse_proxy": 2.685910734024829
+    }
+  },
+  "paired_v003_vs_v000": {
+    "mean_mae_reduction_percent": 30.271609490276564,
+    "mean_smape_reduction_percent": 24.34629594817566,
+    "mae_wins_ties_losses": [14, 6, 10],
+    "smape_wins_ties_losses": [14, 6, 10]
+  }
+}

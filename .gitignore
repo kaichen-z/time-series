@@ -236,3 +236,4 @@ runs/evolving/codex_test/
 runs/evolving/meta_smoke/
 runs/evolving/sample_evolve/
 before/
+.repo_memory/
