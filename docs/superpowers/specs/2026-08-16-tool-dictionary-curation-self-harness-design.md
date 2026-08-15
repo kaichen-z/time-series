@@ -1,306 +1,382 @@
-# Tool Dictionary Curation Self-Harness Design
+# Parameterized Self-Evolution Harness Design
 
-## Scope
+## Goal
 
-Phase 1 builds and validates a reusable numerical forecasting tool dictionary with one
-self-evolving Numerical Agent. It does not use context documents, Retrieval Agent, Decision
-Agent, multi-agent co-evolution, or LLM weight training.
+Build a reusable Self-Evolution Harness whose lifecycle is configured through parameters and
+pluggable adapters. The first adapter targets numerical tool-dictionary curation, but the core
+must not contain implementations of statistical models, time-series foundation models, or
+combined forecasting methods.
 
-The required workflow is:
+The current work delivers the framework. Collaborators supply the base method definitions,
+method implementation strategy, and runtime backends later.
 
-1. Construct one raw JSON dictionary containing statistical, time-series foundation-model, and
-   combined forecasting methods.
-2. Let one Numerical Agent implement every method behind a common executable interface.
-3. Execute and test each implementation on historical time-series tasks.
-4. Keep, revise, quarantine, or discard methods based on trusted performance evidence.
-5. Accept an evolved dictionary generation only when it improves on held-out Dev tasks.
+## Current Phase
 
-The output is a vetted working dictionary, not merely a ranked list of method descriptions.
+The target experiment is configured as:
 
-## Terminology
+1. Load one externally supplied dictionary of base methods.
+2. Ask one Numerical Agent, through an injected implementer, to materialize or revise methods.
+3. Test methods through an injected executor and trusted evaluator.
+4. Keep, revise, quarantine, or discard methods according to configured performance rules.
+5. Accept a Child dictionary only through the shared Train/Dev acceptance lifecycle.
 
-- **Method specification**: a human- or collaborator-authored description of a forecasting
-  method.
-- **Tool implementation**: executable code or a validated wrapper that realizes a method.
-- **Raw dictionary**: the initial collection of unvalidated method specifications.
-- **Working dictionary**: methods with executable implementations and validation records.
-- **Dictionary generation**: a versioned Parent or Child dictionary artifact.
-- **Numerical Agent**: the single LLM role that implements and revises methods.
-- **Trusted evaluator**: deterministic Python code that executes tools and calculates metrics.
+The Harness provides this lifecycle and its contracts. It does not author the real method
+dictionary or implement ARIMA, ETS, Chronos, TimesFM, ensembles, or any other forecasting method.
 
-## Information Boundary
+## Non-Goals
 
-The Numerical Agent may receive only:
+This phase does not implement:
 
-- historical timestamps and values;
-- frequency and prediction horizon;
-- public numerical target metadata;
-- one method specification at a time;
-- sanitized implementation errors and historical hindcast diagnostics;
-- summaries of previously validated numerical tools.
+- concrete statistical forecasting methods;
+- concrete TSFM wrappers;
+- concrete statistical/TSFM combined methods;
+- context retrieval or document processing;
+- Retrieval or Decision Agents;
+- multi-agent co-evolution;
+- LLM weight training.
 
-It must not receive:
+Small deterministic fake methods are permitted only as test fixtures for verifying the framework.
 
-- context documents or document roles;
-- Retrieval or Decision Agent output;
-- GT evidence;
-- unresolved future values;
-- Public-Test or Hidden-Test labels.
+## Architecture
 
-Resolved Train labels are visible only to the trusted evaluator after forecasts are frozen. Dev
-labels are read-only for generation acceptance and cannot be used to revise individual tools.
+The implementation has a parameterized core and task-specific adapters:
 
-## Raw Dictionary Schema
+```text
+External Experiment Inputs
+  - Base methods
+  - Tasks and split
+  - LLM / method implementer
+  - Method runtime providers
+  - Metrics and budgets
+            ↓
+Dictionary Curation Adapter
+  - Artifact schema
+  - Mutation actions
+  - Execution mapping
+  - Failure attribution
+            ↓
+Generic Self-Evolution Core
+  Parent → Children → Execute → Evaluate → Accept/Reject → Persist
+```
 
-The repository stores one canonical raw dictionary:
+The core is unaware of time-series forecasting. It operates on generic artifacts, candidates,
+execution results, and scores.
+
+## Generic Core Contracts
+
+The core receives an `EvolutionComponents` bundle:
+
+```python
+@dataclass(frozen=True)
+class EvolutionComponents[ArtifactT, CandidateT, ResultT]:
+    artifact_adapter: ArtifactAdapter[ArtifactT]
+    mutator: Mutator[ArtifactT, CandidateT]
+    executor: Executor[CandidateT, ResultT]
+    evaluator: Evaluator[ResultT]
+    acceptance_gate: AcceptanceGate
+    store: ArtifactStore[ArtifactT]
+```
+
+The protocols are:
+
+- `ArtifactAdapter`: load, validate, clone, fingerprint, and serialize an artifact;
+- `Mutator`: propose bounded Children from a Parent and sanitized failure feedback;
+- `Executor`: execute one Child on an evaluation item without seeing its label;
+- `Evaluator`: score frozen execution outputs with trusted labels;
+- `AcceptanceGate`: compare Parent and Child aggregate reports;
+- `ArtifactStore`: persist generations, checkpoints, traces, and accepted artifacts.
+
+The controller implements only:
+
+```text
+Load Parent
+→ Evaluate Parent on Train
+→ Propose Children
+→ Validate mutation boundaries
+→ Optional successive-halving screen
+→ Evaluate eligible Children on Train
+→ Evaluate the best eligible Child on read-only Dev
+→ Accept or reject
+→ Checkpoint and continue
+```
+
+## Generic Evolution Parameters
+
+Every experiment supplies an `EvolutionConfig`:
+
+```json
+{
+  "generations": 1,
+  "children_per_generation": 2,
+  "seed": 20260816,
+  "primary_metric": "smape",
+  "objective": "minimize",
+  "acceptance_margin": 0.0,
+  "successive_halving": {
+    "enabled": true,
+    "screen_train_items": 6,
+    "screen_dev_items": 2,
+    "max_promoted_children": 1,
+    "tolerance": 0.01
+  },
+  "resume": true,
+  "output_dir": "runs/dictionary_curation"
+}
+```
+
+These parameters are shared by future Program, Dictionary, Prompt, Genome, or other adapters.
+
+## Dictionary-Curation Task Parameters
+
+The current task is described by a separate adapter configuration:
+
+```json
+{
+  "artifact_type": "tool_dictionary",
+  "adapter": "dictionary_curation",
+  "allowed_actions": ["keep", "revise", "quarantine", "discard"],
+  "allowed_families": ["statistical", "foundation", "combined"],
+  "max_revisions_per_method": 1,
+  "method_statuses": [
+    "unimplemented",
+    "accepted",
+    "specialized",
+    "quarantined",
+    "unavailable",
+    "discarded"
+  ],
+  "method_metric": "smape",
+  "dictionary_metric": "smape",
+  "discard_requires_dominance_evidence": true,
+  "allow_dev_learning": false
+}
+```
+
+These fields specialize the generic lifecycle for dictionary curation. They are data, not
+hard-coded branches in the controller.
+
+## Externally Supplied Base Methods
+
+The real method definitions are an input parameter:
 
 ```json
 {
   "schema_version": 1,
   "dictionary_id": "forecast_tools_raw_v000",
-  "tools": [
+  "methods": [
     {
-      "tool_id": "damped_trend",
-      "name": "Damped trend",
+      "method_id": "provided_by_collaborator",
       "family": "statistical",
-      "description": "Extrapolate a trend whose future slope decays over the horizon.",
-      "assumptions": ["a recent trend exists", "trend persistence is uncertain"],
-      "failure_conditions": ["abrupt regime shift", "dominant unmodeled seasonality"],
-      "implementation_kind": "generated_python",
-      "implementation_hint": "Use robust slope estimation and exponential damping.",
-      "dependencies": [],
-      "source_ids": [],
+      "description": "Externally supplied method description.",
+      "assumptions": [],
+      "failure_conditions": [],
+      "implementation_spec": {},
       "status": "unimplemented"
     }
   ]
 }
 ```
 
-Allowed families are:
+The Harness validates only the common schema. It does not define the real methods.
 
-- `statistical`: executable Python forecasting methods;
-- `foundation`: wrappers around available TSFM backends such as Chronos or TimesFM;
-- `combined`: deterministic selection, ensemble, preprocessing, or residual-correction methods
-  combining statistical tools and/or TSFMs.
-
-Allowed implementation kinds are `generated_python`, `builtin`, `tsfm_wrapper`, and
-`composition`. Dictionary loading rejects duplicate IDs, malformed fields, unknown families, and
-invalid dependency references.
-
-## Common Executable Contract
-
-Every accepted method must expose the same host interface:
+The Python API receives the base methods and their capabilities through dependency injection:
 
 ```python
-def forecast(
-    history: list[float],
-    horizon: int,
-    frequency: str,
-) -> list[float]:
-    ...
+task = DictionaryCurationTask(
+    base_methods=method_catalog,
+    implementer=provided_method_implementer,
+    runtimes=provided_runtime_registry,
+    task_source=provided_train_dev_source,
+    metric=provided_metric,
+)
+
+engine = SelfEvolutionEngine(
+    config=evolution_config,
+    components=task.components(),
+)
 ```
 
-Statistical and composition methods run through the existing forecasting sandbox. Foundation
-methods use host-owned adapters; the agent generates or revises wrapper configuration and
-composition logic, not foundation-model weights or external package internals.
+For CLI usage, importable objects are not loaded from arbitrary user strings. The application
+constructs a provider registry and the experiment config refers to approved provider names.
 
-An implementation is invalid when it fails static validation, times out, returns non-finite
-values, changes output length, mutates its inputs, accesses forbidden data, or requires an
-unavailable backend.
+## Pluggable Method Implementer
 
-## Method-Level Self-Evolution
+The framework defines but does not implement the domain-specific `MethodImplementer` protocol:
 
-Each raw method is processed independently by the same Numerical Agent role:
+```python
+class MethodImplementer(Protocol):
+    def implement(self, method: MethodDefinition, context: ImplementationContext) -> MethodCandidate:
+        ...
 
-1. **Implement**: translate the specification into executable code or a backend wrapper.
-2. **Smoke test**: validate syntax, safety, determinism, output shape, and finite values.
-3. **Hindcast**: evaluate on historical rolling cutoffs from Train tasks.
-4. **Diagnose**: expose sanitized fold errors, execution failures, and failure categories.
-5. **Revise**: allow a bounded number of implementation or applicability revisions.
-6. **Classify**: assign `accepted`, `specialized`, `quarantined`, `unavailable`, or `discarded`.
-
-The LLM proposes implementations and revisions. It cannot assign its own final status or score.
-The trusted evaluator owns all metrics and status transitions.
-
-## Status Policy
-
-- `accepted`: valid and competitive on a sufficiently broad applicable task set.
-- `specialized`: valid and materially useful on a coherent subset despite weak global averages.
-- `quarantined`: valid or repairable, but evidence is insufficient or performance is currently
-  weak.
-- `unavailable`: requires a backend or dependency absent from the evaluation environment.
-- `discarded`: irreparably invalid, duplicate and dominated, unsafe, or consistently inferior
-  without a detectable applicability region.
-
-Low global average performance alone is not sufficient for permanent discard. This prevents a
-rare but valuable seasonal, intermittent-demand, or regime-shift method from being deleted.
-
-## Method Evaluation
-
-Historical evaluation uses the same deterministic folds and budget for all comparable methods.
-The evaluator records:
-
-- MAE and sMAPE per fold;
-- mean, median, and worst-fold error;
-- execution success rate;
-- rank and win rate against simple frozen baselines;
-- task characteristics associated with wins and failures;
-- runtime and backend availability;
-- whether a revision improved over its Parent implementation.
-
-Method status uses Train evidence only. Method selection must consider conditional performance by
-task characteristics, not only the raw mean across heterogeneous scales.
-
-## Dictionary-Level Self-Evolution
-
-A dictionary generation contains executable tools, learned applicability metadata, status, and
-provenance:
-
-```json
-{
-  "dictionary_id": "forecast_tools_v001",
-  "parent_dictionary_id": "forecast_tools_v000",
-  "generation": 1,
-  "tools": [
-    {
-      "tool_id": "damped_trend",
-      "family": "statistical",
-      "implementation_ref": "generated/damped_trend_v002.py",
-      "status": "accepted",
-      "applicability": ["stable positive or negative local slope"],
-      "failure_conditions": ["recent change point"],
-      "train_summary": {
-        "mean_smape": 18.4,
-        "median_smape": 11.2,
-        "win_rate": 0.61,
-        "successful_tasks": 128
-      },
-      "version": 2,
-      "parent_version": 1
-    }
-  ]
-}
+    def revise(
+        self,
+        parent: MethodCandidate,
+        feedback: SanitizedMethodFeedback,
+    ) -> MethodCandidate:
+        ...
 ```
 
-For each generation:
+A later experiment can inject:
 
-1. Evaluate the Parent dictionary on Train.
-2. Identify invalid methods, duplicate methods, weak applicability metadata, and failure clusters.
-3. Generate bounded Child changes: method revisions, applicability revisions, status changes,
-   deduplication, or safe compositions.
-4. Re-evaluate changed methods on Train.
-5. Freeze the Child dictionary.
-6. Evaluate Parent and Child dictionaries with the same router, budget, and tasks on read-only
-   Dev.
-7. Accept the Child only when the primary Dev metric improves and safety/coverage gates pass.
+- an LLM coding implementer for statistical methods;
+- a registry-backed wrapper implementer for TSFMs;
+- a composition implementer for combined methods;
+- a single implementer that dispatches among all three families.
 
-The initial implementation uses mean Dev sMAPE as the primary acceptance metric. Secondary gates
-prevent apparent improvements caused by excessive method removal, backend failure, or severe
-regressions on a small subset.
+The framework invokes the interface identically and records which provider produced each
+candidate.
 
-## Single-Agent Boundary
+## Pluggable Method Runtime
 
-This remains a single-agent experiment even though the Numerical Agent is invoked at multiple
-stages. `Implementer`, `Diagnoser`, and `Reviser` are prompt roles or calls of the same agent, not
-separate communicating agents.
+The framework also defines a runtime contract:
 
-Python orchestration is responsible for:
+```python
+class MethodRuntime(Protocol):
+    def supports(self, candidate: MethodCandidate) -> bool:
+        ...
 
-- task loading and split enforcement;
-- method scheduling;
-- sandbox and backend execution;
-- metrics and failure records;
-- Parent/Child comparison;
-- persistence and checkpointing;
-- acceptance and rollback.
+    def forecast(
+        self,
+        candidate: MethodCandidate,
+        history: Sequence[float],
+        horizon: int,
+        frequency: str,
+    ) -> Sequence[float]:
+        ...
+```
 
-## Data Split
+The runtime registry selects a supplied runtime by implementation kind or provider name. Missing
+providers produce a structured `unavailable` result rather than crashing the whole run.
 
-The canonical experiment uses `splits/drcik_public_v1.json`:
+## Dictionary-Curation Adapter
 
-- Train: 139 public labeled tasks;
-- Dev: 30 public labeled tasks;
-- Public Test: 30 public labeled tasks;
-- Hidden Test: excluded from local training and scoring.
+The adapter maps the generic contracts to the current task:
 
-Method implementation and revision use Train only. Dev accepts dictionary generations. Public
-Test is accessed once after the dictionary and all budgets are frozen.
+| Generic contract | Dictionary-curation behavior |
+|---|---|
+| Artifact | Versioned method dictionary |
+| Candidate | Child dictionary or revised method candidate |
+| Mutator | Single-agent keep/revise/quarantine/discard proposal |
+| Executor | Supplied method runtime on historical cutoffs |
+| Evaluator | Supplied metric over frozen forecasts |
+| Acceptance | Parent/Child dictionary comparison on Dev |
+| Store | JSON artifacts, implementations, checkpoints, and traces |
 
-## Artifacts
+For every supplied method, the adapter orchestrates:
 
-The curation run writes:
+```text
+Method definition
+→ injected implementer
+→ common validation
+→ injected runtime
+→ historical evaluation
+→ sanitized feedback
+→ optional injected revision
+→ trusted status classification
+```
 
-- `forecast_tools_raw.json`: immutable input specifications;
-- `forecast_tools_working.json`: latest fully materialized dictionary;
-- `best_dictionary.json`: accepted dictionary generation;
-- `method_evaluations.jsonl`: trusted per-method/per-task results;
-- `dictionary_evolution_trace.json`: Parent/Child proposals and acceptance decisions;
-- `checkpoint.json`: resumable progress;
-- `generated/`: versioned validated method implementations;
-- `quarantine.json`: rejected or unavailable implementations with reasons;
-- `dev_evaluation.json`: read-only generation comparison.
+The framework owns orchestration and generic validation. Actual forecasting logic remains outside
+the framework.
 
-No generated implementation or skill is learned from Dev or Public Test.
+## Status Rules
+
+The adapter supports the following results:
+
+- `accepted`: valid and competitive on a broad applicable set;
+- `specialized`: useful on a coherent subset despite weak global averages;
+- `quarantined`: repairable or insufficiently validated;
+- `unavailable`: required injected provider is absent;
+- `discarded`: unsafe, irreparably invalid, or dominated with sufficient evidence.
+
+The task configuration controls thresholds. The LLM may propose a status, but trusted Python rules
+make the final transition.
+
+## Train/Dev Boundary
+
+The task source is injected but must expose separate Train and Dev iterables. The controller
+enforces:
+
+- Train may generate method feedback and revisions;
+- Dev may score frozen Parent and Child artifacts only;
+- Dev cannot update implementations, metadata, memory, or prompts;
+- Test is not part of the evolution API.
+
+The existing `splits/drcik_public_v1.json` can be passed by the Dr-CiK experiment, but the generic
+core does not depend on Dr-CiK.
+
+## Persistence
+
+The generic store writes:
+
+- `best_artifact.json`;
+- `evolution_trace.json`;
+- `checkpoint.json`;
+- `train_evaluation.json`;
+- `dev_evaluation.json`.
+
+The dictionary adapter additionally writes:
+
+- `working_dictionary.json`;
+- `method_evaluations.jsonl`;
+- `quarantine.json`;
+- candidate implementation artifacts returned by the supplied implementer.
 
 ## Package Structure
 
 ```text
+evolving_agent/
+  evolution_core/
+    contracts.py           Generic protocols and records.
+    controller.py          Parent/Child generation lifecycle.
+    acceptance.py          Metric direction and acceptance gates.
+    halving.py             Optional successive-halving screening.
+    persistence.py         Checkpoints, artifacts, and traces.
+
 numerical_agent/
-  dictionary.py             Dictionary and tool schemas.
-  method_contract.py        Common executable contract and validation.
-  method_implementer.py     Numerical Agent implementation/revision calls.
-  method_executor.py        Sandbox and TSFM adapter execution.
-  method_evaluation.py      Historical folds and method diagnostics.
-  dictionary_curator.py     Status, deduplication, and Child construction.
-  dictionary_evolution.py   Train/Dev Parent-Child lifecycle.
-  persistence.py            Versioned artifacts and checkpoints.
-  main.py                   CLI.
+  adapters/
+    dictionary_curation.py Dictionary-specific contract mapping.
+  dictionary.py            Common method/dictionary schemas.
+  providers.py             Approved implementer/runtime registry.
+  config.py                Task-specific parameter validation.
+  main.py                  CLI composition only.
 ```
 
-Existing primitives from `evolving_agent` are reused for LLM access, sandboxing, task loading,
-metrics, retries, and trace persistence. Existing Coding Program Evolution supplies the inner
-implementation/revision pattern; it is not copied wholesale.
+Existing LLM, retry, metric, sandbox, and task-loading utilities may be adapted behind these
+protocols. The generic core must not import `numerical_agent`.
 
 ## CLI
 
 ```bash
 python -m numerical_agent curate \
-  --dictionary numerical_agent/forecast_tools_raw.json \
+  --experiment-config configs/dictionary_curation.json \
+  --base-methods path/to/collaborator_methods.json \
+  --provider-config path/to/provider_registry.json \
   --tasks-path external/Dr-CiK/full-download/Dr-CiK_public/tasks \
   --split-manifest splits/drcik_public_v1.json \
-  --llm-backend codex \
-  --codex-model gpt-5.6-sol \
-  --codex-reasoning-effort high \
-  --method-revisions 1 \
-  --generations 1 \
-  --children 2 \
   --output-dir runs/dictionary_curation
 ```
 
-A deterministic fake-LLM and a small fixture dictionary support offline unit and smoke tests.
+The framework can be tested before real methods exist by injecting deterministic fake
+implementers, runtimes, tasks, and metrics.
 
-## Acceptance Criteria
+## Framework Acceptance Criteria
 
-The first implementation is complete when it can:
+The current implementation is complete when it can:
 
-1. Load and validate a mixed-family raw dictionary.
-2. Implement at least one statistical method, one foundation wrapper, and one composition method.
-3. Reject unsafe or malformed implementations before evaluation.
-4. Execute deterministic historical hindcasts and persist per-method diagnostics.
-5. Revise a failed method once using sanitized feedback.
-6. Assign all five statuses through trusted rules.
-7. Resume an interrupted curation run without repeating completed method evaluations.
-8. Produce a complete versioned working dictionary and quarantine artifact.
-9. Accept an improving Child and reject a non-improving Child on read-only Dev.
-10. Preserve the existing `evolving_agent` regression suite and future-label firewall.
+1. Run a generic Parent/Child lifecycle without importing time-series modules.
+2. Validate task and evolution parameters independently.
+3. Load externally supplied method definitions without embedding real methods.
+4. Invoke injected implementer and runtime protocols.
+5. Isolate labels until execution outputs are frozen.
+6. Produce keep/revise/quarantine/discard transitions through trusted rules.
+7. Accept an improving Child and reject a non-improving Child on read-only Dev.
+8. Resume from a checkpoint without repeating completed evaluations.
+9. Persist generic and dictionary-specific artifacts.
+10. Pass offline tests using fake providers and preserve the existing regression suite.
 
-## Deferred Work
+## Deferred Integration
 
-The following are explicitly outside Phase 1:
-
-- Retrieval Agent and context documents;
-- Decision Agent;
-- multi-agent co-evolution;
-- Prompt/Genome/Source Meta-Harness evolution of the full forecasting system;
-- LLM weight training;
-- online learning from Hidden Test or unresolved future outcomes.
+After collaborators provide the real base dictionary and providers, the same framework can run
+the full statistical, foundation, and combined-method experiment without changing the generic
+controller. Program Self-Harness and later multi-agent evolution can be integrated as additional
+adapters rather than separate orchestration implementations.
