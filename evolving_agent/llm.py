@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -34,6 +35,10 @@ class LLMClient(Protocol):
 
 class JsonExtractionError(ValueError):
     """Raised when a model's response contains no parseable JSON object."""
+
+
+class TransientLLMError(RuntimeError):
+    """Raised when temporary infrastructure prevents an LLM call from completing."""
 
 
 def parse_json_object(text: str) -> dict:
@@ -89,6 +94,8 @@ class CodexCLIConfig:
     timeout_seconds: int = 900
     cache_dir: str | Path | None = "runs/evolving/codex-cache"
     json_repair_attempts: int = 2
+    transport_retries: int = 2
+    transport_retry_delay_seconds: float = 1.0
 
 
 class CodexCLIClient:
@@ -155,24 +162,38 @@ class CodexCLIClient:
             if self.config.model:
                 command.extend(["--model", self.config.model])
             command.append("-")
-            try:
-                completed = subprocess.run(
-                    command,
-                    input=prompt,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.config.timeout_seconds,
-                    check=False,
-                )
-            except FileNotFoundError as exc:
-                raise RuntimeError(f"Codex CLI was not found: {self.config.binary}") from exc
-            except subprocess.TimeoutExpired as exc:
-                raise RuntimeError(
-                    f"Codex CLI timed out after {self.config.timeout_seconds} seconds"
-                ) from exc
-            self.calls += 1
-            if completed.returncode != 0:
+            retries = max(int(self.config.transport_retries), 0)
+            for attempt in range(retries + 1):
+                try:
+                    completed = subprocess.run(
+                        command,
+                        input=prompt,
+                        capture_output=True,
+                        text=True,
+                        timeout=self.config.timeout_seconds,
+                        check=False,
+                    )
+                except FileNotFoundError as exc:
+                    raise RuntimeError(f"Codex CLI was not found: {self.config.binary}") from exc
+                except subprocess.TimeoutExpired as exc:
+                    self.calls += 1
+                    if attempt < retries:
+                        self._transport_backoff(attempt)
+                        continue
+                    raise TransientLLMError(
+                        f"Codex CLI timed out after {self.config.timeout_seconds} seconds"
+                    ) from exc
+                self.calls += 1
+                if completed.returncode == 0:
+                    break
                 details = (completed.stderr or completed.stdout).strip()[-2000:]
+                if self._is_transient_transport_error(details):
+                    if attempt < retries:
+                        self._transport_backoff(attempt)
+                        continue
+                    raise TransientLLMError(
+                        f"Codex CLI transport failed after {retries + 1} attempts: {details}"
+                    )
                 raise RuntimeError(
                     f"Codex CLI failed with exit code {completed.returncode}: {details}"
                 )
@@ -180,6 +201,34 @@ class CodexCLIClient:
                 raise RuntimeError("Codex CLI completed without writing its final response")
             text = result_path.read_text(encoding="utf-8").strip()
         return text
+
+    def _transport_backoff(self, attempt: int) -> None:
+        delay = max(float(self.config.transport_retry_delay_seconds), 0.0) * (2**attempt)
+        if delay:
+            time.sleep(delay)
+
+    @staticmethod
+    def _is_transient_transport_error(details: str) -> bool:
+        lowered = details.lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "connection reset",
+                "connection refused",
+                "failed to connect",
+                "error sending request",
+                "stream disconnected",
+                "temporary failure in name resolution",
+                "network is unreachable",
+                "service unavailable",
+                "selected model is at capacity",
+                "rate limit",
+                "status code 429",
+                "status code 502",
+                "status code 503",
+                "status code 504",
+            )
+        )
 
     def _repair_json(self, broken: str, initial_error: Exception) -> dict:
         error: Exception = initial_error

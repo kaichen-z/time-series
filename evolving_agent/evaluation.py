@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from evolving_agent.data import ContextTask
-from evolving_agent.metrics import score_forecast
+from evolving_agent.metrics import score_forecast, spearman_rank_correlation
 
 if TYPE_CHECKING:
     from evolving_agent.harness import HarnessResult
@@ -22,6 +22,8 @@ class ResolvedOutcome:
     supporting_recall: float
     distractor_avoidance: float
     decision_selection_regret: float
+    candidate_count: int
+    hindcast_future_rank_correlation: float
 
 
 def score_after_resolution(task: ContextTask, result: "HarnessResult") -> ResolvedOutcome:
@@ -34,6 +36,11 @@ def score_after_resolution(task: ContextTask, result: "HarnessResult") -> Resolv
         candidate.candidate_id: score_forecast(truth, list(candidate.forecast))["smape"]
         for candidate in result.candidates
     }
+    hindcast_scores = [candidate.hindcast_smape for candidate in result.candidates]
+    resolved_scores = [
+        score_forecast(truth, list(candidate.forecast))["smape"]
+        for candidate in result.candidates
+    ]
     oracle = min(candidate_scores.values())
     selected_score = candidate_scores[result.decision.selected.candidate_id]
     retrieved_ids = set(result.retrieval.selected_document_ids)
@@ -52,4 +59,9 @@ def score_after_resolution(task: ContextTask, result: "HarnessResult") -> Resolv
         supporting_recall=recall,
         distractor_avoidance=avoidance,
         decision_selection_regret=selected_score - oracle,
+        candidate_count=len(result.candidates),
+        hindcast_future_rank_correlation=spearman_rank_correlation(
+            hindcast_scores,
+            resolved_scores,
+        ),
     )

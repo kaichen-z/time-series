@@ -15,9 +15,10 @@ from evolving_agent.co_evolution import (
     CoEvolutionConfig,
     CoEvolutionEngine,
     HarnessPolicy,
+    evaluation_diagnostics,
 )
 from evolving_agent.coding_agent.evolution import CodingEvolutionAgent, CodingEvolutionConfig
-from evolving_agent.coding_agent.skill_library import SkillLibrary
+from evolving_agent.coding_agent.skill_library import Skill, SkillLibrary
 from evolving_agent.data import (
     ContextTask,
     DEFAULT_TASKS_FILE,
@@ -25,12 +26,12 @@ from evolving_agent.data import (
     load_huggingface_context_tasks,
 )
 from evolving_agent.decision_agent.agent import DecisionAgent
-from evolving_agent.decision_agent.skill_library import DecisionSkillLibrary
+from evolving_agent.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
 from evolving_agent.frozen_inference import run_frozen_inference
 from evolving_agent.harness import EvolvingForecastHarness, HarnessRuntimeConfig
 from evolving_agent.llm import ClaudeCLIClient, ClaudeCLIConfig, CodexCLIClient, CodexCLIConfig, QwenClient
 from evolving_agent.retrieval_agent.agent import RetrievalAgent
-from evolving_agent.retrieval_agent.skill_library import RetrievalSkillLibrary
+from evolving_agent.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
 from evolving_agent.skill_learning import OutcomeSkillLearner
 from evolving_agent.source_evolution import (
     SourceEvaluation,
@@ -104,6 +105,18 @@ def _add_unified_baseline_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--claude-timeout", type=int, default=None)
 
 
+def _add_successive_halving_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--successive-halving",
+        action="store_true",
+        help="Screen all children on small train/dev subsets before full evaluation.",
+    )
+    parser.add_argument("--screen-train-tasks", type=int, default=6)
+    parser.add_argument("--screen-dev-tasks", type=int, default=2)
+    parser.add_argument("--screen-promote", type=int, default=1)
+    parser.add_argument("--screen-tolerance", type=float, default=0.01)
+
+
 def _add_unified_evolution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tasks-file", default=str(DEFAULT_TASKS_FILE))
     parser.add_argument("--setting", choices=("llm_only", "statistics", "tsfm", "combined"), default="statistics")
@@ -120,6 +133,13 @@ def _add_unified_evolution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--chronos-device", default="cpu")
     parser.add_argument("--generations", type=int, default=3)
     parser.add_argument("--children", type=int, default=2)
+    _add_successive_halving_arguments(parser)
+    parser.add_argument(
+        "--evolve-target",
+        choices=("auto", "coding", "retrieval", "decision"),
+        default="auto",
+        help="Restrict prompt/genome mutations to one role; auto diagnoses the weakest role.",
+    )
     parser.add_argument("--dev-fraction", type=float, default=0.25)
     parser.add_argument(
         "--holdout-fraction",
@@ -247,6 +267,13 @@ def build_parser() -> argparse.ArgumentParser:
     evolve = subparsers.choices["evolve"]
     evolve.add_argument("--generations", type=int, default=3)
     evolve.add_argument("--children", type=int, default=2)
+    _add_successive_halving_arguments(evolve)
+    evolve.add_argument(
+        "--evolve-target",
+        choices=("auto", "coding", "retrieval", "decision"),
+        default="auto",
+        help="Restrict prompt/genome mutations to one role; auto diagnoses the weakest role.",
+    )
     evolve.add_argument(
         "--evolution-mode",
         choices=("prompt", "genome", "source"),
@@ -598,12 +625,32 @@ def _factory(
     isolate_library: bool = False,
 ):
     def build(policy: HarnessPolicy) -> EvolvingForecastHarness:
-        task_library = library.clone(persist=False) if isolate_library else library
-        task_retrieval_library = (
-            retrieval_library.clone(persist=False) if isolate_library else retrieval_library
+        coding_records = {skill.name: skill for skill in library.all()}
+        coding_records.update(
+            {record["name"]: Skill(**record) for record in policy.coding_skills}
         )
-        task_decision_library = (
-            decision_library.clone(persist=False) if isolate_library else decision_library
+        retrieval_records = {skill.name: skill for skill in retrieval_library.all()}
+        retrieval_records.update(
+            {record["name"]: RetrievalSkill(**record) for record in policy.retrieval_skills}
+        )
+        decision_records = {skill.name: skill for skill in decision_library.all()}
+        decision_records.update(
+            {record["name"]: DecisionSkill(**record) for record in policy.decision_skills}
+        )
+        task_library = SkillLibrary(
+            library.path,
+            list(coding_records.values()),
+            persist=not isolate_library,
+        )
+        task_retrieval_library = RetrievalSkillLibrary(
+            retrieval_library.path,
+            list(retrieval_records.values()),
+            persist=not isolate_library,
+        )
+        task_decision_library = DecisionSkillLibrary(
+            decision_library.path,
+            list(decision_records.values()),
+            persist=not isolate_library,
         )
         coding = CodingEvolutionAgent(
             llm,
@@ -700,7 +747,7 @@ def run_command(args) -> dict:
             )
     return {
         "n_tasks": len(outcomes),
-        "mean_final_smape": sum(item.final_smape for item in outcomes) / len(outcomes),
+        **evaluation_diagnostics(outcomes),
         "results_path": str(destination),
         "skills_saved": len(library),
         "retrieval_skills_saved": len(retrieval_library),
@@ -759,9 +806,15 @@ def evolve_command(args) -> dict:
             generations=args.generations,
             children_per_generation=args.children,
             mode=args.evolution_mode,
+            target=args.evolve_target,
             checkpoint_path=checkpoint_path,
             progress_path=progress_path,
             resume=not args.no_resume,
+            successive_halving=args.successive_halving,
+            screening_train_tasks=args.screen_train_tasks,
+            screening_dev_tasks=args.screen_dev_tasks,
+            screening_promote=args.screen_promote,
+            screening_tolerance=args.screen_tolerance,
         ),
     )
     seed_policy = _seed_policy(args)

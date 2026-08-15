@@ -143,6 +143,9 @@ def test_numbers_only_evolution_then_verified_context_decision() -> None:
         assert result.forecast == (26.0, 27.0)
         assert result.decision.llm_override_accepted
         assert result.retrieval.rejected == ()
+        outcome = EvolvingForecastHarness.score_after_resolution(_task(), result)
+        assert outcome.candidate_count == len(result.candidates)
+        assert -1.0 <= outcome.hindcast_future_rank_correlation <= 1.0
 
         # Coding receives the numeric Task only; future labels and documents never enter its prompt.
         coding_text = " ".join(

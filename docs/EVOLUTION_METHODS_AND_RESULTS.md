@@ -287,3 +287,30 @@ For each mode, report multiple seeds, mean and standard deviation of sMAPE/syste
 precision and recall, Decision regret, acceptance rate, token cost, and wall-clock time. Source mode
 should sample multiple children because one rejected architecture is not informative about the
 search space.
+
+## 11. Fresh 30-task frozen-Genome evaluation
+
+Two frozen LLM-only Harness Genomes and three fixed baselines were evaluated on the same separately
+sampled 30-task public Dr-CiK manifest. This set was not used to generate either Genome. The raw
+manifest, frozen v000/v003 policies, and machine-readable aggregate are stored under
+`runs/fresh30_four_method_20260815/`.
+
+| Method | Tasks | Mean MAE | Median MAE | Mean sMAPE | Median sMAPE |
+|---|---:|---:|---:|---:|---:|
+| retry2 v003 | 30 | **23.057969** | 9.098874 | **24.519263** | **15.857966** |
+| v000 | 30 | 33.068265 | **7.246025** | 32.409864 | 24.614434 |
+| Codex-Contract | 30 | 50.186415 | 8.383005 | not emitted | not emitted |
+| Chronos | 30 | 51.566175 | 8.383005 | not emitted | not emitted |
+| Codex-Direct | 30 | 64.255378 | 7.667382 | not emitted | not emitted |
+
+Relative to v000, v003 reduced mean MAE by **30.27%** and mean sMAPE by **24.35%**. Its paired
+per-task outcome was 14 wins, 6 ties, and 10 losses for both MAE and sMAPE. The result supports a
+mean improvement from this generated Genome on the frozen manifest, but not uniform improvement:
+v003's median MAE was worse and one third of tasks degraded. Moreover, v003 changed Coding search,
+hindcasting, prompts, and the Retrieval/Decision topology together, so this comparison cannot
+attribute the gain to any single component.
+
+The v003 policy was a Meta-Harness-generated child, not the accepted incumbent of the original
+retry2 selection run: it failed that run's screen threshold and v000 was retained. This fresh
+evaluation is therefore an exploratory frozen-child comparison, not a retrospective change to the
+original acceptance decision.

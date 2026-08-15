@@ -5,10 +5,17 @@ import subprocess
 from pathlib import Path
 
 from evolving_agent.source_evolution import (
+    SOURCE_ENGINEER_PROMPT,
     SourceEvaluation,
     SourceEvolutionConfig,
     SourceEvolutionEngine,
 )
+
+
+def test_source_engineer_must_edit_without_requesting_confirmation() -> None:
+    assert "Do not ask for confirmation" in SOURCE_ENGINEER_PROMPT
+    assert "make at least one concrete source change" in SOURCE_ENGINEER_PROMPT
+    assert '"changed_files"' in SOURCE_ENGINEER_PROMPT
 
 
 def test_source_audit_accepts_new_safe_agent_module() -> None:
@@ -62,6 +69,30 @@ def test_source_audit_rejects_filesystem_import() -> None:
         path.write_text("from pathlib import Path\n")
         result = SourceEvolutionEngine.audit(root, ("evolving_agent/generated/unsafe.py",))
     assert result == "forbidden_import:evolving_agent/generated/unsafe.py:pathlib"
+
+
+def test_source_audit_allows_future_annotations_and_regex_compile() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        subprocess.run(["git", "init"], cwd=root, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"], cwd=root, check=True
+        )
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+        path = root / "evolving_agent/generated/safe_regex.py"
+        path.parent.mkdir(parents=True)
+        path.write_text("SEED = True\n")
+        subprocess.run(["git", "add", "."], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-m", "seed"], cwd=root, capture_output=True, check=True)
+        path.write_text(
+            "from __future__ import annotations\n"
+            "import re\n\n"
+            "SAFE_PATTERN = re.compile(r'event')\n"
+        )
+        result = SourceEvolutionEngine.audit(
+            root, ("evolving_agent/generated/safe_regex.py",)
+        )
+    assert result is None
 
 
 def test_source_engine_accepts_better_child_and_returns_inheritable_patch() -> None:

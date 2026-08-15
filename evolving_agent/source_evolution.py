@@ -20,12 +20,17 @@ implementation, create new Python agent modules under evolving_agent/generated/,
 the runtime. You may invent new agent roles, validation/ranking algorithms, communication patterns,
 memory use, stopping rules, or orchestration rather than merely tuning constants.
 
+Act autonomously: do not stop after proposing a design. Do not ask for confirmation or permission.
+You must make at least one concrete source change in the isolated worktree and validate it. If no
+safe, testable change can be implemented, return an explicit failure instead of a proposal.
+
 Do not edit tests, the CLI, data loading, metrics/scorer, LLM transport, code sandbox, outcome skill
 learner, co-evolution/source-evolution host, or any file outside the explicit mutable paths. Never
 read or introduce future_values, gt_evidence, role/subtype labels, or resolved outcomes into
 inference. Do not weaken citation verification or execute shell/network/file operations from
 generated forecasting code. Do not commit. Keep public interfaces compatible and finish with a
-brief JSON final message: {"summary": "...", "hypothesis": "..."}.
+brief JSON final message:
+{"summary": "...", "hypothesis": "...", "changed_files": ["evolving_agent/..."]}.
 """
 
 _EXACT_MUTABLE = frozenset(
@@ -40,7 +45,6 @@ _GENERATED_PREFIX = "evolving_agent/generated/"
 _FORBIDDEN_ADDED_TEXT = (
     "future_values",
     "gt_evidence",
-    "annotations",
     "document.role",
     "document.subtype",
     "import subprocess",
@@ -59,7 +63,6 @@ _FORBIDDEN_ADDED_TEXT = (
     "import urllib",
     "eval(",
     "exec(",
-    "compile(",
     "__import__(",
     "open(",
     "getattr(",

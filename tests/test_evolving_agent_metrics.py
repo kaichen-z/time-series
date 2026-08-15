@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from evolving_agent.metrics import mae, score_forecast, smape
+from evolving_agent.metrics import mae, score_forecast, smape, spearman_rank_correlation
 
 
 class SmapeTests(unittest.TestCase):
@@ -38,6 +38,27 @@ class ScoreForecastTests(unittest.TestCase):
         self.assertIn("smape", result)
         self.assertIn("mae", result)
         self.assertEqual(result["primary"], result["smape"])
+
+
+class SpearmanRankCorrelationTests(unittest.TestCase):
+    def test_perfect_and_inverse_order(self):
+        self.assertAlmostEqual(
+            spearman_rank_correlation([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]),
+            1.0,
+        )
+        self.assertAlmostEqual(
+            spearman_rank_correlation([1.0, 2.0, 3.0], [6.0, 5.0, 4.0]),
+            -1.0,
+        )
+
+    def test_ties_use_average_ranks(self):
+        self.assertAlmostEqual(
+            spearman_rank_correlation([1.0, 1.0, 2.0], [1.0, 2.0, 3.0]),
+            0.8660254038,
+        )
+
+    def test_constant_rank_has_no_information(self):
+        self.assertEqual(spearman_rank_correlation([1.0, 1.0], [2.0, 3.0]), 0.0)
 
 
 if __name__ == "__main__":

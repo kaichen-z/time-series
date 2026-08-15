@@ -5,7 +5,12 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from evolving_agent.llm import CodexCLIClient, CodexCLIConfig, parse_json_object
+from evolving_agent.llm import (
+    CodexCLIClient,
+    CodexCLIConfig,
+    TransientLLMError,
+    parse_json_object,
+)
 
 
 def test_codex_cli_client_returns_and_caches_json() -> None:
@@ -76,3 +81,66 @@ def test_codex_cli_client_ignores_malformed_cache() -> None:
 
     assert parse_json_object(response.text) == {"answer": 9}
     assert client.cache_hits == 0
+
+
+def test_codex_cli_client_retries_a_transient_network_failure() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        client = CodexCLIClient(
+            CodexCLIConfig(
+                cache_dir=Path(directory) / "cache",
+                transport_retries=1,
+                transport_retry_delay_seconds=0.0,
+            )
+        )
+        attempts = 0
+
+        def fake_run(command, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return subprocess.CompletedProcess(
+                    command,
+                    1,
+                    "",
+                    "stream disconnected: Connection reset by peer",
+                )
+            output = Path(command[command.index("--output-last-message") + 1])
+            output.write_text('{"answer": 11}')
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with patch("evolving_agent.llm.subprocess.run", side_effect=fake_run):
+            response = client.complete(
+                system="Return JSON.", messages=[{"role": "user", "content": "x"}]
+            )
+
+    assert parse_json_object(response.text) == {"answer": 11}
+    assert attempts == 2
+    assert client.calls == 2
+
+
+def test_codex_cli_client_raises_transient_error_after_network_retries() -> None:
+    client = CodexCLIClient(
+        CodexCLIConfig(
+            cache_dir=None,
+            transport_retries=1,
+            transport_retry_delay_seconds=0.0,
+        )
+    )
+
+    def fake_run(command, **_kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            "",
+            "failed to connect to WebSocket: Connection refused",
+        )
+
+    with patch("evolving_agent.llm.subprocess.run", side_effect=fake_run) as mocked:
+        try:
+            client.complete(system="Return JSON.", messages=[{"role": "user", "content": "x"}])
+            assert False, "expected a TransientLLMError"
+        except TransientLLMError as exc:
+            assert "Connection refused" in str(exc)
+
+    assert mocked.call_count == 2
+    assert client.calls == 2
