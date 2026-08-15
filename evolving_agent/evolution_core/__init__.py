@@ -13,6 +13,8 @@ from .contracts import (
     MutationContext,
     Mutator,
 )
+from .acceptance import MetricAcceptanceGate
+from .persistence import JsonArtifactStore
 
 __all__ = [
     "AcceptanceGate",
@@ -26,4 +28,6 @@ __all__ = [
     "MetricSpec",
     "MutationContext",
     "Mutator",
+    "MetricAcceptanceGate",
+    "JsonArtifactStore",
 ]
