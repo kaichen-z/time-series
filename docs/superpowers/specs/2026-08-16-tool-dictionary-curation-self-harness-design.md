@@ -67,8 +67,12 @@ execution results, and scores.
 The core receives an `EvolutionComponents` bundle:
 
 ```python
+ArtifactT = TypeVar("ArtifactT")
+CandidateT = TypeVar("CandidateT")
+ResultT = TypeVar("ResultT")
+
 @dataclass(frozen=True)
-class EvolutionComponents[ArtifactT, CandidateT, ResultT]:
+class EvolutionComponents(Generic[ArtifactT, CandidateT, ResultT]):
     artifact_adapter: ArtifactAdapter[ArtifactT]
     mutator: Mutator[ArtifactT, CandidateT]
     executor: Executor[CandidateT, ResultT]
