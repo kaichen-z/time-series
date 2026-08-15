@@ -1,5 +1,11 @@
 # Unified Numerical Self-Harness Design
 
+> **Phase 1 scope update:** the executable design for the current dictionary work is specified in
+> `2026-08-16-tool-dictionary-curation-self-harness-design.md`. Unlike the original fixed-tool
+> `dictionary` mode below, Phase 1 implements, tests, revises, and status-classifies every method
+> before accepting a dictionary generation on held-out Dev. The fixed-tool mode remains a later
+> routing ablation.
+
 ## Goal
 
 Unify the existing Coding Program Evolution loop and the planned Dictionary Filtering loop into
@@ -301,4 +307,3 @@ malformed filtering output, unavailable tools, hybrid candidate composition, agg
 diagnostics, mutation-scope rejection, Train/Dev acceptance and rejection, successive halving,
 checkpoint round trips, no Dev learning, no Public-Test access, CLI smoke execution, and the full
 existing `evolving_agent` regression suite.
-
