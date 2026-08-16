@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from evolving_agent.llm import FakeLLMClient, JsonExtractionError, parse_json_object, pick_free_gpu
+from common.llm import FakeLLMClient, JsonExtractionError, parse_json_object, pick_free_gpu
 
 
 class ParseJsonObjectTests(unittest.TestCase):

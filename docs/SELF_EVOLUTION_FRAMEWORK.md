@@ -7,7 +7,7 @@ three-agent Meta-Harness.
 ## 1. Generic Self-Harness
 
 The reusable controller is implemented in
-[`evolving_agent/evolution_core/controller.py`](../evolving_agent/evolution_core/controller.py).
+[`common/evolution_core/controller.py`](../common/evolution_core/controller.py).
 It treats the object being evolved as an artifact and delegates domain behavior to injected
 components.
 
@@ -172,10 +172,10 @@ ground-truth evidence, or document relevance labels.
 
 | Responsibility | File |
 |---|---|
-| Generic Parent/Child lifecycle | `evolving_agent/evolution_core/controller.py` |
-| Generic contracts and configuration | `evolving_agent/evolution_core/contracts.py` |
-| Dev acceptance gate | `evolving_agent/evolution_core/acceptance.py` |
-| Artifact/checkpoint persistence | `evolving_agent/evolution_core/persistence.py` |
+| Generic Parent/Child lifecycle | `common/evolution_core/controller.py` |
+| Generic contracts and configuration | `common/evolution_core/contracts.py` |
+| Dev acceptance gate | `common/evolution_core/acceptance.py` |
+| Artifact/checkpoint persistence | `common/evolution_core/persistence.py` |
 | Dictionary filtering and curation | `numerical_agent/adapters/dictionary_curation.py` |
 | Numbers-only executable program evolution | `evolving_agent/coding_agent/evolution.py` |
 | Three-agent forecast runtime | `evolving_agent/harness.py` |

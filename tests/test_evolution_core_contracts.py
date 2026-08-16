@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from evolving_agent.evolution_core.contracts import EvolutionConfig, MetricSpec
+from common.evolution_core.contracts import EvolutionConfig, MetricSpec
 
 
 def test_evolution_config_rejects_invalid_budgets() -> None:

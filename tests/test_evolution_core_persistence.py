@@ -4,9 +4,9 @@ import json
 
 import pytest
 
-from evolving_agent.evolution_core.acceptance import MetricAcceptanceGate
-from evolving_agent.evolution_core.contracts import EvaluationReport, MetricSpec
-from evolving_agent.evolution_core.persistence import JsonArtifactStore
+from common.evolution_core.acceptance import MetricAcceptanceGate
+from common.evolution_core.contracts import EvaluationReport, MetricSpec
+from common.evolution_core.persistence import JsonArtifactStore
 
 
 def report(score: float) -> EvaluationReport:

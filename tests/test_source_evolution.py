@@ -38,8 +38,8 @@ def test_source_audit_accepts_new_safe_agent_module() -> None:
 def test_source_audit_rejects_protected_file_changes() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        assert SourceEvolutionEngine.audit(root, ("evolving_agent/metrics.py",)) == (
-            "protected_paths_changed:evolving_agent/metrics.py"
+        assert SourceEvolutionEngine.audit(root, ("common/metrics.py",)) == (
+            "protected_paths_changed:common/metrics.py"
         )
 
 
@@ -144,7 +144,7 @@ def test_source_engine_audits_an_external_seed_patch_before_evaluation() -> None
             ["git", "config", "user.email", "test@example.com"], cwd=root, check=True
         )
         subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
-        protected = root / "evolving_agent/metrics.py"
+        protected = root / "common/metrics.py"
         protected.parent.mkdir(parents=True)
         protected.write_text("SCORE = 1\n")
         subprocess.run(["git", "add", "."], cwd=root, check=True)
@@ -157,7 +157,7 @@ def test_source_engine_audits_an_external_seed_patch_before_evaluation() -> None
             text=True,
             check=True,
         ).stdout
-        subprocess.run(["git", "checkout", "--", "evolving_agent/metrics.py"], cwd=root, check=True)
+        subprocess.run(["git", "checkout", "--", "common/metrics.py"], cwd=root, check=True)
 
         engine = SourceEvolutionEngine(root, lambda _worktree: None)
         try:

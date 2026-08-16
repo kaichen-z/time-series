@@ -16,8 +16,8 @@ from evolving_agent.co_evolution import HarnessPolicy
 from evolving_agent.coding_agent.skill_library import SkillLibrary
 from evolving_agent.data import ContextTask, Task
 from evolving_agent.decision_agent.skill_library import DecisionSkillLibrary
-from evolving_agent.llm import FakeLLMClient
 from evolving_agent.retrieval_agent.skill_library import RetrievalSkillLibrary
+from common.llm import FakeLLMClient
 
 
 def test_evolve_cli_exposes_three_evolution_modes() -> None:

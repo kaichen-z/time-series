@@ -22,4 +22,4 @@ evolving-agent = "evolving_agent.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["drcik_agent*", "evolving_agent*", "numerical_agent*"]
+include = ["common*", "drcik_agent*", "evolving_agent*", "numerical_agent*"]

@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 
-from evolving_agent.evolution_core.contracts import EvaluationReport, MutationContext
-from evolving_agent.evolution_core.persistence import JsonArtifactStore
+from common.evolution_core.contracts import EvaluationReport, MutationContext
+from common.evolution_core.persistence import JsonArtifactStore
 from numerical_agent.adapters.dictionary_curation import (
     DictionaryCurationTask,
     NumericalTaskItem,

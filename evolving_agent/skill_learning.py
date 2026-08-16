@@ -10,8 +10,8 @@ from evolving_agent.data import ContextTask
 from evolving_agent.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
 from evolving_agent.evaluation import ResolvedOutcome
 from evolving_agent.harness import HarnessResult
-from evolving_agent.llm import JsonExtractionError, LLMClient, parse_json_object
 from evolving_agent.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
+from common.llm import JsonExtractionError, LLMClient, parse_json_object
 
 SKILL_LEARNING_PROMPT = """You are the post-outcome Skill Curator for a forecasting harness.
 Read a resolved public training trajectory. Generalize only successful behavior into reusable

@@ -6,14 +6,14 @@ import statistics
 from dataclasses import dataclass, replace
 from typing import Callable, Mapping, Sequence, cast
 
-from evolving_agent.evolution_core.acceptance import MetricAcceptanceGate
-from evolving_agent.evolution_core.contracts import (
+from common.evolution_core.acceptance import MetricAcceptanceGate
+from common.evolution_core.contracts import (
     EvaluationReport,
     EvolutionComponents,
     MetricSpec,
     MutationContext,
 )
-from evolving_agent.evolution_core.persistence import JsonArtifactStore
+from common.evolution_core.persistence import JsonArtifactStore
 
 from ..config import DictionaryCurationConfig
 from ..dictionary import (

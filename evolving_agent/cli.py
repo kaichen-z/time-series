@@ -29,7 +29,6 @@ from evolving_agent.decision_agent.agent import DecisionAgent
 from evolving_agent.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
 from evolving_agent.frozen_inference import run_frozen_inference
 from evolving_agent.harness import EvolvingForecastHarness, HarnessRuntimeConfig
-from evolving_agent.llm import ClaudeCLIClient, ClaudeCLIConfig, CodexCLIClient, CodexCLIConfig, QwenClient
 from evolving_agent.retrieval_agent.agent import RetrievalAgent
 from evolving_agent.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
 from evolving_agent.skill_learning import OutcomeSkillLearner
@@ -41,6 +40,7 @@ from evolving_agent.source_evolution import (
 )
 from evolving_agent.source_inference import run_source_inference
 from evolving_agent.tsfm import ChronosConfig, ChronosForecaster
+from common.llm import ClaudeCLIClient, ClaudeCLIConfig, CodexCLIClient, CodexCLIConfig, QwenClient
 
 BASELINE_CHOICES = (
     "skill-fresh",

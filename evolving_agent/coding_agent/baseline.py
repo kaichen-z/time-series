@@ -9,9 +9,9 @@ from pathlib import Path
 from evolving_agent.coding_agent.agent import CodingSkillAgent
 from evolving_agent.coding_agent.skill_library import SkillLibrary
 from evolving_agent.data import DEFAULT_TASKS_FILE, Task, load_tasks
-from evolving_agent.llm import LLMClient, QwenClient
-from evolving_agent.metrics import score_forecast
 from evolving_agent.tracing import TraceEvent, configure, emit
+from common.llm import LLMClient, QwenClient
+from common.metrics import score_forecast
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -48,7 +48,7 @@ def run_baseline(
     results_path.parent.mkdir(parents=True, exist_ok=True)
     agent = CodingSkillAgent(llm, library, mode=mode)
 
-    scores: list[float] = []
+    scores: list[dict] = []
     with open(results_path, "w", encoding="utf-8") as results_file:
 
         for task in tasks:
@@ -74,7 +74,7 @@ def run_baseline(
                 + "\n"
             )
             results_file.flush()
-            scores.append(score["primary"])
+            scores.append({"smape": score["smape"], "mae": score["mae"]})
 
             emit(
                 TraceEvent(
@@ -93,17 +93,29 @@ def run_baseline(
     return _summarize(mode, scores, library, results_path)
 
 
-def _summarize(mode: str, scores: list[float], library: SkillLibrary | None, results_path: Path) -> dict:
-    """First-half vs second-half mean sMAPE: the direct answer to 'did it get better as the library grew'."""
+def _mean(values: list[float]) -> float | None:
+    """Plain mean, or None for an empty list rather than a ZeroDivisionError."""
+    return sum(values) / len(values) if values else None
+
+
+def _round3(value: float | None) -> float | None:
+    """Round to 3 decimal places; None passes through unchanged."""
+    return round(value, 3) if value is not None else None
+
+
+def _summarize(mode: str, scores: list[dict], library: SkillLibrary | None, results_path: Path) -> dict:
+    """First-half vs second-half mean sMAPE and MAE: did it get better as the library grew."""
     half = len(scores) // 2
-    first_half = scores[:half]
-    second_half = scores[half:]
+    first_half, second_half = scores[:half], scores[half:]
     return {
         "mode": mode,
         "n_tasks": len(scores),
-        "mean_smape": sum(scores) / len(scores) if scores else None,
-        "mean_smape_first_half": sum(first_half) / len(first_half) if first_half else None,
-        "mean_smape_second_half": sum(second_half) / len(second_half) if second_half else None,
+        "mean_smape": _round3(_mean([s["smape"] for s in scores])),
+        "mean_smape_first_half": _round3(_mean([s["smape"] for s in first_half])),
+        "mean_smape_second_half": _round3(_mean([s["smape"] for s in second_half])),
+        "mean_mae": _round3(_mean([s["mae"] for s in scores])),
+        "mean_mae_first_half": _round3(_mean([s["mae"] for s in first_half])),
+        "mean_mae_second_half": _round3(_mean([s["mae"] for s in second_half])),
         "skills_saved": len(library) if library is not None else 0,
         "results_path": str(results_path),
     }

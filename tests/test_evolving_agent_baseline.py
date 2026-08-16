@@ -8,8 +8,8 @@ from pathlib import Path
 from evolving_agent.coding_agent.baseline import run_baseline, select_tasks
 from evolving_agent.coding_agent.skill_library import SkillLibrary
 from evolving_agent.data import Task
-from evolving_agent.llm import FakeLLMClient
 from evolving_agent.tracing import configure
+from common.llm import FakeLLMClient
 
 VALID_CODE = 'def forecast(history, horizon, frequency):\n    return [history[-1]] * horizon\n'
 

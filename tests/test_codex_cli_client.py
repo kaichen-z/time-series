@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from evolving_agent.llm import (
+from common.llm import (
     CodexCLIClient,
     CodexCLIConfig,
     TransientLLMError,
@@ -26,7 +26,7 @@ def test_codex_cli_client_returns_and_caches_json() -> None:
             assert "Do not use tools" in kwargs["input"]
             return subprocess.CompletedProcess(command, 0, "", "")
 
-        with patch("evolving_agent.llm.subprocess.run", side_effect=fake_run) as mocked:
+        with patch("common.llm.subprocess.run", side_effect=fake_run) as mocked:
             first = client.complete(system="Return JSON.", messages=[{"role": "user", "content": "x"}])
             second = client.complete(system="Return JSON.", messages=[{"role": "user", "content": "x"}])
 
@@ -49,7 +49,7 @@ def test_codex_cli_client_repairs_malformed_json_once() -> None:
             output.write_text(next(outputs))
             return subprocess.CompletedProcess(command, 0, "", "")
 
-        with patch("evolving_agent.llm.subprocess.run", side_effect=fake_run) as mocked:
+        with patch("common.llm.subprocess.run", side_effect=fake_run) as mocked:
             response = client.complete(
                 system="Return JSON.", messages=[{"role": "user", "content": "x"}]
             )
@@ -74,7 +74,7 @@ def test_codex_cli_client_ignores_malformed_cache() -> None:
             output.write_text('{"answer": 9}')
             return subprocess.CompletedProcess(command, 0, "", "")
 
-        with patch("evolving_agent.llm.subprocess.run", side_effect=fake_run):
+        with patch("common.llm.subprocess.run", side_effect=fake_run):
             response = client.complete(
                 system="Return JSON.", messages=[{"role": "user", "content": "x"}]
             )
@@ -108,7 +108,7 @@ def test_codex_cli_client_retries_a_transient_network_failure() -> None:
             output.write_text('{"answer": 11}')
             return subprocess.CompletedProcess(command, 0, "", "")
 
-        with patch("evolving_agent.llm.subprocess.run", side_effect=fake_run):
+        with patch("common.llm.subprocess.run", side_effect=fake_run):
             response = client.complete(
                 system="Return JSON.", messages=[{"role": "user", "content": "x"}]
             )
@@ -135,7 +135,7 @@ def test_codex_cli_client_raises_transient_error_after_network_retries() -> None
             "failed to connect to WebSocket: Connection refused",
         )
 
-    with patch("evolving_agent.llm.subprocess.run", side_effect=fake_run) as mocked:
+    with patch("common.llm.subprocess.run", side_effect=fake_run) as mocked:
         try:
             client.complete(system="Return JSON.", messages=[{"role": "user", "content": "x"}])
             assert False, "expected a TransientLLMError"

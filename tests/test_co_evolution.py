@@ -16,8 +16,8 @@ from evolving_agent.co_evolution import (
 from evolving_agent.coding_agent.skill_library import Skill, SkillLibrary
 from evolving_agent.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
 from evolving_agent.evaluation import ResolvedOutcome
-from evolving_agent.llm import FakeLLMClient, TransientLLMError
 from evolving_agent.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
+from common.llm import FakeLLMClient, TransientLLMError
 
 
 def _open_genome(**overrides) -> str:

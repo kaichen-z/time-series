@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from evolving_agent.metrics import mae, score_forecast, smape, spearman_rank_correlation
+from common.metrics import mae, score_forecast, smape, spearman_rank_correlation
 
 
 class SmapeTests(unittest.TestCase):

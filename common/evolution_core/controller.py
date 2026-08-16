@@ -68,10 +68,12 @@ class SelfEvolutionEngine(Generic[ArtifactT, ItemT, ResultT]):
             checkpoint = self.components.store.load_checkpoint()
             if checkpoint is not None:
                 current, start_generation = self._restore_checkpoint(checkpoint)
+
         adapter.validate(current)
 
         steps: list[EvolutionStep] = []
         for generation in range(start_generation + 1, self.config.generations + 1):
+            
             parent_train = self._evaluate(current, train_items, "train")
             current = adapter.apply_train_report(current, parent_train)
             adapter.validate(current)

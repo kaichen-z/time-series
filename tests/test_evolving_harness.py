@@ -9,8 +9,8 @@ from evolving_agent.coding_agent.skill_library import SkillLibrary
 from evolving_agent.data import ContextTask, Document, Task
 from evolving_agent.decision_agent.agent import DecisionAgent
 from evolving_agent.harness import EvolvingForecastHarness
-from evolving_agent.llm import FakeLLMClient
 from evolving_agent.retrieval_agent.agent import RetrievalAgent
+from common.llm import FakeLLMClient
 
 
 LEVEL_CODE = (

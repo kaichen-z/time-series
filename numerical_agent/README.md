@@ -20,8 +20,8 @@ Generic Self-Evolution Core
 Parent → Children → Train → frozen Dev → accept/reject → checkpoint
 ```
 
-The generic core is in `evolving_agent/evolution_core/` and does not import this package or any
-time-series dependency. It receives six components:
+The generic core is in `common/evolution_core/`, a shared package owned by no single agent. It
+does not import this package or any time-series dependency. It receives six components:
 
 | Component | Responsibility |
 |---|---|

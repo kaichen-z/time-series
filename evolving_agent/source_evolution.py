@@ -69,7 +69,7 @@ _FORBIDDEN_ADDED_TEXT = (
     "setattr(",
     "evolving_agent.data",
     "evolving_agent.evaluation",
-    "evolving_agent.metrics",
+    "common.metrics",
     "evolving_agent.co_evolution",
     "evolving_agent.source_evolution",
     "evolving_agent.skill_learning",

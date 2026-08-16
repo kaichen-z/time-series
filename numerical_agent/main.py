@@ -7,10 +7,10 @@ import sys
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from evolving_agent.evolution_core.contracts import EvolutionConfig, MetricSpec
-from evolving_agent.evolution_core.controller import SelfEvolutionEngine
-from evolving_agent.evolution_core.persistence import JsonArtifactStore
-from evolving_agent.metrics import mae, smape
+from common.evolution_core.contracts import EvolutionConfig, MetricSpec
+from common.evolution_core.controller import SelfEvolutionEngine
+from common.evolution_core.persistence import JsonArtifactStore
+from common.metrics import mae, smape
 
 from .adapters.dictionary_curation import DictionaryCurationTask, NumericalTaskItem
 from .config import DictionaryCurationConfig

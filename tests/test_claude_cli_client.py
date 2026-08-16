@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from evolving_agent.llm import ClaudeCLIClient, ClaudeCLIConfig, parse_json_object
+from common.llm import ClaudeCLIClient, ClaudeCLIConfig, parse_json_object
 
 
 def _envelope(result_text: str, is_error: bool = False) -> str:
@@ -27,7 +27,7 @@ def test_claude_cli_client_returns_and_caches_json() -> None:
             assert not any(key.startswith("CLAUDE") for key in kwargs["env"])
             return subprocess.CompletedProcess(command, 0, _envelope('{"answer": 7}'), "")
 
-        with patch("evolving_agent.llm.subprocess.run", side_effect=fake_run) as mocked:
+        with patch("common.llm.subprocess.run", side_effect=fake_run) as mocked:
             first = client.complete(system="Return JSON.", messages=[{"role": "user", "content": "x"}])
             second = client.complete(system="Return JSON.", messages=[{"role": "user", "content": "x"}])
 
@@ -44,7 +44,7 @@ def test_claude_cli_client_raises_on_error_result() -> None:
     def fake_run(command, **kwargs):
         return subprocess.CompletedProcess(command, 0, _envelope("refused", is_error=True), "")
 
-    with patch("evolving_agent.llm.subprocess.run", side_effect=fake_run):
+    with patch("common.llm.subprocess.run", side_effect=fake_run):
         try:
             client.complete(system="s", messages=[{"role": "user", "content": "x"}])
             assert False, "expected a RuntimeError"
@@ -58,7 +58,7 @@ def test_claude_cli_client_missing_binary_raises_clear_error() -> None:
     def fake_run(command, **kwargs):
         raise FileNotFoundError(command[0])
 
-    with patch("evolving_agent.llm.subprocess.run", side_effect=fake_run):
+    with patch("common.llm.subprocess.run", side_effect=fake_run):
         try:
             client.complete(system="s", messages=[{"role": "user", "content": "x"}])
             assert False, "expected a RuntimeError"

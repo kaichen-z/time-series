@@ -13,13 +13,13 @@ from evolving_agent.data import ContextTask, Document
 from evolving_agent.decision_agent.agent import DECISION_PROMPT
 from evolving_agent.evaluation import ResolvedOutcome, score_after_resolution
 from evolving_agent.harness import EvolvingForecastHarness
-from evolving_agent.llm import (
+from evolving_agent.retrieval_agent.agent import RETRIEVAL_PROMPT
+from common.llm import (
     JsonExtractionError,
     LLMClient,
     TransientLLMError,
     parse_json_object,
 )
-from evolving_agent.retrieval_agent.agent import RETRIEVAL_PROMPT
 
 
 META_HARNESS_PROMPT = """You are an open-ended Meta-Harness Engineer for contextual time-series

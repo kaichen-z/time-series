@@ -10,7 +10,7 @@ from .models import ForecastMemoryEntry, ForecastTask, ForecastWorkspace
 
 
 class ForecastMemoryBank:
-    """Post-hoc memory populated only after actual future values are available."""
+    """After memory populated only after actual future values are available."""
 
     def __init__(self, path: str | Path | None = None) -> None:
         self.path = Path(path).expanduser().resolve() if path else None

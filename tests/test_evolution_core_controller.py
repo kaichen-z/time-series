@@ -6,16 +6,16 @@ from typing import Mapping, Sequence
 
 import pytest
 
-from evolving_agent.evolution_core.acceptance import MetricAcceptanceGate
-from evolving_agent.evolution_core.contracts import (
+from common.evolution_core.acceptance import MetricAcceptanceGate
+from common.evolution_core.contracts import (
     EvaluationReport,
     EvolutionComponents,
     EvolutionConfig,
     MetricSpec,
     MutationContext,
 )
-from evolving_agent.evolution_core.controller import SelfEvolutionEngine
-from evolving_agent.evolution_core.persistence import JsonArtifactStore
+from common.evolution_core.controller import SelfEvolutionEngine
+from common.evolution_core.persistence import JsonArtifactStore
 
 
 @dataclass(frozen=True)

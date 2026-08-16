@@ -14,9 +14,9 @@ from evolving_agent.coding_agent.prompts import (
 
 from evolving_agent.coding_agent.skill_library import Skill, SkillLibrary
 from evolving_agent.data import Task
-from evolving_agent.llm import JsonExtractionError, LLMClient, parse_json_object
 from evolving_agent.sandbox import SandboxResult, run_forecast_code
 from evolving_agent.tracing import TraceEvent, emit
+from common.llm import JsonExtractionError, LLMClient, parse_json_object
 
 Mode = Literal["library", "fresh"]
 

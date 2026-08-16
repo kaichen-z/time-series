@@ -7,8 +7,8 @@ from dataclasses import dataclass
 
 from evolving_agent.coding_agent.evolution import ValidatedProgram
 from evolving_agent.data import ContextTask
-from evolving_agent.llm import JsonExtractionError, LLMClient, parse_json_object
 from evolving_agent.retrieval_agent.skill_library import RetrievalSkillLibrary
+from common.llm import JsonExtractionError, LLMClient, parse_json_object
 
 RETRIEVAL_PROMPT = """You are the Retrieval Agent for contextual time-series forecasting.
 Read the task corpus and the Coding Agent's competing, numbers-only assumptions. Retrieve only
