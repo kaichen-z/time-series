@@ -20,6 +20,15 @@ audit of all earlier baseline families and saved results is available at
 The complete installation, baseline, Coding-setting, skill-learning, and evolution manual is
 available at [`docs/USAGE_GUIDE.md`](docs/USAGE_GUIDE.md).
 
+## Parameterized Self-Evolution framework
+
+The repository also contains a domain-independent Parent/Child evolution core plus a numerical
+tool-dictionary curation adapter. The framework accepts externally supplied base methods,
+implementers, runtimes, tasks, metrics, and evolution parameters. It does **not** ship concrete
+Statistical, TSFM, or Combined forecasting methods in this phase. See
+[`numerical_agent/README.md`](numerical_agent/README.md) for the component contracts, artifacts,
+and offline fake-provider smoke command.
+
 This repository contains an auditable, gap-guided agent loop for the
 [Dr-CiK](https://github.com/ServiceNow/Dr-CiK) contextual time-series forecasting
 benchmark. Its research hypothesis is that a passage should be retrieved because it is
