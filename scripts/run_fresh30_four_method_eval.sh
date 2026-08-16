@@ -3,8 +3,8 @@
 # entity-disjoint fresh 30-task Dr-CiK manifest.
 #
 # Usage:
-#   evolving_loop/scripts/run_fresh30_four_method_eval.sh smoke
-#   evolving_loop/scripts/run_fresh30_four_method_eval.sh full
+#   scripts/run_fresh30_four_method_eval.sh smoke
+#   scripts/run_fresh30_four_method_eval.sh full
 #
 # `smoke` runs only the first manifest task. `full` runs all 30. Actual runs
 # execute two methods at a time and retry process failures without converting
@@ -12,7 +12,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 PYTHON="${PYTHON:-python3}"
 MODE="${1:-smoke}"

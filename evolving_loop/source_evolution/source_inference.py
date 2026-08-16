@@ -47,7 +47,7 @@ def run_source_inference(
             existing = environment.get("PYTHONPATH", "")
             environment["PYTHONPATH"] = str(worktree) + (os.pathsep + existing if existing else "")
             result = subprocess.run(
-                [sys.executable, "-m", "evolving_loop.frozen_runner", "--config", str(config_path)],
+                [sys.executable, "-m", "evolving_loop.source_evolution.frozen_runner", "--config", str(config_path)],
                 cwd=worktree,
                 capture_output=True,
                 text=True,

@@ -7,7 +7,7 @@ from pathlib import Path
 
 def test_llm_only_script_forwards_target_and_explicit_python() -> None:
     root = Path(__file__).resolve().parents[1]
-    script = root / "evolving_loop/scripts/run_llm_only_evolutions.sh"
+    script = root / "scripts/run_llm_only_evolutions.sh"
     environment = {
         **os.environ,
         "EA_DRY_RUN": "1",
@@ -35,7 +35,7 @@ def test_llm_only_script_forwards_target_and_explicit_python() -> None:
 
 def test_pilot30_script_renders_auto_genome_protocol() -> None:
     root = Path(__file__).resolve().parents[1]
-    script = root / "evolving_loop/scripts/run_coevolution_pilot30.sh"
+    script = root / "scripts/run_coevolution_pilot30.sh"
     completed = subprocess.run(
         ["bash", str(script), "/tmp/nonexistent-drcik-tasks"],
         cwd=root,
@@ -71,7 +71,7 @@ def test_pilot30_script_renders_auto_genome_protocol() -> None:
 def test_fresh30_launcher_dry_run_renders_four_methods_for_one_smoke_task() -> None:
     """A smoke launch must cover all methods without leaking into task two."""
     root = Path(__file__).resolve().parents[1]
-    script = root / "evolving_loop/scripts/run_fresh30_four_method_eval.sh"
+    script = root / "scripts/run_fresh30_four_method_eval.sh"
     completed = subprocess.run(
         ["bash", str(script), "smoke"],
         cwd=root,

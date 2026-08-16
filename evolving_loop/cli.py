@@ -38,7 +38,7 @@ from evolving_loop.source_evolution import (
     SourceEvolutionEngine,
     save_source_trace,
 )
-from evolving_loop.source_inference import run_source_inference
+from evolving_loop.source_evolution.source_inference import run_source_inference
 from common.llm import ClaudeCLIClient, ClaudeCLIConfig, CodexCLIClient, CodexCLIConfig, QwenClient
 from common.tsfm import ChronosConfig, ChronosForecaster
 
@@ -1029,7 +1029,7 @@ def _source_evolve_command(
                 [
                     sys.executable,
                     "-m",
-                    "evolving_loop.source_eval",
+                    "evolving_loop.source_evolution.source_eval",
                     "--config",
                     str(config_path),
                 ],

@@ -265,7 +265,7 @@ evolving-agent evolve \
 Run the frozen first 30-task LLM-only co-evolution pilot:
 
 ```bash
-evolving_loop/scripts/run_coevolution_pilot30.sh \
+scripts/run_coevolution_pilot30.sh \
   /path/to/Dr-CiK/Dr-CiK_public/tasks
 ```
 

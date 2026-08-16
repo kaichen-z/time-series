@@ -180,5 +180,5 @@ ground-truth evidence, or document relevance labels.
 | Numbers-only executable program evolution | `evolving_loop/coding_agent/evolution.py` |
 | Three-agent forecast runtime | `evolving_loop/harness.py` |
 | Prompt/Genome co-evolution | `evolving_loop/co_evolution.py` |
-| Source-level evolution | `evolving_loop/source_evolution.py` |
+| Source-level evolution | `evolving_loop/source_evolution/__init__.py` |
 | Full operational guide | `docs/EVOLVING_AGENT.md` |
