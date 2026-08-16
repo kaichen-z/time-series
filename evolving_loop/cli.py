@@ -11,36 +11,36 @@ import tempfile
 from dataclasses import asdict
 from pathlib import Path
 
-from evolving_agent.co_evolution import (
+from evolving_loop.co_evolution import (
     CoEvolutionConfig,
     CoEvolutionEngine,
     HarnessPolicy,
     evaluation_diagnostics,
 )
-from evolving_agent.coding_agent.evolution import CodingEvolutionAgent, CodingEvolutionConfig
-from evolving_agent.coding_agent.skill_library import Skill, SkillLibrary
-from evolving_agent.data import (
+from evolving_loop.coding_agent.evolution import CodingEvolutionAgent, CodingEvolutionConfig
+from evolving_loop.coding_agent.skill_library import Skill, SkillLibrary
+from evolving_loop.data import (
     ContextTask,
     DEFAULT_TASKS_FILE,
     load_context_tasks,
     load_huggingface_context_tasks,
 )
-from evolving_agent.decision_agent.agent import DecisionAgent
-from evolving_agent.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
-from evolving_agent.frozen_inference import run_frozen_inference
-from evolving_agent.harness import EvolvingForecastHarness, HarnessRuntimeConfig
-from evolving_agent.retrieval_agent.agent import RetrievalAgent
-from evolving_agent.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
-from evolving_agent.skill_learning import OutcomeSkillLearner
-from evolving_agent.source_evolution import (
+from evolving_loop.decision_agent.agent import DecisionAgent
+from evolving_loop.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
+from evolving_loop.frozen_inference import run_frozen_inference
+from evolving_loop.harness import EvolvingForecastHarness, HarnessRuntimeConfig
+from evolving_loop.retrieval_agent.agent import RetrievalAgent
+from evolving_loop.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
+from evolving_loop.skill_learning import OutcomeSkillLearner
+from evolving_loop.source_evolution import (
     SourceEvaluation,
     SourceEvolutionConfig,
     SourceEvolutionEngine,
     save_source_trace,
 )
-from evolving_agent.source_inference import run_source_inference
-from evolving_agent.tsfm import ChronosConfig, ChronosForecaster
+from evolving_loop.source_inference import run_source_inference
 from common.llm import ClaudeCLIClient, ClaudeCLIConfig, CodexCLIClient, CodexCLIConfig, QwenClient
+from common.tsfm import ChronosConfig, ChronosForecaster
 
 BASELINE_CHOICES = (
     "skill-fresh",
@@ -410,7 +410,7 @@ def baseline_command(args: argparse.Namespace) -> dict | None:
             raise SystemExit(
                 f"{args.baseline} consumes --tasks-file and does not directly load a Hugging Face split"
             )
-        from evolving_agent.coding_agent.baseline import main as coding_baseline_main
+        from evolving_loop.coding_agent.baseline import main as coding_baseline_main
 
         mode = "fresh" if args.baseline == "skill-fresh" else "library"
         output_dir = Path(args.output_dir or f"outputs/baselines/{args.baseline}")
@@ -560,6 +560,17 @@ def _select_manifest_split(
     return selected
 
 
+class _ChronosNumericForecaster:
+    """Adapts common.tsfm.ChronosForecaster to the NumericForecaster(history, horizon, frequency) protocol."""
+
+    def __init__(self, forecaster: ChronosForecaster) -> None:
+        self._forecaster = forecaster
+
+    def forecast(self, history, horizon, frequency):
+        del frequency  # Chronos consumes the numerical history directly.
+        return self._forecaster.forecast(history, horizon)
+
+
 def _components(args):
     if args.llm_backend == "codex":
         llm = CodexCLIClient(
@@ -590,12 +601,14 @@ def _components(args):
     decision_library = DecisionSkillLibrary.load(args.decision_library_path)
     tsfm = None
     if args.setting in {"tsfm", "combined"}:
-        tsfm = ChronosForecaster(
-            ChronosConfig(
-                model_id=args.chronos_model_id,
-                device_map=args.chronos_device,
-                cache_dir=args.chronos_cache_dir,
-                local_files_only=args.chronos_local_files_only,
+        tsfm = _ChronosNumericForecaster(
+            ChronosForecaster(
+                ChronosConfig(
+                    model_id=args.chronos_model_id,
+                    device_map=args.chronos_device,
+                    cache_dir=args.chronos_cache_dir,
+                    local_files_only=args.chronos_local_files_only,
+                )
             )
         )
     return llm, library, retrieval_library, decision_library, tsfm
@@ -1016,7 +1029,7 @@ def _source_evolve_command(
                 [
                     sys.executable,
                     "-m",
-                    "evolving_agent.source_eval",
+                    "evolving_loop.source_eval",
                     "--config",
                     str(config_path),
                 ],

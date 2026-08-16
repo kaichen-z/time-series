@@ -6,10 +6,10 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from evolving_agent.cli import _components, _factory, _select_manifest_split, _task_subset
-from evolving_agent.co_evolution import HarnessPolicy
-from evolving_agent.data import load_context_tasks, load_huggingface_context_tasks
-from evolving_agent.frozen_inference import run_frozen_inference
+from evolving_loop.cli import _components, _factory, _select_manifest_split, _task_subset
+from evolving_loop.co_evolution import HarnessPolicy
+from evolving_loop.data import load_context_tasks, load_huggingface_context_tasks
+from evolving_loop.frozen_inference import run_frozen_inference
 
 
 def main() -> None:

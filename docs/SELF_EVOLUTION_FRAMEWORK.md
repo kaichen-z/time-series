@@ -60,7 +60,7 @@ knowledge being curated.
 ## 3. Numbers-Only Program Self-Evolution
 
 The Numerical/Coding Agent implementation is in
-[`evolving_agent/coding_agent/evolution.py`](../evolving_agent/coding_agent/evolution.py).
+[`evolving_loop/coding_agent/evolution.py`](../evolving_loop/coding_agent/evolution.py).
 It cannot see documents, retrieved evidence, ground-truth evidence, or future values.
 
 ```text
@@ -107,7 +107,7 @@ candidate, and a contextual override must cite verified evidence.
 ## 5. Whole-Harness Co-Evolution
 
 The structured three-agent Meta-Harness is implemented in
-[`evolving_agent/co_evolution.py`](../evolving_agent/co_evolution.py). During task inference, all
+[`evolving_loop/co_evolution.py`](../evolving_loop/co_evolution.py). During task inference, all
 future labels are removed before the agents run. Labels become visible only to the trusted scorer
 after a forecast has been frozen.
 
@@ -142,7 +142,7 @@ write skills. Public Test is never used for mutation or acceptance.
 |---|---|---|
 | `prompt` | Exactly one complete prompt owned by the diagnosed target role | `best_policy.json` |
 | `genome` | Role prompts, Numerical search/hindcast budgets, Retrieval/Decision topology, evidence policy, aggregation, and validated skill snapshots | `best_policy.json` |
-| `source` | Mutable Agent/Harness Python and new modules under `evolving_agent/generated/` | `best_source.patch` |
+| `source` | Mutable Agent/Harness Python and new modules under `evolving_loop/generated/` | `best_source.patch` |
 
 Source evolution runs Codex in an isolated Git worktree. A proposed patch must pass the static
 label/safety audit, the full test suite, Train selection, and held-out Dev acceptance before it can
@@ -177,8 +177,8 @@ ground-truth evidence, or document relevance labels.
 | Dev acceptance gate | `common/evolution_core/acceptance.py` |
 | Artifact/checkpoint persistence | `common/evolution_core/persistence.py` |
 | Dictionary filtering and curation | `numerical_agent/adapters/dictionary_curation.py` |
-| Numbers-only executable program evolution | `evolving_agent/coding_agent/evolution.py` |
-| Three-agent forecast runtime | `evolving_agent/harness.py` |
-| Prompt/Genome co-evolution | `evolving_agent/co_evolution.py` |
-| Source-level evolution | `evolving_agent/source_evolution.py` |
+| Numbers-only executable program evolution | `evolving_loop/coding_agent/evolution.py` |
+| Three-agent forecast runtime | `evolving_loop/harness.py` |
+| Prompt/Genome co-evolution | `evolving_loop/co_evolution.py` |
+| Source-level evolution | `evolving_loop/source_evolution.py` |
 | Full operational guide | `docs/EVOLVING_AGENT.md` |

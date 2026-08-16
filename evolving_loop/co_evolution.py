@@ -8,12 +8,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal, Sequence
 
-from evolving_agent.coding_agent.evolution import GENERATION_PROMPT, REVISION_PROMPT
-from evolving_agent.data import ContextTask, Document
-from evolving_agent.decision_agent.agent import DECISION_PROMPT
-from evolving_agent.evaluation import ResolvedOutcome, score_after_resolution
-from evolving_agent.harness import EvolvingForecastHarness
-from evolving_agent.retrieval_agent.agent import RETRIEVAL_PROMPT
+from evolving_loop.coding_agent.evolution import GENERATION_PROMPT, REVISION_PROMPT
+from evolving_loop.data import ContextTask, Document
+from evolving_loop.decision_agent.agent import DECISION_PROMPT
+from evolving_loop.evaluation import ResolvedOutcome, score_after_resolution
+from evolving_loop.harness import EvolvingForecastHarness
+from evolving_loop.retrieval_agent.agent import RETRIEVAL_PROMPT
 from common.llm import (
     JsonExtractionError,
     LLMClient,

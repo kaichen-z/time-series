@@ -15,9 +15,9 @@ Machine-readable catalogue: [`results/baseline_results_catalogue.json`](results/
 All currently executable methods use one entrypoint:
 
 ```bash
-python -m evolving_agent --list-methods
-python -m evolving_agent --baseline <name> [data options]
-python -m evolving_agent --evolution <prompt|genome|source> [data options]
+python -m evolving_loop --list-methods
+python -m evolving_loop --baseline <name> [data options]
+python -m evolving_loop --evolution <prompt|genome|source> [data options]
 ```
 
 The baseline names distinguish fixed methods and never trigger evolution. The evolution names run

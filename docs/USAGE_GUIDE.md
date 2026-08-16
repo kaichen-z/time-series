@@ -29,8 +29,8 @@ training tasks -> three-agent harness -> failure attribution -> child harnesses
 The unified entrypoint is:
 
 ```bash
-python -m evolving_agent --baseline <baseline-name> [options]
-python -m evolving_agent --evolution <prompt|genome|source> [options]
+python -m evolving_loop --baseline <baseline-name> [options]
+python -m evolving_loop --evolution <prompt|genome|source> [options]
 ```
 
 A baseline evaluates one fixed method and does not alter the harness. An evolution run uses resolved
@@ -142,8 +142,8 @@ Use this sample for smoke tests and mechanism inspection, not aggregate performa
 Most fixed baselines support:
 
 ```bash
-python -m evolving_agent --baseline statistical --public-dev --limit 10
-python -m evolving_agent --baseline chronos --hidden-test
+python -m evolving_loop --baseline statistical --public-dev --limit 10
+python -m evolving_loop --baseline chronos --hidden-test
 ```
 
 `--public-dev` selects the 199 labeled public tasks. `--hidden-test` selects the 80 tasks whose
@@ -196,7 +196,7 @@ python -c 'import json; from pathlib import Path; source=Path("external/Dr-CiK/f
 List every method:
 
 ```bash
-python -m evolving_agent --list-methods
+python -m evolving_loop --list-methods
 ```
 
 Run the tests:
@@ -208,7 +208,7 @@ pytest -q
 Run a lightweight real-task smoke test without an LLM or TSFM:
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline statistical \
   --sample-dir external/Dr-CiK/sample \
   --task-id task_42 \
@@ -321,7 +321,7 @@ This is a traceable restricted programmatic edit, not free-form LLM number gener
 General form:
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline <name> \
   --sample-dir external/Dr-CiK/sample \
   --task-id task_42 \
@@ -334,7 +334,7 @@ Runs `amazon/chronos-bolt-small` on numbers only. It reads no documents and runs
 Decision Agent.
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline chronos \
   --sample-dir external/Dr-CiK/sample \
   --task-id task_42 \
@@ -351,7 +351,7 @@ that fallback in a formal Chronos comparison because it changes the method being
 Runs TimesFM on numbers only. It is an alternative TSFM comparison and does not consume documents.
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline timesfm \
   --sample-dir external/Dr-CiK/sample \
   --task-id task_42 \
@@ -364,7 +364,7 @@ Runs a deterministic, LLM-free statistical model. It uses seasonal naive or drif
 when a seasonal lag is detected, otherwise linear trend extrapolation. It uses no documents.
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline statistical \
   --sample-dir external/Dr-CiK/sample \
   --task-id task_42 \
@@ -380,7 +380,7 @@ Runs one numerical diagnosis, one retrieval pass, evidence synthesis, and probab
 It has no iterative gap filling and no self-evolution.
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline one-pass \
   --sample-dir external/Dr-CiK/sample \
   --backbone chronos \
@@ -402,7 +402,7 @@ The safe mode permits automatic revision only for explicit future values or a hi
 normal-regime projection. Generic textual up/down claims do not become arbitrary multipliers.
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline iterative \
   --sample-dir external/Dr-CiK/sample \
   --task-id task_42 \
@@ -418,7 +418,7 @@ Runs the same loop while allowing generic text-derived add/multiply revisions wi
 validation. This is a negative safety ablation, not a recommended runtime.
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline iterative-unsafe \
   --sample-dir external/Dr-CiK/sample \
   --task-id task_42 \
@@ -432,7 +432,7 @@ how well the downstream evidence-to-number stage could perform under perfect ret
 ceiling diagnostic, not a deployable baseline, and is forbidden on Hidden Test.
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline oracle-context \
   --sample-dir external/Dr-CiK/sample \
   --task-id task_42 \
@@ -449,7 +449,7 @@ Runs the earlier fixed three-agent implementation with deterministic reasoning:
 - multiple retrieval/decision rounds are possible, but prompts and source never evolve.
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline rules-triad \
   --sample-dir external/Dr-CiK/sample \
   --task-id task_42 \
@@ -462,10 +462,10 @@ python -m evolving_agent \
 Uses the same earlier Triad host, but backs the Coding, Retrieval, and Decision reasoning roles with
 schema-constrained Codex calls. Chronos/Python still execute and hindcast numerical candidates.
 
-This is not the current `evolving_agent` harness and does not run prompt, genome, or source evolution.
+This is not the current `evolving_loop` harness and does not run prompt, genome, or source evolution.
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline codex-triad \
   --sample-dir external/Dr-CiK/sample \
   --task-id task_42 \
@@ -485,7 +485,7 @@ This tests a strong direct-LLM baseline but lacks executable-candidate compariso
 numerical edits.
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline codex-direct \
   --sample-dir external/Dr-CiK/sample \
   --task-id task_42 \
@@ -505,7 +505,7 @@ This separation of textual reasoning from numerical generation is the most stabl
 among the aggregate runs currently stored in the repository.
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline codex-contract \
   --sample-dir external/Dr-CiK/sample \
   --task-id task_42 \
@@ -527,7 +527,7 @@ numeric task -> local Qwen writes a Python skill -> sandbox
 Fresh mode neither stores nor reuses skills.
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline skill-fresh \
   --tasks-file external/Dr-CiK/derived/public_tasks.jsonl \
   --model-id Qwen/Qwen2.5-32B-Instruct \
@@ -542,7 +542,7 @@ Uses the same one-task workflow but can retrieve, execute, create, persist, and 
 Python skills across tasks.
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline skill-library \
   --tasks-file external/Dr-CiK/derived/public_tasks.jsonl \
   --model-id Qwen/Qwen2.5-32B-Instruct \
@@ -571,7 +571,7 @@ Evaluates a fixed snapshot of the current Coding/Retrieval/Decision harness:
 - does not persist skills learned from the evaluation tasks.
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline evolving-harness \
   --sample-dir external/Dr-CiK/sample \
   --setting statistics \
@@ -622,19 +622,19 @@ protocol; the LLM does not imitate Chronos weights.
 Example setting comparison:
 
 ```bash
-python -m evolving_agent --baseline evolving-harness \
+python -m evolving_loop --baseline evolving-harness \
   --sample-dir external/Dr-CiK/sample --setting llm_only \
   --output-dir outputs/settings/llm-only
 
-python -m evolving_agent --baseline evolving-harness \
+python -m evolving_loop --baseline evolving-harness \
   --sample-dir external/Dr-CiK/sample --setting statistics \
   --output-dir outputs/settings/statistics
 
-python -m evolving_agent --baseline evolving-harness \
+python -m evolving_loop --baseline evolving-harness \
   --sample-dir external/Dr-CiK/sample --setting tsfm \
   --output-dir outputs/settings/tsfm
 
-python -m evolving_agent --baseline evolving-harness \
+python -m evolving_loop --baseline evolving-harness \
   --sample-dir external/Dr-CiK/sample --setting combined \
   --output-dir outputs/settings/combined
 ```
@@ -680,7 +680,7 @@ skill libraries on an explicitly authorized public training stream, use the lega
 subcommand:
 
 ```bash
-python -m evolving_agent run \
+python -m evolving_loop run \
   --tasks-file external/Dr-CiK/full-download/Dr-CiK_public/tasks \
   --setting statistics \
   --llm-backend codex \
@@ -701,7 +701,7 @@ Never enable outcome learning on Hidden Test.
 General form:
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --evolution <prompt|genome|source> \
   --tasks-file external/Dr-CiK/full-download/Dr-CiK_public/tasks \
   --setting statistics \
@@ -778,7 +778,7 @@ Candidate budgets, hindcast settings, topology, aggregation, source, scorer, and
 remain fixed. This is the controlled prompt-only baseline.
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --evolution prompt \
   --tasks-file external/Dr-CiK/full-download/Dr-CiK_public/tasks \
   --setting statistics \
@@ -807,7 +807,7 @@ The data split, label firewall, scorer, sandbox, citation checks, resource caps,
 acceptance test remain immutable.
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --evolution genome \
   --tasks-file external/Dr-CiK/full-download/Dr-CiK_public/tasks \
   --setting combined \
@@ -822,7 +822,7 @@ python -m evolving_agent \
 Continue from an accepted genome:
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --evolution genome \
   --tasks-file external/Dr-CiK/full-download/Dr-CiK_public/tasks \
   --setting combined \
@@ -837,7 +837,7 @@ python -m evolving_agent \
 
 This is the most open and expensive mode. In an isolated Git worktree, the Codex Source Engineer
 may rewrite the Coding, Retrieval, Decision, and Harness implementations; add modules under
-`evolving_agent/generated/`; create new agent roles; and redesign ranking, validation, memory,
+`evolving_loop/generated/`; create new agent roles; and redesign ranking, validation, memory,
 stopping, or communication algorithms.
 
 It may not edit the CLI, data loaders, scorer, LLM transport, sandbox, evolution host, tests, or
@@ -855,7 +855,7 @@ Codex source edit -> isolated worktree -> path/AST/text safety audit -> full pyt
 Source evolution requires a clean tracked worktree.
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --evolution source \
   --tasks-file external/Dr-CiK/full-download/Dr-CiK_public/tasks \
   --setting statistics \
@@ -882,7 +882,7 @@ first run.
 Continue from an accepted source patch:
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --evolution source \
   --tasks-file external/Dr-CiK/full-download/Dr-CiK_public/tasks \
   --seed-source-patch runs/source/best_source.patch \
@@ -901,7 +901,7 @@ Evolution and inference are separate operations. `--evolution` may read resolved
 Evaluate a frozen prompt/genome artifact on the untouched Public Holdout:
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --inference genome \
   --tasks-file external/Dr-CiK/full-download/Dr-CiK_public/tasks \
   --split-manifest runs/genome/split_manifest.json \
@@ -915,7 +915,7 @@ python -m evolving_agent \
 Generate the official-format Hidden Test files without local scores:
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --inference genome \
   --hidden-test \
   --policy-path runs/genome/best_policy.json \
@@ -927,7 +927,7 @@ python -m evolving_agent \
 For source evolution, run the accepted cumulative patch in an isolated worktree:
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --inference source \
   --hidden-test \
   --source-patch-path runs/source/best_source.patch \
@@ -1145,15 +1145,15 @@ mkdir -p external
 git clone https://github.com/ServiceNow/Dr-CiK.git external/Dr-CiK
 
 pytest -q
-python -m evolving_agent --list-methods
+python -m evolving_loop --list-methods
 
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline statistical \
   --sample-dir external/Dr-CiK/sample \
   --task-id task_42 \
   --output-dir outputs/quick/statistical
 
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline evolving-harness \
   --sample-dir external/Dr-CiK/sample \
   --setting statistics \

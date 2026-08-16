@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import ast
 
-from evolving_agent.data import Task
+from evolving_loop.data import Task
 
 ACTIONS = ("use_skill", "revise_skill", "write_skill")
 

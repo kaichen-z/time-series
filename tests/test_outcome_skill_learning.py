@@ -4,14 +4,14 @@ import json
 import tempfile
 from pathlib import Path
 
-from evolving_agent.coding_agent.evolution import CodingEvolutionAgent, CodingEvolutionConfig
-from evolving_agent.coding_agent.skill_library import SkillLibrary
-from evolving_agent.decision_agent.agent import DecisionAgent
-from evolving_agent.decision_agent.skill_library import DecisionSkillLibrary
-from evolving_agent.harness import EvolvingForecastHarness
-from evolving_agent.retrieval_agent.agent import RetrievalAgent
-from evolving_agent.retrieval_agent.skill_library import RetrievalSkillLibrary
-from evolving_agent.skill_learning import OutcomeSkillLearner
+from evolving_loop.coding_agent.evolution import CodingEvolutionAgent, CodingEvolutionConfig
+from evolving_loop.coding_agent.skill_library import SkillLibrary
+from evolving_loop.decision_agent.agent import DecisionAgent
+from evolving_loop.decision_agent.skill_library import DecisionSkillLibrary
+from evolving_loop.harness import EvolvingForecastHarness
+from evolving_loop.retrieval_agent.agent import RetrievalAgent
+from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
+from evolving_loop.skill_learning import OutcomeSkillLearner
 from common.llm import FakeLLMClient
 
 from test_evolving_harness import TREND_CODE, _program, _retrieval_response, _task

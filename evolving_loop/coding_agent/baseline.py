@@ -6,10 +6,10 @@ import json
 import random
 from pathlib import Path
 
-from evolving_agent.coding_agent.agent import CodingSkillAgent
-from evolving_agent.coding_agent.skill_library import SkillLibrary
-from evolving_agent.data import DEFAULT_TASKS_FILE, Task, load_tasks
-from evolving_agent.tracing import TraceEvent, configure, emit
+from evolving_loop.coding_agent.agent import CodingSkillAgent
+from evolving_loop.coding_agent.skill_library import SkillLibrary
+from evolving_loop.data import DEFAULT_TASKS_FILE, Task, load_tasks
+from evolving_loop.tracing import TraceEvent, configure, emit
 from common.llm import LLMClient, QwenClient
 from common.metrics import score_forecast
 

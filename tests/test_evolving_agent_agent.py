@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from evolving_agent.coding_agent.agent import FALLBACK_SKILL_NAME, CodingSkillAgent
-from evolving_agent.coding_agent.skill_library import Skill, SkillLibrary
-from evolving_agent.data import Task
+from evolving_loop.coding_agent.agent import FALLBACK_SKILL_NAME, CodingSkillAgent
+from evolving_loop.coding_agent.skill_library import Skill, SkillLibrary
+from evolving_loop.data import Task
 from common.llm import FakeLLMClient
 
 VALID_CODE = 'def forecast(history, horizon, frequency):\n    return [history[-1]] * horizon\n'

@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from evolving_agent.coding_agent.prompts import (
+from evolving_loop.coding_agent.prompts import (
     InvalidAgentResponseError,
     build_system_prompt,
     build_user_message,
     validate_response,
 )
-from evolving_agent.data import Task
+from evolving_loop.data import Task
 
 
 def _task() -> Task:

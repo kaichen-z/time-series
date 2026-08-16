@@ -153,7 +153,7 @@ for evolution_mode in "${MODES[@]}"; do
     codex_cache_dir="${EA_CODEX_CACHE_DIR:-$run_dir/codex-cache}"
     mkdir -p "$run_dir"
     args=(
-        "$PYTHON" -m evolving_agent
+        "$PYTHON" -m evolving_loop
         --evolution "$evolution_mode"
         --tasks-file "$TASKS_FILE"
         --setting llm_only

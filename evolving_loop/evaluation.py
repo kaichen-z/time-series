@@ -4,11 +4,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from evolving_agent.data import ContextTask
+from evolving_loop.data import ContextTask
 from common.metrics import score_forecast, spearman_rank_correlation
 
 if TYPE_CHECKING:
-    from evolving_agent.harness import HarnessResult
+    from evolving_loop.harness import HarnessResult
 
 
 @dataclass(frozen=True)

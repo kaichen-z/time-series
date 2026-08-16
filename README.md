@@ -4,7 +4,7 @@ Repository: <https://github.com/kaichen-z/time-series>
 
 ## New canonical evolving-agent implementation
 
-The collaborator's top-level [`evolving_agent/`](evolving_agent/) package is now the base for the
+The collaborator's top-level [`evolving_loop/`](evolving_loop/) package is now the base for the
 self-evolving experiment. The original Fresh-vs-Skill-Library baseline is preserved. The integrated
 version adds numbers-only program evolution with historical hindcasting, outcome-validated
 Retrieval and Decision skill libraries, verified contextual retrieval, a citation-constrained
@@ -52,19 +52,19 @@ that its label-free utility proxy is an already trained PRM.
 All executable baselines and evolution levels now share one Python entrypoint. List the names with:
 
 ```bash
-python -m evolving_agent --list-methods
+python -m evolving_loop --list-methods
 ```
 
 Run a baseline by name:
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline chronos \
   --sample-dir external/Dr-CiK/sample \
   --task-id task_42 \
   --output-dir outputs/baselines/chronos-task42
 
-python -m evolving_agent \
+python -m evolving_loop \
   --baseline codex-triad \
   --sample-dir external/Dr-CiK/sample \
   --task-id task_42 \
@@ -76,7 +76,7 @@ python -m evolving_agent \
 Run one evolution level by name:
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --evolution genome \
   --tasks-file external/Dr-CiK/full-download/Dr-CiK_public/tasks \
   --generations 3 \
@@ -98,7 +98,7 @@ Evolution now reserves entity-disjoint Train, Dev, and Public Holdout partitions
 manifest. After freezing the artifact, run label-free Hidden Test inference separately:
 
 ```bash
-python -m evolving_agent \
+python -m evolving_loop \
   --inference genome \
   --hidden-test \
   --policy-path runs/evolving/best_policy.json \

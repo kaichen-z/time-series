@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from evolving_agent.tracing import TraceEvent, configure, emit
+from evolving_loop.tracing import TraceEvent, configure, emit
 
 
 class TracingTests(unittest.TestCase):

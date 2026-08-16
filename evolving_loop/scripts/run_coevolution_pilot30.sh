@@ -2,7 +2,7 @@
 # Frozen first-stage protocol for complete LLM-only three-agent co-evolution.
 #
 # Usage:
-#   evolving_agent/scripts/run_coevolution_pilot30.sh /path/to/Dr-CiK_public/tasks
+#   evolving_loop/scripts/run_coevolution_pilot30.sh /path/to/Dr-CiK_public/tasks
 #
 # Override any EA_* value when scaling beyond the first pilot. The default run
 # is intentionally one generation with four screened children and one promotion.

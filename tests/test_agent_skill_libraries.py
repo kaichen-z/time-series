@@ -3,8 +3,8 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from evolving_agent.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
-from evolving_agent.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
+from evolving_loop.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
+from evolving_loop.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
 
 
 def test_retrieval_library_clone_is_isolated() -> None:

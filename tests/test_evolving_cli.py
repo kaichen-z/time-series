@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from evolving_agent.cli import (
+from evolving_loop.cli import (
     BASELINE_CHOICES,
     EVOLUTION_CHOICES,
     _baseline_argv,
@@ -12,11 +12,11 @@ from evolving_agent.cli import (
     _three_way_entity_split,
     build_parser,
 )
-from evolving_agent.co_evolution import HarnessPolicy
-from evolving_agent.coding_agent.skill_library import SkillLibrary
-from evolving_agent.data import ContextTask, Task
-from evolving_agent.decision_agent.skill_library import DecisionSkillLibrary
-from evolving_agent.retrieval_agent.skill_library import RetrievalSkillLibrary
+from evolving_loop.co_evolution import HarnessPolicy
+from evolving_loop.coding_agent.skill_library import SkillLibrary
+from evolving_loop.data import ContextTask, Task
+from evolving_loop.decision_agent.skill_library import DecisionSkillLibrary
+from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
 from common.llm import FakeLLMClient
 
 

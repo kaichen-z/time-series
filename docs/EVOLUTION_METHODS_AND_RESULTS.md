@@ -103,11 +103,11 @@ without allowing arbitrary source edits.
 
 Source mode is the most expressive option. A Source Harness Engineer may modify:
 
-- `evolving_agent/coding_agent/evolution.py`;
-- `evolving_agent/retrieval_agent/agent.py`;
-- `evolving_agent/decision_agent/agent.py`;
-- `evolving_agent/harness.py`; and
-- new Python modules under `evolving_agent/generated/`.
+- `evolving_loop/coding_agent/evolution.py`;
+- `evolving_loop/retrieval_agent/agent.py`;
+- `evolving_loop/decision_agent/agent.py`;
+- `evolving_loop/harness.py`; and
+- new Python modules under `evolving_loop/generated/`.
 
 Each source candidate is created in a detached temporary Git worktree. It must pass:
 
@@ -170,7 +170,7 @@ The initial Source smoke run used a deliberately small budget:
 The Source Engineer generated a cutoff-stability tournament with adaptive challengers,
 recency-robust validation, stability-aware Decision logic, and stricter Retrieval coverage. It
 modified all three agents and the Harness and created
-`evolving_agent/generated/cutoff_tournament.py`.
+`evolving_loop/generated/cutoff_tournament.py`.
 
 The candidate passed the source audit and all **163 tests**, but its empirical reward decreased:
 

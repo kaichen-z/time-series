@@ -5,9 +5,9 @@ import json
 import re
 from dataclasses import dataclass
 
-from evolving_agent.coding_agent.evolution import ValidatedProgram
-from evolving_agent.data import ContextTask
-from evolving_agent.retrieval_agent.skill_library import RetrievalSkillLibrary
+from evolving_loop.coding_agent.evolution import ValidatedProgram
+from evolving_loop.data import ContextTask
+from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
 from common.llm import JsonExtractionError, LLMClient, parse_json_object
 
 RETRIEVAL_PROMPT = """You are the Retrieval Agent for contextual time-series forecasting.

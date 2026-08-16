@@ -31,4 +31,4 @@ ARGS=(
 
 cd "$REPO_ROOT"
 echo "Running baseline (mode=$MODE) -> $RUN_DIR"
-"$PYTHON" -m evolving_agent.coding_agent.baseline "${ARGS[@]}" "$@"
+"$PYTHON" -m evolving_loop.coding_agent.baseline "${ARGS[@]}" "$@"

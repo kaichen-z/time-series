@@ -16,7 +16,7 @@ SOURCE_ENGINEER_PROMPT = """You are the Source Harness Engineer for a contextual
 forecasting system. Work directly in the provided isolated Git worktree. Inspect the current
 implementation and the supplied resolved training failure summary, then implement one coherent,
 testable child architecture. You may rewrite the mutable Coding, Retrieval, Decision, and Harness
-implementation, create new Python agent modules under evolving_agent/generated/, and wire them into
+implementation, create new Python agent modules under evolving_loop/generated/, and wire them into
 the runtime. You may invent new agent roles, validation/ranking algorithms, communication patterns,
 memory use, stopping rules, or orchestration rather than merely tuning constants.
 
@@ -30,18 +30,18 @@ read or introduce future_values, gt_evidence, role/subtype labels, or resolved o
 inference. Do not weaken citation verification or execute shell/network/file operations from
 generated forecasting code. Do not commit. Keep public interfaces compatible and finish with a
 brief JSON final message:
-{"summary": "...", "hypothesis": "...", "changed_files": ["evolving_agent/..."]}.
+{"summary": "...", "hypothesis": "...", "changed_files": ["evolving_loop/..."]}.
 """
 
 _EXACT_MUTABLE = frozenset(
     {
-        "evolving_agent/harness.py",
-        "evolving_agent/coding_agent/evolution.py",
-        "evolving_agent/retrieval_agent/agent.py",
-        "evolving_agent/decision_agent/agent.py",
+        "evolving_loop/harness.py",
+        "evolving_loop/coding_agent/evolution.py",
+        "evolving_loop/retrieval_agent/agent.py",
+        "evolving_loop/decision_agent/agent.py",
     }
 )
-_GENERATED_PREFIX = "evolving_agent/generated/"
+_GENERATED_PREFIX = "evolving_loop/generated/"
 _FORBIDDEN_ADDED_TEXT = (
     "future_values",
     "gt_evidence",
@@ -67,13 +67,13 @@ _FORBIDDEN_ADDED_TEXT = (
     "open(",
     "getattr(",
     "setattr(",
-    "evolving_agent.data",
-    "evolving_agent.evaluation",
+    "evolving_loop.data",
+    "evolving_loop.evaluation",
     "common.metrics",
-    "evolving_agent.co_evolution",
-    "evolving_agent.source_evolution",
-    "evolving_agent.skill_learning",
-    "evolving_agent.cli",
+    "evolving_loop.co_evolution",
+    "evolving_loop.source_evolution",
+    "evolving_loop.skill_learning",
+    "evolving_loop.cli",
 )
 _FORBIDDEN_IMPORTS = frozenset(
     {"os", "pathlib", "subprocess", "socket", "requests", "urllib", "sys", "shutil"}
@@ -479,7 +479,7 @@ class SourceEvolutionEngine:
 
     def _changed_files(self, worktree: Path) -> tuple[str, ...]:
         subprocess.run(
-            ["git", "add", "-N", "evolving_agent"],
+            ["git", "add", "-N", "evolving_loop"],
             cwd=worktree,
             capture_output=True,
             check=False,
@@ -496,7 +496,7 @@ class SourceEvolutionEngine:
     @staticmethod
     def _diff(worktree: Path) -> str:
         subprocess.run(
-            ["git", "add", "-N", "evolving_agent"],
+            ["git", "add", "-N", "evolving_loop"],
             cwd=worktree,
             capture_output=True,
             check=False,

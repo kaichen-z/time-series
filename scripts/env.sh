@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared configuration for evolving_agent/coding_agent scripts. Sourced, not executed directly.
+# Shared configuration for evolving_loop/coding_agent scripts. Sourced, not executed directly.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

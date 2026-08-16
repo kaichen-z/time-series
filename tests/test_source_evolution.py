@@ -4,7 +4,7 @@ import tempfile
 import subprocess
 from pathlib import Path
 
-from evolving_agent.source_evolution import (
+from evolving_loop.source_evolution import (
     SOURCE_ENGINEER_PROMPT,
     SourceEvaluation,
     SourceEvolutionConfig,
@@ -21,7 +21,7 @@ def test_source_engineer_must_edit_without_requesting_confirmation() -> None:
 def test_source_audit_accepts_new_safe_agent_module() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        path = root / "evolving_agent/generated/candidate_auditor.py"
+        path = root / "evolving_loop/generated/candidate_auditor.py"
         path.parent.mkdir(parents=True)
         path.write_text(
             "from dataclasses import dataclass\n\n"
@@ -30,7 +30,7 @@ def test_source_audit_accepts_new_safe_agent_module() -> None:
             "    threshold: float = 1.0\n"
         )
         result = SourceEvolutionEngine.audit(
-            root, ("evolving_agent/generated/candidate_auditor.py",)
+            root, ("evolving_loop/generated/candidate_auditor.py",)
         )
     assert result is None
 
@@ -51,24 +51,24 @@ def test_source_audit_rejects_label_access_even_in_mutable_file() -> None:
             ["git", "config", "user.email", "test@example.com"], cwd=root, check=True
         )
         subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
-        path = root / "evolving_agent/harness.py"
+        path = root / "evolving_loop/harness.py"
         path.parent.mkdir(parents=True)
         path.write_text("def safe(task):\n    return task.numeric.history_values\n")
         subprocess.run(["git", "add", "."], cwd=root, check=True)
         subprocess.run(["git", "commit", "-m", "seed"], cwd=root, capture_output=True, check=True)
         path.write_text("def cheat(task):\n    return task.numeric.future_values\n")
-        result = SourceEvolutionEngine.audit(root, ("evolving_agent/harness.py",))
+        result = SourceEvolutionEngine.audit(root, ("evolving_loop/harness.py",))
     assert result == "forbidden_added_code:future_values"
 
 
 def test_source_audit_rejects_filesystem_import() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        path = root / "evolving_agent/generated/unsafe.py"
+        path = root / "evolving_loop/generated/unsafe.py"
         path.parent.mkdir(parents=True)
         path.write_text("from pathlib import Path\n")
-        result = SourceEvolutionEngine.audit(root, ("evolving_agent/generated/unsafe.py",))
-    assert result == "forbidden_import:evolving_agent/generated/unsafe.py:pathlib"
+        result = SourceEvolutionEngine.audit(root, ("evolving_loop/generated/unsafe.py",))
+    assert result == "forbidden_import:evolving_loop/generated/unsafe.py:pathlib"
 
 
 def test_source_audit_allows_future_annotations_and_regex_compile() -> None:
@@ -79,7 +79,7 @@ def test_source_audit_allows_future_annotations_and_regex_compile() -> None:
             ["git", "config", "user.email", "test@example.com"], cwd=root, check=True
         )
         subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
-        path = root / "evolving_agent/generated/safe_regex.py"
+        path = root / "evolving_loop/generated/safe_regex.py"
         path.parent.mkdir(parents=True)
         path.write_text("SEED = True\n")
         subprocess.run(["git", "add", "."], cwd=root, check=True)
@@ -90,7 +90,7 @@ def test_source_audit_allows_future_annotations_and_regex_compile() -> None:
             "SAFE_PATTERN = re.compile(r'event')\n"
         )
         result = SourceEvolutionEngine.audit(
-            root, ("evolving_agent/generated/safe_regex.py",)
+            root, ("evolving_loop/generated/safe_regex.py",)
         )
     assert result is None
 
@@ -103,20 +103,20 @@ def test_source_engine_accepts_better_child_and_returns_inheritable_patch() -> N
             ["git", "config", "user.email", "test@example.com"], cwd=root, check=True
         )
         subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
-        path = root / "evolving_agent/harness.py"
+        path = root / "evolving_loop/harness.py"
         path.parent.mkdir(parents=True)
         path.write_text("SEED = True\n")
         subprocess.run(["git", "add", "."], cwd=root, check=True)
         subprocess.run(["git", "commit", "-m", "seed"], cwd=root, capture_output=True, check=True)
 
         def evaluator(worktree: Path) -> SourceEvaluation:
-            improved = "SOURCE_CHILD = True" in (worktree / "evolving_agent/harness.py").read_text()
+            improved = "SOURCE_CHILD = True" in (worktree / "evolving_loop/harness.py").read_text()
             reward = 0.8 if improved else 0.5
             return SourceEvaluation(reward, reward, {"coding": reward}, {"coding": reward}, ())
 
         class StubSourceEngine(SourceEvolutionEngine):
             def _run_engineer(self, worktree, candidate_id, parent):
-                candidate = worktree / "evolving_agent/harness.py"
+                candidate = worktree / "evolving_loop/harness.py"
                 candidate.write_text(candidate.read_text() + "SOURCE_CHILD = True\n")
                 return '{"summary":"added child","hypothesis":"improves reward"}'
 

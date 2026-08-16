@@ -8,9 +8,9 @@ from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
-from evolving_agent.cli import _components, _factory
-from evolving_agent.co_evolution import HarnessPolicy, evaluate_policy
-from evolving_agent.data import load_context_tasks
+from evolving_loop.cli import _components, _factory
+from evolving_loop.co_evolution import HarnessPolicy, evaluate_policy
+from evolving_loop.data import load_context_tasks
 
 
 def main() -> None:

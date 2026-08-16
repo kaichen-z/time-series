@@ -13,11 +13,11 @@ forecasting harness.
 The same entrypoint selects either a fixed baseline or an evolution mechanism:
 
 ```text
-python -m evolving_agent --baseline <name> [data and runtime options]
-python -m evolving_agent --evolution <prompt|genome|source> [data and runtime options]
+python -m evolving_loop --baseline <name> [data and runtime options]
+python -m evolving_loop --evolution <prompt|genome|source> [data and runtime options]
 ```
 
-Use `python -m evolving_agent --list-methods` for the complete machine-readable name list. A baseline
+Use `python -m evolving_loop --list-methods` for the complete machine-readable name list. A baseline
 is evaluated without modifying the harness; an evolution mode performs a train/entity-held-out-dev
 search and accepts a child only under its mode-specific validation gate. Output directories must be
 kept separate when comparing methods.
@@ -40,7 +40,7 @@ experiments through `--evolution-mode`:
 |---|---|---|---|
 | `prompt` | Exactly one full prompt belonging to the diagnosed weakest role | `best_policy.json` | Rank children on train; accept the train winner only if it improves entity-disjoint dev |
 | `genome` (default) | All four role prompts, Coding search/hindcast budgets, Retrieval/Decision workflow, evidence adjustment policy, and aggregation | `best_policy.json` | The same train selection and held-out dev gate |
-| `source` | Mutable Coding, Retrieval, Decision, and Harness Python; it may also create new agent modules under `evolving_agent/generated/` | `best_source.patch` | Static audit, full tests, train selection, then held-out dev gate |
+| `source` | Mutable Coding, Retrieval, Decision, and Harness Python; it may also create new agent modules under `evolving_loop/generated/` | `best_source.patch` | Static audit, full tests, train selection, then held-out dev gate |
 
 `prompt` recreates the original conservative baseline. `genome` is the current structured
 Meta-Harness. `source` is the full source-level option: each candidate is generated and executed in
@@ -184,7 +184,7 @@ successive generations without injecting a statistical dictionary or TSFM into C
 
 ## Commands
 
-Install both the original `drcik_agent` and top-level `evolving_agent` packages:
+Install both the original `drcik_agent` and top-level `evolving_loop` packages:
 
 ```bash
 pip install -e '.[dev]'
@@ -265,7 +265,7 @@ evolving-agent evolve \
 Run the frozen first 30-task LLM-only co-evolution pilot:
 
 ```bash
-evolving_agent/scripts/run_coevolution_pilot30.sh \
+evolving_loop/scripts/run_coevolution_pilot30.sh \
   /path/to/Dr-CiK/Dr-CiK_public/tasks
 ```
 
@@ -310,7 +310,7 @@ evolving-agent evolve \
 ```
 
 The old one-shot comparison remains runnable with
-`python -m evolving_agent.coding_agent.baseline --mode fresh|library ...`.
+`python -m evolving_loop.coding_agent.baseline --mode fresh|library ...`.
 
 ## Important experiment boundary
 

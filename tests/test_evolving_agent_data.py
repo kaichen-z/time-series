@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from evolving_agent.data import Task, load_tasks, split_tasks
+from evolving_loop.data import Task, load_tasks, split_tasks
 
 
 def _record(task_id: str, entity: str, future=(1.0, 2.0), history=(1.0, 2.0, 3.0)) -> dict:

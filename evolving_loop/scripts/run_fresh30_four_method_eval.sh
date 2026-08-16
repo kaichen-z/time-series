@@ -3,8 +3,8 @@
 # entity-disjoint fresh 30-task Dr-CiK manifest.
 #
 # Usage:
-#   evolving_agent/scripts/run_fresh30_four_method_eval.sh smoke
-#   evolving_agent/scripts/run_fresh30_four_method_eval.sh full
+#   evolving_loop/scripts/run_fresh30_four_method_eval.sh smoke
+#   evolving_loop/scripts/run_fresh30_four_method_eval.sh full
 #
 # `smoke` runs only the first manifest task. `full` runs all 30. Actual runs
 # execute two methods at a time and retry process failures without converting
@@ -97,7 +97,7 @@ method_command() {
             local policy="$EA_V000_POLICY"
             [[ "$method" == "retry2_v003" ]] && policy="$EA_V003_POLICY"
             METHOD_COMMAND=(
-                "$PYTHON" -m evolving_agent
+                "$PYTHON" -m evolving_loop
                 --inference genome
                 --tasks-file "$EA_TASKS_FILE"
                 "${TASK_ARGS[@]}"
@@ -120,7 +120,7 @@ method_command() {
             local baseline="codex-direct"
             [[ "$method" == "codex_contract" ]] && baseline="codex-contract"
             METHOD_COMMAND=(
-                "$PYTHON" -m evolving_agent
+                "$PYTHON" -m evolving_loop
                 --baseline "$baseline"
                 --sample-dir "$EA_SAMPLE_ROOT"
                 "${TASK_ARGS[@]}"

@@ -6,11 +6,11 @@ import statistics
 import uuid
 from dataclasses import asdict, dataclass
 
-from evolving_agent.data import ContextTask
-from evolving_agent.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
-from evolving_agent.evaluation import ResolvedOutcome
-from evolving_agent.harness import HarnessResult
-from evolving_agent.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
+from evolving_loop.data import ContextTask
+from evolving_loop.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
+from evolving_loop.evaluation import ResolvedOutcome
+from evolving_loop.harness import HarnessResult
+from evolving_loop.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
 from common.llm import JsonExtractionError, LLMClient, parse_json_object
 
 SKILL_LEARNING_PROMPT = """You are the post-outcome Skill Curator for a forecasting harness.

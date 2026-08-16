@@ -18,8 +18,11 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 drcik-agent = "drcik_agent.cli:main"
-evolving-agent = "evolving_agent.cli:main"
+evolving-agent = "evolving_loop.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["common*", "drcik_agent*", "evolving_agent*", "numerical_agent*"]
+include = ["common*", "drcik_agent*", "evolving_loop*", "numerical_agent*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

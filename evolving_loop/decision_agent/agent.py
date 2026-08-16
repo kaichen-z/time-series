@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 
-from evolving_agent.retrieval_agent.agent import RetrievalResult
-from evolving_agent.decision_agent.skill_library import DecisionSkillLibrary
+from evolving_loop.retrieval_agent.agent import RetrievalResult
+from evolving_loop.decision_agent.skill_library import DecisionSkillLibrary
 from common.llm import JsonExtractionError, LLMClient, parse_json_object
 
 DECISION_PROMPT = """You are the Decision Agent in a time-series forecasting harness.

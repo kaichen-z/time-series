@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-import importlib
-import math
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Protocol
 
 from .models import Diagnosis, ForecastTask
-
-
-class BackboneUnavailableError(RuntimeError):
-    """Raised when a configured forecasting backbone cannot be loaded."""
+from common.tsfm import (
+    BackboneUnavailableError,
+    ChronosConfig,
+    ChronosForecaster,
+    TimesFMConfig,
+    TimesFMForecaster,
+)
 
 
 class ForecastBackbone(Protocol):
@@ -83,45 +83,19 @@ class ChronosForecastBackbone:
         tensor_module: Any | None = None,
     ) -> None:
         self.config = config or ChronosBackboneConfig()
-        self._runtime_module = runtime_module
-        self._tensor_module = tensor_module
-        self._pipeline: Any | None = None
-
-    def _load_runtime(self) -> tuple[Any, Any]:
-        try:
-            chronos = self._runtime_module or importlib.import_module("chronos")
-            torch = self._tensor_module or importlib.import_module("torch")
-        except ImportError as error:
-            raise BackboneUnavailableError(
-                "Chronos is the configured backbone but is not installed. "
-                "Install it with: pip install -e '.[chronos]'"
-            ) from error
-        return chronos, torch
-
-    def _ensure_pipeline(self) -> tuple[Any, Any]:
-        chronos, torch = self._load_runtime()
-        if self._pipeline is not None:
-            return self._pipeline, torch
-        load_kwargs: dict[str, Any] = {
-            "device_map": self.config.device_map,
-            "local_files_only": self.config.local_files_only,
-        }
-        if self.config.cache_dir:
-            load_kwargs["cache_dir"] = str(
-                Path(self.config.cache_dir).expanduser().resolve()
-            )
-        try:
-            self._pipeline = chronos.BaseChronosPipeline.from_pretrained(
-                self.config.model_id,
-                **load_kwargs,
-            )
-        except Exception as error:
-            location = "local cache" if self.config.local_files_only else "Hugging Face or cache"
-            raise BackboneUnavailableError(
-                f"Could not load Chronos checkpoint {self.config.model_id!r} "
-                f"from {location}: {error}"
-            ) from error
-        return self._pipeline, torch
+        self._forecaster = ChronosForecaster(
+            ChronosConfig(
+                model_id=self.config.model_id,
+                device_map=self.config.device_map,
+                cache_dir=self.config.cache_dir,
+                local_files_only=self.config.local_files_only,
+                max_context=self.config.max_context,
+                max_horizon=self.config.max_horizon,
+                validate_output=True,
+            ),
+            runtime_module=runtime_module,
+            tensor_module=tensor_module,
+        )
 
     def forecast(
         self,
@@ -129,32 +103,7 @@ class ChronosForecastBackbone:
         diagnosis: Diagnosis,
     ) -> tuple[tuple[float, ...], str]:
         del diagnosis  # Chronos consumes the numerical history directly.
-        if task.prediction_length > self.config.max_horizon:
-            raise ValueError(
-                f"Task horizon {task.prediction_length} exceeds Chronos max_horizon "
-                f"{self.config.max_horizon}"
-            )
-        pipeline, torch = self._ensure_pipeline()
-        context = task.history_values[-self.config.max_context :]
-        try:
-            context_tensor = torch.tensor(context, dtype=torch.float32)
-            _quantiles, point_forecast = pipeline.predict_quantiles(
-                inputs=context_tensor,
-                prediction_length=task.prediction_length,
-                quantile_levels=[0.1, 0.5, 0.9],
-            )
-            row = point_forecast[0]
-            if hasattr(row, "tolist"):
-                row = row.tolist()
-            values = tuple(float(value) for value in row)
-        except Exception as error:
-            raise BackboneUnavailableError(f"Chronos inference failed: {error}") from error
-        if len(values) != task.prediction_length:
-            raise BackboneUnavailableError(
-                "Chronos returned a point forecast with the wrong horizon length"
-            )
-        if not all(math.isfinite(value) for value in values):
-            raise BackboneUnavailableError("Chronos returned non-finite point forecasts")
+        values = self._forecaster.forecast(task.history_values, task.prediction_length)
         return values, f"chronos-bolt:{self.config.model_id}"
 
 
@@ -189,52 +138,21 @@ class TimesFMForecastBackbone:
         runtime_module: Any | None = None,
     ) -> None:
         self.config = config or TimesFMBackboneConfig()
-        self._runtime_module = runtime_module
-        self._model: Any | None = None
-
-    def _load_runtime(self) -> Any:
-        if self._runtime_module is not None:
-            return self._runtime_module
-        try:
-            return importlib.import_module("timesfm")
-        except ImportError as error:
-            raise BackboneUnavailableError(
-                "TimesFM is the configured backbone but is not installed. "
-                "Install it with: pip install -e '.[timesfm]'"
-            ) from error
-
-    def _ensure_model(self) -> Any:
-        if self._model is not None:
-            return self._model
-        timesfm = self._load_runtime()
-        try:
-            model = timesfm.TimesFM_2p5_200M_torch.from_pretrained(
-                self.config.model_id,
-                cache_dir=(
-                    str(Path(self.config.cache_dir).expanduser().resolve())
-                    if self.config.cache_dir
-                    else None
-                ),
+        self._forecaster = TimesFMForecaster(
+            TimesFMConfig(
+                model_id=self.config.model_id,
+                max_context=self.config.max_context,
+                max_horizon=self.config.max_horizon,
+                cache_dir=self.config.cache_dir,
                 local_files_only=self.config.local_files_only,
-            )
-            model.compile(
-                timesfm.ForecastConfig(
-                    max_context=self.config.max_context,
-                    max_horizon=self.config.max_horizon,
-                    normalize_inputs=self.config.normalize_inputs,
-                    use_continuous_quantile_head=self.config.use_continuous_quantile_head,
-                    force_flip_invariance=self.config.force_flip_invariance,
-                    infer_is_positive=self.config.infer_is_positive,
-                    fix_quantile_crossing=self.config.fix_quantile_crossing,
-                )
-            )
-        except Exception as error:
-            location = "local cache" if self.config.local_files_only else "Hugging Face or cache"
-            raise BackboneUnavailableError(
-                f"Could not load TimesFM checkpoint {self.config.model_id!r} from {location}: {error}"
-            ) from error
-        self._model = model
-        return model
+                normalize_inputs=self.config.normalize_inputs,
+                use_continuous_quantile_head=self.config.use_continuous_quantile_head,
+                force_flip_invariance=self.config.force_flip_invariance,
+                infer_is_positive=self.config.infer_is_positive,
+                fix_quantile_crossing=self.config.fix_quantile_crossing,
+            ),
+            runtime_module=runtime_module,
+        )
 
     def forecast(
         self,
@@ -242,26 +160,7 @@ class TimesFMForecastBackbone:
         diagnosis: Diagnosis,
     ) -> tuple[tuple[float, ...], str]:
         del diagnosis  # TimesFM 2.5 consumes the numerical history directly.
-        if task.prediction_length > self.config.max_horizon:
-            raise ValueError(
-                f"Task horizon {task.prediction_length} exceeds TimesFM max_horizon "
-                f"{self.config.max_horizon}"
-            )
-        model = self._ensure_model()
-        try:
-            point_forecast, _quantile_forecast = model.forecast(
-                horizon=task.prediction_length,
-                inputs=[list(task.history_values)],
-            )
-            values = tuple(float(value) for value in point_forecast[0])
-        except Exception as error:
-            raise BackboneUnavailableError(f"TimesFM inference failed: {error}") from error
-        if len(values) != task.prediction_length:
-            raise BackboneUnavailableError(
-                "TimesFM returned a point forecast with the wrong horizon length"
-            )
-        if not all(math.isfinite(value) for value in values):
-            raise BackboneUnavailableError("TimesFM returned non-finite point forecasts")
+        values = self._forecaster.forecast(task.history_values, task.prediction_length)
         return values, f"timesfm-2.5-200m-pytorch:{self.config.model_id}"
 
 

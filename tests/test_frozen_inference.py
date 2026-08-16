@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from evolving_agent.co_evolution import HarnessPolicy
-from evolving_agent.data import ContextTask, Document, Task, load_context_tasks
-from evolving_agent.decision_agent.agent import DecisionCandidate, DecisionResult
-from evolving_agent.frozen_inference import inference_view, run_frozen_inference
-from evolving_agent.cli import build_parser, inference_command
-from evolving_agent.harness import HarnessResult
-from evolving_agent.retrieval_agent.agent import Evidence, RetrievalResult
+from evolving_loop.co_evolution import HarnessPolicy
+from evolving_loop.data import ContextTask, Document, Task, load_context_tasks
+from evolving_loop.decision_agent.agent import DecisionCandidate, DecisionResult
+from evolving_loop.frozen_inference import inference_view, run_frozen_inference
+from evolving_loop.cli import build_parser, inference_command
+from evolving_loop.harness import HarnessResult
+from evolving_loop.retrieval_agent.agent import Evidence, RetrievalResult
 
 
 def _task(*, public: bool) -> ContextTask:

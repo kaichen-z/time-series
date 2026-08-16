@@ -5,11 +5,11 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
-from evolving_agent.coding_agent.evolution import CodingEvolutionAgent, CodingEvolutionResult
-from evolving_agent.data import ContextTask
-from evolving_agent.decision_agent.agent import DecisionAgent, DecisionCandidate, DecisionResult
-from evolving_agent.evaluation import ResolvedOutcome, score_after_resolution
-from evolving_agent.retrieval_agent.agent import RetrievalAgent, RetrievalResult
+from evolving_loop.coding_agent.evolution import CodingEvolutionAgent, CodingEvolutionResult
+from evolving_loop.data import ContextTask
+from evolving_loop.decision_agent.agent import DecisionAgent, DecisionCandidate, DecisionResult
+from evolving_loop.evaluation import ResolvedOutcome, score_after_resolution
+from evolving_loop.retrieval_agent.agent import RetrievalAgent, RetrievalResult
 
 
 @dataclass(frozen=True)

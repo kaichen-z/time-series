@@ -36,7 +36,7 @@ document text.
 After downloading the full public task export, reproduce the recommended manifest with:
 
 ```bash
-python -m evolving_agent.split_manifest \
+python -m evolving_loop.split_manifest \
   --tasks-path external/Dr-CiK/full-download/Dr-CiK_public/tasks \
   --output splits/drcik_public_80_20_99_v1.json \
   --seed 20260816
@@ -45,7 +45,7 @@ python -m evolving_agent.split_manifest \
 To reproduce the legacy manifest, pass explicit sizes:
 
 ```bash
-python -m evolving_agent.split_manifest \
+python -m evolving_loop.split_manifest \
   --tasks-path external/Dr-CiK/full-download/Dr-CiK_public/tasks \
   --output splits/drcik_public_v1.json \
   --seed 20260816 \

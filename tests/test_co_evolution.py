@@ -6,17 +6,17 @@ from pathlib import Path
 
 import pytest
 
-from evolving_agent.co_evolution import (
+from evolving_loop.co_evolution import (
     CoEvolutionEngine,
     HarnessPolicy,
     PolicyEvaluation,
     evaluation_diagnostics,
     snapshot_policy_skills,
 )
-from evolving_agent.coding_agent.skill_library import Skill, SkillLibrary
-from evolving_agent.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
-from evolving_agent.evaluation import ResolvedOutcome
-from evolving_agent.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
+from evolving_loop.coding_agent.skill_library import Skill, SkillLibrary
+from evolving_loop.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
+from evolving_loop.evaluation import ResolvedOutcome
+from evolving_loop.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
 from common.llm import FakeLLMClient, TransientLLMError
 
 
@@ -118,7 +118,7 @@ def test_prompt_mode_changes_only_one_prompt() -> None:
             )
         ]
     )
-    from evolving_agent.co_evolution import CoEvolutionConfig
+    from evolving_loop.co_evolution import CoEvolutionConfig
 
     child = CoEvolutionEngine(
         client,
@@ -131,7 +131,7 @@ def test_prompt_mode_changes_only_one_prompt() -> None:
 
 
 def test_coding_target_overrides_weakest_role_in_prompt_mode() -> None:
-    from evolving_agent.co_evolution import CoEvolutionConfig
+    from evolving_loop.co_evolution import CoEvolutionConfig
 
     evaluation = PolicyEvaluation(
         version="v000",
@@ -172,7 +172,7 @@ def test_coding_target_overrides_weakest_role_in_prompt_mode() -> None:
 
 
 def test_coding_target_genome_preserves_other_agents_and_workflow() -> None:
-    from evolving_agent.co_evolution import CoEvolutionConfig
+    from evolving_loop.co_evolution import CoEvolutionConfig
 
     parent = HarnessPolicy()
     evaluation = PolicyEvaluation(
@@ -413,7 +413,7 @@ def test_mutation_propagates_transient_infrastructure_failure() -> None:
 
 
 def test_checkpoint_round_trip_resumes_next_generation() -> None:
-    from evolving_agent.co_evolution import CoEvolutionConfig, EvolutionStep
+    from evolving_loop.co_evolution import CoEvolutionConfig, EvolutionStep
 
     with tempfile.TemporaryDirectory() as directory:
         checkpoint = Path(directory) / "checkpoint.json"
@@ -448,8 +448,8 @@ def test_checkpoint_round_trip_resumes_next_generation() -> None:
 
 
 def test_evaluation_progress_keeps_failure_traces_for_debugging(monkeypatch, tmp_path) -> None:
-    from evolving_agent import co_evolution
-    from evolving_agent.co_evolution import CoEvolutionConfig
+    from evolving_loop import co_evolution
+    from evolving_loop.co_evolution import CoEvolutionConfig
 
     evaluation = PolicyEvaluation(
         version="v000",
@@ -484,7 +484,7 @@ def test_evaluation_progress_keeps_failure_traces_for_debugging(monkeypatch, tmp
 
 
 def test_child_must_improve_train_before_dev_is_spent(monkeypatch) -> None:
-    from evolving_agent.co_evolution import CoEvolutionConfig
+    from evolving_loop.co_evolution import CoEvolutionConfig
 
     engine = CoEvolutionEngine(
         FakeLLMClient([]),
@@ -527,7 +527,7 @@ def test_child_must_improve_train_before_dev_is_spent(monkeypatch) -> None:
 def test_successive_halving_prunes_screen_failures_and_only_fully_evaluates_top_child(
     monkeypatch,
 ) -> None:
-    from evolving_agent.co_evolution import CoEvolutionConfig
+    from evolving_loop.co_evolution import CoEvolutionConfig
 
     engine = CoEvolutionEngine(
         FakeLLMClient([]),
@@ -608,7 +608,7 @@ def test_successive_halving_prunes_screen_failures_and_only_fully_evaluates_top_
 def test_successive_halving_keeps_parent_when_every_child_fails_screen(
     monkeypatch,
 ) -> None:
-    from evolving_agent.co_evolution import CoEvolutionConfig
+    from evolving_loop.co_evolution import CoEvolutionConfig
 
     engine = CoEvolutionEngine(
         FakeLLMClient([]),
@@ -660,8 +660,8 @@ def test_successive_halving_keeps_parent_when_every_child_fails_screen(
 def test_successive_halving_pauses_on_infrastructure_failure_instead_of_failing_candidate(
     monkeypatch, tmp_path
 ) -> None:
-    from evolving_agent import co_evolution
-    from evolving_agent.co_evolution import CoEvolutionConfig
+    from evolving_loop import co_evolution
+    from evolving_loop.co_evolution import CoEvolutionConfig
 
     progress = tmp_path / "progress.jsonl"
     engine = CoEvolutionEngine(
@@ -709,7 +709,7 @@ def test_successive_halving_pauses_on_infrastructure_failure_instead_of_failing_
 
 
 def test_accepted_child_contains_skills_learned_during_train(monkeypatch, tmp_path) -> None:
-    from evolving_agent.co_evolution import CoEvolutionConfig
+    from evolving_loop.co_evolution import CoEvolutionConfig
 
     class Agent:
         def __init__(self, library):
@@ -771,7 +771,7 @@ def test_accepted_child_contains_skills_learned_during_train(monkeypatch, tmp_pa
 
 
 def test_checkpoint_rejects_a_different_evolution_target() -> None:
-    from evolving_agent.co_evolution import CoEvolutionConfig
+    from evolving_loop.co_evolution import CoEvolutionConfig
 
     with tempfile.TemporaryDirectory() as directory:
         checkpoint = Path(directory) / "checkpoint.json"
@@ -791,7 +791,7 @@ def test_checkpoint_rejects_a_different_evolution_target() -> None:
 
 
 def test_checkpoint_rejects_different_successive_halving_controls() -> None:
-    from evolving_agent.co_evolution import CoEvolutionConfig
+    from evolving_loop.co_evolution import CoEvolutionConfig
 
     with tempfile.TemporaryDirectory() as directory:
         checkpoint = Path(directory) / "checkpoint.json"

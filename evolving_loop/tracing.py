@@ -7,8 +7,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-_file_logger = logging.getLogger("evolving_agent.trace_file")
-_console_logger = logging.getLogger("evolving_agent.trace_console")
+_file_logger = logging.getLogger("evolving_loop.trace_file")
+_console_logger = logging.getLogger("evolving_loop.trace_console")
 
 
 @dataclass(frozen=True)

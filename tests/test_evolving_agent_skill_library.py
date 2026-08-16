@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from evolving_agent.coding_agent.skill_library import Skill, SkillLibrary
+from evolving_loop.coding_agent.skill_library import Skill, SkillLibrary
 
 
 def _skill(name="detect_trend", description="fits a linear trend") -> Skill:

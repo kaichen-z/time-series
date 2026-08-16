@@ -4,7 +4,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from evolving_agent.data import load_context_tasks, load_tasks
+from evolving_loop.data import load_context_tasks, load_tasks
 
 
 def test_nested_drcik_record_loads_numeric_and_context_views() -> None:

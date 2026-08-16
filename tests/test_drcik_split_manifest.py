@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from evolving_agent.split_manifest import (
+from evolving_loop.split_manifest import (
     RECOMMENDED_PUBLIC_SPLIT_SIZES,
     build_split_manifest,
     load_public_records,

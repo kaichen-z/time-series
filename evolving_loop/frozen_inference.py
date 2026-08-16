@@ -8,10 +8,10 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Callable, Sequence
 
-from evolving_agent.co_evolution import HarnessPolicy
-from evolving_agent.data import ContextTask, Document
-from evolving_agent.evaluation import score_after_resolution
-from evolving_agent.harness import EvolvingForecastHarness
+from evolving_loop.co_evolution import HarnessPolicy
+from evolving_loop.data import ContextTask, Document
+from evolving_loop.evaluation import score_after_resolution
+from evolving_loop.harness import EvolvingForecastHarness
 
 HarnessFactory = Callable[[HarnessPolicy], EvolvingForecastHarness]
 
