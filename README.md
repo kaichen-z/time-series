@@ -17,6 +17,9 @@ metrics, and commands. The initial English experiment report is available at
 [`docs/EVOLUTION_METHODS_AND_RESULTS.md`](docs/EVOLUTION_METHODS_AND_RESULTS.md). A consolidated
 audit of all earlier baseline families and saved results is available at
 [`docs/BASELINE_METHODS_AND_RESULTS.md`](docs/BASELINE_METHODS_AND_RESULTS.md).
+For a concise map of the generic Self-Harness, dictionary curation adapter, three-agent
+Meta-Harness, evolution depths, and data protocol, see
+[`docs/SELF_EVOLUTION_FRAMEWORK.md`](docs/SELF_EVOLUTION_FRAMEWORK.md).
 The complete installation, baseline, Coding-setting, skill-learning, and evolution manual is
 available at [`docs/USAGE_GUIDE.md`](docs/USAGE_GUIDE.md).
 
