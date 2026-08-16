@@ -1,0 +1,37 @@
+{
+  "evolution": {
+    "generations": 1,
+    "children_per_generation": 1,
+    "seed": 20260816,
+    "resume": true
+  },
+  "curation": {
+    "max_revisions_per_method": 1,
+    "dictionary_metric": "smape",
+    "method_metric": "smape",
+    "accepted_max_error": 20.0,
+    "specialized_max_error": 60.0
+  },
+  "tasks": {
+    "train": [
+      {
+        "item_id": "train_1",
+        "history": [8.0, 9.0, 10.0],
+        "horizon": 1,
+        "frequency": "D"
+      }
+    ],
+    "dev": [
+      {
+        "item_id": "dev_1",
+        "history": [8.0, 9.0, 10.0],
+        "horizon": 1,
+        "frequency": "D"
+      }
+    ]
+  },
+  "labels": {
+    "train": {"train_1": [10.0]},
+    "dev": {"dev_1": [10.0]}
+  }
+}

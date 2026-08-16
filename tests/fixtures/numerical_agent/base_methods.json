@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "dictionary_id": "fixture_raw_v000",
+  "parent_dictionary_id": null,
+  "generation": 0,
+  "methods": [
+    {
+      "method_id": "external_fixture_method",
+      "family": "statistical",
+      "description": "A deterministic external method used only for framework smoke testing.",
+      "assumptions": [],
+      "failure_conditions": [],
+      "implementation_spec": {"prediction": 10.0},
+      "dependencies": [],
+      "status": "unimplemented"
+    }
+  ]
+}

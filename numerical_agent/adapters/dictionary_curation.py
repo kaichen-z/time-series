@@ -94,6 +94,9 @@ class DictionaryArtifactAdapter:
         updated = []
         for record in artifact.methods:
             typed = cast(MethodRecord, record)
+            if typed.candidate is None and typed.status == "unimplemented":
+                updated.append(typed)
+                continue
             summary = per_method.get(typed.definition.method_id, {})
             if not isinstance(summary, Mapping):
                 summary = {}
