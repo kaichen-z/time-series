@@ -95,7 +95,7 @@ class SelfEvolutionEngine(Generic[ArtifactT, ItemT, ResultT]):
             for child in proposed:
                 adapter.validate(child)
 
-            promoted = self._promote(current, proposed, train_items, dev_items)
+            promoted = proposed
             train_pairs: list[tuple[ArtifactT, EvaluationReport]] = []
             for child in promoted:
                 report = self._evaluate(child, train_items, "train")
@@ -165,46 +165,6 @@ class SelfEvolutionEngine(Generic[ArtifactT, ItemT, ResultT]):
         if report.split != split:
             raise ValueError("evaluator returned a report for the wrong split")
         return report
-
-    def _promote(
-        self,
-        parent: ArtifactT,
-        children: Sequence[ArtifactT],
-        train_items: Sequence[ItemT],
-        dev_items: Sequence[ItemT],
-    ) -> tuple[ArtifactT, ...]:
-        if not self.config.successive_halving:
-            return tuple(children)
-        if not children:
-            return ()
-
-        screen_train = tuple(train_items[: self.config.screen_train_items])
-        screen_dev = tuple(dev_items[: self.config.screen_dev_items])
-        parent_train = self._evaluate(parent, screen_train, "screen_train")
-        parent_dev = self._evaluate(parent, screen_dev, "screen_dev")
-        scored: list[tuple[float, ArtifactT]] = []
-        metric_name = self.config.metric.name
-        for child in children:
-            child_train = self._evaluate(child, screen_train, "screen_train")
-            child_dev = self._evaluate(child, screen_dev, "screen_dev")
-            if self._within_screen_tolerance(
-                child_train.metrics[metric_name], parent_train.metrics[metric_name]
-            ) and self._within_screen_tolerance(
-                child_dev.metrics[metric_name], parent_dev.metrics[metric_name]
-            ):
-                scored.append((child_dev.metrics[metric_name], child))
-
-        reverse = self.config.metric.objective == "maximize"
-        scored.sort(key=lambda pair: pair[0], reverse=reverse)
-        return tuple(
-            child for _, child in scored[: self.config.max_promoted_children]
-        )
-
-    def _within_screen_tolerance(self, candidate: float, parent: float) -> bool:
-        tolerance = self.config.screening_tolerance
-        if self.config.metric.objective == "minimize":
-            return candidate <= parent + tolerance
-        return candidate >= parent - tolerance
 
     def _best_train_pair(
         self, pairs: Sequence[tuple[ArtifactT, EvaluationReport]]

@@ -119,11 +119,6 @@ def _evolution_config(
         "children_per_generation",
         "seed",
         "acceptance_margin",
-        "successive_halving",
-        "screen_train_items",
-        "screen_dev_items",
-        "max_promoted_children",
-        "screening_tolerance",
         "resume",
     }
     unknown = set(payload) - allowed

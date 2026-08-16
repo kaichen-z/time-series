@@ -44,28 +44,18 @@ class EvolutionConfig:
     seed: int = 20260816
     metric: MetricSpec = field(default_factory=lambda: MetricSpec("smape"))
     acceptance_margin: float = 0.0
-    successive_halving: bool = False
-    screen_train_items: int = 6
-    screen_dev_items: int = 2
-    max_promoted_children: int = 1
-    screening_tolerance: float = 0.01
     resume: bool = True
 
     def __post_init__(self) -> None:
         positive = {
             "generations": self.generations,
             "children_per_generation": self.children_per_generation,
-            "screen_train_items": self.screen_train_items,
-            "screen_dev_items": self.screen_dev_items,
-            "max_promoted_children": self.max_promoted_children,
         }
         for name, value in positive.items():
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
         if self.acceptance_margin < 0:
             raise ValueError("acceptance_margin must be non-negative")
-        if self.screening_tolerance < 0:
-            raise ValueError("screening_tolerance must be non-negative")
 
 
 @dataclass(frozen=True)

@@ -162,28 +162,6 @@ def test_engine_requires_nonempty_train_and_dev(tmp_path: Path) -> None:
         engine.evolve(FakeArtifact("v000", 0.0), (1,), ())
 
 
-def test_successive_halving_fully_evaluates_only_promoted_child(tmp_path: Path) -> None:
-    engine, _, _, executor = make_engine(
-        tmp_path,
-        qualities=(2.0, -2.0),
-        successive_halving=True,
-        screen_train_items=1,
-        screen_dev_items=1,
-        max_promoted_children=1,
-        screening_tolerance=10.0,
-    )
-
-    outcome = engine.evolve(FakeArtifact("v000", 0.0), (1, 2, 3), (4, 5))
-
-    full_train_children = [
-        artifact_id
-        for artifact_id, split, count in executor.calls
-        if split == "train" and count == 3 and artifact_id != "v000"
-    ]
-    assert full_train_children == ["v001_1"]
-    assert outcome.accepted_artifact.quality == 2.0
-
-
 def test_engine_resumes_from_persisted_generation(tmp_path: Path) -> None:
     first_engine, _, _, _ = make_engine(tmp_path, qualities=(1.0,), generations=1)
     first = first_engine.evolve(FakeArtifact("v000", 0.0), (1, 2), (3, 4))

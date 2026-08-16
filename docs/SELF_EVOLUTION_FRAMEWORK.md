@@ -15,8 +15,7 @@ components.
 Parent artifact
   -> evaluate on Train and collect failure traces
   -> propose multiple child artifacts
-  -> optionally screen children on small Train/Dev prefixes
-  -> evaluate promoted children on complete Train
+  -> evaluate each child on complete Train
   -> select the best Train child
   -> compare that child with the parent on disjoint Dev
   -> accept only if the configured Dev metric improves

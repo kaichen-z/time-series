@@ -10,8 +10,6 @@ def test_evolution_config_rejects_invalid_budgets() -> None:
         EvolutionConfig(generations=0)
     with pytest.raises(ValueError, match="children_per_generation"):
         EvolutionConfig(children_per_generation=0)
-    with pytest.raises(ValueError, match="screen_train_items"):
-        EvolutionConfig(screen_train_items=0)
     with pytest.raises(ValueError, match="acceptance_margin"):
         EvolutionConfig(acceptance_margin=-0.1)
 

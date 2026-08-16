@@ -334,8 +334,7 @@ class DictionaryEvaluator:
         results: Sequence[MethodExecutionResult],
         split: str,
     ) -> EvaluationReport:
-        label_split = self._label_split(split)
-        split_labels = self.labels.get(label_split)
+        split_labels = self.labels.get(split)
         if split_labels is None:
             raise ValueError(f"labels are unavailable for split {split!r}")
         by_method: dict[str, list[MethodExecutionResult]] = {}
@@ -414,14 +413,6 @@ class DictionaryEvaluator:
                 }
             )
         return summary
-
-    @staticmethod
-    def _label_split(split: str) -> str:
-        if split == "screen_train":
-            return "train"
-        if split == "screen_dev":
-            return "dev"
-        return split
 
     @staticmethod
     def _failure_category(summary: Mapping[str, object]) -> str:
