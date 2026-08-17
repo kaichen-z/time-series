@@ -2,20 +2,29 @@
   "coverage": {
     "all_required_cells_covered": false,
     "category_counts": {
+      "statistical.analogue": 2,
       "statistical.arima": 2,
       "statistical.autoregressive": 3,
       "statistical.baseline": 5,
+      "statistical.calibration": 2,
       "statistical.change_point": 1,
+      "statistical.count_forecasting": 3,
       "statistical.decomposition": 4,
       "statistical.exponential_smoothing": 5,
       "statistical.intermittent_demand": 5,
+      "statistical.kernel": 3,
       "statistical.local_level": 1,
+      "statistical.neural": 5,
+      "statistical.outlier_handling": 2,
       "statistical.probabilistic": 1,
       "statistical.reconciliation": 1,
+      "statistical.regime_switching": 3,
       "statistical.regression": 2,
       "statistical.robust": 1,
+      "statistical.seasonal": 4,
       "statistical.spectral": 1,
       "statistical.state_space": 2,
+      "statistical.tree": 3,
       "statistical.trend": 4
     },
     "empty_cells": [
@@ -26,32 +35,24 @@
       "foundation.covariate_tsfm",
       "foundation.fine_tuned",
       "foundation.probabilistic_tsfm",
-      "foundation.zero_shot",
-      "statistical.analogue",
-      "statistical.calibration",
-      "statistical.count_forecasting",
-      "statistical.kernel",
-      "statistical.neural",
-      "statistical.outlier_handling",
-      "statistical.regime_switching",
-      "statistical.seasonal",
-      "statistical.tree"
+      "foundation.zero_shot"
     ],
     "family_counts": {
-      "statistical": 38
+      "statistical": 65
     },
     "implementation_counts": {
-      "unknown": 38
+      "available": 8,
+      "unknown": 57
     },
     "source_type_counts": {
-      "official_docs": 2,
-      "paper": 9,
-      "textbook": 1
+      "official_docs": 3,
+      "paper": 23,
+      "textbook": 3
     },
-    "total_method_count": 38,
+    "total_method_count": 65,
     "unknown_cells": [],
     "verification_counts": {
-      "verified": 38
+      "verified": 65
     }
   },
   "duplicate_candidates": [
@@ -304,6 +305,14 @@
       "right_method_uid": "method_seed_0023"
     },
     {
+      "left_method_uid": "method_seed_0018",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0023"
+    },
+    {
       "left_method_uid": "method_seed_0020",
       "reasons": [
         "shared_source_claim"
@@ -326,6 +335,14 @@
       ],
       "requires_manual_review": true,
       "right_method_uid": "method_seed_0023"
+    },
+    {
+      "left_method_uid": "method_seed_0023",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0023"
     },
     {
       "left_method_uid": "method_seed_0029",
@@ -352,19 +369,219 @@
       "right_method_uid": "method_seed_0037"
     },
     {
+      "left_method_uid": "method_seed_0033",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0005"
+    },
+    {
+      "left_method_uid": "method_seed_0033",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0006"
+    },
+    {
+      "left_method_uid": "method_seed_0033",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0023"
+    },
+    {
       "left_method_uid": "method_seed_0036",
       "reasons": [
         "shared_source_claim"
       ],
       "requires_manual_review": true,
       "right_method_uid": "method_seed_0037"
+    },
+    {
+      "left_method_uid": "method_seed_0036",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0005"
+    },
+    {
+      "left_method_uid": "method_seed_0036",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0006"
+    },
+    {
+      "left_method_uid": "method_seed_0036",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0023"
+    },
+    {
+      "left_method_uid": "method_seed_0037",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0005"
+    },
+    {
+      "left_method_uid": "method_seed_0037",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0006"
+    },
+    {
+      "left_method_uid": "method_seed_0037",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0023"
+    },
+    {
+      "left_method_uid": "method_stat_0001",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0002"
+    },
+    {
+      "left_method_uid": "method_stat_0003",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0004"
+    },
+    {
+      "left_method_uid": "method_stat_0005",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0006"
+    },
+    {
+      "left_method_uid": "method_stat_0005",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0023"
+    },
+    {
+      "left_method_uid": "method_stat_0006",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0023"
+    },
+    {
+      "left_method_uid": "method_stat_0009",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0010"
+    },
+    {
+      "left_method_uid": "method_stat_0009",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0025"
+    },
+    {
+      "left_method_uid": "method_stat_0009",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0026"
+    },
+    {
+      "left_method_uid": "method_stat_0009",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0027"
+    },
+    {
+      "left_method_uid": "method_stat_0010",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0025"
+    },
+    {
+      "left_method_uid": "method_stat_0010",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0026"
+    },
+    {
+      "left_method_uid": "method_stat_0010",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0027"
+    },
+    {
+      "left_method_uid": "method_stat_0016",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0017"
+    },
+    {
+      "left_method_uid": "method_stat_0025",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0026"
+    },
+    {
+      "left_method_uid": "method_stat_0025",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0027"
+    },
+    {
+      "left_method_uid": "method_stat_0026",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0027"
     }
   ],
   "verification": {
     "is_publishable": true,
     "issue_codes": [],
     "issues": [],
-    "method_count": 38,
-    "source_count": 12
+    "method_count": 65,
+    "source_count": 29
   }
 }
