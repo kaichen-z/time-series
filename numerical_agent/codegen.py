@@ -67,6 +67,7 @@ class LLMMethodImplementer:
             previous_code=str(previous_code),
             metrics=feedback.metrics,
             failure_categories=feedback.failure_categories,
+            sample_errors=feedback.sample_errors,
         )
         code = self._request_code(
             REVISE_SYSTEM,
@@ -75,6 +76,7 @@ class LLMMethodImplementer:
             "revise",
             parent.version + 1,
             failure_categories=list(feedback.failure_categories),
+            sample_errors=list(feedback.sample_errors),
         )
         return MethodCandidate(
             method_id=parent.method_id,

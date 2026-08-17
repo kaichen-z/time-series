@@ -7,6 +7,9 @@ from common.evolution_core.contracts import EvaluationReport, MutationContext
 from common.evolution_core.persistence import JsonArtifactStore
 from numerical_agent.adapters.dictionary_curation import (
     DictionaryCurationTask,
+    DictionaryEvaluator,
+    DictionaryMutator,
+    MethodExecutionResult,
     NumericalTaskItem,
 )
 from numerical_agent.config import DictionaryCurationConfig
@@ -226,3 +229,96 @@ def test_dev_evaluation_never_updates_or_revises_methods(tmp_path: Path) -> None
 
     assert report.split == "dev"
     assert (len(implementer.implemented), len(implementer.revised)) == calls_before
+
+
+class RaisingRuntime:
+    """A runtime whose failures carry a distinctive message, not just an exception type."""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    def supports(self, candidate: MethodCandidate) -> bool:
+        return candidate.provider == "fake"
+
+    def forecast(
+        self, candidate: MethodCandidate, history: Sequence[float], horizon: int, frequency: str
+    ) -> Sequence[float]:
+        raise IndexError(self.message)
+
+
+class OneShotImplementer:
+    """Always returns the same opaque candidate; revise() is unused in this test."""
+
+    def implement(self, method: MethodDefinition, context: ImplementationContext) -> MethodCandidate:
+        return MethodCandidate(method.method_id, "fake", "opaque", {})
+
+    def revise(self, parent: MethodCandidate, feedback: SanitizedMethodFeedback) -> MethodCandidate:
+        raise AssertionError("not expected in this test")
+
+
+def test_execute_one_preserves_the_real_exception_message(tmp_path: Path) -> None:
+    method = MethodDefinition("m", "statistical", "external m")
+    task = DictionaryCurationTask(
+        base_dictionary=ToolDictionary("d0", None, 0, (method,)),
+        config=DictionaryCurationConfig(),
+        implementer=OneShotImplementer(),
+        runtimes=RuntimeRegistry({"fake": RaisingRuntime("list index out of range")}),
+        labels={"train": {"t1": (1.0,)}, "dev": {}},
+        metric=absolute_error,
+        store=JsonArtifactStore(tmp_path),
+    )
+    components = task.components()
+    child = components.mutator.propose(
+        task.base_dictionary,
+        context(task.base_dictionary, EvaluationReport("d0", "train", {"smape": 1.0}, 1, {}), 1),
+        1,
+    )[0]
+
+    results = components.executor.execute(child, (NumericalTaskItem("t1", (1.0,), 1, "D"),), "train")
+
+    # The real message must survive, not just "runtime error: IndexError".
+    assert results[0].error == "list index out of range"
+
+
+def test_method_summary_deduplicates_and_caps_sample_errors() -> None:
+    evaluator = DictionaryEvaluator(DictionaryCurationConfig(), {"train": {}}, absolute_error)
+    results = (
+        [MethodExecutionResult("d0", "m", f"a{i}", "invalid", error="IndexError: bad") for i in range(50)]
+        + [MethodExecutionResult("d0", "m", f"b{i}", "invalid", error="TypeError: worse") for i in range(10)]
+        + [MethodExecutionResult("d0", "m", f"c{i}", "invalid", error="ValueError: also bad") for i in range(3)]
+        + [MethodExecutionResult("d0", "m", f"d{i}", "invalid", error="KeyError: overflow") for i in range(2)]
+        + [MethodExecutionResult("d0", "m", "ok", "success", forecast=(1.0,))]
+    )
+
+    summary = evaluator._method_summary(results, {"ok": (1.0,)})
+
+    # Exactly the cap, deduplicated, first-seen order, and never from a successful item.
+    assert summary["sample_errors"] == (
+        "IndexError: bad",
+        "TypeError: worse",
+        "ValueError: also bad",
+    )
+
+
+def test_feedback_carries_sample_errors_past_the_metrics_float_filter() -> None:
+    report = EvaluationReport(
+        "d0",
+        "train",
+        {"smape": 1.0},
+        1,
+        diagnostics={
+            "per_method": {
+                "m": {
+                    "invalid_count": 1,
+                    "sample_errors": ["IndexError: list index out of range"],
+                }
+            }
+        },
+    )
+    mutator = DictionaryMutator(DictionaryCurationConfig(), implementer=None)  # type: ignore[arg-type]
+
+    feedback = mutator._feedback("m", MutationContext(generation=2, parent_train_report=report))
+
+    assert feedback.sample_errors == ("IndexError: list index out of range",)
+    # A plain string field must not leak into the numeric metrics mapping.
+    assert "sample_errors" not in feedback.metrics

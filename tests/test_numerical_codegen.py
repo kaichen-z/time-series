@@ -85,7 +85,13 @@ def test_revise_versions_the_candidate_and_forwards_sanitized_feedback() -> None
     client = scripted(NAIVE_CODE)
 
     child = LLMMethodImplementer(client).revise(
-        parent, SanitizedMethodFeedback("ses", {"mean_error": 91.25}, ("high_error",))
+        parent,
+        SanitizedMethodFeedback(
+            "ses",
+            {"mean_error": 91.25},
+            ("high_error",),
+            ("IndexError: list index out of range",),
+        ),
     )
 
     assert child.version == 2
@@ -95,6 +101,8 @@ def test_revise_versions_the_candidate_and_forwards_sanitized_feedback() -> None
     assert "old" in user
     assert "91.25" in user
     assert "high_error" in user
+    # The real error text must reach the model, not just aggregate counts.
+    assert "IndexError: list index out of range" in user
 
 
 def test_implement_rejects_a_response_without_code() -> None:
