@@ -76,6 +76,24 @@ def test_catalog_covers_foundation_modes_with_complete_release_metadata(
     assert all(len(method.foundation_metadata) == 11 for method in foundation)
 
 
+def test_catalog_contains_lineage_valid_combined_methods(tmp_path: Path) -> None:
+    sources_path = tmp_path / "sources.jsonl"
+    methods_path = tmp_path / "methods.jsonl"
+    write_catalog_manifests(LEGACY, sources_path, methods_path)
+    methods = load_method_cards(methods_path)
+    combined = [method for method in methods if method.family == "combined"]
+
+    assert len(combined) >= 12
+    assert {method.category for method in combined} == {
+        "ensemble",
+        "selector",
+        "residual_correction",
+        "fallback",
+    }
+    assert all(len(set(method.lineage["parent_method_uids"])) >= 2 for method in combined)
+    assert verify_registry(load_source_records(sources_path), methods).is_publishable
+
+
 def test_catalog_excludes_unverified_constructed_seed_variants(tmp_path: Path) -> None:
     sources_path = tmp_path / "sources.jsonl"
     methods_path = tmp_path / "methods.jsonl"

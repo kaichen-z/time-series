@@ -1,7 +1,11 @@
 {
   "coverage": {
-    "all_required_cells_covered": false,
+    "all_required_cells_covered": true,
     "category_counts": {
+      "combined.ensemble": 5,
+      "combined.fallback": 4,
+      "combined.residual_correction": 4,
+      "combined.selector": 4,
       "foundation.covariate_tsfm": 3,
       "foundation.fine_tuned": 4,
       "foundation.probabilistic_tsfm": 3,
@@ -31,32 +35,28 @@
       "statistical.tree": 3,
       "statistical.trend": 4
     },
-    "empty_cells": [
-      "combined.ensemble",
-      "combined.fallback",
-      "combined.residual_correction",
-      "combined.selector"
-    ],
+    "empty_cells": [],
     "family_counts": {
+      "combined": 17,
       "foundation": 14,
       "statistical": 65
     },
     "implementation_counts": {
       "available": 21,
       "partial": 1,
-      "unknown": 57
+      "unknown": 74
     },
     "source_type_counts": {
       "model_card": 2,
       "official_docs": 4,
       "official_repo": 10,
-      "paper": 37,
+      "paper": 41,
       "textbook": 3
     },
-    "total_method_count": 79,
+    "total_method_count": 96,
     "unknown_cells": [],
     "verification_counts": {
-      "verified": 79
+      "verified": 96
     }
   },
   "duplicate_candidates": [],
@@ -64,7 +64,7 @@
     "is_publishable": true,
     "issue_codes": [],
     "issues": [],
-    "method_count": 79,
-    "source_count": 56
+    "method_count": 96,
+    "source_count": 60
   }
 }

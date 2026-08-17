@@ -569,6 +569,37 @@ FOUNDATION_SOURCE_PAYLOADS: tuple[Mapping[str, object], ...] = (
     },
 )
 
+COMBINED_SOURCE_PAYLOADS: tuple[Mapping[str, object], ...] = (
+    {
+        "source_id": "source_000057", "title": "The Combination of Forecasts",
+        "authors": ["J. M. Bates", "C. W. J. Granger"], "year": 1969,
+        "source_type": "paper", "url": "https://doi.org/10.1057/jors.1969.103",
+        "doi": "10.1057/jors.1969.103", "isbn": "", "retrieved_at": "2026-08-17",
+        "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000058", "title": "Stacked generalization",
+        "authors": ["David H. Wolpert"], "year": 1992, "source_type": "paper",
+        "url": "https://doi.org/10.1016/S0893-6080(05)80023-1",
+        "doi": "10.1016/S0893-6080(05)80023-1", "isbn": "", "retrieved_at": "2026-08-17",
+        "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000059", "title": "FFORMA: Feature-based forecast model averaging",
+        "authors": ["Pablo Montero-Manso", "George Athanasopoulos", "Rob J. Hyndman", "Thiyanga S. Talagala"],
+        "year": 2020, "source_type": "paper", "url": "https://doi.org/10.1016/j.ijforecast.2019.02.011",
+        "doi": "10.1016/j.ijforecast.2019.02.011", "isbn": "", "retrieved_at": "2026-08-17",
+        "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000060", "title": "Time series forecasting using a hybrid ARIMA and neural network model",
+        "authors": ["G. Peter Zhang"], "year": 2003, "source_type": "paper",
+        "url": "https://doi.org/10.1016/S0925-2312(01)00702-0",
+        "doi": "10.1016/S0925-2312(01)00702-0", "isbn": "", "retrieved_at": "2026-08-17",
+        "primary": True, "review_status": "verified",
+    },
+)
+
 
 EXCLUDED_LEGACY_IDS = {
     "fft_dominant_frequency_extrapolation",
@@ -988,6 +1019,163 @@ FOUNDATION_METHOD_SPECS: tuple[Mapping[str, object], ...] = (
     },
 )
 
+COMBINED_METHOD_SPECS: tuple[Mapping[str, object], ...] = (
+    {
+        "name": "median_forecast_combination", "category": "ensemble",
+        "description": "Take the pointwise median of forecasts from heterogeneous component methods.",
+        "assumption": "At least half of the component forecasts remain reasonably centered.",
+        "failure": "A majority of similarly biased components moves the median in the wrong direction.",
+        "sources": ["source_000011"],
+        "parents": ["method_seed_0012", "method_seed_0018", "method_seed_0014"],
+        "hyperparameters": [],
+    },
+    {
+        "name": "inverse_error_weighted_combination", "category": "ensemble",
+        "description": "Weight component forecasts inversely to their rolling-origin validation errors.",
+        "assumption": "Recent relative validation performance persists into the forecast window.",
+        "failure": "Noisy short validation windows assign extreme weight to accidental winners.",
+        "sources": ["source_000057", "source_000011"],
+        "parents": ["method_seed_0012", "method_seed_0018", "method_seed_0014"],
+        "hyperparameters": ["validation_window", "weight_power"],
+    },
+    {
+        "name": "covariance_optimal_forecast_combination", "category": "ensemble",
+        "description": "Estimate component error covariance and choose minimum-variance linear combination weights.",
+        "assumption": "The estimated error covariance is stable and component forecasts are approximately unbiased.",
+        "failure": "Ill-conditioned covariance estimates produce unstable or extreme weights.",
+        "sources": ["source_000057"],
+        "parents": ["method_seed_0012", "method_seed_0018"],
+        "hyperparameters": ["covariance_regularization"],
+    },
+    {
+        "name": "cross_validated_stacked_forecast", "category": "ensemble",
+        "description": "Train a second-level regressor on out-of-fold component forecasts to produce the final forecast.",
+        "assumption": "Out-of-fold component error relationships transfer to the future window.",
+        "failure": "Leakage or too few folds causes the meta-regressor to overfit component noise.",
+        "sources": ["source_000058", "source_000011"],
+        "parents": ["method_seed_0012", "method_seed_0018", "method_tsfm_0001"],
+        "hyperparameters": ["folds", "meta_regressor", "weight_constraints"],
+    },
+    {
+        "name": "quantile_forecast_averaging", "category": "ensemble",
+        "description": "Average corresponding predictive quantiles from multiple probabilistic forecasters.",
+        "assumption": "Component quantiles share the same probability levels and are individually ordered.",
+        "failure": "Miscalibrated or dependent components can preserve bias and yield incoherent quantile curves.",
+        "sources": ["source_000011"],
+        "parents": ["method_tsfm_0002", "method_tsfm_0003", "method_tsfm_0013"],
+        "hyperparameters": ["quantile_levels", "component_weights"],
+        "probabilistic": True,
+    },
+    {
+        "name": "rolling_origin_champion_selector", "category": "selector",
+        "description": "Select the single component with the lowest rolling-origin validation loss for the target horizon.",
+        "assumption": "Historical forecast-origin errors rank candidate methods similarly to the next origin.",
+        "failure": "A regime change after the last validation origin makes the historical champion obsolete.",
+        "sources": ["source_000001", "source_000011"],
+        "parents": ["method_seed_0004", "method_seed_0012", "method_tsfm_0001"],
+        "hyperparameters": ["folds", "loss", "tie_break"],
+    },
+    {
+        "name": "fforma_feature_weighted_selector", "category": "selector",
+        "description": "Map time-series features to learned nonnegative weights over a pool of forecasting methods.",
+        "assumption": "A representative reference collection links series features to relative model performance.",
+        "failure": "Targets outside the reference feature distribution receive unreliable weights.",
+        "sources": ["source_000059"],
+        "parents": ["method_seed_0012", "method_seed_0018", "method_seed_0014"],
+        "hyperparameters": ["feature_set", "meta_model", "loss"],
+    },
+    {
+        "name": "per_horizon_model_selector", "category": "selector",
+        "description": "Choose a potentially different validated component for each forecast horizon step.",
+        "assumption": "Enough historical origins exist to estimate horizon-specific error rankings.",
+        "failure": "Sparse long-horizon validation creates a jagged and unstable sequence of selections.",
+        "sources": ["source_000001", "source_000011"],
+        "parents": ["method_seed_0004", "method_seed_0018", "method_tsfm_0002"],
+        "hyperparameters": ["folds", "horizon_loss", "switch_penalty"],
+    },
+    {
+        "name": "feature_gated_mixture_of_forecasters", "category": "selector",
+        "description": "Use a learned gating model to assign target-dependent weights to statistical and foundation forecasters.",
+        "assumption": "Observable history features identify which expert is reliable for each target.",
+        "failure": "The gate overfits a small task collection or ignores a new failure mode shared by all experts.",
+        "sources": ["source_000059", "source_000011"],
+        "parents": ["method_seed_0018", "method_tsfm_0001", "method_tsfm_0002"],
+        "hyperparameters": ["gate_model", "feature_set", "temperature"],
+    },
+    {
+        "name": "arima_neural_residual_hybrid", "category": "residual_correction",
+        "description": "Forecast a linear ARIMA component and add a neural forecast fitted to its residual structure.",
+        "assumption": "The series contains separable linear and nonlinear components.",
+        "failure": "Residual dependence changes after fitting or both components model the same signal twice.",
+        "sources": ["source_000060"],
+        "parents": ["method_seed_0018", "method_stat_0011"],
+        "hyperparameters": ["arima_order", "neural_lags", "combination_scale"],
+    },
+    {
+        "name": "timesfm_arima_residual_correction", "category": "residual_correction",
+        "description": "Use TimesFM as the primary path and add an ARIMA forecast of historical primary-model residuals.",
+        "assumption": "Systematic residual autocorrelation remains after the foundation forecast.",
+        "failure": "Residuals estimated from too few pseudo-origins are noisy or change regime at deployment.",
+        "sources": ["source_000060", "source_000030"],
+        "parents": ["method_tsfm_0001", "method_seed_0018"],
+        "hyperparameters": ["residual_origins", "residual_arima_order"],
+    },
+    {
+        "name": "chronos_gradient_boost_residual_correction", "category": "residual_correction",
+        "description": "Add a lag-feature gradient-boosting correction trained on pseudo-out-of-sample Chronos residuals.",
+        "assumption": "Residual bias is predictable from historical, calendar, or known-future features.",
+        "failure": "In-sample residual leakage or unseen covariate states causes an oversized correction.",
+        "sources": ["source_000058", "source_000032"],
+        "parents": ["method_tsfm_0002", "method_stat_0027"],
+        "hyperparameters": ["residual_origins", "lag_features", "shrinkage"],
+    },
+    {
+        "name": "ets_autoregressive_residual_correction", "category": "residual_correction",
+        "description": "Forecast level, trend, and seasonality with ETS, then add an autoregressive residual forecast.",
+        "assumption": "ETS captures structural components while remaining residual dependence is linear and stable.",
+        "failure": "Residual correction double-counts seasonal dynamics or amplifies a structural break.",
+        "sources": ["source_000001", "source_000060"],
+        "parents": ["method_seed_0012", "method_seed_0015"],
+        "hyperparameters": ["ets_form", "residual_ar_order"],
+    },
+    {
+        "name": "validated_foundation_statistical_fallback", "category": "fallback",
+        "description": "Use a foundation forecast only when it clears a margin over a statistical challenger in rolling validation.",
+        "assumption": "History-only validation can detect harmful foundation-model mismatch before deployment.",
+        "failure": "A future event changes the regime in a way no historical fold can reveal.",
+        "sources": ["source_000001", "source_000011"],
+        "parents": ["method_tsfm_0001", "method_seed_0012"],
+        "hyperparameters": ["validation_margin", "folds", "default_parent"],
+    },
+    {
+        "name": "short_history_foundation_fallback", "category": "fallback",
+        "description": "Use a zero-shot foundation model below a data threshold and switch to a fitted statistical model once history is sufficient.",
+        "assumption": "Pretraining is more reliable than local estimation only in the short-history regime.",
+        "failure": "The threshold is poorly calibrated or the foundation model is mismatched to the target domain.",
+        "sources": ["source_000011", "source_000046"],
+        "parents": ["method_tsfm_0009", "method_seed_0012"],
+        "hyperparameters": ["history_threshold", "statistical_parent"],
+    },
+    {
+        "name": "outlier_guarded_model_fallback", "category": "fallback",
+        "description": "Choose a robust or intervention-adjusted forecaster when anomaly diagnostics exceed a threshold, otherwise use the primary model.",
+        "assumption": "The anomaly diagnostic separates contamination from genuine persistent changes.",
+        "failure": "A true regime shift is labeled as an outlier and routed to an inappropriate robust fallback.",
+        "sources": ["source_000021", "source_000011"],
+        "parents": ["method_stat_0017", "method_tsfm_0002"],
+        "hyperparameters": ["anomaly_threshold", "guard_window"],
+    },
+    {
+        "name": "availability_aware_forecast_fallback", "category": "fallback",
+        "description": "Execute an ordered list of forecasters and fall back when a model cannot satisfy context, covariate, device, or runtime constraints.",
+        "assumption": "Fallback parents are valid substitutes and operational failures are detected before emitting a forecast.",
+        "failure": "Silent model degradation passes the availability checks and prevents fallback activation.",
+        "sources": ["source_000011"],
+        "parents": ["method_tsfm_0014", "method_tsfm_0001", "method_seed_0004"],
+        "hyperparameters": ["ordered_parents", "runtime_budget", "failure_checks"],
+    },
+)
+
 
 def _jsonl(records: Sequence[Mapping[str, object]]) -> str:
     return "".join(
@@ -1122,6 +1310,41 @@ def _foundation_card(spec: Mapping[str, object], index: int) -> MethodCard:
     )
 
 
+def _combined_card(spec: Mapping[str, object], index: int) -> MethodCard:
+    return MethodCard.from_payload(
+        {
+            "method_uid": f"method_combined_{index:04d}",
+            "definition_version": 1,
+            "canonical_name": spec["name"],
+            "aliases": [],
+            "family": "combined",
+            "category": spec["category"],
+            "description": spec["description"],
+            "assumptions": [spec["assumption"]],
+            "failure_conditions": [spec["failure"]],
+            "applicability": {
+                "minimum_history": 1,
+                "frequencies": ["any"],
+                "supports_univariate": True,
+                "supports_covariates": True,
+                "supports_probabilistic_output": bool(
+                    spec.get("probabilistic", False)
+                ),
+            },
+            "hyperparameters": list(spec.get("hyperparameters", [])),
+            "definition_source_ids": list(spec["sources"]),
+            "implementation_source_ids": [],
+            "implementation_availability": "unknown",
+            "verification_status": "verified",
+            "lineage": {
+                "operation": "composed",
+                "parent_method_uids": list(spec["parents"]),
+            },
+            "foundation_metadata": {},
+        }
+    )
+
+
 def write_catalog_manifests(
     legacy_source: str | Path,
     source_destination: str | Path,
@@ -1139,6 +1362,7 @@ def write_catalog_manifests(
             SOURCE_PAYLOADS
             + ADDITIONAL_STATISTICAL_SOURCE_PAYLOADS
             + FOUNDATION_SOURCE_PAYLOADS
+            + COMBINED_SOURCE_PAYLOADS
         )
     )
     legacy_cards = tuple(
@@ -1154,7 +1378,11 @@ def write_catalog_manifests(
         _foundation_card(spec, index)
         for index, spec in enumerate(FOUNDATION_METHOD_SPECS, start=1)
     )
-    methods = legacy_cards + extra_cards + foundation_cards
+    combined_cards = tuple(
+        _combined_card(spec, index)
+        for index, spec in enumerate(COMBINED_METHOD_SPECS, start=1)
+    )
+    methods = legacy_cards + extra_cards + foundation_cards + combined_cards
     source_path = Path(source_destination)
     method_path = Path(method_destination)
     source_path.parent.mkdir(parents=True, exist_ok=True)
