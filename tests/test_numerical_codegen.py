@@ -14,6 +14,7 @@ from common.llm import (
     QwenClient,
 )
 from common.sandbox import ALLOWED_IMPORTS
+from common.tracing import configure
 from numerical_agent.adapters.dictionary_curation import DictionaryMutator
 from numerical_agent.codegen import (
     SANDBOX_PROVIDER,
@@ -158,6 +159,79 @@ def test_runtime_reports_unsafe_code_as_a_runtime_failure() -> None:
     # quarantined and therefore revisable, rather than escaping the run.
     with pytest.raises(RuntimeError, match="disallowed import"):
         SandboxMethodRuntime().forecast(unsafe, [1.0], 2, "D")
+
+
+def traced(tmp_path: Path) -> Path:
+    """Point the shared tracer at a temporary log and return it."""
+    log = tmp_path / "trace.jsonl"
+    configure(log)
+    return log
+
+
+def events(log: Path) -> list[dict]:
+    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_a_successful_call_is_traced_and_transcribed(tmp_path: Path) -> None:
+    log = traced(tmp_path)
+    implementer = LLMMethodImplementer(scripted(NAIVE_CODE), transcript_dir=tmp_path / "t")
+
+    implementer.implement(definition(), ImplementationContext("d0", 1))
+
+    end = [event for event in events(log) if event["event_type"] == "method_end"]
+    assert end[0]["task_id"] == "ses"
+    assert end[0]["detail"]["ok"] is True
+    assert end[0]["detail"]["stage"] == "implement"
+    transcript = (tmp_path / "t" / "ses.implement.md").read_text(encoding="utf-8")
+    assert "# system" in transcript and "# response" in transcript
+    assert NAIVE_CODE.strip().splitlines()[0] in transcript
+
+
+def test_a_failed_call_records_the_real_error_before_it_is_swallowed(tmp_path: Path) -> None:
+    log = traced(tmp_path)
+    implementer = LLMMethodImplementer(
+        FakeLLMClient(["sorry, no JSON"]), transcript_dir=tmp_path / "t"
+    )
+
+    with pytest.raises(JsonExtractionError):
+        implementer.implement(definition(), ImplementationContext("d0", 1))
+
+    end = [event for event in events(log) if event["event_type"] == "method_end"]
+    assert end[0]["detail"]["ok"] is False
+    assert "JsonExtractionError" in end[0]["detail"]["error"]
+    # The raw response must survive so a bad answer can be inspected afterwards.
+    assert "sorry, no JSON" in (tmp_path / "t" / "ses.implement.md").read_text(encoding="utf-8")
+
+
+def test_sandbox_failures_are_traced_with_the_real_reason(tmp_path: Path) -> None:
+    log = traced(tmp_path)
+    unsafe = MethodCandidate(
+        "ses",
+        SANDBOX_PROVIDER,
+        "python_code",
+        {"code": "import scipy\ndef forecast(history, horizon, frequency):\n    return [1.0] * horizon\n"},
+    )
+
+    with pytest.raises(RuntimeError):
+        SandboxMethodRuntime().forecast(unsafe, [1.0], 2, "D")
+
+    failures = [event for event in events(log) if event["event_type"] == "sandbox_failed"]
+    # The adapter keeps only the exception class name, so the detail must be captured here.
+    assert failures[0]["detail"]["error"] == "disallowed import: scipy"
+    assert failures[0]["task_id"] == "ses"
+
+
+def test_transcripts_refuse_a_method_id_that_escapes_the_directory(tmp_path: Path) -> None:
+    traced(tmp_path)
+    implementer = LLMMethodImplementer(scripted(NAIVE_CODE), transcript_dir=tmp_path / "t")
+
+    implementer.implement(
+        MethodDefinition("../escaped", "statistical", "hostile id"),
+        ImplementationContext("d0", 1),
+    )
+
+    assert not (tmp_path / "escaped.implement.md").exists()
+    assert not list(tmp_path.glob("**/*.implement.md"))
 
 
 def test_prompt_advertises_exactly_the_sandbox_allow_list() -> None:

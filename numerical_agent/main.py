@@ -17,6 +17,7 @@ from common.llm import (
     QwenClient,
 )
 from common.metrics import mae, smape
+from common.tracing import configure
 
 from .adapters.dictionary_curation import DictionaryCurationTask, NumericalTaskItem
 from .codegen import SANDBOX_PROVIDER, LLMMethodImplementer, SandboxMethodRuntime
@@ -93,6 +94,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     train_items, dev_items = _task_items(experiment)
     labels = _labels(experiment)
     output_dir = Path(args.output_dir)
+    configure(output_dir / "curation_trace.jsonl")
     store = MethodSourceArtifactStore(output_dir)
 
     implementer, runtimes = _providers(args.provider, args)
@@ -259,7 +261,9 @@ def _providers(provider: str, args: argparse.Namespace) -> tuple[object, Runtime
     if provider == "fake":
         return FixtureMethodImplementer(), RuntimeRegistry({"fake": FixtureMethodRuntime()})
     if provider == "llm":
-        implementer = LLMMethodImplementer(_llm_client(args))
+        implementer = LLMMethodImplementer(
+            _llm_client(args), transcript_dir=Path(args.output_dir) / "transcripts"
+        )
         return implementer, RuntimeRegistry({SANDBOX_PROVIDER: SandboxMethodRuntime()})
     raise ValueError(f"unsupported approved provider {provider!r}")
 
