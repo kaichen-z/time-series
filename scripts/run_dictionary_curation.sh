@@ -24,7 +24,7 @@ NA_LLM_BACKEND="${NA_LLM_BACKEND:-qwen}"
 NA_CODEX_MODEL="${NA_CODEX_MODEL:-gpt-5.6-sol}"
 NA_REASONING_EFFORT="${NA_REASONING_EFFORT:-high}"
 NA_CODEX_TIMEOUT="${NA_CODEX_TIMEOUT:-900}"
-NA_GENERATIONS="${NA_GENERATIONS:-1}"
+NA_GENERATIONS="${NA_GENERATIONS:-3}"
 # One child per generation: every child re-implements the same methods from the same
 # prompt, so at temperature 0 additional children are identical and only cost calls.
 NA_CHILDREN="${NA_CHILDREN:-1}"
