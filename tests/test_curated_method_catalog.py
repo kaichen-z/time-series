@@ -125,4 +125,7 @@ def test_catalog_has_depth_in_previously_sparse_method_families(
     assert counts[("statistical", "reconciliation")] >= 8
     assert counts[("statistical", "robust")] >= 3
     assert counts[("statistical", "spectral")] >= 2
-    assert sum(method.family == "foundation" for method in methods) >= 15
+    assert sum(method.family == "foundation" for method in methods) >= 17
+    assert {"Chronos-2", "Moirai 2.0"} <= {
+        method.canonical_name for method in methods
+    }

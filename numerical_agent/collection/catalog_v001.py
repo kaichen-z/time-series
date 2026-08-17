@@ -716,6 +716,18 @@ DEPTH_EXPANSION_SOURCE_PAYLOADS: tuple[Mapping[str, object], ...] = (
         "source_type": "paper", "url": "https://doi.org/10.2307/1913643", "doi": "10.2307/1913643", "isbn": "",
         "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
     },
+    {
+        "source_id": "source_000080", "title": "Chronos-2: From Univariate to Universal Forecasting",
+        "authors": ["Abdul Fatir Ansari", "Oleksandr Shchur", "Jaris Kuken", "Andreas Auer", "Boran Han", "Pedro Mercado", "Syama Sundar Rangapuram", "Huibin Shen", "Lorenzo Stella", "Xiyuan Zhang", "Mononito Goswami", "Shubham Kapoor", "Danielle C. Maddix", "Pablo Guerron", "Tony Hu", "Junming Yin", "Nick Erickson", "Prateek Mutalik Desai", "Hao Wang", "Huzefa Rangwala", "George Karypis", "Yuyang Wang", "Michael Bohlke-Schneider"],
+        "year": 2025, "source_type": "paper", "url": "https://arxiv.org/abs/2510.15821", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000081", "title": "Moirai 2.0: When Less Is More for Time Series Forecasting",
+        "authors": ["Chenghao Liu", "Taha Aksu", "Juncheng Liu", "Xu Liu", "Hanshu Yan", "Quang Pham", "Doyen Sahoo", "Caiming Xiong", "Silvio Savarese", "Junnan Li"],
+        "year": 2025, "source_type": "paper", "url": "https://arxiv.org/abs/2511.11698", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
 )
 
 
@@ -1341,6 +1353,26 @@ DEPTH_EXPANSION_FOUNDATION_METHOD_SPECS: tuple[Mapping[str, object], ...] = (
         "definition_sources": ["source_000078"],
         "implementation_sources": ["source_000043"],
         "metadata": ["thuml/Timer-S1", "2026-v3", 11520, "serial_generation", "zero_shot", True, False, "GPU recommended", "research release", True, True],
+    },
+    {
+        "name": "Chronos-2",
+        "category": "covariate_tsfm",
+        "description": "A zero-shot universal forecaster using group attention for in-context information sharing among related series, variates, targets, and covariates.",
+        "assumption": "Synthetic multivariate structures teach group attention relationships that transfer to target and covariate groups.",
+        "failure": "Unseen group semantics or future events absent from the provided numeric covariates remain unresolved.",
+        "definition_sources": ["source_000080"],
+        "implementation_sources": ["source_000033"],
+        "metadata": ["amazon/chronos-2", "2025", "model_config", "model_config", "zero_shot_in_context", True, True, "CPU or accelerator; GPU recommended", "Apache-2.0", True, True],
+    },
+    {
+        "name": "Moirai 2.0",
+        "category": "probabilistic_tsfm",
+        "description": "A decoder-only single-patch foundation model trained with quantile loss and recursive multi-token prediction.",
+        "assumption": "The 36-million-series corpus and direct quantile objective transfer to the target distribution.",
+        "failure": "Performance declines at long horizons or under domains outside the pretraining corpus.",
+        "definition_sources": ["source_000081"],
+        "implementation_sources": ["source_000035"],
+        "metadata": ["Salesforce/moirai-2.0", "2.0", "model_config", "recursive_multi_token", "zero_shot_quantiles", True, False, "CPU or accelerator", "Apache-2.0", True, True],
     },
 )
 

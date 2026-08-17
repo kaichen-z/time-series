@@ -6,9 +6,9 @@
       "combined.fallback": 4,
       "combined.residual_correction": 4,
       "combined.selector": 4,
-      "foundation.covariate_tsfm": 3,
+      "foundation.covariate_tsfm": 4,
       "foundation.fine_tuned": 4,
-      "foundation.probabilistic_tsfm": 3,
+      "foundation.probabilistic_tsfm": 4,
       "foundation.zero_shot": 5,
       "statistical.analogue": 2,
       "statistical.arima": 2,
@@ -38,11 +38,11 @@
     "empty_cells": [],
     "family_counts": {
       "combined": 17,
-      "foundation": 15,
+      "foundation": 17,
       "statistical": 92
     },
     "implementation_counts": {
-      "available": 22,
+      "available": 24,
       "partial": 1,
       "unknown": 101
     },
@@ -50,13 +50,13 @@
       "model_card": 2,
       "official_docs": 4,
       "official_repo": 10,
-      "paper": 60,
+      "paper": 62,
       "textbook": 3
     },
-    "total_method_count": 124,
+    "total_method_count": 126,
     "unknown_cells": [],
     "verification_counts": {
-      "verified": 124
+      "verified": 126
     }
   },
   "duplicate_candidates": [
@@ -73,7 +73,7 @@
     "is_publishable": true,
     "issue_codes": [],
     "issues": [],
-    "method_count": 124,
-    "source_count": 79
+    "method_count": 126,
+    "source_count": 81
   }
 }
