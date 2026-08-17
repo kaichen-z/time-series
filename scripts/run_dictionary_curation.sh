@@ -18,19 +18,23 @@ MODE="${1:-smoke}"
 
 NA_TASKS_FILE="${NA_TASKS_FILE:-/raid/home/air/khoutaibi/time_series_dataset/Dr-CiK/data/tasks/train.jsonl}"
 NA_SPLIT_FILE="${NA_SPLIT_FILE:-$REPO_ROOT/splits/drcik_public_80_20_99_v1.json}"
-NA_BASE_METHODS="${NA_BASE_METHODS:-$REPO_ROOT/numerical_agent/dictionaries/statistical_base_methods_v000.json}"
+NA_BASE_METHODS="${NA_BASE_METHODS:-$REPO_ROOT/numerical_agent/datasets/forecast_method_dataset_v001.json}"
 NA_RUNS_DIR="${NA_RUNS_DIR:-$EA_RUNS_DIR/dictionary_curation}"
 NA_LLM_BACKEND="${NA_LLM_BACKEND:-qwen}"
 NA_CODEX_MODEL="${NA_CODEX_MODEL:-gpt-5.6-sol}"
 NA_REASONING_EFFORT="${NA_REASONING_EFFORT:-high}"
 NA_CODEX_TIMEOUT="${NA_CODEX_TIMEOUT:-900}"
 NA_GENERATIONS="${NA_GENERATIONS:-3}"
-# One child per generation: every child re-implements the same methods from the same
-# prompt, so at temperature 0 additional children are identical and only cost calls.
+# Child prompts now receive distinct implementation objectives. Keep one child as the
+# conservative default; raise NA_CHILDREN when the compute budget permits real search.
 NA_CHILDREN="${NA_CHILDREN:-1}"
 NA_MAX_REVISIONS="${NA_MAX_REVISIONS:-1}"
+NA_MAX_IMPLEMENTATION_ATTEMPTS="${NA_MAX_IMPLEMENTATION_ATTEMPTS:-3}"
 NA_ACCEPTED_MAX_ERROR="${NA_ACCEPTED_MAX_ERROR:-50.0}"
 NA_SPECIALIZED_MAX_ERROR="${NA_SPECIALIZED_MAX_ERROR:-100.0}"
+NA_MIN_SUCCESS_RATE="${NA_MIN_SUCCESS_RATE:-0.8}"
+NA_SELECTION_FOLDS="${NA_SELECTION_FOLDS:-3}"
+NA_SELECTION_HORIZON="${NA_SELECTION_HORIZON:-8}"
 NA_DRY_RUN="${NA_DRY_RUN:-0}"
 
 die() {
@@ -60,8 +64,12 @@ BUILD_COMMAND=(
     --generations "$NA_GENERATIONS"
     --children-per-generation "$NA_CHILDREN"
     --max-revisions-per-method "$NA_MAX_REVISIONS"
+    --max-implementation-attempts "$NA_MAX_IMPLEMENTATION_ATTEMPTS"
     --accepted-max-error "$NA_ACCEPTED_MAX_ERROR"
     --specialized-max-error "$NA_SPECIALIZED_MAX_ERROR"
+    --min-success-rate "$NA_MIN_SUCCESS_RATE"
+    --selection-folds "$NA_SELECTION_FOLDS"
+    --selection-horizon "$NA_SELECTION_HORIZON"
 )
 [[ "$NA_TRAIN_LIMIT" != "0" ]] && BUILD_COMMAND+=(--train-limit "$NA_TRAIN_LIMIT")
 [[ "$NA_DEV_LIMIT" != "0" ]] && BUILD_COMMAND+=(--dev-limit "$NA_DEV_LIMIT")
@@ -83,7 +91,7 @@ if [[ "$NA_LLM_BACKEND" == "codex" ]]; then
     )
 fi
 
-METHOD_COUNT="$("$PYTHON" -c "import json,sys; print(len(json.load(open(sys.argv[1]))['methods']))" "$NA_BASE_METHODS")"
+METHOD_COUNT="$("$PYTHON" -c "import json,sys; methods=json.load(open(sys.argv[1]))['methods']; print(sum((m.get('family') or m.get('definition', {}).get('family')) == 'statistical' for m in methods))" "$NA_BASE_METHODS")"
 
 cat <<EOF
 Dictionary curation

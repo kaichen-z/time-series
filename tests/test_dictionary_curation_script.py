@@ -99,6 +99,28 @@ def test_builder_honours_task_limits(tmp_path: Path) -> None:
     assert summary["dev_tasks"] == 2
 
 
+def test_builder_persists_selector_coverage_and_retry_parameters(tmp_path: Path) -> None:
+    completed, output = build(
+        tmp_path,
+        "--max-implementation-attempts",
+        "4",
+        "--min-success-rate",
+        "0.75",
+        "--selection-folds",
+        "4",
+        "--selection-horizon",
+        "6",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    curation = json.loads(output.read_text(encoding="utf-8"))["curation"]
+    assert curation["max_implementation_attempts"] == 4
+    assert curation["min_success_rate"] == 0.75
+    assert curation["selection_folds"] == 4
+    assert curation["selection_horizon"] == 6
+    assert curation["allowed_families"] == ["statistical"]
+
+
 def test_builder_keeps_train_and_dev_disjoint(tmp_path: Path) -> None:
     _, output = build(tmp_path)
     experiment = json.loads(output.read_text(encoding="utf-8"))
@@ -161,7 +183,7 @@ def test_runner_renders_both_stages_for_each_mode(tmp_path: Path, mode: str) -> 
     assert "-m numerical_agent build-experiment" in completed.stdout
     assert "-m numerical_agent curate" in completed.stdout
     assert "--provider llm" in completed.stdout
-    assert "statistical_base_methods_v000.json" in completed.stdout
+    assert "forecast_method_dataset_v001.json" in completed.stdout
 
 
 def test_runner_limits_tasks_only_in_smoke_mode(tmp_path: Path) -> None:

@@ -50,11 +50,15 @@ The command deterministically regenerates the manifests, runs the publication ga
 release and SHA-256 sidecar, and executes the collection tests. It does not download models or run
 forecasting experiments.
 
-The Dictionary Curation Adapter consumes the release as the externally supplied base dictionary.
+The Dictionary Curation Adapter converts the release into the executable `ToolDictionary`
+contract. Phase 1 imports the 111 statistical cards by default. Foundation and combined cards
+remain in the research catalog until a caller explicitly enables their families and registers
+honest model/dependency runtimes; they are never approximated by a similarly named NumPy method.
 A collaborator must still provide an approved `MethodImplementer`, one or more `MethodRuntime`
-providers, Train/Dev tasks, trusted labels, and a metric. The single-agent self-harness may then
-implement, test, and propose `keep`, `revise`, `quarantine`, or `discard` decisions; held-out Dev
-performance decides whether a Child dictionary replaces its Parent.
+providers, Train/Dev tasks, trusted labels, and a metric. The LLM implements or repairs code;
+trusted Python evaluation assigns `accepted`, `specialized`, `quarantined`, `unavailable`, or
+`discarded` status. Held-out Dev performance decides whether a Child dictionary replaces its
+Parent.
 
 ## Architecture
 
@@ -67,6 +71,8 @@ External parameters
   - metric and budgets
           ↓
 Dictionary Curation Adapter
+          ↓
+History-only hindcasting selector
           ↓
 Generic Self-Evolution Core
 Parent → Children → Train → frozen Dev → accept/reject → checkpoint
@@ -93,8 +99,6 @@ These do not depend on dictionary curation:
 - generations and children per generation;
 - primary metric and minimize/maximize direction;
 - strict acceptance margin;
-- successive-halving prefixes, tolerance, and promotion budget;
-- deterministic seed;
 - checkpoint/resume behavior.
 
 ### Dictionary-curation parameters
@@ -104,6 +108,9 @@ These specialize the framework for the current task:
 - allowed actions: keep, revise, quarantine, discard;
 - allowed method families and statuses;
 - per-method revision budget;
+- transient implementation retry budget;
+- minimum successful-task coverage;
+- history-only selector folds and horizon;
 - status-classification thresholds;
 - method and dictionary metrics;
 - the permanent prohibition on Dev learning.
@@ -121,6 +128,13 @@ Collaborators provide:
 The Harness does not invent base method IDs. Unknown runtime providers become structured
 `unavailable` results instead of crashing the run. CLI provider names are resolved through an
 application-owned registry; arbitrary import strings are rejected.
+
+The primary dictionary score is deployable: for each task, the Executor chooses one eligible
+method using only rolling hindcasts inside the observed history, freezes that choice, and only
+then lets the trusted Evaluator compare its future forecast with the label. The hindsight best
+method across the whole dictionary is recorded separately as `oracle_score` for coverage
+diagnosis and is never used as the acceptance metric. Quarantined and unavailable methods can be
+executed for repair diagnostics but cannot be selected for the final forecast.
 
 ## Python integration
 

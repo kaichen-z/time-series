@@ -12,6 +12,8 @@ class ImplementationContext:
     dictionary_id: str
     generation: int
     provider_config: Mapping[str, object] = field(default_factory=dict)
+    child_index: int = 1
+    diversity_instruction: str = ""
 
 
 @dataclass(frozen=True)
@@ -20,6 +22,8 @@ class SanitizedMethodFeedback:
     metrics: Mapping[str, float]
     failure_categories: tuple[str, ...] = ()
     sample_errors: tuple[str, ...] = ()
+    child_index: int = 1
+    diversity_instruction: str = ""
 
 
 class MethodImplementer(Protocol):

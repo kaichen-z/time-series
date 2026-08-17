@@ -1,6 +1,7 @@
 """Dictionary-curation adapter with all forecasting behavior injected."""
 from __future__ import annotations
 
+import json
 import math
 import statistics
 from dataclasses import dataclass, replace
@@ -58,6 +59,8 @@ class MethodExecutionResult:
     status: str
     forecast: tuple[float, ...] = ()
     error: str = ""
+    selected: bool = False
+    selection_score: float | None = None
 
 
 class DictionaryArtifactAdapter:
@@ -94,6 +97,9 @@ class DictionaryArtifactAdapter:
         updated = []
         for record in artifact.methods:
             typed = cast(MethodRecord, record)
+            if typed.status == "discarded":
+                updated.append(typed)
+                continue
             if typed.candidate is None and typed.status == "unimplemented":
                 updated.append(typed)
                 continue
@@ -119,6 +125,9 @@ class DictionaryArtifactAdapter:
         if total_count > 0 and int(summary.get("unavailable_count", 0)) == total_count:
             return "unavailable"
         if success_count <= 0:
+            return "quarantined"
+        success_rate = float(summary.get("success_rate", 0.0))
+        if success_rate < self.config.min_success_rate:
             return "quarantined"
         mean_error = float(summary.get("mean_error", math.inf))
         subset_win_rate = float(summary.get("subset_win_rate", 0.0))
@@ -148,11 +157,28 @@ class DictionaryMutator:
         count: int,
     ) -> Sequence[ToolDictionary]:
         children = []
+        signatures: set[str] = set()
         for child_index in range(1, count + 1):
+            diversity_instruction = self._diversity_instruction(child_index)
             records = tuple(
-                self._mutate_record(record, parent, context)
+                self._mutate_record(
+                    record,
+                    parent,
+                    context,
+                    child_index=child_index,
+                    diversity_instruction=diversity_instruction,
+                )
                 for record in parent.methods
             )
+            signature = json.dumps(
+                [cast(MethodRecord, record).to_payload() for record in records],
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            if signature in signatures:
+                continue
+            signatures.add(signature)
             children.append(
                 ToolDictionary(
                     dictionary_id=(
@@ -170,6 +196,9 @@ class DictionaryMutator:
         raw_record: MethodRecord | object,
         parent: ToolDictionary,
         context: MutationContext,
+        *,
+        child_index: int,
+        diversity_instruction: str,
     ) -> MethodRecord:
         record = cast(MethodRecord, raw_record)
         if record.status == "unimplemented" and record.candidate is None:
@@ -179,20 +208,52 @@ class DictionaryMutator:
                     ImplementationContext(
                         dictionary_id=parent.dictionary_id,
                         generation=context.generation,
+                        child_index=child_index,
+                        diversity_instruction=diversity_instruction,
                     ),
                 )
             except Exception:
-                return replace(record, status="quarantined")
+                attempts = record.implementation_attempts + 1
+                status: MethodStatus = (
+                    "quarantined"
+                    if attempts >= self.config.max_implementation_attempts
+                    else "unimplemented"
+                )
+                return replace(
+                    record,
+                    status=status,
+                    implementation_attempts=attempts,
+                )
             if candidate.method_id != record.definition.method_id:
-                return replace(record, status="quarantined")
-            return replace(record, candidate=candidate, status="unimplemented")
+                attempts = record.implementation_attempts + 1
+                status = (
+                    "quarantined"
+                    if attempts >= self.config.max_implementation_attempts
+                    else "unimplemented"
+                )
+                return replace(
+                    record,
+                    status=cast(MethodStatus, status),
+                    implementation_attempts=attempts,
+                )
+            return replace(
+                record,
+                candidate=candidate,
+                status="unimplemented",
+                implementation_attempts=record.implementation_attempts + 1,
+            )
 
         if (
             record.status == "quarantined"
             and record.candidate is not None
             and record.revision_count < self.config.max_revisions_per_method
         ):
-            feedback = self._feedback(record.definition.method_id, context)
+            feedback = self._feedback(
+                record.definition.method_id,
+                context,
+                child_index=child_index,
+                diversity_instruction=diversity_instruction,
+            )
             try:
                 candidate = self.implementer.revise(record.candidate, feedback)
             except Exception:
@@ -207,8 +268,23 @@ class DictionaryMutator:
             )
         return record
 
+    @staticmethod
+    def _diversity_instruction(child_index: int) -> str:
+        instructions = (
+            "Prefer the most reference-faithful minimal implementation.",
+            "Prefer robust estimation and explicit short-history fallbacks.",
+            "Prefer a computationally distinct but method-faithful formulation.",
+            "Prefer conservative parameter estimation for unstable histories.",
+        )
+        return instructions[(child_index - 1) % len(instructions)]
+
     def _feedback(
-        self, method_id: str, context: MutationContext
+        self,
+        method_id: str,
+        context: MutationContext,
+        *,
+        child_index: int = 1,
+        diversity_instruction: str = "",
     ) -> SanitizedMethodFeedback:
         per_method = context.parent_train_report.diagnostics.get("per_method", {})
         summary: Mapping[str, object] = {}
@@ -235,12 +311,31 @@ class DictionaryMutator:
             if isinstance(raw_errors, Sequence) and not isinstance(raw_errors, (str, bytes))
             else ()
         )
-        return SanitizedMethodFeedback(method_id, metrics, tuple(categories), sample_errors)
+        return SanitizedMethodFeedback(
+            method_id,
+            metrics,
+            tuple(categories),
+            sample_errors,
+            child_index,
+            diversity_instruction,
+        )
 
 
 class DictionaryExecutor:
-    def __init__(self, runtimes: RuntimeRegistry) -> None:
+    def __init__(
+        self,
+        runtimes: RuntimeRegistry,
+        *,
+        selection_metric: MetricFunction,
+        selection_folds: int,
+        selection_horizon: int,
+        min_selection_success_rate: float = 0.8,
+    ) -> None:
         self.runtimes = runtimes
+        self.selection_metric = selection_metric
+        self.selection_folds = selection_folds
+        self.selection_horizon = selection_horizon
+        self.min_selection_success_rate = min_selection_success_rate
 
     def execute(
         self,
@@ -248,14 +343,103 @@ class DictionaryExecutor:
         items: Sequence[NumericalTaskItem],
         split: str,
     ) -> Sequence[MethodExecutionResult]:
+        del split  # Selection is label-free and identical across Train and Dev.
+        records = tuple(
+            cast(MethodRecord, raw_record)
+            for raw_record in artifact.methods
+            if cast(MethodRecord, raw_record).status != "discarded"
+        )
+        selectable_ids = {
+            record.definition.method_id
+            for record in records
+            if record.status in ("unimplemented", "accepted", "specialized")
+        }
         results = []
-        for raw_record in artifact.methods:
-            record = cast(MethodRecord, raw_record)
-            if record.status == "discarded":
-                continue
-            for item in items:
-                results.append(self._execute_one(artifact, record, item))
+        for item in items:
+            item_results = []
+            for record in records:
+                result = self._execute_one(artifact, record, item)
+                score = (
+                    self._hindcast_score(record, item)
+                    if result.status == "success"
+                    else None
+                )
+                item_results.append(replace(result, selection_score=score))
+
+            selectable = [
+                result
+                for result in item_results
+                if result.status == "success"
+                and result.method_id in selectable_ids
+                and result.selection_score is not None
+                and math.isfinite(result.selection_score)
+            ]
+            if selectable:
+                selected_id = min(
+                    selectable,
+                    key=lambda result: (cast(float, result.selection_score), result.method_id),
+                ).method_id
+            else:
+                successful_ids = sorted(
+                    result.method_id
+                    for result in item_results
+                    if result.status == "success" and result.method_id in selectable_ids
+                )
+                selected_id = successful_ids[0] if successful_ids else None
+            results.extend(
+                replace(result, selected=result.method_id == selected_id)
+                for result in item_results
+            )
         return tuple(results)
+
+    def _hindcast_score(
+        self,
+        record: MethodRecord,
+        item: NumericalTaskItem,
+    ) -> float | None:
+        candidate = record.candidate
+        if candidate is None:
+            return None
+        resolution = self.runtimes.resolve(candidate)
+        if not resolution.available or resolution.runtime is None:
+            return None
+
+        history = item.history
+        fold_horizon = min(
+            self.selection_horizon,
+            max(1, len(history) // (self.selection_folds + 1)),
+        )
+        errors = []
+        available_folds = 0
+        for fold_index in range(self.selection_folds):
+            validation_end = len(history) - fold_index * fold_horizon
+            train_end = validation_end - fold_horizon
+            if train_end < 2:
+                continue
+            available_folds += 1
+            prefix = history[:train_end]
+            truth = history[train_end:validation_end]
+            try:
+                raw = resolution.runtime.forecast(
+                    candidate,
+                    prefix,
+                    fold_horizon,
+                    item.frequency,
+                )
+                forecast = tuple(float(value) for value in raw)
+            except Exception:
+                continue
+            if len(forecast) != fold_horizon or any(
+                not math.isfinite(value) for value in forecast
+            ):
+                continue
+            error = float(self.selection_metric(forecast, truth))
+            if math.isfinite(error):
+                errors.append(error)
+        required = math.ceil(available_folds * self.min_selection_success_rate)
+        if available_folds <= 0 or len(errors) < max(1, required):
+            return None
+        return statistics.fmean(errors)
 
     def _execute_one(
         self,
@@ -346,6 +530,7 @@ class DictionaryEvaluator:
             raise ValueError(f"labels are unavailable for split {split!r}")
         by_method: dict[str, list[MethodExecutionResult]] = {}
         by_item_errors: dict[str, list[float]] = {}
+        selected_errors: dict[str, float] = {}
         for result in results:
             by_method.setdefault(result.method_id, []).append(result)
             if result.status == "success":
@@ -356,16 +541,26 @@ class DictionaryEvaluator:
                 if not math.isfinite(error):
                     raise ValueError("method metric must be finite")
                 by_item_errors.setdefault(result.item_id, []).append(error)
+                if result.selected:
+                    if result.item_id in selected_errors:
+                        raise ValueError(
+                            f"multiple methods were selected for item {result.item_id!r}"
+                        )
+                    selected_errors[result.item_id] = error
 
         per_method = {
             method_id: self._method_summary(method_results, split_labels)
             for method_id, method_results in by_method.items()
         }
         penalty = self.config.specialized_max_error * 10.0
-        dictionary_errors = [
+        oracle_errors = [
             min(by_item_errors.get(item_id, (penalty,))) for item_id in split_labels
         ]
+        dictionary_errors = [
+            selected_errors.get(item_id, penalty) for item_id in split_labels
+        ]
         dictionary_score = statistics.fmean(dictionary_errors)
+        oracle_score = statistics.fmean(oracle_errors)
         failure_traces = [
             {
                 "method_id": method_id,
@@ -380,7 +575,22 @@ class DictionaryEvaluator:
             split=split,
             metrics={self.config.dictionary_metric: dictionary_score},
             item_count=len(split_labels),
-            diagnostics={"per_method": per_method, "failure_traces": failure_traces},
+            diagnostics={
+                "per_method": per_method,
+                "failure_traces": failure_traces,
+                "oracle_score": oracle_score,
+                "selected_method_ids": {
+                    item_id: next(
+                        (
+                            result.method_id
+                            for result in results
+                            if result.item_id == item_id and result.selected
+                        ),
+                        None,
+                    )
+                    for item_id in split_labels
+                },
+            },
         )
 
     def _method_summary(
@@ -465,7 +675,13 @@ class DictionaryCurationTask:
         return EvolutionComponents(
             artifact_adapter=DictionaryArtifactAdapter(self.config),
             mutator=DictionaryMutator(self.config, self.implementer),
-            executor=DictionaryExecutor(self.runtimes),
+            executor=DictionaryExecutor(
+                self.runtimes,
+                selection_metric=self.metric,
+                selection_folds=self.config.selection_folds,
+                selection_horizon=self.config.selection_horizon,
+                min_selection_success_rate=self.config.min_success_rate,
+            ),
             evaluator=DictionaryEvaluator(self.config, self.labels, self.metric),
             acceptance_gate=MetricAcceptanceGate(
                 MetricSpec(self.config.dictionary_metric, "minimize")

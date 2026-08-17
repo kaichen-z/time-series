@@ -131,12 +131,15 @@ class MethodRecord:
     status: MethodStatus = "unimplemented"
     revision_count: int = 0
     train_summary: Mapping[str, float] = field(default_factory=dict)
+    implementation_attempts: int = 0
 
     def __post_init__(self) -> None:
         if self.status not in METHOD_STATUSES:
             raise ValueError(f"unsupported method status: {self.status!r}")
         if self.revision_count < 0:
             raise ValueError("revision_count must be non-negative")
+        if self.implementation_attempts < 0:
+            raise ValueError("implementation_attempts must be non-negative")
         if self.candidate is not None and self.candidate.method_id != self.definition.method_id:
             raise ValueError("candidate method_id does not match its definition")
 
@@ -147,6 +150,7 @@ class MethodRecord:
             "status": self.status,
             "revision_count": self.revision_count,
             "train_summary": dict(self.train_summary),
+            "implementation_attempts": self.implementation_attempts,
         }
 
     @classmethod
@@ -170,6 +174,7 @@ class MethodRecord:
             status=cast(MethodStatus, payload.get("status", "unimplemented")),
             revision_count=int(payload.get("revision_count", 0)),
             train_summary={str(key): float(value) for key, value in summary.items()},
+            implementation_attempts=int(payload.get("implementation_attempts", 0)),
         )
 
 

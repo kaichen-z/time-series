@@ -47,6 +47,8 @@ class LLMMethodImplementer:
             failure_conditions=method.failure_conditions,
             dictionary_id=context.dictionary_id,
             generation=context.generation,
+            child_index=context.child_index,
+            diversity_instruction=context.diversity_instruction,
         )
         code = self._request_code(
             IMPLEMENT_SYSTEM, user, method.method_id, "implement", context.generation
@@ -68,6 +70,8 @@ class LLMMethodImplementer:
             metrics=feedback.metrics,
             failure_categories=feedback.failure_categories,
             sample_errors=feedback.sample_errors,
+            child_index=feedback.child_index,
+            diversity_instruction=feedback.diversity_instruction,
         )
         code = self._request_code(
             REVISE_SYSTEM,

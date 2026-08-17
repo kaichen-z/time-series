@@ -80,6 +80,24 @@ def test_implement_sends_the_method_description_to_the_model() -> None:
     assert client.calls[0]["temperature"] == 0.0
 
 
+def test_implement_sends_child_diversity_context_to_the_model() -> None:
+    client = scripted(NAIVE_CODE)
+
+    LLMMethodImplementer(client).implement(
+        definition(),
+        ImplementationContext(
+            "statistical_base_methods_v000",
+            3,
+            child_index=2,
+            diversity_instruction="Prefer a robust alternative parameterization.",
+        ),
+    )
+
+    user = client.calls[0]["messages"][0]["content"]
+    assert '"child_index": 2' in user
+    assert "robust alternative parameterization" in user
+
+
 def test_revise_versions_the_candidate_and_forwards_sanitized_feedback() -> None:
     parent = MethodCandidate("ses", SANDBOX_PROVIDER, "python_code", {"code": "old"})
     client = scripted(NAIVE_CODE)
@@ -119,7 +137,7 @@ def test_implement_rejects_a_response_that_is_not_json() -> None:
         implementer.implement(definition(), ImplementationContext("d0", 1))
 
 
-def test_mutator_quarantines_a_method_when_the_model_fails() -> None:
+def test_mutator_keeps_a_first_model_failure_retryable() -> None:
     record = MethodRecord(definition())
     parent = ToolDictionary("d0", None, 0, (record,))
     mutator = DictionaryMutator(
@@ -130,7 +148,8 @@ def test_mutator_quarantines_a_method_when_the_model_fails() -> None:
 
     children = mutator.propose(parent, context, 1)
 
-    assert children[0].methods[0].status == "quarantined"
+    assert children[0].methods[0].status == "unimplemented"
+    assert children[0].methods[0].implementation_attempts == 1
 
 
 def test_runtime_supports_only_sandbox_candidates_carrying_code() -> None:

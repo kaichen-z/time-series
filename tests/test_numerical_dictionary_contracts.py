@@ -96,8 +96,31 @@ def test_runtime_registry_returns_structured_unavailable_result() -> None:
 
 
 def test_curation_config_validates_actions_and_revision_budget() -> None:
-    config = DictionaryCurationConfig(max_revisions_per_method=1)
+    config = DictionaryCurationConfig(
+        max_revisions_per_method=1,
+        max_implementation_attempts=3,
+        min_success_rate=0.8,
+    )
     assert config.allowed_actions == ("keep", "revise", "quarantine", "discard")
+    assert config.allowed_families == ("statistical",)
 
     with pytest.raises(ValueError, match="max_revisions_per_method"):
         DictionaryCurationConfig(max_revisions_per_method=-1)
+    with pytest.raises(ValueError, match="max_implementation_attempts"):
+        DictionaryCurationConfig(max_implementation_attempts=0)
+    with pytest.raises(ValueError, match="min_success_rate"):
+        DictionaryCurationConfig(min_success_rate=1.1)
+
+
+def test_method_record_round_trip_preserves_implementation_attempts() -> None:
+    definition = MethodDefinition("m1", "statistical", "external method")
+    original = ToolDictionary(
+        "d1",
+        "d0",
+        1,
+        (MethodRecord(definition, implementation_attempts=2),),
+    )
+
+    restored = ToolDictionary.from_payload(original.to_payload())
+
+    assert restored.methods[0].implementation_attempts == 2

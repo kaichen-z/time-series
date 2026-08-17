@@ -6,14 +6,21 @@ from typing import Sequence
 from common.evolution_core.contracts import EvaluationReport, MutationContext
 from common.evolution_core.persistence import JsonArtifactStore
 from numerical_agent.adapters.dictionary_curation import (
+    DictionaryArtifactAdapter,
     DictionaryCurationTask,
     DictionaryEvaluator,
+    DictionaryExecutor,
     DictionaryMutator,
     MethodExecutionResult,
     NumericalTaskItem,
 )
 from numerical_agent.config import DictionaryCurationConfig
-from numerical_agent.dictionary import MethodCandidate, MethodDefinition, ToolDictionary
+from numerical_agent.dictionary import (
+    MethodCandidate,
+    MethodDefinition,
+    MethodRecord,
+    ToolDictionary,
+)
 from numerical_agent.providers import (
     ImplementationContext,
     MethodImplementer,
@@ -322,3 +329,281 @@ def test_feedback_carries_sample_errors_past_the_metrics_float_filter() -> None:
     assert feedback.sample_errors == ("IndexError: list index out of range",)
     # A plain string field must not leak into the numeric metrics mapping.
     assert "sample_errors" not in feedback.metrics
+
+
+def test_dictionary_score_uses_the_history_selected_method_not_oracle_minimum() -> None:
+    evaluator = DictionaryEvaluator(
+        DictionaryCurationConfig(),
+        {"dev": {"t1": (0.0,), "t2": (0.0,)}},
+        absolute_error,
+    )
+    results = (
+        MethodExecutionResult("d", "A", "t1", "success", (0.0,), selected=True),
+        MethodExecutionResult("d", "A", "t2", "success", (100.0,), selected=True),
+        MethodExecutionResult("d", "B", "t1", "success", (100.0,)),
+        MethodExecutionResult("d", "B", "t2", "success", (0.0,)),
+    )
+
+    report = evaluator.evaluate("d", results, "dev")
+
+    assert report.metrics["smape"] == 50.0
+    assert report.diagnostics["oracle_score"] == 0.0
+
+
+class PatternRuntime:
+    def supports(self, candidate: MethodCandidate) -> bool:
+        return candidate.provider == "pattern"
+
+    def forecast(
+        self,
+        candidate: MethodCandidate,
+        history: Sequence[float],
+        horizon: int,
+        frequency: str,
+    ) -> Sequence[float]:
+        if candidate.implementation["kind"] == "last":
+            return [float(history[-1])] * horizon
+        step = float(history[-1] - history[-2]) if len(history) > 1 else 0.0
+        return [float(history[-1] + step * offset) for offset in range(1, horizon + 1)]
+
+
+def test_executor_selects_a_method_using_history_only_hindcasting() -> None:
+    methods = (
+        MethodRecord(
+            MethodDefinition("last", "statistical", "last value"),
+            MethodCandidate("last", "pattern", "opaque", {"kind": "last"}),
+        ),
+        MethodRecord(
+            MethodDefinition("trend", "statistical", "linear continuation"),
+            MethodCandidate("trend", "pattern", "opaque", {"kind": "trend"}),
+        ),
+    )
+    dictionary = ToolDictionary("d", None, 0, methods)
+    executor = DictionaryExecutor(
+        RuntimeRegistry({"pattern": PatternRuntime()}),
+        selection_metric=absolute_error,
+        selection_folds=2,
+        selection_horizon=1,
+    )
+
+    results = executor.execute(
+        dictionary,
+        (NumericalTaskItem("t", (1.0, 2.0, 3.0, 4.0, 5.0), 1, "D"),),
+        "dev",
+    )
+
+    selected = [result.method_id for result in results if result.selected]
+    assert selected == ["trend"]
+    assert all(result.selection_score is not None for result in results)
+
+
+def test_executor_never_selects_a_quarantined_method() -> None:
+    methods = (
+        MethodRecord(
+            MethodDefinition("accepted", "statistical", "deployable"),
+            MethodCandidate("accepted", "fake", "opaque", {"prediction": 4.0}),
+            status="accepted",
+        ),
+        MethodRecord(
+            MethodDefinition("quarantined", "statistical", "not deployable"),
+            MethodCandidate("quarantined", "fake", "opaque", {"prediction": 5.0}),
+            status="quarantined",
+        ),
+    )
+    dictionary = ToolDictionary("d", None, 1, methods)
+    executor = DictionaryExecutor(
+        RuntimeRegistry({"fake": FakeRuntime()}),
+        selection_metric=absolute_error,
+        selection_folds=2,
+        selection_horizon=1,
+    )
+
+    results = executor.execute(
+        dictionary,
+        (NumericalTaskItem("t", (5.0, 5.0, 5.0, 5.0, 5.0), 1, "D"),),
+        "dev",
+    )
+
+    assert [result.method_id for result in results if result.selected] == ["accepted"]
+
+
+class FragileHindcastRuntime:
+    def supports(self, candidate: MethodCandidate) -> bool:
+        return candidate.provider == "fragile"
+
+    def forecast(
+        self,
+        candidate: MethodCandidate,
+        history: Sequence[float],
+        horizon: int,
+        frequency: str,
+    ) -> Sequence[float]:
+        if candidate.implementation["kind"] == "fragile":
+            if len(history) == 3:
+                raise RuntimeError("one historical fold fails")
+            return [5.0] * horizon
+        return [4.0] * horizon
+
+
+def test_selector_requires_hindcast_fold_coverage() -> None:
+    methods = (
+        MethodRecord(
+            MethodDefinition("fragile", "statistical", "partially runnable"),
+            MethodCandidate("fragile", "fragile", "opaque", {"kind": "fragile"}),
+        ),
+        MethodRecord(
+            MethodDefinition("stable", "statistical", "fully runnable"),
+            MethodCandidate("stable", "fragile", "opaque", {"kind": "stable"}),
+        ),
+    )
+    executor = DictionaryExecutor(
+        RuntimeRegistry({"fragile": FragileHindcastRuntime()}),
+        selection_metric=absolute_error,
+        selection_folds=2,
+        selection_horizon=1,
+        min_selection_success_rate=0.8,
+    )
+
+    results = executor.execute(
+        ToolDictionary("d", None, 0, methods),
+        (NumericalTaskItem("t", (5.0, 5.0, 5.0, 5.0, 5.0), 1, "D"),),
+        "dev",
+    )
+
+    assert [result.method_id for result in results if result.selected] == ["stable"]
+    fragile = next(result for result in results if result.method_id == "fragile")
+    assert fragile.selection_score is None
+
+
+def test_low_coverage_method_is_not_accepted() -> None:
+    adapter = DictionaryArtifactAdapter(
+        DictionaryCurationConfig(min_success_rate=0.8)
+    )
+
+    status = adapter._classify(
+        {
+            "total_count": 100,
+            "success_count": 1,
+            "success_rate": 0.01,
+            "invalid_count": 99,
+            "mean_error": 1.0,
+            "subset_win_rate": 1.0,
+        }
+    )
+
+    assert status == "quarantined"
+
+
+def test_discarded_method_remains_terminal_without_a_new_execution_report() -> None:
+    record = MethodRecord(
+        MethodDefinition("unsafe", "statistical", "unsafe method"),
+        MethodCandidate("unsafe", "fake", "opaque", {"unsafe": True}),
+        status="discarded",
+    )
+    dictionary = ToolDictionary("d", None, 1, (record,))
+    report = EvaluationReport(
+        "d",
+        "train",
+        {"smape": 1000.0},
+        1,
+        diagnostics={"per_method": {}},
+    )
+
+    updated = DictionaryArtifactAdapter(DictionaryCurationConfig()).apply_train_report(
+        dictionary, report
+    )
+
+    assert updated.methods[0].status == "discarded"
+
+
+class ContextAwareImplementer:
+    def __init__(self) -> None:
+        self.contexts: list[ImplementationContext] = []
+
+    def implement(
+        self, method: MethodDefinition, context: ImplementationContext
+    ) -> MethodCandidate:
+        self.contexts.append(context)
+        return MethodCandidate(
+            method.method_id,
+            "fake",
+            "opaque",
+            {"child_index": context.child_index},
+        )
+
+    def revise(
+        self, parent: MethodCandidate, feedback: SanitizedMethodFeedback
+    ) -> MethodCandidate:
+        return parent
+
+
+def test_mutator_gives_each_child_a_distinct_mutation_context() -> None:
+    implementer = ContextAwareImplementer()
+    parent = ToolDictionary(
+        "d0", None, 0, (MethodDefinition("m", "statistical", "method"),)
+    )
+    mutator = DictionaryMutator(DictionaryCurationConfig(), implementer)
+    report = EvaluationReport("d0", "train", {"smape": 1.0}, 1)
+
+    children = mutator.propose(parent, MutationContext(1, report), 2)
+
+    assert len(children) == 2
+    assert [item.child_index for item in implementer.contexts] == [1, 2]
+    assert len({item.diversity_instruction for item in implementer.contexts}) == 2
+
+
+class ConstantImplementer(ContextAwareImplementer):
+    def implement(
+        self, method: MethodDefinition, context: ImplementationContext
+    ) -> MethodCandidate:
+        self.contexts.append(context)
+        return MethodCandidate(method.method_id, "fake", "opaque", {"same": True})
+
+
+def test_mutator_deduplicates_identical_children() -> None:
+    parent = ToolDictionary(
+        "d0", None, 0, (MethodDefinition("m", "statistical", "method"),)
+    )
+    mutator = DictionaryMutator(DictionaryCurationConfig(), ConstantImplementer())
+    report = EvaluationReport("d0", "train", {"smape": 1.0}, 1)
+
+    children = mutator.propose(parent, MutationContext(1, report), 2)
+
+    assert len(children) == 1
+
+
+class FlakyImplementer:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def implement(
+        self, method: MethodDefinition, context: ImplementationContext
+    ) -> MethodCandidate:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("temporary model failure")
+        return MethodCandidate(method.method_id, "fake", "opaque", {"prediction": 1.0})
+
+    def revise(
+        self, parent: MethodCandidate, feedback: SanitizedMethodFeedback
+    ) -> MethodCandidate:
+        return parent
+
+
+def test_transient_implementation_failure_is_retried_next_generation() -> None:
+    implementer = FlakyImplementer()
+    parent = ToolDictionary(
+        "d0", None, 0, (MethodDefinition("m", "statistical", "method"),)
+    )
+    mutator = DictionaryMutator(
+        DictionaryCurationConfig(max_implementation_attempts=2), implementer
+    )
+    report = EvaluationReport("d0", "train", {"smape": 1.0}, 1)
+
+    first = mutator.propose(parent, MutationContext(1, report), 1)[0]
+    second = mutator.propose(first, MutationContext(2, report), 1)[0]
+
+    assert first.methods[0].status == "unimplemented"
+    assert first.methods[0].implementation_attempts == 1
+    assert second.methods[0].candidate is not None
+    assert second.methods[0].implementation_attempts == 2

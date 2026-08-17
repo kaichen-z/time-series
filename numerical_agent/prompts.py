@@ -53,12 +53,16 @@ def render_implement_user(
     failure_conditions: Sequence[str],
     dictionary_id: str,
     generation: int,
+    child_index: int = 1,
+    diversity_instruction: str = "",
 ) -> str:
     """Build the user message asking for one named method's implementation."""
     return json.dumps(
         {
             "dictionary_id": dictionary_id,
             "generation": generation,
+            "child_index": child_index,
+            "diversity_instruction": diversity_instruction,
             "method_id": method_id,
             "description": description,
             "assumptions": list(assumptions),
@@ -77,6 +81,8 @@ def render_revise_user(
     metrics: Mapping[str, float],
     failure_categories: Sequence[str],
     sample_errors: Sequence[str] = (),
+    child_index: int = 1,
+    diversity_instruction: str = "",
 ) -> str:
     """Build the user message asking for a repaired implementation of one method."""
     return json.dumps(
@@ -86,6 +92,8 @@ def render_revise_user(
             "metrics": {key: float(value) for key, value in metrics.items()},
             "failure_categories": list(failure_categories),
             "sample_errors": list(sample_errors),
+            "child_index": child_index,
+            "diversity_instruction": diversity_instruction,
         },
         ensure_ascii=False,
         indent=2,

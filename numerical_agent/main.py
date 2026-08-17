@@ -21,6 +21,7 @@ from common.tracing import configure
 
 from .adapters.dictionary_curation import DictionaryCurationTask, NumericalTaskItem
 from .codegen import SANDBOX_PROVIDER, LLMMethodImplementer, SandboxMethodRuntime
+from .catalog_adapter import tool_dictionary_from_payload
 from .collection.coverage import audit_coverage, audit_saturation
 from .collection.contracts import MethodCard, SourceRecord
 from .collection.normalization import find_duplicate_candidates
@@ -32,7 +33,7 @@ from .collection.registry import (
 )
 from .collection.verification import verify_registry
 from .config import DictionaryCurationConfig
-from .dictionary import MethodRecord, ToolDictionary
+from .dictionary import MethodRecord
 from .experiment import build_experiment
 from .persistence import MethodSourceArtifactStore
 from .providers import RuntimeRegistry
@@ -76,8 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--children-per-generation", type=int, default=1)
     build.add_argument("--seed", type=int, default=20260816)
     build.add_argument("--max-revisions-per-method", type=int, default=1)
+    build.add_argument("--max-implementation-attempts", type=int, default=3)
     build.add_argument("--accepted-max-error", type=float, default=50.0)
     build.add_argument("--specialized-max-error", type=float, default=100.0)
+    build.add_argument("--min-success-rate", type=float, default=0.8)
+    build.add_argument("--selection-folds", type=int, default=3)
+    build.add_argument("--selection-horizon", type=int, default=8)
     build.add_argument("--train-limit", type=int, default=None)
     build.add_argument("--dev-limit", type=int, default=None)
 
@@ -130,8 +135,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(f"unsupported command: {args.command}")
 
     experiment = _read_object(Path(args.experiment_config))
-    dictionary = ToolDictionary.from_payload(_read_object(Path(args.base_methods)))
     curation = _curation_config(experiment)
+    dictionary = tool_dictionary_from_payload(
+        _read_object(Path(args.base_methods)),
+        allowed_families=curation.allowed_families,
+    )
     evolution = _evolution_config(experiment, curation)
     train_items, dev_items = _task_items(experiment)
     labels = _labels(experiment)
@@ -182,8 +190,12 @@ def _build_experiment(args: argparse.Namespace) -> int:
         children_per_generation=args.children_per_generation,
         seed=args.seed,
         max_revisions_per_method=args.max_revisions_per_method,
+        max_implementation_attempts=args.max_implementation_attempts,
         accepted_max_error=args.accepted_max_error,
         specialized_max_error=args.specialized_max_error,
+        min_success_rate=args.min_success_rate,
+        selection_folds=args.selection_folds,
+        selection_horizon=args.selection_horizon,
         train_limit=args.train_limit,
         dev_limit=args.dev_limit,
     )
