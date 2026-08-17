@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
 
 import pytest
 
@@ -65,6 +66,24 @@ def test_wrapper_and_underlying_method_are_only_flagged_for_manual_review() -> N
     )
     assert wrapper_pair.reasons == ("shared_source_claim",)
     assert wrapper_pair.requires_manual_review is True
+
+
+def test_shared_textbook_does_not_flag_distinct_methods_with_one_common_token() -> None:
+    methods = load_method_cards(FIXTURE)
+    first = replace(
+        methods[0],
+        method_uid="method_naive_last",
+        canonical_name="naive last",
+        aliases=(),
+    )
+    second = replace(
+        methods[1],
+        method_uid="method_naive_mean",
+        canonical_name="naive mean",
+        aliases=(),
+    )
+
+    assert find_duplicate_candidates((first, second)) == ()
 
 
 def test_duplicate_report_order_is_deterministic() -> None:

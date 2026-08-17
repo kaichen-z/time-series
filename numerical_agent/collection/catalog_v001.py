@@ -404,6 +404,171 @@ ADDITIONAL_STATISTICAL_SOURCE_PAYLOADS: tuple[Mapping[str, object], ...] = (
     },
 )
 
+FOUNDATION_SOURCE_PAYLOADS: tuple[Mapping[str, object], ...] = (
+    {
+        "source_id": "source_000030", "title": "A decoder-only foundation model for time-series forecasting",
+        "authors": ["Abhimanyu Das", "Weihao Kong", "Rajat Sen", "Yichen Zhou"], "year": 2023,
+        "source_type": "paper", "url": "https://arxiv.org/abs/2310.10688", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000031", "title": "TimesFM official repository",
+        "authors": ["Google Research"], "year": 2026, "source_type": "official_repo",
+        "url": "https://github.com/google-research/timesfm", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": False, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000032", "title": "Chronos: Learning the Language of Time Series",
+        "authors": ["Abdul Fatir Ansari", "Lorenzo Stella", "Caner Turkmen", "Xiyuan Zhang", "Pedro Mercado", "Huibin Shen", "Oleksandr Shchur", "Syama Sundar Rangapuram", "Sebastian Pineda Arango", "Shubham Kapoor", "Jasper Zschiegner", "Danielle C. Maddix", "Hao Wang", "Michael W. Mahoney", "Kari Torkkola", "Andrew Gordon Wilson", "Michael Bohlke-Schneider", "Yuyang Wang"],
+        "year": 2024, "source_type": "paper", "url": "https://arxiv.org/abs/2403.07815", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000033", "title": "Chronos forecasting official repository",
+        "authors": ["Amazon Science"], "year": 2026, "source_type": "official_repo",
+        "url": "https://github.com/amazon-science/chronos-forecasting", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": False, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000034", "title": "Unified Training of Universal Time Series Forecasting Transformers",
+        "authors": ["Gerald Woo", "Chenghao Liu", "Akshat Kumar", "Caiming Xiong", "Silvio Savarese", "Doyen Sahoo"],
+        "year": 2024, "source_type": "paper", "url": "https://arxiv.org/abs/2402.02592", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000035", "title": "Uni2TS and Moirai official repository",
+        "authors": ["Salesforce AI Research"], "year": 2026, "source_type": "official_repo",
+        "url": "https://github.com/SalesforceAIResearch/uni2ts", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": False, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000036", "title": "Lag-Llama: Towards Foundation Models for Probabilistic Time Series Forecasting",
+        "authors": ["Kashif Rasul", "Arjun Ashok", "Andrew Robert Williams", "Hena Ghonia", "Rishika Bhagwatkar", "Arian Khorasani", "Mohammad Javad Darvishi Bayazi", "George Adamopoulos", "Roland Riachi", "Nadhir Hassen", "Marin Bilos", "Sahil Garg", "Anderson Schneider", "Nicolas Chapados", "Alexandre Drouin", "Valentina Zantedeschi", "Yuriy Nevmyvaka", "Irina Rish"],
+        "year": 2023, "source_type": "paper", "url": "https://arxiv.org/abs/2310.08278", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000037", "title": "Lag-Llama model card",
+        "authors": ["Time Series Foundation Models"], "year": 2024, "source_type": "model_card",
+        "url": "https://huggingface.co/time-series-foundation-models/Lag-Llama", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000038", "title": "MOMENT: A Family of Open Time-series Foundation Models",
+        "authors": ["Mononito Goswami", "Konrad Szafer", "Arjun Choudhry", "Yifu Cai", "Shuo Li", "Artur Dubrawski"],
+        "year": 2024, "source_type": "paper", "url": "https://arxiv.org/abs/2402.03885", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000039", "title": "MOMENT official repository",
+        "authors": ["MOMENT authors"], "year": 2026, "source_type": "official_repo",
+        "url": "https://github.com/moment-timeseries-foundation-model/moment", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": False, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000040", "title": "Tiny Time Mixers: Fast Pre-trained Models for Enhanced Zero/Few-Shot Forecasting of Multivariate Time Series",
+        "authors": ["Vijay Ekambaram", "Arindam Jati", "Pankaj Dayama", "Sumanta Mukherjee", "Nam H. Nguyen", "Wesley M. Gifford", "Chandra Reddy", "Jayant Kalagnanam"],
+        "year": 2024, "source_type": "paper", "url": "https://arxiv.org/abs/2401.03955", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000041", "title": "Granite Tiny Time Mixer R2 model card",
+        "authors": ["IBM Research"], "year": 2025, "source_type": "model_card",
+        "url": "https://huggingface.co/ibm-granite/granite-timeseries-ttm-r2", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000042", "title": "Timer: Generative Pre-trained Transformers Are Large Time Series Models",
+        "authors": ["Yong Liu", "Haoran Zhang", "Chenyu Li", "Xiangdong Huang", "Jianmin Wang", "Mingsheng Long"],
+        "year": 2024, "source_type": "paper", "url": "https://arxiv.org/abs/2402.02368", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000043", "title": "Timer official repository",
+        "authors": ["THUML"], "year": 2026, "source_type": "official_repo",
+        "url": "https://github.com/thuml/Large-Time-Series-Model", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": False, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000044", "title": "Time-MoE: Billion-Scale Time Series Foundation Models with Mixture of Experts",
+        "authors": ["Xiaoming Shi", "Shiyu Wang", "Yuqi Nie", "Dianqi Li", "Zhou Ye", "Qingsong Wen", "Ming Jin"],
+        "year": 2024, "source_type": "paper", "url": "https://arxiv.org/abs/2409.16040", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000045", "title": "Time-MoE official repository",
+        "authors": ["Time-MoE authors"], "year": 2026, "source_type": "official_repo",
+        "url": "https://github.com/Time-MoE/Time-MoE", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": False, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000046", "title": "ForecastPFN: Synthetically-Trained Zero-Shot Forecasting",
+        "authors": ["Samuel Dooley", "Gurnoor Singh Khurana", "Chirag Mohapatra", "Siddartha Naidu", "Colin White"],
+        "year": 2023, "source_type": "paper", "url": "https://arxiv.org/abs/2311.01933", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000047", "title": "ForecastPFN official repository",
+        "authors": ["Abacus.AI"], "year": 2026, "source_type": "official_repo",
+        "url": "https://github.com/abacusai/ForecastPFN", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": False, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000048", "title": "TimeGPT-1",
+        "authors": ["Azul Garza", "Cristian Challu", "Max Mergenthaler-Canseco"],
+        "year": 2023, "source_type": "paper", "url": "https://arxiv.org/abs/2310.03589", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000049", "title": "TimeGPT official documentation",
+        "authors": ["Nixtla"], "year": 2026, "source_type": "official_docs",
+        "url": "https://www.nixtla.io/docs", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000050", "title": "TEMPO: Prompt-based Generative Pre-trained Transformer for Time Series Forecasting",
+        "authors": ["Defu Cao", "Furong Jia", "Sercan O. Arik", "Tomas Pfister", "Yixiang Zheng", "Wen Ye", "Yan Liu"],
+        "year": 2023, "source_type": "paper", "url": "https://arxiv.org/abs/2310.04948", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000051", "title": "UniTS: Building a Unified Time Series Model",
+        "authors": ["Shanghua Gao", "Teddy Koker", "Owen Queen", "Thomas Hartvigsen", "Theodoros Tsiligkaridis", "Marinka Zitnik"],
+        "year": 2024, "source_type": "paper", "url": "https://arxiv.org/abs/2403.00131", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000052", "title": "UniTS official repository",
+        "authors": ["UniTS authors"], "year": 2026, "source_type": "official_repo",
+        "url": "https://github.com/mims-harvard/UniTS", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": False, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000053", "title": "Sundial: A Family of Highly Capable Time Series Foundation Models",
+        "authors": ["Yong Liu", "Guo Qin", "Zhiyuan Shi", "Zhi Chen", "Caiyin Yang", "Xiangdong Huang", "Jianmin Wang", "Mingsheng Long"],
+        "year": 2025, "source_type": "paper", "url": "https://arxiv.org/abs/2502.00816", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000054", "title": "Sundial official repository",
+        "authors": ["THUML"], "year": 2026, "source_type": "official_repo",
+        "url": "https://github.com/thuml/Sundial", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": False, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000055", "title": "Toto 2.0: Time Series Forecasting Enters the Scaling Era",
+        "authors": ["Emaad Khwaja", "Chris Lettieri", "Gerald Woo", "Eden Belouadah", "Marc Cenac", "Guillaume Jarry", "Enguerrand Paquin", "Xunyi Zhao", "Viktoriya Zhukov", "Othmane Abou-Amal", "Chenghao Liu", "Ameet Talwalkar", "David Asker"],
+        "year": 2026, "source_type": "paper", "url": "https://arxiv.org/abs/2605.20119", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000056", "title": "Toto official repository",
+        "authors": ["Datadog"], "year": 2026, "source_type": "official_repo",
+        "url": "https://github.com/DataDog/toto", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-17", "primary": False, "review_status": "verified",
+    },
+)
+
 
 EXCLUDED_LEGACY_IDS = {
     "fft_dominant_frequency_extrapolation",
@@ -694,6 +859,135 @@ EXTRA_STATISTICAL_METHOD_SPECS: tuple[Mapping[str, object], ...] = (
     },
 )
 
+FOUNDATION_METHOD_SPECS: tuple[Mapping[str, object], ...] = (
+    {
+        "name": "TimesFM 1.0",
+        "category": "zero_shot",
+        "description": "A patched decoder-only transformer pretrained across heterogeneous series for direct point forecasting.",
+        "assumption": "Pretraining patterns transfer to the target frequency and forecast horizon.",
+        "failure": "Large domain shifts or required context beyond the checkpoint limit reduce zero-shot reliability.",
+        "definition_sources": ["source_000030"], "implementation_sources": ["source_000031"],
+        "metadata": ["google/timesfm-1.0-200m", "1.0", 512, 128, "zero_shot", False, False, "CPU or accelerator", "Apache-2.0", True, True],
+    },
+    {
+        "name": "Chronos T5",
+        "category": "probabilistic_tsfm",
+        "description": "Scale and quantize values into tokens, then sample continuations from a pretrained T5 language-model family.",
+        "assumption": "Quantized sequence patterns learned from public and synthetic corpora transfer to the target.",
+        "failure": "Quantization, unmodeled covariates, and autoregressive sampling can miss sharp conditional events.",
+        "definition_sources": ["source_000032"], "implementation_sources": ["source_000033"],
+        "metadata": ["amazon/chronos-t5-base", "original", 512, "autoregressive", "zero_shot_sampling", True, False, "CPU or accelerator", "Apache-2.0", True, True],
+    },
+    {
+        "name": "Moirai 1.x",
+        "category": "covariate_tsfm",
+        "description": "A masked encoder universal forecaster using multi-patch-size projections and an any-variate attention design.",
+        "assumption": "Cross-frequency and cross-variate patterns in LOTSA transfer to the target variables.",
+        "failure": "Unseen covariate semantics or data distributions can defeat the universal patch representation.",
+        "definition_sources": ["source_000034"], "implementation_sources": ["source_000035"],
+        "metadata": ["Salesforce/moirai-1.1-R-base", "1.1", "configurable", "configurable", "zero_shot_distribution", True, True, "CPU or accelerator", "Apache-2.0", True, True],
+    },
+    {
+        "name": "Lag-Llama",
+        "category": "probabilistic_tsfm",
+        "description": "A decoder-only probabilistic forecaster that conditions on lagged values and time features across frequencies.",
+        "assumption": "Lag covariates provide a frequency-robust representation transferable across domains.",
+        "failure": "Long nonseasonal dependencies and unseen exogenous shocks are poorly represented by fixed lag features.",
+        "definition_sources": ["source_000036", "source_000037"], "implementation_sources": ["source_000037"],
+        "metadata": ["time-series-foundation-models/Lag-Llama", "2024 release", "checkpoint_config", "autoregressive", "zero_shot_or_finetuned_sampling", True, False, "CPU or accelerator", "Apache-2.0", True, True],
+    },
+    {
+        "name": "MOMENT-1",
+        "category": "fine_tuned",
+        "description": "A masked-patch encoder pretrained on the Time-series Pile and adapted with task-specific forecasting heads.",
+        "assumption": "Pretrained representations can be adapted with a small amount of task supervision.",
+        "failure": "A fixed patch context and weak target-specific adaptation can miss long-horizon dynamics.",
+        "definition_sources": ["source_000038"], "implementation_sources": ["source_000039"],
+        "metadata": ["AutonLab/MOMENT-1-large", "1", 512, "task_configured", "linear_probe_or_finetune", False, False, "GPU recommended", "MIT", True, True],
+    },
+    {
+        "name": "Granite Tiny Time Mixer R2",
+        "category": "fine_tuned",
+        "description": "A compact adaptive-patching mixer pretrained for zero-shot use and lightweight target or covariate adaptation.",
+        "assumption": "Resolution-diverse pretraining transfers and a small adaptation head captures target specifics.",
+        "failure": "Checkpoint-specific context and horizon pairs constrain direct use on mismatched tasks.",
+        "definition_sources": ["source_000040", "source_000041"], "implementation_sources": ["source_000041"],
+        "metadata": ["ibm-granite/granite-timeseries-ttm-r2", "r2", "checkpoint_dependent", "checkpoint_dependent", "zero_shot_or_finetuned", False, "fine_tuning", "CPU or accelerator", "Apache-2.0", True, True],
+    },
+    {
+        "name": "Timer",
+        "category": "fine_tuned",
+        "description": "A GPT-style model pretrained by next-patch prediction and adapted to forecasting and other generative time-series tasks.",
+        "assumption": "Next-patch generative pretraining learns patterns reusable under the target sampling process.",
+        "failure": "Channel-independent generation and finite context can miss new cross-variate causal structure.",
+        "definition_sources": ["source_000042"], "implementation_sources": ["source_000043"],
+        "metadata": ["thuml/timer-base", "original", "checkpoint_dependent", "autoregressive", "zero_shot_or_finetuned", False, False, "GPU recommended", "research release", True, True],
+    },
+    {
+        "name": "Time-MoE",
+        "category": "zero_shot",
+        "description": "A sparse mixture-of-experts decoder pretrained autoregressively on the Time-300B corpus.",
+        "assumption": "Sparse experts specialize in reusable temporal regimes across large heterogeneous pretraining data.",
+        "failure": "Unsupported dynamic covariates and context-plus-horizon beyond the trained window limit applicability.",
+        "definition_sources": ["source_000044"], "implementation_sources": ["source_000045"],
+        "metadata": ["Maple728/TimeMoE-200M", "2024", 4096, "context_plus_horizon_up_to_4096", "zero_shot_autoregressive", False, False, "CPU or accelerator; GPU recommended", "Apache-2.0", True, True],
+    },
+    {
+        "name": "ForecastPFN",
+        "category": "zero_shot",
+        "description": "A prior-data-fitted network trained on synthetic generators to approximate Bayesian zero-shot forecasting.",
+        "assumption": "The synthetic prior assigns meaningful probability to the target data-generating behavior.",
+        "failure": "Real dynamics outside the synthetic training prior lead to systematic zero-shot errors.",
+        "definition_sources": ["source_000046"], "implementation_sources": ["source_000047"],
+        "metadata": ["abacusai/ForecastPFN", "NeurIPS-2023", "model_config", "model_config", "zero_shot", True, False, "CPU or accelerator", "repository license", True, True],
+    },
+    {
+        "name": "TimeGPT-1",
+        "category": "covariate_tsfm",
+        "description": "A hosted pretrained forecasting service supporting zero-shot forecasts, intervals, and exogenous inputs.",
+        "assumption": "The proprietary pretraining corpus and service adaptation transfer to the submitted target.",
+        "failure": "Closed weights and training data limit diagnosis under domain shift or service changes.",
+        "definition_sources": ["source_000048", "source_000049"], "implementation_sources": ["source_000049"],
+        "metadata": ["Nixtla TimeGPT API", "service-current-2026-08-17", "service_managed", "service_managed", "zero_shot_api", True, True, "hosted API", "proprietary service", False, False],
+    },
+    {
+        "name": "TEMPO",
+        "category": "zero_shot",
+        "description": "A prompt-conditioned pretrained transformer that decomposes trend, seasonality, and residual structure for transfer.",
+        "assumption": "Prompt and decomposition components align the target distribution with pretrained regimes.",
+        "failure": "Incorrect decomposition or a target outside prompt coverage produces negative transfer.",
+        "definition_sources": ["source_000050"], "implementation_sources": [],
+        "metadata": ["TEMPO research checkpoint", "2023", "checkpoint_config", "checkpoint_config", "zero_shot_prompting", False, "multimodal_context", "GPU recommended", "research release", True, True],
+    },
+    {
+        "name": "UniTS",
+        "category": "fine_tuned",
+        "description": "A unified task-tokenized time-series model that supports forecasting, imputation, classification, and anomaly detection.",
+        "assumption": "A shared sequence-variable representation transfers across tasks and domains with prompting or adaptation.",
+        "failure": "Task and domain shifts not represented during pretraining require substantial target-specific tuning.",
+        "definition_sources": ["source_000051"], "implementation_sources": ["source_000052"],
+        "metadata": ["mims-harvard/UniTS", "NeurIPS-2024", "task_configured", "task_configured", "zero_few_shot_or_finetuned", False, True, "GPU recommended", "repository license", True, True],
+    },
+    {
+        "name": "Sundial",
+        "category": "probabilistic_tsfm",
+        "description": "A native continuous-value transformer trained with flow matching to generate multiple future paths.",
+        "assumption": "Flow-matching pretraining on TimeBench captures a transferable conditional future distribution.",
+        "failure": "Unseen domains or event-conditioned futures absent from numeric context remain underrepresented.",
+        "definition_sources": ["source_000053"], "implementation_sources": ["source_000054"],
+        "metadata": ["thuml/sundial-base-128m", "2025", "arbitrary_with_model_limit", "generative", "zero_shot_sampling", True, False, "GPU recommended", "research release", True, True],
+    },
+    {
+        "name": "Toto 2.0",
+        "category": "covariate_tsfm",
+        "description": "A multivariate decoder-only probabilistic forecaster scaled for observability and general forecasting data.",
+        "assumption": "Large observability and synthetic pretraining transfers to the target variables and covariates.",
+        "failure": "Targets far from observability dynamics or hardware limits for larger checkpoints reduce usefulness.",
+        "definition_sources": ["source_000055"], "implementation_sources": ["source_000056"],
+        "metadata": ["Datadog/Toto-2.0-313m", "2.0", "variable", "variable", "zero_shot_probabilistic", True, True, "GPU recommended", "Apache-2.0", True, True],
+    },
+)
+
 
 def _jsonl(records: Sequence[Mapping[str, object]]) -> str:
     return "".join(
@@ -779,6 +1073,55 @@ def _extra_statistical_card(spec: Mapping[str, object], index: int) -> MethodCar
     )
 
 
+def _foundation_card(spec: Mapping[str, object], index: int) -> MethodCard:
+    metadata_values = tuple(spec["metadata"])
+    metadata_keys = (
+        "checkpoint_or_api",
+        "release_version",
+        "context_length",
+        "prediction_length",
+        "inference_mode",
+        "probabilistic_output",
+        "covariate_support",
+        "device_requirements",
+        "license",
+        "weights_available",
+        "code_available",
+    )
+    metadata = dict(zip(metadata_keys, metadata_values, strict=True))
+    return MethodCard.from_payload(
+        {
+            "method_uid": f"method_tsfm_{index:04d}",
+            "definition_version": 1,
+            "canonical_name": spec["name"],
+            "aliases": [],
+            "family": "foundation",
+            "category": spec["category"],
+            "description": spec["description"],
+            "assumptions": [spec["assumption"]],
+            "failure_conditions": [spec["failure"]],
+            "applicability": {
+                "minimum_history": 1,
+                "frequencies": ["cross_frequency"],
+                "supports_univariate": True,
+                "supports_covariates": bool(metadata["covariate_support"]),
+                "supports_probabilistic_output": bool(
+                    metadata["probabilistic_output"]
+                ),
+            },
+            "hyperparameters": ["context_length", "prediction_length"],
+            "definition_source_ids": list(spec["definition_sources"]),
+            "implementation_source_ids": list(spec["implementation_sources"]),
+            "implementation_availability": (
+                "available" if metadata["code_available"] else "partial"
+            ),
+            "verification_status": "verified",
+            "lineage": {"operation": "collected", "parent_method_uids": []},
+            "foundation_metadata": metadata,
+        }
+    )
+
+
 def write_catalog_manifests(
     legacy_source: str | Path,
     source_destination: str | Path,
@@ -792,7 +1135,11 @@ def write_catalog_manifests(
         raise ValueError("legacy dictionary must contain a methods list")
     sources = tuple(
         SourceRecord.from_payload(payload)
-        for payload in SOURCE_PAYLOADS + ADDITIONAL_STATISTICAL_SOURCE_PAYLOADS
+        for payload in (
+            SOURCE_PAYLOADS
+            + ADDITIONAL_STATISTICAL_SOURCE_PAYLOADS
+            + FOUNDATION_SOURCE_PAYLOADS
+        )
     )
     legacy_cards = tuple(
         _legacy_card(method, index)
@@ -803,7 +1150,11 @@ def write_catalog_manifests(
         _extra_statistical_card(spec, index)
         for index, spec in enumerate(EXTRA_STATISTICAL_METHOD_SPECS, start=1)
     )
-    methods = legacy_cards + extra_cards
+    foundation_cards = tuple(
+        _foundation_card(spec, index)
+        for index, spec in enumerate(FOUNDATION_METHOD_SPECS, start=1)
+    )
+    methods = legacy_cards + extra_cards + foundation_cards
     source_path = Path(source_destination)
     method_path = Path(method_destination)
     source_path.parent.mkdir(parents=True, exist_ok=True)

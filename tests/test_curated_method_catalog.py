@@ -57,6 +57,25 @@ def test_classical_catalog_covers_every_statistical_taxonomy_cell(
     ]
 
 
+def test_catalog_covers_foundation_modes_with_complete_release_metadata(
+    tmp_path: Path,
+) -> None:
+    sources_path = tmp_path / "sources.jsonl"
+    methods_path = tmp_path / "methods.jsonl"
+    write_catalog_manifests(LEGACY, sources_path, methods_path)
+    methods = load_method_cards(methods_path)
+    foundation = [method for method in methods if method.family == "foundation"]
+
+    assert len(foundation) >= 14
+    assert {method.category for method in foundation} == {
+        "zero_shot",
+        "fine_tuned",
+        "probabilistic_tsfm",
+        "covariate_tsfm",
+    }
+    assert all(len(method.foundation_metadata) == 11 for method in foundation)
+
+
 def test_catalog_excludes_unverified_constructed_seed_variants(tmp_path: Path) -> None:
     sources_path = tmp_path / "sources.jsonl"
     methods_path = tmp_path / "methods.jsonl"

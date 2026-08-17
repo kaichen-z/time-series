@@ -42,24 +42,28 @@ class DuplicateCandidate:
         }
 
 
-def _tokens(card: MethodCard) -> set[str]:
-    values = (card.canonical_name, *card.aliases)
-    tokens = {
-        token
-        for value in values
-        for token in normalize_name(value).split()
-        if token not in _TOKEN_STOPWORDS
-    }
-    return tokens
+def _name_token_sets(card: MethodCard) -> tuple[frozenset[str], ...]:
+    return tuple(
+        frozenset(
+            token
+            for token in normalize_name(value).split()
+            if token not in _TOKEN_STOPWORDS
+        )
+        for value in (card.canonical_name, *card.aliases)
+    )
 
 
 def _shared_source_claim(left: MethodCard, right: MethodCard) -> bool:
     shared_sources = set(left.definition_source_ids) & set(right.definition_source_ids)
     if not shared_sources:
         return False
-    left_tokens = _tokens(left)
-    right_tokens = _tokens(right)
-    return bool(left_tokens & right_tokens)
+    return any(
+        left_tokens
+        and right_tokens
+        and (left_tokens <= right_tokens or right_tokens <= left_tokens)
+        for left_tokens in _name_token_sets(left)
+        for right_tokens in _name_token_sets(right)
+    )
 
 
 def _pair_reasons(left: MethodCard, right: MethodCard) -> tuple[str, ...]:
