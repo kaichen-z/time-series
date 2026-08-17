@@ -1,0 +1,2 @@
+{"source_id":"source_000002","title":"Second source","authors":["B. Author"],"year":2025,"source_type":"paper","url":"https://example.org/second","doi":"","isbn":"","retrieved_at":"2026-08-17","primary":true,"review_status":"verified"}
+{"source_id":"source_000001","title":"First source","authors":["A. Author"],"year":2024,"source_type":"textbook","url":"https://example.org/first","doi":"","isbn":"","retrieved_at":"2026-08-17","primary":true,"review_status":"verified"}
