@@ -9,17 +9,27 @@ from typing import Mapping, Sequence
 
 from common.evolution_core.contracts import EvolutionConfig, MetricSpec
 from common.evolution_core.controller import SelfEvolutionEngine
-from common.evolution_core.persistence import JsonArtifactStore
+from common.llm import (
+    ClaudeCLIClient,
+    ClaudeCLIConfig,
+    CodexCLIClient,
+    CodexCLIConfig,
+    QwenClient,
+)
 from common.metrics import mae, smape
 
 from .adapters.dictionary_curation import DictionaryCurationTask, NumericalTaskItem
+from .codegen import SANDBOX_PROVIDER, LLMMethodImplementer, SandboxMethodRuntime
 from .config import DictionaryCurationConfig
 from .dictionary import MethodRecord, ToolDictionary
+from .experiment import build_experiment
+from .persistence import MethodSourceArtifactStore
 from .providers import RuntimeRegistry
 from .smoke import FixtureMethodImplementer, FixtureMethodRuntime
 
 
-APPROVED_PROVIDERS = ("fake",)
+APPROVED_PROVIDERS = ("fake", "llm")
+LLM_BACKENDS = ("codex", "qwen", "claude")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,16 +40,49 @@ def build_parser() -> argparse.ArgumentParser:
     curate.add_argument("--base-methods", required=True)
     curate.add_argument("--provider", required=True)
     curate.add_argument("--output-dir", required=True)
+    curate.add_argument("--llm-backend", choices=LLM_BACKENDS, default=None)
+    curate.add_argument("--codex-model", default=None)
+    curate.add_argument(
+        "--codex-reasoning-effort",
+        choices=("none", "low", "medium", "high"),
+        default=None,
+    )
+    curate.add_argument("--codex-cache-dir", default=None)
+    curate.add_argument("--codex-timeout", type=int, default=None)
+    curate.add_argument("--claude-model", default=None)
+    curate.add_argument("--claude-cache-dir", default=None)
+    curate.add_argument("--claude-timeout", type=int, default=None)
+    curate.add_argument("--model-id", default=None)
+    curate.add_argument("--device", default=None)
+
+    build = subparsers.add_parser(
+        "build-experiment", help="build a curation experiment config from a frozen split"
+    )
+    build.add_argument("--tasks-file", required=True)
+    build.add_argument("--split-file", required=True)
+    build.add_argument("--output", required=True)
+    build.add_argument("--generations", type=int, default=1)
+    build.add_argument("--children-per-generation", type=int, default=1)
+    build.add_argument("--seed", type=int, default=20260816)
+    build.add_argument("--max-revisions-per-method", type=int, default=1)
+    build.add_argument("--accepted-max-error", type=float, default=50.0)
+    build.add_argument("--specialized-max-error", type=float, default=100.0)
+    build.add_argument("--train-limit", type=int, default=None)
+    build.add_argument("--dev-limit", type=int, default=None)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "build-experiment":
+        return _build_experiment(args)
     if args.provider not in APPROVED_PROVIDERS:
         parser.error(
             f"provider must be an approved provider name: {', '.join(APPROVED_PROVIDERS)}"
         )
+    if args.provider == "fake" and args.llm_backend is not None:
+        parser.error("--llm-backend applies only to --provider llm")
     if args.command != "curate":
         parser.error(f"unsupported command: {args.command}")
 
@@ -50,13 +93,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     train_items, dev_items = _task_items(experiment)
     labels = _labels(experiment)
     output_dir = Path(args.output_dir)
-    store = JsonArtifactStore(output_dir)
+    store = MethodSourceArtifactStore(output_dir)
 
-    implementer, runtimes = _providers(args.provider)
+    implementer, runtimes = _providers(args.provider, args)
     task = DictionaryCurationTask(
         base_dictionary=dictionary,
         config=curation,
-        implementer=implementer,
+        implementer=implementer, # type: ignore
         runtimes=runtimes,
         labels=labels,
         metric=_metric(curation.method_metric),
@@ -84,6 +127,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     sys.stdout.write(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     sys.stdout.write("\n")
+    return 0
+
+
+def _build_experiment(args: argparse.Namespace) -> int:
+    experiment = build_experiment(
+        tasks_file=args.tasks_file,
+        split_file=args.split_file,
+        generations=args.generations,
+        children_per_generation=args.children_per_generation,
+        seed=args.seed,
+        max_revisions_per_method=args.max_revisions_per_method,
+        accepted_max_error=args.accepted_max_error,
+        specialized_max_error=args.specialized_max_error,
+        train_limit=args.train_limit,
+        dev_limit=args.dev_limit,
+    )
+    destination = Path(args.output)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps(experiment, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    summary = {
+        "output": str(destination),
+        "train_tasks": len(experiment["tasks"]["train"]), # type: ignore
+        "dev_tasks": len(experiment["tasks"]["dev"]), # type: ignore
+    }
+    sys.stdout.write(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     return 0
 
 
@@ -184,10 +255,47 @@ def _labels(
     return normalized
 
 
-def _providers(provider: str) -> tuple[FixtureMethodImplementer, RuntimeRegistry]:
-    if provider != "fake":
-        raise ValueError(f"unsupported approved provider {provider!r}")
-    return FixtureMethodImplementer(), RuntimeRegistry({"fake": FixtureMethodRuntime()})
+def _providers(provider: str, args: argparse.Namespace) -> tuple[object, RuntimeRegistry]:
+    if provider == "fake":
+        return FixtureMethodImplementer(), RuntimeRegistry({"fake": FixtureMethodRuntime()})
+    if provider == "llm":
+        implementer = LLMMethodImplementer(_llm_client(args))
+        return implementer, RuntimeRegistry({SANDBOX_PROVIDER: SandboxMethodRuntime()})
+    raise ValueError(f"unsupported approved provider {provider!r}")
+
+
+def _llm_client(args: argparse.Namespace):
+    """Build the requested LLM client, keeping each config's own defaults."""
+    backend = args.llm_backend or "codex"
+    if backend == "codex":
+        return CodexCLIClient(
+            CodexCLIConfig(
+                **_present(
+                    model=args.codex_model,
+                    reasoning_effort=args.codex_reasoning_effort,
+                    timeout_seconds=args.codex_timeout,
+                    cache_dir=args.codex_cache_dir,
+                ) # type: ignore
+            )
+        )
+    if backend == "claude":
+        return ClaudeCLIClient(
+            ClaudeCLIConfig(
+                **_present(
+                    model=args.claude_model,
+                    timeout_seconds=args.claude_timeout,
+                    cache_dir=args.claude_cache_dir,
+                ) # type: ignore
+            )
+        )
+    if backend == "qwen":
+        return QwenClient(**_present(model_id=args.model_id, device=args.device)) # type: ignore
+    raise ValueError(f"unsupported llm backend {backend!r}")
+
+
+def _present(**values: object) -> dict[str, object]:
+    """Drop unset options so each config keeps its declared default."""
+    return {name: value for name, value in values.items() if value is not None}
 
 
 def _metric(name: str):

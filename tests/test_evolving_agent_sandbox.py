@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from evolving_loop.sandbox import UnsafeCodeError, check_code, run_forecast_code
+from common.sandbox import UnsafeCodeError, check_code, run_forecast_code
 
 VALID_CODE = """
 def forecast(history, horizon, frequency):

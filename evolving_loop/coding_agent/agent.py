@@ -14,7 +14,7 @@ from evolving_loop.coding_agent.prompts import (
 
 from evolving_loop.coding_agent.skill_library import Skill, SkillLibrary
 from evolving_loop.data import Task
-from evolving_loop.sandbox import SandboxResult, run_forecast_code
+from common.sandbox import SandboxResult, run_forecast_code
 from evolving_loop.tracing import TraceEvent, emit
 from common.llm import JsonExtractionError, LLMClient, parse_json_object
 
