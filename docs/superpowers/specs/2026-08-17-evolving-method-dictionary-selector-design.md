@@ -151,6 +151,11 @@ version is considered saturated only when:
 Later source refreshes create a new raw-registry version; they never silently change a frozen
 experiment dictionary.
 
+Method count is not a stopping condition and the dataset has no configured upper limit. A release
+may contain 100, 200, 300, or more verified records when the systematic search finds distinct,
+relevant methods. Collection continues past round-number milestones until the coverage and
+saturation rules pass; provenance and deduplication requirements never relax to increase count.
+
 ## Data Contracts
 
 ### Source record

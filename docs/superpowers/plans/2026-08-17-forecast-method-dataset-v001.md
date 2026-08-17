@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build and publish a reproducible, provenance-grounded dataset of at least 100 verified statistical, TSFM, and combined forecasting methods collected from authoritative papers, textbooks, official documentation, model cards, and official repositories.
+**Goal:** Build and publish a reproducible, provenance-grounded dataset containing every distinct verified statistical, TSFM, and combined forecasting method found before systematic source collection reaches the defined coverage and saturation criteria.
 
 **Architecture:** Human- or research-agent-produced source and method manifests are treated as untrusted collection inputs. A deterministic Python pipeline validates provenance, normalizes stable identities, reports possible duplicates, audits taxonomy coverage and saturation, and builds one canonical JSON release. The release is independent of Dr-CiK labels and documents and becomes the immutable seed for later implementation and selector evolution.
 
@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - The collection cutoff for v001 is `2026-08-17`.
-- The verified release must contain at least 100 canonical method records.
+- Method count has no target and no upper limit. Passing 100, 200, or 300 records never stops collection; only coverage and saturation do.
 - Families are exactly `statistical`, `foundation`, and `combined`.
 - Every verified method must have an immutable `method_uid`, at least one authoritative definition source, explicit assumptions, explicit failure conditions, applicability metadata, and implementation-availability metadata.
 - Every scientific definition must be paraphrased; do not copy long copyrighted passages.
@@ -494,8 +494,9 @@ is not publishable; do not write a verified release.
 - [ ] **Step 5: Implement `build-dataset`**
 
 Run loading, duplicate reporting, verification, coverage, saturation, deterministic release
-writing, and SHA-256 sidecar generation. Reject releases with fewer than 100 verified methods,
-unresolved duplicate candidates, empty required taxonomy groups, or failed provenance checks.
+writing, and SHA-256 sidecar generation. Reject releases with unresolved duplicate candidates,
+empty required taxonomy groups, unsatisfied saturation, or failed provenance checks. Never reject
+or truncate a release because its verified method count is above a round-number milestone.
 
 - [ ] **Step 6: Run CLI tests**
 
@@ -644,8 +645,8 @@ python -m numerical_agent build-dataset \
   --sha256-output numerical_agent/datasets/forecast_method_dataset_v001.sha256
 ```
 
-Expected: exit 0, at least 100 verified methods, all required taxonomy groups covered, no
-unresolved duplicates, and a matching SHA-256 sidecar.
+Expected: exit 0, every verified non-duplicate method retained, all required taxonomy groups
+covered, saturation passed, no unresolved duplicates, and a matching SHA-256 sidecar.
 
 - [ ] **Step 9: Rebuild and prove determinism**
 
@@ -700,7 +701,7 @@ the release, and why implementation performance is not part of v001.
 
 Run: `bash scripts/build_method_dataset.sh`
 
-Expected: exit 0 and print `forecast_method_dataset_v001` with at least 100 methods.
+Expected: exit 0 and print `forecast_method_dataset_v001` with its uncapped verified method count.
 
 - [ ] **Step 4: Commit documentation and automation**
 
@@ -757,8 +758,8 @@ python -m numerical_agent verify-methods \
   --output /tmp/forecast_method_collection_audit.json
 ```
 
-Expected: no whitespace errors, checksum passes, verification exits 0, at least 100 verified
-methods, no unresolved duplicate candidates, and no empty required taxonomy groups.
+Expected: no whitespace errors, checksum passes, verification exits 0, all saturated-search
+methods retained, no unresolved duplicate candidates, and no empty required taxonomy groups.
 
 - [ ] **Step 4: Record final commit state**
 
