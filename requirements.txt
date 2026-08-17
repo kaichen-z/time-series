@@ -1,0 +1,35 @@
+# Runtime requirements for running the experiments in this repository.
+#
+# The packages themselves (common/, drcik_agent/, evolving_loop/, numerical_agent/)
+# import only the standard library, which is why pyproject.toml declares
+# `dependencies = []`. Everything below enables a capability rather than an import,
+# so install the sections you actually use.
+#
+# Versions are lower bounds; the versions this repository is verified against are
+# recorded beside each entry.
+
+# --- Code generated inside the sandbox -------------------------------------
+# Nothing in this repository imports these. common/sandbox allows LLM-written
+# forecast() code to import them, and the ARIMA, ETS, and state-space methods in
+# numerical_agent/dictionaries/ cannot run without statsmodels installed.
+numpy>=2.0                  # verified: 2.2.6
+statsmodels>=0.14           # verified: 0.14.6
+
+# --- Local LLM backend (--llm-backend qwen) --------------------------------
+# Imported lazily by common/llm.py:QwenClient; not needed for the codex or
+# claude backends, which shell out to their CLIs instead.
+torch>=2.6                  # verified: 2.12.1+cu126
+transformers>=4.45          # verified: 5.12.1
+
+# --- Dr-CiK loading from Hugging Face --------------------------------------
+# Imported by drcik_agent/data.py. Not needed when reading a local tasks JSONL.
+datasets>=3.0               # verified: 5.0.0
+huggingface_hub>=0.25       # verified: 1.16.1
+
+# --- Time-series foundation model backbones --------------------------------
+# Optional: only for --backbone chronos / --backbone timesfm.
+chronos-forecasting>=2.2.0  # verified: 2.3.1
+timesfm[torch]>=2.0.2       # verified: 2.0.2
+
+# --- Tests -----------------------------------------------------------------
+pytest>=8.0                 # verified: 9.1.1
