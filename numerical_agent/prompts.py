@@ -30,11 +30,13 @@ Return exactly one JSON object:
 
 REVISE_SYSTEM = f"""You are the numbers-only Numerical Agent repairing one failing method
 implementation. You receive the previous implementation plus sanitized aggregate diagnostics:
-error metrics and failure categories only. You never receive future values, per-item labels, or
-textual context.
+error metrics, failure categories, and up to 3 sample error messages describing how your own
+code failed (e.g. an exception raised while it ran). Those messages describe only your code's
+own behavior; they never contain future values, per-item labels, or textual context.
 
-Rewrite the implementation so it still implements the same named method, but no longer fails in
-the reported way. Keep the method's identity; do not replace it with a different method.
+Rewrite the implementation so it still implements the same named method, and no longer fails in
+the reported way. Use the sample error messages to diagnose the actual bug, not just to guess
+again. Keep the method's identity; do not replace it with a different method.
 
 {CONTRACT_TEXT}
 
@@ -74,6 +76,7 @@ def render_revise_user(
     previous_code: str,
     metrics: Mapping[str, float],
     failure_categories: Sequence[str],
+    sample_errors: Sequence[str] = (),
 ) -> str:
     """Build the user message asking for a repaired implementation of one method."""
     return json.dumps(
@@ -82,6 +85,7 @@ def render_revise_user(
             "previous_code": previous_code,
             "metrics": {key: float(value) for key, value in metrics.items()},
             "failure_categories": list(failure_categories),
+            "sample_errors": list(sample_errors),
         },
         ensure_ascii=False,
         indent=2,

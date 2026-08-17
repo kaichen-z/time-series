@@ -228,7 +228,14 @@ class DictionaryMutator:
             categories.append("invalid")
         if float(summary.get("mean_error", 0.0)) > self.config.accepted_max_error:
             categories.append("high_error")
-        return SanitizedMethodFeedback(method_id, metrics, tuple(categories))
+        # A tuple of strings, so it must bypass the float-only metrics filter above.
+        raw_errors = summary.get("sample_errors", ())
+        sample_errors = (
+            tuple(str(item) for item in raw_errors)
+            if isinstance(raw_errors, Sequence) and not isinstance(raw_errors, (str, bytes))
+            else ()
+        )
+        return SanitizedMethodFeedback(method_id, metrics, tuple(categories), sample_errors)
 
 
 class DictionaryExecutor:
@@ -293,7 +300,7 @@ class DictionaryExecutor:
                 record.definition.method_id,
                 item.item_id,
                 "invalid",
-                error=f"runtime error: {type(exc).__name__}",
+                error=str(exc) or type(exc).__name__,
             )
         if len(forecast) != item.horizon or any(
             not math.isfinite(value) for value in forecast
@@ -396,6 +403,7 @@ class DictionaryEvaluator:
             "unsafe_count": sum(result.status == "unsafe" for result in results),
             "invalid_count": sum(result.status == "invalid" for result in results),
             "success_rate": len(errors) / total_count if total_count else 0.0,
+            "sample_errors": self._sample_errors(results),
         }
         if errors:
             summary.update(
@@ -413,6 +421,18 @@ class DictionaryEvaluator:
                 }
             )
         return summary
+
+    @staticmethod
+    def _sample_errors(results: Sequence[MethodExecutionResult]) -> tuple[str, ...]:
+        """Up to 3 distinct failure messages, first-seen order, for the repair prompt.
+
+        Deduplicated with a dict, not a set: set iteration order isn't reproducible
+        across runs since Python randomizes string hashing per process.
+        """
+        distinct = dict.fromkeys(
+            result.error[:200] for result in results if result.error and result.status != "success"
+        )
+        return tuple(distinct)[:3]
 
     @staticmethod
     def _failure_category(summary: Mapping[str, object]) -> str:

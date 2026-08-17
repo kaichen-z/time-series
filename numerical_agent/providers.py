@@ -19,6 +19,7 @@ class SanitizedMethodFeedback:
     method_id: str
     metrics: Mapping[str, float]
     failure_categories: tuple[str, ...] = ()
+    sample_errors: tuple[str, ...] = ()
 
 
 class MethodImplementer(Protocol):
