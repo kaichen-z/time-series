@@ -1,8 +1,60 @@
 # Parameterized Numerical Self-Evolution Harness
 
 This package composes a generic Parent/Child Self-Evolution Core with a dictionary-curation
-adapter. The current implementation builds the framework only. It does not implement ARIMA, ETS,
-Chronos, TimesFM, or any real Statistical, Foundation, or Combined forecasting method.
+adapter. It now ships an auditable forecasting-method dataset, but it still does not implement
+ARIMA, ETS, Chronos, TimesFM, or the other listed forecasting runtimes. Method definitions and
+executable providers remain deliberately separate.
+
+## Forecast Method Dataset v001
+
+The publishable release is
+[`datasets/forecast_method_dataset_v001.json`](datasets/forecast_method_dataset_v001.json). It
+contains **166 canonical methods** grounded in **115 reviewed sources** through the collection
+cutoff of **2026-08-17**. Of these sources, 105 are marked as primary definition sources and the
+remaining 10 are official implementation repositories:
+
+| Family | Methods | Scope |
+|---|---:|---|
+| Statistical | 111 | Classical, machine-learning, neural, multivariate, probabilistic, robust, calibration, reconciliation, and validation-oriented forecasting mechanisms. |
+| Foundation | 31 | Distinct TSFM architectures or materially different releases with checkpoint/API metadata. |
+| Combined | 24 | Ensembles, selectors, residual corrections, and fallbacks with explicit parent-method lineage. |
+
+The dataset has three layers:
+
+1. `collection/catalog_v001.py` is the deterministic, reviewed catalog source.
+2. `datasets/source_registry_v001.jsonl` and `datasets/method_candidates_v001.jsonl` are generated
+   review manifests.
+3. `datasets/forecast_method_dataset_v001.json` is the release artifact produced only after
+   provenance, taxonomy, duplicate-resolution, and scoped-saturation gates pass.
+
+Every method card records assumptions, failure conditions, applicability, hyperparameters,
+source IDs, verification status, and implementation availability. Foundation cards additionally
+record checkpoint/API, release, context and prediction limits, inference mode, uncertainty and
+covariate support, device requirements, license, and weight/code availability. Combined cards
+identify at least two parent method UIDs.
+
+The catalog is broad, not timelessly exhaustive. “Saturated” means that the final three
+independent review batches each added fewer than 2% of the 166-method base under the documented
+canonicalization rule. The evidence is in
+[`datasets/collection_journal_v001.json`](datasets/collection_journal_v001.json), and the resulting
+machine-readable audit is
+[`datasets/collection_audit_v001.json`](datasets/collection_audit_v001.json).
+
+Rebuild and validate the release with one command:
+
+```bash
+scripts/build_method_dataset.sh
+```
+
+The command deterministically regenerates the manifests, runs the publication gates, writes the
+release and SHA-256 sidecar, and executes the collection tests. It does not download models or run
+forecasting experiments.
+
+The Dictionary Curation Adapter consumes the release as the externally supplied base dictionary.
+A collaborator must still provide an approved `MethodImplementer`, one or more `MethodRuntime`
+providers, Train/Dev tasks, trusted labels, and a metric. The single-agent self-harness may then
+implement, test, and propose `keep`, `revise`, `quarantine`, or `discard` decisions; held-out Dev
+performance decides whether a Child dictionary replaces its Parent.
 
 ## Architecture
 
@@ -60,7 +112,7 @@ These specialize the framework for the current task:
 
 Collaborators provide:
 
-- the base-method JSON file;
+- the base-method JSON file (normally `datasets/forecast_method_dataset_v001.json`);
 - a `MethodImplementer` implementation;
 - one or more `MethodRuntime` implementations;
 - Train and Dev inputs and trusted labels;

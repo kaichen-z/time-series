@@ -27,10 +27,11 @@ available at [`docs/USAGE_GUIDE.md`](docs/USAGE_GUIDE.md).
 
 The repository also contains a domain-independent Parent/Child evolution core plus a numerical
 tool-dictionary curation adapter. The framework accepts externally supplied base methods,
-implementers, runtimes, tasks, metrics, and evolution parameters. It does **not** ship concrete
-Statistical, TSFM, or Combined forecasting methods in this phase. See
+implementers, runtimes, tasks, metrics, and evolution parameters. It now ships an auditable
+**166-method / 115-source** definition dataset spanning Statistical, TSFM, and Combined methods;
+these are method cards, not bundled executable forecasting runtimes. See
 [`numerical_agent/README.md`](numerical_agent/README.md) for the component contracts, artifacts,
-and offline fake-provider smoke command.
+release build command, and offline fake-provider smoke command.
 
 This repository contains an auditable, gap-guided agent loop for the
 [Dr-CiK](https://github.com/ServiceNow/Dr-CiK) contextual time-series forecasting

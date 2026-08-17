@@ -83,7 +83,7 @@ def test_catalog_contains_lineage_valid_combined_methods(tmp_path: Path) -> None
     methods = load_method_cards(methods_path)
     combined = [method for method in methods if method.family == "combined"]
 
-    assert len(combined) >= 12
+    assert len(combined) >= 23
     assert {method.category for method in combined} == {
         "ensemble",
         "selector",
@@ -95,6 +95,10 @@ def test_catalog_contains_lineage_valid_combined_methods(tmp_path: Path) -> None
         "serial_dependence_corrected_combination",
         "fformpp_performance_selector",
         "zoocast_model_zoo_selector",
+        "adapts_online_forecaster_weighter",
+        "adapts_multivariate_adapter",
+        "seqfusion_sequential_ptm_fusion",
+        "llm_zero_cost_model_selector",
     } <= {method.canonical_name for method in combined}
     assert verify_registry(load_source_records(sources_path), methods).is_publishable
 
@@ -125,12 +129,13 @@ def test_catalog_has_depth_in_previously_sparse_method_families(
         counts[key] = counts.get(key, 0) + 1
 
     assert counts[("statistical", "change_point")] >= 3
-    assert counts[("statistical", "neural")] >= 16
+    assert counts[("statistical", "calibration")] >= 3
+    assert counts[("statistical", "neural")] >= 23
     assert counts[("statistical", "probabilistic")] >= 3
     assert counts[("statistical", "reconciliation")] >= 8
     assert counts[("statistical", "robust")] >= 3
     assert counts[("statistical", "spectral")] >= 2
-    assert sum(method.family == "foundation" for method in methods) >= 21
+    assert sum(method.family == "foundation" for method in methods) >= 31
     assert {
         "Chronos-2",
         "Chronos-Bolt",
@@ -138,6 +143,16 @@ def test_catalog_has_depth_in_previously_sparse_method_families(
         "Moirai-MoE",
         "FlowState",
         "Xihe",
+        "Kairos",
+        "TimeFound",
+        "Reverso",
+        "Falcon-X",
+        "SEMPO",
+        "TiRex",
+        "TiRex-2",
+        "TabPFN-TS",
+        "PatchTST-FM",
+        "TimesFM 2.5",
     } <= {
         method.canonical_name for method in methods
     }
@@ -152,4 +167,11 @@ def test_catalog_has_depth_in_previously_sparse_method_families(
         "auto_mfles",
         "dynamic_theta",
         "film_legendre_memory",
+        "auto_tbats",
+        "conformal_seasonal_pool",
+        "crossformer",
+        "micn_multiscale_convolution",
+        "nonstationary_transformer",
+        "pyraformer",
+        "lightts_sampling_mlp",
     } <= {method.canonical_name for method in methods}
