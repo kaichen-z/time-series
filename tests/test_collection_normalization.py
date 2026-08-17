@@ -86,6 +86,26 @@ def test_shared_textbook_does_not_flag_distinct_methods_with_one_common_token() 
     assert find_duplicate_candidates((first, second)) == ()
 
 
+def test_forecast_token_inside_name_distinguishes_reconciliation_methods() -> None:
+    methods = load_method_cards(FIXTURE)
+    historical = replace(
+        methods[0],
+        method_uid="method_historical_proportions",
+        canonical_name="top down historical proportions",
+        aliases=(),
+        definition_source_ids=("source_shared",),
+    )
+    forecast = replace(
+        methods[1],
+        method_uid="method_forecast_proportions",
+        canonical_name="top down forecast proportions",
+        aliases=(),
+        definition_source_ids=("source_shared",),
+    )
+
+    assert find_duplicate_candidates((historical, forecast)) == ()
+
+
 def test_duplicate_report_order_is_deterministic() -> None:
     methods = load_method_cards(FIXTURE)
 

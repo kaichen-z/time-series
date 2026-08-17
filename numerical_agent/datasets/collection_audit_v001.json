@@ -9,28 +9,28 @@
       "foundation.covariate_tsfm": 3,
       "foundation.fine_tuned": 4,
       "foundation.probabilistic_tsfm": 3,
-      "foundation.zero_shot": 4,
+      "foundation.zero_shot": 5,
       "statistical.analogue": 2,
       "statistical.arima": 2,
       "statistical.autoregressive": 3,
       "statistical.baseline": 5,
       "statistical.calibration": 2,
-      "statistical.change_point": 1,
+      "statistical.change_point": 3,
       "statistical.count_forecasting": 3,
       "statistical.decomposition": 4,
       "statistical.exponential_smoothing": 5,
       "statistical.intermittent_demand": 5,
       "statistical.kernel": 3,
       "statistical.local_level": 1,
-      "statistical.neural": 5,
+      "statistical.neural": 17,
       "statistical.outlier_handling": 2,
-      "statistical.probabilistic": 1,
-      "statistical.reconciliation": 1,
+      "statistical.probabilistic": 3,
+      "statistical.reconciliation": 9,
       "statistical.regime_switching": 3,
       "statistical.regression": 2,
-      "statistical.robust": 1,
+      "statistical.robust": 3,
       "statistical.seasonal": 4,
-      "statistical.spectral": 1,
+      "statistical.spectral": 2,
       "statistical.state_space": 2,
       "statistical.tree": 3,
       "statistical.trend": 4
@@ -38,33 +38,42 @@
     "empty_cells": [],
     "family_counts": {
       "combined": 17,
-      "foundation": 14,
-      "statistical": 65
+      "foundation": 15,
+      "statistical": 92
     },
     "implementation_counts": {
-      "available": 21,
+      "available": 22,
       "partial": 1,
-      "unknown": 74
+      "unknown": 101
     },
     "source_type_counts": {
       "model_card": 2,
       "official_docs": 4,
       "official_repo": 10,
-      "paper": 41,
+      "paper": 60,
       "textbook": 3
     },
-    "total_method_count": 96,
+    "total_method_count": 124,
     "unknown_cells": [],
     "verification_counts": {
-      "verified": 96
+      "verified": 124
     }
   },
-  "duplicate_candidates": [],
+  "duplicate_candidates": [
+    {
+      "left_method_uid": "method_seed_0022",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0030"
+    }
+  ],
   "verification": {
     "is_publishable": true,
     "issue_codes": [],
     "issues": [],
-    "method_count": 96,
-    "source_count": 60
+    "method_count": 124,
+    "source_count": 79
   }
 }

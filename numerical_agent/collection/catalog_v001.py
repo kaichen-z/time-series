@@ -601,6 +601,124 @@ COMBINED_SOURCE_PAYLOADS: tuple[Mapping[str, object], ...] = (
 )
 
 
+DEPTH_EXPANSION_SOURCE_PAYLOADS: tuple[Mapping[str, object], ...] = (
+    {
+        "source_id": "source_000061", "title": "Bayesian Online Changepoint Detection",
+        "authors": ["Ryan Prescott Adams", "David J. C. MacKay"], "year": 2007,
+        "source_type": "paper", "url": "https://arxiv.org/abs/0710.3742", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000062", "title": "Optimal detection of changepoints with a linear computational cost",
+        "authors": ["Rebecca Killick", "Paul Fearnhead", "Idris A. Eckley"], "year": 2012,
+        "source_type": "paper", "url": "https://arxiv.org/abs/1101.1438", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000063", "title": "Forecast reconciliation: A review",
+        "authors": ["George Athanasopoulos", "Rob J. Hyndman", "Nikolaos Kourentzes", "Anastasios Panagiotelis"], "year": 2024,
+        "source_type": "paper", "url": "https://robjhyndman.com/publications/frreview.html", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000064", "title": "Forecasting with temporal hierarchies",
+        "authors": ["George Athanasopoulos", "Rob J. Hyndman", "Nikolaos Kourentzes", "Fotios Petropoulos"], "year": 2017,
+        "source_type": "paper", "url": "https://robjhyndman.com/publications/temporal-hierarchies/", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000065", "title": "Optimal forecast reconciliation for hierarchical and grouped time series through trace minimization",
+        "authors": ["Shanika L. Wickramasuriya", "George Athanasopoulos", "Rob J. Hyndman"], "year": 2019,
+        "source_type": "paper", "url": "https://robjhyndman.com/publications/mint/", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000066", "title": "Are Transformers Effective for Time Series Forecasting?",
+        "authors": ["Ailing Zeng", "Muxi Chen", "Lei Zhang", "Qiang Xu"], "year": 2022,
+        "source_type": "paper", "url": "https://arxiv.org/abs/2205.13504", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000067", "title": "A Time Series is Worth 64 Words: Long-term Forecasting with Transformers",
+        "authors": ["Yuqi Nie", "Nam H. Nguyen", "Phanwadee Sinthong", "Jayant Kalagnanam"], "year": 2022,
+        "source_type": "paper", "url": "https://arxiv.org/abs/2211.14730", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000068", "title": "Autoformer: Decomposition Transformers with Auto-Correlation for Long-Term Series Forecasting",
+        "authors": ["Haixu Wu", "Jiehui Xu", "Jianmin Wang", "Mingsheng Long"], "year": 2021,
+        "source_type": "paper", "url": "https://arxiv.org/abs/2106.13008", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000069", "title": "FEDformer: Frequency Enhanced Decomposed Transformer for Long-term Series Forecasting",
+        "authors": ["Tian Zhou", "Ziqing Ma", "Qingsong Wen", "Xue Wang", "Liang Sun", "Rong Jin"], "year": 2022,
+        "source_type": "paper", "url": "https://arxiv.org/abs/2201.12740", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000070", "title": "iTransformer: Inverted Transformers Are Effective for Time Series Forecasting",
+        "authors": ["Yong Liu", "Tengge Hu", "Haoran Zhang", "Haixu Wu", "Shiyu Wang", "Lintao Ma", "Mingsheng Long"], "year": 2023,
+        "source_type": "paper", "url": "https://arxiv.org/abs/2310.06625", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000071", "title": "TimesNet: Temporal 2D-Variation Modeling for General Time Series Analysis",
+        "authors": ["Haixu Wu", "Tengge Hu", "Yong Liu", "Hang Zhou", "Jianmin Wang", "Mingsheng Long"], "year": 2022,
+        "source_type": "paper", "url": "https://arxiv.org/abs/2210.02186", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000072", "title": "TimeMixer: Decomposable Multiscale Mixing for Time Series Forecasting",
+        "authors": ["Shiyu Wang", "Haixu Wu", "Xiaoming Shi", "Tengge Hu", "Huakun Luo", "Lintao Ma", "James Y. Zhang", "Jun Zhou"], "year": 2024,
+        "source_type": "paper", "url": "https://arxiv.org/abs/2405.14616", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000073", "title": "Informer: Beyond Efficient Transformer for Long Sequence Time-Series Forecasting",
+        "authors": ["Haoyi Zhou", "Shanghang Zhang", "Jieqi Peng", "Shuai Zhang", "Jianxin Li", "Hui Xiong", "Wancai Zhang"], "year": 2020,
+        "source_type": "paper", "url": "https://arxiv.org/abs/2012.07436", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000074", "title": "TSMixer: An All-MLP Architecture for Time Series Forecasting",
+        "authors": ["Si-An Chen", "Chun-Liang Li", "Nate Yoder", "Sercan O. Arik", "Tomas Pfister"], "year": 2023,
+        "source_type": "paper", "url": "https://arxiv.org/abs/2303.06053", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000075", "title": "Long-term Forecasting with TiDE: Time-series Dense Encoder",
+        "authors": ["Abhimanyu Das", "Weihao Kong", "Andrew Leach", "Shaan Mathur", "Rajat Sen", "Rose Yu"], "year": 2023,
+        "source_type": "paper", "url": "https://arxiv.org/abs/2304.08424", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000076", "title": "SCINet: Time Series Modeling and Forecasting with Sample Convolution and Interaction",
+        "authors": ["Minhao Liu", "Ailing Zeng", "Muxi Chen", "Zhijian Xu", "Qiuxia Lai", "Lingna Ma", "Qiang Xu"], "year": 2021,
+        "source_type": "paper", "url": "https://arxiv.org/abs/2106.09305", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000077", "title": "SAMformer: Unlocking the Potential of Transformers in Time Series Forecasting with Sharpness-Aware Minimization and Channel-Wise Attention",
+        "authors": ["Romain Ilbert", "Ambroise Odonnat", "Vasilii Feofanov", "Aladin Virmaux", "Giuseppe Paolo", "Themis Palpanas", "Ievgen Redko"], "year": 2024,
+        "source_type": "paper", "url": "https://arxiv.org/abs/2402.10198", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000078", "title": "Timer-S1: A Billion-Scale Time Series Foundation Model with Serial Scaling",
+        "authors": ["Yong Liu", "Xingjian Su", "Shiyu Wang", "Haoran Zhang", "Haixuan Liu", "Yuxuan Wang", "Zhou Ye", "Yang Xiang", "Jianmin Wang", "Mingsheng Long"], "year": 2026,
+        "source_type": "paper", "url": "https://arxiv.org/abs/2603.04791", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000079", "title": "Regression Quantiles",
+        "authors": ["Roger Koenker", "Gilbert Bassett Jr."], "year": 1978,
+        "source_type": "paper", "url": "https://doi.org/10.2307/1913643", "doi": "10.2307/1913643", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+)
+
+
 EXCLUDED_LEGACY_IDS = {
     "fft_dominant_frequency_extrapolation",
     "wavelet_trend_detail_forecast",
@@ -890,6 +1008,199 @@ EXTRA_STATISTICAL_METHOD_SPECS: tuple[Mapping[str, object], ...] = (
     },
 )
 
+
+DEPTH_EXPANSION_STATISTICAL_METHOD_SPECS: tuple[Mapping[str, object], ...] = (
+    {
+        "name": "bayesian_online_changepoint_forecast", "category": "change_point",
+        "description": "Maintain a posterior over the current run length and forecast from the regime implied by that posterior.",
+        "assumption": "Abrupt changes reset locally stable predictive parameters with a meaningful hazard prior.",
+        "failure": "Gradual drift or a misspecified hazard spreads posterior mass across misleading run lengths.",
+        "sources": ["source_000061"], "hyperparameters": ["hazard_rate", "predictive_model"], "probabilistic": True,
+    },
+    {
+        "name": "pelt_segment_then_forecast", "category": "change_point",
+        "description": "Use PELT to locate an optimal penalized segmentation and fit the forecasting model only to the latest regime.",
+        "assumption": "The most recent detected segment is long enough and more relevant than older regimes.",
+        "failure": "Penalty errors create a tiny final segment or retain obsolete observations after a missed break.",
+        "sources": ["source_000062"], "hyperparameters": ["cost_function", "penalty", "minimum_segment_length"],
+    },
+    {
+        "name": "robust_stl_ets", "category": "robust",
+        "description": "Apply robust STL weights, forecast the seasonally adjusted component with ETS, and restore seasonality.",
+        "assumption": "A small fraction of observations are contaminated while trend and seasonality remain locally smooth.",
+        "failure": "Persistent level shifts are downweighted as outliers instead of becoming the new forecast regime.",
+        "sources": ["source_000001", "source_000010"], "hyperparameters": ["stl_window", "robust_iterations", "ets_model"],
+    },
+    {
+        "name": "median_seasonal_profile_forecast", "category": "robust",
+        "description": "Estimate each seasonal position by a median across cycles and extrapolate the robust profile around a recent median level.",
+        "assumption": "Seasonal phase is stable and fewer than half of comparable cycles are contaminated.",
+        "failure": "Changing seasonal amplitude or phase makes the historical median profile obsolete.",
+        "sources": ["source_000001"], "hyperparameters": ["season_length", "cycles", "level_window"],
+    },
+    {
+        "name": "state_space_trigonometric_harmonics", "category": "spectral",
+        "description": "Represent periodic behavior with stochastic trigonometric state pairs whose amplitudes evolve through a state-space model.",
+        "assumption": "A small set of harmonic frequencies explains recurring behavior while amplitudes change gradually.",
+        "failure": "Irregular event timing or rapidly changing frequencies cannot be tracked by fixed harmonic states.",
+        "sources": ["source_000003", "source_000025"], "hyperparameters": ["periods", "harmonics", "state_variance"], "probabilistic": True,
+    },
+    {
+        "name": "quantile_regression_forecast", "category": "probabilistic",
+        "description": "Fit separate conditional quantile regressions over lagged, calendar, and optional exogenous predictors.",
+        "assumption": "Conditional quantiles are stable functions of the supplied predictors.",
+        "failure": "Sparse tail observations and independently fitted levels can produce unstable or crossing quantiles.",
+        "sources": ["source_000079"], "hyperparameters": ["quantile_levels", "lag_features", "regularization"], "covariates": True, "probabilistic": True,
+    },
+    {
+        "name": "forecast_residual_bootstrap", "category": "probabilistic",
+        "description": "Simulate future paths by adding resampled historical forecast residuals to recursive point forecasts.",
+        "assumption": "Residual blocks approximate the dependence and scale of future forecast errors.",
+        "failure": "Heteroscedasticity or regime change makes historical residual draws miscalibrated.",
+        "sources": ["source_000001"], "hyperparameters": ["bootstrap_paths", "block_length", "residual_window"], "probabilistic": True,
+    },
+    {
+        "name": "bottom_up_reconciliation", "category": "reconciliation",
+        "description": "Forecast the bottom-level series and aggregate them through the hierarchy summing matrix.",
+        "assumption": "Bottom-level forecasts are reliable enough to determine every aggregate.",
+        "failure": "Noisy disaggregated series propagate high variance into all upper levels.",
+        "sources": ["source_000063"], "hyperparameters": ["bottom_level_models"],
+    },
+    {
+        "name": "top_down_historical_proportions", "category": "reconciliation",
+        "description": "Forecast the total and disaggregate it using proportions estimated from historical observations.",
+        "assumption": "Historical component shares persist through the forecast horizon.",
+        "failure": "Structural share shifts allocate an accurate total to the wrong bottom series.",
+        "sources": ["source_000063"], "hyperparameters": ["proportion_window", "averaging_rule"],
+    },
+    {
+        "name": "top_down_forecast_proportions", "category": "reconciliation",
+        "description": "Disaggregate an aggregate forecast using proportions derived from independently generated base forecasts.",
+        "assumption": "Relative base forecasts contain useful allocation information even when they are incoherent.",
+        "failure": "Biased or near-zero component base forecasts create unstable proportions.",
+        "sources": ["source_000063"], "hyperparameters": ["proportion_rule", "zero_guard"],
+    },
+    {
+        "name": "middle_out_reconciliation", "category": "reconciliation",
+        "description": "Forecast a selected middle level, aggregate upward, and disaggregate downward with estimated proportions.",
+        "assumption": "The chosen middle level balances signal strength and allocation stability.",
+        "failure": "A poor middle-level choice inherits both noisy forecasts and unstable disaggregation.",
+        "sources": ["source_000063"], "hyperparameters": ["middle_level", "proportion_rule"],
+    },
+    {
+        "name": "ols_projection_reconciliation", "category": "reconciliation",
+        "description": "Project incoherent base forecasts onto the coherent subspace using ordinary least squares.",
+        "assumption": "Base forecast errors have comparable, uncorrelated variance after scaling.",
+        "failure": "Strongly unequal or correlated errors make the unweighted projection inefficient.",
+        "sources": ["source_000063"], "hyperparameters": ["scaling"],
+    },
+    {
+        "name": "wls_structural_reconciliation", "category": "reconciliation",
+        "description": "Reconcile base forecasts with diagonal weights derived from hierarchy structure or forecast-error variances.",
+        "assumption": "Diagonal weights capture the dominant reliability differences across nodes.",
+        "failure": "Ignoring cross-series error covariance loses important offsetting information.",
+        "sources": ["source_000063"], "hyperparameters": ["weight_estimator"],
+    },
+    {
+        "name": "mint_shrinkage_reconciliation", "category": "reconciliation",
+        "description": "Use a shrinkage estimate of the full base-error covariance in minimum-trace forecast reconciliation.",
+        "assumption": "Historical base forecast errors estimate future cross-series dependence after regularization.",
+        "failure": "Few origins or changing dependence make even the shrunk covariance misleading.",
+        "sources": ["source_000065"], "hyperparameters": ["covariance_shrinkage", "error_origins"],
+    },
+    {
+        "name": "temporal_hierarchy_reconciliation", "category": "reconciliation",
+        "description": "Forecast multiple non-overlapping temporal aggregation levels and reconcile them to one coherent path.",
+        "assumption": "Different temporal scales offer complementary information and share stable aggregation constraints.",
+        "failure": "Misaligned calendars or scale-specific structural breaks invalidate the temporal hierarchy.",
+        "sources": ["source_000064"], "hyperparameters": ["aggregation_levels", "reconciliation_matrix"],
+    },
+    {
+        "name": "ltsf_dlinear", "category": "neural",
+        "description": "Decompose the input into trend and remainder and map each component directly to the forecast with linear layers.",
+        "assumption": "A fixed linear projection of decomposed history captures the target horizon.",
+        "failure": "Nonlinear conditional dynamics or new regimes cannot be represented by the fixed projection.",
+        "sources": ["source_000066"], "hyperparameters": ["lookback", "moving_average_window", "individual_channels"],
+    },
+    {
+        "name": "informer", "category": "neural",
+        "description": "Use ProbSparse attention, attention distillation, and a one-shot generative decoder for long-sequence forecasting.",
+        "assumption": "A small set of dominant attention interactions captures long-range dependencies.",
+        "failure": "Diffuse dependencies or limited training data make sparse attention discard useful signals.",
+        "sources": ["source_000073"], "hyperparameters": ["lookback", "attention_factor", "encoder_layers"], "covariates": True,
+    },
+    {
+        "name": "autoformer", "category": "neural",
+        "description": "Embed progressive decomposition and sub-series auto-correlation blocks inside a Transformer architecture.",
+        "assumption": "Periodic sub-series dependencies and decomposable trend-seasonal structure persist.",
+        "failure": "Event-driven or aperiodic dynamics undermine auto-correlation aggregation.",
+        "sources": ["source_000068"], "hyperparameters": ["lookback", "moving_average_window", "attention_factor"], "covariates": True,
+    },
+    {
+        "name": "fedformer", "category": "neural",
+        "description": "Combine seasonal-trend decomposition with sparse Fourier or wavelet-domain Transformer operations.",
+        "assumption": "The target has a compact frequency-domain representation transferable across windows.",
+        "failure": "Sharp transient events spread energy across frequencies and are poorly reconstructed from sparse modes.",
+        "sources": ["source_000069"], "hyperparameters": ["lookback", "frequency_modes", "transform"], "covariates": True,
+    },
+    {
+        "name": "patchtst", "category": "neural",
+        "description": "Tokenize each variable into temporal patches and apply a channel-independent Transformer across patches.",
+        "assumption": "Local patch structure transfers and channel independence does not discard essential interactions.",
+        "failure": "Strong cross-variable causal structure or badly chosen patch sizes reduces accuracy.",
+        "sources": ["source_000067"], "hyperparameters": ["lookback", "patch_length", "stride"],
+    },
+    {
+        "name": "itransformer", "category": "neural",
+        "description": "Invert standard tokenization so complete variable histories become tokens and attention models cross-variate relations.",
+        "assumption": "Cross-variable relationships are stable and full-history variable embeddings preserve predictive temporal information.",
+        "failure": "Very many variables or unstable cross-series relations make variate attention expensive or misleading.",
+        "sources": ["source_000070"], "hyperparameters": ["lookback", "model_dimension", "attention_heads"], "covariates": True,
+    },
+    {
+        "name": "timesnet", "category": "neural",
+        "description": "Reshape one-dimensional histories into multiple period-aligned two-dimensional tensors and model them with inception blocks.",
+        "assumption": "A small number of discoverable periods organizes intra-period and inter-period variation.",
+        "failure": "Weak or drifting periodicity yields unstable two-dimensional reshaping.",
+        "sources": ["source_000071"], "hyperparameters": ["top_periods", "inception_kernels", "blocks"],
+    },
+    {
+        "name": "tsmixer", "category": "neural",
+        "description": "Stack MLP blocks that alternately mix information across time and feature dimensions.",
+        "assumption": "Time and feature mixing through dense projections captures the relevant multivariate dynamics.",
+        "failure": "Long irregular dependencies or small training sets make dense mixers overfit.",
+        "sources": ["source_000074"], "hyperparameters": ["lookback", "mixer_blocks", "hidden_dimension"], "covariates": True,
+    },
+    {
+        "name": "tide", "category": "neural",
+        "description": "Encode history and covariates with residual MLP blocks and decode the full long-horizon forecast directly.",
+        "assumption": "Dense nonlinear feature maps and known covariates are sufficient without explicit attention.",
+        "failure": "Unobserved long-range dependencies or unreliable future covariates produce systematic errors.",
+        "sources": ["source_000075"], "hyperparameters": ["lookback", "hidden_dimension", "residual_blocks"], "covariates": True,
+    },
+    {
+        "name": "scinet", "category": "neural",
+        "description": "Recursively downsample the sequence, convolve each subsequence, and exchange information across resolutions.",
+        "assumption": "Downsampled subsequences preserve complementary temporal relations at multiple resolutions.",
+        "failure": "Aliasing or irregular sampling breaks the interleaved multi-resolution representation.",
+        "sources": ["source_000076"], "hyperparameters": ["levels", "kernel_size", "stacks"],
+    },
+    {
+        "name": "timemixer", "category": "neural",
+        "description": "Decompose multi-scale histories, mix seasonal and trend information across scales, and combine scale-specific predictors.",
+        "assumption": "Fine and coarse sampling scales contain complementary stable patterns.",
+        "failure": "Scale construction smears sharp events or aliases irregular cycles.",
+        "sources": ["source_000072"], "hyperparameters": ["downsampling_layers", "decomposition", "predictor_count"],
+    },
+    {
+        "name": "samformer", "category": "neural",
+        "description": "Train a shallow channel-attention Transformer with sharpness-aware minimization for multivariate forecasting.",
+        "assumption": "Flat-minimum optimization improves generalization of a compact cross-channel attention model.",
+        "failure": "Optimization cost or unstable channel relations remove the expected generalization benefit.",
+        "sources": ["source_000077"], "hyperparameters": ["lookback", "attention_dimension", "sam_radius"], "covariates": True,
+    },
+)
+
 FOUNDATION_METHOD_SPECS: tuple[Mapping[str, object], ...] = (
     {
         "name": "TimesFM 1.0",
@@ -1016,6 +1327,20 @@ FOUNDATION_METHOD_SPECS: tuple[Mapping[str, object], ...] = (
         "failure": "Targets far from observability dynamics or hardware limits for larger checkpoints reduce usefulness.",
         "definition_sources": ["source_000055"], "implementation_sources": ["source_000056"],
         "metadata": ["Datadog/Toto-2.0-313m", "2.0", "variable", "variable", "zero_shot_probabilistic", True, True, "GPU recommended", "Apache-2.0", True, True],
+    },
+)
+
+
+DEPTH_EXPANSION_FOUNDATION_METHOD_SPECS: tuple[Mapping[str, object], ...] = (
+    {
+        "name": "Timer-S1",
+        "category": "zero_shot",
+        "description": "An 8.3B-parameter sparse mixture-of-experts foundation model trained for serial-token time-series prediction with an 11.5K context.",
+        "assumption": "Serial scaling over architecture, data, and training transfers to the target series and horizon.",
+        "failure": "Numeric history alone cannot resolve unseen event-driven futures or unsupported target semantics.",
+        "definition_sources": ["source_000078"],
+        "implementation_sources": ["source_000043"],
+        "metadata": ["thuml/Timer-S1", "2026-v3", 11520, "serial_generation", "zero_shot", True, False, "GPU recommended", "research release", True, True],
     },
 )
 
@@ -1363,6 +1688,7 @@ def write_catalog_manifests(
             + ADDITIONAL_STATISTICAL_SOURCE_PAYLOADS
             + FOUNDATION_SOURCE_PAYLOADS
             + COMBINED_SOURCE_PAYLOADS
+            + DEPTH_EXPANSION_SOURCE_PAYLOADS
         )
     )
     legacy_cards = tuple(
@@ -1374,15 +1700,36 @@ def write_catalog_manifests(
         _extra_statistical_card(spec, index)
         for index, spec in enumerate(EXTRA_STATISTICAL_METHOD_SPECS, start=1)
     )
+    expanded_statistical_cards = tuple(
+        _extra_statistical_card(spec, index)
+        for index, spec in enumerate(
+            DEPTH_EXPANSION_STATISTICAL_METHOD_SPECS,
+            start=len(EXTRA_STATISTICAL_METHOD_SPECS) + 1,
+        )
+    )
     foundation_cards = tuple(
         _foundation_card(spec, index)
         for index, spec in enumerate(FOUNDATION_METHOD_SPECS, start=1)
+    )
+    expanded_foundation_cards = tuple(
+        _foundation_card(spec, index)
+        for index, spec in enumerate(
+            DEPTH_EXPANSION_FOUNDATION_METHOD_SPECS,
+            start=len(FOUNDATION_METHOD_SPECS) + 1,
+        )
     )
     combined_cards = tuple(
         _combined_card(spec, index)
         for index, spec in enumerate(COMBINED_METHOD_SPECS, start=1)
     )
-    methods = legacy_cards + extra_cards + foundation_cards + combined_cards
+    methods = (
+        legacy_cards
+        + extra_cards
+        + expanded_statistical_cards
+        + foundation_cards
+        + expanded_foundation_cards
+        + combined_cards
+    )
     source_path = Path(source_destination)
     method_path = Path(method_destination)
     source_path.parent.mkdir(parents=True, exist_ok=True)

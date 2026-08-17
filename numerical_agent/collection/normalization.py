@@ -10,7 +10,7 @@ from .contracts import MethodCard
 
 
 _APOSTROPHES = {"'", "’", "ʼ", "＇"}
-_TOKEN_STOPWORDS = {"forecast", "forecasting", "method", "model"}
+_TRAILING_GENERIC_TOKENS = {"forecast", "forecasting", "method", "model"}
 
 
 def normalize_name(name: str) -> str:
@@ -43,14 +43,13 @@ class DuplicateCandidate:
 
 
 def _name_token_sets(card: MethodCard) -> tuple[frozenset[str], ...]:
-    return tuple(
-        frozenset(
-            token
-            for token in normalize_name(value).split()
-            if token not in _TOKEN_STOPWORDS
-        )
-        for value in (card.canonical_name, *card.aliases)
-    )
+    token_sets = []
+    for value in (card.canonical_name, *card.aliases):
+        tokens = normalize_name(value).split()
+        if tokens and tokens[-1] in _TRAILING_GENERIC_TOKENS:
+            tokens = tokens[:-1]
+        token_sets.append(frozenset(tokens))
+    return tuple(token_sets)
 
 
 def _shared_source_claim(left: MethodCard, right: MethodCard) -> bool:

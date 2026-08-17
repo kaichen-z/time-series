@@ -104,3 +104,25 @@ def test_catalog_excludes_unverified_constructed_seed_variants(tmp_path: Path) -
     assert "fft_dominant_frequency_extrapolation" not in names
     assert "wavelet_trend_detail_forecast" not in names
     assert "empirical_quantile_persistence" not in names
+
+
+def test_catalog_has_depth_in_previously_sparse_method_families(
+    tmp_path: Path,
+) -> None:
+    sources_path = tmp_path / "sources.jsonl"
+    methods_path = tmp_path / "methods.jsonl"
+    write_catalog_manifests(LEGACY, sources_path, methods_path)
+    methods = load_method_cards(methods_path)
+
+    counts: dict[tuple[str, str], int] = {}
+    for method in methods:
+        key = (method.family, method.category)
+        counts[key] = counts.get(key, 0) + 1
+
+    assert counts[("statistical", "change_point")] >= 3
+    assert counts[("statistical", "neural")] >= 16
+    assert counts[("statistical", "probabilistic")] >= 3
+    assert counts[("statistical", "reconciliation")] >= 8
+    assert counts[("statistical", "robust")] >= 3
+    assert counts[("statistical", "spectral")] >= 2
+    assert sum(method.family == "foundation" for method in methods) >= 15
