@@ -464,6 +464,7 @@ Collection writes:
 
 - `source_registry.jsonl`;
 - `raw_method_registry.json`;
+- `collection_journal.json` containing reviewed search batches and duplicate resolutions;
 - `method_dictionary_verified_vNNN.json`;
 - `duplicate_and_rejection_report.json`; and
 - `collection_coverage_report.md`.

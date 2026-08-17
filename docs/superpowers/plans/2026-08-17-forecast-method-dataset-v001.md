@@ -38,6 +38,7 @@ numerical_agent/
   datasets/
     source_registry_v001.jsonl
     method_candidates_v001.jsonl
+    collection_journal_v001.json
     forecast_method_dataset_v001.json
     forecast_method_dataset_v001.sha256
     collection_queries_v001.json
@@ -497,6 +498,9 @@ Run loading, duplicate reporting, verification, coverage, saturation, determinis
 writing, and SHA-256 sidecar generation. Reject releases with unresolved duplicate candidates,
 empty required taxonomy groups, unsatisfied saturation, or failed provenance checks. Never reject
 or truncate a release because its verified method count is above a round-number milestone.
+`build-dataset` requires `--collection-journal`; this immutable input contains collection-batch
+counts and manual duplicate resolutions. `--audit-output` is generated and is never reused as an
+input.
 
 - [ ] **Step 6: Run CLI tests**
 
@@ -570,6 +574,7 @@ git commit -m "data(dataset): migrate statistical seed cards"
 **Files:**
 - Modify: `numerical_agent/datasets/source_registry_v001.jsonl`
 - Modify: `numerical_agent/datasets/method_candidates_v001.jsonl`
+- Create: `numerical_agent/datasets/collection_journal_v001.json`
 - Create: `numerical_agent/datasets/collection_audit_v001.json`
 - Create: `numerical_agent/datasets/forecast_method_dataset_v001.json`
 - Create: `numerical_agent/datasets/forecast_method_dataset_v001.sha256`
@@ -621,15 +626,15 @@ an authoritative source defining the composition. Run verification after each ba
 - [ ] **Step 6: Resolve duplicate candidates manually and record decisions**
 
 For every duplicate-candidate pair, set one of `same_concept`, `distinct_wrapper`,
-`distinct_checkpoint_variant`, or `not_duplicate` in `collection_audit_v001.json`. Verified output
+`distinct_checkpoint_variant`, or `not_duplicate` in `collection_journal_v001.json`. Verified output
 must contain no unresolved pair.
 
 - [ ] **Step 7: Run three saturation batches**
 
 Repeat the lowest-coverage query cells with different authoritative source tiers. Record each
 batch's reviewed-source count, candidate count, new canonical-method count, duplicate count, and
-rejected count. Stop only after three consecutive batches each add fewer than two percent new
-canonical methods and no required taxonomy group is empty.
+rejected count in `collection_journal_v001.json`. Stop only after three consecutive batches each
+add fewer than two percent new canonical methods and no required taxonomy group is empty.
 
 - [ ] **Step 8: Build the release**
 
@@ -640,6 +645,7 @@ python -m numerical_agent build-dataset \
   --sources numerical_agent/datasets/source_registry_v001.jsonl \
   --methods numerical_agent/datasets/method_candidates_v001.jsonl \
   --queries numerical_agent/datasets/collection_queries_v001.json \
+  --collection-journal numerical_agent/datasets/collection_journal_v001.json \
   --output numerical_agent/datasets/forecast_method_dataset_v001.json \
   --audit-output numerical_agent/datasets/collection_audit_v001.json \
   --sha256-output numerical_agent/datasets/forecast_method_dataset_v001.sha256
@@ -658,6 +664,7 @@ python -m numerical_agent build-dataset \
   --sources numerical_agent/datasets/source_registry_v001.jsonl \
   --methods numerical_agent/datasets/method_candidates_v001.jsonl \
   --queries numerical_agent/datasets/collection_queries_v001.json \
+  --collection-journal numerical_agent/datasets/collection_journal_v001.json \
   --output "$dataset_verify_dir/forecast_method_dataset_v001.json" \
   --audit-output "$dataset_verify_dir/collection_audit_v001.json" \
   --sha256-output "$dataset_verify_dir/forecast_method_dataset_v001.sha256"
