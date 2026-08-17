@@ -728,6 +728,12 @@ DEPTH_EXPANSION_SOURCE_PAYLOADS: tuple[Mapping[str, object], ...] = (
         "year": 2025, "source_type": "paper", "url": "https://arxiv.org/abs/2511.11698", "doi": "", "isbn": "",
         "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
     },
+    {
+        "source_id": "source_000082", "title": "Chronos-Bolt Base model card",
+        "authors": ["Amazon Science"], "year": 2024, "source_type": "model_card",
+        "url": "https://huggingface.co/amazon/chronos-bolt-base", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
 )
 
 
@@ -1211,6 +1217,83 @@ DEPTH_EXPANSION_STATISTICAL_METHOD_SPECS: tuple[Mapping[str, object], ...] = (
         "failure": "Optimization cost or unstable channel relations remove the expected generalization benefit.",
         "sources": ["source_000077"], "hyperparameters": ["lookback", "attention_dimension", "sam_radius"], "covariates": True,
     },
+    {
+        "name": "auto_ces", "category": "exponential_smoothing",
+        "description": "Automatically select and fit a complex exponential smoothing model using information-criterion search.",
+        "assumption": "Complex-valued smoothing states capture stable oscillatory level and trend dynamics.",
+        "failure": "Irregular shocks or weak oscillation make the selected complex state unstable or unnecessary.",
+        "sources": ["source_000002"], "hyperparameters": ["model_search", "information_criterion"], "probabilistic": True,
+    },
+    {
+        "name": "auto_mfles", "category": "seasonal",
+        "description": "Automatically combine multiple seasonalities, trend, and exogenous effects through MFLES boosting components.",
+        "assumption": "Additive boosted components capture stable trend and multiple seasonal structures.",
+        "failure": "Abrupt regimes or poorly specified seasonal periods cause component leakage and overfit.",
+        "sources": ["source_000002"], "hyperparameters": ["seasonal_periods", "trend_penalty", "smoothing"], "covariates": True, "probabilistic": True,
+    },
+    {
+        "name": "dynamic_theta", "category": "trend",
+        "description": "Allow the Theta model's decomposition and smoothing behavior to adapt dynamically rather than using fixed theta lines.",
+        "assumption": "Local changes in level and curvature can be tracked by dynamically updated Theta components.",
+        "failure": "Rapid structural breaks or short histories make the dynamic parameters unstable.",
+        "sources": ["source_000002"], "hyperparameters": ["season_length", "decomposition", "theta_update"], "probabilistic": True,
+    },
+    {
+        "name": "croston_optimized", "category": "intermittent_demand",
+        "description": "Estimate Croston demand-size and inter-arrival smoothing parameters by optimizing in-sample fit.",
+        "assumption": "Optimized smoothing parameters transfer to future intermittent arrivals and sizes.",
+        "failure": "Sparse observations make optimization noisy and obsolescence violates stationary arrival assumptions.",
+        "sources": ["source_000002", "source_000005"], "hyperparameters": ["optimization_loss", "initialization"],
+    },
+    {
+        "name": "seasonal_window_average", "category": "baseline",
+        "description": "Forecast each seasonal position with the average of its most recent matching seasonal observations.",
+        "assumption": "Seasonal phase persists and recent matching cycles have a stable mean.",
+        "failure": "Level shifts or changing seasonal amplitude bias the fixed seasonal window average.",
+        "sources": ["source_000002"], "hyperparameters": ["season_length", "window_cycles"],
+    },
+    {
+        "name": "arch_volatility_forecast", "category": "volatility",
+        "description": "Forecast conditional variance as a function of lagged squared innovations in an ARCH model.",
+        "assumption": "Volatility clustering is driven by a stable finite history of squared shocks.",
+        "failure": "Long-memory or asymmetric volatility requires richer variance dynamics.",
+        "sources": ["source_000002"], "hyperparameters": ["arch_order"], "probabilistic": True,
+    },
+    {
+        "name": "garch_volatility_forecast", "category": "volatility",
+        "description": "Recursively forecast conditional variance from lagged squared innovations and lagged conditional variances.",
+        "assumption": "A stable GARCH recursion captures persistent volatility clustering.",
+        "failure": "Leverage effects, structural breaks, or near-integrated variance make symmetric GARCH unreliable.",
+        "sources": ["source_000002"], "hyperparameters": ["arch_order", "garch_order", "innovation_distribution"], "probabilistic": True,
+    },
+    {
+        "name": "vector_autoregression", "category": "multivariate",
+        "description": "Jointly forecast multiple stationary series using linear equations over lags of every variable.",
+        "assumption": "Cross-series lag relationships are linear, stable, and estimable from sufficient history.",
+        "failure": "Many variables and lags exhaust sample size or structural changes invalidate coefficients.",
+        "sources": ["source_000003"], "hyperparameters": ["lag_order", "trend_terms"], "covariates": True, "probabilistic": True,
+    },
+    {
+        "name": "vector_error_correction_model", "category": "multivariate",
+        "description": "Combine short-run vector autoregression with error-correction terms for cointegrated nonstationary series.",
+        "assumption": "A stable cointegration rank and long-run equilibrium connect the component series.",
+        "failure": "Rank misspecification or changing equilibrium relationships produces biased forecasts.",
+        "sources": ["source_000003"], "hyperparameters": ["cointegration_rank", "lag_order", "deterministic_terms"], "covariates": True, "probabilistic": True,
+    },
+    {
+        "name": "varmax_state_space", "category": "multivariate",
+        "description": "Represent multivariate autoregressive-moving-average dynamics with optional exogenous regressors in state space.",
+        "assumption": "Joint linear dynamics and exogenous effects are stable and identifiable.",
+        "failure": "High-dimensional moving-average terms are weakly identified and computationally fragile.",
+        "sources": ["source_000003"], "hyperparameters": ["ar_order", "ma_order", "trend"], "covariates": True, "probabilistic": True,
+    },
+    {
+        "name": "dynamic_factor_forecast", "category": "multivariate",
+        "description": "Extract a small set of latent dynamic factors shared by many observed series and forecast through their state evolution.",
+        "assumption": "Low-dimensional common factors explain most cross-series predictive variation.",
+        "failure": "Idiosyncratic dynamics or time-varying loadings defeat the fixed low-rank structure.",
+        "sources": ["source_000003"], "hyperparameters": ["factor_count", "factor_order", "error_order"], "covariates": True, "probabilistic": True,
+    },
 )
 
 FOUNDATION_METHOD_SPECS: tuple[Mapping[str, object], ...] = (
@@ -1373,6 +1456,16 @@ DEPTH_EXPANSION_FOUNDATION_METHOD_SPECS: tuple[Mapping[str, object], ...] = (
         "definition_sources": ["source_000081"],
         "implementation_sources": ["source_000035"],
         "metadata": ["Salesforce/moirai-2.0", "2.0", "model_config", "recursive_multi_token", "zero_shot_quantiles", True, False, "CPU or accelerator", "Apache-2.0", True, True],
+    },
+    {
+        "name": "Chronos-Bolt",
+        "category": "probabilistic_tsfm",
+        "description": "A patch-based Chronos variant whose encoder representations directly produce multi-step quantile forecasts.",
+        "assumption": "Patch compression and direct multi-step decoding preserve the predictive structure needed for the target horizon.",
+        "failure": "Fixed patch aggregation can miss narrow pulses, while numeric-only input cannot anticipate unobserved events.",
+        "definition_sources": ["source_000082"],
+        "implementation_sources": ["source_000033"],
+        "metadata": ["amazon/chronos-bolt-base", "2024", "checkpoint_config", "direct_multi_step", "zero_shot_quantiles", True, False, "CPU or accelerator", "Apache-2.0", True, True],
     },
 )
 

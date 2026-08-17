@@ -26,6 +26,8 @@
       "autoregressive": ["autoregressive moving average"],
       "arima": ["ARIMA SARIMA automatic ARIMA"],
       "state_space": ["structural state space"],
+      "multivariate": ["VAR VECM VARMAX dynamic factor forecasting"],
+      "volatility": ["ARCH GARCH volatility forecasting"],
       "seasonal": ["seasonal forecast"],
       "spectral": ["Fourier spectral"],
       "decomposition": ["time series decomposition"],
