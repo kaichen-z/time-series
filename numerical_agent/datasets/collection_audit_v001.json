@@ -4,12 +4,12 @@
     "category_counts": {
       "combined.ensemble": 5,
       "combined.fallback": 4,
-      "combined.residual_correction": 4,
-      "combined.selector": 4,
+      "combined.residual_correction": 5,
+      "combined.selector": 6,
       "foundation.covariate_tsfm": 4,
       "foundation.fine_tuned": 4,
-      "foundation.probabilistic_tsfm": 5,
-      "foundation.zero_shot": 5,
+      "foundation.probabilistic_tsfm": 7,
+      "foundation.zero_shot": 6,
       "statistical.analogue": 2,
       "statistical.arima": 2,
       "statistical.autoregressive": 3,
@@ -23,7 +23,7 @@
       "statistical.kernel": 3,
       "statistical.local_level": 1,
       "statistical.multivariate": 4,
-      "statistical.neural": 17,
+      "statistical.neural": 18,
       "statistical.outlier_handling": 2,
       "statistical.probabilistic": 3,
       "statistical.reconciliation": 9,
@@ -39,26 +39,26 @@
     },
     "empty_cells": [],
     "family_counts": {
-      "combined": 17,
-      "foundation": 18,
-      "statistical": 103
+      "combined": 20,
+      "foundation": 21,
+      "statistical": 104
     },
     "implementation_counts": {
-      "available": 32,
-      "partial": 1,
-      "unknown": 105
+      "available": 34,
+      "partial": 2,
+      "unknown": 109
     },
     "source_type_counts": {
-      "model_card": 3,
+      "model_card": 4,
       "official_docs": 4,
       "official_repo": 10,
-      "paper": 62,
+      "paper": 69,
       "textbook": 3
     },
-    "total_method_count": 138,
+    "total_method_count": 145,
     "unknown_cells": [],
     "verification_counts": {
-      "verified": 138
+      "verified": 145
     }
   },
   "duplicate_candidates": [
@@ -83,7 +83,7 @@
     "is_publishable": true,
     "issue_codes": [],
     "issues": [],
-    "method_count": 138,
-    "source_count": 82
+    "method_count": 145,
+    "source_count": 90
   }
 }

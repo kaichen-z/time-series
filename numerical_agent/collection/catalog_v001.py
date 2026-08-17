@@ -734,6 +734,54 @@ DEPTH_EXPANSION_SOURCE_PAYLOADS: tuple[Mapping[str, object], ...] = (
         "url": "https://huggingface.co/amazon/chronos-bolt-base", "doi": "", "isbn": "",
         "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
     },
+    {
+        "source_id": "source_000083", "title": "FiLM: Frequency improved Legendre Memory Model for Long-term Time Series Forecasting",
+        "authors": ["Tian Zhou", "Ziqing Ma", "Xue Wang", "Qingsong Wen", "Liang Sun", "Tao Yao", "Wotao Yin", "Rong Jin"],
+        "year": 2022, "source_type": "paper", "url": "https://arxiv.org/abs/2205.08897", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000084", "title": "Corrected Forecast Combinations",
+        "authors": ["Chu-An Liu", "Andrey L. Vasnev"], "year": 2026,
+        "source_type": "paper", "url": "https://arxiv.org/abs/2601.09999", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000085", "title": "FFORMPP: Feature-based forecast model performance prediction",
+        "authors": ["Thiyanga S. Talagala", "Feng Li", "Yanfei Kang"], "year": 2021,
+        "source_type": "paper", "url": "https://arxiv.org/abs/1908.11500", "doi": "10.1016/j.ijforecast.2021.07.002", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000086", "title": "Moirai-MoE: Empowering Time Series Foundation Models with Sparse Mixture of Experts",
+        "authors": ["Xu Liu", "Juncheng Liu", "Gerald Woo", "Taha Aksu", "Yuxuan Liang", "Roger Zimmermann", "Chenghao Liu", "Silvio Savarese", "Caiming Xiong", "Doyen Sahoo"],
+        "year": 2024, "source_type": "paper", "url": "https://arxiv.org/abs/2410.10469", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000087", "title": "FlowState: Sampling Rate Invariant Time Series Forecasting",
+        "authors": ["Lars Graf", "Thomas Ortner", "Stanisław Woźniak", "Angeliki Pantazi"],
+        "year": 2025, "source_type": "paper", "url": "https://arxiv.org/abs/2508.05287", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000088", "title": "FlowState model card",
+        "authors": ["IBM Research"], "year": 2025,
+        "source_type": "model_card", "url": "https://huggingface.co/ibm-research/flowstate", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000089", "title": "Xihe: Scalable Zero-Shot Time Series Learner Via Hierarchical Interleaved Block Attention",
+        "authors": ["Yinbo Sun", "Yuchen Fang", "Zhibo Zhu", "Jia Li", "Yu Liu", "Qiwen Deng", "Jun Zhou", "Hang Yu", "Xingyu Lu", "Lintao Ma"],
+        "year": 2025, "source_type": "paper", "url": "https://arxiv.org/abs/2510.21795", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
+    {
+        "source_id": "source_000090", "title": "One-Embedding-Fits-All: Efficient Zero-Shot Time Series Forecasting by a Model Zoo",
+        "authors": ["Hao-Nan Shi", "Ting-Ji Huang", "Lu Han", "De-Chuan Zhan", "Han-Jia Ye"],
+        "year": 2025, "source_type": "paper", "url": "https://arxiv.org/abs/2509.04208", "doi": "", "isbn": "",
+        "retrieved_at": "2026-08-18", "primary": True, "review_status": "verified",
+    },
 )
 
 
@@ -1294,6 +1342,13 @@ DEPTH_EXPANSION_STATISTICAL_METHOD_SPECS: tuple[Mapping[str, object], ...] = (
         "failure": "Idiosyncratic dynamics or time-varying loadings defeat the fixed low-rank structure.",
         "sources": ["source_000003"], "hyperparameters": ["factor_count", "factor_order", "error_order"], "covariates": True, "probabilistic": True,
     },
+    {
+        "name": "film_legendre_memory", "category": "neural",
+        "description": "Project history into Legendre memory coefficients, remove noise through Fourier projection, and forecast with compact frequency-enhanced representations.",
+        "assumption": "Smooth long-range history has a compact Legendre and Fourier representation.",
+        "failure": "Abrupt transients or irregular sampling are distorted by low-rank spectral compression.",
+        "sources": ["source_000083"], "hyperparameters": ["legendre_order", "frequency_modes", "lookback"],
+    },
 )
 
 FOUNDATION_METHOD_SPECS: tuple[Mapping[str, object], ...] = (
@@ -1467,6 +1522,36 @@ DEPTH_EXPANSION_FOUNDATION_METHOD_SPECS: tuple[Mapping[str, object], ...] = (
         "implementation_sources": ["source_000033"],
         "metadata": ["amazon/chronos-bolt-base", "2024", "checkpoint_config", "direct_multi_step", "zero_shot_quantiles", True, False, "CPU or accelerator", "Apache-2.0", True, True],
     },
+    {
+        "name": "Moirai-MoE",
+        "category": "probabilistic_tsfm",
+        "description": "A sparse mixture-of-experts universal forecaster that learns token-level specialization instead of routing by a human-defined frequency class.",
+        "assumption": "Sparse experts discover reusable local temporal regimes across heterogeneous pretraining data.",
+        "failure": "Routing can specialize to pretraining regimes that do not represent a new target or an unobserved event-driven future.",
+        "definition_sources": ["source_000086"],
+        "implementation_sources": ["source_000035"],
+        "metadata": ["Salesforce/moirai-moe-1.0-R-small", "1.0", "model_config", "model_config", "zero_shot_probabilistic", True, False, "CPU or accelerator; GPU recommended", "Apache-2.0", True, True],
+    },
+    {
+        "name": "FlowState",
+        "category": "probabilistic_tsfm",
+        "description": "A state-space encoder with a continuous functional-basis decoder that adjusts forecasts to the target sampling rate and horizon.",
+        "assumption": "Temporal dynamics remain expressible after mapping observations into a sampling-rate-invariant coefficient space.",
+        "failure": "A poor scale factor or dynamics beyond the learned functional basis degrade long-horizon forecasts.",
+        "definition_sources": ["source_000087", "source_000088"],
+        "implementation_sources": ["source_000088"],
+        "metadata": ["ibm-research/flowstate", "r1.1", 4096, "dynamic", "zero_shot_quantiles", True, False, "GPU recommended", "research/non-commercial checkpoint terms", True, True],
+    },
+    {
+        "name": "Xihe",
+        "category": "zero_shot",
+        "description": "A scalable foundation-model family using hierarchical interleaved block attention to capture local and global temporal dependencies.",
+        "assumption": "Hierarchical sparse attention learned from a large cross-domain corpus transfers across target scales and sampling patterns.",
+        "failure": "Targets outside the pretraining pattern distribution or requiring unavailable contextual events can defeat zero-shot transfer.",
+        "definition_sources": ["source_000089"],
+        "implementation_sources": [],
+        "metadata": ["Xihe research family", "2025", "model_config", "model_config", "zero_shot", False, False, "GPU recommended", "not specified in paper", False, False],
+    },
 )
 
 COMBINED_METHOD_SPECS: tuple[Mapping[str, object], ...] = (
@@ -1623,6 +1708,33 @@ COMBINED_METHOD_SPECS: tuple[Mapping[str, object], ...] = (
         "sources": ["source_000011"],
         "parents": ["method_tsfm_0014", "method_tsfm_0001", "method_seed_0004"],
         "hyperparameters": ["ordered_parents", "runtime_budget", "failure_checks"],
+    },
+    {
+        "name": "serial_dependence_corrected_combination", "category": "residual_correction",
+        "description": "Correct a combined forecast by adding an estimated predictable fraction of the preceding combined forecast error.",
+        "assumption": "Combined forecast errors have stable serial dependence observable at the next forecast origin.",
+        "failure": "Changing error dependence or delayed labels makes the correction stale or unavailable.",
+        "sources": ["source_000084", "source_000057"],
+        "parents": ["method_combined_0002", "method_seed_0015"],
+        "hyperparameters": ["error_lag", "correction_coefficient", "weight_estimator"],
+    },
+    {
+        "name": "fformpp_performance_selector", "category": "selector",
+        "description": "Predict each candidate model's forecast error from series features using Bayesian multivariate surface regression, then select or combine predicted winners.",
+        "assumption": "A representative reference collection maps time-series features to future method performance.",
+        "failure": "Targets outside the reference feature distribution receive misleading predicted errors.",
+        "sources": ["source_000085"],
+        "parents": ["method_seed_0012", "method_seed_0018", "method_tsfm_0001"],
+        "hyperparameters": ["feature_set", "reference_collection", "performance_regressor"],
+    },
+    {
+        "name": "zoocast_model_zoo_selector", "category": "selector",
+        "description": "Embed forecasting tasks and pretrained forecasters in a shared space, then select or ensemble the nearest model representations for a new series.",
+        "assumption": "Model preference embeddings learned on representative tasks transfer to unseen forecasting configurations.",
+        "failure": "A target outside the co-embedding reference distribution or a newly added uncharacterized model yields an unreliable ranking.",
+        "sources": ["source_000090"],
+        "parents": ["method_tsfm_0001", "method_tsfm_0002", "method_tsfm_0003"],
+        "hyperparameters": ["task_encoder", "advantage_subset", "top_k", "consensus_rule"],
     },
 )
 

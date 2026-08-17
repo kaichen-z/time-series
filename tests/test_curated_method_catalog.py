@@ -91,6 +91,11 @@ def test_catalog_contains_lineage_valid_combined_methods(tmp_path: Path) -> None
         "fallback",
     }
     assert all(len(set(method.lineage["parent_method_uids"])) >= 2 for method in combined)
+    assert {
+        "serial_dependence_corrected_combination",
+        "fformpp_performance_selector",
+        "zoocast_model_zoo_selector",
+    } <= {method.canonical_name for method in combined}
     assert verify_registry(load_source_records(sources_path), methods).is_publishable
 
 
@@ -125,8 +130,15 @@ def test_catalog_has_depth_in_previously_sparse_method_families(
     assert counts[("statistical", "reconciliation")] >= 8
     assert counts[("statistical", "robust")] >= 3
     assert counts[("statistical", "spectral")] >= 2
-    assert sum(method.family == "foundation" for method in methods) >= 18
-    assert {"Chronos-2", "Chronos-Bolt", "Moirai 2.0"} <= {
+    assert sum(method.family == "foundation" for method in methods) >= 21
+    assert {
+        "Chronos-2",
+        "Chronos-Bolt",
+        "Moirai 2.0",
+        "Moirai-MoE",
+        "FlowState",
+        "Xihe",
+    } <= {
         method.canonical_name for method in methods
     }
     assert {
@@ -139,4 +151,5 @@ def test_catalog_has_depth_in_previously_sparse_method_families(
         "auto_ces",
         "auto_mfles",
         "dynamic_theta",
+        "film_legendre_memory",
     } <= {method.canonical_name for method in methods}
