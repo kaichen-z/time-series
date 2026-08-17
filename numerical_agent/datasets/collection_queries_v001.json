@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "collection_cutoff": "2026-08-17",
+  "query_templates": [
+    "time series forecasting {term} original paper",
+    "time series forecasting {term} textbook",
+    "time series forecasting {term} official documentation",
+    "time series forecasting {term} model card",
+    "time series forecasting {term} official repository"
+  ],
+  "source_tiers": [
+    "paper",
+    "textbook",
+    "official_docs",
+    "model_card",
+    "official_repo",
+    "survey",
+    "benchmark"
+  ],
+  "taxonomy": {
+    "statistical": {
+      "baseline": ["naive forecast baseline"],
+      "local_level": ["local level"],
+      "trend": ["trend damped trend"],
+      "exponential_smoothing": ["exponential smoothing ETS"],
+      "autoregressive": ["autoregressive moving average"],
+      "arima": ["ARIMA SARIMA automatic ARIMA"],
+      "state_space": ["structural state space"],
+      "seasonal": ["seasonal forecast"],
+      "spectral": ["Fourier spectral"],
+      "decomposition": ["time series decomposition"],
+      "intermittent_demand": ["intermittent demand"],
+      "count_forecasting": ["count forecasting"],
+      "robust": ["robust forecasting"],
+      "outlier_handling": ["outlier handling"],
+      "change_point": ["change point"],
+      "regime_switching": ["regime switching"],
+      "analogue": ["historical analogue matching"],
+      "regression": ["regression forecast"],
+      "tree": ["tree based forecast"],
+      "kernel": ["kernel forecast"],
+      "neural": ["neural forecast"],
+      "probabilistic": ["probabilistic forecast"],
+      "calibration": ["forecast calibration"],
+      "reconciliation": ["hierarchical forecast reconciliation"]
+    },
+    "foundation": {
+      "zero_shot": ["zero shot time series foundation model"],
+      "fine_tuned": ["fine tuned time series foundation model"],
+      "probabilistic_tsfm": ["probabilistic time series foundation model"],
+      "covariate_tsfm": ["time series foundation model covariates"]
+    },
+    "combined": {
+      "ensemble": ["forecast ensemble combination"],
+      "selector": ["forecast model selection"],
+      "residual_correction": ["forecast residual correction"],
+      "fallback": ["forecast fallback policy"]
+    }
+  }
+}
