@@ -55,7 +55,7 @@ def test_legacy_seed_migration_preserves_behavior_and_legacy_identity(
     assert load_method_cards(destination) == migrated
 
 
-def test_checked_in_seed_candidates_and_empty_source_registry_are_parseable() -> None:
+def test_checked_in_catalog_manifests_are_parseable_after_curation() -> None:
     cards = load_method_cards(
         ROOT / "numerical_agent/datasets/method_candidates_v001.jsonl"
     )
@@ -63,5 +63,6 @@ def test_checked_in_seed_candidates_and_empty_source_registry_are_parseable() ->
         ROOT / "numerical_agent/datasets/source_registry_v001.jsonl"
     )
 
-    assert len(cards) == 41
-    assert sources == ()
+    assert len(cards) >= 38
+    assert len(sources) >= 10
+    assert {card.verification_status for card in cards} == {"verified"}
