@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -19,7 +20,13 @@ from common.llm import (
 from common.metrics import mae, smape
 from common.tracing import configure
 
-from .adapters.dictionary_curation import DictionaryCurationTask, NumericalTaskItem
+from .adapters.dictionary_curation import (
+    DictionaryArtifactAdapter,
+    DictionaryCurationTask,
+    DictionaryEvaluator,
+    DictionaryExecutor,
+    NumericalTaskItem,
+)
 from .codegen import SANDBOX_PROVIDER, LLMMethodImplementer, SandboxMethodRuntime
 from .catalog_adapter import tool_dictionary_from_payload
 from .collection.coverage import audit_coverage, audit_saturation
@@ -34,7 +41,7 @@ from .collection.registry import (
 from .collection.verification import verify_registry
 from .config import DictionaryCurationConfig
 from .dictionary import MethodRecord
-from .experiment import build_experiment
+from .experiment import build_experiment, build_frozen_test
 from .persistence import MethodSourceArtifactStore
 from .providers import RuntimeRegistry
 from .smoke import FixtureMethodImplementer, FixtureMethodRuntime
@@ -86,6 +93,16 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--train-limit", type=int, default=None)
     build.add_argument("--dev-limit", type=int, default=None)
 
+    frozen = subparsers.add_parser(
+        "evaluate-frozen",
+        help="score a frozen working dictionary once on the sealed Public Test split",
+    )
+    frozen.add_argument("--tasks-file", required=True)
+    frozen.add_argument("--split-file", required=True)
+    frozen.add_argument("--experiment-config", required=True)
+    frozen.add_argument("--dictionary", required=True)
+    frozen.add_argument("--output-dir", required=True)
+
     collect_methods = subparsers.add_parser(
         "collect-methods", help="normalize collected source and method manifests"
     )
@@ -119,6 +136,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "build-experiment":
         return _build_experiment(args)
+    if args.command == "evaluate-frozen":
+        return _evaluate_frozen(args)
     if args.command == "collect-methods":
         return _collect_methods(args)
     if args.command == "verify-methods":
@@ -211,6 +230,81 @@ def _build_experiment(args: argparse.Namespace) -> int:
         "dev_tasks": len(experiment["tasks"]["dev"]), # type: ignore
     }
     sys.stdout.write(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    return 0
+
+
+def _evaluate_frozen(args: argparse.Namespace) -> int:
+    experiment = _read_object(Path(args.experiment_config))
+    curation = _curation_config(experiment)
+    dictionary_path = Path(args.dictionary)
+    dictionary_sha256 = hashlib.sha256(dictionary_path.read_bytes()).hexdigest()
+    dictionary = tool_dictionary_from_payload(
+        _read_object(dictionary_path),
+        allowed_families=curation.allowed_families,
+    )
+    DictionaryArtifactAdapter(curation).validate(dictionary)
+
+    frozen = build_frozen_test(
+        tasks_file=args.tasks_file,
+        split_file=args.split_file,
+    )
+    items = _task_items_for_split(frozen, "public_test")
+    labels = _labels_for_splits(frozen, ("public_test",))
+    metric = _metric(curation.method_metric)
+    executor = DictionaryExecutor(
+        RuntimeRegistry({SANDBOX_PROVIDER: SandboxMethodRuntime()}),
+        selection_metric=metric,
+        selection_folds=curation.selection_folds,
+        selection_horizon=curation.selection_horizon,
+        min_selection_success_rate=curation.min_success_rate,
+    )
+    evaluator = DictionaryEvaluator(curation, labels, metric)
+    results = tuple(executor.execute(dictionary, items, "public_test"))
+    report = evaluator.evaluate(dictionary.dictionary_id, results, "public_test")
+
+    output_dir = Path(args.output_dir)
+    report_path = output_dir / "frozen_test_report.json"
+    if report_path.exists():
+        raise FileExistsError(
+            f"frozen test report already exists and will not be overwritten: {report_path}"
+        )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_payload = {
+        "artifact_id": report.artifact_id,
+        "split": report.split,
+        "item_count": report.item_count,
+        "metrics": dict(report.metrics),
+        "diagnostics": dict(report.diagnostics),
+        "manifest_sha256": frozen["manifest_sha256"],
+        "dictionary_sha256": dictionary_sha256,
+    }
+    with (output_dir / "frozen_test_forecasts.jsonl").open(
+        "w", encoding="utf-8"
+    ) as handle:
+        for result in results:
+            payload: dict[str, object] = {
+                "item_id": result.item_id,
+                "method_id": result.method_id,
+                "status": result.status,
+                "forecast": list(result.forecast),
+                "selected": result.selected,
+                "selection_score": result.selection_score,
+            }
+            if result.error:
+                payload["error"] = result.error
+            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    # Write the report last: its presence is the immutable completion marker.
+    _write_json(report_path, report_payload)
+
+    score = float(report.metrics[curation.dictionary_metric])
+    summary = {
+        "artifact_id": dictionary.dictionary_id,
+        "metric": curation.dictionary_metric,
+        "public_test_tasks": len(items),
+        "score": score,
+    }
+    sys.stdout.write(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    sys.stdout.write("\n")
     return 0
 
 
@@ -478,46 +572,57 @@ def _evolution_config(
 def _task_items(
     experiment: Mapping[str, object],
 ) -> tuple[tuple[NumericalTaskItem, ...], tuple[NumericalTaskItem, ...]]:
+    return (
+        _task_items_for_split(experiment, "train"),
+        _task_items_for_split(experiment, "dev"),
+    )
+
+
+def _task_items_for_split(
+    experiment: Mapping[str, object], split: str
+) -> tuple[NumericalTaskItem, ...]:
     tasks = experiment.get("tasks")
     if not isinstance(tasks, Mapping):
-        raise ValueError("tasks must be an object with Train and Dev lists")
-
-    def parse(split: str) -> tuple[NumericalTaskItem, ...]:
-        values = tasks.get(split)
-        if not isinstance(values, list):
-            raise ValueError(f"tasks.{split} must be a list")
-        parsed = []
-        for value in values:
-            if not isinstance(value, Mapping):
-                raise ValueError(f"tasks.{split} entries must be objects")
-            history = value.get("history")
-            if not isinstance(history, list):
-                raise ValueError("task history must be a list")
-            characteristics = value.get("characteristics", [])
-            if not isinstance(characteristics, list):
-                raise ValueError("task characteristics must be a list")
-            parsed.append(
-                NumericalTaskItem(
-                    item_id=str(value["item_id"]),
-                    history=tuple(float(item) for item in history),
-                    horizon=int(value["horizon"]),
-                    frequency=str(value["frequency"]),
-                    characteristics=tuple(str(item) for item in characteristics),
-                )
+        raise ValueError("tasks must be an object")
+    values = tasks.get(split)
+    if not isinstance(values, list):
+        raise ValueError(f"tasks.{split} must be a list")
+    parsed = []
+    for value in values:
+        if not isinstance(value, Mapping):
+            raise ValueError(f"tasks.{split} entries must be objects")
+        history = value.get("history")
+        if not isinstance(history, list):
+            raise ValueError("task history must be a list")
+        characteristics = value.get("characteristics", [])
+        if not isinstance(characteristics, list):
+            raise ValueError("task characteristics must be a list")
+        parsed.append(
+            NumericalTaskItem(
+                item_id=str(value["item_id"]),
+                history=tuple(float(item) for item in history),
+                horizon=int(value["horizon"]),
+                frequency=str(value["frequency"]),
+                characteristics=tuple(str(item) for item in characteristics),
             )
-        return tuple(parsed)
-
-    return parse("train"), parse("dev")
+        )
+    return tuple(parsed)
 
 
 def _labels(
     experiment: Mapping[str, object],
 ) -> dict[str, dict[str, tuple[float, ...]]]:
+    return _labels_for_splits(experiment, ("train", "dev"))
+
+
+def _labels_for_splits(
+    experiment: Mapping[str, object], splits: Sequence[str]
+) -> dict[str, dict[str, tuple[float, ...]]]:
     labels = experiment.get("labels")
     if not isinstance(labels, Mapping):
         raise ValueError("labels must be an object")
     normalized: dict[str, dict[str, tuple[float, ...]]] = {}
-    for split in ("train", "dev"):
+    for split in splits:
         values = labels.get(split)
         if not isinstance(values, Mapping):
             raise ValueError(f"labels.{split} must be an object")

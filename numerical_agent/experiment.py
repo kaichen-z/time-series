@@ -60,19 +60,51 @@ def build_experiment(
     }
 
 
+def build_frozen_test(
+    *,
+    tasks_file: str | Path,
+    split_file: str | Path,
+) -> dict[str, object]:
+    """Return the sealed Public Test inputs and labels without Train/Dev state."""
+    tasks = {task.task_id: task for task in load_tasks(tasks_file)}
+    split_path = Path(split_file)
+    payload = json.loads(split_path.read_text(encoding="utf-8"))
+    task_ids = _partition_ids(payload, split_path, "public_test")
+    public_test = _select(tasks, task_ids, None, "public_test")
+    manifest_sha256 = payload.get("manifest_sha256")
+    if not isinstance(manifest_sha256, str) or not manifest_sha256:
+        raise ValueError(f"{split_path} has no manifest_sha256")
+    return {
+        "manifest_sha256": manifest_sha256,
+        "tasks": {"public_test": [_item(task) for task in public_test]},
+        "labels": {
+            "public_test": {
+                task.task_id: list(task.future_values) for task in public_test
+            }
+        },
+    }
+
+
 def _partitions(split_file: Path) -> dict[str, tuple[str, ...]]:
     """Read the frozen split's Train and Dev task ids; Public Test is never used here."""
     payload = json.loads(split_file.read_text(encoding="utf-8"))
+    return {
+        name: _partition_ids(payload, split_file, name) for name in ("train", "dev")
+    }
+
+
+def _partition_ids(
+    payload: object, split_file: Path, name: str
+) -> tuple[str, ...]:
+    if not isinstance(payload, dict):
+        raise ValueError(f"{split_file} must contain a JSON object")
     partitions = payload.get("partitions")
     if not isinstance(partitions, dict):
         raise ValueError(f"{split_file} has no partitions object")
-    selected = {}
-    for name in ("train", "dev"):
-        part = partitions.get(name)
-        if not isinstance(part, dict) or not isinstance(part.get("task_ids"), list):
-            raise ValueError(f"{split_file} has no {name} task_ids")
-        selected[name] = tuple(str(task_id) for task_id in part["task_ids"])
-    return selected
+    part = partitions.get(name)
+    if not isinstance(part, dict) or not isinstance(part.get("task_ids"), list):
+        raise ValueError(f"{split_file} has no {name} task_ids")
+    return tuple(str(task_id) for task_id in part["task_ids"])
 
 
 def _select(

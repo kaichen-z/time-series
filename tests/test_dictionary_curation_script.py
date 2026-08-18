@@ -13,6 +13,7 @@ from numerical_agent.main import _curation_config, _evolution_config, _labels, _
 ROOT = Path(__file__).resolve().parents[1]
 SPLIT_FILE = ROOT / "splits/drcik_public_80_20_99_v1.json"
 RUNNER = ROOT / "scripts/run_dictionary_curation.sh"
+FROZEN_RUNNER = ROOT / "scripts/run_dictionary_frozen_test.sh"
 
 
 def write_tasks(path: Path, task_ids, *, history=8, horizon=2) -> Path:
@@ -215,3 +216,38 @@ def test_runner_fails_when_the_tasks_file_is_absent(tmp_path: Path) -> None:
 
     assert completed.returncode != 0
     assert "tasks file does not exist" in completed.stderr
+
+
+def test_frozen_runner_wires_the_sealed_test_command_without_an_llm(
+    tmp_path: Path,
+) -> None:
+    tasks_file = write_tasks(tmp_path / "tasks.jsonl", ["fixture"])
+    dictionary = tmp_path / "working_dictionary.json"
+    dictionary.write_text("{}", encoding="utf-8")
+    experiment = tmp_path / "experiment.json"
+    experiment.write_text("{}", encoding="utf-8")
+    environment = {
+        **os.environ,
+        "NA_DRY_RUN": "1",
+        "NA_TASKS_FILE": str(tasks_file),
+        "NA_DICTIONARY": str(dictionary),
+        "NA_EXPERIMENT_CONFIG": str(experiment),
+        "NA_FROZEN_OUTPUT_DIR": str(tmp_path / "frozen"),
+        "PYTHON": "python3",
+    }
+
+    completed = subprocess.run(
+        ["bash", str(FROZEN_RUNNER)],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "-m numerical_agent evaluate-frozen" in completed.stdout
+    assert "--dictionary" in completed.stdout
+    assert "--split-file" in completed.stdout
+    assert "--provider" not in completed.stdout
+    assert "--llm-backend" not in completed.stdout

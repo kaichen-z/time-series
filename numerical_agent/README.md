@@ -157,6 +157,35 @@ Train reports may create sanitized revision feedback and update method status. D
 frozen Parent and Child dictionaries only; the controller never applies a Dev report to an
 artifact.
 
+## Frozen Public Test evaluation
+
+After evolution and all method choices are frozen, evaluate the accepted dictionary once on the
+entity-disjoint 99-task Public Test partition:
+
+```bash
+scripts/run_dictionary_frozen_test.sh
+```
+
+The script reads the default artifacts from `runs/dictionary_curation/full/`. Paths can be
+overridden with `NA_TASKS_FILE`, `NA_EXPERIMENT_CONFIG`, `NA_DICTIONARY`, and
+`NA_FROZEN_OUTPUT_DIR`. The underlying command is also available directly:
+
+```bash
+python -m numerical_agent evaluate-frozen \
+  --tasks-file /path/to/Dr-CiK/data/tasks/train.jsonl \
+  --split-file splits/drcik_public_80_20_99_v1.json \
+  --experiment-config runs/dictionary_curation/full/experiment.json \
+  --dictionary runs/dictionary_curation/full/working_dictionary.json \
+  --output-dir runs/dictionary_curation/frozen_public_test
+```
+
+This path registers only the existing sandbox runtime. It has no LLM/provider option, does not
+implement or revise methods, does not update statuses or checkpoints, and does not participate in
+Parent/Child acceptance. It writes `frozen_test_report.json` and
+`frozen_test_forecasts.jsonl`; these results must never be fed back into evolution. A completed
+report is never overwritten, and it records both the split-manifest and frozen-dictionary SHA-256
+identifiers.
+
 ## Offline smoke test
 
 The repository includes one deterministic fake provider and fixture dictionary solely to verify
@@ -184,6 +213,11 @@ The command writes:
 - `evolution_trace.jsonl`: Parent/Child decisions;
 - `checkpoint.json`: resumable accepted state;
 - generation-specific Parent and Child JSON snapshots.
+
+The separate frozen evaluation command writes only:
+
+- `frozen_test_report.json`: the aggregate Public Test metric and diagnostics;
+- `frozen_test_forecasts.jsonl`: auditable method forecasts and history-only selection scores.
 
 ## Adding real methods later
 

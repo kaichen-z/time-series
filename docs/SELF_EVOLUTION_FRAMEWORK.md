@@ -167,6 +167,10 @@ The split is entity-disjoint. The official 80 hidden tasks are excluded and rema
 benchmark's hidden evaluation. Assignment uses metadata only and never inspects future values,
 ground-truth evidence, or document relevance labels.
 
+For dictionary curation, run `scripts/run_dictionary_frozen_test.sh` only after the accepted
+`working_dictionary.json` is frozen. The command evaluates the 99 Public Test tasks without an LLM,
+without artifact write-back, and without exposing its result to mutation or Dev acceptance.
+
 ## 8. Main Implementation Map
 
 | Responsibility | File |
