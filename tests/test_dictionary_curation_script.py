@@ -197,10 +197,18 @@ def test_runner_limits_tasks_only_in_smoke_mode(tmp_path: Path) -> None:
 
 def test_runner_passes_codex_flags_only_for_the_codex_backend(tmp_path: Path) -> None:
     codex = run_script(tmp_path, "smoke", NA_LLM_BACKEND="codex").stdout
-    qwen = run_script(tmp_path, "smoke", NA_LLM_BACKEND="qwen").stdout
+    qwen = run_script(
+        tmp_path,
+        "smoke",
+        NA_LLM_BACKEND="qwen",
+        NA_MODEL_ID="fixture/qwen",
+        NA_DEVICE="cuda:7",
+    ).stdout
 
     assert "--codex-model" in codex
     assert "--llm-backend qwen" in qwen
+    assert "--model-id fixture/qwen" in qwen
+    assert "--device cuda:7" in qwen
     assert "--codex-model" not in qwen
 
 

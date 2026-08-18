@@ -24,6 +24,8 @@ NA_LLM_BACKEND="${NA_LLM_BACKEND:-qwen}"
 NA_CODEX_MODEL="${NA_CODEX_MODEL:-gpt-5.6-sol}"
 NA_REASONING_EFFORT="${NA_REASONING_EFFORT:-high}"
 NA_CODEX_TIMEOUT="${NA_CODEX_TIMEOUT:-900}"
+NA_MODEL_ID="${NA_MODEL_ID:-Qwen/Qwen3.5-27B}"
+NA_DEVICE="${NA_DEVICE:-}"
 NA_GENERATIONS="${NA_GENERATIONS:-3}"
 # Child prompts now receive distinct implementation objectives. Keep one child as the
 # conservative default; raise NA_CHILDREN when the compute budget permits real search.
@@ -89,6 +91,9 @@ if [[ "$NA_LLM_BACKEND" == "codex" ]]; then
         --codex-timeout "$NA_CODEX_TIMEOUT"
         --codex-cache-dir "$OUTPUT_ROOT/codex-cache"
     )
+elif [[ "$NA_LLM_BACKEND" == "qwen" ]]; then
+    CURATE_COMMAND+=(--model-id "$NA_MODEL_ID")
+    [[ -n "$NA_DEVICE" ]] && CURATE_COMMAND+=(--device "$NA_DEVICE")
 fi
 
 METHOD_COUNT="$("$PYTHON" -c "import json,sys; methods=json.load(open(sys.argv[1]))['methods']; print(sum((m.get('family') or m.get('definition', {}).get('family')) == 'statistical' for m in methods))" "$NA_BASE_METHODS")"
