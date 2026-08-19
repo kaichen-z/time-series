@@ -33,6 +33,10 @@ these are method cards, not bundled executable forecasting runtimes. See
 [`numerical_agent/README.md`](numerical_agent/README.md) for the component contracts, artifacts,
 release build command, and offline fake-provider smoke command.
 
+An opt-in Setting 2 extension adds diagnostic-selected, source-backed forecasting guidance to the
+existing Coding evolution loop. See [`docs/setting2/README.md`](docs/setting2/README.md) for the
+integration flow, knowledge provenance, commands, and historical results.
+
 This repository contains an auditable, gap-guided agent loop for the
 [Dr-CiK](https://github.com/ServiceNow/Dr-CiK) contextual time-series forecasting
 benchmark. Its research hypothesis is that a passage should be retrieved because it is

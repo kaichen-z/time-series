@@ -39,6 +39,17 @@ def test_evolve_cli_exposes_targeted_agent_evolution() -> None:
     assert parser.parse_args(["evolve"]).evolve_target == "auto"
 
 
+def test_setting2_knowledge_is_explicitly_opt_in_for_both_interfaces() -> None:
+    parser = build_parser()
+
+    assert parser.parse_args(["evolve"]).setting2_knowledge is False
+    assert parser.parse_args(["evolve", "--setting2-knowledge"]).setting2_knowledge is True
+    unified = parser.parse_args(
+        ["--evolution", "genome", "--tasks-file", "tasks.jsonl", "--setting2-knowledge"]
+    )
+    assert unified.setting2_knowledge is True
+
+
 def test_evolve_cli_exposes_successive_halving_controls() -> None:
     parser = build_parser()
     values = [

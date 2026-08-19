@@ -24,5 +24,8 @@ evolving-agent = "evolving_loop.cli:main"
 where = ["."]
 include = ["common*", "drcik_agent*", "evolving_loop*", "numerical_agent*"]
 
+[tool.setuptools.package-data]
+evolving_loop = ["knowledge/*.json"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
