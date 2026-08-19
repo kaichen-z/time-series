@@ -156,6 +156,47 @@ def test_numbers_only_evolution_then_verified_context_decision() -> None:
         assert "26.0" not in coding_text
 
 
+def test_setting2_adds_a_cited_knowledge_branch_without_removing_plain_candidates() -> None:
+    conditioned = json.dumps(
+        {
+            "programs": [
+                {
+                    "name": "analogue",
+                    "description": "Use a historical continuation when it survives hindcasts.",
+                    "assumption": "A prior trajectory has a transferable continuation.",
+                    "failure_condition": "Historical neighbours disagree.",
+                    "knowledge_ids": ["ANALOG_DIRECT_CONTINUATION", "UNKNOWN_RULE"],
+                    "prior_confidence": 0.7,
+                    "code": LEVEL_CODE,
+                }
+            ]
+        }
+    )
+    llm = FakeLLMClient([_program("plain_level", LEVEL_CODE), conditioned])
+    result = CodingEvolutionAgent(
+        llm,
+        config=CodingEvolutionConfig(
+            setting="statistics",
+            initial_programs=1,
+            mutations=0,
+            validation_folds=2,
+            validation_horizon=2,
+            minimum_validation_history=4,
+            use_external_knowledge=True,
+        ),
+    ).run_task(_task().numeric)
+
+    assert result.knowledge_base_version == "setting2-tskb-2026-08-15"
+    assert "ANALOG_DIRECT_CONTINUATION" in result.selected_knowledge_ids
+    assert {item.program.source for item in result.candidates} == {"generated", "knowledge"}
+    knowledge_program = next(
+        item.program for item in result.candidates if item.program.source == "knowledge"
+    )
+    assert knowledge_program.knowledge_ids == ("ANALOG_DIRECT_CONTINUATION",)
+    assert knowledge_program.prior_confidence == 0.7
+    assert "ANALOG_DIRECT_CONTINUATION" in llm.calls[1]["system"]
+
+
 def test_decision_rejects_uncited_override() -> None:
     with tempfile.TemporaryDirectory() as directory:
         coding = CodingEvolutionAgent(

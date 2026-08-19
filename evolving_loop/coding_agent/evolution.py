@@ -9,6 +9,11 @@ from typing import Literal, Protocol
 
 from evolving_loop.coding_agent.skill_library import Skill, SkillLibrary
 from evolving_loop.data import Task
+from evolving_loop.knowledge_base import (
+    DiagnosticProfile,
+    KnowledgeSelection,
+    TimeSeriesKnowledgeBase,
+)
 from common.sandbox import SandboxResult, run_forecast_code
 from common.llm import JsonExtractionError, LLMClient, parse_json_object
 from common.metrics import smape
@@ -49,7 +54,12 @@ Return exactly one JSON object:
 {"programs": [{"name": "short_snake_case", "description": "when to use it",
 "assumption": "a falsifiable statement about the numeric process",
 "failure_condition": "an observable condition under which it should fail",
+"knowledge_ids": ["cited external knowledge entry IDs"],
+"prior_confidence": 0.0,
 "code": "def forecast(...): ..."}]}
+
+When external knowledge is supplied, treat it as a falsifiable prior and cite only its exact IDs.
+The host reranks every executable hypothesis with causal rolling hindcasts.
 """
 
 REVISION_PROMPT = """You are the inner Coding Harness Engineer.
@@ -72,6 +82,8 @@ class ForecastProgram:
     assumption: str
     failure_condition: str
     code: str
+    knowledge_ids: tuple[str, ...] = ()
+    prior_confidence: float | None = None
     generation: int = 0
     source: str = "generated"
 
@@ -94,6 +106,9 @@ class CodingEvolutionResult:
     repeat_last_hindcast_smape: float
     improvement: float
     saved_skill_name: str | None
+    knowledge_base_version: str | None = None
+    selected_knowledge_ids: tuple[str, ...] = ()
+    diagnostic_profile: DiagnosticProfile | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +121,7 @@ class CodingEvolutionConfig:
     validation_horizon: int = 8
     minimum_validation_history: int = 16
     minimum_library_improvement: float = 0.0
+    use_external_knowledge: bool = False
 
 
 class CodingEvolutionAgent:
@@ -120,6 +136,7 @@ class CodingEvolutionAgent:
         *,
         generation_prompt: str = GENERATION_PROMPT,
         revision_prompt: str = REVISION_PROMPT,
+        knowledge_base: TimeSeriesKnowledgeBase | None = None,
     ) -> None:
         self.llm = llm
         self.library = library
@@ -127,11 +144,15 @@ class CodingEvolutionAgent:
         self.tsfm_forecaster = tsfm_forecaster
         self.generation_prompt = generation_prompt
         self.revision_prompt = revision_prompt
+        self.knowledge_base = knowledge_base
+        if self.config.use_external_knowledge and self.knowledge_base is None:
+            self.knowledge_base = TimeSeriesKnowledgeBase()
 
     def run_task(self, task: Task) -> CodingEvolutionResult:
+        knowledge = self._knowledge(task)
         programs = [] if self.config.setting == "tsfm" else self._library_programs()
         if self.config.setting != "tsfm":
-            programs.extend(self._generate(task))
+            programs.extend(self._generate(task, knowledge))
         validated = [candidate for program in programs if (candidate := self._validate(task, program))]
         if self.config.setting in {"tsfm", "combined"}:
             if self.tsfm_forecaster is None:
@@ -166,7 +187,7 @@ class CodingEvolutionAgent:
         saved_name = None
         if (
             self.library is not None
-            and selected.program.source in {"generated", "mutation"}
+            and selected.program.source in {"generated", "knowledge", "mutation"}
             and selected.hindcast_smape + self.config.minimum_library_improvement < baseline_score
         ):
             saved_name = selected.program.name
@@ -189,6 +210,9 @@ class CodingEvolutionAgent:
             repeat_last_hindcast_smape=baseline_score,
             improvement=initial_best.hindcast_smape - selected.hindcast_smape,
             saved_skill_name=saved_name,
+            knowledge_base_version=(self.knowledge_base.version if knowledge is not None else None),
+            selected_knowledge_ids=(knowledge.entry_ids if knowledge is not None else ()),
+            diagnostic_profile=(knowledge.profile if knowledge is not None else None),
         )
 
     def _library_programs(self) -> list[ForecastProgram]:
@@ -206,7 +230,17 @@ class CodingEvolutionAgent:
             for skill in self.library.all()
         ]
 
-    def _generate(self, task: Task) -> list[ForecastProgram]:
+    def _knowledge(self, task: Task) -> KnowledgeSelection | None:
+        if self.knowledge_base is None or self.config.setting not in {"statistics", "combined"}:
+            return None
+        return self.knowledge_base.retrieve(
+            task,
+            include_tsfm=self.config.setting == "combined",
+        )
+
+    def _generate(
+        self, task: Task, knowledge: KnowledgeSelection | None
+    ) -> list[ForecastProgram]:
         setting = self.config.setting
         guidance = ""
         if setting in {"statistics", "combined"}:
@@ -219,11 +253,26 @@ class CodingEvolutionAgent:
         user = self._numeric_payload(task)
         if self.library is not None:
             user += "\nReusable skill summaries:\n" + self.library.list_for_prompt()
-        return self._call_programs(
+        programs = self._call_programs(
             self.generation_prompt + guidance,
             user,
             generation=0,
             limit=self.config.initial_programs,
+        )
+        if knowledge is None or self.knowledge_base is None:
+            return programs
+        conditioned = self._call_programs(
+            self.generation_prompt
+            + guidance
+            + "\n\n"
+            + knowledge.prompt_text(self.knowledge_base.sources),
+            user,
+            generation=0,
+            limit=self.config.initial_programs,
+            allowed_knowledge_ids=knowledge.entry_ids,
+        )
+        return self._unique_program_names(
+            [*programs, *(replace(item, source="knowledge") for item in conditioned)]
         )
 
     def _mutate(
@@ -266,7 +315,13 @@ class CodingEvolutionAgent:
         )
 
     def _call_programs(
-        self, system: str, user: str, *, generation: int, limit: int
+        self,
+        system: str,
+        user: str,
+        *,
+        generation: int,
+        limit: int,
+        allowed_knowledge_ids: tuple[str, ...] = (),
     ) -> list[ForecastProgram]:
         response = self.llm.complete(
             system=system,
@@ -289,6 +344,24 @@ class CodingEvolutionAgent:
             fields = ("name", "description", "assumption", "failure_condition", "code")
             if not all(isinstance(record.get(field), str) and record[field].strip() for field in fields):
                 continue
+            raw_ids = record.get("knowledge_ids", ())
+            knowledge_ids = (
+                tuple(
+                    dict.fromkeys(
+                        str(value)
+                        for value in raw_ids
+                        if str(value) in allowed_knowledge_ids
+                    )
+                )
+                if isinstance(raw_ids, list)
+                else ()
+            )
+            raw_confidence = record.get("prior_confidence")
+            prior_confidence = (
+                min(1.0, max(0.0, float(raw_confidence)))
+                if isinstance(raw_confidence, (int, float))
+                else None
+            )
             programs.append(
                 ForecastProgram(
                     name=record["name"],
@@ -296,10 +369,26 @@ class CodingEvolutionAgent:
                     assumption=record["assumption"],
                     failure_condition=record["failure_condition"],
                     code=record["code"],
+                    knowledge_ids=knowledge_ids,
+                    prior_confidence=prior_confidence,
                     generation=generation,
                 )
             )
         return programs
+
+    @staticmethod
+    def _unique_program_names(programs: list[ForecastProgram]) -> list[ForecastProgram]:
+        counts: dict[str, int] = {}
+        unique = []
+        for program in programs:
+            count = counts.get(program.name, 0)
+            counts[program.name] = count + 1
+            unique.append(
+                program
+                if count == 0
+                else replace(program, name=f"{program.name}__{count + 1}")
+            )
+        return unique
 
     def _validate(self, task: Task, program: ForecastProgram) -> ValidatedProgram | None:
         result = run_forecast_code(

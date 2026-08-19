@@ -126,6 +126,11 @@ def _add_unified_evolution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--coding-initial-programs", type=int, default=3)
     parser.add_argument("--coding-mutations", type=int, default=1)
     parser.add_argument("--coding-validation-folds", type=int, default=3)
+    parser.add_argument(
+        "--setting2-knowledge",
+        action="store_true",
+        help="Add diagnostic-selected source-backed forecasting rules to statistics/combined Coding.",
+    )
     parser.add_argument("--seed-policy-path", default=None)
     parser.add_argument("--library-path", default="runs/evolving/skills.json")
     parser.add_argument("--retrieval-library-path", default="runs/evolving/retrieval_skills.json")
@@ -237,6 +242,11 @@ def build_parser() -> argparse.ArgumentParser:
         child.add_argument("--coding-initial-programs", type=int, default=3)
         child.add_argument("--coding-mutations", type=int, default=1)
         child.add_argument("--coding-validation-folds", type=int, default=3)
+        child.add_argument(
+            "--setting2-knowledge",
+            action="store_true",
+            help="Add diagnostic-selected source-backed forecasting rules to statistics/combined Coding.",
+        )
         child.add_argument(
             "--seed-policy-path",
             default=None,
@@ -675,6 +685,7 @@ def _factory(
                 mutation_children=policy.coding_mutation_children,
                 validation_folds=policy.coding_validation_folds,
                 validation_horizon=policy.coding_validation_horizon,
+                use_external_knowledge=getattr(args, "setting2_knowledge", False),
             ),
             tsfm_forecaster=tsfm,
             generation_prompt=policy.coding_generation_prompt,
@@ -751,9 +762,19 @@ def run_command(args) -> dict:
                                 "assumption": item.program.assumption,
                                 "failure_condition": item.program.failure_condition,
                                 "hindcast_smape": item.hindcast_smape,
+                                "knowledge_ids": list(item.program.knowledge_ids),
                             }
                             for item in result.coding.candidates
                         ],
+                        "setting2_knowledge": {
+                            "version": result.coding.knowledge_base_version,
+                            "selected_entry_ids": list(result.coding.selected_knowledge_ids),
+                            "diagnostic_profile": (
+                                asdict(result.coding.diagnostic_profile)
+                                if result.coding.diagnostic_profile is not None
+                                else None
+                            ),
+                        },
                     },
                     ensure_ascii=False,
                 ) + "\n"
