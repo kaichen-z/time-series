@@ -53,14 +53,18 @@ you restructure the module so it becomes a smaller set of genuinely distinct, wo
 {CONTRACT_TEXT}
 
 Each method's report gives:
-- mean_smape and mean_mae over the tasks it actually produced a forecast for (lower is better);
+- mean_mase, mean_smape, and mean_mae over the tasks it actually produced a forecast for
+  (lower is better for all three). mean_mase is the primary metric to compare methods by: it
+  scales MAE by the in-sample naive error, so it stays finite and comparable across series
+  instead of blowing up near zero the way sMAPE does. Treat mean_mase as the deciding signal
+  when it disagrees with sMAPE, especially on intermittent or near-zero series;
 - success / total and coverage;
 - not_applicable: tasks it declined by raising NotApplicable, which is correct behavior, not failure;
 - crashed: tasks where it raised something else, which is always a defect;
 - invalid: tasks where it returned the wrong shape or a non-finite value, also a defect;
-- by_characteristic and by_characteristic_mae: mean sMAPE and mean MAE grouped by series
-  type, which is the evidence for its docstring. sMAPE and MAE can disagree, especially on
-  intermittent or near-zero series where sMAPE is unstable; weigh both, not sMAPE alone;
+- by_characteristic, by_characteristic_mae, and by_characteristic_mase: the same three metrics
+  grouped by series type, which is the evidence for its docstring. Lead with by_characteristic_mase
+  when picking which series type a method is genuinely strong on;
 - sample_failures: real exception messages from crashed or invalid runs.
 
 Judge on evidence and prefer few strong methods over many weak ones:
