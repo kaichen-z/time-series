@@ -6,6 +6,11 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Literal, Mapping, Sequence, cast
 
+from common.payload import (
+    require_non_empty as _non_empty,
+    require_object as _object,
+    require_strings as _strings,
+)
 from numerical_agent.config import ALLOWED_FAMILIES
 
 
@@ -47,30 +52,6 @@ FOUNDATION_METADATA_FIELDS = {
     "weights_available",
     "code_available",
 }
-
-
-def _non_empty(value: object, field_name: str) -> str:
-    text = str(value).strip()
-    if not text:
-        raise ValueError(f"{field_name} must not be empty")
-    return text
-
-
-def _strings(value: object, field_name: str, *, allow_empty: bool = True) -> tuple[str, ...]:
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        raise ValueError(f"{field_name} must be a list of strings")
-    result = tuple(str(item).strip() for item in value)
-    if any(not item for item in result):
-        raise ValueError(f"{field_name} must not contain empty values")
-    if not allow_empty and not result:
-        raise ValueError(f"{field_name} must not be empty")
-    return result
-
-
-def _object(value: object, field_name: str) -> dict[str, object]:
-    if not isinstance(value, Mapping):
-        raise ValueError(f"{field_name} must be an object")
-    return {str(key): item for key, item in value.items()}
 
 
 def _iso_date(value: object, field_name: str) -> str:

@@ -7,6 +7,8 @@ import tempfile
 from pathlib import Path
 from typing import Mapping
 
+from common.payload import canonical_json_bytes, is_simple_filename
+
 
 class JsonArtifactStore:
     """Persist JSON artifacts atomically and traces append-only."""
@@ -16,7 +18,7 @@ class JsonArtifactStore:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def save_artifact(self, name: str, payload: Mapping[str, object]) -> Path:
-        if not name or Path(name).name != name:
+        if not is_simple_filename(name):
             raise ValueError("artifact name must be a simple non-empty filename stem")
         destination = self.root / f"{name}.json"
         self._write_json(destination, payload)
@@ -49,15 +51,14 @@ class JsonArtifactStore:
         temporary_path: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
+                mode="wb",
                 dir=destination.parent,
                 prefix=f".{destination.name}.",
                 suffix=".tmp",
                 delete=False,
             ) as handle:
-                json.dump(dict(payload), handle, ensure_ascii=False, indent=2, sort_keys=True)
-                handle.write("\n")
+                # Write through a temporary file so a crash can never leave a partial artifact.
+                handle.write(canonical_json_bytes(dict(payload)))
                 temporary_path = Path(handle.name)
             os.replace(temporary_path, destination)
         finally:

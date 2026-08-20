@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, Mapping, Sequence, cast
 
+from common.payload import require_strings as _tuple_of_strings
+
 from .config import ALLOWED_FAMILIES, METHOD_STATUSES
 
 
@@ -16,17 +18,6 @@ MethodStatus = Literal[
     "unavailable",
     "discarded",
 ]
-
-
-def _tuple_of_strings(value: object, field_name: str) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        raise ValueError(f"{field_name} must be a list of strings")
-    result = tuple(str(item) for item in value)
-    if any(not item for item in result):
-        raise ValueError(f"{field_name} must not contain empty values")
-    return result
 
 
 @dataclass(frozen=True)

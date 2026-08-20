@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Mapping, Sequence, cast
 
-from .collection.contracts import DatasetRelease
-from .dictionary import MethodDefinition, MethodFamily, ToolDictionary
+from .contracts import DatasetRelease
+from ..dictionary import MethodDefinition, MethodFamily, ToolDictionary
 
 
 def tool_dictionary_from_payload(
@@ -15,10 +15,8 @@ def tool_dictionary_from_payload(
 ) -> ToolDictionary:
     """Load either a native ToolDictionary or a published DatasetRelease.
 
-    A release catalog describes more methods than the current Python sandbox can
-    execute.  Callers therefore choose the families they can materialize.  Phase 1
-    uses only ``statistical``; foundation and combined cards remain in the release
-    catalog until dedicated runtimes are registered.
+    A release describes more methods than the sandbox can execute, so callers pass the
+    families they can materialize; the rest stay in the catalog until runtimes exist.
     """
 
     if "dictionary_id" in payload:

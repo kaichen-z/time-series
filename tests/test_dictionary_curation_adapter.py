@@ -5,7 +5,7 @@ from typing import Sequence
 
 from common.evolution_core.contracts import EvaluationReport, MutationContext
 from common.evolution_core.persistence import JsonArtifactStore
-from numerical_agent.adapters.dictionary_curation import (
+from numerical_agent.curation import (
     DictionaryArtifactAdapter,
     DictionaryCurationTask,
     DictionaryEvaluator,

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Mapping
 
 from common.evolution_core.persistence import JsonArtifactStore
+from common.payload import is_simple_filename
 
 
 class MethodSourceArtifactStore(JsonArtifactStore):
@@ -46,6 +47,6 @@ class MethodSourceArtifactStore(JsonArtifactStore):
             return None, None
         method_id = str(definition.get("method_id", ""))
         # Reject any id that is not a plain filename so it cannot escape the directory.
-        if not method_id or Path(method_id).name != method_id:
+        if not is_simple_filename(method_id):
             return None, None
         return method_id, code

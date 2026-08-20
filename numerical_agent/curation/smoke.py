@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from .dictionary import MethodCandidate, MethodDefinition
-from .providers import ImplementationContext, SanitizedMethodFeedback
+from ..dictionary import MethodCandidate, MethodDefinition
+from ..providers import ImplementationContext, SanitizedMethodFeedback
 
 
 class FixtureMethodImplementer:

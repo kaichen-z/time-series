@@ -6,17 +6,18 @@ from pathlib import Path
 from typing import Sequence
 
 from common.llm import LLMClient, parse_json_object
+from common.payload import is_simple_filename
 from common.sandbox import run_forecast_code
 from common.tracing import TraceEvent, emit
 
-from .dictionary import MethodCandidate, MethodDefinition
+from ..dictionary import MethodCandidate, MethodDefinition
 from .prompts import (
     IMPLEMENT_SYSTEM,
     REVISE_SYSTEM,
     render_implement_user,
     render_revise_user,
 )
-from .providers import ImplementationContext, SanitizedMethodFeedback
+from ..providers import ImplementationContext, SanitizedMethodFeedback
 
 
 SANDBOX_PROVIDER = "sandbox"
@@ -164,7 +165,7 @@ class LLMMethodImplementer:
         self, method_id: str, stage: str, system: str, user: str, response: str
     ) -> None:
         """Persist exactly what was asked and answered so bad code can be diagnosed."""
-        if self.transcript_dir is None or Path(method_id).name != method_id:
+        if self.transcript_dir is None or not is_simple_filename(method_id):
             return
         self.transcript_dir.mkdir(parents=True, exist_ok=True)
         destination = self.transcript_dir / f"{method_id}.{stage}.md"

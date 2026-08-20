@@ -7,6 +7,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Mapping, Sequence, TypeVar
 
+from common.payload import canonical_json_bytes
+
 from .contracts import DatasetRelease, MethodCard, SourceRecord
 
 
@@ -88,12 +90,6 @@ def build_release(
     )
 
 
-def _serialized(payload: Mapping[str, object]) -> bytes:
-    return (
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    ).encode("utf-8")
-
-
 def write_release(
     release: DatasetRelease,
     destination: str | Path,
@@ -102,9 +98,9 @@ def write_release(
     output = Path(destination)
     output.parent.mkdir(parents=True, exist_ok=True)
     unhashed = replace(release, content_hash="")
-    content_digest = hashlib.sha256(_serialized(unhashed.to_payload())).hexdigest()
+    content_digest = hashlib.sha256(canonical_json_bytes(unhashed.to_payload())).hexdigest()
     finalized = replace(release, content_hash=f"sha256:{content_digest}")
-    release_bytes = _serialized(finalized.to_payload())
+    release_bytes = canonical_json_bytes(finalized.to_payload())
     output.write_bytes(release_bytes)
     if sha256_destination is not None:
         sidecar = Path(sha256_destination)

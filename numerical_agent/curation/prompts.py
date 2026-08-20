@@ -6,15 +6,19 @@ from typing import Mapping, Sequence
 
 
 ALLOWED_IMPORTS_TEXT = (
-    "numpy, math, statistics, itertools, functools, collections, and statsmodels"
+    "numpy, math, statistics, itertools, functools, collections, torch and statsmodels"
 )
 
 CONTRACT_TEXT = f"""Every implementation must define exactly:
     def forecast(history: list[float], horizon: int, frequency: str) -> list[float]
 It must return exactly horizon finite numbers. Allowed imports are {ALLOWED_IMPORTS_TEXT}.
 Do not access files or the network, use randomness, call eval/exec, or hard-code any series.
-Handle short histories and degenerate inputs by falling back inside the function rather than
-raising."""
+
+Only fall back to a simpler estimate for these specific degenerate inputs: an empty history,
+non-finite values in the history, or horizon <= 0. For any other input, if your method's own
+logic fails, let it raise rather than wrapping it in a broad try/except that silently returns
+a different, simpler method's forecast -- a visible failure can be diagnosed and repaired; a
+silently masked one cannot."""
 
 IMPLEMENT_SYSTEM = f"""You are the numbers-only Numerical Agent in a time-series harness.
 You implement one specific, named classical statistical forecasting method that is given to you.

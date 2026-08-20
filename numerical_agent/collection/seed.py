@@ -1,8 +1,7 @@
 """Deterministic migration of the pre-existing statistical method seed.
 
-The legacy dictionary is useful as a discovery seed, but it contains no source
-provenance.  Migration therefore preserves every behavioral claim while marking
-every card unverified and leaving all source references empty.
+The legacy dictionary carries no provenance, so migration keeps every behavioral claim
+but marks each card unverified with empty source references.
 """
 from __future__ import annotations
 

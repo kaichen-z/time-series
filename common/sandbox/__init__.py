@@ -33,8 +33,17 @@ class SandboxResult:
     duration_ms: float
 
 
-def check_code(code: str) -> None:
-    """Statically reject disallowed imports and dangerous builtins before anything runs."""
+def check_code(
+    code: str,
+    allowed: frozenset[str] | None = None,
+    allowed_dunders: frozenset[str] = frozenset(),
+) -> None:
+    """Statically reject disallowed imports and dangerous builtins before anything runs.
+
+    Callers may widen the import allow-list for their own runtime; the default set stays
+    narrow because it also gates evolving_loop's published-results code.
+    """
+    permitted = ALLOWED_IMPORTS if allowed is None else allowed
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
@@ -43,18 +52,23 @@ def check_code(code: str) -> None:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                _check_module(alias.name)
+                _check_module(alias.name, permitted)
         elif isinstance(node, ast.ImportFrom):
-            _check_module(node.module or "")
+            _check_module(node.module or "", permitted)
         elif isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
             raise UnsafeCodeError(f"use of forbidden name: {node.id}")
-        elif isinstance(node, ast.Attribute) and node.attr.startswith("__") and node.attr.endswith("__"):
+        elif (
+            isinstance(node, ast.Attribute)
+            and node.attr.startswith("__")
+            and node.attr.endswith("__")
+            and node.attr not in allowed_dunders
+        ):
             raise UnsafeCodeError(f"use of forbidden dunder attribute: {node.attr}")
 
 
-def _check_module(module_name: str) -> None:
+def _check_module(module_name: str, permitted: frozenset[str]) -> None:
     root = module_name.split(".")[0]
-    if root and root not in ALLOWED_IMPORTS:
+    if root and root not in permitted:
         raise UnsafeCodeError(f"disallowed import: {module_name}")
 
 

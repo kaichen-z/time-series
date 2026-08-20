@@ -395,8 +395,8 @@ class ClaudeCLIClient:
         return {key: value for key, value in os.environ.items() if not key.startswith("CLAUDE")}
 
 
-def pick_free_gpu() -> str:
-    """Return the cuda device with the most free memory, or 'cpu' if nvidia-smi is unavailable."""
+def _gpu_free_mib() -> dict[int, int]:
+    """Return free MiB per cuda device index, or an empty map when nvidia-smi is unavailable."""
     try:
         output = subprocess.run(
             ["nvidia-smi", "--query-gpu=index,memory.used,memory.total", "--format=csv,noheader,nounits"],
@@ -406,15 +406,67 @@ def pick_free_gpu() -> str:
             check=True,
         ).stdout
     except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return "cpu"
+        return {}
+    return _parse_gpu_free(output)
 
-    best_index, best_free = None, -1
+
+def _parse_gpu_free(output: str) -> dict[int, int]:
+    """Parse `index, used, total` nvidia-smi rows into free MiB per device."""
+    free: dict[int, int] = {}
     for line in output.strip().splitlines():
-        index_s, used_s, total_s = (part.strip() for part in line.split(","))
-        free = int(total_s) - int(used_s)
-        if free > best_free:
-            best_index, best_free = int(index_s), free
-    return f"cuda:{best_index}" if best_index is not None else "cpu"
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 3:
+            continue
+        index_s, used_s, total_s = parts
+        try:
+            free[int(index_s)] = int(total_s) - int(used_s)
+        except ValueError:
+            continue
+    return free
+
+
+def pick_free_gpu(required_gb: float = 0.0) -> str:
+    """Return the cuda device with the most free memory, or 'cpu' when none qualifies.
+
+    A non-zero required_gb rejects devices that merely have the most free memory without
+    enough headroom to actually run, which is the usual cause of a mid-generation OOM.
+    """
+    free = _gpu_free_mib()
+    if not free:
+        return "cpu"
+    index, available = max(free.items(), key=lambda item: item[1])
+    if available < required_gb * 1024:
+        return "cpu"
+    return f"cuda:{index}"
+
+
+def shard_max_memory(reserve_gb: float = 10.0, min_free_gb: float = 40.0) -> dict[int | str, str]:
+    """Cap per-device use at free memory minus a reserve, leaving room for other users.
+
+    Only devices with min_free_gb actually free are offered: a card that is merely not full
+    still invites an OOM, because a neighbouring job can grow into the little room left and
+    evict our shard mid-generation.
+    """
+    eligible = {
+        index: free_mib
+        for index, free_mib in _gpu_free_mib().items()
+        if free_mib / 1024.0 >= min_free_gb
+    }
+    # Never return an empty budget on a machine that does have GPUs: fall back to the
+    # roomiest card so placement degrades rather than failing outright.
+    if not eligible:
+        free = _gpu_free_mib()
+        if not free:
+            return {}
+        index, free_mib = max(free.items(), key=lambda item: item[1])
+        eligible = {index: free_mib}
+
+    budget: dict[int | str, str] = {}
+    for index, free_mib in sorted(eligible.items()):
+        usable = free_mib / 1024.0 - reserve_gb
+        if usable > 1.0:
+            budget[index] = f"{usable:.1f}GiB"
+    return budget
 
 
 class QwenClient:
@@ -425,12 +477,17 @@ class QwenClient:
         model_id: str = DEFAULT_MODEL_ID,
         device: str | None = None,
         cache_dir: str = DEFAULT_CACHE_DIR,
-        max_new_tokens: int = 8192,
+        max_new_tokens: int = 32768,
+        reserve_gb: float = 10.0,
     ) -> None:
         self.model_id = model_id
-        self.device = device or pick_free_gpu()
+        # An explicit device pins the model to one card, as before. Left unset, the weights
+        # are sharded across cards: a 27B model plus a long-context KV cache does not fit
+        # beside other users' jobs on a single device, which OOMs mid-generation.
+        self.device = device
         self.cache_dir = cache_dir
         self.max_new_tokens = max_new_tokens
+        self.reserve_gb = reserve_gb
         self._tokenizer = None
         self._model = None
 
@@ -441,10 +498,24 @@ class QwenClient:
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         self._tokenizer = AutoTokenizer.from_pretrained(self.model_id, cache_dir=self.cache_dir)
-        self._model = AutoModelForCausalLM.from_pretrained(
-            self.model_id, cache_dir=self.cache_dir, torch_dtype=torch.bfloat16
-        ).to(self.device)
+        if self.device is not None:
+            self._model = AutoModelForCausalLM.from_pretrained(
+                self.model_id, cache_dir=self.cache_dir, torch_dtype=torch.bfloat16
+            ).to(self.device)
+        else:
+            # device_map and .to() are mutually exclusive; accelerate places the shards.
+            self._model = AutoModelForCausalLM.from_pretrained(
+                self.model_id,
+                cache_dir=self.cache_dir,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+                max_memory=shard_max_memory(self.reserve_gb) or None,
+            )
         self._model.eval()
+
+    def _input_device(self):
+        """Where to put input ids: the first shard once sharded, else the pinned device."""
+        return self.device if self.device is not None else self._model.device
 
     def complete(self, *, system: str, messages: list[dict], temperature: float = 0.0) -> LLMResponse:
         self._ensure_loaded()
@@ -452,7 +523,7 @@ class QwenClient:
 
         chat = [{"role": "system", "content": system}, *messages]
         prompt = self._tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
-        inputs = self._tokenizer(prompt, return_tensors="pt").to(self.device)
+        inputs = self._tokenizer(prompt, return_tensors="pt").to(self._input_device())
         with torch.no_grad():
             output_ids = self._model.generate(
                 **inputs,

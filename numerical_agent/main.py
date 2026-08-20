@@ -18,17 +18,18 @@ from common.llm import (
     QwenClient,
 )
 from common.metrics import mae, smape
+from common.payload import read_json_object, require_object, write_json
 from common.tracing import configure
 
-from .adapters.dictionary_curation import (
+from .curation import (
     DictionaryArtifactAdapter,
     DictionaryCurationTask,
     DictionaryEvaluator,
     DictionaryExecutor,
     NumericalTaskItem,
 )
-from .codegen import SANDBOX_PROVIDER, LLMMethodImplementer, SandboxMethodRuntime
-from .catalog_adapter import tool_dictionary_from_payload
+from .curation.codegen import SANDBOX_PROVIDER, LLMMethodImplementer, SandboxMethodRuntime
+from .collection.catalog_adapter import tool_dictionary_from_payload
 from .collection.coverage import audit_coverage, audit_saturation
 from .collection.contracts import MethodCard, SourceRecord
 from .collection.normalization import find_duplicate_candidates
@@ -42,9 +43,9 @@ from .collection.verification import verify_registry
 from .config import DictionaryCurationConfig
 from .dictionary import MethodRecord
 from .experiment import build_experiment, build_frozen_test
-from .persistence import MethodSourceArtifactStore
+from .curation.persistence import MethodSourceArtifactStore
 from .providers import RuntimeRegistry
-from .smoke import FixtureMethodImplementer, FixtureMethodRuntime
+from .curation.smoke import FixtureMethodImplementer, FixtureMethodRuntime
 
 
 APPROVED_PROVIDERS = ("fake", "llm")
@@ -153,10 +154,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command != "curate":
         parser.error(f"unsupported command: {args.command}")
 
-    experiment = _read_object(Path(args.experiment_config))
+    experiment = read_json_object(Path(args.experiment_config))
     curation = _curation_config(experiment)
     dictionary = tool_dictionary_from_payload(
-        _read_object(Path(args.base_methods)),
+        read_json_object(Path(args.base_methods)),
         allowed_families=curation.allowed_families,
     )
     evolution = _evolution_config(experiment, curation)
@@ -234,12 +235,12 @@ def _build_experiment(args: argparse.Namespace) -> int:
 
 
 def _evaluate_frozen(args: argparse.Namespace) -> int:
-    experiment = _read_object(Path(args.experiment_config))
+    experiment = read_json_object(Path(args.experiment_config))
     curation = _curation_config(experiment)
     dictionary_path = Path(args.dictionary)
     dictionary_sha256 = hashlib.sha256(dictionary_path.read_bytes()).hexdigest()
     dictionary = tool_dictionary_from_payload(
-        _read_object(dictionary_path),
+        read_json_object(dictionary_path),
         allowed_families=curation.allowed_families,
     )
     DictionaryArtifactAdapter(curation).validate(dictionary)
@@ -294,7 +295,7 @@ def _evaluate_frozen(args: argparse.Namespace) -> int:
                 payload["error"] = result.error
             handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
     # Write the report last: its presence is the immutable completion marker.
-    _write_json(report_path, report_payload)
+    write_json(report_path, report_payload)
 
     score = float(report.metrics[curation.dictionary_metric])
     summary = {
@@ -308,20 +309,12 @@ def _evaluate_frozen(args: argparse.Namespace) -> int:
     return 0
 
 
-def _write_json(path: Path, payload: Mapping[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
-
 def _collect_methods(args: argparse.Namespace) -> int:
     sources = load_source_records(args.sources)
     methods = load_method_cards(args.methods)
     duplicates = find_duplicate_candidates(methods)
     output_dir = Path(args.output_dir)
-    _write_json(
+    write_json(
         output_dir / "raw_method_registry.json",
         {
             "schema_version": 1,
@@ -329,7 +322,7 @@ def _collect_methods(args: argparse.Namespace) -> int:
             "methods": [method.to_payload() for method in methods],
         },
     )
-    _write_json(
+    write_json(
         output_dir / "duplicate_candidates.json",
         {"duplicate_candidates": [candidate.to_payload() for candidate in duplicates]},
     )
@@ -344,10 +337,8 @@ def _collect_methods(args: argparse.Namespace) -> int:
 
 
 def _query_manifest(path: str | Path) -> dict[str, object]:
-    payload = _read_object(Path(path))
-    taxonomy = payload.get("taxonomy")
-    if not isinstance(taxonomy, Mapping):
-        raise ValueError("query manifest taxonomy must be an object")
+    payload = read_json_object(Path(path))
+    taxonomy = require_object(payload.get("taxonomy"), "query manifest taxonomy")
     return payload
 
 
@@ -381,7 +372,7 @@ def _verify_methods(args: argparse.Namespace) -> int:
         sources, methods, queries
     )
     publishable = verification_ok and coverage_ok and not duplicates
-    _write_json(Path(args.output), audit)
+    write_json(Path(args.output), audit)
     summary = {
         "publishable": publishable,
         "source_count": len(sources),
@@ -393,7 +384,7 @@ def _verify_methods(args: argparse.Namespace) -> int:
 
 
 def _journal(path: str | Path) -> dict[str, object]:
-    payload = _read_object(Path(path))
+    payload = read_json_object(Path(path))
     base_count = payload.get("saturation_base_count")
     batches = payload.get("collection_batches")
     resolutions = payload.get("duplicate_resolutions")
@@ -446,9 +437,7 @@ def _duplicate_resolution_status(
 
 
 def _taxonomy_for_release(queries: Mapping[str, object]) -> dict[str, tuple[str, ...]]:
-    raw = queries["taxonomy"]
-    if not isinstance(raw, Mapping):
-        raise ValueError("query manifest taxonomy must be an object")
+    raw = require_object(queries["taxonomy"], "query manifest taxonomy")
     taxonomy = {}
     for family, categories in raw.items():
         if not isinstance(categories, Mapping):
@@ -490,7 +479,7 @@ def _build_dataset(args: argparse.Namespace) -> int:
             "unresolved_duplicate_candidates": list(unresolved),
         }
     )
-    _write_json(Path(args.audit_output), audit)
+    write_json(Path(args.audit_output), audit)
 
     publishable = (
         verification_ok
@@ -526,17 +515,8 @@ def _build_dataset(args: argparse.Namespace) -> int:
     return 0
 
 
-def _read_object(path: Path) -> dict[str, object]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"{path} must contain a JSON object")
-    return payload
-
-
 def _curation_config(experiment: Mapping[str, object]) -> DictionaryCurationConfig:
-    payload = experiment.get("curation", {})
-    if not isinstance(payload, Mapping):
-        raise ValueError("curation config must be an object")
+    payload = require_object(experiment.get("curation", {}), "curation config")
     normalized = dict(payload)
     for field_name in ("allowed_actions", "allowed_families", "method_statuses"):
         if field_name in normalized:
@@ -550,9 +530,7 @@ def _curation_config(experiment: Mapping[str, object]) -> DictionaryCurationConf
 def _evolution_config(
     experiment: Mapping[str, object], curation: DictionaryCurationConfig
 ) -> EvolutionConfig:
-    payload = experiment.get("evolution", {})
-    if not isinstance(payload, Mapping):
-        raise ValueError("evolution config must be an object")
+    payload = require_object(experiment.get("evolution", {}), "evolution config")
     allowed = {
         "generations",
         "children_per_generation",
@@ -581,9 +559,7 @@ def _task_items(
 def _task_items_for_split(
     experiment: Mapping[str, object], split: str
 ) -> tuple[NumericalTaskItem, ...]:
-    tasks = experiment.get("tasks")
-    if not isinstance(tasks, Mapping):
-        raise ValueError("tasks must be an object")
+    tasks = require_object(experiment.get("tasks"), "tasks")
     values = tasks.get(split)
     if not isinstance(values, list):
         raise ValueError(f"tasks.{split} must be a list")
@@ -618,9 +594,7 @@ def _labels(
 def _labels_for_splits(
     experiment: Mapping[str, object], splits: Sequence[str]
 ) -> dict[str, dict[str, tuple[float, ...]]]:
-    labels = experiment.get("labels")
-    if not isinstance(labels, Mapping):
-        raise ValueError("labels must be an object")
+    labels = require_object(experiment.get("labels"), "labels")
     normalized: dict[str, dict[str, tuple[float, ...]]] = {}
     for split in splits:
         values = labels.get(split)

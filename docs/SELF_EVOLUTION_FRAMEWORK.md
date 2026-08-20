@@ -37,7 +37,7 @@ tool dictionary, an executable forecasting program, or another structured artifa
 ## 2. Numerical Dictionary Curation Adapter
 
 The dictionary-specific implementation is in
-[`numerical_agent/adapters/dictionary_curation.py`](../numerical_agent/adapters/dictionary_curation.py).
+[`numerical_agent/curation/__init__.py`](../numerical_agent/curation/__init__.py).
 It plugs a `ToolDictionary` into the generic Self-Harness.
 
 ```text
@@ -179,7 +179,7 @@ without artifact write-back, and without exposing its result to mutation or Dev 
 | Generic contracts and configuration | `common/evolution_core/contracts.py` |
 | Dev acceptance gate | `common/evolution_core/acceptance.py` |
 | Artifact/checkpoint persistence | `common/evolution_core/persistence.py` |
-| Dictionary filtering and curation | `numerical_agent/adapters/dictionary_curation.py` |
+| Dictionary filtering and curation | `numerical_agent/curation/__init__.py` |
 | Numbers-only executable program evolution | `evolving_loop/coding_agent/evolution.py` |
 | Three-agent forecast runtime | `evolving_loop/harness.py` |
 | Prompt/Genome co-evolution | `evolving_loop/co_evolution.py` |

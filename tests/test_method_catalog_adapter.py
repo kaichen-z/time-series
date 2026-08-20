@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from numerical_agent.catalog_adapter import tool_dictionary_from_payload
+from numerical_agent.collection.catalog_adapter import tool_dictionary_from_payload
 
 
 ROOT = Path(__file__).resolve().parents[1]

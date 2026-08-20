@@ -15,8 +15,8 @@ from common.llm import (
 )
 from common.sandbox import ALLOWED_IMPORTS
 from common.tracing import configure
-from numerical_agent.adapters.dictionary_curation import DictionaryMutator
-from numerical_agent.codegen import (
+from numerical_agent.curation import DictionaryMutator
+from numerical_agent.curation.codegen import (
     SANDBOX_PROVIDER,
     LLMMethodImplementer,
     SandboxMethodRuntime,
@@ -29,8 +29,8 @@ from numerical_agent.dictionary import (
     ToolDictionary,
 )
 from numerical_agent.main import LLM_BACKENDS, _providers, build_parser
-from numerical_agent.persistence import MethodSourceArtifactStore
-from numerical_agent.prompts import ALLOWED_IMPORTS_TEXT
+from numerical_agent.curation.persistence import MethodSourceArtifactStore
+from numerical_agent.curation.prompts import ALLOWED_IMPORTS_TEXT
 from numerical_agent.providers import ImplementationContext, SanitizedMethodFeedback
 
 

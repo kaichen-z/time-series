@@ -1,9 +1,7 @@
 """Curated, source-grounded authoring helpers for forecast methods v001.
 
-This module is deliberately declarative: it records reviewed primary sources and
-the evidence assignment for each migrated method.  It does not infer provenance
-from names and it drops legacy constructs for which no reviewed definition was
-found.
+Deliberately declarative: provenance is never inferred from names, and legacy constructs
+without a reviewed definition are dropped rather than guessed at.
 """
 from __future__ import annotations
 
