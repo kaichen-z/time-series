@@ -1,0 +1,10 @@
+# Reviewed direct requirements and VCS build backend for CPython 3.11 on Linux x86_64.
+torch==2.6.0
+transformers==4.56.2
+numpy==2.2.5
+pandas==2.2.3
+einops==0.8.1
+jaxtyping==0.3.2
+hatchling==1.27.0
+setuptools==80.9.0
+wheel==0.45.1

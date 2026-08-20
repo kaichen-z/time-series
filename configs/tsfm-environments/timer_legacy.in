@@ -1,0 +1,7 @@
+# Reviewed direct requirements for CPython 3.10 on Linux x86_64.
+torch==2.0.1
+transformers==4.40.1
+numpy==1.23.5
+einops==0.4.0
+setuptools==80.9.0
+wheel==0.45.1

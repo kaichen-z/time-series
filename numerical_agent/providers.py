@@ -7,6 +7,10 @@ from typing import Mapping, Protocol, Sequence
 from .dictionary import MethodCandidate, MethodDefinition
 
 
+class RuntimeUnavailableError(RuntimeError):
+    """A method runtime cannot execute because its provider resources are unavailable."""
+
+
 @dataclass(frozen=True)
 class ImplementationContext:
     dictionary_id: str
@@ -74,3 +78,28 @@ class RuntimeRegistry:
                 reason=f"runtime provider {candidate.provider!r} does not support candidate",
             )
         return RuntimeResolution(available=True, runtime=runtime)
+
+    def close(self) -> None:
+        """Close every distinct registered runtime once (e.g. worker subprocesses)."""
+        seen: set[int] = set()
+        errors: list[BaseException] = []
+        for runtime in self._runtimes.values():
+            identity = id(runtime)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            close = getattr(runtime, "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except BaseException as error:  # noqa: BLE001 - report after closing the rest
+                errors.append(error)
+        if errors:
+            raise errors[0]
+
+    def __enter__(self) -> "RuntimeRegistry":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()

@@ -1,0 +1,10 @@
+# Reviewed direct requirements for CPython 3.10 on Linux x86_64.
+timeagi==0.0.2
+torch==1.13.0
+torchvision==0.14.0
+torchaudio==0.13.0
+transformers==4.30.2
+peft==0.4.0
+numpy==1.26.4
+setuptools==80.9.0
+wheel==0.45.1

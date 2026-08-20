@@ -1,0 +1,7 @@
+# Reviewed direct requirements for CPython 3.11 on Linux x86_64.
+tabpfn-time-series==1.2.0
+tabpfn==8.3.0
+torch==2.7.1
+pandas==2.3.2
+setuptools==80.9.0
+wheel==0.45.1

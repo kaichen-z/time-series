@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "environments": {
+    "timesfm_v1": {"interpreter": "/opt/numerical-agent/tsfm/timesfm_v1/bin/python"},
+    "uni2ts": {"interpreter": "/opt/numerical-agent/tsfm/uni2ts/bin/python"},
+    "lag_llama": {"interpreter": "/opt/numerical-agent/tsfm/lag_llama/bin/python"},
+    "granite_tsfm": {"interpreter": "/opt/numerical-agent/tsfm/granite_tsfm/bin/python"},
+    "timer_legacy": {"interpreter": "/opt/numerical-agent/tsfm/timer_legacy/bin/python"},
+    "transformers_recent": {"interpreter": "/opt/numerical-agent/tsfm/transformers_recent/bin/python"},
+    "tempo_legacy": {"interpreter": "/opt/numerical-agent/tsfm/tempo_legacy/bin/python"},
+    "toto2": {"interpreter": "/opt/numerical-agent/tsfm/toto2/bin/python"},
+    "kairos": {"interpreter": "/opt/numerical-agent/tsfm/kairos/bin/python"},
+    "tirex": {"interpreter": "/opt/numerical-agent/tsfm/tirex/bin/python"},
+    "tabpfn_ts": {"interpreter": "/opt/numerical-agent/tsfm/tabpfn_ts/bin/python"}
+  }
+}

@@ -1,0 +1,8 @@
+# Reviewed direct requirements for CPython 3.11 on Linux x86_64.
+tirex-ts==1.4.2
+torch==2.6.0
+huggingface-hub==0.34.4
+numpy==2.2.5
+scikit-learn==1.6.1
+setuptools==80.9.0
+wheel==0.45.1

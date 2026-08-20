@@ -1,0 +1,7 @@
+# Reviewed direct requirements and VCS build backend for CPython 3.10 on Linux x86_64.
+torch==2.0.1
+gluonts==0.14.4
+lightning==2.1.4
+numpy==1.26.4
+setuptools==80.9.0
+wheel==0.45.1

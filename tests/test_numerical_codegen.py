@@ -300,7 +300,7 @@ def test_llm_provider_builds_the_requested_backend(backend, expected) -> None:
     implementer, registry = _providers("llm", parsed(*extra))
 
     # Constructing only: QwenClient loads its weights lazily, so no model is fetched.
-    assert isinstance(implementer.llm, expected)
+    assert isinstance(implementer.statistical_implementer.llm, expected)
     assert registry.resolve(
         MethodCandidate("m", SANDBOX_PROVIDER, "python_code", {"code": NAIVE_CODE})
     ).available
@@ -311,15 +311,15 @@ def test_every_advertised_backend_is_constructible() -> None:
         implementer, _ = _providers(
             "llm", parsed("--provider", "llm", "--llm-backend", backend)
         )
-        assert implementer.llm is not None
+        assert implementer.statistical_implementer.llm is not None
 
 
 def test_llm_provider_keeps_each_config_default_when_flags_are_unset() -> None:
     implementer, _ = _providers("llm", parsed("--provider", "llm", "--llm-backend", "codex"))
 
     # Unset flags must not overwrite the dataclass defaults with None.
-    assert implementer.llm.config.reasoning_effort == "high"
-    assert implementer.llm.config.timeout_seconds == 900
+    assert implementer.statistical_implementer.llm.config.reasoning_effort == "high"
+    assert implementer.statistical_implementer.llm.config.timeout_seconds == 900
 
 
 def test_provider_rejects_an_unknown_name() -> None:

@@ -1,0 +1,120 @@
+{
+  "coverage": {
+    "all_required_cells_covered": true,
+    "category_counts": {
+      "combined.ensemble": 6,
+      "combined.fallback": 4,
+      "combined.residual_correction": 6,
+      "combined.selector": 8,
+      "foundation.covariate_tsfm": 8,
+      "foundation.fine_tuned": 5,
+      "foundation.probabilistic_tsfm": 9,
+      "foundation.zero_shot": 9,
+      "statistical.analogue": 2,
+      "statistical.arima": 2,
+      "statistical.autoregressive": 3,
+      "statistical.baseline": 6,
+      "statistical.calibration": 3,
+      "statistical.change_point": 3,
+      "statistical.count_forecasting": 3,
+      "statistical.decomposition": 4,
+      "statistical.exponential_smoothing": 6,
+      "statistical.intermittent_demand": 6,
+      "statistical.kernel": 3,
+      "statistical.local_level": 1,
+      "statistical.multivariate": 4,
+      "statistical.neural": 23,
+      "statistical.outlier_handling": 2,
+      "statistical.probabilistic": 3,
+      "statistical.reconciliation": 9,
+      "statistical.regime_switching": 3,
+      "statistical.regression": 2,
+      "statistical.robust": 3,
+      "statistical.seasonal": 6,
+      "statistical.spectral": 2,
+      "statistical.state_space": 2,
+      "statistical.tree": 3,
+      "statistical.trend": 5,
+      "statistical.volatility": 2
+    },
+    "empty_cells": [],
+    "family_counts": {
+      "combined": 24,
+      "foundation": 31,
+      "statistical": 111
+    },
+    "implementation_counts": {
+      "available": 41,
+      "partial": 7,
+      "unknown": 118
+    },
+    "source_type_counts": {
+      "model_card": 12,
+      "official_docs": 4,
+      "official_repo": 14,
+      "paper": 88,
+      "textbook": 3
+    },
+    "total_method_count": 166,
+    "unknown_cells": [],
+    "verification_counts": {
+      "verified": 166
+    }
+  },
+  "duplicate_candidates": [
+    {
+      "left_method_uid": "method_seed_0022",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0030"
+    },
+    {
+      "left_method_uid": "method_seed_0024",
+      "reasons": [
+        "shared_source_claim"
+      ],
+      "requires_manual_review": true,
+      "right_method_uid": "method_stat_0058"
+    }
+  ],
+  "duplicate_resolutions": [
+    {
+      "decision": "not_duplicate",
+      "left_method_uid": "method_seed_0022",
+      "rationale": "stl_ets is a standard STL-plus-ETS pipeline, whereas robust_stl_ets explicitly uses robust STL to downweight outliers before forecasting.",
+      "right_method_uid": "method_stat_0030"
+    },
+    {
+      "decision": "not_duplicate",
+      "left_method_uid": "method_seed_0024",
+      "rationale": "croston uses the classical fixed smoothing formulation, whereas croston_optimized estimates smoothing parameters from the observed intermittent-demand history.",
+      "right_method_uid": "method_stat_0058"
+    }
+  ],
+  "saturation": {
+    "batch_new_method_counts": [
+      38,
+      27,
+      31,
+      23,
+      46,
+      0,
+      0,
+      1
+    ],
+    "consecutive_low_yield_batches": 3,
+    "minimum_consecutive_batches": 3,
+    "saturated": true,
+    "threshold": 3.3200000000000003
+  },
+  "unresolved_duplicate_candidates": [],
+  "verification": {
+    "is_publishable": true,
+    "issue_codes": [],
+    "issues": [],
+    "method_count": 166,
+    "source_count": 121
+  }
+}

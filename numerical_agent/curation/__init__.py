@@ -27,6 +27,7 @@ from ..providers import (
     ImplementationContext,
     MethodImplementer,
     RuntimeRegistry,
+    RuntimeUnavailableError,
     SanitizedMethodFeedback,
 )
 
@@ -478,6 +479,14 @@ class DictionaryExecutor:
                 candidate, item.history, item.horizon, item.frequency
             )
             forecast = tuple(float(value) for value in raw_forecast)
+        except RuntimeUnavailableError as exc:
+            return MethodExecutionResult(
+                artifact.dictionary_id,
+                record.definition.method_id,
+                item.item_id,
+                "unavailable",
+                error=str(exc) or type(exc).__name__,
+            )
         except Exception as exc:
             return MethodExecutionResult(
                 artifact.dictionary_id,

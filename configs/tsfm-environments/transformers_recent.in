@@ -1,0 +1,8 @@
+# Reviewed direct requirements for CPython 3.11 on Linux x86_64.
+torch==2.6.0
+transformers==4.57.6
+accelerate==1.10.1
+numpy==2.2.5
+einops==0.8.1
+setuptools==80.9.0
+wheel==0.45.1

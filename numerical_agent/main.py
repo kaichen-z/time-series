@@ -4,9 +4,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
-from typing import Mapping, Sequence, cast
+from typing import Callable, Mapping, Sequence, cast
 
 from common.evolution_core.contracts import EvolutionConfig, MetricSpec
 from common.evolution_core.controller import SelfEvolutionEngine
@@ -28,7 +29,12 @@ from .curation import (
     DictionaryExecutor,
     NumericalTaskItem,
 )
-from .curation.codegen import SANDBOX_PROVIDER, LLMMethodImplementer, SandboxMethodRuntime
+from .curation.codegen import (
+    SANDBOX_PROVIDER,
+    FamilyRoutingImplementer,
+    LLMMethodImplementer,
+    SandboxMethodRuntime,
+)
 from .collection.catalog_adapter import tool_dictionary_from_payload
 from .collection.coverage import audit_coverage, audit_saturation
 from .collection.contracts import MethodCard, SourceRecord
@@ -46,10 +52,35 @@ from .experiment import build_experiment, build_frozen_test
 from .curation.persistence import MethodSourceArtifactStore
 from .providers import RuntimeRegistry
 from .curation.smoke import FixtureMethodImplementer, FixtureMethodRuntime
+from .tsfm import ChronosRuntime, TimesFMRuntime
+from .tsfm.broker import WorkerBroker, WorkerMethodRuntime
+from .tsfm.deployment import TSFMDeployment, parse_acknowledged_licenses
+from .tsfm.manifests import ManifestRegistry
+from .tsfm.security import SecretRedactor
 
 
 APPROVED_PROVIDERS = ("fake", "llm")
 LLM_BACKENDS = ("codex", "qwen", "claude")
+TSFM_RUNTIMES = ("chronos", "timesfm")
+
+
+def _add_tsfm_runtime_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--tsfm-runtimes",
+        default="",
+        help="comma-separated optional runtimes: chronos,timesfm",
+    )
+    parser.add_argument("--chronos-device-map", default="cpu")
+    parser.add_argument("--model-cache-dir", default=None)
+    parser.add_argument(
+        "--tsfm-workers-config",
+        default=os.environ.get("NA_TSFM_WORKERS_CONFIG") or None,
+    )
+    parser.add_argument(
+        "--acknowledged-model-licenses",
+        default=os.environ.get("NA_ACCEPT_MODEL_LICENSES", ""),
+        help="comma-separated exact third-party model license identifiers",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -74,6 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     curate.add_argument("--claude-timeout", type=int, default=None)
     curate.add_argument("--model-id", default=None)
     curate.add_argument("--device", default=None)
+    _add_tsfm_runtime_options(curate)
 
     build = subparsers.add_parser(
         "build-experiment", help="build a curation experiment config from a frozen split"
@@ -103,6 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
     frozen.add_argument("--experiment-config", required=True)
     frozen.add_argument("--dictionary", required=True)
     frozen.add_argument("--output-dir", required=True)
+    _add_tsfm_runtime_options(frozen)
 
     collect_methods = subparsers.add_parser(
         "collect-methods", help="normalize collected source and method manifests"
@@ -168,17 +201,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     store = MethodSourceArtifactStore(output_dir)
 
     implementer, runtimes = _providers(args.provider, args)
-    task = DictionaryCurationTask(
-        base_dictionary=dictionary,
-        config=curation,
-        implementer=implementer, # type: ignore
-        runtimes=runtimes,
-        labels=labels,
-        metric=_metric(curation.method_metric),
-        store=store,
-    )
-    engine = SelfEvolutionEngine(evolution, task.components())
-    outcome = engine.evolve(dictionary, train_items, dev_items)
+    try:
+        task = DictionaryCurationTask(
+            base_dictionary=dictionary,
+            config=curation,
+            implementer=implementer, # type: ignore
+            runtimes=runtimes,
+            labels=labels,
+            metric=_metric(curation.method_metric),
+            store=store,
+        )
+        engine = SelfEvolutionEngine(evolution, task.components())
+        outcome = engine.evolve(dictionary, train_items, dev_items)
+    finally:
+        runtimes.close()
     best = outcome.accepted_artifact
     store.save_artifact("working_dictionary", best.to_payload())
     _write_method_evaluations(output_dir, outcome.steps)
@@ -252,15 +288,19 @@ def _evaluate_frozen(args: argparse.Namespace) -> int:
     items = _task_items_for_split(frozen, "public_test")
     labels = _labels_for_splits(frozen, ("public_test",))
     metric = _metric(curation.method_metric)
-    executor = DictionaryExecutor(
-        RuntimeRegistry({SANDBOX_PROVIDER: SandboxMethodRuntime()}),
-        selection_metric=metric,
-        selection_folds=curation.selection_folds,
-        selection_horizon=curation.selection_horizon,
-        min_selection_success_rate=curation.min_success_rate,
-    )
+    runtimes = _runtime_registry(args)
+    try:
+        executor = DictionaryExecutor(
+            runtimes,
+            selection_metric=metric,
+            selection_folds=curation.selection_folds,
+            selection_horizon=curation.selection_horizon,
+            min_selection_success_rate=curation.min_success_rate,
+        )
+        results = tuple(executor.execute(dictionary, items, "public_test"))
+    finally:
+        runtimes.close()
     evaluator = DictionaryEvaluator(curation, labels, metric)
-    results = tuple(executor.execute(dictionary, items, "public_test"))
     report = evaluator.evaluate(dictionary.dictionary_id, results, "public_test")
 
     output_dir = Path(args.output_dir)
@@ -610,13 +650,87 @@ def _labels_for_splits(
 
 def _providers(provider: str, args: argparse.Namespace) -> tuple[object, RuntimeRegistry]:
     if provider == "fake":
-        return FixtureMethodImplementer(), RuntimeRegistry({"fake": FixtureMethodRuntime()})
+        implementer = FamilyRoutingImplementer(FixtureMethodImplementer())
+        runtimes = _runtime_registry(args, base_factories={"fake": FixtureMethodRuntime})
+        return implementer, runtimes
     if provider == "llm":
-        implementer = LLMMethodImplementer(
-            _llm_client(args), transcript_dir=Path(args.output_dir) / "transcripts"
+        implementer = FamilyRoutingImplementer(
+            LLMMethodImplementer(
+                _llm_client(args), transcript_dir=Path(args.output_dir) / "transcripts"
+            )
         )
-        return implementer, RuntimeRegistry({SANDBOX_PROVIDER: SandboxMethodRuntime()})
+        return implementer, _runtime_registry(args)
     raise ValueError(f"unsupported approved provider {provider!r}")
+
+
+def _runtime_registry(
+    args: argparse.Namespace,
+    *,
+    base_factories: Mapping[str, Callable[[], object]] | None = None,
+) -> RuntimeRegistry:
+    """Build the sandbox runtime plus any optional TSFM runtimes the caller enabled."""
+    names = _comma_separated(
+        getattr(args, "tsfm_runtimes", "") or "",
+        allowed=TSFM_RUNTIMES,
+        option="--tsfm-runtimes",
+        allow_empty=True,
+    )
+    model_cache_dir = getattr(args, "model_cache_dir", None)
+    if names and model_cache_dir:
+        os.environ["HF_HOME"] = str(Path(model_cache_dir).expanduser())
+
+    runtimes: dict[str, object] = {SANDBOX_PROVIDER: SandboxMethodRuntime()}
+    for name, factory in (base_factories or {}).items():
+        runtimes[name] = factory()
+    if "chronos" in names:
+        runtimes["chronos"] = ChronosRuntime(
+            device_map=getattr(args, "chronos_device_map", "cpu")
+        )
+    if "timesfm" in names:
+        runtimes["timesfm"] = TimesFMRuntime()
+
+    manifests = ManifestRegistry.load_default()
+    acknowledged = parse_acknowledged_licenses(
+        getattr(args, "acknowledged_model_licenses", "") or "", manifests
+    )
+    deployment_path = getattr(args, "tsfm_workers_config", None)
+    if acknowledged and not deployment_path:
+        raise ValueError("--acknowledged-model-licenses requires --tsfm-workers-config")
+    if deployment_path:
+        deployment = TSFMDeployment.load(
+            deployment_path,
+            manifests=manifests,
+            acknowledged_licenses=tuple(sorted(acknowledged)),
+        )
+        parent_environment = dict(os.environ)
+        broker = WorkerBroker(
+            deployment.commands,
+            timeout_seconds=300.0,
+            parent_environment=parent_environment,
+            redactor=SecretRedactor.from_environment(parent_environment),
+        )
+        runtimes["tsfm_worker"] = WorkerMethodRuntime(
+            broker, manifests=manifests, enabled_manifest_ids=deployment.enabled_manifest_ids
+        )
+    return RuntimeRegistry(runtimes) # type: ignore[arg-type]
+
+
+def _comma_separated(
+    value: str,
+    *,
+    allowed: Sequence[str],
+    option: str,
+    allow_empty: bool = False,
+) -> tuple[str, ...]:
+    names = tuple(name.strip() for name in value.split(",") if name.strip())
+    if not names and not allow_empty:
+        raise ValueError(f"{option} must not be empty")
+    unknown = set(names) - set(allowed)
+    if unknown:
+        raise ValueError(f"{option} contains unsupported values: {sorted(unknown)!r}")
+    if len(names) != len(set(names)):
+        raise ValueError(f"{option} contains duplicate values")
+    return names
 
 
 def _llm_client(args: argparse.Namespace):

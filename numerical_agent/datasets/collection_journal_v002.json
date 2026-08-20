@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "scope": "Canonical forecasting mechanisms available from primary papers, textbooks, official documentation, official repositories, and model cards through 2026-08-18. Checkpoint-size variants and library aliases are not separate methods.",
+  "saturation_base_count": 166,
+  "collection_batches": [
+    {
+      "batch_id": "legacy_seed_migration",
+      "reviewed_source_count": 12,
+      "candidate_count": 41,
+      "new_canonical_methods": 38,
+      "duplicate_count": 0,
+      "rejected_count": 3,
+      "notes": "Migrated the original statistical seed after removing three constructed methods without adequate primary-source support."
+    },
+    {
+      "batch_id": "statistical_taxonomy_expansion",
+      "reviewed_source_count": 17,
+      "candidate_count": 27,
+      "new_canonical_methods": 27,
+      "duplicate_count": 0,
+      "rejected_count": 0,
+      "notes": "Filled missing statistical taxonomy cells using primary papers, Forecasting: Principles and Practice, statsmodels, and StatsForecast."
+    },
+    {
+      "batch_id": "foundation_model_catalog",
+      "reviewed_source_count": 31,
+      "candidate_count": 31,
+      "new_canonical_methods": 31,
+      "duplicate_count": 0,
+      "rejected_count": 0,
+      "notes": "Collected distinct TSFM architectures and materially different releases; model sizes and checkpoint aliases were collapsed."
+    },
+    {
+      "batch_id": "combined_method_catalog",
+      "reviewed_source_count": 10,
+      "candidate_count": 23,
+      "new_canonical_methods": 23,
+      "duplicate_count": 0,
+      "rejected_count": 0,
+      "notes": "Collected ensembles, selectors, residual corrections, and fallbacks with explicit parent-method lineage."
+    },
+    {
+      "batch_id": "depth_and_multivariate_expansion",
+      "reviewed_source_count": 39,
+      "candidate_count": 46,
+      "new_canonical_methods": 46,
+      "duplicate_count": 0,
+      "rejected_count": 0,
+      "notes": "Deepened neural, probabilistic, multivariate, reconciliation, robustness, calibration, volatility, and recent TSFM coverage."
+    },
+    {
+      "batch_id": "saturation_statistical_official_catalog",
+      "reviewed_source_count": 3,
+      "candidate_count": 0,
+      "new_canonical_methods": 0,
+      "duplicate_count": 34,
+      "rejected_count": 0,
+      "reviewed_sources": [
+        "https://nixtlaverse.nixtla.io/statsforecast/src/core/models.html",
+        "https://www.statsmodels.org/stable/tsa.html",
+        "https://otexts.com/fpp3/"
+      ],
+      "notes": "Every named mechanism was already represented; wrappers, aliases, and parameterized variants were mapped to existing canonical cards."
+    },
+    {
+      "batch_id": "saturation_tsfm_official_catalog",
+      "reviewed_source_count": 4,
+      "candidate_count": 0,
+      "new_canonical_methods": 0,
+      "duplicate_count": 28,
+      "rejected_count": 0,
+      "reviewed_sources": [
+        "https://github.com/SalesforceAIResearch/gift-eval/tree/main/notebooks",
+        "https://github.com/amazon-science/chronos-forecasting",
+        "https://github.com/google-research/timesfm",
+        "https://github.com/SalesforceAIResearch/uni2ts"
+      ],
+      "notes": "Reviewed official benchmark integrations and model families; checkpoint sizes and release aliases did not introduce a new forecasting mechanism."
+    },
+    {
+      "batch_id": "saturation_combination_and_selection_scan",
+      "reviewed_source_count": 4,
+      "candidate_count": 4,
+      "new_canonical_methods": 1,
+      "duplicate_count": 3,
+      "rejected_count": 0,
+      "reviewed_sources": [
+        "https://arxiv.org/abs/2504.02119",
+        "https://arxiv.org/abs/2502.12920",
+        "https://arxiv.org/abs/2502.10235",
+        "https://arxiv.org/abs/2503.02836"
+      ],
+      "notes": "Added the zero-cost LLM model selector. AdapTS, AdaPTS, and SeqFusion were already represented."
+    }
+  ],
+  "duplicate_resolutions": [
+    {
+      "left_method_uid": "method_seed_0022",
+      "right_method_uid": "method_stat_0030",
+      "decision": "not_duplicate",
+      "rationale": "stl_ets is a standard STL-plus-ETS pipeline, whereas robust_stl_ets explicitly uses robust STL to downweight outliers before forecasting."
+    },
+    {
+      "left_method_uid": "method_seed_0024",
+      "right_method_uid": "method_stat_0058",
+      "decision": "not_duplicate",
+      "rationale": "croston uses the classical fixed smoothing formulation, whereas croston_optimized estimates smoothing parameters from the observed intermittent-demand history."
+    }
+  ]
+}

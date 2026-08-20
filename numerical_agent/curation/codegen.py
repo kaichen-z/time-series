@@ -11,17 +11,48 @@ from common.sandbox import run_forecast_code
 from common.tracing import TraceEvent, emit
 
 from ..dictionary import MethodCandidate, MethodDefinition
+from ..foundation import FoundationCandidateFactory, TSFM_IMPLEMENTATION_KIND
 from .prompts import (
     IMPLEMENT_SYSTEM,
     REVISE_SYSTEM,
     render_implement_user,
     render_revise_user,
 )
-from ..providers import ImplementationContext, SanitizedMethodFeedback
+from ..providers import ImplementationContext, MethodImplementer, SanitizedMethodFeedback
 
 
 SANDBOX_PROVIDER = "sandbox"
 IMPLEMENTATION_KIND = "python_code"
+
+
+class FamilyRoutingImplementer:
+    """Keep statistical codegen separate from deterministic foundation bindings."""
+
+    def __init__(
+        self,
+        statistical_implementer: MethodImplementer,
+        foundation_factory: FoundationCandidateFactory | None = None,
+    ) -> None:
+        self.statistical_implementer = statistical_implementer
+        self.foundation_factory = foundation_factory or FoundationCandidateFactory()
+
+    def implement(
+        self, method: MethodDefinition, context: ImplementationContext
+    ) -> MethodCandidate:
+        if method.family == "foundation":
+            return self.foundation_factory.create(method)
+        if method.family == "statistical":
+            return self.statistical_implementer.implement(method, context)
+        raise ValueError(
+            f"combined method {method.method_id!r} requires an executable dependency graph"
+        )
+
+    def revise(
+        self, parent: MethodCandidate, feedback: SanitizedMethodFeedback
+    ) -> MethodCandidate:
+        if parent.implementation_kind == TSFM_IMPLEMENTATION_KIND:
+            raise ValueError("deterministic foundation candidates cannot be revised")
+        return self.statistical_implementer.revise(parent, feedback)
 
 
 class LLMMethodImplementer:

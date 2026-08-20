@@ -1,0 +1,6 @@
+# Reviewed direct requirements for CPython 3.12 on Linux x86_64.
+toto-2==2.0.0
+torch==2.7.1
+numpy==2.2.5
+setuptools==80.9.0
+wheel==0.45.1

@@ -1,0 +1,2 @@
+# Installed after the hashed PyPI closure with dependency and build isolation disabled.
+kairos @ git+https://github.com/foundation-model-research/Kairos.git@0322393840ccf6e2bfe9c663f9dcd088a5a7ee07
