@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from common.metrics import mae, mase, smape
+from common.metrics import mae, mse
 
 
 NOT_APPLICABLE = "not_applicable"
@@ -42,9 +42,8 @@ class Outcome:
     method: str
     task_id: str
     status: str
-    smape: float | None = None
     mae: float | None = None
-    mase: float | None = None
+    mse: float | None = None
     detail: str = ""
 
 
@@ -58,13 +57,11 @@ class MethodReport:
     not_applicable: int
     crashed: int
     invalid: int
-    mean_smape: float | None
     mean_mae: float | None
-    mean_mase: float | None
+    mean_mse: float | None
     coverage: float
-    by_characteristic: Mapping[str, float] = field(default_factory=dict)
     by_characteristic_mae: Mapping[str, float] = field(default_factory=dict)
-    by_characteristic_mase: Mapping[str, float] = field(default_factory=dict)
+    by_characteristic_mse: Mapping[str, float] = field(default_factory=dict)
     sample_failures: tuple[str, ...] = ()
 
 
@@ -105,7 +102,14 @@ def load_methods(path: str | Path) -> tuple[object, dict[str, object]]:
     functions = {
         name: value
         for name, value in vars(module).items()
-        if callable(value) and not name.startswith("_") and not isinstance(value, type)
+        if callable(value)
+        and not name.startswith("_")
+        and not isinstance(value, type)
+        # Only functions defined in this file are methods. Without this, any module-level
+        # import would be measured as a forecasting method: called with (history, horizon,
+        # frequency), it raises TypeError on every task and the resulting fake crashes reach
+        # the evolution prompt as evidence against a method that does not exist.
+        and getattr(value, "__module__", None) == module.__name__
     }
     if not functions:
         raise ImportError(f"{source} defines no forecasting functions")
@@ -113,7 +117,7 @@ def load_methods(path: str | Path) -> tuple[object, dict[str, object]]:
 
 
 def run_module(
-    path: str | Path, tasks: Sequence[Task], *, time_budget_s: float = 20.0
+    path: str | Path, tasks: Sequence[Task], *, time_budget_s: float = 300.0
 ) -> tuple[tuple[Outcome, ...], tuple[MethodReport, ...]]:
     """Run every method over every task in this process and summarize each method."""
     module, functions = load_methods(path)
@@ -163,11 +167,9 @@ def _run_one(
     if not all(math.isfinite(value) for value in forecast):
         return Outcome(name, task.task_id, INVALID, detail="returned a non-finite value")
     truth = list(task.future)
-    history = list(task.history)
     return Outcome(
         name, task.task_id, SUCCESS,
-        smape=smape(truth, forecast), mae=mae(truth, forecast),
-        mase=mase(truth, forecast, history),
+        mae=mae(truth, forecast), mse=mse(truth, forecast),
     )
 
 
@@ -178,14 +180,12 @@ def _report(
     scored = [o for o in outcomes if o.status == SUCCESS]
     counts = Counter(o.status for o in outcomes)
 
-    grouped: dict[str, list[float]] = {}
     grouped_mae: dict[str, list[float]] = {}
-    grouped_mase: dict[str, list[float]] = {}
+    grouped_mse: dict[str, list[float]] = {}
     for outcome in scored:
         for tag in by_id[outcome.task_id].characteristics():
-            grouped.setdefault(tag, []).append(float(outcome.smape))
             grouped_mae.setdefault(tag, []).append(float(outcome.mae))
-            grouped_mase.setdefault(tag, []).append(float(outcome.mase))
+            grouped_mse.setdefault(tag, []).append(float(outcome.mse))
 
     # Deduplicated with a dict, not a set: set order is not reproducible across runs.
     ordered_failures = tuple(
@@ -202,18 +202,14 @@ def _report(
         not_applicable=counts.get(NOT_APPLICABLE, 0),
         crashed=counts.get(CRASHED, 0),
         invalid=counts.get(INVALID, 0),
-        mean_smape=statistics.fmean(o.smape for o in scored) if scored else None,
         mean_mae=statistics.fmean(o.mae for o in scored) if scored else None,
-        mean_mase=statistics.fmean(o.mase for o in scored) if scored else None,
+        mean_mse=statistics.fmean(o.mse for o in scored) if scored else None,
         coverage=len(scored) / total if total else 0.0,
-        by_characteristic={
-            tag: statistics.fmean(values) for tag, values in sorted(grouped.items())
-        },
         by_characteristic_mae={
             tag: statistics.fmean(values) for tag, values in sorted(grouped_mae.items())
         },
-        by_characteristic_mase={
-            tag: statistics.fmean(values) for tag, values in sorted(grouped_mase.items())
+        by_characteristic_mse={
+            tag: statistics.fmean(values) for tag, values in sorted(grouped_mse.items())
         },
         sample_failures=ordered_failures,
     )
@@ -224,23 +220,19 @@ def report_payload(reports: Sequence[MethodReport]) -> list[dict[str, object]]:
     return [
         {
             "method": report.method,
-            "mean_smape": report.mean_smape,
             "mean_mae": report.mean_mae,
-            "mean_mase": report.mean_mase,
+            "mean_mse": report.mean_mse,
             "success": report.success,
             "total": report.total,
             "coverage": round(report.coverage, 4),
             "not_applicable": report.not_applicable,
             "crashed": report.crashed,
             "invalid": report.invalid,
-            "by_characteristic": {
-                tag: round(value, 4) for tag, value in report.by_characteristic.items()
-            },
             "by_characteristic_mae": {
                 tag: round(value, 4) for tag, value in report.by_characteristic_mae.items()
             },
-            "by_characteristic_mase": {
-                tag: round(value, 4) for tag, value in report.by_characteristic_mase.items()
+            "by_characteristic_mse": {
+                tag: round(value, 4) for tag, value in report.by_characteristic_mse.items()
             },
             "sample_failures": list(report.sample_failures),
         }

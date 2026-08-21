@@ -140,7 +140,7 @@ def test_the_whole_module_reaches_the_prompt(tmp_path: Path) -> None:
 
     sent = llm.calls[0]["messages"][0]["content"]
     assert "def alpha(" in sent and "def beta(" in sent
-    assert "mean_smape" in sent
+    assert "mean_mae" in sent
 
 
 def test_run_evolution_stops_when_a_generation_changes_nothing(tmp_path: Path) -> None:

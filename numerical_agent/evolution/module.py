@@ -9,9 +9,13 @@ from typing import Mapping, Sequence
 from common.sandbox import ALLOWED_IMPORTS, check_code
 
 
+# The frozen skill library methods compose. Allowed by its exact dotted name, so the rest of
+# numerical_agent stays out of reach.
+SKILLS_MODULE = "numerical_agent.evolution.primite_ts_skills"
+
 # The evolving module may use heavier forecasting stacks than evolving_loop's sandbox allows.
 EVOLUTION_IMPORTS = ALLOWED_IMPORTS | frozenset(
-    {"torch", "sklearn", "scipy", "lightgbm", "xgboost", "pandas"}
+    {"torch", "sklearn", "scipy", "lightgbm", "xgboost", "pandas", SKILLS_MODULE}
 )
 
 # torch.nn.Module subclasses cannot be written without super().__init__(); the escape-hatch
@@ -20,15 +24,20 @@ EVOLUTION_DUNDERS = frozenset({"__init__"})
 
 
 # No __future__ import: the shared sandbox gate allows only forecasting libraries.
-MODULE_HEADER = '''"""Forecasting methods evolved from a verified method catalog.
+#
+# The header is the only module-level text that survives render(), so the skill import has to
+# live here: an import written anywhere else is silently dropped on the next write. NotApplicable
+# is imported rather than redefined so a skill raising it is the same class the runner catches.
+MODULE_HEADER = f'''"""Forecasting methods evolved from a frozen library of analysis skills.
 
 Each function takes (history, horizon, frequency) and returns exactly horizon finite floats,
 or raises NotApplicable when the series does not meet its stated requirements.
+
+The frozen skill library is available as P; compose its skills rather than reimplementing them.
 """
 
-
-class NotApplicable(Exception):
-    """Raised when the series does not meet the method's stated requirements."""
+import {SKILLS_MODULE} as P
+from {SKILLS_MODULE} import NotApplicable
 '''
 
 SIGNATURE = ("history", "horizon", "frequency")
@@ -120,10 +129,11 @@ def apply_operations(
     model can never leave the module half-rewritten.
     """
     current = module
+    original = frozenset(module.names())
     summaries: list[str] = []
     for index, operation in enumerate(operations, start=1):
         try:
-            current, summary = _apply_one(current, operation)
+            current, summary = _apply_one(current, operation, original)
         except ModuleError as exc:
             raise ModuleError(f"operation {index}: {exc}") from exc
         summaries.append(summary)
@@ -131,7 +141,7 @@ def apply_operations(
 
 
 def _apply_one(
-    module: MethodModule, operation: Mapping[str, object]
+    module: MethodModule, operation: Mapping[str, object], original: frozenset[str] = frozenset()
 ) -> tuple[MethodModule, str]:
     op = str(operation.get("op", ""))
     if op not in OPERATIONS:
@@ -141,7 +151,15 @@ def _apply_one(
         raise ModuleError(f"{op} must state a reason")
 
     if op == "delete":
-        name = _require_existing(module, operation.get("name"))
+        name = str(operation.get("name") or "").strip()
+        if not name:
+            raise ModuleError("a method name is required")
+        if module.get(name) is None:
+            # Tolerated only if an earlier operation in this batch consumed it: the requested
+            # end state already holds. A name that never existed is still a hallucination.
+            if name not in original:
+                raise ModuleError(f"unknown method {name!r}")
+            return module, f"delete {name}: already removed earlier in this batch; {reason}"
         methods = tuple(m for m in module.methods if m.name != name)
         if not methods:
             raise ModuleError("refusing to delete the last remaining method")
@@ -162,9 +180,11 @@ def _apply_one(
     raw_names = operation.get("names")
     if not isinstance(raw_names, Sequence) or isinstance(raw_names, (str, bytes)):
         raise ModuleError("merge requires a list of names")
-    sources = tuple(_require_existing(module, name) for name in raw_names)
-    if len(sources) < 2:
+    requested = tuple(_require_named(module, name, original) for name in raw_names)
+    if len(requested) < 2:
         raise ModuleError("merge requires at least two methods")
+    # Sources an earlier operation in this batch already consumed are skipped, not fatal.
+    sources = tuple(name for name in requested if module.get(name) is not None)
     into = str(operation.get("into", "")).strip()
     if not into:
         raise ModuleError("merge requires an 'into' name")
@@ -176,7 +196,7 @@ def _apply_one(
         raise ModuleError("merge would empty the module")
     return (
         replace(module, methods=kept + (method,)),
-        f"merge {', '.join(sources)} -> {into}: {reason}",
+        f"merge {', '.join(requested)} -> {into}: {reason}",
     )
 
 
@@ -185,6 +205,16 @@ def _require_existing(module: MethodModule, name: object) -> str:
     if not text:
         raise ModuleError("a method name is required")
     if module.get(text) is None:
+        raise ModuleError(f"unknown method {text!r}")
+    return text
+
+
+def _require_named(module: MethodModule, name: object, original: frozenset[str]) -> str:
+    """Accept a name the module still has, or one an earlier operation in this batch consumed."""
+    text = str(name or "").strip()
+    if not text:
+        raise ModuleError("a method name is required")
+    if module.get(text) is None and text not in original:
         raise ModuleError(f"unknown method {text!r}")
     return text
 

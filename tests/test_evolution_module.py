@@ -6,6 +6,7 @@ import pytest
 
 from numerical_agent.evolution.module import (
     MODULE_HEADER,
+    SKILLS_MODULE,
     MethodModule,
     ModuleError,
     apply_operations,
@@ -195,8 +196,12 @@ def test_write_and_read_round_trip(tmp_path: Path) -> None:
 
     write_module(destination, module)
 
+    text = destination.read_text(encoding="utf-8")
     assert read_module(destination).names() == ("alpha", "beta")
-    assert "class NotApplicable" in destination.read_text(encoding="utf-8")
+    # NotApplicable is imported from the skill library, not redefined, so a skill raising it
+    # is the very class the runner catches.
+    assert f"from {SKILLS_MODULE} import NotApplicable" in text
+    assert f"import {SKILLS_MODULE} as P" in text
 
 
 def test_write_rejects_a_disallowed_import(tmp_path: Path) -> None:
@@ -229,6 +234,7 @@ def test_written_module_is_importable_and_callable(tmp_path: Path) -> None:
 
     assert loaded.naive_last([1.0, 2.0, 5.0], 3, "1 day") == [5.0, 5.0, 5.0]
     assert issubclass(loaded.NotApplicable, Exception)
+    assert loaded.P.infer_period([1.0, 2.0] * 20) == 2
 
 
 def test_notapplicable_from_an_except_handler_is_rejected() -> None:
@@ -275,3 +281,60 @@ def test_a_narrow_handler_that_does_not_silence_is_allowed() -> None:
     )
 
     assert parse_method(fine).name == "alpha"
+
+
+def test_delete_after_a_merge_consumed_the_method_is_a_no_op() -> None:
+    """The model merges three naives, then redundantly deletes one it already merged."""
+    module = parse_module(module_text("naive_last", "naive_mean", "naive_drift", "other"))
+
+    updated, summaries = apply_operations(
+        module,
+        [
+            {
+                "op": "merge",
+                "names": ["naive_last", "naive_mean", "naive_drift"],
+                "into": "naive_last",
+                "code": method_source("naive_last"),
+                "reason": "similar MASE; consolidate",
+            },
+            {"op": "delete", "name": "naive_mean", "reason": "merged into naive_last"},
+        ],
+    )
+
+    assert set(updated.names()) == {"other", "naive_last"}
+    assert "already removed earlier in this batch" in summaries[1]
+
+
+def test_merge_naming_a_method_an_earlier_delete_removed_still_merges_the_rest() -> None:
+    """The model deletes theta_classic, then merges it again alongside theta_optimized."""
+    module = parse_module(module_text("theta_classic", "theta_optimized", "other"))
+
+    updated, summaries = apply_operations(
+        module,
+        [
+            {"op": "delete", "name": "theta_classic", "reason": "identical to theta_optimized"},
+            {
+                "op": "merge",
+                "names": ["theta_optimized", "theta_classic"],
+                "into": "theta_optimized",
+                "code": method_source("theta_optimized"),
+                "reason": "identical MASE; redundant",
+            },
+        ],
+    )
+
+    assert set(updated.names()) == {"other", "theta_optimized"}
+    assert summaries[1].startswith("merge theta_optimized, theta_classic -> theta_optimized:")
+
+
+def test_a_method_that_never_existed_is_still_rejected() -> None:
+    module = parse_module(module_text("alpha", "beta"))
+
+    with pytest.raises(ModuleError, match="unknown method"):
+        apply_operations(
+            module,
+            [{
+                "op": "merge", "names": ["alpha", "hallucinated"], "into": "alpha",
+                "code": method_source("alpha"), "reason": "x",
+            }],
+        )

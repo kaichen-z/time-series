@@ -76,7 +76,7 @@ def test_not_applicable_is_separated_from_a_crash(tmp_path: Path) -> None:
     # Declining to apply is coverage, not failure.
     assert (picky.not_applicable, picky.crashed) == (2, 0)
     assert (broken.crashed, broken.not_applicable) == (2, 0)
-    assert picky.mean_smape is None and broken.mean_smape is None
+    assert picky.mean_mae is None and broken.mean_mae is None
 
 
 def test_a_crash_keeps_its_real_message(tmp_path: Path) -> None:
@@ -99,8 +99,8 @@ def test_a_correct_method_is_scored_on_every_task(tmp_path: Path) -> None:
     perfect = next(r for r in reports if r.method == "perfect_method")
 
     assert (perfect.success, perfect.coverage) == (2, 1.0)
-    assert perfect.mean_smape == pytest.approx(0.0)
     assert perfect.mean_mae == pytest.approx(0.0)
+    assert perfect.mean_mse == pytest.approx(0.0)
 
 
 def test_outcome_statuses_cover_every_method_and_task(tmp_path: Path) -> None:
@@ -114,8 +114,8 @@ def test_scores_are_grouped_by_series_characteristic(tmp_path: Path) -> None:
     _, reports = run_module(write_fixture(tmp_path), tasks())
     perfect = next(r for r in reports if r.method == "perfect_method")
 
-    assert "frequency:1 day" in perfect.by_characteristic
-    assert any(tag.startswith("history:") for tag in perfect.by_characteristic)
+    assert "frequency:1 day" in perfect.by_characteristic_mae
+    assert any(tag.startswith("history:") for tag in perfect.by_characteristic_mae)
 
 
 def test_characteristics_flag_intermittent_and_trending_series() -> None:
@@ -156,3 +156,46 @@ def test_a_module_without_not_applicable_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ImportError, match="NotApplicable"):
         run_module(bad, tasks())
+
+
+def test_an_imported_callable_is_never_measured_as_a_method(tmp_path: Path) -> None:
+    """A module-level import must not be scored as a forecasting method.
+
+    Without this filter, `sqrt` would be called as sqrt(history, horizon, frequency) on every
+    task, raise TypeError each time, and land in the report as a method that crashed everywhere
+    -- evidence the model would then act on for a method that does not exist.
+    """
+    source = MODULE_HEADER + '''
+
+from math import sqrt
+
+
+def real_method(history, horizon, frequency):
+    """A genuine method."""
+    return [float(history[-1])] * horizon
+'''
+    destination = tmp_path / "methods.py"
+    destination.write_text(source, encoding="utf-8")
+
+    _module, functions = load_methods(destination)
+
+    assert set(functions) == {"real_method"}
+    assert "sqrt" not in functions
+    assert "P" not in functions
+
+
+def test_methods_can_call_the_frozen_skill_library(tmp_path: Path) -> None:
+    source = MODULE_HEADER + '''
+
+def period_repeat(history, horizon, frequency):
+    """Repeat the last full seasonal cycle the skill library detects."""
+    period = P.infer_period(history, frequency)
+    return [float(history[-period + (i % period)]) for i in range(horizon)]
+'''
+    destination = tmp_path / "methods.py"
+    destination.write_text(source, encoding="utf-8")
+
+    _module, functions = load_methods(destination)
+
+    assert set(functions) == {"period_repeat"}
+    assert functions["period_repeat"]([1.0, 9.0] * 30, 4, "1 day") == [1.0, 9.0, 1.0, 9.0]

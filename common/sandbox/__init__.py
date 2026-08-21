@@ -54,6 +54,10 @@ def check_code(
             for alias in node.names:
                 _check_module(alias.name, permitted)
         elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                # A relative import leaves node.module as None, which used to slip past the
+                # root check entirely; there is no package context here in any case.
+                raise UnsafeCodeError("relative imports are not allowed")
             _check_module(node.module or "", permitted)
         elif isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
             raise UnsafeCodeError(f"use of forbidden name: {node.id}")
@@ -67,6 +71,12 @@ def check_code(
 
 
 def _check_module(module_name: str, permitted: frozenset[str]) -> None:
+    """Permit a module by its root package, or by its exact dotted name.
+
+    Exact names let a caller allow one specific module without opening its whole package.
+    """
+    if module_name in permitted:
+        return
     root = module_name.split(".")[0]
     if root and root not in permitted:
         raise UnsafeCodeError(f"disallowed import: {module_name}")
