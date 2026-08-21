@@ -1,4 +1,4 @@
-"""sMAPE, MAE, and MASE metrics."""
+"""sMAPE, MAE, and MSE metrics."""
 from __future__ import annotations
 
 
@@ -22,23 +22,12 @@ def mae(y_true: list[float], y_pred: list[float]) -> float:
     return sum(abs(t - p) for t, p in zip(y_true, y_pred)) / len(y_true)
 
 
-def mase(
-    y_true: list[float], y_pred: list[float], history: list[float], seasonal_period: int = 1
-) -> float:
-    """Mean Absolute Scaled Error (Hyndman & Koehler 2006): MAE scaled by the in-sample naive
-    error, so it stays finite and comparable across series instead of blowing up."""
+def mse(y_true: list[float], y_pred: list[float]) -> float:
+    """Mean squared error; penalizes large deviations more heavily than MAE."""
     _check_same_length(y_true, y_pred)
-    if not history:
-        raise ValueError("history must not be empty for MASE scaling")
-    period = seasonal_period if 0 < seasonal_period < len(history) else 1
-    diffs = [abs(history[i] - history[i - period]) for i in range(period, len(history))]
-    scale = sum(diffs) / len(diffs) if diffs else 0.0
-    if scale <= 1e-8:
-        # A flat in-sample history would otherwise divide by zero; fall back to the series'
-        # own spread so a genuinely flat series still yields a finite, comparable score.
-        spread = max(history) - min(history)
-        scale = spread if spread > 1e-8 else 1.0
-    return mae(y_true, y_pred) / scale
+    if not y_true:
+        return 0.0
+    return sum((t - p) ** 2 for t, p in zip(y_true, y_pred)) / len(y_true)
 
 
 def score_forecast(y_true: list[float], y_pred: list[float]) -> dict:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from common.metrics import mae, score_forecast, smape, spearman_rank_correlation
+from common.metrics import mae, mse, score_forecast, smape, spearman_rank_correlation
 
 
 class SmapeTests(unittest.TestCase):
@@ -30,6 +30,25 @@ class MaeTests(unittest.TestCase):
 
     def test_known_value(self):
         self.assertEqual(mae([1.0, 2.0, 3.0], [2.0, 2.0, 5.0]), 1.0)
+
+
+class MseTests(unittest.TestCase):
+    def test_perfect_forecast_is_zero(self):
+        self.assertEqual(mse([1.0, 2.0], [1.0, 2.0]), 0.0)
+
+    def test_known_value(self):
+        # (1 + 0 + 4) / 3
+        self.assertAlmostEqual(mse([1.0, 2.0, 3.0], [2.0, 2.0, 5.0]), 5.0 / 3.0)
+
+    def test_penalizes_large_errors_more_than_mae(self):
+        self.assertGreater(mse([0.0, 0.0], [0.0, 10.0]), mae([0.0, 0.0], [0.0, 10.0]))
+
+    def test_length_mismatch_raises(self):
+        with self.assertRaises(ValueError):
+            mse([1.0, 2.0], [1.0])
+
+    def test_empty_inputs(self):
+        self.assertEqual(mse([], []), 0.0)
 
 
 class ScoreForecastTests(unittest.TestCase):

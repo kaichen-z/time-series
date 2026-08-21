@@ -2,7 +2,7 @@
 
 One PNG per task: history, the trusted future, and every method's forecast overlaid on
 shared axes so the methods are directly comparable, each method's own subplot annotated
-with its sMAPE against the trusted future.
+with its MAE and MSE against the trusted future.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import matplotlib.font_manager as fm
 from matplotlib.ticker import MaxNLocator
 
 from common.data import Task, load_tasks
-from common.metrics import smape
+from common.metrics import mae, mse
 from common.payload import read_json_object
 from numerical_agent.evolution.execution import load_methods
 
@@ -126,7 +126,10 @@ def plot_task_forecasts(
                 [history_x[-1], *future_x], [history[-1], *forecast],
                 color=FORECAST, linewidth=1.6, linestyle=(0, (5, 1.5)), label="forecast", zorder=4,
             )
-            subtitle = f"sMAPE {smape(future, forecast):.1f}" if has_future else "forecast only"
+            subtitle = (
+                f"MAE {mae(future, forecast):.3g}  ·  MSE {mse(future, forecast):.3g}"
+                if has_future else "forecast only"
+            )
             title_color = INK
         else:
             label = {"not_applicable": "not applicable", "crashed": "crashed", "invalid": "invalid"}[status]
