@@ -137,6 +137,11 @@ class _TiRexBackend:
         return self.torch.tensor(values, dtype=self.torch.float32).reshape(1, -1)
 
 
+TOTO_PATCH_SIZE = 32
+"""Toto's fixed input patch size: it reshapes the time axis into (patch, seq/patch), so any
+history not already a multiple of this length must be padded before the tensor is built."""
+
+
 @dataclass(frozen=True)
 class _TotoBackend:
     torch: Any
@@ -145,15 +150,22 @@ class _TotoBackend:
 
     def tensor(
         self, values: tuple[float, ...], *, layout: str, device: object
-    ) -> Any:
+    ) -> tuple[Any, int]:
         if layout != "batch_variate_time":
             raise ValueError(f"unsupported Toto tensor layout {layout!r}")
-        return self.torch.tensor(
-            values, dtype=self.torch.float32, device=device
+        remainder = len(values) % TOTO_PATCH_SIZE
+        pad = (TOTO_PATCH_SIZE - remainder) if remainder else 0
+        padded = (0.0,) * pad + tuple(values)
+        tensor = self.torch.tensor(
+            padded, dtype=self.torch.float32, device=device
         ).reshape(1, 1, -1)
+        return tensor, pad
 
-    def observed_mask(self, tensor: Any) -> Any:
-        return self.torch.ones_like(tensor, dtype=self.torch.bool)
+    def observed_mask(self, tensor: Any, pad: int) -> Any:
+        mask = self.torch.ones_like(tensor, dtype=self.torch.bool)
+        if pad:
+            mask[..., :pad] = False
+        return mask
 
     def series_ids(self, *, device: object) -> Any:
         return self.torch.zeros((1, 1), dtype=self.torch.long, device=device)
@@ -301,14 +313,14 @@ class DedicatedAdapter:
                 )
 
             if manifest.method_id == _TOTO_ID:
-                target = backend.tensor(
+                target, pad = backend.tensor(
                     request.history,
                     layout="batch_variate_time",
                     device=backend.device,
                 )
                 inputs = {
                     "target": target,
-                    "target_mask": backend.observed_mask(target),
+                    "target_mask": backend.observed_mask(target, pad),
                     "series_ids": backend.series_ids(device=backend.device),
                 }
                 with backend.no_grad():

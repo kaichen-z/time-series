@@ -121,12 +121,12 @@ class _TotoBackend:
 
     def tensor(
         self, values: tuple[float, ...], *, layout: str, device: object
-    ) -> object:
+    ) -> tuple[object, int]:
         self.tensor_calls.append((tuple(values), layout, device))
-        return {"values": tuple(values), "layout": layout, "device": device}
+        return {"values": tuple(values), "layout": layout, "device": device}, 0
 
-    def observed_mask(self, tensor: object) -> object:
-        return {"ones_like": tensor, "dtype": "bool"}
+    def observed_mask(self, tensor: object, pad: int) -> object:
+        return {"ones_like": tensor, "dtype": "bool", "pad": pad}
 
     def series_ids(self, *, device: object) -> object:
         return {"shape": (1, 1), "device": device, "dtype": "long"}
@@ -284,7 +284,7 @@ def test_toto_uses_rank_three_inputs_and_returns_p50_quantile() -> None:
         (
             {
                 "target": target,
-                "target_mask": {"ones_like": target, "dtype": "bool"},
+                "target_mask": {"ones_like": target, "dtype": "bool", "pad": 0},
                 "series_ids": {
                     "shape": (1, 1),
                     "device": "fake-device",
