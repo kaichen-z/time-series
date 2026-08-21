@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from common.metrics import mae, mse
+from common.metrics import change_mae, mae, mse, shape_correlation, variance_ratio
 
 
 NOT_APPLICABLE = "not_applicable"
@@ -44,6 +44,9 @@ class Outcome:
     status: str
     mae: float | None = None
     mse: float | None = None
+    variance_ratio: float | None = None
+    shape_correlation: float | None = None
+    change_mae: float | None = None
     detail: str = ""
 
 
@@ -59,6 +62,10 @@ class MethodReport:
     invalid: int
     mean_mae: float | None
     mean_mse: float | None
+    mean_variance_ratio: float | None
+    mean_shape_correlation: float | None
+    mean_change_mae: float | None
+    mean_rank: float | None
     coverage: float
     by_characteristic_mae: Mapping[str, float] = field(default_factory=dict)
     by_characteristic_mse: Mapping[str, float] = field(default_factory=dict)
@@ -131,11 +138,39 @@ def run_module(
             outcomes.append(
                 _run_one(name, function, task, not_applicable, time_budget_s)
             )
+    ranks = _mean_ranks(outcomes)
     reports = tuple(
-        _report(name, [o for o in outcomes if o.method == name], tasks)
+        _report(name, [o for o in outcomes if o.method == name], tasks, ranks.get(name))
         for name in functions
     )
     return tuple(outcomes), reports
+
+
+def _mean_ranks(outcomes: Sequence[Outcome]) -> dict[str, float]:
+    """Average rank by MAE among the methods that forecast the same task.
+
+    Ranking within a task before averaging stops one large-magnitude series from deciding the
+    whole comparison, which a mean over raw errors cannot avoid.
+    """
+    by_task: dict[str, list[Outcome]] = {}
+    for outcome in outcomes:
+        if outcome.status == SUCCESS:
+            by_task.setdefault(outcome.task_id, []).append(outcome)
+
+    collected: dict[str, list[float]] = {}
+    for scored in by_task.values():
+        # Ties share the average of the positions they span, so equivalent methods rank equally.
+        ordered = sorted(scored, key=lambda o: float(o.mae))
+        position = 0
+        while position < len(ordered):
+            end = position + 1
+            while end < len(ordered) and float(ordered[end].mae) == float(ordered[position].mae):
+                end += 1
+            shared = ((position + 1) + end) / 2.0
+            for outcome in ordered[position:end]:
+                collected.setdefault(outcome.method, []).append(shared)
+            position = end
+    return {name: statistics.fmean(values) for name, values in collected.items()}
 
 
 def _run_one(
@@ -170,11 +205,17 @@ def _run_one(
     return Outcome(
         name, task.task_id, SUCCESS,
         mae=mae(truth, forecast), mse=mse(truth, forecast),
+        variance_ratio=variance_ratio(truth, forecast),
+        shape_correlation=shape_correlation(truth, forecast),
+        change_mae=change_mae(truth, forecast, float(task.history[-1])),
     )
 
 
 def _report(
-    name: str, outcomes: Sequence[Outcome], tasks: Sequence[Task]
+    name: str,
+    outcomes: Sequence[Outcome],
+    tasks: Sequence[Task],
+    mean_rank: float | None = None,
 ) -> MethodReport:
     by_id = {task.task_id: task for task in tasks}
     scored = [o for o in outcomes if o.status == SUCCESS]
@@ -204,6 +245,12 @@ def _report(
         invalid=counts.get(INVALID, 0),
         mean_mae=statistics.fmean(o.mae for o in scored) if scored else None,
         mean_mse=statistics.fmean(o.mse for o in scored) if scored else None,
+        mean_variance_ratio=statistics.fmean(o.variance_ratio for o in scored) if scored else None,
+        mean_shape_correlation=(
+            statistics.fmean(o.shape_correlation for o in scored) if scored else None
+        ),
+        mean_change_mae=statistics.fmean(o.change_mae for o in scored) if scored else None,
+        mean_rank=mean_rank,
         coverage=len(scored) / total if total else 0.0,
         by_characteristic_mae={
             tag: statistics.fmean(values) for tag, values in sorted(grouped_mae.items())
@@ -222,6 +269,10 @@ def report_payload(reports: Sequence[MethodReport]) -> list[dict[str, object]]:
             "method": report.method,
             "mean_mae": report.mean_mae,
             "mean_mse": report.mean_mse,
+            "mean_rank": report.mean_rank,
+            "mean_variance_ratio": report.mean_variance_ratio,
+            "mean_shape_correlation": report.mean_shape_correlation,
+            "mean_change_mae": report.mean_change_mae,
             "success": report.success,
             "total": report.total,
             "coverage": round(report.coverage, 4),

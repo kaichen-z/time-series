@@ -76,9 +76,20 @@ library spans far more combinations than any module will hold.
 {CONTRACT_TEXT}
 
 Each method's report gives:
+- mean_rank: the method's average rank by MAE among the methods that forecast the same task,
+  1.0 being best. This is the primary signal for comparing methods, because ranking within a
+  task before averaging stops one large-magnitude series from deciding the whole comparison,
+  which a mean over raw errors cannot avoid;
+- mean_variance_ratio, mean_shape_correlation and mean_change_mae: whether the forecast tracks
+  the series or merely sits near its level. A flat forecast has a variance ratio of 0.0 and a
+  shape correlation of 0.0 however good its MAE, and its mean_change_mae equals the series' own
+  volatility. A method with respectable error but a variance ratio near zero has found the mean,
+  not the dynamics; say so in its docstring, and prefer a method that tracks the shape when the
+  errors are close. Beware the opposite too: a variance ratio far above 1.0 is a forecast
+  swinging more wildly than the truth;
 - mean_mae and mean_mse over the tasks it actually produced a forecast for (lower is better
-  for both). mean_mae is the primary metric to compare methods by. mean_mse penalizes large
-  deviations more heavily, so treat a method with much worse mean_mse than its mean_mae
+  for both). mean_mse penalizes large deviations more heavily, so treat a method with much
+  worse mean_mse than its mean_mae
   suggests as one that occasionally produces large errors;
 - success / total and coverage;
 - not_applicable: tasks it declined by raising NotApplicable, which is correct behavior, not failure;

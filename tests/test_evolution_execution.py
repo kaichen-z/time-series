@@ -199,3 +199,51 @@ def period_repeat(history, horizon, frequency):
 
     assert set(functions) == {"period_repeat"}
     assert functions["period_repeat"]([1.0, 9.0] * 30, 4, "1 day") == [1.0, 9.0, 1.0, 9.0]
+
+
+def test_mean_rank_orders_methods_within_a_task_not_by_raw_magnitude(tmp_path: Path) -> None:
+    """One large-magnitude series must not decide the whole comparison.
+
+    `steady` is beaten on the small task and wins the huge one; `spiky` is the reverse. Their
+    mean MAE is dominated by the huge task, but their mean ranks stay balanced.
+    """
+    source = MODULE_HEADER + '''
+
+def steady(history, horizon, frequency):
+    """Always predicts the last value."""
+    return [float(history[-1])] * horizon
+
+
+def spiky(history, horizon, frequency):
+    """Always predicts the last value plus one."""
+    return [float(history[-1]) + 1.0] * horizon
+'''
+    destination = tmp_path / "methods.py"
+    destination.write_text(source, encoding="utf-8")
+    tasks = (
+        Task("small", (1.0, 2.0, 3.0), 2, "1 day", (3.0, 3.0)),
+        Task("huge", (0.0, 0.0, 1e6), 2, "1 day", (1e6 + 1.0, 1e6 + 1.0)),
+    )
+
+    _outcomes, reports = run_module(destination, tasks)
+    by_name = {report.method: report for report in reports}
+
+    assert by_name["steady"].mean_rank == pytest.approx(1.5)
+    assert by_name["spiky"].mean_rank == pytest.approx(1.5)
+
+
+def test_a_flat_method_is_visibly_flat_in_the_report(tmp_path: Path) -> None:
+    source = MODULE_HEADER + '''
+
+def flat(history, horizon, frequency):
+    """Predicts the mean of the history forever."""
+    return [sum(history) / len(history)] * horizon
+'''
+    destination = tmp_path / "methods.py"
+    destination.write_text(source, encoding="utf-8")
+    task = Task("wave", (1.0, 5.0, 1.0, 5.0), 4, "1 day", (1.0, 5.0, 1.0, 5.0))
+
+    _outcomes, reports = run_module(destination, (task,))
+
+    assert reports[0].mean_variance_ratio == pytest.approx(0.0)
+    assert reports[0].mean_shape_correlation == pytest.approx(0.0)
