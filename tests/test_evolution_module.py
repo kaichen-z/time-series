@@ -338,3 +338,11 @@ def test_a_method_that_never_existed_is_still_rejected() -> None:
                 "code": method_source("alpha"), "reason": "x",
             }],
         )
+
+
+def test_placeholder_code_says_what_is_actually_wrong() -> None:
+    """The v002 run lost four generations to `"code": "..."`; the error must name the cause."""
+    with pytest.raises(ModuleError, match="complete function source"):
+        parse_method("...")
+    with pytest.raises(ModuleError, match="complete function source"):
+        parse_method("x = 1")

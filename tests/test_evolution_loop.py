@@ -38,7 +38,9 @@ def tasks() -> tuple[Task, ...]:
 
 
 def scripted(operations: list[dict]) -> FakeLLMClient:
-    return FakeLLMClient([json.dumps({"operations": operations})])
+    """The same batch twice: a rejected batch is retried once, so both attempts are scripted."""
+    payload = json.dumps({"operations": operations})
+    return FakeLLMClient([payload, payload])
 
 
 def test_bootstrap_writes_and_commits_a_module(tmp_path: Path) -> None:
@@ -176,3 +178,105 @@ def test_successive_generations_build_a_readable_history(tmp_path: Path) -> None
         "seed",
     ]
     assert read_module(repo / "methods.py").names() == ("alpha", "beta")
+
+
+# --------------------------------------------------------------------------------------
+# Recovery from a malformed batch
+# --------------------------------------------------------------------------------------
+
+
+def placeholder_batch() -> list[dict]:
+    """The exact shape that killed the v002 run: an ellipsis where the code should be."""
+    return [
+        {"op": "delete", "name": "beta", "reason": "worse everywhere"},
+        {"op": "rewrite", "name": "alpha", "code": "...", "reason": "tighten the docstring"},
+    ]
+
+
+def good_batch() -> list[dict]:
+    # The body must actually differ, or commit_module correctly makes no commit.
+    changed = method("alpha", "    return [float(history[-1]) + 1.0] * horizon")
+    return [{"op": "rewrite", "name": "alpha", "code": changed, "reason": "clearer"}]
+
+
+def test_a_malformed_batch_is_retried_and_the_retry_commits(tmp_path: Path) -> None:
+    repo = seed_repo(tmp_path, "alpha", "beta")
+    llm = FakeLLMClient([
+        json.dumps({"operations": placeholder_batch()}),
+        json.dumps({"operations": good_batch()}),
+    ])
+
+    outcome = evolve_once(repo, tasks(), llm, 1)
+
+    assert outcome.retried is True
+    assert outcome.rejected == ""
+    assert outcome.applied
+    assert (repo / "transcripts" / "generation_001.md").exists()
+    assert (repo / "transcripts" / "generation_001_retry1.md").exists()
+
+
+def test_the_retry_prompt_quotes_the_rejection(tmp_path: Path) -> None:
+    repo = seed_repo(tmp_path, "alpha", "beta")
+    llm = FakeLLMClient([
+        json.dumps({"operations": placeholder_batch()}),
+        json.dumps({"operations": good_batch()}),
+    ])
+
+    evolve_once(repo, tasks(), llm, 1)
+    retry = (repo / "transcripts" / "generation_001_retry1.md").read_text(encoding="utf-8")
+
+    assert "complete function source" in retry
+    assert "rejected" in retry
+
+
+def test_a_batch_malformed_twice_leaves_the_module_untouched(tmp_path: Path) -> None:
+    repo = seed_repo(tmp_path, "alpha", "beta")
+    before = (repo / "methods.py").read_text(encoding="utf-8")
+    commits = git(repo, "log", "--oneline")
+    llm = FakeLLMClient([
+        json.dumps({"operations": placeholder_batch()}),
+        json.dumps({"operations": placeholder_batch()}),
+    ])
+
+    outcome = evolve_once(repo, tasks(), llm, 1)
+
+    assert outcome.rejected
+    assert outcome.applied == ()
+    assert (repo / "methods.py").read_text(encoding="utf-8") == before
+    assert git(repo, "log", "--oneline") == commits
+
+
+def test_a_rejected_generation_no_longer_ends_the_run(tmp_path: Path) -> None:
+    """The regression that cost generations 8-10 of the v002 run."""
+    repo = seed_repo(tmp_path, "alpha", "beta")
+    llm = FakeLLMClient([
+        json.dumps({"operations": placeholder_batch()}),   # gen 1 first attempt
+        json.dumps({"operations": placeholder_batch()}),   # gen 1 retry, also bad
+        json.dumps({"operations": good_batch()}),          # gen 2 succeeds
+    ])
+
+    outcomes = run_evolution(repo, tasks(), llm, generations=2)
+
+    assert len(outcomes) == 2
+    assert outcomes[0].rejected
+    assert outcomes[1].applied
+    assert "generation 2" in git(repo, "log", "-1", "--format=%s")
+
+
+def test_the_run_still_stops_when_the_model_proposes_nothing(tmp_path: Path) -> None:
+    repo = seed_repo(tmp_path, "alpha", "beta")
+    llm = FakeLLMClient([json.dumps({"operations": []}), json.dumps({"operations": good_batch()})])
+
+    outcomes = run_evolution(repo, tasks(), llm, generations=3)
+
+    assert len(outcomes) == 1
+    assert outcomes[0].rejected == "no operations proposed"
+
+
+def test_neither_prompt_schema_shows_an_abbreviated_code_placeholder() -> None:
+    from numerical_agent.evolution.prompts import BOOTSTRAP_SYSTEM, EVOLVE_SYSTEM
+
+    for prompt in (BOOTSTRAP_SYSTEM, EVOLVE_SYSTEM):
+        assert '"def ..."' not in prompt
+        assert "def method_name(history, horizon, frequency): ..." not in prompt
+    assert "never write `...` or an ellipsis" in EVOLVE_SYSTEM

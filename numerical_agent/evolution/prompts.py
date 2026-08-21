@@ -59,7 +59,7 @@ you consider stronger.
 {CONTRACT_TEXT}
 
 Return exactly one JSON object:
-{{"code": "def method_name(history, horizon, frequency): ..."}}
+{{"code": "<the complete function source, starting with def>"}}
 """
 
 EVOLVE_SYSTEM = f"""You are evolving a Python module of forecasting methods against measured
@@ -127,11 +127,17 @@ evidence rather than a textbook description.
 
 Return exactly one JSON object with the operations to apply, in order:
 {{"operations": [
-  {{"op": "delete",  "name": "...", "reason": "..."}},
-  {{"op": "rewrite", "name": "...", "code": "def ...", "reason": "..."}},
-  {{"op": "merge",   "names": ["...", "..."], "into": "...", "code": "def ...", "reason": "..."}},
-  {{"op": "add",     "code": "def ...", "reason": "..."}}
+  {{"op": "delete",  "name": "<method name>", "reason": "<why, citing the measurement>"}},
+  {{"op": "rewrite", "name": "<method name>", "code": "<the complete function source>", "reason": "<why>"}},
+  {{"op": "merge",   "names": ["<method name>", "<method name>"], "into": "<method name>", "code": "<the complete function source>", "reason": "<why>"}},
+  {{"op": "add",     "code": "<the complete function source>", "reason": "<why>"}}
 ]}}
+
+Every `code` field carries the entire function, from its `def` line to its last line. Never
+abbreviate it, never write `...` or an ellipsis, never send a diff, and never leave a comment
+standing in for lines you did not change. A rewrite restates the whole method even when only
+its docstring differs. A batch containing an abbreviated `code` field is rejected in full, so
+if you are running short of room, return fewer operations rather than shortening any of them.
 
 Operations apply in sequence to the module as your earlier operations have already changed it.
 A merge removes every method it names, so do not also delete those methods afterwards, and do
@@ -187,3 +193,18 @@ def render_evolve_user(
         sort_keys=True,
     )
     return f"# Measured results\n\n{summary}\n\n# Current module\n\n```python\n{module_source}```\n"
+
+
+def render_retry_user(error: str) -> str:
+    """Ask again after a rejected batch, quoting the exact failure."""
+    return (
+        "Your previous operations were rejected and nothing was applied. Operations are "
+        "applied atomically, so one malformed operation discards the whole batch, including "
+        "the ones that were fine.\n\n"
+        f"The rejection was:\n\n    {error}\n\n"
+        "Return the complete JSON object again with that fixed. Two rules account for most "
+        "rejections: every `code` field must be the entire function source starting with "
+        "`def`, never abbreviated or replaced by `...`; and operations apply in sequence, so "
+        "an operation must not name a method an earlier operation already deleted or merged "
+        "away. Return fewer operations if you need the room to write each one out in full."
+    )

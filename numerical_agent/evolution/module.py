@@ -111,6 +111,10 @@ def parse_method(source: str, expected_name: str | None = None) -> Method:
     except SyntaxError as exc:
         raise ModuleError(f"method does not parse: {exc}") from exc
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    if not functions:
+        raise ModuleError(
+            "code must be the complete function source starting with 'def', not a placeholder"
+        )
     if len(functions) != 1:
         raise ModuleError(f"expected exactly one function definition, found {len(functions)}")
     node = functions[0]

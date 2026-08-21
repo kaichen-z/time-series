@@ -18,6 +18,7 @@ from .prompts import (
     EVOLVE_SYSTEM,
     render_bootstrap_user,
     render_evolve_user,
+    render_retry_user,
 )
 
 MODULE_NAME = "methods.py"
@@ -32,6 +33,8 @@ class Generation:
     method_count: int
     commit: str
     rejected: str = ""
+    retried: bool = False
+    converged: bool = False
 
 
 def git(repo: Path, *args: str) -> str:
@@ -132,32 +135,58 @@ def evolve_once(
         generation=generation,
         task_count=len(tasks),
     )
-    response = llm.complete(
-        system=EVOLVE_SYSTEM,
-        messages=[{"role": "user", "content": user}],
-        temperature=0.7, # This might get chanfed but better than 0.0
-    )
-    _write_transcript(root, generation, EVOLVE_SYSTEM, user, response.text)
+    messages = [{"role": "user", "content": user}]
+    updated: MethodModule | None = None
+    summaries: tuple[str, ...] = ()
+    failure = ""
 
-    operations = _parse_operations(response.text)
-    if not operations:
-        return Generation(generation, (), len(module.names()), _head(root), "no operations proposed")
+    # One retry: a malformed operation is usually a formatting slip in a single field, and the
+    # rest of the batch is worth recovering rather than discarding along with it.
+    for attempt in range(2):
+        response = llm.complete(
+            system=EVOLVE_SYSTEM, messages=messages,
+            temperature=0.7, # This might get chanfed but better than 0.0
+        )
+        _write_transcript(root, generation, EVOLVE_SYSTEM, messages, response.text, attempt)
 
-    try:
-        updated, summaries = apply_operations(module, operations)
-        write_module(module_path, updated)
-    except (ModuleError, ValueError) as exc:
-        # A rejected generation leaves the previous commit standing, unmodified.
-        write_module(module_path, module)
-        emit(TraceEvent("module", "evolution", "generation",
-                        {"generation": generation, "ok": False, "error": str(exc)}))
-        return Generation(generation, (), len(module.names()), _head(root), str(exc))
+        operations = _parse_operations(response.text)
+        if not operations:
+            if attempt:
+                break
+            return Generation(
+                generation, (), len(module.names()), _head(root),
+                "no operations proposed", converged=True,
+            )
 
+        try:
+            updated, summaries = apply_operations(module, operations)
+            write_module(module_path, updated)
+            failure = ""
+            break
+        except (ModuleError, ValueError) as exc:
+            # A rejected generation leaves the previous commit standing, unmodified.
+            write_module(module_path, module)
+            updated, failure = None, str(exc)
+            emit(TraceEvent("module", "evolution", "generation",
+                            {"generation": generation, "ok": False,
+                             "attempt": attempt + 1, "error": failure}))
+            messages = messages + [
+                {"role": "assistant", "content": response.text},
+                {"role": "user", "content": render_retry_user(failure)},
+            ]
+
+    if updated is None:
+        return Generation(
+            generation, (), len(module.names()), _head(root),
+            failure or "no operations proposed", retried=True,
+        )
+
+    retried = len(messages) > 1
     commit = commit_module(root, f"generation {generation}: {len(summaries)} operations", summaries)
     emit(TraceEvent("module", "evolution", "generation",
                     {"generation": generation, "methods": len(updated.names()),
-                     "operations": len(summaries), "commit": commit}))
-    return Generation(generation, summaries, len(updated.names()), commit)
+                     "operations": len(summaries), "commit": commit, "retried": retried}))
+    return Generation(generation, summaries, len(updated.names()), commit, retried=retried)
 
 
 def run_evolution(
@@ -166,12 +195,16 @@ def run_evolution(
     llm: LLMClient,
     generations: int,
 ) -> tuple[Generation, ...]:
-    """Run consecutive generations, stopping early when a generation changes nothing."""
+    """Run consecutive generations, stopping only when the model proposes nothing.
+
+    A rejected generation leaves the module untouched, so the next generation re-measures and
+    tries again rather than ending the run.
+    """
     results = []
     for number in range(1, generations + 1):
         outcome = evolve_once(repo, tasks, llm, number)
         results.append(outcome)
-        if not outcome.applied:
+        if outcome.converged:
             break
     return tuple(results)
 
@@ -199,10 +232,20 @@ def _head(repo: Path) -> str:
     return git(repo, "rev-parse", "--short", "HEAD") if _has_commit(repo) else ""
 
 
-def _write_transcript(repo: Path, generation: int, system: str, user: str, response: str) -> None:
-    destination = repo / "transcripts" / f"generation_{generation:03d}.md"
+def _write_transcript(
+    repo: Path,
+    generation: int,
+    system: str,
+    messages: Sequence[Mapping[str, str]],
+    response: str,
+    attempt: int = 0,
+) -> None:
+    """Write one attempt's transcript; a retry gets its own file rather than overwriting."""
+    suffix = "" if not attempt else f"_retry{attempt}"
+    destination = repo / "transcripts" / f"generation_{generation:03d}{suffix}.md"
     destination.parent.mkdir(parents=True, exist_ok=True)
+    turns = "\n\n".join(f"## {m['role']}\n\n{m['content']}" for m in messages)
     destination.write_text(
-        f"# system\n\n{system}\n\n# user\n\n{user}\n\n# response\n\n{response}\n",
+        f"# system\n\n{system}\n\n# user\n\n{turns}\n\n# response\n\n{response}\n",
         encoding="utf-8",
     )
