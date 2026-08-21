@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from common.metrics import change_mae, mae, mse, shape_correlation, variance_ratio
+from common.metrics import change_mae, mae, rmse, shape_correlation, variance_ratio
 
 
 NOT_APPLICABLE = "not_applicable"
@@ -43,7 +43,7 @@ class Outcome:
     task_id: str
     status: str
     mae: float | None = None
-    mse: float | None = None
+    rmse: float | None = None
     variance_ratio: float | None = None
     shape_correlation: float | None = None
     change_mae: float | None = None
@@ -61,14 +61,14 @@ class MethodReport:
     crashed: int
     invalid: int
     mean_mae: float | None
-    mean_mse: float | None
+    mean_rmse: float | None
     mean_variance_ratio: float | None
     mean_shape_correlation: float | None
     mean_change_mae: float | None
     mean_rank: float | None
     coverage: float
     by_characteristic_mae: Mapping[str, float] = field(default_factory=dict)
-    by_characteristic_mse: Mapping[str, float] = field(default_factory=dict)
+    by_characteristic_rmse: Mapping[str, float] = field(default_factory=dict)
     sample_failures: tuple[str, ...] = ()
 
 
@@ -204,7 +204,7 @@ def _run_one(
     truth = list(task.future)
     return Outcome(
         name, task.task_id, SUCCESS,
-        mae=mae(truth, forecast), mse=mse(truth, forecast),
+        mae=mae(truth, forecast), rmse=rmse(truth, forecast),
         variance_ratio=variance_ratio(truth, forecast),
         shape_correlation=shape_correlation(truth, forecast),
         change_mae=change_mae(truth, forecast, float(task.history[-1])),
@@ -222,11 +222,11 @@ def _report(
     counts = Counter(o.status for o in outcomes)
 
     grouped_mae: dict[str, list[float]] = {}
-    grouped_mse: dict[str, list[float]] = {}
+    grouped_rmse: dict[str, list[float]] = {}
     for outcome in scored:
         for tag in by_id[outcome.task_id].characteristics():
             grouped_mae.setdefault(tag, []).append(float(outcome.mae))
-            grouped_mse.setdefault(tag, []).append(float(outcome.mse))
+            grouped_rmse.setdefault(tag, []).append(float(outcome.rmse))
 
     # Deduplicated with a dict, not a set: set order is not reproducible across runs.
     ordered_failures = tuple(
@@ -244,7 +244,7 @@ def _report(
         crashed=counts.get(CRASHED, 0),
         invalid=counts.get(INVALID, 0),
         mean_mae=statistics.fmean(o.mae for o in scored) if scored else None,
-        mean_mse=statistics.fmean(o.mse for o in scored) if scored else None,
+        mean_rmse=statistics.fmean(o.rmse for o in scored) if scored else None,
         mean_variance_ratio=statistics.fmean(o.variance_ratio for o in scored) if scored else None,
         mean_shape_correlation=(
             statistics.fmean(o.shape_correlation for o in scored) if scored else None
@@ -255,8 +255,8 @@ def _report(
         by_characteristic_mae={
             tag: statistics.fmean(values) for tag, values in sorted(grouped_mae.items())
         },
-        by_characteristic_mse={
-            tag: statistics.fmean(values) for tag, values in sorted(grouped_mse.items())
+        by_characteristic_rmse={
+            tag: statistics.fmean(values) for tag, values in sorted(grouped_rmse.items())
         },
         sample_failures=ordered_failures,
     )
@@ -268,7 +268,7 @@ def report_payload(reports: Sequence[MethodReport]) -> list[dict[str, object]]:
         {
             "method": report.method,
             "mean_mae": report.mean_mae,
-            "mean_mse": report.mean_mse,
+            "mean_rmse": report.mean_rmse,
             "mean_rank": report.mean_rank,
             "mean_variance_ratio": report.mean_variance_ratio,
             "mean_shape_correlation": report.mean_shape_correlation,
@@ -282,8 +282,8 @@ def report_payload(reports: Sequence[MethodReport]) -> list[dict[str, object]]:
             "by_characteristic_mae": {
                 tag: round(value, 4) for tag, value in report.by_characteristic_mae.items()
             },
-            "by_characteristic_mse": {
-                tag: round(value, 4) for tag, value in report.by_characteristic_mse.items()
+            "by_characteristic_rmse": {
+                tag: round(value, 4) for tag, value in report.by_characteristic_rmse.items()
             },
             "sample_failures": list(report.sample_failures),
         }

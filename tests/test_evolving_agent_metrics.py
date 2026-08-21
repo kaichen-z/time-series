@@ -5,7 +5,7 @@ import unittest
 from common.metrics import (
     change_mae,
     mae,
-    mse,
+    rmse,
     score_forecast,
     shape_correlation,
     smape,
@@ -41,23 +41,27 @@ class MaeTests(unittest.TestCase):
         self.assertEqual(mae([1.0, 2.0, 3.0], [2.0, 2.0, 5.0]), 1.0)
 
 
-class MseTests(unittest.TestCase):
+class RmseTests(unittest.TestCase):
     def test_perfect_forecast_is_zero(self):
-        self.assertEqual(mse([1.0, 2.0], [1.0, 2.0]), 0.0)
+        self.assertEqual(rmse([1.0, 2.0], [1.0, 2.0]), 0.0)
 
     def test_known_value(self):
-        # (1 + 0 + 4) / 3
-        self.assertAlmostEqual(mse([1.0, 2.0, 3.0], [2.0, 2.0, 5.0]), 5.0 / 3.0)
+        # sqrt((1 + 0 + 4) / 3)
+        self.assertAlmostEqual(rmse([1.0, 2.0, 3.0], [2.0, 2.0, 5.0]), (5.0 / 3.0) ** 0.5)
 
     def test_penalizes_large_errors_more_than_mae(self):
-        self.assertGreater(mse([0.0, 0.0], [0.0, 10.0]), mae([0.0, 0.0], [0.0, 10.0]))
+        self.assertGreater(rmse([0.0, 0.0], [0.0, 10.0]), mae([0.0, 0.0], [0.0, 10.0]))
+
+    def test_is_in_the_same_units_as_mae_not_squared(self):
+        # RMSE of a constant-error series equals that error exactly, unlike raw MSE.
+        self.assertAlmostEqual(rmse([0.0, 0.0, 0.0], [3.0, 3.0, 3.0]), 3.0)
 
     def test_length_mismatch_raises(self):
         with self.assertRaises(ValueError):
-            mse([1.0, 2.0], [1.0])
+            rmse([1.0, 2.0], [1.0])
 
     def test_empty_inputs(self):
-        self.assertEqual(mse([], []), 0.0)
+        self.assertEqual(rmse([], []), 0.0)
 
 
 class ScoreForecastTests(unittest.TestCase):

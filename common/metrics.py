@@ -1,4 +1,4 @@
-"""sMAPE, MAE, MSE and forecast-shape metrics."""
+"""sMAPE, MAE, RMSE and forecast-shape metrics."""
 from __future__ import annotations
 
 
@@ -22,12 +22,12 @@ def mae(y_true: list[float], y_pred: list[float]) -> float:
     return sum(abs(t - p) for t, p in zip(y_true, y_pred)) / len(y_true)
 
 
-def mse(y_true: list[float], y_pred: list[float]) -> float:
-    """Mean squared error; penalizes large deviations more heavily than MAE."""
+def rmse(y_true: list[float], y_pred: list[float]) -> float:
+    """Root mean squared error; penalizes large deviations more than MAE, in the same units."""
     _check_same_length(y_true, y_pred)
     if not y_true:
         return 0.0
-    return sum((t - p) ** 2 for t, p in zip(y_true, y_pred)) / len(y_true)
+    return (sum((t - p) ** 2 for t, p in zip(y_true, y_pred)) / len(y_true)) ** 0.5
 
 
 def variance_ratio(y_true: list[float], y_pred: list[float]) -> float:

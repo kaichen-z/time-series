@@ -87,15 +87,15 @@ Each method's report gives:
   not the dynamics; say so in its docstring, and prefer a method that tracks the shape when the
   errors are close. Beware the opposite too: a variance ratio far above 1.0 is a forecast
   swinging more wildly than the truth;
-- mean_mae and mean_mse over the tasks it actually produced a forecast for (lower is better
-  for both). mean_mse penalizes large deviations more heavily, so treat a method with much
-  worse mean_mse than its mean_mae
+- mean_mae and mean_rmse over the tasks it actually produced a forecast for (lower is better
+  for both). mean_rmse penalizes large deviations more heavily, so treat a method with much
+  worse mean_rmse than its mean_mae
   suggests as one that occasionally produces large errors;
 - success / total and coverage;
 - not_applicable: tasks it declined by raising NotApplicable, which is correct behavior, not failure;
 - crashed: tasks where it raised something else, which is always a defect;
 - invalid: tasks where it returned the wrong shape or a non-finite value, also a defect;
-- by_characteristic_mae and by_characteristic_mse: the same two metrics grouped by series type,
+- by_characteristic_mae and by_characteristic_rmse: the same two metrics grouped by series type,
   which is the evidence for its docstring. Lead with by_characteristic_mae when picking which
   series type a method is genuinely strong on;
 - sample_failures: real exception messages from crashed or invalid runs.

@@ -100,7 +100,7 @@ def test_a_correct_method_is_scored_on_every_task(tmp_path: Path) -> None:
 
     assert (perfect.success, perfect.coverage) == (2, 1.0)
     assert perfect.mean_mae == pytest.approx(0.0)
-    assert perfect.mean_mse == pytest.approx(0.0)
+    assert perfect.mean_rmse == pytest.approx(0.0)
 
 
 def test_outcome_statuses_cover_every_method_and_task(tmp_path: Path) -> None:
