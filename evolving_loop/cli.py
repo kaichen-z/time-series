@@ -768,6 +768,9 @@ def run_command(args) -> dict:
                         ],
                         "setting2_knowledge": {
                             "version": result.coding.knowledge_base_version,
+                            "retrieved_entry_ids": list(
+                                result.coding.retrieved_knowledge_ids
+                            ),
                             "selected_entry_ids": list(result.coding.selected_knowledge_ids),
                             "diagnostic_profile": (
                                 asdict(result.coding.diagnostic_profile)

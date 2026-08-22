@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import statistics
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from typing import Literal, Protocol
 
 from evolving_loop.coding_agent.skill_library import Skill, SkillLibrary
@@ -71,7 +71,11 @@ why it addresses the observed failure. Preserve
 the required forecast(history, horizon, frequency) signature and return exactly one JSON object:
 {"programs": [{"name": "short_snake_case", "description": "when to use it",
 "assumption": "falsifiable numeric assumption", "failure_condition": "when it fails",
+"knowledge_ids": ["cited external knowledge entry IDs"], "prior_confidence": 0.0,
 "code": "def forecast(...): ..."}]}
+
+When the parent cites external knowledge, revise it as a falsifiable prior: preserve only relevant
+allowed IDs, lower confidence when hindcasts contradict it, and never cite an ID not supplied.
 """
 
 
@@ -107,6 +111,7 @@ class CodingEvolutionResult:
     improvement: float
     saved_skill_name: str | None
     knowledge_base_version: str | None = None
+    retrieved_knowledge_ids: tuple[str, ...] = ()
     selected_knowledge_ids: tuple[str, ...] = ()
     diagnostic_profile: DiagnosticProfile | None = None
 
@@ -170,24 +175,50 @@ class CodingEvolutionAgent:
         generated_candidates = [
             item for item in validated if item.program.source not in {"tsfm", "fallback"}
         ]
-        parent = min(generated_candidates, key=lambda item: item.hindcast_smape) if generated_candidates else None
+        plain_candidates = [
+            item for item in generated_candidates if not self._knowledge_lineage(item.program)
+        ]
+        knowledge_candidates = [
+            item for item in generated_candidates if self._knowledge_lineage(item.program)
+        ]
+        parents = {
+            lineage: min(items, key=lambda item: item.hindcast_smape)
+            for lineage, items in (
+                ("plain", plain_candidates),
+                ("knowledge", knowledge_candidates),
+            )
+            if items
+        }
         for generation in range(1, self.config.mutations + 1):
-            if parent is None:
+            if not parents:
                 break
-            mutations = self._mutate(task, parent, generation)
-            children = [candidate for program in mutations if (candidate := self._validate(task, program))]
-            all_candidates.extend(children)
-            if children:
-                child = min(children, key=lambda item: item.hindcast_smape)
-                if child.hindcast_smape < parent.hindcast_smape:
-                    parent = child
+            next_parents = dict(parents)
+            for lineage, parent in parents.items():
+                mutations = self._mutate(
+                    task,
+                    parent,
+                    generation,
+                    knowledge if lineage == "knowledge" else None,
+                )
+                children = [
+                    candidate
+                    for program in mutations
+                    if (candidate := self._validate(task, program))
+                ]
+                all_candidates.extend(children)
+                if children:
+                    child = min(children, key=lambda item: item.hindcast_smape)
+                    if child.hindcast_smape < parent.hindcast_smape:
+                        next_parents[lineage] = child
+            parents = next_parents
 
         selected = min(all_candidates, key=lambda item: item.hindcast_smape)
         baseline_score = self._repeat_last_hindcast(task)
         saved_name = None
         if (
             self.library is not None
-            and selected.program.source in {"generated", "knowledge", "mutation"}
+            and selected.program.source
+            in {"generated", "knowledge", "mutation", "knowledge_mutation"}
             and selected.hindcast_smape + self.config.minimum_library_improvement < baseline_score
         ):
             saved_name = selected.program.name
@@ -211,7 +242,8 @@ class CodingEvolutionAgent:
             improvement=initial_best.hindcast_smape - selected.hindcast_smape,
             saved_skill_name=saved_name,
             knowledge_base_version=(self.knowledge_base.version if knowledge is not None else None),
-            selected_knowledge_ids=(knowledge.entry_ids if knowledge is not None else ()),
+            retrieved_knowledge_ids=(knowledge.entry_ids if knowledge is not None else ()),
+            selected_knowledge_ids=selected.program.knowledge_ids,
             diagnostic_profile=(knowledge.profile if knowledge is not None else None),
         )
 
@@ -276,8 +308,22 @@ class CodingEvolutionAgent:
         )
 
     def _mutate(
-        self, task: Task, parent: ValidatedProgram, generation: int
+        self,
+        task: Task,
+        parent: ValidatedProgram,
+        generation: int,
+        knowledge: KnowledgeSelection | None = None,
     ) -> list[ForecastProgram]:
+        cited_ids = tuple(
+            entry_id
+            for entry_id in parent.program.knowledge_ids
+            if knowledge is not None and entry_id in knowledge.entry_ids
+        )
+        cited_entries = (
+            tuple(item for item in knowledge.entries if item.entry_id in cited_ids)
+            if knowledge is not None
+            else ()
+        )
         payload = {
             "task": json.loads(self._numeric_payload(task)),
             "parent": {
@@ -286,20 +332,38 @@ class CodingEvolutionAgent:
                 "assumption": parent.program.assumption,
                 "failure_condition": parent.program.failure_condition,
                 "code": parent.program.code,
+                "source": parent.program.source,
+                "knowledge_ids": list(cited_ids),
+                "prior_confidence": parent.program.prior_confidence,
             },
             "historical_validation": {
                 "mean_smape": parent.hindcast_smape,
                 "fold_scores": list(parent.fold_scores),
                 "execution_errors": list(parent.fold_errors),
             },
+            "knowledge_diagnostics": (
+                asdict(knowledge.profile) if knowledge is not None and cited_entries else None
+            ),
         }
+        guidance = self.revision_prompt
+        if knowledge is not None and cited_entries and self.knowledge_base is not None:
+            guidance += "\n\n" + KnowledgeSelection(
+                profile=knowledge.profile,
+                entries=cited_entries,
+            ).prompt_text(self.knowledge_base.sources)
         programs = self._call_programs(
-            self.revision_prompt,
+            guidance,
             json.dumps(payload, ensure_ascii=False),
             generation=generation,
             limit=self.config.mutation_children,
+            allowed_knowledge_ids=cited_ids,
         )
-        return [replace(program, source="mutation") for program in programs]
+        source = "knowledge_mutation" if self._knowledge_lineage(parent.program) else "mutation"
+        return [replace(program, source=source) for program in programs]
+
+    @staticmethod
+    def _knowledge_lineage(program: ForecastProgram) -> bool:
+        return program.source in {"knowledge", "knowledge_mutation"}
 
     @staticmethod
     def _numeric_payload(task: Task) -> str:

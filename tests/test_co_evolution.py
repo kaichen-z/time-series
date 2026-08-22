@@ -73,6 +73,7 @@ def test_multiple_children_receive_distinct_payloads_without_full_skill_source()
         system_reward=0.2,
         module_rewards={"coding": 0.8, "retrieval": 0.2, "decision": 0.7},
         outcomes=(),
+        diagnostics={"mean_selection_regret": 12.5, "mean_best_of_k_smape": 4.0},
     )
     client = FakeLLMClient([_open_genome(), _open_genome()])
     engine = CoEvolutionEngine(client, harness_factory=lambda _policy: None)
@@ -97,6 +98,10 @@ def test_multiple_children_receive_distinct_payloads_without_full_skill_source()
     assert second["child_index"] == 1
     assert first["diversity_instruction"] != second["diversity_instruction"]
     assert first["skill_inventory"]["coding"] == ["private_code_skill"]
+    assert first["system_diagnostics"] == {
+        "mean_selection_regret": 12.5,
+        "mean_best_of_k_smape": 4.0,
+    }
     assert "FULL_EXECUTABLE_SOURCE" not in client.calls[0]["messages"][0]["content"]
 
 
@@ -603,6 +608,70 @@ def test_successive_halving_prunes_screen_failures_and_only_fully_evaluates_top_
         "v001": "below_parent_tolerance",
         "v003": "not_top_k",
     }
+
+
+def test_successive_halving_selects_the_train_best_before_dev_acceptance(
+    monkeypatch,
+) -> None:
+    from evolving_loop.co_evolution import CoEvolutionConfig
+
+    engine = CoEvolutionEngine(
+        FakeLLMClient([]),
+        lambda _policy: object(),
+        CoEvolutionConfig(
+            generations=1,
+            children_per_generation=2,
+            successive_halving=True,
+            screening_train_tasks=1,
+            screening_dev_tasks=1,
+            screening_promote=2,
+            screening_tolerance=0.01,
+        ),
+    )
+    monkeypatch.setattr(
+        engine,
+        "mutate",
+        lambda _parent, _evaluation, *, child_index=0: HarnessPolicy(
+            version=f"v{child_index + 1:03d}", parent="v000"
+        ),
+    )
+
+    def fake_evaluate(policy, _tasks, *, stage, **_kwargs):
+        rewards = {
+            ("v000", "parent_screen_train"): 0.70,
+            ("v000", "parent_screen_dev"): 0.70,
+            ("v000", "parent_train_remaining"): 0.70,
+            ("v000", "parent_dev"): 0.70,
+            ("v001", "child_screen_train"): 0.90,
+            ("v001", "child_screen_dev"): 0.72,
+            ("v001", "child_train_remaining"): 0.90,
+            ("v001", "child_dev"): 0.75,
+            ("v002", "child_screen_train"): 0.85,
+            ("v002", "child_screen_dev"): 0.90,
+            ("v002", "child_train_remaining"): 0.85,
+            ("v002", "child_dev"): 0.95,
+        }
+        reward = rewards[(policy.version, stage)]
+        return PolicyEvaluation(
+            version=policy.version,
+            system_reward=reward,
+            module_rewards={"coding": reward, "retrieval": reward, "decision": reward},
+            outcomes=(),
+        )
+
+    monkeypatch.setattr(engine, "_evaluate", fake_evaluate)
+    best, trace = engine.evolve(
+        HarnessPolicy(), (object(), object()), (object(), object())
+    )
+
+    assert best.version == "v001"
+    assert trace[0].accepted_version == "v001"
+    assert trace[0].best_child_train_module_rewards == {
+        "coding": pytest.approx(0.90),
+        "retrieval": pytest.approx(0.90),
+        "decision": pytest.approx(0.90),
+    }
+    assert trace[0].best_child_dev_reward == pytest.approx(0.75)
 
 
 def test_successive_halving_keeps_parent_when_every_child_fails_screen(

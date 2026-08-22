@@ -187,7 +187,7 @@ def test_setting2_adds_a_cited_knowledge_branch_without_removing_plain_candidate
     ).run_task(_task().numeric)
 
     assert result.knowledge_base_version == "setting2-tskb-2026-08-15"
-    assert "ANALOG_DIRECT_CONTINUATION" in result.selected_knowledge_ids
+    assert "ANALOG_DIRECT_CONTINUATION" in result.retrieved_knowledge_ids
     assert {item.program.source for item in result.candidates} == {"generated", "knowledge"}
     knowledge_program = next(
         item.program for item in result.candidates if item.program.source == "knowledge"
@@ -195,6 +195,73 @@ def test_setting2_adds_a_cited_knowledge_branch_without_removing_plain_candidate
     assert knowledge_program.knowledge_ids == ("ANALOG_DIRECT_CONTINUATION",)
     assert knowledge_program.prior_confidence == 0.7
     assert "ANALOG_DIRECT_CONTINUATION" in llm.calls[1]["system"]
+
+
+def test_setting2_evolves_plain_and_knowledge_lineages_independently() -> None:
+    def knowledge_program(name: str, code: str, confidence: float) -> str:
+        return json.dumps(
+            {
+                "programs": [
+                    {
+                        "name": name,
+                        "description": "Use a cited analogue only when hindcasts support it.",
+                        "assumption": "A historical continuation remains transferable.",
+                        "failure_condition": "The analogue breaks on recent folds.",
+                        "knowledge_ids": [
+                            "ANALOG_DIRECT_CONTINUATION",
+                            "UNKNOWN_RULE",
+                        ],
+                        "prior_confidence": confidence,
+                        "code": code,
+                    }
+                ]
+            }
+        )
+
+    llm = FakeLLMClient(
+        [
+            _program("plain_level", LEVEL_CODE),
+            knowledge_program("knowledge_level", LEVEL_CODE, 0.7),
+            _program("plain_revision", LEVEL_CODE),
+            knowledge_program("knowledge_trend", TREND_CODE, 0.55),
+        ]
+    )
+    result = CodingEvolutionAgent(
+        llm,
+        config=CodingEvolutionConfig(
+            setting="statistics",
+            initial_programs=1,
+            mutations=1,
+            mutation_children=1,
+            validation_folds=2,
+            validation_horizon=2,
+            minimum_validation_history=4,
+            use_external_knowledge=True,
+        ),
+    ).run_task(_task().numeric)
+
+    assert len(llm.calls) == 4
+    assert {item.program.source for item in result.candidates} == {
+        "generated",
+        "knowledge",
+        "mutation",
+        "knowledge_mutation",
+    }
+    assert result.selected.program.name == "knowledge_trend"
+    assert result.selected_knowledge_ids == ("ANALOG_DIRECT_CONTINUATION",)
+    knowledge_child = next(
+        item.program
+        for item in result.candidates
+        if item.program.source == "knowledge_mutation"
+    )
+    assert knowledge_child.knowledge_ids == ("ANALOG_DIRECT_CONTINUATION",)
+    assert knowledge_child.prior_confidence == 0.55
+    assert "ANALOG_DIRECT_CONTINUATION" not in llm.calls[2]["system"]
+    assert "ANALOG_DIRECT_CONTINUATION" in llm.calls[3]["system"]
+    revision_payload = llm.calls[3]["messages"][0]["content"]
+    assert "knowledge_diagnostics" in revision_payload
+    assert "future_values" not in revision_payload
+    assert "doc_event" not in revision_payload
 
 
 def test_decision_rejects_uncited_override() -> None:

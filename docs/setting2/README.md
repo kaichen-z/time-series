@@ -89,6 +89,46 @@ This design is complementary to the upstream Numerical Agent method catalog. The
 canonical executable methods for dictionary curation; Setting 2 supplies task-specific operational
 priors to the existing candidate-generation and validation loop.
 
+## Evolution update (2026-08-22)
+
+The latest `main` branch adds Git-backed Numerical method evolution, a versioned 166-method catalog,
+MASE reporting, and isolated TSFM runtimes. Setting 2 continues to use the existing
+`evolving_loop` contracts and now improves both levels of that evolution path without duplicating
+the new runtime infrastructure.
+
+### Single-agent evolution: preserve both lineages
+
+Previously, knowledge affected only generation zero. The inner loop pooled ordinary and
+knowledge-conditioned candidates, selected one global parent, and mutated only that parent. This
+made one branch disappear immediately and dropped knowledge provenance during revision.
+
+The loop now keeps two independently validated elites when available:
+
+1. the best ordinary or library-derived candidate;
+2. the best knowledge-conditioned candidate.
+
+Each elite receives its own hindcast-driven revision call in every generation. A knowledge-lineage
+revision receives only the diagnostic profile and rule IDs cited by its parent. Returned IDs are
+checked against that allowlist, and the revised confidence remains bounded. Final selection still
+uses the same pooled causal-hindcast ranking, so the extra lineage adds search diversity without a
+privileged score. Results separately record retrieved rules and the rules actually cited by the
+selected program.
+
+### Multi-agent evolution: attribute the failure before mutation
+
+The outer Meta-Harness already computed candidate-coverage, selection-regret, retrieval, and
+hindcast-ranking diagnostics, but its mutation prompt did not receive them. It now receives those
+aggregate diagnostics plus task-level candidate source, knowledge IDs, prior confidence, resolved
+error, retrieval precision/recall/avoidance, and selection regret. This lets it distinguish:
+
+- poor best-of-k forecasts: improve Coding candidate coverage;
+- good best-of-k forecasts but high regret: improve Decision selection;
+- weak evidence precision, recall, or distractor avoidance: improve Retrieval.
+
+Successive-halving also now selects the full-evaluation child by Train reward before using held-out
+Dev only for the final parent-versus-child acceptance decision. This fixes a path that previously
+named the candidate `train_best` while actually selecting it by Dev reward.
+
 ## Historical experiment
 
 The original Setting 2 work was developed before upstream reorganized the packages. That

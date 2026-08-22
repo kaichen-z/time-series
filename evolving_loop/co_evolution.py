@@ -45,6 +45,11 @@ inference; only verified quotes may support contextual changes; generated code k
 forecast(history, horizon, frequency) contract and sandbox restrictions; no agent may edit the
 scorer, data split, label boundary, sandbox, acceptance test, or resource caps. The child will be
 executed on train tasks and accepted only if it improves a disjoint held-out development split.
+
+Use the supplied system diagnostics to attribute failures before changing the genome: poor
+best-of-k performance indicates a Coding coverage problem; low best-of-k error but high selection
+regret indicates a Decision problem; low precision/recall/avoidance indicates a Retrieval problem.
+Candidate source and knowledge IDs are provenance, not permission to bypass measured evidence.
 """
 
 PROMPT_ONLY_EVOLVER_PROMPT = """You are a constrained Prompt Evolver for a time-series agent
@@ -276,14 +281,27 @@ def evaluate_policy(
             {
                 "task_id": task.numeric.task_id,
                 "final_smape": outcome.final_smape,
+                "coding_oracle_smape": outcome.coding_oracle_smape,
+                "decision_selection_regret": outcome.decision_selection_regret,
+                "retrieval_precision": outcome.retrieval_precision,
+                "supporting_recall": outcome.supporting_recall,
+                "distractor_avoidance": outcome.distractor_avoidance,
+                "hindcast_future_rank_correlation": (
+                    outcome.hindcast_future_rank_correlation
+                ),
                 "coding_candidates": [
                     {
                         "candidate_id": candidate.candidate_id,
                         "assumption": candidate.assumption,
                         "hindcast_smape": candidate.hindcast_smape,
                         "resolved_smape": candidate_scores[candidate.candidate_id],
+                        "source": program.program.source,
+                        "knowledge_ids": list(program.program.knowledge_ids),
+                        "prior_confidence": program.program.prior_confidence,
                     }
+                    for program in inference.coding.candidates
                     for candidate in inference.candidates
+                    if candidate.candidate_id == program.program.name
                 ],
                 "oracle_candidate_id": oracle_id,
                 "selected_candidate_id": inference.decision.selected.candidate_id,
@@ -441,6 +459,7 @@ class CoEvolutionEngine:
             "child_index": child_index,
             "diversity_instruction": diversity_instruction,
             "module_rewards": evaluation.module_rewards,
+            "system_diagnostics": evaluation.diagnostics,
             "worst_failure_trajectories": worst,
             "current_policy": current_policy,
             "skill_inventory": {
@@ -1042,7 +1061,7 @@ class CoEvolutionEngine:
         train_best = (
             max(
                 (full_policies[version] for version in dev_evaluations),
-                key=lambda policy: dev_evaluations[policy.version].system_reward,
+                key=lambda policy: train_evaluations[policy.version].system_reward,
             )
             if dev_evaluations
             else None
