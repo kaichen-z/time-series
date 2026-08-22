@@ -11,6 +11,7 @@ from evolving_loop.co_evolution import (
     HarnessPolicy,
     PolicyEvaluation,
     evaluation_diagnostics,
+    forecast_utility,
     snapshot_policy_skills,
 )
 from evolving_loop.coding_agent.skill_library import Skill, SkillLibrary
@@ -356,6 +357,10 @@ def test_evaluation_diagnostics_separate_generation_from_selection_failure() -> 
             decision_selection_regret=20.0,
             candidate_count=4,
             hindcast_future_rank_correlation=0.8,
+            coding_oracle_mae=1.0,
+            decision_selection_mae_regret=2.0,
+            contextual_oracle_mae=1.0,
+            retrieval_candidate_gain_mae=0.0,
         ),
         ResolvedOutcome(
             task_id="task_b",
@@ -369,16 +374,60 @@ def test_evaluation_diagnostics_separate_generation_from_selection_failure() -> 
             decision_selection_regret=30.0,
             candidate_count=6,
             hindcast_future_rank_correlation=-0.2,
+            coding_oracle_mae=2.0,
+            decision_selection_mae_regret=4.0,
+            contextual_oracle_mae=1.0,
+            retrieval_candidate_gain_mae=1.0,
         ),
     )
 
     assert evaluation_diagnostics(outcomes) == {
+        "mean_final_mae": 4.0,
+        "mean_best_of_k_mae": 1.5,
+        "mean_selection_mae_regret": 3.0,
+        "mean_contextual_oracle_mae": 1.0,
+        "mean_retrieval_candidate_gain_mae": 0.5,
         "mean_final_smape": 40.0,
         "mean_best_of_k_smape": 15.0,
         "mean_selection_regret": 25.0,
         "mean_candidate_count": 5.0,
         "mean_hindcast_future_rank_correlation": 0.30000000000000004,
     }
+    assert forecast_utility(outcomes) == -4.0
+
+
+def test_weakest_agent_uses_attributable_mae_when_available() -> None:
+    decision_failure = PolicyEvaluation(
+        version="v000",
+        system_reward=-7.0,
+        module_rewards={"coding": 0.1, "retrieval": 0.8, "decision": 0.9},
+        outcomes=(),
+        diagnostics={
+            "mean_contextual_oracle_mae": 2.0,
+            "mean_selection_mae_regret": 5.0,
+        },
+    )
+    coding_failure = PolicyEvaluation(
+        version="v000",
+        system_reward=-3.0,
+        module_rewards={"coding": 0.9, "retrieval": 0.8, "decision": 0.1},
+        outcomes=(),
+        diagnostics={
+            "mean_contextual_oracle_mae": 2.0,
+            "mean_selection_mae_regret": 1.0,
+        },
+    )
+    retrieval_failure = PolicyEvaluation(
+        version="v000",
+        system_reward=-3.0,
+        module_rewards={"coding": 0.9, "retrieval": 0.4, "decision": 0.9},
+        outcomes=(),
+        diagnostics=coding_failure.diagnostics,
+    )
+
+    assert CoEvolutionEngine.weakest_agent(decision_failure) == "decision"
+    assert CoEvolutionEngine.weakest_agent(coding_failure) == "coding"
+    assert CoEvolutionEngine.weakest_agent(retrieval_failure) == "retrieval"
 
 
 def test_mutation_transport_failure_becomes_rejected_candidate() -> None:
@@ -561,20 +610,16 @@ def test_successive_halving_prunes_screen_failures_and_only_fully_evaluates_top_
         if policy.version == "v000":
             reward = {
                 "parent_screen_train": 0.8,
-                "parent_screen_dev": 0.7,
                 "parent_train_remaining": 0.8,
                 "parent_dev": 0.7,
             }[stage]
         else:
             reward = {
-                ("v001", "child_screen_train"): 0.8,
-                ("v001", "child_screen_dev"): 0.60,
+                ("v001", "child_screen_train"): 0.78,
                 ("v002", "child_screen_train"): 0.9,
-                ("v002", "child_screen_dev"): 0.75,
                 ("v002", "child_train_remaining"): 0.9,
                 ("v002", "child_dev"): 0.8,
                 ("v003", "child_screen_train"): 0.85,
-                ("v003", "child_screen_dev"): 0.72,
             }[(policy.version, stage)]
         return PolicyEvaluation(
             version=policy.version,
@@ -596,13 +641,10 @@ def test_successive_halving_prunes_screen_failures_and_only_fully_evaluates_top_
     assert ("v003", "child_train_remaining", 2) not in calls
     assert ("v002", "child_train_remaining", 2) in calls
     assert ("v002", "child_dev", 2) in calls
+    assert not any("screen_dev" in stage for _version, stage, _count in calls)
     assert trace[0].successive_halving is True
-    assert trace[0].parent_screen_dev_reward == pytest.approx(0.7)
-    assert trace[0].child_screen_dev_rewards == {
-        "v001": pytest.approx(0.60),
-        "v002": pytest.approx(0.75),
-        "v003": pytest.approx(0.72),
-    }
+    assert trace[0].parent_screen_dev_reward is None
+    assert trace[0].child_screen_dev_rewards is None
     assert trace[0].promoted_versions == ("v002",)
     assert trace[0].screen_prune_reasons == {
         "v001": "below_parent_tolerance",
@@ -636,20 +678,19 @@ def test_successive_halving_selects_the_train_best_before_dev_acceptance(
         ),
     )
 
+    calls: list[tuple[str, str]] = []
+
     def fake_evaluate(policy, _tasks, *, stage, **_kwargs):
+        calls.append((policy.version, stage))
         rewards = {
             ("v000", "parent_screen_train"): 0.70,
-            ("v000", "parent_screen_dev"): 0.70,
             ("v000", "parent_train_remaining"): 0.70,
             ("v000", "parent_dev"): 0.70,
             ("v001", "child_screen_train"): 0.90,
-            ("v001", "child_screen_dev"): 0.72,
             ("v001", "child_train_remaining"): 0.90,
             ("v001", "child_dev"): 0.75,
             ("v002", "child_screen_train"): 0.85,
-            ("v002", "child_screen_dev"): 0.90,
             ("v002", "child_train_remaining"): 0.85,
-            ("v002", "child_dev"): 0.95,
         }
         reward = rewards[(policy.version, stage)]
         return PolicyEvaluation(
@@ -672,6 +713,9 @@ def test_successive_halving_selects_the_train_best_before_dev_acceptance(
         "decision": pytest.approx(0.90),
     }
     assert trace[0].best_child_dev_reward == pytest.approx(0.75)
+    assert ("v001", "child_dev") in calls
+    assert ("v002", "child_dev") not in calls
+    assert not any("screen_dev" in stage for _version, stage in calls)
 
 
 def test_successive_halving_keeps_parent_when_every_child_fails_screen(
@@ -891,3 +935,48 @@ def test_checkpoint_rejects_different_successive_halving_controls() -> None:
         )
         with pytest.raises(ValueError, match="successive-halving"):
             reader._load_checkpoint(HarnessPolicy())
+
+
+def test_checkpoint_rejects_the_retired_dev_screening_protocol() -> None:
+    from evolving_loop.co_evolution import CoEvolutionConfig
+
+    with tempfile.TemporaryDirectory() as directory:
+        checkpoint = Path(directory) / "checkpoint.json"
+        engine = CoEvolutionEngine(
+            FakeLLMClient([]),
+            lambda _policy: None,
+            CoEvolutionConfig(checkpoint_path=checkpoint, successive_halving=True),
+        )
+        engine._save_checkpoint(HarnessPolicy(), [], 1)
+        payload = json.loads(checkpoint.read_text())
+        payload["successive_halving"].pop("protocol")
+        checkpoint.write_text(json.dumps(payload))
+
+        with pytest.raises(ValueError, match="successive-halving"):
+            engine._load_checkpoint(HarnessPolicy())
+
+
+def test_checkpoint_accepts_old_controls_when_halving_was_disabled() -> None:
+    from evolving_loop.co_evolution import CoEvolutionConfig
+
+    with tempfile.TemporaryDirectory() as directory:
+        checkpoint = Path(directory) / "checkpoint.json"
+        engine = CoEvolutionEngine(
+            FakeLLMClient([]),
+            lambda _policy: None,
+            CoEvolutionConfig(checkpoint_path=checkpoint),
+        )
+        engine._save_checkpoint(HarnessPolicy(), [], 1)
+        payload = json.loads(checkpoint.read_text())
+        payload["successive_halving"] = {
+            "enabled": False,
+            "screening_train_tasks": 6,
+            "screening_dev_tasks": 2,
+            "screening_promote": 1,
+            "screening_tolerance": 0.01,
+        }
+        checkpoint.write_text(json.dumps(payload))
+
+        _policy, _history, start = engine._load_checkpoint(HarnessPolicy())
+
+    assert start == 1

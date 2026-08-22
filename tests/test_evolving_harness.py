@@ -6,6 +6,7 @@ from pathlib import Path
 
 from evolving_loop.coding_agent.evolution import CodingEvolutionAgent, CodingEvolutionConfig
 from evolving_loop.coding_agent.skill_library import SkillLibrary
+from evolving_loop.co_evolution import HarnessPolicy, evaluate_policy
 from evolving_loop.data import ContextTask, Document, Task
 from evolving_loop.decision_agent.agent import DecisionAgent
 from evolving_loop.harness import EvolvingForecastHarness
@@ -145,6 +146,10 @@ def test_numbers_only_evolution_then_verified_context_decision() -> None:
         assert result.retrieval.rejected == ()
         outcome = EvolvingForecastHarness.score_after_resolution(_task(), result)
         assert outcome.candidate_count == len(result.candidates)
+        assert outcome.coding_oracle_mae == 5.0
+        assert outcome.contextual_oracle_mae == 0.0
+        assert outcome.retrieval_candidate_gain_mae == 5.0
+        assert outcome.decision_selection_mae_regret == 0.0
         assert -1.0 <= outcome.hindcast_future_rank_correlation <= 1.0
 
         # Coding receives the numeric Task only; future labels and documents never enter its prompt.
@@ -154,6 +159,53 @@ def test_numbers_only_evolution_then_verified_context_decision() -> None:
         assert "doc_event" not in coding_text
         assert "future_values" not in coding_text
         assert "26.0" not in coding_text
+
+
+def test_read_only_evaluation_cannot_write_coding_skills() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        library = SkillLibrary.load(Path(directory) / "skills.json")
+        harness = EvolvingForecastHarness(
+            CodingEvolutionAgent(
+                FakeLLMClient([_program("trend", TREND_CODE)]),
+                library,
+                CodingEvolutionConfig(
+                    setting="statistics",
+                    initial_programs=1,
+                    mutations=0,
+                    validation_folds=2,
+                    validation_horizon=2,
+                    minimum_validation_history=4,
+                ),
+            ),
+            RetrievalAgent(FakeLLMClient([_retrieval_response()])),
+            DecisionAgent(
+                FakeLLMClient(
+                    [
+                        json.dumps(
+                            {
+                                "selected_candidate_id": "trend__evidence_0",
+                                "supporting_document_ids": ["doc_event"],
+                                "rationale": "Use the verified event window.",
+                                "request_more_retrieval": False,
+                            }
+                        )
+                    ]
+                )
+            ),
+        )
+
+        evaluation = evaluate_policy(
+            HarnessPolicy(),
+            (_task(),),
+            lambda _policy: harness,
+            learn_skills=False,
+            harness=harness,
+        )
+
+        assert evaluation.system_reward == 0.0
+        assert evaluation.outcomes[0].final_mae == 0.0
+        assert len(library) == 0
+        assert not (Path(directory) / "skills.json").exists()
 
 
 def test_setting2_adds_a_cited_knowledge_branch_without_removing_plain_candidates() -> None:

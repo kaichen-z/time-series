@@ -69,7 +69,9 @@ def _to_context_task(record: dict) -> ContextTask:
     series = _series(record)
     metadata = _metadata(record)
     showcase = _showcase(record)
-    variable = showcase.get("time_series_variable", {})
+    variable = showcase.get("time_series_variable")
+    variable_name = variable.get("name") if isinstance(variable, dict) else variable
+    target_name = str(record.get("target_name") or variable_name or "target")
     annotations = record.get("annotations", {})
     raw_evidence = annotations.get("gt_evidence", record.get("gt_evidence", ()))
     evidence = tuple(
@@ -90,7 +92,7 @@ def _to_context_task(record: dict) -> ContextTask:
     )
     return ContextTask(
         numeric=_to_task(record),
-        target_name=str(record.get("target_name") or variable.get("name") or "target"),
+        target_name=target_name,
         target_description=str(metadata.get("target_description", "")),
         history_timestamps=tuple(str(value) for value in series.get("history_timestamps", ())),
         future_timestamps=tuple(str(value) for value in series.get("future_timestamps", ())),

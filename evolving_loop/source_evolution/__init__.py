@@ -141,6 +141,7 @@ class SourceEvolutionConfig:
 
 
 EvaluationCallback = Callable[[Path], SourceEvaluation]
+SOURCE_OBJECTIVE = "neg_mean_mae_v1"
 
 
 class SourceEvolutionEngine:
@@ -573,6 +574,7 @@ class SourceEvolutionEngine:
             json.dumps(
                 {
                     "schema_version": 1,
+                    "objective": SOURCE_OBJECTIVE,
                     "next_generation": next_generation,
                     "incumbent_patch": incumbent_patch,
                     "incumbent_evaluation": asdict(evaluation),
@@ -595,6 +597,8 @@ class SourceEvolutionEngine:
         ):
             return None
         payload = json.loads(Path(self.config.checkpoint_path).read_text(encoding="utf-8"))
+        if payload.get("objective") != SOURCE_OBJECTIVE:
+            raise ValueError("source checkpoint objective does not match this run")
         raw_evaluation = payload["incumbent_evaluation"]
         evaluation = SourceEvaluation(
             train_reward=float(raw_evaluation["train_reward"]),

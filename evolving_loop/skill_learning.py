@@ -81,7 +81,8 @@ class OutcomeSkillLearner:
         )
         decision_eligible = (
             len(result.candidates) >= 2
-            and outcome.decision_selection_regret <= self.config.maximum_decision_regret
+            and outcome.decision_selection_mae_regret
+            <= self.config.maximum_decision_regret
         )
         if not retrieval_eligible and not decision_eligible:
             return SkillLearningResult(None, None, False, False, ("no_module_passed_validation",))
@@ -93,6 +94,7 @@ class OutcomeSkillLearner:
             },
             "resolved_metrics": {
                 "retrieval_quality": retrieval_score,
+                "decision_selection_mae_regret": outcome.decision_selection_mae_regret,
                 "decision_selection_regret": outcome.decision_selection_regret,
                 "final_smape": outcome.final_smape,
             },

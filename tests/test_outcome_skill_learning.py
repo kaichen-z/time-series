@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 from evolving_loop.coding_agent.evolution import CodingEvolutionAgent, CodingEvolutionConfig
@@ -134,6 +135,38 @@ def test_generated_skill_cannot_memorize_task_identifiers() -> None:
         assert len(decision_library) == 0
         assert "retrieval:task_specific_identifier" in learning.rejection_reasons
         assert "decision:task_specific_identifier" in learning.rejection_reasons
+
+
+def test_decision_skill_gate_uses_mae_regret() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        harness, retrieval_library, decision_library = _harness(directory)
+        task = _task()
+        result = harness.run(task)
+        outcome = harness.score_after_resolution(task, result)
+        result = replace(
+            result,
+            retrieval=replace(
+                result.retrieval,
+                selected_document_ids=(),
+                evidence=(),
+            ),
+        )
+        outcome = replace(
+            outcome,
+            retrieval_precision=0.0,
+            supporting_recall=0.0,
+            distractor_avoidance=0.0,
+            decision_selection_regret=0.0,
+            decision_selection_mae_regret=1.0,
+        )
+        learner = OutcomeSkillLearner(
+            FakeLLMClient([]), retrieval_library, decision_library
+        )
+
+        learning = learner.learn(task, result, outcome)
+
+        assert learning.decision_eligible is False
+        assert len(decision_library) == 0
 
 
 def test_skill_summaries_are_available_but_unknown_claims_are_not_trusted() -> None:

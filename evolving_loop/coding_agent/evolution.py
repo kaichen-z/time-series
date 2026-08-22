@@ -153,7 +153,9 @@ class CodingEvolutionAgent:
         if self.config.use_external_knowledge and self.knowledge_base is None:
             self.knowledge_base = TimeSeriesKnowledgeBase()
 
-    def run_task(self, task: Task) -> CodingEvolutionResult:
+    def run_task(
+        self, task: Task, *, allow_skill_writes: bool = True
+    ) -> CodingEvolutionResult:
         knowledge = self._knowledge(task)
         programs = [] if self.config.setting == "tsfm" else self._library_programs()
         if self.config.setting != "tsfm":
@@ -216,7 +218,8 @@ class CodingEvolutionAgent:
         baseline_score = self._repeat_last_hindcast(task)
         saved_name = None
         if (
-            self.library is not None
+            allow_skill_writes
+            and self.library is not None
             and selected.program.source
             in {"generated", "knowledge", "mutation", "knowledge_mutation"}
             and selected.hindcast_smape + self.config.minimum_library_improvement < baseline_score

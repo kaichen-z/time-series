@@ -129,6 +129,46 @@ Successive-halving also now selects the full-evaluation child by Train reward be
 Dev only for the final parent-versus-child acceptance decision. This fixes a path that previously
 named the candidate `train_best` while actually selecting it by Dev reward.
 
+### MAE-aligned, leakage-resistant policy selection
+
+The outer loop now uses negative raw mean MAE as its only policy-selection utility. Its previous
+weighted reward mixed capped sMAPE with retrieval quality, so a policy with worse MAE could defeat a
+better forecast because it retrieved documents more accurately. Retrieval and sMAPE remain visible
+for diagnosis, but they no longer offset forecasting error.
+
+Resolved-candidate attribution is also separated into three causal stages:
+
+1. `coding_oracle_mae` is the best executable numeric candidate before any document-derived change;
+2. `contextual_oracle_mae` is the best candidate after verified evidence adjustments, and their
+   difference is `retrieval_candidate_gain_mae`;
+3. `decision_selection_mae_regret` is the final selector's loss relative to that contextual oracle.
+
+This distinction tells the Meta-Harness whether to expand numerical search, improve contextual
+candidate construction, or repair final selection. The mutation trace includes both task-level and
+aggregate versions of these diagnostics.
+
+Successive halving is now Train-only. All children are screened and promoted using Train data,
+promoted children finish the full Train split, and only the single full-Train winner reaches Dev.
+The parent and that child each receive one complete Dev evaluation for strict acceptance. A
+`train_only_v2` checkpoint marker prevents an older Dev-screening checkpoint from being resumed
+silently.
+
+All Dev calls also disable Coding skill writes, not just post-outcome Retrieval/Decision learning.
+This closes a separate state channel in which an earlier Dev task could previously add a
+hindcast-validated numeric skill for a later Dev task. Source-evolution checkpoints now carry a
+`neg_mean_mae_v1` objective marker so rewards saved under the former positive mixed objective
+cannot be compared with new negative-MAE rewards after resume.
+
+### Frozen 30-task reward replay
+
+A no-new-inference replay over the existing 30-task Setting 2 development trajectories exposed a
+concrete selection error. Checkpoint v2 had mean MAE **56.0935** and old reward **0.768145**;
+checkpoint v3 improved mean MAE to **52.1090** but had lower old reward **0.758844**. The old
+objective therefore preferred v2, while the MAE-aligned objective correctly prefers v3, a
+**7.10%** reduction in mean MAE. Checkpoint v4 remains the best of the three at mean MAE
+**48.0744** under both objectives. This is a counterfactual objective check on already generated
+forecasts, not a newly tuned benchmark result.
+
 ## Historical experiment
 
 The original Setting 2 work was developed before upstream reorganized the packages. That
