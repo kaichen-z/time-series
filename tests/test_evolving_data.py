@@ -73,6 +73,24 @@ def test_context_loader_accepts_one_json_object() -> None:
     assert contextual[0].numeric.task_id == "one"
 
 
+def test_context_loader_accepts_normalized_string_variable() -> None:
+    record = {
+        "benchmark_id": "normalized",
+        "entity_name": "entity",
+        "time_series_variable": "request count",
+        "frequency": "1 hour",
+        "prediction_length": 1,
+        "history_values": [1, 2],
+        "future_values": [3],
+        "documents": [],
+    }
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "task.jsonl"
+        path.write_text(json.dumps(record) + "\n")
+        contextual = load_context_tasks(path)
+    assert contextual[0].target_name == "request count"
+
+
 def test_context_loader_accepts_task_directory() -> None:
     template = {
         "entity_name": "entity",

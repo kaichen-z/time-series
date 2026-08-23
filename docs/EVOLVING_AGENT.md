@@ -73,15 +73,20 @@ executed candidates + verified evidence
 
 After the true future becomes available, the system computes separate diagnostic rewards:
 
-- Coding: quality/coverage of the best candidate available to Decision.
-- Retrieval: supporting-document precision/recall and distractor avoidance.
-- Decision: regret between the selected candidate and the best generated candidate.
-- Whole system: final forecast score plus retrieval quality.
+- Coding: quality of the best numeric candidate produced before evidence adjustment.
+- Retrieval: supporting-document precision/recall, distractor avoidance, and the MAE gain from
+  evidence-derived candidates.
+- Decision: regret between the selected candidate and the best contextual candidate.
+- Whole system: negative raw mean MAE, so policy selection exactly matches the primary reported
+  forecasting metric. Retrieval and sMAPE cannot compensate for worse MAE.
 
 Every policy evaluation also reports:
 
-- `mean_best_of_k_smape`: whether Coding generated at least one strong candidate;
-- `mean_selection_regret`: how much Decision lost relative to that candidate;
+- `mean_best_of_k_mae`: whether Coding generated at least one strong numeric candidate;
+- `mean_contextual_oracle_mae`: the best candidate after verified evidence adjustments;
+- `mean_retrieval_candidate_gain_mae`: the improvement from numeric to contextual oracle;
+- `mean_selection_mae_regret`: how much Decision lost relative to the contextual oracle;
+- `mean_best_of_k_smape` and `mean_selection_regret`: scale-free companion diagnostics;
 - `mean_candidate_count`: the executed candidate budget actually available;
 - `mean_hindcast_future_rank_correlation`: whether historical hindcast ordering predicted the
   resolved-future ordering.
@@ -89,18 +94,25 @@ Every policy evaluation also reports:
 These fields are diagnostics, not alternate acceptance objectives. A child still has to improve the
 end-to-end training reward and then strictly improve disjoint development reward.
 
+Automatic role diagnosis first treats Retrieval as failed only when its verified evidence score
+is below 0.5. Otherwise it decomposes mean final MAE into contextual-oracle MAE and Decision
+selection regret: the larger component determines whether the next targeted prompt mutation
+addresses Coding coverage or Decision selection. Worst trajectories are ranked by final MAE.
+
 ### Successive-halving acceleration
 
 `--successive-halving` preserves child diversity without fully evaluating every weak genome. The
-engine first trains every child on a deterministic prefix of the Train split and evaluates it on a
-deterministic prefix of Dev. Children below the equivalently screened parent by more than
-`--screen-tolerance` are pruned; among the survivors, only the top `--screen-promote` children
-continue through the remaining Train tasks and the complete Dev split. The screened Train work is
-reused rather than rerun. Public Holdout remains outside both screening and final acceptance.
+engine first trains every child on a deterministic prefix of Train. Children below the equivalently
+screened parent by more than `--screen-tolerance` are pruned; only the top `--screen-promote`
+survivors continue through the remaining Train tasks. The single best full-Train child is then
+evaluated once on the complete Dev split and accepted only if it strictly improves the parent.
+The screened Train work is reused rather than rerun. Dev never ranks or promotes multiple children,
+and Public Holdout remains outside both screening and final acceptance.
 
-Every trace records the parent and child screening rewards, promoted versions, and explicit prune
-reasons (`below_parent_tolerance`, `not_top_k`, or an execution failure). Checkpoints also store all
-screening controls and refuse to resume under a different successive-halving configuration.
+Every trace records the parent and child Train-screening rewards, promoted versions, and explicit
+prune reasons (`below_parent_tolerance`, `not_top_k`, or an execution failure). Checkpoints store a
+`train_only_v2` protocol marker and refuse to resume an older Dev-screening trajectory. The legacy
+`--screen-dev-tasks` option is accepted as a no-op so existing launch scripts do not break.
 
 Example:
 
@@ -115,7 +127,6 @@ evolving-agent evolve \
   --children 4 \
   --successive-halving \
   --screen-train-tasks 6 \
-  --screen-dev-tasks 2 \
   --screen-promote 1 \
   --screen-tolerance 0.01
 ```
@@ -126,7 +137,7 @@ Successful public training trajectories may also produce three persistent, gener
 - `retrieval_skills.json`: query and verification strategies learned only from retrieval runs that
   pass the configured precision/recall/avoidance threshold.
 - `decision_skills.json`: candidate-selection rules learned only when Decision has negligible
-  regret relative to the best available executed candidate.
+  MAE regret relative to the best available contextual candidate.
 
 These skills contain reusable applicability and failure conditions, not raw task answers. The host
 rejects generated skills containing task IDs, document IDs, entity names, or exact timestamps.
@@ -139,6 +150,10 @@ settings, plus immutable snapshots of all validated Coding, Retrieval, and Decis
 on the training split. Development inference uses this exact snapshot read-only. A later generation
 hydrates the same snapshots before continuing evolution, so the artifact does not lose the skills
 that produced its reported development score.
+
+Read-only evaluation also disables Coding's automatic hindcast-validated skill write. Consequently
+one Dev task cannot create a skill visible to the next Dev task, and neither accepted policy
+snapshots nor persistent library files can be changed by Dev inference.
 
 The weakest role is reported as a diagnosis, but it no longer restricts what may evolve. A child
 may jointly rewrite all role prompts, Coding candidate/mutation budgets, hindcast folds and horizon,

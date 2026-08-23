@@ -89,6 +89,86 @@ This design is complementary to the upstream Numerical Agent method catalog. The
 canonical executable methods for dictionary curation; Setting 2 supplies task-specific operational
 priors to the existing candidate-generation and validation loop.
 
+## Evolution update (2026-08-22)
+
+The latest `main` branch adds Git-backed Numerical method evolution, a versioned 166-method catalog,
+MASE reporting, and isolated TSFM runtimes. Setting 2 continues to use the existing
+`evolving_loop` contracts and now improves both levels of that evolution path without duplicating
+the new runtime infrastructure.
+
+### Single-agent evolution: preserve both lineages
+
+Previously, knowledge affected only generation zero. The inner loop pooled ordinary and
+knowledge-conditioned candidates, selected one global parent, and mutated only that parent. This
+made one branch disappear immediately and dropped knowledge provenance during revision.
+
+The loop now keeps two independently validated elites when available:
+
+1. the best ordinary or library-derived candidate;
+2. the best knowledge-conditioned candidate.
+
+Each elite receives its own hindcast-driven revision call in every generation. A knowledge-lineage
+revision receives only the diagnostic profile and rule IDs cited by its parent. Returned IDs are
+checked against that allowlist, and the revised confidence remains bounded. Final selection still
+uses the same pooled causal-hindcast ranking, so the extra lineage adds search diversity without a
+privileged score. Results separately record retrieved rules and the rules actually cited by the
+selected program.
+
+### Multi-agent evolution: attribute the failure before mutation
+
+The outer Meta-Harness already computed candidate-coverage, selection-regret, retrieval, and
+hindcast-ranking diagnostics, but its mutation prompt did not receive them. It now receives those
+aggregate diagnostics plus task-level candidate source, knowledge IDs, prior confidence, resolved
+error, retrieval precision/recall/avoidance, and selection regret. This lets it distinguish:
+
+- poor best-of-k forecasts: improve Coding candidate coverage;
+- good best-of-k forecasts but high regret: improve Decision selection;
+- weak evidence precision, recall, or distractor avoidance: improve Retrieval.
+
+Successive-halving also now selects the full-evaluation child by Train reward before using held-out
+Dev only for the final parent-versus-child acceptance decision. This fixes a path that previously
+named the candidate `train_best` while actually selecting it by Dev reward.
+
+### MAE-aligned, leakage-resistant policy selection
+
+The outer loop now uses negative raw mean MAE as its only policy-selection utility. Its previous
+weighted reward mixed capped sMAPE with retrieval quality, so a policy with worse MAE could defeat a
+better forecast because it retrieved documents more accurately. Retrieval and sMAPE remain visible
+for diagnosis, but they no longer offset forecasting error.
+
+Resolved-candidate attribution is also separated into three causal stages:
+
+1. `coding_oracle_mae` is the best executable numeric candidate before any document-derived change;
+2. `contextual_oracle_mae` is the best candidate after verified evidence adjustments, and their
+   difference is `retrieval_candidate_gain_mae`;
+3. `decision_selection_mae_regret` is the final selector's loss relative to that contextual oracle.
+
+This distinction tells the Meta-Harness whether to expand numerical search, improve contextual
+candidate construction, or repair final selection. The mutation trace includes both task-level and
+aggregate versions of these diagnostics.
+
+Successive halving is now Train-only. All children are screened and promoted using Train data,
+promoted children finish the full Train split, and only the single full-Train winner reaches Dev.
+The parent and that child each receive one complete Dev evaluation for strict acceptance. A
+`train_only_v2` checkpoint marker prevents an older Dev-screening checkpoint from being resumed
+silently.
+
+All Dev calls also disable Coding skill writes, not just post-outcome Retrieval/Decision learning.
+This closes a separate state channel in which an earlier Dev task could previously add a
+hindcast-validated numeric skill for a later Dev task. Source-evolution checkpoints now carry a
+`neg_mean_mae_v1` objective marker so rewards saved under the former positive mixed objective
+cannot be compared with new negative-MAE rewards after resume.
+
+### Frozen 30-task reward replay
+
+A no-new-inference replay over the existing 30-task Setting 2 development trajectories exposed a
+concrete selection error. Checkpoint v2 had mean MAE **56.0935** and old reward **0.768145**;
+checkpoint v3 improved mean MAE to **52.1090** but had lower old reward **0.758844**. The old
+objective therefore preferred v2, while the MAE-aligned objective correctly prefers v3, a
+**7.10%** reduction in mean MAE. Checkpoint v4 remains the best of the three at mean MAE
+**48.0744** under both objectives. This is a counterfactual objective check on already generated
+forecasts, not a newly tuned benchmark result.
+
 ## Historical experiment
 
 The original Setting 2 work was developed before upstream reorganized the packages. That

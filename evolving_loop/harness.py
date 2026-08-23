@@ -53,9 +53,13 @@ class EvolvingForecastHarness:
         self.outcome_learner = outcome_learner
         self.runtime = runtime or HarnessRuntimeConfig()
 
-    def run(self, task: ContextTask) -> HarnessResult:
+    def run(
+        self, task: ContextTask, *, allow_skill_writes: bool = True
+    ) -> HarnessResult:
         # Keep this local boundary for normal ``run`` calls as well as evaluator calls.
-        coding = self.coding.run_task(task.numeric_view())
+        coding = self.coding.run_task(
+            task.numeric_view(), allow_skill_writes=allow_skill_writes
+        )
         retrieval_runs = []
         retrieval = _empty_retrieval()
         candidates = self._decision_candidates(task, coding, retrieval)

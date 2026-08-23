@@ -45,6 +45,14 @@ inference; only verified quotes may support contextual changes; generated code k
 forecast(history, horizon, frequency) contract and sandbox restrictions; no agent may edit the
 scorer, data split, label boundary, sandbox, acceptance test, or resource caps. The child will be
 executed on train tasks and accepted only if it improves a disjoint held-out development split.
+
+Use the supplied system diagnostics to attribute failures before changing the genome: poor numeric
+best-of-k performance indicates a Coding coverage problem; contextual gain measures whether
+evidence-derived candidates helped; low contextual best-of-k error but high selection regret
+indicates a Decision problem; low precision/recall/avoidance indicates a Retrieval problem.
+Candidate source and knowledge IDs are provenance, not permission to bypass measured evidence.
+Raw mean MAE is the sole policy-selection objective. Retrieval and sMAPE remain diagnostics and
+must not compensate for a worse MAE.
 """
 
 PROMPT_ONLY_EVOLVER_PROMPT = """You are a constrained Prompt Evolver for a time-series agent
@@ -147,6 +155,11 @@ def evaluation_diagnostics(
     """Aggregate diagnostics that distinguish candidate coverage from final selection."""
     if not outcomes:
         return {
+            "mean_final_mae": 0.0,
+            "mean_best_of_k_mae": 0.0,
+            "mean_selection_mae_regret": 0.0,
+            "mean_contextual_oracle_mae": 0.0,
+            "mean_retrieval_candidate_gain_mae": 0.0,
             "mean_final_smape": 0.0,
             "mean_best_of_k_smape": 0.0,
             "mean_selection_regret": 0.0,
@@ -154,6 +167,17 @@ def evaluation_diagnostics(
             "mean_hindcast_future_rank_correlation": 0.0,
         }
     return {
+        "mean_final_mae": statistics.fmean(item.final_mae for item in outcomes),
+        "mean_best_of_k_mae": statistics.fmean(item.coding_oracle_mae for item in outcomes),
+        "mean_selection_mae_regret": statistics.fmean(
+            item.decision_selection_mae_regret for item in outcomes
+        ),
+        "mean_contextual_oracle_mae": statistics.fmean(
+            item.contextual_oracle_mae for item in outcomes
+        ),
+        "mean_retrieval_candidate_gain_mae": statistics.fmean(
+            item.retrieval_candidate_gain_mae for item in outcomes
+        ),
         "mean_final_smape": statistics.fmean(item.final_smape for item in outcomes),
         "mean_best_of_k_smape": statistics.fmean(
             item.coding_oracle_smape for item in outcomes
@@ -166,6 +190,13 @@ def evaluation_diagnostics(
             item.hindcast_future_rank_correlation for item in outcomes
         ),
     }
+
+
+def forecast_utility(outcomes: Sequence[ResolvedOutcome]) -> float:
+    """Higher-is-better deployment utility aligned with the reported mean MAE."""
+    if not outcomes:
+        raise ValueError("forecast utility needs at least one resolved outcome")
+    return -statistics.fmean(item.final_mae for item in outcomes)
 
 
 @dataclass(frozen=True)
@@ -248,7 +279,10 @@ def evaluate_policy(
             gt_evidence=(),
             labels_public=False,
         )
-        inference = harness.run(inference_task)
+        inference = harness.run(
+            inference_task,
+            allow_skill_writes=learn_skills,
+        )
         if learn_skills:
             outcome, _learning = harness.record_outcome(task, inference)
         else:
@@ -262,10 +296,19 @@ def evaluate_policy(
                     decision=replace(inference.decision, selected=candidate),
                     forecast=candidate.forecast,
                 ),
-            ).final_smape
+            )
             for candidate in inference.candidates
         }
-        oracle_id = min(candidate_scores, key=candidate_scores.get)
+        oracle_id = min(
+            candidate_scores,
+            key=lambda candidate_id: candidate_scores[candidate_id].final_mae,
+        )
+        coding_ids = {item.program.name for item in inference.coding.candidates}
+        numeric_oracle_id = min(
+            (candidate_id for candidate_id in candidate_scores if candidate_id in coding_ids),
+            key=lambda candidate_id: candidate_scores[candidate_id].final_mae,
+            default=oracle_id,
+        )
         supporting_ids = [
             document.document_id for document in task.documents if document.role == "supporting"
         ]
@@ -275,16 +318,38 @@ def evaluate_policy(
         traces.append(
             {
                 "task_id": task.numeric.task_id,
+                "final_mae": outcome.final_mae,
                 "final_smape": outcome.final_smape,
+                "coding_oracle_mae": outcome.coding_oracle_mae,
+                "coding_oracle_smape": outcome.coding_oracle_smape,
+                "contextual_oracle_mae": outcome.contextual_oracle_mae,
+                "contextual_oracle_smape": outcome.contextual_oracle_smape,
+                "retrieval_candidate_gain_mae": outcome.retrieval_candidate_gain_mae,
+                "decision_selection_mae_regret": outcome.decision_selection_mae_regret,
+                "decision_selection_regret": outcome.decision_selection_regret,
+                "retrieval_precision": outcome.retrieval_precision,
+                "supporting_recall": outcome.supporting_recall,
+                "distractor_avoidance": outcome.distractor_avoidance,
+                "hindcast_future_rank_correlation": (
+                    outcome.hindcast_future_rank_correlation
+                ),
                 "coding_candidates": [
                     {
                         "candidate_id": candidate.candidate_id,
                         "assumption": candidate.assumption,
                         "hindcast_smape": candidate.hindcast_smape,
-                        "resolved_smape": candidate_scores[candidate.candidate_id],
+                        "resolved_mae": candidate_scores[candidate.candidate_id].final_mae,
+                        "resolved_smape": candidate_scores[candidate.candidate_id].final_smape,
+                        "source": program.program.source,
+                        "knowledge_ids": list(program.program.knowledge_ids),
+                        "prior_confidence": program.program.prior_confidence,
                     }
+                    for program in inference.coding.candidates
                     for candidate in inference.candidates
+                    if candidate.candidate_id == program.program.name
                 ],
+                "numeric_oracle_candidate_id": numeric_oracle_id,
+                "contextual_oracle_candidate_id": oracle_id,
                 "oracle_candidate_id": oracle_id,
                 "selected_candidate_id": inference.decision.selected.candidate_id,
                 "decision_rejection_reason": inference.decision.rejection_reason,
@@ -297,7 +362,11 @@ def evaluate_policy(
         if progress:
             progress(
                 "task_completed",
-                {"task_id": task.numeric.task_id, "final_smape": outcome.final_smape},
+                {
+                    "task_id": task.numeric.task_id,
+                    "final_mae": outcome.final_mae,
+                    "final_smape": outcome.final_smape,
+                },
             )
     coding = statistics.fmean(1.0 - min(item.coding_coverage_regret, 200.0) / 200.0 for item in outcomes)
     retrieval = statistics.fmean(
@@ -310,10 +379,9 @@ def evaluate_policy(
         1.0 - min(max(item.decision_selection_regret, 0.0), 200.0) / 200.0
         for item in outcomes
     )
-    forecast = statistics.fmean(1.0 - min(item.final_smape, 200.0) / 200.0 for item in outcomes)
     return PolicyEvaluation(
         version=policy.version,
-        system_reward=0.8 * forecast + 0.2 * retrieval,
+        system_reward=forecast_utility(outcomes),
         module_rewards={"coding": coding, "retrieval": retrieval, "decision": decision},
         outcomes=tuple(outcomes),
         failure_traces=tuple(traces),
@@ -386,6 +454,19 @@ class CoEvolutionEngine:
 
     @staticmethod
     def weakest_agent(evaluation: PolicyEvaluation) -> str:
+        diagnostics = evaluation.diagnostics
+        if {
+            "mean_contextual_oracle_mae",
+            "mean_selection_mae_regret",
+        }.issubset(diagnostics):
+            if evaluation.module_rewards.get("retrieval", 1.0) < 0.5:
+                return "retrieval"
+            return (
+                "decision"
+                if diagnostics["mean_selection_mae_regret"]
+                > diagnostics["mean_contextual_oracle_mae"]
+                else "coding"
+            )
         return min(evaluation.module_rewards, key=evaluation.module_rewards.get)
 
     def target_agent(self, evaluation: PolicyEvaluation) -> str:
@@ -405,7 +486,9 @@ class CoEvolutionEngine:
         target = self.target_agent(evaluation)
         worst = sorted(
             evaluation.failure_traces,
-            key=lambda item: item["final_smape"],
+            key=lambda item: (
+                item["final_mae"] if "final_mae" in item else item["final_smape"]
+            ),
             reverse=True,
         )[:5]
         if self.config.target == "auto":
@@ -441,6 +524,7 @@ class CoEvolutionEngine:
             "child_index": child_index,
             "diversity_instruction": diversity_instruction,
             "module_rewards": evaluation.module_rewards,
+            "system_diagnostics": evaluation.diagnostics,
             "worst_failure_trajectories": worst,
             "current_policy": current_policy,
             "skill_inventory": {
@@ -828,20 +912,19 @@ class CoEvolutionEngine:
         *,
         generation: int,
     ) -> tuple[HarnessPolicy, EvolutionStep, float | None]:
-        """Screen every child cheaply, then fully evaluate only the best survivors."""
+        """Screen on Train, then expose Dev only to the single full-Train winner."""
         screen_train_count = min(
             max(1, self.config.screening_train_tasks), len(train_tasks)
         )
-        screen_dev_count = min(max(1, self.config.screening_dev_tasks), len(dev_tasks))
         screen_train_tasks = train_tasks[:screen_train_count]
         remaining_train_tasks = train_tasks[screen_train_count:]
-        screen_dev_tasks = dev_tasks[:screen_dev_count]
         self._progress(
             "screening_started",
             generation=generation,
             parent=incumbent.version,
             screen_train_tasks=screen_train_count,
-            screen_dev_tasks=screen_dev_count,
+            screen_dev_tasks=0,
+            protocol="train_only_v2",
             promote=self.config.screening_promote,
             tolerance=self.config.screening_tolerance,
         )
@@ -856,14 +939,6 @@ class CoEvolutionEngine:
             harness=parent_harness,
         )
         screen_trained_parent = snapshot_policy_skills(incumbent, parent_harness)
-        parent_screen_dev = self._evaluate(
-            screen_trained_parent,
-            screen_dev_tasks,
-            stage="parent_screen_dev",
-            generation=generation,
-            learn_skills=False,
-            harness=parent_harness,
-        )
         if remaining_train_tasks:
             parent_train_remaining = self._evaluate(
                 screen_trained_parent,
@@ -895,7 +970,6 @@ class CoEvolutionEngine:
         children: list[HarnessPolicy] = []
         child_harnesses: dict[str, EvolvingForecastHarness] = {}
         child_screen_train: dict[str, PolicyEvaluation] = {}
-        child_screen_dev: dict[str, PolicyEvaluation] = {}
         child_policies: dict[str, HarnessPolicy] = {}
         for child_index in range(self.config.children_per_generation):
             self._progress("candidate_started", generation=generation, child=child_index)
@@ -914,20 +988,11 @@ class CoEvolutionEngine:
                 )
                 screen_child = snapshot_policy_skills(child, child_harness)
                 child_policies[child.version] = screen_child
-                child_screen_dev[child.version] = self._evaluate(
-                    screen_child,
-                    screen_dev_tasks,
-                    stage="child_screen_dev",
-                    generation=generation,
-                    learn_skills=False,
-                    harness=child_harness,
-                )
                 self._progress(
                     "candidate_screen_completed",
                     generation=generation,
                     child=child.version,
                     train_reward=child_screen_train[child.version].system_reward,
-                    dev_reward=child_screen_dev[child.version].system_reward,
                 )
             except TransientLLMError:
                 raise
@@ -940,15 +1005,15 @@ class CoEvolutionEngine:
                     error=f"{type(exc).__name__}: {exc}",
                 )
 
-        threshold = parent_screen_dev.system_reward - self.config.screening_tolerance
+        threshold = parent_screen_train.system_reward - self.config.screening_tolerance
         eligible = sorted(
             (
                 child
                 for child in children
-                if child.version in child_screen_dev
-                and child_screen_dev[child.version].system_reward >= threshold
+                if child.version in child_screen_train
+                and child_screen_train[child.version].system_reward >= threshold
             ),
-            key=lambda child: child_screen_dev[child.version].system_reward,
+            key=lambda child: child_screen_train[child.version].system_reward,
             reverse=True,
         )
         promote_count = max(0, min(self.config.screening_promote, len(eligible)))
@@ -956,9 +1021,9 @@ class CoEvolutionEngine:
         promoted_versions = {child.version for child in promoted}
         prune_reasons: dict[str, str] = {}
         for child in children:
-            if child.version not in child_screen_dev:
+            if child.version not in child_screen_train:
                 prune_reasons[child.version] = "screen_failed"
-            elif child_screen_dev[child.version].system_reward < threshold:
+            elif child_screen_train[child.version].system_reward < threshold:
                 prune_reasons[child.version] = "below_parent_tolerance"
             elif child.version not in promoted_versions:
                 prune_reasons[child.version] = "not_top_k"
@@ -967,7 +1032,7 @@ class CoEvolutionEngine:
                     "candidate_promoted",
                     generation=generation,
                     child=child.version,
-                    screen_dev_reward=child_screen_dev[child.version].system_reward,
+                    screen_train_reward=child_screen_train[child.version].system_reward,
                 )
                 continue
             self._progress(
@@ -975,16 +1040,15 @@ class CoEvolutionEngine:
                 generation=generation,
                 child=child.version,
                 reason=prune_reasons[child.version],
-                parent_screen_dev_reward=parent_screen_dev.system_reward,
-                child_screen_dev_reward=(
-                    child_screen_dev[child.version].system_reward
-                    if child.version in child_screen_dev
+                parent_screen_train_reward=parent_screen_train.system_reward,
+                child_screen_train_reward=(
+                    child_screen_train[child.version].system_reward
+                    if child.version in child_screen_train
                     else None
                 ),
             )
 
         train_evaluations: dict[str, PolicyEvaluation] = {}
-        dev_evaluations: dict[str, PolicyEvaluation] = {}
         full_policies: dict[str, HarnessPolicy] = {}
         for child in promoted:
             screen_child = child_policies[child.version]
@@ -1018,36 +1082,41 @@ class CoEvolutionEngine:
                     parent_train_reward=parent_train.system_reward,
                     child_train_reward=train_evaluations[child.version].system_reward,
                 )
-                continue
+
+        improving_versions = [
+            version
+            for version, evaluation in train_evaluations.items()
+            if evaluation.system_reward > parent_train.system_reward
+        ]
+        train_best = (
+            max(
+                (full_policies[version] for version in improving_versions),
+                key=lambda policy: train_evaluations[policy.version].system_reward,
+            )
+            if improving_versions
+            else None
+        )
+        child_dev = None
+        if train_best is not None:
             try:
-                dev_evaluations[child.version] = self._evaluate(
-                    full_child,
+                child_dev = self._evaluate(
+                    train_best,
                     dev_tasks,
                     stage="child_dev",
                     generation=generation,
                     learn_skills=False,
-                    harness=child_harness,
+                    harness=child_harnesses[train_best.version],
                 )
             except TransientLLMError:
                 raise
             except Exception as exc:
-                prune_reasons[child.version] = "full_dev_failed"
+                prune_reasons[train_best.version] = "full_dev_failed"
                 self._progress(
                     "candidate_dev_failed",
                     generation=generation,
-                    child=child.version,
+                    child=train_best.version,
                     error=f"{type(exc).__name__}: {exc}",
                 )
-
-        train_best = (
-            max(
-                (full_policies[version] for version in dev_evaluations),
-                key=lambda policy: dev_evaluations[policy.version].system_reward,
-            )
-            if dev_evaluations
-            else None
-        )
-        child_dev = dev_evaluations.get(train_best.version) if train_best else None
         accepted = (
             train_best
             if train_best is not None
@@ -1096,15 +1165,12 @@ class CoEvolutionEngine:
             child_changelogs={child.version: child.changelog for child in children},
             successive_halving=True,
             parent_screen_train_reward=parent_screen_train.system_reward,
-            parent_screen_dev_reward=parent_screen_dev.system_reward,
+            parent_screen_dev_reward=None,
             child_screen_train_rewards={
                 version: evaluation.system_reward
                 for version, evaluation in child_screen_train.items()
             },
-            child_screen_dev_rewards={
-                version: evaluation.system_reward
-                for version, evaluation in child_screen_dev.items()
-            },
+            child_screen_dev_rewards=None,
             promoted_versions=tuple(child.version for child in promoted),
             screen_prune_reasons=prune_reasons,
         )
@@ -1226,12 +1292,16 @@ class CoEvolutionEngine:
             raise ValueError("checkpoint evolution target does not match this run")
         stored_halving = payload.get("successive_halving")
         current_halving = self._successive_halving_signature()
-        if stored_halving is None:
-            if current_halving["enabled"]:
-                raise ValueError(
-                    "checkpoint successive-halving controls do not match this run"
-                )
-        elif stored_halving != current_halving:
+        disabled_checkpoint = (
+            stored_halving is None
+            or (
+                isinstance(stored_halving, dict)
+                and stored_halving.get("enabled") is False
+            )
+        )
+        if current_halving["enabled"] and stored_halving != current_halving:
+            raise ValueError("checkpoint successive-halving controls do not match this run")
+        if not current_halving["enabled"] and not disabled_checkpoint:
             raise ValueError("checkpoint successive-halving controls do not match this run")
         incumbent_payload = dict(payload["incumbent"])
         incumbent_payload["workflow"] = tuple(incumbent_payload["workflow"])
@@ -1257,11 +1327,13 @@ class CoEvolutionEngine:
         self._progress("checkpoint_resumed", next_generation=start, incumbent=incumbent.version)
         return incumbent, history, start
 
-    def _successive_halving_signature(self) -> dict[str, bool | int | float]:
+    def _successive_halving_signature(self) -> dict[str, bool | int | float | str]:
+        if not self.config.successive_halving:
+            return {"enabled": False}
         return {
-            "enabled": self.config.successive_halving,
+            "enabled": True,
+            "protocol": "train_only_v2",
             "screening_train_tasks": self.config.screening_train_tasks,
-            "screening_dev_tasks": self.config.screening_dev_tasks,
             "screening_promote": self.config.screening_promote,
             "screening_tolerance": self.config.screening_tolerance,
         }

@@ -109,10 +109,15 @@ def _add_successive_halving_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--successive-halving",
         action="store_true",
-        help="Screen all children on small train/dev subsets before full evaluation.",
+        help="Screen all children on a small Train subset before full evaluation.",
     )
     parser.add_argument("--screen-train-tasks", type=int, default=6)
-    parser.add_argument("--screen-dev-tasks", type=int, default=2)
+    parser.add_argument(
+        "--screen-dev-tasks",
+        type=int,
+        default=2,
+        help="Deprecated compatibility option; Dev is never used for screening.",
+    )
     parser.add_argument("--screen-promote", type=int, default=1)
     parser.add_argument("--screen-tolerance", type=float, default=0.01)
 
@@ -768,6 +773,9 @@ def run_command(args) -> dict:
                         ],
                         "setting2_knowledge": {
                             "version": result.coding.knowledge_base_version,
+                            "retrieved_entry_ids": list(
+                                result.coding.retrieved_knowledge_ids
+                            ),
                             "selected_entry_ids": list(result.coding.selected_knowledge_ids),
                             "diagnostic_profile": (
                                 asdict(result.coding.diagnostic_profile)

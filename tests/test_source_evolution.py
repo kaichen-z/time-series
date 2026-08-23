@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-import tempfile
+import json
 import subprocess
+import tempfile
 from pathlib import Path
+
+import pytest
 
 from evolving_loop.source_evolution import (
     SOURCE_ENGINEER_PROMPT,
@@ -187,3 +190,21 @@ def test_source_checkpoint_round_trip() -> None:
     assert restored_evaluation == evaluation
     assert trace == []
     assert start == 2
+
+
+def test_source_checkpoint_rejects_an_unversioned_reward_objective() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        checkpoint = Path(directory) / "checkpoint.json"
+        engine = SourceEvolutionEngine(
+            directory,
+            lambda _worktree: None,
+            SourceEvolutionConfig(checkpoint_path=checkpoint),
+        )
+        evaluation = SourceEvaluation(0.4, 0.5, {"coding": 0.4}, {"coding": 0.5}, ())
+        engine._save_checkpoint("patch-data", evaluation, [], 2)
+        payload = json.loads(checkpoint.read_text())
+        payload.pop("objective")
+        checkpoint.write_text(json.dumps(payload))
+
+        with pytest.raises(ValueError, match="objective"):
+            engine._load_checkpoint()
