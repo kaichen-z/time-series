@@ -14,7 +14,7 @@ dependencies = []
 huggingface = ["huggingface_hub>=0.25"]
 chronos = ["chronos-forecasting>=2.2.0"]
 timesfm = ["timesfm[torch]>=2.0.2"]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "setuptools>=68"]
 
 [project.scripts]
 drcik-agent = "drcik_agent.cli:main"
