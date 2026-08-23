@@ -133,6 +133,7 @@ class DecisionPolicy:
     ensemble_max_members: int = 3
     ensemble_min_diversity: float = 0.05
     ensemble_min_improvement: float = 0.01
+    fallback_to_best_available: bool = True
 
     def __post_init__(self) -> None:
         allowed = {
@@ -293,7 +294,34 @@ def select_numerical_forecast(
         else:
             eligible.append(diagnostic)
     if not eligible:
-        raise ValueError("no active candidate passed the reliability gate")
+        if not policy.fallback_to_best_available:
+            raise ValueError("no active candidate passed the reliability gate")
+        fallback = [
+            diagnostic
+            for name in sorted(active)
+            if name in forecasts and (diagnostic := diagnostics.get(name)) is not None
+        ]
+        if not fallback:
+            raise ValueError("no active candidate has both diagnostics and a final forecast")
+        chosen = min(
+            fallback,
+            key=lambda item: (
+                -item.successful_folds,
+                not math.isfinite(item.median_mase),
+                item.median_mase,
+                item.recent_mase,
+                item.name,
+            ),
+        )
+        return SelectionDecision(
+            mode="single",
+            selected=(chosen.name,),
+            weights=(1.0,),
+            forecast=tuple(float(value) for value in forecasts[chosen.name]),
+            confidence=0.0,
+            reason_codes=("conservative_best_available_fallback",),
+            rejected=rejected,
+        )
 
     front = _pareto_front(eligible)
     order = policy.ranking_order

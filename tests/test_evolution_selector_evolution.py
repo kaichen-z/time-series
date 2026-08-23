@@ -67,6 +67,7 @@ def test_decision_policy_round_trip_and_strict_mutation_schema():
             "ensemble_max_members": 2,
             "ensemble_min_diversity": 0.1,
             "ensemble_min_improvement": 0.02,
+            "fallback_to_best_available": True,
         },
     }))
     assert child.recent_regime_first
@@ -116,6 +117,7 @@ def test_evolution_prompt_contains_train_aggregates_not_ids_or_futures(tmp_path)
             "ensemble_max_members": parent.ensemble_max_members,
             "ensemble_min_diversity": parent.ensemble_min_diversity,
             "ensemble_min_improvement": parent.ensemble_min_improvement,
+            "fallback_to_best_available": parent.fallback_to_best_available,
         },
     })
     result = evolve_selector_once(

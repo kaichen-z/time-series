@@ -92,6 +92,7 @@ _FIELDS = (
     "ensemble_max_members",
     "ensemble_min_diversity",
     "ensemble_min_improvement",
+    "fallback_to_best_available",
 )
 
 
@@ -206,7 +207,13 @@ def evaluate_decision(
             sum(record[1].mode == "ensemble" for record in records) / completed
             if completed else 0.0
         ),
-        fallback_rate=0.0,
+        fallback_rate=(
+            sum(
+                "conservative_best_available_fallback" in record[1].reason_codes
+                for record in records
+            ) / completed
+            if completed else 0.0
+        ),
     )
 
 
@@ -307,6 +314,7 @@ def _parse_policy(raw: Mapping[str, object]) -> DecisionPolicy:
             ensemble_max_members=_strict_int(raw["ensemble_max_members"]),
             ensemble_min_diversity=_finite_float(raw["ensemble_min_diversity"]),
             ensemble_min_improvement=_finite_float(raw["ensemble_min_improvement"]),
+            fallback_to_best_available=_strict_bool(raw["fallback_to_best_available"]),
         )
     except (TypeError, ValueError) as error:
         raise SelectorEvolutionError(f"invalid DecisionPolicy: {error}") from error
@@ -322,6 +330,7 @@ def _policy_payload(policy: DecisionPolicy) -> dict[str, object]:
         "ensemble_max_members": policy.ensemble_max_members,
         "ensemble_min_diversity": policy.ensemble_min_diversity,
         "ensemble_min_improvement": policy.ensemble_min_improvement,
+        "fallback_to_best_available": policy.fallback_to_best_available,
     }
 
 

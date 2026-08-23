@@ -181,3 +181,23 @@ def test_selector_never_returns_more_than_three_members():
         forecasts={name: (1.0, 2.0) for name in diagnostics},
     )
     assert len(decision.selected) <= 3
+
+
+def test_selector_uses_history_only_best_available_fallback_for_coverage():
+    diagnostics = {
+        "weak": CandidateDiagnostics.synthetic(
+            name="weak", family="statistical", median_mase=2.0, eligible=False
+        ),
+        "less_weak": CandidateDiagnostics.synthetic(
+            name="less_weak", family="statistical", median_mase=1.0, eligible=False
+        ),
+    }
+    decision = select_numerical_forecast(
+        DecisionPolicy(ensemble_enabled=False, fallback_to_best_available=True),
+        active_names=("weak", "less_weak"),
+        diagnostics=diagnostics,
+        forecasts={"weak": (4.0,), "less_weak": (3.0,)},
+    )
+    assert decision.selected == ("less_weak",)
+    assert decision.forecast == (3.0,)
+    assert "conservative_best_available_fallback" in decision.reason_codes
