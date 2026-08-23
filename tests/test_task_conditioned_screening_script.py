@@ -25,6 +25,7 @@ def test_screening_cli_has_train_dev_but_no_public_test_option():
     ])
     assert args.train_limit == 80
     assert args.dev_limit == 20
+    assert args.seed_policy == "all"
     with pytest.raises(SystemExit):
         parser.parse_args([
             "--repo", "repo", "--tasks-file", "tasks",
@@ -47,4 +48,3 @@ def test_screening_shell_forwards_formal_configuration():
         "--target-batches-file", "--output-dir", "--codex-model",
     ):
         assert option in source
-

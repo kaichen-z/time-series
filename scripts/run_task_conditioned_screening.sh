@@ -25,6 +25,7 @@ python -m numerical_agent.run_task_conditioned_screening \
   --output-dir "$OUTPUT_DIR" \
   --train-limit "$TRAIN_LIMIT" \
   --dev-limit "$DEV_LIMIT" \
+  --seed-policy all \
   --codex-model "$CODEX_MODEL" \
   --codex-reasoning-effort "$CODEX_REASONING" \
   --tsfm-runtimes chronos,timesfm \

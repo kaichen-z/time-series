@@ -16,7 +16,7 @@ from common.payload import read_json_object, write_json
 
 from .evolution.cache import OutcomeCache
 from .evolution.execution import Outcome, Task
-from .evolution.filtering import parse_filter_source
+from .evolution.filtering import build_filter_dictionary, parse_filter_source
 from .evolution.module import read_module
 from .evolution.portfolio import (
     PolicyOutcomeCache,
@@ -49,6 +49,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--train-limit", type=int, default=80)
     parser.add_argument("--dev-limit", type=int, default=20)
+    parser.add_argument(
+        "--seed-policy", choices=("all", "legacy"), default="all",
+        help="start from the complete selectable Master Dictionary or the legacy global filter",
+    )
     parser.add_argument("--codex-model", default="gpt-5.6-luna")
     parser.add_argument(
         "--codex-reasoning-effort", choices=("none", "low", "medium", "high"), default="low"
@@ -77,8 +81,14 @@ def main(argv: list[str] | None = None) -> int:
     legacy_path = repo / "frozen_dictionary.py"
     if not legacy_path.is_file():
         legacy_path = repo / "dictionary.py"
+    legacy_dictionary = parse_filter_source(legacy_path.read_text(encoding="utf-8"))
+    seed_dictionary = (
+        build_filter_dictionary(module, portfolio)
+        if args.seed_policy == "all"
+        else legacy_dictionary
+    )
     parent = migrate_filter_dictionary(
-        parse_filter_source(legacy_path.read_text(encoding="utf-8")),
+        seed_dictionary,
         fallback_names=_fallback_names(module.names(), tuple(policy.name for policy in portfolio.tsfm)),
     )
     if len(parent.entries) != 103:
@@ -142,6 +152,7 @@ def main(argv: list[str] | None = None) -> int:
         "train_tasks": len(train),
         "dev_tasks": len(dev),
         "candidate_count": len(parent.entries),
+        "seed_policy": args.seed_policy,
         "frozen_screening_policy_sha256": frozen_hash,
         "frozen_screening_policy_fingerprint": parent.fingerprint(),
         "source_hashes": {
