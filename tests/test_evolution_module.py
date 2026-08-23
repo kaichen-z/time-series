@@ -129,6 +129,40 @@ def test_add_rejects_an_existing_name() -> None:
         )
 
 
+def test_repair_replaces_a_method_without_renaming_it() -> None:
+    module = parse_module(module_text("alpha", "beta"))
+    repaired = method_source("alpha", "    return [float(sum(history) / len(history))] * horizon")
+
+    updated, summaries = apply_operations(
+        module,
+        [{"op": "repair", "name": "alpha", "code": repaired, "reason": "stabilized"}],
+    )
+
+    assert updated.names() == ("alpha", "beta")
+    assert "sum(history)" in updated.get("alpha").source
+    assert summaries == ("repair alpha: stabilized",)
+
+
+def test_fork_adds_a_new_method_and_preserves_its_parent() -> None:
+    module = parse_module(module_text("sarima_auto", "beta"))
+    forked = method_source("recent_two_cycle_profile")
+
+    updated, summaries = apply_operations(
+        module,
+        [{
+            "op": "fork",
+            "from": "sarima_auto",
+            "code": forked,
+            "reason": "a different stable algorithm",
+        }],
+    )
+
+    assert updated.names() == ("sarima_auto", "beta", "recent_two_cycle_profile")
+    assert summaries == (
+        "fork sarima_auto -> recent_two_cycle_profile: a different stable algorithm",
+    )
+
+
 def test_merge_consolidates_several_methods_into_one() -> None:
     module = parse_module(module_text("alpha", "beta", "gamma"))
 

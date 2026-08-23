@@ -175,6 +175,49 @@ def test_ungrounded_codex_quote_is_rejected() -> None:
     assert result.retrieved == []
     assert result.evidence == []
     assert result.forecast.mean == result.forecast.baseline_mean
+
+
+def test_codex_retrieval_impacts_do_not_leak_across_tasks() -> None:
+    client = FakeTriadCodexClient()
+    original_complete = client.complete
+    retrieval_calls = 0
+
+    def complete(stage, prompt, schema, workspace_files=None):
+        nonlocal retrieval_calls
+        if stage.startswith("triad_retrieval"):
+            retrieval_calls += 1
+            if retrieval_calls == 2:
+                return {
+                    "query": "no relevant event",
+                    "rationale": "No evidence applies to the second task.",
+                    "selected_document_ids": [],
+                    "evidence": [],
+                    "impacts": [],
+                    "sufficient": True,
+                }
+        return original_complete(stage, prompt, schema, workspace_files)
+
+    client.complete = complete
+    system = ThreeAgentForecastSystem(
+        TriadConfig(
+            backbone="statistical",
+            max_rounds=1,
+            documents_per_round=2,
+            num_samples=20,
+            reasoning_agent="codex",
+        ),
+        codex_client=client,
+    )
+    first = system.run(_task(), 0)
+    second = system.run(_task(), 1)
+
+    assert first.loop_trace[-1]["evidence_impacts"]
+    assert second.loop_trace[-1]["evidence_impacts"] == []
+    assert second.loop_trace[-1]["decision"]["selected_candidate_ids"] == (
+        "c_backbone",
+    )
+
+
 def test_codex_decision_rejects_adjusted_candidate_without_matching_citation() -> None:
     client = FakeTriadCodexClient()
     original_complete = client.complete

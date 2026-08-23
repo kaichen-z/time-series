@@ -32,7 +32,7 @@ class NotApplicable(Exception):
 '''
 
 SIGNATURE = ("history", "horizon", "frequency")
-OPERATIONS = ("delete", "rewrite", "merge", "add")
+OPERATIONS = ("delete", "rewrite", "repair", "merge", "add", "fork")
 
 
 class ModuleError(ValueError):
@@ -147,17 +147,29 @@ def _apply_one(
             raise ModuleError("refusing to delete the last remaining method")
         return replace(module, methods=methods), f"delete {name}: {reason}"
 
-    if op == "rewrite":
+    if op in {"rewrite", "repair"}:
         name = _require_existing(module, operation.get("name"))
         method = parse_method(_require_code(operation), expected_name=name)
         methods = tuple(method if m.name == name else m for m in module.methods)
-        return replace(module, methods=methods), f"rewrite {name}: {reason}"
+        return replace(module, methods=methods), f"{op} {name}: {reason}"
 
     if op == "add":
         method = parse_method(_require_code(operation))
         if module.get(method.name) is not None:
             raise ModuleError(f"{method.name!r} already exists; use rewrite")
         return replace(module, methods=module.methods + (method,)), f"add {method.name}: {reason}"
+
+    if op == "fork":
+        parent = _require_existing(module, operation.get("from"))
+        method = parse_method(_require_code(operation))
+        if method.name == parent:
+            raise ModuleError("fork must use a new method name; use repair to keep the name")
+        if module.get(method.name) is not None:
+            raise ModuleError(f"{method.name!r} already exists; fork needs a new name")
+        return (
+            replace(module, methods=module.methods + (method,)),
+            f"fork {parent} -> {method.name}: {reason}",
+        )
 
     raw_names = operation.get("names")
     if not isinstance(raw_names, Sequence) or isinstance(raw_names, (str, bytes)):

@@ -212,6 +212,46 @@ Return code, its updated falsifiable assumption, and its failure condition.
 
 
 @dataclass(frozen=True)
+class CodingAgentPolicy:
+    """Versioned policy controlling how the numbers-only Coding Agent writes code.
+
+    The policy contains instructions only.  Task data are supplied separately through
+    ``task.json``, whose construction deliberately excludes documents, retrieved
+    evidence, ground-truth evidence, and future values.
+    """
+
+    version: str = "v000"
+    parent: str | None = None
+    generation_prompt: str = INITIAL_PROMPT
+    revision_prompt: str = MUTATION_PROMPT
+    notes: str = "Hand-written seed policy."
+
+    @classmethod
+    def load(cls, path: str | Path | None) -> "CodingAgentPolicy":
+        if path is None:
+            return cls()
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.exists():
+            return cls()
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+        return cls(
+            version=str(payload.get("version", "v000")),
+            parent=(str(payload["parent"]) if payload.get("parent") else None),
+            generation_prompt=str(payload.get("generation_prompt", INITIAL_PROMPT)),
+            revision_prompt=str(payload.get("revision_prompt", MUTATION_PROMPT)),
+            notes=str(payload.get("notes", "")),
+        )
+
+    def save(self, path: str | Path) -> None:
+        resolved = Path(path).expanduser().resolve()
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        resolved.write_text(
+            json.dumps(asdict(self), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+
+@dataclass(frozen=True)
 class CodeEvolutionConfig:
     initial_programs: int = 3
     mutations: int = 2
@@ -482,9 +522,11 @@ class CodexCodeEvolutionAgent:
         self,
         client: CodeEvolutionCLIClient,
         config: CodeEvolutionConfig | None = None,
+        policy: CodingAgentPolicy | None = None,
     ) -> None:
         self.client = client
         self.config = config or CodeEvolutionConfig()
+        self.policy = policy or CodingAgentPolicy()
         self.diagnoser = TimeSeriesDiagnosisAgent()
         self.sandbox = ForecastProgramSandbox(
             timeout_seconds=self.config.execution_timeout_seconds,
@@ -546,7 +588,7 @@ class CodexCodeEvolutionAgent:
     def generate(self, task: ForecastTask) -> list[GeneratedProgram]:
         result = self.client.complete(
             f"code_evolve_generate_{task.benchmark_id}",
-            INITIAL_PROMPT,
+            self.policy.generation_prompt,
             PROGRAM_SCHEMA,
             workspace_files=self._task_workspace(task),
         )
@@ -664,7 +706,7 @@ class CodexCodeEvolutionAgent:
         }
         result = self.client.complete(
             f"code_evolve_mutate_{task.benchmark_id}_{parent.program.program_id}",
-            MUTATION_PROMPT,
+            self.policy.revision_prompt,
             PROGRAM_SCHEMA,
             workspace_files={
                 "evolution.json": json.dumps(payload, ensure_ascii=False, indent=2)

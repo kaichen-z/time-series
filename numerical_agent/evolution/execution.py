@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import importlib.util
 import math
+import multiprocessing
 import statistics
 import sys
+import tempfile
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -12,6 +14,8 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from common.metrics import mae, mase, smape
+
+from .analysis_skills import DEFAULT_SKILLS_PATH, skill_namespace
 
 
 NOT_APPLICABLE = "not_applicable"
@@ -46,6 +50,7 @@ class Outcome:
     mae: float | None = None
     mase: float | None = None
     detail: str = ""
+    forecast: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -77,7 +82,12 @@ def derive_characteristics(
     tags = [f"frequency:{frequency}", f"history:{_bucket(length, (48, 168, 512))}"]
     tags.append(f"horizon:{_bucket(horizon, (8, 24, 96))}")
     zeros = sum(1 for value in values if value == 0.0)
-    tags.append("intermittent" if zeros / length > 0.3 else "dense")
+    zero_ratio = zeros / length
+    tags.append("intermittent" if zero_ratio > 0.3 else "dense")
+    tags.append("many_zeros" if zero_ratio > 0.3 else ("no_zeros" if zeros == 0 else "some_zeros"))
+    tags.append("nonnegative" if min(values) >= 0.0 else "signed")
+    integer_ratio = sum(abs(value - round(value)) <= 1e-8 for value in values) / length
+    tags.append("integer_valued" if integer_ratio >= 0.98 else "continuous_valued")
     if length >= 8:
         first, second = values[: length // 2], values[length // 2 :]
         spread = statistics.pstdev(values) or 1.0
@@ -93,45 +103,337 @@ def _bucket(value: int, edges: Sequence[int]) -> str:
     return f"gt_{edges[-1]}"
 
 
-def load_methods(path: str | Path) -> tuple[object, dict[str, object]]:
+def _skills_path(methods_path: Path, requested: str | Path | None) -> Path:
+    if requested is not None:
+        return Path(requested).resolve()
+    sibling = methods_path.with_name("skills.py")
+    return sibling if sibling.is_file() else DEFAULT_SKILLS_PATH
+
+
+def load_methods(
+    path: str | Path, *, skills_path: str | Path | None = None
+) -> tuple[object, dict[str, object]]:
     """Import the module once and return it with its forecasting functions by name."""
     source = Path(path).resolve()
+    from .module import read_module
+
+    method_names = read_module(source).names()
     spec = importlib.util.spec_from_file_location(f"evolved_methods_{source.stem}", source)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot import a methods module from {source}")
     module = importlib.util.module_from_spec(spec)
+    module.__dict__.update(skill_namespace(_skills_path(source, skills_path)))
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    functions = {
-        name: value
-        for name, value in vars(module).items()
-        if callable(value) and not name.startswith("_") and not isinstance(value, type)
-    }
+    functions = {name: getattr(module, name) for name in method_names}
     if not functions:
         raise ImportError(f"{source} defines no forecasting functions")
     return module, functions
 
 
 def run_module(
-    path: str | Path, tasks: Sequence[Task], *, time_budget_s: float = 20.0
+    path: str | Path,
+    tasks: Sequence[Task],
+    *,
+    time_budget_s: float = 20.0,
+    isolated: bool = False,
+    timeout_circuit_breaker: int = 2,
+    worker_startup_timeout_s: float = 10.0,
+    skills_path: str | Path | None = None,
 ) -> tuple[tuple[Outcome, ...], tuple[MethodReport, ...]]:
     """Run every method over every task in this process and summarize each method."""
-    module, functions = load_methods(path)
-    not_applicable = getattr(module, "NotApplicable", None)
-    if not isinstance(not_applicable, type) or not issubclass(not_applicable, Exception):
-        raise ImportError("methods module must define a NotApplicable exception")
+    if isolated:
+        # Parse without importing in the parent. Import can execute arbitrary top-level work, so
+        # it belongs inside the bounded worker-startup phase rather than the trusted evaluator.
+        from .module import read_module
 
-    outcomes: list[Outcome] = []
-    for name, function in functions.items():
-        for task in tasks:
-            outcomes.append(
-                _run_one(name, function, task, not_applicable, time_budget_s)
-            )
+        names = read_module(path).names()
+        outcomes = _run_isolated(
+            Path(path).resolve(),
+            names,
+            tasks,
+            time_budget_s=time_budget_s,
+            timeout_circuit_breaker=timeout_circuit_breaker,
+            worker_startup_timeout_s=worker_startup_timeout_s,
+            skills_path=_skills_path(Path(path).resolve(), skills_path),
+        )
+    else:
+        module, functions = load_methods(path, skills_path=skills_path)
+        not_applicable = getattr(module, "NotApplicable", None)
+        if not isinstance(not_applicable, type) or not issubclass(not_applicable, Exception):
+            raise ImportError("methods module must define a NotApplicable exception")
+        names = tuple(functions)
+        outcomes = []
+        for name, function in functions.items():
+            for task in tasks:
+                outcomes.append(
+                    _run_one(name, function, task, not_applicable, time_budget_s)
+                )
     reports = tuple(
         _report(name, [o for o in outcomes if o.method == name], tasks)
-        for name in functions
+        for name in names
     )
     return tuple(outcomes), reports
+
+
+def run_method(
+    method: object,
+    tasks: Sequence[Task],
+    *,
+    time_budget_s: float = 20.0,
+    isolated: bool = False,
+    timeout_circuit_breaker: int = 2,
+    worker_startup_timeout_s: float = 10.0,
+    skills_path: str | Path | None = None,
+) -> tuple[tuple[Outcome, ...], MethodReport]:
+    """Execute one parsed method through the same trusted module evaluator."""
+    from .module import MODULE_HEADER, Method
+
+    if not isinstance(method, Method):
+        raise TypeError("method must be a parsed Method")
+    with tempfile.TemporaryDirectory(prefix="method-outcome-") as directory:
+        path = Path(directory) / "methods.py"
+        path.write_text(
+            MODULE_HEADER.rstrip("\n") + "\n\n\n" + method.source.strip("\n") + "\n",
+            encoding="utf-8",
+        )
+        selected_skills = Path(skills_path) if skills_path is not None else DEFAULT_SKILLS_PATH
+        temporary_skills = Path(directory) / "skills.py"
+        temporary_skills.write_text(selected_skills.read_text(encoding="utf-8"), encoding="utf-8")
+        outcomes, reports = run_module(
+            path,
+            tasks,
+            time_budget_s=time_budget_s,
+            isolated=isolated,
+            timeout_circuit_breaker=timeout_circuit_breaker,
+            worker_startup_timeout_s=worker_startup_timeout_s,
+            skills_path=temporary_skills,
+        )
+    if len(reports) != 1 or reports[0].method != method.name:
+        raise RuntimeError(f"single-method execution returned unexpected reports for {method.name}")
+    return outcomes, reports[0]
+
+
+def reports_from_outcomes(
+    method_names: Sequence[str],
+    outcomes: Sequence[Outcome],
+    tasks: Sequence[Task],
+) -> tuple[MethodReport, ...]:
+    """Aggregate an outcome matrix reconstructed from cached method executions."""
+    return tuple(
+        _report(name, [outcome for outcome in outcomes if outcome.method == name], tasks)
+        for name in method_names
+    )
+
+
+def _run_isolated(
+    path: Path,
+    names: Sequence[str],
+    tasks: Sequence[Task],
+    *,
+    time_budget_s: float,
+    timeout_circuit_breaker: int,
+    worker_startup_timeout_s: float,
+    skills_path: Path,
+) -> list[Outcome]:
+    """Run one persistent subprocess per method, containing native crashes and hangs."""
+    if time_budget_s <= 0:
+        raise ValueError("time_budget_s must be positive")
+    if timeout_circuit_breaker < 1:
+        raise ValueError("timeout_circuit_breaker must be at least one")
+    if worker_startup_timeout_s <= 0:
+        raise ValueError("worker_startup_timeout_s must be positive")
+
+    context = multiprocessing.get_context("spawn")
+    outcomes: list[Outcome] = []
+    for name in names:
+        parent, worker, startup_status, startup_detail = _start_isolated_worker(
+            context,
+            path,
+            name,
+            worker_startup_timeout_s,
+            skills_path,
+        )
+        if startup_detail:
+            outcomes.extend(
+                Outcome(name, task.task_id, startup_status, detail=startup_detail)
+                for task in tasks
+            )
+            continue
+        assert parent is not None
+        timeouts = 0
+        try:
+            for index, task in enumerate(tasks):
+                try:
+                    parent.send(task)
+                except (BrokenPipeError, EOFError, OSError):
+                    outcomes.append(
+                        Outcome(name, task.task_id, CRASHED, detail=_worker_exit(worker))
+                    )
+                    _stop_worker(worker)
+                    parent.close()
+                    if index + 1 < len(tasks):
+                        parent, worker, status, detail = _start_isolated_worker(
+                            context, path, name, worker_startup_timeout_s, skills_path
+                        )
+                        if detail:
+                            outcomes.extend(
+                                Outcome(name, pending.task_id, status, detail=detail)
+                                for pending in tasks[index + 1 :]
+                            )
+                            break
+                        assert parent is not None
+                    continue
+
+                if parent.poll(time_budget_s):
+                    try:
+                        outcome = parent.recv()
+                    except (EOFError, OSError):
+                        outcome = Outcome(
+                            name, task.task_id, CRASHED, detail=_worker_exit(worker)
+                        )
+                        _stop_worker(worker)
+                        parent.close()
+                        if index + 1 < len(tasks):
+                            parent, worker, status, detail = _start_isolated_worker(
+                                context, path, name, worker_startup_timeout_s, skills_path
+                            )
+                            if detail:
+                                outcomes.append(outcome)
+                                outcomes.extend(
+                                    Outcome(name, pending.task_id, status, detail=detail)
+                                    for pending in tasks[index + 1 :]
+                                )
+                                break
+                            assert parent is not None
+                    outcomes.append(outcome)
+                    if outcome.status != INVALID or "hard timeout" not in outcome.detail:
+                        timeouts = 0
+                    continue
+
+                if worker.exitcode is not None:
+                    outcomes.append(
+                        Outcome(name, task.task_id, CRASHED, detail=_worker_exit(worker))
+                    )
+                else:
+                    timeouts += 1
+                    outcomes.append(
+                        Outcome(
+                            name,
+                            task.task_id,
+                            INVALID,
+                            detail=f"hard timeout after {time_budget_s:g}s",
+                        )
+                    )
+                _stop_worker(worker)
+                parent.close()
+
+                remaining = tasks[index + 1 :]
+                if timeouts >= timeout_circuit_breaker:
+                    outcomes.extend(
+                        Outcome(
+                            name,
+                            pending.task_id,
+                            INVALID,
+                            detail=(
+                                "hard timeout circuit breaker after "
+                                f"{timeouts} timeouts"
+                            ),
+                        )
+                        for pending in remaining
+                    )
+                    break
+                if remaining:
+                    parent, worker, status, detail = _start_isolated_worker(
+                        context, path, name, worker_startup_timeout_s, skills_path
+                    )
+                    if detail:
+                        outcomes.extend(
+                            Outcome(name, pending.task_id, status, detail=detail)
+                            for pending in remaining
+                        )
+                        break
+                    assert parent is not None
+        finally:
+            if parent is not None:
+                try:
+                    parent.send(None)
+                except (BrokenPipeError, EOFError, OSError):
+                    pass
+                parent.close()
+            _stop_worker(worker)
+    return outcomes
+
+
+def _start_isolated_worker(
+    context: object,
+    path: Path,
+    name: str,
+    startup_timeout_s: float,
+    skills_path: Path,
+) -> tuple[object | None, multiprocessing.Process, str, str]:
+    """Start one worker and wait separately for its bounded import/ready phase."""
+    parent, child = context.Pipe()  # type: ignore[attr-defined]
+    worker = context.Process(  # type: ignore[attr-defined]
+        target=_isolated_method_worker,
+        args=(str(path), str(skills_path), name, child),
+        daemon=True,
+    )
+    worker.start()
+    child.close()
+    if not parent.poll(startup_timeout_s):
+        if worker.exitcode is None:
+            status = INVALID
+            detail = f"worker startup timeout after {startup_timeout_s:g}s"
+        else:
+            status = CRASHED
+            detail = _worker_exit(worker)
+        parent.close()
+        _stop_worker(worker)
+        return None, worker, status, detail
+    try:
+        ready = parent.recv()
+    except (EOFError, OSError):
+        detail = _worker_exit(worker)
+        parent.close()
+        _stop_worker(worker)
+        return None, worker, CRASHED, detail
+    if ready != "worker_ready":
+        parent.close()
+        _stop_worker(worker)
+        return None, worker, CRASHED, "worker returned an invalid startup handshake"
+    return parent, worker, "", ""
+
+
+def _isolated_method_worker(
+    path: str, skills_path: str, name: str, connection: object
+) -> None:
+    """Load and repeatedly execute exactly one method inside a disposable process."""
+    module, functions = load_methods(path, skills_path=skills_path)
+    not_applicable = getattr(module, "NotApplicable")
+    function = functions[name]
+    connection.send("worker_ready")  # type: ignore[attr-defined]
+    while True:
+        task = connection.recv()  # type: ignore[attr-defined]
+        if task is None:
+            return
+        connection.send(  # type: ignore[attr-defined]
+            _run_one(name, function, task, not_applicable, float("inf"))
+        )
+
+
+def _worker_exit(worker: multiprocessing.Process) -> str:
+    worker.join(timeout=0.05)
+    return f"worker exited with code {worker.exitcode}"
+
+
+def _stop_worker(worker: multiprocessing.Process) -> None:
+    if worker.is_alive():
+        worker.terminate()
+    worker.join(timeout=1.0)
+    if worker.is_alive():
+        worker.kill()
+        worker.join(timeout=1.0)
 
 
 def _run_one(
@@ -168,6 +470,7 @@ def _run_one(
         name, task.task_id, SUCCESS,
         smape=smape(truth, forecast), mae=mae(truth, forecast),
         mase=mase(truth, forecast, history),
+        forecast=tuple(forecast),
     )
 
 

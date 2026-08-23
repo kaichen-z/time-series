@@ -45,6 +45,7 @@ class TriadConfig:
     decision_margin: float = 0.12
     feedback_path: str | None = None
     evolution_path: str | None = None
+    agent_bundle_path: str | None = None
     learn_from_public_outcomes: bool = False
     learning_rate: float = 0.05
     validation_folds: int = 3
@@ -746,6 +747,7 @@ class ThreeAgentForecastSystem:
         self,
         config: TriadConfig | None = None,
         codex_client: Any | None = None,
+        agent_bundle: Any | None = None,
     ) -> None:
         self.config = config or TriadConfig()
         backbone = build_forecast_backbone(
@@ -771,6 +773,7 @@ class ThreeAgentForecastSystem:
         self.diagnosis_agent = TimeSeriesDiagnosisAgent()
         self.codex_client = None
         if self.config.reasoning_agent == "codex":
+            from .co_evolution import AgentPromptBundle
             from .codex_agents import CodexCLIClient, CodexCLIConfig
             from .codex_triad import (
                 CodexCodingForecastAgent,
@@ -778,6 +781,10 @@ class ThreeAgentForecastSystem:
                 CodexRetrievalStreamAgent,
             )
 
+            bundle = agent_bundle or AgentPromptBundle.load(
+                self.config.agent_bundle_path
+            )
+            self.agent_bundle = bundle
             self.codex_client = codex_client or CodexCLIClient(
                 CodexCLIConfig(
                     binary=self.config.codex_binary,
@@ -795,14 +802,18 @@ class ThreeAgentForecastSystem:
                 validation_horizon=self.config.validation_horizon,
                 minimum_validation_history=self.config.minimum_validation_history,
                 client=self.codex_client,
+                planning_prompt=bundle.coding_plan_prompt,
             )
             self.retrieval_agent = CodexRetrievalStreamAgent(
-                self.codex_client, self.coding_agent
+                self.codex_client,
+                self.coding_agent,
+                prompt=bundle.retrieval_prompt,
             )
             self.decision_agent = CodexDecisionForecastAgent(
                 self.config.decision_margin,
                 self.policy,
                 client=self.codex_client,
+                prompt=bundle.decision_prompt,
             )
         else:
             self.coding_agent = CodingForecastAgent(
@@ -819,6 +830,9 @@ class ThreeAgentForecastSystem:
         self.probabilistic_agent = ProbabilisticForecastAgent(backbone)
 
     def run(self, task: ForecastTask, task_index: int = 0) -> RunResult:
+        reset_retrieval_state = getattr(self.retrieval_agent, "reset", None)
+        if callable(reset_retrieval_state):
+            reset_retrieval_state()
         diagnosis = self.diagnosis_agent.diagnose(task)
         candidates, baseline_method = self.coding_agent.initial_candidates(task, diagnosis)
         baseline = next(candidate for candidate in candidates if "backbone" in candidate.tags)

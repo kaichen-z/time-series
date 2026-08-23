@@ -16,6 +16,29 @@ from numerical_agent.evolution import (
 )
 from numerical_agent.evolution.execution import Task
 from numerical_agent.evolution.module import MODULE_HEADER, read_module, write_module, parse_module
+from numerical_agent.evolution.prompts import MUTATE_SYSTEM
+from numerical_agent.run_evolution import (
+    _evolution_tasks,
+    _llm_clients,
+    _validate_judge_halving_configuration,
+    build_parser,
+)
+
+
+
+SARIMA_EXAMPLE = '''def sarima_auto(history, horizon, frequency):
+    """Use for seasonal SARIMA selection."""
+    from statsmodels.tsa.statespace.sarimax import SARIMAX
+    best = None
+    best_aic = float("inf")
+    for p in range(2):
+        model = SARIMAX(history, order=(p, 0, 0), seasonal_order=(1, 0, 0, 7))
+        result = model.fit(disp=False)
+        if result.aic < best_aic:
+            best_aic = result.aic
+            best = result
+    return list(best.forecast(steps=horizon))
+'''
 
 
 def method(name: str, body: str = "    return [float(history[-1])] * horizon") -> str:
@@ -176,3 +199,442 @@ def test_successive_generations_build_a_readable_history(tmp_path: Path) -> None
         "seed",
     ]
     assert read_module(repo / "methods.py").names() == ("alpha", "beta")
+
+
+def test_two_stage_generation_selects_before_sending_only_target_code(
+    tmp_path: Path,
+) -> None:
+    repo = seed_repo(tmp_path, "alpha", "beta", "gamma")
+    selector = FakeLLMClient([
+        json.dumps({
+            "targets": [
+                {"name": "gamma", "action": "delete", "reason": "dominated on MASE"}
+            ]
+        })
+    ])
+    mutator = scripted([
+        {"op": "delete", "name": "gamma", "reason": "dominated on MASE"}
+    ])
+
+    outcome = evolve_once(repo, tasks(), mutator, 1, selector_llm=selector)
+
+    selector_prompt = selector.calls[0]["messages"][0]["content"]
+    selector_system = selector.calls[0]["system"]
+    mutator_prompt = mutator.calls[0]["messages"][0]["content"]
+    assert "mean_mase" in selector_prompt
+    assert "def alpha(" not in selector_prompt
+    assert "def beta(" not in selector_prompt
+    assert "def gamma(" not in selector_prompt
+    assert "not_applicable is correct" in selector_system
+    assert "Never delete" in selector_system
+    assert "def gamma(" in mutator_prompt
+    assert "def alpha(" not in mutator_prompt
+    assert "def beta(" not in mutator_prompt
+    assert outcome.applied == ("delete gamma: dominated on MASE",)
+
+
+def test_two_stage_generation_rejects_an_operation_outside_selected_targets(
+    tmp_path: Path,
+) -> None:
+    repo = seed_repo(tmp_path, "alpha", "beta", "gamma")
+    selector = FakeLLMClient([
+        json.dumps({
+            "targets": [
+                    {"name": "gamma", "action": "repair", "reason": "crashed"}
+            ]
+        })
+    ])
+    mutator = scripted([
+        {"op": "delete", "name": "alpha", "reason": "not selected"}
+    ])
+
+    outcome = evolve_once(repo, tasks(), mutator, 1, selector_llm=selector)
+
+    assert outcome.applied == ()
+    assert "outside selected targets" in outcome.rejected
+    assert read_module(repo / "methods.py").names() == ("alpha", "beta", "gamma")
+
+
+def test_two_stage_generation_rejects_an_operation_that_changes_selected_action(
+    tmp_path: Path,
+) -> None:
+    repo = seed_repo(tmp_path, "alpha", "beta", "gamma")
+    selector = FakeLLMClient([
+        json.dumps({
+            "targets": [
+                {"name": "gamma", "action": "fork", "reason": "needs a challenger"}
+            ]
+        })
+    ])
+    mutator = scripted([
+        {"op": "delete", "name": "gamma", "reason": "changed the selected action"}
+    ])
+
+    outcome = evolve_once(repo, tasks(), mutator, 1, selector_llm=selector)
+
+    assert outcome.applied == ()
+    assert "does not match selector action" in outcome.rejected
+    assert read_module(repo / "methods.py").names() == ("alpha", "beta", "gamma")
+
+
+def test_cli_builds_distinct_codex_selector_and_mutator_models() -> None:
+    args = build_parser().parse_args([
+        "--repo", "unused",
+        "--llm-backend", "codex",
+        "--codex-model", "gpt-5.6-terra",
+        "--codex-reasoning-effort", "medium",
+        "--selector-codex-model", "gpt-5.6-luna",
+        "--selector-codex-reasoning-effort", "medium",
+        "--train-limit", "16",
+    ])
+
+    mutator, selector = _llm_clients(args)
+
+    assert mutator.config.model == "gpt-5.6-terra"
+    assert selector.config.model == "gpt-5.6-luna"
+    assert args.train_limit == 16
+    assert args.isolated_methods is True
+
+
+def test_cli_exposes_targetwise_cache_and_screening_options() -> None:
+    args = build_parser().parse_args([
+        "--repo", "unused",
+        "--evolution-strategy", "targetwise",
+        "--outcome-cache-dir", "runs/cache",
+        "--max-targets", "2",
+        "--screen-tasks", "3",
+        "--full-evaluation-candidates", "2",
+        "--failure-judge",
+    ])
+
+    assert args.evolution_strategy == "targetwise"
+    assert args.outcome_cache_dir == "runs/cache"
+    assert args.max_targets == 2
+    assert args.screen_tasks == 3
+    assert args.full_evaluation_candidates == 2
+    assert args.failure_judge is True
+
+
+def test_judge_halving_cli_requires_the_frozen_16_plus_4_design() -> None:
+    args = build_parser().parse_args([
+        "--repo", "unused",
+        "--evolution-strategy", "targetwise",
+        "--failure-judge",
+        "--max-targets", "8",
+        "--screen-tasks", "4",
+        "--full-evaluation-candidates", "3",
+    ])
+    train = tuple(tasks()[0] for _ in range(16))
+    dev = tuple(tasks()[0] for _ in range(4))
+
+    _validate_judge_halving_configuration(args, train, dev)
+
+    with pytest.raises(ValueError, match="16 Train and 4 mini-dev"):
+        _validate_judge_halving_configuration(args, train[:-1], dev)
+
+
+def test_two_stage_generation_rejects_a_malformed_selector_response(
+    tmp_path: Path,
+) -> None:
+    repo = seed_repo(tmp_path, "alpha", "beta")
+    selector = FakeLLMClient([json.dumps({"targets": "alpha"})])
+    mutator = scripted([])
+
+    outcome = evolve_once(repo, tasks(), mutator, 1, selector_llm=selector)
+
+    assert outcome.applied == ()
+    assert "targets" in outcome.rejected
+    assert mutator.calls == []
+
+
+def test_two_stage_generation_rejects_a_merge_without_two_distinct_methods(
+    tmp_path: Path,
+) -> None:
+    repo = seed_repo(tmp_path, "alpha", "beta")
+    selector = FakeLLMClient([
+        json.dumps({
+            "targets": [
+                {"name": "alpha", "action": "merge", "reason": "possibly redundant"},
+                {"name": "beta", "action": "merge", "reason": "possibly redundant"},
+            ]
+        })
+    ])
+    mutator = scripted([
+        {
+            "op": "merge",
+            "names": ["alpha", "alpha"],
+            "into": "alpha",
+            "code": method("alpha"),
+            "reason": "invalid duplicate merge",
+        }
+    ])
+
+    outcome = evolve_once(repo, tasks(), mutator, 1, selector_llm=selector)
+
+    assert outcome.applied == ()
+    assert "distinct" in outcome.rejected
+    assert read_module(repo / "methods.py").names() == ("alpha", "beta")
+
+
+def test_two_stage_generation_rejects_a_malformed_mutator_response(
+    tmp_path: Path,
+) -> None:
+    repo = seed_repo(tmp_path, "alpha", "beta")
+    selector = FakeLLMClient([
+        json.dumps({
+            "targets": [
+                    {"name": "alpha", "action": "repair", "reason": "crashed"}
+            ]
+        })
+    ])
+    mutator = FakeLLMClient([json.dumps({"operations": "not-a-list"})])
+
+    outcome = evolve_once(repo, tasks(), mutator, 1, selector_llm=selector)
+
+    assert outcome.applied == ()
+    assert "operations" in outcome.rejected
+    assert read_module(repo / "methods.py").names() == ("alpha", "beta")
+
+
+def test_two_stage_prompt_exposes_identity_contracts_and_repair_fork_actions(
+    tmp_path: Path,
+) -> None:
+    repo = seed_repo(tmp_path, "alpha", "beta")
+    selector = FakeLLMClient([
+        json.dumps({
+            "targets": [
+                {"name": "alpha", "action": "repair", "reason": "crashed"}
+            ]
+        })
+    ])
+    mutator = scripted([])
+
+    evolve_once(repo, tasks(), mutator, 1, selector_llm=selector)
+
+    prompt = mutator.calls[0]["messages"][0]["content"]
+    system = mutator.calls[0]["system"]
+    assert "identity_contracts" in prompt
+    assert '"repair_allowed": false' in prompt
+    assert '"mode": "fork_only"' in prompt
+    assert '"op": "repair"' in system
+    assert '"op": "fork"' in system
+
+
+def test_two_stage_mutator_explains_that_same_name_repair_is_constant_only() -> None:
+    assert "literal constants" in MUTATE_SYSTEM
+    assert "control flow, calls, variable names, operators, and returns" in MUTATE_SYSTEM
+    assert "use fork" in MUTATE_SYSTEM
+    assert "exact action selected" in MUTATE_SYSTEM
+    assert "coverage is at least 0.5" in MUTATE_SYSTEM
+
+
+def test_selector_inventory_marks_unreviewed_methods_fork_only(tmp_path: Path) -> None:
+    repo = seed_repo(tmp_path, "alpha", "beta")
+    selector = FakeLLMClient([json.dumps({"targets": []})])
+
+    evolve_once(repo, tasks(), scripted([]), 1, selector_llm=selector)
+
+    prompt = selector.calls[0]["messages"][0]["content"]
+    system = selector.calls[0]["system"]
+    assert '"repair_allowed": false' in prompt
+    assert '"mode": "fork_only"' in prompt
+    assert "fork_only" in system
+
+
+def test_two_stage_generation_rejects_deleting_an_untested_specialist(
+    tmp_path: Path,
+) -> None:
+    repo = init_repo(tmp_path / "evo")
+    specialist = method(
+        "specialist",
+        '    raise NotApplicable("needs a longer history")',
+    )
+    module = parse_module(MODULE_HEADER + "\n\n" + specialist + "\n\n" + method("general"))
+    write_module(repo / "methods.py", module)
+    commit_module(repo, "seed", [])
+    selector = FakeLLMClient([
+        json.dumps({
+            "targets": [
+                {"name": "specialist", "action": "delete", "reason": "zero coverage"}
+            ]
+        })
+    ])
+    mutator = scripted([
+        {"op": "delete", "name": "specialist", "reason": "zero coverage"}
+    ])
+
+    outcome = evolve_once(repo, tasks(), mutator, 1, selector_llm=selector)
+
+    assert outcome.applied == ()
+    assert "not sufficiently evaluated" in outcome.rejected
+    assert "specialist" in read_module(repo / "methods.py").names()
+
+
+def test_validation_tasks_reject_a_child_with_worse_oracle_mase(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "evo")
+    alpha = method("alpha", "    return [float(history[-1])] * horizon")
+    beta = method("beta", "    return [0.0] * horizon")
+    module = parse_module(MODULE_HEADER + "\n\n" + alpha + "\n\n" + beta)
+    write_module(repo / "methods.py", module)
+    commit_module(repo, "seed", [])
+    selector = FakeLLMClient([
+        json.dumps({
+            "targets": [
+                {"name": "beta", "action": "delete", "reason": "poor on train"}
+            ]
+        })
+    ])
+    mutator = scripted([
+        {"op": "delete", "name": "beta", "reason": "poor on train"}
+    ])
+    validation = (
+        Task("dev", (5.0, 5.0, 5.0), 2, "1 day", (0.0, 0.0)),
+    )
+
+    outcome = evolve_once(
+        repo,
+        tasks(),
+        mutator,
+        1,
+        selector_llm=selector,
+        validation_tasks=validation,
+    )
+
+    assert outcome.applied == ()
+    assert "validation MASE regressed" in outcome.rejected
+    assert read_module(repo / "methods.py").names() == ("alpha", "beta")
+
+
+def test_two_stage_rejects_rewrite_even_when_the_method_was_selected(tmp_path: Path) -> None:
+    repo = seed_repo(tmp_path, "alpha", "beta")
+    selector = FakeLLMClient([json.dumps({
+        "targets": [{"name": "alpha", "action": "repair", "reason": "crashed"}]
+    })])
+    mutator = scripted([{
+        "op": "rewrite",
+        "name": "alpha",
+        "code": method("alpha"),
+        "reason": "legacy operation",
+    }])
+
+    outcome = evolve_once(repo, tasks(), mutator, 1, selector_llm=selector)
+
+    assert outcome.applied == ()
+    assert "does not allow operation 'rewrite'" in outcome.rejected
+
+
+def test_merge_cannot_replace_a_named_method_with_another_algorithm(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "evo")
+    module = parse_module(
+        MODULE_HEADER + "\n\n" + SARIMA_EXAMPLE + "\n\n" + method("beta")
+    )
+    write_module(repo / "methods.py", module)
+    commit_module(repo, "seed", [])
+    selector = FakeLLMClient([json.dumps({"targets": [
+        {"name": "sarima_auto", "action": "merge", "reason": "similar"},
+        {"name": "beta", "action": "merge", "reason": "similar"},
+    ]})])
+    mutator = scripted([{
+        "op": "merge",
+        "names": ["sarima_auto", "beta"],
+        "into": "sarima_auto",
+        "code": method("sarima_auto"),
+        "reason": "replace both with last value",
+    }])
+
+    outcome = evolve_once(repo, tasks(), mutator, 1, selector_llm=selector)
+
+    assert outcome.applied == ()
+    assert "violates method identity" in outcome.rejected
+
+
+def test_merge_cannot_remove_an_all_not_applicable_specialist(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "evo")
+    specialist = method("specialist", '    raise NotApplicable("needs another domain")')
+    module = parse_module(
+        MODULE_HEADER + "\n\n" + SARIMA_EXAMPLE + "\n\n" + specialist
+    )
+    write_module(repo / "methods.py", module)
+    commit_module(repo, "seed", [])
+    selector = FakeLLMClient([json.dumps({"targets": [
+        {"name": "sarima_auto", "action": "merge", "reason": "combine"},
+        {"name": "specialist", "action": "merge", "reason": "combine"},
+    ]})])
+    mutator = scripted([{
+        "op": "merge",
+        "names": ["sarima_auto", "specialist"],
+        "into": "sarima_auto",
+        "code": SARIMA_EXAMPLE,
+        "reason": "combine",
+    }])
+
+    outcome = evolve_once(repo, tasks(), mutator, 1, selector_llm=selector)
+
+    assert outcome.applied == ()
+    assert "specialist is not sufficiently evaluated for deletion" in outcome.rejected
+
+
+def test_fork_parent_must_survive_the_complete_operation_batch(tmp_path: Path) -> None:
+    repo = seed_repo(tmp_path, "alpha", "beta")
+    selector = FakeLLMClient([json.dumps({"targets": [
+        {"name": "alpha", "action": "fork", "reason": "try challenger"},
+        {"name": "alpha", "action": "delete", "reason": "replace parent"},
+    ]})])
+    mutator = scripted([
+        {
+            "op": "fork",
+            "from": "alpha",
+            "new_identity": "recent mean challenger",
+            "code": method("alpha_recent_mean", "    return [sum(history[-4:]) / 4] * horizon"),
+            "reason": "try challenger",
+        },
+        {"op": "delete", "name": "alpha", "reason": "replace parent"},
+    ])
+
+    outcome = evolve_once(repo, tasks(), mutator, 1, selector_llm=selector)
+
+    assert outcome.applied == ()
+    assert "duplicate selector target 'alpha'" in outcome.rejected
+    assert mutator.calls == []
+    assert read_module(repo / "methods.py").names() == ("alpha", "beta")
+
+
+def test_train_limit_counts_evolution_tasks_before_validation_tail(tmp_path: Path) -> None:
+    split = tmp_path / "split.json"
+    split.write_text(json.dumps({
+        "partitions": {"train": {"task_ids": [f"task_{i}" for i in range(25)]}}
+    }))
+    tasks_file = tmp_path / "tasks.jsonl"
+    tasks_file.write_text("\n".join(json.dumps({
+        "benchmark_id": f"task_{i}",
+        "task_metadata": {"prediction_length": 1, "frequency": "1 day"},
+        "series": {"history_values": [1.0, 2.0], "future_values": [3.0]},
+    }) for i in range(25)))
+
+    train, validation = _evolution_tasks(split, tasks_file, train_limit=16, validation_tail=4)
+
+    assert [task.task_id for task in train] == [f"task_{i}" for i in range(16)]
+    assert [task.task_id for task in validation] == [f"task_{i}" for i in range(16, 20)]
+
+
+def test_evolution_tasks_can_load_the_public_task_directory(tmp_path: Path) -> None:
+    split = tmp_path / "split.json"
+    split.write_text(json.dumps({
+        "partitions": {"train": {"task_ids": ["task_2", "task_1"]}}
+    }))
+    directory = tmp_path / "tasks"
+    directory.mkdir()
+    for task_id, value in (("task_1", 1.0), ("task_2", 2.0)):
+        (directory / f"{task_id}.json").write_text(json.dumps({
+            "benchmark_id": task_id,
+            "labels_public": True,
+            "task_metadata": {"prediction_length": 1, "frequency": "1 day"},
+            "series": {"history_values": [value, value], "future_values": [value]},
+        }))
+
+    train, validation = _evolution_tasks(
+        split, directory, train_limit=1, validation_tail=1
+    )
+
+    assert [task.task_id for task in train] == ["task_2"]
+    assert [task.task_id for task in validation] == ["task_1"]

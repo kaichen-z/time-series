@@ -73,14 +73,21 @@ def _to_task(record: dict) -> Task:
 
 
 def load_tasks(tasks_file: str | Path = DEFAULT_TASKS_FILE) -> list[Task]:
-    """Load every labeled task from a Dr-CiK-style JSONL file."""
+    """Load labeled tasks from a Dr-CiK JSONL file or public task directory."""
     tasks: list[Task] = []
-    with open(tasks_file, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            record = json.loads(line)
-            if _is_labeled(record):
-                tasks.append(_to_task(record))
+    source = Path(tasks_file)
+    if source.is_dir():
+        records = (
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(source.glob("task_*.json"))
+        )
+    else:
+        records = (
+            json.loads(line)
+            for line in source.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+    for record in records:
+        if _is_labeled(record):
+            tasks.append(_to_task(record))
     return tasks

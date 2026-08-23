@@ -272,6 +272,46 @@ are logged separately from historical validation scores. The feedback log also e
 training targets: candidate-set coverage for Coding, evidence quality for Retrieval, and
 selection regret for Decision.
 
+### Numbers-only Coding Agent and co-evolution
+
+The executable Coding Agent now has an explicit information boundary and a nested evolution
+contract:
+
+```text
+Input: historical timestamps + historical values only
+  -> analyze statistical properties
+  -> generate multiple falsifiable assumptions
+  -> translate every assumption into executable Python
+  -> sandbox execution
+  -> rolling historical hindcast
+  -> revise one failed assumption/program once
+Output: assumption + failure condition + code + hindcast score
+```
+
+It never receives documents, retrieved evidence, `gt_evidence`, future values, or Retrieval
+Agent output. [`scripts/run_code_evolution.py`](scripts/run_code_evolution.py) executes this
+inner task-level loop. The returned program is selected by history-only validation rather than
+by an LLM-authored numerical answer.
+
+The new outer loop in [`co_evolution.py`](drcik_agent/co_evolution.py) evolves the reusable
+generation policy across resolved training tasks. It evaluates a population of versioned prompt
+bundles, attributes the weakest module from candidate coverage, evidence quality, and decision
+regret, then changes exactly one eligible prompt. The sequence is:
+
+```text
+Coding assumptions + executable candidates
+        -> Retrieval searches for evidence that tests those assumptions
+        -> Decision cross-checks candidates against verified evidence
+        -> final forecast
+        -> delayed ground truth and labels score all three modules
+        -> failure attribution chooses Coding OR Retrieval OR Decision
+        -> mutate one prompt -> train/dev evaluation -> retain only validated bundles
+```
+
+Run the minimal population loop with [`scripts/run_co_evolution.py`](scripts/run_co_evolution.py).
+An evolved JSON bundle can be loaded into the Codex triad with `--agent-bundle`. This is prompt-
+policy evolution, not neural-weight training and not graph-topology search.
+
 All three reasoning roles can instead be backed by schema-constrained Codex calls:
 
 ```bash

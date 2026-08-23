@@ -27,6 +27,7 @@ include = ["common*", "drcik_agent*", "evolving_loop*", "numerical_agent*"]
 [tool.setuptools.package-data]
 evolving_loop = ["knowledge/*.json"]
 numerical_agent = [
+  "datasets/forecast_method_dataset_v002.json",
   "datasets/method_candidates_v002.jsonl",
   "datasets/source_registry_v002.jsonl",
   "tsfm/runtime_manifests.json",

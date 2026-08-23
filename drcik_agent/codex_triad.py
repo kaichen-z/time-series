@@ -200,9 +200,16 @@ def _candidate_family(candidate: ForecastCandidate) -> str:
 class CodexCodingForecastAgent(CodingForecastAgent):
     """Codex proposes hypotheses; deterministic tools execute and backtest them."""
 
-    def __init__(self, *args: Any, client: CodexCLIClient, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        client: CodexCLIClient,
+        planning_prompt: str = CODING_AGENT_PROMPT,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.client = client
+        self.planning_prompt = planning_prompt
         self.information_needs: tuple[str, ...] = ()
         self.normal_regime_agent = RegimeNormalizationAgent()
 
@@ -228,7 +235,7 @@ class CodexCodingForecastAgent(CodingForecastAgent):
         candidates, method = super().initial_candidates(task, diagnosis)
         result = self.client.complete(
             f"triad_coding_plan_{task.benchmark_id}",
-            CODING_AGENT_PROMPT,
+            self.planning_prompt,
             CODING_PLAN_SCHEMA,
             workspace_files=self._workspace(task, diagnosis),
         )
@@ -396,6 +403,11 @@ class _StoredImpactTranslator:
             )
             self.by_key[key] = impact
 
+    def reset(self) -> None:
+        """Drop evidence state before processing a different forecast task."""
+
+        self.by_key.clear()
+
     def translate(self, *_args: Any, **_kwargs: Any) -> list[EvidenceImpact]:
         return list(self.by_key.values())
 
@@ -403,10 +415,21 @@ class _StoredImpactTranslator:
 class CodexRetrievalStreamAgent:
     """Codex searches the full local corpus and returns grounded evidence."""
 
-    def __init__(self, client: CodexCLIClient, information_needs_source: Any) -> None:
+    def __init__(
+        self,
+        client: CodexCLIClient,
+        information_needs_source: Any,
+        prompt: str = RETRIEVAL_AGENT_PROMPT,
+    ) -> None:
         self.client = client
         self.information_needs_source = information_needs_source
+        self.prompt = prompt
         self.impact_agent = _StoredImpactTranslator()
+
+    def reset(self) -> None:
+        """Ensure evidence impacts never leak across benchmark tasks."""
+
+        self.impact_agent.reset()
 
     @staticmethod
     def _workspace(
@@ -497,7 +520,7 @@ class CodexRetrievalStreamAgent:
         seen_ids: set[str],
     ) -> tuple[QueryAction, list[RetrievedDocument], list[RetrievedDocument], list[Evidence]]:
         needs = tuple(getattr(self.information_needs_source, "information_needs", ()))
-        prompt = RETRIEVAL_AGENT_PROMPT
+        prompt = self.prompt
         if needs:
             prompt += "\nCoding Agent information needs:\n- " + "\n- ".join(needs)
         result = self.client.complete(
@@ -559,9 +582,16 @@ class CodexRetrievalStreamAgent:
 class CodexDecisionForecastAgent(DecisionForecastAgent):
     """Codex selects; the host validates the ID and computes the final series."""
 
-    def __init__(self, *args: Any, client: CodexCLIClient, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        client: CodexCLIClient,
+        prompt: str = DECISION_AGENT_PROMPT,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.client = client
+        self.prompt = prompt
 
     def decide(
         self,
@@ -582,7 +612,7 @@ class CodexDecisionForecastAgent(DecisionForecastAgent):
         }
         result = self.client.complete(
             f"triad_decision_{round_index}_{len(candidates)}",
-            DECISION_AGENT_PROMPT,
+            self.prompt,
             DECISION_SCHEMA,
             workspace_files={
                 "candidates.json": json.dumps(payload, ensure_ascii=False, indent=2),

@@ -31,6 +31,13 @@ from .triad import (
     TriadConfig,
     TriadEvolutionPolicy,
 )
+from .code_evolution import CodingAgentPolicy
+from .co_evolution import (
+    AgentPromptBundle,
+    CoEvolutionConfig,
+    PromptCoEvolutionEngine,
+    evaluate_bundle,
+)
 
 __all__ = [
     "Document",
@@ -70,5 +77,10 @@ __all__ = [
     "ThreeAgentForecastSystem",
     "TriadConfig",
     "TriadEvolutionPolicy",
+    "CodingAgentPolicy",
+    "AgentPromptBundle",
+    "CoEvolutionConfig",
+    "PromptCoEvolutionEngine",
+    "evaluate_bundle",
 ]
 __version__ = "0.9.0"

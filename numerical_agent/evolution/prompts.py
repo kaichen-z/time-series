@@ -34,7 +34,16 @@ fails, let it propagate: that is a defect to be found and repaired, and silencin
 NotApplicable hides it exactly as a fallback would. Both patterns are rejected automatically.
 
 The docstring is one sentence saying when to use the method, written for someone choosing
-between methods."""
+between methods.
+
+The runtime injects reviewed history-only analysis skills that can be called directly without an
+import: detect_periodicity(history, frequency), detect_outliers(history),
+detect_trend(history), detect_change_points(history), detect_intermittency(history),
+estimate_noise_scale(history), assess_stationarity(history), detect_recent_regime(history), and
+analyze_series(history, frequency). They report measurements and never see future labels. When
+one of these operations is needed, use the injected skill; do not reimplement it inside the
+forecasting function. The forecasting method remains responsible for deciding how to use the
+reported measurement and for producing the forecast."""
 
 BOOTSTRAP_SYSTEM = f"""You implement one named classical statistical forecasting method as a
 Python function. Implement the method that is described; do not substitute a different method
@@ -92,6 +101,133 @@ Return exactly one JSON object with the operations to apply, in order:
 
 Every operation states a reason citing the measurement that justifies it; the reasons become the
 commit message. Return an empty operations list only if nothing in the report warrants a change.
+
+For merge, `into` must be one of `names` whenever that method already exists. For example:
+{{"op": "merge", "names": ["naive_last", "naive_drift"], "into": "naive_last", ...}}
+"""
+
+SELECT_SYSTEM = """You are the low-cost screening stage of forecasting-method evolution.
+Use mean_mase as the primary metric, with mean_smape and mean_mae as supporting evidence.
+Select at most ten existing methods that warrant repair, forking, deletion, or merging. For a merge,
+select every participating method. Do not write Python code and do not invent method names.
+
+The report fields have distinct meanings. not_applicable is correct specialist behavior, not a
+failure: judge a specialist only on tasks where it applies, together with its docstring and
+explicit preconditions. Never delete or rewrite a method solely because its coverage is low or
+zero on this particular sample. A crash or invalid forecast is an implementation defect and must
+be treated separately from an honest NotApplicable result.
+
+Each inventory entry states whether repair is allowed. When mode is fork_only or repair_allowed
+is false, never select repair: select fork if a distinct challenger is justified, or leave the
+method unchanged.
+
+Prefer repair for implementation defects while preserving the named mathematics. Choose fork
+when a different algorithm may be useful under a new honest name. Delete only with evidence from
+enough applicable tasks; zero coverage from NotApplicable is never deletion evidence.
+
+Return exactly one JSON object:
+{"targets": [{"name": "...", "action": "delete|repair|fork|merge", "reason": "..."}]}
+Return an empty targets list when the evidence is insufficient.
+"""
+
+MUTATE_SYSTEM = f"""You are the code-writing stage of forecasting-method evolution. You receive
+only methods selected by a screening model. Produce conservative, schema-valid changes supported
+by the measured results. mean_mase is primary; mean_smape and mean_mae are supporting metrics.
+
+{CONTRACT_TEXT}
+
+You may repair, fork, or delete a selected method, or merge two or more selected methods. Do not
+touch an unselected method. Use the exact action selected for each method; do not turn a repair or
+fork target into a deletion. Delete only when coverage is at least 0.5 and the applicable-task
+evidence shows inferiority; NotApplicable and low coverage are never deletion evidence.
+
+A same-name change must use repair and preserve every required component
+in its identity contract. A same-name repair may tune literal constants and its docstring only: its
+control flow, calls, variable names, operators, and returns must remain structurally identical. If
+any of those need to change, use fork with a new descriptive name and leave the original untouched.
+Never use rewrite or add. For merge, every name must be selected and `into` must be one of `names`.
+
+An identity contract with mode fork_only or repair_allowed false forbids repair. In that case,
+only fork under a new honest name, or make no change.
+
+Metric improvement never compensates for an identity violation. Do not replace a named model
+with a moving average, seasonal profile, naive forecast, generic autoregression, or local trend.
+
+Return exactly one JSON object:
+{{"operations": [
+  {{"op": "delete", "name": "...", "reason": "..."}},
+  {{"op": "repair", "name": "...", "preserved_components": ["..."], "code": "def ...", "reason": "..."}},
+  {{"op": "fork", "from": "...", "new_identity": "...", "code": "def new_name(...)", "reason": "..."}},
+  {{"op": "merge", "names": ["...", "..."], "into": "...", "code": "def ...", "reason": "..."}}
+]}}
+"""
+
+TARGETWISE_SELECT_SYSTEM = """You are the low-cost screening stage of target-wise forecasting
+method evolution. Use mean_mase as the primary metric. Select no more than the requested
+max_targets, with a hard ceiling of ten unique existing methods. Each target action is repair,
+fork, or delete; never merge targets in this mode.
+
+NotApplicable is correct specialist behavior. Low or zero coverage alone never supports deletion.
+Use repair for a defect in the named implementation, fork when a structurally different challenger
+is justified, and delete only with broad applicable-task evidence that the method is harmful or
+dominated. Do not write code.
+
+Return exactly one JSON object:
+{"targets": [{"name": "...", "action": "repair|fork|delete", "reason": "..."}]}
+"""
+
+TARGETWISE_MUTATE_SYSTEM = f"""You write exactly one independent forecasting-method child.
+
+{CONTRACT_TEXT}
+
+The request contains one target and its allowed_actions. Return zero or one operation, and choose
+only from allowed_actions. Never escalate repair or fork into deletion. A repair may tune literal
+constants and its docstring only; control flow, calls, variable names, operators, and returns must
+remain structurally identical. A structural change must be a fork with a new honest function name,
+and the Parent remains untouched. Deletion is valid only when it is explicitly allowed.
+
+Return exactly one JSON object:
+{{"operations": [
+  {{"op": "repair", "name": "...", "preserved_components": ["..."], "code": "def ...", "reason": "..."}}
+]}}
+
+For a fork use `op`, `from`, `new_identity`, `code`, and `reason`. For a deletion use `op`, `name`,
+and `reason`. Return {{"operations": []}} when no compliant change is justified.
+"""
+
+POLICY_SELECT_SYSTEM = """You are the low-cost screening stage for ten non-Python forecast
+policies: five reviewed time-series foundation-model invocation policies and five Combined
+TSFM/statistical policies. Use mean_mase as the primary metric. Select no more than the requested
+max_targets. A policy is repaired in place; it is never deleted, renamed, or forked.
+
+For TSFM policies, the reviewed model/checkpoint identity is immutable. You may improve only
+history-only applicability, context window, reversible preprocessing, and bounded shrinkage.
+For Combined policies, both parent identities are immutable. You may improve only blend weight,
+blend-versus-route mode, history-only signal, route direction, and threshold. Low coverage caused
+by honest NotApplicable behavior is not a failure. Crashes and invalid forecasts are defects.
+
+Return exactly one JSON object:
+{"targets": [{"name": "...", "action": "repair", "reason": "..."}]}
+Return an empty targets list when the Train evidence is insufficient.
+"""
+
+POLICY_MUTATE_SYSTEM = """You repair exactly one typed forecast policy using Train-only measured
+results and diagnostics. Return a complete replacement dictionary and a concise evidence-based
+reason. Preserve its name and family.
+
+For a TSFM policy, preserve method_id exactly. Allowed evolvable fields are applicability
+(all|periodic|intermittent|recent_regime|trending|stable), context_window (32..4096), preprocess
+(none|standardize|robust_scale|log1p_shift), and shrinkage_to_last (0..0.5).
+
+For a Combined policy, preserve tsfm_parent and statistical_parent exactly. Allowed evolvable
+fields are mode (blend|route), weight (0.05..0.95), signal
+(periodicity_strength|zero_fraction|outlier_fraction|trend_strength|recent_regime_confidence),
+threshold (finite), and tsfm_when (above|below). Combined always uses forecasts produced by both
+declared parents; it cannot hide a failed parent behind a fallback.
+
+Return exactly one JSON object:
+{"replacement": {"name": "...", "...": "all remaining policy fields"},
+ "reason": "measured justification"}
 """
 
 
@@ -136,3 +272,102 @@ def render_evolve_user(
         sort_keys=True,
     )
     return f"# Measured results\n\n{summary}\n\n# Current module\n\n```python\n{module_source}```\n"
+
+
+def render_select_user(
+    *,
+    reports: Sequence[Mapping[str, object]],
+    method_inventory: Sequence[Mapping[str, object]],
+    generation: int,
+    task_count: int,
+    max_targets: int = 10,
+) -> str:
+    """Give the selector metrics and docstrings, but no implementation bodies."""
+    return json.dumps(
+        {
+            "generation": generation,
+            "train_tasks": task_count,
+            "method_count": len(reports),
+            "max_targets": max_targets,
+            "reports": list(reports),
+            "method_inventory": list(method_inventory),
+        },
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
+
+
+def render_mutate_user(
+    *,
+    reports: Sequence[Mapping[str, object]],
+    selected: Sequence[Mapping[str, object]],
+    selected_source: str,
+    all_method_names: Sequence[str],
+    identity_contracts: Sequence[Mapping[str, object]],
+    generation: int,
+    task_count: int,
+    failure_diagnosis: Mapping[str, object] | None = None,
+) -> str:
+    """Give the mutator only selected code plus the evidence needed to edit it."""
+    summary = json.dumps(
+        {
+            "generation": generation,
+            "train_tasks": task_count,
+            "selected_targets": list(selected),
+            "selected_reports": list(reports),
+            "all_method_names": list(all_method_names),
+            "identity_contracts": list(identity_contracts),
+            "failure_diagnosis": dict(failure_diagnosis or {}),
+        },
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
+    return f"# Selected evidence\n\n{summary}\n\n# Selected method code\n\n```python\n{selected_source}```\n"
+
+
+def render_policy_select_user(
+    *,
+    reports: Sequence[Mapping[str, object]],
+    policies: Sequence[Mapping[str, object]],
+    generation: int,
+    task_count: int,
+    max_targets: int,
+) -> str:
+    """Give the selector measured results and typed policy inventory, never source code."""
+    return json.dumps(
+        {
+            "generation": generation,
+            "train_tasks": task_count,
+            "max_targets": max_targets,
+            "reports": list(reports),
+            "policy_inventory": list(policies),
+        },
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
+
+
+def render_policy_mutate_user(
+    *,
+    report: Mapping[str, object],
+    policy: Mapping[str, object],
+    diagnosis: Mapping[str, object],
+    generation: int,
+    task_count: int,
+) -> str:
+    """Give one policy repairer only its current contract and Train evidence."""
+    return json.dumps(
+        {
+            "generation": generation,
+            "train_tasks": task_count,
+            "current_policy": dict(policy),
+            "measured_report": dict(report),
+            "failure_diagnosis": dict(diagnosis),
+        },
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )

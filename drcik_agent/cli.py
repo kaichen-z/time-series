@@ -54,6 +54,11 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
         help="Persisted interpretable policy read and updated by --system triad",
     )
     parser.add_argument(
+        "--agent-bundle",
+        default=None,
+        help="Versioned co-evolved Coding/Retrieval/Decision prompt bundle for Codex triad",
+    )
+    parser.add_argument(
         "--learn-from-public-outcomes",
         action="store_true",
         help="Research-only: write memory after each labeled task resolves; never used for hidden test",
@@ -293,6 +298,7 @@ def main(argv: list[str] | None = None) -> None:
                 seed=arguments.seed,
                 feedback_path=arguments.feedback_file,
                 evolution_path=arguments.evolution_file,
+                agent_bundle_path=arguments.agent_bundle,
                 learn_from_public_outcomes=arguments.learn_from_public_outcomes,
                 backbone=arguments.backbone,
                 chronos_model_id=arguments.chronos_model_id,

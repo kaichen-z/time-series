@@ -1,9 +1,9 @@
 # Parameterized Numerical Self-Evolution Harness
 
 This package composes a generic Parent/Child Self-Evolution Core with a dictionary-curation
-adapter. It now ships an auditable forecasting-method dataset, but it still does not implement
-ARIMA, ETS, Chronos, TimesFM, or the other listed forecasting runtimes. Method definitions and
-executable providers remain deliberately separate.
+adapter. It ships an auditable forecasting-method dataset and reviewed runtime adapters for a
+subset of foundation models. Catalog definitions and executable providers remain deliberately
+separate: a method is counted as executable only when its implementation/runtime is enabled.
 
 ## Forecast Method Dataset v001
 
@@ -59,6 +59,34 @@ providers, Train/Dev tasks, trusted labels, and a metric. The LLM implements or 
 trusted Python evaluation assigns `accepted`, `specialized`, `quarantined`, `unavailable`, or
 `discarded` status. Held-out Dev performance decides whether a Child dictionary replaces its
 Parent.
+
+## Git-based 103-candidate evolution portfolio
+
+The method-repository loop now supports a separate, explicitly enabled portfolio:
+
+| Executable family | Count | Evolved artifact |
+|---|---:|---|
+| Python statistical forecasters | 93 | `methods.py` |
+| Flagship TSFMs | 5 | invocation settings in `policies.py` |
+| TSFM/statistical Combined policies | 5 | blend/route settings in `policies.py` |
+| **Total** | **103** | small auditable Git repository |
+
+The five TSFMs are TimesFM 2.5, Moirai 2.0, Toto 2.0, Chronos-Bolt, and Granite TTM R2. Their
+checkpoint, adapter, license, and model identity are immutable. Evolution may change only
+history-only applicability, context window, reversible preprocessing, and bounded output
+shrinkage. The five Combined policies bind one TSFM parent and one statistical parent; evolution
+may change their weight or history-only routing rule but cannot substitute either parent.
+
+Every Python forecaster can call the reviewed history-only functions in `skills.py`, including
+periodicity, outlier, trend, change-point, intermittency, noise, stationarity, and recent-regime
+detection. A skill never sees future labels and its source is part of the outcome-cache key.
+
+Enable the portfolio through `scripts/run_method_evolution.sh` with
+`ME_FOUNDATION_PORTFOLIO=flagship5`, `ME_TSFM_RUNTIMES=chronos,timesfm`, a worker deployment file,
+and the exact required license acknowledgement. The run fails before evaluation if any of the
+five reviewed runtime bindings cannot resolve. Install `requirements.txt` in the Python process
+that launches evolution; otherwise dependency-backed statistical methods would be measured as
+environment failures rather than as forecasting methods.
 
 ## Architecture
 

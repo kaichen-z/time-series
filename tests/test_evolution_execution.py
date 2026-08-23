@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import multiprocessing
+import signal
+import time
 from pathlib import Path
 
 import pytest
@@ -14,6 +17,7 @@ from numerical_agent.evolution.execution import (
     load_methods,
     report_payload,
     run_module,
+    _stop_worker,
 )
 from numerical_agent.evolution.module import MODULE_HEADER
 
@@ -95,12 +99,17 @@ def test_a_wrong_length_forecast_is_invalid_not_a_crash(tmp_path: Path) -> None:
 
 
 def test_a_correct_method_is_scored_on_every_task(tmp_path: Path) -> None:
-    _, reports = run_module(write_fixture(tmp_path), tasks())
+    outcomes, reports = run_module(write_fixture(tmp_path), tasks())
     perfect = next(r for r in reports if r.method == "perfect_method")
+    perfect_outcomes = [o for o in outcomes if o.method == "perfect_method"]
 
     assert (perfect.success, perfect.coverage) == (2, 1.0)
     assert perfect.mean_smape == pytest.approx(0.0)
     assert perfect.mean_mae == pytest.approx(0.0)
+    assert [outcome.forecast for outcome in perfect_outcomes] == [
+        (19.0, 19.0, 19.0),
+        (29.0, 29.0, 29.0),
+    ]
 
 
 def test_outcome_statuses_cover_every_method_and_task(tmp_path: Path) -> None:
@@ -126,6 +135,16 @@ def test_characteristics_flag_intermittent_and_trending_series() -> None:
     assert "intermittent" in intermittent
     assert "trending" in trending
     assert "flat" in flat
+
+
+def test_characteristics_distinguish_integer_counts_from_continuous_series() -> None:
+    counts = derive_characteristics([0.0, 1.0, 0.0, 4.0, 2.0, 0.0], 2, "1 day")
+    continuous = derive_characteristics([0.1, 0.4, 1.3, 2.7, 3.2, 4.8], 2, "1 day")
+    signed = derive_characteristics([-2.0, -1.0, 0.0, 1.0, 2.0, 3.0], 2, "1 day")
+
+    assert {"nonnegative", "integer_valued", "many_zeros"}.issubset(counts)
+    assert {"nonnegative", "continuous_valued", "no_zeros"}.issubset(continuous)
+    assert "signed" in signed
 
 
 def test_characteristics_never_read_the_future() -> None:
@@ -156,3 +175,178 @@ def test_a_module_without_not_applicable_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ImportError, match="NotApplicable"):
         run_module(bad, tasks())
+
+
+def test_isolated_execution_enforces_a_hard_timeout_without_stopping_other_methods(
+    tmp_path: Path,
+) -> None:
+    module = tmp_path / "methods.py"
+    module.write_text(
+        MODULE_HEADER
+        + '''
+
+def slow_method(history, horizon, frequency):
+    """Use when a deliberately slow method is under test."""
+    import time
+    time.sleep(5)
+    return [float(history[-1])] * horizon
+
+
+def perfect_method(history, horizon, frequency):
+    """Use when the future repeats the final observation."""
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+
+    outcomes, reports = run_module(
+        module,
+        tasks(),
+        time_budget_s=0.1,
+        isolated=True,
+        timeout_circuit_breaker=1,
+    )
+
+    slow = next(report for report in reports if report.method == "slow_method")
+    perfect = next(report for report in reports if report.method == "perfect_method")
+    assert (slow.invalid, slow.success) == (2, 0)
+    assert all(
+        "hard timeout" in outcome.detail
+        for outcome in outcomes
+        if outcome.method == "slow_method"
+    )
+    assert (perfect.success, perfect.invalid) == (2, 0)
+
+
+def test_worker_startup_time_is_not_charged_to_the_method_budget(tmp_path: Path) -> None:
+    module = tmp_path / "methods.py"
+    module.write_text(
+        MODULE_HEADER
+        + '''
+
+import time
+time.sleep(0.3)
+
+def fast_after_import(history, horizon, frequency):
+    """Use when worker startup timing is under test."""
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+
+    outcomes, reports = run_module(
+        module,
+        tasks()[:1],
+        time_budget_s=0.1,
+        isolated=True,
+    )
+
+    assert outcomes[0].status == SUCCESS
+    assert reports[0].success == 1
+
+
+def test_worker_startup_import_hang_is_bounded_separately(tmp_path: Path) -> None:
+    module = tmp_path / "methods.py"
+    module.write_text(
+        MODULE_HEADER
+        + '''
+
+import time
+time.sleep(30)
+
+def never_loaded(history, horizon, frequency):
+    """Use when startup-hang containment is under test."""
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+
+    outcomes, reports = run_module(
+        module,
+        tasks()[:1],
+        time_budget_s=0.1,
+        worker_startup_timeout_s=0.1,
+        isolated=True,
+    )
+
+    assert outcomes[0].status == INVALID
+    assert "startup timeout" in outcomes[0].detail
+    assert reports[0].invalid == 1
+
+
+def test_isolated_execution_contains_a_native_style_worker_exit(tmp_path: Path) -> None:
+    module = tmp_path / "methods.py"
+    module.write_text(
+        MODULE_HEADER
+        + '''
+
+def exiting_method(history, horizon, frequency):
+    """Use when a native-style worker failure is under test."""
+    import os
+    os._exit(17)
+
+
+def perfect_method(history, horizon, frequency):
+    """Use when the future repeats the final observation."""
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+
+    outcomes, reports = run_module(module, tasks(), isolated=True, time_budget_s=1.0)
+
+    exiting = next(report for report in reports if report.method == "exiting_method")
+    perfect = next(report for report in reports if report.method == "perfect_method")
+    assert exiting.crashed == 2
+    assert all(
+        "worker exited" in outcome.detail
+        for outcome in outcomes
+        if outcome.method == "exiting_method"
+    )
+    assert perfect.success == 2
+
+
+def test_isolated_execution_restarts_a_worker_after_one_task_exits(tmp_path: Path) -> None:
+    module = tmp_path / "methods.py"
+    module.write_text(
+        MODULE_HEADER
+        + '''
+
+def sometimes_exiting_method(history, horizon, frequency):
+    """Use when worker recovery across tasks is under test."""
+    if len(history) == 20:
+        import os
+        os._exit(19)
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+
+    outcomes, reports = run_module(module, tasks(), isolated=True, time_budget_s=1.0)
+
+    report = reports[0]
+    assert (report.crashed, report.success) == (1, 1)
+    assert outcomes[0].status == CRASHED
+    assert outcomes[1].status == SUCCESS
+
+
+def _ignore_sigterm_forever(ready: object) -> None:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    ready.send(True)  # type: ignore[attr-defined]
+    while True:
+        time.sleep(30)
+
+
+def test_hard_timeout_cleanup_kills_a_worker_that_ignores_sigterm() -> None:
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe()
+    worker = context.Process(target=_ignore_sigterm_forever, args=(child,))
+    worker.start()
+    child.close()
+    assert parent.poll(5.0) and parent.recv() is True
+
+    _stop_worker(worker)
+
+    parent.close()
+    assert worker.is_alive() is False
+    assert worker.exitcode is not None

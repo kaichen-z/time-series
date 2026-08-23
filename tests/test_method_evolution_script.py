@@ -28,6 +28,16 @@ def seeded_repo(tmp_path: Path) -> Path:
     return repo
 
 
+def add_policies(repo: Path) -> None:
+    from numerical_agent.evolution.portfolio import PolicyPortfolio, write_policy_file
+
+    write_policy_file(repo / "policies.py", PolicyPortfolio.flagship5())
+    subprocess.run(["git", "add", "policies.py"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "--quiet", "-m", "add policies"], cwd=repo, check=True
+    )
+
+
 def run(repo: Path, **overrides: str) -> subprocess.CompletedProcess:
     environment = {**os.environ, "ME_DRY_RUN": "1", "ME_REPO": str(repo), "PYTHON": "python3", **overrides}
     return subprocess.run(
@@ -54,10 +64,75 @@ def test_runner_passes_codex_flags_only_for_codex(tmp_path: Path) -> None:
     assert "--codex-model" not in qwen
 
 
+def test_runner_forwards_two_stage_models_and_train_limit(tmp_path: Path) -> None:
+    completed = run(
+        seeded_repo(tmp_path),
+        ME_LLM_BACKEND="codex",
+        ME_CODEX_MODEL="gpt-5.6-terra",
+        ME_REASONING_EFFORT="medium",
+        ME_SELECTOR_CODEX_MODEL="gpt-5.6-luna",
+        ME_SELECTOR_REASONING_EFFORT="medium",
+        ME_TRAIN_LIMIT="16",
+        ME_VALIDATION_TAIL="4",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--codex-model gpt-5.6-terra" in completed.stdout
+    assert "--codex-reasoning-effort medium" in completed.stdout
+    assert "--selector-codex-model gpt-5.6-luna" in completed.stdout
+    assert "--selector-codex-reasoning-effort medium" in completed.stdout
+    assert "--train-limit 16" in completed.stdout
+    assert "--validation-tail 4" in completed.stdout
+
+
 def test_runner_forwards_the_generation_count(tmp_path: Path) -> None:
     completed = run(seeded_repo(tmp_path), ME_GENERATIONS="4")
 
     assert "--generations 4" in completed.stdout
+
+
+def test_runner_forwards_targetwise_evolution_options(tmp_path: Path) -> None:
+    completed = run(
+        seeded_repo(tmp_path),
+        ME_EVOLUTION_STRATEGY="targetwise",
+        ME_OUTCOME_CACHE_DIR="/tmp/method-outcomes",
+        ME_MAX_TARGETS="8",
+        ME_SCREEN_TASKS="3",
+        ME_FULL_EVALUATION_CANDIDATES="2",
+        ME_FAILURE_JUDGE="1",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--evolution-strategy targetwise" in completed.stdout
+    assert "--outcome-cache-dir /tmp/method-outcomes" in completed.stdout
+    assert "--max-targets 8" in completed.stdout
+    assert "--screen-tasks 3" in completed.stdout
+    assert "--full-evaluation-candidates 2" in completed.stdout
+    assert "--failure-judge" in completed.stdout
+
+
+def test_runner_forwards_flagship_tsfm_and_combined_portfolio(tmp_path: Path) -> None:
+    repo = seeded_repo(tmp_path)
+    add_policies(repo)
+    deployment = tmp_path / "workers.json"
+    deployment.write_text("{}", encoding="utf-8")
+
+    completed = run(
+        repo,
+        ME_EVOLUTION_STRATEGY="targetwise",
+        ME_FOUNDATION_PORTFOLIO="flagship5",
+        ME_TSFM_RUNTIMES="chronos,timesfm",
+        ME_TSFM_WORKERS_CONFIG=str(deployment),
+        ME_ACKNOWLEDGED_MODEL_LICENSES="CC-BY-NC-4.0",
+        ME_POLICY_MAX_TARGETS="2",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--foundation-portfolio flagship5" in completed.stdout
+    assert "--tsfm-runtimes chronos\\,timesfm" in completed.stdout
+    assert f"--tsfm-workers-config {deployment}" in completed.stdout
+    assert "--acknowledged-model-licenses CC-BY-NC-4.0" in completed.stdout
+    assert "--policy-max-targets 2" in completed.stdout
 
 
 def test_runner_reports_the_current_commit_and_method_count(tmp_path: Path) -> None:
