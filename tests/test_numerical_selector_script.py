@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from numerical_agent.evolution.execution import Task
+from numerical_agent.evolution.execution import Outcome, Task
 from numerical_agent.evolution.numerical_selector import CandidateDiagnostics
 from numerical_agent.evolution.selector_evolution import DecisionCase
-from numerical_agent.run_selector_evolution import _write_cases, build_parser
+from numerical_agent.run_selector_evolution import _global_ranking, _write_cases, build_parser
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,3 +58,15 @@ def test_case_artifact_serializes_ineligible_infinite_diagnostics_as_null(tmp_pa
     target = tmp_path / "cases.jsonl"
     _write_cases(target, (case,))
     assert '"median_mase": null' in target.read_text(encoding="utf-8")
+
+
+def test_global_ranking_penalizes_failures_and_is_deterministic():
+    rows = (
+        Outcome("a", "t1", "success", mase=1.0),
+        Outcome("a", "t2", "success", mase=1.0),
+        Outcome("b", "t1", "success", mase=0.1),
+        Outcome("b", "t2", "crashed"),
+        Outcome("c", "t1", "success", mase=1.0),
+        Outcome("c", "t2", "success", mase=1.0),
+    )
+    assert _global_ranking(rows, ("t1", "t2")) == ("a", "c", "b")

@@ -289,6 +289,9 @@ def main(argv: list[str] | None = None) -> int:
         "frozen_decision_policy_sha256": _sha256(frozen_path),
         "train": asdict(evaluate_decision(parent, train_cases)),
         "dev": asdict(evaluate_decision(parent, dev_cases)),
+        "frozen_global_ranking": list(
+            _global_ranking(final_outcomes, tuple(task.task_id for task in train))
+        ),
         "accepted_generations": [row["generation"] for row in generations if row["accepted"]],
         "generations": generations,
         "cache": {
@@ -347,6 +350,29 @@ def _write_cases(path: Path, cases: Sequence[DecisionCase]) -> None:
                 "families": dict(case.families),
             }
             handle.write(json.dumps(_finite_json(payload), sort_keys=True, allow_nan=False) + "\n")
+
+
+def _global_ranking(
+    outcomes: Sequence[Outcome], task_ids: Sequence[str], *, failure_penalty: float = 20.0
+) -> tuple[str, ...]:
+    """Freeze the legacy cross-task ranker from Train labels only."""
+    requested = tuple(task_ids)
+    by_method: dict[str, dict[str, Outcome]] = {}
+    for outcome in outcomes:
+        if outcome.task_id in requested:
+            by_method.setdefault(outcome.method, {})[outcome.task_id] = outcome
+    scores = []
+    for name, rows in by_method.items():
+        values = []
+        for task_id in requested:
+            outcome = rows.get(task_id)
+            values.append(
+                float(outcome.mase)
+                if outcome is not None and outcome.status == SUCCESS and outcome.mase is not None
+                else failure_penalty
+            )
+        scores.append((sum(values) / len(values), name))
+    return tuple(name for _, name in sorted(scores))
 
 
 def _finite_json(value):
