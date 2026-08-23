@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,17 @@ from numerical_agent.evaluate_frozen_two_stage import (
     verify_frozen_policies,
 )
 from numerical_agent.evolution.execution import Task
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_frozen_evaluation_runner_prefers_project_virtualenv():
+    source = (ROOT / "scripts" / "evaluate_frozen_two_stage.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"' in source
+    assert '"$PYTHON_BIN" -m numerical_agent.evaluate_frozen_two_stage' in source
 
 
 def _write(path, text):
@@ -63,4 +75,3 @@ def test_score_reports_mean_median_rmsse_and_diversity():
     assert score["mean_rmsse"] == 0.0
     assert score["method_diversity"] == 1
     assert score["family_diversity"] == 1
-

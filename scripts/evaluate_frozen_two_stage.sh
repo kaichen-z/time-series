@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 RUN_REPO="${RUN_REPO:-$ROOT_DIR/runs/method_filtering/combined103_full_80_20_99_20260823}"
 SCREENING_DIR="${SCREENING_DIR:-$ROOT_DIR/runs/task_conditioned_screening/formal_80_20_all103_20260823}"
 SELECTOR_DIR="${SELECTOR_DIR:-$ROOT_DIR/runs/numerical_selector/formal_80_20_fallback_20260823}"
@@ -13,7 +14,7 @@ WORKERS_CONFIG="${NA_TSFM_WORKERS_CONFIG:-$ROOT_DIR/runs/method_evolution/local_
 MODEL_CACHE="${NA_MODEL_CACHE_DIR:-$ROOT_DIR/outputs/model-cache}"
 
 cd "$ROOT_DIR"
-python -m numerical_agent.evaluate_frozen_two_stage \
+"$PYTHON_BIN" -m numerical_agent.evaluate_frozen_two_stage \
   --repo "$RUN_REPO" \
   --screening-dir "$SCREENING_DIR" \
   --selector-dir "$SELECTOR_DIR" \
