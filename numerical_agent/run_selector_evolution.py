@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
+import multiprocessing
 import os
 import tempfile
 import time
@@ -83,12 +85,23 @@ class ForecastStore:
         portfolio: PolicyPortfolio,
         runtimes,
         screening_hash: str,
+        statistical_time_budget_s: float = 20.0,
+        statistical_failure_limit: int = 2,
     ) -> None:
+        if statistical_time_budget_s <= 0:
+            raise ValueError("statistical_time_budget_s must be positive")
+        if statistical_failure_limit < 1:
+            raise ValueError("statistical_failure_limit must be positive")
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        loaded, functions = load_methods(module_path, skills_path=skills_path)
-        self.not_applicable = loaded.NotApplicable
-        self.functions = functions
+        self.not_applicable = _HistoryOnlyNotApplicable
+        self.statistical_names = frozenset(module.names())
+        self._statistical = _IsolatedStatisticalRuntime(
+            module_path,
+            skills_path,
+            time_budget_s=statistical_time_budget_s,
+            failure_limit=statistical_failure_limit,
+        )
         self.module = module
         self.portfolio = portfolio
         self.runtimes = runtimes
@@ -130,9 +143,8 @@ class ForecastStore:
     def _execute(
         self, name: str, history: tuple[float, ...], horizon: int, frequency: str
     ) -> tuple[float, ...]:
-        if function := self.functions.get(name):
-            raw = function(list(history), horizon, frequency)
-            return _valid_forecast(raw, horizon)
+        if name in self.statistical_names:
+            return self._statistical.forecast(name, history, horizon, frequency)
         if policy := self.tsfm.get(name):
             dummy = Task("history-only", history, horizon, frequency, (0.0,) * horizon)
             outcome = _run_tsfm(policy, dummy, self.runtimes)
@@ -144,6 +156,9 @@ class ForecastStore:
         if policy := self.combined.get(name):
             return self._combined(policy, history, horizon, frequency)
         raise KeyError(f"unknown numerical candidate {name}")
+
+    def close(self) -> None:
+        self._statistical.close()
 
     def _combined(
         self,
@@ -194,6 +209,147 @@ class ForecastStore:
                 Path(temporary).unlink(missing_ok=True)
 
 
+class _HistoryOnlyNotApplicable(Exception):
+    """Transport-safe applicability signal from the statistical worker."""
+
+
+class _IsolatedStatisticalRuntime:
+    """Execute generated statistical methods behind a restartable hard boundary."""
+
+    def __init__(
+        self,
+        module_path: str | Path,
+        skills_path: str | Path | None,
+        *,
+        time_budget_s: float,
+        failure_limit: int,
+        startup_timeout_s: float = 10.0,
+    ) -> None:
+        self.module_path = str(Path(module_path).resolve())
+        self.skills_path = str(Path(skills_path).resolve()) if skills_path else None
+        self.time_budget_s = time_budget_s
+        self.failure_limit = failure_limit
+        self.startup_timeout_s = startup_timeout_s
+        self.context = multiprocessing.get_context("spawn")
+        self.connection = None
+        self.worker = None
+        self.hard_failures: dict[str, int] = {}
+
+    def forecast(
+        self, name: str, history: Sequence[float], horizon: int, frequency: str
+    ) -> tuple[float, ...]:
+        failures = self.hard_failures.get(name, 0)
+        if failures >= self.failure_limit:
+            raise RuntimeError(
+                f"hard failure circuit breaker after {failures} failures for {name}"
+            )
+        self._ensure_worker()
+        try:
+            self.connection.send((name, tuple(history), horizon, frequency))
+        except (BrokenPipeError, EOFError, OSError) as error:
+            self._hard_failure(name)
+            raise RuntimeError(f"statistical worker crashed: {type(error).__name__}") from None
+        if not self.connection.poll(self.time_budget_s):
+            self._hard_failure(name)
+            raise RuntimeError(f"hard timeout after {self.time_budget_s:g}s for {name}")
+        try:
+            status, payload = self.connection.recv()
+        except (EOFError, OSError):
+            self._hard_failure(name)
+            raise RuntimeError(f"statistical worker crashed while running {name}") from None
+        if status == SUCCESS:
+            return _valid_forecast(payload, horizon)
+        if status == NOT_APPLICABLE:
+            raise _HistoryOnlyNotApplicable(str(payload))
+        raise RuntimeError(str(payload))
+
+    def close(self) -> None:
+        if self.connection is not None:
+            try:
+                self.connection.send(None)
+            except (BrokenPipeError, EOFError, OSError):
+                pass
+            self.connection.close()
+        _stop_statistical_worker(self.worker)
+        self.connection = None
+        self.worker = None
+
+    def _ensure_worker(self) -> None:
+        if self.worker is not None and self.worker.is_alive():
+            return
+        self.close()
+        parent, child = self.context.Pipe()
+        worker = self.context.Process(
+            target=_statistical_worker,
+            args=(self.module_path, self.skills_path, child),
+            daemon=True,
+        )
+        worker.start()
+        child.close()
+        if not parent.poll(self.startup_timeout_s):
+            parent.close()
+            _stop_statistical_worker(worker)
+            raise RuntimeError(
+                f"statistical worker startup timeout after {self.startup_timeout_s:g}s"
+            )
+        try:
+            status, detail = parent.recv()
+        except (EOFError, OSError):
+            parent.close()
+            _stop_statistical_worker(worker)
+            raise RuntimeError("statistical worker crashed during startup") from None
+        if status != "ready":
+            parent.close()
+            _stop_statistical_worker(worker)
+            raise RuntimeError(str(detail))
+        self.connection = parent
+        self.worker = worker
+
+    def _hard_failure(self, name: str) -> None:
+        self.hard_failures[name] = self.hard_failures.get(name, 0) + 1
+        self.close()
+
+
+def _statistical_worker(
+    module_path: str, skills_path: str | None, connection: object
+) -> None:
+    with open(os.devnull, "w", encoding="utf-8") as sink, contextlib.redirect_stderr(sink):
+        try:
+            loaded, functions = load_methods(module_path, skills_path=skills_path)
+            not_applicable = loaded.NotApplicable
+            connection.send(("ready", ""))  # type: ignore[attr-defined]
+            while True:
+                request = connection.recv()  # type: ignore[attr-defined]
+                if request is None:
+                    return
+                name, history, horizon, frequency = request
+                try:
+                    raw = functions[name](list(history), horizon, frequency)
+                    connection.send((SUCCESS, _valid_forecast(raw, horizon)))  # type: ignore[attr-defined]
+                except not_applicable as error:
+                    connection.send((NOT_APPLICABLE, str(error)[:200]))  # type: ignore[attr-defined]
+                except BaseException as error:
+                    connection.send(  # type: ignore[attr-defined]
+                        ("failed", f"{type(error).__name__}: {error}"[:200])
+                    )
+        except BaseException as error:
+            try:
+                connection.send(("startup_failed", f"{type(error).__name__}: {error}"[:200]))  # type: ignore[attr-defined]
+            except BaseException:
+                pass
+
+
+def _stop_statistical_worker(worker: multiprocessing.Process | None) -> None:
+    if worker is None:
+        return
+    if worker.is_alive():
+        worker.terminate()
+    worker.join(timeout=1.0)
+    if worker.is_alive():
+        worker.kill()
+        worker.join(timeout=1.0)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     started = time.monotonic()
@@ -228,11 +384,14 @@ def main(argv: list[str] | None = None) -> int:
             runtimes,
             actual_screening_hash,
         )
-        config = HindcastConfig(folds=args.folds)
-        cases = tuple(
-            _build_case(task, screening, actual_screening_hash, final_by_key, store, config)
-            for task in train + dev
-        )
+        try:
+            config = HindcastConfig(folds=args.folds)
+            cases = tuple(
+                _build_case(task, screening, actual_screening_hash, final_by_key, store, config)
+                for task in train + dev
+            )
+        finally:
+            store.close()
     finally:
         runtimes.close()
 

@@ -179,15 +179,18 @@ def main(argv: list[str] | None = None) -> int:
             runtimes,
             screening_hash,
         )
-        config = HindcastConfig(folds=3)
-        all_cases = tuple(
-            _build_case(task, all_screening, screening_hash, by_key, store, config)
-            for task in tasks
-        )
-        screened_cases = tuple(
-            _build_case(task, screening, screening_hash, by_key, store, config)
-            for task in tasks
-        )
+        try:
+            config = HindcastConfig(folds=3)
+            all_cases = tuple(
+                _build_case(task, all_screening, screening_hash, by_key, store, config)
+                for task in tasks
+            )
+            screened_cases = tuple(
+                _build_case(task, screening, screening_hash, by_key, store, config)
+                for task in tasks
+            )
+        finally:
+            store.close()
     finally:
         runtimes.close()
 

@@ -1,17 +1,65 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
 from numerical_agent.evolution.execution import Outcome, Task
+from numerical_agent.evolution.module import MODULE_HEADER, read_module
 from numerical_agent.evolution.numerical_selector import CandidateDiagnostics
+from numerical_agent.evolution.portfolio import PolicyPortfolio
 from numerical_agent.evolution.selector_evolution import DecisionCase
-from numerical_agent.run_selector_evolution import _global_ranking, _write_cases, build_parser
+from numerical_agent.providers import RuntimeRegistry
+from numerical_agent.run_selector_evolution import (
+    ForecastStore,
+    _global_ranking,
+    _write_cases,
+    build_parser,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_forecast_store_contains_a_hanging_statistical_method_and_recovers(tmp_path):
+    methods = tmp_path / "methods.py"
+    methods.write_text(
+        MODULE_HEADER
+        + '''
+
+def hangs_forever(history, horizon, frequency):
+    """Use only to verify that native or Python hangs are contained."""
+    while True:
+        pass
+
+
+def fast_method(history, horizon, frequency):
+    """Use when a last-value forecast is sufficient."""
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+    module = read_module(methods)
+    store = ForecastStore(
+        tmp_path / "cache",
+        methods,
+        None,
+        module,
+        PolicyPortfolio.flagship5(),
+        RuntimeRegistry(),
+        "screen-hash",
+        statistical_time_budget_s=0.1,
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(RuntimeError, match="hard timeout"):
+            store.forecast("hangs_forever", (1.0, 2.0), 2, "D")
+        assert store.forecast("fast_method", (1.0, 2.0), 2, "D") == (2.0, 2.0)
+    finally:
+        store.close()
+    assert time.monotonic() - started < 3.0
 
 
 def test_selector_cli_requires_frozen_screen_and_has_no_test_option():
