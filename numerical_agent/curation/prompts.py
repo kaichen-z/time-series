@@ -6,7 +6,7 @@ from typing import Mapping, Sequence
 
 
 ALLOWED_IMPORTS_TEXT = (
-    "numpy, math, statistics, itertools, functools, collections, torch and statsmodels"
+    "numpy, math, statistics, itertools, functools, collections and statsmodels"
 )
 
 CONTRACT_TEXT = f"""Every implementation must define exactly:
