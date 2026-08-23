@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 RUN_REPO="${RUN_REPO:-$ROOT_DIR/runs/method_filtering/combined103_full_80_20_99_20260823}"
 SCREENING_DIR="${SCREENING_DIR:-$ROOT_DIR/runs/task_conditioned_screening/formal_80_20_all103_20260823}"
-SELECTOR_DIR="${SELECTOR_DIR:-$ROOT_DIR/runs/numerical_selector/formal_80_20_20260823}"
+SELECTOR_DIR="${SELECTOR_DIR:-$ROOT_DIR/runs/numerical_selector/formal_80_20_fallback_20260823}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/runs/frozen_two_stage/public_test_99_20260823}"
 HINDCAST_CACHE="${HINDCAST_CACHE:-$ROOT_DIR/runs/numerical_selector/hindcast-cache}"
 TASKS_FILE="${TASKS_FILE:-$ROOT_DIR/external/Dr-CiK/full-download/Dr-CiK_public/tasks}"
