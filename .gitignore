@@ -239,3 +239,4 @@ before/
 .repo_memory/
 dictionary_curation/
 runs/method_evolution/
+.worktrees/
