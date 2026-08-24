@@ -118,7 +118,7 @@ class EvolvingForecastHarness:
                 forecast=item.forecast,
                 assumption=item.program.assumption,
                 failure_condition=item.program.failure_condition,
-                hindcast_smape=item.hindcast_smape,
+                hindcast_smae=item.hindcast_smae,
                 tags=(item.program.source,),
             )
             for item in coding.candidates
@@ -127,7 +127,7 @@ class EvolvingForecastHarness:
             return tuple(candidates)
         if max_evidence_adjustments <= 0:
             return tuple(candidates)
-        best = min(candidates, key=lambda item: item.hindcast_smape)
+        best = min(candidates, key=lambda item: item.hindcast_smae)
         adjustments = 0
         for index, impact in enumerate(retrieval.impacts):
             if impact.temporal_relation != "overlaps_future":
@@ -149,7 +149,7 @@ class EvolvingForecastHarness:
                     forecast=tuple(values),
                     assumption=f"{best.assumption} plus verified future impact: {impact.rationale}",
                     failure_condition="The cited magnitude or event window does not apply to the target.",
-                    hindcast_smape=best.hindcast_smape,
+                    hindcast_smae=best.hindcast_smae,
                     source_document_ids=impact.source_document_ids,
                     tags=("evidence_adjusted", impact.mechanism_layer),
                 )
@@ -257,7 +257,7 @@ def _aggregate_decisions(
     finalists = {candidate_id for candidate_id, count in votes.items() if count == largest}
     chosen = min(
         (candidate for candidate in candidates if candidate.candidate_id in finalists),
-        key=lambda item: item.hindcast_smape,
+        key=lambda item: item.hindcast_smae,
     )
     source = next(item for item in reversed(decisions) if item.selected.candidate_id == chosen.candidate_id)
     return replace(source, selected=chosen, rationale=f"Panel aggregation ({strategy}): {source.rationale}")

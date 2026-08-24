@@ -348,7 +348,7 @@ class SourceEvolutionEngine:
                 self._sanitized_failure(item)
                 for item in sorted(
                     parent.failure_traces,
-                    key=lambda item: item.get("final_smape", 0.0),
+                    key=lambda item: item.get("final_smae", 0.0),
                     reverse=True,
                 )[:5]
             ],

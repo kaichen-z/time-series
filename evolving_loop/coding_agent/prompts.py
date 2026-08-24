@@ -24,7 +24,10 @@ parameters from the inputs (history, horizon, frequency) instead of hardcoding v
 only fit this task.
 
 If a skill library is shown below, each skill comes with usage stats: uses, ok_rate (fraction \
-of runs without errors), and mean_smape (lower is better). Choose as follows:
+of runs without errors), and mean_smae (lower is better). mean_smae is the Dr-CiK scaled MAE: \
+each task's error divided by the mean absolute value of that task's truth over the horizon, so \
+it reads as a fraction of the series' own magnitude - 0.1 is an average error a tenth the size \
+of the series, and 1.0 is an error as large as the series itself. Choose as follows:
 - If an existing skill fits this task, reuse it - prefer skills with strong stats.
 - If an existing skill ALMOST fits but has a bug or limitation, revise it: keep its name, \
 return improved code. NEVER create a new skill that is a variant of an existing one.

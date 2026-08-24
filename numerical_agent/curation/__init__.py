@@ -31,7 +31,7 @@ from ..providers import (
 )
 
 
-MetricFunction = Callable[[Sequence[float], Sequence[float]], float]
+MetricFunction = Callable[..., float]
 
 
 @dataclass(frozen=True)
@@ -604,7 +604,9 @@ class DictionaryEvaluator:
                 truth = labels.get(result.item_id)
                 if truth is None:
                     raise ValueError(f"missing trusted label for item {result.item_id!r}")
-                errors.append(float(self.metric(result.forecast, truth)))
+                errors.append(
+                    float(self.metric(result.forecast, truth))
+                )
         total_count = len(results)
         summary: dict[str, object] = {
             "total_count": total_count,

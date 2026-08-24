@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from evolving_loop.data import ContextTask
-from common.metrics import score_forecast, spearman_rank_correlation
+from common.metrics import scaled_mae, scaled_rmse, spearman_rank_correlation
 
 if TYPE_CHECKING:
     from evolving_loop.harness import HarnessResult
@@ -14,9 +14,9 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class ResolvedOutcome:
     task_id: str
-    final_smape: float
-    final_mae: float
-    coding_oracle_smape: float
+    final_smae: float
+    final_srmse: float
+    coding_oracle_smae: float
     coding_coverage_regret: float
     retrieval_precision: float
     supporting_recall: float
@@ -31,16 +31,12 @@ def score_after_resolution(task: ContextTask, result: "HarnessResult") -> Resolv
     if not task.labels_public:
         raise ValueError("resolved-outcome learning is forbidden for hidden/unreleased labels")
     truth = list(task.numeric.future_values)
-    final = score_forecast(truth, list(result.forecast))
     candidate_scores = {
-        candidate.candidate_id: score_forecast(truth, list(candidate.forecast))["smape"]
+        candidate.candidate_id: scaled_mae(truth, list(candidate.forecast))
         for candidate in result.candidates
     }
-    hindcast_scores = [candidate.hindcast_smape for candidate in result.candidates]
-    resolved_scores = [
-        score_forecast(truth, list(candidate.forecast))["smape"]
-        for candidate in result.candidates
-    ]
+    hindcast_scores = [candidate.hindcast_smae for candidate in result.candidates]
+    resolved_scores = list(candidate_scores.values())
     oracle = min(candidate_scores.values())
     selected_score = candidate_scores[result.decision.selected.candidate_id]
     retrieved_ids = set(result.retrieval.selected_document_ids)
@@ -51,9 +47,9 @@ def score_after_resolution(task: ContextTask, result: "HarnessResult") -> Resolv
     avoidance = 1.0 - (len(retrieved_ids & distractors) / len(distractors)) if distractors else 1.0
     return ResolvedOutcome(
         task_id=task.numeric.task_id,
-        final_smape=final["smape"],
-        final_mae=final["mae"],
-        coding_oracle_smape=oracle,
+        final_smae=scaled_mae(truth, list(result.forecast)),
+        final_srmse=scaled_rmse(truth, list(result.forecast)),
+        coding_oracle_smae=oracle,
         coding_coverage_regret=oracle,
         retrieval_precision=precision,
         supporting_recall=recall,

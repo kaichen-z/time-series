@@ -94,7 +94,7 @@ class OutcomeSkillLearner:
             "resolved_metrics": {
                 "retrieval_quality": retrieval_score,
                 "decision_selection_regret": outcome.decision_selection_regret,
-                "final_smape": outcome.final_smape,
+                "final_smae": outcome.final_smae,
             },
             "retrieval_trace": {
                 "query": result.retrieval.query,

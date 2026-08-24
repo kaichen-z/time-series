@@ -27,12 +27,12 @@ class DictionaryCurationConfig:
     max_revisions_per_method: int = 1
     max_implementation_attempts: int = 3
     method_statuses: tuple[str, ...] = METHOD_STATUSES
-    method_metric: str = "smape"
-    dictionary_metric: str = "smape"
+    method_metric: str = "smae"
+    dictionary_metric: str = "smae"
     discard_requires_dominance_evidence: bool = True
     allow_dev_learning: bool = False
-    accepted_max_error: float = 50.0
-    specialized_max_error: float = 100.0
+    accepted_max_error: float = 1.0
+    specialized_max_error: float = 2.0
     min_success_rate: float = 0.8
     selection_folds: int = 3
     selection_horizon: int = 8

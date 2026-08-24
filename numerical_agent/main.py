@@ -17,7 +17,6 @@ from common.llm import (
     CodexCLIConfig,
     QwenClient,
 )
-from common.metrics import mae, smape
 from common.payload import read_json_object, require_object, write_json
 from common.tracing import configure
 
@@ -42,6 +41,7 @@ from .collection.registry import (
 from .collection.verification import verify_registry
 from .config import DictionaryCurationConfig
 from .dictionary import MethodRecord
+from .curation.scaled import ScaledMetric
 from .experiment import build_experiment, build_frozen_test
 from .curation.persistence import MethodSourceArtifactStore
 from .providers import RuntimeRegistry
@@ -654,11 +654,15 @@ def _present(**values: object) -> dict[str, object]:
 
 
 def _metric(name: str):
-    if name == "smape":
-        return lambda prediction, truth: smape(list(truth), list(prediction))
-    if name == "mae":
-        return lambda prediction, truth: mae(list(truth), list(prediction))
-    raise ValueError(f"unsupported metric {name!r}")
+    """Build a scoring metric. Only the Dr-CiK scaled metrics are selectable.
+
+    Unscaled errors are deliberately not offered: they are not comparable across tasks whose
+    magnitudes differ by orders of magnitude, so a mean over them is decided by the largest
+    series rather than by forecast quality.
+    """
+    if name in ("smae", "srmse"):
+        return ScaledMetric(name)
+    raise ValueError(f"unsupported metric {name!r}; use 'smae' or 'srmse'")
 
 
 def _write_method_evaluations(output_dir: Path, steps: Sequence[object]) -> None:

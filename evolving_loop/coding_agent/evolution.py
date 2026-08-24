@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import statistics
 import uuid
 from dataclasses import dataclass, replace
@@ -16,7 +17,7 @@ from evolving_loop.knowledge_base import (
 )
 from common.sandbox import SandboxResult, run_forecast_code
 from common.llm import JsonExtractionError, LLMClient, parse_json_object
-from common.metrics import smape
+from common.metrics import scaled_mae
 
 CodingSetting = Literal["llm_only", "statistics", "tsfm", "combined"]
 
@@ -88,11 +89,18 @@ class ForecastProgram:
     source: str = "generated"
 
 
+def _improvement(initial: float, selected: float) -> float:
+    """How much the search gained, as 0.0 rather than NaN when no candidate ever validated."""
+    if math.isinf(initial) and math.isinf(selected):
+        return 0.0
+    return initial - selected
+
+
 @dataclass(frozen=True)
 class ValidatedProgram:
     program: ForecastProgram
     forecast: tuple[float, ...]
-    hindcast_smape: float
+    hindcast_smae: float
     fold_scores: tuple[float, ...]
     fold_errors: tuple[str, ...]
     sandbox_result: SandboxResult
@@ -103,7 +111,7 @@ class CodingEvolutionResult:
     candidates: tuple[ValidatedProgram, ...]
     selected: ValidatedProgram
     initial_best: ValidatedProgram
-    repeat_last_hindcast_smape: float
+    repeat_last_hindcast_smae: float
     improvement: float
     saved_skill_name: str | None
     knowledge_base_version: str | None = None
@@ -164,13 +172,13 @@ class CodingEvolutionAgent:
             fallback = self._fallback_program()
             validated = [self._validate(task, fallback)]
         validated = [item for item in validated if item is not None]
-        initial_best = min(validated, key=lambda item: item.hindcast_smape)
+        initial_best = min(validated, key=lambda item: item.hindcast_smae)
         all_candidates = list(validated)
 
         generated_candidates = [
             item for item in validated if item.program.source not in {"tsfm", "fallback"}
         ]
-        parent = min(generated_candidates, key=lambda item: item.hindcast_smape) if generated_candidates else None
+        parent = min(generated_candidates, key=lambda item: item.hindcast_smae) if generated_candidates else None
         for generation in range(1, self.config.mutations + 1):
             if parent is None:
                 break
@@ -178,17 +186,17 @@ class CodingEvolutionAgent:
             children = [candidate for program in mutations if (candidate := self._validate(task, program))]
             all_candidates.extend(children)
             if children:
-                child = min(children, key=lambda item: item.hindcast_smape)
-                if child.hindcast_smape < parent.hindcast_smape:
+                child = min(children, key=lambda item: item.hindcast_smae)
+                if child.hindcast_smae < parent.hindcast_smae:
                     parent = child
 
-        selected = min(all_candidates, key=lambda item: item.hindcast_smape)
+        selected = min(all_candidates, key=lambda item: item.hindcast_smae)
         baseline_score = self._repeat_last_hindcast(task)
         saved_name = None
         if (
             self.library is not None
             and selected.program.source in {"generated", "knowledge", "mutation"}
-            and selected.hindcast_smape + self.config.minimum_library_improvement < baseline_score
+            and selected.hindcast_smae + self.config.minimum_library_improvement < baseline_score
         ):
             saved_name = selected.program.name
             self.library.add(
@@ -200,15 +208,15 @@ class CodingEvolutionAgent:
                     created_from_task=task.task_id,
                     assumption=selected.program.assumption,
                     failure_condition=selected.program.failure_condition,
-                    validation_score=selected.hindcast_smape,
+                    validation_score=selected.hindcast_smae,
                 )
             )
         return CodingEvolutionResult(
-            candidates=tuple(sorted(all_candidates, key=lambda item: item.hindcast_smape)),
+            candidates=tuple(sorted(all_candidates, key=lambda item: item.hindcast_smae)),
             selected=selected,
             initial_best=initial_best,
-            repeat_last_hindcast_smape=baseline_score,
-            improvement=initial_best.hindcast_smape - selected.hindcast_smape,
+            repeat_last_hindcast_smae=baseline_score,
+            improvement=_improvement(initial_best.hindcast_smae, selected.hindcast_smae),
             saved_skill_name=saved_name,
             knowledge_base_version=(self.knowledge_base.version if knowledge is not None else None),
             selected_knowledge_ids=(knowledge.entry_ids if knowledge is not None else ()),
@@ -288,7 +296,7 @@ class CodingEvolutionAgent:
                 "code": parent.program.code,
             },
             "historical_validation": {
-                "mean_smape": parent.hindcast_smape,
+                "mean_smae": parent.hindcast_smae,
                 "fold_scores": list(parent.fold_scores),
                 "execution_errors": list(parent.fold_errors),
             },
@@ -407,16 +415,16 @@ class CodingEvolutionAgent:
             )
             if not fold.ok or fold.forecast is None:
                 errors.append(fold.error or "unknown sandbox failure")
-                fold_scores.append(200.0)
+                fold_scores.append(math.inf)
             else:
-                fold_scores.append(smape(list(target), list(fold.forecast)))
+                fold_scores.append(scaled_mae(list(target), list(fold.forecast)))
         if not fold_scores:
-            fold_scores = [200.0]
+            fold_scores = [math.inf]
             errors.append("insufficient_history_for_hindcast")
         return ValidatedProgram(
             program=program,
             forecast=result.forecast,
-            hindcast_smape=statistics.fmean(fold_scores),
+            hindcast_smae=statistics.fmean(fold_scores),
             fold_scores=tuple(fold_scores),
             fold_errors=tuple(errors),
             sandbox_result=result,
@@ -430,7 +438,7 @@ class CodingEvolutionAgent:
             fold_scores = []
             for train, target in self._folds(task):
                 prediction = self.tsfm_forecaster.forecast(train, len(target), task.frequency)
-                fold_scores.append(smape(list(target), list(prediction)))
+                fold_scores.append(scaled_mae(list(target), list(prediction)))
         except Exception:
             return None
         if len(forecast) != task.prediction_length:
@@ -446,7 +454,7 @@ class CodingEvolutionAgent:
                 source="tsfm",
             ),
             forecast=forecast,
-            hindcast_smape=statistics.fmean(fold_scores) if fold_scores else 200.0,
+            hindcast_smae=statistics.fmean(fold_scores) if fold_scores else math.inf,
             fold_scores=tuple(fold_scores),
             fold_errors=(() if fold_scores else ("insufficient_history_for_hindcast",)),
             sandbox_result=result,
@@ -471,8 +479,8 @@ class CodingEvolutionAgent:
         scores = []
         for train, target in self._folds(task):
             prediction = [train[-1]] * len(target)
-            scores.append(smape(list(target), prediction))
-        return statistics.fmean(scores) if scores else 200.0
+            scores.append(scaled_mae(list(target), prediction))
+        return statistics.fmean(scores) if scores else math.inf
 
     @staticmethod
     def _fallback_program() -> ForecastProgram:

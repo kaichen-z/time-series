@@ -63,7 +63,7 @@ def _summary_line(event: TraceEvent) -> str:
         score = event.detail.get("score")
         action = event.detail.get("action")
         skill = event.detail.get("skill_name")
-        line = f"[{event.mode}] {event.task_id}: action={action} skill={skill} smape={score}"
+        line = f"[{event.mode}] {event.task_id}: action={action} skill={skill} score={score}"
         error = event.detail.get("error")
         if error:
             line += f" error={error!r}"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run Phase 1 dictionary curation: an LLM implements each statistical method, the
-# sandbox runs it, and measured Train/Dev sMAPE decides what is kept.
+# sandbox runs it, and measured Train/Dev sMAE decides what is kept.
 #
 # Usage:
 #   scripts/run_dictionary_curation.sh smoke

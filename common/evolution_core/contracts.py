@@ -42,7 +42,7 @@ class EvolutionConfig:
     generations: int = 1
     children_per_generation: int = 2
     seed: int = 20260816
-    metric: MetricSpec = field(default_factory=lambda: MetricSpec("smape"))
+    metric: MetricSpec = field(default_factory=lambda: MetricSpec("smae"))
     acceptance_margin: float = 0.0
     resume: bool = True
 

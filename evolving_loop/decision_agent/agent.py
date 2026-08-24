@@ -36,7 +36,7 @@ class DecisionCandidate:
     forecast: tuple[float, ...]
     assumption: str
     failure_condition: str
-    hindcast_smape: float
+    hindcast_smae: float
     source_document_ids: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
 
@@ -75,7 +75,7 @@ class DecisionAgent:
     ) -> DecisionResult:
         if not candidates:
             raise ValueError("Decision Agent requires at least one executed candidate")
-        host_default = min(candidates, key=lambda item: item.hindcast_smape)
+        host_default = min(candidates, key=lambda item: item.hindcast_smae)
         by_id = {candidate.candidate_id: candidate for candidate in candidates}
         payload = {
             "candidates": [
@@ -84,7 +84,7 @@ class DecisionAgent:
                     "forecast": list(item.forecast),
                     "assumption": item.assumption,
                     "failure_condition": item.failure_condition,
-                    "hindcast_smape": item.hindcast_smape,
+                    "hindcast_smae": item.hindcast_smae,
                     "source_document_ids": list(item.source_document_ids),
                     "tags": list(item.tags),
                 }

@@ -12,6 +12,7 @@ from common.payload import write_json
 from common.tracing import TraceEvent, emit
 
 from .execution import Task, report_payload, run_module
+from .history import parse_history
 from .module import MethodModule, ModuleError, apply_operations, parse_method, read_module, write_module
 from .prompts import (
     BOOTSTRAP_SYSTEM,
@@ -134,6 +135,8 @@ def evolve_once(
         reports=payload,
         generation=generation,
         task_count=len(tasks),
+        history=parse_history(git(root, "log", "--format=%s%n%b")),
+        live=module.names(),
     )
     messages = [{"role": "user", "content": user}]
     updated: MethodModule | None = None
@@ -149,16 +152,17 @@ def evolve_once(
         )
         _write_transcript(root, generation, EVOLVE_SYSTEM, messages, response.text, attempt)
 
-        operations = _parse_operations(response.text)
-        if not operations:
-            if attempt:
-                break
-            return Generation(
-                generation, (), len(module.names()), _head(root),
-                "no operations proposed", converged=True,
-            )
-
         try:
+            # An empty or truncated response fails to parse as JSON at all, which is the same
+            # kind of transient slip as a malformed operation -- worth a retry, not a crash.
+            operations = _parse_operations(response.text)
+            if not operations:
+                if attempt:
+                    break
+                return Generation(
+                    generation, (), len(module.names()), _head(root),
+                    "no operations proposed", converged=True,
+                )
             updated, summaries = apply_operations(module, operations)
             write_module(module_path, updated)
             failure = ""

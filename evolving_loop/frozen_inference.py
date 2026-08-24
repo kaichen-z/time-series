@@ -131,7 +131,7 @@ def run_frozen_inference(
                                 "candidate_id": item.candidate_id,
                                 "assumption": item.assumption,
                                 "failure_condition": item.failure_condition,
-                                "hindcast_smape": item.hindcast_smape,
+                                "hindcast_smae": item.hindcast_smae,
                             }
                             for item in result.candidates
                         ],
@@ -154,11 +154,11 @@ def run_frozen_inference(
         "forecasts_path": str(forecast_path),
         "deep_research_path": str(research_path),
         "run_report_path": str(report_path),
-        "mean_final_smape": (
-            statistics.fmean(item.final_smape for item in outcomes) if outcomes else None
+        "mean_final_smae": (
+            statistics.fmean(item.final_smae for item in outcomes) if outcomes else None
         ),
-        "mean_final_mae": (
-            statistics.fmean(item.final_mae for item in outcomes) if outcomes else None
+        "mean_final_srmse": (
+            statistics.fmean(item.final_srmse for item in outcomes) if outcomes else None
         ),
     }
     (destination / "summary.json").write_text(

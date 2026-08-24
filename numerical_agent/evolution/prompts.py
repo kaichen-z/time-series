@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from typing import Mapping, Sequence
 
+from .history import History
 from .skills_index import render_index
 
 
@@ -76,28 +77,31 @@ library spans far more combinations than any module will hold.
 {CONTRACT_TEXT}
 
 Each method's report gives:
-- mean_rank: the method's average rank by MAE among the methods that forecast the same task,
+- mean_rank: the method's average rank by scaled error among the methods that forecast the same task,
   1.0 being best. This is the primary signal for comparing methods, because ranking within a
   task before averaging stops one large-magnitude series from deciding the whole comparison,
   which a mean over raw errors cannot avoid;
-- mean_variance_ratio, mean_shape_correlation and mean_change_mae: whether the forecast tracks
+- mean_variance_ratio, mean_shape_correlation and mean_change_smae: whether the forecast tracks
   the series or merely sits near its level. A flat forecast has a variance ratio of 0.0 and a
-  shape correlation of 0.0 however good its MAE, and its mean_change_mae equals the series' own
-  volatility. A method with respectable error but a variance ratio near zero has found the mean,
-  not the dynamics; say so in its docstring, and prefer a method that tracks the shape when the
-  errors are close. Beware the opposite too: a variance ratio far above 1.0 is a forecast
+  shape correlation of 0.0 however good its error, and its mean_change_smae equals the series'
+  own volatility scaled the same way as mean_smae. A method with respectable error but a
+  variance ratio near zero has found the mean, not the dynamics; say so in its docstring, and
+  prefer a method that tracks the shape when the errors are close. Beware the opposite too:
+  a variance ratio far above 1.0 is a forecast
   swinging more wildly than the truth;
-- mean_mae and mean_rmse over the tasks it actually produced a forecast for (lower is better
-  for both). mean_rmse penalizes large deviations more heavily, so treat a method with much
-  worse mean_rmse than its mean_mae
-  suggests as one that occasionally produces large errors;
+- mean_smae and mean_srmse: the Dr-CiK scaled metrics, and the primary way to judge accuracy.
+  Each task's error is divided by the mean absolute value of that task's truth over the
+  forecast horizon, so a slow expensive series and a fast cheap one count equally. Read them
+  as a fraction of the series' own typical magnitude: 0.1 means the average error is a tenth
+  of that, and 1.0 means the error is as large as the series itself, which is a method not
+  worth keeping. Lower is better with 0.0 the floor and no upper bound, so a very large value
+  is the evidence that separates an ordinarily bad method from a catastrophic one;
 - success / total and coverage;
 - not_applicable: tasks it declined by raising NotApplicable, which is correct behavior, not failure;
 - crashed: tasks where it raised something else, which is always a defect;
 - invalid: tasks where it returned the wrong shape or a non-finite value, also a defect;
-- by_characteristic_mae and by_characteristic_rmse: the same two metrics grouped by series type,
-  which is the evidence for its docstring. Lead with by_characteristic_mae when picking which
-  series type a method is genuinely strong on;
+- by_characteristic_smae: the scaled error grouped by series type, which is the evidence for
+  its docstring and the way to see which series type a method is genuinely strong on;
 - sample_failures: real exception messages from crashed or invalid runs.
 
 Judge on evidence and prefer few strong methods over many weak ones:
@@ -118,7 +122,9 @@ Judge on evidence and prefer few strong methods over many weak ones:
 Add methods deliberately, not only as a last resort:
 - a series type where every current method scores badly needs a method built for it;
 - a skill or option the module never uses -- an unused cost, search, dictionary, distance or
-  model -- is a hypothesis nobody has tested yet;
+  model -- is a hypothesis nobody has tested yet, unless the history above shows it was tried
+  and failed; that a skill is unused is a reason to look at it, never on its own a reason to
+  ship a method built from it;
 - two strong methods that fail on different tasks suggest a third combining what each does
   well.
 
@@ -127,7 +133,7 @@ evidence rather than a textbook description.
 
 Return exactly one JSON object with the operations to apply, in order:
 {{"operations": [
-  {{"op": "delete",  "name": "<method name>", "reason": "<why, citing the measurement>"}},
+  {{"op": "delete",  "name": "<method name>", "reason": "<why, meaning the reason and reasoning>"}},
   {{"op": "rewrite", "name": "<method name>", "code": "<the complete function source>", "reason": "<why>"}},
   {{"op": "merge",   "names": ["<method name>", "<method name>"], "into": "<method name>", "code": "<the complete function source>", "reason": "<why>"}},
   {{"op": "add",     "code": "<the complete function source>", "reason": "<why>"}}
@@ -143,6 +149,13 @@ Operations apply in sequence to the module as your earlier operations have alrea
 A merge removes every method it names, so do not also delete those methods afterwards, and do
 not name a method an earlier operation already deleted or merged away. Each method should be
 touched by exactly one operation.
+
+Anything the history above establishes is settled unless this generation's measurements
+contradict it. Do not re-derive it, and do not spend an operation rediscovering a bug an
+earlier generation already fixed. You may add back a method that was removed, but its reason
+must say what is different this time -- a different skill, a different configuration, a
+different precondition. A method earns its place by covering a task type the current set
+forecasts badly, not by covering a corner of the library.
 
 Every operation states a reason citing the measurement that justifies it; the reasons become the
 commit message. Return an empty operations list only if nothing in the report warrants a change.
@@ -173,12 +186,51 @@ def render_bootstrap_user(
     )
 
 
+def render_history(history: History, live: Sequence[str]) -> str:
+    """What earlier generations already established, as evidence rather than as a changelog.
+
+    Two views of the same operations: how each surviving method came to be what it is, and
+    what has already been tried and taken back out. Empty when nothing has happened yet.
+    """
+    if not history:
+        return ""
+
+    sections = []
+    provenance = []
+    for name in live:
+        operations = history.for_method(name)
+        if not operations:
+            # A seed method nothing has touched yet has no history to report.
+            continue
+        lines = "\n".join(
+            f"  gen {op.generation} {op.op} -- {op.reason}" for op in operations
+        )
+        provenance.append(f"{name}\n{lines}")
+    if provenance:
+        sections.append("## How the current methods got here\n\n" + "\n".join(provenance))
+
+    buried = history.removed(live)
+    if buried:
+        lines = "\n".join(
+            f"{op.name} (removed in generation {op.generation}) -- {op.reason}" for op in buried
+        )
+        sections.append(
+            "## Tried and removed\n\n" + lines + "\n\nA name listed twice was added back "
+            "after being removed once, and removed again."
+        )
+    if not sections:
+        return ""
+    return "# What earlier generations already established\n\n" + "\n\n".join(sections)
+
+
 def render_evolve_user(
     *,
     module_source: str,
     reports: Sequence[Mapping[str, object]],
     generation: int,
     task_count: int,
+    history: History | None = None,
+    live: Sequence[str] = (),
 ) -> str:
     """Build the request to restructure the whole module from its measured results."""
     summary = json.dumps(
@@ -192,7 +244,13 @@ def render_evolve_user(
         indent=2,
         sort_keys=True,
     )
-    return f"# Measured results\n\n{summary}\n\n# Current module\n\n```python\n{module_source}```\n"
+    established = render_history(history, live) if history is not None else ""
+    # The history reads as settled context, so it comes before this generation's numbers.
+    prefix = f"{established}\n\n" if established else ""
+    return (
+        f"{prefix}# Measured results\n\n{summary}\n\n"
+        f"# Current module\n\n```python\n{module_source}```\n"
+    )
 
 
 def render_retry_user(error: str) -> str:

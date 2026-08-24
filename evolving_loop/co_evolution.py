@@ -55,6 +55,10 @@ source code, scorer, data boundary, or safety mechanism. Return exactly:
 "replacement_prompt": "complete replacement prompt", "changelog": "testable rationale"}
 """
 
+# The error at which a module's reward reaches zero. A reward-shaping choice, not a metric cap:
+# sMAE and sRMSE themselves are uncapped.
+REWARD_ERROR_CEILING = 5.0
+
 EvolutionMode = Literal["prompt", "genome"]
 EvolutionTarget = Literal["auto", "coding", "retrieval", "decision"]
 
@@ -147,16 +151,16 @@ def evaluation_diagnostics(
     """Aggregate diagnostics that distinguish candidate coverage from final selection."""
     if not outcomes:
         return {
-            "mean_final_smape": 0.0,
-            "mean_best_of_k_smape": 0.0,
+            "mean_final_smae": 0.0,
+            "mean_best_of_k_smae": 0.0,
             "mean_selection_regret": 0.0,
             "mean_candidate_count": 0.0,
             "mean_hindcast_future_rank_correlation": 0.0,
         }
     return {
-        "mean_final_smape": statistics.fmean(item.final_smape for item in outcomes),
-        "mean_best_of_k_smape": statistics.fmean(
-            item.coding_oracle_smape for item in outcomes
+        "mean_final_smae": statistics.fmean(item.final_smae for item in outcomes),
+        "mean_best_of_k_smae": statistics.fmean(
+            item.coding_oracle_smae for item in outcomes
         ),
         "mean_selection_regret": statistics.fmean(
             item.decision_selection_regret for item in outcomes
@@ -262,7 +266,7 @@ def evaluate_policy(
                     decision=replace(inference.decision, selected=candidate),
                     forecast=candidate.forecast,
                 ),
-            ).final_smape
+            ).final_smae
             for candidate in inference.candidates
         }
         oracle_id = min(candidate_scores, key=candidate_scores.get)
@@ -275,13 +279,13 @@ def evaluate_policy(
         traces.append(
             {
                 "task_id": task.numeric.task_id,
-                "final_smape": outcome.final_smape,
+                "final_smae": outcome.final_smae,
                 "coding_candidates": [
                     {
                         "candidate_id": candidate.candidate_id,
                         "assumption": candidate.assumption,
-                        "hindcast_smape": candidate.hindcast_smape,
-                        "resolved_smape": candidate_scores[candidate.candidate_id],
+                        "hindcast_smae": candidate.hindcast_smae,
+                        "resolved_smae": candidate_scores[candidate.candidate_id],
                     }
                     for candidate in inference.candidates
                 ],
@@ -297,9 +301,11 @@ def evaluate_policy(
         if progress:
             progress(
                 "task_completed",
-                {"task_id": task.numeric.task_id, "final_smape": outcome.final_smape},
+                {"task_id": task.numeric.task_id, "final_smae": outcome.final_smae},
             )
-    coding = statistics.fmean(1.0 - min(item.coding_coverage_regret, 200.0) / 200.0 for item in outcomes)
+    coding = statistics.fmean(
+        1.0 - min(item.coding_coverage_regret, REWARD_ERROR_CEILING) / REWARD_ERROR_CEILING for item in outcomes
+    )
     retrieval = statistics.fmean(
         statistics.fmean(
             (item.retrieval_precision, item.supporting_recall, item.distractor_avoidance)
@@ -307,10 +313,12 @@ def evaluate_policy(
         for item in outcomes
     )
     decision = statistics.fmean(
-        1.0 - min(max(item.decision_selection_regret, 0.0), 200.0) / 200.0
+        1.0 - min(max(item.decision_selection_regret, 0.0), REWARD_ERROR_CEILING) / REWARD_ERROR_CEILING
         for item in outcomes
     )
-    forecast = statistics.fmean(1.0 - min(item.final_smape, 200.0) / 200.0 for item in outcomes)
+    forecast = statistics.fmean(
+        1.0 - min(item.final_smae, REWARD_ERROR_CEILING) / REWARD_ERROR_CEILING for item in outcomes
+    )
     return PolicyEvaluation(
         version=policy.version,
         system_reward=0.8 * forecast + 0.2 * retrieval,
@@ -405,7 +413,7 @@ class CoEvolutionEngine:
         target = self.target_agent(evaluation)
         worst = sorted(
             evaluation.failure_traces,
-            key=lambda item: item["final_smape"],
+            key=lambda item: item["final_smae"],
             reverse=True,
         )[:5]
         if self.config.target == "auto":

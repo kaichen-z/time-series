@@ -75,13 +75,13 @@ class SkillLibrary:
         line = f"- {skill.name}: {skill.description}"
         stats = []
         if skill.validation_score is not None:
-            stats.append(f"hindcast_sMAPE={skill.validation_score:.4f}")
+            stats.append(f"hindcast_sMAE={skill.validation_score:.4f}")
         if skill.uses > 0:
             ok_rate = (skill.uses - skill.failures) / skill.uses
-            mean_smape = f"{skill.avg_score:.4f}" if skill.avg_score is not None else "n/a"
+            mean_smae = f"{skill.avg_score:.4f}" if skill.avg_score is not None else "n/a"
             stats.append(f"uses={skill.uses}")
             stats.append(f"ok_rate={ok_rate:.2f}")
-            stats.append(f"mean_smape={mean_smape}")
+            stats.append(f"mean_smae={mean_smae}")
         if stats:
             line += " [" + ", ".join(stats) + "]"
         return line

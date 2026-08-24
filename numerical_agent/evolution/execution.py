@@ -11,7 +11,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from common.metrics import change_mae, mae, rmse, shape_correlation, variance_ratio
+from common.metrics import (
+    change_smae,
+    scaled_mae,
+    scaled_rmse,
+    shape_correlation,
+    variance_ratio,
+)
 
 
 NOT_APPLICABLE = "not_applicable"
@@ -42,11 +48,11 @@ class Outcome:
     method: str
     task_id: str
     status: str
-    mae: float | None = None
-    rmse: float | None = None
+    smae: float | None = None
+    srmse: float | None = None
     variance_ratio: float | None = None
     shape_correlation: float | None = None
-    change_mae: float | None = None
+    change_smae: float | None = None
     detail: str = ""
 
 
@@ -60,15 +66,14 @@ class MethodReport:
     not_applicable: int
     crashed: int
     invalid: int
-    mean_mae: float | None
-    mean_rmse: float | None
+    mean_smae: float | None
+    mean_srmse: float | None
     mean_variance_ratio: float | None
     mean_shape_correlation: float | None
-    mean_change_mae: float | None
+    mean_change_smae: float | None
     mean_rank: float | None
     coverage: float
-    by_characteristic_mae: Mapping[str, float] = field(default_factory=dict)
-    by_characteristic_rmse: Mapping[str, float] = field(default_factory=dict)
+    by_characteristic_smae: Mapping[str, float] = field(default_factory=dict)
     sample_failures: tuple[str, ...] = ()
 
 
@@ -147,10 +152,10 @@ def run_module(
 
 
 def _mean_ranks(outcomes: Sequence[Outcome]) -> dict[str, float]:
-    """Average rank by MAE among the methods that forecast the same task.
+    """Average rank by scaled MAE among the methods that forecast the same task.
 
     Ranking within a task before averaging stops one large-magnitude series from deciding the
-    whole comparison, which a mean over raw errors cannot avoid.
+    whole comparison, which a mean over the errors themselves cannot avoid.
     """
     by_task: dict[str, list[Outcome]] = {}
     for outcome in outcomes:
@@ -160,11 +165,13 @@ def _mean_ranks(outcomes: Sequence[Outcome]) -> dict[str, float]:
     collected: dict[str, list[float]] = {}
     for scored in by_task.values():
         # Ties share the average of the positions they span, so equivalent methods rank equally.
-        ordered = sorted(scored, key=lambda o: float(o.mae))
+        ordered = sorted(scored, key=lambda o: float(o.smae))
         position = 0
         while position < len(ordered):
             end = position + 1
-            while end < len(ordered) and float(ordered[end].mae) == float(ordered[position].mae):
+            while end < len(ordered) and (
+                float(ordered[end].smae) == float(ordered[position].smae)
+            ):
                 end += 1
             shared = ((position + 1) + end) / 2.0
             for outcome in ordered[position:end]:
@@ -204,10 +211,11 @@ def _run_one(
     truth = list(task.future)
     return Outcome(
         name, task.task_id, SUCCESS,
-        mae=mae(truth, forecast), rmse=rmse(truth, forecast),
+        smae=scaled_mae(truth, forecast),
+        srmse=scaled_rmse(truth, forecast),
         variance_ratio=variance_ratio(truth, forecast),
         shape_correlation=shape_correlation(truth, forecast),
-        change_mae=change_mae(truth, forecast, float(task.history[-1])),
+        change_smae=change_smae(truth, forecast, float(task.history[-1])),
     )
 
 
@@ -221,12 +229,10 @@ def _report(
     scored = [o for o in outcomes if o.status == SUCCESS]
     counts = Counter(o.status for o in outcomes)
 
-    grouped_mae: dict[str, list[float]] = {}
-    grouped_rmse: dict[str, list[float]] = {}
+    grouped_smae: dict[str, list[float]] = {}
     for outcome in scored:
         for tag in by_id[outcome.task_id].characteristics():
-            grouped_mae.setdefault(tag, []).append(float(outcome.mae))
-            grouped_rmse.setdefault(tag, []).append(float(outcome.rmse))
+            grouped_smae.setdefault(tag, []).append(float(outcome.smae))
 
     # Deduplicated with a dict, not a set: set order is not reproducible across runs.
     ordered_failures = tuple(
@@ -243,20 +249,17 @@ def _report(
         not_applicable=counts.get(NOT_APPLICABLE, 0),
         crashed=counts.get(CRASHED, 0),
         invalid=counts.get(INVALID, 0),
-        mean_mae=statistics.fmean(o.mae for o in scored) if scored else None,
-        mean_rmse=statistics.fmean(o.rmse for o in scored) if scored else None,
+        mean_smae=statistics.fmean(o.smae for o in scored) if scored else None,
+        mean_srmse=statistics.fmean(o.srmse for o in scored) if scored else None,
         mean_variance_ratio=statistics.fmean(o.variance_ratio for o in scored) if scored else None,
         mean_shape_correlation=(
             statistics.fmean(o.shape_correlation for o in scored) if scored else None
         ),
-        mean_change_mae=statistics.fmean(o.change_mae for o in scored) if scored else None,
+        mean_change_smae=statistics.fmean(o.change_smae for o in scored) if scored else None,
         mean_rank=mean_rank,
         coverage=len(scored) / total if total else 0.0,
-        by_characteristic_mae={
-            tag: statistics.fmean(values) for tag, values in sorted(grouped_mae.items())
-        },
-        by_characteristic_rmse={
-            tag: statistics.fmean(values) for tag, values in sorted(grouped_rmse.items())
+        by_characteristic_smae={
+            tag: statistics.fmean(values) for tag, values in sorted(grouped_smae.items())
         },
         sample_failures=ordered_failures,
     )
@@ -267,23 +270,20 @@ def report_payload(reports: Sequence[MethodReport]) -> list[dict[str, object]]:
     return [
         {
             "method": report.method,
-            "mean_mae": report.mean_mae,
-            "mean_rmse": report.mean_rmse,
+            "mean_smae": report.mean_smae,
+            "mean_srmse": report.mean_srmse,
             "mean_rank": report.mean_rank,
             "mean_variance_ratio": report.mean_variance_ratio,
             "mean_shape_correlation": report.mean_shape_correlation,
-            "mean_change_mae": report.mean_change_mae,
+            "mean_change_smae": report.mean_change_smae,
             "success": report.success,
             "total": report.total,
             "coverage": round(report.coverage, 4),
             "not_applicable": report.not_applicable,
             "crashed": report.crashed,
             "invalid": report.invalid,
-            "by_characteristic_mae": {
-                tag: round(value, 4) for tag, value in report.by_characteristic_mae.items()
-            },
-            "by_characteristic_rmse": {
-                tag: round(value, 4) for tag, value in report.by_characteristic_rmse.items()
+            "by_characteristic_smae": {
+                tag: round(value, 4) for tag, value in report.by_characteristic_smae.items()
             },
             "sample_failures": list(report.sample_failures),
         }

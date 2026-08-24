@@ -29,12 +29,10 @@ python -m numerical_agent build-dataset \
   --sha256-output numerical_agent/datasets/forecast_method_dataset_v001.sha256
 
 python -m pytest -q \
-  tests/test_curated_method_catalog.py \
-  tests/test_collection_normalization.py \
-  tests/test_collection_verification.py \
-  tests/test_collection_coverage.py \
-  tests/test_method_dataset_cli.py \
-  tests/test_build_method_dataset_script.py
+  tests/test_collection_catalog.py \
+  tests/test_collection.py \
+  tests/test_numerical_cli.py \
+  tests/test_scripts.py
 
 echo "Release: numerical_agent/datasets/forecast_method_dataset_v001.json"
 echo "Checksum: numerical_agent/datasets/forecast_method_dataset_v001.sha256"

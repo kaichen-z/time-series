@@ -99,7 +99,7 @@ class RetrievalAgent:
                 "candidate_id": candidate.program.name,
                 "assumption": candidate.program.assumption,
                 "failure_condition": candidate.program.failure_condition,
-                "hindcast_smape": candidate.hindcast_smape,
+                "hindcast_smae": candidate.hindcast_smae,
             }
             for candidate in candidates
         ]
