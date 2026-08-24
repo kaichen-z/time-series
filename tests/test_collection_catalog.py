@@ -1,14 +1,20 @@
+"""Tests for the curated method catalog: build_release output, the legacy seed-method migration, and the catalog adapter."""
 from __future__ import annotations
 
+import json
+import pytest
 from pathlib import Path
-
 from numerical_agent.collection.catalog_v001 import write_catalog_manifests
 from numerical_agent.collection.coverage import audit_coverage
 from numerical_agent.collection.registry import load_method_cards, load_source_records
 from numerical_agent.collection.verification import verify_registry
+from numerical_agent.collection.seed import migrate_legacy_statistical_seed
+from numerical_agent.collection.catalog_adapter import tool_dictionary_from_payload
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
 LEGACY = ROOT / "numerical_agent/dictionaries/statistical_base_methods_v000.json"
 
 
@@ -175,3 +181,122 @@ def test_catalog_has_depth_in_previously_sparse_method_families(
         "pyraformer",
         "lightts_sampling_mlp",
     } <= {method.canonical_name for method in methods}
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+LEGACY = ROOT / "numerical_agent/dictionaries/statistical_base_methods_v000.json"
+
+
+def test_legacy_seed_migration_is_deterministic_and_does_not_invent_sources(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "method_candidates_v001.jsonl"
+
+    first = migrate_legacy_statistical_seed(LEGACY, destination)
+    first_bytes = destination.read_bytes()
+    second = migrate_legacy_statistical_seed(LEGACY, destination)
+
+    assert first == second
+    assert destination.read_bytes() == first_bytes
+    assert len(first) == 41
+    assert [card.method_uid for card in first] == [
+        f"method_seed_{index:04d}" for index in range(1, 42)
+    ]
+    assert all(card.verification_status == "unverified" for card in first)
+    assert all(not card.definition_source_ids for card in first)
+    assert all(not card.implementation_source_ids for card in first)
+
+
+def test_legacy_seed_migration_preserves_behavior_and_legacy_identity(
+    tmp_path: Path,
+) -> None:
+    legacy_payload = json.loads(LEGACY.read_text(encoding="utf-8"))
+    legacy_methods = legacy_payload["methods"]
+    destination = tmp_path / "method_candidates_v001.jsonl"
+
+    migrated = migrate_legacy_statistical_seed(LEGACY, destination)
+
+    assert [card.canonical_name for card in migrated] == [
+        method["method_id"] for method in legacy_methods
+    ]
+    assert [card.aliases for card in migrated] == [
+        (method["method_id"],) for method in legacy_methods
+    ]
+    assert [list(card.assumptions) for card in migrated] == [
+        method["assumptions"] for method in legacy_methods
+    ]
+    assert [list(card.failure_conditions) for card in migrated] == [
+        method["failure_conditions"] for method in legacy_methods
+    ]
+    assert load_method_cards(destination) == migrated
+
+
+def test_checked_in_catalog_manifests_are_parseable_after_curation() -> None:
+    cards = load_method_cards(
+        ROOT / "numerical_agent/datasets/method_candidates_v001.jsonl"
+    )
+    sources = load_source_records(
+        ROOT / "numerical_agent/datasets/source_registry_v001.jsonl"
+    )
+
+    assert len(cards) >= 38
+    assert len(sources) >= 10
+    assert {card.verification_status for card in cards} == {"verified"}
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_release_catalog_imports_as_an_executable_statistical_dictionary() -> None:
+    payload = json.loads(
+        (
+            ROOT / "numerical_agent/datasets/forecast_method_dataset_v001.json"
+        ).read_text()
+    )
+
+    dictionary = tool_dictionary_from_payload(
+        payload, allowed_families=("statistical",)
+    )
+
+    assert dictionary.dictionary_id == "forecast_method_dataset_v001.statistical.v000"
+    assert dictionary.methods
+    assert all(
+        record.definition.family == "statistical" for record in dictionary.methods
+    )
+    assert dictionary.methods[0].definition.method_id.startswith("method_")
+    assert all(record.candidate is None for record in dictionary.methods)
+
+
+def test_existing_tool_dictionary_payload_remains_supported() -> None:
+    payload = {
+        "dictionary_id": "existing",
+        "parent_dictionary_id": None,
+        "generation": 0,
+        "methods": [
+            {
+                "method_id": "m1",
+                "family": "statistical",
+                "description": "existing method",
+            }
+        ],
+    }
+
+    dictionary = tool_dictionary_from_payload(
+        payload, allowed_families=("statistical",)
+    )
+
+    assert dictionary.dictionary_id == "existing"
+    assert dictionary.methods[0].definition.method_id == "m1"
+
+
+def test_release_import_rejects_combined_methods_without_their_parent_families() -> (
+    None
+):
+    payload = json.loads(
+        (
+            ROOT / "numerical_agent/datasets/forecast_method_dataset_v001.json"
+        ).read_text()
+    )
+
+    with pytest.raises(ValueError, match="requires excluded parent methods"):
+        tool_dictionary_from_payload(payload, allowed_families=("combined",))

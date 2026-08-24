@@ -341,36 +341,36 @@ def test_evaluation_diagnostics_separate_generation_from_selection_failure() -> 
     outcomes = (
         ResolvedOutcome(
             task_id="task_a",
-            final_smape=30.0,
-            final_mae=3.0,
-            coding_oracle_smape=10.0,
-            coding_coverage_regret=10.0,
+            final_smae=0.6,
+            final_srmse=0.8,
+            coding_oracle_smae=0.2,
+            coding_coverage_regret=0.2,
             retrieval_precision=0.5,
             supporting_recall=0.5,
             distractor_avoidance=1.0,
-            decision_selection_regret=20.0,
+            decision_selection_regret=0.4,
             candidate_count=4,
             hindcast_future_rank_correlation=0.8,
         ),
         ResolvedOutcome(
             task_id="task_b",
-            final_smape=50.0,
-            final_mae=5.0,
-            coding_oracle_smape=20.0,
-            coding_coverage_regret=20.0,
+            final_smae=1.0,
+            final_srmse=1.2,
+            coding_oracle_smae=0.4,
+            coding_coverage_regret=0.4,
             retrieval_precision=1.0,
             supporting_recall=0.0,
             distractor_avoidance=1.0,
-            decision_selection_regret=30.0,
+            decision_selection_regret=0.6,
             candidate_count=6,
             hindcast_future_rank_correlation=-0.2,
         ),
     )
 
     assert evaluation_diagnostics(outcomes) == {
-        "mean_final_smape": 40.0,
-        "mean_best_of_k_smape": 15.0,
-        "mean_selection_regret": 25.0,
+        "mean_final_smae": 0.8,
+        "mean_best_of_k_smae": 0.30000000000000004,
+        "mean_selection_regret": 0.5,
         "mean_candidate_count": 5.0,
         "mean_hindcast_future_rank_correlation": 0.30000000000000004,
     }
@@ -576,7 +576,7 @@ def test_successive_halving_prunes_screen_failures_and_only_fully_evaluates_top_
             system_reward=reward,
             module_rewards={"coding": reward, "retrieval": reward, "decision": reward},
             outcomes=(),
-            diagnostics={"mean_final_smape": 1.0 - reward},
+            diagnostics={"mean_final_smae": 1.0 - reward},
         )
 
     monkeypatch.setattr(engine, "_evaluate", fake_evaluate)

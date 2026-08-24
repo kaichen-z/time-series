@@ -144,7 +144,7 @@ def test_mutator_keeps_a_first_model_failure_retryable() -> None:
         DictionaryCurationConfig(),
         LLMMethodImplementer(FakeLLMClient(["not json"])),
     )
-    context = MutationContext(1, EvaluationReport("d0", "train", {"smape": 1.0}, 1))
+    context = MutationContext(1, EvaluationReport("d0", "train", {"smae": 1.0}, 1))
 
     children = mutator.propose(parent, context, 1)
 

@@ -7,8 +7,8 @@
   },
   "curation": {
     "max_revisions_per_method": 1,
-    "dictionary_metric": "smape",
-    "method_metric": "smape",
+    "dictionary_metric": "smae",
+    "method_metric": "smae",
     "accepted_max_error": 20.0,
     "specialized_max_error": 60.0
   },
@@ -16,7 +16,11 @@
     "train": [
       {
         "item_id": "train_1",
-        "history": [8.0, 9.0, 10.0],
+        "history": [
+          8.0,
+          9.0,
+          10.0
+        ],
         "horizon": 1,
         "frequency": "D"
       }
@@ -24,14 +28,26 @@
     "dev": [
       {
         "item_id": "dev_1",
-        "history": [8.0, 9.0, 10.0],
+        "history": [
+          8.0,
+          9.0,
+          10.0
+        ],
         "horizon": 1,
         "frequency": "D"
       }
     ]
   },
   "labels": {
-    "train": {"train_1": [10.0]},
-    "dev": {"dev_1": [10.0]}
+    "train": {
+      "train_1": [
+        10.0
+      ]
+    },
+    "dev": {
+      "dev_1": [
+        10.0
+      ]
+    }
   }
 }

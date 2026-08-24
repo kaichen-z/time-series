@@ -1,12 +1,8 @@
+"""Tests for common/evolution_core: typed contracts, the acceptance gate, and JSON persistence."""
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from pathlib import Path
-from typing import Mapping, Sequence
-
 import pytest
-
-from common.evolution_core.acceptance import MetricAcceptanceGate
+import json
 from common.evolution_core.contracts import (
     EvaluationReport,
     EvolutionComponents,
@@ -14,9 +10,41 @@ from common.evolution_core.contracts import (
     MetricSpec,
     MutationContext,
 )
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Mapping, Sequence
+from common.evolution_core.acceptance import MetricAcceptanceGate
 from common.evolution_core.controller import SelfEvolutionEngine
 from common.evolution_core.persistence import JsonArtifactStore
 
+
+def test_evolution_config_rejects_invalid_budgets() -> None:
+    with pytest.raises(ValueError, match="generations"):
+        EvolutionConfig(generations=0)
+    with pytest.raises(ValueError, match="children_per_generation"):
+        EvolutionConfig(children_per_generation=0)
+    with pytest.raises(ValueError, match="acceptance_margin"):
+        EvolutionConfig(acceptance_margin=-0.1)
+
+
+def test_metric_spec_orders_minimized_scores() -> None:
+    metric = MetricSpec(name="smae", objective="minimize")
+
+    assert metric.better(10.0, 12.0)
+    assert not metric.better(12.0, 10.0)
+    assert not metric.better(10.0, 10.0)
+
+
+def test_metric_spec_orders_maximized_scores_with_margin() -> None:
+    metric = MetricSpec(name="reward", objective="maximize")
+
+    assert metric.better(0.7, 0.5, margin=0.1)
+    assert not metric.better(0.6, 0.5, margin=0.1)
+
+
+def test_metric_spec_rejects_invalid_objective() -> None:
+    with pytest.raises(ValueError, match="objective"):
+        MetricSpec(name="smae", objective="sideways")  # type: ignore[arg-type]
 
 @dataclass(frozen=True)
 class FakeArtifact:
@@ -175,3 +203,57 @@ def test_engine_resumes_from_persisted_generation(tmp_path: Path) -> None:
     assert resumed.resumed_from_generation == 1
     assert resumed_mutator.calls == 1
     assert resumed.accepted_artifact.quality == 2.0
+
+def report(score: float) -> EvaluationReport:
+    return EvaluationReport(
+        artifact_id="v",
+        split="dev",
+        metrics={"smae": score},
+        item_count=2,
+        diagnostics={},
+    )
+
+
+def test_acceptance_requires_strict_improvement() -> None:
+    gate = MetricAcceptanceGate(MetricSpec("smae", "minimize"), margin=0.0)
+
+    assert gate.accept(report(10.0), report(9.9))
+    assert not gate.accept(report(10.0), report(10.0))
+    assert not gate.accept(report(10.0), report(10.1))
+
+
+def test_acceptance_rejects_missing_metric() -> None:
+    gate = MetricAcceptanceGate(MetricSpec("smae", "minimize"))
+    missing = EvaluationReport("v", "dev", {"mae": 1.0}, 2, {})
+
+    with pytest.raises(ValueError, match="smae"):
+        gate.accept(report(10.0), missing)
+
+
+def test_json_store_round_trips_checkpoint_and_artifact(tmp_path) -> None:
+    store = JsonArtifactStore(tmp_path)
+
+    artifact_path = store.save_artifact("parent", {"id": "v000", "quality": 1})
+    checkpoint_path = store.save_checkpoint(
+        {"generation": 2, "accepted_artifact": {"id": "v002"}}
+    )
+
+    assert json.loads(artifact_path.read_text())["id"] == "v000"
+    assert checkpoint_path.name == "checkpoint.json"
+    assert store.load_checkpoint() == {
+        "generation": 2,
+        "accepted_artifact": {"id": "v002"},
+    }
+
+
+def test_json_store_appends_one_trace_object_per_line(tmp_path) -> None:
+    store = JsonArtifactStore(tmp_path)
+
+    store.append_trace({"generation": 0, "accepted": False})
+    store.append_trace({"generation": 1, "accepted": True})
+
+    trace_path = tmp_path / "evolution_trace.jsonl"
+    assert [json.loads(line) for line in trace_path.read_text().splitlines()] == [
+        {"generation": 0, "accepted": False},
+        {"generation": 1, "accepted": True},
+    ]

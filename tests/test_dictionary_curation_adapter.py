@@ -113,7 +113,7 @@ def context(parent: ToolDictionary, report: EvaluationReport, generation: int) -
 def test_adapter_implements_tests_and_classifies_external_methods(tmp_path: Path) -> None:
     task, implementer = make_task(tmp_path)
     components = task.components()
-    empty_report = EvaluationReport("d0", "train", {"smape": 999.0}, 2, {})
+    empty_report = EvaluationReport("d0", "train", {"smae": 999.0}, 2, {})
 
     child = components.mutator.propose(
         task.base_dictionary, context(task.base_dictionary, empty_report, 1), count=1
@@ -144,7 +144,7 @@ def test_adapter_revises_quarantined_method_on_next_generation(tmp_path: Path) -
     components = task.components()
     initial = components.mutator.propose(
         task.base_dictionary,
-        context(task.base_dictionary, EvaluationReport("d0", "train", {"smape": 9.0}, 1, {}), 1),
+        context(task.base_dictionary, EvaluationReport("d0", "train", {"smae": 9.0}, 1, {}), 1),
         count=1,
     )[0]
     train_items = (NumericalTaskItem("t1", (1.0,), 1, "D"),)
@@ -205,7 +205,7 @@ def test_adapter_marks_subset_winner_specialized_instead_of_discarded(tmp_path: 
     components = task.components()
     child = components.mutator.propose(
         task.base_dictionary,
-        context(task.base_dictionary, EvaluationReport("d0", "train", {"smape": 1.0}, 2, {}), 1),
+        context(task.base_dictionary, EvaluationReport("d0", "train", {"smae": 1.0}, 2, {}), 1),
         1,
     )[0]
     items = (
@@ -225,7 +225,7 @@ def test_dev_evaluation_never_updates_or_revises_methods(tmp_path: Path) -> None
     components = task.components()
     child = components.mutator.propose(
         task.base_dictionary,
-        context(task.base_dictionary, EvaluationReport("d0", "train", {"smape": 1.0}, 1, {}), 1),
+        context(task.base_dictionary, EvaluationReport("d0", "train", {"smae": 1.0}, 1, {}), 1),
         1,
     )[0]
     calls_before = (len(implementer.implemented), len(implementer.revised))
@@ -277,7 +277,7 @@ def test_execute_one_preserves_the_real_exception_message(tmp_path: Path) -> Non
     components = task.components()
     child = components.mutator.propose(
         task.base_dictionary,
-        context(task.base_dictionary, EvaluationReport("d0", "train", {"smape": 1.0}, 1, {}), 1),
+        context(task.base_dictionary, EvaluationReport("d0", "train", {"smae": 1.0}, 1, {}), 1),
         1,
     )[0]
 
@@ -311,7 +311,7 @@ def test_feedback_carries_sample_errors_past_the_metrics_float_filter() -> None:
     report = EvaluationReport(
         "d0",
         "train",
-        {"smape": 1.0},
+        {"smae": 1.0},
         1,
         diagnostics={
             "per_method": {
@@ -332,8 +332,9 @@ def test_feedback_carries_sample_errors_past_the_metrics_float_filter() -> None:
 
 
 def test_dictionary_score_uses_the_history_selected_method_not_oracle_minimum() -> None:
+    config = DictionaryCurationConfig()
     evaluator = DictionaryEvaluator(
-        DictionaryCurationConfig(),
+        config,
         {"dev": {"t1": (0.0,), "t2": (0.0,)}},
         absolute_error,
     )
@@ -346,7 +347,8 @@ def test_dictionary_score_uses_the_history_selected_method_not_oracle_minimum() 
 
     report = evaluator.evaluate("d", results, "dev")
 
-    assert report.metrics["smape"] == 50.0
+    # Keyed by whichever metric the config names, not a hard-coded one.
+    assert report.metrics[config.dictionary_metric] == 50.0
     assert report.diagnostics["oracle_score"] == 0.0
 
 
@@ -504,7 +506,7 @@ def test_discarded_method_remains_terminal_without_a_new_execution_report() -> N
     report = EvaluationReport(
         "d",
         "train",
-        {"smape": 1000.0},
+        {"smae": 1000.0},
         1,
         diagnostics={"per_method": {}},
     )
@@ -543,7 +545,7 @@ def test_mutator_gives_each_child_a_distinct_mutation_context() -> None:
         "d0", None, 0, (MethodDefinition("m", "statistical", "method"),)
     )
     mutator = DictionaryMutator(DictionaryCurationConfig(), implementer)
-    report = EvaluationReport("d0", "train", {"smape": 1.0}, 1)
+    report = EvaluationReport("d0", "train", {"smae": 1.0}, 1)
 
     children = mutator.propose(parent, MutationContext(1, report), 2)
 
@@ -565,7 +567,7 @@ def test_mutator_deduplicates_identical_children() -> None:
         "d0", None, 0, (MethodDefinition("m", "statistical", "method"),)
     )
     mutator = DictionaryMutator(DictionaryCurationConfig(), ConstantImplementer())
-    report = EvaluationReport("d0", "train", {"smape": 1.0}, 1)
+    report = EvaluationReport("d0", "train", {"smae": 1.0}, 1)
 
     children = mutator.propose(parent, MutationContext(1, report), 2)
 
@@ -598,7 +600,7 @@ def test_transient_implementation_failure_is_retried_next_generation() -> None:
     mutator = DictionaryMutator(
         DictionaryCurationConfig(max_implementation_attempts=2), implementer
     )
-    report = EvaluationReport("d0", "train", {"smape": 1.0}, 1)
+    report = EvaluationReport("d0", "train", {"smae": 1.0}, 1)
 
     first = mutator.propose(parent, MutationContext(1, report), 1)[0]
     second = mutator.propose(first, MutationContext(2, report), 1)[0]

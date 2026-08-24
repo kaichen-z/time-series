@@ -1,9 +1,8 @@
+"""Tests for numerical_agent/evolution/execution: running methods against tasks, scoring, ranking, and characterization, plus seeding the exemplar module."""
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
-
+from pathlib import Path
 from numerical_agent.evolution.execution import (
     CRASHED,
     INVALID,
@@ -15,7 +14,9 @@ from numerical_agent.evolution.execution import (
     report_payload,
     run_module,
 )
-from numerical_agent.evolution.module import MODULE_HEADER
+from numerical_agent.evolution.module import MODULE_HEADER, SKILLS_MODULE, read_module
+from numerical_agent.evolution import MODULE_NAME, exemplar_methods, git
+from numerical_agent.seed_evolution import seed
 
 
 FIXTURE = MODULE_HEADER + '''
@@ -76,7 +77,7 @@ def test_not_applicable_is_separated_from_a_crash(tmp_path: Path) -> None:
     # Declining to apply is coverage, not failure.
     assert (picky.not_applicable, picky.crashed) == (2, 0)
     assert (broken.crashed, broken.not_applicable) == (2, 0)
-    assert picky.mean_mae is None and broken.mean_mae is None
+    assert picky.mean_smae is None and broken.mean_smae is None
 
 
 def test_a_crash_keeps_its_real_message(tmp_path: Path) -> None:
@@ -99,8 +100,8 @@ def test_a_correct_method_is_scored_on_every_task(tmp_path: Path) -> None:
     perfect = next(r for r in reports if r.method == "perfect_method")
 
     assert (perfect.success, perfect.coverage) == (2, 1.0)
-    assert perfect.mean_mae == pytest.approx(0.0)
-    assert perfect.mean_rmse == pytest.approx(0.0)
+    assert perfect.mean_smae == pytest.approx(0.0)
+    assert perfect.mean_srmse == pytest.approx(0.0)
 
 
 def test_outcome_statuses_cover_every_method_and_task(tmp_path: Path) -> None:
@@ -114,8 +115,8 @@ def test_scores_are_grouped_by_series_characteristic(tmp_path: Path) -> None:
     _, reports = run_module(write_fixture(tmp_path), tasks())
     perfect = next(r for r in reports if r.method == "perfect_method")
 
-    assert "frequency:1 day" in perfect.by_characteristic_mae
-    assert any(tag.startswith("history:") for tag in perfect.by_characteristic_mae)
+    assert "frequency:1 day" in perfect.by_characteristic_smae
+    assert any(tag.startswith("history:") for tag in perfect.by_characteristic_smae)
 
 
 def test_characteristics_flag_intermittent_and_trending_series() -> None:
@@ -205,7 +206,10 @@ def test_mean_rank_orders_methods_within_a_task_not_by_raw_magnitude(tmp_path: P
     """One large-magnitude series must not decide the whole comparison.
 
     `steady` is beaten on the small task and wins the huge one; `spiky` is the reverse. Their
-    mean MAE is dominated by the huge task, but their mean ranks stay balanced.
+    mean MAE is dominated by the huge task, but their mean ranks stay balanced. The huge task's
+    errors (1.0 against a scale of ~1001) are kept well clear of common/metrics.py's 3-decimal
+    rounding -- a relative error near 1e-6 would round to 0.0 for both methods and tie instead
+    of separating them.
     """
     source = MODULE_HEADER + '''
 
@@ -222,7 +226,7 @@ def spiky(history, horizon, frequency):
     destination.write_text(source, encoding="utf-8")
     tasks = (
         Task("small", (1.0, 2.0, 3.0), 2, "1 day", (3.0, 3.0)),
-        Task("huge", (0.0, 0.0, 1e6), 2, "1 day", (1e6 + 1.0, 1e6 + 1.0)),
+        Task("huge", (0.0, 0.0, 1000.0), 2, "1 day", (1001.0, 1001.0)),
     )
 
     _outcomes, reports = run_module(destination, tasks)
@@ -247,3 +251,106 @@ def flat(history, horizon, frequency):
 
     assert reports[0].mean_variance_ratio == pytest.approx(0.0)
     assert reports[0].mean_shape_correlation == pytest.approx(0.0)
+
+def seeding_tasks() -> tuple[Task, ...]:
+    """Two seasonal tasks long enough that none of the exemplars declines on length alone."""
+    period, length, horizon = 12, 240, 12
+    rising = [10.0 + 0.05 * i + 3.0 * ((i % period) - period / 2) for i in range(length + horizon)]
+    flat = [50.0 + 2.0 * ((i % period) - period / 2) for i in range(length + horizon)]
+    return (
+        Task("rising", tuple(rising[:length]), horizon, "1 hour", tuple(rising[length:])),
+        Task("flat", tuple(flat[:length]), horizon, "1 hour", tuple(flat[length:])),
+    )
+
+
+def test_the_exemplar_module_satisfies_the_method_contract() -> None:
+    module = read_module(exemplar_methods.__file__)
+
+    assert len(module.names()) >= 3
+    for method in module.methods:
+        assert method.docstring.strip()
+        assert "def " in method.source
+
+
+def test_every_exemplar_composes_the_skill_library_rather_than_inlining_statistics() -> None:
+    module = read_module(exemplar_methods.__file__)
+
+    for method in module.methods:
+        assert "P." in method.source, f"{method.name} never calls a skill"
+
+
+def test_seeding_creates_a_repository_with_one_commit(tmp_path: Path) -> None:
+    repo = tmp_path / "evo"
+
+    commit = seed(repo)
+
+    assert commit
+    assert (repo / MODULE_NAME).exists()
+    assert git(repo, "log", "--oneline").count("\n") == 0
+    assert "seed 5 composed forecasting methods" in git(repo, "log", "-1", "--format=%s")
+
+
+def test_the_seeded_module_carries_the_skill_import_in_its_header(tmp_path: Path) -> None:
+    repo = tmp_path / "evo"
+    seed(repo)
+
+    text = (repo / MODULE_NAME).read_text(encoding="utf-8")
+
+    assert f"import {SKILLS_MODULE} as P" in text
+    assert f"from {SKILLS_MODULE} import NotApplicable" in text
+
+
+def test_seeding_refuses_to_overwrite_without_force(tmp_path: Path) -> None:
+    repo = tmp_path / "evo"
+    seed(repo)
+
+    with pytest.raises(FileExistsError):
+        seed(repo)
+
+    assert seed(repo, force=True)
+
+
+def test_the_seeded_module_loads_only_its_methods(tmp_path: Path) -> None:
+    repo = tmp_path / "evo"
+    seed(repo)
+
+    _module, functions = load_methods(repo / MODULE_NAME)
+
+    assert set(functions) == set(read_module(exemplar_methods.__file__).names())
+    # Neither the skill namespace nor the imported exception is a measurable method.
+    assert "P" not in functions
+    assert "NotApplicable" not in functions
+
+
+def test_no_exemplar_crashes_or_returns_an_invalid_forecast(tmp_path: Path) -> None:
+    repo = tmp_path / "evo"
+    seed(repo)
+
+    _outcomes, reports = run_module(repo / MODULE_NAME, seeding_tasks())
+
+    for report in reports:
+        assert report.crashed == 0, f"{report.method}: {report.sample_failures}"
+        assert report.invalid == 0, f"{report.method}: {report.sample_failures}"
+
+
+def test_at_least_one_exemplar_forecasts_every_task(tmp_path: Path) -> None:
+    repo = tmp_path / "evo"
+    seed(repo)
+
+    outcomes, _reports = run_module(repo / MODULE_NAME, seeding_tasks())
+    covered = {o.task_id for o in outcomes if o.status == "success"}
+
+    assert covered == {task.task_id for task in seeding_tasks()}
+
+
+def test_a_skill_declining_a_series_is_not_applicable_rather_than_a_crash(tmp_path: Path) -> None:
+    """The header imports NotApplicable from the library, so the classes are identical."""
+    repo = tmp_path / "evo"
+    seed(repo)
+    short = Task("short", (1.0, 2.0, 3.0, 4.0, 5.0), 3, "1 hour", (6.0, 7.0, 8.0))
+
+    _outcomes, reports = run_module(repo / MODULE_NAME, (short,))
+
+    for report in reports:
+        assert report.crashed == 0, f"{report.method}: {report.sample_failures}"
+        assert report.not_applicable == 1

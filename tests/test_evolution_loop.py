@@ -142,7 +142,7 @@ def test_the_whole_module_reaches_the_prompt(tmp_path: Path) -> None:
 
     sent = llm.calls[0]["messages"][0]["content"]
     assert "def alpha(" in sent and "def beta(" in sent
-    assert "mean_mae" in sent
+    assert "mean_smae" in sent
 
 
 def test_run_evolution_stops_when_a_generation_changes_nothing(tmp_path: Path) -> None:
@@ -280,3 +280,31 @@ def test_neither_prompt_schema_shows_an_abbreviated_code_placeholder() -> None:
         assert '"def ..."' not in prompt
         assert "def method_name(history, horizon, frequency): ..." not in prompt
     assert "never write `...` or an ellipsis" in EVOLVE_SYSTEM
+
+
+def test_an_empty_response_is_retried_not_a_crash(tmp_path: Path) -> None:
+    """A truncated or empty LLM response fails JSON parsing entirely -- this must recover the
+    same way a malformed operation does, not propagate out of evolve_once."""
+    repo = seed_repo(tmp_path, "alpha", "beta")
+    llm = FakeLLMClient(["", json.dumps({"operations": good_batch()})])
+
+    outcome = evolve_once(repo, tasks(), llm, 1)
+
+    assert outcome.applied
+    assert outcome.retried is True
+    assert (repo / "transcripts" / "generation_001.md").exists()
+    assert (repo / "transcripts" / "generation_001_retry1.md").exists()
+
+
+def test_a_response_thats_not_json_at_all_is_also_retried(tmp_path: Path) -> None:
+    """Prose instead of JSON is the same class of failure as an empty response."""
+    repo = seed_repo(tmp_path, "alpha", "beta")
+    llm = FakeLLMClient([
+        "I'll analyze the results and get back to you.",
+        json.dumps({"operations": good_batch()}),
+    ])
+
+    outcome = evolve_once(repo, tasks(), llm, 1)
+
+    assert outcome.applied
+    assert outcome.retried is True
