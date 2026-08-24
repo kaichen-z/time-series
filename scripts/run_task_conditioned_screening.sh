@@ -11,6 +11,15 @@ TRAIN_LIMIT="${SCREEN_TRAIN:-80}"
 DEV_LIMIT="${SCREEN_DEV:-20}"
 CODEX_MODEL="${SCREEN_CODEX_MODEL:-gpt-5.6-luna}"
 CODEX_REASONING="${SCREEN_CODEX_REASONING:-low}"
+BASELINE_METHOD="${SCREEN_BASELINE_METHOD:-toto_2_0}"
+MIN_CANDIDATES="${SCREEN_MIN_CANDIDATES:-12}"
+MAX_CANDIDATES="${SCREEN_MAX_CANDIDATES:-40}"
+MIN_UNIQUE="${SCREEN_MIN_UNIQUE_DICTIONARIES:-3}"
+MAX_JACCARD="${SCREEN_MAX_MEAN_JACCARD:-0.995}"
+MIN_GROUP_SUPPORT="${SCREEN_MIN_GROUP_SUPPORT:-4}"
+BATCH_SIZE="${SCREEN_BATCH_SIZE:-8}"
+REFINEMENT_GENERATIONS="${SCREEN_REFINEMENT_GENERATIONS:-3}"
+REFINEMENT_BATCH_SIZE="${SCREEN_REFINEMENT_BATCH_SIZE:-24}"
 WORKERS_CONFIG="${NA_TSFM_WORKERS_CONFIG:-$ROOT_DIR/runs/method_evolution/local_tsfm_workers.json}"
 MODEL_CACHE="${NA_MODEL_CACHE_DIR:-$ROOT_DIR/outputs/model-cache}"
 
@@ -28,6 +37,15 @@ python -m numerical_agent.run_task_conditioned_screening \
   --seed-policy all \
   --codex-model "$CODEX_MODEL" \
   --codex-reasoning-effort "$CODEX_REASONING" \
+  --baseline-method "$BASELINE_METHOD" \
+  --screen-min-candidates "$MIN_CANDIDATES" \
+  --screen-max-candidates "$MAX_CANDIDATES" \
+  --screen-min-unique-dictionaries "$MIN_UNIQUE" \
+  --screen-max-mean-jaccard "$MAX_JACCARD" \
+  --screen-min-group-support "$MIN_GROUP_SUPPORT" \
+  --screen-batch-size "$BATCH_SIZE" \
+  --screen-refinement-generations "$REFINEMENT_GENERATIONS" \
+  --screen-refinement-batch-size "$REFINEMENT_BATCH_SIZE" \
   --tsfm-runtimes chronos,timesfm \
   --chronos-device-map cpu \
   --model-cache-dir "$MODEL_CACHE" \

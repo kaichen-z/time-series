@@ -330,6 +330,11 @@ class ScreeningScore:
     mean_active_families: float
     fallback_rate: float
     active_counts: Mapping[str, int]
+    min_active_candidates: int
+    max_active_candidates: int
+    unique_active_dictionaries: int
+    mean_pairwise_jaccard: float
+    conditioned_entries_by_family: Mapping[str, int]
 
 
 @dataclass(frozen=True)
@@ -337,6 +342,43 @@ class ScreeningGateResult:
     accepted: bool
     reason: str
     improved_dimensions: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ScreeningConstraints:
+    """Acceptance limits for one task-conditioned screening experiment."""
+
+    baseline_method: str = "toto_2_0"
+    min_active_candidates: int = 12
+    max_active_candidates: int = 40
+    min_unique_active_dictionaries: int = 3
+    max_mean_pairwise_jaccard: float = 0.995
+    min_group_support: int = 4
+    required_conditioned_families: tuple[str, ...] = (
+        "statistical",
+        "tsfm",
+        "combined",
+    )
+
+    def __post_init__(self) -> None:
+        if not self.baseline_method.isidentifier():
+            raise ValueError("baseline_method must be a Python identifier")
+        if self.min_active_candidates < 1:
+            raise ValueError("min_active_candidates must be positive")
+        if self.max_active_candidates < self.min_active_candidates:
+            raise ValueError("max_active_candidates must not be smaller than the minimum")
+        if self.min_unique_active_dictionaries < 1:
+            raise ValueError("min_unique_active_dictionaries must be positive")
+        if not 0.0 <= self.max_mean_pairwise_jaccard <= 1.0:
+            raise ValueError("max_mean_pairwise_jaccard must be between zero and one")
+        if self.min_group_support < 1:
+            raise ValueError("min_group_support must be positive")
+        if (
+            len(self.required_conditioned_families)
+            != len(set(self.required_conditioned_families))
+            or set(self.required_conditioned_families) - _FAMILIES
+        ):
+            raise ValueError("required_conditioned_families must be unique known families")
 
 
 def profile_tags(profile: TaskProfile) -> frozenset[str]:
@@ -356,7 +398,44 @@ def profile_tags(profile: TaskProfile) -> frozenset[str]:
         if profile.zero_fraction > 0.3
         else ("no_zeros" if profile.zero_fraction <= 1e-12 else "some_zeros")
     )
+    tags.update(task_group_tags(profile))
     return frozenset(tags)
+
+
+def task_group_tags(profile: TaskProfile) -> frozenset[str]:
+    """Assign one history-only stratum for each approved screening dimension."""
+    if profile.periodicity_strength >= 0.6 and profile.periodicity_confidence >= 0.5:
+        periodicity = "strong"
+    elif profile.periodicity_periods or profile.periodicity_strength >= 0.25:
+        periodicity = "weak"
+    else:
+        periodicity = "none"
+
+    if profile.trend_direction == "flat" or profile.trend_strength < 0.25:
+        trend = "flat"
+    elif profile.trend_strength >= 0.6:
+        trend = f"strong_{profile.trend_direction}"
+    else:
+        trend = f"weak_{profile.trend_direction}"
+
+    intermittent = profile.zero_fraction > 0.3 or profile.intermittency_adi > 1.32
+    if intermittent and profile.intermittency_cv2 > 0.49:
+        intermittency = "lumpy"
+    else:
+        intermittency = "intermittent" if intermittent else "dense"
+
+    regime = "recent_shift" if profile.recent_regime_confidence >= 0.5 else "stable"
+    return frozenset(
+        {
+            f"periodicity:{periodicity}",
+            f"trend:{trend}",
+            f"intermittency:{intermittency}",
+            f"regime:{regime}",
+            f"frequency:{profile.frequency}",
+            f"history:{_bucket(profile.history_length, (48, 168, 512))}",
+            f"horizon:{_bucket(profile.horizon, (8, 24, 96))}",
+        }
+    )
 
 
 def materialize_active_dictionary(
@@ -455,10 +534,13 @@ def evaluate_screening(
     family_counts: list[int] = []
     fallback_count = 0
     policy_names = {entry.name for entry in policy.entries}
+    active_signatures: list[frozenset[str]] = []
+    profiles = {task.task_id: profile_task(task) for task in tasks}
 
     for task in tasks:
-        active_dictionary = materialize_active_dictionary(policy, profile_task(task))
+        active_dictionary = materialize_active_dictionary(policy, profiles[task.task_id])
         active_names = {candidate.name for candidate in active_dictionary.active}
+        active_signatures.append(frozenset(active_names))
         active_counts[task.task_id] = len(active_names)
         active_attempts += len(active_names)
         family_counts.append(len({candidate.family for candidate in active_dictionary.active}))
@@ -503,6 +585,15 @@ def evaluate_screening(
     denominator = max(1, active_attempts)
     task_denominator = max(1, len(tasks))
     counts = tuple(active_counts.values())
+    conditioned = {
+        family: sum(
+            entry.family == family
+            and entry.status == "specialized"
+            and any(entry.applicability.match(profile) is not None for profile in profiles.values())
+            for entry in policy.entries
+        )
+        for family in sorted(_FAMILIES)
+    }
     return ScreeningScore(
         task_count=len(tasks),
         coverage=covered / task_denominator,
@@ -517,6 +608,11 @@ def evaluate_screening(
         mean_active_families=sum(family_counts) / task_denominator,
         fallback_rate=fallback_count / task_denominator,
         active_counts=active_counts,
+        min_active_candidates=min(counts, default=0),
+        max_active_candidates=max(counts, default=0),
+        unique_active_dictionaries=len(set(active_signatures)),
+        mean_pairwise_jaccard=_mean_pairwise_jaccard(active_signatures),
+        conditioned_entries_by_family=conditioned,
     )
 
 
@@ -525,22 +621,59 @@ def compare_screening(
     train_child: ScreeningScore,
     dev_parent: ScreeningScore,
     dev_child: ScreeningScore,
+    *,
+    constraints: ScreeningConstraints | None = None,
+    enforce_final_constraints: bool = False,
 ) -> ScreeningGateResult:
     """Apply the frozen Train-improvement and read-only Dev acceptance gate."""
     tolerance = 1e-12
     if train_child.coverage < 1.0 - tolerance or dev_child.coverage < 1.0 - tolerance:
         return ScreeningGateResult(False, "rejected: screening coverage is below 100%")
-    allowed_retention_loss = 1.0 / max(1, dev_child.task_count)
     if (
-        dev_child.global_oracle_retention < 0.95 - tolerance
-        or dev_child.global_oracle_retention
-        < dev_parent.global_oracle_retention - allowed_retention_loss - tolerance
+        train_child.global_oracle_retention < 1.0 - tolerance
+        or dev_child.global_oracle_retention < 1.0 - tolerance
     ):
-        return ScreeningGateResult(False, "rejected: Dev oracle retention regressed")
+        return ScreeningGateResult(
+            False, "rejected: Train and Dev oracle retention must remain 100%"
+        )
     if dev_child.mean_active_oracle_regret > dev_parent.mean_active_oracle_regret + 0.01 + tolerance:
         return ScreeningGateResult(False, "rejected: Dev active-oracle regret regressed")
     if dev_child.failure_exposure > dev_parent.failure_exposure + tolerance:
         return ScreeningGateResult(False, "rejected: Dev failure exposure increased")
+    if train_child.failure_exposure > train_parent.failure_exposure + tolerance:
+        return ScreeningGateResult(False, "rejected: Train failure exposure increased")
+    if constraints is not None:
+        if (
+            train_child.min_active_candidates < constraints.min_active_candidates
+            or dev_child.min_active_candidates < constraints.min_active_candidates
+        ):
+            return ScreeningGateResult(False, "rejected: active candidate pool is too small")
+        if enforce_final_constraints and (
+            train_child.max_active_candidates > constraints.max_active_candidates
+            or dev_child.max_active_candidates > constraints.max_active_candidates
+        ):
+            return ScreeningGateResult(False, "rejected: active candidate pool is too large")
+        if enforce_final_constraints and (
+            train_child.unique_active_dictionaries
+            < min(constraints.min_unique_active_dictionaries, train_child.task_count)
+            or dev_child.unique_active_dictionaries
+            < min(constraints.min_unique_active_dictionaries, dev_child.task_count)
+            or (
+                dev_child.task_count > 1
+                and dev_child.mean_pairwise_jaccard
+                > constraints.max_mean_pairwise_jaccard + tolerance
+            )
+        ):
+            return ScreeningGateResult(
+                False, "rejected: insufficient task-conditioned diversity"
+            )
+        if enforce_final_constraints and any(
+            dev_child.conditioned_entries_by_family.get(family, 0) < 1
+            for family in constraints.required_conditioned_families
+        ):
+            return ScreeningGateResult(
+                False, "rejected: required families lack conditioned entries"
+            )
 
     dimensions = {
         "active_success_rate": (
@@ -600,6 +733,17 @@ def _median(values: Sequence[int]) -> float:
     if len(ordered) % 2:
         return float(ordered[middle])
     return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def _mean_pairwise_jaccard(signatures: Sequence[frozenset[str]]) -> float:
+    if len(signatures) < 2:
+        return 1.0
+    similarities = []
+    for left_index, left in enumerate(signatures[:-1]):
+        for right in signatures[left_index + 1 :]:
+            union = left | right
+            similarities.append(len(left & right) / len(union) if union else 1.0)
+    return sum(similarities) / len(similarities)
 
 
 def _bucket(value: int, edges: Sequence[int]) -> str:

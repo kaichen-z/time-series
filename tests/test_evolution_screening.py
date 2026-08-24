@@ -13,11 +13,13 @@ from numerical_agent.evolution.screening import (
     ScreeningGateResult,
     ScreeningPolicy,
     ScreeningScore,
+    ScreeningConstraints,
     TaskProfile,
     compare_screening,
     evaluate_screening,
     materialize_active_dictionary,
     profile_task,
+    task_group_tags,
 )
 
 
@@ -74,6 +76,39 @@ def test_profile_detects_periodic_trending_signed_and_recent_regime_histories() 
     assert signed.signed is True
     assert regime.recent_regime_start is not None
     assert regime.recent_regime_confidence > 0.0
+
+
+def test_task_groups_cover_every_approved_history_only_dimension() -> None:
+    task = Task(
+        "hidden-id",
+        tuple([0.0, 0.0, 5.0] * 20),
+        12,
+        "1 day",
+        (999.0,) * 12,
+    )
+
+    groups = task_group_tags(profile_task(task))
+
+    assert {group.split(":", 1)[0] for group in groups} == {
+        "periodicity",
+        "trend",
+        "intermittency",
+        "regime",
+        "frequency",
+        "history",
+        "horizon",
+    }
+    assert "frequency:1 day" in groups
+    assert "history:le_168" in groups
+    assert "horizon:le_24" in groups
+    assert "hidden-id" not in repr(groups)
+    assert "999.0" not in repr(groups)
+
+
+def test_task_group_tags_are_executable_applicability_conditions() -> None:
+    profile = profile_task(_task(tuple([1.0, 3.0, 2.0] * 12)))
+
+    assert ApplicabilityClause(("periodicity:strong",)).matches(profile)
 
 
 def test_profile_is_deterministic_and_rejects_empty_history() -> None:
@@ -225,6 +260,9 @@ def test_screening_score_is_independent_of_a_final_forecast_selector() -> None:
     assert child.global_oracle_retention == 1.0
     assert child.mean_active_oracle_regret == 0.0
     assert set(child.active_counts) == {task.task_id for task in tasks}
+    assert child.unique_active_dictionaries == 1
+    assert child.mean_pairwise_jaccard == 1.0
+    assert child.min_active_candidates == child.max_active_candidates == 4
 
 
 def test_screening_gate_rejects_compression_that_loses_the_dev_oracle() -> None:
@@ -245,3 +283,119 @@ def test_screening_gate_rejects_compression_that_loses_the_dev_oracle() -> None:
     assert isinstance(result, ScreeningGateResult)
     assert not result.accepted
     assert "oracle retention" in result.reason
+
+
+def test_final_screening_gate_enforces_pool_bounds_and_task_diversity() -> None:
+    tasks = _screen_tasks()
+    outcomes = _screen_outcomes(tasks)
+    parent = _screen_policy()
+    child = _screen_policy(broken_status="repair")
+    parent_score = evaluate_screening(parent, tasks, outcomes)
+    child_score = evaluate_screening(child, tasks, outcomes)
+    constraints = ScreeningConstraints(
+        baseline_method="timesfm",
+        min_active_candidates=2,
+        max_active_candidates=4,
+        min_unique_active_dictionaries=2,
+        max_mean_pairwise_jaccard=0.99,
+        min_group_support=1,
+        required_conditioned_families=(),
+    )
+
+    result = compare_screening(
+        parent_score,
+        child_score,
+        parent_score,
+        child_score,
+        constraints=constraints,
+        enforce_final_constraints=True,
+    )
+
+    assert not result.accepted
+    assert "task-conditioned diversity" in result.reason
+
+
+def test_final_screening_gate_requires_conditions_for_all_method_families() -> None:
+    tasks = _screen_tasks()
+    outcomes = _screen_outcomes(tasks)
+    parent = _screen_policy()
+    child = _screen_policy(broken_status="repair")
+    constraints = ScreeningConstraints(
+        baseline_method="timesfm",
+        min_active_candidates=1,
+        max_active_candidates=5,
+        min_unique_active_dictionaries=1,
+        max_mean_pairwise_jaccard=1.0,
+        min_group_support=1,
+        required_conditioned_families=("statistical", "tsfm", "combined"),
+    )
+
+    result = compare_screening(
+        evaluate_screening(parent, tasks, outcomes),
+        evaluate_screening(child, tasks, outcomes),
+        evaluate_screening(parent, tasks, outcomes),
+        evaluate_screening(child, tasks, outcomes),
+        constraints=constraints,
+        enforce_final_constraints=True,
+    )
+
+    assert not result.accepted
+    assert "conditioned entries" in result.reason
+
+
+def test_conditioned_family_count_requires_a_rule_to_match_a_task() -> None:
+    tasks = _screen_tasks()
+    outcomes = _screen_outcomes(tasks)
+    impossible = ApplicabilityPolicy((ApplicabilityClause(("signed",)),))
+    policy = ScreeningPolicy(
+        (
+            ScreeningEntry("stable", "statistical", "keep", ApplicabilityPolicy(()), "stable"),
+            ScreeningEntry("oracle", "statistical", "keep", ApplicabilityPolicy(()), "oracle"),
+            ScreeningEntry("broken", "statistical", "repair", ApplicabilityPolicy(()), "bad"),
+            ScreeningEntry("skip", "combined", "specialized", impossible, "unmatched"),
+            ScreeningEntry("timesfm", "tsfm", "specialized", impossible, "unmatched"),
+        ),
+        ("stable", "timesfm", "oracle"),
+    )
+
+    score = evaluate_screening(policy, tasks, outcomes)
+
+    assert score.conditioned_entries_by_family["combined"] == 0
+    assert score.conditioned_entries_by_family["tsfm"] == 0
+
+
+def test_screening_gate_rejects_train_failure_exposure_increase() -> None:
+    train = _screen_tasks("train")
+    dev = _screen_tasks("dev")
+    outcomes = _screen_outcomes(train + dev)
+    parent = _screen_policy(broken_status="repair")
+    child = _screen_policy(broken_status="keep")
+
+    result = compare_screening(
+        evaluate_screening(parent, train, outcomes),
+        evaluate_screening(child, train, outcomes),
+        evaluate_screening(parent, dev, outcomes),
+        evaluate_screening(parent, dev, outcomes),
+    )
+
+    assert not result.accepted
+    assert "Train failure exposure" in result.reason
+
+
+def test_screening_gate_requires_full_train_and_dev_oracle_retention() -> None:
+    train = _screen_tasks("train")
+    dev = _screen_tasks("dev")
+    outcomes = _screen_outcomes(train + dev)
+    parent = _screen_policy()
+    only_dense = ApplicabilityPolicy((ApplicabilityClause(("dense",)),))
+    child = _screen_policy(broken_status="repair", oracle_rule=only_dense)
+
+    result = compare_screening(
+        evaluate_screening(parent, train, outcomes),
+        evaluate_screening(child, train, outcomes),
+        evaluate_screening(parent, dev, outcomes),
+        evaluate_screening(child, dev, outcomes),
+    )
+
+    assert not result.accepted
+    assert "100%" in result.reason
