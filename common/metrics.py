@@ -35,10 +35,6 @@ def rmse(y_true: list[float], y_pred: list[float]) -> float:
 
 def horizon_scale(y_true: list[float]) -> float:
     """Mean absolute value of the truth over the horizon, the denominator of sMAE and sRMSE.
-
-    The Dr-CiK scale factor a = (1/T sum |y_t|)^-1, taken over the forecast horizon itself.
-    Falls back to 1.0 for an all-zero horizon, which leaves the error in its own units rather
-    than dividing by ~zero.
     """
     if not y_true:
         return 1.0
@@ -48,9 +44,6 @@ def horizon_scale(y_true: list[float]) -> float:
 
 def scaled_mae(y_true: list[float], y_pred: list[float]) -> float:
     """Dr-CiK sMAE: MAE divided by the mean absolute truth over the horizon.
-
-    Read as a fraction of the series' own typical magnitude: 0.1 means the average error is a
-    tenth of that, so a slow expensive series and a fast cheap one weigh the same.
     """
     return round(mae(y_true, y_pred) / horizon_scale(y_true), ROUND_DIGITS)
 
@@ -72,11 +65,7 @@ def variance_ratio(y_true: list[float], y_pred: list[float]) -> float:
 
 
 def shape_correlation(y_true: list[float], y_pred: list[float]) -> float:
-    """Pearson correlation between forecast and truth; 0.0 when either is constant.
-
-    A forecast that sits at the right level but never moves scores 0.0 here however good its
-    MAE, which is what separates tracking the series from parking near its mean.
-    """
+    """Pearson correlation between forecast and truth; 0.0 when either is constant."""
     _check_same_length(y_true, y_pred)
     if len(y_true) < 2:
         return 0.0
@@ -91,12 +80,7 @@ def shape_correlation(y_true: list[float], y_pred: list[float]) -> float:
 
 
 def change_mae(y_true: list[float], y_pred: list[float], last_observed: float) -> float:
-    """MAE on first differences, counting the step from the last observation into the horizon.
-
-    A flat forecast predicts zero change everywhere, so this equals the truth's own volatility
-    for it; anything that tracks the dynamics beats that. A building block for change_smae
-    rather than a metric to rank methods by, for the same reason as mae and rmse.
-    """
+    """MAE on first differences, counting the step from the last observation into the horizon."""
     _check_same_length(y_true, y_pred)
     if not y_true:
         return 0.0
@@ -110,11 +94,7 @@ def change_mae(y_true: list[float], y_pred: list[float], last_observed: float) -
 
 
 def change_smae(y_true: list[float], y_pred: list[float], last_observed: float) -> float:
-    """change_mae divided by the same horizon scale as scaled_mae and scaled_rmse.
-
-    Puts whether a forecast tracks the series' dynamics on the same footing across a slow
-    expensive series and a fast cheap one, the way scaled_mae does for level error.
-    """
+    """change_mae divided by the same horizon scale as scaled_mae and scaled_rmse."""
     value = change_mae(y_true, y_pred, last_observed) / horizon_scale(y_true)
     return round(value, ROUND_DIGITS)
 
