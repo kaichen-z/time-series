@@ -489,6 +489,58 @@ class CodingEvolutionAgent:
             sandbox_result=result,
         )
 
+    def validate_median(
+        self,
+        task: Task,
+        candidates: tuple[ValidatedProgram, ...],
+    ) -> tuple[tuple[float, ...], tuple[float, ...]] | None:
+        """Replay a pointwise-median candidate on the same causal folds."""
+        if not candidates:
+            return None
+        forecast = tuple(
+            statistics.median(values)
+            for values in zip(*(item.forecast for item in candidates), strict=True)
+        )
+        fold_scores = []
+        for train, target in self._folds(task):
+            member_forecasts = []
+            for item in candidates:
+                result = run_forecast_code(
+                    item.program.code,
+                    list(train),
+                    len(target),
+                    task.frequency,
+                )
+                if not result.ok or result.forecast is None:
+                    return None
+                member_forecasts.append(result.forecast)
+            median_forecast = tuple(
+                statistics.median(values)
+                for values in zip(*member_forecasts, strict=True)
+            )
+            fold_scores.append(smape(list(target), list(median_forecast)))
+        return (forecast, tuple(fold_scores)) if fold_scores else None
+
+    def score_program_folds(
+        self,
+        program: ForecastProgram,
+        folds: tuple[tuple[tuple[float, ...], tuple[float, ...]], ...],
+        frequency: str,
+    ) -> tuple[float, ...] | None:
+        """Replay one raw program against caller-supplied causal fold targets."""
+        scores = []
+        for train, target in folds:
+            result = run_forecast_code(
+                program.code,
+                list(train),
+                len(target),
+                frequency,
+            )
+            if not result.ok or result.forecast is None:
+                return None
+            scores.append(smape(list(target), list(result.forecast)))
+        return tuple(scores) if scores else None
+
     def _validate_tsfm(self, task: Task) -> ValidatedProgram | None:
         try:
             forecast = self.tsfm_forecaster.forecast(
