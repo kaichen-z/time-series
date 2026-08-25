@@ -2,14 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from common.metrics import (
-    aggregate_drcik_metrics,
-    drcik_task_metrics,
-    mae,
-    score_forecast,
-    smape,
-    spearman_rank_correlation,
-)
+from common.metrics import mae, score_forecast, smape, spearman_rank_correlation
 
 
 class SmapeTests(unittest.TestCase):
@@ -45,36 +38,6 @@ class ScoreForecastTests(unittest.TestCase):
         self.assertIn("smape", result)
         self.assertIn("mae", result)
         self.assertEqual(result["primary"], result["smape"])
-
-
-class DrCikMetricTests(unittest.TestCase):
-    def test_matches_appendix_formula_for_two_trajectories(self):
-        result = drcik_task_metrics([1.0, 3.0], [[1.0, 1.0], [3.0, 5.0]])
-
-        self.assertAlmostEqual(result["smae"], 0.25)
-        self.assertAlmostEqual(result["srmse"], 2**0.5 / 4)
-        self.assertAlmostEqual(result["scrps"], 0.375)
-
-    def test_deterministic_crps_equals_scaled_mae_and_metrics_are_capped(self):
-        deterministic = drcik_task_metrics([2.0, 4.0], [[3.0, 2.0]])
-        capped = drcik_task_metrics([1.0], [[100.0]])
-
-        self.assertAlmostEqual(deterministic["scrps"], deterministic["smae"])
-        self.assertEqual(capped["smae"], 5.0)
-        self.assertEqual(capped["srmse"], 5.0)
-        self.assertEqual(capped["scrps"], 5.0)
-
-    def test_aggregate_reports_sample_standard_error(self):
-        result = aggregate_drcik_metrics(
-            [
-                {"smae": 0.0, "srmse": 1.0, "scrps": 2.0},
-                {"smae": 2.0, "srmse": 3.0, "scrps": 4.0},
-            ]
-        )
-
-        self.assertEqual(result["num_tasks"], 2)
-        self.assertEqual(result["smae"], 1.0)
-        self.assertAlmostEqual(result["smae_se"], 1.0)
 
 
 class SpearmanRankCorrelationTests(unittest.TestCase):

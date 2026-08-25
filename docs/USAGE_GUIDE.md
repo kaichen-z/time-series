@@ -1021,8 +1021,7 @@ lower-is-better. It is more scale-comparable than MAE, but near-zero series stil
 
 - retrieval precision: fraction of retrieved documents that are supporting;
 - supporting recall: fraction of all supporting documents retrieved;
-- distractor avoidance: for non-empty citation sets, one minus the fraction of cited documents
-  that are distractors; empty citation sets receive 1.0 in this local diagnostic.
+- distractor avoidance: fraction of distractors not incorrectly retrieved.
 
 All are higher-is-better. Document roles are used only after inference for scoring.
 

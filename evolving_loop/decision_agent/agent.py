@@ -77,8 +77,6 @@ class DecisionAgent:
             raise ValueError("Decision Agent requires at least one executed candidate")
         host_default = min(candidates, key=lambda item: item.hindcast_smape)
         by_id = {candidate.candidate_id: candidate for candidate in candidates}
-        if len(by_id) != len(candidates):
-            raise ValueError("Decision candidates must have unique IDs")
         payload = {
             "candidates": [
                 {
@@ -95,11 +93,6 @@ class DecisionAgent:
             "host_default_id": host_default.candidate_id,
             "verified_evidence": [asdict(item) for item in retrieval.evidence],
             "verified_impacts": [asdict(item) for item in retrieval.impacts],
-            "retrieval_status": {
-                "sufficient": retrieval.sufficient,
-                "missing_information": list(retrieval.missing_information),
-                "rejections": list(retrieval.rejected),
-            },
             "validated_decision_skills": (
                 self.library.list_for_prompt()
                 if self.library is not None
@@ -118,9 +111,7 @@ class DecisionAgent:
         }
         response = self.llm.complete(
             system=self.prompt,
-            messages=[
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}
-            ],
+            messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
             temperature=0.0,
         )
         try:
@@ -137,22 +128,10 @@ class DecisionAgent:
         if not set(cited).issubset(verified_ids):
             return self._fallback(host_default, "unverified_decision_citation")
         override = chosen.candidate_id != host_default.candidate_id
-        if override and (
-            not retrieval.sufficient
-            or retrieval.missing_information
-            or retrieval.rejected
-        ):
-            return self._fallback(
-                host_default, "override_requires_sufficient_retrieval"
-            )
         if override and not cited:
             return self._fallback(host_default, "override_requires_task_evidence")
-        if chosen.source_document_ids and not set(chosen.source_document_ids).issubset(
-            cited
-        ):
-            return self._fallback(
-                host_default, "adjusted_candidate_requires_matching_citations"
-            )
+        if chosen.source_document_ids and not set(chosen.source_document_ids).issubset(cited):
+            return self._fallback(host_default, "adjusted_candidate_requires_matching_citations")
         used_skills = []
         unknown_skills = []
         for name in choice.get("used_skill_names", ()):
@@ -161,11 +140,6 @@ class DecisionAgent:
                 used_skills.append(name)
             else:
                 unknown_skills.append(name)
-        if unknown_skills:
-            return self._fallback(
-                host_default,
-                "unknown_decision_skills:" + ",".join(unknown_skills),
-            )
         return DecisionResult(
             selected=chosen,
             host_default_id=host_default.candidate_id,
@@ -174,7 +148,11 @@ class DecisionAgent:
             supporting_document_ids=cited,
             llm_override_accepted=override,
             used_skill_names=tuple(used_skills),
-            rejection_reason=None,
+            rejection_reason=(
+                "unknown_decision_skills:" + ",".join(unknown_skills)
+                if unknown_skills
+                else None
+            ),
         )
 
     @staticmethod

@@ -5,16 +5,9 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
-from evolving_loop.coding_agent.evolution import (
-    CodingEvolutionAgent,
-    CodingEvolutionResult,
-)
+from evolving_loop.coding_agent.evolution import CodingEvolutionAgent, CodingEvolutionResult
 from evolving_loop.data import ContextTask
-from evolving_loop.decision_agent.agent import (
-    DecisionAgent,
-    DecisionCandidate,
-    DecisionResult,
-)
+from evolving_loop.decision_agent.agent import DecisionAgent, DecisionCandidate, DecisionResult
 from evolving_loop.evaluation import ResolvedOutcome, score_after_resolution
 from evolving_loop.retrieval_agent.agent import RetrievalAgent, RetrievalResult
 
@@ -42,8 +35,7 @@ class HarnessRuntimeConfig:
 class OutcomeLearner(Protocol):
     def learn(
         self, task: ContextTask, result: HarnessResult, outcome: ResolvedOutcome
-    ) -> Any:
-        ...
+    ) -> Any: ...
 
 
 class EvolvingForecastHarness:
@@ -64,27 +56,11 @@ class EvolvingForecastHarness:
     def run(
         self, task: ContextTask, *, allow_skill_writes: bool = True
     ) -> HarnessResult:
-        retrieval_snapshot = 0
-        decision_snapshots = []
-        for stage in self.runtime.workflow:
-            if stage == "retrieve":
-                retrieval_snapshot += 1
-            elif stage == "decide":
-                decision_snapshots.append(retrieval_snapshot)
-        if decision_snapshots and self.runtime.workflow[-1] != "decide":
-            raise ValueError("A workflow with Decision stages must end with decide")
-        if (
-            self.runtime.decision_aggregation != "last"
-            and len(set(decision_snapshots)) > 1
-        ):
-            raise ValueError(
-                "Decision aggregation cannot combine different retrieval snapshots"
-            )
         # Keep this local boundary for normal ``run`` calls as well as evaluator calls.
         coding = self.coding.run_task(
             task.numeric_view(), allow_skill_writes=allow_skill_writes
         )
-        retrieval_round = 0
+        retrieval_runs = []
         retrieval = _empty_retrieval()
         candidates = self._decision_candidates(task, coding, retrieval)
         decisions = []
@@ -93,28 +69,11 @@ class EvolvingForecastHarness:
                 current = self.retrieval.run(
                     task,
                     coding.candidates,
-                    prior=retrieval if retrieval_round else None,
-                    decision_feedback=(
-                        {
-                            "selected_candidate_id": decisions[
-                                -1
-                            ].selected.candidate_id,
-                            "request_more_retrieval": decisions[
-                                -1
-                            ].requested_more_retrieval,
-                            "rationale": decisions[-1].rationale,
-                            "rejection_reason": decisions[-1].rejection_reason,
-                        }
-                        if decisions
-                        else None
-                    ),
-                    round_index=retrieval_round,
+                    prior=retrieval if retrieval.evidence else None,
+                    round_index=len(retrieval_runs),
                 )
-                # A follow-up response is a complete verified snapshot.  Using
-                # it directly lets round two retract or correct a stale claim
-                # instead of keeping an append-only union forever.
-                retrieval = current
-                retrieval_round += 1
+                retrieval_runs.append(current)
+                retrieval = _merge_retrieval(retrieval_runs)
                 candidates = self._decision_candidates(
                     task,
                     coding,
@@ -168,9 +127,6 @@ class EvolvingForecastHarness:
             )
             for item in coding.candidates
         ]
-        candidate_ids = {item.candidate_id for item in candidates}
-        if len(candidate_ids) != len(candidates):
-            raise ValueError("Coding candidates must have unique IDs")
         if not enable_evidence_adjustments:
             return tuple(candidates)
         if max_evidence_adjustments <= 0:
@@ -180,14 +136,9 @@ class EvolvingForecastHarness:
         for index, impact in enumerate(retrieval.impacts):
             if impact.temporal_relation != "overlaps_future":
                 continue
-            if (
-                impact.adjustment_kind not in {"multiply", "add"}
-                or impact.adjustment_value is None
-            ):
+            if impact.adjustment_kind not in {"multiply", "add"} or impact.adjustment_value is None:
                 continue
-            start, end = _future_window(
-                task, impact.start_timestamp, impact.end_timestamp
-            )
+            start, end = _future_window(task, impact.start_timestamp, impact.end_timestamp)
             if start is None or end is None:
                 continue
             values = list(best.forecast)
@@ -196,16 +147,9 @@ class EvolvingForecastHarness:
                     values[step] *= 1.0 + impact.adjustment_value
                 else:
                     values[step] += impact.adjustment_value
-            base_id = f"{best.candidate_id}__evidence_{index}"
-            candidate_id = base_id
-            suffix = 2
-            while candidate_id in candidate_ids:
-                candidate_id = f"{base_id}__{suffix}"
-                suffix += 1
-            candidate_ids.add(candidate_id)
             candidates.append(
                 DecisionCandidate(
-                    candidate_id=candidate_id,
+                    candidate_id=f"{best.candidate_id}__evidence_{index}",
                     forecast=tuple(values),
                     assumption=f"{best.assumption} plus verified future impact: {impact.rationale}",
                     failure_condition="The cited magnitude or event window does not apply to the target.",
@@ -220,9 +164,7 @@ class EvolvingForecastHarness:
         return tuple(candidates)
 
     @staticmethod
-    def score_after_resolution(
-        task: ContextTask, result: HarnessResult
-    ) -> ResolvedOutcome:
+    def score_after_resolution(task: ContextTask, result: HarnessResult) -> ResolvedOutcome:
         """Compatibility wrapper around the immutable evaluation host."""
         return score_after_resolution(task, result)
 
@@ -252,6 +194,48 @@ def _future_window(
     return (min(indexes), max(indexes)) if indexes else (None, None)
 
 
+def _merge_retrieval(results: list[RetrievalResult]) -> RetrievalResult:
+    evidence = []
+    evidence_keys = set()
+    impacts = []
+    impact_keys = set()
+    for result in results:
+        for item in result.evidence:
+            key = (item.document_id, item.exact_quote)
+            if key not in evidence_keys:
+                evidence_keys.add(key)
+                evidence.append(item)
+        for item in result.impacts:
+            key = (
+                item.source_document_ids,
+                item.mechanism_layer,
+                item.temporal_relation,
+                item.adjustment_kind,
+                item.adjustment_value,
+                item.start_timestamp,
+                item.end_timestamp,
+            )
+            if key not in impact_keys:
+                impact_keys.add(key)
+                impacts.append(item)
+    return RetrievalResult(
+        query=" | ".join(item.query for item in results if item.query),
+        selected_document_ids=tuple(
+            dict.fromkeys(value for item in results for value in item.selected_document_ids)
+        ),
+        evidence=tuple(evidence),
+        impacts=tuple(impacts),
+        sufficient=any(item.sufficient for item in results),
+        missing_information=tuple(
+            dict.fromkeys(value for item in results for value in item.missing_information)
+        ),
+        rejected=tuple(dict.fromkeys(value for item in results for value in item.rejected)),
+        used_skill_names=tuple(
+            dict.fromkeys(value for item in results for value in item.used_skill_names)
+        ),
+    )
+
+
 def _empty_retrieval() -> RetrievalResult:
     return RetrievalResult(
         query="",
@@ -274,20 +258,10 @@ def _aggregate_decisions(
         return decisions[-1]
     votes = Counter(item.selected.candidate_id for item in decisions)
     largest = max(votes.values())
-    finalists = {
-        candidate_id for candidate_id, count in votes.items() if count == largest
-    }
+    finalists = {candidate_id for candidate_id, count in votes.items() if count == largest}
     chosen = min(
         (candidate for candidate in candidates if candidate.candidate_id in finalists),
         key=lambda item: item.hindcast_smape,
     )
-    source = next(
-        item
-        for item in reversed(decisions)
-        if item.selected.candidate_id == chosen.candidate_id
-    )
-    return replace(
-        source,
-        selected=chosen,
-        rationale=f"Panel aggregation ({strategy}): {source.rationale}",
-    )
+    source = next(item for item in reversed(decisions) if item.selected.candidate_id == chosen.candidate_id)
+    return replace(source, selected=chosen, rationale=f"Panel aggregation ({strategy}): {source.rationale}")

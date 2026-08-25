@@ -1,9 +1,5 @@
-"""Forecast metrics, including the public Dr-CiK definitions."""
+"""sMAPE, MAE, and MASE metrics."""
 from __future__ import annotations
-
-import math
-import statistics
-from collections.abc import Sequence
 
 
 def smape(y_true: list[float], y_pred: list[float]) -> float:
@@ -27,10 +23,7 @@ def mae(y_true: list[float], y_pred: list[float]) -> float:
 
 
 def mase(
-    y_true: list[float],
-    y_pred: list[float],
-    history: list[float],
-    seasonal_period: int = 1,
+    y_true: list[float], y_pred: list[float], history: list[float], seasonal_period: int = 1
 ) -> float:
     """Mean Absolute Scaled Error (Hyndman & Koehler 2006): MAE scaled by the in-sample naive
     error, so it stays finite and comparable across series instead of blowing up."""
@@ -50,105 +43,7 @@ def mase(
 
 def score_forecast(y_true: list[float], y_pred: list[float]) -> dict:
     """sMAPE + MAE together, with sMAPE as the single scalar used for ranking/comparison."""
-    return {
-        "smape": smape(y_true, y_pred),
-        "mae": mae(y_true, y_pred),
-        "primary": smape(y_true, y_pred),
-    }
-
-
-def drcik_task_metrics(
-    y_true: Sequence[float],
-    samples: Sequence[Sequence[float]],
-    *,
-    cap: float = 5.0,
-) -> dict[str, float]:
-    """Compute the forecasting metrics defined in Dr-CiK Appendix H.2.
-
-    Dr-CiK scales each task by the mean absolute value of that task's *future
-    target*, not by a history-based MASE denominator.  The three scaled metrics
-    are independently capped before cross-task aggregation.
-    """
-    truth = tuple(float(value) for value in y_true)
-    trajectories = tuple(tuple(float(value) for value in sample) for sample in samples)
-    if not truth:
-        raise ValueError("Dr-CiK metrics require a non-empty future target")
-    if not trajectories:
-        raise ValueError("Dr-CiK metrics require at least one forecast trajectory")
-    if cap <= 0:
-        raise ValueError("Dr-CiK metric cap must be positive")
-    if any(len(sample) != len(truth) for sample in trajectories):
-        raise ValueError("every forecast trajectory must match the future horizon")
-    if not all(math.isfinite(value) for value in truth):
-        raise ValueError("future target contains a non-finite value")
-    if not all(math.isfinite(value) for sample in trajectories for value in sample):
-        raise ValueError("forecast trajectory contains a non-finite value")
-
-    scale_denominator = statistics.fmean(abs(value) for value in truth)
-    if scale_denominator == 0.0:
-        # The paper does not specify a fallback for an all-zero future target.
-        raise ValueError(
-            "official Dr-CiK scaling is undefined for an all-zero future target"
-        )
-
-    point = tuple(
-        statistics.fmean(sample[step] for sample in trajectories)
-        for step in range(len(truth))
-    )
-    point_mae = statistics.fmean(
-        abs(actual - predicted) for actual, predicted in zip(truth, point)
-    )
-    point_rmse = math.sqrt(
-        statistics.fmean(
-            (actual - predicted) ** 2 for actual, predicted in zip(truth, point)
-        )
-    )
-    crps = statistics.fmean(
-        _empirical_crps(actual, [sample[step] for sample in trajectories])
-        for step, actual in enumerate(truth)
-    )
-    raw = {
-        "smae_uncapped": point_mae / scale_denominator,
-        "srmse_uncapped": point_rmse / scale_denominator,
-        "scrps_uncapped": crps / scale_denominator,
-    }
-    return {
-        "official_scale_denominator": scale_denominator,
-        "official_point_mae": point_mae,
-        "official_point_rmse": point_rmse,
-        "official_crps": crps,
-        **raw,
-        "smae": min(cap, raw["smae_uncapped"]),
-        "srmse": min(cap, raw["srmse_uncapped"]),
-        "scrps": min(cap, raw["scrps_uncapped"]),
-    }
-
-
-def aggregate_drcik_metrics(rows: Sequence[dict[str, float]]) -> dict[str, float | int]:
-    """Aggregate already capped task metrics as mean and standard error."""
-    if not rows:
-        raise ValueError("at least one task metric row is required")
-    summary: dict[str, float | int] = {"num_tasks": len(rows)}
-    for name in ("smae", "srmse", "scrps"):
-        values = [float(row[name]) for row in rows]
-        summary[name] = statistics.fmean(values)
-        summary[f"{name}_se"] = (
-            statistics.stdev(values) / math.sqrt(len(values))
-            if len(values) > 1
-            else 0.0
-        )
-    return summary
-
-
-def _empirical_crps(truth: float, samples: Sequence[float]) -> float:
-    """Empirical CRPS in O(S log S), equivalent to the paper's pairwise formula."""
-    ordered = sorted(samples)
-    count = len(ordered)
-    accuracy = statistics.fmean(abs(value - truth) for value in ordered)
-    dispersion = sum(
-        (2 * index - count + 1) * value for index, value in enumerate(ordered)
-    ) / (count * count)
-    return accuracy - dispersion
+    return {"smape": smape(y_true, y_pred), "mae": mae(y_true, y_pred), "primary": smape(y_true, y_pred)}
 
 
 def spearman_rank_correlation(left: list[float], right: list[float]) -> float:
@@ -188,6 +83,4 @@ def spearman_rank_correlation(left: list[float], right: list[float]) -> float:
 
 def _check_same_length(y_true: list[float], y_pred: list[float]) -> None:
     if len(y_true) != len(y_pred):
-        raise ValueError(
-            f"length mismatch: {len(y_true)} true values vs {len(y_pred)} predicted"
-        )
+        raise ValueError(f"length mismatch: {len(y_true)} true values vs {len(y_pred)} predicted")

@@ -57,7 +57,6 @@ class ContextTask:
             "frequency": self.numeric.frequency,
             "prediction_length": self.numeric.prediction_length,
             "history_timestamps": list(self.history_timestamps),
-            "history_values": list(self.numeric.history_values),
             "future_timestamps": list(self.future_timestamps),
             "documents": [
                 {"document_id": document.document_id, "content": document.content}
@@ -79,9 +78,7 @@ def _to_context_task(record: dict) -> ContextTask:
         str(item.get("evidence", "")) if isinstance(item, dict) else str(item)
         for item in raw_evidence
     )
-    labels_public = bool(
-        record.get("labels_public", _is_labeled(record))
-    ) and _is_labeled(record)
+    labels_public = bool(record.get("labels_public", _is_labeled(record))) and _is_labeled(record)
     documents = tuple(
         Document(
             document_id=str(item["document_id"]),
@@ -97,12 +94,8 @@ def _to_context_task(record: dict) -> ContextTask:
         numeric=_to_task(record),
         target_name=target_name,
         target_description=str(metadata.get("target_description", "")),
-        history_timestamps=tuple(
-            str(value) for value in series.get("history_timestamps", ())
-        ),
-        future_timestamps=tuple(
-            str(value) for value in series.get("future_timestamps", ())
-        ),
+        history_timestamps=tuple(str(value) for value in series.get("history_timestamps", ())),
+        future_timestamps=tuple(str(value) for value in series.get("future_timestamps", ())),
         documents=documents,
         gt_evidence=tuple(item for item in evidence if item) if labels_public else (),
         labels_public=labels_public,

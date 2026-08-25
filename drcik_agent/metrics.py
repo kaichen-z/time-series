@@ -3,28 +3,16 @@ from __future__ import annotations
 import math
 import statistics
 
-from common.metrics import drcik_task_metrics
-
 from .agents import tokenize
 from .models import Evidence, Forecast, ForecastTask, RetrievedDocument
 
 
-def _mean_absolute_error(
-    truth: tuple[float, ...], prediction: tuple[float, ...]
-) -> float:
-    return statistics.fmean(
-        abs(actual - predicted) for actual, predicted in zip(truth, prediction)
-    )
+def _mean_absolute_error(truth: tuple[float, ...], prediction: tuple[float, ...]) -> float:
+    return statistics.fmean(abs(actual - predicted) for actual, predicted in zip(truth, prediction))
 
 
-def _root_mean_squared_error(
-    truth: tuple[float, ...], prediction: tuple[float, ...]
-) -> float:
-    return math.sqrt(
-        statistics.fmean(
-            (actual - predicted) ** 2 for actual, predicted in zip(truth, prediction)
-        )
-    )
+def _root_mean_squared_error(truth: tuple[float, ...], prediction: tuple[float, ...]) -> float:
+    return math.sqrt(statistics.fmean((actual - predicted) ** 2 for actual, predicted in zip(truth, prediction)))
 
 
 def _crps_at_point(truth: float, samples: list[float]) -> float:
@@ -32,15 +20,11 @@ def _crps_at_point(truth: float, samples: list[float]) -> float:
     ordered = sorted(samples)
     count = len(ordered)
     accuracy = statistics.fmean(abs(value - truth) for value in ordered)
-    pairwise_half = sum(
-        (2 * index - count + 1) * value for index, value in enumerate(ordered)
-    ) / (count * count)
+    pairwise_half = sum((2 * index - count + 1) * value for index, value in enumerate(ordered)) / (count * count)
     return accuracy - pairwise_half
 
 
-def crps_ensemble(
-    truth: tuple[float, ...], samples: tuple[tuple[float, ...], ...]
-) -> float:
+def crps_ensemble(truth: tuple[float, ...], samples: tuple[tuple[float, ...], ...]) -> float:
     if not samples:
         raise ValueError("samples must not be empty")
     horizon = len(truth)
@@ -60,18 +44,11 @@ def development_scale(task: ForecastTask) -> float:
     values = task.history_values
     period = task.seasonal_period
     if period and 0 < period < len(values):
-        errors = [
-            abs(values[index] - values[index - period])
-            for index in range(period, len(values))
-        ]
+        errors = [abs(values[index] - values[index - period]) for index in range(period, len(values))]
     else:
-        errors = [
-            abs(values[index] - values[index - 1]) for index in range(1, len(values))
-        ]
+        errors = [abs(values[index] - values[index - 1]) for index in range(1, len(values))]
     nonzero_mean = statistics.fmean(errors) if errors else 0.0
-    fallback = max(
-        statistics.pstdev(values), max(values) - min(values), abs(values[-1]) * 0.1, 1.0
-    )
+    fallback = max(statistics.pstdev(values), max(values) - min(values), abs(values[-1]) * 0.1, 1.0)
     return nonzero_mean if nonzero_mean > 1e-8 else fallback
 
 
@@ -92,15 +69,6 @@ def forecast_metrics(task: ForecastTask, forecast: Forecast) -> dict[str, float]
         "srmse_proxy": min(5.0, rmse / scale),
         "scrps_proxy": min(5.0, crps / scale),
     }
-    official = drcik_task_metrics(truth, forecast.samples)
-    metrics.update(
-        {
-            "official_scale_denominator": official["official_scale_denominator"],
-            "smae": official["smae"],
-            "srmse": official["srmse"],
-            "scrps": official["scrps"],
-        }
-    )
     if forecast.baseline_mean:
         baseline_mae = _mean_absolute_error(truth, forecast.baseline_mean)
         baseline_rmse = _root_mean_squared_error(truth, forecast.baseline_mean)
@@ -124,36 +92,20 @@ def retrieval_metrics(
     evidence: list[Evidence],
 ) -> dict[str, float]:
     retrieved_ids = {item.document.document_id for item in retrieved}
-    supporting_ids = {
-        document.document_id
-        for document in task.documents
-        if document.role == "supporting"
-    }
-    distractor_ids = {
-        document.document_id
-        for document in task.documents
-        if document.role == "distractor"
-    }
+    supporting_ids = {document.document_id for document in task.documents if document.role == "supporting"}
+    distractor_ids = {document.document_id for document in task.documents if document.role == "distractor"}
     support_hits = len(retrieved_ids & supporting_ids)
     distractor_hits = len(retrieved_ids & distractor_ids)
     metrics = {
-        "supporting_document_recall": support_hits / len(supporting_ids)
-        if supporting_ids
-        else 0.0,
-        "retrieval_precision": support_hits / len(retrieved_ids)
-        if retrieved_ids
-        else 0.0,
-        "distractor_avoidance": 1 - distractor_hits / len(retrieved_ids)
-        if retrieved_ids
-        else 1.0,
+        "supporting_document_recall": support_hits / len(supporting_ids) if supporting_ids else 0.0,
+        "retrieval_precision": support_hits / len(retrieved_ids) if retrieved_ids else 0.0,
+        "distractor_avoidance": 1 - distractor_hits / len(retrieved_ids) if retrieved_ids else 1.0,
     }
 
     if task.gt_evidence:
         predicted_tokens = set(tokenize(" ".join(item.claim for item in evidence)))
         gold_tokens = set(tokenize(" ".join(task.gt_evidence)))
         metrics["evidence_token_recall_proxy"] = (
-            len(predicted_tokens & gold_tokens) / len(gold_tokens)
-            if gold_tokens
-            else 0.0
+            len(predicted_tokens & gold_tokens) / len(gold_tokens) if gold_tokens else 0.0
         )
     return metrics
