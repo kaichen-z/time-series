@@ -171,7 +171,7 @@ class CodingEvolutionAgent:
             fallback = self._fallback_program()
             validated = [self._validate(task, fallback)]
         validated = [item for item in validated if item is not None]
-        initial_best = min(validated, key=lambda item: item.hindcast_smape)
+        initial_candidate_count = len(validated)
         all_candidates = list(validated)
 
         generated_candidates = [
@@ -214,6 +214,17 @@ class CodingEvolutionAgent:
                         next_parents[lineage] = child
             parents = next_parents
 
+        unique_programs = self._unique_program_names(
+            [item.program for item in all_candidates]
+        )
+        all_candidates = [
+            replace(item, program=program)
+            for item, program in zip(all_candidates, unique_programs, strict=True)
+        ]
+        initial_best = min(
+            all_candidates[:initial_candidate_count],
+            key=lambda item: item.hindcast_smape,
+        )
         selected = min(all_candidates, key=lambda item: item.hindcast_smape)
         baseline_score = self._repeat_last_hindcast(task)
         saved_name = None
@@ -445,15 +456,17 @@ class CodingEvolutionAgent:
 
     @staticmethod
     def _unique_program_names(programs: list[ForecastProgram]) -> list[ForecastProgram]:
-        counts: dict[str, int] = {}
+        used: set[str] = set()
         unique = []
         for program in programs:
-            count = counts.get(program.name, 0)
-            counts[program.name] = count + 1
+            name = program.name
+            suffix = 2
+            while name in used:
+                name = f"{program.name}__{suffix}"
+                suffix += 1
+            used.add(name)
             unique.append(
-                program
-                if count == 0
-                else replace(program, name=f"{program.name}__{count + 1}")
+                program if name == program.name else replace(program, name=name)
             )
         return unique
 

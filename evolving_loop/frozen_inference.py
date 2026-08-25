@@ -8,6 +8,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Callable, Sequence
 
+from common.metrics import aggregate_drcik_metrics
 from evolving_loop.co_evolution import HarnessPolicy
 from evolving_loop.data import ContextTask, Document
 from evolving_loop.evaluation import score_after_resolution
@@ -64,7 +65,9 @@ def run_frozen_inference(
         for task in tasks:
             task_id = task.numeric.task_id
             if task_id in seen_ids:
-                raise ValueError(f"duplicate benchmark_id in inference input: {task_id}")
+                raise ValueError(
+                    f"duplicate benchmark_id in inference input: {task_id}"
+                )
             seen_ids.add(task_id)
 
             # One isolated harness per task prevents accidental online skill writes
@@ -95,7 +98,9 @@ def run_frozen_inference(
                 json.dumps(
                     {
                         "benchmark_id": task_id,
-                        "cited_document_ids": list(result.retrieval.selected_document_ids),
+                        "cited_document_ids": list(
+                            result.retrieval.selected_document_ids
+                        ),
                         "evidence": [item.claim for item in result.retrieval.evidence],
                     },
                     ensure_ascii=False,
@@ -114,8 +119,12 @@ def run_frozen_inference(
                         "selected_candidate_id": result.decision.selected.candidate_id,
                         "host_default_id": result.decision.host_default_id,
                         "forecast": list(values),
-                        "retrieved_document_ids": list(result.retrieval.selected_document_ids),
-                        "evidence": [asdict(item) for item in result.retrieval.evidence],
+                        "retrieved_document_ids": list(
+                            result.retrieval.selected_document_ids
+                        ),
+                        "evidence": [
+                            asdict(item) for item in result.retrieval.evidence
+                        ],
                         "impacts": [asdict(item) for item in result.retrieval.impacts],
                         "retrieval_rejections": list(result.retrieval.rejected),
                         "decision": {
@@ -142,6 +151,20 @@ def run_frozen_inference(
                 + "\n"
             )
 
+    official = (
+        aggregate_drcik_metrics(
+            [
+                {
+                    "smae": item.final_drcik_smae,
+                    "srmse": item.final_drcik_srmse,
+                    "scrps": item.final_drcik_scrps_deterministic,
+                }
+                for item in outcomes
+            ]
+        )
+        if outcomes
+        else None
+    )
     summary = {
         "artifact_kind": artifact_kind,
         "policy_version": policy.version,
@@ -155,11 +178,19 @@ def run_frozen_inference(
         "deep_research_path": str(research_path),
         "run_report_path": str(report_path),
         "mean_final_smape": (
-            statistics.fmean(item.final_smape for item in outcomes) if outcomes else None
+            statistics.fmean(item.final_smape for item in outcomes)
+            if outcomes
+            else None
         ),
         "mean_final_mae": (
             statistics.fmean(item.final_mae for item in outcomes) if outcomes else None
         ),
+        "mean_drcik_smae": official["smae"] if official else None,
+        "drcik_smae_se": official["smae_se"] if official else None,
+        "mean_drcik_srmse": official["srmse"] if official else None,
+        "drcik_srmse_se": official["srmse_se"] if official else None,
+        "mean_drcik_scrps_deterministic": official["scrps"] if official else None,
+        "drcik_scrps_deterministic_se": official["scrps_se"] if official else None,
     }
     (destination / "summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
