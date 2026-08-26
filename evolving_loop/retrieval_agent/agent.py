@@ -167,10 +167,14 @@ class RetrievalAgent:
             document_id = str(item.get("document_id", ""))
             quote = str(item.get("exact_quote", "")).strip()
             document = documents.get(document_id)
-            if document is None or not quote or _normalize(quote) not in _normalize(document.content):
+            spans = _verified_quote_spans(quote, document.content) if document is not None else ()
+            if not spans:
                 rejected.append(f"ungrounded_quote:{document_id}")
                 continue
-            accepted.append(Evidence(document_id, str(item.get("claim", "")), quote))
+            accepted.extend(
+                Evidence(document_id, str(item.get("claim", "")), span)
+                for span in spans
+            )
 
         accepted_ids = {item.document_id for item in accepted}
         impacts = []
@@ -262,6 +266,30 @@ class RetrievalAgent:
 
 def _normalize(text: str) -> str:
     return " ".join(text.lower().replace("−", "-").split())
+
+
+def _verified_quote_spans(quote: str, document: str) -> tuple[str, ...]:
+    """Accept a full quote or multiple independently exact, non-trivial sentences."""
+    normalized_document = _normalize(document)
+    if not quote:
+        return ()
+    if _normalize(quote) in normalized_document:
+        return (quote,)
+    spans = tuple(
+        dict.fromkeys(
+            part.strip()
+            for part in re.split(r"(?<=[.!?])\s+", quote)
+            if part.strip()
+        )
+    )
+    if len(spans) < 2:
+        return ()
+    if any(
+        len(_normalize(span)) < 32 or _normalize(span) not in normalized_document
+        for span in spans
+    ):
+        return ()
+    return spans
 
 
 def _optional_text(value: object) -> str | None:
