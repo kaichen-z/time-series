@@ -1,6 +1,8 @@
 """End-to-end Coding -> Retrieval -> Decision forecasting harness."""
 from __future__ import annotations
 
+import math
+import statistics
 from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
@@ -85,6 +87,7 @@ class EvolvingForecastHarness:
                 decision = self.decision.run(
                     candidates,
                     retrieval,
+                    host_default_id=coding.selected.program.name,
                     prior_decisions=tuple(decisions),
                     round_index=len(decisions),
                 )
@@ -92,12 +95,20 @@ class EvolvingForecastHarness:
             else:
                 raise ValueError(f"Unknown harness stage: {stage}")
         if not decisions:
-            decisions.append(self.decision.run(candidates, retrieval))
+            decisions.append(
+                self.decision.run(
+                    candidates,
+                    retrieval,
+                    host_default_id=coding.selected.program.name,
+                )
+            )
         decision = _aggregate_decisions(
             tuple(decisions),
             candidates,
             self.runtime.decision_aggregation,
         )
+        decision = _guard_raw_override(decision, candidates, coding)
+        decision = self._horizon_aligned_host(task, coding, candidates, decision)
         return HarnessResult(
             task_id=task.numeric.task_id,
             coding=coding,
@@ -107,8 +118,227 @@ class EvolvingForecastHarness:
             forecast=decision.selected.forecast,
         )
 
-    @staticmethod
+    def _historical_clean_candidate(
+        self,
+        task: ContextTask,
+        coding: CodingEvolutionResult,
+        retrieval: RetrievalResult,
+    ) -> DecisionCandidate | None:
+        """Replay executable programs after a citation-grounded observation repair."""
+        impacts = [
+            impact
+            for impact in retrieval.impacts
+            if impact.mechanism_layer == "observation"
+            and impact.temporal_relation in {"historical", "ended_before_future"}
+            and impact.adjustment_kind in {"history_mask", "history_repair"}
+            and impact.start_timestamp is not None
+            and impact.end_timestamp is not None
+        ]
+        kinds = {impact.adjustment_kind for impact in impacts}
+        if not impacts or len(kinds) != 1 or coding.selected.program.source == "tsfm":
+            return None
+
+        raw_history = task.numeric.history_values
+        history = list(raw_history)
+        history_offset = 0
+        if kinds == {"history_mask"}:
+            masked = {
+                index
+                for impact in impacts
+                for index, timestamp in enumerate(task.history_timestamps)
+                if impact.start_timestamp <= timestamp <= impact.end_timestamp
+            }
+            if not masked:
+                return None
+            history_offset = max(masked) + 1
+            history = history[history_offset:]
+        else:
+            rates: dict[tuple[str | None, str | None], set[float]] = {}
+            for impact in impacts:
+                key = (impact.start_timestamp, impact.end_timestamp)
+                rates.setdefault(key, set())
+                if impact.adjustment_value is not None:
+                    rates[key].add(impact.adjustment_value)
+            if any(len(values) != 1 for values in rates.values()):
+                return None
+            used_indexes: set[int] = set()
+            for (start, end), values in rates.items():
+                indexes = [
+                    index
+                    for index, timestamp in enumerate(task.history_timestamps)
+                    if start <= timestamp <= end
+                ]
+                if not indexes or used_indexes.intersection(indexes):
+                    return None
+                used_indexes.update(indexes)
+                rate = next(iter(values))
+                for step, index in enumerate(indexes, start=1):
+                    history[index] += rate * step
+            if not all(math.isfinite(value) for value in history):
+                return None
+
+        clean_task = replace(task.numeric_view(), history_values=tuple(history))
+        folds = self.coding._folds(clean_task)
+        if len(folds) < self.coding.config.validation_folds:
+            return None
+        validated = [
+            candidate
+            for item in coding.candidates
+            if item.program.source != "tsfm"
+            and (candidate := self.coding._validate(clean_task, item.program)) is not None
+            and not candidate.fold_errors
+        ]
+        if len(validated) < 3:
+            return None
+        top = sorted(
+            validated,
+            key=lambda candidate: (candidate.hindcast_srmse, candidate.hindcast_smae),
+        )[:3]
+        raw_scores = self.coding.score_program_folds(
+            coding.selected.program,
+            tuple(
+                (
+                    tuple(raw_history[: history_offset + len(train)]),
+                    target,
+                )
+                for train, target in folds
+            ),
+            clean_task.frequency,
+        )
+        ensemble = self.coding.validate_median(clean_task, tuple(top))
+        if raw_scores is None or ensemble is None:
+            return None
+        ensemble_forecast, ensemble_smae, ensemble_srmse = ensemble
+
+        best = top[0]
+        selected_forecast = best.forecast
+        selected_smae = best.fold_smae
+        selected_srmse = best.fold_srmse
+        selected_id = f"history_clean__{best.program.name}"
+        selected_tags = ("history_cleaned", "observation", "single")
+        if (
+            len({candidate.forecast for candidate in top}) >= 2
+            and _fold_pair_improves(
+                ensemble_smae,
+                ensemble_srmse,
+                best.fold_smae,
+                best.fold_srmse,
+            )
+        ):
+            selected_forecast = ensemble_forecast
+            selected_smae = ensemble_smae
+            selected_srmse = ensemble_srmse
+            selected_id = "history_clean_top3_median"
+            selected_tags = ("history_cleaned", "observation", "validated_ensemble")
+
+        raw_smae, raw_srmse = raw_scores
+        if not _fold_pair_improves(
+            selected_smae,
+            selected_srmse,
+            raw_smae,
+            raw_srmse,
+        ):
+            return None
+        treatment = "post-defect suffix" if history_offset else "exact additive repair"
+        return DecisionCandidate(
+            candidate_id=selected_id,
+            forecast=selected_forecast,
+            assumption=(
+                f"Verified observation evidence supports a {treatment}. On identical cleaned "
+                "validation targets, this route passed mean and worst-fold sMAE/sRMSE gates "
+                "against the raw-history host replay."
+            ),
+            failure_condition=(
+                "The cited defect window or repair rate is wrong, or fewer than three "
+                "clean causal folds remain."
+            ),
+            hindcast_smae=statistics.fmean(selected_smae),
+            hindcast_srmse=statistics.fmean(selected_srmse),
+            source_document_ids=tuple(
+                dict.fromkeys(
+                    document_id
+                    for impact in impacts
+                    for document_id in impact.source_document_ids
+                )
+            ),
+            tags=selected_tags,
+        )
+
+    def _horizon_aligned_host(
+        self,
+        task: ContextTask,
+        coding: CodingEvolutionResult,
+        candidates: tuple[DecisionCandidate, ...],
+        decision: DecisionResult,
+    ) -> DecisionResult:
+        """Use one full-horizon causal fold only to correct an uncontextualized raw host."""
+        host = coding.selected
+        if (
+            decision.selected.candidate_id != host.program.name
+            or decision.llm_override_accepted
+            or decision.supporting_document_ids
+            or decision.rejection_reason is not None
+        ):
+            return decision
+        try:
+            period = int(task.numeric.seasonal_period or 0)
+        except (TypeError, ValueError):
+            return decision
+        horizon = task.numeric.prediction_length
+        train_length = len(task.numeric.history_values) - horizon
+        minimum_train = max(self.coding.config.minimum_validation_history, 2 * period)
+        if period <= 0 or horizon <= period or train_length < minimum_train:
+            return decision
+        fold = (
+            (
+                task.numeric.history_values[:train_length],
+                task.numeric.history_values[train_length:],
+            ),
+        )
+        scored = []
+        for item in coding.candidates:
+            if item.program.source == "tsfm":
+                continue
+            scores = self.coding.score_program_folds(
+                item.program,
+                fold,
+                task.numeric.frequency,
+            )
+            if scores is not None:
+                scored.append((item, *scores))
+        host_score = next((item for item in scored if item[0] == host), None)
+        if host_score is None:
+            return decision
+        selected, selected_smae, selected_srmse = min(
+            scored,
+            key=lambda item: (item[2][0], item[1][0]),
+        )
+        if selected == host or not _fold_pair_improves(
+            selected_smae,
+            selected_srmse,
+            host_score[1],
+            host_score[2],
+        ):
+            return decision
+        selected_candidate = next(
+            item for item in candidates if item.candidate_id == selected.program.name
+        )
+        return replace(
+            decision,
+            selected=selected_candidate,
+            host_default_id=selected_candidate.candidate_id,
+            requested_more_retrieval=False,
+            rationale=(
+                "Promote the raw host that passed the full-horizon causal sMAE/sRMSE gate."
+            ),
+            supporting_document_ids=(),
+            llm_override_accepted=False,
+            rejection_reason=None,
+            used_skill_names=(),
+        )
+
     def _decision_candidates(
+        self,
         task: ContextTask,
         coding: CodingEvolutionResult,
         retrieval: RetrievalResult,
@@ -122,21 +352,26 @@ class EvolvingForecastHarness:
                 forecast=item.forecast,
                 assumption=item.program.assumption,
                 failure_condition=item.program.failure_condition,
-                hindcast_smape=item.hindcast_smape,
+                hindcast_smae=item.hindcast_smae,
+                hindcast_srmse=item.hindcast_srmse,
                 tags=(item.program.source,),
             )
             for item in coding.candidates
         ]
         if not enable_evidence_adjustments:
             return tuple(candidates)
-        if max_evidence_adjustments <= 0:
-            return tuple(candidates)
-        best = min(candidates, key=lambda item: item.hindcast_smape)
+        best = min(
+            candidates, key=lambda item: (item.hindcast_srmse, item.hindcast_smae)
+        )
         adjustments = 0
         for index, impact in enumerate(retrieval.impacts):
+            if adjustments >= max_evidence_adjustments:
+                break
             if impact.temporal_relation != "overlaps_future":
                 continue
             if impact.adjustment_kind not in {"multiply", "add"} or impact.adjustment_value is None:
+                continue
+            if _persistent_effect_already_observed(task, impact, retrieval.impacts):
                 continue
             start, end = _future_window(task, impact.start_timestamp, impact.end_timestamp)
             if start is None or end is None:
@@ -153,14 +388,16 @@ class EvolvingForecastHarness:
                     forecast=tuple(values),
                     assumption=f"{best.assumption} plus verified future impact: {impact.rationale}",
                     failure_condition="The cited magnitude or event window does not apply to the target.",
-                    hindcast_smape=best.hindcast_smape,
+                    hindcast_smae=best.hindcast_smae,
+                    hindcast_srmse=best.hindcast_srmse,
                     source_document_ids=impact.source_document_ids,
                     tags=("evidence_adjusted", impact.mechanism_layer),
                 )
             )
             adjustments += 1
-            if adjustments >= max_evidence_adjustments:
-                break
+        clean = self._historical_clean_candidate(task, coding, retrieval)
+        if clean is not None:
+            candidates.append(clean)
         return tuple(candidates)
 
     @staticmethod
@@ -192,6 +429,127 @@ def _future_window(
         if start_timestamp <= timestamp <= end_timestamp
     ]
     return (min(indexes), max(indexes)) if indexes else (None, None)
+
+
+def _fold_pair_improves(
+    candidate_smae: tuple[float, ...],
+    candidate_srmse: tuple[float, ...],
+    reference_smae: tuple[float, ...],
+    reference_srmse: tuple[float, ...],
+    *,
+    minimum_relative_gain: float = 0.01,
+) -> bool:
+    """Require Pareto-safe mean and worst-fold gains in the two official metrics."""
+    candidate_mean_smae = statistics.fmean(candidate_smae)
+    candidate_mean_srmse = statistics.fmean(candidate_srmse)
+    reference_mean_smae = statistics.fmean(reference_smae)
+    reference_mean_srmse = statistics.fmean(reference_srmse)
+    return (
+        candidate_mean_smae <= reference_mean_smae
+        and candidate_mean_srmse <= reference_mean_srmse
+        and max(candidate_smae) <= max(reference_smae)
+        and max(candidate_srmse) <= max(reference_srmse)
+        and (
+            candidate_mean_smae
+            < (1.0 - minimum_relative_gain) * reference_mean_smae
+            or candidate_mean_srmse
+            < (1.0 - minimum_relative_gain) * reference_mean_srmse
+        )
+    )
+
+
+def _fold_pair_within(
+    candidate_smae: tuple[float, ...],
+    candidate_srmse: tuple[float, ...],
+    reference_smae: tuple[float, ...],
+    reference_srmse: tuple[float, ...],
+    *,
+    relative_slack: float = 0.05,
+) -> bool:
+    """Keep evidence-selectable alternatives whose two fold metrics are comparable."""
+    multiplier = 1.0 + relative_slack
+    return (
+        statistics.fmean(candidate_smae) <= multiplier * statistics.fmean(reference_smae)
+        and statistics.fmean(candidate_srmse)
+        <= multiplier * statistics.fmean(reference_srmse)
+        and max(candidate_smae) <= multiplier * max(reference_smae)
+        and max(candidate_srmse) <= multiplier * max(reference_srmse)
+    )
+
+
+def _guard_raw_override(
+    decision: DecisionResult,
+    candidates: tuple[DecisionCandidate, ...],
+    coding: CodingEvolutionResult,
+) -> DecisionResult:
+    """Reject only unstable raw overrides, after preserving the full Decision context."""
+    host = coding.selected
+    if decision.selected.candidate_id == host.program.name:
+        return decision
+    raw = next(
+        (
+            item
+            for item in coding.candidates
+            if item.program.name == decision.selected.candidate_id
+        ),
+        None,
+    )
+    if raw is None:
+        return decision
+    host_is_near_perfect = max(host.hindcast_smae, host.hindcast_srmse) <= 0.01
+    if (
+        host_is_near_perfect
+        or _fold_pair_improves(
+            raw.fold_smae,
+            raw.fold_srmse,
+            host.fold_smae,
+            host.fold_srmse,
+        )
+        or _fold_pair_within(
+            raw.fold_smae,
+            raw.fold_srmse,
+            host.fold_smae,
+            host.fold_srmse,
+        )
+    ):
+        return decision
+    host_candidate = next(
+        item for item in candidates if item.candidate_id == host.program.name
+    )
+    return replace(
+        decision,
+        selected=host_candidate,
+        requested_more_retrieval=False,
+        rationale="Preserve the stable numeric host after the raw override failed its fold gate.",
+        supporting_document_ids=(),
+        llm_override_accepted=False,
+        rejection_reason="raw_override_failed_smae_srmse_fold_gate",
+        used_skill_names=(),
+    )
+
+
+def _persistent_effect_already_observed(
+    task: ContextTask,
+    impact: Any,
+    impacts: tuple[Any, ...],
+) -> bool:
+    """Avoid applying a permanent effect twice when history already contains it."""
+    if impact.permanence != "permanent" or not task.future_timestamps:
+        return False
+    origin = task.future_timestamps[0]
+    if impact.start_timestamp is not None and impact.start_timestamp < origin:
+        return True
+    return any(
+        other is not impact
+        and other.permanence == "permanent"
+        and other.adjustment_kind == impact.adjustment_kind
+        and other.adjustment_value == impact.adjustment_value
+        and set(other.source_document_ids) == set(impact.source_document_ids)
+        and other.start_timestamp is not None
+        and other.start_timestamp < origin
+        and (other.end_timestamp is None or other.end_timestamp >= origin)
+        for other in impacts
+    )
 
 
 def _merge_retrieval(results: list[RetrievalResult]) -> RetrievalResult:
@@ -261,7 +619,7 @@ def _aggregate_decisions(
     finalists = {candidate_id for candidate_id, count in votes.items() if count == largest}
     chosen = min(
         (candidate for candidate in candidates if candidate.candidate_id in finalists),
-        key=lambda item: item.hindcast_smape,
+        key=lambda item: (item.hindcast_srmse, item.hindcast_smae),
     )
     source = next(item for item in reversed(decisions) if item.selected.candidate_id == chosen.candidate_id)
     return replace(source, selected=chosen, rationale=f"Panel aggregation ({strategy}): {source.rationale}")

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import statistics
 import uuid
 from dataclasses import asdict, dataclass
 
@@ -31,7 +30,7 @@ Return exactly one JSON object. Use null when the corresponding module was not s
 
 @dataclass(frozen=True)
 class SkillLearningConfig:
-    minimum_retrieval_score: float = 0.6
+    minimum_retrieval_gain: float = 0.0
     maximum_decision_regret: float = 1e-8
 
 
@@ -67,20 +66,37 @@ class OutcomeSkillLearner:
     ) -> SkillLearningResult:
         if not task.labels_public:
             raise ValueError("skill learning is forbidden for hidden/unreleased labels")
-        retrieval_score = statistics.fmean(
-            (outcome.retrieval_precision, outcome.supporting_recall, outcome.distractor_avoidance)
+        retrieval_smae_gain = (
+            outcome.coding_oracle_smae - outcome.contextual_oracle_smae
+        )
+        retrieval_srmse_gain = (
+            outcome.coding_oracle_srmse - outcome.contextual_oracle_srmse
         )
         for name in result.retrieval.used_skill_names:
-            self.retrieval_library.record_use(name, retrieval_score)
-        decision_score = max(0.0, 1.0 - outcome.decision_selection_regret / 200.0)
+            self.retrieval_library.record_use(
+                name, retrieval_smae_gain, retrieval_srmse_gain
+            )
         for name in result.decision.used_skill_names:
-            self.decision_library.record_use(name, decision_score)
+            self.decision_library.record_use(
+                name,
+                -outcome.decision_selection_smae_regret,
+                -outcome.decision_selection_srmse_regret,
+            )
         retrieval_eligible = (
-            retrieval_score >= self.config.minimum_retrieval_score
+            retrieval_smae_gain >= self.config.minimum_retrieval_gain
+            and retrieval_srmse_gain >= self.config.minimum_retrieval_gain
+            and (
+                retrieval_smae_gain > self.config.minimum_retrieval_gain
+                or retrieval_srmse_gain > self.config.minimum_retrieval_gain
+            )
             and bool(result.retrieval.evidence)
         )
         decision_eligible = (
             len(result.candidates) >= 2
+            and float(outcome.decision_selection_smae_regret or 0.0)
+            <= self.config.maximum_decision_regret
+            and float(outcome.decision_selection_srmse_regret or 0.0)
+            <= self.config.maximum_decision_regret
             and outcome.decision_selection_mae_regret
             <= self.config.maximum_decision_regret
         )
@@ -93,10 +109,16 @@ class OutcomeSkillLearner:
                 "decision": decision_eligible,
             },
             "resolved_metrics": {
-                "retrieval_quality": retrieval_score,
-                "decision_selection_mae_regret": outcome.decision_selection_mae_regret,
-                "decision_selection_regret": outcome.decision_selection_regret,
-                "final_smape": outcome.final_smape,
+                "retrieval_smae_gain": retrieval_smae_gain,
+                "retrieval_srmse_gain": retrieval_srmse_gain,
+                "decision_selection_smae_regret": (
+                    outcome.decision_selection_smae_regret
+                ),
+                "decision_selection_srmse_regret": (
+                    outcome.decision_selection_srmse_regret
+                ),
+                "final_smae": outcome.final_smae,
+                "final_srmse": outcome.final_srmse,
             },
             "retrieval_trace": {
                 "query": result.retrieval.query,
@@ -143,7 +165,8 @@ class OutcomeSkillLearner:
                         query_strategy=record["query_strategy"],
                         verification_rule=record["verification_rule"],
                         created_from_task=task.numeric.task_id,
-                        validation_score=retrieval_score,
+                        validation_smae=retrieval_smae_gain,
+                        validation_srmse=retrieval_srmse_gain,
                     )
                 )
         if decision_eligible and isinstance(proposal.get("decision_skill"), dict):
@@ -162,7 +185,8 @@ class OutcomeSkillLearner:
                         decision_rule=record["decision_rule"],
                         failure_condition=record["failure_condition"],
                         created_from_task=task.numeric.task_id,
-                        validation_score=decision_score,
+                        validation_smae=-outcome.decision_selection_smae_regret,
+                        validation_srmse=-outcome.decision_selection_srmse_regret,
                     )
                 )
         return SkillLearningResult(

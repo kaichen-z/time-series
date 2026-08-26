@@ -1,8 +1,9 @@
-"""Point-forecast metrics used by the local forecasting harness."""
+"""Forecast metrics shared by trusted evaluation hosts."""
 from __future__ import annotations
 
 import math
 import statistics
+from collections.abc import Sequence
 
 
 def smape(y_true: list[float], y_pred: list[float]) -> float:
@@ -36,27 +37,52 @@ def rmse(y_true: list[float], y_pred: list[float]) -> float:
 
 
 def drcik_point_metrics(
-    y_true: list[float], y_pred: list[float], *, cap: float = 5.0
+    y_true: Sequence[float],
+    forecast: Sequence[float] | Sequence[Sequence[float]],
+    *,
+    cap: float = 5.0,
 ) -> dict[str, float | bool]:
-    """Dr-CiK-aligned deterministic point metrics for one task.
+    """Dr-CiK-aligned point metrics for one task.
 
     Dr-CiK scales both MAE and RMSE by the mean absolute value of the true
     forecast horizon, then independently caps each per-task scaled metric at
-    ``cap`` before aggregating across tasks.  A deterministic forecast is the
-    one-sample special case of the paper's sample-mean point forecast.
+    ``cap`` before aggregating across tasks. ``forecast`` accepts either one
+    deterministic trajectory or multiple trajectories; multiple trajectories
+    are reduced to their step-wise mean before scoring.
 
     These values reproduce the public metric definition, but they are not a
     verified hidden-test leaderboard score because the official scorer and
     hidden labels remain private.
     """
-    _check_same_length(y_true, y_pred)
-    if not y_true:
+    truth = [float(value) for value in y_true]
+    if not truth:
         raise ValueError("Dr-CiK point metrics require a non-empty horizon")
     if not math.isfinite(cap) or cap <= 0.0:
         raise ValueError("cap must be a positive finite value")
-    scale = statistics.fmean(abs(value) for value in y_true)
-    absolute_error = mae(y_true, y_pred)
-    squared_error = rmse(y_true, y_pred)
+    raw = tuple(forecast)
+    if not raw:
+        raise ValueError("Dr-CiK point metrics require at least one forecast")
+    first = raw[0]
+    if isinstance(first, Sequence) and not isinstance(first, (str, bytes)):
+        trajectories = tuple(
+            tuple(float(value) for value in sample)  # type: ignore[arg-type]
+            for sample in raw
+        )
+        if any(len(sample) != len(truth) for sample in trajectories):
+            raise ValueError("every forecast trajectory must match the future horizon")
+        prediction = [
+            statistics.fmean(sample[step] for sample in trajectories)
+            for step in range(len(truth))
+        ]
+    else:
+        prediction = [float(value) for value in raw]  # type: ignore[arg-type]
+        _check_same_length(truth, prediction)
+    if not all(math.isfinite(value) for value in (*truth, *prediction)):
+        raise ValueError("Dr-CiK inputs must contain only finite values")
+
+    scale = statistics.fmean(abs(value) for value in truth)
+    absolute_error = mae(truth, prediction)
+    squared_error = rmse(truth, prediction)
     if scale > 0.0:
         smae_raw = absolute_error / scale
         srmse_raw = squared_error / scale
@@ -73,6 +99,18 @@ def drcik_point_metrics(
         "srmse": min(cap, srmse_raw),
         "smae_clipped": smae_raw > cap,
         "srmse_clipped": srmse_raw > cap,
+    }
+
+
+def aggregate_drcik_point_metrics(
+    rows: Sequence[dict[str, float]],
+) -> dict[str, float]:
+    """Average already capped Dr-CiK task metrics across tasks."""
+    if not rows:
+        raise ValueError("at least one task metric row is required")
+    return {
+        "smae": statistics.fmean(float(row["smae"]) for row in rows),
+        "srmse": statistics.fmean(float(row["srmse"]) for row in rows),
     }
 
 

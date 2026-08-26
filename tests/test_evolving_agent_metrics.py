@@ -4,6 +4,7 @@ import math
 import unittest
 
 from common.metrics import (
+    aggregate_drcik_point_metrics,
     drcik_point_metrics,
     mae,
     rmse,
@@ -41,6 +42,22 @@ class MaeTests(unittest.TestCase):
 
 
 class DrCikPointMetricTests(unittest.TestCase):
+    def test_reduces_multiple_trajectories_to_their_stepwise_mean(self):
+        result = drcik_point_metrics(
+            [2.0, 4.0],
+            [[1.0, 3.0], [3.0, 5.0]],
+        )
+
+        self.assertEqual(result["smae"], 0.0)
+        self.assertEqual(result["srmse"], 0.0)
+
+    def test_aggregate_averages_already_capped_task_metrics(self):
+        result = aggregate_drcik_point_metrics(
+            [{"smae": 1.0, "srmse": 2.0}, {"smae": 3.0, "srmse": 4.0}]
+        )
+
+        self.assertEqual(result, {"smae": 2.0, "srmse": 3.0})
+
     def test_scales_by_mean_absolute_future_and_winsorizes_each_metric(self):
         result = drcik_point_metrics(
             [1.0, 1.0, 1.0, 1.0],

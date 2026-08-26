@@ -93,15 +93,47 @@ class SourceEvaluation:
     train_module_rewards: dict[str, float]
     dev_module_rewards: dict[str, float]
     failure_traces: tuple[dict, ...]
+    train_smae: float | None = None
+    train_srmse: float | None = None
+    dev_smae: float | None = None
+    dev_srmse: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.train_smae is None:
+            object.__setattr__(self, "train_smae", -self.train_reward)
+        if self.train_srmse is None:
+            object.__setattr__(self, "train_srmse", -self.train_reward)
+        if self.dev_smae is None:
+            object.__setattr__(self, "dev_smae", -self.dev_reward)
+        if self.dev_srmse is None:
+            object.__setattr__(self, "dev_srmse", -self.dev_reward)
 
     @classmethod
     def from_dict(cls, payload: dict) -> "SourceEvaluation":
         return cls(
             train_reward=float(payload["train"]["system_reward"]),
             dev_reward=float(payload["dev"]["system_reward"]),
+            train_smae=float(payload["train"]["diagnostics"]["mean_smae"]),
+            train_srmse=float(payload["train"]["diagnostics"]["mean_srmse"]),
+            dev_smae=float(payload["dev"]["diagnostics"]["mean_smae"]),
+            dev_srmse=float(payload["dev"]["diagnostics"]["mean_srmse"]),
             train_module_rewards=dict(payload["train"]["module_rewards"]),
             dev_module_rewards=dict(payload["dev"]["module_rewards"]),
             failure_traces=tuple(payload["train"].get("failure_traces", ())),
+        )
+
+    @property
+    def train_rank_key(self) -> tuple[float, float]:
+        return -self.train_srmse, -self.train_smae
+
+    def dev_better_than(self, other: "SourceEvaluation") -> bool:
+        return (
+            self.dev_smae <= other.dev_smae
+            and self.dev_srmse <= other.dev_srmse
+            and (
+                self.dev_smae < other.dev_smae
+                or self.dev_srmse < other.dev_srmse
+            )
         )
 
 
@@ -141,7 +173,7 @@ class SourceEvolutionConfig:
 
 
 EvaluationCallback = Callable[[Path], SourceEvaluation]
-SOURCE_OBJECTIVE = "neg_mean_mae_v1"
+SOURCE_OBJECTIVE = "drcik_smae_srmse_pareto_v1"
 
 
 class SourceEvolutionEngine:
@@ -182,14 +214,14 @@ class SourceEvolutionEngine:
             ]
             valid = [item for item in candidates if item.evaluation is not None]
             train_best = (
-                max(valid, key=lambda item: item.evaluation.train_reward)
+                max(valid, key=lambda item: item.evaluation.train_rank_key)
                 if valid
                 else None
             )
             accepted = (
                 train_best
                 if train_best is not None
-                and train_best.evaluation.dev_reward > incumbent_evaluation.dev_reward
+                and train_best.evaluation.dev_better_than(incumbent_evaluation)
                 else None
             )
             if accepted is not None:
@@ -342,14 +374,18 @@ class SourceEvolutionEngine:
     ) -> str:
         payload = {
             "candidate_id": candidate_id,
-            "parent_train_reward": parent.train_reward,
-            "parent_dev_reward": parent.dev_reward,
+            "parent_train_smae": parent.train_smae,
+            "parent_train_srmse": parent.train_srmse,
+            "parent_dev_smae": parent.dev_smae,
+            "parent_dev_srmse": parent.dev_srmse,
             "module_rewards": parent.train_module_rewards,
             "worst_training_failures": [
                 self._sanitized_failure(item)
                 for item in sorted(
                     parent.failure_traces,
-                    key=lambda item: item.get("final_smape", 0.0),
+                    key=lambda item: (
+                        item.get("final_srmse", 0.0), item.get("final_smae", 0.0)
+                    ),
                     reverse=True,
                 )[:5]
             ],
@@ -603,6 +639,10 @@ class SourceEvolutionEngine:
         evaluation = SourceEvaluation(
             train_reward=float(raw_evaluation["train_reward"]),
             dev_reward=float(raw_evaluation["dev_reward"]),
+            train_smae=float(raw_evaluation["train_smae"]),
+            train_srmse=float(raw_evaluation["train_srmse"]),
+            dev_smae=float(raw_evaluation["dev_smae"]),
+            dev_srmse=float(raw_evaluation["dev_srmse"]),
             train_module_rewards=dict(raw_evaluation["train_module_rewards"]),
             dev_module_rewards=dict(raw_evaluation["dev_module_rewards"]),
             failure_traces=tuple(raw_evaluation.get("failure_traces", ())),

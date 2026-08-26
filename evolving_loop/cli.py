@@ -766,7 +766,8 @@ def run_command(args) -> dict:
                                 "name": item.program.name,
                                 "assumption": item.program.assumption,
                                 "failure_condition": item.program.failure_condition,
-                                "hindcast_smape": item.hindcast_smape,
+                                "hindcast_smae": item.hindcast_smae,
+                                "hindcast_srmse": item.hindcast_srmse,
                                 "knowledge_ids": list(item.program.knowledge_ids),
                             }
                             for item in result.coding.candidates
