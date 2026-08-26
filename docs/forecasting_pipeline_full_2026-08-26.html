@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Time-Series Self-Evolution Pipeline · 2026-08-26</title>
+  <title>Time-Series Self-Evolution Pipeline · 2026-08-27</title>
   <style>
     :root {
       --bg: #f4f0e8;
@@ -278,9 +278,10 @@
   <div class="shell">
     <aside>
       <div class="brand">Forecasting Pipeline</div>
-      <div class="brand-sub">完整项目地图 · 2026-08-26</div>
+      <div class="brand-sub">完整项目地图 · 更新至 2026-08-27</div>
       <nav aria-label="页面目录">
         <div class="nav-label">先看结论</div>
+        <a href="#latest">最新：三代系统与 99 题结果</a>
         <a href="#now">0. 现在到底在做什么</a>
         <a href="#question">1. 研究问题与 Dr-CiK</a>
         <a href="#timeline">2. 项目演进时间线</a>
@@ -313,16 +314,68 @@
         <div class="meta-row">
           <span class="pill">仓库 <code>time-series</code></span>
           <span class="pill">分支 <code>main</code></span>
-          <span class="pill">HEAD <code>d94ed50</code></span>
-          <span class="pill">页面日期 2026-08-26</span>
+          <span class="pill">HEAD <code>78b4ca8</code></span>
+          <span class="pill">页面更新 2026-08-27</span>
         </div>
         <div class="pill-row">
           <span class="pill good"><span class="dot"></span>103-candidate 框架已实现</span>
           <span class="pill good"><span class="dot"></span>80/20/99 防泄漏划分已冻结</span>
           <span class="pill warn"><span class="dot"></span>Selector 泛化仍不稳定</span>
-          <span class="pill bad"><span class="dot"></span>最新 5-TSFM R1/R2/R3 尚未形成有效结论</span>
+          <span class="pill warn"><span class="dot"></span>Protected Top-k 已过 Dev，99题主指标未胜 Toto</span>
         </div>
       </header>
+
+      <section id="latest" data-section>
+        <h2>最新 · 三代系统到底分别在做什么</h2>
+        <p class="section-intro">这三个名字不是三个互相独立的项目，而是同一条 Numerical Selector 演进路线。核心变化是：从“保守地替换一个方法”，逐步走向“保留强 TSFM 锚点，再允许多个 TSFM 与 Statistical residual 在严格历史回测门控下共同参与”。</p>
+
+        <div class="grid g3">
+          <article class="card">
+            <div class="kpi">1</div>
+            <h3>New Safe-Anchor System</h3>
+            <p><strong>做什么：</strong>默认保留 Toto；只有某个单一 challenger 在历史 folds 上足够稳定，才允许覆盖 Toto。</p>
+            <p><strong>没有做什么：</strong>当时没有 Combined forecast 通过全部 gate，实际收益主要来自少量保守的单方法替换。</p>
+            <p><strong>旧 99 题结果：</strong>mean sMAE 0.455015，较 Toto 好 1.23%；mean sRMSE 0.683928，较 Toto 差 0.49%；27 胜 / 55 平 / 17 负。</p>
+            <span class="status good">最稳的旧版本</span>
+          </article>
+          <article class="card">
+            <div class="kpi">2</div>
+            <h3>NEW FULL SYSTEM</h3>
+            <p><strong>本页对应：</strong>2026-08-26 的 Change-aware full system。</p>
+            <p><strong>做什么：</strong>把 Task-conditioned Screening、历史回测、完整 Selector、change-aware guard 与 Parent fallback 接到一起；不再只允许一个安全单方法，而是让完整候选池参与判断。</p>
+            <p><strong>80/20 结果：</strong>Child 在 Train 和只读 Dev 的 sMAE/sRMSE 都改善，因此被接受；但 Dev MASE 与 raw MAE 变差，说明它只是“通过当前主指标”，还不是全面占优。</p>
+            <span class="status warn">完整架构已接通，指标仍有冲突</span>
+          </article>
+          <article class="card">
+            <div class="kpi">3</div>
+            <h3>Latest Protected Top-k</h3>
+            <p><strong>做什么：</strong>以 NEW FULL SYSTEM 的安全 TSFM Parent 为锚点，允许三类受保护 challenger：单 TSFM、多个 TSFM portfolio、以及 TSFM + Statistical residual；只有跨折稳定时才覆盖 Parent。</p>
+            <p><strong>实际 Child：</strong><code>protected_topk_joint_residual</code>。80 Train 中只改 9 题；使用 75% TimesFM + 25% Statistical，或 90% Toto + 10% TimesFM 的保守组合。</p>
+            <p><strong>20 Dev：</strong>sMAE 改善 0.228%，sRMSE 改善 0.147%，通过只读 Dev gate。</p>
+            <span class="status warn">Dev 通过；99题主指标未胜 Toto</span>
+          </article>
+        </div>
+
+        <h3>最新 Protected Top-k：99 题 Public Regression Test</h3>
+        <p>冻结后运行，<strong>零 LLM 调用、零 mutation、零 Test-time adaptation</strong>。流程是：历史序列 → Task-conditioned Active Dictionary → history-only hindcasting → 冻结 Selector → forecast；预测冻结后 trusted scorer 才读取 future values。99 题此前已被消费，因此这里只能作为回归测试，不能称为新的 unseen test。</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>系统</th><th class="num">Mean sMAE</th><th class="num">Median sMAE</th><th class="num">Mean sRMSE</th><th class="num">Mean MASE</th><th class="num">Mean MAE</th><th class="num">Mean sMAPE</th></tr></thead>
+            <tbody>
+              <tr><td>Fixed Toto / A / E</td><td class="num"><strong>0.460684</strong></td><td class="num">0.276721</td><td class="num"><strong>0.680614</strong></td><td class="num">2.883039</td><td class="num">555.73</td><td class="num">45.60</td></tr>
+              <tr><td>Decision only / C</td><td class="num">0.469332</td><td class="num"><strong>0.247280</strong></td><td class="num">0.707570</td><td class="num"><strong>2.780045</strong></td><td class="num"><strong>417.97</strong></td><td class="num"><strong>38.64</strong></td></tr>
+              <tr><td>Protected Top-k full / D</td><td class="num">0.471608</td><td class="num"><strong>0.247280</strong></td><td class="num">0.710132</td><td class="num">2.796273</td><td class="num">419.02</td><td class="num">38.74</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="grid g3">
+          <article class="card"><div class="kpi bad">+2.37%</div><div class="kpi-label">Full mean sMAE vs Toto</div><p>Dr-CiK point-forecast 主指标没有超过固定 Toto。</p></article>
+          <article class="card"><div class="kpi good">−10.64%</div><div class="kpi-label">Full median sMAE vs Toto</div><p>典型任务更好，但平均值被较差任务拉回。</p></article>
+          <article class="card"><div class="kpi good">3.03%</div><div class="kpi-label">Full catastrophic rate</div><p>Toto 为 4.04%；尾部失败比例有所下降。</p></article>
+        </div>
+        <div class="callout warnbox"><strong>简明结论：</strong>Safe-Anchor 是“少动、保守替换”；NEW FULL SYSTEM 是“把筛选和选择的完整流水线接通”；最新 Protected Top-k 是“在完整系统上加入受保护的多模型/残差组合”。最新版本在 Dev 通过，也改善 median sMAE、MASE、RMSSE、MAE、sMAPE 和 catastrophic rate；但 99 题 mean sMAE/sRMSE 仍比 Toto 差 2.37%/4.34%，战绩为 32 胜 / 33 平 / 34 负。因此它还不能替代 Safe-Anchor 成为新的最优回归版本。</div>
+        <p class="kpi-label">运行耗时 330.86 秒；Decision policy SHA-256：<code>8c6561af…731d</code>；Screening policy SHA-256：<code>2277acd9…abc2</code>；99/99 结果哈希校验通过。</p>
+      </section>
 
       <section id="now" data-section>
         <h2>0. 现在到底在做什么</h2>
@@ -408,6 +461,10 @@
           <div class="event">
             <time>2026-08-26</time><h3>Safe Anchor、TSFM Portfolio 与 R1/R2/R3</h3>
             <p>把目标改成 Dr-CiK-aligned sMAE/sRMSE，并重点防止尾部失败。当前正在测试“Parent 默认不动，只有严格稳定的单 TSFM、多 TSFM 或 Statistical residual challenger 才能覆盖”。</p>
+          </div>
+          <div class="event">
+            <time>2026-08-27</time><h3>Protected Top-k 冻结回归评测</h3>
+            <p>把安全 Parent、TSFM portfolio 和 Statistical residual 接成同一个 protected selector。Child 通过 20 Dev，但在 99 题回归测试中 mean sMAE/sRMSE 未超过 Toto；典型任务与若干辅助指标改善。</p>
           </div>
         </div>
       </section>
@@ -718,6 +775,20 @@ Route:
           </article>
         </div>
         <p><span class="status good">Accepted</span> 覆盖率 100%，Dev sMAE/sRMSE 同时改善；但 Dev mean MASE 与 raw MAE 变差，说明指标选择会改变继承结论。这是当前最有希望的 Train/Dev 结果之一，尚未形成新的 pristine Test 结论。</p>
+
+        <h3>2026-08-27 Protected Top-k（20 Dev → 99 Public Regression）</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>阶段</th><th>Policy</th><th class="num">sMAE</th><th class="num">sRMSE</th><th class="num">MASE</th><th class="num">MAE</th><th>结论</th></tr></thead>
+            <tbody>
+              <tr><td>Dev</td><td>Parent</td><td class="num">0.252749</td><td class="num">0.442357</td><td class="num">3.212472</td><td class="num">169.02</td><td>冻结对照</td></tr>
+              <tr><td>Dev</td><td>Protected Child</td><td class="num"><strong>0.252173</strong></td><td class="num"><strong>0.441707</strong></td><td class="num"><strong>3.212019</strong></td><td class="num">169.19</td><td class="good">通过只读 Dev gate</td></tr>
+              <tr><td>99 Regression</td><td>Fixed Toto</td><td class="num"><strong>0.460684</strong></td><td class="num"><strong>0.680614</strong></td><td class="num">2.883039</td><td class="num">555.73</td><td class="good">主指标仍最好</td></tr>
+              <tr><td>99 Regression</td><td>Protected Full</td><td class="num">0.471608</td><td class="num">0.710132</td><td class="num"><strong>2.796273</strong></td><td class="num"><strong>419.02</strong></td><td class="warn">典型/辅助指标改善，主指标未胜</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Full vs Toto 的逐题 sMAE：32 胜 / 33 平 / 34 负。Decision-only 的 mean sMAE 0.469332，略好于 Full 的 0.471608，说明当前 Task-conditioned Screening 在这次 99 题上产生了小幅负迁移；下一步应修 A→B 耦合，而不是继续扩大组合搜索。</p>
       </section>
 
       <section id="tsfm" data-section>
@@ -884,7 +955,7 @@ python -m evolving_loop --evolution &lt;prompt|genome|source&gt; [options]</code
       </section>
 
       <footer>
-        <p>Generated from the local <code>time-series</code> worktree on 2026-08-26. HEAD is <code>d94ed50</code>; several 2026-08-25/26 selector experiments are uncommitted local artifacts and are labeled accordingly.</p>
+        <p>Updated from the local <code>time-series</code> worktree on 2026-08-27. Repository snapshot before this documentation update: <code>78b4ca8</code>. The Protected Top-k result is a frozen 99-task Public Regression Test with zero LLM/mutation calls; it is not a new unseen-test claim.</p>
       </footer>
     </main>
   </div>
