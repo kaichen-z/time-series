@@ -108,7 +108,6 @@ class EvolvingForecastHarness:
             self.runtime.decision_aggregation,
         )
         decision = _guard_raw_override(decision, candidates, coding)
-        decision = self._horizon_aligned_host(task, coding, candidates, decision)
         return HarnessResult(
             task_id=task.numeric.task_id,
             coding=coding,
@@ -262,79 +261,6 @@ class EvolvingForecastHarness:
                 )
             ),
             tags=selected_tags,
-        )
-
-    def _horizon_aligned_host(
-        self,
-        task: ContextTask,
-        coding: CodingEvolutionResult,
-        candidates: tuple[DecisionCandidate, ...],
-        decision: DecisionResult,
-    ) -> DecisionResult:
-        """Use one full-horizon causal fold only to correct an uncontextualized raw host."""
-        host = coding.selected
-        if (
-            decision.selected.candidate_id != host.program.name
-            or decision.llm_override_accepted
-            or decision.supporting_document_ids
-            or decision.rejection_reason is not None
-        ):
-            return decision
-        try:
-            period = int(task.numeric.seasonal_period or 0)
-        except (TypeError, ValueError):
-            return decision
-        horizon = task.numeric.prediction_length
-        train_length = len(task.numeric.history_values) - horizon
-        minimum_train = max(self.coding.config.minimum_validation_history, 2 * period)
-        if period <= 0 or horizon <= period or train_length < minimum_train:
-            return decision
-        fold = (
-            (
-                task.numeric.history_values[:train_length],
-                task.numeric.history_values[train_length:],
-            ),
-        )
-        scored = []
-        for item in coding.candidates:
-            if item.program.source == "tsfm":
-                continue
-            scores = self.coding.score_program_folds(
-                item.program,
-                fold,
-                task.numeric.frequency,
-            )
-            if scores is not None:
-                scored.append((item, *scores))
-        host_score = next((item for item in scored if item[0] == host), None)
-        if host_score is None:
-            return decision
-        selected, selected_smae, selected_srmse = min(
-            scored,
-            key=lambda item: (item[2][0], item[1][0]),
-        )
-        if selected == host or not _fold_pair_improves(
-            selected_smae,
-            selected_srmse,
-            host_score[1],
-            host_score[2],
-        ):
-            return decision
-        selected_candidate = next(
-            item for item in candidates if item.candidate_id == selected.program.name
-        )
-        return replace(
-            decision,
-            selected=selected_candidate,
-            host_default_id=selected_candidate.candidate_id,
-            requested_more_retrieval=False,
-            rationale=(
-                "Promote the raw host that passed the full-horizon causal sMAE/sRMSE gate."
-            ),
-            supporting_document_ids=(),
-            llm_override_accepted=False,
-            rejection_reason=None,
-            used_skill_names=(),
         )
 
     def _decision_candidates(
