@@ -1,0 +1,121 @@
+{
+  "accepted": false,
+  "child_hash": "f4f28fea8c48fe948ffbe50030110c30318d8b7736d9203551b201f1a02ffc1f",
+  "dev_child": {
+    "active_counts": {
+      "task_102": 51,
+      "task_103": 50
+    },
+    "active_success_rate": 0.9306930693069307,
+    "compression": 0.49029126213592233,
+    "coverage": 1.0,
+    "failure_exposure": 0.06930693069306931,
+    "fallback_rate": 0.0,
+    "global_oracle_retention": 1.0,
+    "mean_active_candidates": 50.5,
+    "mean_active_families": 3.0,
+    "mean_active_oracle_regret": 0.0,
+    "median_active_candidates": 50.5,
+    "not_applicable_exposure": 0.0,
+    "task_count": 2
+  },
+  "dev_parent": {
+    "active_counts": {
+      "task_102": 50,
+      "task_103": 49
+    },
+    "active_success_rate": 0.9292929292929293,
+    "compression": 0.48058252427184467,
+    "coverage": 1.0,
+    "failure_exposure": 0.0707070707070707,
+    "fallback_rate": 0.0,
+    "global_oracle_retention": 1.0,
+    "mean_active_candidates": 49.5,
+    "mean_active_families": 3.0,
+    "mean_active_oracle_regret": 0.0,
+    "median_active_candidates": 49.5,
+    "not_applicable_exposure": 0.0,
+    "task_count": 2
+  },
+  "gate": {
+    "accepted": false,
+    "improved_dimensions": [],
+    "reason": "rejected: no Train screening dimension improved safely on Dev"
+  },
+  "generation": 3,
+  "parent_hash": "358e1f061f66357f20b05822b567ff11ea3cd6558a460b24ada10a7fea09e062",
+  "required_targets": [
+    "granite_ttm_r2",
+    "combined_granite_regime_profile",
+    "combined_moirai_croston_router",
+    "integer_autoregressive_inar",
+    "croston_sba",
+    "croston",
+    "tsb",
+    "nbeats",
+    "nhits",
+    "tide",
+    "autoformer",
+    "informer",
+    "fedformer",
+    "seasonal_block_bootstrap",
+    "fourier_harmonic_regression",
+    "median_seasonal_profile_forecast",
+    "seasonal_naive",
+    "seasonal_window_average",
+    "combined_timesfm_seasonal",
+    "deepar",
+    "dtw_analogue_forecast",
+    "micn_multiscale_convolution",
+    "pyraformer",
+    "temporal_fusion_transformer"
+  ],
+  "train_child": {
+    "active_counts": {
+      "task_108": 36,
+      "task_109": 40,
+      "task_110": 40,
+      "task_114": 45,
+      "task_115": 45,
+      "task_118": 45,
+      "task_127": 40,
+      "task_128": 40
+    },
+    "active_success_rate": 0.9818731117824774,
+    "compression": 0.4016990291262136,
+    "coverage": 1.0,
+    "failure_exposure": 0.0,
+    "fallback_rate": 0.0,
+    "global_oracle_retention": 0.125,
+    "mean_active_candidates": 41.375,
+    "mean_active_families": 3.0,
+    "mean_active_oracle_regret": 0.05263619675232569,
+    "median_active_candidates": 40.0,
+    "not_applicable_exposure": 0.01812688821752266,
+    "task_count": 8
+  },
+  "train_parent": {
+    "active_counts": {
+      "task_108": 36,
+      "task_109": 40,
+      "task_110": 40,
+      "task_114": 45,
+      "task_115": 45,
+      "task_118": 45,
+      "task_127": 40,
+      "task_128": 40
+    },
+    "active_success_rate": 0.9818731117824774,
+    "compression": 0.4016990291262136,
+    "coverage": 1.0,
+    "failure_exposure": 0.0,
+    "fallback_rate": 0.0,
+    "global_oracle_retention": 0.125,
+    "mean_active_candidates": 41.375,
+    "mean_active_families": 3.0,
+    "mean_active_oracle_regret": 0.05263619675232569,
+    "median_active_candidates": 40.0,
+    "not_applicable_exposure": 0.01812688821752266,
+    "task_count": 8
+  }
+}

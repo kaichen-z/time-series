@@ -10,7 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Sequence
 
-from common.data import load_tasks
+from common.data import load_tasks_by_id
 from common.llm import CodexCLIClient, CodexCLIConfig
 from common.payload import read_json_object, write_json
 
@@ -27,13 +27,14 @@ from .evolution.portfolio import (
 from .evolution.screening import (
     ScreeningConstraints,
     ScreeningPolicy,
+    compare_screening,
     evaluate_screening,
     materialize_active_dictionary,
     profile_task,
 )
 from .evolution.screening_evolution import (
     complete_target_batches,
-    evolve_screening_once,
+    evolve_screening_on_train_once,
     migrate_filter_dictionary,
     render_screening_source,
     select_refinement_targets,
@@ -64,10 +65,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--codex-cache-dir", default=None)
     parser.add_argument("--baseline-method", default="toto_2_0")
     parser.add_argument("--screen-min-candidates", type=int, default=12)
-    parser.add_argument("--screen-max-candidates", type=int, default=40)
+    parser.add_argument(
+        "--screen-max-candidates",
+        type=int,
+        default=103,
+        help="optional safety ceiling; 103 leaves compression as a soft objective",
+    )
     parser.add_argument("--screen-min-unique-dictionaries", type=int, default=3)
     parser.add_argument("--screen-max-mean-jaccard", type=float, default=0.995)
     parser.add_argument("--screen-min-group-support", type=int, default=4)
+    parser.add_argument("--screen-min-dev-oracle-retention", type=float, default=0.9)
     parser.add_argument("--screen-batch-size", type=int, default=8)
     parser.add_argument("--screen-refinement-generations", type=int, default=3)
     parser.add_argument("--screen-refinement-batch-size", type=int, default=24)
@@ -116,11 +123,15 @@ def main(argv: list[str] | None = None) -> int:
         min_unique_active_dictionaries=args.screen_min_unique_dictionaries,
         max_mean_pairwise_jaccard=args.screen_max_mean_jaccard,
         min_group_support=args.screen_min_group_support,
+        min_dev_oracle_retention=args.screen_min_dev_oracle_retention,
     )
     if parent.get(constraints.baseline_method) is None:
         raise ValueError(f"unknown screening baseline {constraints.baseline_method!r}")
 
-    outcomes, cache_summary = _training_outcomes(args, repo, module, portfolio, train + dev)
+    train_outcomes, train_cache_summary = _training_outcomes(
+        args, repo, module, portfolio, train
+    )
+    original_parent = parent
     batches_payload = read_json_object(args.target_batches_file)
     raw_batches = batches_payload.get("batches")
     if not isinstance(raw_batches, list) or not raw_batches:
@@ -141,8 +152,8 @@ def main(argv: list[str] | None = None) -> int:
     ))
     generations = []
     for number, batch in enumerate(batches, 1):
-        result = evolve_screening_once(
-            parent, train, dev, outcomes, agent,
+        result = evolve_screening_on_train_once(
+            parent, train, train_outcomes, agent,
             generation=number,
             required_targets=batch,
             transcript_dir=output / "transcripts",
@@ -156,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         generation_payload = {
             "generation": number,
             "phase": "review",
+            "evaluation_scope": "train_only",
             "required_targets": list(batch),
             "accepted": result.accepted,
             "gate": asdict(result.gate),
@@ -163,8 +175,6 @@ def main(argv: list[str] | None = None) -> int:
             "child_hash": result.child.fingerprint(),
             "train_parent": asdict(result.train_parent),
             "train_child": asdict(result.train_child),
-            "dev_parent": asdict(result.dev_parent),
-            "dev_child": asdict(result.dev_child),
             "oracle_shields": [asdict(shield) for shield in result.oracle_shields],
             "action_decisions": [
                 asdict(decision) for decision in result.action_decisions
@@ -178,20 +188,18 @@ def main(argv: list[str] | None = None) -> int:
 
     attempted_refinements: set[str] = set()
     for refinement in range(1, args.screen_refinement_generations + 1):
-        train_score = evaluate_screening(parent, train, outcomes)
-        dev_score = evaluate_screening(parent, dev, outcomes)
-        if _constraints_met(train_score, dev_score, constraints):
+        train_score = evaluate_screening(parent, train, train_outcomes)
+        if _train_constraints_met(train_score, constraints):
             break
         needed_families = tuple(
             family
             for family in constraints.required_conditioned_families
             if train_score.conditioned_entries_by_family.get(family, 0) < 1
-            or dev_score.conditioned_entries_by_family.get(family, 0) < 1
         )
         batch = select_refinement_targets(
             parent,
             train,
-            outcomes,
+            train_outcomes,
             constraints=constraints,
             excluded_names=frozenset(attempted_refinements),
             required_families=needed_families,
@@ -206,11 +214,10 @@ def main(argv: list[str] | None = None) -> int:
             if any(parent.get(name).family == family for name in batch)  # type: ignore[union-attr]
         )
         number = len(generations) + 1
-        result = evolve_screening_once(
+        result = evolve_screening_on_train_once(
             parent,
             train,
-            dev,
-            outcomes,
+            train_outcomes,
             agent,
             generation=number,
             required_targets=batch,
@@ -226,6 +233,7 @@ def main(argv: list[str] | None = None) -> int:
         generation_payload = {
             "generation": number,
             "phase": "refinement",
+            "evaluation_scope": "train_only",
             "refinement": refinement,
             "required_conditioning_families": list(missing_families),
             "required_targets": list(batch),
@@ -235,8 +243,6 @@ def main(argv: list[str] | None = None) -> int:
             "child_hash": result.child.fingerprint(),
             "train_parent": asdict(result.train_parent),
             "train_child": asdict(result.train_child),
-            "dev_parent": asdict(result.dev_parent),
-            "dev_child": asdict(result.dev_child),
             "oracle_shields": [asdict(shield) for shield in result.oracle_shields],
             "action_decisions": [
                 asdict(decision) for decision in result.action_decisions
@@ -251,9 +257,28 @@ def main(argv: list[str] | None = None) -> int:
         if result.accepted:
             parent = result.child
 
-    train_score = evaluate_screening(parent, train, outcomes)
-    dev_score = evaluate_screening(parent, dev, outcomes)
-    final_constraints_met = _constraints_met(train_score, dev_score, constraints)
+    # Freeze the Train winner before loading any Dev outcome.  Dev is a single,
+    # read-only final gate and never influences a later mutation or refinement.
+    train_score = evaluate_screening(parent, train, train_outcomes)
+    dev_outcomes, dev_cache_summary = _training_outcomes(
+        args, repo, module, portfolio, dev
+    )
+    dev_score = evaluate_screening(parent, dev, dev_outcomes)
+    original_train_score = evaluate_screening(
+        original_parent, train, train_outcomes
+    )
+    original_dev_score = evaluate_screening(original_parent, dev, dev_outcomes)
+    final_gate = compare_screening(
+        original_train_score,
+        train_score,
+        original_dev_score,
+        dev_score,
+        constraints=constraints,
+        enforce_final_constraints=True,
+    )
+    final_constraints_met = final_gate.accepted and _constraints_met(
+        train_score, dev_score, constraints
+    )
     policy_artifacts = _write_policy_artifacts(
         output, parent, accepted=final_constraints_met
     )
@@ -278,11 +303,20 @@ def main(argv: list[str] | None = None) -> int:
             "policies.py": _sha256(repo / "policies.py"),
             "legacy_dictionary.py": _sha256(legacy_path),
         },
-        "cache": cache_summary,
+        "cache": _merge_cache_summaries(train_cache_summary, dev_cache_summary),
         "train": asdict(train_score),
         "dev": asdict(dev_score),
+        "final_dev_gate": asdict(final_gate),
+        "dev_evaluations": 1,
         "generations": generations,
-        "accepted_generations": [row["generation"] for row in generations if row["accepted"]],
+        "accepted_train_generations": [
+            row["generation"] for row in generations if row["accepted"]
+        ],
+        "accepted_generations": (
+            [row["generation"] for row in generations if row["accepted"]]
+            if final_constraints_met
+            else []
+        ),
         "elapsed_seconds": time.monotonic() - started,
         "public_test_accessed": False,
     }
@@ -299,13 +333,18 @@ def load_frozen_partitions(
     train_limit: int,
     dev_limit: int,
 ) -> tuple[tuple[Task, ...], tuple[Task, ...]]:
-    if train_limit < 1 or dev_limit < 1:
-        raise ValueError("Train and Dev limits must be positive")
+    if train_limit < 1 or dev_limit < 0:
+        raise ValueError("Train limit must be positive and Dev limit must be nonnegative")
     split = read_json_object(split_file)
-    catalog = {task.task_id: task for task in load_tasks(tasks_file)}
+    raw = split["partitions"]  # type: ignore[index]
+    train_ids = tuple(str(value) for value in raw["train"]["task_ids"][:train_limit])
+    dev_ids = tuple(str(value) for value in raw["dev"]["task_ids"][:dev_limit])
+    catalog = {
+        task.task_id: task
+        for task in load_tasks_by_id(tasks_file, [*train_ids, *dev_ids])
+    }
 
     def partition(name: str, limit: int) -> tuple[Task, ...]:
-        raw = split["partitions"]  # type: ignore[index]
         ids = raw[name]["task_ids"][:limit]  # type: ignore[index]
         rows = []
         for task_id in ids:
@@ -320,7 +359,10 @@ def load_frozen_partitions(
             raise ValueError(f"requested {limit} {name} tasks, loaded {len(rows)}")
         return tuple(rows)
 
-    return partition("train", train_limit), partition("dev", dev_limit)
+    return (
+        partition("train", train_limit),
+        partition("dev", dev_limit) if dev_limit else (),
+    )
 
 
 def _training_outcomes(args, repo, module, portfolio, tasks) -> tuple[tuple[Outcome, ...], dict]:
@@ -396,13 +438,42 @@ def _write_policy_artifacts(
     }
 
 
+def _merge_cache_summaries(*summaries: dict) -> dict:
+    """Combine disjoint Train/Dev cache accounting without hiding either pass."""
+    keys = {key for summary in summaries for key in summary}
+    return {
+        key: sum(int(summary.get(key, 0)) for summary in summaries)
+        for key in sorted(keys)
+    }
+
+
+def _train_constraints_met(train_score, constraints: ScreeningConstraints) -> bool:
+    """Check refinement goals using Train only; Dev is reserved for the final gate."""
+    return all(
+        (
+            train_score.global_oracle_retention >= 1.0 - 1e-12,
+            train_score.min_active_candidates >= constraints.min_active_candidates,
+            train_score.max_active_candidates <= constraints.max_active_candidates,
+            train_score.unique_active_dictionaries
+            >= min(constraints.min_unique_active_dictionaries, train_score.task_count),
+            train_score.mean_pairwise_jaccard
+            <= constraints.max_mean_pairwise_jaccard + 1e-12,
+            all(
+                train_score.conditioned_entries_by_family.get(family, 0) >= 1
+                for family in constraints.required_conditioned_families
+            ),
+        )
+    )
+
+
 def _constraints_met(
     train_score, dev_score, constraints: ScreeningConstraints
 ) -> bool:
     return all(
         (
             train_score.global_oracle_retention >= 1.0 - 1e-12,
-            dev_score.global_oracle_retention >= 1.0 - 1e-12,
+            dev_score.global_oracle_retention
+            >= constraints.min_dev_oracle_retention - 1e-12,
             train_score.min_active_candidates >= constraints.min_active_candidates,
             dev_score.min_active_candidates >= constraints.min_active_candidates,
             train_score.max_active_candidates <= constraints.max_active_candidates,
@@ -441,6 +512,8 @@ def _report(manifest: dict) -> str:
         f"- Frozen SHA-256: `{manifest['frozen_screening_policy_sha256']}`",
         f"- Public Test accessed: `{manifest['public_test_accessed']}`",
         f"- Final constraints met: `{manifest['final_constraints_met']}`",
+        f"- Dev evaluations: {manifest.get('dev_evaluations', 'not recorded')}",
+        f"- Final Dev gate: {manifest.get('final_dev_gate', {}).get('reason', 'not recorded')}",
         "",
         "| Split | Coverage | Active success | Failure exposure | N/A exposure | Oracle retention | Mean regret | Compression |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",

@@ -145,6 +145,9 @@ def test_installed_wheel_constructs_default_registry_without_repository_data(
             "__pycache__",
             "*.egg-info",
             "build",
+            "external",
+            "outputs",
+            "runs",
         ),
     )
     clean_venv = tmp_path / "clean-venv"

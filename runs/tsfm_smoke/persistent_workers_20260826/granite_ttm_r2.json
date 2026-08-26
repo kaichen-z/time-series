@@ -1,0 +1,29 @@
+{
+  "adapter": "granite",
+  "checkpoint": "ibm-granite/granite-timeseries-ttm-r2",
+  "checkpoint_revision": "3442406f106122f414a11f72b4ebfe4878bec89d",
+  "device": "cpu",
+  "finite_output": true,
+  "history_length": 96,
+  "horizon": 4,
+  "latency_seconds": 9.699427,
+  "manifest_id": "method_tsfm_0006",
+  "message": "",
+  "output_length": 4,
+  "output_status": "finite",
+  "package_versions": {
+    "accelerate": "1.14.0",
+    "granite-tsfm": "0.3.8",
+    "numpy": "2.5.2",
+    "pandas": "2.3.3",
+    "torch": "2.10.0",
+    "transformers": "4.57.6"
+  },
+  "peak_memory_bytes": 370769920,
+  "reason_code": "",
+  "requested_device": "cpu",
+  "requested_revision": "512-96-ft-r2.1",
+  "schema_version": 1,
+  "status": "success",
+  "worker_environment": "granite_tsfm"
+}

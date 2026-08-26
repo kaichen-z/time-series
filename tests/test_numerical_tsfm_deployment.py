@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import sys
+from types import SimpleNamespace
+import venv
 
 import pytest
 
@@ -228,6 +230,210 @@ def test_deployment_rejects_missing_and_non_executable_interpreters(
     )
     with pytest.raises(ValueError, match="not executable"):
         TSFMDeployment.load(config, manifests=ManifestRegistry.load_default())
+
+
+def test_runtime_validation_rejects_a_stripped_virtual_environment(
+    tmp_path: Path,
+) -> None:
+    environment = tmp_path / "stripped-worker"
+    (environment / "bin").mkdir(parents=True)
+    (environment / "lib" / "python3.12" / "site-packages").mkdir(parents=True)
+    interpreter = environment / "bin" / "python"
+    interpreter.symlink_to(sys.executable)
+    config = _write_config(
+        tmp_path / "workers.json",
+        {"uni2ts": {"interpreter": str(interpreter)}},
+    )
+
+    deployment = TSFMDeployment.load(
+        config,
+        manifests=ManifestRegistry.load_default(),
+        acknowledged_licenses=("CC-BY-NC-4.0",),
+    )
+
+    with pytest.raises(ValueError, match="requires an explicit virtual environment"):
+        deployment.validate_runtime()
+
+
+def test_runtime_validation_rejects_missing_reviewed_dependencies(
+    tmp_path: Path,
+) -> None:
+    environment = tmp_path / "empty-worker"
+    venv.EnvBuilder(with_pip=False).create(environment)
+    interpreter = environment / "bin" / "python"
+    config = _write_config(
+        tmp_path / "workers.json",
+        {"uni2ts": {"interpreter": str(interpreter)}},
+    )
+
+    deployment = TSFMDeployment.load(
+        config,
+        manifests=ManifestRegistry.load_default(),
+        acknowledged_licenses=("CC-BY-NC-4.0",),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"missing reviewed dependencies: .*numerical_agent\.tsfm\.worker_main",
+    ):
+        deployment.validate_runtime()
+
+
+def test_runtime_validation_rejects_a_non_venv_system_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    environment = tmp_path / "system-prefix"
+    (environment / "bin").mkdir(parents=True)
+    interpreter = environment / "bin" / "python"
+    interpreter.symlink_to(sys.executable)
+    config = _write_config(
+        tmp_path / "workers.json",
+        {"uni2ts": {"interpreter": str(interpreter)}},
+    )
+    deployment = TSFMDeployment.load(
+        config,
+        manifests=ManifestRegistry.load_default(),
+        acknowledged_licenses=("CC-BY-NC-4.0",),
+    )
+
+    monkeypatch.setattr(
+        "numerical_agent.tsfm.deployment.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "base_prefix": str(environment),
+                    "executable": str(interpreter),
+                    "missing": [],
+                    "prefix": str(environment),
+                }
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="requires an explicit virtual environment"):
+        deployment.validate_runtime()
+
+
+def test_runtime_validation_rejects_system_site_packages_venv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    environment = tmp_path / "system-site-worker"
+    venv.EnvBuilder(with_pip=False, system_site_packages=True).create(environment)
+    interpreter = environment / "bin" / "python"
+    config = _write_config(
+        tmp_path / "workers.json",
+        {"uni2ts": {"interpreter": str(interpreter)}},
+    )
+    deployment = TSFMDeployment.load(
+        config,
+        manifests=ManifestRegistry.load_default(),
+        acknowledged_licenses=("CC-BY-NC-4.0",),
+    )
+
+    monkeypatch.setattr(
+        "numerical_agent.tsfm.deployment.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "base_prefix": sys.base_prefix,
+                    "executable": str(interpreter),
+                    "missing": [],
+                    "prefix": str(environment),
+                }
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="must isolate system site-packages"):
+        deployment.validate_runtime()
+
+
+def test_runtime_validation_probes_exact_lazy_backend_modules(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    environment = tmp_path / "worker"
+    venv.EnvBuilder(with_pip=False).create(environment)
+    interpreter = environment / "bin" / "python"
+    config = _write_config(
+        tmp_path / "workers.json",
+        {"uni2ts": {"interpreter": str(interpreter)}},
+    )
+    deployment = TSFMDeployment.load(
+        config,
+        manifests=ManifestRegistry.load_default(),
+        acknowledged_licenses=("CC-BY-NC-4.0",),
+    )
+
+    def probe(argv, **_kwargs):
+        dependency = "uni2ts.model.moirai2"
+        missing = [dependency] if dependency in argv[-1] else []
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "base_prefix": sys.base_prefix,
+                    "executable": str(interpreter),
+                    "missing": missing,
+                    "prefix": str(environment),
+                }
+            ),
+        )
+
+    monkeypatch.setattr("numerical_agent.tsfm.deployment.subprocess.run", probe)
+
+    with pytest.raises(ValueError, match="uni2ts.model.moirai2"):
+        deployment.validate_runtime()
+
+
+def test_runtime_validation_probes_tabpfn_license_error_types(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    environment = tmp_path / "tabpfn-worker"
+    venv.EnvBuilder(with_pip=False).create(environment)
+    interpreter = environment / "bin" / "python"
+    config = _write_config(
+        tmp_path / "workers.json",
+        {"tabpfn_ts": {"interpreter": str(interpreter)}},
+    )
+    deployment = TSFMDeployment.load(
+        config,
+        manifests=ManifestRegistry.load_default(),
+        acknowledged_licenses=(
+            "TabPFN-3 Non-Commercial License; Apache-2.0 code",
+        ),
+    )
+
+    def probe(argv, **_kwargs):
+        required_symbols = json.loads(argv[-1])
+        required = {
+            "TabPFNHuggingFaceGatedRepoError",
+            "TabPFNLicenseError",
+        }
+        present = set(required_symbols.get("tabpfn.errors", ()))
+        missing = [
+            f"tabpfn.errors:{name}" for name in sorted(required - present)
+        ]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "base_prefix": sys.base_prefix,
+                    "executable": str(interpreter),
+                    "missing": missing,
+                    "prefix": str(environment),
+                }
+            ),
+        )
+
+    monkeypatch.setattr("numerical_agent.tsfm.deployment.subprocess.run", probe)
+
+    deployment.validate_runtime()
 
 
 def test_worker_failure_redacts_token_bearing_environment_values(

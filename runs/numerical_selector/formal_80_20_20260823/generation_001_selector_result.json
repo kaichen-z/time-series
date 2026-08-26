@@ -1,0 +1,70 @@
+{
+  "accepted": false,
+  "child_hash": "0d55d5d64e739784be9239b841768cf203a5887145a42b34fbb5ab516fbf9c12",
+  "dev_child": {
+    "catastrophic_rate": 0.07142857142857142,
+    "coverage": 0.7,
+    "ensemble_rate": 0.6428571428571429,
+    "fallback_rate": 0.0,
+    "family_diversity": 3,
+    "mean_active_oracle_regret": 0.25915058847661376,
+    "mean_mae": 182.98255357683868,
+    "mean_mase": 3.256091059656393,
+    "mean_smape": 37.7636055372706,
+    "median_mae": 10.82714670513222,
+    "median_mase": 1.624978173823991,
+    "method_diversity": 13,
+    "task_count": 20
+  },
+  "dev_parent": {
+    "catastrophic_rate": 0.15789473684210525,
+    "coverage": 0.95,
+    "ensemble_rate": 0.6842105263157895,
+    "fallback_rate": 0.0,
+    "family_diversity": 3,
+    "mean_active_oracle_regret": 0.6533347499993036,
+    "mean_mae": 170.1690398142937,
+    "mean_mase": 4.549459394282045,
+    "mean_smape": 40.36673703625235,
+    "median_mae": 9.506828685244797,
+    "median_mase": 2.7587301458358824,
+    "method_diversity": 17,
+    "task_count": 20
+  },
+  "gate": {
+    "accepted": false,
+    "reason": "coverage decreased"
+  },
+  "generation": 1,
+  "parent_hash": "1bd81db8f25998c275b9fe9a79bebe5830cb9a12c2344de2ea38ea233022518e",
+  "train_child": {
+    "catastrophic_rate": 0.05357142857142857,
+    "coverage": 0.7,
+    "ensemble_rate": 0.5178571428571429,
+    "fallback_rate": 0.0,
+    "family_diversity": 3,
+    "mean_active_oracle_regret": 0.25022885101444864,
+    "mean_mae": 112.68682021737538,
+    "mean_mase": 2.3052121304716935,
+    "mean_smape": 41.61715215479656,
+    "median_mae": 8.924048674870516,
+    "median_mase": 1.3756257378729646,
+    "method_diversity": 19,
+    "task_count": 80
+  },
+  "train_parent": {
+    "catastrophic_rate": 0.07575757575757576,
+    "coverage": 0.825,
+    "ensemble_rate": 0.6818181818181818,
+    "fallback_rate": 0.0,
+    "family_diversity": 3,
+    "mean_active_oracle_regret": 0.534240832282547,
+    "mean_mae": 1771.9359698415221,
+    "mean_mase": 3.2333084402129773,
+    "mean_smape": 35.04739943248634,
+    "median_mae": 9.64440618944908,
+    "median_mase": 1.5941714786124512,
+    "method_diversity": 27,
+    "task_count": 80
+  }
+}

@@ -1,0 +1,292 @@
+{
+  "accepted": false,
+  "audit_statuses": {
+    "dev": {},
+    "train": {
+      "combined:failed": 75,
+      "combined:success": 136,
+      "statistical:failed": 558,
+      "statistical:success": 2739,
+      "tsfm:success": 279
+    }
+  },
+  "cache": {
+    "hindcast_hits": 13710,
+    "hindcast_misses": 0,
+    "statistical_hits": 7440,
+    "statistical_misses": 0,
+    "tsfm_hits": 368,
+    "tsfm_misses": 32
+  },
+  "candidate_count": 3,
+  "candidates": [
+    {
+      "adaptive_overlay_assignments": {},
+      "changed_train_tasks": [],
+      "eligible": true,
+      "entity_crossfold_gate": {
+        "accepted": true,
+        "reason": "zero-penalty parent reference"
+      },
+      "route": {
+        "baseline_strategy": "toto_first",
+        "blend_weight": 0.0,
+        "guard_enabled": false,
+        "max_regret": 0.0,
+        "min_coverage": 0.75,
+        "minimum_improvement": 0.05
+      },
+      "train": {
+        "assumption_kind_diversity": 0,
+        "catastrophic_rate": 0.0375,
+        "coverage": 1.0,
+        "ensemble_rate": 0.2375,
+        "fallback_rate": 0.0,
+        "family_diversity": 3,
+        "mean_active_oracle_regret": 0.1102687633606035,
+        "mean_assumption_count": 0.0,
+        "mean_considered_candidates": 0.0,
+        "mean_considered_families": 0.0,
+        "mean_mae": 203.05157780484996,
+        "mean_mase": 2.65855685325228,
+        "mean_smae": 0.3249752753243828,
+        "mean_smape": 35.26948266377266,
+        "mean_srmse": 0.5161607206727465,
+        "median_mae": 7.204112705809264,
+        "median_mase": 1.3864754846339644,
+        "median_smae": 0.22754562310230403,
+        "median_srmse": 0.43523901896971146,
+        "method_diversity": 20,
+        "p90_smae": 0.564301991894019,
+        "p95_smae": 0.8814857360648275,
+        "se_smae": 0.04708526399531246,
+        "se_srmse": 0.06174412206973542,
+        "smae_clipped_count": 0,
+        "smae_clipped_rate": 0.0,
+        "srmse_clipped_count": 0,
+        "srmse_clipped_rate": 0.0,
+        "task_count": 80
+      },
+      "train_gate": {
+        "accepted": true,
+        "reason": "zero-penalty parent reference"
+      }
+    },
+    {
+      "adaptive_overlay_assignments": {
+        "task_127": 0.1,
+        "task_132": 0.1,
+        "task_169": 0.1
+      },
+      "changed_train_tasks": [
+        "task_127",
+        "task_132",
+        "task_169"
+      ],
+      "eligible": true,
+      "entity_crossfold_gate": {
+        "accepted": true,
+        "reason": "Activation-aware sMAE improved in 2/4 folds with no material fold regression"
+      },
+      "route": {
+        "baseline_strategy": "conservative_tsfm",
+        "blend_weight": 0.1,
+        "guard_enabled": false,
+        "max_regret": 0.0,
+        "min_coverage": 0.75,
+        "minimum_improvement": 0.02
+      },
+      "train": {
+        "assumption_kind_diversity": 0,
+        "catastrophic_rate": 0.0375,
+        "coverage": 1.0,
+        "ensemble_rate": 0.275,
+        "fallback_rate": 0.0,
+        "family_diversity": 3,
+        "mean_active_oracle_regret": 0.1101607588541305,
+        "mean_assumption_count": 0.0,
+        "mean_considered_candidates": 0.0,
+        "mean_considered_families": 0.0,
+        "mean_mae": 203.02071315563217,
+        "mean_mase": 2.6576364500799707,
+        "mean_smae": 0.32481998910288606,
+        "mean_smape": 35.248659918415164,
+        "mean_srmse": 0.5161395925454046,
+        "median_mae": 7.204112705809264,
+        "median_mase": 1.3864754846339644,
+        "median_smae": 0.22754562310230403,
+        "median_srmse": 0.43523901896971146,
+        "method_diversity": 20,
+        "p90_smae": 0.5565030366923396,
+        "p95_smae": 0.8814857360648275,
+        "se_smae": 0.04707862145215098,
+        "se_srmse": 0.061740487647951335,
+        "smae_clipped_count": 0,
+        "smae_clipped_rate": 0.0,
+        "srmse_clipped_count": 0,
+        "srmse_clipped_rate": 0.0,
+        "task_count": 80
+      },
+      "train_gate": {
+        "accepted": true,
+        "reason": "Candidate passed strict aggregate Train sMAE and sRMSE gates"
+      }
+    },
+    {
+      "adaptive_overlay_assignments": {
+        "task_127": 0.25,
+        "task_132": 0.25,
+        "task_169": 0.1
+      },
+      "changed_train_tasks": [
+        "task_127",
+        "task_132",
+        "task_169"
+      ],
+      "eligible": false,
+      "entity_crossfold_gate": {
+        "accepted": false,
+        "reason": "aggregate Train gate failed"
+      },
+      "route": {
+        "baseline_strategy": "conservative_tsfm",
+        "blend_weight": 0.25,
+        "guard_enabled": false,
+        "max_regret": 0.0,
+        "min_coverage": 0.75,
+        "minimum_improvement": 0.02
+      },
+      "train": {
+        "assumption_kind_diversity": 0,
+        "catastrophic_rate": 0.0375,
+        "coverage": 1.0,
+        "ensemble_rate": 0.275,
+        "fallback_rate": 0.0,
+        "family_diversity": 3,
+        "mean_active_oracle_regret": 0.11010716838774667,
+        "mean_assumption_count": 0.0,
+        "mean_considered_candidates": 0.0,
+        "mean_considered_families": 0.0,
+        "mean_mae": 202.98145930088057,
+        "mean_mase": 2.6570410737360493,
+        "mean_smae": 0.3247495380040092,
+        "mean_smape": 35.23878773279672,
+        "mean_srmse": 0.5162217910272074,
+        "median_mae": 7.204112705809264,
+        "median_mase": 1.3864754846339644,
+        "median_smae": 0.22754562310230403,
+        "median_srmse": 0.43523901896971146,
+        "method_diversity": 20,
+        "p90_smae": 0.5565030366923396,
+        "p95_smae": 0.8814857360648275,
+        "se_smae": 0.047078609062382634,
+        "se_srmse": 0.06174774932307812,
+        "smae_clipped_count": 0,
+        "smae_clipped_rate": 0.0,
+        "srmse_clipped_count": 0,
+        "srmse_clipped_rate": 0.0,
+        "task_count": 80
+      },
+      "train_gate": {
+        "accepted": false,
+        "reason": "Train aggregate sRMSE did not improve"
+      }
+    }
+  ],
+  "dev_evaluated": false,
+  "dev_gate": {
+    "accepted": false,
+    "reason": "Train-only run; Dev was not evaluated"
+  },
+  "dev_parent": null,
+  "dev_tasks": 0,
+  "dev_winner": null,
+  "elapsed_seconds": 22.298167124856263,
+  "experiment": "conservative-tsfm",
+  "public_test_accessed": false,
+  "schema_version": 1,
+  "screening_policy_sha256": "2277acd9ef0b5e219960e84aa1b02fbfa13bf1b54cf106e26b00c5f3fc2babc2",
+  "selected_adaptive_overlay_assignments": {
+    "task_127": 0.1,
+    "task_132": 0.1,
+    "task_169": 0.1
+  },
+  "selected_dev_changes": [],
+  "selected_route": {
+    "baseline_strategy": "conservative_tsfm",
+    "blend_weight": 0.1,
+    "guard_enabled": false,
+    "max_regret": 0.0,
+    "min_coverage": 0.75,
+    "minimum_improvement": 0.02
+  },
+  "selected_train_changes": [
+    "task_127",
+    "task_132",
+    "task_169"
+  ],
+  "selection": "Train-only search with entity-disjoint cross-validation; Dev not accessed",
+  "train_parent": {
+    "assumption_kind_diversity": 0,
+    "catastrophic_rate": 0.0375,
+    "coverage": 1.0,
+    "ensemble_rate": 0.2375,
+    "fallback_rate": 0.0,
+    "family_diversity": 3,
+    "mean_active_oracle_regret": 0.1102687633606035,
+    "mean_assumption_count": 0.0,
+    "mean_considered_candidates": 0.0,
+    "mean_considered_families": 0.0,
+    "mean_mae": 203.05157780484996,
+    "mean_mase": 2.65855685325228,
+    "mean_smae": 0.3249752753243828,
+    "mean_smape": 35.26948266377266,
+    "mean_srmse": 0.5161607206727465,
+    "median_mae": 7.204112705809264,
+    "median_mase": 1.3864754846339644,
+    "median_smae": 0.22754562310230403,
+    "median_srmse": 0.43523901896971146,
+    "method_diversity": 20,
+    "p90_smae": 0.564301991894019,
+    "p95_smae": 0.8814857360648275,
+    "se_smae": 0.04708526399531246,
+    "se_srmse": 0.06174412206973542,
+    "smae_clipped_count": 0,
+    "smae_clipped_rate": 0.0,
+    "srmse_clipped_count": 0,
+    "srmse_clipped_rate": 0.0,
+    "task_count": 80
+  },
+  "train_tasks": 80,
+  "train_winner": {
+    "assumption_kind_diversity": 0,
+    "catastrophic_rate": 0.0375,
+    "coverage": 1.0,
+    "ensemble_rate": 0.275,
+    "fallback_rate": 0.0,
+    "family_diversity": 3,
+    "mean_active_oracle_regret": 0.1101607588541305,
+    "mean_assumption_count": 0.0,
+    "mean_considered_candidates": 0.0,
+    "mean_considered_families": 0.0,
+    "mean_mae": 203.02071315563217,
+    "mean_mase": 2.6576364500799707,
+    "mean_smae": 0.32481998910288606,
+    "mean_smape": 35.248659918415164,
+    "mean_srmse": 0.5161395925454046,
+    "median_mae": 7.204112705809264,
+    "median_mase": 1.3864754846339644,
+    "median_smae": 0.22754562310230403,
+    "median_srmse": 0.43523901896971146,
+    "method_diversity": 20,
+    "p90_smae": 0.5565030366923396,
+    "p95_smae": 0.8814857360648275,
+    "se_smae": 0.04707862145215098,
+    "se_srmse": 0.061740487647951335,
+    "smae_clipped_count": 0,
+    "smae_clipped_rate": 0.0,
+    "srmse_clipped_count": 0,
+    "srmse_clipped_rate": 0.0,
+    "task_count": 80
+  }
+}

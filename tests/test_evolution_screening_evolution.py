@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
 from common.llm import FakeLLMClient
-from numerical_agent.evolution.execution import CRASHED, SUCCESS, Outcome, Task
+from numerical_agent.evolution.execution import CRASHED, INVALID, SUCCESS, Outcome, Task
 from numerical_agent.evolution.filtering import FilterDictionary, FilterEntry
 from numerical_agent.evolution.screening import (
     ApplicabilityClause,
@@ -17,17 +18,290 @@ from numerical_agent.evolution.screening import (
     profile_task,
 )
 from numerical_agent.evolution.screening_evolution import (
+    SCREENING_SYSTEM,
     ScreeningEvolutionError,
     apply_screening_response,
     build_train_evidence,
     complete_target_batches,
     evolve_screening_once,
+    evolve_screening_train_then_dev,
+    compile_supported_specialists,
     protect_train_oracles,
     select_refinement_targets,
+    validate_failure_status_evidence,
+    validate_specialized_evidence,
     migrate_filter_dictionary,
     parse_screening_source,
     render_screening_source,
 )
+
+
+def test_screening_prompt_discloses_the_trusted_joint_clause_gate() -> None:
+    assert "exact joint" in SCREENING_SYSTEM
+    assert "75%" in SCREENING_SYSTEM
+    assert "50%" in SCREENING_SYSTEM
+    assert "poor MASE alone" in SCREENING_SYSTEM
+
+
+def test_failure_status_requires_real_crash_or_invalid_train_evidence() -> None:
+    tasks, outcomes, parent = _joint_support_fixture()
+    score_only_repair = ScreeningPolicy(
+        (
+            ScreeningEntry(
+                "candidate", "statistical", "repair", ApplicabilityPolicy(),
+                "high MASE is not an implementation failure",
+            ),
+            parent.get("baseline"),
+        ),
+        parent.fallback_names,
+    )
+
+    with pytest.raises(ScreeningEvolutionError, match="no Crash/Invalid"):
+        validate_failure_status_evidence(
+            parent,
+            score_only_repair,
+            tasks,
+            outcomes,
+            target_names=("candidate",),
+        )
+
+    invalid_outcomes = tuple(
+        replace(row, status=INVALID, mase=None)
+        if row.method == "candidate" and row.task_id == tasks[0].task_id
+        else row
+        for row in outcomes
+    )
+    evidence = validate_failure_status_evidence(
+        parent,
+        score_only_repair,
+        tasks,
+        invalid_outcomes,
+        target_names=("candidate",),
+    )
+    assert evidence == {"candidate": 1}
+
+
+def _joint_support_fixture():
+    tasks = (
+        Task("short-short", (1.0,) * 12, 2, "1 day", (1.0, 1.0)),
+        Task("short-long", (1.0,) * 12, 20, "1 day", (1.0,) * 20),
+        Task("long-short", (1.0,) * 200, 2, "1 day", (1.0, 1.0)),
+        Task("long-long", (1.0,) * 200, 20, "1 day", (1.0,) * 20),
+    )
+    outcomes = tuple(
+        row
+        for task in tasks
+        for row in (
+            Outcome("candidate", task.task_id, SUCCESS, mase=0.5),
+            Outcome("baseline", task.task_id, SUCCESS, mase=1.0),
+        )
+    )
+    parent = ScreeningPolicy(
+        (
+            ScreeningEntry(
+                "candidate", "statistical", "keep", ApplicabilityPolicy(), "broad"
+            ),
+            ScreeningEntry(
+                "baseline", "tsfm", "keep", ApplicabilityPolicy(), "baseline"
+            ),
+        ),
+        ("candidate", "baseline"),
+    )
+    return tasks, outcomes, parent
+
+
+def test_specialized_clause_requires_exact_joint_train_support() -> None:
+    """Two supported marginals cannot justify an unsupported conjunction."""
+    tasks, outcomes, parent = _joint_support_fixture()
+    child = ScreeningPolicy(
+        (
+            ScreeningEntry(
+                "candidate",
+                "statistical",
+                "specialized",
+                ApplicabilityPolicy(
+                    (
+                        ApplicabilityClause(
+                            feature_tests=(
+                                FeatureTest("history_length", "==", 12),
+                                FeatureTest("horizon", "==", 2),
+                            )
+                        ),
+                    )
+                ),
+                "unsupported conjunction",
+            ),
+            parent.get("baseline"),
+        ),
+        parent.fallback_names,
+    )
+
+    with pytest.raises(ScreeningEvolutionError, match="joint support"):
+        validate_specialized_evidence(
+            parent,
+            child,
+            tasks,
+            outcomes,
+            baseline_method="baseline",
+            min_group_support=2,
+            target_names=("candidate",),
+        )
+
+
+def test_specialized_clause_accepts_supported_reliable_baseline_uplift() -> None:
+    tasks, outcomes, parent = _joint_support_fixture()
+    child = ScreeningPolicy(
+        (
+            ScreeningEntry(
+                "candidate",
+                "statistical",
+                "specialized",
+                ApplicabilityPolicy(
+                    (
+                        ApplicabilityClause(
+                            feature_tests=(
+                                FeatureTest("history_length", "==", 12),
+                            )
+                        ),
+                    )
+                ),
+                "supported short-history specialist",
+            ),
+            parent.get("baseline"),
+        ),
+        parent.fallback_names,
+    )
+
+    evidence = validate_specialized_evidence(
+        parent,
+        child,
+        tasks,
+        outcomes,
+        baseline_method="baseline",
+        min_group_support=2,
+        target_names=("candidate",),
+    )
+
+    assert evidence[0].support == 2
+    assert evidence[0].comparable == 2
+    assert evidence[0].win_rate == 1.0
+    assert evidence[0].median_relative_mase < 0.0
+
+
+def test_trusted_compiler_replaces_an_unsupported_conjunction_with_train_strata() -> None:
+    tasks, outcomes, parent = _joint_support_fixture()
+    proposed = ScreeningPolicy(
+        (
+            ScreeningEntry(
+                "candidate",
+                "statistical",
+                "specialized",
+                ApplicabilityPolicy(
+                    (
+                        ApplicabilityClause(
+                            feature_tests=(
+                                FeatureTest("history_length", "==", 12),
+                                FeatureTest("horizon", "==", 2),
+                            )
+                        ),
+                    )
+                ),
+                "Agent proposed a weak conjunction",
+            ),
+            parent.get("baseline"),
+        ),
+        parent.fallback_names,
+    )
+
+    compiled = compile_supported_specialists(
+        parent,
+        proposed,
+        tasks,
+        outcomes,
+        baseline_method="baseline",
+        min_group_support=2,
+        target_names=("candidate",),
+    )
+
+    candidate = compiled.get("candidate")
+    assert candidate is not None
+    assert candidate.status == "specialized"
+    assert candidate.applicability.any_of
+    validate_specialized_evidence(
+        parent,
+        compiled,
+        tasks,
+        outcomes,
+        baseline_method="baseline",
+        min_group_support=2,
+        target_names=("candidate",),
+    )
+
+
+def test_screening_generations_never_use_dev_until_one_final_gate(tmp_path) -> None:
+    """Changing Dev labels may change survival, never the Train-evolved Child."""
+    parent = migrate_filter_dictionary(
+        _legacy(), fallback_names=("stable", "timesfm", "special")
+    )
+    train, dev = _tasks("train"), _tasks("dev")
+    response = json.dumps(
+        {
+            "summary": "quarantine the crashing combined method",
+            "actions": [
+                {
+                    "name": "broken",
+                    "status": "repair",
+                    "any_of": [],
+                    "reason": "crashes on Train",
+                }
+            ],
+        }
+    )
+    constraints = ScreeningConstraints(
+        baseline_method="timesfm",
+        min_active_candidates=1,
+        max_active_candidates=4,
+        min_unique_active_dictionaries=1,
+        max_mean_pairwise_jaccard=1.0,
+        min_group_support=1,
+        required_conditioned_families=(),
+    )
+    safe_agent = FakeLLMClient([response])
+    safe = evolve_screening_train_then_dev(
+        parent,
+        train,
+        dev,
+        _outcomes(train + dev),
+        safe_agent,
+        batches=(("broken",),),
+        transcript_dir=tmp_path / "safe",
+        constraints=constraints,
+    )
+
+    dev_oracle_outcomes = tuple(
+        replace(row, status=SUCCESS, mase=0.1)
+        if row.method == "broken" and row.task_id.startswith("dev-")
+        else row
+        for row in _outcomes(train + dev)
+    )
+    rejected_agent = FakeLLMClient([response])
+    rejected = evolve_screening_train_then_dev(
+        parent,
+        train,
+        dev,
+        dev_oracle_outcomes,
+        rejected_agent,
+        batches=(("broken",),),
+        transcript_dir=tmp_path / "rejected",
+        constraints=constraints,
+    )
+
+    assert safe.train_winner == rejected.train_winner
+    assert safe_agent.calls[0]["messages"] == rejected_agent.calls[0]["messages"]
+    assert safe.final_gate.accepted
+    assert not rejected.final_gate.accepted
+    assert safe.frozen == safe.train_winner
+    assert rejected.frozen == parent
 
 
 def _legacy() -> FilterDictionary:
@@ -589,18 +863,24 @@ def test_refinement_retries_when_required_family_is_left_broad(tmp_path) -> None
         }
     )
     agent = FakeLLMClient([broad, conditioned])
+    outcomes = tuple(
+        replace(row, mase=0.8)
+        if row.method == "timesfm"
+        else row
+        for row in _outcomes(train + dev)
+    )
 
     result = evolve_screening_once(
         parent,
         train,
         dev,
-        _outcomes(train + dev),
+        outcomes,
         agent,
         generation=1,
         required_targets=("timesfm",),
         transcript_dir=tmp_path,
         constraints=ScreeningConstraints(
-            baseline_method="timesfm",
+            baseline_method="stable",
             min_active_candidates=1,
             max_active_candidates=4,
             min_unique_active_dictionaries=1,

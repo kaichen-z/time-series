@@ -1,0 +1,925 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Time-Series Self-Evolution Pipeline · 2026-08-26</title>
+  <style>
+    :root {
+      --bg: #f4f0e8;
+      --surface: #fffdf8;
+      --surface-2: #ebe5da;
+      --ink: #17211d;
+      --muted: #66706b;
+      --line: #d8d0c3;
+      --accent: #0f6b59;
+      --accent-2: #d7693b;
+      --accent-3: #315b8a;
+      --good: #197054;
+      --warn: #9a5b12;
+      --bad: #a23b35;
+      --code: #15231f;
+      --code-ink: #e6f1ec;
+      --shadow: 0 18px 48px rgba(28, 39, 34, .09);
+      --radius: 18px;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #111714;
+        --surface: #18201c;
+        --surface-2: #222b26;
+        --ink: #e8eee9;
+        --muted: #aab5af;
+        --line: #344039;
+        --accent: #70c9af;
+        --accent-2: #ee9167;
+        --accent-3: #89add5;
+        --good: #79d1ae;
+        --warn: #edb86c;
+        --bad: #ef8d87;
+        --code: #0b100e;
+        --code-ink: #dce9e2;
+        --shadow: 0 18px 48px rgba(0, 0, 0, .25);
+      }
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 10% 0%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 30rem),
+        radial-gradient(circle at 90% 8%, color-mix(in srgb, var(--accent-2) 10%, transparent), transparent 28rem),
+        var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
+      line-height: 1.65;
+    }
+    a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+    code { font-size: .92em; }
+    .shell {
+      width: min(1500px, 100%);
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 260px minmax(0, 1fr);
+      gap: 28px;
+      padding: 28px;
+    }
+    aside {
+      position: sticky;
+      top: 22px;
+      align-self: start;
+      max-height: calc(100vh - 44px);
+      overflow: auto;
+      padding: 22px 18px;
+      background: color-mix(in srgb, var(--surface) 88%, transparent);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+    .brand { font-weight: 750; letter-spacing: -.02em; margin-bottom: 2px; }
+    .brand-sub { color: var(--muted); font-size: 12px; margin-bottom: 18px; }
+    nav a {
+      display: block;
+      padding: 7px 9px;
+      margin: 2px 0;
+      border-radius: 9px;
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 13px;
+    }
+    nav a:hover, nav a.active { background: var(--surface-2); color: var(--ink); }
+    .nav-label {
+      margin: 17px 9px 6px;
+      color: var(--muted);
+      font-size: 10px;
+      letter-spacing: .13em;
+      text-transform: uppercase;
+    }
+    main { min-width: 0; }
+    .hero {
+      padding: clamp(30px, 5vw, 68px);
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 28px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      position: relative;
+    }
+    .hero::after {
+      content: "";
+      position: absolute;
+      right: -80px;
+      top: -100px;
+      width: 310px;
+      height: 310px;
+      border: 56px solid color-mix(in srgb, var(--accent) 12%, transparent);
+      border-radius: 50%;
+      pointer-events: none;
+    }
+    .eyebrow { color: var(--accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: 12px; }
+    h1 { max-width: 900px; margin: 12px 0 18px; font-size: clamp(36px, 6vw, 76px); line-height: 1.02; letter-spacing: -.055em; }
+    .lede { max-width: 900px; font-size: clamp(17px, 2vw, 22px); color: var(--muted); margin: 0; }
+    .meta-row, .pill-row { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 24px; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface);
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+    .good { color: var(--good); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+    section {
+      scroll-margin-top: 24px;
+      margin: 28px 0;
+      padding: clamp(24px, 4vw, 44px);
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+    section > h2 { margin: 0 0 8px; font-size: clamp(25px, 3.2vw, 40px); letter-spacing: -.035em; line-height: 1.15; }
+    h3 { margin: 32px 0 10px; font-size: 20px; letter-spacing: -.02em; }
+    h4 { margin: 22px 0 8px; }
+    p { margin: 10px 0; }
+    .section-intro { color: var(--muted); max-width: 920px; margin-bottom: 24px; }
+    .grid { display: grid; gap: 16px; }
+    .g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 18px;
+      background: color-mix(in srgb, var(--surface) 90%, var(--surface-2));
+      min-width: 0;
+    }
+    .card h3, .card h4 { margin-top: 0; }
+    .kpi { font-size: 30px; font-weight: 750; letter-spacing: -.04em; line-height: 1.1; }
+    .kpi-label { color: var(--muted); font-size: 12px; margin-top: 5px; }
+    .callout {
+      margin: 18px 0;
+      padding: 16px 18px;
+      border-left: 4px solid var(--accent);
+      background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+      border-radius: 0 12px 12px 0;
+    }
+    .callout.warnbox { border-left-color: var(--warn); background: color-mix(in srgb, var(--warn) 9%, var(--surface)); }
+    .callout.badbox { border-left-color: var(--bad); background: color-mix(in srgb, var(--bad) 8%, var(--surface)); }
+    .flow {
+      display: flex;
+      align-items: stretch;
+      gap: 9px;
+      overflow-x: auto;
+      padding: 8px 2px 14px;
+    }
+    .node {
+      flex: 1 0 148px;
+      min-width: 148px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface-2);
+      font-weight: 700;
+      line-height: 1.35;
+    }
+    .node small { display: block; color: var(--muted); font-weight: 400; margin-top: 6px; }
+    .arrow { align-self: center; color: var(--muted); font-weight: 800; }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 13px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--surface); }
+    th, td { padding: 11px 13px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; background: var(--surface-2); }
+    tr:last-child td { border-bottom: 0; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    pre {
+      margin: 15px 0;
+      padding: 17px;
+      border-radius: 13px;
+      background: var(--code);
+      color: var(--code-ink);
+      overflow: auto;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    ul, ol { padding-left: 22px; }
+    li { margin: 5px 0; }
+    details { border-top: 1px solid var(--line); padding: 13px 0; }
+    details:last-child { border-bottom: 1px solid var(--line); }
+    summary { cursor: pointer; font-weight: 700; color: var(--ink); }
+    .status {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      border: 1px solid currentColor;
+      white-space: nowrap;
+    }
+    .bar-row { display: grid; grid-template-columns: 165px 1fr 70px; gap: 10px; align-items: center; margin: 10px 0; font-size: 13px; }
+    .bar-track { height: 12px; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
+    .bar-fill { height: 100%; background: var(--accent); border-radius: inherit; }
+    .bar-fill.alt { background: var(--accent-2); }
+    .bar-fill.blue { background: var(--accent-3); }
+    .timeline { position: relative; margin-left: 10px; padding-left: 26px; }
+    .timeline::before { content: ""; position: absolute; left: 5px; top: 8px; bottom: 8px; width: 2px; background: var(--line); }
+    .event { position: relative; padding: 0 0 24px; }
+    .event::before { content: ""; position: absolute; left: -26px; top: 7px; width: 12px; height: 12px; border-radius: 50%; background: var(--accent); border: 3px solid var(--surface); box-shadow: 0 0 0 1px var(--accent); }
+    .event time { color: var(--accent); font-weight: 700; font-size: 12px; }
+    .event h3 { margin: 2px 0 5px; }
+    .source-list { columns: 2; column-gap: 28px; font-size: 13px; }
+    .source-list li { break-inside: avoid; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 2px; }
+    button {
+      appearance: none;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 7px 11px;
+      color: var(--ink);
+      background: var(--surface);
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    button:hover { background: var(--surface-2); }
+    footer { padding: 10px 4px 46px; color: var(--muted); font-size: 12px; }
+    @media (max-width: 1050px) {
+      .shell { grid-template-columns: 1fr; }
+      aside { position: relative; top: 0; max-height: none; }
+      nav { display: flex; flex-wrap: wrap; gap: 2px; }
+      .nav-label { width: 100%; }
+    }
+    @media (max-width: 760px) {
+      .shell { padding: 12px; gap: 14px; }
+      .hero, section { padding: 22px 18px; border-radius: 16px; }
+      .g2, .g3, .g4 { grid-template-columns: 1fr; }
+      .bar-row { grid-template-columns: 110px 1fr 54px; }
+      .source-list { columns: 1; }
+      th, td { padding: 9px; }
+    }
+    @media print {
+      body { background: white; color: black; }
+      .shell { display: block; max-width: none; padding: 0; }
+      aside, .toolbar { display: none; }
+      .hero, section { box-shadow: none; break-inside: avoid; border-color: #bbb; }
+      details > * { display: block !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand">Forecasting Pipeline</div>
+      <div class="brand-sub">完整项目地图 · 2026-08-26</div>
+      <nav aria-label="页面目录">
+        <div class="nav-label">先看结论</div>
+        <a href="#now">0. 现在到底在做什么</a>
+        <a href="#question">1. 研究问题与 Dr-CiK</a>
+        <a href="#timeline">2. 项目演进时间线</a>
+        <div class="nav-label">系统结构</div>
+        <a href="#architecture">3. 完整端到端流水线</a>
+        <a href="#data">4. 数据与防泄漏边界</a>
+        <a href="#portfolio">5. 103 个 Candidate</a>
+        <a href="#json-python">6. JSON、Python 与 Git</a>
+        <a href="#evolution">7. Self-Evolution 到底是什么</a>
+        <div class="nav-label">两阶段 Numerical Agent</div>
+        <a href="#phase-a">8. A 阶段：筛选</a>
+        <a href="#phase-b">9. B 阶段：选择与 Combined</a>
+        <a href="#metrics">10. 指标</a>
+        <div class="nav-label">实验与下一步</div>
+        <a href="#results">11. 已有结果总表</a>
+        <a href="#tsfm">12. TSFM 状态</a>
+        <a href="#r123">13. R1/R2/R3 当前试验</a>
+        <a href="#gaps">14. 现在的问题</a>
+        <a href="#next">15. 下一步</a>
+        <a href="#run">16. 如何运行</a>
+        <a href="#sources">17. 代码与产物索引</a>
+      </nav>
+    </aside>
+
+    <main>
+      <header class="hero">
+        <div class="eyebrow">Time-Series · Numerical Agent · Self-Evolution</div>
+        <h1>从方法字典到安全的任务条件预测</h1>
+        <p class="lede">这不是“让一个 LLM 猜未来”，而是构建一套可审计的系统：先理解历史序列、筛掉不适用的方法，再用历史回测选择或组合 Statistical 与 TSFM，并让规则、策略和代码在 Train/Dev 门控下逐步演化。</p>
+        <div class="meta-row">
+          <span class="pill">仓库 <code>time-series</code></span>
+          <span class="pill">分支 <code>main</code></span>
+          <span class="pill">HEAD <code>d94ed50</code></span>
+          <span class="pill">页面日期 2026-08-26</span>
+        </div>
+        <div class="pill-row">
+          <span class="pill good"><span class="dot"></span>103-candidate 框架已实现</span>
+          <span class="pill good"><span class="dot"></span>80/20/99 防泄漏划分已冻结</span>
+          <span class="pill warn"><span class="dot"></span>Selector 泛化仍不稳定</span>
+          <span class="pill bad"><span class="dot"></span>最新 5-TSFM R1/R2/R3 尚未形成有效结论</span>
+        </div>
+      </header>
+
+      <section id="now" data-section>
+        <h2>0. 现在到底在做什么</h2>
+        <p class="section-intro">一句话版本：我们正在完善 <strong>Numerical Agent 内部</strong>的两阶段自进化，而不是在训练 LLM 或把 Retrieval 文档直接塞进数值模型。</p>
+        <div class="grid g3">
+          <article class="card">
+            <div class="kpi">A</div>
+            <h3>Task-conditioned Screening</h3>
+            <p>根据周期、趋势、间歇性、regime、频率、历史长度和 horizon，为每道题生成不同的 Active Dictionary。</p>
+            <span class="status good">已经实现，多版策略已跑</span>
+          </article>
+          <article class="card">
+            <div class="kpi">B</div>
+            <h3>Numerical Selection</h3>
+            <p>只用历史回测，在 Active Dictionary 中选择单方法、TSFM portfolio 或受保护的 Combined forecast。</p>
+            <span class="status warn">已实现，正在解决尾部风险</span>
+          </article>
+          <article class="card">
+            <div class="kpi">C</div>
+            <h3>Context + Decision</h3>
+            <p>未来再接 Retrieval Agent：检索外部信息，让 Decision Agent 在数值假设和证据之间做最终决策。</p>
+            <span class="status warn">完整架构已有，当前实验重心不在此</span>
+          </article>
+        </div>
+        <div class="callout">
+          <strong>当前最重要的技术问题：</strong>不是候选不够多，而是如何在不看真实 future 的前提下，可靠判断“何时应覆盖强 TSFM baseline”。旧 Selector 在一般任务上有收益，但少数灾难性选择会拖垮平均表现。
+        </div>
+      </section>
+
+      <section id="question" data-section>
+        <h2>1. 研究问题与 Dr-CiK</h2>
+        <p class="section-intro">Dr-CiK 是离线、带上下文的时间序列预测 testbed。每道题已经有历史序列、文档、future values 和 evidence annotations；推理时必须隔离后两者。</p>
+        <div class="grid g2">
+          <article class="card">
+            <h3>我们真正研究的问题</h3>
+            <p><strong>输入：</strong>历史数字、频率、forecast horizon；在完整系统中还可有文档。</p>
+            <p><strong>输出：</strong>长度恰好等于 horizon 的点预测；未来可扩展为概率轨迹。</p>
+            <p><strong>目标：</strong>让系统学会针对不同序列选用不同方法，并安全融合数值模型与外部 context。</p>
+          </article>
+          <article class="card">
+            <h3>它不是什么</h3>
+            <ul>
+              <li>不是 FutureX 那种等待现实未来发生的 live forecasting。</li>
+              <li>不是对 LLM 权重做 SFT/RL；目前演化的是 artifact、prompt、policy 和代码。</li>
+              <li>不是用 Test 标签反复调参；Public Test 只能作为已消费的 regression test。</li>
+              <li>不是把所有方法平均起来；每个覆盖都必须通过 history-only gate。</li>
+            </ul>
+          </article>
+        </div>
+        <h3>Dr-CiK 数据规模</h3>
+        <div class="grid g4">
+          <div class="card"><div class="kpi">279</div><div class="kpi-label">总任务</div></div>
+          <div class="card"><div class="kpi">199</div><div class="kpi-label">Public labeled tasks</div></div>
+          <div class="card"><div class="kpi">80</div><div class="kpi-label">Official hidden unlabeled tasks</div></div>
+          <div class="card"><div class="kpi">10,342</div><div class="kpi-label">全部文档</div></div>
+        </div>
+      </section>
+
+      <section id="timeline" data-section>
+        <h2>2. 项目演进时间线</h2>
+        <p class="section-intro">系统不是一次写成的。下面把早期 contextual agent、三层 Harness、Dictionary evolution 和当前两阶段 Numerical Agent 放在同一条线上。</p>
+        <div class="timeline">
+          <div class="event">
+            <time>早期</time><h3>Chronos + Context Revision</h3>
+            <p>先用 Chronos 预测，再让文档证据修改 forecast。结果表明：没有保守 gate 时 context 会显著伤害预测；安全 gate 能避免大多数灾难，但平均提升很小。</p>
+          </div>
+          <div class="event">
+            <time>2026-08-12/13</time><h3>Codex Contract、Triad 与三层 Harness</h3>
+            <p>把系统拆成 Numerical/Coding、Retrieval、Decision。实现 Prompt、Genome、Source 三种进化深度，并使用 Train → read-only Dev → accept/reject。</p>
+          </div>
+          <div class="event">
+            <time>2026-08-16</time><h3>Setting 2 与可持久化 Skills</h3>
+            <p>知识库从固定规则扩展到 outcome-derived Coding/Retrieval/Decision skills；prompt child 没有通过严格 gate，但训练结果积累了 6/12/5 个三类 skills。</p>
+          </div>
+          <div class="event">
+            <time>2026-08-17—22</time><h3>从 JSON 实现转向 Git/Python 方法仓库</h3>
+            <p>统计方法变成真实 Python 函数，LLM 通过 add/repair/fork/merge/delete 提交结构化变更；Git 保存 Parent/Child lineage，JSON 只保留目录与控制信息。</p>
+          </div>
+          <div class="event">
+            <time>2026-08-23—25</time><h3>103 Candidates + 两阶段系统</h3>
+            <p>建立 93 Statistical + 5 TSFM + 5 Combined；A 阶段学习 Active Dictionary，B 阶段用历史回测选择最终 forecast；完成一次 80/20/99 冻结评测。</p>
+          </div>
+          <div class="event">
+            <time>2026-08-26</time><h3>Safe Anchor、TSFM Portfolio 与 R1/R2/R3</h3>
+            <p>把目标改成 Dr-CiK-aligned sMAE/sRMSE，并重点防止尾部失败。当前正在测试“Parent 默认不动，只有严格稳定的单 TSFM、多 TSFM 或 Statistical residual challenger 才能覆盖”。</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="architecture" data-section>
+        <h2>3. 完整端到端流水线</h2>
+        <p class="section-intro">Numerical Agent 先独立处理数字；Retrieval 处理文档；Decision 最后合并。这样可以分别测量“数值方法是否好”“文档是否找对”“最后是否选对”。</p>
+        <div class="flow" aria-label="完整流水线">
+          <div class="node">Historical Series<small>只含观察到的数字、频率、horizon</small></div><div class="arrow">→</div>
+          <div class="node">Analysis Skills<small>周期、趋势、异常、regime 等</small></div><div class="arrow">→</div>
+          <div class="node">Active Dictionary<small>筛后的 Statistical / TSFM / Combined</small></div><div class="arrow">→</div>
+          <div class="node">Hindcasting<small>多折历史回测与稳定性诊断</small></div><div class="arrow">→</div>
+          <div class="node">Numerical Selector<small>Parent / challenger / top-k / combined</small></div><div class="arrow">→</div>
+          <div class="node">Retrieval + Decision<small>未来接入 context 与最终 critic</small></div><div class="arrow">→</div>
+          <div class="node">Frozen Forecast<small>预测冻结后 trusted scorer 才看标签</small></div>
+        </div>
+        <h3>标签到达后的外层进化</h3>
+        <div class="flow" aria-label="进化闭环">
+          <div class="node">Parent Artifact<small>方法、策略、skills 或 harness</small></div><div class="arrow">→</div>
+          <div class="node">Child Proposal<small>LLM 或 trusted Python 生成</small></div><div class="arrow">→</div>
+          <div class="node">Train Evaluation<small>允许诊断与学习</small></div><div class="arrow">→</div>
+          <div class="node">Read-only Dev<small>只做一次接受判断</small></div><div class="arrow">→</div>
+          <div class="node">Accept / Reject<small>Dev 不改善就保留 Parent</small></div><div class="arrow">→</div>
+          <div class="node">Frozen Test<small>零 mutation、零 write-back</small></div>
+        </div>
+        <div class="callout warnbox"><strong>重要：</strong>这叫 artifact/harness self-evolution，不是模型权重训练。LLM 负责提出 Child，Python 负责边界、执行、评分和继承。</div>
+      </section>
+
+      <section id="data" data-section>
+        <h2>4. 数据划分与防泄漏边界</h2>
+        <p class="section-intro">199 道 Public labeled tasks 被按 entity 分组后冻结为 80/20/99。相同 entity 不会跨 split，划分不读取 future、GT evidence、文档标签或正文。</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Partition</th><th class="num">Tasks</th><th class="num">Entities</th><th>允许用途</th><th>禁止用途</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Train</strong></td><td class="num">80</td><td class="num">47</td><td>Child mutation、failure analysis、skills/dictionary learning、阈值搜索</td><td>不能绕过历史信息边界看 future</td></tr>
+              <tr><td><strong>Dev</strong></td><td class="num">20</td><td class="num">10</td><td>Parent/Child 最终接受与 early stop</td><td>不能产生 skills、不能回传逐题 failure 调参</td></tr>
+              <tr><td><strong>Public Test</strong></td><td class="num">99</td><td class="num">56</td><td>冻结后一次评测；之后只能叫 regression test</td><td>不能再次用来选择版本</td></tr>
+              <tr><td><strong>Official Hidden</strong></td><td class="num">80</td><td class="num">64</td><td>官方最终 benchmark</td><td>本地没有 labels，不能自行计算成绩</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>正式 manifest：<code>splits/drcik_public_80_20_99_v1.json</code>；SHA-256：<code>3cc81f45…afca92</code>。</p>
+        <h3>推理时每个组件能看什么</h3>
+        <div class="grid g3">
+          <article class="card"><h4>Numerical Agent</h4><p><strong>可见：</strong>历史数值、频率、horizon、history-only diagnostics。</p><p><strong>不可见：</strong>documents、future values、GT evidence。</p></article>
+          <article class="card"><h4>Retrieval Agent</h4><p><strong>可见：</strong>候选假设、metadata、documents。</p><p><strong>不可见：</strong>future values、GT evidence labels。</p></article>
+          <article class="card"><h4>Trusted Evaluator</h4><p><strong>可见：</strong>预测冻结后的 future labels。</p><p><strong>职责：</strong>计算指标；不能修改 forecast。</p></article>
+        </div>
+      </section>
+
+      <section id="portfolio" data-section>
+        <h2>5. 103 个 Candidate 到底是什么</h2>
+        <p class="section-intro">当前正式候选池不是“103 个 LLM prompt”，而是三种不同执行对象共享统一的 <code>history → forecast</code> 接口。</p>
+        <div class="grid g3">
+          <article class="card"><div class="kpi">93</div><h3>Statistical</h3><p>位于小 Git repo 的 <code>methods.py</code>；每个是可执行 Python forecast 函数。</p></article>
+          <article class="card"><div class="kpi">5</div><h3>Foundation / TSFM</h3><p>TimesFM 2.5、Moirai 2.0、Toto 2.0、Chronos-Bolt、Granite TTM R2。</p></article>
+          <article class="card"><div class="kpi">5</div><h3>Combined</h3><p>固定父模型身份，允许进化 weight、routing rule 或受限 residual correction。</p></article>
+        </div>
+        <h3>九个 analysis primitives</h3>
+        <p>它们不是最终 forecasting methods，而是 Statistical/TSFM/Combined 都可以使用的历史分析工具：</p>
+        <div class="pill-row">
+          <span class="pill">detect_periodicity</span><span class="pill">detect_outliers</span><span class="pill">detect_trend</span><span class="pill">detect_change_points</span><span class="pill">detect_intermittency</span><span class="pill">estimate_noise_scale</span><span class="pill">assess_stationarity</span><span class="pill">detect_recent_regime</span><span class="pill">analyze_series</span>
+        </div>
+        <details>
+          <summary>五个 Combined 初始定义</summary>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Name</th><th>Parents</th><th>Mode</th><th>Condition signal</th></tr></thead>
+              <tbody>
+                <tr><td>combined_timesfm_seasonal</td><td>TimesFM + seasonal_naive</td><td>blend</td><td>periodicity_strength</td></tr>
+                <tr><td>combined_chronos_damped_trend</td><td>Chronos + Holt damped trend</td><td>blend</td><td>trend_strength</td></tr>
+                <tr><td>combined_moirai_croston_router</td><td>Moirai + Croston SBA</td><td>route</td><td>zero_fraction</td></tr>
+                <tr><td>combined_toto_robust_router</td><td>Toto + robust LOESS trend</td><td>route</td><td>outlier_fraction</td></tr>
+                <tr><td>combined_granite_regime_profile</td><td>Granite + median seasonal profile</td><td>blend</td><td>recent_regime_confidence</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+      </section>
+
+      <section id="json-python" data-section>
+        <h2>6. JSON、Python 与 Git 的关系</h2>
+        <p class="section-intro">最简洁的理解：<strong>JSON 是控制面，Python 是执行面，Git 是继承与审计历史。</strong></p>
+        <div class="flow" aria-label="JSON Python Git 关系">
+          <div class="node">Catalog JSON<small>方法是谁、family、assumptions、license、status</small></div><div class="arrow">→</div>
+          <div class="node">Manifest / Policy<small>checkpoint、adapter、worker、组合父代、参数</small></div><div class="arrow">→</div>
+          <div class="node">Python Runtime<small>真正执行预测、hindcast、筛选和选择</small></div><div class="arrow">→</div>
+          <div class="node">Git Generation<small>保存 Parent、Child、diff、commit 与回滚点</small></div>
+        </div>
+        <div class="grid g2">
+          <article class="card">
+            <h3>JSON 负责什么</h3>
+            <ul>
+              <li><code>method_id</code>、family、描述、假设、失败条件、status。</li>
+              <li>TSFM 的 checkpoint/license/adapter 不可变绑定。</li>
+              <li>训练摘要、revision count、candidate version。</li>
+              <li>序列化、跨运行恢复、hash 验证。</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>Python/Git repo 负责什么</h3>
+            <ul>
+              <li><code>methods.py</code> 中的 93 个实际预测函数。</li>
+              <li><code>skills.py</code> 中的九个 history-only primitives。</li>
+              <li><code>policies.py</code> 中的 TSFM 和 Combined policies。</li>
+              <li>LLM 提交 add / repair / fork / merge / delete，Python 校验，Git 保存 lineage。</li>
+            </ul>
+          </article>
+        </div>
+        <pre><code>Catalog JSON: "sarima_auto 是什么、何时适用、当前状态是什么"
+        ↓ identity / routing
+methods.py: def sarima_auto(history, horizon, frequency): ...
+        ↓ execute + history-only validation
+Git commit: Parent → validated Child
+        ↓ report
+JSON artifact: score、status、revision、hash</code></pre>
+        <div class="callout"><strong>所以不是 JSON 和 Git 二选一：</strong>同一个方法在 JSON 中有身份证和状态，在 Python 中有可运行实现，在 Git 中有可追溯演化历史。</div>
+      </section>
+
+      <section id="evolution" data-section>
+        <h2>7. Self-Evolution 到底是什么</h2>
+        <p class="section-intro">这里至少有四个粒度。它们共享 Parent/Child/Train/Dev 逻辑，但“允许改什么”不同。</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>层级</th><th>LLM/系统可以改什么</th><th>产物</th><th>接受门</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Skill learning</strong></td><td>新增可复用的 numerical/retrieval/decision 经验</td><td>Skills JSON 或 Python skill</td><td>训练 outcome validation</td></tr>
+              <tr><td><strong>Method self-evolution</strong></td><td>add、repair、fork、merge、delete Python forecasting functions</td><td>Git-tracked <code>methods.py</code></td><td>执行、安全、Train/Dev</td></tr>
+              <tr><td><strong>Policy/Genome evolution</strong></td><td>screening rules、selector thresholds、prompts、budgets、workflow</td><td>Policy JSON/Python</td><td>Train winner → read-only Dev</td></tr>
+              <tr><td><strong>Source evolution</strong></td><td>Agent/Harness Python 与新 orchestration modules</td><td>Git patch</td><td>audit → tests → Train → Dev</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>Prompt / Genome / Source 三层 Harness</h3>
+        <div class="grid g3">
+          <article class="card"><h4>Prompt</h4><p>只改一个 Agent 的完整 prompt。表达力最低，最容易审计。</p></article>
+          <article class="card"><h4>Genome</h4><p>可共同改变 prompts、candidate budgets、hindcast folds、Retrieval/Decision topology 和 aggregation。</p></article>
+          <article class="card"><h4>Source</h4><p>Codex 在隔离 Git worktree 里直接改允许范围内的源码；patch 必须通过静态安全检查和完整测试。</p></article>
+        </div>
+        <h3>Dictionary 方法的单 Agent 进化</h3>
+        <ol>
+          <li>Python 先对 Parent methods 跑历史任务，生成每个方法的 Success / NotApplicable / Crash / Invalid 和误差诊断。</li>
+          <li>Selector LLM 从失败中选出最值得处理的方法；不是简单删除所有高误差方法。</li>
+          <li>Coder LLM 生成结构化操作，例如 repair 或 fork。</li>
+          <li>AST/identity gate 检查方法是否仍保持原算法身份，拒绝“名字叫 SARIMA、实际只 repeat-last”的伪修复。</li>
+          <li>Child 在少量任务 screen，再在完整 Train 和 read-only Dev 比较。</li>
+          <li>只有通过 gate 的 Child 才成为新 Git generation。</li>
+        </ol>
+      </section>
+
+      <section id="phase-a" data-section>
+        <h2>8. A 阶段：Task-conditioned Screening</h2>
+        <p class="section-intro">A 阶段不直接决定最终 forecast。它学习“面对这类历史序列，哪些方法值得进入本题候选池”。</p>
+        <h3>从历史数字生成 TaskProfile</h3>
+        <div class="flow">
+          <div class="node">History<small>例如非负、很多零、周期候选 24</small></div><div class="arrow">→</div>
+          <div class="node">TaskProfile<small>intermittent、trend、regime、length、horizon ratio</small></div><div class="arrow">→</div>
+          <div class="node">Applicability Rules<small>每个方法的 OR-of-AND typed predicates</small></div><div class="arrow">→</div>
+          <div class="node">Active Dictionary<small>keep / specialized 留下；repair/quarantine 排除</small></div>
+        </div>
+        <pre><code>例：Croston SBA
+适用条件：intermittent AND nonnegative
+
+若一条历史序列：
+  zero_fraction 很高 → intermittent = true
+  全部值 ≥ 0       → nonnegative = true
+那么 Croston SBA 进入该题的 Active Dictionary。
+这只代表“允许参加 B 阶段”，不代表最终一定选择它。</code></pre>
+        <h3>策略版本的真实演进</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>版本</th><th class="num">Dev success</th><th class="num">Crash/Invalid</th><th class="num">平均候选</th><th class="num">不同字典</th><th class="num">平均 Jaccard</th><th>解释</th></tr></thead>
+            <tbody>
+              <tr><td>Part 1 / formal</td><td class="num">85.10%</td><td class="num">1.16%</td><td class="num">56.05</td><td class="num">—</td><td class="num">≈99.82%*</td><td>安全压缩成功，但几乎所有任务得到同一字典。</td></tr>
+              <tr><td>Part 2 v8</td><td class="num">80.02%</td><td class="num">6.72%</td><td class="num">58.05</td><td class="num">9</td><td class="num">94.73%</td><td>更 task-conditioned；因当时人为 max≤40 门槛未“转正”，但可用于后续实验。</td></tr>
+              <tr><td>v11 compiled specialists</td><td class="num">78.56%</td><td class="num">8.76%</td><td class="num">47.35</td><td class="num">6</td><td class="num">97.31%</td><td>通过当时约束，覆盖 Statistical/TSFM/Combined 条件；oracle retention 90%。</td></tr>
+              <tr><td>v13 failure burden</td><td class="num">59.16%</td><td class="num">31.01%</td><td class="num">78.35</td><td class="num">6</td><td class="num">98.36%</td><td>更宽松但暴露更多失败，不是更好的默认选择。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="kpi-label">* Part 1 的 99.82% 来自保存的 active-dictionary 分析；旧 manifest 本身尚未记录该字段。</p>
+        <div class="callout warnbox"><strong>为什么 Part 2 仍值得用：</strong>“候选必须少于 40”不是理论定律。更合理的约束是同时看 oracle retention、failure exposure、候选计算成本和任务间差异。v8 的价值是证明画像真的能改变字典；它不应只因 58&gt;40 被否定。</div>
+      </section>
+
+      <section id="phase-b" data-section>
+        <h2>9. B 阶段：Numerical Selector 与 Combined</h2>
+        <p class="section-intro">B 阶段回答的是：Active Dictionary 已经给定，最终该选谁、是否组合、何时必须退回强 baseline。</p>
+        <h3>每个候选的历史诊断</h3>
+        <div class="grid g3">
+          <div class="card"><h4>中心表现</h4><p>median sMAE、recent sMAE、mean MAE、mean sRMSE。</p></div>
+          <div class="card"><h4>稳定性</h4><p>worst fold、MAD、bias、slope error、phase error、explosion。</p></div>
+          <div class="card"><h4>可执行性</h4><p>成功 folds、coverage、Crash/Invalid、NotApplicable、fallback。</p></div>
+        </div>
+        <h3>Combined 在本项目里的准确含义</h3>
+        <p>当前 Combined 是 <strong>forecast-level combination</strong>，不是 TSFM 参数相加或 checkpoint merge。</p>
+        <pre><code>Weighted blend:
+  forecast = w × TSFM + (1 - w) × Statistical
+
+Clipped residual correction:
+  forecast = TSFM + α × clip(Statistical - TSFM)
+
+Route:
+  若历史画像满足条件 → Statistical，否则 → TSFM</code></pre>
+        <h3>Safe Anchor / baseline protection</h3>
+        <p>默认先保留 Toto 或 TimesFM。challenger 只有在历史 folds 上同时满足以下条件才可覆盖：</p>
+        <ul>
+          <li>sMAE 改善达到最低阈值；</li>
+          <li>sRMSE 不退化；</li>
+          <li>至少赢规定数量的 folds；</li>
+          <li>recent fold 和 worst fold 的 regret 都受限；</li>
+          <li>没有 explosion、coverage 缺失或 catastrophic pattern；</li>
+          <li>Statistical 与 TSFM 预测有足够 diversity，避免无意义重复组合。</li>
+        </ul>
+        <div class="callout"><strong>核心原则：</strong>不是“平均回测分高就替换”，而是“中心表现更好，并且没有任何明显危险的历史证据，才允许替换”。</div>
+      </section>
+
+      <section id="metrics" data-section>
+        <h2>10. 现在使用哪些指标</h2>
+        <p class="section-intro">正式 Selector gate 已对齐 Dr-CiK point-forecast appendix：sMAE 与 sRMSE 为主；MASE、RMSSE、MAE、sMAPE 用作诊断。</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Metric</th><th>直观解释</th><th>优点</th><th>当前角色</th></tr></thead>
+            <tbody>
+              <tr><td><strong>sMAE</strong></td><td>MAE ÷ 真实 future 的平均绝对量级；每题 capped at 5</td><td>跨量纲、与 Dr-CiK point table 对齐</td><td>主指标，越低越好</td></tr>
+              <tr><td><strong>sRMSE</strong></td><td>RMSE ÷ 相同 future scale；每题 capped at 5</td><td>更惩罚大错误，控制尾部</td><td>硬安全 gate</td></tr>
+              <tr><td><strong>MASE</strong></td><td>MAE ÷ 历史 naive one-step 误差</td><td>判断是否优于 naive；对零值比 sMAPE 稳健</td><td>诊断，不再单独决定继承</td></tr>
+              <tr><td><strong>RMSSE</strong></td><td>RMSE 的 naive-scaled 版本</td><td>量纲公平、强调大错误</td><td>诊断</td></tr>
+              <tr><td><strong>MAE</strong></td><td>未来每步绝对误差平均</td><td>直观</td><td>同任务比较与案例分析</td></tr>
+              <tr><td><strong>sMAPE</strong></td><td>相对真实值与预测值平均量级的百分比误差</td><td>易读</td><td>接近零时会失真，仅辅助</td></tr>
+              <tr><td><strong>sCRPS</strong></td><td>概率预测分布与真值之间的距离</td><td>同时评价 calibration 与 sharpness</td><td>当前点预测阶段不算</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="results" data-section>
+        <h2>11. 已有结果总表</h2>
+        <p class="section-intro">不同任务集、backbone 和指标不能直接横向排名。下面按实验阶段分组，并明确哪些是机制 smoke、哪些是 frozen regression。</p>
+        <h3>早期 agent / contextual 基线</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>实验</th><th class="num">Tasks</th><th class="num">MAE</th><th class="num">RMSE</th><th>结论</th></tr></thead>
+            <tbody>
+              <tr><td>Chronos baseline</td><td class="num">199</td><td class="num">797.6268</td><td class="num">1121.9784</td><td>早期 199-task 数值参考。</td></tr>
+              <tr><td>Unsafe contextual revision</td><td class="num">199</td><td class="num">1289.7688</td><td class="num">1591.6977</td><td class="bad">证明 context 无 gate 会严重伤害。</td></tr>
+              <tr><td>Safe contextual gate</td><td class="num">199</td><td class="num">797.1785</td><td class="num">1121.4969</td><td>基本避免伤害，但提升仅 0.056%。</td></tr>
+              <tr><td>Codex Contract</td><td class="num">30</td><td class="num">156.3621</td><td class="num">296.4659</td><td>相对同组 Chronos MAE 改善 3.85%，2/28/0。</td></tr>
+              <tr><td>Codex Triad</td><td class="num">30</td><td class="num">219.7548</td><td class="num">335.9287</td><td class="bad">负基线；MAE 比同组基线差 34.84%。</td></tr>
+              <tr><td>P41 Direct-Context*</td><td class="num">30</td><td class="num">80.9567</td><td class="num">125.8651</td><td>用户提供的外部协作者报告；21/0/9 vs Contract。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="kpi-label">* P41 数字来自本次会话中提供的外部报告，不是当前仓库内可复算 artifact，故单独标注。</p>
+
+        <h3>三层 Harness smoke</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Mode</th><th class="num">Parent Train</th><th class="num">Child Train</th><th class="num">Parent Dev</th><th class="num">Child Dev</th><th>结果</th></tr></thead>
+            <tbody>
+              <tr><td>Genome v001</td><td class="num">0.659675</td><td class="num">0.850589</td><td class="num">0.859456</td><td class="num">0.870863</td><td class="good">接受；3-task 机制 smoke</td></tr>
+              <tr><td>Source child</td><td class="num">0.898000</td><td class="num">0.874556</td><td class="num">0.859363</td><td class="num">0.847298</td><td class="bad">163 tests 通过，但预测更差，拒绝</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>第一次 80/20/99 冻结两阶段评测</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Policy</th><th class="num">Mean MASE</th><th class="num">Median MASE</th><th class="num">Mean RMSSE</th><th class="num">Mean MAE</th><th class="num">Mean sMAPE</th></tr></thead>
+            <tbody>
+              <tr><td>Fixed Toto / global ranker</td><td class="num">2.8830</td><td class="num">1.5800</td><td class="num">2.7998</td><td class="num">555.73</td><td class="num">45.60</td></tr>
+              <tr><td>Screening only</td><td class="num">2.8830</td><td class="num">1.5800</td><td class="num">2.7998</td><td class="num">555.73</td><td class="num">45.60</td></tr>
+              <tr><td>Decision only / Full</td><td class="num">3.1846</td><td class="num">1.7963</td><td class="num">2.8761</td><td class="num">1340.20</td><td class="num">44.52</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Full vs Toto：41 胜 / 7 平 / 51 负。它改善 sMAPE，但 MASE、RMSSE 和 MAE 更差；主要问题是 task_200 等少数灾难性选择。</p>
+
+        <h3>Safe-anchor 版本的 Public Regression Test</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Policy</th><th class="num">Mean sMAE</th><th class="num">Mean sRMSE</th><th class="num">P90 / P95 sMAE</th><th>W/T/L vs Toto</th></tr></thead>
+            <tbody>
+              <tr><td>Fixed Toto</td><td class="num">0.460684</td><td class="num"><strong>0.680614</strong></td><td class="num">1.1455 / 1.9537</td><td>reference</td></tr>
+              <tr><td>Old full selector</td><td class="num">0.472474</td><td class="num">0.688686</td><td class="num">—</td><td>41 / 7 / 51</td></tr>
+              <tr><td>Safe-anchor selector</td><td class="num"><strong>0.455015</strong></td><td class="num">0.683928</td><td class="num"><strong>1.0025 / 1.7135</strong></td><td>27 / 55 / 17</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Safe-anchor 的 mean sMAE 比 Toto 好 1.23%，上尾更好；mean sRMSE 仍差 0.49%。没有 Combined forecast 通过全部 gate，收益来自少量保守 single-method overrides。</p>
+
+        <h3>2026-08-26 Change-aware guard（80 Train → 20 read-only Dev）</h3>
+        <div class="grid g2">
+          <article class="card">
+            <h4>Train</h4>
+            <div class="bar-row"><span>Parent sMAE</span><div class="bar-track"><div class="bar-fill alt" style="width:100%"></div></div><span class="num">0.3250</span></div>
+            <div class="bar-row"><span>Child sMAE</span><div class="bar-track"><div class="bar-fill" style="width:72.7%"></div></div><span class="num">0.2363</span></div>
+            <div class="bar-row"><span>Parent sRMSE</span><div class="bar-track"><div class="bar-fill alt" style="width:100%"></div></div><span class="num">0.5162</span></div>
+            <div class="bar-row"><span>Child sRMSE</span><div class="bar-track"><div class="bar-fill" style="width:80.3%"></div></div><span class="num">0.4146</span></div>
+          </article>
+          <article class="card">
+            <h4>Dev</h4>
+            <div class="bar-row"><span>Parent sMAE</span><div class="bar-track"><div class="bar-fill alt" style="width:100%"></div></div><span class="num">0.2791</span></div>
+            <div class="bar-row"><span>Child sMAE</span><div class="bar-track"><div class="bar-fill" style="width:94.1%"></div></div><span class="num">0.2628</span></div>
+            <div class="bar-row"><span>Parent sRMSE</span><div class="bar-track"><div class="bar-fill alt" style="width:100%"></div></div><span class="num">0.4799</span></div>
+            <div class="bar-row"><span>Child sRMSE</span><div class="bar-track"><div class="bar-fill" style="width:95.1%"></div></div><span class="num">0.4565</span></div>
+          </article>
+        </div>
+        <p><span class="status good">Accepted</span> 覆盖率 100%，Dev sMAE/sRMSE 同时改善；但 Dev mean MASE 与 raw MAE 变差，说明指标选择会改变继承结论。这是当前最有希望的 Train/Dev 结果之一，尚未形成新的 pristine Test 结论。</p>
+      </section>
+
+      <section id="tsfm" data-section>
+        <h2>12. TSFM 清单与真实运行状态</h2>
+        <p class="section-intro">仓库更大的 foundation catalog 有 31 张卡；其中 4 个 direct、17 个 worker、10 个 unavailable。当前 103-candidate 主实验只选旗舰 5 个。</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Flagship</th><th>Provider</th><th>Runtime</th><th>License</th><th>当前状态</th></tr></thead>
+            <tbody>
+              <tr><td>TimesFM 2.5</td><td>Google</td><td>direct</td><td>Apache-2.0</td><td class="good">当前环境可运行</td></tr>
+              <tr><td>Chronos-Bolt</td><td>Amazon</td><td>direct</td><td>Apache-2.0</td><td class="good">当前环境可运行</td></tr>
+              <tr><td>Moirai 2.0</td><td>Salesforce</td><td>uni2ts worker</td><td>CC-BY-NC-4.0</td><td class="warn">旧 worker 路径已失效；新环境安装被本次页面任务暂停</td></tr>
+              <tr><td>Toto 2.0</td><td>Datadog</td><td>dedicated worker</td><td>Apache-2.0</td><td class="good">新本地依赖环境已完成 import；仍需重新 checkpoint smoke</td></tr>
+              <tr><td>Granite TTM R2</td><td>IBM</td><td>granite worker</td><td>Apache-2.0</td><td class="warn">旧 worker 路径已失效；且部分频率/horizon 天生不适用</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>历史手工 smoke 记录（非仓库 attested artifact）</h3>
+        <p>此前会话记录曾报告五个真实 checkpoint 在本地 Mac 上跑通：TimesFM 35.14、Moirai 35.79、Toto 36.27、Chronos 37.61、Granite 42.35 sMAPE。但仓库的 <code>docs/tsfm-runtime-matrix.md</code> 明确说明这些结果没有以正式 attestation artifact 提交。因此本页把它们视为<strong>历史运维记录</strong>，不是可引用实验结论。</p>
+        <div class="callout warnbox"><strong>为什么最新 R1/R2/R3 不能直接解释：</strong>其 80-Train audit 中 TSFM success=160、failed=240，实际只有 Chronos 与 TimesFM 各成功 80 次；Moirai、Toto、Granite 全部失败。因此“R1/R2/R3 没覆盖 Parent”只能证明两模型子集下 gate 没触发，不能说明五模型 portfolio 无效。</div>
+      </section>
+
+      <section id="r123" data-section>
+        <h2>13. 最新 R1/R2/R3 试验</h2>
+        <p class="section-intro">这是当前正在试的安全升级。它们不是任意搜索组合，而是三层越来越有表达力、同时都保留 Parent fallback 的 challenger。</p>
+        <div class="grid g3">
+          <article class="card"><div class="kpi">R1</div><h3>Single TSFM</h3><p>从其他 TSFM 中寻找单一 challenger。所有历史 folds 同时通过 sMAE/sRMSE 与 regret gate 才覆盖 Parent。</p></article>
+          <article class="card"><div class="kpi">R2</div><h3>Multi-TSFM Portfolio</h3><p>在多个可靠 TSFM 之间做保守组合；portfolio 必须比当前 Parent 更稳定，而不是只比某个弱成员好。</p></article>
+          <article class="card"><div class="kpi">R3</div><h3>Joint Residual</h3><p>先得到 R2 的安全 TSFM anchor，再加入 5%/10%/20% 的 task-conditioned Statistical residual correction，并限制 correction scale。</p></article>
+        </div>
+        <h3>已完成但无效的环境不完整运行</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Policy</th><th class="num">Train sMAE</th><th class="num">Train sRMSE</th><th class="num">Changed tasks</th><th>解释</th></tr></thead>
+            <tbody>
+              <tr><td>Parent</td><td class="num">0.312303</td><td class="num">0.505928</td><td class="num">—</td><td>实际为 Chronos/TimesFM 可用时的 fallback Parent。</td></tr>
+              <tr><td>R1</td><td class="num">0.312303</td><td class="num">0.505928</td><td class="num">0</td><td>没有 challenger 过 gate。</td></tr>
+              <tr><td>R2</td><td class="num">0.312303</td><td class="num">0.505928</td><td class="num">0</td><td>只剩两 TSFM，portfolio 空间不足。</td></tr>
+              <tr><td>R3</td><td class="num">0.312303</td><td class="num">0.505928</td><td class="num">0</td><td>上游 anchor 未变，residual 也未过 gate。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>运行只访问了 80 Train；<code>dev_evaluated=false</code>、<code>public_test_accessed=false</code>。它是安全的失败尝试，但不是方法对比结论。</p>
+      </section>
+
+      <section id="gaps" data-section>
+        <h2>14. 现在真正的问题</h2>
+        <div class="grid g2">
+          <article class="card">
+            <h3>已经解决</h3>
+            <ul>
+              <li>方法目录不再只是 prompt：93 个真实 Python methods。</li>
+              <li>JSON / manifest / checkpoint / license 的确定性绑定。</li>
+              <li>Train/Dev/Test 和 future-label firewall。</li>
+              <li>NotApplicable 与 Crash/Invalid 分开，不再错误淘汰 specialist。</li>
+              <li>Task-conditioned Active Dictionary 已能产生多个不同子集。</li>
+              <li>sMAE/sRMSE 双指标与 tail diagnostics。</li>
+              <li>Parent fallback 与 Combined baseline protection。</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>尚未解决</h3>
+            <ul>
+              <li>筛选的 task differentiation 仍偏弱，共同核心过大。</li>
+              <li>历史 hindcast 对未来 regime shift 的迁移不可靠。</li>
+              <li>Combined 在严格 gate 下几乎从不激活；放松又容易产生灾难。</li>
+              <li>五个 TSFM 的当前本地 worker 环境没有全部恢复。</li>
+              <li>99 Public Test 已被消费，不能继续用它选版本。</li>
+              <li>Retrieval/context 尚未接入当前 Numerical 两阶段的正式新实验。</li>
+            </ul>
+          </article>
+        </div>
+        <h3>失败不是“方法普遍更差”，而是 tail risk</h3>
+        <p>旧 C/D selector 在 99 题上的中位 MSE 和 10% trimmed mean MSE 反而更好，但少数大尺度任务把全量 mean MSE 拉高约十倍。去掉最差 3 题后，C/D mean MASE 也会优于无 Toto 的 TimesFM baseline。这说明应优化 <strong>override risk</strong>，而不是简单删除 Statistical 或 Toto。</p>
+      </section>
+
+      <section id="next" data-section>
+        <h2>15. 推荐下一步</h2>
+        <p class="section-intro">优先顺序按“先恢复可解释实验，再增加复杂度”排列。</p>
+        <div class="grid g2">
+          <article class="card">
+            <h3>1 · 恢复五模型运行边界</h3>
+            <p>为 Moirai、Toto、Granite 建立稳定 worker env；逐模型做 immutable checkpoint smoke；把版本、device、latency 和 revision 记录为 artifact。</p>
+          </article>
+          <article class="card">
+            <h3>2 · 重跑 Train-only R1/R2/R3</h3>
+            <p>仍只看 80 Train。若 Child 同时改善 mean sMAE、mean sRMSE、P90/P95 且不增加 clipped tasks，再打开一次 20 Dev gate。</p>
+          </article>
+          <article class="card">
+            <h3>3 · 让 A 与 B 真正耦合</h3>
+            <p>不仅把危险方法筛掉，还要让 profile 影响 TSFM/Combined eligibility、portfolio size、correction budget 和 baseline identity。</p>
+          </article>
+          <article class="card">
+            <h3>4 · 再接 Retrieval</h3>
+            <p>Retrieval 不应完全忽略 Numerical assumptions。推荐基础检索先独立做，第二轮再读 Numerical gap/assumption，专门找反证和 regime evidence。</p>
+          </article>
+        </div>
+        <div class="callout"><strong>停止规则：</strong>在 80 Train/20 Dev 没有稳定提升前，不再看 99 Public Test；没有新的 sealed labels，就只把 99 题称为 regression test，不声称新的 generalization。</div>
+      </section>
+
+      <section id="run" data-section>
+        <h2>16. 如何运行</h2>
+        <p class="section-intro">下面是当前项目的最小复现路径。真实 TSFM worker 必须先满足各自环境和许可证要求。</p>
+        <h3>安装与基础验证</h3>
+        <pre><code>git clone https://github.com/kaichen-z/time-series.git
+cd time-series
+git clone https://github.com/ServiceNow/Dr-CiK.git external/Dr-CiK
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -e '.[dev]'
+pytest -q</code></pre>
+        <h3>查看统一 Harness</h3>
+        <pre><code>python -m evolving_loop --list-methods
+python -m evolving_loop --baseline &lt;name&gt; [options]
+python -m evolving_loop --evolution &lt;prompt|genome|source&gt; [options]</code></pre>
+        <h3>当前 R1/R2/R3 Train-only 命令</h3>
+        <pre><code>.venv/bin/python -m numerical_agent.run_task_conditioned_audit_experiment \
+  --repo runs/method_evolution/v001 \
+  --screening-dir runs/task_conditioned_screening/conditional_v11_compiled_specialists_train_only_80_20_20260825 \
+  --parent-selector-dir runs/numerical_selector/joint_tsfm_statistical_v4_train80_20260826 \
+  --split-file splits/drcik_public_80_20_99_v1.json \
+  --tasks-file external/Dr-CiK/full-download/Dr-CiK_public/tasks \
+  --output-dir runs/numerical_selector/protected_r1_r2_r3_train80_20260826 \
+  --train-limit 80 --train-only \
+  --folds 3 --train-validation-folds 4 \
+  --candidate-family protected-portfolio \
+  --tsfm-runtimes chronos,timesfm \
+  --model-cache-dir outputs/model-cache \
+  --tsfm-workers-config runs/method_evolution/local_tsfm_workers.json \
+  --acknowledged-model-licenses CC-BY-NC-4.0</code></pre>
+        <p class="bad"><strong>注意：</strong>当前 worker config 仍引用已经失效的临时目录。未完成 worker smoke 前，不应把该命令的结果解释为五模型实验。</p>
+      </section>
+
+      <section id="sources" data-section>
+        <h2>17. 代码与产物索引</h2>
+        <p class="section-intro">本页主要依据以下真实仓库文件；外部 P41 与历史手工 smoke 已单独标记。</p>
+        <ul class="source-list">
+          <li><code>splits/drcik_public_80_20_99_v1.json</code></li>
+          <li><code>runs/method_evolution/v001/methods.py</code></li>
+          <li><code>runs/method_evolution/v001/skills.py</code></li>
+          <li><code>runs/method_evolution/v001/policies.py</code></li>
+          <li><code>numerical_agent/dictionary.py</code></li>
+          <li><code>numerical_agent/evolution/screening.py</code></li>
+          <li><code>numerical_agent/evolution/screening_evolution.py</code></li>
+          <li><code>numerical_agent/evolution/numerical_selector.py</code></li>
+          <li><code>numerical_agent/evolution/selector_evolution.py</code></li>
+          <li><code>numerical_agent/tsfm/runtime_manifests.json</code></li>
+          <li><code>docs/BASELINE_METHODS_AND_RESULTS.md</code></li>
+          <li><code>docs/EVOLUTION_METHODS_AND_RESULTS.md</code></li>
+          <li><code>docs/FROZEN_TWO_STAGE_80_20_99_REPORT.md</code></li>
+          <li><code>docs/GUARDED_COMBINED_PHASE_B.md</code></li>
+          <li><code>docs/tsfm-runtime-matrix.md</code></li>
+          <li><code>runs/task_conditioned_screening/*/screening_manifest.json</code></li>
+          <li><code>runs/numerical_selector/*/evaluation.json</code></li>
+          <li><code>runs/frozen_two_stage/*/frozen_two_stage_results.json</code></li>
+        </ul>
+        <div class="toolbar">
+          <button type="button" id="expand-all">展开全部细节</button>
+          <button type="button" id="collapse-all">收起全部细节</button>
+          <button type="button" id="print-page">打印 / 导出 PDF</button>
+        </div>
+      </section>
+
+      <footer>
+        <p>Generated from the local <code>time-series</code> worktree on 2026-08-26. HEAD is <code>d94ed50</code>; several 2026-08-25/26 selector experiments are uncommitted local artifacts and are labeled accordingly.</p>
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    (() => {
+      const links = Array.from(document.querySelectorAll('nav a[href^="#"]'));
+      const sections = links
+        .map(link => document.querySelector(link.getAttribute('href')))
+        .filter(Boolean);
+
+      const setActive = id => {
+        links.forEach(link => {
+          link.classList.toggle('active', link.getAttribute('href') === `#${id}`);
+        });
+      };
+
+      if ('IntersectionObserver' in window) {
+        const observer = new IntersectionObserver(entries => {
+          const visible = entries
+            .filter(entry => entry.isIntersecting)
+            .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+          if (visible) setActive(visible.target.id);
+        }, { rootMargin: '-18% 0px -68% 0px', threshold: [0, 0.2, 0.5] });
+        sections.forEach(section => observer.observe(section));
+      }
+
+      document.getElementById('expand-all').addEventListener('click', () => {
+        document.querySelectorAll('details').forEach(item => { item.open = true; });
+      });
+      document.getElementById('collapse-all').addEventListener('click', () => {
+        document.querySelectorAll('details').forEach(item => { item.open = false; });
+      });
+      document.getElementById('print-page').addEventListener('click', () => window.print());
+    })();
+  </script>
+</body>
+</html>

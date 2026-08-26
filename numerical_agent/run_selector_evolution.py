@@ -14,6 +14,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from common.data import load_tasks
 from common.llm import CodexCLIClient, CodexCLIConfig
 from common.payload import read_json_object, write_json
 
@@ -38,7 +39,7 @@ from .evolution.selector_evolution import (
     DecisionCase,
     decision_policy_hash,
     evaluate_decision,
-    evolve_selector_once,
+    evolve_selector_train_then_dev,
     render_decision_source,
 )
 from .main import _add_tsfm_runtime_options, _runtime_registry
@@ -59,6 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dev-limit", type=int, default=20)
     parser.add_argument("--generations", type=int, default=3)
     parser.add_argument("--folds", type=int, default=3)
+    parser.add_argument("--train-validation-folds", type=int, default=4)
     parser.add_argument("--codex-model", default="gpt-5.6-luna")
     parser.add_argument(
         "--codex-reasoning-effort", choices=("none", "low", "medium", "high"), default="low"
@@ -182,9 +184,8 @@ class ForecastStore:
 
     def _key(self, name, history, horizon, frequency) -> str:
         payload = json.dumps({
-            "schema": 1,
+            "schema": 2,
             "identity": self.identity_hash,
-            "screening": self.screening_hash,
             "name": name,
             "history": history,
             "horizon": horizon,
@@ -367,6 +368,10 @@ def main(argv: list[str] | None = None) -> int:
         args.split_file, args.tasks_file,
         train_limit=args.train_limit, dev_limit=args.dev_limit,
     )
+    entity_by_task = {
+        source.task_id: source.entity_name
+        for source in load_tasks(args.tasks_file)
+    }
     module = read_module(repo / "methods.py")
     portfolio = read_policy_file(repo / "policies.py")
     final_outcomes, final_cache = _training_outcomes(
@@ -387,7 +392,15 @@ def main(argv: list[str] | None = None) -> int:
         try:
             config = HindcastConfig(folds=args.folds)
             cases = tuple(
-                _build_case(task, screening, actual_screening_hash, final_by_key, store, config)
+                _build_case(
+                    task,
+                    screening,
+                    actual_screening_hash,
+                    final_by_key,
+                    store,
+                    config,
+                    group_id=entity_by_task.get(task.task_id, task.task_id),
+                )
                 for task in train + dev
             )
         finally:
@@ -406,17 +419,29 @@ def main(argv: list[str] | None = None) -> int:
         timeout_seconds=args.codex_timeout,
         cache_dir=args.codex_cache_dir or output / "agent-cache",
     ))
+    evolution = evolve_selector_train_then_dev(
+        parent,
+        train_cases,
+        dev_cases,
+        agent,
+        generations=args.generations,
+        available_hindcast_folds=args.folds,
+        train_validation_folds=args.train_validation_folds,
+        screening_policy_hash=actual_screening_hash,
+        transcript_dir=output / "transcripts",
+    )
     generations = []
-    for generation in range(1, args.generations + 1):
-        result = evolve_selector_once(
-            parent, train_cases, dev_cases, agent,
-            generation=generation,
-            screening_policy_hash=actual_screening_hash,
-            transcript_dir=output / "transcripts",
-        )
+    for result in evolution.generations:
+        generation = result.generation
         source = render_decision_source(result.child, screening_policy_hash=actual_screening_hash)
         (output / f"generation_{generation:03d}_child_decision_policy.py").write_text(
             source, encoding="utf-8"
+        )
+        proposal_source = render_decision_source(
+            result.proposal, screening_policy_hash=actual_screening_hash
+        )
+        (output / f"generation_{generation:03d}_proposal_decision_policy.py").write_text(
+            proposal_source, encoding="utf-8"
         )
         payload = {
             "generation": generation,
@@ -424,34 +449,55 @@ def main(argv: list[str] | None = None) -> int:
             "gate": asdict(result.gate),
             "train_parent": asdict(result.train_parent),
             "train_child": asdict(result.train_child),
-            "dev_parent": asdict(result.dev_parent),
-            "dev_child": asdict(result.dev_child),
-            "parent_hash": decision_policy_hash(parent, screening_policy_hash=actual_screening_hash),
+            "candidate_count": result.candidate_count,
+            "parent_hash": decision_policy_hash(
+                result.parent, screening_policy_hash=actual_screening_hash
+            ),
+            "proposal_hash": decision_policy_hash(
+                result.proposal, screening_policy_hash=actual_screening_hash
+            ),
             "child_hash": decision_policy_hash(result.child, screening_policy_hash=actual_screening_hash),
         }
         write_json(output / f"generation_{generation:03d}_selector_result.json", payload)
         generations.append(payload)
-        if result.accepted:
-            parent = result.child
 
     frozen_path = output / "frozen_decision_policy.py"
     frozen_path.write_text(
-        render_decision_source(parent, screening_policy_hash=actual_screening_hash),
+        render_decision_source(evolution.frozen, screening_policy_hash=actual_screening_hash),
         encoding="utf-8",
     )
+    final_train = evaluate_decision(evolution.frozen, train_cases)
+    final_dev = evaluate_decision(evolution.frozen, dev_cases)
     manifest = {
         "schema_version": 1,
         "phase": "task_conditioned_numerical_selector",
         "train_tasks": len(train),
         "dev_tasks": len(dev),
+        "train_validation_folds": args.train_validation_folds,
         "screening_policy_sha256": actual_screening_hash,
         "frozen_decision_policy_sha256": _sha256(frozen_path),
-        "train": asdict(evaluate_decision(parent, train_cases)),
-        "dev": asdict(evaluate_decision(parent, dev_cases)),
+        "train": asdict(final_train),
+        "dev": asdict(final_dev),
+        "train_search_parent": asdict(evolution.train_parent),
+        "train_search_winner": asdict(evolution.train_winner_score),
+        "dev_parent": asdict(evolution.dev_parent),
+        "dev_train_winner": asdict(evolution.dev_winner),
+        "final_dev_gate": asdict(evolution.final_gate),
+        "dev_accepted": evolution.final_gate.accepted,
+        "train_winner_sha256": decision_policy_hash(
+            evolution.train_winner, screening_policy_hash=actual_screening_hash
+        ),
         "frozen_global_ranking": list(
             _global_ranking(final_outcomes, tuple(task.task_id for task in train))
         ),
-        "accepted_generations": [row["generation"] for row in generations if row["accepted"]],
+        "accepted_train_generations": [
+            row["generation"] for row in generations if row["accepted"]
+        ],
+        "accepted_generations": (
+            [row["generation"] for row in generations if row["accepted"]]
+            if evolution.final_gate.accepted
+            else []
+        ),
         "generations": generations,
         "cache": {
             **final_cache,
@@ -467,27 +513,48 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _build_case(task, screening, screening_hash, final_by_key, store, config) -> DecisionCase:
+def _build_case(
+    task,
+    screening,
+    screening_hash,
+    final_by_key,
+    store,
+    config,
+    *,
+    group_id: str = "",
+) -> DecisionCase:
     active = materialize_active_dictionary(screening, profile_task(task))
     diagnostics = {}
     forecasts = {}
     families = {}
-    for candidate in active.active:
-        families[candidate.name] = candidate.family
-        diagnostics[candidate.name] = diagnose_candidate(
-            task, candidate.name, candidate.family, store.forecast, config,
+    specs = [
+        (candidate.name, candidate.family, candidate.matched_clause >= 0)
+        for candidate in active.active
+    ]
+    known = {name for name, _, _ in specs}
+    specs.extend(
+        (name, "tsfm", False)
+        for name in getattr(store, "tsfm", {})
+        if name not in known
+    )
+    for name, family, _ in specs:
+        families[name] = family
+        diagnostics[name] = diagnose_candidate(
+            task, name, family, store.forecast, config,
             screening_policy_hash=screening_hash,
             runtime_settings={"portfolio": "flagship5"},
         )
-        outcome = final_by_key.get((candidate.name, task.task_id))
+        outcome = final_by_key.get((name, task.task_id))
         if outcome is not None and outcome.status == SUCCESS:
-            forecasts[candidate.name] = tuple(outcome.forecast)
+            forecasts[name] = tuple(outcome.forecast)
     return DecisionCase(
         task,
-        tuple(candidate.name for candidate in active.active),
+        tuple(name for name, _, _ in specs),
         diagnostics,
         forecasts,
         families,
+        tuple(name for name, _, matched in specs if matched),
+        group_id,
     )
 
 
@@ -507,6 +574,8 @@ def _write_cases(path: Path, cases: Sequence[DecisionCase]) -> None:
                 "diagnostics": {name: asdict(value) for name, value in case.diagnostics.items()},
                 "final_forecasts": {name: list(values) for name, values in case.forecasts.items()},
                 "families": dict(case.families),
+                "conditioned_names": list(case.conditioned_names),
+                "group_id": case.group_id,
             }
             handle.write(json.dumps(_finite_json(payload), sort_keys=True, allow_nan=False) + "\n")
 
@@ -559,10 +628,12 @@ def _report(manifest: Mapping[str, object]) -> str:
         f"- Accepted generations: {manifest['accepted_generations']}",
         f"- Screening SHA-256: `{manifest['screening_policy_sha256']}`",
         f"- Decision SHA-256: `{manifest['frozen_decision_policy_sha256']}`",
+        f"- Dev accepted: `{manifest.get('dev_accepted', False)}`",
+        f"- Final Dev gate: {manifest.get('final_dev_gate', {}).get('reason', 'not recorded')}",
         f"- Public Test accessed: `{manifest['public_test_accessed']}`",
         "",
-        "| Split | Coverage | Mean MASE | Median MASE | Mean MAE | Mean sMAPE | Catastrophic | Oracle regret | Methods | Families | Ensemble |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Split | Coverage | Mean sMAE | sMAE SE | Mean sRMSE | sRMSE SE | P90/P95 sMAE | Clipped sMAE/sRMSE | Mean MASE | Mean MAE | Mean sMAPE | Oracle regret | Methods | Families | Ensemble | Assumptions | Verifier pool | Pool families | Assumption kinds |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         _score_row("Train", train),
         _score_row("Dev", dev),
         "",
@@ -571,10 +642,15 @@ def _report(manifest: Mapping[str, object]) -> str:
 
 def _score_row(label: str, score: Mapping[str, object]) -> str:
     return (
-        f"| {label} | {score['coverage']:.4f} | {score['mean_mase']:.6f} | "
-        f"{score['median_mase']:.6f} | {score['mean_mae']:.6f} | {score['mean_smape']:.6f} | "
-        f"{score['catastrophic_rate']:.4f} | {score['mean_active_oracle_regret']:.6f} | "
-        f"{score['method_diversity']} | {score['family_diversity']} | {score['ensemble_rate']:.4f} |"
+        f"| {label} | {score['coverage']:.4f} | {score['mean_smae']:.6f} | "
+        f"{score['se_smae']:.6f} | {score['mean_srmse']:.6f} | {score['se_srmse']:.6f} | "
+        f"{score['p90_smae']:.6f}/{score['p95_smae']:.6f} | "
+        f"{score['smae_clipped_count']}/{score['srmse_clipped_count']} | "
+        f"{score['mean_mase']:.6f} | {score['mean_mae']:.6f} | {score['mean_smape']:.6f} | "
+        f"{score['mean_active_oracle_regret']:.6f} | "
+        f"{score['method_diversity']} | {score['family_diversity']} | {score['ensemble_rate']:.4f} | "
+        f"{score['mean_assumption_count']:.2f} | {score['mean_considered_candidates']:.2f} | "
+        f"{score['mean_considered_families']:.2f} | {score['assumption_kind_diversity']} |"
     )
 
 

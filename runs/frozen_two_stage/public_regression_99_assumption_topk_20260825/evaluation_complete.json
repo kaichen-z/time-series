@@ -1,0 +1,7 @@
+{
+  "decision_policy_sha256": "f9fcd056db3044bf3664055b90a2be7c02e2b520028c0842d014b19dc5d2a06e",
+  "per_task_sha256": "76a3968e97232d68b8a7beed82ac2f7e922808c6ddd799835aba14a24e914401",
+  "results_sha256": "e10c09b002e58d04d08d466542df53bfd2fdd44eb05a9318cc944fe26318491e",
+  "screening_policy_sha256": "2277acd9ef0b5e219960e84aa1b02fbfa13bf1b54cf106e26b00c5f3fc2babc2",
+  "task_count": 99
+}

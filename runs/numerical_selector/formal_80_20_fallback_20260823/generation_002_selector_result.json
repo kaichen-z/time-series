@@ -1,0 +1,70 @@
+{
+  "accepted": false,
+  "child_hash": "988fb289581a91a862cfb6c0260707d82cf7a320b5b013c2d94da841030a0c89",
+  "dev_child": {
+    "catastrophic_rate": 0.1,
+    "coverage": 1.0,
+    "ensemble_rate": 0.0,
+    "fallback_rate": 1.0,
+    "family_diversity": 3,
+    "mean_active_oracle_regret": 0.38040964771792596,
+    "mean_mae": 160.3550604527953,
+    "mean_mase": 3.680623369859332,
+    "mean_smape": 37.98668474049894,
+    "median_mae": 10.014435968982815,
+    "median_mase": 2.1350856097132445,
+    "method_diversity": 10,
+    "task_count": 20
+  },
+  "dev_parent": {
+    "catastrophic_rate": 0.1,
+    "coverage": 1.0,
+    "ensemble_rate": 0.45,
+    "fallback_rate": 0.1,
+    "family_diversity": 3,
+    "mean_active_oracle_regret": 0.2748201891409202,
+    "mean_mae": 165.91435703098617,
+    "mean_mase": 3.375290779398759,
+    "mean_smape": 32.85685042908346,
+    "median_mae": 9.945914190202851,
+    "median_mase": 2.1350856097132445,
+    "method_diversity": 16,
+    "task_count": 20
+  },
+  "gate": {
+    "accepted": false,
+    "reason": "Dev active-oracle regret increased"
+  },
+  "generation": 2,
+  "parent_hash": "9b3682bd46b7bf739f8ad8c02f8bd9d9384d167e9a771d2000c9991643c4d8a7",
+  "train_child": {
+    "catastrophic_rate": 0.1,
+    "coverage": 1.0,
+    "ensemble_rate": 0.0,
+    "fallback_rate": 1.0,
+    "family_diversity": 3,
+    "mean_active_oracle_regret": 1.0199394671906432,
+    "mean_mae": 1471.7692738408268,
+    "mean_mase": 3.928293597073883,
+    "mean_smape": 37.6289638018538,
+    "median_mae": 7.356446428571431,
+    "median_mase": 1.629527257874667,
+    "method_diversity": 20,
+    "task_count": 80
+  },
+  "train_parent": {
+    "catastrophic_rate": 0.0875,
+    "coverage": 1.0,
+    "ensemble_rate": 0.4375,
+    "fallback_rate": 0.2,
+    "family_diversity": 3,
+    "mean_active_oracle_regret": 0.8972677704392984,
+    "mean_mae": 1465.735083721672,
+    "mean_mase": 3.714398325072261,
+    "mean_smape": 35.92031761923819,
+    "median_mae": 7.437722632746977,
+    "median_mase": 1.5200931020149424,
+    "method_diversity": 23,
+    "task_count": 80
+  }
+}

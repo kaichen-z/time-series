@@ -1,0 +1,121 @@
+{
+  "accepted": false,
+  "child_hash": "2455a8133eafae20b109d57cbec6386d6a8d216e0179195e2a774cd2daeb177f",
+  "dev_child": {
+    "active_counts": {
+      "task_102": 56,
+      "task_103": 55
+    },
+    "active_success_rate": 0.8288288288288288,
+    "compression": 0.5388349514563107,
+    "coverage": 1.0,
+    "failure_exposure": 0.17117117117117117,
+    "fallback_rate": 0.0,
+    "global_oracle_retention": 1.0,
+    "mean_active_candidates": 55.5,
+    "mean_active_families": 3.0,
+    "mean_active_oracle_regret": 0.0,
+    "median_active_candidates": 55.5,
+    "not_applicable_exposure": 0.0,
+    "task_count": 2
+  },
+  "dev_parent": {
+    "active_counts": {
+      "task_102": 50,
+      "task_103": 49
+    },
+    "active_success_rate": 0.9292929292929293,
+    "compression": 0.48058252427184467,
+    "coverage": 1.0,
+    "failure_exposure": 0.0707070707070707,
+    "fallback_rate": 0.0,
+    "global_oracle_retention": 1.0,
+    "mean_active_candidates": 49.5,
+    "mean_active_families": 3.0,
+    "mean_active_oracle_regret": 0.0,
+    "median_active_candidates": 49.5,
+    "not_applicable_exposure": 0.0,
+    "task_count": 2
+  },
+  "gate": {
+    "accepted": false,
+    "improved_dimensions": [],
+    "reason": "rejected: Dev failure exposure increased"
+  },
+  "generation": 1,
+  "parent_hash": "358e1f061f66357f20b05822b567ff11ea3cd6558a460b24ada10a7fea09e062",
+  "required_targets": [
+    "toto_2_0",
+    "poisson_dynamic_regression",
+    "sarima_auto",
+    "markov_switching_autoregression",
+    "auto_ces",
+    "auto_tbats",
+    "lightgbm_lag_forecast",
+    "mstl_ets",
+    "neural_network_autoregression",
+    "negative_binomial_dynamic_regression",
+    "holt_winters_multiplicative",
+    "bats",
+    "ets_auto",
+    "tbats",
+    "smooth_transition_autoregression",
+    "outlier_adjusted_arima",
+    "local_linear_trend_kalman",
+    "holt_linear_trend",
+    "holt_damped_trend",
+    "intervention_arima",
+    "dynamic_theta",
+    "croston_optimized",
+    "theta_classic",
+    "local_level_kalman"
+  ],
+  "train_child": {
+    "active_counts": {
+      "task_108": 42,
+      "task_109": 46,
+      "task_110": 46,
+      "task_114": 51,
+      "task_115": 51,
+      "task_118": 51,
+      "task_127": 46,
+      "task_128": 46
+    },
+    "active_success_rate": 0.9841688654353562,
+    "compression": 0.45995145631067963,
+    "coverage": 1.0,
+    "failure_exposure": 0.0,
+    "fallback_rate": 0.0,
+    "global_oracle_retention": 0.125,
+    "mean_active_candidates": 47.375,
+    "mean_active_families": 3.0,
+    "mean_active_oracle_regret": 0.05263619675232569,
+    "median_active_candidates": 46.0,
+    "not_applicable_exposure": 0.0158311345646438,
+    "task_count": 8
+  },
+  "train_parent": {
+    "active_counts": {
+      "task_108": 36,
+      "task_109": 40,
+      "task_110": 40,
+      "task_114": 45,
+      "task_115": 45,
+      "task_118": 45,
+      "task_127": 40,
+      "task_128": 40
+    },
+    "active_success_rate": 0.9818731117824774,
+    "compression": 0.4016990291262136,
+    "coverage": 1.0,
+    "failure_exposure": 0.0,
+    "fallback_rate": 0.0,
+    "global_oracle_retention": 0.125,
+    "mean_active_candidates": 41.375,
+    "mean_active_families": 3.0,
+    "mean_active_oracle_regret": 0.05263619675232569,
+    "median_active_candidates": 40.0,
+    "not_applicable_exposure": 0.01812688821752266,
+    "task_count": 8
+  }
+}

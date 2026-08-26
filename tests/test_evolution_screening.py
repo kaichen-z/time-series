@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from numerical_agent.evolution.execution import Task
@@ -382,6 +384,40 @@ def test_screening_gate_rejects_train_failure_exposure_increase() -> None:
     assert "Train failure exposure" in result.reason
 
 
+def test_screening_gate_uses_absolute_failure_burden_when_compressing_successes() -> None:
+    """Removing a reliable broad candidate must not manufacture a failure regression."""
+    train = _screen_tasks("train")
+    dev = _screen_tasks("dev")
+    outcomes = _screen_outcomes(train + dev)
+    parent = _screen_policy()
+    dense_only = ApplicabilityPolicy((ApplicabilityClause(("dense",)),))
+    child = ScreeningPolicy(
+        tuple(
+            replace(entry, status="specialized", applicability=dense_only)
+            if entry.name == "stable"
+            else entry
+            for entry in parent.entries
+        ),
+        parent.fallback_names,
+    )
+    train_parent = evaluate_screening(parent, train, outcomes)
+    train_child = evaluate_screening(child, train, outcomes)
+    dev_parent = evaluate_screening(parent, dev, outcomes)
+    dev_child = evaluate_screening(child, dev, outcomes)
+
+    assert train_child.failure_exposure > train_parent.failure_exposure
+    assert train_child.mean_active_failures == train_parent.mean_active_failures
+    result = compare_screening(
+        train_parent,
+        train_child,
+        dev_parent,
+        dev_child,
+    )
+
+    assert result.accepted
+    assert "compression" in result.improved_dimensions
+
+
 def test_screening_gate_requires_full_train_and_dev_oracle_retention() -> None:
     train = _screen_tasks("train")
     dev = _screen_tasks("dev")
@@ -399,3 +435,38 @@ def test_screening_gate_requires_full_train_and_dev_oracle_retention() -> None:
 
     assert not result.accepted
     assert "100%" in result.reason
+
+
+def test_final_gate_allows_bounded_dev_oracle_loss_when_regret_remains_small() -> None:
+    tasks = _screen_tasks()
+    outcomes = _screen_outcomes(tasks)
+    parent = evaluate_screening(_screen_policy(), tasks, outcomes)
+    child = evaluate_screening(
+        _screen_policy(broken_status="repair"), tasks, outcomes
+    )
+    dev_child = replace(
+        child,
+        global_oracle_retention=0.9,
+        mean_active_oracle_regret=0.005,
+    )
+    constraints = ScreeningConstraints(
+        baseline_method="timesfm",
+        min_active_candidates=1,
+        max_active_candidates=103,
+        min_unique_active_dictionaries=1,
+        max_mean_pairwise_jaccard=1.0,
+        min_group_support=1,
+        min_dev_oracle_retention=0.9,
+        required_conditioned_families=(),
+    )
+
+    result = compare_screening(
+        parent,
+        child,
+        parent,
+        dev_child,
+        constraints=constraints,
+        enforce_final_constraints=True,
+    )
+
+    assert result.accepted

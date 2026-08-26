@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "wheel>=0.43"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -14,7 +14,7 @@ dependencies = []
 huggingface = ["huggingface_hub>=0.25"]
 chronos = ["chronos-forecasting>=2.2.0"]
 timesfm = ["timesfm[torch]>=2.0.2"]
-dev = ["pytest>=8.0", "setuptools>=68"]
+dev = ["pytest>=8.0", "setuptools>=68", "wheel>=0.43"]
 
 [project.scripts]
 drcik-agent = "drcik_agent.cli:main"

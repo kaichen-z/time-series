@@ -1,0 +1,446 @@
+{
+  "accepted": false,
+  "action_decisions": [
+    {
+      "accepted": false,
+      "name": "bayesian_online_changepoint_forecast",
+      "reason": "rejected: no Train screening dimension improved safely on Dev"
+    },
+    {
+      "accepted": false,
+      "name": "lightts_sampling_mlp",
+      "reason": "rejected: Dev failure exposure increased"
+    },
+    {
+      "accepted": false,
+      "name": "ltsf_dlinear",
+      "reason": "rejected: Dev failure exposure increased"
+    },
+    {
+      "accepted": false,
+      "name": "tsmixer",
+      "reason": "rejected: Dev failure exposure increased"
+    },
+    {
+      "accepted": false,
+      "name": "nearest_neighbor_lag_analogue",
+      "reason": "rejected: no Train screening dimension improved safely on Dev"
+    },
+    {
+      "accepted": false,
+      "name": "naive_last",
+      "reason": "rejected: no Train screening dimension improved safely on Dev"
+    },
+    {
+      "accepted": false,
+      "name": "naive_mean",
+      "reason": "rejected: Dev failure exposure increased"
+    },
+    {
+      "accepted": false,
+      "name": "naive_drift",
+      "reason": "rejected: Dev failure exposure increased"
+    },
+    {
+      "accepted": false,
+      "name": "simple_moving_average",
+      "reason": "rejected: Dev failure exposure increased"
+    },
+    {
+      "accepted": false,
+      "name": "ar",
+      "reason": "rejected: Dev failure exposure increased"
+    },
+    {
+      "accepted": false,
+      "name": "robust_loess_trend",
+      "reason": "rejected: Dev failure exposure increased"
+    },
+    {
+      "accepted": false,
+      "name": "linear_trend_regression",
+      "reason": "rejected: Dev failure exposure increased"
+    },
+    {
+      "accepted": false,
+      "name": "polynomial_trend_regression",
+      "reason": "rejected: Dev failure exposure increased"
+    },
+    {
+      "accepted": false,
+      "name": "piecewise_linear_trend",
+      "reason": "rejected: Dev failure exposure increased"
+    },
+    {
+      "accepted": false,
+      "name": "threshold_autoregression",
+      "reason": "rejected: Dev failure exposure increased"
+    },
+    {
+      "accepted": false,
+      "name": "pelt_segment_then_forecast",
+      "reason": "rejected: Dev failure exposure increased"
+    },
+    {
+      "accepted": false,
+      "name": "forecast_residual_bootstrap",
+      "reason": "rejected: no Train screening dimension improved safely on Dev"
+    },
+    {
+      "accepted": false,
+      "name": "patchtst",
+      "reason": "rejected: no Train screening dimension improved safely on Dev"
+    },
+    {
+      "accepted": false,
+      "name": "itransformer",
+      "reason": "rejected: Dev failure exposure increased"
+    },
+    {
+      "accepted": false,
+      "name": "timesnet",
+      "reason": "rejected: Dev failure exposure increased"
+    },
+    {
+      "accepted": false,
+      "name": "scinet",
+      "reason": "rejected: Dev failure exposure increased"
+    },
+    {
+      "accepted": false,
+      "name": "timemixer",
+      "reason": "rejected: Dev failure exposure increased"
+    },
+    {
+      "accepted": false,
+      "name": "samformer",
+      "reason": "rejected: Dev failure exposure increased"
+    },
+    {
+      "accepted": false,
+      "name": "auto_mfles",
+      "reason": "rejected: no Train screening dimension improved safely on Dev"
+    }
+  ],
+  "agent_calls": 1,
+  "child_hash": "dd298f442dbc9ed647bacdab9f5aeed9d185d8ed6c7049341d5189c9dedc1edb",
+  "evaluation_scope": "train_only",
+  "gate": {
+    "accepted": false,
+    "improved_dimensions": [],
+    "reason": "rejected: Dev failure exposure increased"
+  },
+  "generation": 4,
+  "oracle_shields": [
+    {
+      "method": "itransformer",
+      "profile_tags": [
+        "frequency:1 hour",
+        "history:le_168",
+        "horizon:gt_96",
+        "intermittency:dense",
+        "periodicity:strong",
+        "regime:recent_shift",
+        "trend:weak_up"
+      ]
+    },
+    {
+      "method": "lightts_sampling_mlp",
+      "profile_tags": [
+        "frequency:1 hour",
+        "history:le_48",
+        "horizon:le_24",
+        "intermittency:intermittent",
+        "periodicity:strong",
+        "regime:recent_shift",
+        "trend:flat"
+      ]
+    },
+    {
+      "method": "ltsf_dlinear",
+      "profile_tags": [
+        "frequency:1 day",
+        "history:le_512",
+        "horizon:le_96",
+        "intermittency:dense",
+        "periodicity:strong",
+        "regime:stable",
+        "trend:weak_up"
+      ]
+    },
+    {
+      "method": "ltsf_dlinear",
+      "profile_tags": [
+        "frequency:1 hour",
+        "history:le_168",
+        "horizon:le_96",
+        "intermittency:dense",
+        "periodicity:strong",
+        "regime:recent_shift",
+        "trend:flat"
+      ]
+    },
+    {
+      "method": "piecewise_linear_trend",
+      "profile_tags": [
+        "frequency:1 hour",
+        "history:le_168",
+        "horizon:gt_96",
+        "intermittency:dense",
+        "periodicity:strong",
+        "regime:recent_shift",
+        "trend:flat"
+      ]
+    },
+    {
+      "method": "scinet",
+      "profile_tags": [
+        "frequency:5 minutes",
+        "history:le_512",
+        "horizon:gt_96",
+        "intermittency:dense",
+        "periodicity:strong",
+        "regime:stable",
+        "trend:weak_down"
+      ]
+    }
+  ],
+  "parent_hash": "3e659c643a74d3bc2e6c84d51c8cba41425db2982a35437fc32f6d421be48c5f",
+  "phase": "review",
+  "required_targets": [
+    "bayesian_online_changepoint_forecast",
+    "lightts_sampling_mlp",
+    "ltsf_dlinear",
+    "tsmixer",
+    "nearest_neighbor_lag_analogue",
+    "naive_last",
+    "naive_mean",
+    "naive_drift",
+    "simple_moving_average",
+    "ar",
+    "robust_loess_trend",
+    "linear_trend_regression",
+    "polynomial_trend_regression",
+    "piecewise_linear_trend",
+    "threshold_autoregression",
+    "pelt_segment_then_forecast",
+    "forecast_residual_bootstrap",
+    "patchtst",
+    "itransformer",
+    "timesnet",
+    "scinet",
+    "timemixer",
+    "samformer",
+    "auto_mfles"
+  ],
+  "train_child": {
+    "active_counts": {
+      "task_108": 43,
+      "task_109": 43,
+      "task_110": 43,
+      "task_114": 42,
+      "task_115": 43,
+      "task_118": 43,
+      "task_127": 43,
+      "task_128": 43,
+      "task_129": 42,
+      "task_130": 42,
+      "task_131": 42,
+      "task_132": 43,
+      "task_133": 43,
+      "task_134": 42,
+      "task_135": 42,
+      "task_136": 42,
+      "task_142": 43,
+      "task_147": 43,
+      "task_149": 42,
+      "task_158": 43,
+      "task_163": 43,
+      "task_164": 43,
+      "task_167": 43,
+      "task_169": 42,
+      "task_170": 42,
+      "task_171": 42,
+      "task_174": 43,
+      "task_175": 43,
+      "task_176": 43,
+      "task_177": 43,
+      "task_178": 42,
+      "task_185": 42,
+      "task_186": 42,
+      "task_187": 42,
+      "task_199": 42,
+      "task_201": 42,
+      "task_202": 42,
+      "task_206": 43,
+      "task_207": 42,
+      "task_209": 42,
+      "task_216": 42,
+      "task_217": 42,
+      "task_218": 42,
+      "task_219": 42,
+      "task_221": 42,
+      "task_223": 42,
+      "task_224": 42,
+      "task_227": 42,
+      "task_229": 42,
+      "task_232": 42,
+      "task_233": 42,
+      "task_235": 42,
+      "task_239": 43,
+      "task_42": 42,
+      "task_43": 42,
+      "task_45": 43,
+      "task_48": 43,
+      "task_49": 43,
+      "task_54": 42,
+      "task_58": 42,
+      "task_59": 42,
+      "task_60": 42,
+      "task_61": 42,
+      "task_64": 43,
+      "task_65": 42,
+      "task_66": 42,
+      "task_67": 42,
+      "task_71": 42,
+      "task_74": 42,
+      "task_78": 42,
+      "task_79": 42,
+      "task_83": 42,
+      "task_84": 42,
+      "task_85": 42,
+      "task_86": 42,
+      "task_90": 42,
+      "task_94": 42,
+      "task_95": 42,
+      "task_96": 42,
+      "task_99": 42
+    },
+    "active_success_rate": 0.7113737075332348,
+    "compression": 0.4108009708737864,
+    "conditioned_entries_by_family": {
+      "combined": 0,
+      "statistical": 7,
+      "tsfm": 0
+    },
+    "coverage": 1.0,
+    "failure_exposure": 0.09955686853766617,
+    "fallback_rate": 0.0,
+    "global_oracle_retention": 1.0,
+    "max_active_candidates": 43,
+    "mean_active_candidates": 42.3125,
+    "mean_active_families": 3.0,
+    "mean_active_oracle_regret": 0.0,
+    "mean_pairwise_jaccard": 0.986529223646533,
+    "median_active_candidates": 42.0,
+    "min_active_candidates": 42,
+    "not_applicable_exposure": 0.18906942392909898,
+    "task_count": 80,
+    "unique_active_dictionaries": 8
+  },
+  "train_parent": {
+    "active_counts": {
+      "task_108": 61,
+      "task_109": 61,
+      "task_110": 61,
+      "task_114": 60,
+      "task_115": 60,
+      "task_118": 60,
+      "task_127": 61,
+      "task_128": 61,
+      "task_129": 60,
+      "task_130": 60,
+      "task_131": 60,
+      "task_132": 61,
+      "task_133": 61,
+      "task_134": 60,
+      "task_135": 60,
+      "task_136": 60,
+      "task_142": 60,
+      "task_147": 60,
+      "task_149": 60,
+      "task_158": 61,
+      "task_163": 60,
+      "task_164": 60,
+      "task_167": 61,
+      "task_169": 60,
+      "task_170": 60,
+      "task_171": 60,
+      "task_174": 61,
+      "task_175": 61,
+      "task_176": 61,
+      "task_177": 61,
+      "task_178": 60,
+      "task_185": 60,
+      "task_186": 60,
+      "task_187": 60,
+      "task_199": 60,
+      "task_201": 60,
+      "task_202": 60,
+      "task_206": 60,
+      "task_207": 60,
+      "task_209": 60,
+      "task_216": 60,
+      "task_217": 60,
+      "task_218": 60,
+      "task_219": 60,
+      "task_221": 60,
+      "task_223": 60,
+      "task_224": 60,
+      "task_227": 60,
+      "task_229": 60,
+      "task_232": 60,
+      "task_233": 60,
+      "task_235": 60,
+      "task_239": 60,
+      "task_42": 60,
+      "task_43": 60,
+      "task_45": 60,
+      "task_48": 60,
+      "task_49": 60,
+      "task_54": 60,
+      "task_58": 60,
+      "task_59": 60,
+      "task_60": 60,
+      "task_61": 60,
+      "task_64": 60,
+      "task_65": 60,
+      "task_66": 60,
+      "task_67": 60,
+      "task_71": 60,
+      "task_74": 60,
+      "task_78": 60,
+      "task_79": 60,
+      "task_83": 60,
+      "task_84": 60,
+      "task_85": 60,
+      "task_86": 60,
+      "task_90": 60,
+      "task_94": 60,
+      "task_95": 60,
+      "task_96": 60,
+      "task_99": 60
+    },
+    "active_success_rate": 0.7961770205692915,
+    "compression": 0.5841019417475728,
+    "conditioned_entries_by_family": {
+      "combined": 0,
+      "statistical": 2,
+      "tsfm": 0
+    },
+    "coverage": 1.0,
+    "failure_exposure": 0.07001869935591107,
+    "fallback_rate": 0.0,
+    "global_oracle_retention": 1.0,
+    "max_active_candidates": 61,
+    "mean_active_candidates": 60.1625,
+    "mean_active_families": 3.0,
+    "mean_active_oracle_regret": 0.0,
+    "mean_pairwise_jaccard": 0.9952568462202706,
+    "median_active_candidates": 60.0,
+    "min_active_candidates": 60,
+    "not_applicable_exposure": 0.13380428007479742,
+    "task_count": 80,
+    "unique_active_dictionaries": 3
+  }
+}

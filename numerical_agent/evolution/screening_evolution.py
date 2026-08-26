@@ -39,8 +39,14 @@ intermittency, regime, frequency, history length, and horizon. Propose a conserv
 Keep a method broad only when it is reliable across supported strata. Mark it specialized when the
 evidence shows a coherent regime where it beats or safely complements the baseline. Statistical,
 TSFM, and Combined methods are equally eligible for typed specialization. Treat not_applicable as
-valid specialist behavior; use repair for crashes/invalid outputs and quarantine only for severe
-unreliability. oracle_profiles lists anonymous Train strata where a method is globally best; every
+valid specialist behavior. Repair or quarantine requires observed Crash/Invalid Train evidence;
+poor MASE alone must remain keep or become specialized because a weak standalone method can still
+be useful as a diverse ensemble member. Every specialized clause must pass its exact joint Train subset: the supplied
+minimum support, at least 75% successful executions, at least 50% wins over the named baseline,
+and a negative median normalized MASE difference. Do not combine marginally supported tags into
+an unsupported conjunction. For every specialized action, trusted Python will compile your intent
+into at most three validated atomic Train strata; your any_of clauses are preferences, not an
+authority to bypass that compiler. oracle_profiles lists anonymous Train strata where a method is globally best; every
 listed profile must remain covered by keep or a matching clause. Never manufacture dictionary
 differences without performance evidence. Preserve
 the per-task historical oracle, reduce crash/invalid exposure, and move candidate counts toward the
@@ -91,6 +97,378 @@ class ScreeningActionDecision:
     name: str
     accepted: bool
     reason: str
+
+
+@dataclass(frozen=True)
+class SpecializedClauseEvidence:
+    """Exact Train evidence for one proposed applicability conjunction."""
+
+    method: str
+    clause_index: int
+    support: int
+    successes: int
+    comparable: int
+    win_rate: float
+    median_relative_mase: float
+
+
+@dataclass(frozen=True)
+class ScreeningTrainDevResult:
+    """Train-only screening evolution followed by one read-only Dev gate."""
+
+    original_parent: ScreeningPolicy
+    train_winner: ScreeningPolicy
+    frozen: ScreeningPolicy
+    generations: tuple[ScreeningGeneration, ...]
+    train_parent: ScreeningScore
+    train_winner_score: ScreeningScore
+    dev_parent: ScreeningScore
+    dev_winner: ScreeningScore
+    final_gate: ScreeningGateResult
+
+
+def validate_specialized_evidence(
+    parent: ScreeningPolicy,
+    child: ScreeningPolicy,
+    tasks: Sequence[Task],
+    outcomes: Sequence[Outcome],
+    *,
+    baseline_method: str,
+    min_group_support: int,
+    target_names: Sequence[str],
+) -> tuple[SpecializedClauseEvidence, ...]:
+    """Reject unsupported Agent-created conjunctions before they reach a gate.
+
+    The prompt contains marginal stratum summaries.  A Child may combine those
+    marginals, so trusted Python must verify the *joint* clause on Train tasks.
+    Trusted oracle shields are added later and therefore are not constrained by
+    this Agent-proposal check.
+    """
+    if min_group_support < 1:
+        raise ValueError("min_group_support must be positive")
+    by_key = {(row.method, row.task_id): row for row in outcomes}
+    profiles = {task.task_id: profile_task(task) for task in tasks}
+    evidence: list[SpecializedClauseEvidence] = []
+    for name in tuple(str(item) for item in target_names):
+        before = parent.get(name)
+        after = child.get(name)
+        if before is None or after is None or after == before or after.status != "specialized":
+            continue
+        for clause_index, clause in enumerate(after.applicability.any_of):
+            matched = [task for task in tasks if clause.matches(profiles[task.task_id])]
+            support = len(matched)
+            if support < min_group_support:
+                raise ScreeningEvolutionError(
+                    f"{name} clause {clause_index} has joint support {support}; "
+                    f"requires at least {min_group_support}"
+                )
+            successes = 0
+            relative: list[float] = []
+            wins = 0
+            for task in matched:
+                method = by_key.get((name, task.task_id))
+                baseline = by_key.get((baseline_method, task.task_id))
+                if method is not None and method.status == SUCCESS and _finite_outcome(method):
+                    successes += 1
+                if (
+                    method is None
+                    or baseline is None
+                    or method.status != SUCCESS
+                    or baseline.status != SUCCESS
+                    or not _finite_outcome(method)
+                    or not _finite_outcome(baseline)
+                ):
+                    continue
+                method_mase = float(method.mase)
+                baseline_mase = float(baseline.mase)
+                wins += int(method_mase < baseline_mase - 1e-12)
+                relative.append(
+                    (method_mase - baseline_mase) / (1.0 + abs(baseline_mase))
+                )
+            comparable = len(relative)
+            if successes / support < 0.75 - 1e-12:
+                raise ScreeningEvolutionError(
+                    f"{name} clause {clause_index} is unreliable on its joint support"
+                )
+            if comparable < min_group_support:
+                raise ScreeningEvolutionError(
+                    f"{name} clause {clause_index} has only {comparable} comparable "
+                    f"Train outcomes; requires at least {min_group_support}"
+                )
+            win_rate = wins / comparable
+            median_relative = statistics.median(relative)
+            if win_rate < 0.5 - 1e-12 or median_relative >= -1e-12:
+                raise ScreeningEvolutionError(
+                    f"{name} clause {clause_index} lacks reliable baseline uplift"
+                )
+            evidence.append(
+                SpecializedClauseEvidence(
+                    name,
+                    clause_index,
+                    support,
+                    successes,
+                    comparable,
+                    win_rate,
+                    median_relative,
+                )
+            )
+    return tuple(evidence)
+
+
+def compile_supported_specialists(
+    parent: ScreeningPolicy,
+    child: ScreeningPolicy,
+    tasks: Sequence[Task],
+    outcomes: Sequence[Outcome],
+    *,
+    baseline_method: str,
+    min_group_support: int,
+    target_names: Sequence[str],
+    max_clauses: int = 3,
+) -> ScreeningPolicy:
+    """Compile Agent specialization intent into exact, trusted Train strata.
+
+    The Agent decides *which* methods should become specialists.  Python owns
+    the executable applicability clauses: it enumerates approved atomic task
+    strata, validates each one against the same trusted gate, removes duplicate
+    task subsets, and keeps a small best-first OR policy.  This prevents a weak
+    LLM conjunction from invalidating an otherwise useful generation.
+    """
+    if max_clauses < 1:
+        raise ValueError("max_clauses must be positive")
+    profiles = {task.task_id: profile_task(task) for task in tasks}
+    replacements: dict[str, ScreeningEntry] = {}
+    for name in tuple(str(item) for item in target_names):
+        before = parent.get(name)
+        proposed = child.get(name)
+        if (
+            before is None
+            or proposed is None
+            or proposed == before
+            or proposed.status != "specialized"
+        ):
+            continue
+        preferred = {
+            tag
+            for clause in proposed.applicability.any_of
+            for tag in clause.all_tags
+        }
+        supported: list[
+            tuple[
+                bool,
+                float,
+                float,
+                int,
+                str,
+                tuple[str, ...],
+                ApplicabilityClause,
+            ]
+        ] = []
+        tags = sorted(
+            {tag for profile in profiles.values() for tag in task_group_tags(profile)}
+        )
+        for tag in tags:
+            clause = ApplicabilityClause((tag,))
+            matched_ids = tuple(
+                sorted(
+                    task_id
+                    for task_id, profile in profiles.items()
+                    if clause.matches(profile)
+                )
+            )
+            candidate_entry = ScreeningEntry(
+                proposed.name,
+                proposed.family,
+                "specialized",
+                ApplicabilityPolicy((clause,)),
+                proposed.reason,
+            )
+            candidate = ScreeningPolicy(
+                tuple(
+                    candidate_entry if entry.name == name else entry
+                    for entry in child.entries
+                ),
+                child.fallback_names,
+            )
+            try:
+                evidence = validate_specialized_evidence(
+                    parent,
+                    candidate,
+                    tasks,
+                    outcomes,
+                    baseline_method=baseline_method,
+                    min_group_support=min_group_support,
+                    target_names=(name,),
+                )[0]
+            except (IndexError, ScreeningEvolutionError):
+                continue
+            supported.append(
+                (
+                    tag not in preferred,
+                    evidence.median_relative_mase,
+                    -evidence.win_rate,
+                    -evidence.support,
+                    tag,
+                    matched_ids,
+                    clause,
+                )
+            )
+        if not supported:
+            raise ScreeningEvolutionError(
+                f"{name} has no evidence-supported atomic Train stratum"
+            )
+        supported.sort(key=lambda row: row[:5])
+        selected: list[ApplicabilityClause] = []
+        seen_subsets: set[tuple[str, ...]] = set()
+        for row in supported:
+            if row[-2] in seen_subsets:
+                continue
+            seen_subsets.add(row[-2])
+            selected.append(row[-1])
+            if len(selected) == max_clauses:
+                break
+        clauses = tuple(selected)
+        replacements[name] = ScreeningEntry(
+            proposed.name,
+            proposed.family,
+            "specialized",
+            ApplicabilityPolicy(clauses),
+            proposed.reason + "; applicability compiled from trusted Train strata",
+        )
+    if not replacements:
+        return child
+    return ScreeningPolicy(
+        tuple(replacements.get(entry.name, entry) for entry in child.entries),
+        child.fallback_names,
+    )
+
+
+def _finite_outcome(outcome: Outcome) -> bool:
+    return outcome.mase is not None and math.isfinite(float(outcome.mase))
+
+
+def validate_failure_status_evidence(
+    parent: ScreeningPolicy,
+    child: ScreeningPolicy,
+    tasks: Sequence[Task],
+    outcomes: Sequence[Outcome],
+    *,
+    target_names: Sequence[str],
+) -> dict[str, int]:
+    """Require trusted execution failures before making a method non-selectable.
+
+    Forecast error is not an implementation failure. A method with weak
+    standalone MASE can still contribute a useful shape or residual to a
+    guarded combination, so only Crash/Invalid outcomes authorize ``repair``
+    or ``quarantine``.
+    """
+    task_ids = {task.task_id for task in tasks}
+    failure_counts: dict[str, int] = {}
+    for name in tuple(str(item) for item in target_names):
+        before = parent.get(name)
+        after = child.get(name)
+        if (
+            before is None
+            or after is None
+            or after == before
+            or after.status not in {"repair", "quarantine"}
+        ):
+            continue
+        failures = sum(
+            row.method == name
+            and row.task_id in task_ids
+            and row.status in {CRASHED, INVALID}
+            for row in outcomes
+        )
+        if failures == 0:
+            raise ScreeningEvolutionError(
+                f"{name} cannot become {after.status}: no Crash/Invalid Train evidence"
+            )
+        failure_counts[name] = failures
+    return failure_counts
+
+
+def evolve_screening_on_train_once(
+    parent: ScreeningPolicy,
+    train_tasks: Sequence[Task],
+    train_outcomes: Sequence[Outcome],
+    agent: LLMClient,
+    **kwargs: object,
+) -> ScreeningGeneration:
+    """Run one mutation using Train for proposal and acceptance, never Dev."""
+    return evolve_screening_once(
+        parent,
+        train_tasks,
+        train_tasks,
+        train_outcomes,
+        agent,
+        **kwargs,
+    )
+
+
+def evolve_screening_train_then_dev(
+    parent: ScreeningPolicy,
+    train_tasks: Sequence[Task],
+    dev_tasks: Sequence[Task],
+    outcomes: Sequence[Outcome],
+    agent: LLMClient,
+    *,
+    batches: Sequence[Sequence[str]],
+    transcript_dir: str | Path,
+    constraints: ScreeningConstraints,
+) -> ScreeningTrainDevResult:
+    """Evolve every requested batch on Train, then expose Dev exactly once."""
+    if not batches:
+        raise ValueError("screening evolution requires at least one target batch")
+    original = parent
+    current = parent
+    train_ids = {task.task_id for task in train_tasks}
+    train_outcomes = tuple(row for row in outcomes if row.task_id in train_ids)
+    generations: list[ScreeningGeneration] = []
+    for generation, batch in enumerate(batches, 1):
+        # Reuse the existing proposal/salvage machinery with Train as both the
+        # optimization and safety partition.  No Dev task or outcome crosses
+        # this boundary; Dev is read only after the final Train winner exists.
+        result = evolve_screening_on_train_once(
+            current,
+            train_tasks,
+            train_outcomes,
+            agent,
+            generation=generation,
+            required_targets=batch,
+            transcript_dir=transcript_dir,
+            constraints=constraints,
+            enforce_final_constraints=False,
+        )
+        generations.append(result)
+        if result.accepted:
+            current = result.child
+
+    train_parent = evaluate_screening(original, train_tasks, train_outcomes)
+    train_winner = evaluate_screening(current, train_tasks, train_outcomes)
+    dev_ids = {task.task_id for task in dev_tasks}
+    dev_outcomes = tuple(row for row in outcomes if row.task_id in dev_ids)
+    dev_parent = evaluate_screening(original, dev_tasks, dev_outcomes)
+    dev_winner = evaluate_screening(current, dev_tasks, dev_outcomes)
+    final_gate = compare_screening(
+        train_parent,
+        train_winner,
+        dev_parent,
+        dev_winner,
+        constraints=constraints,
+        enforce_final_constraints=True,
+    )
+    return ScreeningTrainDevResult(
+        original,
+        current,
+        current if final_gate.accepted else original,
+        tuple(generations),
+        train_parent,
+        train_winner,
+        dev_parent,
+        dev_winner,
+        final_gate,
+    )
 
 
 def migrate_filter_dictionary(
@@ -496,6 +874,31 @@ def evolve_screening_once(
         child = apply_screening_response(
             parent, response.text, required_names=frozenset(target_names)
         )
+        child = compile_supported_specialists(
+            parent,
+            child,
+            train_tasks,
+            train_outcomes,
+            baseline_method=effective_constraints.baseline_method,
+            min_group_support=effective_constraints.min_group_support,
+            target_names=target_names,
+        )
+        validate_failure_status_evidence(
+            parent,
+            child,
+            train_tasks,
+            train_outcomes,
+            target_names=target_names,
+        )
+        validate_specialized_evidence(
+            parent,
+            child,
+            train_tasks,
+            train_outcomes,
+            baseline_method=effective_constraints.baseline_method,
+            min_group_support=effective_constraints.min_group_support,
+            target_names=target_names,
+        )
         _require_conditioned_families(child, target_names, conditioning_families)
     except ValueError as first_error:
         repair_request = json.dumps(
@@ -529,6 +932,31 @@ def evolve_screening_once(
         try:
             child = apply_screening_response(
                 parent, repaired.text, required_names=frozenset(target_names)
+            )
+            child = compile_supported_specialists(
+                parent,
+                child,
+                train_tasks,
+                train_outcomes,
+                baseline_method=effective_constraints.baseline_method,
+                min_group_support=effective_constraints.min_group_support,
+                target_names=target_names,
+            )
+            validate_failure_status_evidence(
+                parent,
+                child,
+                train_tasks,
+                train_outcomes,
+                target_names=target_names,
+            )
+            validate_specialized_evidence(
+                parent,
+                child,
+                train_tasks,
+                train_outcomes,
+                baseline_method=effective_constraints.baseline_method,
+                min_group_support=effective_constraints.min_group_support,
+                target_names=target_names,
             )
             _require_conditioned_families(child, target_names, conditioning_families)
             applied_response = repaired.text
@@ -645,6 +1073,31 @@ def _salvage_screening_actions(
         )
         candidate = apply_screening_response(
             current, single, required_names=frozenset({name})
+        )
+        candidate = compile_supported_specialists(
+            current,
+            candidate,
+            train_tasks,
+            train_outcomes,
+            baseline_method=constraints.baseline_method,
+            min_group_support=constraints.min_group_support,
+            target_names=(name,),
+        )
+        validate_failure_status_evidence(
+            current,
+            candidate,
+            train_tasks,
+            train_outcomes,
+            target_names=(name,),
+        )
+        validate_specialized_evidence(
+            current,
+            candidate,
+            train_tasks,
+            train_outcomes,
+            baseline_method=constraints.baseline_method,
+            min_group_support=constraints.min_group_support,
+            target_names=(name,),
         )
         candidate, shields = protect_train_oracles(candidate, train_tasks, train_outcomes)
         candidate_train = evaluate_screening(candidate, train_tasks, train_outcomes)
@@ -884,6 +1337,8 @@ def _score_payload(score: ScreeningScore) -> dict[str, object]:
         "active_success_rate": score.active_success_rate,
         "failure_exposure": score.failure_exposure,
         "not_applicable_exposure": score.not_applicable_exposure,
+        "mean_active_failures": score.mean_active_failures,
+        "mean_active_not_applicable": score.mean_active_not_applicable,
         "global_oracle_retention": score.global_oracle_retention,
         "mean_active_oracle_regret": score.mean_active_oracle_regret,
         "mean_active_candidates": score.mean_active_candidates,

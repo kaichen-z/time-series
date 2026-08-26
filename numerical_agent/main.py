@@ -697,12 +697,13 @@ def _runtime_registry(
     if acknowledged and not deployment_path:
         raise ValueError("--acknowledged-model-licenses requires --tsfm-workers-config")
     if deployment_path:
+        parent_environment = dict(os.environ)
         deployment = TSFMDeployment.load(
             deployment_path,
             manifests=manifests,
             acknowledged_licenses=tuple(sorted(acknowledged)),
         )
-        parent_environment = dict(os.environ)
+        deployment.validate_runtime(parent_environment=parent_environment)
         broker = WorkerBroker(
             deployment.commands,
             timeout_seconds=300.0,

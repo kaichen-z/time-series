@@ -322,6 +322,8 @@ class ScreeningScore:
     active_success_rate: float
     failure_exposure: float
     not_applicable_exposure: float
+    mean_active_failures: float
+    mean_active_not_applicable: float
     compression: float
     mean_active_candidates: float
     median_active_candidates: float
@@ -350,10 +352,11 @@ class ScreeningConstraints:
 
     baseline_method: str = "toto_2_0"
     min_active_candidates: int = 12
-    max_active_candidates: int = 40
+    max_active_candidates: int = 103
     min_unique_active_dictionaries: int = 3
     max_mean_pairwise_jaccard: float = 0.995
     min_group_support: int = 4
+    min_dev_oracle_retention: float = 0.9
     required_conditioned_families: tuple[str, ...] = (
         "statistical",
         "tsfm",
@@ -373,6 +376,8 @@ class ScreeningConstraints:
             raise ValueError("max_mean_pairwise_jaccard must be between zero and one")
         if self.min_group_support < 1:
             raise ValueError("min_group_support must be positive")
+        if not 0.0 <= self.min_dev_oracle_retention <= 1.0:
+            raise ValueError("min_dev_oracle_retention must be between zero and one")
         if (
             len(self.required_conditioned_families)
             != len(set(self.required_conditioned_families))
@@ -600,6 +605,8 @@ def evaluate_screening(
         active_success_rate=active_successes / denominator,
         failure_exposure=active_failures / denominator,
         not_applicable_exposure=active_not_applicable / denominator,
+        mean_active_failures=active_failures / task_denominator,
+        mean_active_not_applicable=active_not_applicable / task_denominator,
         compression=active_attempts / max(1, len(policy.entries) * len(tasks)),
         mean_active_candidates=sum(counts) / task_denominator,
         median_active_candidates=_median(counts),
@@ -629,19 +636,28 @@ def compare_screening(
     tolerance = 1e-12
     if train_child.coverage < 1.0 - tolerance or dev_child.coverage < 1.0 - tolerance:
         return ScreeningGateResult(False, "rejected: screening coverage is below 100%")
-    if (
-        train_child.global_oracle_retention < 1.0 - tolerance
-        or dev_child.global_oracle_retention < 1.0 - tolerance
-    ):
+    if train_child.global_oracle_retention < 1.0 - tolerance:
         return ScreeningGateResult(
-            False, "rejected: Train and Dev oracle retention must remain 100%"
+            False, "rejected: Train oracle retention must remain 100%"
+        )
+    required_dev_oracle = (
+        constraints.min_dev_oracle_retention if constraints is not None else 1.0
+    )
+    if dev_child.global_oracle_retention < required_dev_oracle - tolerance:
+        return ScreeningGateResult(
+            False,
+            "rejected: Dev oracle retention is below the bounded safety floor",
         )
     if dev_child.mean_active_oracle_regret > dev_parent.mean_active_oracle_regret + 0.01 + tolerance:
         return ScreeningGateResult(False, "rejected: Dev active-oracle regret regressed")
-    if dev_child.failure_exposure > dev_parent.failure_exposure + tolerance:
-        return ScreeningGateResult(False, "rejected: Dev failure exposure increased")
-    if train_child.failure_exposure > train_parent.failure_exposure + tolerance:
-        return ScreeningGateResult(False, "rejected: Train failure exposure increased")
+    if dev_child.mean_active_failures > dev_parent.mean_active_failures + tolerance:
+        return ScreeningGateResult(
+            False, "rejected: Dev failure exposure count increased"
+        )
+    if train_child.mean_active_failures > train_parent.mean_active_failures + tolerance:
+        return ScreeningGateResult(
+            False, "rejected: Train failure exposure count increased"
+        )
     if constraints is not None:
         if (
             train_child.min_active_candidates < constraints.min_active_candidates

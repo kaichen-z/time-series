@@ -7,16 +7,166 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import subprocess
 from types import MappingProxyType
 
 from .broker import WorkerCommand
 from .manifests import ManifestRegistry
-from .security import SecretRedactor
+from .security import SecretRedactor, controlled_worker_environment
 
 
 _DEPLOYMENT_FIELDS = frozenset({"schema_version", "environments"})
 _ENVIRONMENT_FIELDS = frozenset({"interpreter"})
 _WORKER_MODULE = "numerical_agent.tsfm.worker_main"
+_RUNTIME_IMPORTS = MappingProxyType(
+    {
+        "timesfm_v1": (
+            "torch",
+            "timesfm",
+            "timesfm.timesfm_torch",
+            "huggingface_hub",
+            "numerical_agent.tsfm.workers.legacy",
+        ),
+        "uni2ts": (
+            "torch",
+            "pandas",
+            "gluonts.dataset.pandas",
+            "uni2ts.model.moirai",
+            "uni2ts.model.moirai2",
+            "uni2ts.model.moirai_moe",
+            "numerical_agent.tsfm.workers.uni2ts",
+        ),
+        "lag_llama": (
+            "torch",
+            "pandas",
+            "gluonts.dataset.pandas",
+            "huggingface_hub",
+            "lag_llama.gluon.estimator",
+            "numerical_agent.tsfm.workers.legacy",
+        ),
+        "granite_tsfm": (
+            "torch",
+            "tsfm_public",
+            "tsfm_public.toolkit.get_model",
+            "numerical_agent.tsfm.workers.granite",
+        ),
+        "timer_legacy": (
+            "torch",
+            "transformers",
+            "numerical_agent.tsfm.workers.transformer_generation",
+        ),
+        "transformers_recent": (
+            "torch",
+            "transformers",
+            "numerical_agent.tsfm.workers.transformer_generation",
+        ),
+        "tempo_legacy": (
+            "torch",
+            "huggingface_hub",
+            "omegaconf",
+            "tempo.models.TEMPO",
+            "numerical_agent.tsfm.workers.legacy",
+        ),
+        "toto2": (
+            "torch",
+            "toto2",
+            "numerical_agent.tsfm.workers.dedicated",
+        ),
+        "kairos": (
+            "torch",
+            "tsfm.model.kairos",
+            "numerical_agent.tsfm.workers.transformer_generation",
+        ),
+        "tirex": (
+            "torch",
+            "tirex",
+            "numerical_agent.tsfm.workers.dedicated",
+        ),
+        "tabpfn_ts": (
+            "torch",
+            "pandas",
+            "huggingface_hub",
+            "tabpfn.errors",
+            "tabpfn.model_loading",
+            "tabpfn_time_series",
+            "numerical_agent.tsfm.workers.dedicated",
+        ),
+    }
+)
+_RUNTIME_SYMBOLS = MappingProxyType(
+    {
+        "timesfm_v1": {
+            "huggingface_hub": ("hf_hub_download",),
+            "timesfm": ("TimesFmCheckpoint", "TimesFmHparams", "freq_map"),
+            "timesfm.timesfm_torch": ("TimesFmTorch",),
+        },
+        "uni2ts": {
+            "gluonts.dataset.pandas": ("PandasDataset",),
+            "uni2ts.model.moirai": ("MoiraiForecast", "MoiraiModule"),
+            "uni2ts.model.moirai2": ("Moirai2Forecast", "Moirai2Module"),
+            "uni2ts.model.moirai_moe": (
+                "MoiraiMoEForecast",
+                "MoiraiMoEModule",
+            ),
+        },
+        "lag_llama": {
+            "gluonts.dataset.pandas": ("PandasDataset",),
+            "huggingface_hub": ("hf_hub_download",),
+            "lag_llama.gluon.estimator": ("LagLlamaEstimator",),
+        },
+        "granite_tsfm": {
+            "tsfm_public": ("FlowStateForPrediction", "PatchTSTFMForPrediction"),
+            "tsfm_public.toolkit.get_model": ("get_model",),
+        },
+        "timer_legacy": {"transformers": ("AutoModelForCausalLM",)},
+        "transformers_recent": {"transformers": ("AutoModelForCausalLM",)},
+        "tempo_legacy": {
+            "huggingface_hub": ("hf_hub_download",),
+            "omegaconf": ("OmegaConf",),
+            "tempo.models.TEMPO": ("TEMPO",),
+        },
+        "toto2": {"toto2": ("Toto2Model",)},
+        "kairos": {"tsfm.model.kairos": ("AutoModel",)},
+        "tirex": {"tirex": ("load_model",)},
+        "tabpfn_ts": {
+            "huggingface_hub": ("hf_hub_download",),
+            "tabpfn.errors": (
+                "TabPFNHuggingFaceGatedRepoError",
+                "TabPFNLicenseError",
+            ),
+            "tabpfn.model_loading": ("prepend_cache_path",),
+            "tabpfn_time_series": ("TabPFNMode", "TabPFNTSPipeline"),
+        },
+    }
+)
+_RUNTIME_PROBE = """\
+import importlib
+import json
+import sys
+
+module_names = json.loads(sys.argv[1])
+required_symbols = json.loads(sys.argv[2])
+missing = []
+modules = {}
+for module_name in module_names:
+    try:
+        modules[module_name] = importlib.import_module(module_name)
+    except BaseException:
+        missing.append(module_name)
+for module_name, symbol_names in required_symbols.items():
+    module = modules.get(module_name)
+    if module is None:
+        continue
+    for symbol_name in symbol_names:
+        if not hasattr(module, symbol_name):
+            missing.append(f"{module_name}:{symbol_name}")
+print(json.dumps({
+    "base_prefix": sys.base_prefix,
+    "executable": sys.executable,
+    "missing": missing,
+    "prefix": sys.prefix,
+}, sort_keys=True))
+"""
 
 
 def _strict_json_object(payload: str) -> dict[str, object]:
@@ -110,6 +260,19 @@ def redact_environment_secrets(message: object) -> str:
     return SecretRedactor.from_environment().redact_text(message)
 
 
+def _isolates_system_site_packages(marker: Path) -> bool:
+    try:
+        lines = marker.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return False
+    settings: dict[str, str] = {}
+    for line in lines:
+        key, separator, value = line.partition("=")
+        if separator:
+            settings[key.strip().lower()] = value.strip().lower()
+    return settings.get("include-system-site-packages") == "false"
+
+
 @dataclass(frozen=True)
 class TSFMDeployment:
     """Validated commands and manifest IDs enabled by one local deployment."""
@@ -120,6 +283,82 @@ class TSFMDeployment:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "commands", MappingProxyType(dict(self.commands)))
+
+    def validate_runtime(
+        self,
+        environment_keys: Sequence[str] | None = None,
+        *,
+        parent_environment: Mapping[str, str] | None = None,
+    ) -> None:
+        """Fail fast when a configured worker interpreter is incomplete."""
+
+        selected = tuple(self.commands) if environment_keys is None else tuple(
+            environment_keys
+        )
+        unknown = set(selected) - set(self.commands)
+        if unknown:
+            raise ValueError(f"unknown configured worker environments: {sorted(unknown)!r}")
+        source_environment = os.environ if parent_environment is None else parent_environment
+        probe_environment = dict(controlled_worker_environment(source_environment))
+        for environment in selected:
+            command = self.commands[environment]
+            interpreter = Path(command.argv[0])
+            logical_root = interpreter.parent.parent
+            marker = logical_root / "pyvenv.cfg"
+            if not marker.is_file():
+                raise ValueError(
+                    f"worker environment {environment!r} requires an explicit virtual environment"
+                )
+            if not _isolates_system_site_packages(marker):
+                raise ValueError(
+                    f"worker environment {environment!r} must isolate system site-packages"
+                )
+            try:
+                completed = subprocess.run(
+                    [
+                        str(interpreter),
+                        "-I",
+                        "-c",
+                        _RUNTIME_PROBE,
+                        json.dumps((*_RUNTIME_IMPORTS[environment], _WORKER_MODULE)),
+                        json.dumps(_RUNTIME_SYMBOLS[environment]),
+                    ],
+                    shell=False,
+                    env=probe_environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=60.0,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                raise ValueError(
+                    f"worker environment {environment!r} runtime probe failed"
+                ) from None
+            try:
+                result = json.loads(completed.stdout)
+            except (json.JSONDecodeError, TypeError):
+                result = None
+            if (
+                completed.returncode != 0
+                or not isinstance(result, Mapping)
+                or not isinstance(result.get("prefix"), str)
+                or not isinstance(result.get("missing"), list)
+                or not all(isinstance(name, str) for name in result["missing"])
+            ):
+                raise ValueError(
+                    f"worker environment {environment!r} runtime probe failed"
+                )
+            reported_prefix = Path(result["prefix"])
+            if logical_root.resolve() != reported_prefix.resolve():
+                raise ValueError(
+                    f"worker environment {environment!r} virtual environment identity changed"
+                )
+            missing = tuple(result["missing"])
+            if missing:
+                raise ValueError(
+                    f"worker environment {environment!r} is missing reviewed dependencies: "
+                    f"{', '.join(missing)}"
+                )
 
     @classmethod
     def load(

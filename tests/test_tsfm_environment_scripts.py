@@ -933,11 +933,19 @@ def test_checkpoint_smoke_records_complete_success_metadata_atomically(
     calls: dict[str, object] = {}
     order: list[str] = []
 
+    def validate_runtime(environment_keys=None, *, parent_environment=None):
+        order.append("runtime_validated")
+        calls["runtime_validation"] = (
+            tuple(environment_keys or ()),
+            parent_environment,
+        )
+
     def deployment_loader(path, *, manifests, acknowledged_licenses):
         calls["deployment"] = (path, manifests, tuple(acknowledged_licenses))
         return SimpleNamespace(
             commands={"uni2ts": command},
             enabled_manifest_ids=frozenset({manifest_id}),
+            validate_runtime=validate_runtime,
         )
 
     class Broker:
@@ -1016,7 +1024,10 @@ def test_checkpoint_smoke_records_complete_success_metadata_atomically(
     assert request.horizon == 4
     assert request.frequency == "H"
     assert request.checkpoint_revision == "a" * 40
-    assert order == ["revision_resolved", "broker_init"]
+    assert order == ["runtime_validated", "revision_resolved", "broker_init"]
+    validated_keys, validation_environment = calls["runtime_validation"]  # type: ignore[misc]
+    assert validated_keys == ("uni2ts",)
+    assert validation_environment["NA_TSFM_DEVICE"] == "cpu"
     assert calls["broker_closed"] is True
 
 
@@ -1056,6 +1067,48 @@ def test_checkpoint_smoke_preserves_typed_license_unavailability_without_startin
     assert token not in serialized
     assert "Dr-CiK" not in serialized
     assert str(tmp_path) not in serialized
+
+
+def test_checkpoint_smoke_reports_an_unhealthy_worker_before_checkpoint_access(
+    tmp_path: Path,
+) -> None:
+    from numerical_agent.tsfm.smoke import run_checkpoint_smoke
+
+    manifest_id = "method_tsfm_0003"
+    command = WorkerCommand((sys.executable, "-m", "fixture"))
+    output = tmp_path / "unhealthy-worker.json"
+
+    def validate_runtime(_environment_keys, *, parent_environment=None):
+        del parent_environment
+        raise ValueError("private broken interpreter details")
+
+    def deployment_loader(_path, *, manifests, acknowledged_licenses):
+        del manifests, acknowledged_licenses
+        return SimpleNamespace(
+            commands={"uni2ts": command},
+            enabled_manifest_ids=frozenset({manifest_id}),
+            validate_runtime=validate_runtime,
+        )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("unhealthy worker must stop before checkpoint access")
+
+    report = run_checkpoint_smoke(
+        manifest_id=manifest_id,
+        deployment_config=tmp_path / "workers.json",
+        device="cpu",
+        output_path=output,
+        acknowledged_licenses=("CC-BY-NC-4.0",),
+        _deployment_loader=deployment_loader,
+        _broker_factory=forbidden,
+        _version_reader=forbidden,
+        _revision_reader=forbidden,
+    )
+
+    assert report["status"] == "unavailable"
+    assert report["reason_code"] == "worker_environment_unhealthy"
+    assert report["message"] == "worker environment failed its startup health check"
+    assert "private broken interpreter details" not in output.read_text(encoding="utf-8")
 
 
 def test_checkpoint_smoke_preserves_worker_failure_type_and_redacts_message(

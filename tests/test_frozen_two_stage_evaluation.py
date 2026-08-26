@@ -8,11 +8,17 @@ import pytest
 
 from numerical_agent.evaluate_frozen_two_stage import (
     ForecastResult,
+    _hindcast_config_for_policy,
+    _paired_counts,
+    _report,
+    _selector_forecast,
     build_parser,
     score_forecast_results,
     verify_frozen_policies,
 )
 from numerical_agent.evolution.execution import Task
+from numerical_agent.evolution.numerical_selector import CandidateDiagnostics, DecisionPolicy
+from numerical_agent.evolution.selector_evolution import DecisionCase
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +71,28 @@ def test_evaluation_cli_has_no_llm_or_mutation_options():
     assert "llm_backend" not in options
 
 
+def test_frozen_evaluator_builds_long_audit_for_change_aware_guard():
+    parent = _hindcast_config_for_policy(DecisionPolicy())
+    guarded = _hindcast_config_for_policy(
+        DecisionPolicy(long_horizon_guard_enabled=True)
+    )
+    routed = _hindcast_config_for_policy(
+        DecisionPolicy(
+            baseline_strategy="conservative_tsfm",
+            tsfm_router_min_improvement=0.02,
+        )
+    )
+    portfolio = _hindcast_config_for_policy(
+        DecisionPolicy(baseline_strategy="conservative_joint_portfolio")
+    )
+
+    assert parent.long_horizon_audit is False
+    assert guarded.long_horizon_audit is True
+    assert routed.long_horizon_audit is True
+    assert portfolio.long_horizon_audit is True
+    assert guarded.folds == parent.folds == 3
+
+
 def test_score_reports_mean_median_rmsse_and_diversity():
     task = Task("t", (1.0, 2.0, 3.0), 2, "D", (4.0, 5.0))
     perfect = ForecastResult("t", (4.0, 5.0), ("a",), ("statistical",), "single")
@@ -75,3 +103,105 @@ def test_score_reports_mean_median_rmsse_and_diversity():
     assert score["mean_rmsse"] == 0.0
     assert score["method_diversity"] == 1
     assert score["family_diversity"] == 1
+
+
+def test_score_reports_drcik_aligned_point_metrics_standard_errors_and_tails():
+    tasks = (
+        Task("easy", (1.0, 2.0, 3.0), 2, "D", (2.0, 2.0)),
+        Task("clipped", (1.0, 2.0, 3.0), 2, "D", (1.0, 1.0)),
+    )
+    results = (
+        ForecastResult("easy", (3.0, 3.0), ("a",), ("statistical",), "single"),
+        ForecastResult("clipped", (11.0, 11.0), ("b",), ("tsfm",), "single"),
+    )
+
+    score = score_forecast_results(tasks, results)
+
+    assert score["mean_smae"] == pytest.approx(2.75)
+    assert score["se_smae"] == pytest.approx(2.25)
+    assert score["mean_srmse"] == pytest.approx(2.75)
+    assert score["se_srmse"] == pytest.approx(2.25)
+    assert score["p90_smae"] == pytest.approx(4.55)
+    assert score["p95_smae"] == pytest.approx(4.775)
+    assert score["smae_clipped_count"] == 1
+    assert score["smae_clipped_rate"] == pytest.approx(0.5)
+    assert score["srmse_clipped_count"] == 1
+    assert score["srmse_clipped_rate"] == pytest.approx(0.5)
+    clipped = next(row for row in score["per_task"] if row["task_id"] == "clipped")
+    assert clipped["smae_raw"] == pytest.approx(10.0)
+    assert clipped["smae"] == pytest.approx(5.0)
+    assert clipped["smae_clipped"] is True
+
+
+def test_frozen_report_leads_with_drcik_point_metrics():
+    task = Task("t", (1.0, 2.0, 3.0), 1, "D", (2.0,))
+    result = ForecastResult("t", (3.0,), ("a",), ("statistical",), "single")
+    score = score_forecast_results((task,), (result,))
+    report = _report({
+        "task_count": 1,
+        "screening_policy_sha256": "screen",
+        "decision_policy_sha256": "decision",
+        "llm_calls": 0,
+        "mutation_calls": 0,
+        "rows": {"candidate": score},
+        "paired_vs_A": {"candidate": {"wins": 0, "ties": 1, "losses": 0}},
+    })
+
+    assert "Mean sMAE" in report
+    assert "sMAE SE" in report
+    assert "Mean sRMSE" in report
+    assert "P90/P95 sMAE" in report
+    assert "Clipped sMAE/sRMSE" in report
+
+
+def test_paired_counts_compare_the_reported_smae_metric():
+    comparison = _paired_counts(
+        ({"task_id": "t", "mase": 0.1, "smae": 2.0},),
+        {"t": 1.0},
+    )
+
+    assert comparison == {"wins": 0, "ties": 0, "losses": 1, "missing": 0}
+
+
+def test_frozen_selector_records_history_only_top_k_assumptions():
+    truth_folds = ((0.0, 0.0),) * 3
+    diagnostics = {
+        "toto_2_0": CandidateDiagnostics.synthetic(
+            name="toto_2_0", family="tsfm", median_mase=2.0,
+            worst_mase=2.0, recent_mase=2.0,
+            fold_forecasts=((2.0, 2.0),) * 3, fold_truths=truth_folds,
+        ),
+        "seasonal_naive": CandidateDiagnostics.synthetic(
+            name="seasonal_naive", family="statistical", median_mase=0.0,
+            worst_mase=0.0, recent_mase=0.0,
+            fold_forecasts=truth_folds, fold_truths=truth_folds,
+        ),
+    }
+    case = DecisionCase(
+        Task(
+            "periodic",
+            tuple(float(index % 7) for index in range(70)),
+            2,
+            "D",
+            (0.0, 0.0),
+        ),
+        ("toto_2_0", "seasonal_naive"),
+        diagnostics,
+        {"toto_2_0": (2.0, 2.0), "seasonal_naive": (0.0, 0.0)},
+        {"toto_2_0": "tsfm", "seasonal_naive": "statistical"},
+    )
+    policy = DecisionPolicy(
+        assumption_guidance_enabled=True,
+        assumption_top_k=3,
+        assumption_candidates_per_hypothesis=1,
+        assumption_min_confidence=0.2,
+        ensemble_enabled=False,
+        ensemble_min_improvement=0.0,
+        ensemble_min_fold_wins=3,
+        ensemble_max_worst_fold_regret=0.0,
+    )
+
+    result = _selector_forecast(case, policy)
+
+    assert result.assumption_ids
+    assert any(value.startswith("periodic_persistence") for value in result.assumption_ids)

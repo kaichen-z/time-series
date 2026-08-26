@@ -1,10 +1,28 @@
 __pycache__/
 *.py[cod]
+.DS_Store
 .pytest_cache/
 .venv/
+.tsfm-envs/
 dist/
 build/
 *.egg-info/
+
+# Local experiment caches and replay payloads are reproducible but too large for Git.
+runs/**/agent-cache/
+runs/**/filter-agent-cache/
+runs/**/transcripts/
+runs/**/filter-transcripts/
+runs/**/hindcast-cache/
+runs/**/outcome-cache*/
+runs/**/policy-outcome-cache*/
+runs/**/train_decision_cases.jsonl
+runs/**/dev_decision_cases.jsonl
+runs/**/*.log
+
+# These generated method-filtering workspaces are nested local Git repositories.
+runs/method_filtering/combined103_10_smoke_20260823/
+runs/method_filtering/combined103_full_80_20_99_20260823/
 outputs/
 external/
 .env

@@ -164,6 +164,34 @@ method across the whole dictionary is recorded separately as `oracle_score` for 
 diagnosis and is never used as the acceptance metric. Quarantined and unavailable methods can be
 executed for repair diagnostics but cannot be selected for the final forecast.
 
+Phase B additionally supports a guarded dynamic TSFM-plus-statistical forecast combination. It
+searches a small TSFM-heavy weight grid and clipped residual corrections, accepts a combination
+only after majority-fold and worst-fold-regret checks, and otherwise falls back to a stable
+Toto/TimesFM forecast. See [`docs/GUARDED_COMBINED_PHASE_B.md`](../docs/GUARDED_COMBINED_PHASE_B.md)
+for the exact policy contract and the cached 80/20 exploratory result.
+
+Selector evolution now uses the Dr-CiK point-forecast definition for its trusted Train/Dev gate:
+per-task MAE and RMSE are divided by the mean absolute true future value, independently capped at
+`5.0`, and then averaged across tasks. A Child must improve clipped mean sMAE while preserving
+100% coverage, mean sRMSE, clipped-task counts, active-oracle regret, and the P90/P95 sMAE tail.
+MASE, RMSSE, MAE, and sMAPE remain diagnostic metrics. This phase intentionally does **not**
+compute sCRPS or generate probabilistic trajectories.
+
+Existing frozen point forecasts can be rescored without any LLM or TSFM calls:
+
+```bash
+python -m numerical_agent.rescore_point_forecasts \
+  --split-file splits/drcik_public_80_20_99_v1.json \
+  --tasks-file external/Dr-CiK/full-download/Dr-CiK_public/tasks \
+  --per-task-results runs/frozen_two_stage/public_test_99_20260823/per_task_results.jsonl \
+  --output-dir runs/frozen_two_stage/public_test_99_20260823/point_rescore \
+  --baseline-row E_toto_reference
+```
+
+The output is a public-label development/regression report, not a verified official Hidden Test
+score. The tool writes `point_rescore_results.json` and `POINT_RESCORE_REPORT.md` and records that
+sCRPS was not computed.
+
 ## Python integration
 
 ```python

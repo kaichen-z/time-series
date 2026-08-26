@@ -1,0 +1,532 @@
+{
+  "accepted_generations": [],
+  "cache": {
+    "statistical_hits": 930,
+    "statistical_misses": 0,
+    "tsfm_hits": 50,
+    "tsfm_misses": 0
+  },
+  "candidate_count": 103,
+  "dev": {
+    "active_counts": {
+      "task_102": 50,
+      "task_103": 49
+    },
+    "active_success_rate": 0.9292929292929293,
+    "compression": 0.48058252427184467,
+    "coverage": 1.0,
+    "failure_exposure": 0.0707070707070707,
+    "fallback_rate": 0.0,
+    "global_oracle_retention": 1.0,
+    "mean_active_candidates": 49.5,
+    "mean_active_families": 3.0,
+    "mean_active_oracle_regret": 0.0,
+    "median_active_candidates": 49.5,
+    "not_applicable_exposure": 0.0,
+    "task_count": 2
+  },
+  "dev_tasks": 2,
+  "elapsed_seconds": 199.2910704165697,
+  "frozen_screening_policy_fingerprint": "358e1f061f66357f20b05822b567ff11ea3cd6558a460b24ada10a7fea09e062",
+  "frozen_screening_policy_sha256": "eed0d114ea16b86a9c96bf7be259d64c5ed39d2539241add2c7275d1145bd75c",
+  "generations": [
+    {
+      "accepted": false,
+      "child_hash": "2455a8133eafae20b109d57cbec6386d6a8d216e0179195e2a774cd2daeb177f",
+      "dev_child": {
+        "active_counts": {
+          "task_102": 56,
+          "task_103": 55
+        },
+        "active_success_rate": 0.8288288288288288,
+        "compression": 0.5388349514563107,
+        "coverage": 1.0,
+        "failure_exposure": 0.17117117117117117,
+        "fallback_rate": 0.0,
+        "global_oracle_retention": 1.0,
+        "mean_active_candidates": 55.5,
+        "mean_active_families": 3.0,
+        "mean_active_oracle_regret": 0.0,
+        "median_active_candidates": 55.5,
+        "not_applicable_exposure": 0.0,
+        "task_count": 2
+      },
+      "dev_parent": {
+        "active_counts": {
+          "task_102": 50,
+          "task_103": 49
+        },
+        "active_success_rate": 0.9292929292929293,
+        "compression": 0.48058252427184467,
+        "coverage": 1.0,
+        "failure_exposure": 0.0707070707070707,
+        "fallback_rate": 0.0,
+        "global_oracle_retention": 1.0,
+        "mean_active_candidates": 49.5,
+        "mean_active_families": 3.0,
+        "mean_active_oracle_regret": 0.0,
+        "median_active_candidates": 49.5,
+        "not_applicable_exposure": 0.0,
+        "task_count": 2
+      },
+      "gate": {
+        "accepted": false,
+        "improved_dimensions": [],
+        "reason": "rejected: Dev failure exposure increased"
+      },
+      "generation": 1,
+      "parent_hash": "358e1f061f66357f20b05822b567ff11ea3cd6558a460b24ada10a7fea09e062",
+      "required_targets": [
+        "toto_2_0",
+        "poisson_dynamic_regression",
+        "sarima_auto",
+        "markov_switching_autoregression",
+        "auto_ces",
+        "auto_tbats",
+        "lightgbm_lag_forecast",
+        "mstl_ets",
+        "neural_network_autoregression",
+        "negative_binomial_dynamic_regression",
+        "holt_winters_multiplicative",
+        "bats",
+        "ets_auto",
+        "tbats",
+        "smooth_transition_autoregression",
+        "outlier_adjusted_arima",
+        "local_linear_trend_kalman",
+        "holt_linear_trend",
+        "holt_damped_trend",
+        "intervention_arima",
+        "dynamic_theta",
+        "croston_optimized",
+        "theta_classic",
+        "local_level_kalman"
+      ],
+      "train_child": {
+        "active_counts": {
+          "task_108": 42,
+          "task_109": 46,
+          "task_110": 46,
+          "task_114": 51,
+          "task_115": 51,
+          "task_118": 51,
+          "task_127": 46,
+          "task_128": 46
+        },
+        "active_success_rate": 0.9841688654353562,
+        "compression": 0.45995145631067963,
+        "coverage": 1.0,
+        "failure_exposure": 0.0,
+        "fallback_rate": 0.0,
+        "global_oracle_retention": 0.125,
+        "mean_active_candidates": 47.375,
+        "mean_active_families": 3.0,
+        "mean_active_oracle_regret": 0.05263619675232569,
+        "median_active_candidates": 46.0,
+        "not_applicable_exposure": 0.0158311345646438,
+        "task_count": 8
+      },
+      "train_parent": {
+        "active_counts": {
+          "task_108": 36,
+          "task_109": 40,
+          "task_110": 40,
+          "task_114": 45,
+          "task_115": 45,
+          "task_118": 45,
+          "task_127": 40,
+          "task_128": 40
+        },
+        "active_success_rate": 0.9818731117824774,
+        "compression": 0.4016990291262136,
+        "coverage": 1.0,
+        "failure_exposure": 0.0,
+        "fallback_rate": 0.0,
+        "global_oracle_retention": 0.125,
+        "mean_active_candidates": 41.375,
+        "mean_active_families": 3.0,
+        "mean_active_oracle_regret": 0.05263619675232569,
+        "median_active_candidates": 40.0,
+        "not_applicable_exposure": 0.01812688821752266,
+        "task_count": 8
+      }
+    },
+    {
+      "accepted": false,
+      "child_hash": "fb44bd85c3f15969d9e3098be1d83e6c50ff5b95d975774aec9364feddd015c7",
+      "dev_child": {
+        "active_counts": {
+          "task_102": 73,
+          "task_103": 72
+        },
+        "active_success_rate": 0.6344827586206897,
+        "compression": 0.7038834951456311,
+        "coverage": 1.0,
+        "failure_exposure": 0.36551724137931035,
+        "fallback_rate": 0.0,
+        "global_oracle_retention": 1.0,
+        "mean_active_candidates": 72.5,
+        "mean_active_families": 3.0,
+        "mean_active_oracle_regret": 0.0,
+        "median_active_candidates": 72.5,
+        "not_applicable_exposure": 0.0,
+        "task_count": 2
+      },
+      "dev_parent": {
+        "active_counts": {
+          "task_102": 50,
+          "task_103": 49
+        },
+        "active_success_rate": 0.9292929292929293,
+        "compression": 0.48058252427184467,
+        "coverage": 1.0,
+        "failure_exposure": 0.0707070707070707,
+        "fallback_rate": 0.0,
+        "global_oracle_retention": 1.0,
+        "mean_active_candidates": 49.5,
+        "mean_active_families": 3.0,
+        "mean_active_oracle_regret": 0.0,
+        "median_active_candidates": 49.5,
+        "not_applicable_exposure": 0.0,
+        "task_count": 2
+      },
+      "gate": {
+        "accepted": false,
+        "improved_dimensions": [],
+        "reason": "rejected: Dev failure exposure increased"
+      },
+      "generation": 2,
+      "parent_hash": "358e1f061f66357f20b05822b567ff11ea3cd6558a460b24ada10a7fea09e062",
+      "required_targets": [
+        "ses",
+        "adida",
+        "theta_optimized",
+        "ma",
+        "imapa",
+        "arma",
+        "kernel_ridge_lag_regression",
+        "arima_auto",
+        "gaussian_process_autoregression",
+        "combined_chronos_damped_trend",
+        "stl_naive",
+        "classical_decomposition",
+        "stl_ets",
+        "robust_stl_ets",
+        "dynamic_harmonic_regression_arima",
+        "random_forest_lag_forecast",
+        "structural_time_series_bsm",
+        "stl_arima",
+        "support_vector_lag_regression",
+        "state_space_trigonometric_harmonics",
+        "quantile_regression_forecast",
+        "holt_winters_damped",
+        "holt_winters_additive",
+        "xgboost_lag_forecast"
+      ],
+      "train_child": {
+        "active_counts": {
+          "task_108": 59,
+          "task_109": 63,
+          "task_110": 63,
+          "task_114": 68,
+          "task_115": 68,
+          "task_118": 68,
+          "task_127": 63,
+          "task_128": 63
+        },
+        "active_success_rate": 0.9883495145631068,
+        "compression": 0.625,
+        "coverage": 1.0,
+        "failure_exposure": 0.0,
+        "fallback_rate": 0.0,
+        "global_oracle_retention": 0.25,
+        "mean_active_candidates": 64.375,
+        "mean_active_families": 3.0,
+        "mean_active_oracle_regret": 0.01100439011049013,
+        "median_active_candidates": 63.0,
+        "not_applicable_exposure": 0.011650485436893204,
+        "task_count": 8
+      },
+      "train_parent": {
+        "active_counts": {
+          "task_108": 36,
+          "task_109": 40,
+          "task_110": 40,
+          "task_114": 45,
+          "task_115": 45,
+          "task_118": 45,
+          "task_127": 40,
+          "task_128": 40
+        },
+        "active_success_rate": 0.9818731117824774,
+        "compression": 0.4016990291262136,
+        "coverage": 1.0,
+        "failure_exposure": 0.0,
+        "fallback_rate": 0.0,
+        "global_oracle_retention": 0.125,
+        "mean_active_candidates": 41.375,
+        "mean_active_families": 3.0,
+        "mean_active_oracle_regret": 0.05263619675232569,
+        "median_active_candidates": 40.0,
+        "not_applicable_exposure": 0.01812688821752266,
+        "task_count": 8
+      }
+    },
+    {
+      "accepted": false,
+      "child_hash": "f4f28fea8c48fe948ffbe50030110c30318d8b7736d9203551b201f1a02ffc1f",
+      "dev_child": {
+        "active_counts": {
+          "task_102": 51,
+          "task_103": 50
+        },
+        "active_success_rate": 0.9306930693069307,
+        "compression": 0.49029126213592233,
+        "coverage": 1.0,
+        "failure_exposure": 0.06930693069306931,
+        "fallback_rate": 0.0,
+        "global_oracle_retention": 1.0,
+        "mean_active_candidates": 50.5,
+        "mean_active_families": 3.0,
+        "mean_active_oracle_regret": 0.0,
+        "median_active_candidates": 50.5,
+        "not_applicable_exposure": 0.0,
+        "task_count": 2
+      },
+      "dev_parent": {
+        "active_counts": {
+          "task_102": 50,
+          "task_103": 49
+        },
+        "active_success_rate": 0.9292929292929293,
+        "compression": 0.48058252427184467,
+        "coverage": 1.0,
+        "failure_exposure": 0.0707070707070707,
+        "fallback_rate": 0.0,
+        "global_oracle_retention": 1.0,
+        "mean_active_candidates": 49.5,
+        "mean_active_families": 3.0,
+        "mean_active_oracle_regret": 0.0,
+        "median_active_candidates": 49.5,
+        "not_applicable_exposure": 0.0,
+        "task_count": 2
+      },
+      "gate": {
+        "accepted": false,
+        "improved_dimensions": [],
+        "reason": "rejected: no Train screening dimension improved safely on Dev"
+      },
+      "generation": 3,
+      "parent_hash": "358e1f061f66357f20b05822b567ff11ea3cd6558a460b24ada10a7fea09e062",
+      "required_targets": [
+        "granite_ttm_r2",
+        "combined_granite_regime_profile",
+        "combined_moirai_croston_router",
+        "integer_autoregressive_inar",
+        "croston_sba",
+        "croston",
+        "tsb",
+        "nbeats",
+        "nhits",
+        "tide",
+        "autoformer",
+        "informer",
+        "fedformer",
+        "seasonal_block_bootstrap",
+        "fourier_harmonic_regression",
+        "median_seasonal_profile_forecast",
+        "seasonal_naive",
+        "seasonal_window_average",
+        "combined_timesfm_seasonal",
+        "deepar",
+        "dtw_analogue_forecast",
+        "micn_multiscale_convolution",
+        "pyraformer",
+        "temporal_fusion_transformer"
+      ],
+      "train_child": {
+        "active_counts": {
+          "task_108": 36,
+          "task_109": 40,
+          "task_110": 40,
+          "task_114": 45,
+          "task_115": 45,
+          "task_118": 45,
+          "task_127": 40,
+          "task_128": 40
+        },
+        "active_success_rate": 0.9818731117824774,
+        "compression": 0.4016990291262136,
+        "coverage": 1.0,
+        "failure_exposure": 0.0,
+        "fallback_rate": 0.0,
+        "global_oracle_retention": 0.125,
+        "mean_active_candidates": 41.375,
+        "mean_active_families": 3.0,
+        "mean_active_oracle_regret": 0.05263619675232569,
+        "median_active_candidates": 40.0,
+        "not_applicable_exposure": 0.01812688821752266,
+        "task_count": 8
+      },
+      "train_parent": {
+        "active_counts": {
+          "task_108": 36,
+          "task_109": 40,
+          "task_110": 40,
+          "task_114": 45,
+          "task_115": 45,
+          "task_118": 45,
+          "task_127": 40,
+          "task_128": 40
+        },
+        "active_success_rate": 0.9818731117824774,
+        "compression": 0.4016990291262136,
+        "coverage": 1.0,
+        "failure_exposure": 0.0,
+        "fallback_rate": 0.0,
+        "global_oracle_retention": 0.125,
+        "mean_active_candidates": 41.375,
+        "mean_active_families": 3.0,
+        "mean_active_oracle_regret": 0.05263619675232569,
+        "median_active_candidates": 40.0,
+        "not_applicable_exposure": 0.01812688821752266,
+        "task_count": 8
+      }
+    },
+    {
+      "accepted": false,
+      "child_hash": "2b2374414c0dfdaedd45f3d8f0aea1e9e2d375ef52cdaf9857403a68ff11618c",
+      "dev_child": {
+        "active_counts": {
+          "task_102": 49,
+          "task_103": 48
+        },
+        "active_success_rate": 0.9278350515463918,
+        "compression": 0.470873786407767,
+        "coverage": 1.0,
+        "failure_exposure": 0.07216494845360824,
+        "fallback_rate": 0.0,
+        "global_oracle_retention": 1.0,
+        "mean_active_candidates": 48.5,
+        "mean_active_families": 3.0,
+        "mean_active_oracle_regret": 0.0,
+        "median_active_candidates": 48.5,
+        "not_applicable_exposure": 0.0,
+        "task_count": 2
+      },
+      "dev_parent": {
+        "active_counts": {
+          "task_102": 50,
+          "task_103": 49
+        },
+        "active_success_rate": 0.9292929292929293,
+        "compression": 0.48058252427184467,
+        "coverage": 1.0,
+        "failure_exposure": 0.0707070707070707,
+        "fallback_rate": 0.0,
+        "global_oracle_retention": 1.0,
+        "mean_active_candidates": 49.5,
+        "mean_active_families": 3.0,
+        "mean_active_oracle_regret": 0.0,
+        "median_active_candidates": 49.5,
+        "not_applicable_exposure": 0.0,
+        "task_count": 2
+      },
+      "gate": {
+        "accepted": false,
+        "improved_dimensions": [],
+        "reason": "rejected: Dev failure exposure increased"
+      },
+      "generation": 4,
+      "parent_hash": "358e1f061f66357f20b05822b567ff11ea3cd6558a460b24ada10a7fea09e062",
+      "required_targets": [
+        "bayesian_online_changepoint_forecast",
+        "lightts_sampling_mlp",
+        "ltsf_dlinear",
+        "tsmixer",
+        "nearest_neighbor_lag_analogue"
+      ],
+      "train_child": {
+        "active_counts": {
+          "task_108": 35,
+          "task_109": 39,
+          "task_110": 39,
+          "task_114": 44,
+          "task_115": 44,
+          "task_118": 44,
+          "task_127": 39,
+          "task_128": 39
+        },
+        "active_success_rate": 0.9814241486068112,
+        "compression": 0.3919902912621359,
+        "coverage": 1.0,
+        "failure_exposure": 0.0,
+        "fallback_rate": 0.0,
+        "global_oracle_retention": 0.125,
+        "mean_active_candidates": 40.375,
+        "mean_active_families": 3.0,
+        "mean_active_oracle_regret": 0.05263619675232569,
+        "median_active_candidates": 39.0,
+        "not_applicable_exposure": 0.018575851393188854,
+        "task_count": 8
+      },
+      "train_parent": {
+        "active_counts": {
+          "task_108": 36,
+          "task_109": 40,
+          "task_110": 40,
+          "task_114": 45,
+          "task_115": 45,
+          "task_118": 45,
+          "task_127": 40,
+          "task_128": 40
+        },
+        "active_success_rate": 0.9818731117824774,
+        "compression": 0.4016990291262136,
+        "coverage": 1.0,
+        "failure_exposure": 0.0,
+        "fallback_rate": 0.0,
+        "global_oracle_retention": 0.125,
+        "mean_active_candidates": 41.375,
+        "mean_active_families": 3.0,
+        "mean_active_oracle_regret": 0.05263619675232569,
+        "median_active_candidates": 40.0,
+        "not_applicable_exposure": 0.01812688821752266,
+        "task_count": 8
+      }
+    }
+  ],
+  "phase": "task_conditioned_screening",
+  "public_test_accessed": false,
+  "schema_version": 1,
+  "source_hashes": {
+    "legacy_dictionary.py": "ccdfa28e2403fefc3ac8f6b4645e133c97de90248b7d6441bf1bfee9616dc937",
+    "methods.py": "79970be82cc8a165289ace8c66f40c0baed126d438728e981ead6d1fed4c94ad",
+    "policies.py": "3b7b0809a8a580f836f877fb094dd06a2e568a7e4bd16b0bb785c225f87aa2f2"
+  },
+  "train": {
+    "active_counts": {
+      "task_108": 36,
+      "task_109": 40,
+      "task_110": 40,
+      "task_114": 45,
+      "task_115": 45,
+      "task_118": 45,
+      "task_127": 40,
+      "task_128": 40
+    },
+    "active_success_rate": 0.9818731117824774,
+    "compression": 0.4016990291262136,
+    "coverage": 1.0,
+    "failure_exposure": 0.0,
+    "fallback_rate": 0.0,
+    "global_oracle_retention": 0.125,
+    "mean_active_candidates": 41.375,
+    "mean_active_families": 3.0,
+    "mean_active_oracle_regret": 0.05263619675232569,
+    "median_active_candidates": 40.0,
+    "not_applicable_exposure": 0.01812688821752266,
+    "task_count": 8
+  },
+  "train_tasks": 8
+}

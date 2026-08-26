@@ -1,0 +1,28 @@
+{
+  "adapter": "dedicated",
+  "checkpoint": "Datadog/Toto-2.0-22m",
+  "checkpoint_revision": "685e4ae3e2be8d8998025e53dd98e7fdcb296a89",
+  "device": "cpu",
+  "finite_output": true,
+  "history_length": 96,
+  "horizon": 4,
+  "latency_seconds": 8.701098,
+  "manifest_id": "method_tsfm_0014",
+  "message": "",
+  "output_length": 4,
+  "output_status": "finite",
+  "package_versions": {
+    "gluonts": "0.16.3",
+    "numpy": "2.2.5",
+    "pandas": "2.3.3",
+    "torch": "2.7.1",
+    "toto-2": "2.0.0"
+  },
+  "peak_memory_bytes": 290324480,
+  "reason_code": "",
+  "requested_device": "cpu",
+  "requested_revision": "main",
+  "schema_version": 1,
+  "status": "success",
+  "worker_environment": "toto2"
+}

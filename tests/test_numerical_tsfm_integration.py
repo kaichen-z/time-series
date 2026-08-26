@@ -32,6 +32,7 @@ def test_mixed_fake_worker_curation_and_frozen_evaluation_cover_runtime_contract
 
     adapter_requests: list[str] = []
     broker_instances = []
+    runtime_validation_calls: list[tuple[str, ...]] = []
 
     class NoDownloadBroker:
         def __init__(
@@ -65,6 +66,14 @@ def test_mixed_fake_worker_curation_and_frozen_evaluation_cover_runtime_contract
             self.close_count += 1
 
     monkeypatch.setattr(numerical_main, "WorkerBroker", NoDownloadBroker)
+
+    def validate_runtime(self, environment_keys=None, *, parent_environment=None):
+        del parent_environment
+        runtime_validation_calls.append(
+            tuple(self.commands) if environment_keys is None else tuple(environment_keys)
+        )
+
+    monkeypatch.setattr(TSFMDeployment, "validate_runtime", validate_runtime)
 
     deployment_path = tmp_path / "workers.json"
     _write_json(
@@ -241,3 +250,19 @@ def test_mixed_fake_worker_curation_and_frozen_evaluation_cover_runtime_contract
         "frozen_test_report.json",
     }
     assert all(instance.close_count == 1 for instance in broker_instances)
+    assert runtime_validation_calls == [
+        (
+            "timesfm_v1",
+            "uni2ts",
+            "granite_tsfm",
+            "transformers_recent",
+            "toto2",
+        ),
+        (
+            "timesfm_v1",
+            "uni2ts",
+            "granite_tsfm",
+            "transformers_recent",
+            "toto2",
+        ),
+    ]

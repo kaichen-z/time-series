@@ -1,0 +1,28 @@
+{
+  "adapter": "uni2ts",
+  "checkpoint": "Salesforce/moirai-2.0-R-small",
+  "checkpoint_revision": "30f43ff08c8494f4943ae1521e9d4e94a0fbb389",
+  "device": "cpu",
+  "finite_output": true,
+  "history_length": 96,
+  "horizon": 4,
+  "latency_seconds": 8.815178,
+  "manifest_id": "method_tsfm_0017",
+  "message": "",
+  "output_length": 4,
+  "output_status": "finite",
+  "package_versions": {
+    "gluonts": "0.14.4",
+    "numpy": "1.26.4",
+    "pandas": "2.1.4",
+    "torch": "2.4.1",
+    "uni2ts": "2.0.0"
+  },
+  "peak_memory_bytes": 410009600,
+  "reason_code": "",
+  "requested_device": "cpu",
+  "requested_revision": "main",
+  "schema_version": 1,
+  "status": "success",
+  "worker_environment": "uni2ts"
+}

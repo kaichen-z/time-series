@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -91,3 +92,48 @@ def load_tasks(tasks_file: str | Path = DEFAULT_TASKS_FILE) -> list[Task]:
         if _is_labeled(record):
             tasks.append(_to_task(record))
     return tasks
+
+
+_BENCHMARK_ID = re.compile(r'"benchmark_id"\s*:\s*("(?:[^"\\]|\\.)*")')
+
+
+def load_tasks_by_id(
+    tasks_file: str | Path,
+    task_ids: tuple[str, ...] | list[str],
+) -> list[Task]:
+    """Load only authorized task records, without parsing other directory entries."""
+    requested = tuple(dict.fromkeys(str(task_id) for task_id in task_ids))
+    if not requested:
+        return []
+    wanted = set(requested)
+    source = Path(tasks_file)
+    records: dict[str, dict] = {}
+    if source.is_dir():
+        for task_id in requested:
+            if Path(task_id).name != task_id:
+                raise ValueError(f"invalid task id path component: {task_id}")
+            path = source / f"{task_id}.json"
+            if not path.is_file():
+                continue
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if str(record.get("benchmark_id")) == task_id:
+                records[task_id] = record
+    else:
+        with source.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                match = _BENCHMARK_ID.search(line)
+                if match is None:
+                    continue
+                task_id = str(json.loads(match.group(1)))
+                if task_id not in wanted:
+                    continue
+                record = json.loads(line)
+                if str(record.get("benchmark_id")) == task_id:
+                    records[task_id] = record
+    return [
+        _to_task(records[task_id])
+        for task_id in requested
+        if task_id in records and _is_labeled(records[task_id])
+    ]

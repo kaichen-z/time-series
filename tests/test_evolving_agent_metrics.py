@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import math
 import unittest
 
-from common.metrics import mae, score_forecast, smape, spearman_rank_correlation
+from common.metrics import (
+    drcik_point_metrics,
+    mae,
+    rmse,
+    score_forecast,
+    smape,
+    spearman_rank_correlation,
+)
 
 
 class SmapeTests(unittest.TestCase):
@@ -30,6 +38,48 @@ class MaeTests(unittest.TestCase):
 
     def test_known_value(self):
         self.assertEqual(mae([1.0, 2.0, 3.0], [2.0, 2.0, 5.0]), 1.0)
+
+
+class DrCikPointMetricTests(unittest.TestCase):
+    def test_scales_by_mean_absolute_future_and_winsorizes_each_metric(self):
+        result = drcik_point_metrics(
+            [1.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 25.0],
+        )
+
+        self.assertEqual(result["scale"], 1.0)
+        self.assertEqual(result["mae"], 6.0)
+        self.assertEqual(result["rmse"], 12.0)
+        self.assertEqual(result["smae_raw"], 6.0)
+        self.assertEqual(result["srmse_raw"], 12.0)
+        self.assertEqual(result["smae"], 5.0)
+        self.assertEqual(result["srmse"], 5.0)
+        self.assertTrue(result["smae_clipped"])
+        self.assertTrue(result["srmse_clipped"])
+
+    def test_zero_scale_is_perfect_only_for_an_exact_zero_forecast(self):
+        perfect = drcik_point_metrics([0.0, 0.0], [0.0, 0.0])
+        wrong = drcik_point_metrics([0.0, 0.0], [1.0, 1.0])
+
+        self.assertEqual(perfect["smae"], 0.0)
+        self.assertEqual(perfect["srmse"], 0.0)
+        self.assertFalse(perfect["smae_clipped"])
+        self.assertEqual(wrong["smae"], 5.0)
+        self.assertEqual(wrong["srmse"], 5.0)
+        self.assertTrue(wrong["smae_clipped"])
+        self.assertTrue(wrong["srmse_clipped"])
+
+    def test_finite_extreme_prediction_is_clipped_instead_of_crashing(self):
+        result = drcik_point_metrics([1.0, 1.0], [1e308, 1e308])
+
+        self.assertTrue(math.isfinite(result["rmse"]))
+        self.assertEqual(result["srmse"], 5.0)
+        self.assertTrue(result["srmse_clipped"])
+
+
+class RmseTests(unittest.TestCase):
+    def test_uses_a_scale_stable_norm_for_large_finite_errors(self):
+        self.assertTrue(math.isfinite(rmse([0.0, 0.0], [1e308, 1e308])))
 
 
 class ScoreForecastTests(unittest.TestCase):

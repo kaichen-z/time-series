@@ -12,15 +12,27 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from common.data import load_tasks
-from common.metrics import mae, mase, smape
+from common.metrics import (
+    drcik_point_metrics,
+    linear_quantile,
+    mae,
+    mase,
+    smape,
+    standard_error,
+)
 from common.payload import read_json_object, write_json
 
 from .evolution.execution import SUCCESS, Task
 from .evolution.filtering import build_filter_dictionary
 from .evolution.module import read_module
-from .evolution.numerical_selector import DecisionPolicy, HindcastConfig, select_numerical_forecast
+from .evolution.numerical_selector import (
+    DecisionPolicy,
+    HindcastConfig,
+    select_assumption_guided_forecast,
+)
 from .evolution.portfolio import read_policy_file
 from .evolution.screening_evolution import migrate_filter_dictionary, parse_screening_source
+from .evolution.screening import profile_task
 from .evolution.selector_evolution import parse_decision_source
 from .main import _add_tsfm_runtime_options, _runtime_registry
 from .run_selector_evolution import ForecastStore, _build_case
@@ -35,6 +47,7 @@ class ForecastResult:
     families: tuple[str, ...]
     mode: str
     oracle_mase: float | None = None
+    assumption_ids: tuple[str, ...] = ()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,10 +107,11 @@ def score_forecast_results(
         truth = list(task.future)
         prediction = list(result.forecast)
         task_mase = mase(truth, prediction, list(task.history))
+        point = drcik_point_metrics(truth, prediction)
         task_scores.append({
             "task_id": task.task_id,
             "mase": task_mase,
-            "mae": mae(truth, prediction),
+            **point,
             "smape": smape(truth, prediction),
             "rmsse": _rmsse(task.history, task.future, result.forecast),
             "oracle_regret": (
@@ -114,11 +128,27 @@ def score_forecast_results(
         return [float(row[name]) for row in task_scores]
 
     mases = values("mase")
+    smaes = values("smae")
+    srmses = values("srmse")
+    smae_clipped_count = sum(bool(row["smae_clipped"]) for row in task_scores)
+    srmse_clipped_count = sum(bool(row["srmse_clipped"]) for row in task_scores)
     return {
         "task_count": len(tasks),
         "coverage": count / len(tasks) if tasks else 0.0,
         "mean_mase": statistics.fmean(mases) if mases else math.inf,
         "median_mase": statistics.median(mases) if mases else math.inf,
+        "mean_smae": statistics.fmean(smaes) if smaes else math.inf,
+        "median_smae": statistics.median(smaes) if smaes else math.inf,
+        "se_smae": standard_error(smaes) if smaes else math.inf,
+        "mean_srmse": statistics.fmean(srmses) if srmses else math.inf,
+        "median_srmse": statistics.median(srmses) if srmses else math.inf,
+        "se_srmse": standard_error(srmses) if srmses else math.inf,
+        "p90_smae": linear_quantile(smaes, 0.90) if smaes else math.inf,
+        "p95_smae": linear_quantile(smaes, 0.95) if smaes else math.inf,
+        "smae_clipped_count": smae_clipped_count,
+        "smae_clipped_rate": smae_clipped_count / count if count else 1.0,
+        "srmse_clipped_count": srmse_clipped_count,
+        "srmse_clipped_rate": srmse_clipped_count / count if count else 1.0,
         "mean_rmsse": statistics.fmean(values("rmsse")) if mases else math.inf,
         "median_rmsse": statistics.median(values("rmsse")) if mases else math.inf,
         "mean_mae": statistics.fmean(values("mae")) if mases else math.inf,
@@ -180,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
             screening_hash,
         )
         try:
-            config = HindcastConfig(folds=3)
+            config = _hindcast_config_for_policy(decision_policy)
             all_cases = tuple(
                 _build_case(task, all_screening, screening_hash, by_key, store, config)
                 for task in tasks
@@ -213,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     scores = {name: score_forecast_results(tasks, results) for name, results in rows.items()}
     baseline_by_task = {
-        row["task_id"]: row["mase"]
+        row["task_id"]: row["smae"]
         for row in scores["A_current_global_ranker"]["per_task"]
     }
     paired = {
@@ -283,6 +313,23 @@ def _public_test_tasks(split_file: str | Path, tasks_file: str | Path) -> tuple[
     return tuple(rows)
 
 
+def _hindcast_config_for_policy(policy: DecisionPolicy) -> HindcastConfig:
+    return HindcastConfig(
+        folds=3,
+        long_horizon_audit=(
+            policy.long_horizon_audit_enabled or policy.long_horizon_guard_enabled
+            or policy.baseline_strategy in {
+                "conservative_tsfm",
+                "conservative_combined",
+                "conservative_single_tsfm",
+                "conservative_tsfm_portfolio",
+                "conservative_tsfm_statistical",
+                "conservative_joint_portfolio",
+            }
+        ),
+    )
+
+
 def _ranked_forecast(case, ranking: Sequence[str], *, active_only: bool) -> ForecastResult:
     allowed = set(case.active_names) if active_only else set(case.forecasts)
     name = next((name for name in ranking if name in allowed and name in case.forecasts), None)
@@ -293,15 +340,26 @@ def _ranked_forecast(case, ranking: Sequence[str], *, active_only: bool) -> Fore
 
 def _selector_forecast(case, policy: DecisionPolicy) -> ForecastResult:
     try:
-        decision = select_numerical_forecast(
+        decision = select_assumption_guided_forecast(
             policy,
+            profile=profile_task(case.task),
             active_names=case.active_names,
             diagnostics=case.diagnostics,
             forecasts=case.forecasts,
+            families=case.families,
+            history=case.task.history,
+            conditioned_names=case.conditioned_names,
         )
     except (ValueError, KeyError):
         return ForecastResult(case.task.task_id, (), (), (), "missing")
-    return _result(case, decision.selected, decision.weights, decision.forecast, decision.mode)
+    return _result(
+        case,
+        decision.selected,
+        decision.weights,
+        decision.forecast,
+        decision.mode,
+        assumption_ids=decision.assumption_ids,
+    )
 
 
 def _fixed_forecast(case, name: str) -> ForecastResult:
@@ -310,7 +368,7 @@ def _fixed_forecast(case, name: str) -> ForecastResult:
     return _result(case, (name,), (1.0,), tuple(case.forecasts[name]), "single")
 
 
-def _result(case, selected, weights, forecast, mode) -> ForecastResult:
+def _result(case, selected, weights, forecast, mode, *, assumption_ids=()) -> ForecastResult:
     del weights
     truth = list(case.task.future)
     oracle = min(
@@ -328,6 +386,7 @@ def _result(case, selected, weights, forecast, mode) -> ForecastResult:
         tuple(case.families.get(name, "unknown") for name in selected),
         mode,
         oracle,
+        tuple(assumption_ids),
     )
 
 
@@ -340,7 +399,7 @@ def _paired_counts(per_task, baseline: Mapping[str, float]) -> dict[str, int]:
         if task_id not in baseline:
             result["missing"] += 1
             continue
-        delta = float(row["mase"]) - float(baseline[task_id])
+        delta = float(row["smae"]) - float(baseline[task_id])
         if abs(delta) <= 1e-12:
             result["ties"] += 1
         elif delta < 0:
@@ -376,17 +435,20 @@ def _report(payload: Mapping[str, object]) -> str:
         f"- Decision SHA-256: `{payload['decision_policy_sha256']}`",
         f"- LLM / mutation calls: {payload['llm_calls']} / {payload['mutation_calls']}",
         "",
-        "| Row | Mean MASE | Median MASE | Mean RMSSE | Mean MAE | Mean sMAPE | Coverage | Catastrophic | Methods | Families | Ensemble | W/T/L vs A |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Row | Mean sMAE | sMAE SE | Mean sRMSE | sRMSE SE | P90/P95 sMAE | Clipped sMAE/sRMSE | Mean MASE | Mean RMSSE | Mean MAE | Coverage | Methods | Families | Ensemble | W/T/L vs A (sMAE) |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name, raw in scores.items():
         score = raw
         comparison = paired[name]
         lines.append(
-            f"| {name} | {score['mean_mase']:.6f} | {score['median_mase']:.6f} | "
-            f"{score['mean_rmsse']:.6f} | {score['mean_mae']:.6f} | "
-            f"{score['mean_smape']:.6f} | {score['coverage']:.4f} | "
-            f"{score['catastrophic_rate']:.4f} | {score['method_diversity']} | "
+            f"| {name} | {score['mean_smae']:.6f} | {score['se_smae']:.6f} | "
+            f"{score['mean_srmse']:.6f} | {score['se_srmse']:.6f} | "
+            f"{score['p90_smae']:.6f}/{score['p95_smae']:.6f} | "
+            f"{score['smae_clipped_count']}/{score['srmse_clipped_count']} | "
+            f"{score['mean_mase']:.6f} | {score['mean_rmsse']:.6f} | "
+            f"{score['mean_mae']:.6f} | {score['coverage']:.4f} | "
+            f"{score['method_diversity']} | "
             f"{score['family_diversity']} | {score['ensemble_rate']:.4f} | "
             f"{comparison['wins']}/{comparison['ties']}/{comparison['losses']} |"
         )

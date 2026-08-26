@@ -1,5 +1,8 @@
-"""sMAPE, MAE, and MASE metrics."""
+"""Point-forecast metrics used by the local forecasting harness."""
 from __future__ import annotations
+
+import math
+import statistics
 
 
 def smape(y_true: list[float], y_pred: list[float]) -> float:
@@ -20,6 +23,80 @@ def mae(y_true: list[float], y_pred: list[float]) -> float:
     if not y_true:
         return 0.0
     return sum(abs(t - p) for t, p in zip(y_true, y_pred)) / len(y_true)
+
+
+def rmse(y_true: list[float], y_pred: list[float]) -> float:
+    """Root mean squared error."""
+    _check_same_length(y_true, y_pred)
+    if not y_true:
+        return 0.0
+    return math.hypot(*(t - p for t, p in zip(y_true, y_pred))) / math.sqrt(
+        len(y_true)
+    )
+
+
+def drcik_point_metrics(
+    y_true: list[float], y_pred: list[float], *, cap: float = 5.0
+) -> dict[str, float | bool]:
+    """Dr-CiK-aligned deterministic point metrics for one task.
+
+    Dr-CiK scales both MAE and RMSE by the mean absolute value of the true
+    forecast horizon, then independently caps each per-task scaled metric at
+    ``cap`` before aggregating across tasks.  A deterministic forecast is the
+    one-sample special case of the paper's sample-mean point forecast.
+
+    These values reproduce the public metric definition, but they are not a
+    verified hidden-test leaderboard score because the official scorer and
+    hidden labels remain private.
+    """
+    _check_same_length(y_true, y_pred)
+    if not y_true:
+        raise ValueError("Dr-CiK point metrics require a non-empty horizon")
+    if not math.isfinite(cap) or cap <= 0.0:
+        raise ValueError("cap must be a positive finite value")
+    scale = statistics.fmean(abs(value) for value in y_true)
+    absolute_error = mae(y_true, y_pred)
+    squared_error = rmse(y_true, y_pred)
+    if scale > 0.0:
+        smae_raw = absolute_error / scale
+        srmse_raw = squared_error / scale
+    else:
+        smae_raw = 0.0 if absolute_error == 0.0 else math.inf
+        srmse_raw = 0.0 if squared_error == 0.0 else math.inf
+    return {
+        "scale": scale,
+        "mae": absolute_error,
+        "rmse": squared_error,
+        "smae_raw": smae_raw,
+        "srmse_raw": srmse_raw,
+        "smae": min(cap, smae_raw),
+        "srmse": min(cap, srmse_raw),
+        "smae_clipped": smae_raw > cap,
+        "srmse_clipped": srmse_raw > cap,
+    }
+
+
+def standard_error(values: list[float]) -> float:
+    """Standard error of a task-level sample; zero for fewer than two tasks."""
+    if len(values) < 2:
+        return 0.0
+    return statistics.stdev(values) / math.sqrt(len(values))
+
+
+def linear_quantile(values: list[float], probability: float) -> float:
+    """Linearly interpolated quantile with endpoints included."""
+    if not values:
+        raise ValueError("quantile requires at least one value")
+    if not 0.0 <= probability <= 1.0:
+        raise ValueError("probability must be between zero and one")
+    ordered = sorted(values)
+    position = probability * (len(ordered) - 1)
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
 
 
 def mase(

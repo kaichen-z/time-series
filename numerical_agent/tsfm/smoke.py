@@ -274,6 +274,17 @@ def run_checkpoint_smoke(
         return _finish_report(report, output, redactor)
 
     parent_environment = _environment_for_device(requested_device)
+    runtime_validator = getattr(deployment, "validate_runtime", None)
+    if callable(runtime_validator):
+        try:
+            runtime_validator(
+                (manifest.worker_environment,),
+                parent_environment=parent_environment,
+            )
+        except ValueError:
+            report["reason_code"] = "worker_environment_unhealthy"
+            report["message"] = "worker environment failed its startup health check"
+            return _finish_report(report, output, redactor)
     versions_available = False
     try:
         versions = _version_reader(command, parent_environment)
