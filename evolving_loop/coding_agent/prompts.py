@@ -24,7 +24,7 @@ parameters from the inputs (history, horizon, frequency) instead of hardcoding v
 only fit this task.
 
 If a skill library is shown below, each skill comes with usage stats: uses, ok_rate (fraction \
-of runs without errors), and mean_smape (lower is better). Choose as follows:
+of runs without errors), mean_sMAE, and mean_sRMSE (both lower are better). Choose as follows:
 - If an existing skill fits this task, reuse it - prefer skills with strong stats.
 - If an existing skill ALMOST fits but has a bug or limitation, revise it: keep its name, \
 return improved code. NEVER create a new skill that is a variant of an existing one.

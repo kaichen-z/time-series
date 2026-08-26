@@ -18,8 +18,12 @@ class DecisionSkill:
     decision_rule: str
     failure_condition: str
     created_from_task: str
-    validation_score: float
+    validation_smae: float | None = None
+    validation_srmse: float | None = None
+    validation_score: float | None = None
     uses: int = 0
+    avg_smae: float | None = None
+    avg_srmse: float | None = None
     avg_score: float | None = None
 
 
@@ -54,7 +58,21 @@ class DecisionSkillLibrary:
 
     def add(self, skill: DecisionSkill) -> None:
         existing = self._skills.get(skill.name)
-        if existing is not None and existing.validation_score > skill.validation_score:
+        if (
+            existing is not None
+            and existing.validation_smae is not None
+            and existing.validation_srmse is not None
+            and skill.validation_smae is not None
+            and skill.validation_srmse is not None
+            and not (
+                skill.validation_smae >= existing.validation_smae
+                and skill.validation_srmse >= existing.validation_srmse
+                and (
+                    skill.validation_smae > existing.validation_smae
+                    or skill.validation_srmse > existing.validation_srmse
+                )
+            )
+        ):
             return
         self._skills[skill.name] = skill
         self.save()
@@ -71,17 +89,22 @@ class DecisionSkillLibrary:
         return "\n".join(
             f"- {skill.name}: {skill.description}; applies when: {skill.applicability}; "
             f"rule: {skill.decision_rule}; fails when: {skill.failure_condition}; "
-            f"validation={skill.validation_score:.3f}"
+            f"sMAE signal={skill.validation_smae:.3f}; "
+            f"sRMSE signal={skill.validation_srmse:.3f}"
             for skill in self._skills.values()
+            if skill.validation_smae is not None and skill.validation_srmse is not None
         )
 
-    def record_use(self, name: str, score: float) -> None:
+    def record_use(self, name: str, smae: float, srmse: float) -> None:
         skill = self._skills.get(name)
         if skill is None:
             return
         uses = skill.uses + 1
-        average = score if skill.avg_score is None else (skill.avg_score * skill.uses + score) / uses
-        self._skills[name] = replace(skill, uses=uses, avg_score=average)
+        avg_smae = smae if skill.avg_smae is None else (skill.avg_smae * skill.uses + smae) / uses
+        avg_srmse = srmse if skill.avg_srmse is None else (skill.avg_srmse * skill.uses + srmse) / uses
+        self._skills[name] = replace(
+            skill, uses=uses, avg_smae=avg_smae, avg_srmse=avg_srmse
+        )
         self.save()
 
     def clone(self, *, persist: bool = False) -> "DecisionSkillLibrary":

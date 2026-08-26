@@ -11,7 +11,7 @@ from evolving_loop.coding_agent.skill_library import SkillLibrary
 from evolving_loop.data import DEFAULT_TASKS_FILE, Task, load_tasks
 from evolving_loop.tracing import TraceEvent, configure, emit
 from common.llm import LLMClient, QwenClient
-from common.metrics import score_forecast
+from common.metrics import drcik_point_metrics
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -55,10 +55,15 @@ def run_baseline(
 
             emit(TraceEvent(task_id=task.task_id, mode=mode, event_type="task_start"))
             result = agent.run_task(task)
-            score = score_forecast(list(task.future_values), list(result.forecast))
+            score = drcik_point_metrics(task.future_values, [result.forecast])
 
             if library is not None and result.action != "fallback":
-                library.record_use(result.skill_name, score["primary"])
+                library.record_use(
+                    result.skill_name,
+                    True,
+                    smae=score["smae"],
+                    srmse=score["srmse"],
+                )
 
             results_file.write(
                 json.dumps(
@@ -66,15 +71,15 @@ def run_baseline(
                         "task_id": task.task_id,
                         "action": result.action,
                         "skill_name": result.skill_name,
-                        "smape": score["smape"],
-                        "mae": score["mae"],
+                        "smae": score["smae"],
+                        "srmse": score["srmse"],
                         "error": result.error,
                     }
                 )
                 + "\n"
             )
             results_file.flush()
-            scores.append({"smape": score["smape"], "mae": score["mae"]})
+            scores.append(score)
 
             emit(
                 TraceEvent(
@@ -82,7 +87,8 @@ def run_baseline(
                     mode=mode,
                     event_type="task_end",
                     detail={
-                        "score": score["primary"],
+                        "smae": score["smae"],
+                        "srmse": score["srmse"],
                         "action": result.action,
                         "skill_name": result.skill_name,
                         "error": result.error,
@@ -104,18 +110,18 @@ def _round3(value: float | None) -> float | None:
 
 
 def _summarize(mode: str, scores: list[dict], library: SkillLibrary | None, results_path: Path) -> dict:
-    """First-half vs second-half mean sMAPE and MAE: did it get better as the library grew."""
+    """First-half vs second-half Dr-CiK point metrics."""
     half = len(scores) // 2
     first_half, second_half = scores[:half], scores[half:]
     return {
         "mode": mode,
         "n_tasks": len(scores),
-        "mean_smape": _round3(_mean([s["smape"] for s in scores])),
-        "mean_smape_first_half": _round3(_mean([s["smape"] for s in first_half])),
-        "mean_smape_second_half": _round3(_mean([s["smape"] for s in second_half])),
-        "mean_mae": _round3(_mean([s["mae"] for s in scores])),
-        "mean_mae_first_half": _round3(_mean([s["mae"] for s in first_half])),
-        "mean_mae_second_half": _round3(_mean([s["mae"] for s in second_half])),
+        "mean_smae": _round3(_mean([s["smae"] for s in scores])),
+        "mean_smae_first_half": _round3(_mean([s["smae"] for s in first_half])),
+        "mean_smae_second_half": _round3(_mean([s["smae"] for s in second_half])),
+        "mean_srmse": _round3(_mean([s["srmse"] for s in scores])),
+        "mean_srmse_first_half": _round3(_mean([s["srmse"] for s in first_half])),
+        "mean_srmse_second_half": _round3(_mean([s["srmse"] for s in second_half])),
         "skills_saved": len(library) if library is not None else 0,
         "results_path": str(results_path),
     }

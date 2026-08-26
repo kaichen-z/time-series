@@ -1,5 +1,66 @@
-"""sMAPE, MAE, and MASE metrics."""
+"""Forecast metrics shared by trusted evaluation hosts."""
 from __future__ import annotations
+
+import math
+import statistics
+from collections.abc import Sequence
+
+
+def drcik_point_metrics(
+    y_true: Sequence[float],
+    samples: Sequence[Sequence[float]],
+    *,
+    cap: float = 5.0,
+) -> dict[str, float]:
+    """Return the official per-task Dr-CiK sMAE and sRMSE.
+
+    The point forecast is the step-wise mean across submitted trajectories. Both
+    errors are scaled by the future target's mean absolute value and capped
+    independently before cross-task aggregation, as specified in Appendix H.2.
+    """
+    truth = tuple(float(value) for value in y_true)
+    trajectories = tuple(tuple(float(value) for value in sample) for sample in samples)
+    if not truth:
+        raise ValueError("Dr-CiK metrics require a non-empty future target")
+    if not trajectories:
+        raise ValueError("Dr-CiK metrics require at least one forecast trajectory")
+    if cap <= 0.0:
+        raise ValueError("Dr-CiK metric cap must be positive")
+    if any(len(sample) != len(truth) for sample in trajectories):
+        raise ValueError("every forecast trajectory must match the future horizon")
+    if not all(math.isfinite(value) for value in truth):
+        raise ValueError("future target contains a non-finite value")
+    if not all(math.isfinite(value) for sample in trajectories for value in sample):
+        raise ValueError("forecast trajectory contains a non-finite value")
+
+    scale = statistics.fmean(abs(value) for value in truth)
+    if scale == 0.0:
+        raise ValueError("official Dr-CiK scaling is undefined for an all-zero future target")
+    point = tuple(
+        statistics.fmean(sample[step] for sample in trajectories)
+        for step in range(len(truth))
+    )
+    smae = statistics.fmean(
+        abs(actual - predicted) for actual, predicted in zip(truth, point)
+    ) / scale
+    srmse = math.sqrt(
+        statistics.fmean(
+            (actual - predicted) ** 2 for actual, predicted in zip(truth, point)
+        )
+    ) / scale
+    return {"smae": min(cap, smae), "srmse": min(cap, srmse)}
+
+
+def aggregate_drcik_point_metrics(
+    rows: Sequence[dict[str, float]],
+) -> dict[str, float]:
+    """Average already capped Dr-CiK task metrics across tasks."""
+    if not rows:
+        raise ValueError("at least one task metric row is required")
+    return {
+        "smae": statistics.fmean(float(row["smae"]) for row in rows),
+        "srmse": statistics.fmean(float(row["srmse"]) for row in rows),
+    }
 
 
 def smape(y_true: list[float], y_pred: list[float]) -> float:

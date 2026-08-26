@@ -18,9 +18,14 @@ class Skill:
     created_from_task: str
     assumption: str = ""
     failure_condition: str = ""
+    validation_smae: float | None = None
+    validation_srmse: float | None = None
+    # Retained only so older artifacts remain loadable; new runs never use it.
     validation_score: float | None = None
     uses: int = 0
     failures: int = 0
+    avg_smae: float | None = None
+    avg_srmse: float | None = None
     avg_score: float | None = None
 
 
@@ -74,14 +79,18 @@ class SkillLibrary:
     def _line_for_prompt(skill: Skill) -> str:
         line = f"- {skill.name}: {skill.description}"
         stats = []
-        if skill.validation_score is not None:
-            stats.append(f"hindcast_sMAPE={skill.validation_score:.4f}")
+        if skill.validation_smae is not None:
+            stats.append(f"hindcast_sMAE={skill.validation_smae:.4f}")
+        if skill.validation_srmse is not None:
+            stats.append(f"hindcast_sRMSE={skill.validation_srmse:.4f}")
         if skill.uses > 0:
             ok_rate = (skill.uses - skill.failures) / skill.uses
-            mean_smape = f"{skill.avg_score:.4f}" if skill.avg_score is not None else "n/a"
             stats.append(f"uses={skill.uses}")
             stats.append(f"ok_rate={ok_rate:.2f}")
-            stats.append(f"mean_smape={mean_smape}")
+            if skill.avg_smae is not None:
+                stats.append(f"mean_sMAE={skill.avg_smae:.4f}")
+            if skill.avg_srmse is not None:
+                stats.append(f"mean_sRMSE={skill.avg_srmse:.4f}")
         if stats:
             line += " [" + ", ".join(stats) + "]"
         return line
@@ -94,7 +103,13 @@ class SkillLibrary:
         """Create an evaluation-local snapshot so competing policies cannot contaminate each other."""
         return SkillLibrary(self.path, list(self._skills.values()), persist=persist)
 
-    def record_use(self, name: str, ok: bool, score: float | None = None) -> None:
+    def record_use(
+        self,
+        name: str,
+        ok: bool,
+        smae: float | None = None,
+        srmse: float | None = None,
+    ) -> None:
         """Record one use attempt; only successful attempts feed the running average score."""
         skill = self._skills[name]
         new_uses = skill.uses + 1
@@ -103,14 +118,33 @@ class SkillLibrary:
             self.save()
             return
         successes_before = skill.uses - skill.failures
-        new_avg = score if skill.avg_score is None else (skill.avg_score * successes_before + score) / (successes_before + 1)
-        self._skills[name] = replace(skill, uses=new_uses, avg_score=new_avg)
+        avg_smae = (
+            smae
+            if skill.avg_smae is None
+            else (skill.avg_smae * successes_before + smae) / (successes_before + 1)
+        ) if smae is not None else skill.avg_smae
+        avg_srmse = (
+            srmse
+            if skill.avg_srmse is None
+            else (skill.avg_srmse * successes_before + srmse) / (successes_before + 1)
+        ) if srmse is not None else skill.avg_srmse
+        self._skills[name] = replace(
+            skill, uses=new_uses, avg_smae=avg_smae, avg_srmse=avg_srmse
+        )
         self.save()
 
     def revise(self, name: str, new_code: str) -> None:
         """Replace a skill's code; reset usage stats since the new code is functionally different."""
         skill = self._skills[name]
-        self._skills[name] = replace(skill, code=new_code, uses=0, failures=0, avg_score=None)
+        self._skills[name] = replace(
+            skill,
+            code=new_code,
+            uses=0,
+            failures=0,
+            avg_smae=None,
+            avg_srmse=None,
+            avg_score=None,
+        )
         self.save()
 
     def __len__(self) -> int:

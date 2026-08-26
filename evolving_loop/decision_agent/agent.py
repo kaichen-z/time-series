@@ -11,9 +11,27 @@ from common.llm import JsonExtractionError, LLMClient, parse_json_object
 DECISION_PROMPT = """You are the Decision Agent in a time-series forecasting harness.
 Choose among candidates that were already executed and historically hindcast. You cannot write
 new values or edit a trajectory. The safe host default is the candidate with the lowest historical
-hindcast error. Override it only when verified task evidence specifically falsifies its assumption
-or supports another candidate. An override must cite verified document IDs. If selecting an
-evidence-adjusted candidate, cite every document used to construct that candidate.
+hindcast sRMSE, with sMAE as the tie-breaker. Override it only when verified task evidence
+specifically falsifies its assumption or supports another candidate. An override must cite verified
+document IDs. If selecting an evidence-adjusted candidate, cite every document used to construct
+that candidate.
+
+Judge the complete evidence chain, not isolated quotes. A history-only hindcast cannot reject a
+future event absent from history: when verified same-entity evidence jointly supplies the event,
+causal mechanism, target, magnitude, and forecast window, prefer the matching executed
+evidence-adjusted candidate unless equally strong counterevidence remains. Conversely, abstain when
+the chain changes entity or target, ends before the forecast, is contradicted, or lacks a magnitude
+or window. If one concrete missing discriminator or unresolved contradiction could change the
+selected trajectory, set request_more_retrieval=true; do this only for a named gap, not generic
+uncertainty.
+
+A historical defect can falsify a numeric candidate only when its verified affected window overlaps
+the supplied visible history. Earlier defects outside that history must not influence selection.
+When a history_cleaned candidate is present, the host has already replayed the same executable
+programs on evidence-cleaned history and required both sMAE and sRMSE to be non-worse, with at least
+one strict improvement over the raw-host replay on the same targets. Select it only when its cited
+observation evidence supports the stated window and repair semantics; cite every source_document_id
+attached to the candidate.
 
 Treat measurement/software/sensor errors as observation-layer evidence: they can invalidate
 extrapolation of the corrupted historical pattern but do not imply the real process had the same
@@ -36,7 +54,8 @@ class DecisionCandidate:
     forecast: tuple[float, ...]
     assumption: str
     failure_condition: str
-    hindcast_smape: float
+    hindcast_smae: float
+    hindcast_srmse: float
     source_document_ids: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
 
@@ -70,13 +89,19 @@ class DecisionAgent:
         candidates: tuple[DecisionCandidate, ...],
         retrieval: RetrievalResult,
         *,
+        host_default_id: str | None = None,
         prior_decisions: tuple[DecisionResult, ...] = (),
         round_index: int = 0,
     ) -> DecisionResult:
         if not candidates:
             raise ValueError("Decision Agent requires at least one executed candidate")
-        host_default = min(candidates, key=lambda item: item.hindcast_smape)
         by_id = {candidate.candidate_id: candidate for candidate in candidates}
+        host_default = by_id.get(host_default_id) if host_default_id else None
+        if host_default is None:
+            host_default = min(
+                candidates,
+                key=lambda item: (item.hindcast_srmse, item.hindcast_smae),
+            )
         payload = {
             "candidates": [
                 {
@@ -84,7 +109,8 @@ class DecisionAgent:
                     "forecast": list(item.forecast),
                     "assumption": item.assumption,
                     "failure_condition": item.failure_condition,
-                    "hindcast_smape": item.hindcast_smape,
+                    "hindcast_smae": item.hindcast_smae,
+                    "hindcast_srmse": item.hindcast_srmse,
                     "source_document_ids": list(item.source_document_ids),
                     "tags": list(item.tags),
                 }

@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import json
 import math
-import statistics
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Callable, Sequence
 
+from common.metrics import aggregate_drcik_point_metrics
 from evolving_loop.co_evolution import HarnessPolicy
 from evolving_loop.data import ContextTask, Document
 from evolving_loop.evaluation import score_after_resolution
@@ -131,7 +131,8 @@ def run_frozen_inference(
                                 "candidate_id": item.candidate_id,
                                 "assumption": item.assumption,
                                 "failure_condition": item.failure_condition,
-                                "hindcast_smape": item.hindcast_smape,
+                                "hindcast_smae": item.hindcast_smae,
+                                "hindcast_srmse": item.hindcast_srmse,
                             }
                             for item in result.candidates
                         ],
@@ -142,6 +143,16 @@ def run_frozen_inference(
                 + "\n"
             )
 
+    aggregate = (
+        aggregate_drcik_point_metrics(
+            [
+                {"smae": item.final_smae, "srmse": item.final_srmse}
+                for item in outcomes
+            ]
+        )
+        if outcomes
+        else None
+    )
     summary = {
         "artifact_kind": artifact_kind,
         "policy_version": policy.version,
@@ -154,12 +165,8 @@ def run_frozen_inference(
         "forecasts_path": str(forecast_path),
         "deep_research_path": str(research_path),
         "run_report_path": str(report_path),
-        "mean_final_smape": (
-            statistics.fmean(item.final_smape for item in outcomes) if outcomes else None
-        ),
-        "mean_final_mae": (
-            statistics.fmean(item.final_mae for item in outcomes) if outcomes else None
-        ),
+        "mean_smae": aggregate["smae"] if aggregate else None,
+        "mean_srmse": aggregate["srmse"] if aggregate else None,
     }
     (destination / "summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
