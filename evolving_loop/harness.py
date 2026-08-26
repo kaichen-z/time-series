@@ -107,6 +107,7 @@ class EvolvingForecastHarness:
             candidates,
             self.runtime.decision_aggregation,
         )
+        decision = _guard_raw_override(decision, candidates, coding)
         return HarnessResult(
             task_id=task.numeric.task_id,
             coding=coding,
@@ -380,6 +381,76 @@ def _fold_pair_improves(
             or candidate_mean_srmse
             < (1.0 - minimum_relative_gain) * reference_mean_srmse
         )
+    )
+
+
+def _fold_pair_within(
+    candidate_smae: tuple[float, ...],
+    candidate_srmse: tuple[float, ...],
+    reference_smae: tuple[float, ...],
+    reference_srmse: tuple[float, ...],
+    *,
+    relative_slack: float = 0.05,
+) -> bool:
+    """Keep evidence-selectable alternatives whose two fold metrics are comparable."""
+    multiplier = 1.0 + relative_slack
+    return (
+        statistics.fmean(candidate_smae) <= multiplier * statistics.fmean(reference_smae)
+        and statistics.fmean(candidate_srmse)
+        <= multiplier * statistics.fmean(reference_srmse)
+        and max(candidate_smae) <= multiplier * max(reference_smae)
+        and max(candidate_srmse) <= multiplier * max(reference_srmse)
+    )
+
+
+def _guard_raw_override(
+    decision: DecisionResult,
+    candidates: tuple[DecisionCandidate, ...],
+    coding: CodingEvolutionResult,
+) -> DecisionResult:
+    """Reject only unstable raw overrides, after preserving the full Decision context."""
+    host = coding.selected
+    if decision.selected.candidate_id == host.program.name:
+        return decision
+    raw = next(
+        (
+            item
+            for item in coding.candidates
+            if item.program.name == decision.selected.candidate_id
+        ),
+        None,
+    )
+    if raw is None:
+        return decision
+    host_is_near_perfect = max(host.hindcast_smae, host.hindcast_srmse) <= 0.01
+    if (
+        host_is_near_perfect
+        or _fold_pair_improves(
+            raw.fold_smae,
+            raw.fold_srmse,
+            host.fold_smae,
+            host.fold_srmse,
+        )
+        or _fold_pair_within(
+            raw.fold_smae,
+            raw.fold_srmse,
+            host.fold_smae,
+            host.fold_srmse,
+        )
+    ):
+        return decision
+    host_candidate = next(
+        item for item in candidates if item.candidate_id == host.program.name
+    )
+    return replace(
+        decision,
+        selected=host_candidate,
+        requested_more_retrieval=False,
+        rationale="Preserve the stable numeric host after the raw override failed its fold gate.",
+        supporting_document_ids=(),
+        llm_override_accepted=False,
+        rejection_reason="raw_override_failed_smae_srmse_fold_gate",
+        used_skill_names=(),
     )
 
 
