@@ -17,6 +17,7 @@ from evolving_loop.co_evolution import (
 from evolving_loop.coding_agent.skill_library import Skill, SkillLibrary
 from evolving_loop.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
 from evolving_loop.evaluation import ResolvedOutcome
+from evolving_loop.retrieval_agent.credit import RetrievalTaskDiagnostics
 from evolving_loop.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
 from common.llm import FakeLLMClient, TransientLLMError
 
@@ -466,6 +467,51 @@ def test_weakest_agent_uses_attributable_mae_when_available() -> None:
     assert CoEvolutionEngine.weakest_agent(decision_failure) == "decision"
     assert CoEvolutionEngine.weakest_agent(coding_failure) == "coding"
     assert CoEvolutionEngine.weakest_agent(retrieval_failure) == "retrieval"
+
+
+def test_retrieval_diagnostics_aggregate_the_vector_and_drive_weakest_agent() -> None:
+    retrieval = RetrievalTaskDiagnostics(
+        supporting_recall=1.0,
+        gt_evidence_recall=0.5,
+        distractor_avoidance=0.75,
+        exact_quote_validity=1.0,
+        complete_chain_rate=0.5,
+        contextual_oracle_smae_gain=0.0,
+        contextual_oracle_srmse_gain=0.0,
+        invalid_count=1,
+        catastrophic_count=2,
+        chain_credit=(),
+    )
+    outcomes = (
+        ResolvedOutcome(
+            task_id="task_a",
+            final_smae=0.2,
+            final_srmse=0.3,
+            coding_oracle_smae=0.2,
+            coding_oracle_srmse=0.3,
+            contextual_oracle_smae=0.1,
+            contextual_oracle_srmse=0.2,
+            decision_selection_smae_regret=0.0,
+            decision_selection_srmse_regret=0.0,
+            retrieval_diagnostics=retrieval,
+        ),
+    )
+
+    diagnostics = evaluation_diagnostics(outcomes)
+    evaluation = PolicyEvaluation(
+        version="v000",
+        system_reward=-0.3,
+        module_rewards={"coding": -0.2, "retrieval": 0.1, "decision": 0.0},
+        outcomes=outcomes,
+        diagnostics=diagnostics,
+    )
+
+    assert diagnostics["mean_retrieval_supporting_recall"] == 1.0
+    assert diagnostics["mean_retrieval_gt_evidence_recall"] == 0.5
+    assert diagnostics["mean_retrieval_contextual_oracle_smae_gain"] == 0.0
+    assert diagnostics["retrieval_invalid_count"] == 1.0
+    assert diagnostics["retrieval_catastrophic_count"] == 2.0
+    assert CoEvolutionEngine.weakest_agent(evaluation) == "retrieval"
 
 
 def test_mutation_transport_failure_becomes_rejected_candidate() -> None:

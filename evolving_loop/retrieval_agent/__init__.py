@@ -1,6 +1,17 @@
 """Context retrieval and evidence verification for the evolving harness."""
 
 from .agent import Evidence, EvidenceImpact, RetrievalAgent, RetrievalResult
+from .credit import (
+    EvidenceChainCredit,
+    RetrievalCreditReport,
+    RetrievalSkillTaskEvidence,
+    RetrievalTaskDiagnostics,
+    SkillCredit,
+    SkillNecessity,
+    assign_chain_credit,
+    promote_retrieval_skills,
+    validate_skill_necessity,
+)
 from .schemas import (
     EvidenceChain,
     EvidenceCitation,
@@ -23,6 +34,15 @@ from .skill_library import (
 __all__ = [
     "Evidence",
     "EvidenceImpact",
+    "EvidenceChainCredit",
+    "RetrievalCreditReport",
+    "RetrievalSkillTaskEvidence",
+    "RetrievalTaskDiagnostics",
+    "SkillCredit",
+    "SkillNecessity",
+    "assign_chain_credit",
+    "promote_retrieval_skills",
+    "validate_skill_necessity",
     "RetrievalAgent",
     "RetrievalResult",
     "RetrievalApplicability",

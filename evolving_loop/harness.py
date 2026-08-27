@@ -22,6 +22,60 @@ from evolving_loop.retrieval_agent.verifier import merge_verified_rounds
 
 
 @dataclass(frozen=True)
+class CandidatePoolEntry:
+    """The only candidate data retained for trusted post-resolution replay."""
+
+    candidate_id: str
+    forecast: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.candidate_id, str) or not self.candidate_id:
+            raise ValueError("candidate snapshot IDs must be non-empty strings")
+        values = tuple(float(value) for value in self.forecast)
+        if not values or not all(math.isfinite(value) for value in values):
+            raise ValueError("candidate snapshot forecasts must be non-empty and finite")
+        object.__setattr__(self, "forecast", values)
+
+
+@dataclass(frozen=True)
+class CandidatePoolSnapshot:
+    """An immutable, label-free pool after one verified numeric chain."""
+
+    after_chain_id: str | None
+    candidates: tuple[CandidatePoolEntry, ...]
+
+    def __post_init__(self) -> None:
+        if self.after_chain_id is not None and (
+            not isinstance(self.after_chain_id, str) or not self.after_chain_id
+        ):
+            raise ValueError("after_chain_id must be a non-empty string or None")
+        candidates = tuple(self.candidates)
+        if not candidates or any(
+            not isinstance(candidate, CandidatePoolEntry) for candidate in candidates
+        ):
+            raise ValueError("candidate pool snapshots require frozen candidate entries")
+        identifiers = tuple(candidate.candidate_id for candidate in candidates)
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("candidate pool snapshots cannot duplicate candidate IDs")
+        object.__setattr__(self, "candidates", candidates)
+
+
+@dataclass(frozen=True)
+class SkillLeaveOneOutSnapshot:
+    """A pre-label candidate-pool replay with one named Skill withheld."""
+
+    chain_id: str
+    skill_id: str
+    snapshot: CandidatePoolSnapshot
+
+    def __post_init__(self) -> None:
+        if not self.chain_id or not self.skill_id:
+            raise ValueError("leave-one-out snapshots require chain and Skill IDs")
+        if not isinstance(self.snapshot, CandidatePoolSnapshot):
+            raise ValueError("leave-one-out replay must contain a candidate pool snapshot")
+
+
+@dataclass(frozen=True)
 class HarnessResult:
     task_id: str
     coding: CodingEvolutionResult
@@ -30,6 +84,8 @@ class HarnessResult:
     candidates: tuple[DecisionCandidate, ...]
     forecast: tuple[float, ...]
     retrieval_card: FinalRetrievalCard | None = None
+    candidate_pool_snapshots: tuple[CandidatePoolSnapshot, ...] = ()
+    skill_leave_one_out_snapshots: tuple[SkillLeaveOneOutSnapshot, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -139,6 +195,7 @@ class EvolvingForecastHarness:
             decision=decision,
             candidates=candidates,
             forecast=decision.selected.forecast,
+            candidate_pool_snapshots=_candidate_pool_snapshots(candidates, None),
         )
 
     def _run_two_stage(self, task: ContextTask, coding: CodingEvolutionResult) -> HarnessResult:
@@ -229,6 +286,7 @@ class EvolvingForecastHarness:
             candidates=candidates,
             forecast=decision.selected.forecast,
             retrieval_card=card,
+            candidate_pool_snapshots=_candidate_pool_snapshots(candidates, card),
         )
 
     def _historical_clean_candidate(
@@ -456,6 +514,57 @@ class EvolvingForecastHarness:
             else None
         )
         return outcome, learning
+
+
+def _candidate_pool_snapshots(
+    candidates: tuple[DecisionCandidate, ...],
+    card: FinalRetrievalCard | None,
+) -> tuple[CandidatePoolSnapshot, ...]:
+    """Freeze incremental pools before a resolved task ever reaches evaluation."""
+    retrieval_candidates: dict[int, DecisionCandidate] = {}
+    history_clean_candidates = tuple(
+        candidate for candidate in candidates if "history_cleaned" in candidate.tags
+    )
+    for candidate in candidates:
+        if "evidence_adjusted" not in candidate.tags:
+            continue
+        _prefix, separator, raw_index = candidate.candidate_id.rpartition(
+            "__evidence_"
+        )
+        if separator and raw_index.isdigit():
+            retrieval_candidates[int(raw_index)] = candidate
+    baseline_by_id = {
+        candidate.candidate_id: CandidatePoolEntry(
+            candidate.candidate_id, candidate.forecast
+        )
+        for candidate in candidates
+        if "evidence_adjusted" not in candidate.tags
+        and "history_cleaned" not in candidate.tags
+    }
+    baseline = tuple(baseline_by_id.values())
+    snapshots = [CandidatePoolSnapshot(None, baseline)]
+    pool = list(baseline)
+    if card is None:
+        chain_ids = tuple(
+            f"legacy_evidence_{index}"
+            for index in range(max(retrieval_candidates, default=-1) + 1)
+        )
+    else:
+        chain_ids = tuple(
+            chain.chain_id for chain in card.chains if chain.numeric_eligible
+        )
+    for index, chain_id in enumerate(chain_ids):
+        candidate = retrieval_candidates.get(index)
+        if candidate is not None:
+            pool.append(CandidatePoolEntry(candidate.candidate_id, candidate.forecast))
+        snapshots.append(CandidatePoolSnapshot(chain_id, tuple(pool)))
+    if card is None:
+        for index, candidate in enumerate(history_clean_candidates):
+            pool.append(CandidatePoolEntry(candidate.candidate_id, candidate.forecast))
+            snapshots.append(
+                CandidatePoolSnapshot(f"legacy_history_clean_{index}", tuple(pool))
+            )
+    return tuple(snapshots)
 
 
 def _future_window(

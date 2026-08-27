@@ -10,6 +10,10 @@ from common.metrics import (
     spearman_rank_correlation,
 )
 from evolving_loop.data import ContextTask
+from evolving_loop.retrieval_agent.credit import (
+    RetrievalTaskDiagnostics,
+    assign_chain_credit,
+)
 
 if TYPE_CHECKING:
     from evolving_loop.harness import HarnessResult
@@ -27,6 +31,7 @@ class ResolvedOutcome:
     decision_selection_smae_regret: float | None = None
     decision_selection_srmse_regret: float | None = None
     candidate_count: int = 0
+    retrieval_diagnostics: RetrievalTaskDiagnostics | None = None
     # Legacy diagnostics remain readable so old checkpoints and downstream
     # reports survive the metric migration.  They never drive the new Pareto
     # acceptance rule.
@@ -53,34 +58,11 @@ def score_after_resolution(
     if not task.labels_public:
         raise ValueError("resolved-outcome learning is forbidden for hidden/unreleased labels")
     truth = task.numeric.future_values
-    final = drcik_point_metrics(truth, [result.forecast])
+    retrieval_credit = assign_chain_credit(task, result)
     candidates = {
         candidate.candidate_id: drcik_point_metrics(truth, [candidate.forecast])
         for candidate in result.candidates
     }
-    coding = {
-        candidate.program.name: drcik_point_metrics(truth, [candidate.forecast])
-        for candidate in result.coding.candidates
-    } or candidates
-    selected = candidates[result.decision.selected.candidate_id]
-    contextual_id = min(
-        candidates,
-        key=lambda candidate_id: (
-            candidates[candidate_id]["srmse"],
-            candidates[candidate_id]["smae"],
-            candidate_id,
-        ),
-    )
-    coding_id = min(
-        coding,
-        key=lambda candidate_id: (
-            coding[candidate_id]["srmse"],
-            coding[candidate_id]["smae"],
-            candidate_id,
-        ),
-    )
-    contextual = candidates[contextual_id]
-    coding_oracle = coding[coding_id]
     legacy_final = score_forecast(list(truth), list(result.forecast))
     legacy_candidates = {
         candidate.candidate_id: score_forecast(list(truth), list(candidate.forecast))
@@ -111,15 +93,16 @@ def score_after_resolution(
     ]
     return ResolvedOutcome(
         task_id=task.numeric.task_id,
-        final_smae=final["smae"],
-        final_srmse=final["srmse"],
-        coding_oracle_smae=coding_oracle["smae"],
-        coding_oracle_srmse=coding_oracle["srmse"],
-        contextual_oracle_smae=contextual["smae"],
-        contextual_oracle_srmse=contextual["srmse"],
-        decision_selection_smae_regret=selected["smae"] - contextual["smae"],
-        decision_selection_srmse_regret=selected["srmse"] - contextual["srmse"],
+        final_smae=retrieval_credit.final_smae,
+        final_srmse=retrieval_credit.final_srmse,
+        coding_oracle_smae=retrieval_credit.coding_oracle_smae,
+        coding_oracle_srmse=retrieval_credit.coding_oracle_srmse,
+        contextual_oracle_smae=retrieval_credit.contextual_oracle_smae,
+        contextual_oracle_srmse=retrieval_credit.contextual_oracle_srmse,
+        decision_selection_smae_regret=retrieval_credit.decision_smae_regret,
+        decision_selection_srmse_regret=retrieval_credit.decision_srmse_regret,
         candidate_count=len(result.candidates),
+        retrieval_diagnostics=retrieval_credit.diagnostics,
         final_smape=legacy_final["smape"],
         final_mae=legacy_final["mae"],
         coding_oracle_smape=legacy_coding_smape,

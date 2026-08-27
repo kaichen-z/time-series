@@ -235,7 +235,7 @@ def evaluation_diagnostics(
                 item.hindcast_future_rank_correlation for item in outcomes
             ),
         }
-    return {
+    diagnostics = {
         "mean_smae": statistics.fmean(float(item.final_smae) for item in outcomes),
         "mean_srmse": statistics.fmean(float(item.final_srmse) for item in outcomes),
         "mean_coding_oracle_smae": statistics.fmean(
@@ -257,6 +257,44 @@ def evaluation_diagnostics(
             float(item.decision_selection_srmse_regret) for item in outcomes
         ),
     }
+    retrieval = tuple(
+        item.retrieval_diagnostics
+        for item in outcomes
+        if item.retrieval_diagnostics is not None
+    )
+    if retrieval:
+        diagnostics.update(
+            {
+                "mean_retrieval_supporting_recall": statistics.fmean(
+                    item.supporting_recall for item in retrieval
+                ),
+                "mean_retrieval_gt_evidence_recall": statistics.fmean(
+                    item.gt_evidence_recall for item in retrieval
+                ),
+                "mean_retrieval_distractor_avoidance": statistics.fmean(
+                    item.distractor_avoidance for item in retrieval
+                ),
+                "mean_retrieval_exact_quote_validity": statistics.fmean(
+                    item.exact_quote_validity for item in retrieval
+                ),
+                "mean_retrieval_complete_chain_rate": statistics.fmean(
+                    item.complete_chain_rate for item in retrieval
+                ),
+                "mean_retrieval_contextual_oracle_smae_gain": statistics.fmean(
+                    item.contextual_oracle_smae_gain for item in retrieval
+                ),
+                "mean_retrieval_contextual_oracle_srmse_gain": statistics.fmean(
+                    item.contextual_oracle_srmse_gain for item in retrieval
+                ),
+                "retrieval_invalid_count": float(
+                    sum(item.invalid_count for item in retrieval)
+                ),
+                "retrieval_catastrophic_count": float(
+                    sum(item.catastrophic_count for item in retrieval)
+                ),
+            }
+        )
+    return diagnostics
 
 
 def forecast_utility(outcomes: Sequence[ResolvedOutcome]) -> float:
@@ -446,11 +484,15 @@ def evaluate_policy(
                 item.coding_oracle_srmse for item in outcomes
             ),
             "retrieval_smae_gain": statistics.fmean(
-                item.coding_oracle_smae - item.contextual_oracle_smae
+                item.retrieval_diagnostics.contextual_oracle_smae_gain
+                if item.retrieval_diagnostics is not None
+                else item.coding_oracle_smae - item.contextual_oracle_smae
                 for item in outcomes
             ),
             "retrieval_srmse_gain": statistics.fmean(
-                item.coding_oracle_srmse - item.contextual_oracle_srmse
+                item.retrieval_diagnostics.contextual_oracle_srmse_gain
+                if item.retrieval_diagnostics is not None
+                else item.coding_oracle_srmse - item.contextual_oracle_srmse
                 for item in outcomes
             ),
             "decision_smae_regret": -statistics.fmean(
@@ -507,8 +549,15 @@ def combine_policy_evaluations(
             for trace in evaluation.failure_traces
         ),
         diagnostics={
-            key: weighted(
-                [(evaluation.diagnostics.get(key, 0.0), count) for evaluation, count in usable]
+            key: (
+                sum(evaluation.diagnostics.get(key, 0.0) for evaluation, _count in usable)
+                if key in {"retrieval_invalid_count", "retrieval_catastrophic_count"}
+                else weighted(
+                    [
+                        (evaluation.diagnostics.get(key, 0.0), count)
+                        for evaluation, count in usable
+                    ]
+                )
             )
             for key in diagnostic_keys
         },
@@ -560,10 +609,16 @@ class CoEvolutionEngine:
         if any(value > 0.0 for value in selection_regret):
             return "decision"
         retrieval_gain = (
-            diagnostics["mean_coding_oracle_smae"]
-            - diagnostics["mean_contextual_oracle_smae"],
-            diagnostics["mean_coding_oracle_srmse"]
-            - diagnostics["mean_contextual_oracle_srmse"],
+            diagnostics.get(
+                "mean_retrieval_contextual_oracle_smae_gain",
+                diagnostics["mean_coding_oracle_smae"]
+                - diagnostics["mean_contextual_oracle_smae"],
+            ),
+            diagnostics.get(
+                "mean_retrieval_contextual_oracle_srmse_gain",
+                diagnostics["mean_coding_oracle_srmse"]
+                - diagnostics["mean_contextual_oracle_srmse"],
+            ),
         )
         if not (
             all(value >= 0.0 for value in retrieval_gain)
