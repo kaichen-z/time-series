@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -24,7 +25,6 @@ from evolving_loop.retrieval_agent.skill_library import (
     RetrievalApplicability,
     RetrievalSkill,
     RetrievalSkillLibrary,
-    RetrievalSkillOperation,
 )
 from evolving_loop.retrieval_agent.policy import RetrievalGenome, write_retrieval_release
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
@@ -447,22 +447,32 @@ def test_harness_factory_replays_complete_versioned_retrieval_skill_history(tmp_
             validation_srmse_gain=0.1,
         )
 
-    source = RetrievalSkillLibrary(tmp_path / "source.json", [skill()], persist=False)
-    source.apply_operations(
-        (
-            RetrievalSkillOperation.repair(
-                "window_skill", skill(description="Find inclusive event boundaries.")
-            ),
-            RetrievalSkillOperation.specialize(
-                "window_skill",
-                skill(
-                    stage="round2",
-                    status="specialized",
-                    applicability=RetrievalApplicability(gap_types=("missing_window",)),
-                ),
-            ),
-            RetrievalSkillOperation.quarantine("window_skill", "unsafe on ambiguous dates"),
-        )
+    version1 = skill()
+    version2 = replace(
+        version1,
+        version=2,
+        parent_version=1,
+        description="Find inclusive event boundaries.",
+    )
+    version3 = replace(
+        version2,
+        version=3,
+        parent_version=2,
+        stage="round2",
+        status="specialized",
+        applicability=RetrievalApplicability(gap_types=("missing_window",)),
+    )
+    version4 = replace(
+        version3,
+        version=4,
+        parent_version=3,
+        status="quarantined",
+        quarantine_reason="unsafe on ambiguous dates",
+    )
+    source = RetrievalSkillLibrary(
+        tmp_path / "source.json",
+        (version1, version2, version3, version4),
+        persist=False,
     )
     policy = HarnessPolicy(
         retrieval_skills=tuple(item.to_payload() for item in source.all())

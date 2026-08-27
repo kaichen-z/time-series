@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import copy
+import pickle
+from dataclasses import asdict, replace
 
 import pytest
 
@@ -50,7 +53,12 @@ def seed_skill(*, skill_id: str = "explicit_window", **overrides: object) -> Ret
 
 
 def repaired_skill() -> RetrievalSkill:
-    return seed_skill(description="Find inclusive event boundaries and recovery dates.")
+    return seed_skill(
+        status="candidate",
+        description="Find inclusive event boundaries and recovery dates.",
+        validation_smae_gain=None,
+        validation_srmse_gain=None,
+    )
 
 
 def test_load_migrates_legacy_rows_and_saves_typed_schema(tmp_path) -> None:
@@ -127,7 +135,9 @@ def test_repair_preserves_identity_and_lineage(tmp_path) -> None:
 def test_specialization_must_narrow_applicability(tmp_path) -> None:
     library = RetrievalSkillLibrary(tmp_path / "skills.json", [seed_skill()])
     specialized = seed_skill(
-        status="specialized",
+        status="candidate",
+        validation_smae_gain=None,
+        validation_srmse_gain=None,
     )
 
     with pytest.raises(RetrievalSkillError, match="narrow"):
@@ -136,7 +146,9 @@ def test_specialization_must_narrow_applicability(tmp_path) -> None:
         )
 
     narrowed = seed_skill(
-        status="specialized",
+        status="candidate",
+        validation_smae_gain=None,
+        validation_srmse_gain=None,
         applicability=RetrievalApplicability(
             assumption_kinds=("future_event",),
             gap_types=("missing_window",),
@@ -153,7 +165,121 @@ def test_specialization_must_narrow_applicability(tmp_path) -> None:
     library.apply_operations(
         (RetrievalSkillOperation.specialize("explicit_window", narrowed),)
     )
-    assert library.get_by_id("explicit_window").status == "specialized"
+    assert library.get_by_id("explicit_window").status == "candidate"
+
+
+def _candidate_seed(*, skill_id: str = "explicit_window") -> RetrievalSkill:
+    return seed_skill(
+        skill_id=skill_id,
+        status="candidate",
+        validated_task_ids=(),
+        validated_entities=(),
+        validation_smae_gain=None,
+        validation_srmse_gain=None,
+    )
+
+
+@pytest.mark.parametrize("operation_kind", ("add", "repair", "specialize", "merge"))
+def test_public_skill_mutations_cannot_create_active_status(tmp_path, operation_kind) -> None:
+    first = _candidate_seed()
+    second = _candidate_seed(skill_id="explicit_recovery")
+    library = RetrievalSkillLibrary(tmp_path / "skills.json", (first, second))
+    forged = seed_skill()
+    if operation_kind == "add":
+        action = lambda: library.add(forged)
+    elif operation_kind == "repair":
+        action = lambda: library.apply_operations(
+            (RetrievalSkillOperation.repair(first.skill_id, forged),)
+        )
+    elif operation_kind == "specialize":
+        forged = replace(
+            forged,
+            status="specialized",
+            applicability=RetrievalApplicability(
+                assumption_kinds=("future_event",),
+                gap_types=("missing_window",),
+                temporal_relations=("overlaps_future",),
+            ),
+        )
+        action = lambda: library.apply_operations(
+            (RetrievalSkillOperation.specialize(first.skill_id, forged),)
+        )
+    else:
+        forged = seed_skill(skill_id="forged_merge")
+        action = lambda: library.apply_operations(
+            (
+                RetrievalSkillOperation.merge(
+                    (first.skill_id, second.skill_id), forged
+                ),
+            )
+        )
+
+    with pytest.raises(RetrievalSkillError, match="candidate|active|trusted"):
+        action()
+    assert all(not skill.is_active for skill in library.all())
+
+
+def test_copied_or_serialized_active_records_cannot_bypass_public_repair(tmp_path) -> None:
+    candidate = _candidate_seed()
+    active = seed_skill()
+    forged_records = (
+        replace(candidate, status="accepted", validation_smae_gain=0.9, validation_srmse_gain=0.9),
+        copy.copy(active),
+        pickle.loads(pickle.dumps(active)),
+        RetrievalSkill.from_payload(asdict(active)),
+    )
+    forged_operation = replace(
+        RetrievalSkillOperation.repair(candidate.skill_id, candidate),
+        skill=active,
+    )
+    operations = (
+        *(RetrievalSkillOperation.repair(candidate.skill_id, row) for row in forged_records),
+        pickle.loads(pickle.dumps(forged_operation)),
+    )
+    for index, operation in enumerate(operations):
+        library = RetrievalSkillLibrary(
+            tmp_path / f"skills_{index}.json", (candidate,)
+        )
+
+        with pytest.raises(RetrievalSkillError, match="candidate|active|trusted"):
+            library.apply_operations((operation,))
+        assert library.get_by_id(candidate.skill_id).status == "candidate"
+
+
+def test_rejected_active_forgery_cannot_survive_save_and_reload(tmp_path) -> None:
+    path = tmp_path / "skills.json"
+    candidate = _candidate_seed()
+    library = RetrievalSkillLibrary(path, (candidate,))
+
+    with pytest.raises(RetrievalSkillError, match="candidate|active|trusted"):
+        library.add(seed_skill())
+    library.save()
+    reloaded = RetrievalSkillLibrary.load(path)
+
+    assert reloaded.get_by_id(candidate.skill_id).status == "candidate"
+    assert len(reloaded.history(candidate.skill_id)) == 1
+
+
+def test_loaded_legacy_active_skill_is_usable_but_not_publicly_revalidated(tmp_path) -> None:
+    path = tmp_path / "skills.json"
+    path.write_text(json.dumps([seed_skill().to_payload()]))
+    library = RetrievalSkillLibrary.load(path)
+
+    assert library.for_stage(
+        "round1",
+        assumption_kinds=("future_event",),
+        gap_types=("missing_window",),
+        temporal_relations=("overlaps_future",),
+    )
+    with pytest.raises(RetrievalSkillError, match="candidate|active|trusted"):
+        library.apply_operations(
+            (RetrievalSkillOperation.repair("explicit_window", seed_skill()),)
+        )
+
+    library.apply_operations(
+        (RetrievalSkillOperation.quarantine("explicit_window", "retire legacy record"),)
+    )
+    assert library.get_by_id("explicit_window").status == "quarantined"
 
 
 def test_merge_retains_predecessors_and_records_ancestry(tmp_path) -> None:

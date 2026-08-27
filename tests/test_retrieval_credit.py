@@ -128,7 +128,15 @@ def _result(
         complete=all(chain.numeric_eligible for chain in chains),
     )
     executed = tuple(
-        DecisionCandidate(candidate.candidate_id, candidate.forecast, candidate.candidate_id, "none")
+        DecisionCandidate(
+            candidate.candidate_id,
+            candidate.forecast,
+            candidate.candidate_id,
+            "none",
+            tags=("evidence_adjusted",)
+            if "__evidence_" in candidate.candidate_id
+            else (),
+        )
         for candidate in snapshots[-1].candidates
     )
     coding = tuple(
@@ -157,6 +165,14 @@ def test_candidate_snapshots_are_immutable_and_contain_no_evaluator_labels() -> 
         snapshot.candidates[0].forecast = (12.0, 12.0)  # type: ignore[misc]
     assert set(vars(snapshot)) == {"after_chain_id", "candidates"}
     assert set(vars(snapshot.candidates[0])) == {"candidate_id", "forecast"}
+    with pytest.raises(ValueError, match="duplicate candidate IDs"):
+        CandidatePoolSnapshot(
+            None,
+            (
+                CandidatePoolEntry("duplicate", (10.0, 10.0)),
+                CandidatePoolEntry("duplicate", (12.0, 12.0)),
+            ),
+        )
 
 
 def test_credit_rejects_missing_snapshots_instead_of_reconstructing_them() -> None:
@@ -247,13 +263,13 @@ def test_chain_credit_follows_verified_order_without_double_attribution() -> Non
             _snapshot(
                 "first",
                 ("numeric", (6.0, 6.0)),
-                ("first_candidate", (10.0, 10.0)),
+                ("numeric__evidence_0", (10.0, 10.0)),
             ),
             _snapshot(
                 "second",
                 ("numeric", (6.0, 6.0)),
-                ("first_candidate", (10.0, 10.0)),
-                ("second_candidate", (12.0, 12.0)),
+                ("numeric__evidence_0", (10.0, 10.0)),
+                ("numeric__evidence_1", (12.0, 12.0)),
             ),
         ),
     )
@@ -272,16 +288,16 @@ def test_chain_credit_follows_verified_order_without_double_attribution() -> Non
         (
             (
                 _snapshot(None, ("numeric", (6.0, 6.0))),
-                _snapshot("first", ("numeric", (7.0, 7.0)), ("first_candidate", (10.0, 10.0))),
-                _snapshot("second", ("numeric", (7.0, 7.0)), ("first_candidate", (10.0, 10.0)), ("second_candidate", (12.0, 12.0))),
+                _snapshot("first", ("numeric", (7.0, 7.0)), ("numeric__evidence_0", (10.0, 10.0))),
+                _snapshot("second", ("numeric", (7.0, 7.0)), ("numeric__evidence_0", (10.0, 10.0)), ("numeric__evidence_1", (12.0, 12.0))),
             ),
             "changed",
         ),
         (
             (
                 _snapshot(None, ("numeric", (6.0, 6.0))),
-                _snapshot("first", ("first_candidate", (10.0, 10.0)), ("numeric", (6.0, 6.0))),
-                _snapshot("second", ("first_candidate", (10.0, 10.0)), ("numeric", (6.0, 6.0)), ("second_candidate", (12.0, 12.0))),
+                _snapshot("first", ("numeric__evidence_0", (10.0, 10.0)), ("numeric", (6.0, 6.0))),
+                _snapshot("second", ("numeric__evidence_0", (10.0, 10.0)), ("numeric", (6.0, 6.0)), ("numeric__evidence_1", (12.0, 12.0))),
             ),
             "prefix",
         ),
@@ -308,6 +324,97 @@ def test_credit_rejects_snapshots_not_bound_to_executed_cumulative_pool(
 
     with pytest.raises(ValueError, match=match):
         assign_chain_credit(_task(), result)
+
+
+@pytest.mark.parametrize("card_backed", (False, True))
+def test_snapshot_stage_rejects_swapped_executed_evidence_candidates(card_backed) -> None:
+    first = _chain("first", numeric_eligible=True)
+    second = _chain("second", numeric_eligible=True)
+    stage_ids = ("first", "second") if card_backed else (
+        "legacy_evidence_0",
+        "legacy_evidence_1",
+    )
+    snapshots = (
+        _snapshot(None, ("numeric", (6.0, 6.0))),
+        _snapshot(
+            stage_ids[0],
+            ("numeric", (6.0, 6.0)),
+            ("numeric__evidence_1", (12.0, 12.0)),
+        ),
+        _snapshot(
+            stage_ids[1],
+            ("numeric", (6.0, 6.0)),
+            ("numeric__evidence_1", (12.0, 12.0)),
+            ("numeric__evidence_0", (10.0, 10.0)),
+        ),
+    )
+    if card_backed:
+        result = _result(first, second, snapshots=snapshots)
+    else:
+        candidates = tuple(
+            DecisionCandidate(
+                item.candidate_id,
+                item.forecast,
+                item.candidate_id,
+                "none",
+                tags=("evidence_adjusted",)
+                if "__evidence_" in item.candidate_id
+                else (),
+            )
+            for item in snapshots[-1].candidates
+        )
+        result = _legacy_result(candidates, snapshots)
+
+    with pytest.raises(ValueError, match="candidate|stage|addition"):
+        assign_chain_credit(_task(), result)
+
+
+def test_card_snapshot_allows_unchanged_stage_only_when_candidate_was_not_created() -> None:
+    first = _chain("first", numeric_eligible=True)
+    second = _chain("second", numeric_eligible=True)
+    candidates = (
+        DecisionCandidate("numeric", (10.0, 10.0), "numeric", "none"),
+        DecisionCandidate(
+            "numeric__evidence_1",
+            (12.0, 12.0),
+            "second only",
+            "none",
+            tags=("evidence_adjusted",),
+        ),
+    )
+    snapshots = (
+        _snapshot(None, ("numeric", (10.0, 10.0))),
+        _snapshot("first", ("numeric", (10.0, 10.0))),
+        _snapshot(
+            "second",
+            ("numeric", (10.0, 10.0)),
+            ("numeric__evidence_1", (12.0, 12.0)),
+        ),
+    )
+    result = _result(first, second, snapshots=snapshots)
+    result.candidates = candidates
+
+    report = assign_chain_credit(_task(), result)
+
+    assert report.chains[0].marginal_smae_gain == 0.0
+    assert report.chains[1].marginal_smae_gain > 0.0
+
+
+def test_card_snapshot_rejects_delaying_an_existing_candidate_to_a_later_chain() -> None:
+    first = _chain("first", numeric_eligible=True)
+    second = _chain("second", numeric_eligible=True)
+    snapshots = (
+        _snapshot(None, ("numeric", (10.0, 10.0))),
+        _snapshot("first", ("numeric", (10.0, 10.0))),
+        _snapshot(
+            "second",
+            ("numeric", (10.0, 10.0)),
+            ("numeric__evidence_0", (12.0, 12.0)),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="exact executed candidate"):
+        assign_chain_credit(_task(), _result(first, second, snapshots=snapshots))
 
 
 def test_skipped_chain_keeps_an_unchanged_pool_without_stealing_later_credit() -> None:
@@ -450,7 +557,7 @@ def test_joint_skill_credit_requires_leave_one_out_replay() -> None:
     full = _snapshot(
         "joint",
         ("numeric", (10.0, 10.0)),
-        ("joint_candidate", (12.0, 12.0)),
+        ("numeric__evidence_0", (12.0, 12.0)),
     )
     result = _result(
         chain,
@@ -474,7 +581,7 @@ def test_joint_skill_credit_requires_leave_one_out_replay() -> None:
 def test_leave_one_out_replay_provenance_fails_closed(mutation) -> None:
     chain = _chain("joint", numeric_eligible=True, used_skill_ids=("window_search",))
     baseline = _snapshot(None, ("numeric", (10.0, 10.0)))
-    full = _snapshot("joint", ("numeric", (10.0, 10.0)), ("joint_candidate", (12.0, 12.0)))
+    full = _snapshot("joint", ("numeric", (10.0, 10.0)), ("numeric__evidence_0", (12.0, 12.0)))
     valid = SkillLeaveOneOutSnapshot(
         "joint", "window_search", _snapshot("joint", ("numeric", (10.0, 10.0)))
     )
@@ -553,7 +660,7 @@ def _promotion_task_result(
             citations=(EvidenceCitation("support", "invented quote"),),
         )
     baseline = _snapshot(None, ("numeric", (10.0, 10.0)))
-    full = _snapshot("gain", ("numeric", (10.0, 10.0)), ("gain_candidate", (12.0, 12.0)))
+    full = _snapshot("gain", ("numeric", (10.0, 10.0)), ("numeric__evidence_0", (12.0, 12.0)))
     replays = (
         SkillLeaveOneOutSnapshot(
             "gain",
@@ -584,6 +691,9 @@ def test_skill_promotion_requires_trusted_evaluator_derived_evidence(tmp_path) -
     assert accepted.version == 2
     assert accepted.validated_task_ids == ("train_1", "train_2", "train_3")
     assert accepted.validated_entities == ("Alpha", "Beta")
+    reloaded = RetrievalSkillLibrary.load(library.path)
+    assert reloaded.get_by_id("window_search").status == "accepted"
+    assert reloaded.get_by_id("window_search").version == 2
 
 
 def test_no_public_evidence_row_api_can_authorize_promotion(tmp_path) -> None:

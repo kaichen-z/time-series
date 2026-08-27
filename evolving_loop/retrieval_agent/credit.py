@@ -11,7 +11,6 @@ from common.metrics import drcik_point_metrics
 from evolving_loop.data import ContextTask
 from evolving_loop.retrieval_agent.skill_library import (
     RetrievalSkillLibrary,
-    RetrievalSkillOperation,
 )
 from evolving_loop.retrieval_agent.verifier import _verified_quote_spans
 
@@ -173,15 +172,14 @@ def _coding_entry_tuple(result: "HarnessResult") -> tuple[tuple[str, tuple[float
     return tuple(entries)
 
 
-def _expected_snapshot_ids(result: "HarnessResult") -> tuple[str, ...]:
-    card = getattr(result, "retrieval_card", None)
-    if card is not None:
-        return tuple(
-            str(chain.chain_id) for chain in card.chains if chain.numeric_eligible
-        )
-
-    evidence_indexes: set[int] = set()
-    history_count = 0
+def _contextual_candidate_entries(
+    result: "HarnessResult",
+) -> tuple[
+    dict[int, tuple[str, tuple[float, ...]]],
+    tuple[tuple[str, tuple[float, ...]], ...],
+]:
+    evidence: dict[int, tuple[str, tuple[float, ...]]] = {}
+    history: list[tuple[str, tuple[float, ...]]] = []
     for candidate in getattr(result, "candidates", ()):
         tags = tuple(getattr(candidate, "tags", ()))
         if "evidence_adjusted" in tags:
@@ -191,19 +189,44 @@ def _expected_snapshot_ids(result: "HarnessResult") -> tuple[str, ...]:
             if not separator or not raw_index.isdigit():
                 raise ValueError("legacy evidence candidate lacks an executed stage index")
             index = int(raw_index)
-            if index in evidence_indexes:
+            if index in evidence:
                 raise ValueError("legacy evidence stage indexes must be unique")
-            evidence_indexes.add(index)
+            evidence[index] = (
+                str(candidate.candidate_id),
+                tuple(float(value) for value in candidate.forecast),
+            )
         if "history_cleaned" in tags:
-            history_count += 1
-    evidence_ids = tuple(
-        f"legacy_evidence_{index}"
-        for index in range(max(evidence_indexes, default=-1) + 1)
+            history.append(
+                (
+                    str(candidate.candidate_id),
+                    tuple(float(value) for value in candidate.forecast),
+                )
+            )
+    return evidence, tuple(history)
+
+
+def _expected_snapshot_stages(
+    result: "HarnessResult",
+) -> tuple[tuple[str, tuple[str, tuple[float, ...]] | None], ...]:
+    evidence, history = _contextual_candidate_entries(result)
+    card = getattr(result, "retrieval_card", None)
+    if card is not None:
+        numeric_chain_ids = tuple(
+            str(chain.chain_id) for chain in card.chains if chain.numeric_eligible
+        )
+        return tuple(
+            (chain_id, evidence.get(index))
+            for index, chain_id in enumerate(numeric_chain_ids)
+        )
+    evidence_stages = tuple(
+        (f"legacy_evidence_{index}", evidence.get(index))
+        for index in range(max(evidence, default=-1) + 1)
     )
-    history_ids = tuple(
-        f"legacy_history_clean_{index}" for index in range(history_count)
+    history_stages = tuple(
+        (f"legacy_history_clean_{index}", entry)
+        for index, entry in enumerate(history)
     )
-    return evidence_ids + history_ids
+    return evidence_stages + history_stages
 
 
 def _selected_candidate_matches_pool(result: "HarnessResult") -> bool:
@@ -242,7 +265,8 @@ def _validate_candidate_snapshots(
     if frozen[-1] != executed:
         raise ValueError("final snapshot is not the executed cumulative candidate pool")
 
-    expected_ids = _expected_snapshot_ids(result)
+    expected_stages = _expected_snapshot_stages(result)
+    expected_ids = tuple(stage_id for stage_id, _addition in expected_stages)
     actual_ids = tuple(snapshot.after_chain_id for snapshot in snapshots[1:])
     if actual_ids != expected_ids:
         raise ValueError(
@@ -251,7 +275,9 @@ def _validate_candidate_snapshots(
     if len(set(actual_ids)) != len(actual_ids):
         raise ValueError("candidate-pool snapshot chain IDs must be unique")
 
-    for previous, current in zip(frozen, frozen[1:]):
+    for (stage_id, expected_addition), previous, current in zip(
+        expected_stages, frozen, frozen[1:]
+    ):
         if len(current) < len(previous):
             raise ValueError("candidate-pool snapshots are non-monotonic")
         if len(current) > len(previous) + 1:
@@ -263,6 +289,15 @@ def _validate_candidate_snapshots(
                 raise ValueError("candidate-pool snapshots are non-prefix")
             if current[index][1] != prior[1]:
                 raise ValueError("candidate-pool snapshot changed an existing forecast")
+        addition = current[len(previous):]
+        if expected_addition is None and addition:
+            raise ValueError(
+                f"snapshot stage {stage_id} added a candidate when execution created none"
+            )
+        if expected_addition is not None and addition != (expected_addition,):
+            raise ValueError(
+                f"snapshot stage {stage_id} does not add its exact executed candidate"
+            )
 
 
 def _chain_ledger(result: "HarnessResult") -> tuple[object, ...]:
@@ -640,7 +675,7 @@ def evaluate_and_promote_retrieval_skills(
     grouped: dict[str, list[RetrievalSkillTaskEvidence]] = {}
     for row in evidence:
         grouped.setdefault(row.skill_id, []).append(row)
-    operations = []
+    accepted_records = []
     promoted = []
     for skill_id in sorted(grouped):
         rows = grouped[skill_id]
@@ -673,16 +708,33 @@ def evaluate_and_promote_retrieval_skills(
             continue
         accepted = replace(
             current,
+            version=current.version + 1,
+            parent_version=current.version,
             status="accepted",
             validated_task_ids=task_ids,
             validated_entities=entities,
             validation_smae_gain=smae_gain,
             validation_srmse_gain=srmse_gain,
         )
-        operations.append(RetrievalSkillOperation.repair(skill_id, accepted))
+        accepted_records.append(accepted)
         promoted.append(skill_id)
-    if operations:
-        library.apply_operations(operations)
+    if accepted_records:
+        # The trusted evaluator commits the already-gated transition directly.
+        # No public operation accepts active records, so there is no transferable
+        # token or caller-constructible promotion request.
+        proposed = {
+            skill_id: tuple(history)
+            for skill_id, history in library._skills.items()
+        }
+        for accepted in accepted_records:
+            proposed[accepted.skill_id] = (
+                *proposed[accepted.skill_id],
+                accepted,
+            )
+        proposed = library._validated_index(library._all_from(proposed))
+        if library.persist:
+            library._write(proposed)
+        library._skills = proposed
     return tuple(promoted)
 
 

@@ -483,13 +483,20 @@ class RetrievalSkillLibrary:
             return {**proposed, skill.skill_id: (skill,)}
         if operation.kind == "repair":
             current = self._current(proposed, operation.skill_id)
-            replacement = self._next_version(current, self._operation_skill(operation))
+            requested = self._operation_skill(operation)
+            if requested.status != "candidate":
+                raise RetrievalSkillError(
+                    "public repair may create only candidate skills; active promotion is trusted-evaluator only"
+                )
+            replacement = self._next_version(current, requested)
             return {**proposed, current.skill_id: (*proposed[current.skill_id], replacement)}
         if operation.kind == "specialize":
             current = self._current(proposed, operation.skill_id)
             replacement = self._next_version(current, self._operation_skill(operation))
-            if replacement.status != "specialized":
-                raise RetrievalSkillError("specialize must produce a specialized skill")
+            if replacement.status != "candidate":
+                raise RetrievalSkillError(
+                    "public specialize may create only candidate skills; active promotion is trusted-evaluator only"
+                )
             stage_narrowed = current.stage == "both" and replacement.stage != "both"
             if not stage_narrowed and not replacement.applicability.is_narrower_than(current.applicability):
                 raise RetrievalSkillError("specialize must narrow applicability or stage")
