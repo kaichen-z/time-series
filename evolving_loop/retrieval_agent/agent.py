@@ -2,13 +2,12 @@
 from __future__ import annotations
 
 import json
-import math
-import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from evolving_loop.coding_agent.evolution import ValidatedProgram
 from evolving_loop.data import ContextTask
 from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
+from evolving_loop.retrieval_agent.verifier import _verified_quote_spans, merge_verified_rounds, verify_round_result
 from common.llm import JsonExtractionError, LLMClient, parse_json_object
 
 RETRIEVAL_PROMPT = """You are the Retrieval Agent for contextual time-series forecasting.
@@ -162,140 +161,113 @@ class RetrievalAgent:
         return self._verify(task, result)
 
     def _verify(self, task: ContextTask, result: dict) -> RetrievalResult:
-        documents = {document.document_id: document for document in task.documents}
-        accepted = []
-        rejected = []
-        for item in result.get("evidence", ()):
-            if not isinstance(item, dict):
-                continue
-            document_id = str(item.get("document_id", ""))
-            quote = str(item.get("exact_quote", "")).strip()
-            document = documents.get(document_id)
-            spans = _verified_quote_spans(quote, document.content) if document is not None else ()
-            if not spans:
-                rejected.append(f"ungrounded_quote:{document_id}")
-                continue
-            accepted.extend(
-                Evidence(document_id, str(item.get("claim", "")), span)
-                for span in spans
-            )
-
-        accepted_ids = {item.document_id for item in accepted}
-        impacts = []
-        for raw in result.get("impacts", ()):
-            if not isinstance(raw, dict):
-                continue
-            sources = tuple(str(value) for value in raw.get("source_document_ids", ()))
-            if not sources or not set(sources).issubset(accepted_ids):
-                rejected.append("impact_without_verified_citation")
-                continue
-            kind = str(raw.get("adjustment_kind", "none"))
-            value = raw.get("adjustment_value")
-            value = float(value) if isinstance(value, (int, float)) else None
-            if kind not in {
-                "preserve",
-                "multiply",
-                "add",
-                "history_mask",
-                "history_repair",
-                "none",
-            }:
-                rejected.append("unknown_adjustment_kind")
-                kind, value = "none", None
-            permanence = str(raw.get("permanence", "unknown"))
-            start = _optional_text(raw.get("start_timestamp"))
-            end = _optional_text(raw.get("end_timestamp"))
-            if kind in {"multiply", "add"}:
-                quoted = " ".join(item.exact_quote for item in accepted if item.document_id in sources)
-                if value is None or not math.isfinite(value) or not re.search(r"\d", quoted):
-                    rejected.append("quantitative_impact_without_explicit_magnitude")
-                    kind, value = "none", None
-                elif kind == "multiply" and not -1.0 <= value <= 20.0:
-                    rejected.append("implausible_multiplicative_adjustment")
-                    kind, value = "none", None
-                elif permanence == "temporary" and (not start or not end):
-                    rejected.append("temporary_impact_without_complete_window")
-                    kind, value = "none", None
-            elif kind in {"history_mask", "history_repair"}:
-                if not start or not end:
-                    rejected.append("history_adjustment_without_complete_window")
-                    kind, value = "none", None
-                elif not any(start <= timestamp <= end for timestamp in task.history_timestamps):
-                    rejected.append("history_adjustment_outside_visible_history")
-                    kind, value = "none", None
-                elif kind == "history_repair" and value is not None:
-                    quoted = " ".join(
-                        item.exact_quote for item in accepted if item.document_id in sources
-                    )
-                    if not math.isfinite(value) or not re.search(r"\d", quoted):
-                        rejected.append("history_repair_without_explicit_finite_rate")
-                        kind, value = "none", None
-            impacts.append(
-                EvidenceImpact(
-                    source_document_ids=sources,
-                    mechanism_layer=str(raw.get("mechanism_layer", "irrelevant")),
-                    temporal_relation=str(raw.get("temporal_relation", "unknown")),
-                    direction=str(raw.get("direction", "unknown")),
-                    permanence=permanence,
-                    adjustment_kind=kind,
-                    adjustment_value=value,
-                    start_timestamp=start,
-                    end_timestamp=end,
-                    rationale=str(raw.get("rationale", "")),
-                )
-            )
-        selected = tuple(
-            document_id
-            for document_id in result.get("selected_document_ids", ())
-            if document_id in accepted_ids
+        payload, used_skill_names = _legacy_round_payload(result, self.library)
+        allowed_skill_ids = (
+            tuple(skill.skill_id for skill in self.library.all())
+            if self.library is not None
+            else ()
         )
-        used_skills = []
-        for name in result.get("used_skill_names", ()):
-            name = str(name)
-            if self.library is not None and self.library.get(name) is not None:
-                used_skills.append(name)
-            else:
-                rejected.append(f"unknown_retrieval_skill:{name}")
-        return RetrievalResult(
+        verified = verify_round_result(
+            task,
+            payload,
+            stage="round1",
+            allowed_skill_ids=allowed_skill_ids,
+            allowed_assumption_ids=(),
+        )
+        card = merge_verified_rounds(verified, None)
+        legacy = card.to_legacy_result()
+        return replace(
+            legacy,
             query=str(result.get("query", "")),
-            selected_document_ids=selected,
-            evidence=tuple(accepted),
-            impacts=tuple(impacts),
-            sufficient=bool(result.get("sufficient", False)) and bool(accepted),
-            missing_information=tuple(str(value) for value in result.get("missing_information", ())),
-            rejected=tuple(rejected),
-            used_skill_names=tuple(used_skills),
+            missing_information=tuple(str(item) for item in result.get("missing_information", ())),
+            used_skill_names=used_skill_names,
         )
 
 
-def _normalize(text: str) -> str:
-    return " ".join(text.lower().replace("−", "-").split())
-
-
-def _verified_quote_spans(quote: str, document: str) -> tuple[str, ...]:
-    """Accept a full quote or multiple independently exact, non-trivial sentences."""
-    normalized_document = _normalize(document)
-    if not quote:
-        return ()
-    if _normalize(quote) in normalized_document:
-        return (quote,)
-    spans = tuple(
-        dict.fromkeys(
-            part.strip()
-            for part in re.split(r"(?<=[.!?])\s+", quote)
-            if part.strip()
-        )
-    )
-    if len(spans) < 2:
-        return ()
-    if any(
-        len(_normalize(span)) < 32 or _normalize(span) not in normalized_document
-        for span in spans
-    ):
-        return ()
-    return spans
-
-
-def _optional_text(value: object) -> str | None:
-    text = str(value).strip() if value is not None else ""
-    return text or None
+def _legacy_round_payload(
+    result: dict,
+    library: RetrievalSkillLibrary | None,
+) -> tuple[dict[str, object], tuple[str, ...]]:
+    """Translate the public legacy wire shape into the strict verifier schema."""
+    evidence = [item for item in result.get("evidence", ()) if isinstance(item, dict)]
+    used_skill_names: list[str] = []
+    used_skill_ids: list[str] = []
+    rejected: list[str] = []
+    for raw_name in result.get("used_skill_names", ()):
+        name = str(raw_name)
+        skill = library.get(name) if library is not None else None
+        if skill is None:
+            rejected.append(f"unknown_retrieval_skill:{name}")
+        else:
+            used_skill_names.append(name)
+            used_skill_ids.append(skill.skill_id)
+    chains: list[dict[str, object]] = []
+    impacts = [item for item in result.get("impacts", ()) if isinstance(item, dict)]
+    for index, impact in enumerate(impacts):
+        raw_sources = impact.get("source_document_ids", ())
+        sources = tuple(str(item) for item in raw_sources) if isinstance(raw_sources, (list, tuple)) else ()
+        citations = [
+            {
+                "document_id": str(item.get("document_id", "")),
+                "exact_quote": str(item.get("exact_quote", "")),
+            }
+            for item in evidence
+            if str(item.get("document_id", "")) in sources
+        ]
+        if not sources or not citations:
+            rejected.append("impact_without_verified_citation")
+            continue
+        kind = str(impact.get("adjustment_kind", "none"))
+        magnitude_kind = "absolute" if kind == "add" else "relative" if kind == "multiply" else "unknown"
+        raw_value = impact.get("adjustment_value")
+        magnitude_value = raw_value if isinstance(raw_value, (int, float)) and not isinstance(raw_value, bool) else None
+        chains.append({
+            "chain_id": f"legacy_impact_{index}",
+            "claim": str(impact.get("rationale", "legacy retrieval impact")),
+            "entity_match": True,
+            "target_match": True,
+            "temporal_relation": str(impact.get("temporal_relation", "unknown")),
+            "mechanism": str(impact.get("mechanism_layer", "irrelevant")),
+            "direction": str(impact.get("direction", "unknown")),
+            "magnitude_kind": magnitude_kind,
+            "magnitude_value": magnitude_value,
+            "start_timestamp": impact.get("start_timestamp"),
+            "end_timestamp": impact.get("end_timestamp"),
+            "citations": citations,
+            "missing_links": [],
+            "used_skill_ids": used_skill_ids,
+            "addressed_assumption_ids": [],
+            "stance": "supports",
+            "numeric_eligible": True,
+        })
+    if not chains:
+        for index, item in enumerate(evidence):
+            chains.append({
+                "chain_id": f"legacy_evidence_{index}",
+                "claim": str(item.get("claim", "legacy evidence")),
+                "entity_match": True,
+                "target_match": True,
+                "temporal_relation": "unknown",
+                "mechanism": "observation",
+                "direction": "unknown",
+                "magnitude_kind": "unknown",
+                "magnitude_value": None,
+                "start_timestamp": None,
+                "end_timestamp": None,
+                "citations": [{
+                    "document_id": str(item.get("document_id", "")),
+                    "exact_quote": str(item.get("exact_quote", "")),
+                }],
+                "missing_links": ["legacy_qualitative_evidence"],
+                "used_skill_ids": used_skill_ids,
+                "addressed_assumption_ids": [],
+                "stance": "unresolved",
+                "numeric_eligible": False,
+            })
+    return {
+        "evidence_chains": chains,
+        "counterevidence": [],
+        "missing_information": [str(item) for item in result.get("missing_information", ())],
+        "sufficient": bool(result.get("sufficient", False)),
+        "rejected": rejected,
+    }, tuple(used_skill_names)

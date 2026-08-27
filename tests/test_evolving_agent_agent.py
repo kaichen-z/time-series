@@ -7,7 +7,8 @@ from pathlib import Path
 
 from evolving_loop.coding_agent.agent import FALLBACK_SKILL_NAME, CodingSkillAgent
 from evolving_loop.coding_agent.skill_library import Skill, SkillLibrary
-from evolving_loop.data import Task
+from evolving_loop.data import ContextTask, Document, Task
+from evolving_loop.retrieval_agent.agent import RetrievalAgent
 from common.llm import FakeLLMClient
 
 VALID_CODE = 'def forecast(history, horizon, frequency):\n    return [history[-1]] * horizon\n'
@@ -128,3 +129,56 @@ class CodingSkillAgentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_legacy_retrieval_agent_projects_only_host_verified_numeric_impacts():
+    task = ContextTask(
+        numeric=Task(
+            task_id="task_context",
+            history_values=(1.0, 2.0),
+            future_values=(),
+            prediction_length=2,
+            frequency="D",
+            seasonal_period=None,
+            entity_name="Entity A",
+        ),
+        target_name="sales",
+        target_description="Daily sales",
+        history_timestamps=("2026-01-01", "2026-01-02"),
+        future_timestamps=("2026-01-03", "2026-01-04"),
+        documents=(
+            Document(
+                "doc_1",
+                "Entity A sales will increase from 2026-01-03 through 2026-01-04.",
+            ),
+        ),
+        labels_public=False,
+    )
+    response = json.dumps({
+        "query": "future sales",
+        "selected_document_ids": ["doc_1"],
+        "evidence": [{
+            "document_id": "doc_1",
+            "claim": "A future event changes sales.",
+            "exact_quote": "Entity A sales will increase from 2026-01-03 through 2026-01-04.",
+        }],
+        "impacts": [{
+            "source_document_ids": ["doc_1"],
+            "mechanism_layer": "future_driver",
+            "temporal_relation": "overlaps_future",
+            "direction": "up",
+            "permanence": "temporary",
+            "adjustment_kind": "add",
+            "adjustment_value": 7,
+            "start_timestamp": "2026-01-03",
+            "end_timestamp": "2026-01-04",
+            "rationale": "An ungrounded magnitude must not reach Decision.",
+        }],
+        "sufficient": True,
+        "missing_information": [],
+    })
+
+    result = RetrievalAgent(FakeLLMClient([response])).run(task, ())
+
+    assert result.evidence
+    assert result.impacts == ()

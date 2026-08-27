@@ -489,6 +489,61 @@ class FinalRetrievalCard:
             "complete": self.complete,
         }
 
+    def to_legacy_result(self):
+        """Project only host-verified numeric chains into the legacy Decision API."""
+        # Local import avoids making the strict stage-schema boundary depend on the
+        # legacy agent while keeping existing Decision and harness consumers intact.
+        from evolving_loop.retrieval_agent.agent import Evidence, EvidenceImpact, RetrievalResult
+
+        evidence = tuple(
+            Evidence(citation.document_id, chain.claim, citation.exact_quote)
+            for chain in self.chains
+            for citation in chain.citations
+        )
+        impacts = []
+        for chain in self.chains:
+            if not chain.numeric_eligible:
+                continue
+            if chain.magnitude_kind == "absolute":
+                adjustment_kind = "add"
+            else:
+                adjustment_kind = "multiply"
+            impacts.append(
+                EvidenceImpact(
+                    source_document_ids=tuple(
+                        dict.fromkeys(item.document_id for item in chain.citations)
+                    ),
+                    mechanism_layer=chain.mechanism,
+                    temporal_relation=chain.temporal_relation,
+                    direction=chain.direction,
+                    permanence="temporary",
+                    adjustment_kind=adjustment_kind,
+                    adjustment_value=chain.magnitude_value,
+                    start_timestamp=chain.start_timestamp,
+                    end_timestamp=chain.end_timestamp,
+                    rationale=chain.claim,
+                )
+            )
+        return RetrievalResult(
+            query="",
+            selected_document_ids=self.selected_document_ids,
+            evidence=evidence,
+            impacts=tuple(impacts),
+            sufficient=self.complete,
+            missing_information=tuple(
+                dict.fromkeys(
+                    item
+                    for result in (self.round1, self.round2)
+                    if result is not None
+                    for item in result.missing_information
+                )
+            ),
+            rejected=self.rejected,
+            used_skill_names=tuple(
+                dict.fromkeys(skill_id for chain in self.chains for skill_id in chain.used_skill_ids)
+            ),
+        )
+
 
 def _skill_payload(skill: object) -> dict[str, object]:
     """Project a skill to advice fields; never expose outcome/evaluation fields."""
