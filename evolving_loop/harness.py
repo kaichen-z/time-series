@@ -182,10 +182,15 @@ class EvolvingForecastHarness:
         provisional = _guard_raw_override(provisional, provisional_candidates, coding)
 
         round2 = None
-        if morphology_failure is None and assumptions and _should_run_round2(
-            self.retrieval.genome.second_round_trigger,
-            round1,
-            provisional,
+        if (
+            not _fatal_round1_failure(round1)
+            and morphology_failure is None
+            and assumptions
+            and _should_run_round2(
+                self.retrieval.genome.second_round_trigger,
+                round1,
+                provisional,
+            )
         ):
             round2 = self.retrieval.run_round2(
                 task,
@@ -658,6 +663,14 @@ def _should_run_round2(
             or any(item.missing_links or not item.numeric_eligible for item in round1.chains)
         )
     raise ValueError(f"Unknown second-round trigger: {trigger}")
+
+
+def _fatal_round1_failure(round1: Any) -> bool:
+    """Separate an invalid stage execution from a valid incomplete ledger."""
+    return (
+        "invalid_round1_response" in round1.rejected
+        or "invalid_retrieval_payload" in round1.missing_information
+    )
 
 
 def _aggregate_decisions(

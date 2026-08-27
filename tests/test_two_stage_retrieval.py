@@ -19,7 +19,11 @@ from evolving_loop.retrieval_agent.schemas import (
     RetrievalGap,
 )
 from evolving_loop.retrieval_agent.agent import RetrievalResult
-from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
+from evolving_loop.retrieval_agent.skill_library import (
+    RetrievalApplicability,
+    RetrievalSkill,
+    RetrievalSkillLibrary,
+)
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 
 
@@ -307,11 +311,13 @@ def test_two_stage_construction_fails_before_run_without_a_valid_provider() -> N
 
 
 def test_round1_parse_failure_falls_back_to_numeric_candidates() -> None:
-    retrieval = _agent(["not json"])
+    genome = replace(RetrievalGenome.seed(), second_round_trigger="on_incomplete_chain")
+    retrieval = _agent(["not json", _round(_chain())], genome=genome)
     harness = _harness(retrieval, [_decision(), _decision()])
 
     result = harness.run(_task())
 
+    assert len(retrieval.llm.calls) == 1
     assert [item.candidate_id for item in result.candidates] == ["numeric"]
     assert result.retrieval.evidence == ()
     assert result.forecast == (21.0, 22.0)
@@ -378,7 +384,7 @@ def test_morphology_runtime_failure_is_recorded_and_skips_round2() -> None:
     assert "morphology_provider_failed:RuntimeError" in result.retrieval.rejected
 
 
-def test_non_runtime_llm_failure_is_sanitized_before_incomplete_round2() -> None:
+def test_non_runtime_round1_failure_skips_incomplete_round2() -> None:
     genome = replace(RetrievalGenome.seed(), second_round_trigger="on_incomplete_chain")
     llm = _FailingThenRespondingLLM(_round())
     retrieval = TwoStageRetrievalAgent(
@@ -390,12 +396,8 @@ def test_non_runtime_llm_failure_is_sanitized_before_incomplete_round2() -> None
 
     result = harness.run(_task())
 
-    assert len(llm.calls) == 2
-    second = json.loads(llm.calls[1]["messages"][0]["content"])
-    encoded = json.dumps(second, sort_keys=True)
-    assert '"candidate_id":' not in encoded
-    assert '"forecast":' not in encoded
-    assert '"hindcast_srmse":' not in encoded
+    assert len(llm.calls) == 1
+    assert [item.candidate_id for item in result.candidates] == ["numeric"]
     assert "invalid_round1_response" in result.retrieval.rejected
 
 
@@ -484,6 +486,58 @@ def test_two_stage_agent_enforces_fixed_document_chain_and_citation_budgets() ->
     assert len(result.chains[0].citations) == 1
 
 
+def test_all_matching_stage_skills_see_materialized_generator_selectors() -> None:
+    def skill(skill_id: str) -> RetrievalSkill:
+        return RetrievalSkill(
+            skill_id=skill_id,
+            version=1,
+            parent_version=None,
+            stage="round2",
+            status="accepted",
+            name=skill_id,
+            description="Investigate the named trend gap.",
+            applicability=RetrievalApplicability(
+                assumption_kinds=("trend_persistence",),
+                gap_types=("continuation_or_reversal",),
+            ),
+            query_steps=("Search for reversal evidence.",),
+            required_chain_fields=("entity", "target"),
+            counterevidence_rule="Search for continuation evidence.",
+            failure_conditions=("The evidence concerns another entity.",),
+            validation_smae_gain=0.1,
+            validation_srmse_gain=0.1,
+        )
+
+    genome = replace(
+        RetrievalGenome.seed(),
+        active_skill_ids=("gap_alpha", "gap_beta"),
+    )
+    agent = TwoStageRetrievalAgent(
+        FakeLLMClient([]),
+        genome,
+        RetrievalSkillLibrary(
+            "unused-two-stage-skills.json",
+            (skill("gap_alpha"), skill("gap_beta")),
+            persist=False,
+        ),
+    )
+    assumption = RetrievalAssumption(
+        "a_trend",
+        "trend_persistence",
+        "The historical trend continues.",
+        "A future event reverses the trend.",
+    )
+    gap = RetrievalGap.from_payload(_gap())
+
+    selected = agent._skills(
+        "round2",
+        assumptions=(item for item in (assumption,)),
+        gaps=(item for item in (gap,)),
+    )
+
+    assert tuple(item.skill_id for item in selected) == ("gap_alpha", "gap_beta")
+
+
 @pytest.mark.parametrize(
     "gap",
     [
@@ -521,6 +575,70 @@ def test_invalid_gap_preserves_provisional_selection_but_disables_request(gap) -
     assert result.gaps == ()
     assert result.rejection_reason is not None
     assert "invalid_retrieval_gaps" in result.rejection_reason
+
+
+@pytest.mark.parametrize("raw_request", ["false", 1, None])
+def test_decision_requires_exact_boolean_retrieval_request(raw_request) -> None:
+    candidate = DecisionCandidate(
+        candidate_id="numeric",
+        forecast=(21.0, 22.0),
+        assumption="The local trend persists.",
+        failure_condition="A future event reverses the trend.",
+        hindcast_smae=0.1,
+        hindcast_srmse=0.2,
+    )
+    assumption = RetrievalAssumption(
+        "a_trend",
+        "trend_persistence",
+        "The historical trend continues.",
+        "A future event reverses the trend.",
+    )
+    agent = DecisionAgent(
+        FakeLLMClient([_decision(gaps=[_gap()], request=raw_request)])
+    )
+
+    result = agent.run(
+        (candidate,),
+        RetrievalResult("", (), (), (), False, ()),
+        assumptions=(assumption,),
+    )
+
+    assert result.selected == candidate
+    assert result.requested_more_retrieval is False
+    assert result.rejection_reason is not None
+    assert "invalid_retrieval_request" in result.rejection_reason
+
+
+@pytest.mark.parametrize("field", ["forecast", "source_code"])
+def test_decision_rejects_top_level_schema_drift_without_losing_selection(field) -> None:
+    payload = json.loads(_decision(gaps=[_gap()], request=True))
+    payload[field] = [999.0] if field == "forecast" else "unsafe candidate code"
+    candidate = DecisionCandidate(
+        candidate_id="numeric",
+        forecast=(21.0, 22.0),
+        assumption="The local trend persists.",
+        failure_condition="A future event reverses the trend.",
+        hindcast_smae=0.1,
+        hindcast_srmse=0.2,
+    )
+    assumption = RetrievalAssumption(
+        "a_trend",
+        "trend_persistence",
+        "The historical trend continues.",
+        "A future event reverses the trend.",
+    )
+    agent = DecisionAgent(FakeLLMClient([json.dumps(payload)]))
+
+    result = agent.run(
+        (candidate,),
+        RetrievalResult("", (), (), (), False, ()),
+        assumptions=(assumption,),
+    )
+
+    assert result.selected == candidate
+    assert result.requested_more_retrieval is False
+    assert result.rejection_reason is not None
+    assert "forbidden_decision_fields" in result.rejection_reason
 
 
 def test_retrieval_gap_contract_is_strict_and_typed() -> None:

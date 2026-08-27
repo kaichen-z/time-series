@@ -1013,6 +1013,8 @@ def inference_command(args) -> dict:
         "library_path",
         "retrieval_library_path",
         "decision_library_path",
+        "retrieval_mode",
+        "retrieval_release_path",
         "chronos_model_id",
         "chronos_device",
         "chronos_cache_dir",
@@ -1026,6 +1028,7 @@ def inference_command(args) -> dict:
         "library_path",
         "retrieval_library_path",
         "decision_library_path",
+        "retrieval_release_path",
         "chronos_cache_dir",
     ):
         if runtime.get(key):
@@ -1087,6 +1090,8 @@ def _source_evolve_command(
         "coding_initial_programs",
         "coding_mutations",
         "coding_validation_folds",
+        "retrieval_mode",
+        "retrieval_release_path",
         "chronos_model_id",
         "chronos_device",
         "chronos_cache_dir",
@@ -1095,6 +1100,10 @@ def _source_evolve_command(
     runtime = {key: getattr(args, key) for key in runtime_keys}
     runtime["codex_cache_dir"] = str((repo_root / args.codex_cache_dir).resolve())
     runtime["claude_cache_dir"] = str((repo_root / args.claude_cache_dir).resolve())
+    if args.retrieval_release_path:
+        runtime["retrieval_release_path"] = str(
+            (repo_root / args.retrieval_release_path).resolve()
+        )
     if args.chronos_cache_dir:
         runtime["chronos_cache_dir"] = str(
             (repo_root / args.chronos_cache_dir).resolve()

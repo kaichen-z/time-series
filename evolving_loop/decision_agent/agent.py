@@ -59,6 +59,17 @@ If validated decision skills are supplied, use only applicable rules and report 
 in used_skill_names. A skill never overrides citation, provenance, or safe-host validation.
 """
 
+_DECISION_RESPONSE_FIELDS = frozenset(
+    {
+        "selected_candidate_id",
+        "supporting_document_ids",
+        "rationale",
+        "request_more_retrieval",
+        "gaps",
+        "used_skill_names",
+    }
+)
+
 
 @dataclass(frozen=True)
 class DecisionCandidate:
@@ -193,12 +204,33 @@ class DecisionAgent:
             else:
                 unknown_skills.append(name)
         gaps, gap_error = _parse_gaps(choice.get("gaps", ()), assumptions)
-        requested_more = bool(choice.get("request_more_retrieval", False)) and bool(gaps)
+        unknown_fields = set(choice) - _DECISION_RESPONSE_FIELDS
+        raw_requested_more = choice.get("request_more_retrieval", False)
+        request_error = (
+            None
+            if "request_more_retrieval" not in choice
+            or isinstance(raw_requested_more, bool)
+            else "request_more_retrieval must be a boolean"
+        )
         reasons = []
         if unknown_skills:
             reasons.append("unknown_decision_skills:" + ",".join(unknown_skills))
         if gap_error is not None:
             reasons.append("invalid_retrieval_gaps:" + gap_error)
+        if unknown_fields:
+            reasons.append(
+                "forbidden_decision_fields:" + ",".join(sorted(unknown_fields))
+            )
+        if request_error is not None:
+            reasons.append("invalid_retrieval_request:" + request_error)
+        gap_interface_valid = (
+            gap_error is None and not unknown_fields and request_error is None
+        )
+        if not gap_interface_valid:
+            gaps = ()
+        requested_more = (
+            gap_interface_valid and raw_requested_more is True and bool(gaps)
+        )
         return DecisionResult(
             selected=chosen,
             host_default_id=host_default.candidate_id,

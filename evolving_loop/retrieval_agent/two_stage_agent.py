@@ -1,7 +1,7 @@
 """Assumption-blind Round 1 and sanitized gap-directed Round 2 retrieval."""
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 import json
 
@@ -139,18 +139,20 @@ class TwoStageRetrievalAgent:
         self,
         stage: str,
         *,
-        assumptions: Sequence[RetrievalAssumption] = (),
-        gaps: Sequence[RetrievalGap] = (),
+        assumptions: Iterable[RetrievalAssumption] = (),
+        gaps: Iterable[RetrievalGap] = (),
     ) -> tuple[RetrievalSkill, ...]:
         active_ids = frozenset(self.genome.active_skill_ids)
         if not active_ids:
             return ()
+        assumption_kinds = tuple(value.kind for value in assumptions)
+        gap_types = tuple(value.gap_type for value in gaps)
         return tuple(
             item
             for item in self.skills.for_stage(
                 stage,
-                assumption_kinds=(value.kind for value in assumptions),
-                gap_types=(value.gap_type for value in gaps),
+                assumption_kinds=assumption_kinds,
+                gap_types=gap_types,
             )
             if item.skill_id in active_ids
         )

@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import subprocess
 from types import SimpleNamespace
 
 import pytest
+import evolving_loop.cli as cli_module
 
 from evolving_loop.cli import (
     BASELINE_CHOICES,
     EVOLUTION_CHOICES,
     _baseline_argv,
     _factory,
+    _source_evolve_command,
     _three_way_entity_split,
     build_parser,
+    inference_command,
 )
 from evolving_loop.co_evolution import HarnessPolicy
 from evolving_loop.coding_agent.skill_library import SkillLibrary
@@ -323,6 +327,103 @@ def test_two_stage_factory_ignores_legacy_policy_retrieval_rows(tmp_path) -> Non
 
     assert isinstance(harness.retrieval, TwoStageRetrievalAgent)
     assert harness.retrieval.skills.all() == ()
+
+
+def test_source_inference_propagates_two_stage_controls_and_worker_fails_closed(
+    tmp_path, monkeypatch
+) -> None:
+    patch_path = tmp_path / "accepted.patch"
+    patch_path.write_text("")
+    release_path = tmp_path / "retrieval-release"
+    captured = {}
+
+    def fake_source_inference(**kwargs):
+        captured.update(kwargs["config"]["runtime"])
+        worker_args = SimpleNamespace(**kwargs["config"]["runtime"])
+        with pytest.raises(ValueError, match="MorphologyProvider"):
+            _factory(
+                worker_args,
+                FakeLLMClient([]),
+                SkillLibrary(tmp_path / "worker-coding.json"),
+                RetrievalSkillLibrary(tmp_path / "worker-retrieval.json"),
+                DecisionSkillLibrary(tmp_path / "worker-decision.json"),
+                None,
+                isolate_library=True,
+            )
+        return {"status": "fail_closed"}
+
+    monkeypatch.setattr(cli_module, "run_source_inference", fake_source_inference)
+    args = build_parser().parse_args(
+        [
+            "--inference",
+            "source",
+            "--source-patch-path",
+            str(patch_path),
+            "--retrieval-mode",
+            "two-stage",
+            "--retrieval-release-path",
+            str(release_path),
+        ]
+    )
+
+    result = inference_command(args)
+
+    assert result == {"status": "fail_closed"}
+    assert captured["retrieval_mode"] == "two-stage"
+    assert captured["retrieval_release_path"] == str(release_path.resolve())
+
+
+def test_source_evolution_worker_receives_two_stage_controls_and_fails_closed(
+    tmp_path, monkeypatch
+) -> None:
+    tasks_path = tmp_path / "tasks.jsonl"
+    tasks_path.write_text("")
+    release_path = tmp_path / "retrieval-release"
+    real_run = subprocess.run
+
+    def allow_dirty_worktree_check(command, *args, **kwargs):
+        if list(command[:3]) == ["git", "diff", "--quiet"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return real_run(command, *args, **kwargs)
+
+    class EvaluatingEngine:
+        def __init__(self, repo_root, evaluate, config):
+            del repo_root, config
+            self.evaluate = evaluate
+
+        def evolve(self, seed_patch=""):
+            del seed_patch
+            self.evaluate(cli_module.Path.cwd())
+            raise AssertionError("two-stage worker must fail before evaluation")
+
+    monkeypatch.setattr(cli_module.subprocess, "run", allow_dirty_worktree_check)
+    monkeypatch.setattr(cli_module, "SourceEvolutionEngine", EvaluatingEngine)
+    args = build_parser().parse_args(
+        [
+            "evolve",
+            "--evolution-mode",
+            "source",
+            "--tasks-file",
+            str(tasks_path),
+            "--retrieval-mode",
+            "two-stage",
+            "--retrieval-release-path",
+            str(release_path),
+            "--trace-path",
+            str(tmp_path / "trace.json"),
+            "--source-patch-path",
+            str(tmp_path / "source.patch"),
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="MorphologyProvider"):
+        _source_evolve_command(
+            args,
+            [],
+            [],
+            checkpoint_path=tmp_path / "checkpoint.json",
+            progress_path=tmp_path / "progress.jsonl",
+        )
 
 
 def test_harness_factory_replays_complete_versioned_retrieval_skill_history(tmp_path) -> None:
