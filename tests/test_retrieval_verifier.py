@@ -48,6 +48,10 @@ def context_task() -> ContextTask:
                 "doc_no_magnitude",
                 "Entity A sales will increase from 2026-01-03 through 2026-01-04.",
             ),
+            Document(
+                "doc_counter",
+                "Entity A sales will decrease by 10 percent from 2026-01-03 through 2026-01-04.",
+            ),
         ),
         labels_public=False,
     )
@@ -195,3 +199,132 @@ def test_round2_cannot_erase_or_replace_round1_chain(context_task):
     merged = merge_verified_rounds(round1, round2)
     assert merged.chains[0] == round1.chains[0]
     assert "round2_chain_identity_conflict" in merged.rejected
+
+
+def test_numeric_fields_must_be_bound_to_the_same_entity_target_evidence(context_task):
+    verified = _verified(context_task, _payload(_chain(citations=[
+        {
+            "document_id": "doc_no_magnitude",
+            "exact_quote": "Entity A sales will increase from 2026-01-03 through 2026-01-04.",
+        },
+        {
+            "document_id": "doc_other",
+            "exact_quote": "Entity B sales will increase by 20 percent from 2026-01-03 through 2026-01-04.",
+        },
+    ])))
+
+    assert verified.chains[0].numeric_eligible is False
+    assert "magnitude" in verified.chains[0].missing_links
+
+
+def test_declared_magnitude_must_match_a_local_quote_and_stay_within_domain(context_task):
+    mismatched = _verified(context_task, _payload(_chain(magnitude_value=0.3)))
+    assert mismatched.chains[0].numeric_eligible is False
+    assert "magnitude" in mismatched.chains[0].missing_links
+
+    huge_document = Document(
+        "doc_huge",
+        "Entity A sales will increase by 1000000 units from 2026-01-03 through 2026-01-04.",
+    )
+    huge_task = replace(context_task, documents=(*context_task.documents, huge_document))
+    huge = _verified(huge_task, _payload(_chain(
+        magnitude_kind="absolute",
+        magnitude_value=1_000_000.0,
+        citations=[{"document_id": "doc_huge", "exact_quote": huge_document.content}],
+    )))
+    assert huge.chains[0].numeric_eligible is False
+    assert "magnitude_value" in huge.chains[0].missing_links
+
+
+def test_legacy_adapter_defense_in_depth_excludes_out_of_range_numeric_impacts(context_task):
+    verified = _verified(context_task, _payload(_chain()))
+    forged = replace(verified.chains[0], magnitude_value=21.0, numeric_eligible=True)
+    card = FinalRetrievalCard(
+        round1=verified,
+        round2=None,
+        chains=(forged,),
+        selected_document_ids=("doc_1",),
+        rejected=(),
+        unresolved_contradictions=(),
+        complete=True,
+    )
+
+    assert card.to_legacy_result().impacts == ()
+
+
+def test_round2_submitted_round1_identity_is_rejected_before_canonicalization(context_task):
+    round1 = _verified(context_task, _payload(_chain()))
+    replacement = _payload(_chain(
+        chain_id=round1.chains[0].chain_id,
+        claim="Contradictory replacement text",
+    ))
+
+    round2 = verify_round_result(
+        context_task,
+        replacement,
+        stage="round2",
+        allowed_skill_ids=("s_window",),
+        allowed_assumption_ids=("a_trend",),
+        prior_round1=round1,
+    )
+
+    assert round2.chains == ()
+    assert "round2_chain_identity_conflict" in round2.rejected
+    assert merge_verified_rounds(round1, round2).chains == round1.chains
+
+
+def test_malformed_citation_payload_is_rejected_without_raising(context_task):
+    raw = _payload(_chain(citations=[{"document_id": [], "exact_quote": "anything"}]))
+
+    verified = _verified(context_task, raw)
+
+    assert verified.chains == ()
+    assert verified.rejected
+
+
+def test_round2_counterevidence_is_append_only_in_the_final_ledger(context_task):
+    round1 = _verified(context_task, _payload(_chain()))
+    counter = _chain(
+        chain_id="counter_chain",
+        claim="Counterevidence says the event decreases sales.",
+        direction="down",
+        magnitude_value=0.1,
+        citations=[{
+            "document_id": "doc_counter",
+            "exact_quote": "Entity A sales will decrease by 10 percent from 2026-01-03 through 2026-01-04.",
+        }],
+        stance="challenges",
+    )
+    round2 = verify_round_result(
+        context_task,
+        {**_payload(), "counterevidence": [counter]},
+        stage="round2",
+        allowed_skill_ids=("s_window",),
+        allowed_assumption_ids=("a_trend",),
+    )
+
+    merged = merge_verified_rounds(round1, round2)
+    assert round2.counterevidence[0].chain_id in {item.chain_id for item in merged.chains}
+    assert "doc_counter" in merged.selected_document_ids
+    assert next(item for item in merged.chains if item.chain_id == round2.counterevidence[0].chain_id).numeric_eligible is False
+
+
+def test_stable_chain_identity_includes_host_canonical_entity_and_target(context_task):
+    document = Document(
+        "doc_dual",
+        "Entity A and Entity B sales will increase by 20 percent from 2026-01-03 through 2026-01-04.",
+    )
+    dual_documents = (document,)
+    task_a = replace(context_task, documents=dual_documents)
+    task_b = replace(
+        context_task,
+        numeric=replace(context_task.numeric, entity_name="Entity B"),
+        documents=dual_documents,
+    )
+    raw = _payload(_chain(citations=[{"document_id": "doc_dual", "exact_quote": document.content}]))
+
+    chain_a = _verified(task_a, raw).chains[0]
+    chain_b = _verified(task_b, raw).chains[0]
+
+    assert chain_a.numeric_eligible and chain_b.numeric_eligible
+    assert chain_a.chain_id != chain_b.chain_id

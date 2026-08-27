@@ -6,7 +6,7 @@ mapping is checked for its complete key set before values are converted.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import math
 import re
@@ -245,6 +245,10 @@ class EvidenceChain:
     addressed_assumption_ids: tuple[str, ...]
     stance: str
     numeric_eligible: bool
+    # Host-only identity inputs. They are deliberately absent from the untrusted
+    # wire contract and are populated only by the deterministic verifier.
+    canonical_entity: str = field(default="", repr=False, compare=False)
+    canonical_target: str = field(default="", repr=False, compare=False)
 
     @classmethod
     def from_payload(cls, raw: Mapping[str, object]) -> "EvidenceChain":
@@ -508,6 +512,13 @@ class FinalRetrievalCard:
                 adjustment_kind = "add"
             else:
                 adjustment_kind = "multiply"
+            value = chain.magnitude_value
+            if value is None or not math.isfinite(value):
+                continue
+            if adjustment_kind == "multiply" and not -0.95 <= value <= 20.0:
+                continue
+            if adjustment_kind == "add" and abs(value) > 1_000_000.0:
+                continue
             impacts.append(
                 EvidenceImpact(
                     source_document_ids=tuple(
@@ -518,7 +529,7 @@ class FinalRetrievalCard:
                     direction=chain.direction,
                     permanence="temporary",
                     adjustment_kind=adjustment_kind,
-                    adjustment_value=chain.magnitude_value,
+                    adjustment_value=value,
                     start_timestamp=chain.start_timestamp,
                     end_timestamp=chain.end_timestamp,
                     rationale=chain.claim,

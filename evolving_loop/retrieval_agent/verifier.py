@@ -47,6 +47,8 @@ def stable_chain_id(chain: EvidenceChain) -> str:
     """Return an identity independent of model-provided IDs and document ordering."""
     payload = {
         "claim": _normalize(chain.claim),
+        "entity": _normalize(chain.canonical_entity),
+        "target": _normalize(chain.canonical_target),
         "citations": sorted(
             (_normalize(item.document_id), _normalize(item.exact_quote))
             for item in chain.citations
@@ -84,7 +86,12 @@ def _deduplicate_raw_citations(payload: object) -> object:
                     if not isinstance(citation, Mapping):
                         deduplicated.append(citation)
                         continue
-                    key = (citation.get("document_id"), citation.get("exact_quote"))
+                    document_id = citation.get("document_id")
+                    exact_quote = citation.get("exact_quote")
+                    if not isinstance(document_id, str) or not isinstance(exact_quote, str):
+                        deduplicated.append(citation)
+                        continue
+                    key = (document_id, exact_quote)
                     if key not in seen:
                         seen.add(key)
                         deduplicated.append(citation)
@@ -123,6 +130,82 @@ def _has_term(text: str, term: str) -> bool:
     return _normalize(term) in _normalize(text)
 
 
+def _entity_target_spans(
+    task: ContextTask, citations: Sequence[EvidenceCitation]
+) -> tuple[EvidenceCitation, ...]:
+    return tuple(
+        citation
+        for citation in citations
+        if _has_term(citation.exact_quote, task.numeric.entity_name)
+        and _has_term(citation.exact_quote, task.target_name)
+    )
+
+
+def _has_direction(span: str, direction: str) -> bool:
+    normalized = _normalize(span)
+    terms = {
+        "up": ("increase", "increased", "rises", "rise", "boost", "gain", "higher"),
+        "down": ("decrease", "decreased", "drop", "decline", "lower", "reduce"),
+        "stable": ("stable", "unchanged", "constant", "flat"),
+    }
+    return any(term in normalized for term in terms.get(direction, ()))
+
+
+def _has_mechanism(span: str, mechanism: str) -> bool:
+    normalized = _normalize(span)
+    terms = {
+        "observation": ("measurement", "recording", "sensor", "logging", "reported"),
+        "latent_process": ("process", "demand", "production", "consumption", "behavior"),
+        "future_driver": ("future", "scheduled", "will ", "planned", "upcoming"),
+        "regime": ("regime", "temporary", "recovery", "resumes", "ended"),
+    }
+    return any(term in normalized for term in terms.get(mechanism, ()))
+
+
+def _without_timestamps(text: str) -> str:
+    return re.sub(
+        r"\b\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?\b",
+        "",
+        text,
+    )
+
+
+def _numbers(text: str) -> tuple[float, ...]:
+    return tuple(
+        float(item.replace(",", ""))
+        for item in re.findall(r"(?<![\w.-])(?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)(?![\w.-])", _without_timestamps(text))
+    )
+
+
+def _close(left: float, right: float) -> bool:
+    return abs(left - right) <= max(1e-9, abs(right) * 1e-6)
+
+
+def _magnitude_matches(span: str, kind: str, value: float) -> bool:
+    numbers = _numbers(span)
+    if not numbers:
+        return False
+    normalized = _normalize(span)
+    if kind in {"relative", "rate", "explicit"}:
+        if not any(marker in normalized for marker in ("%", "percent", "percentage", "rate")):
+            return False
+        expected = (value, value * 100.0)
+    elif kind == "multiplier":
+        if not any(marker in normalized for marker in ("times", "multipl", "x ")):
+            return False
+        expected = (value, value + 1.0)
+    else:
+        expected = (value,)
+    return any(_close(number, candidate) for number in numbers for candidate in expected)
+
+
+def _magnitude_is_domain_safe(task: ContextTask, kind: str, value: float) -> bool:
+    if kind == "absolute":
+        history_scale = max((abs(item) for item in task.numeric.history_values), default=0.0)
+        return abs(value) <= max(1.0, history_scale) * 100.0
+    return -0.95 <= value <= 20.0 and (kind != "multiplier" or value > 0.0)
+
+
 def _verify_chain(
     task: ContextTask,
     chain: EvidenceChain,
@@ -132,31 +215,40 @@ def _verify_chain(
     counterevidence: bool,
 ) -> tuple[EvidenceChain, tuple[str, ...]]:
     citations, rejected = _citation_spans(task, chain.citations)
-    quote_text = " ".join(item.exact_quote for item in citations)
+    anchors = _entity_target_spans(task, citations)
     missing: list[str] = list(chain.missing_links)
     if not citations:
         missing.append("citation")
-    if not _has_term(quote_text, task.numeric.entity_name):
+    if not any(_has_term(item.exact_quote, task.numeric.entity_name) for item in citations):
         missing.append("entity")
-    if not _has_term(quote_text, task.target_name):
+    if not any(_has_term(item.exact_quote, task.target_name) for item in citations):
         missing.append("target")
-    if chain.mechanism == "irrelevant":
+    if chain.mechanism == "irrelevant" or not any(
+        _has_mechanism(item.exact_quote, chain.mechanism) for item in anchors
+    ):
         missing.append("mechanism")
-    if chain.direction == "unknown":
+    if chain.direction == "unknown" or not any(
+        _has_direction(item.exact_quote, chain.direction) for item in anchors
+    ):
         missing.append("direction")
     future = set(task.future_timestamps)
     if (
         chain.temporal_relation != "overlaps_future"
-        or chain.start_timestamp not in future
-        or chain.end_timestamp not in future
+        or not any(
+            chain.start_timestamp in item.exact_quote and chain.end_timestamp in item.exact_quote
+            for item in anchors
+        )
     ):
         missing.append("forecast_window")
     if chain.magnitude_kind in {"unknown", "none"} or chain.magnitude_value is None:
         missing.append("magnitude")
-    elif not re.search(r"\d", re.sub(r"\b\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?\b", "", quote_text)):
+    elif not _magnitude_is_domain_safe(task, chain.magnitude_kind, chain.magnitude_value):
+        missing.append("multiplier" if chain.magnitude_kind == "multiplier" else "magnitude_value")
+    elif not any(
+        _magnitude_matches(item.exact_quote, chain.magnitude_kind, chain.magnitude_value)
+        for item in anchors
+    ):
         missing.append("magnitude")
-    elif chain.magnitude_kind == "multiplier" and not 0.0 < chain.magnitude_value <= 21.0:
-        missing.append("multiplier")
     unknown_skills = tuple(
         item for item in chain.used_skill_ids if item not in allowed_skill_ids
     )
@@ -183,6 +275,8 @@ def _verify_chain(
             item for item in chain.addressed_assumption_ids if item in allowed_assumption_ids
         ),
         numeric_eligible=False,
+        canonical_entity=task.numeric.entity_name,
+        canonical_target=task.target_name,
     )
     numeric_eligible = not missing_links and not counterevidence
     verified = replace(verified, numeric_eligible=numeric_eligible)
@@ -196,11 +290,15 @@ def _verify_collection(
     allowed_skill_ids: frozenset[str],
     allowed_assumption_ids: frozenset[str],
     counterevidence: bool,
+    submitted_conflicts: frozenset[str] = frozenset(),
 ) -> tuple[tuple[EvidenceChain, ...], tuple[str, ...]]:
     verified: list[EvidenceChain] = []
     rejected: list[str] = []
     identities: set[str] = set()
     for chain in chains:
+        if chain.chain_id in submitted_conflicts:
+            rejected.append("round2_chain_identity_conflict")
+            continue
         item, item_rejected = _verify_chain(
             task,
             chain,
@@ -224,22 +322,29 @@ def verify_round_result(
     stage: str,
     allowed_skill_ids: Sequence[str],
     allowed_assumption_ids: Sequence[str],
+    prior_round1: RetrievalRoundResult | None = None,
 ) -> RetrievalRoundResult:
     """Parse and deterministically verify one untrusted Retrieval stage response."""
     if stage not in {"round1", "round2"}:
         raise ValueError("stage must be round1 or round2")
     try:
         raw = RetrievalRoundResult.from_payload(_deduplicate_raw_citations(payload))
-    except RetrievalContractError as error:
+    except (RetrievalContractError, TypeError, ValueError) as error:
         return RetrievalRoundResult((), (), ("invalid_retrieval_payload",), False, rejected=(str(error),))
     skill_ids = frozenset(allowed_skill_ids)
     assumption_ids = frozenset(allowed_assumption_ids)
+    submitted_conflicts = (
+        frozenset(item.chain_id for item in (*prior_round1.chains, *prior_round1.counterevidence))
+        if stage == "round2" and prior_round1 is not None
+        else frozenset()
+    )
     chains, chain_rejected = _verify_collection(
         task,
         raw.chains,
         allowed_skill_ids=skill_ids,
         allowed_assumption_ids=assumption_ids,
         counterevidence=False,
+        submitted_conflicts=submitted_conflicts,
     )
     counter, counter_rejected = _verify_collection(
         task,
@@ -247,6 +352,7 @@ def verify_round_result(
         allowed_skill_ids=skill_ids,
         allowed_assumption_ids=assumption_ids,
         counterevidence=True,
+        submitted_conflicts=submitted_conflicts,
     )
     all_ids = {item.chain_id for item in chains}
     unique_counter = tuple(item for item in counter if item.chain_id not in all_ids)
@@ -277,9 +383,16 @@ def merge_verified_rounds(
         round2_chains = round2.chains
         round2_counter = round2.counterevidence
         rejected = [*round1.rejected, *round2.rejected]
-    merged: list[EvidenceChain] = list(round1.chains)
+    merged: list[EvidenceChain] = [*round1.chains, *round1.counterevidence]
     identities = {item.chain_id for item in merged}
     for chain in round2_chains:
+        if chain.chain_id in identities:
+            if chain != next(item for item in merged if item.chain_id == chain.chain_id):
+                rejected.append("round2_chain_identity_conflict")
+            continue
+        identities.add(chain.chain_id)
+        merged.append(chain)
+    for chain in round2_counter:
         if chain.chain_id in identities:
             if chain != next(item for item in merged if item.chain_id == chain.chain_id):
                 rejected.append("round2_chain_identity_conflict")
@@ -302,7 +415,9 @@ def merge_verified_rounds(
         selected_document_ids=selected,
         rejected=tuple(dict.fromkeys(rejected)),
         unresolved_contradictions=unresolved,
-        complete=bool(merged) and all(item.numeric_eligible for item in merged),
+        complete=bool(round1.chains or round2_chains) and all(
+            item.numeric_eligible for item in (*round1.chains, *round2_chains)
+        ),
     )
 
 
