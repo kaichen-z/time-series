@@ -567,6 +567,149 @@ def test_active_voice_negated_cancellation_does_not_block_a_valid_claim(context_
     assert "causal_status" not in verified.chains[0].missing_links
 
 
+@pytest.mark.parametrize("apostrophe", ["'", "’"])
+@pytest.mark.parametrize("status", [
+    "didn{apostrophe}t happen",
+    "doesn{apostrophe}t happen",
+    "won{apostrophe}t happen",
+    "can{apostrophe}t happen",
+    "couldn{apostrophe}t happen",
+    "wouldn{apostrophe}t happen",
+    "shouldn{apostrophe}t happen",
+])
+def test_contracted_true_nonoccurrence_of_claimed_event_blocks_numeric_eligibility(
+    context_task, status, apostrophe
+):
+    nonoccurrence = status.format(apostrophe=apostrophe)
+    text = (
+        f"The scheduled promotion {nonoccurrence}. "
+        "The scheduled promotion will cause Entity A sales to increase by 20 percent "
+        "from 2026-01-03 through 2026-01-04."
+    )
+    task = replace(context_task, documents=(Document("doc_contracted_nonoccurrence", text),))
+
+    verified = _verified(task, _payload(_chain(citations=[{
+        "document_id": "doc_contracted_nonoccurrence", "exact_quote": text,
+    }])))
+
+    assert verified.chains[0].numeric_eligible is False
+    assert "causal_status" in verified.chains[0].missing_links
+    assert verified.chains[0].citations[0].exact_quote == text
+
+
+@pytest.mark.parametrize("apostrophe", ["'", "’"])
+def test_contracted_do_not_nonoccurrence_of_claimed_event_blocks_numeric_eligibility(
+    context_task, apostrophe
+):
+    text = (
+        f"Scheduled promotion events don{apostrophe}t happen. "
+        "The scheduled promotion will cause Entity A sales to increase by 20 percent "
+        "from 2026-01-03 through 2026-01-04."
+    )
+    task = replace(context_task, documents=(Document("doc_contracted_do_not", text),))
+
+    verified = _verified(task, _payload(_chain(citations=[{
+        "document_id": "doc_contracted_do_not", "exact_quote": text,
+    }])))
+
+    assert verified.chains[0].numeric_eligible is False
+    assert "causal_status" in verified.chains[0].missing_links
+
+
+@pytest.mark.parametrize("apostrophe", ["'", "’"])
+@pytest.mark.parametrize("negated_cancellation", [
+    "Management didn{apostrophe}t cancel the scheduled promotion.",
+    "Management doesn{apostrophe}t cancel the scheduled promotion.",
+    "Managers don{apostrophe}t cancel the scheduled promotion.",
+    "Management won{apostrophe}t cancel the scheduled promotion.",
+    "Management can{apostrophe}t cancel the scheduled promotion.",
+    "Management couldn{apostrophe}t cancel the scheduled promotion.",
+    "Management wouldn{apostrophe}t cancel the scheduled promotion.",
+    "Management shouldn{apostrophe}t cancel the scheduled promotion.",
+    "Management hasn{apostrophe}t canceled the scheduled promotion.",
+    "Managers haven{apostrophe}t canceled the scheduled promotion.",
+    "Management hadn{apostrophe}t canceled the scheduled promotion.",
+    "The scheduled promotion isn{apostrophe}t canceled.",
+    "The scheduled promotion and launch aren{apostrophe}t canceled.",
+    "The scheduled promotion wasn{apostrophe}t canceled.",
+    "The scheduled promotion and launch weren{apostrophe}t canceled.",
+])
+def test_contracted_explicit_cancellation_negation_does_not_suppress_valid_impact(
+    context_task, negated_cancellation, apostrophe
+):
+    text = (
+        f"{negated_cancellation.format(apostrophe=apostrophe)} "
+        "The scheduled promotion will cause Entity A sales to increase by 20 percent "
+        "from 2026-01-03 through 2026-01-04."
+    )
+    task = replace(context_task, documents=(Document("doc_contracted_negation", text),))
+
+    verified = _verified(task, _payload(_chain(citations=[{
+        "document_id": "doc_contracted_negation", "exact_quote": text,
+    }])))
+
+    assert verified.chains[0].numeric_eligible is True
+    assert "causal_status" not in verified.chains[0].missing_links
+
+
+def test_positive_cancellation_still_blocks_after_contraction_normalization(context_task):
+    text = (
+        "Management canceled the scheduled promotion. "
+        "The scheduled promotion will cause Entity A sales to increase by 20 percent "
+        "from 2026-01-03 through 2026-01-04."
+    )
+    task = replace(context_task, documents=(Document("doc_positive_cancellation", text),))
+
+    verified = _verified(task, _payload(_chain(citations=[{
+        "document_id": "doc_positive_cancellation", "exact_quote": text,
+    }])))
+
+    assert verified.chains[0].numeric_eligible is False
+    assert "causal_status" in verified.chains[0].missing_links
+
+
+@pytest.mark.parametrize("rescheduling", [
+    "The scheduled promotion was rescheduled.",
+    "Management is rescheduling the scheduled promotion.",
+])
+def test_rescheduling_claimed_event_blocks_the_invalidated_window(context_task, rescheduling):
+    text = (
+        f"{rescheduling} "
+        "The scheduled promotion will cause Entity A sales to increase by 20 percent "
+        "from 2026-01-03 through 2026-01-04."
+    )
+    task = replace(context_task, documents=(Document("doc_rescheduled", text),))
+
+    verified = _verified(task, _payload(_chain(citations=[{
+        "document_id": "doc_rescheduled", "exact_quote": text,
+    }])))
+
+    assert verified.chains[0].numeric_eligible is False
+    assert "causal_status" in verified.chains[0].missing_links
+
+
+@pytest.mark.parametrize("unrelated_status", [
+    "The prior store closure didn’t happen.",
+    "The prior store reopening was rescheduled.",
+])
+def test_contracted_or_rescheduled_unrelated_event_does_not_suppress_claim(
+    context_task, unrelated_status
+):
+    text = (
+        f"{unrelated_status} "
+        "The scheduled promotion will cause Entity A sales to increase by 20 percent "
+        "from 2026-01-03 through 2026-01-04."
+    )
+    task = replace(context_task, documents=(Document("doc_unrelated_semantic_status", text),))
+
+    verified = _verified(task, _payload(_chain(citations=[{
+        "document_id": "doc_unrelated_semantic_status", "exact_quote": text,
+    }])))
+
+    assert verified.chains[0].numeric_eligible is True
+    assert "causal_status" not in verified.chains[0].missing_links
+
+
 @pytest.mark.parametrize("status", ["canceled", "called off", "withdrew"])
 def test_active_voice_status_of_claimed_event_blocks_numeric_eligibility(context_task, status):
     text = (

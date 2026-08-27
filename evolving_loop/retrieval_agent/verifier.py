@@ -21,6 +21,37 @@ def _normalize(text: str) -> str:
     return " ".join(text.lower().replace("−", "-").split())
 
 
+_CONTRACTION_EXPANSIONS = {
+    "didn't": "did not",
+    "doesn't": "does not",
+    "don't": "do not",
+    "won't": "will not",
+    "can't": "can not",
+    "couldn't": "could not",
+    "wouldn't": "would not",
+    "shouldn't": "should not",
+    "hasn't": "has not",
+    "haven't": "have not",
+    "hadn't": "had not",
+    "isn't": "is not",
+    "aren't": "are not",
+    "wasn't": "was not",
+    "weren't": "were not",
+}
+_CONTRACTION_PATTERN = re.compile(
+    r"\b(?:" + "|".join(re.escape(item) for item in _CONTRACTION_EXPANSIONS) + r")\b"
+)
+
+
+def _normalize_semantics(text: str) -> str:
+    """Expand explicit contractions for matching without altering evidence text."""
+    normalized = _normalize(text).replace("‘", "'").replace("’", "'")
+    return _CONTRACTION_PATTERN.sub(
+        lambda match: _CONTRACTION_EXPANSIONS[match.group(0)],
+        normalized,
+    )
+
+
 def _verified_quote_spans(quote: str, document: str) -> tuple[str, ...]:
     """Accept a whole exact quote or independently exact, non-trivial sentences."""
     normalized_document = _normalize(document)
@@ -193,7 +224,7 @@ def _cited_intervals(span: str) -> tuple[tuple[str, str], ...]:
 _EVENT_STATUS = (
     r"(?:abort(?:ed|ion)?|cancel(?:led|ed|lation)?|called\s+off|"
     r"postpon(?:ed|ement)?|defer(?:red|ral)?|suspend(?:ed|sion)?|"
-    r"withdrawn|withdrew|withdraw(?:al)?)"
+    r"reschedul(?:ed|ing)|withdrawn|withdrew|withdraw(?:al)?)"
 )
 _PASSIVE_AUXILIARY = re.compile(
     r"\b(?:was|were|is|are|has\s+been|have\s+been|had\s+been|"
@@ -234,17 +265,21 @@ def _clause_tail(text: str) -> str:
 
 def _status_event_mentions(sentence: str, task: ContextTask) -> tuple[frozenset[str], ...]:
     """Return affected events for active cancellation/non-occurrence statements."""
-    normalized = _normalize(sentence)
+    normalized = _normalize_semantics(sentence)
     mentions: list[frozenset[str]] = []
     for match in re.finditer(rf"\b{_EVENT_STATUS}\b", normalized):
         prefix = normalized[:match.start()]
         if re.search(
-            r"\b(?:did|does|do|will|would|has|have|had|can|could)\s+"
+            r"\b(?:did|does|do|will|would|should|has|have|had|can|could)\s+"
             r"(?:not|never)\s+$",
             prefix,
         ):
             continue
-        passive = _PASSIVE_AUXILIARY.search(prefix)
+        passive = (
+            None
+            if match.group(0) == "rescheduling"
+            else _PASSIVE_AUXILIARY.search(prefix)
+        )
         if passive is not None:
             if passive.group(1) is not None:
                 continue
@@ -258,7 +293,7 @@ def _status_event_mentions(sentence: str, task: ContextTask) -> tuple[frozenset[
         mentions.append(_event_tokens(event_text, task))
 
     nonoccurrence_patterns = (
-        r"\b(?:will|would|did|does|do|can|could)\s+not\s+"
+        r"\b(?:will|would|should|did|does|do|can|could)\s+not\s+"
         r"(?:occur|happen|take\s+place|go\s+ahead)\b",
         r"\b(?:no\s+longer|never)\s+"
         r"(?:occurs?|occurred|happens?|happened|takes?\s+place|took\s+place|goes?\s+ahead)\b",
