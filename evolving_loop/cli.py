@@ -626,7 +626,9 @@ def _components(args):
             kwargs["device"] = args.device
         llm = QwenClient(**kwargs)
     library = SkillLibrary.load(args.library_path)
-    retrieval_library = RetrievalSkillLibrary.load(args.retrieval_library_path)
+    retrieval_library = RetrievalSkillLibrary.load_verified_checkpoint(
+        args.retrieval_library_path
+    )
     decision_library = DecisionSkillLibrary.load(args.decision_library_path)
     tsfm = None
     if args.setting in {"tsfm", "combined"}:
@@ -671,7 +673,7 @@ def _factory(
     if retrieval_mode not in {"single-pass", "two-stage"}:
         raise ValueError("retrieval_mode must be single-pass or two-stage")
     release = None
-    release_skills: tuple[RetrievalSkill, ...] = ()
+    release_library: RetrievalSkillLibrary | None = None
     if retrieval_mode == "two-stage":
         if not isinstance(morphology_provider, MorphologyProvider) or not callable(
             getattr(morphology_provider, "assumptions", None)
@@ -681,10 +683,8 @@ def _factory(
         if not release_path:
             raise ValueError("two-stage construction requires --retrieval-release-path")
         release = RetrievalRelease.load(release_path)
-        release_skills = tuple(
-            RetrievalSkill.from_payload(item) for item in release.skills
-        )
-        available_ids = {item.skill_id for item in release_skills}
+        release_library = RetrievalSkillLibrary.from_release(release_path)
+        available_ids = {item.skill_id for item in release_library.all()}
         missing_ids = set(release.genome.active_skill_ids) - available_ids
         if missing_ids:
             raise ValueError(
@@ -697,10 +697,40 @@ def _factory(
         coding_records.update(
             {record["name"]: Skill(**record) for record in policy.coding_skills}
         )
-        if release is None:
-            policy_retrieval_records = tuple(
-                RetrievalSkill(**record) for record in policy.retrieval_skills
+        runtime_skill_source = None
+        if release is None and policy.retrieval_skill_source is not None:
+            if not isinstance(
+                policy.retrieval_skill_source, RetrievalSkillLibrary
+            ):
+                raise ValueError("invalid runtime Retrieval Skill source")
+            source_records = tuple(
+                skill.to_payload()
+                for skill in policy.retrieval_skill_source.all()
             )
+            if tuple(policy.retrieval_skills) != source_records:
+                raise ValueError(
+                    "policy snapshot changed its verified Retrieval Skill source"
+                )
+            runtime_skill_source = policy.retrieval_skill_source
+            retrieval_records = []
+        elif release is None:
+            verified_by_payload = {
+                json.dumps(skill.to_payload(), sort_keys=True): skill
+                for skill in retrieval_library.all()
+                if skill.is_active
+            }
+            policy_retrieval_records = []
+            for record in policy.retrieval_skills:
+                if record.get("status") in {"accepted", "specialized"}:
+                    matched = verified_by_payload.get(json.dumps(record, sort_keys=True))
+                    if matched is None:
+                        raise ValueError(
+                            "policy snapshot contains an active Retrieval Skill without verified source provenance"
+                        )
+                    policy_retrieval_records.append(matched)
+                else:
+                    policy_retrieval_records.append(RetrievalSkill(**record))
+            policy_retrieval_records = tuple(policy_retrieval_records)
             policy_retrieval_ids = {
                 skill.skill_id for skill in policy_retrieval_records
             }
@@ -721,11 +751,18 @@ def _factory(
             list(coding_records.values()),
             persist=not isolate_library,
         )
-        task_retrieval_library = RetrievalSkillLibrary(
-            retrieval_library.path,
-            release_skills if release is not None else retrieval_records,
-            persist=not isolate_library,
-        )
+        if release_library is not None:
+            task_retrieval_library = release_library.replay_snapshot(
+                release_library.all(), persist=False
+            )
+        elif runtime_skill_source is not None:
+            task_retrieval_library = runtime_skill_source.replay_snapshot(
+                runtime_skill_source.all(), persist=False
+            )
+        else:
+            task_retrieval_library = retrieval_library.replay_snapshot(
+                retrieval_records, persist=not isolate_library
+            )
         task_decision_library = DecisionSkillLibrary(
             decision_library.path,
             list(decision_records.values()),

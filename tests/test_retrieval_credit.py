@@ -6,6 +6,7 @@ from dataclasses import FrozenInstanceError, asdict, replace
 from types import SimpleNamespace
 
 import pytest
+import evolving_loop.retrieval_agent.skill_library as skill_library_module
 
 from common.data import Task
 from evolving_loop.data import ContextTask, Document
@@ -33,6 +34,7 @@ from evolving_loop.retrieval_agent.schemas import (
 from evolving_loop.retrieval_agent.skill_library import (
     RetrievalApplicability,
     RetrievalSkill,
+    RetrievalSkillError,
     RetrievalSkillLibrary,
 )
 
@@ -691,9 +693,84 @@ def test_skill_promotion_requires_trusted_evaluator_derived_evidence(tmp_path) -
     assert accepted.version == 2
     assert accepted.validated_task_ids == ("train_1", "train_2", "train_3")
     assert accepted.validated_entities == ("Alpha", "Beta")
-    reloaded = RetrievalSkillLibrary.load(library.path)
+    reloaded = RetrievalSkillLibrary.load_verified_checkpoint(library.path)
     assert reloaded.get_by_id("window_search").status == "accepted"
     assert reloaded.get_by_id("window_search").version == 2
+
+
+def test_evaluator_checkpoint_cannot_be_copied_to_claim_file_provenance(tmp_path) -> None:
+    library = RetrievalSkillLibrary(tmp_path / "skills.json", (_candidate_skill(),))
+    task_results = tuple(
+        _promotion_task_result(index, entity)
+        for index, entity in enumerate(("Alpha", "Alpha", "Beta"), start=1)
+    )
+    assert evaluate_and_promote_retrieval_skills(
+        library, task_results, split="train"
+    ) == ("window_search",)
+    copied = tmp_path / "copied.json"
+    copied.write_bytes(library.path.read_bytes())
+
+    with pytest.raises(RetrievalSkillError, match="checkpoint|provenance|witness"):
+        RetrievalSkillLibrary.load_verified_checkpoint(copied)
+
+
+def test_evaluator_promotion_checkpoint_rejects_direct_record_tampering(tmp_path) -> None:
+    library = RetrievalSkillLibrary(tmp_path / "skills.json", (_candidate_skill(),))
+    task_results = tuple(
+        _promotion_task_result(index, entity)
+        for index, entity in enumerate(("Alpha", "Alpha", "Beta"), start=1)
+    )
+    assert evaluate_and_promote_retrieval_skills(
+        library, task_results, split="train"
+    ) == ("window_search",)
+    payload = __import__("json").loads(library.path.read_text(encoding="utf-8"))
+    payload["skills"][-1]["validation_smae_gain"] = 4.9
+    library.path.write_text(__import__("json").dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RetrievalSkillError, match="provenance|integrity|hash|tamper"):
+        RetrievalSkillLibrary.load_verified_checkpoint(library.path)
+
+
+def test_loaded_library_refuses_to_overwrite_a_replaced_checkpoint_path(tmp_path) -> None:
+    path = tmp_path / "skills.json"
+    library = RetrievalSkillLibrary(path, (_candidate_skill(),))
+    library.save()
+    loaded = RetrievalSkillLibrary.load(path)
+    replacement = b'{"schema_version": 1, "skills": []}\n'
+    path.write_bytes(replacement)
+
+    with pytest.raises(RetrievalSkillError, match="replaced|changed|tamper"):
+        loaded.save()
+
+    assert path.read_bytes() == replacement
+
+
+def test_evaluator_promotion_write_failure_is_atomic(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "skills.json"
+    library = RetrievalSkillLibrary(path, (_candidate_skill(),))
+    library.save()
+    before = path.read_bytes()
+    task_results = tuple(
+        _promotion_task_result(index, entity)
+        for index, entity in enumerate(("Alpha", "Alpha", "Beta"), start=1)
+    )
+
+    def fail_replace(source, destination):
+        del source, destination
+        raise OSError("simulated atomic replace failure")
+
+    monkeypatch.setattr(skill_library_module.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="simulated atomic replace failure"):
+        evaluate_and_promote_retrieval_skills(library, task_results, split="train")
+
+    assert library.get_by_id("window_search").status == "candidate"
+    assert library.get_by_id("window_search").version == 1
+    assert path.read_bytes() == before
+    assert not path.with_suffix(path.suffix + ".tmp").exists()
+    assert not (path.parent / f".{path.name}.provenance").exists()
 
 
 def test_no_public_evidence_row_api_can_authorize_promotion(tmp_path) -> None:

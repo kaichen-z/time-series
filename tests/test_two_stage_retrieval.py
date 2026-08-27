@@ -12,18 +12,14 @@ from evolving_loop.data import ContextTask, Document
 from evolving_loop.decision_agent.agent import DecisionAgent, DecisionCandidate
 from evolving_loop.harness import EvolvingForecastHarness, HarnessRuntimeConfig
 from evolving_loop.morphology_adapter import MorphologyAdapter
-from evolving_loop.retrieval_agent.policy import RetrievalGenome
+from evolving_loop.retrieval_agent.policy import RetrievalGenome, write_retrieval_release
 from evolving_loop.retrieval_agent.schemas import (
     RetrievalAssumption,
     RetrievalContractError,
     RetrievalGap,
 )
 from evolving_loop.retrieval_agent.agent import RetrievalResult
-from evolving_loop.retrieval_agent.skill_library import (
-    RetrievalApplicability,
-    RetrievalSkill,
-    RetrievalSkillLibrary,
-)
+from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 
 
@@ -486,40 +482,59 @@ def test_two_stage_agent_enforces_fixed_document_chain_and_citation_budgets() ->
     assert len(result.chains[0].citations) == 1
 
 
-def test_all_matching_stage_skills_see_materialized_generator_selectors() -> None:
-    def skill(skill_id: str) -> RetrievalSkill:
-        return RetrievalSkill(
-            skill_id=skill_id,
-            version=1,
-            parent_version=None,
-            stage="round2",
-            status="accepted",
-            name=skill_id,
-            description="Investigate the named trend gap.",
-            applicability=RetrievalApplicability(
-                assumption_kinds=("trend_persistence",),
-                gap_types=("continuation_or_reversal",),
-            ),
-            query_steps=("Search for reversal evidence.",),
-            required_chain_fields=("entity", "target"),
-            counterevidence_rule="Search for continuation evidence.",
-            failure_conditions=("The evidence concerns another entity.",),
-            validation_smae_gain=0.1,
-            validation_srmse_gain=0.1,
-        )
+def test_all_matching_stage_skills_see_materialized_generator_selectors(tmp_path) -> None:
+    def skill(skill_id: str) -> dict[str, object]:
+        return {
+            "skill_id": skill_id,
+            "version": 1,
+            "parent_version": None,
+            "stage": "round2",
+            "status": "accepted",
+            "name": skill_id,
+            "description": "Investigate the named trend gap.",
+            "applicability": {
+                "assumption_kinds": ["trend_persistence"],
+                "gap_types": ["continuation_or_reversal"],
+                "temporal_relations": [],
+            },
+            "query_steps": ["Search for reversal evidence."],
+            "required_chain_fields": ["entity", "target"],
+            "counterevidence_rule": "Search for continuation evidence.",
+            "failure_conditions": ["The evidence concerns another entity."],
+            "validated_task_ids": ["train_1", "train_2", "train_3"],
+            "validated_entities": ["north", "south"],
+            "validation_smae_gain": 0.1,
+            "validation_srmse_gain": 0.1,
+            "merged_from_skill_ids": [],
+            "quarantine_reason": None,
+        }
 
     genome = replace(
         RetrievalGenome.seed(),
+        version="v001",
+        parent="v000",
         active_skill_ids=("gap_alpha", "gap_beta"),
+    )
+    release = write_retrieval_release(
+        tmp_path / "releases",
+        genome,
+        skills=(skill("gap_alpha"), skill("gap_beta")),
+        audit={
+            "state": "accepted",
+            "train_dev_split_sha256": "1" * 64,
+            "verifier_sha256": "2" * 64,
+            "evaluator_sha256": "3" * 64,
+            "metric_sha256": "4" * 64,
+            "metric_cap": 5.0,
+            "train_summary": {"task_count": 80},
+            "dev_summary": {"task_count": 20},
+            "acceptance_reason": "all gates passed",
+        },
     )
     agent = TwoStageRetrievalAgent(
         FakeLLMClient([]),
         genome,
-        RetrievalSkillLibrary(
-            "unused-two-stage-skills.json",
-            (skill("gap_alpha"), skill("gap_beta")),
-            persist=False,
-        ),
+        RetrievalSkillLibrary.from_release(release.path),
     )
     assumption = RetrievalAssumption(
         "a_trend",

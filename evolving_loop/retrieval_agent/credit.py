@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import re
 import statistics
+from copy import copy
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Iterable, Sequence
 
@@ -11,6 +12,7 @@ from common.metrics import drcik_point_metrics
 from evolving_loop.data import ContextTask
 from evolving_loop.retrieval_agent.skill_library import (
     RetrievalSkillLibrary,
+    _record_digest,
 )
 from evolving_loop.retrieval_agent.verifier import _verified_quote_spans
 
@@ -706,16 +708,17 @@ def evaluate_and_promote_retrieval_skills(
             and (smae_gain > tolerance or srmse_gain > tolerance)
         ):
             continue
-        accepted = replace(
-            current,
-            version=current.version + 1,
-            parent_version=current.version,
-            status="accepted",
-            validated_task_ids=task_ids,
-            validated_entities=entities,
-            validation_smae_gain=smae_gain,
-            validation_srmse_gain=srmse_gain,
-        )
+        accepted = copy(current)
+        for field, value in (
+            ("version", current.version + 1),
+            ("parent_version", current.version),
+            ("status", "accepted"),
+            ("validated_task_ids", task_ids),
+            ("validated_entities", entities),
+            ("validation_smae_gain", smae_gain),
+            ("validation_srmse_gain", srmse_gain),
+        ):
+            object.__setattr__(accepted, field, value)
         accepted_records.append(accepted)
         promoted.append(skill_id)
     if accepted_records:
@@ -731,10 +734,27 @@ def evaluate_and_promote_retrieval_skills(
                 *proposed[accepted.skill_id],
                 accepted,
             )
-        proposed = library._validated_index(library._all_from(proposed))
+        active_origins = dict(library._active_record_origins)
+        active_origins.update(
+            {_record_digest(record): "evaluator_promotion" for record in accepted_records}
+        )
+        records = library._all_from(proposed)
+        for record in accepted_records:
+            library._validate_active_origin(
+                record, records, "evaluator_promotion"
+            )
+        proposed = library._validated_index(
+            records,
+            active_record_hashes=active_origins,
+        )
+        file_sha256 = library._file_sha256
         if library.persist:
-            library._write(proposed)
+            file_sha256 = library._write(
+                proposed, active_record_origins=active_origins
+            )
         library._skills = proposed
+        library._active_record_origins = active_origins
+        library._file_sha256 = file_sha256
     return tuple(promoted)
 
 

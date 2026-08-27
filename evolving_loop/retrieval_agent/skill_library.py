@@ -1,15 +1,18 @@
 """Versioned, declarative retrieval skills and their auditable lifecycle."""
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
+from copy import copy
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Literal, Mapping
 
 
 SKILL_LIBRARY_SCHEMA_VERSION = 1
+SKILL_CHECKPOINT_WITNESS_SCHEMA_VERSION = 1
 SkillStage = Literal["round1", "round2", "both"]
 SkillStatus = Literal["candidate", "accepted", "specialized", "quarantined"]
 SkillOperationKind = Literal["add", "repair", "specialize", "merge", "quarantine"]
@@ -160,11 +163,16 @@ class RetrievalSkill:
             if len(args) > len(field_names):
                 raise TypeError("too many positional RetrievalSkill arguments")
             values = {**dict(zip(field_names, args)), **values}
-        self._set_typed(skill_id, values)
+        self._set_typed(skill_id, values, allow_active=False)
 
     @classmethod
     def _legacy_values(
-        cls, skill_id: str, args: tuple[object, ...], supplied: Mapping[str, object]
+        cls,
+        skill_id: str,
+        args: tuple[object, ...],
+        supplied: Mapping[str, object],
+        *,
+        historical_migration: bool = False,
     ) -> dict[str, object]:
         if len(args) > len(cls._LEGACY_FIELDS):
             raise TypeError("too many legacy RetrievalSkill arguments")
@@ -175,13 +183,19 @@ class RetrievalSkill:
         created_from_task = raw.get("created_from_task", "")
         smae = raw.get("validation_smae", raw.get("validation_smae_gain"))
         srmse = raw.get("validation_srmse", raw.get("validation_srmse_gain"))
+        historically_validated = (
+            historical_migration
+            and raw.get("validation_smae") is not None
+            and raw.get("validation_srmse") is not None
+        )
+        if not historically_validated:
+            smae = None
+            srmse = None
         return {
             "version": raw.get("version", 1),
             "parent_version": raw.get("parent_version"),
             "stage": raw.get("stage", "both"),
-            "status": raw.get(
-                "status", "accepted" if smae is not None and srmse is not None else "candidate"
-            ),
+            "status": "accepted" if historically_validated else raw.get("status", "candidate"),
             "name": raw.get("name", skill_id),
             "description": raw.get("description", "legacy retrieval skill"),
             "applicability": RetrievalApplicability(),
@@ -197,7 +211,13 @@ class RetrievalSkill:
             "quarantine_reason": raw.get("quarantine_reason"),
         }
 
-    def _set_typed(self, skill_id: object, values: Mapping[str, object]) -> None:
+    def _set_typed(
+        self,
+        skill_id: object,
+        values: Mapping[str, object],
+        *,
+        allow_active: bool,
+    ) -> None:
         allowed = {
             "version", "parent_version", "stage", "status", "name", "description",
             "applicability", "query_steps", "required_chain_fields", "counterevidence_rule",
@@ -234,6 +254,10 @@ class RetrievalSkill:
             raise RetrievalSkillError("invalid skill stage")
         if status not in {"candidate", "accepted", "specialized", "quarantined"}:
             raise RetrievalSkillError("invalid skill status")
+        if status != "candidate" and not allow_active:
+            raise RetrievalSkillError(
+                "public RetrievalSkill construction is candidate-only; active and quarantine statuses require trusted transitions"
+            )
         applicability = values["applicability"]
         if isinstance(applicability, Mapping):
             applicability = RetrievalApplicability.from_payload(applicability)
@@ -285,6 +309,21 @@ class RetrievalSkill:
 
     @classmethod
     def from_payload(cls, raw: Mapping[str, object]) -> "RetrievalSkill":
+        skill_id, values = cls._payload_values(raw)
+        return cls(skill_id, **values)
+
+    @classmethod
+    def _from_storage_payload(cls, raw: Mapping[str, object]) -> "RetrievalSkill":
+        """Hydrate a record only after its containing artifact was verified."""
+        skill_id, values = cls._payload_values(raw)
+        record = object.__new__(cls)
+        record._set_typed(skill_id, values, allow_active=True)
+        return record
+
+    @classmethod
+    def _payload_values(
+        cls, raw: Mapping[str, object]
+    ) -> tuple[object, dict[str, object]]:
         required = {
             "skill_id", "version", "parent_version", "stage", "status", "name", "description",
             "applicability", "query_steps", "required_chain_fields", "counterevidence_rule",
@@ -306,7 +345,54 @@ class RetrievalSkill:
             **dict(raw),
         }
         skill_id = values.pop("skill_id")
-        return cls(skill_id, **values)
+        return skill_id, values
+
+    @classmethod
+    def _from_legacy_payload(cls, raw: Mapping[str, object]) -> "RetrievalSkill":
+        allowed = {
+            "skill_id",
+            "name",
+            "description",
+            "applicability",
+            "query_strategy",
+            "verification_rule",
+            "created_from_task",
+            "validation_smae",
+            "validation_srmse",
+            "validation_score",
+            "uses",
+            "avg_smae",
+            "avg_srmse",
+            "avg_score",
+        }
+        if set(raw).difference(allowed) or not {
+            "skill_id",
+            "name",
+            "description",
+            "applicability",
+            "query_strategy",
+            "verification_rule",
+            "created_from_task",
+        }.issubset(raw):
+            raise RetrievalSkillError(
+                "legacy migration accepts only historical flat Retrieval Skill rows"
+            )
+        if not isinstance(raw.get("applicability"), str):
+            raise RetrievalSkillError(
+                "legacy migration cannot hydrate typed or current-schema rows"
+            )
+        skill_id = raw["skill_id"]
+        if not isinstance(skill_id, str):
+            raise RetrievalSkillError("legacy skill_id must be a string")
+        values = cls._legacy_values(
+            skill_id,
+            (),
+            {key: value for key, value in raw.items() if key != "skill_id"},
+            historical_migration=True,
+        )
+        record = object.__new__(cls)
+        record._set_typed(skill_id, values, allow_active=True)
+        return record
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -366,6 +452,42 @@ class RetrievalSkillOperation:
         return cls("quarantine", skill_id=skill_id, reason=reason)
 
 
+def _canonical_digest(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _record_digest(skill: RetrievalSkill) -> str:
+    return _canonical_digest(skill.to_payload())
+
+
+def _file_digest(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as error:
+        raise RetrievalSkillError(f"retrieval Skill checkpoint path changed: {path}") from error
+
+
+def _checkpoint_path_digest(path: Path) -> str:
+    try:
+        resolved = str(path.resolve(strict=False))
+    except (OSError, RuntimeError) as error:
+        raise RetrievalSkillError(
+            f"cannot resolve retrieval Skill checkpoint path: {path}"
+        ) from error
+    return _canonical_digest(resolved)
+
+
+def _checkpoint_witness_path(path: Path, checkpoint_sha256: str) -> Path:
+    directory = path.parent / f".{path.name}.provenance"
+    return directory / f"{checkpoint_sha256}.json"
+
+
 class RetrievalSkillLibrary:
     """An append-only skill history whose mutations commit atomically."""
 
@@ -378,40 +500,285 @@ class RetrievalSkillLibrary:
     ) -> None:
         self.path = Path(path)
         self.persist = persist
-        self._skills = self._validated_index(skills or ())
+        self._active_record_origins: dict[str, str] = {}
+        self._file_sha256: str | None = None
+        self._skills = self._validated_index(
+            skills or (), active_record_hashes=self._active_record_origins
+        )
 
     @classmethod
     def load(cls, path: str | Path, *, persist: bool = True) -> "RetrievalSkillLibrary":
         source = Path(path)
         if not source.exists():
             return cls(source, persist=persist)
-        raw = json.loads(source.read_text(encoding="utf-8"))
+        encoded, payloads = cls._read_current_checkpoint(source)
+        if any(
+            record.get("status") in {"accepted", "specialized"}
+            for record in payloads
+        ):
+            raise RetrievalSkillError(
+                "active Retrieval Skills require load_verified_checkpoint(), "
+                "verified release, or explicit legacy migration provenance"
+            )
+        skills = tuple(
+            RetrievalSkill._from_storage_payload(record) for record in payloads
+        )
+        library = object.__new__(cls)
+        library.path = source
+        library.persist = persist
+        library._active_record_origins = {}
+        library._file_sha256 = hashlib.sha256(encoded).hexdigest()
+        library._skills = library._validated_index(skills)
+        return library
+
+    @staticmethod
+    def _read_current_checkpoint(
+        source: Path,
+    ) -> tuple[bytes, tuple[Mapping[str, object], ...]]:
+        try:
+            encoded = source.read_bytes()
+            raw = json.loads(encoded.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RetrievalSkillError(f"invalid retrieval Skill checkpoint: {source}") from error
         if isinstance(raw, list):
-            skills = [cls._load_legacy_or_typed(record) for record in raw]
-        elif isinstance(raw, dict) and set(raw) == {"schema_version", "skills"}:
-            if raw["schema_version"] != SKILL_LIBRARY_SCHEMA_VERSION or not isinstance(raw["skills"], list):
-                raise RetrievalSkillError("unsupported retrieval skill library schema")
-            skills = [RetrievalSkill.from_payload(record) for record in raw["skills"] if isinstance(record, dict)]
-            if len(skills) != len(raw["skills"]):
-                raise RetrievalSkillError("skill rows must be objects")
-        else:
-            raise RetrievalSkillError("invalid retrieval skill library payload")
-        return cls(source, skills, persist=persist)
-
-    @staticmethod
-    def _load_legacy_or_typed(record: object) -> RetrievalSkill:
-        if not isinstance(record, dict):
+            raise RetrievalSkillError(
+                "legacy Retrieval Skill files require explicit migrate_legacy()"
+            )
+        if not isinstance(raw, dict) or set(raw) != {"schema_version", "skills"}:
+            raise RetrievalSkillError(
+                "invalid retrieval Skill checkpoint schema or provenance"
+            )
+        if (
+            raw["schema_version"] != SKILL_LIBRARY_SCHEMA_VERSION
+            or not isinstance(raw["skills"], list)
+        ):
+            raise RetrievalSkillError("unsupported retrieval skill library schema")
+        if any(not isinstance(record, dict) for record in raw["skills"]):
             raise RetrievalSkillError("skill rows must be objects")
-        if "version" in record and "query_steps" in record:
-            return RetrievalSkill.from_payload(record)
-        return RetrievalSkill(**record)
+        return encoded, tuple(raw["skills"])
+
+    @classmethod
+    def load_verified_checkpoint(
+        cls, path: str | Path, *, persist: bool = True
+    ) -> "RetrievalSkillLibrary":
+        """Load a path-bound checkpoint written by migration or the evaluator.
+
+        Ordinary current-schema files are data, not authority. Active records
+        additionally require the immutable, content-addressed witness emitted
+        during the atomic trusted commit.
+        """
+        source = Path(path)
+        if not source.exists():
+            return cls(source, persist=persist)
+        encoded, payloads = cls._read_current_checkpoint(source)
+        if not any(
+            record.get("status") in {"accepted", "specialized"}
+            for record in payloads
+        ):
+            return cls.load(source, persist=persist)
+        checkpoint_sha256 = hashlib.sha256(encoded).hexdigest()
+        witness_path = _checkpoint_witness_path(source, checkpoint_sha256)
+        try:
+            witness = json.loads(witness_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RetrievalSkillError(
+                "active Retrieval Skill checkpoint has no valid immutable provenance witness"
+            ) from error
+        skills = tuple(
+            RetrievalSkill._from_storage_payload(record) for record in payloads
+        )
+        active_origins = cls._validate_checkpoint_witness(
+            witness,
+            source=source,
+            checkpoint_sha256=checkpoint_sha256,
+            payloads=payloads,
+            skills=skills,
+        )
+        library = object.__new__(cls)
+        library.path = source
+        library.persist = persist
+        library._active_record_origins = dict(active_origins)
+        library._file_sha256 = checkpoint_sha256
+        library._skills = library._validated_index(
+            skills, active_record_hashes=library._active_record_origins
+        )
+        return library
+
+    @classmethod
+    def migrate_legacy(
+        cls, path: str | Path, *, persist: bool = True
+    ) -> "RetrievalSkillLibrary":
+        """Explicitly hydrate only the historical flat on-disk schema."""
+        source = Path(path)
+        try:
+            encoded = source.read_bytes()
+            raw = json.loads(encoded.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RetrievalSkillError(f"invalid legacy Retrieval Skill file: {source}") from error
+        if not isinstance(raw, list) or any(not isinstance(record, dict) for record in raw):
+            raise RetrievalSkillError("legacy migration requires an array of flat rows")
+        skills = tuple(RetrievalSkill._from_legacy_payload(record) for record in raw)
+        active_origins = {
+            _record_digest(skill): "legacy_migration"
+            for skill in skills
+            if skill.is_active
+        }
+        library = object.__new__(cls)
+        library.path = source
+        library.persist = persist
+        library._active_record_origins = dict(active_origins)
+        library._file_sha256 = hashlib.sha256(encoded).hexdigest()
+        library._skills = library._validated_index(
+            skills, active_record_hashes=library._active_record_origins
+        )
+        return library
+
+    @classmethod
+    def from_release(cls, path: str | Path) -> "RetrievalSkillLibrary":
+        """Hydrate the Skill history bound to a freshly verified immutable release."""
+        from evolving_loop.retrieval_agent.policy import RetrievalRelease
+
+        release = RetrievalRelease.load(path)
+        payloads = tuple(release.skills)
+        if any(not isinstance(record, Mapping) for record in payloads):
+            raise RetrievalSkillError("release Skill rows must be objects")
+        skills = tuple(
+            RetrievalSkill._from_storage_payload(record) for record in payloads
+        )
+        indexed = cls._validated_index(
+            skills,
+            active_record_hashes=frozenset(
+                _record_digest(skill) for skill in skills if skill.is_active
+            ),
+        )
+        active_ids = {
+            skill_id
+            for skill_id, history in indexed.items()
+            if history[-1].is_active
+        }
+        if active_ids != set(release.genome.active_skill_ids):
+            raise RetrievalSkillError(
+                "release active_skill_ids do not match its active Skill history"
+            )
+        if active_ids and release.manifest["state"] != "accepted":
+            raise RetrievalSkillError("only an accepted release may activate Skills")
+        active_origins = {
+            _record_digest(skill): "verified_release"
+            for skill in skills
+            if skill.is_active
+        }
+        skills_path = release.path / "skills.json"
+        library = object.__new__(cls)
+        library.path = skills_path
+        library.persist = False
+        library._active_record_origins = dict(active_origins)
+        library._file_sha256 = _file_digest(skills_path)
+        library._skills = indexed
+        return library
+
+    @classmethod
+    def _validate_checkpoint_witness(
+        cls,
+        raw: object,
+        *,
+        source: Path,
+        checkpoint_sha256: str,
+        payloads: tuple[Mapping[str, object], ...],
+        skills: tuple[RetrievalSkill, ...],
+    ) -> dict[str, str]:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "schema_version",
+            "checkpoint_sha256",
+            "checkpoint_path_sha256",
+            "skills_sha256",
+            "active_records",
+        }:
+            raise RetrievalSkillError("invalid Retrieval Skill checkpoint witness")
+        if raw["schema_version"] != SKILL_CHECKPOINT_WITNESS_SCHEMA_VERSION:
+            raise RetrievalSkillError("unsupported Retrieval Skill checkpoint witness")
+        if raw["checkpoint_sha256"] != checkpoint_sha256:
+            raise RetrievalSkillError("Retrieval Skill checkpoint witness hash mismatch")
+        if raw["checkpoint_path_sha256"] != _checkpoint_path_digest(source):
+            raise RetrievalSkillError("Retrieval Skill checkpoint witness path mismatch")
+        if raw["skills_sha256"] != _canonical_digest(list(payloads)):
+            raise RetrievalSkillError("Retrieval Skill checkpoint integrity hash mismatch")
+        claimed = raw["active_records"]
+        if not isinstance(claimed, list) or any(
+            not isinstance(item, Mapping)
+            or set(item) != {"sha256", "origin"}
+            or not isinstance(item["sha256"], str)
+            or item["origin"] not in {"evaluator_promotion", "legacy_migration"}
+            for item in claimed
+        ):
+            raise RetrievalSkillError("invalid active-record provenance")
+        origins = {str(item["sha256"]): str(item["origin"]) for item in claimed}
+        if len(origins) != len(claimed) or claimed != [
+            {"sha256": digest, "origin": origins[digest]}
+            for digest in sorted(origins)
+        ]:
+            raise RetrievalSkillError("active-record provenance must be unique and sorted")
+        actual_hashes = frozenset(
+            _record_digest(skill) for skill in skills if skill.is_active
+        )
+        if actual_hashes != frozenset(origins):
+            raise RetrievalSkillError("active Retrieval Skill provenance mismatch")
+        for skill in skills:
+            if skill.is_active:
+                cls._validate_active_origin(skill, skills, origins[_record_digest(skill)])
+        return origins
 
     @staticmethod
-    def _validated_index(skills: Iterable[RetrievalSkill]) -> dict[str, tuple[RetrievalSkill, ...]]:
+    def _validate_active_origin(
+        skill: RetrievalSkill,
+        skills: tuple[RetrievalSkill, ...],
+        origin: str,
+    ) -> None:
+        if origin == "legacy_migration":
+            if skill.status != "accepted" or skill.version != 1:
+                raise RetrievalSkillError(
+                    "legacy provenance may authorize only version-one accepted records"
+                )
+            return
+        grouped = {
+            item.version: item for item in skills if item.skill_id == skill.skill_id
+        }
+        parent = grouped.get(skill.parent_version or -1)
+        tolerance = 1e-12
+        if (
+            skill.status != "accepted"
+            or skill.version <= 1
+            or parent is None
+            or parent.status != "candidate"
+            or len(set(skill.validated_task_ids)) < 3
+            or len(set(skill.validated_entities)) < 2
+            or skill.validation_smae_gain is None
+            or skill.validation_srmse_gain is None
+            or skill.validation_smae_gain < -tolerance
+            or skill.validation_srmse_gain < -tolerance
+            or not (
+                skill.validation_smae_gain > tolerance
+                or skill.validation_srmse_gain > tolerance
+            )
+        ):
+            raise RetrievalSkillError(
+                "evaluator checkpoint contains an active record without promotion gates"
+            )
+
+    @staticmethod
+    def _validated_index(
+        skills: Iterable[RetrievalSkill],
+        *,
+        active_record_hashes: Iterable[str] = (),
+    ) -> dict[str, tuple[RetrievalSkill, ...]]:
+        authorized = frozenset(active_record_hashes)
         grouped: dict[str, list[RetrievalSkill]] = {}
         for skill in skills:
             if not isinstance(skill, RetrievalSkill):
                 raise RetrievalSkillError("library entries must be RetrievalSkill records")
+            if skill.is_active and _record_digest(skill) not in authorized:
+                raise RetrievalSkillError(
+                    "active Retrieval Skills require verified release, migration, or evaluator provenance"
+                )
             grouped.setdefault(skill.skill_id, []).append(skill)
         indexed: dict[str, tuple[RetrievalSkill, ...]] = {}
         for skill_id, history in grouped.items():
@@ -432,21 +799,120 @@ class RetrievalSkillLibrary:
 
     def save(self) -> None:
         if self.persist:
-            self._write(self._skills)
+            self._file_sha256 = self._write(self._skills)
 
-    def _write(self, proposed: Mapping[str, tuple[RetrievalSkill, ...]]) -> None:
+    def _write(
+        self,
+        proposed: Mapping[str, tuple[RetrievalSkill, ...]],
+        *,
+        active_record_origins: Mapping[str, str] | None = None,
+    ) -> str:
+        if self._file_sha256 is not None and (
+            not self.path.exists() or _file_digest(self.path) != self._file_sha256
+        ):
+            raise RetrievalSkillError(
+                "retrieval Skill checkpoint path was replaced or changed"
+            )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        origins = dict(
+            self._active_record_origins
+            if active_record_origins is None
+            else active_record_origins
+        )
+        authorized = frozenset(origins)
+        records = self._all_from(proposed)
+        self._validated_index(records, active_record_hashes=authorized)
+        skills_payload = [skill.to_payload() for skill in records]
         payload = {
             "schema_version": SKILL_LIBRARY_SCHEMA_VERSION,
-            "skills": [skill.to_payload() for skill in self._all_from(proposed)],
+            "skills": skills_payload,
         }
+        active = frozenset(
+            _record_digest(skill)
+            for skill in records
+            if skill.is_active
+        )
+        if active:
+            if active != authorized or any(
+                origin not in {"evaluator_promotion", "legacy_migration"}
+                for origin in origins.values()
+            ):
+                raise RetrievalSkillError(
+                    "active Retrieval Skills cannot be saved without verified provenance"
+                )
+            for skill in records:
+                if skill.is_active:
+                    self._validate_active_origin(
+                        skill, records, origins[_record_digest(skill)]
+                    )
+        encoded = (
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        ).encode("utf-8")
+        checkpoint_sha256 = hashlib.sha256(encoded).hexdigest()
+        witness_path: Path | None = None
+        witness_created = False
+        witness_directory_created = False
         try:
-            temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            temporary.write_bytes(encoded)
+            if active:
+                witness_path = _checkpoint_witness_path(
+                    self.path, checkpoint_sha256
+                )
+                witness_directory_created = not witness_path.parent.exists()
+                witness_path.parent.mkdir(parents=True, exist_ok=True)
+                witness_payload = {
+                    "schema_version": SKILL_CHECKPOINT_WITNESS_SCHEMA_VERSION,
+                    "checkpoint_sha256": checkpoint_sha256,
+                    "checkpoint_path_sha256": _checkpoint_path_digest(self.path),
+                    "skills_sha256": _canonical_digest(skills_payload),
+                    "active_records": [
+                        {"sha256": digest, "origin": origins[digest]}
+                        for digest in sorted(origins)
+                    ],
+                }
+                witness_encoded = (
+                    json.dumps(
+                        witness_payload,
+                        indent=2,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+                witness_temporary = witness_path.with_suffix(
+                    witness_path.suffix + ".tmp"
+                )
+                try:
+                    witness_temporary.write_bytes(witness_encoded)
+                    try:
+                        os.link(witness_temporary, witness_path)
+                        witness_created = True
+                    except FileExistsError:
+                        if witness_path.read_bytes() != witness_encoded:
+                            raise RetrievalSkillError(
+                                "immutable Retrieval Skill checkpoint witness changed"
+                            )
+                finally:
+                    if witness_temporary.exists():
+                        witness_temporary.unlink()
             os.replace(temporary, self.path)
+        except Exception:
+            if witness_created and witness_path is not None:
+                try:
+                    witness_path.unlink()
+                except OSError:
+                    pass
+            if witness_directory_created and witness_path is not None:
+                try:
+                    witness_path.parent.rmdir()
+                except OSError:
+                    pass
+            raise
         finally:
             if temporary.exists():
                 temporary.unlink()
+        return checkpoint_sha256
 
     @staticmethod
     def _all_from(
@@ -464,10 +930,15 @@ class RetrievalSkillLibrary:
             if not isinstance(operation, RetrievalSkillOperation):
                 raise RetrievalSkillError("invalid retrieval skill operation")
             proposed = self._apply_one(proposed, operation)
-            proposed = self._validated_index(self._all_from(proposed))
+            proposed = self._validated_index(
+                self._all_from(proposed),
+                active_record_hashes=self._active_record_origins,
+            )
+        file_sha256 = self._file_sha256
         if self.persist:
-            self._write(proposed)
+            file_sha256 = self._write(proposed)
         self._skills = proposed
+        self._file_sha256 = file_sha256
 
     def _apply_one(
         self,
@@ -506,13 +977,14 @@ class RetrievalSkillLibrary:
             if current.status == "quarantined":
                 raise RetrievalSkillError(f"skill is already quarantined: {current.skill_id}")
             reason = _text(operation.reason, "quarantine reason")
-            quarantined = replace(
-                current,
-                version=current.version + 1,
-                parent_version=current.version,
-                status="quarantined",
-                quarantine_reason=reason,
-            )
+            quarantined = copy(current)
+            for field, value in (
+                ("version", current.version + 1),
+                ("parent_version", current.version),
+                ("status", "quarantined"),
+                ("quarantine_reason", reason),
+            ):
+                object.__setattr__(quarantined, field, value)
             return {**proposed, current.skill_id: (*proposed[current.skill_id], quarantined)}
         if operation.kind == "merge":
             successor = self._operation_skill(operation)
@@ -530,13 +1002,14 @@ class RetrievalSkillLibrary:
             result = {**proposed, successor.skill_id: (successor,)}
             for source in sources:
                 current = result[source][-1]
-                quarantined = replace(
-                    current,
-                    version=current.version + 1,
-                    parent_version=current.version,
-                    status="quarantined",
-                    quarantine_reason=f"merged into {successor.skill_id}",
-                )
+                quarantined = copy(current)
+                for field, value in (
+                    ("version", current.version + 1),
+                    ("parent_version", current.version),
+                    ("status", "quarantined"),
+                    ("quarantine_reason", f"merged into {successor.skill_id}"),
+                ):
+                    object.__setattr__(quarantined, field, value)
                 result[source] = (*result[source], quarantined)
             return result
         raise RetrievalSkillError(f"unknown retrieval skill operation: {operation.kind}")
@@ -645,7 +1118,68 @@ class RetrievalSkillLibrary:
         del name, smae, srmse
 
     def clone(self, *, persist: bool = False) -> "RetrievalSkillLibrary":
-        return RetrievalSkillLibrary(self.path, self.all(), persist=persist)
+        if persist and "verified_release" in self._active_record_origins.values():
+            raise RetrievalSkillError("verified release clones must remain read-only")
+        clone = object.__new__(type(self))
+        clone.path = self.path
+        clone.persist = persist
+        clone._active_record_origins = dict(self._active_record_origins)
+        clone._file_sha256 = self._file_sha256 if persist else None
+        clone._skills = {
+            skill_id: tuple(history) for skill_id, history in self._skills.items()
+        }
+        return clone
+
+    def replay_snapshot(
+        self,
+        skills: Iterable[RetrievalSkill],
+        *,
+        persist: bool = False,
+    ) -> "RetrievalSkillLibrary":
+        """Rebuild a read-only policy snapshot using this verified source's authority.
+
+        Snapshot rows are data, not credentials: any active row must match an
+        exact active record already authorized by this library's immutable
+        release, migration, or evaluator-checkpoint provenance.
+        """
+        records = tuple(skills)
+        active_hashes = frozenset(
+            _record_digest(skill) for skill in records if skill.is_active
+        )
+        if not active_hashes.issubset(self._active_record_origins):
+            raise RetrievalSkillError(
+                "policy snapshot contains an active Skill absent from its verified source"
+            )
+        active_skill_ids = {
+            skill.skill_id for skill in records if skill.is_active
+        }
+        for skill_id in active_skill_ids:
+            supplied = tuple(
+                _record_digest(skill)
+                for skill in records
+                if skill.skill_id == skill_id
+            )
+            verified = tuple(
+                _record_digest(skill) for skill in self.history(skill_id)
+            )
+            if supplied != verified:
+                raise RetrievalSkillError(
+                    "policy snapshot changed a verified active Skill history"
+                )
+        origins = {
+            digest: self._active_record_origins[digest] for digest in active_hashes
+        }
+        if persist and "verified_release" in origins.values():
+            raise RetrievalSkillError("verified release snapshots must remain read-only")
+        replay = object.__new__(type(self))
+        replay.path = self.path
+        replay.persist = persist
+        replay._active_record_origins = origins
+        replay._file_sha256 = self._file_sha256 if persist else None
+        replay._skills = replay._validated_index(
+            records, active_record_hashes=origins
+        )
+        return replay
 
     def __len__(self) -> int:
         return len(self._skills)

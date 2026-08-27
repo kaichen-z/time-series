@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import statistics
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal, Sequence
@@ -95,11 +95,24 @@ class HarnessPolicy:
     retrieval_skills: tuple[dict, ...] = ()
     decision_skills: tuple[dict, ...] = ()
     changelog: str = "Hand-written seed policy."
+    retrieval_skill_source: object | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    def to_payload(self) -> dict[str, object]:
+        """Return the durable policy fields; runtime Skill authority is excluded."""
+        return {
+            item.name: getattr(self, item.name)
+            for item in fields(self)
+            if item.name != "retrieval_skill_source"
+        }
 
     def save(self, path: str | Path) -> None:
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False))
+        destination.write_text(
+            json.dumps(self.to_payload(), indent=2, ensure_ascii=False)
+        )
 
     @classmethod
     def load(cls, path: str | Path) -> "HarnessPolicy":
@@ -107,6 +120,8 @@ class HarnessPolicy:
         if not source.exists():
             return cls()
         payload = json.loads(source.read_text())
+        if "retrieval_skill_source" in payload:
+            raise ValueError("serialized policies cannot carry Retrieval Skill authority")
         if "workflow" in payload:
             payload["workflow"] = tuple(payload["workflow"])
         for field in ("coding_skills", "retrieval_skills", "decision_skills"):
@@ -143,6 +158,13 @@ def snapshot_policy_skills(
             )
         )
 
+    retrieval_agent = getattr(harness, "retrieval", None)
+    retrieval_library = getattr(retrieval_agent, "library", None)
+    retrieval_source = (
+        retrieval_library.clone(persist=False)
+        if callable(getattr(retrieval_library, "clone", None))
+        else policy.retrieval_skill_source
+    )
     return replace(
         policy,
         coding_skills=records(getattr(harness, "coding", None), policy.coding_skills),
@@ -152,6 +174,7 @@ def snapshot_policy_skills(
         decision_skills=records(
             getattr(harness, "decision", None), policy.decision_skills
         ),
+        retrieval_skill_source=retrieval_source,
     )
 
 
@@ -698,7 +721,7 @@ class CoEvolutionEngine:
                     "decision": "Coding or Retrieval fields.",
                 }[target]
             )
-        current_policy = asdict(parent)
+        current_policy = parent.to_payload()
         for field_name in ("coding_skills", "retrieval_skills", "decision_skills"):
             current_policy.pop(field_name, None)
         diversity_modes = (
@@ -1483,7 +1506,7 @@ class CoEvolutionEngine:
                     "target": self.config.target,
                     "successive_halving": self._successive_halving_signature(),
                     "next_generation": next_generation,
-                    "incumbent": asdict(incumbent),
+                    "incumbent": incumbent.to_payload(),
                     "history": [asdict(item) for item in history],
                 },
                 indent=2,

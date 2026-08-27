@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import replace
 from types import SimpleNamespace
@@ -17,12 +18,11 @@ from evolving_loop.cli import (
     build_parser,
     inference_command,
 )
-from evolving_loop.co_evolution import HarnessPolicy
+from evolving_loop.co_evolution import HarnessPolicy, snapshot_policy_skills
 from evolving_loop.coding_agent.skill_library import SkillLibrary
 from evolving_loop.data import ContextTask, Task
 from evolving_loop.decision_agent.skill_library import DecisionSkillLibrary
 from evolving_loop.retrieval_agent.skill_library import (
-    RetrievalApplicability,
     RetrievalSkill,
     RetrievalSkillLibrary,
 )
@@ -427,56 +427,81 @@ def test_source_evolution_worker_receives_two_stage_controls_and_fails_closed(
 
 
 def test_harness_factory_replays_complete_versioned_retrieval_skill_history(tmp_path) -> None:
-    def skill(*, stage="both", status="accepted", applicability=None, description="Find windows."):
-        return RetrievalSkill(
-            skill_id="window_skill",
-            version=1,
-            parent_version=None,
-            stage=stage,
-            status=status,
-            name="window_skill",
-            description=description,
-            applicability=applicability or RetrievalApplicability(),
-            query_steps=("Find event boundaries.",),
-            required_chain_fields=("entity", "target"),
-            counterevidence_rule="Search for cancellation.",
-            failure_conditions=("The event is outside the forecast window.",),
-            validated_task_ids=("train_1", "train_2", "train_3"),
-            validated_entities=("north", "south"),
-            validation_smae_gain=0.1,
-            validation_srmse_gain=0.1,
-        )
-
-    version1 = skill()
-    version2 = replace(
-        version1,
-        version=2,
-        parent_version=1,
-        description="Find inclusive event boundaries.",
+    base = {
+        "skill_id": "window_skill",
+        "version": 1,
+        "parent_version": None,
+        "stage": "both",
+        "status": "accepted",
+        "name": "window_skill",
+        "description": "Find windows.",
+        "applicability": {
+            "assumption_kinds": [],
+            "gap_types": [],
+            "temporal_relations": [],
+        },
+        "query_steps": ["Find event boundaries."],
+        "required_chain_fields": ["entity", "target"],
+        "counterevidence_rule": "Search for cancellation.",
+        "failure_conditions": ["The event is outside the forecast window."],
+        "validated_task_ids": ["train_1", "train_2", "train_3"],
+        "validated_entities": ["north", "south"],
+        "validation_smae_gain": 0.1,
+        "validation_srmse_gain": 0.1,
+        "merged_from_skill_ids": [],
+        "quarantine_reason": None,
+    }
+    version2 = {
+        **base,
+        "version": 2,
+        "parent_version": 1,
+        "description": "Find inclusive event boundaries.",
+    }
+    version3 = {
+        **version2,
+        "version": 3,
+        "parent_version": 2,
+        "stage": "round2",
+        "status": "specialized",
+        "applicability": {
+            "assumption_kinds": [],
+            "gap_types": ["missing_window"],
+            "temporal_relations": [],
+        },
+    }
+    version4 = {
+        **version3,
+        "version": 4,
+        "parent_version": 3,
+        "status": "quarantined",
+        "quarantine_reason": "unsafe on ambiguous dates",
+    }
+    genome = replace(RetrievalGenome.seed(), version="v001", parent="v000")
+    release = write_retrieval_release(
+        tmp_path / "releases",
+        genome,
+        skills=(base, version2, version3, version4),
+        audit={
+            "state": "accepted",
+            "train_dev_split_sha256": "1" * 64,
+            "verifier_sha256": "2" * 64,
+            "evaluator_sha256": "3" * 64,
+            "metric_sha256": "4" * 64,
+            "metric_cap": 5.0,
+            "train_summary": {"task_count": 80},
+            "dev_summary": {"task_count": 20},
+            "acceptance_reason": "all gates passed",
+        },
     )
-    version3 = replace(
-        version2,
-        version=3,
-        parent_version=2,
-        stage="round2",
-        status="specialized",
-        applicability=RetrievalApplicability(gap_types=("missing_window",)),
+    source = RetrievalSkillLibrary.from_release(release.path)
+    policy = snapshot_policy_skills(
+        HarnessPolicy(),
+        SimpleNamespace(retrieval=SimpleNamespace(library=source)),
     )
-    version4 = replace(
-        version3,
-        version=4,
-        parent_version=3,
-        status="quarantined",
-        quarantine_reason="unsafe on ambiguous dates",
-    )
-    source = RetrievalSkillLibrary(
-        tmp_path / "source.json",
-        (version1, version2, version3, version4),
-        persist=False,
-    )
-    policy = HarnessPolicy(
-        retrieval_skills=tuple(item.to_payload() for item in source.all())
-    )
+    policy_payload = policy.to_payload()
+    assert "retrieval_skill_source" not in policy_payload
+    assert isinstance(policy.retrieval_skill_source, RetrievalSkillLibrary)
+    json.dumps(policy_payload)
 
     harness = _factory(
         SimpleNamespace(setting="llm_only"),

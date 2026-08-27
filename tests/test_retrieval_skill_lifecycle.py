@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import copy
 import pickle
 from dataclasses import asdict, replace
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +15,11 @@ from evolving_loop.retrieval_agent.skill_library import (
     RetrievalSkillError,
     RetrievalSkillLibrary,
     RetrievalSkillOperation,
+)
+from evolving_loop.retrieval_agent.policy import (
+    RetrievalGenome,
+    RetrievalPolicyError,
+    write_retrieval_release,
 )
 from evolving_loop.retrieval_agent.agent import RetrievalAgent, RetrievalResult
 from common.llm import FakeLLMClient
@@ -31,7 +38,7 @@ def seed_skill(*, skill_id: str = "explicit_window", **overrides: object) -> Ret
         "version": 1,
         "parent_version": None,
         "stage": "both",
-        "status": "accepted",
+        "status": "candidate",
         "name": "explicit_window_search",
         "description": "Find exact event boundaries.",
         "applicability": RetrievalApplicability(
@@ -43,10 +50,10 @@ def seed_skill(*, skill_id: str = "explicit_window", **overrides: object) -> Ret
         "required_chain_fields": ("entity", "target", "start_timestamp", "end_timestamp"),
         "counterevidence_rule": "Search for cancellation.",
         "failure_conditions": ("The event ends before the forecast window.",),
-        "validated_task_ids": ("train_1", "train_2", "train_3"),
-        "validated_entities": ("north", "south"),
-        "validation_smae_gain": 0.1,
-        "validation_srmse_gain": 0.2,
+        "validated_task_ids": (),
+        "validated_entities": (),
+        "validation_smae_gain": None,
+        "validation_srmse_gain": None,
     }
     values.update(overrides)
     return RetrievalSkill(**values)
@@ -81,7 +88,7 @@ def test_load_migrates_legacy_rows_and_saves_typed_schema(tmp_path) -> None:
         )
     )
 
-    library = RetrievalSkillLibrary.load(path)
+    library = RetrievalSkillLibrary.migrate_legacy(path)
 
     skill = library.get_by_id("legacy_window")
     assert skill is not None
@@ -99,6 +106,8 @@ def test_load_migrates_legacy_rows_and_saves_typed_schema(tmp_path) -> None:
     assert saved["schema_version"] == 1
     assert set(saved["skills"][0]) >= {"version", "stage", "status", "query_steps"}
     assert "query_strategy" not in saved["skills"][0]
+    reloaded = RetrievalSkillLibrary.load_verified_checkpoint(path)
+    assert reloaded.get_by_id("legacy_window").status == "accepted"
 
 
 def test_typed_schema_accepts_omitted_default_audit_fields() -> None:
@@ -179,12 +188,319 @@ def _candidate_seed(*, skill_id: str = "explicit_window") -> RetrievalSkill:
     )
 
 
+def _active_payload(
+    *,
+    skill_id: str = "explicit_window",
+    status: str = "accepted",
+    version: int = 1,
+    parent_version: int | None = None,
+    stage: str = "round1",
+    applicability: dict[str, list[str]] | None = None,
+) -> dict[str, object]:
+    return {
+        "skill_id": skill_id,
+        "version": version,
+        "parent_version": parent_version,
+        "stage": stage,
+        "status": status,
+        "name": "explicit_window_search" if skill_id == "explicit_window" else skill_id,
+        "description": "Find exact event boundaries.",
+        "applicability": applicability
+        or {
+            "assumption_kinds": [],
+            "gap_types": [],
+            "temporal_relations": [],
+        },
+        "query_steps": ["Find the named event."],
+        "required_chain_fields": ["entity", "target"],
+        "counterevidence_rule": "Search for cancellation.",
+        "failure_conditions": ["The event is outside the forecast window."],
+        "validated_task_ids": ["train_1", "train_2", "train_3"],
+        "validated_entities": ["north", "south"],
+        "validation_smae_gain": 0.1,
+        "validation_srmse_gain": 0.2,
+        "merged_from_skill_ids": [],
+        "quarantine_reason": None,
+    }
+
+
+def _accepted_audit() -> dict[str, object]:
+    return {
+        "state": "accepted",
+        "train_dev_split_sha256": "1" * 64,
+        "verifier_sha256": "2" * 64,
+        "evaluator_sha256": "3" * 64,
+        "metric_sha256": "4" * 64,
+        "metric_cap": 5.0,
+        "train_summary": {"task_count": 80},
+        "dev_summary": {"task_count": 20},
+        "acceptance_reason": "all immutable Train and Dev gates passed",
+    }
+
+
+def _verified_active_library(
+    root: Path,
+    *,
+    status: str = "accepted",
+    skill_id: str = "explicit_window",
+    stage: str = "round1",
+    applicability: dict[str, list[str]] | None = None,
+) -> RetrievalSkillLibrary:
+    genome = replace(
+        RetrievalGenome.seed(),
+        version="v001",
+        parent="v000",
+        active_skill_ids=(skill_id,),
+    )
+    release = write_retrieval_release(
+        root / "releases",
+        genome,
+        skills=(
+            _active_payload(
+                status=status,
+                skill_id=skill_id,
+                stage=stage,
+                applicability=applicability,
+            ),
+        ),
+        audit=_accepted_audit(),
+    )
+    return RetrievalSkillLibrary.from_release(release.path)
+
+
+def test_public_payload_and_record_constructors_reject_active_status() -> None:
+    payload = _active_payload()
+
+    with pytest.raises(RetrievalSkillError, match="candidate|active|trusted"):
+        RetrievalSkill.from_payload(payload)
+    with pytest.raises(RetrievalSkillError, match="candidate|active|trusted"):
+        RetrievalSkill(**payload)
+    quarantined = {
+        **payload,
+        "status": "quarantined",
+        "quarantine_reason": "caller-created inactive record",
+    }
+    with pytest.raises(RetrievalSkillError, match="candidate|quarantine|transition"):
+        RetrievalSkill.from_payload(quarantined)
+
+
+def test_public_library_constructor_cannot_persist_a_loaded_active_record(tmp_path) -> None:
+    active = _verified_active_library(tmp_path).get_by_id("explicit_window")
+    assert active is not None and active.status == "accepted"
+    destination = tmp_path / "forged.json"
+
+    with pytest.raises(RetrievalSkillError, match="candidate|active|trusted"):
+        RetrievalSkillLibrary(destination, (active,))
+
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("serialization", ("copy", "pickle", "asdict"))
+def test_copied_or_serialized_loaded_active_records_have_no_constructor_authority(
+    tmp_path, serialization
+) -> None:
+    active = _verified_active_library(tmp_path).get_by_id("explicit_window")
+    assert active is not None
+    if serialization == "copy":
+        forged = copy.copy(active)
+    elif serialization == "pickle":
+        forged = pickle.loads(pickle.dumps(active))
+    else:
+        with pytest.raises(RetrievalSkillError, match="candidate|active|trusted"):
+            RetrievalSkill.from_payload(asdict(active))
+        return
+
+    with pytest.raises(RetrievalSkillError, match="candidate|active|trusted"):
+        RetrievalSkillLibrary(tmp_path / f"{serialization}.json", (forged,))
+
+
+def test_current_schema_file_cannot_claim_active_status(tmp_path) -> None:
+    path = tmp_path / "skills.json"
+    candidate = _candidate_seed().to_payload()
+    active = _active_payload(version=2, parent_version=1)
+    skills = [candidate, active]
+
+    def digest(value: object) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "skills": skills,
+        "provenance": {
+            "skills_sha256": digest(skills),
+            "active_records": [
+                {"sha256": digest(active), "origin": "evaluator_promotion"}
+            ],
+        },
+    }), encoding="utf-8")
+
+    with pytest.raises(RetrievalSkillError, match="candidate|active|trusted|provenance"):
+        RetrievalSkillLibrary.load(path)
+    with pytest.raises(RetrievalSkillError, match="checkpoint|provenance|witness|schema"):
+        RetrievalSkillLibrary.load_verified_checkpoint(path)
+
+
+def test_replacing_candidate_library_path_with_active_payload_fails_closed(tmp_path) -> None:
+    path = tmp_path / "skills.json"
+    candidate = _candidate_seed()
+    library = RetrievalSkillLibrary(path, (candidate,))
+    library.save()
+    path.write_text(
+        json.dumps({"schema_version": 1, "skills": [_active_payload()]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RetrievalSkillError, match="candidate|active|trusted|provenance"):
+        RetrievalSkillLibrary.load(path)
+
+    assert library.get_by_id(candidate.skill_id) == candidate
+
+
+def test_verified_release_hydrates_active_and_specialized_histories(tmp_path) -> None:
+    accepted = _active_payload()
+    specialized = _active_payload(
+        status="specialized", version=2, parent_version=1
+    )
+    genome = replace(
+        RetrievalGenome.seed(),
+        version="v001",
+        parent="v000",
+        active_skill_ids=("explicit_window",),
+    )
+    release = write_retrieval_release(
+        tmp_path / "releases",
+        genome,
+        skills=(accepted, specialized),
+        audit=_accepted_audit(),
+    )
+
+    library = RetrievalSkillLibrary.from_release(release.path)
+
+    assert [skill.status for skill in library.history("explicit_window")] == [
+        "accepted",
+        "specialized",
+    ]
+    assert [skill.skill_id for skill in library.for_stage("round1")] == [
+        "explicit_window"
+    ]
+
+
+def test_verified_release_factory_rechecks_file_hashes_at_hydration(tmp_path) -> None:
+    library = _verified_active_library(tmp_path)
+    release_path = next((tmp_path / "releases").iterdir())
+    skills_path = release_path / "skills.json"
+    skills_path.write_text("[]\n", encoding="utf-8")
+
+    with pytest.raises(RetrievalPolicyError, match="skills hash"):
+        RetrievalSkillLibrary.from_release(release_path)
+
+    assert library.get_by_id("explicit_window").status == "accepted"
+
+
+def test_legacy_migration_is_explicit_and_requires_both_historical_metrics(
+    tmp_path,
+) -> None:
+    public_legacy_record = RetrievalSkill(
+        "public_legacy",
+        name="public_legacy",
+        description="Caller-created legacy-shaped row.",
+        applicability="scheduled event",
+        query_strategy="Find the event window.",
+        verification_rule="Require a quote.",
+        created_from_task="train_0",
+        validation_smae=0.1,
+        validation_srmse=0.2,
+    )
+    assert public_legacy_record.status == "candidate"
+    path = tmp_path / "legacy.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "skill_id": "validated_legacy",
+                    "name": "validated_legacy",
+                    "description": "Historical validated strategy.",
+                    "applicability": "scheduled event",
+                    "query_strategy": "Find the event window.",
+                    "verification_rule": "Require a quote.",
+                    "created_from_task": "train_1",
+                    "validation_smae": 0.1,
+                    "validation_srmse": 0.2,
+                },
+                {
+                    "skill_id": "partial_legacy",
+                    "name": "partial_legacy",
+                    "description": "Only one historical metric.",
+                    "applicability": "scheduled event",
+                    "query_strategy": "Find the event window.",
+                    "verification_rule": "Require a quote.",
+                    "created_from_task": "train_2",
+                    "validation_smae": 0.1,
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RetrievalSkillError, match="legacy|migration"):
+        RetrievalSkillLibrary.load(path)
+
+    library = RetrievalSkillLibrary.migrate_legacy(path)
+
+    assert library.get_by_id("validated_legacy").status == "accepted"
+    assert library.get_by_id("partial_legacy").status == "candidate"
+    with pytest.raises(RetrievalSkillError, match="legacy|typed|schema"):
+        typed_path = tmp_path / "typed-list.json"
+        typed_path.write_text(json.dumps([_active_payload()]), encoding="utf-8")
+        RetrievalSkillLibrary.migrate_legacy(typed_path)
+
+
+def test_clone_preserves_verified_active_history_without_generalizing_constructor(
+    tmp_path,
+) -> None:
+    library = _verified_active_library(tmp_path)
+
+    clone = library.clone(persist=False)
+
+    assert clone.all() == library.all()
+    assert clone.for_stage("round1") == library.for_stage("round1")
+    with pytest.raises(RetrievalSkillError, match="candidate|active|trusted"):
+        RetrievalSkillLibrary(tmp_path / "copy.json", clone.all())
+
+
+def test_verified_source_replays_only_the_exact_skill_history(tmp_path) -> None:
+    library = _verified_active_library(tmp_path)
+
+    replay = library.replay_snapshot(library.all())
+
+    assert replay.all() == library.all()
+    assert replay.for_stage("round1") == library.for_stage("round1")
+    changed = copy.copy(library.all()[0])
+    object.__setattr__(changed, "description", "caller changed the active row")
+    with pytest.raises(RetrievalSkillError, match="verified|absent|history"):
+        library.replay_snapshot((changed,))
+
+
 @pytest.mark.parametrize("operation_kind", ("add", "repair", "specialize", "merge"))
 def test_public_skill_mutations_cannot_create_active_status(tmp_path, operation_kind) -> None:
     first = _candidate_seed()
     second = _candidate_seed(skill_id="explicit_recovery")
     library = RetrievalSkillLibrary(tmp_path / "skills.json", (first, second))
-    forged = seed_skill()
+    forged_id = "forged_merge" if operation_kind == "merge" else "explicit_window"
+    forged_status = "specialized" if operation_kind == "specialize" else "accepted"
+    forged = _verified_active_library(
+        tmp_path / "trusted",
+        status=forged_status,
+        skill_id=forged_id,
+    ).get_by_id(forged_id)
+    assert forged is not None
     if operation_kind == "add":
         action = lambda: library.add(forged)
     elif operation_kind == "repair":
@@ -192,20 +508,10 @@ def test_public_skill_mutations_cannot_create_active_status(tmp_path, operation_
             (RetrievalSkillOperation.repair(first.skill_id, forged),)
         )
     elif operation_kind == "specialize":
-        forged = replace(
-            forged,
-            status="specialized",
-            applicability=RetrievalApplicability(
-                assumption_kinds=("future_event",),
-                gap_types=("missing_window",),
-                temporal_relations=("overlaps_future",),
-            ),
-        )
         action = lambda: library.apply_operations(
             (RetrievalSkillOperation.specialize(first.skill_id, forged),)
         )
     else:
-        forged = seed_skill(skill_id="forged_merge")
         action = lambda: library.apply_operations(
             (
                 RetrievalSkillOperation.merge(
@@ -221,12 +527,13 @@ def test_public_skill_mutations_cannot_create_active_status(tmp_path, operation_
 
 def test_copied_or_serialized_active_records_cannot_bypass_public_repair(tmp_path) -> None:
     candidate = _candidate_seed()
-    active = seed_skill()
+    active = _verified_active_library(tmp_path / "trusted").get_by_id(
+        "explicit_window"
+    )
+    assert active is not None
     forged_records = (
-        replace(candidate, status="accepted", validation_smae_gain=0.9, validation_srmse_gain=0.9),
         copy.copy(active),
         pickle.loads(pickle.dumps(active)),
-        RetrievalSkill.from_payload(asdict(active)),
     )
     forged_operation = replace(
         RetrievalSkillOperation.repair(candidate.skill_id, candidate),
@@ -251,8 +558,12 @@ def test_rejected_active_forgery_cannot_survive_save_and_reload(tmp_path) -> Non
     candidate = _candidate_seed()
     library = RetrievalSkillLibrary(path, (candidate,))
 
+    active = _verified_active_library(tmp_path / "trusted").get_by_id(
+        "explicit_window"
+    )
+    assert active is not None
     with pytest.raises(RetrievalSkillError, match="candidate|active|trusted"):
-        library.add(seed_skill())
+        library.add(active)
     library.save()
     reloaded = RetrievalSkillLibrary.load(path)
 
@@ -262,8 +573,24 @@ def test_rejected_active_forgery_cannot_survive_save_and_reload(tmp_path) -> Non
 
 def test_loaded_legacy_active_skill_is_usable_but_not_publicly_revalidated(tmp_path) -> None:
     path = tmp_path / "skills.json"
-    path.write_text(json.dumps([seed_skill().to_payload()]))
-    library = RetrievalSkillLibrary.load(path)
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "skill_id": "explicit_window",
+                    "name": "explicit_window_search",
+                    "description": "Find exact event boundaries.",
+                    "applicability": "scheduled event",
+                    "query_strategy": "Find the named event.",
+                    "verification_rule": "Search for cancellation.",
+                    "created_from_task": "train_1",
+                    "validation_smae": 0.1,
+                    "validation_srmse": 0.2,
+                }
+            ]
+        )
+    )
+    library = RetrievalSkillLibrary.migrate_legacy(path)
 
     assert library.for_stage(
         "round1",
@@ -271,9 +598,11 @@ def test_loaded_legacy_active_skill_is_usable_but_not_publicly_revalidated(tmp_p
         gap_types=("missing_window",),
         temporal_relations=("overlaps_future",),
     )
+    active = library.get_by_id("explicit_window")
+    assert active is not None
     with pytest.raises(RetrievalSkillError, match="candidate|active|trusted"):
         library.apply_operations(
-            (RetrievalSkillOperation.repair("explicit_window", seed_skill()),)
+            (RetrievalSkillOperation.repair("explicit_window", active),)
         )
 
     library.apply_operations(
@@ -310,6 +639,8 @@ def test_quarantine_then_reactivation_versions_the_same_skill(tmp_path) -> None:
         (RetrievalSkillOperation.quarantine("explicit_window", "unsafe quote rule"),)
     )
     assert library.get_by_id("explicit_window").status == "quarantined"
+    reloaded = RetrievalSkillLibrary.load(library.path)
+    assert reloaded.get_by_id("explicit_window").status == "quarantined"
 
     library.apply_operations(
         (RetrievalSkillOperation.repair("explicit_window", seed_skill(status="candidate")),)
@@ -336,18 +667,31 @@ def test_skill_operations_are_atomic_and_non_destructive(tmp_path) -> None:
 
 def test_prompt_projection_is_stage_and_applicability_filtered_and_clone_is_read_only(tmp_path) -> None:
     path = tmp_path / "skills.json"
-    library = RetrievalSkillLibrary(
-        path,
-        [
-            seed_skill(stage="round1"),
-            seed_skill(
+    genome = replace(
+        RetrievalGenome.seed(),
+        version="v001",
+        parent="v000",
+        active_skill_ids=("explicit_window", "round2_only"),
+    )
+    release = write_retrieval_release(
+        tmp_path / "projection-release",
+        genome,
+        skills=(
+            _active_payload(skill_id="explicit_window", stage="round1"),
+            _active_payload(
                 skill_id="round2_only",
                 stage="round2",
-                applicability=RetrievalApplicability(gap_types=("missing_window",)),
+                applicability={
+                    "assumption_kinds": [],
+                    "gap_types": ["missing_window"],
+                    "temporal_relations": [],
+                },
             ),
-            seed_skill(skill_id="candidate", status="candidate"),
-        ],
+            seed_skill(skill_id="candidate").to_payload(),
+        ),
+        audit=_accepted_audit(),
     )
+    library = RetrievalSkillLibrary.from_release(release.path)
 
     assert [
         skill.skill_id
@@ -373,8 +717,13 @@ def test_constrained_applicability_fails_closed_without_runtime_context(tmp_path
         gap_types=("missing_window",),
         temporal_relations=("overlaps_future",),
     )
-    library = RetrievalSkillLibrary(
-        tmp_path / "skills.json", [seed_skill(applicability=applicability)]
+    library = _verified_active_library(
+        tmp_path,
+        applicability={
+            "assumption_kinds": ["future_event"],
+            "gap_types": ["missing_window"],
+            "temporal_relations": ["overlaps_future"],
+        },
     )
 
     assert applicability.matches() is False
@@ -392,14 +741,14 @@ def test_constrained_applicability_fails_closed_without_runtime_context(tmp_path
 
 
 def test_legacy_agent_projects_round_two_skills_with_prior_gap_context(tmp_path) -> None:
-    library = RetrievalSkillLibrary(
-        tmp_path / "skills.json",
-        [
-            seed_skill(
-                stage="round2",
-                applicability=RetrievalApplicability(gap_types=("missing_window",)),
-            )
-        ],
+    library = _verified_active_library(
+        tmp_path,
+        stage="round2",
+        applicability={
+            "assumption_kinds": [],
+            "gap_types": ["missing_window"],
+            "temporal_relations": [],
+        },
     )
     agent = RetrievalAgent(
         FakeLLMClient(
