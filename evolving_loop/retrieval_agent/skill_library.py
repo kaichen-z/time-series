@@ -689,7 +689,7 @@ def _open_artifact_directory_entry(
     name: str,
     *,
     create: bool,
-) -> tuple[int, bool]:
+) -> tuple[int, bool, tuple[int, int]]:
     if Path(name).name != name or name in {"", ".", ".."}:
         raise RetrievalSkillError("invalid retrieval Skill artifact directory name")
     created = False
@@ -699,24 +699,86 @@ def _open_artifact_directory_entry(
             created = True
         except FileExistsError:
             pass
+    try:
+        entry = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except OSError as error:
+        raise RetrievalSkillError(
+            "cannot inspect retrieval Skill artifact directory"
+        ) from error
+    identity = (entry.st_dev, entry.st_ino)
+    if not stat.S_ISDIR(entry.st_mode):
+        raise RetrievalSkillError(
+            "retrieval Skill artifact parent is not a directory"
+        )
     flags = (
         os.O_RDONLY
         | getattr(os, "O_DIRECTORY", 0)
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_CLOEXEC", 0)
     )
+    descriptor: int | None = None
     try:
         descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode) or (
+            metadata.st_dev,
+            metadata.st_ino,
+        ) != identity:
+            raise RetrievalSkillError(
+                "retrieval Skill artifact directory changed while opening"
+            )
     except OSError as error:
+        if descriptor is not None:
+            os.close(descriptor)
+        cleanup_error: OSError | None = None
+        if created:
+            for _attempt in range(2):
+                try:
+                    _remove_owned_empty_artifact_directory(
+                        parent_descriptor, name, identity
+                    )
+                    cleanup_error = None
+                    break
+                except OSError as candidate:
+                    cleanup_error = candidate
+        if cleanup_error is not None:
+            raise RetrievalSkillError(
+                "retrieval Skill artifact directory cleanup failed"
+            ) from cleanup_error
         raise RetrievalSkillError(
             "cannot open retrieval Skill artifact directory"
         ) from error
-    if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
-        os.close(descriptor)
-        raise RetrievalSkillError(
-            "retrieval Skill artifact parent is not a directory"
-        )
-    return descriptor, created
+    except Exception:
+        if descriptor is not None:
+            os.close(descriptor)
+        if created:
+            for _attempt in range(2):
+                try:
+                    _remove_owned_empty_artifact_directory(
+                        parent_descriptor, name, identity
+                    )
+                    break
+                except OSError:
+                    continue
+        raise
+    return descriptor, created, identity
+
+
+def _remove_owned_empty_artifact_directory(
+    parent_descriptor: int,
+    name: str,
+    identity: tuple[int, int],
+) -> None:
+    try:
+        metadata = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or (metadata.st_dev, metadata.st_ino) != identity
+    ):
+        return
+    os.rmdir(name, dir_fd=parent_descriptor)
 
 
 def _read_optional_artifact_entry(
@@ -726,6 +788,39 @@ def _read_optional_artifact_entry(
         return _read_artifact_entry(parent_descriptor, name)
     except FileNotFoundError:
         return None
+
+
+def _read_optional_artifact_entry_snapshot(
+    parent_descriptor: int, name: str
+) -> tuple[tuple[int, int], bytes] | None:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor, "rb") as handle:
+        metadata = os.fstat(handle.fileno())
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RetrievalSkillError(
+                "retrieval Skill checkpoint is not a regular file"
+            )
+        return (metadata.st_dev, metadata.st_ino), handle.read()
+
+
+def _unlink_owned_artifact_entry(
+    parent_descriptor: int,
+    name: str,
+    identity: tuple[int, int],
+    encoded: bytes,
+) -> None:
+    current = _read_optional_artifact_entry_snapshot(parent_descriptor, name)
+    if current is None or current != (identity, encoded):
+        return
+    os.unlink(name, dir_fd=parent_descriptor)
 
 
 def _replace_artifact_entry_bytes(
@@ -1514,8 +1609,9 @@ class RetrievalSkillLibrary:
         witness_directory_name: str | None = None
         witness_parent_descriptor: int | None = None
         witness_temporary: str | None = None
-        witness_created = False
+        witness_identity: tuple[int, int] | None = None
         witness_directory_created = False
+        witness_directory_identity: tuple[int, int] | None = None
         previous_witness_name: str | None = None
         previous_witness_encoded: bytes | None = None
         write_succeeded = False
@@ -1561,14 +1657,6 @@ class RetrievalSkillLibrary:
                     origins,
                 )
                 witness_directory_name = witness_path.parent.name
-                (
-                    witness_parent_descriptor,
-                    witness_directory_created,
-                ) = _open_artifact_directory_entry(
-                    parent_descriptor,
-                    witness_directory_name,
-                    create=True,
-                )
                 expects_previous_witness = (
                     self._file_sha256 is not None
                     and _operation != "legacy_operator_migration"
@@ -1585,6 +1673,18 @@ class RetrievalSkillLibrary:
                         previous_skills_payload,
                         self._active_record_origins,
                     )
+                (
+                    witness_parent_descriptor,
+                    witness_directory_created,
+                    opened_witness_directory_identity,
+                ) = _open_artifact_directory_entry(
+                    parent_descriptor,
+                    witness_directory_name,
+                    create=True,
+                )
+                if witness_directory_created:
+                    witness_directory_identity = opened_witness_directory_identity
+                if expects_previous_witness:
                     _revalidate_artifact_parent(
                         witness_path, witness_parent_descriptor
                     )
@@ -1606,6 +1706,22 @@ class RetrievalSkillLibrary:
                     witness_path.name,
                     witness_encoded,
                 )
+                temporary_snapshot = _read_optional_artifact_entry_snapshot(
+                    witness_parent_descriptor,
+                    witness_temporary,
+                )
+                if (
+                    temporary_snapshot is None
+                    or temporary_snapshot[1] != witness_encoded
+                ):
+                    raise RetrievalSkillError(
+                        "retrieval Skill checkpoint witness temporary changed"
+                    )
+                proposed_witness_identity = temporary_snapshot[0]
+                witness_before_link = _read_optional_artifact_entry_snapshot(
+                    witness_parent_descriptor,
+                    witness_path.name,
+                )
                 try:
                     _revalidate_artifact_parent(
                         witness_path, witness_parent_descriptor
@@ -1618,17 +1734,29 @@ class RetrievalSkillLibrary:
                             dst_dir_fd=witness_parent_descriptor,
                             follow_symlinks=False,
                         )
-                        witness_created = True
-                    except FileExistsError:
+                    except Exception as link_error:
+                        linked_snapshot = _read_optional_artifact_entry_snapshot(
+                            witness_parent_descriptor,
+                            witness_path.name,
+                        )
                         if (
-                            _read_artifact_entry(
-                                witness_parent_descriptor, witness_path.name
-                            )
-                            != witness_encoded
+                            witness_before_link is None
+                            and linked_snapshot
+                            == (proposed_witness_identity, witness_encoded)
+                        ):
+                            witness_identity = proposed_witness_identity
+                            raise
+                        if not isinstance(link_error, FileExistsError):
+                            raise
+                        if (
+                            linked_snapshot is None
+                            or linked_snapshot[1] != witness_encoded
                         ):
                             raise RetrievalSkillError(
                                 "immutable Retrieval Skill checkpoint witness changed"
                             )
+                    else:
+                        witness_identity = proposed_witness_identity
                 finally:
                     if witness_temporary is not None:
                         try:
@@ -1781,18 +1909,18 @@ class RetrievalSkillLibrary:
                     )
 
                 if (
-                    witness_created
+                    witness_identity is not None
                     and witness_path is not None
+                    and witness_encoded is not None
                     and witness_parent_descriptor is not None
                     and witness_path.name != previous_witness_name
                 ):
-                    try:
-                        os.unlink(
-                            witness_path.name,
-                            dir_fd=witness_parent_descriptor,
-                        )
-                    except FileNotFoundError:
-                        pass
+                    _unlink_owned_artifact_entry(
+                        witness_parent_descriptor,
+                        witness_path.name,
+                        witness_identity,
+                        witness_encoded,
+                    )
                     os.fsync(witness_parent_descriptor)
 
                 parent_is_current = True
@@ -1810,7 +1938,7 @@ class RetrievalSkillLibrary:
                         )
                     )
                 ):
-                    visible_witness_descriptor, _created = (
+                    visible_witness_descriptor, _created, _identity = (
                         _open_artifact_directory_entry(
                             parent_descriptor,
                             witness_directory_name,
@@ -1819,17 +1947,17 @@ class RetrievalSkillLibrary:
                     )
                     try:
                         if (
-                            witness_created
+                            witness_identity is not None
                             and witness_path is not None
+                            and witness_encoded is not None
                             and witness_path.name != previous_witness_name
                         ):
-                            try:
-                                os.unlink(
-                                    witness_path.name,
-                                    dir_fd=visible_witness_descriptor,
-                                )
-                            except FileNotFoundError:
-                                pass
+                            _unlink_owned_artifact_entry(
+                                visible_witness_descriptor,
+                                witness_path.name,
+                                witness_identity,
+                                witness_encoded,
+                            )
                         if (
                             previous_witness_name is not None
                             and previous_witness_encoded is not None
@@ -1858,6 +1986,16 @@ class RetrievalSkillLibrary:
                         os.fsync(visible_witness_descriptor)
                     finally:
                         os.close(visible_witness_descriptor)
+                if (
+                    witness_directory_created
+                    and witness_directory_name is not None
+                    and witness_directory_identity is not None
+                ):
+                    _remove_owned_empty_artifact_directory(
+                        parent_descriptor,
+                        witness_directory_name,
+                        witness_directory_identity,
+                    )
                 os.fsync(parent_descriptor)
             except Exception as rollback_error:
                 raise RetrievalSkillError(
@@ -1883,13 +2021,37 @@ class RetrievalSkillLibrary:
                     )
                 except FileNotFoundError:
                     pass
+            if (
+                not write_succeeded
+                and witness_identity is not None
+                and witness_path is not None
+                and witness_encoded is not None
+                and witness_parent_descriptor is not None
+                and witness_path.name != previous_witness_name
+            ):
+                try:
+                    _unlink_owned_artifact_entry(
+                        witness_parent_descriptor,
+                        witness_path.name,
+                        witness_identity,
+                        witness_encoded,
+                    )
+                    os.fsync(witness_parent_descriptor)
+                except OSError:
+                    pass
             if witness_parent_descriptor is not None:
                 os.close(witness_parent_descriptor)
-            if not write_succeeded and witness_directory_created:
+            if (
+                not write_succeeded
+                and witness_directory_created
+                and witness_directory_name is not None
+                and witness_directory_identity is not None
+            ):
                 try:
-                    os.rmdir(
-                        f".{safe_path.name}.provenance",
-                        dir_fd=parent_descriptor,
+                    _remove_owned_empty_artifact_directory(
+                        parent_descriptor,
+                        witness_directory_name,
+                        witness_directory_identity,
                     )
                 except OSError:
                     pass

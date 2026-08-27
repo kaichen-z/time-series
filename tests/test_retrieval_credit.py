@@ -840,6 +840,148 @@ def test_first_active_publication_rolls_back_main_link_that_committed_then_faile
     ]
 
 
+def test_first_active_publication_open_failure_removes_owned_witness_directory(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "skills.json"
+    provenance_name = f".{path.name}.provenance"
+    library = RetrievalSkillLibrary(path, (_candidate_skill(),))
+    task_results = tuple(
+        _promotion_task_result(index, entity)
+        for index, entity in enumerate(("Alpha", "Alpha", "Beta"), start=1)
+    )
+    real_open = skill_library_module.os.open
+    open_failed = False
+
+    def fail_witness_directory_open(file, flags, mode=0o777, *, dir_fd=None):
+        nonlocal open_failed
+        if file == provenance_name and dir_fd is not None:
+            open_failed = True
+            raise OSError("witness directory open failed")
+        return real_open(file, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(
+        skill_library_module.os, "open", fail_witness_directory_open
+    )
+
+    with pytest.raises(RetrievalSkillError, match="open|directory"):
+        _evaluate_and_promote_retrieval_skills(
+            library, task_results, split="train"
+        )
+
+    assert open_failed
+    assert tuple(tmp_path.iterdir()) == ()
+
+
+def test_first_active_publication_rolls_back_witness_link_that_committed_then_failed(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "skills.json"
+    library = RetrievalSkillLibrary(path, (_candidate_skill(),))
+    task_results = tuple(
+        _promotion_task_result(index, entity)
+        for index, entity in enumerate(("Alpha", "Alpha", "Beta"), start=1)
+    )
+    real_link = skill_library_module.os.link
+    witness_linked = False
+
+    def fail_after_witness_link(source, destination, *args, **kwargs):
+        nonlocal witness_linked
+        result = real_link(source, destination, *args, **kwargs)
+        if destination != path.name:
+            witness_linked = True
+            raise OSError("witness link failed after publication")
+        return result
+
+    monkeypatch.setattr(skill_library_module.os, "link", fail_after_witness_link)
+
+    with pytest.raises(OSError, match="witness link failed after publication"):
+        _evaluate_and_promote_retrieval_skills(
+            library, task_results, split="train"
+        )
+
+    assert witness_linked
+    assert tuple(tmp_path.iterdir()) == ()
+
+
+def test_first_active_publication_retries_transient_witness_cleanup_without_orphans(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "skills.json"
+    library = RetrievalSkillLibrary(path, (_candidate_skill(),))
+    task_results = tuple(
+        _promotion_task_result(index, entity)
+        for index, entity in enumerate(("Alpha", "Alpha", "Beta"), start=1)
+    )
+    real_link = skill_library_module.os.link
+    real_unlink = skill_library_module.os.unlink
+    cleanup_failures = 0
+
+    def fail_after_witness_link(source, destination, *args, **kwargs):
+        result = real_link(source, destination, *args, **kwargs)
+        if destination != path.name:
+            raise OSError("witness link failed after publication")
+        return result
+
+    def fail_first_witness_cleanup(name, *args, **kwargs):
+        nonlocal cleanup_failures
+        if str(name).endswith(".json") and cleanup_failures == 0:
+            cleanup_failures += 1
+            raise OSError("transient witness cleanup failure")
+        return real_unlink(name, *args, **kwargs)
+
+    monkeypatch.setattr(skill_library_module.os, "link", fail_after_witness_link)
+    monkeypatch.setattr(skill_library_module.os, "unlink", fail_first_witness_cleanup)
+
+    with pytest.raises(RetrievalSkillError, match="rollback"):
+        _evaluate_and_promote_retrieval_skills(
+            library, task_results, split="train"
+        )
+
+    assert cleanup_failures == 1
+    assert tuple(tmp_path.iterdir()) == ()
+
+
+def test_first_active_publication_retries_transient_directory_cleanup_without_orphans(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "skills.json"
+    provenance_name = f".{path.name}.provenance"
+    library = RetrievalSkillLibrary(path, (_candidate_skill(),))
+    task_results = tuple(
+        _promotion_task_result(index, entity)
+        for index, entity in enumerate(("Alpha", "Alpha", "Beta"), start=1)
+    )
+    real_open = skill_library_module.os.open
+    real_rmdir = skill_library_module.os.rmdir
+    cleanup_failures = 0
+
+    def fail_witness_directory_open(file, flags, mode=0o777, *, dir_fd=None):
+        if file == provenance_name and dir_fd is not None:
+            raise OSError("witness directory open failed")
+        return real_open(file, flags, mode, dir_fd=dir_fd)
+
+    def fail_first_directory_cleanup(name, *args, **kwargs):
+        nonlocal cleanup_failures
+        if name == provenance_name and cleanup_failures == 0:
+            cleanup_failures += 1
+            raise OSError("transient directory cleanup failure")
+        return real_rmdir(name, *args, **kwargs)
+
+    monkeypatch.setattr(
+        skill_library_module.os, "open", fail_witness_directory_open
+    )
+    monkeypatch.setattr(skill_library_module.os, "rmdir", fail_first_directory_cleanup)
+
+    with pytest.raises(RetrievalSkillError, match="open|directory|rollback"):
+        _evaluate_and_promote_retrieval_skills(
+            library, task_results, split="train"
+        )
+
+    assert cleanup_failures == 1
+    assert tuple(tmp_path.iterdir()) == ()
+
+
 def test_no_public_evidence_row_api_can_authorize_promotion(tmp_path) -> None:
     for name in (
         "promote_retrieval_skills",

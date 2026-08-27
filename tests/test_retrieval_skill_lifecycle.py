@@ -271,6 +271,33 @@ def _verified_active_library(
     return RetrievalSkillLibrary.from_release(release.path)
 
 
+def _operator_active_checkpoint(
+    root: Path,
+) -> tuple[Path, RetrievalSkillLibrary]:
+    library_directory = root / "library"
+    library_directory.mkdir()
+    path = library_directory / "skills.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "skill_id": "historical_skill",
+                    "name": "historical_skill",
+                    "description": "Operator-approved historical strategy.",
+                    "applicability": "scheduled event",
+                    "query_strategy": "Find the event window.",
+                    "verification_rule": "Require an exact quote.",
+                    "created_from_task": "train_1",
+                    "validation_smae": 0.1,
+                    "validation_srmse": 0.2,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path, _migrate_legacy_for_operator(path)
+
+
 def test_public_payload_and_record_constructors_reject_active_status() -> None:
     payload = _active_payload()
 
@@ -1103,6 +1130,183 @@ def test_active_checkpoint_bundle_rolls_back_each_replaced_witness_commit_phase(
     assert (current.version, current.status) == (1, "accepted")
     reloaded = RetrievalSkillLibrary.load_verified_checkpoint(path)
     assert reloaded.get_by_id("historical_skill") == current
+    assert not [
+        artifact
+        for artifact in tmp_path.rglob("*")
+        if artifact.name.endswith(".tmp")
+    ]
+
+
+def test_active_checkpoint_update_rolls_back_witness_link_that_committed_then_failed(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, library = _operator_active_checkpoint(tmp_path)
+    before = path.read_bytes()
+    provenance = path.parent / f".{path.name}.provenance"
+    before_witnesses = {
+        witness.name: witness.read_bytes() for witness in provenance.iterdir()
+    }
+    assert len(before_witnesses) == 1
+    real_link = skill_library_module.os.link
+    witness_linked = False
+
+    def fail_after_witness_link(source, destination, *args, **kwargs):
+        nonlocal witness_linked
+        result = real_link(source, destination, *args, **kwargs)
+        if destination != path.name:
+            witness_linked = True
+            raise OSError("witness link failed after update publication")
+        return result
+
+    monkeypatch.setattr(skill_library_module.os, "link", fail_after_witness_link)
+
+    with pytest.raises(OSError, match="failed after update publication"):
+        library.apply_operations(
+            (
+                RetrievalSkillOperation.quarantine(
+                    "historical_skill", "unsafe historical strategy"
+                ),
+            )
+        )
+
+    assert witness_linked
+    assert path.read_bytes() == before
+    assert {
+        witness.name: witness.read_bytes() for witness in provenance.iterdir()
+    } == before_witnesses
+    current = library.get_by_id("historical_skill")
+    assert current is not None
+    assert (current.version, current.status) == (1, "accepted")
+    assert RetrievalSkillLibrary.load_verified_checkpoint(path).all() == library.all()
+    assert not [
+        artifact
+        for artifact in tmp_path.rglob("*")
+        if artifact.name.endswith(".tmp")
+    ]
+
+
+def test_active_checkpoint_rollback_preserves_preexisting_identical_witness(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, library = _operator_active_checkpoint(tmp_path)
+    before = path.read_bytes()
+    provenance = path.parent / f".{path.name}.provenance"
+    prior_witness_names = {witness.name for witness in provenance.iterdir()}
+    assert len(prior_witness_names) == 1
+    real_link = skill_library_module.os.link
+    real_replace = skill_library_module.os.replace
+    preexisting_name: str | None = None
+    preexisting_identity: tuple[int, int] | None = None
+    preexisting_bytes: bytes | None = None
+
+    def collide_with_identical_witness(source, destination, *args, **kwargs):
+        nonlocal preexisting_name, preexisting_identity, preexisting_bytes
+        if destination != path.name:
+            source_path = provenance / str(source)
+            target_path = provenance / str(destination)
+            preexisting_bytes = source_path.read_bytes()
+            target_path.write_bytes(preexisting_bytes)
+            metadata = target_path.stat()
+            preexisting_name = target_path.name
+            preexisting_identity = (metadata.st_dev, metadata.st_ino)
+            raise FileExistsError("pre-existing identical witness")
+        return real_link(source, destination, *args, **kwargs)
+
+    def fail_main_replace(source, destination, *args, **kwargs):
+        if destination == path.name:
+            raise OSError("main update failed")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(
+        skill_library_module.os, "link", collide_with_identical_witness
+    )
+    monkeypatch.setattr(skill_library_module.os, "replace", fail_main_replace)
+
+    with pytest.raises(OSError, match="main update failed"):
+        library.apply_operations(
+            (
+                RetrievalSkillOperation.quarantine(
+                    "historical_skill", "unsafe historical strategy"
+                ),
+            )
+        )
+
+    assert preexisting_name is not None
+    assert preexisting_identity is not None
+    assert preexisting_bytes is not None
+    preexisting = provenance / preexisting_name
+    metadata = preexisting.stat()
+    assert (metadata.st_dev, metadata.st_ino) == preexisting_identity
+    assert preexisting.read_bytes() == preexisting_bytes
+    assert {witness.name for witness in provenance.iterdir()} == (
+        prior_witness_names | {preexisting_name}
+    )
+    assert path.read_bytes() == before
+    assert RetrievalSkillLibrary.load_verified_checkpoint(path).all() == library.all()
+    assert not [
+        artifact
+        for artifact in tmp_path.rglob("*")
+        if artifact.name.endswith(".tmp")
+    ]
+
+
+def test_failed_witness_link_uses_held_directory_to_remove_only_owned_inode(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, library = _operator_active_checkpoint(tmp_path)
+    before = path.read_bytes()
+    provenance = path.parent / f".{path.name}.provenance"
+    prior_witness_names = {witness.name for witness in provenance.iterdir()}
+    assert len(prior_witness_names) == 1
+    displaced = tmp_path / "displaced-provenance"
+    replacement = tmp_path / "replacement-provenance"
+    replacement.mkdir()
+    real_link = skill_library_module.os.link
+    new_witness_name: str | None = None
+    foreign_identity: tuple[int, int] | None = None
+    foreign_bytes: bytes | None = None
+
+    def replace_directory_after_witness_link(source, destination, *args, **kwargs):
+        nonlocal new_witness_name, foreign_identity, foreign_bytes
+        result = real_link(source, destination, *args, **kwargs)
+        if destination != path.name:
+            new_witness_name = str(destination)
+            foreign_bytes = (provenance / str(source)).read_bytes()
+            provenance.rename(displaced)
+            replacement.rename(provenance)
+            foreign = provenance / new_witness_name
+            foreign.write_bytes(foreign_bytes)
+            metadata = foreign.stat()
+            foreign_identity = (metadata.st_dev, metadata.st_ino)
+            raise OSError("witness link failed after directory replacement")
+        return result
+
+    monkeypatch.setattr(
+        skill_library_module.os, "link", replace_directory_after_witness_link
+    )
+
+    with pytest.raises(OSError, match="failed after directory replacement"):
+        library.apply_operations(
+            (
+                RetrievalSkillOperation.quarantine(
+                    "historical_skill", "unsafe historical strategy"
+                ),
+            )
+        )
+
+    assert new_witness_name is not None
+    assert foreign_identity is not None
+    assert foreign_bytes is not None
+    assert {witness.name for witness in displaced.iterdir()} == prior_witness_names
+    foreign = provenance / new_witness_name
+    metadata = foreign.stat()
+    assert (metadata.st_dev, metadata.st_ino) == foreign_identity
+    assert foreign.read_bytes() == foreign_bytes
+    assert {witness.name for witness in provenance.iterdir()} == (
+        prior_witness_names | {new_witness_name}
+    )
+    assert path.read_bytes() == before
+    assert RetrievalSkillLibrary.load_verified_checkpoint(path).all() == library.all()
     assert not [
         artifact
         for artifact in tmp_path.rglob("*")
