@@ -504,8 +504,10 @@ def _checkpoint_authority_key(path: Path, checkpoint_sha256: str) -> tuple[str, 
 
 def _build_skill_authority_boundary():
     """Keep active authority outside serializable Skill and artifact state."""
-    authorized_checkpoints: set[tuple[str, str]] = set()
-    authorized_libraries: weakref.WeakSet[object] = weakref.WeakSet()
+    current_checkpoints: dict[str, tuple[str, int]] = {}
+    authorized_libraries: weakref.WeakKeyDictionary[
+        object, tuple[object, ...]
+    ] = weakref.WeakKeyDictionary()
     outstanding: dict[int, tuple[object, str, object]] = {}
 
     def consume(capability: object | None, operation: str, target: object) -> None:
@@ -529,11 +531,34 @@ def _build_skill_authority_boundary():
             outstanding.pop(id(capability), None)
 
     def register_checkpoint(library: object, checkpoint_sha256: str | None) -> None:
-        authorized_libraries.add(library)
-        if checkpoint_sha256 is not None:
-            authorized_checkpoints.add(
-                _checkpoint_authority_key(library.path, checkpoint_sha256)
+        if checkpoint_sha256 is None:
+            authorized_libraries[library] = ("detached", object())
+            return
+        path_sha256 = _checkpoint_path_digest(library.path)
+        previous = current_checkpoints.get(path_sha256)
+        epoch = 1 if previous is None else previous[1] + 1
+        current_checkpoints[path_sha256] = (checkpoint_sha256, epoch)
+        authorized_libraries[library] = (
+            "checkpoint",
+            path_sha256,
+            checkpoint_sha256,
+            epoch,
+        )
+
+    def require_library(library: object) -> None:
+        if not any(skill.is_active for skill in library.all()):
+            return
+        authority = authorized_libraries.get(library)
+        if authority is None:
+            raise RetrievalSkillError(
+                "active Retrieval Skills lack evaluator/operator runtime authority"
             )
+        if authority[0] == "checkpoint":
+            _, path_sha256, checkpoint_sha256, epoch = authority
+            if current_checkpoints.get(path_sha256) != (checkpoint_sha256, epoch):
+                raise RetrievalSkillError(
+                    "active Retrieval Skill library is not bound to the current checkpoint epoch"
+                )
 
     def commit_evaluator_records(
         library: object,
@@ -565,10 +590,7 @@ def _build_skill_authority_boundary():
         library: object,
         proposed: Mapping[str, tuple[RetrievalSkill, ...]],
     ) -> None:
-        if library not in authorized_libraries:
-            raise RetrievalSkillError(
-                "active Retrieval Skill update requires evaluator/operator authority"
-            )
+        require_library(library)
         target = (id(library), _checkpoint_path_digest(library.path))
 
         def commit(capability: object) -> None:
@@ -595,17 +617,31 @@ def _build_skill_authority_boundary():
         operator: bool,
     ) -> object:
         key = _checkpoint_authority_key(library.path, checkpoint_sha256)
-        if not operator and key not in authorized_checkpoints:
+        path_sha256, requested_sha256 = key
+        current = current_checkpoints.get(path_sha256)
+        if not operator and (
+            current is None or current[0] != requested_sha256
+        ):
             raise RetrievalSkillError(
-                "active Retrieval Skill checkpoint lacks evaluator/operator authority"
+                "active Retrieval Skill checkpoint lacks authority for the current epoch"
             )
         operation = "operator_checkpoint_load" if operator else "authorized_checkpoint_load"
 
         def activate(capability: object) -> object:
             consume(capability, operation, key)
             if operator:
-                authorized_checkpoints.add(key)
-            authorized_libraries.add(library)
+                previous = current_checkpoints.get(path_sha256)
+                epoch = 1 if previous is None else previous[1] + 1
+                current_checkpoints[path_sha256] = (requested_sha256, epoch)
+            else:
+                assert current is not None
+                epoch = current[1]
+            authorized_libraries[library] = (
+                "checkpoint",
+                path_sha256,
+                requested_sha256,
+                epoch,
+            )
             return library
 
         return run(operation, key, activate)
@@ -666,21 +702,22 @@ def _build_skill_authority_boundary():
 
         def activate(capability: object) -> object:
             consume(capability, "verified_release_load", target)
-            authorized_libraries.add(library)
+            authorized_libraries[library] = ("release", object())
             return library
 
         return run("verified_release_load", target, activate)
 
-    def require_library(library: object) -> None:
-        if any(skill.is_active for skill in library.all()) and library not in authorized_libraries:
-            raise RetrievalSkillError(
-                "active Retrieval Skills lack evaluator/operator runtime authority"
-            )
-
     def inherit_library(source: object, target_library: object) -> None:
         if not any(skill.is_active for skill in target_library.all()):
             return
-        if source not in authorized_libraries:
+        try:
+            require_library(source)
+        except RetrievalSkillError as error:
+            raise RetrievalSkillError(
+                "copied Retrieval Skill libraries do not inherit active authority"
+            ) from error
+        authority = authorized_libraries.get(source)
+        if authority is None:
             raise RetrievalSkillError(
                 "copied Retrieval Skill libraries do not inherit active authority"
             )
@@ -688,7 +725,7 @@ def _build_skill_authority_boundary():
 
         def inherit(capability: object) -> None:
             consume(capability, "verified_library_replay", target)
-            authorized_libraries.add(target_library)
+            authorized_libraries[target_library] = authority
 
         run("verified_library_replay", target, inherit)
 

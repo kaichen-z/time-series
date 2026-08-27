@@ -576,6 +576,70 @@ def test_trusted_operator_migration_preserves_historical_accepted_records(
     assert "historical_skill" in reloaded.list_for_prompt("round1")
 
 
+def test_quarantine_revokes_restored_accepted_checkpoint_authority(tmp_path) -> None:
+    path = tmp_path / "operator-legacy.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "skill_id": "historical_skill",
+                    "name": "historical_skill",
+                    "description": "A genuinely operator-approved historical row.",
+                    "applicability": "scheduled event",
+                    "query_strategy": "Find the event window.",
+                    "verification_rule": "Require an exact quote.",
+                    "created_from_task": "train_1",
+                    "validation_smae": 0.1,
+                    "validation_srmse": 0.2,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    library = _migrate_legacy_for_operator(path)
+    accepted_checkpoint = path.read_bytes()
+
+    library.apply_operations(
+        (RetrievalSkillOperation.quarantine("historical_skill", "unsafe"),)
+    )
+    assert library.get_by_id("historical_skill").status == "quarantined"
+    path.write_bytes(accepted_checkpoint)
+
+    with pytest.raises(RetrievalSkillError, match="current|authority|epoch"):
+        RetrievalSkillLibrary.load_verified_checkpoint(path)
+
+
+def test_verified_checkpoint_clone_is_bound_to_current_path_epoch(tmp_path) -> None:
+    path = tmp_path / "operator-legacy.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "skill_id": "historical_skill",
+                    "name": "historical_skill",
+                    "description": "A genuinely operator-approved historical row.",
+                    "applicability": "scheduled event",
+                    "query_strategy": "Find the event window.",
+                    "verification_rule": "Require an exact quote.",
+                    "created_from_task": "train_1",
+                    "validation_smae": 0.1,
+                    "validation_srmse": 0.2,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    library = _migrate_legacy_for_operator(path)
+    clone = library.clone(persist=False)
+
+    library.apply_operations(
+        (RetrievalSkillOperation.quarantine("historical_skill", "unsafe"),)
+    )
+
+    with pytest.raises(RetrievalSkillError, match="current|authority|epoch"):
+        clone.for_stage("round1")
+
+
 def test_clone_preserves_verified_active_history_without_generalizing_constructor(
     tmp_path,
 ) -> None:
