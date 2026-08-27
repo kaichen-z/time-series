@@ -873,7 +873,7 @@ def test_first_active_publication_open_failure_removes_owned_witness_directory(
     assert tuple(tmp_path.iterdir()) == ()
 
 
-def test_first_active_publication_stat_failure_removes_owned_witness_directory(
+def test_first_active_publication_stat_failure_retains_owned_witness_directory(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "skills.json"
@@ -905,10 +905,13 @@ def test_first_active_publication_stat_failure_removes_owned_witness_directory(
         )
 
     assert stat_failed
-    assert tuple(tmp_path.iterdir()) == ()
+    retained = tuple(tmp_path.iterdir())
+    assert len(retained) == 1
+    assert retained[0].name == provenance_name
+    assert retained[0].is_dir()
 
 
-def test_post_mkdir_stat_replacement_preserves_foreign_and_removes_owned_directory(
+def test_post_mkdir_stat_replacement_preserves_foreign_and_owned_directory(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "skills.json"
@@ -950,7 +953,7 @@ def test_post_mkdir_stat_replacement_preserves_foreign_and_removes_owned_directo
         )
 
     assert replaced
-    assert not displaced.exists()
+    assert displaced.is_dir()
     assert (provenance / "foreign.txt").read_bytes() == foreign_marker
 
 
@@ -982,7 +985,10 @@ def test_first_active_publication_rolls_back_witness_link_that_committed_then_fa
         )
 
     assert witness_linked
-    assert tuple(tmp_path.iterdir()) == ()
+    retained = tuple(tmp_path.iterdir())
+    assert len(retained) == 1
+    assert retained[0].name.startswith(".retrieval-quarantine-")
+    assert retained[0].is_dir()
 
 
 def test_first_active_publication_cleans_link_when_post_link_inspection_fails(
@@ -1029,7 +1035,10 @@ def test_first_active_publication_cleans_link_when_post_link_inspection_fails(
 
     assert witness_name is not None
     assert inspection_failed
-    assert tuple(tmp_path.iterdir()) == ()
+    retained = tuple(tmp_path.iterdir())
+    assert len(retained) == 1
+    assert retained[0].name.startswith(".retrieval-quarantine-")
+    assert retained[0].is_dir()
 
 
 def test_first_active_publication_quarantines_owned_witness_before_unlink(
@@ -1094,10 +1103,13 @@ def test_first_active_publication_quarantines_owned_witness_before_unlink(
     assert witness_name is not None
     assert not replacement_attempted
     assert not displaced.exists()
-    assert tuple(tmp_path.iterdir()) == ()
+    retained = tuple(tmp_path.iterdir())
+    assert len(retained) == 1
+    assert retained[0].name.startswith(".retrieval-quarantine-")
+    assert retained[0].is_dir()
 
 
-def test_first_active_publication_retries_transient_witness_cleanup_without_orphans(
+def test_first_active_publication_does_not_unlink_retained_witness_quarantine(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "skills.json"
@@ -1129,16 +1141,19 @@ def test_first_active_publication_retries_transient_witness_cleanup_without_orph
     monkeypatch.setattr(skill_library_module.os, "link", fail_after_witness_link)
     monkeypatch.setattr(skill_library_module.os, "unlink", fail_first_witness_cleanup)
 
-    with pytest.raises(RetrievalSkillError, match="rollback"):
+    with pytest.raises(OSError, match="witness link failed after publication"):
         _evaluate_and_promote_retrieval_skills(
             library, task_results, split="train"
         )
 
-    assert cleanup_failures == 1
-    assert tuple(tmp_path.iterdir()) == ()
+    assert cleanup_failures == 0
+    retained = tuple(tmp_path.iterdir())
+    assert len(retained) == 1
+    assert retained[0].name.startswith(".retrieval-quarantine-")
+    assert retained[0].is_dir()
 
 
-def test_first_active_publication_retries_transient_directory_cleanup_without_orphans(
+def test_first_active_publication_does_not_rmdir_uncertain_directory_name(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "skills.json"
@@ -1177,7 +1192,7 @@ def test_first_active_publication_retries_transient_directory_cleanup_without_or
             library, task_results, split="train"
         )
 
-    assert cleanup_failures == 1
+    assert cleanup_failures == 0
     assert tuple(tmp_path.iterdir()) == ()
 
 

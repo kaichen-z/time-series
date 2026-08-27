@@ -16,6 +16,25 @@ from evolving_loop.harness import EvolvingForecastHarness
 HarnessFactory = Callable[[HarnessPolicy], EvolvingForecastHarness]
 
 
+def _public_score_payload(outcome: object | None) -> dict[str, object] | None:
+    """Expose point-score fields without evaluator GT/document-label diagnostics."""
+    if outcome is None:
+        return None
+    fields = (
+        "task_id",
+        "final_smae",
+        "final_srmse",
+        "coding_oracle_smae",
+        "coding_oracle_srmse",
+        "contextual_oracle_smae",
+        "contextual_oracle_srmse",
+        "decision_selection_smae_regret",
+        "decision_selection_srmse_regret",
+        "candidate_count",
+    )
+    return {field: getattr(outcome, field, None) for field in fields}
+
+
 def inference_view(task: ContextTask) -> ContextTask:
     """Strip every evaluator-only field before any mutable harness code runs."""
     return replace(
@@ -69,7 +88,9 @@ def run_frozen_inference(
 
             # One isolated harness per task prevents accidental online skill writes
             # from changing later hidden predictions.
-            result = harness_factory(policy).run(inference_view(task))
+            result = harness_factory(policy).run(
+                inference_view(task), allow_skill_writes=False
+            )
             values = tuple(float(value) for value in result.forecast)
             if len(values) != task.numeric.prediction_length:
                 raise ValueError(
@@ -105,12 +126,47 @@ def run_frozen_inference(
             outcome = score_after_resolution(task, result) if score_public else None
             if outcome is not None:
                 outcomes.append(outcome)
+            card = getattr(result, "retrieval_card", None)
+            if card is not None:
+                retrieval_payload = card.to_payload()
+                assumption_stances = [
+                    {
+                        "chain_id": chain.chain_id,
+                        "assumption_ids": list(chain.addressed_assumption_ids),
+                        "stance": chain.stance,
+                    }
+                    for chain in card.chains
+                ]
+                used_skill_ids = list(
+                    dict.fromkeys(
+                        skill_id
+                        for chain in card.chains
+                        for skill_id in chain.used_skill_ids
+                    )
+                )
+            else:
+                # Keep the report schema stable for legacy single-pass artifacts.
+                retrieval_payload = {
+                    "round1": None,
+                    "round2": None,
+                    "chains": [],
+                    "selected_document_ids": list(
+                        result.retrieval.selected_document_ids
+                    ),
+                    "rejected": list(result.retrieval.rejected),
+                    "unresolved_contradictions": [],
+                    "complete": bool(result.retrieval.sufficient),
+                }
+                assumption_stances = []
+                used_skill_ids = []
             reports.write(
                 json.dumps(
                     {
                         "benchmark_id": task_id,
                         "artifact_kind": artifact_kind,
                         "policy_version": policy.version,
+                        "release_sha256": policy.retrieval_release_sha256,
+                        "labels_accessed": score_public,
                         "selected_candidate_id": result.decision.selected.candidate_id,
                         "host_default_id": result.decision.host_default_id,
                         "forecast": list(values),
@@ -118,6 +174,9 @@ def run_frozen_inference(
                         "evidence": [asdict(item) for item in result.retrieval.evidence],
                         "impacts": [asdict(item) for item in result.retrieval.impacts],
                         "retrieval_rejections": list(result.retrieval.rejected),
+                        "retrieval": retrieval_payload,
+                        "assumption_stances": assumption_stances,
+                        "used_skill_ids": used_skill_ids,
                         "decision": {
                             "rationale": result.decision.rationale,
                             "supporting_document_ids": list(
@@ -136,7 +195,7 @@ def run_frozen_inference(
                             }
                             for item in result.candidates
                         ],
-                        "outcome": asdict(outcome) if outcome is not None else None,
+                        "outcome": _public_score_payload(outcome),
                     },
                     ensure_ascii=False,
                 )
@@ -156,6 +215,7 @@ def run_frozen_inference(
     summary = {
         "artifact_kind": artifact_kind,
         "policy_version": policy.version,
+        "release_sha256": policy.retrieval_release_sha256,
         "num_tasks": len(tasks),
         "labels_accessed": score_public,
         "samples_per_task": samples,

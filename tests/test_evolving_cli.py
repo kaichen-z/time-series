@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -20,7 +22,7 @@ from evolving_loop.cli import (
 )
 from evolving_loop.co_evolution import HarnessPolicy, snapshot_policy_skills
 from evolving_loop.coding_agent.skill_library import SkillLibrary
-from evolving_loop.data import ContextTask, Task
+from evolving_loop.data import ContextTask, Document, Task
 from evolving_loop.decision_agent.skill_library import DecisionSkillLibrary
 from evolving_loop.retrieval_agent.skill_library import (
     RetrievalSkill,
@@ -30,6 +32,11 @@ from evolving_loop.retrieval_agent.policy import (
     RetrievalGenome,
     _write_accepted_retrieval_release,
     write_retrieval_release,
+)
+from evolving_loop.retrieval_agent.evolution import (
+    RetrievalEvaluation,
+    RetrievalEvolutionResult,
+    RetrievalGenerationTrace,
 )
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 from common.llm import FakeLLMClient
@@ -110,6 +117,777 @@ def test_unified_cli_exposes_every_named_method() -> None:
         assert args.evolution == name
         frozen = parser.parse_args(["--inference", name, "--hidden-test"])
         assert frozen.inference == name
+
+
+def test_retrieval_cli_has_frozen_defaults_in_root_and_legacy_forms() -> None:
+    parser = build_parser()
+    root = parser.parse_args(
+        [
+            "--evolution",
+            "retrieval",
+            "--tasks-file",
+            "external/Dr-CiK/sample/tasks.jsonl",
+            "--split-manifest",
+            "splits/drcik_public_80_20_99_v1.json",
+        ]
+    )
+    legacy = parser.parse_args(
+        [
+            "evolve",
+            "--evolution-mode",
+            "retrieval",
+            "--tasks-file",
+            "external/Dr-CiK/sample/tasks.jsonl",
+            "--split-manifest",
+            "splits/drcik_public_80_20_99_v1.json",
+        ]
+    )
+    frozen = parser.parse_args(
+        [
+            "--inference",
+            "retrieval",
+            "--hidden-test",
+        ]
+    )
+
+    for args in (root, legacy, frozen):
+        assert args.retrieval_mode == "two-stage"
+        assert args.screen_train_tasks == 8
+        assert args.screen_promote == 2
+    assert root.evolution == "retrieval"
+    assert root.split_manifest_sha256 == (
+        "3cc81f45878c1aae93e5ba48dc367df6553698db6661dbe06fbe5efb06afca92"
+    )
+    assert legacy.evolution_mode == "retrieval"
+    assert frozen.inference == "retrieval"
+
+
+def _manifest_task(task_id: str) -> ContextTask:
+    return ContextTask(
+        numeric=Task(
+            task_id=task_id,
+            history_values=(1.0, 2.0),
+            future_values=(3.0,),
+            prediction_length=1,
+            frequency="1 day",
+            seasonal_period=None,
+            entity_name=f"entity_{task_id}",
+        ),
+        target_name="target",
+        target_description="",
+        history_timestamps=("1", "2"),
+        future_timestamps=("3",),
+        documents=(),
+        labels_public=True,
+    )
+
+
+def test_retrieval_manifest_loader_selects_exact_train_and_dev_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = (
+        Path(__file__).parents[1]
+        / "splits"
+        / "drcik_public_80_20_99_v1.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    partitions = manifest["partitions"]
+    train_ids = tuple(partitions["train"]["task_ids"])
+    dev_ids = tuple(partitions["dev"]["task_ids"])
+    public_ids = tuple(partitions["public_test"]["task_ids"])
+    all_tasks = [
+        _manifest_task(task_id)
+        for task_id in (*public_ids, *dev_ids, *train_ids)
+    ]
+    monkeypatch.setattr(cli_module, "load_context_tasks", lambda _path: all_tasks)
+
+    train, dev, manifest_sha256 = (
+        cli_module._load_retrieval_evolution_tasks(
+            "ignored.jsonl",
+            manifest_path,
+            expected_manifest_sha256=manifest["manifest_sha256"],
+        )
+    )
+
+    assert tuple(task.numeric.task_id for task in train) == train_ids
+    assert tuple(task.numeric.task_id for task in dev) == dev_ids
+    assert len(train) == 80
+    assert len(dev) == 20
+    assert manifest_sha256 == manifest["manifest_sha256"]
+    assert not set(public_ids).intersection(
+        task.numeric.task_id for task in (*train, *dev)
+    )
+
+
+@pytest.mark.parametrize("tamper", ("manifest", "expected_hash"))
+def test_retrieval_manifest_loader_rejects_every_hash_mismatch(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    source = (
+        Path(__file__).parents[1]
+        / "splits"
+        / "drcik_public_80_20_99_v1.json"
+    )
+    manifest = json.loads(source.read_text(encoding="utf-8"))
+    expected = manifest["manifest_sha256"]
+    if tamper == "manifest":
+        manifest["partitions"]["train"]["task_ids"][0] = "forged_task"
+    else:
+        expected = "f" * 64
+    path = tmp_path / "split.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(
+        cli_module,
+        "load_context_tasks",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("tasks must not load before manifest authentication")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="manifest|hash|sha256"):
+        cli_module._load_retrieval_evolution_tasks(
+            "ignored.jsonl",
+            path,
+            expected_manifest_sha256=expected,
+        )
+
+
+def test_retrieval_evolution_dispatch_bypasses_generic_splitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--evolution",
+            "retrieval",
+            "--tasks-file",
+            "tasks.jsonl",
+            "--split-manifest",
+            "split.json",
+        ]
+    )
+    args.evolution_mode = args.evolution
+    captured = []
+
+    def retrieval_dispatch(received):
+        captured.append(received)
+        return {"evolution_mode": "retrieval"}
+
+    monkeypatch.setattr(
+        cli_module,
+        "_retrieval_evolve_command",
+        retrieval_dispatch,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_three_way_entity_split",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("generic splitter must not run")
+        ),
+    )
+
+    assert cli_module.evolve_command(args) == {"evolution_mode": "retrieval"}
+    assert captured == [args]
+
+
+def test_harness_policy_embeds_canonical_release_payload_without_a_path(
+    tmp_path,
+) -> None:
+    genome = replace(RetrievalGenome.seed(), version="v001", parent="v000")
+    release = _write_accepted_retrieval_release(
+        tmp_path / "releases",
+        genome,
+        audit={
+            "state": "accepted",
+            "train_dev_split_sha256": "1" * 64,
+            "verifier_sha256": "2" * 64,
+            "evaluator_sha256": "3" * 64,
+            "metric_sha256": "4" * 64,
+            "metric_cap": 5.0,
+            "train_summary": {"task_count": 80},
+            "dev_summary": {"task_count": 20},
+            "acceptance_reason": "all gates passed",
+        },
+    )
+
+    policy = cli_module._policy_with_retrieval_release(
+        HarnessPolicy(),
+        release,
+        changelog="Accepted Retrieval v001.",
+    )
+    payload = policy.to_payload()
+    embedded = payload["retrieval_release_payload"]
+    expected_sha256 = hashlib.sha256(
+        json.dumps(
+            embedded,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    assert set(embedded) == {
+        "genome",
+        "round1_prompt",
+        "round2_prompt",
+        "skills",
+        "manifest",
+    }
+    assert "path" not in embedded
+    assert payload["retrieval_release_sha256"] == expected_sha256
+    destination = tmp_path / "policy.json"
+    policy.save(destination)
+    assert HarnessPolicy.load(destination) == policy
+
+    mutated_in_memory = HarnessPolicy.load(destination)
+    mutated_in_memory.retrieval_release_payload["genome"]["round1_strategy"] = (
+        "entity_first"
+    )
+    with pytest.raises(ValueError, match="Retrieval release|retrieval release|fingerprint"):
+        mutated_in_memory.save(tmp_path / "mutated-policy.json")
+
+    tampered = json.loads(destination.read_text(encoding="utf-8"))
+    tampered["retrieval_release_payload"]["genome"]["round1_strategy"] = (
+        "entity_first"
+    )
+    destination.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(ValueError, match="Retrieval release|retrieval release|fingerprint"):
+        HarnessPolicy.load(destination)
+
+
+def test_retrieval_cli_exposes_every_frozen_hash_control() -> None:
+    hashes = [f"{index:x}" * 64 for index in range(1, 6)]
+    args = build_parser().parse_args(
+        [
+            "--evolution",
+            "retrieval",
+            "--split-manifest",
+            "split.json",
+            "--split-manifest-sha256",
+            hashes[0],
+            "--verifier-sha256",
+            hashes[1],
+            "--evaluator-sha256",
+            hashes[2],
+            "--metric-sha256",
+            hashes[3],
+            "--harness-sha256",
+            hashes[4],
+            "--metric-cap",
+            "5",
+            "--evolution-tolerance",
+            "0.0001",
+        ]
+    )
+    assert args.split_manifest_sha256 == hashes[0]
+    assert args.verifier_sha256 == hashes[1]
+    assert args.evaluator_sha256 == hashes[2]
+    assert args.metric_sha256 == hashes[3]
+    assert args.harness_sha256 == hashes[4]
+    assert args.metric_cap == 5.0
+    assert args.evolution_tolerance == pytest.approx(0.0001)
+
+
+def test_trusted_retrieval_evaluator_sanitizes_before_inference_and_scores_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = replace(
+        _manifest_task("train_1"),
+        documents=(Document("doc_1", "public", "SECRET_ROLE", "SECRET_SUBTYPE"),),
+        gt_evidence=("SECRET_GT",),
+    )
+    observed: dict[str, object] = {}
+
+    class Harness:
+        def run(self, received, *, allow_skill_writes=True):
+            observed["inference_task"] = received
+            observed["allow_skill_writes"] = allow_skill_writes
+            return SimpleNamespace(task_id=received.numeric.task_id)
+
+    def factory(genome, library):
+        observed["genome"] = genome
+        observed["library"] = library
+        return Harness()
+
+    diagnostics = SimpleNamespace(
+        supporting_recall=0.8,
+        distractor_avoidance=0.9,
+        exact_quote_validity=1.0,
+        complete_chain_rate=0.7,
+        invalid_count=0,
+        catastrophic_count=0,
+    )
+
+    def score(original, result):
+        observed["scoring_task"] = original
+        observed["scoring_result"] = result
+        return SimpleNamespace(
+            final_smae=0.4,
+            final_srmse=0.5,
+            contextual_oracle_smae=0.3,
+            contextual_oracle_srmse=0.35,
+            retrieval_diagnostics=diagnostics,
+        )
+
+    monkeypatch.setattr(cli_module, "score_after_resolution", score, raising=False)
+    cache_key = SimpleNamespace(task_id="train_1")
+    library = object()
+    result = cli_module._TrustedRetrievalEvaluator().evaluate(
+        RetrievalGenome.seed(),
+        (task,),
+        stage="screen_train_parent",
+        skill_library=library,
+        harness_factory=factory,
+        persist=False,
+        writers_enabled=False,
+        evolver_enabled=False,
+        cache_keys=(cache_key,),
+        metric_cap=5.0,
+    )
+
+    inference_task = observed["inference_task"]
+    assert inference_task.numeric.future_values == ()
+    assert inference_task.gt_evidence == ()
+    assert inference_task.labels_public is False
+    assert inference_task.documents[0].role is None
+    assert inference_task.documents[0].subtype is None
+    assert observed["allow_skill_writes"] is False
+    assert observed["scoring_task"] is task
+    assert result.task_count == 1
+    assert result.mean_final_smae == pytest.approx(0.4)
+    assert result.task_traces == (
+        {
+            "task_id": "train_1",
+            "entity_name": "entity_train_1",
+            "final_smae": 0.4,
+            "final_srmse": 0.5,
+            "contextual_oracle_smae": 0.3,
+            "contextual_oracle_srmse": 0.35,
+        },
+    )
+
+
+def _retrieval_evaluation(
+    version: str, tasks: tuple[ContextTask, ...], error: float
+) -> RetrievalEvaluation:
+    return RetrievalEvaluation(
+        version=version,
+        task_count=len(tasks),
+        mean_final_smae=error,
+        mean_final_srmse=error,
+        mean_contextual_oracle_smae=error,
+        mean_contextual_oracle_srmse=error,
+        p90_smae=error,
+        p95_smae=error,
+        supporting_recall=0.9,
+        distractor_avoidance=0.9,
+        exact_quote_validity=1.0,
+        complete_chain_rate=0.8,
+        invalid_count=0,
+        catastrophic_count=0,
+        task_traces=tuple(
+            {
+                "task_id": task.numeric.task_id,
+                "entity_name": task.numeric.entity_name,
+                "final_smae": error,
+                "final_srmse": error,
+                "contextual_oracle_smae": error,
+                "contextual_oracle_srmse": error,
+            }
+            for task in tasks
+        ),
+    )
+
+
+def _retrieval_result(
+    parent: RetrievalGenome,
+    train: tuple[ContextTask, ...],
+    dev: tuple[ContextTask, ...],
+    *,
+    accepted: bool,
+) -> RetrievalEvolutionResult:
+    children = (
+        replace(
+            parent,
+            version="v001",
+            parent="v000",
+            round1_prompt=parent.round1_prompt + "\nChild A.",
+        ),
+        replace(
+            parent,
+            version="v002",
+            parent="v000",
+            max_evidence_chains=parent.max_evidence_chains + 1,
+        ),
+        replace(
+            parent,
+            version="v003",
+            parent="v000",
+            round2_prompt=parent.round2_prompt + "\nChild C.",
+        ),
+    )
+    winner = children[0]
+    generation = RetrievalGenerationTrace(
+        generation=0,
+        parent_version="v000",
+        parent_fingerprint=parent.fingerprint(),
+        child_versions=tuple(child.version for child in children),
+        child_fingerprints=tuple(child.fingerprint() for child in children),
+        child_scopes=("A", "B", "C"),
+        child_proposals=tuple(child.to_payload() for child in children),
+        screen_task_ids=tuple(task.numeric.task_id for task in train[:8]),
+        fold_entities=(tuple(task.numeric.entity_name for task in train[8:]),),
+        promoted_fingerprints=(winner.fingerprint(),),
+        train_winner_version=winner.version,
+        train_winner_fingerprint=winner.fingerprint(),
+        rejection_reasons={children[1].fingerprint(): "dominated"},
+        screen_summaries={},
+        train_summaries={winner.fingerprint(): {"task_count": 80, "mean_final_smae": 0.9}},
+    )
+    parent_dev = _retrieval_evaluation(parent.version, dev, 1.0)
+    child_dev = _retrieval_evaluation(winner.version, dev, 0.9 if accepted else 1.1)
+    return RetrievalEvolutionResult(
+        original_parent=parent,
+        train_winner=winner,
+        selected_genome=winner if accepted else parent,
+        accepted=accepted,
+        acceptance_reasons=("all_dev_gates_passed",) if accepted else (),
+        rejection_reasons=() if accepted else ("mean_final_smae",),
+        parent_dev=parent_dev,
+        child_dev=child_dev,
+        generations=(generation,),
+        trace=(
+            {"kind": "generation_started", "generation": 0},
+            {"kind": "release_accepted" if accepted else "release_rejected"},
+        ),
+        release_genome=winner if accepted else None,
+    )
+
+
+def _install_fake_retrieval_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    result: RetrievalEvolutionResult,
+    captured: dict[str, object],
+) -> None:
+    class Engine:
+        def __init__(self, mutation_llm, evaluator, config, **kwargs):
+            captured["mutation_llm"] = mutation_llm
+            captured["evaluator"] = evaluator
+            captured["config"] = config
+            captured["engine_kwargs"] = kwargs
+            self.config = config
+            self._checkpoint_file_sha256 = None
+            self._checkpoint_authority_epoch = None
+
+        def evolve(self, parent, train, dev):
+            captured["parent"] = parent
+            captured["train"] = train
+            captured["dev"] = dev
+            checkpoint = Path(self.config.checkpoint_path)
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            checkpoint.write_bytes(b"trusted-checkpoint")
+            self._checkpoint_file_sha256 = hashlib.sha256(
+                b"trusted-checkpoint"
+            ).hexdigest()
+            self._checkpoint_authority_epoch = 7
+            return result
+
+    monkeypatch.setattr(cli_module, "RetrievalEvolutionEngine", Engine, raising=False)
+
+
+@pytest.mark.parametrize("accepted", (True, False))
+def test_retrieval_evolution_publishes_only_accepted_release_and_keeps_traces_in_runs(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    accepted: bool,
+) -> None:
+    releases = tmp_path / "releases"
+    parent_release = write_retrieval_release(releases, RetrievalGenome.seed())
+    train = tuple(_manifest_task(f"train_{index:03d}") for index in range(80))
+    dev = tuple(_manifest_task(f"dev_{index:03d}") for index in range(20))
+    result = _retrieval_result(parent_release.genome, train, dev, accepted=accepted)
+    captured: dict[str, object] = {}
+    _install_fake_retrieval_engine(monkeypatch, result, captured)
+    manifest_path = Path(__file__).parents[1] / "splits" / "drcik_public_80_20_99_v1.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    monkeypatch.setattr(
+        cli_module,
+        "_load_retrieval_evolution_tasks",
+        lambda *_args, **_kwargs: (
+            train,
+            dev,
+            manifest["manifest_sha256"],
+            frozenset(manifest["partitions"]["public_test"]["task_ids"]),
+        ),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_components",
+        lambda *_args, **kwargs: (
+            object(),
+            SimpleNamespace(all=lambda: ()),
+            kwargs.get("retrieval_library_override"),
+            SimpleNamespace(all=lambda: ()),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_factory",
+        lambda *_args, **_kwargs: (lambda _policy: object()),
+    )
+    runs = tmp_path / "runs"
+    policy_path = runs / "best_policy.json"
+    if not accepted:
+        policy_path.parent.mkdir(parents=True)
+        policy_path.write_text("parent-policy-must-remain", encoding="utf-8")
+    args = build_parser().parse_args(
+        [
+            "--evolution",
+            "retrieval",
+            "--tasks-file",
+            "tasks.jsonl",
+            "--split-manifest",
+            str(manifest_path),
+            "--split-manifest-sha256",
+            manifest["manifest_sha256"],
+            "--retrieval-release-path",
+            str(parent_release.path),
+            "--checkpoint-path",
+            str(runs / "checkpoint.json"),
+            "--progress-path",
+            str(runs / "progress.jsonl"),
+            "--trace-path",
+            str(runs / "evolution_trace.json"),
+            "--policy-path",
+            str(policy_path),
+        ]
+    )
+    args.evolution_mode = "retrieval"
+
+    output = cli_module._retrieval_evolve_command(args)
+
+    assert len(captured["train"]) == 80
+    assert len(captured["dev"]) == 20
+    config = captured["config"]
+    assert config.screen_tasks == 8
+    assert config.promote == 2
+    assert config.dataset_split_hash == manifest["manifest_sha256"]
+    assert all(
+        len(getattr(config, field)) == 64
+        for field in (
+            "verifier_hash",
+            "evaluator_hash",
+            "metric_hash",
+            "mutation_model_hash",
+            "harness_hash",
+        )
+    )
+    authority = json.loads(
+        (runs / "checkpoint.authority.json").read_text(encoding="utf-8")
+    )
+    assert authority["checkpoint_sha256"] == hashlib.sha256(
+        b"trusted-checkpoint"
+    ).hexdigest()
+    assert authority["authority_epoch"] == 7
+    trace = json.loads((runs / "evolution_trace.json").read_text(encoding="utf-8"))
+    public_ids = set(manifest["partitions"]["public_test"]["task_ids"])
+    encoded_trace = json.dumps(trace)
+    assert all(f'"{task_id}"' not in encoded_trace for task_id in public_ids)
+    assert [item["scope"] for item in trace["scope_changelogs"][0]["children"]] == [
+        "A",
+        "B",
+        "C",
+    ]
+    assert trace["rejection_reasons"] == list(result.rejection_reasons)
+
+    if accepted:
+        release = releases / "v001"
+        assert release.is_dir()
+        assert output["release_path"] == str(release)
+        saved = HarnessPolicy.load(policy_path)
+        assert saved.retrieval_release_payload["genome"]["version"] == "v001"
+        assert saved.retrieval_release_sha256 == output["release_sha256"]
+    else:
+        assert sorted(path.name for path in releases.iterdir()) == ["v000"]
+        assert policy_path.read_text(encoding="utf-8") == "parent-policy-must-remain"
+        assert output["release_path"] == str(parent_release.path)
+        assert output["policy_path"] is None
+
+
+def test_retrieval_inference_uses_private_release_binding_and_frozen_runner(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = write_retrieval_release(tmp_path / "releases", RetrievalGenome.seed())
+    policy = cli_module._policy_with_retrieval_release(
+        HarnessPolicy(), release, changelog="Seed Retrieval release."
+    )
+    policy_path = tmp_path / "policy.json"
+    policy.save(policy_path)
+    hidden = replace(
+        _manifest_task("hidden_1"),
+        numeric=replace(_manifest_task("hidden_1").numeric, future_values=()),
+        labels_public=False,
+    )
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(cli_module, "_inference_tasks", lambda _args: ([hidden], "hidden_test"))
+    monkeypatch.setattr(
+        cli_module,
+        "_components",
+        lambda *_args, **kwargs: (
+            object(),
+            object(),
+            kwargs["retrieval_library_override"],
+            object(),
+            None,
+        ),
+    )
+
+    def factory(*_args, **kwargs):
+        observed["factory_kwargs"] = kwargs
+        return lambda _policy: object()
+
+    def frozen(policy_arg, tasks, harness_factory, **kwargs):
+        observed["policy"] = policy_arg
+        observed["tasks"] = tasks
+        observed["harness_factory"] = harness_factory
+        observed["frozen_kwargs"] = kwargs
+        return {"labels_accessed": False}
+
+    monkeypatch.setattr(cli_module, "_factory", factory)
+    monkeypatch.setattr(cli_module, "run_frozen_inference", frozen)
+    args = build_parser().parse_args(
+        [
+            "--inference",
+            "retrieval",
+            "--hidden-test",
+            "--policy-path",
+            str(policy_path),
+            "--retrieval-release-path",
+            str(release.path),
+            "--output-dir",
+            str(tmp_path / "output"),
+        ]
+    )
+
+    assert inference_command(args) == {"labels_accessed": False}
+    assert observed["policy"] == policy
+    assert observed["tasks"] == [hidden]
+    assert observed["factory_kwargs"]["retrieval_genome"] == release.genome
+    assert observed["factory_kwargs"]["retrieval_skill_source"].persist is False
+    assert observed["frozen_kwargs"]["artifact_kind"] == "retrieval"
+    assert observed["frozen_kwargs"]["score_public"] is False
+
+
+def test_retrieval_inference_rejects_policy_release_mismatch_before_running(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    releases = tmp_path / "releases"
+    seed = write_retrieval_release(releases, RetrievalGenome.seed())
+    candidate = write_retrieval_release(
+        releases,
+        replace(RetrievalGenome.seed(), version="v001", parent="v000"),
+    )
+    policy_path = tmp_path / "policy.json"
+    cli_module._policy_with_retrieval_release(
+        HarnessPolicy(), seed, changelog="Seed."
+    ).save(policy_path)
+    monkeypatch.setattr(
+        cli_module,
+        "_inference_tasks",
+        lambda _args: (_ for _ in ()).throw(
+            AssertionError("mismatched policy must fail before loading inference tasks")
+        ),
+    )
+    args = build_parser().parse_args(
+        [
+            "--inference",
+            "retrieval",
+            "--hidden-test",
+            "--policy-path",
+            str(policy_path),
+            "--retrieval-release-path",
+            str(candidate.path),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="policy|Policy|release"):
+        inference_command(args)
+
+
+def test_v000_operator_release_can_bind_an_old_unembedded_policy(tmp_path) -> None:
+    release = write_retrieval_release(
+        tmp_path / "releases", RetrievalGenome.seed()
+    )
+
+    bound = cli_module._policy_for_retrieval_release(
+        HarnessPolicy(), release
+    )
+
+    assert bound.retrieval_release_payload["genome"]["version"] == "v000"
+    assert bound.retrieval_release_sha256 is not None
+
+
+def test_accepted_release_publication_is_idempotent_for_checkpoint_resume(
+    tmp_path,
+) -> None:
+    genome = replace(RetrievalGenome.seed(), version="v001", parent="v000")
+    audit = {
+        "state": "accepted",
+        "train_dev_split_sha256": "1" * 64,
+        "verifier_sha256": "2" * 64,
+        "evaluator_sha256": "3" * 64,
+        "metric_sha256": "4" * 64,
+        "metric_cap": 5.0,
+        "train_summary": {"task_count": 80},
+        "dev_summary": {"task_count": 20},
+        "acceptance_reason": "all gates passed",
+    }
+
+    first = cli_module._publish_or_resume_accepted_retrieval_release(
+        tmp_path / "releases", genome, skills=(), audit=audit
+    )
+    second = cli_module._publish_or_resume_accepted_retrieval_release(
+        tmp_path / "releases", genome, skills=(), audit=audit
+    )
+
+    assert first.path == second.path
+    assert first.manifest == second.manifest
+    assert tuple((tmp_path / "releases").iterdir()) == (first.path,)
+
+
+def test_checkpoint_resume_requires_matching_out_of_band_digest_and_epoch(
+    tmp_path,
+) -> None:
+    checkpoint = tmp_path / "checkpoint.json"
+    authority = tmp_path / "checkpoint.authority.json"
+    checkpoint.write_bytes(b"checkpoint-one")
+
+    with pytest.raises(ValueError, match="out-of-band authority"):
+        cli_module._restore_retrieval_checkpoint_authority(checkpoint, authority)
+
+    digest = hashlib.sha256(b"checkpoint-one").hexdigest()
+    authority.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "checkpoint_path": str(checkpoint.resolve()),
+                "checkpoint_sha256": digest,
+                "authority_epoch": 4,
+            }
+        ),
+        encoding="utf-8",
+    )
+    cli_module._restore_retrieval_checkpoint_authority(checkpoint, authority)
+
+    checkpoint.write_bytes(b"checkpoint-replacement")
+    with pytest.raises(ValueError, match="digest|checkpoint|trusted"):
+        cli_module._restore_retrieval_checkpoint_authority(checkpoint, authority)
 
 
 @pytest.mark.parametrize(

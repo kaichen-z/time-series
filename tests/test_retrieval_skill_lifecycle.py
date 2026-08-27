@@ -1172,9 +1172,17 @@ def test_active_checkpoint_update_rolls_back_witness_link_that_committed_then_fa
 
     assert witness_linked
     assert path.read_bytes() == before
-    assert {
+    after_witnesses = {
         witness.name: witness.read_bytes() for witness in provenance.iterdir()
+    }
+    assert {
+        name: encoded
+        for name, encoded in after_witnesses.items()
+        if not name.startswith(".retrieval-quarantine-")
     } == before_witnesses
+    assert len(
+        [name for name in after_witnesses if name.startswith(".retrieval-quarantine-")]
+    ) == 1
     current = library.get_by_id("historical_skill")
     assert current is not None
     assert (current.version, current.status) == (1, "accepted")
@@ -1253,9 +1261,17 @@ def test_active_checkpoint_update_quarantines_owned_witness_before_unlink(
     assert not replacement_attempted
     assert not (provenance / displaced_name).exists()
     assert path.read_bytes() == before
-    assert {
+    after_witnesses = {
         witness.name: witness.read_bytes() for witness in provenance.iterdir()
+    }
+    assert {
+        name: encoded
+        for name, encoded in after_witnesses.items()
+        if not name.startswith(".retrieval-quarantine-")
     } == before_witnesses
+    assert len(
+        [name for name in after_witnesses if name.startswith(".retrieval-quarantine-")]
+    ) == 1
 
 
 def test_owned_witness_cleanup_recovers_rename_that_committed_then_raised(
@@ -1297,7 +1313,10 @@ def test_owned_witness_cleanup_recovers_rename_that_committed_then_raised(
         os.close(parent_descriptor)
 
     assert rename_committed
-    assert tuple(tmp_path.iterdir()) == ()
+    retained = tuple(tmp_path.iterdir())
+    assert len(retained) == 1
+    assert retained[0].name.startswith(".retrieval-quarantine-")
+    assert retained[0].read_bytes() == encoded
 
 
 def test_foreign_witness_is_retained_when_restore_name_is_occupied(
@@ -1449,7 +1468,11 @@ def test_owned_witness_cleanup_finds_displaced_inode_and_restores_foreign_entry(
     assert replaced
     assert witness.read_bytes() == foreign
     assert not displaced.exists()
-    assert not [entry for entry in tmp_path.iterdir() if "quarantine" in entry.name]
+    quarantines = [
+        entry for entry in tmp_path.iterdir() if "quarantine" in entry.name
+    ]
+    assert len(quarantines) == 1
+    assert quarantines[0].read_bytes() == owned
 
 
 def test_occupied_foreign_restore_still_cleans_displaced_owned_witness(
@@ -1610,7 +1633,12 @@ def test_owned_empty_directory_cleanup_finds_displaced_inode_and_restores_foreig
     assert replaced
     assert (owned / "foreign.txt").read_bytes() == foreign_marker
     assert not displaced.exists()
-    assert not [entry for entry in tmp_path.iterdir() if "quarantine" in entry.name]
+    quarantines = [
+        entry for entry in tmp_path.iterdir() if "quarantine" in entry.name
+    ]
+    assert len(quarantines) == 1
+    retained = quarantines[0].stat()
+    assert (retained.st_dev, retained.st_ino) == identity
 
 
 def test_owned_empty_directory_cleanup_recovers_rename_that_committed_then_raised(
@@ -1650,7 +1678,279 @@ def test_owned_empty_directory_cleanup_recovers_rename_that_committed_then_raise
         os.close(parent_descriptor)
 
     assert rename_committed
-    assert tuple(tmp_path.iterdir()) == ()
+    retained = tuple(tmp_path.iterdir())
+    assert len(retained) == 1
+    assert retained[0].name.startswith(".retrieval-quarantine-")
+    metadata = retained[0].stat()
+    assert (metadata.st_dev, metadata.st_ino) == identity
+
+
+def test_owned_witness_cleanup_retains_quarantine_instead_of_unlinking_by_name(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    witness = tmp_path / "owned.json"
+    displaced = tmp_path / "displaced-owned.json"
+    owned = b"owned witness\n"
+    foreign = b"foreign replacement must survive\n"
+    witness.write_bytes(owned)
+    metadata = witness.stat()
+    identity = (metadata.st_dev, metadata.st_ino)
+    real_unlink = skill_library_module.os.unlink
+    replacement_attempted = False
+
+    def replace_quarantine_at_unlink(name, *args, **kwargs):
+        nonlocal replacement_attempted
+        directory_fd = kwargs.get("dir_fd")
+        if (
+            isinstance(name, str)
+            and name.startswith(".retrieval-quarantine-")
+            and directory_fd is not None
+        ):
+            replacement_attempted = True
+            os.rename(
+                name,
+                displaced.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            descriptor = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(foreign)
+        return real_unlink(name, *args, **kwargs)
+
+    monkeypatch.setattr(
+        skill_library_module.os,
+        "unlink",
+        replace_quarantine_at_unlink,
+    )
+    parent_descriptor = os.open(
+        tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    )
+    try:
+        skill_library_module._unlink_owned_artifact_entry(
+            parent_descriptor,
+            witness.name,
+            identity,
+            owned,
+        )
+    finally:
+        os.close(parent_descriptor)
+
+    assert not replacement_attempted
+    assert not witness.exists()
+    quarantines = tuple(
+        entry
+        for entry in tmp_path.iterdir()
+        if entry.name.startswith(".retrieval-quarantine-")
+    )
+    assert len(quarantines) == 1
+    assert quarantines[0].read_bytes() == owned
+    assert not displaced.exists()
+
+
+def test_owned_directory_cleanup_retains_quarantine_instead_of_rmdir_by_name(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owned = tmp_path / "owned-directory"
+    displaced = tmp_path / "displaced-owned-directory"
+    owned.mkdir()
+    metadata = owned.stat()
+    identity = (metadata.st_dev, metadata.st_ino)
+    real_rmdir = skill_library_module.os.rmdir
+    replacement_attempted = False
+
+    def replace_quarantine_at_rmdir(name, *args, **kwargs):
+        nonlocal replacement_attempted
+        directory_fd = kwargs.get("dir_fd")
+        if (
+            isinstance(name, str)
+            and name.startswith(".retrieval-quarantine-")
+            and directory_fd is not None
+        ):
+            replacement_attempted = True
+            os.rename(
+                name,
+                displaced.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            os.mkdir(name, dir_fd=directory_fd)
+        return real_rmdir(name, *args, **kwargs)
+
+    monkeypatch.setattr(
+        skill_library_module.os,
+        "rmdir",
+        replace_quarantine_at_rmdir,
+    )
+    parent_descriptor = os.open(
+        tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    )
+    try:
+        skill_library_module._remove_owned_empty_artifact_directory(
+            parent_descriptor,
+            owned.name,
+            identity,
+        )
+    finally:
+        os.close(parent_descriptor)
+
+    assert not replacement_attempted
+    assert not owned.exists()
+    quarantines = tuple(
+        entry
+        for entry in tmp_path.iterdir()
+        if entry.name.startswith(".retrieval-quarantine-")
+    )
+    assert len(quarantines) == 1
+    retained = quarantines[0].stat()
+    assert (retained.st_dev, retained.st_ino) == identity
+    assert not displaced.exists()
+
+
+def test_provenance_directory_is_opened_before_no_replace_publication(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_mkdir = skill_library_module.os.mkdir
+    created_name: str | None = None
+
+    def mkdir_then_raise(name, mode=0o777, *, dir_fd=None):
+        nonlocal created_name
+        result = real_mkdir(name, mode, dir_fd=dir_fd)
+        created_name = str(name)
+        raise OSError("directory creation raised after commit")
+
+    monkeypatch.setattr(skill_library_module.os, "mkdir", mkdir_then_raise)
+    parent_descriptor = os.open(
+        tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    )
+    descriptor: int | None = None
+    try:
+        descriptor, created, identity = (
+            skill_library_module._open_artifact_directory_entry(
+                parent_descriptor,
+                "provenance",
+                create=True,
+            )
+        )
+        opened = os.fstat(descriptor)
+        visible = (tmp_path / "provenance").stat()
+        assert created is True
+        assert created_name is not None
+        assert created_name != "provenance"
+        assert identity == (opened.st_dev, opened.st_ino)
+        assert identity == (visible.st_dev, visible.st_ino)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent_descriptor)
+
+    assert tuple(entry.name for entry in tmp_path.iterdir()) == ("provenance",)
+
+
+def test_provenance_inspection_failure_retains_unique_unpublished_directory(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_fstat = skill_library_module.os.fstat
+    inspection_failed = False
+
+    def fail_first_inspection(descriptor):
+        nonlocal inspection_failed
+        if not inspection_failed:
+            inspection_failed = True
+            raise OSError("cannot inspect newly created directory")
+        return real_fstat(descriptor)
+
+    monkeypatch.setattr(skill_library_module.os, "fstat", fail_first_inspection)
+    parent_descriptor = os.open(
+        tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    )
+    try:
+        with pytest.raises(
+            RetrievalSkillError,
+            match="inspect|open|directory",
+        ):
+            skill_library_module._open_artifact_directory_entry(
+                parent_descriptor,
+                "provenance",
+                create=True,
+            )
+    finally:
+        os.close(parent_descriptor)
+
+    assert inspection_failed
+    assert not (tmp_path / "provenance").exists()
+    retained = tuple(tmp_path.iterdir())
+    assert len(retained) == 1
+    assert retained[0].is_dir()
+    assert retained[0].name != "provenance"
+
+
+def test_provenance_publication_detects_replacement_and_retains_both_inodes(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    displaced = tmp_path / "retained-owned-provenance"
+    foreign_marker = b"foreign provenance must survive\n"
+    real_publish = skill_library_module._rename_artifact_entry_noreplace
+    replaced = False
+
+    def replace_unpublished_before_publish(parent_descriptor, source, destination):
+        nonlocal replaced
+        if destination == "provenance" and not replaced:
+            replaced = True
+            os.rename(
+                source,
+                displaced.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+            os.mkdir(source, dir_fd=parent_descriptor)
+            foreign_directory = os.open(
+                    source,
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                    dir_fd=parent_descriptor,
+            )
+            try:
+                descriptor = os.open(
+                    "foreign-marker",
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=foreign_directory,
+                )
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(foreign_marker)
+            finally:
+                os.close(foreign_directory)
+        return real_publish(parent_descriptor, source, destination)
+
+    monkeypatch.setattr(
+        skill_library_module,
+        "_rename_artifact_entry_noreplace",
+        replace_unpublished_before_publish,
+    )
+    parent_descriptor = os.open(
+        tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    )
+    try:
+        with pytest.raises(
+            RetrievalSkillError,
+            match="changed|replacement|publication|directory",
+        ):
+            skill_library_module._open_artifact_directory_entry(
+                parent_descriptor,
+                "provenance",
+                create=True,
+            )
+    finally:
+        os.close(parent_descriptor)
+
+    assert replaced
+    assert displaced.is_dir()
+    assert (tmp_path / "provenance" / "foreign-marker").read_bytes() == foreign_marker
 
 
 def test_active_checkpoint_rollback_preserves_preexisting_identical_witness(
@@ -1765,7 +2065,15 @@ def test_failed_witness_link_uses_held_directory_to_remove_only_owned_inode(
     assert new_witness_name is not None
     assert foreign_identity is not None
     assert foreign_bytes is not None
-    assert {witness.name for witness in displaced.iterdir()} == prior_witness_names
+    displaced_names = {witness.name for witness in displaced.iterdir()}
+    assert {
+        name
+        for name in displaced_names
+        if not name.startswith(".retrieval-quarantine-")
+    } == prior_witness_names
+    assert len(
+        [name for name in displaced_names if name.startswith(".retrieval-quarantine-")]
+    ) == 1
     foreign = provenance / new_witness_name
     metadata = foreign.stat()
     assert (metadata.st_dev, metadata.st_ino) == foreign_identity

@@ -1,0 +1,258 @@
+from __future__ import annotations
+
+import json
+import hashlib
+from dataclasses import replace
+from types import SimpleNamespace
+
+import evolving_loop.frozen_inference as frozen_module
+from evolving_loop.co_evolution import HarnessPolicy
+from evolving_loop.data import ContextTask, Document, Task
+from evolving_loop.decision_agent.agent import DecisionCandidate, DecisionResult
+from evolving_loop.frozen_inference import run_frozen_inference
+from evolving_loop.evaluation import ResolvedOutcome
+from evolving_loop.retrieval_agent.credit import RetrievalTaskDiagnostics
+from evolving_loop.retrieval_agent.schemas import FinalRetrievalCard
+
+
+def _hidden_task() -> ContextTask:
+    return ContextTask(
+        numeric=Task(
+            task_id="hidden_1",
+            history_values=(1.0, 2.0),
+            future_values=(),
+            prediction_length=1,
+            frequency="1 day",
+            seasonal_period=None,
+            entity_name="Entity",
+        ),
+        target_name="volume",
+        target_description="public description",
+        history_timestamps=("2026-01-01", "2026-01-02"),
+        future_timestamps=("2026-01-03",),
+        documents=(Document("doc_1", "Demand rose by 10%.", "SECRET_ROLE", "SECRET_SUBTYPE"),),
+        gt_evidence=("SECRET_GT",),
+        labels_public=False,
+    )
+
+
+def _chain(chain_id: str, *, stance: str, skill_id: str) -> dict[str, object]:
+    return {
+        "chain_id": chain_id,
+        "claim": "Demand rose.",
+        "entity_match": True,
+        "target_match": True,
+        "temporal_relation": "overlaps_future",
+        "mechanism": "future_driver",
+        "direction": "up",
+        "magnitude_kind": "relative",
+        "magnitude_value": 0.1,
+        "start_timestamp": "2026-01-01",
+        "end_timestamp": "2026-01-03",
+        "citations": [
+            {"document_id": "doc_1", "exact_quote": "Demand rose by 10%."}
+        ],
+        "missing_links": [],
+        "used_skill_ids": [skill_id],
+        "addressed_assumption_ids": ["assumption_1"],
+        "stance": stance,
+        "numeric_eligible": True,
+    }
+
+
+def _card() -> FinalRetrievalCard:
+    first = _chain("round1_chain", stance="supports", skill_id="skill_round1")
+    second = _chain("round2_chain", stance="challenges", skill_id="skill_round2")
+    return FinalRetrievalCard.from_payload(
+        {
+            "round1": {
+                "evidence_chains": [first],
+                "counterevidence": [],
+                "missing_information": ["Need counterevidence"],
+                "sufficient": False,
+                "gaps": [
+                    {
+                        "assumption_id": "assumption_1",
+                        "gap_type": "counterevidence",
+                        "missing_information": "Could demand reverse?",
+                        "priority": "high",
+                    }
+                ],
+                "rejected": ["round1_bad_citation"],
+            },
+            "round2": {
+                "evidence_chains": [second],
+                "counterevidence": [],
+                "missing_information": [],
+                "sufficient": True,
+                "rejected": ["round2_bad_citation"],
+            },
+            "chains": [first, second],
+            "selected_document_ids": ["doc_1"],
+            "rejected": ["round1_bad_citation", "round2_bad_citation"],
+            "unresolved_contradictions": ["direction_conflict"],
+            "complete": True,
+        }
+    )
+
+
+def _result() -> SimpleNamespace:
+    candidate = DecisionCandidate(
+        candidate_id="level",
+        forecast=(3.0,),
+        assumption="level persists",
+        failure_condition="regime changes",
+        hindcast_smape=1.0,
+    )
+    card = _card()
+    return SimpleNamespace(
+        forecast=(3.0,),
+        retrieval=card.to_legacy_result(),
+        retrieval_card=card,
+        decision=DecisionResult(
+            selected=candidate,
+            host_default_id="level",
+            requested_more_retrieval=False,
+            rationale="verified",
+            supporting_document_ids=("doc_1",),
+            llm_override_accepted=False,
+        ),
+        candidates=(candidate,),
+    )
+
+
+def test_hidden_retrieval_inference_is_write_free_and_reports_both_rounds(tmp_path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "library.json"
+    sentinel.write_text("unchanged", encoding="utf-8")
+    calls: list[tuple[ContextTask, bool]] = []
+
+    class Harness:
+        def run(self, task: ContextTask, *, allow_skill_writes: bool = True):
+            calls.append((task, allow_skill_writes))
+            return _result()
+
+    embedded = {
+        "genome": {},
+        "round1_prompt": "one",
+        "round2_prompt": "two",
+        "skills": [],
+        "manifest": {},
+    }
+    release_sha256 = hashlib.sha256(
+        json.dumps(
+            embedded, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    policy = HarnessPolicy(
+        retrieval_release_payload=embedded,
+        retrieval_release_sha256=release_sha256,
+    )
+    summary = run_frozen_inference(
+        policy,
+        [_hidden_task()],
+        lambda _policy: Harness(),
+        output_dir=tmp_path / "output",
+        score_public=False,
+        artifact_kind="retrieval",
+    )
+
+    assert len(calls) == 1
+    inference_task, allow_skill_writes = calls[0]
+    assert allow_skill_writes is False
+    assert inference_task.numeric.future_values == ()
+    assert inference_task.gt_evidence == ()
+    assert inference_task.labels_public is False
+    assert inference_task.documents[0].role is None
+    assert inference_task.documents[0].subtype is None
+    assert sentinel.read_text(encoding="utf-8") == "unchanged"
+    assert {path.name for path in tmp_path.iterdir()} == {"outside", "output"}
+
+    report = json.loads(
+        (tmp_path / "output" / "run_report.jsonl").read_text(encoding="utf-8")
+    )
+    assert report["labels_accessed"] is False
+    assert report["release_sha256"] == policy.retrieval_release_sha256
+    assert report["retrieval"]["round1"]["evidence_chains"][0]["chain_id"] == "round1_chain"
+    assert report["retrieval"]["round2"]["evidence_chains"][0]["chain_id"] == "round2_chain"
+    assert report["retrieval"]["rejected"] == [
+        "round1_bad_citation",
+        "round2_bad_citation",
+    ]
+    assert report["retrieval"]["round1"]["gaps"][0]["assumption_id"] == "assumption_1"
+    assert report["assumption_stances"] == [
+        {
+            "chain_id": "round1_chain",
+            "assumption_ids": ["assumption_1"],
+            "stance": "supports",
+        },
+        {
+            "chain_id": "round2_chain",
+            "assumption_ids": ["assumption_1"],
+            "stance": "challenges",
+        },
+    ]
+    assert report["used_skill_ids"] == ["skill_round1", "skill_round2"]
+    encoded = json.dumps(report).lower()
+    assert "secret_gt" not in encoded
+    assert "secret_role" not in encoded
+    assert "secret_subtype" not in encoded
+    assert "gt_evidence" not in encoded
+    assert summary["labels_accessed"] is False
+
+
+def test_explicit_public_scoring_never_serializes_gt_or_document_role_fields(
+    tmp_path, monkeypatch
+) -> None:
+    task = replace(
+        _hidden_task(),
+        numeric=replace(_hidden_task().numeric, future_values=(3.0,)),
+        gt_evidence=("SECRET_GT",),
+        labels_public=True,
+    )
+
+    class Harness:
+        def run(self, _task, *, allow_skill_writes=True):
+            assert allow_skill_writes is False
+            return _result()
+
+    diagnostics = RetrievalTaskDiagnostics(
+        supporting_recall=1.0,
+        gt_evidence_recall=0.5,
+        distractor_avoidance=1.0,
+        exact_quote_validity=1.0,
+        complete_chain_rate=1.0,
+        contextual_oracle_smae_gain=0.0,
+        contextual_oracle_srmse_gain=0.0,
+        invalid_count=0,
+        catastrophic_count=0,
+        chain_credit=(),
+    )
+    monkeypatch.setattr(
+        frozen_module,
+        "score_after_resolution",
+        lambda original, _result: ResolvedOutcome(
+            task_id=original.numeric.task_id,
+            final_smae=0.1,
+            final_srmse=0.2,
+            contextual_oracle_smae=0.1,
+            contextual_oracle_srmse=0.2,
+            retrieval_diagnostics=diagnostics,
+        ),
+    )
+
+    run_frozen_inference(
+        HarnessPolicy(),
+        [task],
+        lambda _policy: Harness(),
+        output_dir=tmp_path,
+        score_public=True,
+        artifact_kind="retrieval",
+    )
+
+    encoded = (tmp_path / "run_report.jsonl").read_text(encoding="utf-8").lower()
+    assert "gt_evidence" not in encoded
+    assert "secret_gt" not in encoded
+    assert "secret_role" not in encoded
+    assert "secret_subtype" not in encoded

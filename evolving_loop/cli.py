@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
+import re
+import statistics
 import subprocess
 import sys
 import tempfile
-from dataclasses import asdict
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from evolving_loop.co_evolution import (
@@ -27,12 +31,16 @@ from evolving_loop.data import (
 )
 from evolving_loop.decision_agent.agent import DecisionAgent
 from evolving_loop.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
-from evolving_loop.frozen_inference import run_frozen_inference
+from evolving_loop.frozen_inference import inference_view, run_frozen_inference
 from evolving_loop.harness import EvolvingForecastHarness, HarnessRuntimeConfig
 from evolving_loop.morphology_adapter import MorphologyProvider
 from evolving_loop.retrieval_agent.agent import RetrievalAgent
 from evolving_loop.retrieval_agent.policy import (
+    RetrievalGenome,
+    RetrievalPolicyError,
+    RetrievalRelease,
     _load_retrieval_release_for_operator,
+    _write_accepted_retrieval_release,
 )
 from evolving_loop.retrieval_agent.skill_library import (
     RetrievalSkill,
@@ -49,6 +57,17 @@ from evolving_loop.source_evolution import (
 )
 from evolving_loop.source_evolution.source_inference import run_source_inference
 from common.llm import ClaudeCLIClient, ClaudeCLIConfig, CodexCLIClient, CodexCLIConfig, QwenClient
+from common.metrics import linear_quantile
+from evolving_loop.evaluation import score_after_resolution
+from evolving_loop.retrieval_agent.evolution import (
+    RetrievalEvaluation,
+    RetrievalEvolutionConfig,
+    RetrievalEvolutionEngine,
+    RetrievalEvolutionError,
+    RetrievalEvolutionResult,
+    RetrievalForecastingFailure,
+    _authorize_retrieval_evolution_checkpoint_for_operator,
+)
 from common.tsfm import ChronosConfig, ChronosForecaster
 
 BASELINE_CHOICES = (
@@ -67,8 +86,37 @@ BASELINE_CHOICES = (
     "codex-contract",
     "evolving-harness",
 )
-EVOLUTION_CHOICES = ("prompt", "genome", "source")
+EVOLUTION_CHOICES = ("prompt", "genome", "source", "retrieval")
 INFERENCE_CHOICES = EVOLUTION_CHOICES
+DRCIK_PUBLIC_80_20_99_SHA256 = (
+    "3cc81f45878c1aae93e5ba48dc367df6553698db6661dbe06fbe5efb06afca92"
+)
+
+
+class _RetrievalDefaultsParser(argparse.ArgumentParser):
+    """Apply mode-dependent defaults after root and legacy parsing converge."""
+
+    def parse_args(self, args=None, namespace=None):
+        parsed = super().parse_args(args, namespace)
+        retrieval = any(
+            getattr(parsed, field, None) == "retrieval"
+            for field in ("evolution", "inference", "evolution_mode")
+        )
+        defaults = {
+            "retrieval_mode": "two-stage" if retrieval else "single-pass",
+            "retrieval_release_path": (
+                "evolving_loop/retrieval_agent/releases/v000"
+                if retrieval
+                else None
+            ),
+            "screen_train_tasks": 8 if retrieval else 6,
+            "screen_promote": 2 if retrieval else 1,
+            "screen_dev_tasks": 2,
+        }
+        for field, value in defaults.items():
+            if hasattr(parsed, field) and getattr(parsed, field) is None:
+                setattr(parsed, field, value)
+        return parsed
 
 
 def _add_data_source_arguments(parser: argparse.ArgumentParser) -> None:
@@ -120,14 +168,14 @@ def _add_successive_halving_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Screen all children on a small Train subset before full evaluation.",
     )
-    parser.add_argument("--screen-train-tasks", type=int, default=6)
+    parser.add_argument("--screen-train-tasks", type=int, default=None)
     parser.add_argument(
         "--screen-dev-tasks",
         type=int,
-        default=2,
+        default=None,
         help="Deprecated compatibility option; Dev is never used for screening.",
     )
-    parser.add_argument("--screen-promote", type=int, default=1)
+    parser.add_argument("--screen-promote", type=int, default=None)
     parser.add_argument("--screen-tolerance", type=float, default=0.01)
 
 
@@ -135,9 +183,29 @@ def _add_retrieval_topology_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--retrieval-mode",
         choices=("single-pass", "two-stage"),
-        default="single-pass",
+        default=None,
     )
     parser.add_argument("--retrieval-release-path", default=None)
+
+
+def _add_retrieval_evolution_controls(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--split-manifest-sha256",
+        default=DRCIK_PUBLIC_80_20_99_SHA256,
+    )
+    parser.add_argument("--verifier-sha256", default=None)
+    parser.add_argument("--evaluator-sha256", default=None)
+    parser.add_argument("--metric-sha256", default=None)
+    parser.add_argument("--mutation-model-sha256", default=None)
+    parser.add_argument("--harness-sha256", default=None)
+    parser.add_argument("--metric-cap", type=float, default=5.0)
+    parser.add_argument("--train-folds", type=int, default=5)
+    parser.add_argument("--evolution-tolerance", type=float, default=1e-12)
+    parser.add_argument(
+        "--checkpoint-authority-path",
+        default=None,
+        help="Out-of-band trusted digest/epoch record used for checkpoint resume.",
+    )
 
 
 def _add_unified_evolution_arguments(parser: argparse.ArgumentParser) -> None:
@@ -210,10 +278,11 @@ def _add_unified_evolution_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Ignore an existing evolution checkpoint and start from the seed artifact.",
     )
+    _add_retrieval_evolution_controls(parser)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _RetrievalDefaultsParser(
         description=(
             "Run contextual forecasting baselines and self-evolution modes from one entrypoint. "
             "Use --baseline NAME or --evolution NAME for the unified interface; legacy run/evolve "
@@ -311,7 +380,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evolve.add_argument(
         "--evolution-mode",
-        choices=("prompt", "genome", "source"),
+        choices=("prompt", "genome", "source", "retrieval"),
         default="genome",
         help=(
             "prompt changes one role prompt; genome co-evolves prompts/budgets/topology; "
@@ -320,6 +389,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evolve.add_argument("--dev-fraction", type=float, default=0.25)
     evolve.add_argument("--holdout-fraction", type=float, default=0.20)
+    evolve.add_argument(
+        "--split-manifest",
+        default=None,
+        help="Immutable Train/Dev/Public Regression manifest for Retrieval evolution.",
+    )
     evolve.add_argument(
         "--split-manifest-path", default="runs/evolving/split_manifest.json"
     )
@@ -341,6 +415,7 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--checkpoint-path", default=None)
     evolve.add_argument("--progress-path", default=None)
     evolve.add_argument("--no-resume", action="store_true")
+    _add_retrieval_evolution_controls(evolve)
     # Root-mode invocations have no subcommand, while legacy calls require one.
     subparsers.required = False
     return parser
@@ -546,6 +621,291 @@ def _three_way_entity_split(
     return train, dev, holdout
 
 
+def _canonical_sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _load_retrieval_evolution_tasks(
+    tasks_file: str | Path,
+    manifest_path: str | Path,
+    *,
+    expected_manifest_sha256: str | None = None,
+    include_public_ids: bool = False,
+) -> (
+    tuple[tuple[ContextTask, ...], tuple[ContextTask, ...], str]
+    | tuple[
+        tuple[ContextTask, ...],
+        tuple[ContextTask, ...],
+        str,
+        frozenset[str],
+    ]
+):
+    """Authenticate the frozen split before loading exactly its Train and Dev tasks."""
+    source = Path(manifest_path)
+    try:
+        manifest = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid Retrieval split manifest: {source}") from error
+    if not isinstance(manifest, dict):
+        raise ValueError("Retrieval split manifest must be an object")
+    internal_sha256 = manifest.get("manifest_sha256")
+    if not isinstance(internal_sha256, str) or len(internal_sha256) != 64:
+        raise ValueError("Retrieval split manifest requires manifest_sha256")
+    unsigned = {key: value for key, value in manifest.items() if key != "manifest_sha256"}
+    actual_sha256 = _canonical_sha256(unsigned)
+    if internal_sha256 != actual_sha256:
+        raise ValueError("Retrieval split manifest sha256 mismatch")
+    if (
+        expected_manifest_sha256 is not None
+        and expected_manifest_sha256 != actual_sha256
+    ):
+        raise ValueError("Retrieval split manifest does not match the frozen hash")
+    if manifest.get("schema_version") != 1:
+        raise ValueError("unsupported Retrieval split manifest schema")
+    for flag in (
+        "selection_uses_future_values",
+        "selection_uses_gt_evidence",
+        "selection_uses_document_labels",
+    ):
+        if manifest.get(flag) is not False:
+            raise ValueError(f"Retrieval split manifest has unsafe {flag}")
+    expected_sizes = {"train": 80, "dev": 20, "public_test": 99}
+    if manifest.get("target_sizes") != expected_sizes:
+        raise ValueError("Retrieval split manifest target sizes are not frozen")
+    if manifest.get("actual_sizes") != expected_sizes:
+        raise ValueError("Retrieval split manifest actual sizes are not frozen")
+    partitions = manifest.get("partitions")
+    if not isinstance(partitions, dict) or set(partitions) != set(expected_sizes):
+        raise ValueError("Retrieval split manifest partitions are invalid")
+    partition_ids: dict[str, tuple[str, ...]] = {}
+    all_ids: set[str] = set()
+    for name, size in expected_sizes.items():
+        partition = partitions.get(name)
+        if not isinstance(partition, dict):
+            raise ValueError(f"Retrieval split manifest {name} partition is invalid")
+        raw_ids = partition.get("task_ids")
+        if (
+            not isinstance(raw_ids, list)
+            or len(raw_ids) != size
+            or any(not isinstance(task_id, str) or not task_id for task_id in raw_ids)
+            or len(set(raw_ids)) != size
+        ):
+            raise ValueError(f"Retrieval split manifest {name} task IDs are invalid")
+        ids = tuple(raw_ids)
+        if all_ids.intersection(ids):
+            raise ValueError("Retrieval split manifest partitions overlap")
+        partition_ids[name] = ids
+        all_ids.update(ids)
+
+    # Loading follows authentication so a forged manifest never selects or exposes data.
+    available: dict[str, ContextTask] = {}
+    for task in load_context_tasks(tasks_file):
+        task_id = task.numeric.task_id
+        if task_id in available:
+            raise ValueError(f"duplicate task ID in Retrieval dataset: {task_id}")
+        available[task_id] = task
+
+    def select(name: str) -> tuple[ContextTask, ...]:
+        missing = [task_id for task_id in partition_ids[name] if task_id not in available]
+        if missing:
+            raise ValueError(
+                f"Retrieval {name} split references unavailable task: {missing[0]}"
+            )
+        selected = tuple(available[task_id] for task_id in partition_ids[name])
+        if any(not task.labels_public or not task.numeric.future_values for task in selected):
+            raise ValueError(f"Retrieval {name} evaluation requires trusted public labels")
+        return selected
+
+    selected = (select("train"), select("dev"), actual_sha256)
+    if include_public_ids:
+        return (*selected, frozenset(partition_ids["public_test"]))
+    return selected
+
+
+def _plain_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _plain_json(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_plain_json(item) for item in value]
+    return value
+
+
+def _policy_with_retrieval_release(
+    policy: HarnessPolicy,
+    release: RetrievalRelease,
+    *,
+    changelog: str,
+) -> HarnessPolicy:
+    """Embed an authenticated release snapshot without turning it into authority."""
+    embedded = {
+        "genome": release.genome.to_payload(),
+        "round1_prompt": release.round1_prompt,
+        "round2_prompt": release.round2_prompt,
+        "skills": _plain_json(release.skills),
+        "manifest": _plain_json(release.manifest),
+    }
+    digest = _canonical_sha256(embedded)
+    return replace(
+        policy,
+        version=release.genome.version,
+        parent=release.genome.parent,
+        retrieval_prompt=release.round1_prompt,
+        retrieval_skills=tuple(embedded["skills"]),
+        changelog=changelog,
+        retrieval_release_payload=embedded,
+        retrieval_release_sha256=digest,
+    )
+
+
+def _policy_for_retrieval_release(
+    policy: HarnessPolicy,
+    release: RetrievalRelease,
+) -> HarnessPolicy:
+    """Bind legacy v000 policies; require accepted policies to carry exact payloads."""
+    expected = _policy_with_retrieval_release(
+        policy, release, changelog=policy.changelog
+    )
+    if policy.retrieval_release_payload is None:
+        if release.genome.version == "v000" and release.manifest["state"] == "seed":
+            return expected
+        raise ValueError(
+            "accepted Retrieval release requires an embedded HarnessPolicy payload"
+        )
+    if (
+        policy.retrieval_release_sha256 != expected.retrieval_release_sha256
+        or policy.retrieval_release_payload != expected.retrieval_release_payload
+    ):
+        raise ValueError(
+            "HarnessPolicy Retrieval release does not match the trusted operator release"
+        )
+    return policy
+
+
+class _TrustedRetrievalEvaluator:
+    """Run label-free harnesses first, then resolve metrics in the trusted host."""
+
+    def evaluate(
+        self,
+        genome,
+        tasks,
+        *,
+        stage,
+        skill_library,
+        harness_factory,
+        persist,
+        writers_enabled,
+        evolver_enabled,
+        cache_keys,
+        metric_cap,
+    ) -> RetrievalEvaluation:
+        del stage
+        if persist or writers_enabled or evolver_enabled:
+            raise RetrievalEvolutionError(
+                "trusted Retrieval evaluation forbids persistence, writers, and evolvers"
+            )
+        if metric_cap != 5.0:
+            raise RetrievalEvolutionError(
+                "trusted Retrieval evaluation uses the frozen Dr-CiK metric cap 5"
+            )
+        if not callable(harness_factory):
+            raise RetrievalEvolutionError("trusted Retrieval evaluation requires a harness factory")
+        task_ids = tuple(task.numeric.task_id for task in tasks)
+        if tuple(getattr(key, "task_id", None) for key in cache_keys) != task_ids:
+            raise RetrievalEvolutionError(
+                "trusted Retrieval cache keys do not match exact task order"
+            )
+
+        outcomes = []
+        traces: list[dict[str, object]] = []
+        for task in tasks:
+            try:
+                harness = harness_factory(genome, skill_library)
+                result = harness.run(
+                    inference_view(task), allow_skill_writes=False
+                )
+                if getattr(result, "task_id", task.numeric.task_id) != task.numeric.task_id:
+                    raise ValueError("harness returned a mismatched task ID")
+                outcome = score_after_resolution(task, result)
+            except RetrievalForecastingFailure:
+                raise
+            except Exception as error:
+                raise RetrievalForecastingFailure(
+                    type(error).__name__, str(error)
+                ) from error
+            diagnostics = outcome.retrieval_diagnostics
+            if diagnostics is None:
+                raise RetrievalForecastingFailure(
+                    "MissingRetrievalDiagnostics",
+                    "trusted scorer returned no Retrieval diagnostics",
+                )
+            metric_values = {
+                "final_smae": outcome.final_smae,
+                "final_srmse": outcome.final_srmse,
+                "contextual_oracle_smae": outcome.contextual_oracle_smae,
+                "contextual_oracle_srmse": outcome.contextual_oracle_srmse,
+            }
+            if any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                for value in metric_values.values()
+            ):
+                raise RetrievalForecastingFailure(
+                    "InvalidTrustedMetric", "trusted scorer returned an incomplete metric vector"
+                )
+            outcomes.append((outcome, diagnostics))
+            traces.append(
+                {
+                    "task_id": task.numeric.task_id,
+                    "entity_name": task.numeric.entity_name,
+                    **{key: float(value) for key, value in metric_values.items()},
+                }
+            )
+
+        def mean_outcome(field: str) -> float:
+            return statistics.fmean(float(getattr(outcome, field)) for outcome, _ in outcomes)
+
+        def mean_diagnostic(field: str) -> float:
+            return statistics.fmean(float(getattr(diagnostics, field)) for _, diagnostics in outcomes)
+
+        final_smae = [float(trace["final_smae"]) for trace in traces]
+        return RetrievalEvaluation(
+            version=genome.version,
+            task_count=len(tasks),
+            mean_final_smae=mean_outcome("final_smae"),
+            mean_final_srmse=mean_outcome("final_srmse"),
+            mean_contextual_oracle_smae=mean_outcome("contextual_oracle_smae"),
+            mean_contextual_oracle_srmse=mean_outcome("contextual_oracle_srmse"),
+            p90_smae=linear_quantile(final_smae, 0.90),
+            p95_smae=linear_quantile(final_smae, 0.95),
+            supporting_recall=mean_diagnostic("supporting_recall"),
+            distractor_avoidance=mean_diagnostic("distractor_avoidance"),
+            exact_quote_validity=mean_diagnostic("exact_quote_validity"),
+            complete_chain_rate=mean_diagnostic("complete_chain_rate"),
+            invalid_count=sum(
+                int(diagnostics.invalid_count) for _, diagnostics in outcomes
+            ),
+            catastrophic_count=sum(
+                int(diagnostics.catastrophic_count) for _, diagnostics in outcomes
+            ),
+            task_traces=tuple(traces),
+        )
+
+
+class _ConservativeMorphologyProvider:
+    """Safe deployment bridge until a Numerical Morphology provider is configured."""
+
+    def assumptions(self, task: ContextTask) -> tuple[object, ...]:
+        del task
+        return ()
+
+
 def _write_split_manifest(
     path: str | Path,
     *,
@@ -606,14 +966,19 @@ class _ChronosNumericForecaster:
         return self._forecaster.forecast(history, horizon)
 
 
-def _components(args):
+def _components(
+    args,
+    *,
+    retrieval_library_override: RetrievalSkillLibrary | None = None,
+    disable_llm_cache: bool = False,
+):
     if args.llm_backend == "codex":
         llm = CodexCLIClient(
             CodexCLIConfig(
                 model=args.codex_model,
                 reasoning_effort=args.codex_reasoning_effort,
                 timeout_seconds=args.codex_timeout,
-                cache_dir=args.codex_cache_dir,
+                cache_dir=None if disable_llm_cache else args.codex_cache_dir,
             )
         )
     elif args.llm_backend == "claude":
@@ -621,7 +986,7 @@ def _components(args):
             ClaudeCLIConfig(
                 model=args.claude_model,
                 timeout_seconds=args.claude_timeout,
-                cache_dir=args.claude_cache_dir,
+                cache_dir=None if disable_llm_cache else args.claude_cache_dir,
             )
         )
     else:
@@ -632,8 +997,10 @@ def _components(args):
             kwargs["device"] = args.device
         llm = QwenClient(**kwargs)
     library = SkillLibrary.load(args.library_path)
-    retrieval_library = _load_verified_checkpoint_for_operator(
-        args.retrieval_library_path
+    retrieval_library = (
+        retrieval_library_override
+        if retrieval_library_override is not None
+        else _load_verified_checkpoint_for_operator(args.retrieval_library_path)
     )
     decision_library = DecisionSkillLibrary.load(args.decision_library_path)
     tsfm = None
@@ -674,24 +1041,35 @@ def _factory(
     *,
     isolate_library: bool = False,
     morphology_provider: MorphologyProvider | None = None,
+    retrieval_genome=None,
+    retrieval_skill_source: RetrievalSkillLibrary | None = None,
 ):
     retrieval_mode = getattr(args, "retrieval_mode", "single-pass")
     if retrieval_mode not in {"single-pass", "two-stage"}:
         raise ValueError("retrieval_mode must be single-pass or two-stage")
     release = None
+    fixed_genome = retrieval_genome
     release_library: RetrievalSkillLibrary | None = None
     if retrieval_mode == "two-stage":
         if not isinstance(morphology_provider, MorphologyProvider) or not callable(
             getattr(morphology_provider, "assumptions", None)
         ):
             raise ValueError("two-stage construction requires MorphologyProvider")
-        release_path = getattr(args, "retrieval_release_path", None)
-        if not release_path:
-            raise ValueError("two-stage construction requires --retrieval-release-path")
-        release = _load_retrieval_release_for_operator(release_path)
-        release_library = RetrievalSkillLibrary.from_release(release_path)
+        if fixed_genome is not None:
+            if retrieval_skill_source is None:
+                raise ValueError(
+                    "candidate two-stage construction requires a verified Retrieval Skill source"
+                )
+            release_library = retrieval_skill_source
+        else:
+            release_path = getattr(args, "retrieval_release_path", None)
+            if not release_path:
+                raise ValueError("two-stage construction requires --retrieval-release-path")
+            release = _load_retrieval_release_for_operator(release_path)
+            fixed_genome = release.genome
+            release_library = RetrievalSkillLibrary.from_release(release_path)
         available_ids = {item.skill_id for item in release_library.all()}
-        missing_ids = set(release.genome.active_skill_ids) - available_ids
+        missing_ids = set(fixed_genome.active_skill_ids) - available_ids
         if missing_ids:
             raise ValueError(
                 "retrieval release references unavailable active skills: "
@@ -704,7 +1082,7 @@ def _factory(
             {record["name"]: Skill(**record) for record in policy.coding_skills}
         )
         runtime_skill_source = None
-        if release is None and policy.retrieval_skill_source is not None:
+        if fixed_genome is None and policy.retrieval_skill_source is not None:
             if not isinstance(
                 policy.retrieval_skill_source, RetrievalSkillLibrary
             ):
@@ -719,7 +1097,7 @@ def _factory(
                 )
             runtime_skill_source = policy.retrieval_skill_source
             retrieval_records = []
-        elif release is None:
+        elif fixed_genome is None:
             verified_by_payload = {
                 json.dumps(skill.to_payload(), sort_keys=True): skill
                 for skill in retrieval_library.all()
@@ -791,8 +1169,8 @@ def _factory(
             revision_prompt=policy.coding_revision_prompt,
         )
         retrieval_agent = (
-            TwoStageRetrievalAgent(llm, release.genome, task_retrieval_library)
-            if release is not None
+            TwoStageRetrievalAgent(llm, fixed_genome, task_retrieval_library)
+            if fixed_genome is not None
             else RetrievalAgent(
                 llm,
                 task_retrieval_library,
@@ -900,7 +1278,538 @@ def run_command(args) -> dict:
     }
 
 
+def _sha256_sources(*relative_paths: str) -> str:
+    root = Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    for relative in sorted(relative_paths):
+        path = root / relative
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _frozen_sha256(explicit: str | None, label: str, fallback: str) -> str:
+    value = fallback if explicit is None else explicit
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{label} must be an exact lowercase sha256 digest")
+    return value
+
+
+def _checkpoint_authority_path(args, checkpoint_path: Path) -> Path:
+    configured = getattr(args, "checkpoint_authority_path", None)
+    if configured:
+        return Path(configured)
+    return checkpoint_path.with_name(
+        f"{checkpoint_path.stem}.authority.json"
+    )
+
+
+def _restore_retrieval_checkpoint_authority(
+    checkpoint_path: Path,
+    authority_path: Path,
+) -> None:
+    try:
+        payload = json.loads(authority_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise ValueError(
+            "Retrieval checkpoint exists but its out-of-band authority record is missing"
+        ) from error
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("invalid Retrieval checkpoint authority record") from error
+    expected_fields = {
+        "schema_version",
+        "checkpoint_path",
+        "checkpoint_sha256",
+        "authority_epoch",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected_fields:
+        raise ValueError("invalid Retrieval checkpoint authority schema")
+    if payload["schema_version"] != 1:
+        raise ValueError("unsupported Retrieval checkpoint authority schema")
+    expected_path = str(checkpoint_path.resolve(strict=False))
+    if payload["checkpoint_path"] != expected_path:
+        raise ValueError("Retrieval checkpoint authority path binding mismatch")
+    _authorize_retrieval_evolution_checkpoint_for_operator(
+        checkpoint_path,
+        expected_sha256=payload["checkpoint_sha256"],
+        expected_epoch=payload["authority_epoch"],
+    )
+
+
+def _persist_retrieval_checkpoint_authority(
+    engine: object,
+    checkpoint_path: Path,
+    authority_path: Path,
+) -> None:
+    checkpoint_sha256 = getattr(engine, "_checkpoint_file_sha256", None)
+    authority_epoch = getattr(engine, "_checkpoint_authority_epoch", None)
+    if checkpoint_sha256 is None and authority_epoch is None:
+        return
+    if checkpoint_sha256 is None or authority_epoch is None:
+        raise ValueError("Retrieval engine produced incomplete checkpoint authority")
+    # Re-run the private operator boundary before persisting the trusted values.
+    _authorize_retrieval_evolution_checkpoint_for_operator(
+        checkpoint_path,
+        expected_sha256=checkpoint_sha256,
+        expected_epoch=authority_epoch,
+    )
+    payload = {
+        "schema_version": 1,
+        "checkpoint_path": str(checkpoint_path.resolve(strict=False)),
+        "checkpoint_sha256": checkpoint_sha256,
+        "authority_epoch": authority_epoch,
+    }
+    authority_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{authority_path.name}.",
+        suffix=".unpublished",
+        dir=authority_path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, authority_path)
+    except Exception:
+        # The unique unpublished artifact is retained: deleting it by name after
+        # losing descriptor ownership could remove a concurrent replacement.
+        raise
+
+
+def _scope_changelogs(result: RetrievalEvolutionResult) -> list[dict[str, object]]:
+    known = {result.original_parent.version: result.original_parent.to_payload()}
+    generations: list[dict[str, object]] = []
+    for generation in result.generations:
+        parent = known.get(generation.parent_version, {})
+        children = []
+        for scope, proposal in zip(
+            generation.child_scopes, generation.child_proposals
+        ):
+            changed = sorted(
+                field
+                for field, value in proposal.items()
+                if field not in {"schema_version", "version", "parent"}
+                and parent.get(field) != value
+            )
+            children.append(
+                {
+                    "scope": scope,
+                    "version": proposal.get("version"),
+                    "changed_fields": changed,
+                    "changelog": (
+                        f"Scope {scope} changed " + ", ".join(changed)
+                        if changed
+                        else f"Scope {scope} proposed no owned-field change"
+                    ),
+                }
+            )
+            version = proposal.get("version")
+            if isinstance(version, str):
+                known[version] = proposal
+        generations.append(
+            {"generation": generation.generation, "children": children}
+        )
+    return generations
+
+
+def _selected_train_summary(result: RetrievalEvolutionResult) -> dict[str, object]:
+    fingerprint = result.train_winner.fingerprint()
+    for generation in reversed(result.generations):
+        summary = generation.train_summaries.get(fingerprint)
+        if summary:
+            return dict(summary)
+    return {
+        "task_count": 80,
+        "winner_version": result.train_winner.version,
+        "winner_fingerprint": fingerprint,
+    }
+
+
+def _publish_or_resume_accepted_retrieval_release(
+    releases_path: str | Path,
+    genome: RetrievalGenome,
+    *,
+    skills: Sequence[object],
+    audit: Mapping[str, object],
+) -> RetrievalRelease:
+    """Publish once, or operator-verify the identical release after resume."""
+    destination = Path(releases_path) / genome.version
+
+    def verify_existing() -> RetrievalRelease:
+        release = _load_retrieval_release_for_operator(destination)
+        if release.genome.fingerprint() != genome.fingerprint():
+            raise RetrievalEvolutionError(
+                "existing accepted Retrieval release Genome differs from resumed result"
+            )
+        if _plain_json(release.skills) != _plain_json(list(skills)):
+            raise RetrievalEvolutionError(
+                "existing accepted Retrieval release Skills differ from resumed result"
+            )
+        for field, expected in audit.items():
+            if release.manifest.get(field) != expected:
+                raise RetrievalEvolutionError(
+                    f"existing accepted Retrieval release differs at {field}"
+                )
+        return release
+
+    if os.path.lexists(destination):
+        return verify_existing()
+    try:
+        return _write_accepted_retrieval_release(
+            releases_path,
+            genome,
+            skills=skills,
+            audit=audit,
+        )
+    except RetrievalPolicyError:
+        # A concurrent no-replace winner is acceptable only if the private
+        # operator loader proves it is byte-equivalent in every bound input.
+        if not os.path.lexists(destination):
+            raise
+        return verify_existing()
+
+
+def _assert_no_public_regression_ids(
+    payload: object, public_ids: frozenset[str]
+) -> None:
+    def strings(value: object):
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, Mapping):
+            for key, item in value.items():
+                yield str(key)
+                yield from strings(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                yield from strings(item)
+
+    mentioned = {
+        token
+        for value in strings(payload)
+        for token in re.findall(r"(?<![A-Za-z0-9_])task_\d+(?![A-Za-z0-9_])", value)
+    }
+    leaked = sorted(public_ids.intersection(mentioned))
+    if leaked:
+        raise RetrievalEvolutionError(
+            f"Public Regression task ID reached Retrieval evolution trace: {leaked[0]}"
+        )
+
+
+def _write_json_artifact(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _retrieval_evolve_command(args) -> dict:
+    """Run the fixed 80/20 Retrieval evolution protocol; Public Regression stays absent."""
+    if not args.split_manifest:
+        raise ValueError("Retrieval evolution requires --split-manifest")
+    if args.retrieval_mode != "two-stage":
+        raise ValueError("Retrieval evolution requires --retrieval-mode two-stage")
+    train, dev, split_sha256, public_ids = _load_retrieval_evolution_tasks(
+        args.tasks_file,
+        args.split_manifest,
+        expected_manifest_sha256=args.split_manifest_sha256,
+        include_public_ids=True,
+    )
+    if any(task.numeric.task_id in public_ids for task in (*train, *dev)):
+        raise RetrievalEvolutionError(
+            "Public Regression tasks cannot enter Retrieval evolution"
+        )
+
+    parent_release = _load_retrieval_release_for_operator(
+        args.retrieval_release_path
+    )
+    parent_library = RetrievalSkillLibrary.from_release(parent_release.path)
+    base_policy = _seed_policy(args)
+    if base_policy.retrieval_release_payload is not None:
+        expected_parent = _policy_with_retrieval_release(
+            base_policy, parent_release, changelog=base_policy.changelog
+        )
+        if (
+            base_policy.retrieval_release_sha256
+            != expected_parent.retrieval_release_sha256
+        ):
+            raise ValueError(
+                "seed HarnessPolicy does not match the trusted parent Retrieval release"
+            )
+
+    llm, library, _retrieval_library, decision_library, tsfm = _components(
+        args, retrieval_library_override=parent_library
+    )
+    morphology = _ConservativeMorphologyProvider()
+
+    def harness_factory(
+        genome: RetrievalGenome,
+        skill_library: RetrievalSkillLibrary | None,
+    ):
+        if skill_library is None:
+            raise RetrievalEvolutionError(
+                "Retrieval candidate evaluation requires a verified Skill snapshot"
+            )
+        return _factory(
+            args,
+            llm,
+            library,
+            parent_library,
+            decision_library,
+            tsfm,
+            isolate_library=True,
+            morphology_provider=morphology,
+            retrieval_genome=genome,
+            retrieval_skill_source=skill_library,
+        )(base_policy)
+
+    checkpoint_path = Path(args.checkpoint_path) if args.checkpoint_path else Path(
+        args.trace_path
+    ).with_name("checkpoint.json")
+    authority_path = _checkpoint_authority_path(args, checkpoint_path)
+    if not args.no_resume and os.path.lexists(checkpoint_path):
+        _restore_retrieval_checkpoint_authority(
+            checkpoint_path, authority_path
+        )
+
+    verifier_hash = _frozen_sha256(
+        args.verifier_sha256,
+        "--verifier-sha256",
+        _sha256_sources("evolving_loop/retrieval_agent/verifier.py"),
+    )
+    evaluator_hash = _frozen_sha256(
+        args.evaluator_sha256,
+        "--evaluator-sha256",
+        _sha256_sources(
+            "evolving_loop/cli.py",
+            "evolving_loop/evaluation.py",
+            "evolving_loop/retrieval_agent/credit.py",
+        ),
+    )
+    metric_hash = _frozen_sha256(
+        args.metric_sha256,
+        "--metric-sha256",
+        _sha256_sources("common/metrics.py"),
+    )
+    mutation_model_hash = _frozen_sha256(
+        args.mutation_model_sha256,
+        "--mutation-model-sha256",
+        _canonical_sha256(
+            {
+                "backend": args.llm_backend,
+                "model": (
+                    args.codex_model
+                    if args.llm_backend == "codex"
+                    else args.claude_model
+                    if args.llm_backend == "claude"
+                    else args.model_id
+                ),
+                "reasoning_effort": getattr(args, "codex_reasoning_effort", None),
+                "client_source_sha256": _sha256_sources("common/llm.py"),
+            }
+        ),
+    )
+    harness_source_hash = _sha256_sources(
+        "evolving_loop/harness.py",
+        "evolving_loop/frozen_inference.py",
+        "evolving_loop/co_evolution.py",
+        "evolving_loop/coding_agent/evolution.py",
+        "evolving_loop/decision_agent/agent.py",
+        "evolving_loop/morphology_adapter.py",
+        "evolving_loop/retrieval_agent/policy.py",
+        "evolving_loop/retrieval_agent/two_stage_agent.py",
+        "evolving_loop/retrieval_agent/schemas.py",
+    )
+    harness_hash = _frozen_sha256(
+        args.harness_sha256,
+        "--harness-sha256",
+        _canonical_sha256(
+            {
+                "source_sha256": harness_source_hash,
+                "policy": base_policy.to_payload(),
+                "coding_skills": [
+                    asdict(skill)
+                    for skill in sorted(
+                        library.all(), key=lambda item: (item.skill_id, item.name)
+                    )
+                ],
+                "decision_skills": [
+                    asdict(skill)
+                    for skill in sorted(
+                        decision_library.all(),
+                        key=lambda item: (item.skill_id, item.name),
+                    )
+                ],
+                "runtime": {
+                    "setting": args.setting,
+                    "setting2_knowledge": args.setting2_knowledge,
+                    "llm_backend": args.llm_backend,
+                    "model_id": args.model_id,
+                    "codex_model": args.codex_model,
+                    "codex_reasoning_effort": args.codex_reasoning_effort,
+                    "claude_model": args.claude_model,
+                    "device": args.device,
+                    "chronos_model_id": args.chronos_model_id,
+                    "chronos_device": args.chronos_device,
+                    "morphology_provider": "conservative_empty_v1",
+                },
+            }
+        ),
+    )
+    config = RetrievalEvolutionConfig(
+        generations=args.generations,
+        screen_tasks=args.screen_train_tasks,
+        promote=args.screen_promote,
+        train_folds=args.train_folds,
+        tolerance=args.evolution_tolerance,
+        random_seed=args.seed,
+        checkpoint_path=checkpoint_path,
+        resume=not args.no_resume,
+        dataset_split_hash=split_sha256,
+        verifier_hash=verifier_hash,
+        evaluator_hash=evaluator_hash,
+        metric_hash=metric_hash,
+        mutation_model_hash=mutation_model_hash,
+        harness_hash=harness_hash,
+        metric_cap=args.metric_cap,
+    )
+    engine = RetrievalEvolutionEngine(
+        llm,
+        _TrustedRetrievalEvaluator(),
+        config,
+        skill_library=parent_library,
+        harness_factory=harness_factory,
+    )
+    try:
+        result = engine.evolve(parent_release.genome, train, dev)
+    finally:
+        _persist_retrieval_checkpoint_authority(
+            engine, checkpoint_path, authority_path
+        )
+
+    scope_changelogs = _scope_changelogs(result)
+    selected_release = parent_release
+    saved_policy_path: str | None = None
+    if result.accepted:
+        if result.release_genome is None:
+            raise RetrievalEvolutionError(
+                "accepted Retrieval evolution omitted its release Genome"
+            )
+        library_for_release = (
+            engine._readonly_library(result.release_genome)
+            if callable(getattr(engine, "_readonly_library", None))
+            else parent_library
+        )
+        if library_for_release is None:
+            raise RetrievalEvolutionError(
+                "accepted Retrieval release omitted its verified Skill history"
+            )
+        release_skills = tuple(
+            skill.to_payload() for skill in library_for_release.all()
+        )
+        release_audit = {
+            "state": "accepted",
+            "train_dev_split_sha256": split_sha256,
+            "verifier_sha256": verifier_hash,
+            "evaluator_sha256": evaluator_hash,
+            "metric_sha256": metric_hash,
+            "metric_cap": config.metric_cap,
+            "train_summary": _selected_train_summary(result),
+            "dev_summary": (
+                result.child_dev.summary()
+                if result.child_dev
+                else {"task_count": 20}
+            ),
+            "acceptance_reason": ";".join(result.acceptance_reasons),
+        }
+        selected_release = _publish_or_resume_accepted_retrieval_release(
+            parent_release.path.parent,
+            result.release_genome,
+            skills=release_skills,
+            audit=release_audit,
+        )
+        accepted_policy = _policy_with_retrieval_release(
+            base_policy,
+            selected_release,
+            changelog="; ".join(
+                child["changelog"]
+                for generation in scope_changelogs
+                for child in generation["children"]
+            ),
+        )
+        accepted_policy.save(args.policy_path)
+        saved_policy_path = str(args.policy_path)
+        result = replace(result, release_published=True)
+
+    release_binding = _policy_with_retrieval_release(
+        base_policy,
+        selected_release,
+        changelog=base_policy.changelog,
+    )
+    trace_payload = {
+        "schema_version": 1,
+        "evolution_mode": "retrieval",
+        "accepted": result.accepted,
+        "selected_release": selected_release.genome.version,
+        "release_sha256": release_binding.retrieval_release_sha256,
+        "hashes": {
+            "train_dev_split_sha256": split_sha256,
+            "verifier_sha256": verifier_hash,
+            "evaluator_sha256": evaluator_hash,
+            "metric_sha256": metric_hash,
+            "mutation_model_sha256": mutation_model_hash,
+            "harness_sha256": harness_hash,
+        },
+        "train_tasks": len(train),
+        "dev_tasks": len(dev),
+        "public_regression_tasks": 0,
+        "scope_changelogs": scope_changelogs,
+        "rejection_reasons": list(result.rejection_reasons),
+        "result": result.to_payload(),
+    }
+    _assert_no_public_regression_ids(trace_payload, public_ids)
+    trace_path = Path(args.trace_path)
+    _write_json_artifact(trace_path, trace_payload)
+    progress_path = Path(args.progress_path) if args.progress_path else trace_path.with_name(
+        "progress.jsonl"
+    )
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    progress_path.write_text(
+        "".join(
+            json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n"
+            for event in result.trace
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "evolution_mode": "retrieval",
+        "accepted": result.accepted,
+        "release_path": str(selected_release.path),
+        "release_sha256": release_binding.retrieval_release_sha256,
+        "policy_path": saved_policy_path,
+        "trace_path": str(trace_path),
+        "checkpoint_path": str(checkpoint_path),
+        "checkpoint_authority_path": str(authority_path),
+        "progress_path": str(progress_path),
+        "train_tasks": len(train),
+        "dev_tasks": len(dev),
+        "public_regression_tasks": 0,
+        "rejection_reasons": list(result.rejection_reasons),
+    }
+
+
 def evolve_command(args) -> dict:
+    if args.evolution_mode == "retrieval":
+        return _retrieval_evolve_command(args)
     tasks = _task_subset(load_context_tasks(args.tasks_file), args.seed, args.limit)
     train, dev, holdout = _three_way_entity_split(
         tasks,
@@ -1008,6 +1917,43 @@ def inference_command(args) -> dict:
     """Run one accepted artifact with every learner and scorer disabled by default."""
     if args.hidden_test and args.score_public:
         raise ValueError("--score-public is forbidden with --hidden-test")
+    if args.inference == "retrieval":
+        if not args.policy_path or not Path(args.policy_path).exists():
+            raise FileNotFoundError(
+                "frozen retrieval inference requires an existing --policy-path"
+            )
+        policy = HarnessPolicy.load(args.policy_path)
+        release = _load_retrieval_release_for_operator(
+            args.retrieval_release_path
+        )
+        policy = _policy_for_retrieval_release(policy, release)
+        retrieval_library = RetrievalSkillLibrary.from_release(release.path)
+        tasks, _data_source = _inference_tasks(args)
+        llm, library, _unused, decision_library, tsfm = _components(
+            args,
+            retrieval_library_override=retrieval_library,
+            disable_llm_cache=True,
+        )
+        return run_frozen_inference(
+            policy,
+            tasks,
+            _factory(
+                args,
+                llm,
+                library,
+                retrieval_library,
+                decision_library,
+                tsfm,
+                isolate_library=True,
+                morphology_provider=_ConservativeMorphologyProvider(),
+                retrieval_genome=release.genome,
+                retrieval_skill_source=retrieval_library,
+            ),
+            output_dir=args.output_dir or "outputs/inference/retrieval",
+            samples=args.samples,
+            score_public=args.score_public,
+            artifact_kind="retrieval",
+        )
     if args.inference in {"prompt", "genome"}:
         tasks, _data_source = _inference_tasks(args)
         if not args.policy_path or not Path(args.policy_path).exists():

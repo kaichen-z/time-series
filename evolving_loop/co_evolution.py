@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import statistics
+import tempfile
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +75,10 @@ EvolutionTarget = Literal["auto", "coding", "retrieval", "decision"]
 EVOLUTION_OBJECTIVE = "drcik_smae_srmse_pareto_v1"
 
 
+def _replace_policy_artifact(source: Path, destination: Path) -> None:
+    os.replace(source, destination)
+
+
 @dataclass(frozen=True)
 class HarnessPolicy:
     """A complete, inheritable genome for both Coding search and the whole harness."""
@@ -95,24 +102,87 @@ class HarnessPolicy:
     retrieval_skills: tuple[dict, ...] = ()
     decision_skills: tuple[dict, ...] = ()
     changelog: str = "Hand-written seed policy."
+    retrieval_release_payload: dict[str, object] | None = None
+    retrieval_release_sha256: str | None = None
     retrieval_skill_source: object | None = field(
         default=None, repr=False, compare=False
     )
 
+    def __post_init__(self) -> None:
+        self._validate_retrieval_release_binding()
+
+    def _validate_retrieval_release_binding(self) -> None:
+        payload = self.retrieval_release_payload
+        digest = self.retrieval_release_sha256
+        if (payload is None) != (digest is None):
+            raise ValueError(
+                "Retrieval release payload and fingerprint must be supplied together"
+            )
+        if payload is None:
+            return
+        if not isinstance(payload, dict) or set(payload) != {
+            "genome",
+            "round1_prompt",
+            "round2_prompt",
+            "skills",
+            "manifest",
+        }:
+            raise ValueError("Retrieval release payload has an invalid schema")
+        if "path" in payload:
+            raise ValueError("Retrieval release payload cannot embed a path")
+        try:
+            canonical = json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError) as error:
+            raise ValueError("Retrieval release payload must be canonical JSON") from error
+        expected = hashlib.sha256(canonical).hexdigest()
+        if digest != expected:
+            raise ValueError("Retrieval release fingerprint mismatch")
+
     def to_payload(self) -> dict[str, object]:
         """Return the durable policy fields; runtime Skill authority is excluded."""
-        return {
+        self._validate_retrieval_release_binding()
+        payload = {
             item.name: getattr(self, item.name)
             for item in fields(self)
             if item.name != "retrieval_skill_source"
         }
+        if self.retrieval_release_payload is None:
+            payload.pop("retrieval_release_payload")
+            payload.pop("retrieval_release_sha256")
+        # Never return the mutable object held by a frozen policy.
+        else:
+            payload["retrieval_release_payload"] = json.loads(
+                json.dumps(self.retrieval_release_payload, ensure_ascii=False)
+            )
+        return payload
 
     def save(self, path: str | Path) -> None:
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(
-            json.dumps(self.to_payload(), indent=2, ensure_ascii=False)
+        encoded = (
+            json.dumps(self.to_payload(), indent=2, ensure_ascii=False) + "\n"
         )
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.",
+            suffix=".unpublished",
+            dir=destination.parent,
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            _replace_policy_artifact(temporary, destination)
+        except Exception:
+            # Keep the uniquely named unpublished inode rather than deleting a
+            # possibly replaced name after descriptor ownership has ended.
+            raise
 
     @classmethod
     def load(cls, path: str | Path) -> "HarnessPolicy":
@@ -722,7 +792,15 @@ class CoEvolutionEngine:
                 }[target]
             )
         current_policy = parent.to_payload()
-        for field_name in ("coding_skills", "retrieval_skills", "decision_skills"):
+        for field_name in (
+            "coding_skills",
+            "retrieval_skills",
+            "decision_skills",
+            # Accepted release manifests contain trusted Train/Dev summaries.
+            # Their fingerprint and payload are host authority, never Evolver input.
+            "retrieval_release_payload",
+            "retrieval_release_sha256",
+        ):
             current_policy.pop(field_name, None)
         diversity_modes = (
             "Prefer a minimal, conservative genome whose improvement can be attributed clearly.",

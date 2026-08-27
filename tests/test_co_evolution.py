@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import tempfile
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import evolving_loop.co_evolution as co_evolution_module
 
 from evolving_loop.co_evolution import (
     CoEvolutionEngine,
@@ -105,6 +107,63 @@ def test_multiple_children_receive_distinct_payloads_without_full_skill_source()
     assert "module_rewards" not in first
     assert "worst_failure_trajectories" not in first
     assert "FULL_EXECUTABLE_SOURCE" not in client.calls[0]["messages"][0]["content"]
+
+
+def test_accepted_retrieval_release_audit_never_enters_mutation_prompt() -> None:
+    embedded = {
+        "genome": {"version": "v001"},
+        "round1_prompt": "round one",
+        "round2_prompt": "round two",
+        "skills": [],
+        "manifest": {"dev_summary": "DEV_TRUSTED_SUMMARY_MUST_STAY_HOST_SIDE"},
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            embedded, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    parent = HarnessPolicy(
+        retrieval_release_payload=embedded,
+        retrieval_release_sha256=digest,
+    )
+    evaluation = PolicyEvaluation(
+        version="v000",
+        system_reward=0.2,
+        module_rewards={"coding": 0.8, "retrieval": 0.2, "decision": 0.7},
+        outcomes=(),
+    )
+    client = FakeLLMClient([_open_genome()])
+
+    CoEvolutionEngine(client, harness_factory=lambda _policy: None).mutate(
+        parent, evaluation
+    )
+
+    prompt = client.calls[0]["messages"][0]["content"]
+    assert "DEV_TRUSTED_SUMMARY_MUST_STAY_HOST_SIDE" not in prompt
+    current_policy = json.loads(prompt)["current_policy"]
+    assert "retrieval_release_payload" not in current_policy
+    assert "retrieval_release_sha256" not in current_policy
+
+
+def test_policy_save_is_atomic_and_preserves_existing_file_on_publish_failure(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "policy.json"
+    destination.write_text("existing-policy\n", encoding="utf-8")
+
+    def fail_publish(*_args, **_kwargs):
+        raise OSError("policy publication failed")
+
+    monkeypatch.setattr(
+        co_evolution_module,
+        "_replace_policy_artifact",
+        fail_publish,
+        raising=False,
+    )
+    with pytest.raises(OSError, match="publication failed"):
+        HarnessPolicy().save(destination)
+
+    assert destination.read_text(encoding="utf-8") == "existing-policy\n"
 
 
 def test_evolver_prompt_firewall_excludes_all_evaluator_only_values() -> None:

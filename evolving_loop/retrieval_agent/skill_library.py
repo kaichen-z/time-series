@@ -700,122 +700,127 @@ def _open_artifact_directory_entry(
         | getattr(os, "O_CLOEXEC", 0)
     )
 
-    def cleanup_created_directory(
-        owned_identity: tuple[int, int] | None,
-    ) -> OSError | RetrievalSkillError | None:
-        cleanup_error: OSError | RetrievalSkillError | None = None
-        for _attempt in range(2):
-            try:
-                _remove_owned_empty_artifact_directory(
-                    parent_descriptor,
-                    name,
-                    owned_identity,
-                    operation_created=owned_identity is None,
-                )
-                return None
-            except (OSError, RetrievalSkillError) as candidate:
-                cleanup_error = candidate
-        return cleanup_error
-
-    created = False
-    if create:
+    def open_directory(entry_name: str) -> tuple[int, tuple[int, int]]:
+        descriptor: int | None = None
         try:
-            os.mkdir(name, 0o755, dir_fd=parent_descriptor)
-            created = True
-        except FileExistsError:
-            pass
-
-    descriptor: int | None = None
-    opened_identity: tuple[int, int] | None = None
-    open_error: OSError | RetrievalSkillError | None = None
-    if created:
-        try:
-            descriptor = os.open(name, flags, dir_fd=parent_descriptor)
-            opened = os.fstat(descriptor)
-            if not stat.S_ISDIR(opened.st_mode):
+            descriptor = os.open(entry_name, flags, dir_fd=parent_descriptor)
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISDIR(metadata.st_mode):
                 raise RetrievalSkillError(
                     "retrieval Skill artifact parent is not a directory"
                 )
-            opened_identity = (opened.st_dev, opened.st_ino)
-        except (OSError, RetrievalSkillError) as error:
+            identity = (metadata.st_dev, metadata.st_ino)
+            visible = os.stat(
+                entry_name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISDIR(visible.st_mode)
+                or (visible.st_dev, visible.st_ino) != identity
+            ):
+                raise RetrievalSkillError(
+                    "retrieval Skill artifact directory changed while opening"
+                )
+            return descriptor, identity
+        except Exception:
             if descriptor is not None:
                 os.close(descriptor)
-                descriptor = None
-            open_error = error
+            raise
 
     try:
-        entry = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-    except OSError as error:
-        if descriptor is not None:
-            os.close(descriptor)
-            descriptor = None
-        cleanup_error = None
-        if created:
-            cleanup_error = cleanup_created_directory(opened_identity)
-        if cleanup_error is not None:
-            raise RetrievalSkillError(
-                "retrieval Skill artifact directory cleanup failed"
-            ) from cleanup_error
-        raise RetrievalSkillError(
-            "cannot inspect retrieval Skill artifact directory"
-        ) from error
-    identity = (entry.st_dev, entry.st_ino)
-    if not stat.S_ISDIR(entry.st_mode):
-        if descriptor is not None:
-            os.close(descriptor)
-        if created:
-            cleanup_error = cleanup_created_directory(opened_identity)
-            if cleanup_error is not None:
-                raise RetrievalSkillError(
-                    "retrieval Skill artifact directory cleanup failed"
-                ) from cleanup_error
-        raise RetrievalSkillError(
-            "retrieval Skill artifact parent is not a directory"
-        )
-    if open_error is not None:
-        cleanup_error = cleanup_created_directory(identity)
-        if cleanup_error is not None:
-            raise RetrievalSkillError(
-                "retrieval Skill artifact directory cleanup failed"
-            ) from cleanup_error
-        raise RetrievalSkillError(
-            "cannot open retrieval Skill artifact directory"
-        ) from open_error
-
-    try:
-        if descriptor is None:
-            descriptor = os.open(name, flags, dir_fd=parent_descriptor)
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISDIR(metadata.st_mode) or (
-            metadata.st_dev,
-            metadata.st_ino,
-        ) != identity:
-            raise RetrievalSkillError(
-                "retrieval Skill artifact directory changed while opening"
-            )
-    except OSError as error:
-        if descriptor is not None:
-            os.close(descriptor)
-        cleanup_error = None
-        if created:
-            cleanup_error = cleanup_created_directory(
-                opened_identity or identity
-            )
-        if cleanup_error is not None:
-            raise RetrievalSkillError(
-                "retrieval Skill artifact directory cleanup failed"
-            ) from cleanup_error
-        raise RetrievalSkillError(
-            "cannot open retrieval Skill artifact directory"
-        ) from error
-    except Exception:
-        if descriptor is not None:
-            os.close(descriptor)
-        if created:
-            cleanup_created_directory(opened_identity or identity)
+        descriptor, identity = open_directory(name)
+    except FileNotFoundError:
+        if not create:
+            raise
+    except RetrievalSkillError:
         raise
-    assert descriptor is not None
-    return descriptor, created, identity
+    except OSError as error:
+        raise RetrievalSkillError(
+            "cannot open retrieval Skill artifact directory"
+        ) from error
+    else:
+        return descriptor, False, identity
+
+    unpublished: str | None = None
+    creation_error: OSError | None = None
+    for _attempt in range(128):
+        candidate = f".{name}.{os.urandom(16).hex()}.unpublished"
+        try:
+            os.mkdir(candidate, 0o755, dir_fd=parent_descriptor)
+        except FileExistsError:
+            continue
+        except OSError as error:
+            # mkdir(2) may have committed before an injected or filesystem
+            # error surfaced.  The random, unpublished name is retained and
+            # inspected through a descriptor; it is never removed by name.
+            creation_error = error
+        unpublished = candidate
+        break
+    if unpublished is None:
+        raise RetrievalSkillError(
+            "cannot allocate a unique retrieval Skill artifact directory"
+        )
+
+    try:
+        descriptor, identity = open_directory(unpublished)
+    except Exception as error:
+        raise RetrievalSkillError(
+            "cannot inspect newly created retrieval Skill artifact directory; "
+            f"retained as {unpublished}"
+        ) from (creation_error or error)
+
+    try:
+        try:
+            _rename_artifact_entry_noreplace(
+                parent_descriptor,
+                unpublished,
+                name,
+            )
+        except FileExistsError:
+            os.close(descriptor)
+            descriptor = -1
+            try:
+                existing_descriptor, existing_identity = open_directory(name)
+            except Exception as error:
+                raise RetrievalSkillError(
+                    "retrieval Skill artifact directory appeared during "
+                    f"publication; owned directory retained as {unpublished}"
+                ) from error
+            return existing_descriptor, False, existing_identity
+        except Exception as error:
+            visible = _artifact_entry_metadata(parent_descriptor, name)
+            if (
+                visible is not None
+                and stat.S_ISDIR(visible.st_mode)
+                and (visible.st_dev, visible.st_ino) == identity
+            ):
+                return descriptor, True, identity
+            raise RetrievalSkillError(
+                "retrieval Skill artifact directory publication failed; "
+                f"owned directory retained as {unpublished}"
+            ) from error
+
+        try:
+            visible = _artifact_entry_metadata(parent_descriptor, name)
+        except OSError as error:
+            raise RetrievalSkillError(
+                "cannot inspect published retrieval Skill artifact directory; "
+                "owned inode retained"
+            ) from error
+        if (
+            visible is None
+            or not stat.S_ISDIR(visible.st_mode)
+            or (visible.st_dev, visible.st_ino) != identity
+        ):
+            raise RetrievalSkillError(
+                "retrieval Skill artifact directory changed during publication"
+            )
+        return descriptor, True, identity
+    except Exception:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
 
 
 def _remove_owned_empty_artifact_directory(
@@ -892,41 +897,11 @@ def _remove_owned_empty_artifact_directory(
         if restore_error is not None:
             raise restore_error
         return
-
-    try:
-        os.rmdir(quarantine, dir_fd=parent_descriptor)
-    except FileNotFoundError:
-        return
-    except OSError as first_error:
-        current = _artifact_entry_metadata(parent_descriptor, quarantine)
-        if current is None:
-            return
-        if (
-            not stat.S_ISDIR(current.st_mode)
-            or (current.st_dev, current.st_ino) != quarantined_identity
-        ):
-            _restore_quarantined_artifact_entry(
-                parent_descriptor,
-                quarantine,
-                name,
-                expected_identity=(current.st_dev, current.st_ino),
-            )
-            raise RetrievalSkillError(
-                "quarantined retrieval Skill artifact directory changed"
-            ) from first_error
-        try:
-            os.rmdir(quarantine, dir_fd=parent_descriptor)
-        except FileNotFoundError:
-            return
-        except OSError:
-            _restore_quarantined_artifact_entry(
-                parent_descriptor,
-                quarantine,
-                name,
-                expected_identity=quarantined_identity,
-            )
-            raise
-        raise first_error
+    # POSIX has no portable way to remove a directory by an already-held
+    # descriptor.  Deleting this name after the identity check would allow a
+    # concurrent replacement to be removed.  Retain the unique quarantine
+    # entry instead; it remains auditable and cannot shadow a live artifact.
+    return
 
 
 def _read_optional_artifact_entry(
@@ -1190,33 +1165,10 @@ def _unlink_owned_artifact_entry(
         if restore_error is not None:
             raise restore_error
         return
-
-    try:
-        os.unlink(quarantine, dir_fd=parent_descriptor)
-    except FileNotFoundError:
-        return
-    except OSError as first_error:
-        replacement = _read_optional_artifact_entry_snapshot(
-            parent_descriptor,
-            quarantine,
-        )
-        if replacement is None:
-            return
-        if replacement != (identity, encoded):
-            _restore_quarantined_artifact_entry(
-                parent_descriptor,
-                quarantine,
-                name,
-                expected_identity=replacement[0],
-            )
-            raise RetrievalSkillError(
-                "quarantined retrieval Skill artifact changed"
-            ) from first_error
-        try:
-            os.unlink(quarantine, dir_fd=parent_descriptor)
-        except FileNotFoundError:
-            return
-        raise first_error
+    # A file cannot be portably unlinked through its held descriptor.  Keep the
+    # verified inode under its random quarantine name rather than risk deleting
+    # a replacement installed after this ownership check.
+    return
 
 
 def _replace_artifact_entry_bytes(

@@ -112,7 +112,8 @@ def test_frozen_inference_strips_labels_and_exports_submission(tmp_path: Path) -
     observed = []
 
     class Harness:
-        def run(self, task):
+        def run(self, task, *, allow_skill_writes=True):
+            assert allow_skill_writes is False
             observed.append(task)
             return _result(task.numeric.task_id)
 
