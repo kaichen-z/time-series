@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 import re
 import statistics
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Iterable, Sequence
 
 from common.metrics import drcik_point_metrics
@@ -17,9 +17,6 @@ from evolving_loop.retrieval_agent.verifier import _verified_quote_spans
 
 if TYPE_CHECKING:
     from evolving_loop.harness import CandidatePoolSnapshot, HarnessResult
-
-
-_TRUSTED_EVIDENCE_PROVENANCE = object()
 
 
 @dataclass(frozen=True)
@@ -90,8 +87,6 @@ class RetrievalSkillTaskEvidence:
     with_skill_srmse: float
     added_catastrophic_count: int
     necessary: bool
-    _provenance: object | None = field(default=None, init=False, repr=False, compare=False)
-
     def __post_init__(self) -> None:
         if not self.skill_id or not self.task_id or not self.entity_name:
             raise ValueError("Skill evidence requires Skill, task, and entity IDs")
@@ -178,6 +173,55 @@ def _coding_entry_tuple(result: "HarnessResult") -> tuple[tuple[str, tuple[float
     return tuple(entries)
 
 
+def _expected_snapshot_ids(result: "HarnessResult") -> tuple[str, ...]:
+    card = getattr(result, "retrieval_card", None)
+    if card is not None:
+        return tuple(
+            str(chain.chain_id) for chain in card.chains if chain.numeric_eligible
+        )
+
+    evidence_indexes: set[int] = set()
+    history_count = 0
+    for candidate in getattr(result, "candidates", ()):
+        tags = tuple(getattr(candidate, "tags", ()))
+        if "evidence_adjusted" in tags:
+            _prefix, separator, raw_index = str(candidate.candidate_id).rpartition(
+                "__evidence_"
+            )
+            if not separator or not raw_index.isdigit():
+                raise ValueError("legacy evidence candidate lacks an executed stage index")
+            index = int(raw_index)
+            if index in evidence_indexes:
+                raise ValueError("legacy evidence stage indexes must be unique")
+            evidence_indexes.add(index)
+        if "history_cleaned" in tags:
+            history_count += 1
+    evidence_ids = tuple(
+        f"legacy_evidence_{index}"
+        for index in range(max(evidence_indexes, default=-1) + 1)
+    )
+    history_ids = tuple(
+        f"legacy_history_clean_{index}" for index in range(history_count)
+    )
+    return evidence_ids + history_ids
+
+
+def _selected_candidate_matches_pool(result: "HarnessResult") -> bool:
+    try:
+        selected = result.decision.selected
+        selected_id = str(selected.candidate_id)
+        selected_forecast = tuple(float(value) for value in selected.forecast)
+        final_forecast = tuple(float(value) for value in result.forecast)
+        executed = dict(_entry_tuple(result.candidates))
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return False
+    return (
+        selected_id in executed
+        and selected_forecast == executed[selected_id]
+        and final_forecast == selected_forecast
+    )
+
+
 def _validate_candidate_snapshots(
     result: "HarnessResult", snapshots: tuple["CandidatePoolSnapshot", ...]
 ) -> None:
@@ -198,18 +242,12 @@ def _validate_candidate_snapshots(
     if frozen[-1] != executed:
         raise ValueError("final snapshot is not the executed cumulative candidate pool")
 
-    numeric_chain_ids = tuple(
-        str(chain.chain_id) for chain in _chain_ledger(result) if chain.numeric_eligible
-    )
-    if numeric_chain_ids:
-        expected_ids = numeric_chain_ids
-    else:
-        expected_ids = tuple(snapshot.after_chain_id for snapshot in snapshots[1:])
-        if any(not str(chain_id).startswith("legacy_") for chain_id in expected_ids):
-            raise ValueError("candidate-pool snapshots contain extra unverified additions")
+    expected_ids = _expected_snapshot_ids(result)
     actual_ids = tuple(snapshot.after_chain_id for snapshot in snapshots[1:])
     if actual_ids != expected_ids:
-        raise ValueError("candidate-pool snapshots are missing, extra, or out of verified order")
+        raise ValueError(
+            "candidate-pool snapshots are missing, extra, or out of executed legacy/chain order"
+        )
     if len(set(actual_ids)) != len(actual_ids):
         raise ValueError("candidate-pool snapshot chain IDs must be unique")
 
@@ -336,7 +374,12 @@ def assign_chain_credit(
     scored_snapshots = [_score_pool(truth, snapshot) for snapshot in snapshots]
     coding_score = scored_snapshots[0][0]
     contextual_score = scored_snapshots[-1][0]
-    final_score, final_invalid = _score_forecast_drcik(truth, result.forecast)
+    selection_valid = _selected_candidate_matches_pool(result)
+    final_score, _ = (
+        _score_forecast_drcik(truth, result.forecast)
+        if selection_valid
+        else (_invalid_drcik_score(), 1)
+    )
     chains = _chain_ledger(result)
     snapshot_index = 1
     chain_credit: list[EvidenceChainCredit] = []
@@ -402,12 +445,7 @@ def assign_chain_credit(
         invalid_count=(
             quality[5]
             + invalid_candidates
-            + (
-                final_invalid
-                if tuple(result.forecast)
-                not in {tuple(candidate.forecast) for candidate in result.candidates}
-                else 0
-            )
+            + (0 if selection_valid else 1)
         ),
         catastrophic_count=catastrophic_count,
         chain_credit=tuple(chain_credit),
@@ -516,15 +554,16 @@ def _catastrophic_count(
     return count
 
 
-def derive_retrieval_skill_evidence(
+def _derive_retrieval_skill_evidence(
     task_results: Iterable[tuple[ContextTask, "HarnessResult"]],
     *,
     split: str,
 ) -> tuple[RetrievalSkillTaskEvidence, ...]:
-    """Build promotion evidence inside the trusted resolved-label evaluator.
+    """Build diagnostics from resolved labels and frozen inference replays.
 
-    Any incomplete or malformed frozen replay invalidates the batch.  Callers
-    cannot manufacture the private provenance attached here.
+    Any incomplete or malformed frozen replay invalidates the batch.  These
+    rows are descriptive only; promotion aggregation never accepts rows as an
+    input boundary.
     """
     if split not in {"train", "dev"}:
         raise ValueError("Skill evidence split must be train or dev")
@@ -572,26 +611,34 @@ def derive_retrieval_skill_evidence(
                         ),
                         necessary=item.necessary,
                     )
-                    object.__setattr__(row, "_provenance", _TRUSTED_EVIDENCE_PROVENANCE)
                     derived.append(row)
     except (AttributeError, KeyError, TypeError, ValueError):
         return ()
     return tuple(derived)
 
 
-def promote_retrieval_skills(
-    library: RetrievalSkillLibrary,
-    evidence: Iterable[RetrievalSkillTaskEvidence],
+def derive_retrieval_skill_evidence(
+    task_results: Iterable[tuple[ContextTask, "HarnessResult"]],
     *,
-    tolerance: float = 1e-12,
+    split: str,
+) -> tuple[RetrievalSkillTaskEvidence, ...]:
+    """Return evaluator diagnostics with no authority to promote a Skill."""
+    return _derive_retrieval_skill_evidence(task_results, split=split)
+
+
+def evaluate_and_promote_retrieval_skills(
+    library: RetrievalSkillLibrary,
+    task_results: Iterable[tuple[ContextTask, "HarnessResult"]],
+    *,
+    split: str,
 ) -> tuple[str, ...]:
-    """Activate candidate Skills only after all cross-Train gates pass."""
+    """Derive and aggregate inside the only Skill-promotion entry point."""
+    evidence = _derive_retrieval_skill_evidence(task_results, split=split)
+    if split != "train":
+        return ()
+    tolerance = 1e-12
     grouped: dict[str, list[RetrievalSkillTaskEvidence]] = {}
     for row in evidence:
-        if not isinstance(row, RetrievalSkillTaskEvidence):
-            raise TypeError("promotion evidence must be RetrievalSkillTaskEvidence")
-        if row._provenance is not _TRUSTED_EVIDENCE_PROVENANCE:
-            continue
         grouped.setdefault(row.skill_id, []).append(row)
     operations = []
     promoted = []
@@ -639,19 +686,6 @@ def promote_retrieval_skills(
     return tuple(promoted)
 
 
-def evaluate_and_promote_retrieval_skills(
-    library: RetrievalSkillLibrary,
-    task_results: Iterable[tuple[ContextTask, "HarnessResult"]],
-    *,
-    split: str,
-) -> tuple[str, ...]:
-    """Trusted aggregation entry point; Dev evaluation is always write-free."""
-    evidence = derive_retrieval_skill_evidence(task_results, split=split)
-    if split != "train":
-        return ()
-    return promote_retrieval_skills(library, evidence)
-
-
 __all__ = [
     "EvidenceChainCredit",
     "RetrievalCreditReport",
@@ -662,6 +696,5 @@ __all__ = [
     "assign_chain_credit",
     "derive_retrieval_skill_evidence",
     "evaluate_and_promote_retrieval_skills",
-    "promote_retrieval_skills",
     "validate_skill_necessity",
 ]

@@ -12,6 +12,7 @@ from evolving_loop.data import ContextTask
 from evolving_loop.retrieval_agent.credit import (
     RetrievalTaskDiagnostics,
     _score_forecast_drcik,
+    _selected_candidate_matches_pool,
     assign_chain_credit,
 )
 
@@ -71,7 +72,13 @@ def score_after_resolution(
         except (TypeError, ValueError, OverflowError):
             return {"smape": 200.0, "mae": 5.0 * max(scale, 1e-12), "primary": 200.0}
 
-    legacy_final = legacy_score(result.forecast)
+    selection_valid = _selected_candidate_matches_pool(result)
+    invalid_legacy = {
+        "smape": 200.0,
+        "mae": 5.0 * max(scale, 1e-12),
+        "primary": 200.0,
+    }
+    legacy_final = legacy_score(result.forecast) if selection_valid else invalid_legacy
     legacy_candidates = {
         candidate.candidate_id: legacy_score(candidate.forecast)
         for candidate in result.candidates
@@ -80,7 +87,11 @@ def score_after_resolution(
         candidate.program.name: legacy_score(candidate.forecast)
         for candidate in result.coding.candidates
     } or legacy_candidates
-    legacy_selected = legacy_candidates[result.decision.selected.candidate_id]
+    legacy_selected = (
+        legacy_candidates[result.decision.selected.candidate_id]
+        if selection_valid
+        else invalid_legacy
+    )
     legacy_contextual_smape = min(row["smape"] for row in legacy_candidates.values())
     legacy_contextual_mae = min(row["mae"] for row in legacy_candidates.values())
     legacy_coding_smape = min(row["smape"] for row in legacy_coding.values())

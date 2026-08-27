@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -162,7 +163,6 @@ def test_prompt_mode_changes_only_one_prompt() -> None:
         [
             json.dumps(
                 {
-                    "prompt_field": "retrieval_prompt",
                     "replacement_prompt": "Retrieve contrastive exact evidence.",
                     "changelog": "Improve retrieval precision.",
                 }
@@ -179,6 +179,45 @@ def test_prompt_mode_changes_only_one_prompt() -> None:
     assert child.retrieval_prompt == "Retrieve contrastive exact evidence."
     assert child.workflow == HarnessPolicy().workflow
     assert child.coding_initial_programs == HarnessPolicy().coding_initial_programs
+
+
+def test_auto_prompt_mode_hides_target_and_routes_same_generic_proposal() -> None:
+    from evolving_loop.co_evolution import CoEvolutionConfig
+
+    proposal = json.dumps({
+        "replacement_prompt": "Apply the replacement selected by the host.",
+        "changelog": "Exercise hidden host routing.",
+    })
+    coding_evaluation = PolicyEvaluation(
+        version="v000",
+        system_reward=0.0,
+        module_rewards={"coding": 0.1, "retrieval": 0.8, "decision": 0.9},
+        outcomes=(),
+    )
+    retrieval_evaluation = replace(
+        coding_evaluation,
+        module_rewards={"coding": 0.8, "retrieval": 0.1, "decision": 0.9},
+    )
+    coding_client = FakeLLMClient([proposal])
+    retrieval_client = FakeLLMClient([proposal])
+    config = CoEvolutionConfig(mode="prompt", target="auto")
+
+    coding_child = CoEvolutionEngine(
+        coding_client, harness_factory=lambda _policy: None, config=config
+    ).mutate(HarnessPolicy(), coding_evaluation)
+    retrieval_child = CoEvolutionEngine(
+        retrieval_client, harness_factory=lambda _policy: None, config=config
+    ).mutate(HarnessPolicy(), retrieval_evaluation)
+
+    assert coding_client.calls[0]["system"] == retrieval_client.calls[0]["system"]
+    assert coding_client.calls[0]["messages"] == retrieval_client.calls[0]["messages"]
+    payload = json.loads(coding_client.calls[0]["messages"][0]["content"])
+    assert "target_agent" not in payload
+    assert "prompt_field" not in payload
+    assert coding_child.coding_generation_prompt == "Apply the replacement selected by the host."
+    assert coding_child.retrieval_prompt == HarnessPolicy().retrieval_prompt
+    assert retrieval_child.retrieval_prompt == "Apply the replacement selected by the host."
+    assert retrieval_child.coding_generation_prompt == HarnessPolicy().coding_generation_prompt
 
 
 def test_coding_target_overrides_weakest_role_in_prompt_mode() -> None:

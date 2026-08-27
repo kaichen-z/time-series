@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError, replace
+import copy
+import pickle
+from dataclasses import FrozenInstanceError, asdict, replace
 from types import SimpleNamespace
 
 import pytest
@@ -20,7 +22,6 @@ from evolving_loop.retrieval_agent.credit import (
     assign_chain_credit,
     derive_retrieval_skill_evidence,
     evaluate_and_promote_retrieval_skills,
-    promote_retrieval_skills,
     validate_skill_necessity,
 )
 from evolving_loop.retrieval_agent.schemas import (
@@ -360,6 +361,85 @@ def test_legacy_history_clean_candidate_enters_contextual_not_numeric_pool() -> 
     assert [len(snapshot.candidates) for snapshot in snapshots] == [1, 2]
 
 
+def _legacy_result(
+    candidates: tuple[DecisionCandidate, ...],
+    snapshots: tuple[CandidatePoolSnapshot, ...],
+):
+    baseline = snapshots[0].candidates
+    return SimpleNamespace(
+        retrieval_card=None,
+        candidate_pool_snapshots=snapshots,
+        skill_leave_one_out_snapshots=(),
+        forecast=candidates[0].forecast,
+        candidates=candidates,
+        coding=SimpleNamespace(
+            candidates=tuple(
+                SimpleNamespace(
+                    program=SimpleNamespace(name=item.candidate_id),
+                    forecast=item.forecast,
+                )
+                for item in baseline
+            )
+        ),
+        retrieval=SimpleNamespace(selected_document_ids=(), rejected=()),
+        decision=SimpleNamespace(selected=candidates[0]),
+    )
+
+
+@pytest.mark.parametrize("mutation", ("extra", "reordered"))
+def test_legacy_snapshot_order_is_derived_from_executed_candidate_artifacts(
+    mutation,
+) -> None:
+    numeric = DecisionCandidate("numeric", (10.0, 10.0), "numeric", "none")
+    evidence = DecisionCandidate(
+        "numeric__evidence_0",
+        (11.0, 11.0),
+        "evidence",
+        "none",
+        tags=("evidence_adjusted",),
+    )
+    history = DecisionCandidate(
+        "history_clean__numeric",
+        (12.0, 12.0),
+        "history",
+        "none",
+        tags=("history_cleaned",),
+    )
+    candidates = (numeric, evidence) if mutation == "extra" else (numeric, evidence, history)
+    if mutation == "extra":
+        snapshots = (
+            _snapshot(None, ("numeric", (10.0, 10.0))),
+            _snapshot("legacy_evidence_0", ("numeric", (10.0, 10.0)), ("numeric__evidence_0", (11.0, 11.0))),
+            _snapshot("legacy_evidence_1", ("numeric", (10.0, 10.0)), ("numeric__evidence_0", (11.0, 11.0))),
+        )
+    else:
+        snapshots = (
+            _snapshot(None, ("numeric", (10.0, 10.0))),
+            _snapshot("legacy_history_clean_0", ("numeric", (10.0, 10.0)), ("numeric__evidence_0", (11.0, 11.0))),
+            _snapshot("legacy_evidence_0", ("numeric", (10.0, 10.0)), ("numeric__evidence_0", (11.0, 11.0)), ("history_clean__numeric", (12.0, 12.0))),
+        )
+
+    with pytest.raises(ValueError, match="legacy|order|extra"):
+        assign_chain_credit(_task(), _legacy_result(candidates, snapshots))
+
+
+@pytest.mark.parametrize("mutation", ("outside_pool", "changed_forecast"))
+def test_selected_candidate_must_exactly_match_the_frozen_executed_pool(mutation) -> None:
+    baseline = _snapshot(None, ("numeric", (10.0, 10.0)))
+    result = _result(snapshots=(baseline,), forecast=(10.0, 10.0))
+    selected_id = "rogue" if mutation == "outside_pool" else "numeric"
+    result.decision.selected = DecisionCandidate(
+        selected_id, (12.0, 12.0), "mutated selection", "none"
+    )
+    result.forecast = (12.0, 12.0)
+
+    outcome = score_after_resolution(_task(), result)
+
+    assert outcome.final_smae == 5.0
+    assert outcome.final_srmse == 5.0
+    assert outcome.retrieval_diagnostics.invalid_count == 1
+
+
 def test_joint_skill_credit_requires_leave_one_out_replay() -> None:
     chain = _chain(
         "joint",
@@ -493,8 +573,9 @@ def test_skill_promotion_requires_trusted_evaluator_derived_evidence(tmp_path) -
         for index, entity in enumerate(("Alpha", "Alpha", "Beta"), start=1)
     )
 
-    rows = derive_retrieval_skill_evidence(task_results, split="train")
-    promoted = promote_retrieval_skills(library, rows)
+    promoted = evaluate_and_promote_retrieval_skills(
+        library, task_results, split="train"
+    )
 
     assert promoted == ("window_search",)
     accepted = library.get_by_id("window_search")
@@ -505,11 +586,34 @@ def test_skill_promotion_requires_trusted_evaluator_derived_evidence(tmp_path) -
     assert accepted.validated_entities == ("Alpha", "Beta")
 
 
-def test_forged_skill_evidence_cannot_promote(tmp_path) -> None:
-    library = RetrievalSkillLibrary(tmp_path / "skills.json", (_candidate_skill(),))
+def test_no_public_evidence_row_api_can_authorize_promotion(tmp_path) -> None:
+    for name in ("promote_retrieval_skills", "_TRUSTED_EVIDENCE_PROVENANCE"):
+        with pytest.raises(ImportError):
+            exec(
+                f"from evolving_loop.retrieval_agent.credit import {name}",
+                {},
+            )
+    task_results = tuple(
+        _promotion_task_result(index, entity)
+        for index, entity in enumerate(("Alpha", "Alpha", "Beta"), start=1)
+    )
+    derived = derive_retrieval_skill_evidence(task_results, split="train")
+    forged_batches = (
+        _promotion_rows(),
+        tuple(copy.copy(row) for row in derived),
+        tuple(replace(row) for row in derived),
+        pickle.loads(pickle.dumps(derived)),
+        tuple(asdict(row) for row in derived),
+    )
+    for index, forged in enumerate(forged_batches):
+        library = RetrievalSkillLibrary(
+            tmp_path / f"skills_{index}.json", (_candidate_skill(),)
+        )
 
-    assert promote_retrieval_skills(library, _promotion_rows()) == ()
-    assert library.get_by_id("window_search").status == "candidate"
+        assert evaluate_and_promote_retrieval_skills(
+            library, forged, split="train"  # type: ignore[arg-type]
+        ) == ()
+        assert library.get_by_id("window_search").status == "candidate"
 
 
 def test_zero_leave_one_out_replays_cannot_promote(tmp_path) -> None:
@@ -522,7 +626,9 @@ def test_zero_leave_one_out_replays_cannot_promote(tmp_path) -> None:
     rows = derive_retrieval_skill_evidence(task_results, split="train")
 
     assert rows == ()
-    assert promote_retrieval_skills(library, rows) == ()
+    assert evaluate_and_promote_retrieval_skills(
+        library, rows, split="train"  # type: ignore[arg-type]
+    ) == ()
 
 
 @pytest.mark.parametrize(
@@ -571,7 +677,9 @@ def test_skill_evidence_metrics_are_capped_to_formal_report_range() -> None:
 def test_caller_created_rows_never_bypass_train_gates(tmp_path, overrides) -> None:
     library = RetrievalSkillLibrary(tmp_path / "skills.json", (_candidate_skill(),))
 
-    assert promote_retrieval_skills(library, _promotion_rows(**overrides)) == ()
+    assert evaluate_and_promote_retrieval_skills(
+        library, _promotion_rows(**overrides), split="train"  # type: ignore[arg-type]
+    ) == ()
     assert library.get_by_id("window_search").status == "candidate"
 
 

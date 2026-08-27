@@ -53,10 +53,18 @@ are intentionally unavailable. Candidate provenance never permits bypassing veri
 
 PROMPT_ONLY_EVOLVER_PROMPT = """You are a constrained Prompt Evolver for a time-series agent
 harness. Use only label-free interface-failure categories to replace exactly one complete prompt
-owned by the host-selected role. You may not change another role, any numeric/search budget, topology,
+owned by the explicitly named role. You may not change another role, any numeric/search budget, topology,
 source code, scorer, data boundary, or safety mechanism. Return exactly:
 {"prompt_field": "coding_generation_prompt|coding_revision_prompt|retrieval_prompt|decision_prompt",
 "replacement_prompt": "complete replacement prompt", "changelog": "testable rationale"}
+"""
+
+AUTO_PROMPT_EVOLVER_PROMPT = """You are a target-blind Prompt Evolver for a time-series agent
+harness. Propose one generic, complete replacement instruction using only the supplied label-free
+interface-failure categories. The host privately selects and applies the destination field. You may
+not request or infer that field, change budgets or topology, or weaken scorer, data-boundary, or
+safety constraints. Return exactly:
+{"replacement_prompt": "complete generic replacement prompt", "changelog": "testable rationale"}
 """
 
 EvolutionMode = Literal["prompt", "genome"]
@@ -670,7 +678,12 @@ class CoEvolutionEngine:
             for reason in trace.get("retrieval_rejections", ())
             if (category := str(reason).partition(":")[0]) in safe_retrieval_categories
         })
-        if self.config.target == "auto":
+        if self.config.target == "auto" and self.config.mode == "prompt":
+            mutation_instruction = (
+                "Propose one target-blind replacement value. The host will route it to its "
+                "private selected prompt field."
+            )
+        elif self.config.target == "auto":
             mutation_instruction = (
                 "The weakest observed module is a diagnosis, not a mutation restriction. "
                 "Redesign any mutually dependent genome fields needed to improve the whole system."
@@ -699,10 +712,6 @@ class CoEvolutionEngine:
             "Do not duplicate another child from this generation."
         )
         payload = {
-            # Auto-target diagnosis is evaluator-only because it is derived from
-            # resolved labels.  The Evolver sees only an explicit configured
-            # target or the literal auto mode.
-            "target_agent": target if self.config.target != "auto" else "auto",
             "child_index": child_index,
             "diversity_instruction": diversity_instruction,
             "failure_interface_facts": {
@@ -717,13 +726,17 @@ class CoEvolutionEngine:
             },
             "instruction": mutation_instruction,
         }
+        if self.config.target != "auto":
+            payload["target_agent"] = target
         version = f"v{self._version:03d}"
         self._version += 1
         try:
-            system_prompt = (
-                    PROMPT_ONLY_EVOLVER_PROMPT
-                    if self.config.mode == "prompt"
-                    else META_HARNESS_PROMPT
+            system_prompt = META_HARNESS_PROMPT
+            if self.config.mode == "prompt":
+                system_prompt = (
+                    AUTO_PROMPT_EVOLVER_PROMPT
+                    if self.config.target == "auto"
+                    else PROMPT_ONLY_EVOLVER_PROMPT
                 )
             if self.config.target != "auto":
                 system_prompt = system_prompt.replace(
@@ -752,7 +765,13 @@ class CoEvolutionEngine:
         except JsonExtractionError:
             return replace(parent, version=version, parent=parent.version, changelog="Invalid mutation; unchanged.")
         if self.config.mode == "prompt":
-            candidate, reason = self._prompt_proposal(parent, proposal, version, target)
+            candidate, reason = self._prompt_proposal(
+                parent,
+                proposal,
+                version,
+                target,
+                target_blind=self.config.target == "auto",
+            )
         else:
             candidate, reason = self._proposal(parent, proposal, version)
             if candidate is not None and self.config.target != "auto":
@@ -814,13 +833,24 @@ class CoEvolutionEngine:
         proposal: dict,
         version: str,
         target: str,
+        *,
+        target_blind: bool = False,
     ) -> tuple[HarnessPolicy | None, str]:
         allowed = {
             "coding": {"coding_generation_prompt", "coding_revision_prompt"},
             "retrieval": {"retrieval_prompt"},
             "decision": {"decision_prompt"},
         }
-        field = str(proposal.get("prompt_field", ""))
+        if target_blind:
+            if set(proposal) - {"replacement_prompt", "changelog"}:
+                return None, "Illegal target-aware auto prompt mutation; unchanged."
+            field = {
+                "coding": "coding_generation_prompt",
+                "retrieval": "retrieval_prompt",
+                "decision": "decision_prompt",
+            }[target]
+        else:
+            field = str(proposal.get("prompt_field", ""))
         replacement_prompt = str(proposal.get("replacement_prompt", "")).strip()
         if field not in allowed[target] or not replacement_prompt:
             return None, "Illegal prompt-only mutation; unchanged."
