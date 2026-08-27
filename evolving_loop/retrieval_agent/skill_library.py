@@ -684,6 +684,74 @@ def _unique_temporary(
     return temporary
 
 
+def _open_artifact_directory_entry(
+    parent_descriptor: int,
+    name: str,
+    *,
+    create: bool,
+) -> tuple[int, bool]:
+    if Path(name).name != name or name in {"", ".", ".."}:
+        raise RetrievalSkillError("invalid retrieval Skill artifact directory name")
+    created = False
+    if create:
+        try:
+            os.mkdir(name, 0o755, dir_fd=parent_descriptor)
+            created = True
+        except FileExistsError:
+            pass
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+    except OSError as error:
+        raise RetrievalSkillError(
+            "cannot open retrieval Skill artifact directory"
+        ) from error
+    if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise RetrievalSkillError(
+            "retrieval Skill artifact parent is not a directory"
+        )
+    return descriptor, created
+
+
+def _read_optional_artifact_entry(
+    parent_descriptor: int, name: str
+) -> bytes | None:
+    try:
+        return _read_artifact_entry(parent_descriptor, name)
+    except FileNotFoundError:
+        return None
+
+
+def _replace_artifact_entry_bytes(
+    parent_descriptor: int, name: str, encoded: bytes
+) -> None:
+    temporary = _unique_temporary(parent_descriptor, name, encoded)
+    try:
+        os.replace(
+            temporary,
+            name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        temporary = ""
+        if _read_artifact_entry(parent_descriptor, name) != encoded:
+            raise RetrievalSkillError(
+                "retrieval Skill artifact rollback verification failed"
+            )
+    finally:
+        if temporary:
+            try:
+                os.unlink(temporary, dir_fd=parent_descriptor)
+            except FileNotFoundError:
+                pass
+
+
 def _file_digest(path: Path) -> str:
     return hashlib.sha256(_safe_read_bytes(path)).hexdigest()
 
@@ -695,6 +763,33 @@ def _checkpoint_path_digest(path: Path) -> str:
 def _checkpoint_witness_path(path: Path, checkpoint_sha256: str) -> Path:
     directory = path.parent / f".{path.name}.provenance"
     return directory / f"{checkpoint_sha256}.json"
+
+
+def _checkpoint_witness_bytes(
+    path: Path,
+    checkpoint_sha256: str,
+    skills_payload: list[dict[str, object]],
+    active_record_origins: Mapping[str, str],
+) -> bytes:
+    payload = {
+        "schema_version": SKILL_CHECKPOINT_WITNESS_SCHEMA_VERSION,
+        "checkpoint_sha256": checkpoint_sha256,
+        "checkpoint_path_sha256": _checkpoint_path_digest(path),
+        "skills_sha256": _canonical_digest(skills_payload),
+        "active_records": [
+            {"sha256": digest, "origin": active_record_origins[digest]}
+            for digest in sorted(active_record_origins)
+        ],
+    }
+    return (
+        json.dumps(
+            payload,
+            indent=2,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
 
 
 def _checkpoint_authority_key(path: Path, checkpoint_sha256: str) -> tuple[str, str]:
@@ -1412,81 +1507,99 @@ class RetrievalSkillLibrary:
             safe_path, create=True
         )
         temporary: str | None = None
+        rollback_temporary: str | None = None
+        previous_encoded: bytes | None = None
         witness_path: Path | None = None
+        witness_encoded: bytes | None = None
+        witness_directory_name: str | None = None
         witness_parent_descriptor: int | None = None
         witness_temporary: str | None = None
         witness_created = False
         witness_directory_created = False
+        previous_witness_name: str | None = None
+        previous_witness_encoded: bytes | None = None
         write_succeeded = False
         try:
             _revalidate_artifact_parent(safe_path, parent_descriptor)
             exists = _artifact_entry_exists(parent_descriptor, safe_path.name)
-            if self._file_sha256 is not None and (
-                not exists
-                or hashlib.sha256(
-                    _read_artifact_entry(parent_descriptor, safe_path.name)
-                ).hexdigest()
-                != self._file_sha256
-            ):
-                raise RetrievalSkillError(
-                    "retrieval Skill checkpoint path was replaced or changed"
+            if self._file_sha256 is not None:
+                if not exists:
+                    raise RetrievalSkillError(
+                        "retrieval Skill checkpoint path was replaced or changed"
+                    )
+                previous_encoded = _read_artifact_entry(
+                    parent_descriptor, safe_path.name
                 )
-            if self._file_sha256 is None and exists:
+                if (
+                    hashlib.sha256(previous_encoded).hexdigest()
+                    != self._file_sha256
+                ):
+                    raise RetrievalSkillError(
+                        "retrieval Skill checkpoint path was replaced or changed"
+                    )
+            elif exists:
                 raise RetrievalSkillError(
                     "retrieval Skill checkpoint path already exists without a loaded digest"
                 )
             temporary = _unique_temporary(
                 parent_descriptor, safe_path.name, encoded
             )
+            if previous_encoded is not None:
+                rollback_temporary = _unique_temporary(
+                    parent_descriptor,
+                    f"{safe_path.name}.rollback",
+                    previous_encoded,
+                )
             if active:
                 witness_path = _checkpoint_witness_path(
                     safe_path, checkpoint_sha256
                 )
-                witness_payload = {
-                    "schema_version": SKILL_CHECKPOINT_WITNESS_SCHEMA_VERSION,
-                    "checkpoint_sha256": checkpoint_sha256,
-                    "checkpoint_path_sha256": _checkpoint_path_digest(safe_path),
-                    "skills_sha256": _canonical_digest(skills_payload),
-                    "active_records": [
-                        {"sha256": digest, "origin": origins[digest]}
-                        for digest in sorted(origins)
-                    ],
-                }
-                witness_encoded = (
-                    json.dumps(
-                        witness_payload,
-                        indent=2,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    )
-                    + "\n"
-                ).encode("utf-8")
+                witness_encoded = _checkpoint_witness_bytes(
+                    safe_path,
+                    checkpoint_sha256,
+                    skills_payload,
+                    origins,
+                )
                 witness_directory_name = witness_path.parent.name
-                try:
-                    os.mkdir(
-                        witness_directory_name,
-                        0o755,
-                        dir_fd=parent_descriptor,
-                    )
-                    witness_directory_created = True
-                except FileExistsError:
-                    pass
-                directory_flags = (
-                    os.O_RDONLY
-                    | getattr(os, "O_DIRECTORY", 0)
-                    | getattr(os, "O_NOFOLLOW", 0)
-                    | getattr(os, "O_CLOEXEC", 0)
-                )
-                witness_parent_descriptor = os.open(
+                (
+                    witness_parent_descriptor,
+                    witness_directory_created,
+                ) = _open_artifact_directory_entry(
+                    parent_descriptor,
                     witness_directory_name,
-                    directory_flags,
-                    dir_fd=parent_descriptor,
+                    create=True,
                 )
-                if not stat.S_ISDIR(
-                    os.fstat(witness_parent_descriptor).st_mode
-                ):
-                    raise RetrievalSkillError(
-                        "retrieval Skill provenance parent is not a directory"
+                expects_previous_witness = (
+                    self._file_sha256 is not None
+                    and _operation != "legacy_operator_migration"
+                    and any(skill.is_active for skill in self.all())
+                )
+                if expects_previous_witness:
+                    previous_witness_name = f"{self._file_sha256}.json"
+                    previous_skills_payload = [
+                        skill.to_payload() for skill in self.all()
+                    ]
+                    previous_witness_encoded = _checkpoint_witness_bytes(
+                        safe_path,
+                        self._file_sha256,
+                        previous_skills_payload,
+                        self._active_record_origins,
+                    )
+                    _revalidate_artifact_parent(
+                        witness_path, witness_parent_descriptor
+                    )
+                    if (
+                        _read_optional_artifact_entry(
+                            witness_parent_descriptor,
+                            previous_witness_name,
+                        )
+                        != previous_witness_encoded
+                    ):
+                        raise RetrievalSkillError(
+                            "previous Retrieval Skill checkpoint witness changed"
+                        )
+                    _revalidate_artifact_parent(
+                        witness_path, witness_parent_descriptor
                     )
                 witness_temporary = _unique_temporary(
                     witness_parent_descriptor,
@@ -1529,9 +1642,21 @@ class RetrievalSkillLibrary:
                 _revalidate_artifact_parent(
                     witness_path, witness_parent_descriptor
                 )
+                if (
+                    _read_artifact_entry(
+                        witness_parent_descriptor, witness_path.name
+                    )
+                    != witness_encoded
+                ):
+                    raise RetrievalSkillError(
+                        "retrieval Skill checkpoint witness publication failed"
+                    )
                 os.fsync(witness_parent_descriptor)
+                _revalidate_artifact_parent(
+                    witness_path, witness_parent_descriptor
+                )
             _revalidate_artifact_parent(safe_path, parent_descriptor)
-            if self._file_sha256 is None:
+            if previous_encoded is None:
                 try:
                     os.link(
                         temporary,
@@ -1547,9 +1672,10 @@ class RetrievalSkillLibrary:
                 os.unlink(temporary, dir_fd=parent_descriptor)
                 temporary = None
             else:
-                if hashlib.sha256(
+                if (
                     _read_artifact_entry(parent_descriptor, safe_path.name)
-                ).hexdigest() != self._file_sha256:
+                    != previous_encoded
+                ):
                     raise RetrievalSkillError(
                         "retrieval Skill checkpoint changed before guarded replace"
                     )
@@ -1562,26 +1688,191 @@ class RetrievalSkillLibrary:
                 )
                 temporary = None
             _revalidate_artifact_parent(safe_path, parent_descriptor)
-            os.fsync(parent_descriptor)
-            write_succeeded = True
-        except Exception:
+            if _read_artifact_entry(parent_descriptor, safe_path.name) != encoded:
+                raise RetrievalSkillError(
+                    "retrieval Skill checkpoint publication verification failed"
+                )
             if (
-                witness_created
-                and witness_path is not None
+                witness_path is not None
+                and witness_encoded is not None
                 and witness_parent_descriptor is not None
             ):
-                try:
-                    os.unlink(
-                        witness_path.name,
-                        dir_fd=witness_parent_descriptor,
+                _revalidate_artifact_parent(
+                    witness_path, witness_parent_descriptor
+                )
+                if (
+                    _read_artifact_entry(
+                        witness_parent_descriptor, witness_path.name
                     )
-                except OSError:
-                    pass
+                    != witness_encoded
+                ):
+                    raise RetrievalSkillError(
+                        "retrieval Skill checkpoint witness changed during bundle commit"
+                    )
+                os.fsync(witness_parent_descriptor)
+            os.fsync(parent_descriptor)
+            _revalidate_artifact_parent(safe_path, parent_descriptor)
+            if _read_artifact_entry(parent_descriptor, safe_path.name) != encoded:
+                raise RetrievalSkillError(
+                    "retrieval Skill checkpoint changed during bundle commit"
+                )
+            if (
+                witness_path is not None
+                and witness_encoded is not None
+                and witness_parent_descriptor is not None
+            ):
+                _revalidate_artifact_parent(
+                    witness_path, witness_parent_descriptor
+                )
+                if (
+                    _read_artifact_entry(
+                        witness_parent_descriptor, witness_path.name
+                    )
+                    != witness_encoded
+                ):
+                    raise RetrievalSkillError(
+                        "retrieval Skill checkpoint witness changed during bundle commit"
+                    )
+                self._hydrate_verified_checkpoint(
+                    safe_path,
+                    persist=self.persist,
+                    encoded=encoded,
+                    payloads=tuple(skills_payload),
+                )
+                _revalidate_artifact_parent(
+                    witness_path, witness_parent_descriptor
+                )
+                _revalidate_artifact_parent(safe_path, parent_descriptor)
+            write_succeeded = True
+        except Exception:
+            try:
+                current = _read_optional_artifact_entry(
+                    parent_descriptor, safe_path.name
+                )
+                if previous_encoded is None:
+                    if current == encoded:
+                        os.unlink(safe_path.name, dir_fd=parent_descriptor)
+                    elif current is not None:
+                        raise RetrievalSkillError(
+                            "first Retrieval Skill checkpoint publication could not roll back"
+                        )
+                elif current != previous_encoded:
+                    if rollback_temporary is None:
+                        rollback_temporary = _unique_temporary(
+                            parent_descriptor,
+                            f"{safe_path.name}.rollback",
+                            previous_encoded,
+                        )
+                    os.replace(
+                        rollback_temporary,
+                        safe_path.name,
+                        src_dir_fd=parent_descriptor,
+                        dst_dir_fd=parent_descriptor,
+                    )
+                    rollback_temporary = None
+                if (
+                    _read_optional_artifact_entry(
+                        parent_descriptor, safe_path.name
+                    )
+                    != previous_encoded
+                ):
+                    raise RetrievalSkillError(
+                        "retrieval Skill checkpoint rollback verification failed"
+                    )
+
+                if (
+                    witness_created
+                    and witness_path is not None
+                    and witness_parent_descriptor is not None
+                    and witness_path.name != previous_witness_name
+                ):
+                    try:
+                        os.unlink(
+                            witness_path.name,
+                            dir_fd=witness_parent_descriptor,
+                        )
+                    except FileNotFoundError:
+                        pass
+                    os.fsync(witness_parent_descriptor)
+
+                parent_is_current = True
+                try:
+                    _revalidate_artifact_parent(safe_path, parent_descriptor)
+                except RetrievalSkillError:
+                    parent_is_current = False
+                if (
+                    parent_is_current
+                    and witness_directory_name is not None
+                    and (
+                        previous_witness_encoded is not None
+                        or _artifact_entry_exists(
+                            parent_descriptor, witness_directory_name
+                        )
+                    )
+                ):
+                    visible_witness_descriptor, _created = (
+                        _open_artifact_directory_entry(
+                            parent_descriptor,
+                            witness_directory_name,
+                            create=previous_witness_encoded is not None,
+                        )
+                    )
+                    try:
+                        if (
+                            witness_created
+                            and witness_path is not None
+                            and witness_path.name != previous_witness_name
+                        ):
+                            try:
+                                os.unlink(
+                                    witness_path.name,
+                                    dir_fd=visible_witness_descriptor,
+                                )
+                            except FileNotFoundError:
+                                pass
+                        if (
+                            previous_witness_name is not None
+                            and previous_witness_encoded is not None
+                            and _read_optional_artifact_entry(
+                                visible_witness_descriptor,
+                                previous_witness_name,
+                            )
+                            != previous_witness_encoded
+                        ):
+                            _replace_artifact_entry_bytes(
+                                visible_witness_descriptor,
+                                previous_witness_name,
+                                previous_witness_encoded,
+                            )
+                        if (
+                            previous_witness_name is not None
+                            and _read_optional_artifact_entry(
+                                visible_witness_descriptor,
+                                previous_witness_name,
+                            )
+                            != previous_witness_encoded
+                        ):
+                            raise RetrievalSkillError(
+                                "retrieval Skill witness rollback verification failed"
+                            )
+                        os.fsync(visible_witness_descriptor)
+                    finally:
+                        os.close(visible_witness_descriptor)
+                os.fsync(parent_descriptor)
+            except Exception as rollback_error:
+                raise RetrievalSkillError(
+                    "Retrieval Skill checkpoint bundle rollback failed"
+                ) from rollback_error
             raise
         finally:
             if temporary is not None:
                 try:
                     os.unlink(temporary, dir_fd=parent_descriptor)
+                except FileNotFoundError:
+                    pass
+            if rollback_temporary is not None:
+                try:
+                    os.unlink(rollback_temporary, dir_fd=parent_descriptor)
                 except FileNotFoundError:
                     pass
             if witness_temporary is not None and witness_parent_descriptor is not None:

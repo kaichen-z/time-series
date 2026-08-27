@@ -21,6 +21,7 @@ from evolving_loop.retrieval_agent.evolution import (
     RetrievalEvolutionEngine,
     RetrievalEvolutionError,
     RetrievalEvolutionResult,
+    RetrievalForecastingFailure,
     RetrievalGenerationTrace,
     build_inference_cache_key,
     combine_retrieval_evaluations,
@@ -250,6 +251,27 @@ def _engine(
         metric_cap=5.0,
     )
     return RetrievalEvolutionEngine(llm, evaluator, config), llm
+
+
+def _complete_train_checkpoint(
+    engine: RetrievalEvolutionEngine,
+    parent: RetrievalGenome,
+    train: tuple[ContextTask, ...],
+    dev: tuple[ContextTask, ...],
+    *,
+    generation_count: int | None = None,
+) -> tuple[tuple[ContextTask, ...], tuple[tuple[ContextTask, ...], ...]]:
+    """Drive the real engine through a chosen Train generation prefix."""
+    engine._validate_inputs(parent, train, dev)
+    screen, remaining_folds = engine._partition_train(train)
+    engine._scientific_inputs = engine._science_signature(parent, train, dev)
+    assert engine._load_checkpoint(
+        parent, train, dev, screen, remaining_folds
+    ) is None
+    count = engine.config.generations if generation_count is None else generation_count
+    for generation in range(count):
+        engine._run_generation(generation, screen, remaining_folds)
+    return screen, remaining_folds
 
 
 def test_dev_acceptance_enforces_every_pareto_tail_recall_and_safety_gate() -> None:
@@ -1780,6 +1802,230 @@ def test_running_checkpoint_rejects_out_of_order_partial_evaluation_coverage(
     ):
         resumed.evolve(parent, train, dev)
     assert resumed_evaluator.calls == []
+
+
+@pytest.mark.parametrize(
+    ("cursor", "resumed_dev_stages", "accepted"),
+    (
+        ("none", ("parent_dev", "child_dev"), True),
+        ("parent", ("child_dev",), True),
+        ("parent_child", (), True),
+        ("parent_child_terminal", (), False),
+    ),
+)
+def test_running_checkpoint_resumes_each_legal_final_dev_prefix_exactly_once(
+    tmp_path, cursor, resumed_dev_stages, accepted
+) -> None:
+    class FinalDevEvaluator(_FakeEvaluator):
+        def evaluate(self, genome, tasks, **kwargs):
+            result = super().evaluate(genome, tasks, **kwargs)
+            if cursor == "parent_child_terminal" and kwargs["stage"] == "child_dev":
+                raise RuntimeError("terminal Child Dev forecast")
+            return result
+
+    checkpoint = tmp_path / "checkpoint.json"
+    train = _tasks("train", 80)
+    dev = _tasks("dev", 20, entity_offset=100)
+    parent = RetrievalGenome.seed()
+    interrupted_evaluator = FinalDevEvaluator(
+        errors={"v000": 1.0, "v001": 0.9, "v002": 0.95, "v003": 1.2}
+    )
+    interrupted, _ = _engine(
+        interrupted_evaluator,
+        _responses(1),
+        checkpoint_path=checkpoint,
+    )
+    _complete_train_checkpoint(interrupted, parent, train, dev)
+    assert interrupted._current_parent is not None
+    winner = interrupted._current_parent
+
+    if cursor != "none":
+        interrupted._evaluate_batch(
+            parent,
+            dev,
+            stage="parent_dev",
+            readonly=True,
+            library=interrupted._readonly_library(parent),
+        )
+    if cursor in {"parent_child", "parent_child_terminal"}:
+        if cursor == "parent_child_terminal":
+            with pytest.raises(
+                RetrievalForecastingFailure, match="terminal Child Dev forecast"
+            ):
+                interrupted._evaluate_batch(
+                    winner,
+                    dev,
+                    stage="child_dev",
+                    readonly=True,
+                    library=interrupted._readonly_library(winner),
+                )
+        else:
+            interrupted._evaluate_batch(
+                winner,
+                dev,
+                stage="child_dev",
+                readonly=True,
+                library=interrupted._readonly_library(winner),
+            )
+
+    resumed_evaluator = _FakeEvaluator(
+        errors={"v000": 1.0, "v001": 0.9, "v002": 0.95, "v003": 1.2}
+    )
+    resumed, resumed_llm = _engine(
+        resumed_evaluator,
+        [],
+        checkpoint_path=checkpoint,
+    )
+
+    result = resumed.evolve(parent, train, dev)
+
+    assert resumed_llm.calls == []
+    assert tuple(
+        call.stage
+        for call in resumed_evaluator.calls
+        if call.stage in {"parent_dev", "child_dev"}
+    ) == resumed_dev_stages
+    all_dev_calls = [
+        call
+        for call in (*interrupted_evaluator.calls, *resumed_evaluator.calls)
+        if call.stage in {"parent_dev", "child_dev"}
+    ]
+    assert [call.stage for call in all_dev_calls] == ["parent_dev", "child_dev"]
+    assert all(
+        (call.persist, call.writers_enabled, call.evolver_enabled)
+        == (False, False, False)
+        for call in all_dev_calls
+    )
+    assert result.accepted is accepted
+    if cursor == "parent_child_terminal":
+        assert result.child_dev is None
+        assert result.rejection_reasons == (
+            "child_dev_failure:RuntimeError:terminal Child Dev forecast",
+        )
+    else:
+        assert result.parent_dev is not None
+        assert result.child_dev is not None
+
+
+@pytest.mark.parametrize(
+    "cursor",
+    (
+        "child_without_parent",
+        "parent_wrong_genome",
+        "child_wrong_genome",
+        "duplicate_parent_stage",
+        "parent_before_train_complete",
+        "release_audit_in_running",
+    ),
+)
+def test_running_checkpoint_rejects_each_illegal_final_dev_cursor(
+    tmp_path, cursor
+) -> None:
+    checkpoint = tmp_path / "checkpoint.json"
+    train = _tasks("train", 80)
+    dev = _tasks("dev", 20, entity_offset=100)
+    parent = RetrievalGenome.seed()
+    generations = 2 if cursor == "parent_before_train_complete" else 1
+    interrupted, _ = _engine(
+        _FakeEvaluator(
+            errors={"v000": 1.0, "v001": 0.9, "v002": 0.95, "v003": 1.2}
+        ),
+        _responses(generations),
+        checkpoint_path=checkpoint,
+        generations=generations,
+    )
+    _complete_train_checkpoint(
+        interrupted,
+        parent,
+        train,
+        dev,
+        generation_count=1,
+    )
+    assert interrupted._current_parent is not None
+    winner = interrupted._current_parent
+    assert winner.fingerprint() != parent.fingerprint()
+
+    if cursor == "child_without_parent":
+        interrupted._evaluate_batch(
+            winner,
+            dev,
+            stage="child_dev",
+            readonly=True,
+            library=interrupted._readonly_library(winner),
+        )
+    elif cursor == "parent_wrong_genome":
+        interrupted._evaluate_batch(
+            winner,
+            dev,
+            stage="parent_dev",
+            readonly=True,
+            library=interrupted._readonly_library(winner),
+        )
+    elif cursor == "child_wrong_genome":
+        interrupted._evaluate_batch(
+            parent,
+            dev,
+            stage="parent_dev",
+            readonly=True,
+            library=interrupted._readonly_library(parent),
+        )
+        interrupted._evaluate_batch(
+            parent,
+            dev,
+            stage="child_dev",
+            readonly=True,
+            library=interrupted._readonly_library(parent),
+        )
+    elif cursor == "duplicate_parent_stage":
+        interrupted._evaluate_batch(
+            parent,
+            dev,
+            stage="parent_dev",
+            readonly=True,
+            library=interrupted._readonly_library(parent),
+        )
+        interrupted._evaluate_batch(
+            winner,
+            dev,
+            stage="parent_dev",
+            readonly=True,
+            library=interrupted._readonly_library(winner),
+        )
+    elif cursor == "parent_before_train_complete":
+        interrupted._evaluate_batch(
+            parent,
+            dev,
+            stage="parent_dev",
+            readonly=True,
+            library=interrupted._readonly_library(parent),
+        )
+    else:
+        interrupted._trace.append(
+            {
+                "kind": "dev_completed",
+                "original_parent": parent.version,
+                "train_winner": winner.version,
+                "accepted": False,
+                "rejection_reasons": ["forged"],
+            }
+        )
+        interrupted._save_checkpoint(status="running", result=None)
+
+    resumed_evaluator = _FakeEvaluator()
+    resumed, resumed_llm = _engine(
+        resumed_evaluator,
+        [],
+        checkpoint_path=checkpoint,
+        generations=generations,
+    )
+
+    with pytest.raises(
+        RetrievalCheckpointError,
+        match="stage|cursor|coverage|schedule|audit|outcome",
+    ):
+        resumed.evolve(parent, train, dev)
+    assert resumed_evaluator.calls == []
+    assert resumed_llm.calls == []
 
 
 def test_authenticated_checkpoint_rederives_rejected_dev_acceptance(tmp_path) -> None:

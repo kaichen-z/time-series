@@ -2494,6 +2494,7 @@ class RetrievalEvolutionEngine:
         if not 0 <= next_generation <= self.config.generations:
             raise RetrievalCheckpointError("invalid checkpoint generation cursor")
         self._attest_running_stage_cursor(
+            original=original,
             current=current,
             pending=pending,
             next_generation=next_generation,
@@ -2507,6 +2508,7 @@ class RetrievalEvolutionEngine:
     def _attest_running_stage_cursor(
         self,
         *,
+        original: RetrievalGenome,
         current: RetrievalGenome,
         pending: object,
         next_generation: int,
@@ -2539,6 +2541,25 @@ class RetrievalEvolutionEngine:
                 "running checkpoint audit stage cursor is invalid"
             )
         if pending is None:
+            if next_generation == self.config.generations:
+                parent_dev = self._checkpoint_outcome(
+                    "parent_dev",
+                    original,
+                    consumed,
+                    required=False,
+                )
+                if parent_dev is None:
+                    finish()
+                    return
+                if isinstance(parent_dev, RetrievalForecastingFailure):
+                    finish()
+                    return
+                self._checkpoint_outcome(
+                    "child_dev",
+                    current,
+                    consumed,
+                    required=False,
+                )
             finish()
             return
         if next_generation >= self.config.generations:

@@ -971,6 +971,145 @@ def test_skill_checkpoint_commit_rejects_parent_replacement_at_entry_operation(
         assert not path.exists()
 
 
+@pytest.mark.parametrize(
+    "phase",
+    (
+        "witness_directory_open",
+        "before_witness_link",
+        "after_witness_link",
+        "witness_directory_fsync",
+        "before_main_replace",
+        "after_main_replace",
+        "main_directory_fsync",
+    ),
+)
+def test_active_checkpoint_bundle_rolls_back_each_replaced_witness_commit_phase(
+    tmp_path, monkeypatch, phase
+) -> None:
+    library_directory = tmp_path / "library"
+    library_directory.mkdir()
+    path = library_directory / "skills.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "skill_id": "historical_skill",
+                    "name": "historical_skill",
+                    "description": "Operator-approved historical strategy.",
+                    "applicability": "scheduled event",
+                    "query_strategy": "Find the event window.",
+                    "verification_rule": "Require an exact quote.",
+                    "created_from_task": "train_1",
+                    "validation_smae": 0.1,
+                    "validation_srmse": 0.2,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    library = _migrate_legacy_for_operator(path)
+    before = path.read_bytes()
+    before_sha256 = hashlib.sha256(before).hexdigest()
+    provenance = library_directory / f".{path.name}.provenance"
+    prior_witness = provenance / f"{before_sha256}.json"
+    assert prior_witness.is_file()
+    replacement = tmp_path / "replacement-provenance"
+    replacement.mkdir()
+    displaced = tmp_path / "displaced-provenance"
+    main_directory_identity = (
+        library_directory.stat().st_dev,
+        library_directory.stat().st_ino,
+    )
+    witness_directory_identity = (
+        provenance.stat().st_dev,
+        provenance.stat().st_ino,
+    )
+    real_link = skill_library_module.os.link
+    real_open = skill_library_module.os.open
+    real_replace = skill_library_module.os.replace
+    real_fsync = skill_library_module.os.fsync
+    swapped = False
+
+    def swap_witness_directory() -> None:
+        nonlocal swapped
+        assert not swapped
+        provenance.rename(displaced)
+        replacement.rename(provenance)
+        swapped = True
+
+    def replace_witness_link(source, destination, *args, **kwargs):
+        is_witness = str(destination).endswith(".json") and destination != path.name
+        if phase == "before_witness_link" and is_witness and not swapped:
+            swap_witness_directory()
+        result = real_link(source, destination, *args, **kwargs)
+        if phase == "after_witness_link" and is_witness and not swapped:
+            swap_witness_directory()
+        return result
+
+    def replace_witness_directory_open(file, flags, mode=0o777, *, dir_fd=None):
+        if (
+            phase == "witness_directory_open"
+            and file == provenance.name
+            and dir_fd is not None
+            and not swapped
+        ):
+            swap_witness_directory()
+        return real_open(file, flags, mode, dir_fd=dir_fd)
+
+    def replace_main_checkpoint(source, destination, *args, **kwargs):
+        is_main = destination == path.name
+        if phase == "before_main_replace" and is_main and not swapped:
+            swap_witness_directory()
+        result = real_replace(source, destination, *args, **kwargs)
+        if phase == "after_main_replace" and is_main and not swapped:
+            swap_witness_directory()
+        return result
+
+    def replace_directory_fsync(descriptor):
+        metadata = skill_library_module.os.fstat(descriptor)
+        identity = (metadata.st_dev, metadata.st_ino)
+        target = (
+            witness_directory_identity
+            if phase == "witness_directory_fsync"
+            else main_directory_identity
+        )
+        if phase in {"witness_directory_fsync", "main_directory_fsync"} and (
+            identity == target and not swapped
+        ):
+            swap_witness_directory()
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(skill_library_module.os, "link", replace_witness_link)
+    monkeypatch.setattr(skill_library_module.os, "open", replace_witness_directory_open)
+    monkeypatch.setattr(skill_library_module.os, "replace", replace_main_checkpoint)
+    monkeypatch.setattr(skill_library_module.os, "fsync", replace_directory_fsync)
+
+    with pytest.raises(
+        RetrievalSkillError,
+        match="path|parent|directory|changed|bundle|witness",
+    ):
+        library.apply_operations(
+            (
+                RetrievalSkillOperation.quarantine(
+                    "historical_skill", "unsafe historical strategy"
+                ),
+            )
+        )
+
+    assert swapped
+    assert path.read_bytes() == before
+    current = library.get_by_id("historical_skill")
+    assert current is not None
+    assert (current.version, current.status) == (1, "accepted")
+    reloaded = RetrievalSkillLibrary.load_verified_checkpoint(path)
+    assert reloaded.get_by_id("historical_skill") == current
+    assert not [
+        artifact
+        for artifact in tmp_path.rglob("*")
+        if artifact.name.endswith(".tmp")
+    ]
+
+
 @pytest.mark.parametrize("symlink_kind", ("path", "parent"))
 def test_skill_writer_rejects_symlink_paths_and_parents(tmp_path, symlink_kind) -> None:
     real_directory = tmp_path / "real"

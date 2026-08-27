@@ -803,6 +803,43 @@ def test_evaluator_promotion_write_failure_is_atomic(
     assert not (path.parent / f".{path.name}.provenance").exists()
 
 
+def test_first_active_publication_rolls_back_main_link_that_committed_then_failed(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "skills.json"
+    library = RetrievalSkillLibrary(path, (_candidate_skill(),))
+    task_results = tuple(
+        _promotion_task_result(index, entity)
+        for index, entity in enumerate(("Alpha", "Alpha", "Beta"), start=1)
+    )
+    real_link = skill_library_module.os.link
+
+    def fail_after_main_link(source, destination, *args, **kwargs):
+        result = real_link(source, destination, *args, **kwargs)
+        if destination == path.name:
+            raise OSError("main checkpoint link failed after publication")
+        return result
+
+    monkeypatch.setattr(skill_library_module.os, "link", fail_after_main_link)
+
+    with pytest.raises(OSError, match="failed after publication"):
+        _evaluate_and_promote_retrieval_skills(
+            library, task_results, split="train"
+        )
+
+    current = library.get_by_id("window_search")
+    assert current is not None
+    assert (current.version, current.status) == (1, "candidate")
+    assert not path.exists()
+    provenance = path.parent / f".{path.name}.provenance"
+    assert not provenance.exists() or not tuple(provenance.iterdir())
+    assert not [
+        artifact
+        for artifact in tmp_path.rglob("*")
+        if artifact.name.endswith(".tmp")
+    ]
+
+
 def test_no_public_evidence_row_api_can_authorize_promotion(tmp_path) -> None:
     for name in (
         "promote_retrieval_skills",
