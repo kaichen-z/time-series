@@ -13,6 +13,7 @@ from evolving_loop.retrieval_agent.policy import (
     RetrievalRelease,
     write_retrieval_release,
 )
+import evolving_loop.retrieval_agent.policy as policy
 
 
 RELEASE_DIR = Path("evolving_loop/retrieval_agent/releases/v000")
@@ -188,3 +189,26 @@ def test_release_writer_rejects_resolved_git_and_dangling_destination_symlinks(
 
     with pytest.raises(RetrievalPolicyError, match="already exists"):
         write_retrieval_release(releases, genome, skills=())
+
+
+def test_release_reservation_rejects_a_race_without_modifying_the_winner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    releases = tmp_path / "releases"
+    genome = RetrievalGenome.seed()
+    original_reserve = policy._reserve_release_destination
+
+    def competing_reservation(destination: Path) -> None:
+        destination.mkdir()
+        (destination / "winner.txt").write_text("external winner", encoding="utf-8")
+        original_reserve(destination)
+
+    monkeypatch.setattr(policy, "_reserve_release_destination", competing_reservation)
+
+    with pytest.raises(RetrievalPolicyError, match="already exists"):
+        write_retrieval_release(releases, genome, skills=())
+
+    destination = releases / "v000"
+    assert (destination / "winner.txt").read_text(encoding="utf-8") == "external winner"
+    assert {item.name for item in destination.iterdir()} == {"winner.txt"}
+    assert not tuple(releases.glob(".v000.*"))

@@ -432,6 +432,27 @@ def _lexists(path: Path) -> bool:
     return os.path.lexists(os.fspath(path))
 
 
+def _reserve_release_destination(destination: Path) -> None:
+    """Create an empty release directory without ever replacing an existing entry."""
+    try:
+        os.mkdir(destination)
+    except FileExistsError as error:
+        raise RetrievalPolicyError(f"release destination already exists: {destination}") from error
+    except OSError as error:
+        raise RetrievalPolicyError(f"cannot reserve release destination: {destination}") from error
+
+
+def _move_file_without_replacement(source: Path, destination: Path) -> None:
+    """Move a staged sibling file only if its destination name is still unused."""
+    try:
+        os.link(source, destination)
+    except FileExistsError as error:
+        raise RetrievalPolicyError(f"release artifact already exists: {destination}") from error
+    except OSError as error:
+        raise RetrievalPolicyError(f"cannot publish release artifact: {destination}") from error
+    source.unlink()
+
+
 def _write_json(path: Path, payload: object) -> None:
     path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -526,6 +547,7 @@ def write_retrieval_release(
         raise RetrievalPolicyError(f"release root is not a directory: {releases}")
     releases.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{validated.version}.", dir=releases))
+    reserved = False
     try:
         _write_json(temporary / "genome.json", validated.to_payload())
         (temporary / "round1_prompt.md").write_text(validated.round1_prompt, encoding="utf-8")
@@ -542,12 +564,18 @@ def write_retrieval_release(
             **manifest_audit,
         }
         _write_json(temporary / "manifest.json", manifest)
-        if _lexists(destination):  # Reject dangling symlinks without replacing them.
-            raise RetrievalPolicyError(f"release destination already exists: {destination}")
-        os.rename(temporary, destination)
+        RetrievalRelease.load(temporary)
+        _reserve_release_destination(destination)
+        reserved = True
+        for filename in ("genome.json", "round1_prompt.md", "round2_prompt.md", "skills.json"):
+            _move_file_without_replacement(temporary / filename, destination / filename)
+        _move_file_without_replacement(temporary / "manifest.json", destination / "manifest.json")
+        temporary.rmdir()
     except Exception:
         if temporary.exists():
             shutil.rmtree(temporary)
+        if reserved and destination.exists():
+            shutil.rmtree(destination)
         raise
     return RetrievalRelease.load(destination)
 
