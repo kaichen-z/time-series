@@ -380,6 +380,11 @@ class RetrievalRoundResult:
     gaps: tuple[RetrievalGap, ...] = ()
     rejected: tuple[str, ...] = ()
     unresolved_contradictions: tuple[str, ...] = ()
+    # Evaluator-side audit counters are intentionally absent from the wire
+    # schema.  They retain raw-attempt denominators after rejection strings are
+    # deduplicated for user-facing diagnostics.
+    quote_attempt_count: int = field(default=0, repr=False, compare=False)
+    valid_quote_count: int = field(default=0, repr=False, compare=False)
 
     @classmethod
     def from_payload(cls, raw: Mapping[str, object]) -> "RetrievalRoundResult":

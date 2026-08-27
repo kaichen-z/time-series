@@ -100,11 +100,55 @@ def test_multiple_children_receive_distinct_payloads_without_full_skill_source()
     assert second["child_index"] == 1
     assert first["diversity_instruction"] != second["diversity_instruction"]
     assert first["skill_inventory"]["coding"] == ["private_code_skill"]
-    assert first["system_diagnostics"] == {
-        "mean_selection_regret": 12.5,
-        "mean_best_of_k_smape": 4.0,
-    }
+    assert "system_diagnostics" not in first
+    assert "module_rewards" not in first
+    assert "worst_failure_trajectories" not in first
     assert "FULL_EXECUTABLE_SOURCE" not in client.calls[0]["messages"][0]["content"]
+
+
+def test_evolver_prompt_firewall_excludes_all_evaluator_only_values() -> None:
+    evaluation = PolicyEvaluation(
+        version="v000",
+        system_reward=0.123456789,
+        module_rewards={"coding": 0.876543219, "retrieval": 0.765432198, "decision": 0.654321987},
+        outcomes=(),
+        diagnostics={"label_derived_secret": "EVALUATOR_DIAGNOSTIC_SECRET"},
+        failure_traces=(
+            {
+                "task_id": "PRIVATE_TASK_ID",
+                "final_smae": 0.314159265,
+                "final_srmse": 0.271828182,
+                "oracle_candidate_id": "PRIVATE_ORACLE_ID",
+                "retrieved_document_ids": ("PRIVATE_DOCUMENT_ID",),
+                "decision_rejection_reason": "unknown_candidate:PRIVATE_CANDIDATE_ID",
+                "retrieval_rejections": ("ungrounded_quote:PRIVATE_DOCUMENT_ID",),
+            },
+        ),
+    )
+    client = FakeLLMClient([_open_genome()])
+
+    CoEvolutionEngine(client, harness_factory=lambda _policy: None).mutate(
+        HarnessPolicy(), evaluation
+    )
+
+    prompt = client.calls[0]["messages"][0]["content"]
+    for secret in (
+        "EVALUATOR_DIAGNOSTIC_SECRET",
+        "PRIVATE_TASK_ID",
+        "PRIVATE_ORACLE_ID",
+        "PRIVATE_DOCUMENT_ID",
+        "PRIVATE_CANDIDATE_ID",
+        "0.123456789",
+        "0.876543219",
+        "0.314159265",
+        "0.271828182",
+    ):
+        assert secret not in prompt
+    payload = json.loads(prompt)
+    assert payload["failure_interface_facts"] == {
+        "decision_rejection_categories": ["unknown_candidate"],
+        "retrieval_rejection_categories": ["ungrounded_quote"],
+    }
 
 
 def test_prompt_mode_changes_only_one_prompt() -> None:

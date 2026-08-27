@@ -9,6 +9,8 @@ from .credit import (
     SkillCredit,
     SkillNecessity,
     assign_chain_credit,
+    derive_retrieval_skill_evidence,
+    evaluate_and_promote_retrieval_skills,
     promote_retrieval_skills,
     validate_skill_necessity,
 )
@@ -41,6 +43,8 @@ __all__ = [
     "SkillCredit",
     "SkillNecessity",
     "assign_chain_credit",
+    "derive_retrieval_skill_evidence",
+    "evaluate_and_promote_retrieval_skills",
     "promote_retrieval_skills",
     "validate_skill_necessity",
     "RetrievalAgent",

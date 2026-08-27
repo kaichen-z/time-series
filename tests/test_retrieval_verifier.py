@@ -100,6 +100,37 @@ def _chain(**overrides: object) -> dict[str, object]:
     return value
 
 
+def test_quote_validity_audit_counts_raw_attempts_before_deduplication(
+    context_task: ContextTask,
+) -> None:
+    valid = _chain()
+    invalid = _chain(
+        chain_id="invalid_quote",
+        citations=[
+            {"document_id": "doc_1", "exact_quote": "invented quote"},
+            {"document_id": "doc_1", "exact_quote": "invented quote"},
+        ],
+    )
+    payload = {
+        "evidence_chains": [valid, invalid],
+        "counterevidence": [],
+        "missing_information": [],
+        "sufficient": True,
+    }
+
+    result = verify_round_result(
+        context_task,
+        payload,
+        stage="round1",
+        allowed_skill_ids=("s_window",),
+        allowed_assumption_ids=(),
+    )
+
+    assert result.quote_attempt_count == 3
+    assert result.valid_quote_count == 1
+    assert "quote_attempt_count" not in result.to_payload()
+
+
 def _payload(*chains: dict[str, object]) -> dict[str, object]:
     return {
         "evidence_chains": list(chains),

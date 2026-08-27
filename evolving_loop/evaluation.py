@@ -5,13 +5,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from common.metrics import (
-    drcik_point_metrics,
     score_forecast,
     spearman_rank_correlation,
 )
 from evolving_loop.data import ContextTask
 from evolving_loop.retrieval_agent.credit import (
     RetrievalTaskDiagnostics,
+    _score_forecast_drcik,
     assign_chain_credit,
 )
 
@@ -60,16 +60,24 @@ def score_after_resolution(
     truth = task.numeric.future_values
     retrieval_credit = assign_chain_credit(task, result)
     candidates = {
-        candidate.candidate_id: drcik_point_metrics(truth, [candidate.forecast])
+        candidate.candidate_id: _score_forecast_drcik(truth, candidate.forecast)[0]
         for candidate in result.candidates
     }
-    legacy_final = score_forecast(list(truth), list(result.forecast))
+    scale = sum(abs(float(value)) for value in truth) / len(truth) if truth else 1.0
+
+    def legacy_score(forecast) -> dict[str, float]:
+        try:
+            return score_forecast(list(truth), list(forecast))
+        except (TypeError, ValueError, OverflowError):
+            return {"smape": 200.0, "mae": 5.0 * max(scale, 1e-12), "primary": 200.0}
+
+    legacy_final = legacy_score(result.forecast)
     legacy_candidates = {
-        candidate.candidate_id: score_forecast(list(truth), list(candidate.forecast))
+        candidate.candidate_id: legacy_score(candidate.forecast)
         for candidate in result.candidates
     }
     legacy_coding = {
-        candidate.program.name: score_forecast(list(truth), list(candidate.forecast))
+        candidate.program.name: legacy_score(candidate.forecast)
         for candidate in result.coding.candidates
     } or legacy_candidates
     legacy_selected = legacy_candidates[result.decision.selected.candidate_id]

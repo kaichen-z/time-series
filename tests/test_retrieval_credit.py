@@ -14,9 +14,12 @@ from evolving_loop.harness import (
     _candidate_pool_snapshots,
 )
 from evolving_loop.decision_agent.agent import DecisionCandidate
+from evolving_loop.evaluation import score_after_resolution
 from evolving_loop.retrieval_agent.credit import (
     RetrievalSkillTaskEvidence,
     assign_chain_credit,
+    derive_retrieval_skill_evidence,
+    evaluate_and_promote_retrieval_skills,
     promote_retrieval_skills,
     validate_skill_necessity,
 )
@@ -123,11 +126,24 @@ def _result(
         unresolved_contradictions=(),
         complete=all(chain.numeric_eligible for chain in chains),
     )
+    executed = tuple(
+        DecisionCandidate(candidate.candidate_id, candidate.forecast, candidate.candidate_id, "none")
+        for candidate in snapshots[-1].candidates
+    )
+    coding = tuple(
+        SimpleNamespace(program=SimpleNamespace(name=candidate.candidate_id), forecast=candidate.forecast)
+        for candidate in snapshots[0].candidates
+    )
+    selected = next((candidate for candidate in executed if candidate.forecast == forecast), executed[0])
     return SimpleNamespace(
         retrieval_card=card,
         candidate_pool_snapshots=snapshots,
         skill_leave_one_out_snapshots=leave_one_out,
         forecast=forecast,
+        candidates=executed,
+        coding=SimpleNamespace(candidates=coding),
+        retrieval=SimpleNamespace(selected_document_ids=card.selected_document_ids, rejected=()),
+        decision=SimpleNamespace(selected=selected),
     )
 
 
@@ -142,7 +158,7 @@ def test_candidate_snapshots_are_immutable_and_contain_no_evaluator_labels() -> 
     assert set(vars(snapshot.candidates[0])) == {"candidate_id", "forecast"}
 
 
-def test_legacy_result_fallback_canonicalizes_duplicate_candidate_ids() -> None:
+def test_credit_rejects_missing_snapshots_instead_of_reconstructing_them() -> None:
     duplicate = DecisionCandidate("numeric", (10.0, 10.0), "numeric", "none")
     result = SimpleNamespace(
         candidate_pool_snapshots=(),
@@ -158,9 +174,19 @@ def test_legacy_result_fallback_canonicalizes_duplicate_candidate_ids() -> None:
         forecast=(10.0, 10.0),
     )
 
-    report = assign_chain_credit(_task(), result)
+    with pytest.raises(ValueError, match="snapshots"):
+        assign_chain_credit(_task(), result)
 
-    assert report.coding_oracle_smae == pytest.approx(1.0 / 6.0)
+
+def test_resolved_scoring_returns_invalid_diagnostics_for_horizon_mismatch() -> None:
+    snapshots = (_snapshot(None, ("numeric", (10.0,))),)
+    result = _result(snapshots=snapshots, forecast=(10.0,))
+
+    outcome = score_after_resolution(_task(), result)
+
+    assert outcome.final_smae == 5.0
+    assert outcome.final_srmse == 5.0
+    assert outcome.retrieval_diagnostics.invalid_count == 1
 
 
 def test_credit_interfaces_are_exported_from_the_retrieval_package() -> None:
@@ -239,6 +265,50 @@ def test_chain_credit_follows_verified_order_without_double_attribution() -> Non
     )
 
 
+@pytest.mark.parametrize(
+    "snapshots, match",
+    (
+        (
+            (
+                _snapshot(None, ("numeric", (6.0, 6.0))),
+                _snapshot("first", ("numeric", (7.0, 7.0)), ("first_candidate", (10.0, 10.0))),
+                _snapshot("second", ("numeric", (7.0, 7.0)), ("first_candidate", (10.0, 10.0)), ("second_candidate", (12.0, 12.0))),
+            ),
+            "changed",
+        ),
+        (
+            (
+                _snapshot(None, ("numeric", (6.0, 6.0))),
+                _snapshot("first", ("first_candidate", (10.0, 10.0)), ("numeric", (6.0, 6.0))),
+                _snapshot("second", ("first_candidate", (10.0, 10.0)), ("numeric", (6.0, 6.0)), ("second_candidate", (12.0, 12.0))),
+            ),
+            "prefix",
+        ),
+        (
+            (
+                _snapshot(None, ("numeric", (6.0, 6.0))),
+                _snapshot("first", ("numeric", (6.0, 6.0)), ("phantom", (10.0, 10.0))),
+                _snapshot("second", ("numeric", (6.0, 6.0)), ("phantom", (10.0, 10.0)), ("second_candidate", (12.0, 12.0))),
+            ),
+            "executed",
+        ),
+    ),
+)
+def test_credit_rejects_snapshots_not_bound_to_executed_cumulative_pool(
+    snapshots, match
+) -> None:
+    first = _chain("first", numeric_eligible=True)
+    second = _chain("second", numeric_eligible=True)
+    result = _result(first, second, snapshots=snapshots)
+    if match == "executed":
+        result.candidates = tuple(
+            candidate for candidate in result.candidates if candidate.candidate_id != "phantom"
+        )
+
+    with pytest.raises(ValueError, match=match):
+        assign_chain_credit(_task(), result)
+
+
 def test_skipped_chain_keeps_an_unchanged_pool_without_stealing_later_credit() -> None:
     first = _chain("first", numeric_eligible=True)
     second = _chain("second", numeric_eligible=True)
@@ -306,7 +376,9 @@ def test_joint_skill_credit_requires_leave_one_out_replay() -> None:
         chain,
         snapshots=(baseline, full),
         leave_one_out=(
-            SkillLeaveOneOutSnapshot("joint", "window_search", baseline),
+            SkillLeaveOneOutSnapshot(
+                "joint", "window_search", replace(baseline, after_chain_id="joint")
+            ),
             SkillLeaveOneOutSnapshot("joint", "quote_check", full),
         ),
     )
@@ -316,6 +388,31 @@ def test_joint_skill_credit_requires_leave_one_out_replay() -> None:
 
     validated = validate_skill_necessity(_task(), result, "joint")
     assert {item.skill_id for item in validated if item.necessary} == {"window_search"}
+
+
+@pytest.mark.parametrize("mutation", ("duplicate", "extra", "wrong_chain", "unrelated_change"))
+def test_leave_one_out_replay_provenance_fails_closed(mutation) -> None:
+    chain = _chain("joint", numeric_eligible=True, used_skill_ids=("window_search",))
+    baseline = _snapshot(None, ("numeric", (10.0, 10.0)))
+    full = _snapshot("joint", ("numeric", (10.0, 10.0)), ("joint_candidate", (12.0, 12.0)))
+    valid = SkillLeaveOneOutSnapshot(
+        "joint", "window_search", _snapshot("joint", ("numeric", (10.0, 10.0)))
+    )
+    replays = [valid]
+    if mutation == "duplicate":
+        replays.append(valid)
+    elif mutation == "extra":
+        replays.append(SkillLeaveOneOutSnapshot("joint", "extra_skill", full))
+    elif mutation == "wrong_chain":
+        replays[0] = SkillLeaveOneOutSnapshot("other", "window_search", valid.snapshot)
+    else:
+        replays[0] = SkillLeaveOneOutSnapshot(
+            "joint", "window_search", _snapshot("joint", ("numeric", (9.0, 9.0)))
+        )
+    result = _result(chain, snapshots=(baseline, full), leave_one_out=tuple(replays))
+
+    with pytest.raises(ValueError, match="leave-one-out|replay"):
+        validate_skill_necessity(_task(), result, "joint")
 
 
 def _candidate_skill() -> RetrievalSkill:
@@ -356,10 +453,48 @@ def _promotion_rows(**overrides: object) -> tuple[RetrievalSkillTaskEvidence, ..
     return tuple(rows)
 
 
-def test_skill_promotion_requires_every_cross_train_gate(tmp_path) -> None:
-    library = RetrievalSkillLibrary(tmp_path / "skills.json", (_candidate_skill(),))
+def _promotion_task_result(
+    index: int,
+    entity: str,
+    *,
+    include_replay: bool = True,
+    replay_keeps_full_pool: bool = False,
+    valid_quote: bool = True,
+):
+    task = _task()
+    task = replace(
+        task,
+        numeric=replace(task.numeric, task_id=f"train_{index}", entity_name=entity),
+    )
+    chain = _chain("gain", numeric_eligible=True, used_skill_ids=("window_search",))
+    if not valid_quote:
+        chain = replace(
+            chain,
+            citations=(EvidenceCitation("support", "invented quote"),),
+        )
+    baseline = _snapshot(None, ("numeric", (10.0, 10.0)))
+    full = _snapshot("gain", ("numeric", (10.0, 10.0)), ("gain_candidate", (12.0, 12.0)))
+    replays = (
+        SkillLeaveOneOutSnapshot(
+            "gain",
+            "window_search",
+            full
+            if replay_keeps_full_pool
+            else _snapshot("gain", ("numeric", (10.0, 10.0))),
+        ),
+    ) if include_replay else ()
+    return task, _result(chain, snapshots=(baseline, full), leave_one_out=replays, forecast=(12.0, 12.0))
 
-    promoted = promote_retrieval_skills(library, _promotion_rows())
+
+def test_skill_promotion_requires_trusted_evaluator_derived_evidence(tmp_path) -> None:
+    library = RetrievalSkillLibrary(tmp_path / "skills.json", (_candidate_skill(),))
+    task_results = tuple(
+        _promotion_task_result(index, entity)
+        for index, entity in enumerate(("Alpha", "Alpha", "Beta"), start=1)
+    )
+
+    rows = derive_retrieval_skill_evidence(task_results, split="train")
+    promoted = promote_retrieval_skills(library, rows)
 
     assert promoted == ("window_search",)
     accepted = library.get_by_id("window_search")
@@ -368,6 +503,57 @@ def test_skill_promotion_requires_every_cross_train_gate(tmp_path) -> None:
     assert accepted.version == 2
     assert accepted.validated_task_ids == ("train_1", "train_2", "train_3")
     assert accepted.validated_entities == ("Alpha", "Beta")
+
+
+def test_forged_skill_evidence_cannot_promote(tmp_path) -> None:
+    library = RetrievalSkillLibrary(tmp_path / "skills.json", (_candidate_skill(),))
+
+    assert promote_retrieval_skills(library, _promotion_rows()) == ()
+    assert library.get_by_id("window_search").status == "candidate"
+
+
+def test_zero_leave_one_out_replays_cannot_promote(tmp_path) -> None:
+    library = RetrievalSkillLibrary(tmp_path / "skills.json", (_candidate_skill(),))
+    task_results = tuple(
+        _promotion_task_result(index, entity, include_replay=False)
+        for index, entity in enumerate(("Alpha", "Alpha", "Beta"), start=1)
+    )
+
+    rows = derive_retrieval_skill_evidence(task_results, split="train")
+
+    assert rows == ()
+    assert promote_retrieval_skills(library, rows) == ()
+
+
+@pytest.mark.parametrize(
+    "task_results",
+    (
+        tuple(_promotion_task_result(index, "Alpha") for index in range(1, 4)),
+        tuple(_promotion_task_result(index, entity) for index, entity in enumerate(("Alpha", "Beta"), 1)),
+        tuple(
+            _promotion_task_result(index, entity, valid_quote=index != 2)
+            for index, entity in enumerate(("Alpha", "Alpha", "Beta"), 1)
+        ),
+        tuple(
+            _promotion_task_result(index, entity, replay_keeps_full_pool=index == 2)
+            for index, entity in enumerate(("Alpha", "Alpha", "Beta"), 1)
+        ),
+    ),
+)
+def test_trusted_evidence_still_requires_every_cross_train_gate(
+    tmp_path, task_results
+) -> None:
+    library = RetrievalSkillLibrary(tmp_path / "skills.json", (_candidate_skill(),))
+
+    assert evaluate_and_promote_retrieval_skills(
+        library, task_results, split="train"
+    ) == ()
+    assert library.get_by_id("window_search").status == "candidate"
+
+
+def test_skill_evidence_metrics_are_capped_to_formal_report_range() -> None:
+    with pytest.raises(ValueError, match=r"\[0, 5\]"):
+        replace(_promotion_rows()[0], with_skill_smae=5.01)
 
 
 @pytest.mark.parametrize(
@@ -382,7 +568,7 @@ def test_skill_promotion_requires_every_cross_train_gate(tmp_path) -> None:
         {"necessary": False},
     ),
 )
-def test_skill_promotion_fails_closed_when_any_train_gate_fails(tmp_path, overrides) -> None:
+def test_caller_created_rows_never_bypass_train_gates(tmp_path, overrides) -> None:
     library = RetrievalSkillLibrary(tmp_path / "skills.json", (_candidate_skill(),))
 
     assert promote_retrieval_skills(library, _promotion_rows(**overrides)) == ()
@@ -394,8 +580,13 @@ def test_dev_evidence_is_read_only_and_cannot_promote_skills(tmp_path) -> None:
     library = RetrievalSkillLibrary(path, (_candidate_skill(),))
     library.save()
     before = path.read_bytes()
-    dev_rows = tuple(replace(row, split="dev") for row in _promotion_rows())
+    task_results = tuple(
+        _promotion_task_result(index, entity)
+        for index, entity in enumerate(("Alpha", "Alpha", "Beta"), start=1)
+    )
 
-    assert promote_retrieval_skills(library, dev_rows) == ()
+    assert evaluate_and_promote_retrieval_skills(
+        library, task_results, split="dev"
+    ) == ()
     assert library.get_by_id("window_search").status == "candidate"
     assert path.read_bytes() == before

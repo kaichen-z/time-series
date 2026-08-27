@@ -15,8 +15,7 @@ from evolving_loop.retrieval_agent.skill_library import (
     RetrievalSkillLibrary,
 )
 from evolving_loop.retrieval_agent.credit import (
-    RetrievalSkillTaskEvidence,
-    promote_retrieval_skills,
+    evaluate_and_promote_retrieval_skills,
 )
 from common.llm import JsonExtractionError, LLMClient, parse_json_object
 
@@ -214,10 +213,14 @@ class OutcomeSkillLearner:
 
     def promote_retrieval_candidates(
         self,
-        evidence: tuple[RetrievalSkillTaskEvidence, ...],
+        task_results: tuple[tuple[ContextTask, HarnessResult], ...],
+        *,
+        split: str = "train",
     ) -> tuple[str, ...]:
         """Apply evaluator-owned cross-Train gates after task aggregation."""
-        return promote_retrieval_skills(self.retrieval_library, evidence)
+        return evaluate_and_promote_retrieval_skills(
+            self.retrieval_library, task_results, split=split
+        )
 
     @staticmethod
     def _invalid_record(task: ContextTask, record: dict, fields: tuple[str, ...]) -> str | None:

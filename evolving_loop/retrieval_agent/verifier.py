@@ -132,6 +132,40 @@ def _deduplicate_raw_citations(payload: object) -> object:
     return normalized
 
 
+def _raw_quote_audit(
+    task: ContextTask, payload: object
+) -> tuple[int, int]:
+    """Count submitted quote attempts before any wire-level deduplication."""
+    if not isinstance(payload, Mapping):
+        return 0, 0
+    documents = {document.document_id: document.content for document in task.documents}
+    attempts = 0
+    valid = 0
+    for field in ("evidence_chains", "counterevidence"):
+        chains = payload.get(field, ())
+        if not isinstance(chains, (list, tuple)):
+            continue
+        for chain in chains:
+            if not isinstance(chain, Mapping):
+                continue
+            citations = chain.get("citations", ())
+            if not isinstance(citations, (list, tuple)):
+                continue
+            for citation in citations:
+                if not isinstance(citation, Mapping):
+                    continue
+                attempts += 1
+                document_id = citation.get("document_id")
+                quote = citation.get("exact_quote")
+                if (
+                    isinstance(document_id, str)
+                    and isinstance(quote, str)
+                    and _verified_quote_spans(quote, documents.get(document_id, ""))
+                ):
+                    valid += 1
+    return attempts, valid
+
+
 def _missing(existing: Sequence[str], *additions: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys((*existing, *additions)))
 
@@ -522,10 +556,16 @@ def verify_round_result(
     """Parse and deterministically verify one untrusted Retrieval stage response."""
     if stage not in {"round1", "round2"}:
         raise ValueError("stage must be round1 or round2")
+    quote_attempt_count, valid_quote_count = _raw_quote_audit(task, payload)
     try:
         raw = RetrievalRoundResult.from_payload(_deduplicate_raw_citations(payload))
     except (RetrievalContractError, TypeError, ValueError) as error:
-        return RetrievalRoundResult((), (), ("invalid_retrieval_payload",), False, rejected=(str(error),))
+        return RetrievalRoundResult(
+            (), (), ("invalid_retrieval_payload",), False,
+            rejected=(str(error),),
+            quote_attempt_count=quote_attempt_count,
+            valid_quote_count=valid_quote_count,
+        )
     skill_ids = frozenset(allowed_skill_ids)
     assumption_ids = frozenset(allowed_assumption_ids)
     submitted_conflicts = (
@@ -562,6 +602,8 @@ def verify_round_result(
         gaps=raw.gaps,
         rejected=rejected,
         unresolved_contradictions=raw.unresolved_contradictions,
+        quote_attempt_count=quote_attempt_count,
+        valid_quote_count=valid_quote_count,
     )
 
 

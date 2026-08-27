@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 import re
 import statistics
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Iterable, Sequence
 
 from common.metrics import drcik_point_metrics
@@ -17,6 +17,9 @@ from evolving_loop.retrieval_agent.verifier import _verified_quote_spans
 
 if TYPE_CHECKING:
     from evolving_loop.harness import CandidatePoolSnapshot, HarnessResult
+
+
+_TRUSTED_EVIDENCE_PROVENANCE = object()
 
 
 @dataclass(frozen=True)
@@ -87,6 +90,7 @@ class RetrievalSkillTaskEvidence:
     with_skill_srmse: float
     added_catastrophic_count: int
     necessary: bool
+    _provenance: object | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.skill_id or not self.task_id or not self.entity_name:
@@ -104,6 +108,8 @@ class RetrievalSkillTaskEvidence:
             raise ValueError("Skill evidence metrics must be finite")
         if not 0.0 <= self.exact_quote_validity <= 1.0:
             raise ValueError("exact quote validity must be in [0, 1]")
+        if not all(0.0 <= value <= 5.0 for value in metrics[1:]):
+            raise ValueError("Skill evidence sMAE/sRMSE metrics must be in [0, 5]")
         if isinstance(self.added_catastrophic_count, bool) or self.added_catastrophic_count < 0:
             raise ValueError("added catastrophic count must be non-negative")
         if not isinstance(self.necessary, bool):
@@ -123,7 +129,7 @@ def _score_pool(
             continue
         scored.append((candidate.candidate_id, score))
     if not scored:
-        raise ValueError("candidate pool snapshot has no scoreable forecasts")
+        return _invalid_drcik_score(), invalid
     _candidate_id, oracle = min(
         scored,
         key=lambda item: (
@@ -135,54 +141,90 @@ def _score_pool(
     return oracle, invalid
 
 
-def _fallback_snapshots(result: "HarnessResult") -> tuple["CandidatePoolSnapshot", ...]:
-    from evolving_loop.harness import CandidatePoolEntry, CandidatePoolSnapshot
+def _invalid_drcik_score() -> dict[str, float | bool]:
+    return {
+        "smae": 5.0,
+        "srmse": 5.0,
+        "smae_clipped": True,
+        "srmse_clipped": True,
+    }
 
-    coding_ids = {
-        candidate.program.name for candidate in getattr(result.coding, "candidates", ())
-    }
-    baseline_by_id = {
-        candidate.candidate_id: CandidatePoolEntry(
-            candidate.candidate_id, candidate.forecast
-        )
-        for candidate in result.candidates
-        if candidate.candidate_id in coding_ids
-    }
-    baseline = tuple(baseline_by_id.values())
-    if not baseline:
-        baseline = tuple(
-            {
-                candidate.candidate_id: CandidatePoolEntry(
-                    candidate.candidate_id, candidate.forecast
-                )
-                for candidate in result.candidates
-            }.values()
-        )
-    snapshots = [CandidatePoolSnapshot(None, baseline)]
-    pool = list(baseline)
-    chains = tuple(
-        chain
-        for chain in getattr(getattr(result, "retrieval_card", None), "chains", ())
-        if chain.numeric_eligible
+
+def _score_forecast_drcik(
+    truth: Sequence[float], forecast: Sequence[float]
+) -> tuple[dict[str, float | bool], int]:
+    try:
+        return drcik_point_metrics(truth, forecast), 0
+    except (TypeError, ValueError, OverflowError):
+        return _invalid_drcik_score(), 1
+
+
+def _entry_tuple(candidates: Iterable[object]) -> tuple[tuple[str, tuple[float, ...]], ...]:
+    return tuple(
+        (str(candidate.candidate_id), tuple(float(value) for value in candidate.forecast))
+        for candidate in candidates
     )
-    baseline_ids = {item.candidate_id for item in baseline}
-    contextual = tuple(
-        {
-            candidate.candidate_id: candidate
-            for candidate in result.candidates
-            if candidate.candidate_id not in baseline_ids
-        }.values()
+
+
+def _coding_entry_tuple(result: "HarnessResult") -> tuple[tuple[str, tuple[float, ...]], ...]:
+    entries: list[tuple[str, tuple[float, ...]]] = []
+    seen: set[str] = set()
+    for candidate in getattr(result.coding, "candidates", ()):
+        candidate_id = str(candidate.program.name)
+        if candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+        entries.append((candidate_id, tuple(float(value) for value in candidate.forecast)))
+    return tuple(entries)
+
+
+def _validate_candidate_snapshots(
+    result: "HarnessResult", snapshots: tuple["CandidatePoolSnapshot", ...]
+) -> None:
+    if not snapshots:
+        raise ValueError("candidate-pool snapshots are required")
+    if snapshots[0].after_chain_id is not None:
+        raise ValueError("candidate snapshots must start with the numeric-only pool")
+
+    executed = _entry_tuple(getattr(result, "candidates", ()))
+    coding = _coding_entry_tuple(result)
+    for name, entries in (("executed", executed), ("coding", coding)):
+        identifiers = tuple(candidate_id for candidate_id, _forecast in entries)
+        if not entries or len(identifiers) != len(set(identifiers)):
+            raise ValueError(f"{name} candidate pool contains duplicate or missing IDs")
+    frozen = tuple(_entry_tuple(snapshot.candidates) for snapshot in snapshots)
+    if frozen[0] != coding:
+        raise ValueError("baseline snapshot is not the executed numeric candidate pool")
+    if frozen[-1] != executed:
+        raise ValueError("final snapshot is not the executed cumulative candidate pool")
+
+    numeric_chain_ids = tuple(
+        str(chain.chain_id) for chain in _chain_ledger(result) if chain.numeric_eligible
     )
-    for index, chain in enumerate(chains):
-        if index < len(contextual):
-            candidate = contextual[index]
-            pool.append(CandidatePoolEntry(candidate.candidate_id, candidate.forecast))
-        snapshots.append(CandidatePoolSnapshot(chain.chain_id, tuple(pool)))
-    if not chains and contextual:
-        for index, candidate in enumerate(contextual):
-            pool.append(CandidatePoolEntry(candidate.candidate_id, candidate.forecast))
-            snapshots.append(CandidatePoolSnapshot(f"legacy_evidence_{index}", tuple(pool)))
-    return tuple(snapshots)
+    if numeric_chain_ids:
+        expected_ids = numeric_chain_ids
+    else:
+        expected_ids = tuple(snapshot.after_chain_id for snapshot in snapshots[1:])
+        if any(not str(chain_id).startswith("legacy_") for chain_id in expected_ids):
+            raise ValueError("candidate-pool snapshots contain extra unverified additions")
+    actual_ids = tuple(snapshot.after_chain_id for snapshot in snapshots[1:])
+    if actual_ids != expected_ids:
+        raise ValueError("candidate-pool snapshots are missing, extra, or out of verified order")
+    if len(set(actual_ids)) != len(actual_ids):
+        raise ValueError("candidate-pool snapshot chain IDs must be unique")
+
+    for previous, current in zip(frozen, frozen[1:]):
+        if len(current) < len(previous):
+            raise ValueError("candidate-pool snapshots are non-monotonic")
+        if len(current) > len(previous) + 1:
+            raise ValueError("candidate-pool snapshots are missing an executed cumulative step")
+        for index, prior in enumerate(previous):
+            if index >= len(current):
+                raise ValueError("candidate-pool snapshots are non-prefix")
+            if current[index][0] != prior[0]:
+                raise ValueError("candidate-pool snapshots are non-prefix")
+            if current[index][1] != prior[1]:
+                raise ValueError("candidate-pool snapshot changed an existing forecast")
 
 
 def _chain_ledger(result: "HarnessResult") -> tuple[object, ...]:
@@ -247,9 +289,19 @@ def _retrieval_quality(
     rejections = tuple(getattr(card, "rejected", ())) if card is not None else tuple(
         getattr(getattr(result, "retrieval", None), "rejected", ())
     )
-    ungrounded = sum(str(reason).startswith("ungrounded_quote:") for reason in rejections)
-    quote_attempts = len(citations) + ungrounded
-    exact_quote_validity = valid_quotes / quote_attempts if quote_attempts else 1.0
+    audit_rounds = (
+        tuple(item for item in (card.round1, card.round2) if item is not None)
+        if card is not None
+        else ()
+    )
+    audited_attempts = sum(item.quote_attempt_count for item in audit_rounds)
+    audited_valid = sum(item.valid_quote_count for item in audit_rounds)
+    if audited_attempts:
+        exact_quote_validity = audited_valid / audited_attempts
+    else:
+        ungrounded = sum(str(reason).startswith("ungrounded_quote:") for reason in rejections)
+        quote_attempts = len(citations) + ungrounded
+        exact_quote_validity = valid_quotes / quote_attempts if quote_attempts else 1.0
 
     evidence_chains = chains
     if card is not None:
@@ -278,14 +330,13 @@ def assign_chain_credit(
     """Assign contextual-oracle pool gain only after public labels resolve."""
     if not task.labels_public or not task.numeric.future_values:
         raise ValueError("Retrieval credit requires resolved public labels")
-    snapshots = tuple(getattr(result, "candidate_pool_snapshots", ())) or _fallback_snapshots(result)
-    if not snapshots or snapshots[0].after_chain_id is not None:
-        raise ValueError("candidate snapshots must start with the numeric-only pool")
+    snapshots = tuple(getattr(result, "candidate_pool_snapshots", ()))
+    _validate_candidate_snapshots(result, snapshots)
     truth = task.numeric.future_values
     scored_snapshots = [_score_pool(truth, snapshot) for snapshot in snapshots]
     coding_score = scored_snapshots[0][0]
     contextual_score = scored_snapshots[-1][0]
-    final_score = drcik_point_metrics(truth, result.forecast)
+    final_score, final_invalid = _score_forecast_drcik(truth, result.forecast)
     chains = _chain_ledger(result)
     snapshot_index = 1
     chain_credit: list[EvidenceChainCredit] = []
@@ -348,7 +399,16 @@ def assign_chain_credit(
         contextual_oracle_srmse_gain=(
             float(coding_score["srmse"]) - float(contextual_score["srmse"])
         ),
-        invalid_count=quality[5] + invalid_candidates,
+        invalid_count=(
+            quality[5]
+            + invalid_candidates
+            + (
+                final_invalid
+                if tuple(result.forecast)
+                not in {tuple(candidate.forecast) for candidate in result.candidates}
+                else 0
+            )
+        ),
         catastrophic_count=catastrophic_count,
         chain_credit=tuple(chain_credit),
     )
@@ -376,27 +436,55 @@ def validate_skill_necessity(
     """Score explicit pre-label leave-one-Skill-out replays, failing closed if absent."""
     if not task.labels_public or not task.numeric.future_values:
         raise ValueError("Skill necessity requires resolved public labels")
+    snapshots = tuple(getattr(result, "candidate_pool_snapshots", ()))
+    _validate_candidate_snapshots(result, snapshots)
     chain = next(
         (item for item in _chain_ledger(result) if item.chain_id == chain_id),
         None,
     )
     if chain is None:
         raise ValueError(f"unknown evidence chain: {chain_id}")
-    full = next(
-        (
-            snapshot
-            for snapshot in getattr(result, "candidate_pool_snapshots", ())
-            if snapshot.after_chain_id == chain_id
-        ),
+    full_index = next(
+        (index for index, snapshot in enumerate(snapshots) if snapshot.after_chain_id == chain_id),
         None,
     )
+    full = snapshots[full_index] if full_index is not None else None
     if full is None:
         raise ValueError("missing full candidate-pool snapshot for Skill replay")
+    assert full_index is not None and full_index > 0
+    previous = snapshots[full_index - 1]
     full_score = _score_pool(task.numeric.future_values, full)[0]
-    replays = {
-        (replay.chain_id, replay.skill_id): replay.snapshot
-        for replay in getattr(result, "skill_leave_one_out_snapshots", ())
+    replay_rows = tuple(getattr(result, "skill_leave_one_out_snapshots", ()))
+    replay_keys = tuple((replay.chain_id, replay.skill_id) for replay in replay_rows)
+    if len(replay_keys) != len(set(replay_keys)):
+        raise ValueError("duplicate leave-one-out replay key")
+    expected_keys = tuple(
+        (str(ledger_chain.chain_id), str(skill_id))
+        for ledger_chain in _chain_ledger(result)
+        if ledger_chain.numeric_eligible
+        for skill_id in ledger_chain.used_skill_ids
+    )
+    if len(expected_keys) != len(set(expected_keys)):
+        raise ValueError("duplicate used Skill ID in verified chain ledger")
+    if set(replay_keys) != set(expected_keys):
+        raise ValueError("leave-one-out replay keys are missing, extra, or use the wrong chain")
+    replays = {key: replay.snapshot for key, replay in zip(replay_keys, replay_rows)}
+    main_by_chain = {
+        snapshot.after_chain_id: snapshot for snapshot in snapshots[1:]
     }
+    for (replay_chain_id, _skill_id), replay in replays.items():
+        replay_full = main_by_chain.get(replay_chain_id)
+        if replay_full is None or replay.after_chain_id != replay_chain_id:
+            raise ValueError("leave-one-out replay has invalid chain provenance")
+        replay_main_index = snapshots.index(replay_full)
+        replay_previous = snapshots[replay_main_index - 1]
+        prior_entries = _entry_tuple(replay_previous.candidates)
+        replay_entries = _entry_tuple(replay.candidates)
+        full_entries = _entry_tuple(replay_full.candidates)
+        if replay_entries[:len(prior_entries)] != prior_entries:
+            raise ValueError("leave-one-out replay changed an unrelated candidate")
+        if replay_entries not in (prior_entries, full_entries):
+            raise ValueError("leave-one-out replay contains a non-executed candidate")
     validated = []
     for skill_id in chain.used_skill_ids:
         omitted = replays.get((chain_id, skill_id))
@@ -417,6 +505,80 @@ def validate_skill_necessity(
     return tuple(validated)
 
 
+def _catastrophic_count(
+    truth: Sequence[float], snapshot: "CandidatePoolSnapshot"
+) -> int:
+    count = 0
+    for candidate in snapshot.candidates:
+        score, invalid = _score_forecast_drcik(truth, candidate.forecast)
+        if not invalid and (bool(score["smae_clipped"]) or bool(score["srmse_clipped"])):
+            count += 1
+    return count
+
+
+def derive_retrieval_skill_evidence(
+    task_results: Iterable[tuple[ContextTask, "HarnessResult"]],
+    *,
+    split: str,
+) -> tuple[RetrievalSkillTaskEvidence, ...]:
+    """Build promotion evidence inside the trusted resolved-label evaluator.
+
+    Any incomplete or malformed frozen replay invalidates the batch.  Callers
+    cannot manufacture the private provenance attached here.
+    """
+    if split not in {"train", "dev"}:
+        raise ValueError("Skill evidence split must be train or dev")
+    derived: list[RetrievalSkillTaskEvidence] = []
+    seen_task_skills: set[tuple[str, str]] = set()
+    try:
+        for task, result in task_results:
+            report = assign_chain_credit(task, result)
+            snapshots = tuple(result.candidate_pool_snapshots)
+            snapshot_by_chain = {
+                snapshot.after_chain_id: snapshot for snapshot in snapshots[1:]
+            }
+            replay_by_key = {
+                (replay.chain_id, replay.skill_id): replay.snapshot
+                for replay in result.skill_leave_one_out_snapshots
+            }
+            for chain in _chain_ledger(result):
+                if not chain.numeric_eligible or not chain.used_skill_ids:
+                    continue
+                necessity = validate_skill_necessity(task, result, chain.chain_id)
+                full = snapshot_by_chain[chain.chain_id]
+                full_score = _score_pool(task.numeric.future_values, full)[0]
+                full_catastrophes = _catastrophic_count(task.numeric.future_values, full)
+                for item in necessity:
+                    task_skill_key = (task.numeric.task_id, item.skill_id)
+                    if task_skill_key in seen_task_skills:
+                        return ()
+                    seen_task_skills.add(task_skill_key)
+                    omitted = replay_by_key[(chain.chain_id, item.skill_id)]
+                    omitted_score = _score_pool(task.numeric.future_values, omitted)[0]
+                    row = RetrievalSkillTaskEvidence(
+                        skill_id=item.skill_id,
+                        task_id=task.numeric.task_id,
+                        entity_name=task.numeric.entity_name,
+                        split=split,
+                        exact_quote_validity=report.diagnostics.exact_quote_validity,
+                        without_skill_smae=float(omitted_score["smae"]),
+                        without_skill_srmse=float(omitted_score["srmse"]),
+                        with_skill_smae=float(full_score["smae"]),
+                        with_skill_srmse=float(full_score["srmse"]),
+                        added_catastrophic_count=max(
+                            0,
+                            full_catastrophes
+                            - _catastrophic_count(task.numeric.future_values, omitted),
+                        ),
+                        necessary=item.necessary,
+                    )
+                    object.__setattr__(row, "_provenance", _TRUSTED_EVIDENCE_PROVENANCE)
+                    derived.append(row)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return ()
+    return tuple(derived)
+
+
 def promote_retrieval_skills(
     library: RetrievalSkillLibrary,
     evidence: Iterable[RetrievalSkillTaskEvidence],
@@ -428,6 +590,8 @@ def promote_retrieval_skills(
     for row in evidence:
         if not isinstance(row, RetrievalSkillTaskEvidence):
             raise TypeError("promotion evidence must be RetrievalSkillTaskEvidence")
+        if row._provenance is not _TRUSTED_EVIDENCE_PROVENANCE:
+            continue
         grouped.setdefault(row.skill_id, []).append(row)
     operations = []
     promoted = []
@@ -475,6 +639,19 @@ def promote_retrieval_skills(
     return tuple(promoted)
 
 
+def evaluate_and_promote_retrieval_skills(
+    library: RetrievalSkillLibrary,
+    task_results: Iterable[tuple[ContextTask, "HarnessResult"]],
+    *,
+    split: str,
+) -> tuple[str, ...]:
+    """Trusted aggregation entry point; Dev evaluation is always write-free."""
+    evidence = derive_retrieval_skill_evidence(task_results, split=split)
+    if split != "train":
+        return ()
+    return promote_retrieval_skills(library, evidence)
+
+
 __all__ = [
     "EvidenceChainCredit",
     "RetrievalCreditReport",
@@ -483,6 +660,8 @@ __all__ = [
     "SkillCredit",
     "SkillNecessity",
     "assign_chain_credit",
+    "derive_retrieval_skill_evidence",
+    "evaluate_and_promote_retrieval_skills",
     "promote_retrieval_skills",
     "validate_skill_necessity",
 ]

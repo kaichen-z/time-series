@@ -46,18 +46,14 @@ forecast(history, horizon, frequency) contract and sandbox restrictions; no agen
 scorer, data split, label boundary, sandbox, acceptance test, or resource caps. The child will be
 executed on train tasks and accepted only if it improves a disjoint held-out development split.
 
-Use the supplied system diagnostics to attribute failures before changing the genome: poor numeric
-best-of-k performance indicates a Coding coverage problem; contextual gain measures whether
-evidence-derived candidates helped; low contextual best-of-k error but high selection regret
-indicates a Decision problem; no contextual gain indicates a Retrieval problem.
-Candidate source and knowledge IDs are provenance, not permission to bypass measured evidence.
-Policy selection uses only Dr-CiK sMAE and sRMSE. A child must be non-worse on both and strictly
-better on at least one; sRMSE ranks otherwise Pareto-safe children and sMAE breaks ties.
+Use only the supplied label-free interface-failure categories when changing the genome. Evaluator
+scores, outcomes, labels, document roles, ground truth, candidate identities, and task identities
+are intentionally unavailable. Candidate provenance never permits bypassing verified evidence.
 """
 
 PROMPT_ONLY_EVOLVER_PROMPT = """You are a constrained Prompt Evolver for a time-series agent
-harness. Use resolved training failures to replace exactly one complete prompt owned by the
-diagnosed weakest role. You may not change another role, any numeric/search budget, topology,
+harness. Use only label-free interface-failure categories to replace exactly one complete prompt
+owned by the host-selected role. You may not change another role, any numeric/search budget, topology,
 source code, scorer, data boundary, or safety mechanism. Return exactly:
 {"prompt_field": "coding_generation_prompt|coding_revision_prompt|retrieval_prompt|decision_prompt",
 "replacement_prompt": "complete replacement prompt", "changelog": "testable rationale"}
@@ -642,11 +638,38 @@ class CoEvolutionEngine:
         child_index: int = 0,
     ) -> HarnessPolicy:
         target = self.target_agent(evaluation)
-        worst = sorted(
-            evaluation.failure_traces,
-            key=lambda item: (item["final_srmse"], item["final_smae"]),
-            reverse=True,
-        )[:5]
+        safe_decision_categories = frozenset({
+            "invalid_decision_json",
+            "invalid_decision_response_schema",
+            "invalid_retrieval_gaps",
+            "forbidden_decision_fields",
+            "invalid_retrieval_request",
+            "unknown_candidate",
+            "unverified_decision_citation",
+            "override_requires_task_evidence",
+            "adjusted_candidate_requires_matching_citations",
+            "unknown_decision_skills",
+        })
+        safe_retrieval_categories = frozenset({
+            "invalid_retrieval_payload",
+            "ungrounded_quote",
+            "unknown_retrieval_skill",
+            "impact_without_verified_citation",
+            "duplicate_chain_identity",
+            "round2_chain_identity_conflict",
+        })
+        decision_categories = sorted({
+            category
+            for trace in evaluation.failure_traces
+            for reason in str(trace.get("decision_rejection_reason", "")).split(";")
+            if (category := reason.partition(":")[0]) in safe_decision_categories
+        })
+        retrieval_categories = sorted({
+            category
+            for trace in evaluation.failure_traces
+            for reason in trace.get("retrieval_rejections", ())
+            if (category := str(reason).partition(":")[0]) in safe_retrieval_categories
+        })
         if self.config.target == "auto":
             mutation_instruction = (
                 "The weakest observed module is a diagnosis, not a mutation restriction. "
@@ -676,12 +699,16 @@ class CoEvolutionEngine:
             "Do not duplicate another child from this generation."
         )
         payload = {
-            "target_agent": target,
+            # Auto-target diagnosis is evaluator-only because it is derived from
+            # resolved labels.  The Evolver sees only an explicit configured
+            # target or the literal auto mode.
+            "target_agent": target if self.config.target != "auto" else "auto",
             "child_index": child_index,
             "diversity_instruction": diversity_instruction,
-            "module_rewards": evaluation.module_rewards,
-            "system_diagnostics": evaluation.diagnostics,
-            "worst_failure_trajectories": worst,
+            "failure_interface_facts": {
+                "decision_rejection_categories": decision_categories,
+                "retrieval_rejection_categories": retrieval_categories,
+            },
             "current_policy": current_policy,
             "skill_inventory": {
                 "coding": [record.get("name", "") for record in parent.coding_skills],

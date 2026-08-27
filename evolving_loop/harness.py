@@ -444,8 +444,13 @@ class EvolvingForecastHarness:
         enable_evidence_adjustments: bool = True,
         max_evidence_adjustments: int = 3,
     ) -> tuple[DecisionCandidate, ...]:
-        candidates = [
-            DecisionCandidate(
+        candidates = []
+        seen_candidate_ids: set[str] = set()
+        for item in coding.candidates:
+            if item.program.name in seen_candidate_ids:
+                continue
+            seen_candidate_ids.add(item.program.name)
+            candidates.append(DecisionCandidate(
                 candidate_id=item.program.name,
                 forecast=item.forecast,
                 assumption=item.program.assumption,
@@ -453,9 +458,7 @@ class EvolvingForecastHarness:
                 hindcast_smae=item.hindcast_smae,
                 hindcast_srmse=item.hindcast_srmse,
                 tags=(item.program.source,),
-            )
-            for item in coding.candidates
-        ]
+            ))
         if not enable_evidence_adjustments:
             return tuple(candidates)
         best = min(
@@ -521,6 +524,9 @@ def _candidate_pool_snapshots(
     card: FinalRetrievalCard | None,
 ) -> tuple[CandidatePoolSnapshot, ...]:
     """Freeze incremental pools before a resolved task ever reaches evaluation."""
+    candidate_ids = tuple(candidate.candidate_id for candidate in candidates)
+    if len(candidate_ids) != len(set(candidate_ids)):
+        raise ValueError("executed candidate pool cannot contain duplicate candidate IDs")
     retrieval_candidates: dict[int, DecisionCandidate] = {}
     history_clean_candidates = tuple(
         candidate for candidate in candidates if "history_cleaned" in candidate.tags
@@ -532,16 +538,18 @@ def _candidate_pool_snapshots(
             "__evidence_"
         )
         if separator and raw_index.isdigit():
-            retrieval_candidates[int(raw_index)] = candidate
-    baseline_by_id = {
-        candidate.candidate_id: CandidatePoolEntry(
+            index = int(raw_index)
+            if index in retrieval_candidates:
+                raise ValueError("multiple executed candidates claim the same evidence index")
+            retrieval_candidates[index] = candidate
+    baseline = tuple(
+        CandidatePoolEntry(
             candidate.candidate_id, candidate.forecast
         )
         for candidate in candidates
         if "evidence_adjusted" not in candidate.tags
         and "history_cleaned" not in candidate.tags
-    }
-    baseline = tuple(baseline_by_id.values())
+    )
     snapshots = [CandidatePoolSnapshot(None, baseline)]
     pool = list(baseline)
     if card is None:
