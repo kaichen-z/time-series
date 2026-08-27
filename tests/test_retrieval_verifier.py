@@ -502,6 +502,144 @@ def test_cancellation_or_nonoccurrence_in_an_anchored_span_blocks_numeric_eligib
     assert "causal_status" in verified.chains[0].missing_links
 
 
+@pytest.mark.parametrize("status", [
+    "aborted",
+    "cancelled",
+    "canceled",
+    "called off",
+    "postponed",
+    "deferred",
+    "suspended",
+    "withdrawn",
+])
+@pytest.mark.parametrize("status_position", ["before", "after"])
+def test_status_of_the_claimed_causal_event_blocks_before_or_after_the_claim(
+    context_task, status, status_position
+):
+    claim = (
+        "The scheduled promotion will cause Entity A sales to increase by 20 percent "
+        "from 2026-01-03 through 2026-01-04."
+    )
+    cancellation = f"The scheduled promotion was {status}."
+    text = " ".join(
+        (cancellation, claim) if status_position == "before" else (claim, cancellation)
+    )
+    task = replace(context_task, documents=(Document("doc_event_status", text),))
+
+    verified = _verified(task, _payload(_chain(citations=[{
+        "document_id": "doc_event_status", "exact_quote": text,
+    }])))
+
+    assert verified.chains[0].numeric_eligible is False
+    assert "causal_status" in verified.chains[0].missing_links
+
+
+@pytest.mark.parametrize("negation", ["not cancelled", "never canceled"])
+def test_explicitly_negated_cancellation_does_not_block_a_valid_claim(context_task, negation):
+    text = (
+        f"The scheduled promotion was {negation}. "
+        "The scheduled promotion will cause Entity A sales to increase by 20 percent "
+        "from 2026-01-03 through 2026-01-04."
+    )
+    task = replace(context_task, documents=(Document("doc_negated_status", text),))
+
+    verified = _verified(task, _payload(_chain(citations=[{
+        "document_id": "doc_negated_status", "exact_quote": text,
+    }])))
+
+    assert verified.chains[0].numeric_eligible is True
+    assert "causal_status" not in verified.chains[0].missing_links
+
+
+def test_active_voice_negated_cancellation_does_not_block_a_valid_claim(context_task):
+    text = (
+        "Management did not cancel the scheduled promotion. "
+        "The scheduled promotion will cause Entity A sales to increase by 20 percent "
+        "from 2026-01-03 through 2026-01-04."
+    )
+    task = replace(context_task, documents=(Document("doc_active_negation", text),))
+
+    verified = _verified(task, _payload(_chain(citations=[{
+        "document_id": "doc_active_negation", "exact_quote": text,
+    }])))
+
+    assert verified.chains[0].numeric_eligible is True
+    assert "causal_status" not in verified.chains[0].missing_links
+
+
+@pytest.mark.parametrize("status", ["canceled", "called off", "withdrew"])
+def test_active_voice_status_of_claimed_event_blocks_numeric_eligibility(context_task, status):
+    text = (
+        "The scheduled promotion will cause Entity A sales to increase by 20 percent "
+        "from 2026-01-03 through 2026-01-04. "
+        f"Management {status} the scheduled promotion."
+    )
+    task = replace(context_task, documents=(Document("doc_active_status", text),))
+
+    verified = _verified(task, _payload(_chain(citations=[{
+        "document_id": "doc_active_status", "exact_quote": text,
+    }])))
+
+    assert verified.chains[0].numeric_eligible is False
+    assert "causal_status" in verified.chains[0].missing_links
+
+
+@pytest.mark.parametrize("status_position", ["before", "after"])
+def test_unrelated_explicit_event_status_does_not_suppress_the_claim(
+    context_task, status_position
+):
+    claim = (
+        "The scheduled promotion will cause Entity A sales to increase by 20 percent "
+        "from 2026-01-03 through 2026-01-04."
+    )
+    unrelated = "The prior store closure was cancelled."
+    text = " ".join(
+        (unrelated, claim) if status_position == "before" else (claim, unrelated)
+    )
+    task = replace(context_task, documents=(Document("doc_unrelated_status", text),))
+
+    verified = _verified(task, _payload(_chain(citations=[{
+        "document_id": "doc_unrelated_status", "exact_quote": text,
+    }])))
+
+    assert verified.chains[0].numeric_eligible is True
+    assert "causal_status" not in verified.chains[0].missing_links
+
+
+def test_later_status_for_claimed_event_blocks_among_multiple_sentences_and_events(context_task):
+    text = (
+        "The prior store closure was cancelled. "
+        "The scheduled promotion will cause Entity A sales to increase by 20 percent "
+        "from 2026-01-03 through 2026-01-04. "
+        "The scheduled promotion was deferred."
+    )
+    task = replace(context_task, documents=(Document("doc_multiple_events", text),))
+
+    verified = _verified(task, _payload(_chain(citations=[{
+        "document_id": "doc_multiple_events", "exact_quote": text,
+    }])))
+
+    assert verified.chains[0].numeric_eligible is False
+    assert "causal_status" in verified.chains[0].missing_links
+
+
+@pytest.mark.parametrize("ambiguous_reference", ["The event", "It"])
+def test_ambiguous_nearby_status_fails_numeric_eligibility(context_task, ambiguous_reference):
+    text = (
+        "The scheduled promotion will cause Entity A sales to increase by 20 percent "
+        "from 2026-01-03 through 2026-01-04. "
+        f"{ambiguous_reference} was suspended."
+    )
+    task = replace(context_task, documents=(Document("doc_ambiguous_status", text),))
+
+    verified = _verified(task, _payload(_chain(citations=[{
+        "document_id": "doc_ambiguous_status", "exact_quote": text,
+    }])))
+
+    assert verified.chains[0].numeric_eligible is False
+    assert "causal_status" in verified.chains[0].missing_links
+
+
 @pytest.mark.parametrize("token", ["2x", "2×"])
 def test_compact_multiplier_tokens_are_normalized_as_factors(context_task, token):
     text = f"Entity A sales will increase {token} from 2026-01-03 through 2026-01-04."

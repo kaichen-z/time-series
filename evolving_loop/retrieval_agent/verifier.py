@@ -190,15 +190,109 @@ def _cited_intervals(span: str) -> tuple[tuple[str, str], ...]:
     )
 
 
-def _has_cancellation(span: str) -> bool:
-    normalized = _normalize(span)
-    return bool(re.search(
-        r"\b(?:cancel(?:led|ed|lation)?|postpon(?:ed|ement)?|called\s+off|"
-        r"(?:will\s+)?not\s+(?:occur|happen|take\s+place|go\s+ahead)|"
-        r"(?:did|does)\s+not\s+(?:occur|happen|take\s+place)|"
-        r"no\s+longer\s+(?:occur|happen|take\s+place))\b",
-        normalized,
-    ))
+_EVENT_STATUS = (
+    r"(?:abort(?:ed|ion)?|cancel(?:led|ed|lation)?|called\s+off|"
+    r"postpon(?:ed|ement)?|defer(?:red|ral)?|suspend(?:ed|sion)?|"
+    r"withdrawn|withdrew|withdraw(?:al)?)"
+)
+_PASSIVE_AUXILIARY = re.compile(
+    r"\b(?:was|were|is|are|has\s+been|have\s+been|had\s+been|"
+    r"will\s+be|would\s+be)\s+(?:(not|never)\s+)?$"
+)
+_EVENT_TOKEN_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "been", "being", "by",
+    "cause", "caused", "causes", "causing", "documented", "driver", "event",
+    "for", "from", "future", "had", "has", "have", "higher", "in", "increase",
+    "increased", "increases", "increasing", "is", "it", "its", "lower", "of",
+    "on", "percent", "planned", "prior", "scheduled", "says", "stable", "than",
+    "that", "the", "their", "them", "then", "there", "these", "they", "this",
+    "those", "through", "to", "upcoming", "was", "were", "will", "with", "would",
+})
+
+
+def _event_tokens(text: str, task: ContextTask) -> frozenset[str]:
+    excluded = {
+        *_EVENT_TOKEN_STOPWORDS,
+        *re.findall(r"[a-z]+", _normalize(task.numeric.entity_name)),
+        *re.findall(r"[a-z]+", _normalize(task.target_name)),
+    }
+    return frozenset(
+        token
+        for token in re.findall(r"[a-z]+", _normalize(text))
+        if token not in excluded
+        and not re.fullmatch(_EVENT_STATUS, token)
+    )
+
+
+def _clause_tail(text: str) -> str:
+    return re.split(
+        r"[;,:]|\b(?:but|however|although|while|whereas)\b",
+        text,
+        flags=re.IGNORECASE,
+    )[-1]
+
+
+def _status_event_mentions(sentence: str, task: ContextTask) -> tuple[frozenset[str], ...]:
+    """Return affected events for active cancellation/non-occurrence statements."""
+    normalized = _normalize(sentence)
+    mentions: list[frozenset[str]] = []
+    for match in re.finditer(rf"\b{_EVENT_STATUS}\b", normalized):
+        prefix = normalized[:match.start()]
+        if re.search(
+            r"\b(?:did|does|do|will|would|has|have|had|can|could)\s+"
+            r"(?:not|never)\s+$",
+            prefix,
+        ):
+            continue
+        passive = _PASSIVE_AUXILIARY.search(prefix)
+        if passive is not None:
+            if passive.group(1) is not None:
+                continue
+            event_text = _clause_tail(prefix[:passive.start()])
+        else:
+            event_text = re.split(
+                r"[.;,:]|\b(?:but|however|although|while|whereas)\b",
+                normalized[match.end():],
+                maxsplit=1,
+            )[0]
+        mentions.append(_event_tokens(event_text, task))
+
+    nonoccurrence_patterns = (
+        r"\b(?:will|would|did|does|do|can|could)\s+not\s+"
+        r"(?:occur|happen|take\s+place|go\s+ahead)\b",
+        r"\b(?:no\s+longer|never)\s+"
+        r"(?:occurs?|occurred|happens?|happened|takes?\s+place|took\s+place|goes?\s+ahead)\b",
+    )
+    for pattern in nonoccurrence_patterns:
+        for match in re.finditer(pattern, normalized):
+            mentions.append(_event_tokens(_clause_tail(normalized[:match.start()]), task))
+    return tuple(mentions)
+
+
+def _claim_event_tokens(task: ContextTask, claim: str, span: str) -> frozenset[str]:
+    tokens = set(_event_tokens(claim, task))
+    entity = _normalize(task.numeric.entity_name)
+    target = _normalize(task.target_name)
+    for sentence in re.split(r"(?<=[.!?])\s+", _normalize(span)):
+        if entity not in sentence or target not in sentence:
+            continue
+        entity_start = sentence.find(entity)
+        prefix = sentence[:entity_start]
+        if re.search(r"\b(?:cause|causes|caused|causing|drive|drives|driven)\b", prefix):
+            tokens.update(_event_tokens(prefix, task))
+    return frozenset(tokens)
+
+
+def _has_cancellation(task: ContextTask, claim: str, span: str) -> bool:
+    """Match cancellation only to the claimed event; unresolved references fail closed."""
+    claimed_event = _claim_event_tokens(task, claim, span)
+    for sentence in re.split(r"(?<=[.!?])\s+", span):
+        for status_event in _status_event_mentions(sentence, task):
+            if not status_event or not claimed_event:
+                return True
+            if status_event & claimed_event:
+                return True
+    return False
 
 
 def _numbers(text: str) -> tuple[float, ...]:
@@ -296,7 +390,7 @@ def _verify_chain(
         or cited_intervals != {(chain.start_timestamp, chain.end_timestamp)}
     ):
         missing.append("forecast_window")
-    if any(_has_cancellation(item.exact_quote) for item in anchors):
+    if any(_has_cancellation(task, chain.claim, item.exact_quote) for item in anchors):
         missing.append("causal_status")
     if chain.magnitude_kind in {"unknown", "none"} or chain.magnitude_value is None:
         missing.append("magnitude")
