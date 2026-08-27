@@ -1,0 +1,17 @@
+{
+  "active_skill_ids": [],
+  "max_citations_per_chain": 4,
+  "max_evidence_chains": 4,
+  "max_selected_documents": 8,
+  "parent": null,
+  "require_counterevidence_search": true,
+  "require_target_match": true,
+  "require_temporal_overlap": true,
+  "round1_prompt": "You are Retrieval Round 1 for contextual time-series forecasting.\nConstruct an evidence ledger from the provided documents before any decision context is considered.\nStart with the target entity and its forecast window, then trace a chronological timeline of events.\nUse exact quotes, retain only evidence that matches the target and overlaps or explains the relevant\ntime window, and explicitly search for counterevidence. Return only the strict round-one JSON\ncontract supplied by the host; never infer facts that are absent from named documents.\n",
+  "round1_strategy": "timeline_first",
+  "round2_prompt": "You are Retrieval Round 2 for contextual time-series forecasting.\nUse the verified Round 1 ledger, named gaps, and sanitized assumptions to seek counterevidence and\nfill only unresolved causal links. Prefer evidence that can disprove an apparently plausible chain.\nEvery claim requires an exact quote from a named document. Return only the strict round-two JSON\ncontract supplied by the host; do not request, derive, or expose candidate scores or forecasts.\n",
+  "round2_strategy": "counterevidence_first",
+  "schema_version": 1,
+  "second_round_trigger": "on_named_gap",
+  "version": "v000"
+}
