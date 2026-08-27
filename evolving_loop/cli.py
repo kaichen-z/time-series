@@ -657,10 +657,18 @@ def _factory(
         coding_records.update(
             {record["name"]: Skill(**record) for record in policy.coding_skills}
         )
-        retrieval_records = {skill.name: skill for skill in retrieval_library.all()}
-        retrieval_records.update(
-            {record["name"]: RetrievalSkill(**record) for record in policy.retrieval_skills}
+        policy_retrieval_records = tuple(
+            RetrievalSkill(**record) for record in policy.retrieval_skills
         )
+        policy_retrieval_ids = {
+            skill.skill_id for skill in policy_retrieval_records
+        }
+        retrieval_records = [
+            skill
+            for skill in retrieval_library.all()
+            if skill.skill_id not in policy_retrieval_ids
+        ]
+        retrieval_records.extend(policy_retrieval_records)
         decision_records = {skill.name: skill for skill in decision_library.all()}
         decision_records.update(
             {record["name"]: DecisionSkill(**record) for record in policy.decision_skills}
@@ -672,7 +680,7 @@ def _factory(
         )
         task_retrieval_library = RetrievalSkillLibrary(
             retrieval_library.path,
-            list(retrieval_records.values()),
+            retrieval_records,
             persist=not isolate_library,
         )
         task_decision_library = DecisionSkillLibrary(

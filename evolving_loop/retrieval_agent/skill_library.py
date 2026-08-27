@@ -72,7 +72,9 @@ class RetrievalApplicability:
             (self.gap_types, tuple(gap_types)),
             (self.temporal_relations, tuple(temporal_relations)),
         ):
-            if required and available and not set(required).intersection(available):
+            if required and (
+                not available or not set(required).intersection(available)
+            ):
                 return False
         return True
 

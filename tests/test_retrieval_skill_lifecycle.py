@@ -11,6 +11,9 @@ from evolving_loop.retrieval_agent.skill_library import (
     RetrievalSkillLibrary,
     RetrievalSkillOperation,
 )
+from evolving_loop.retrieval_agent.agent import RetrievalAgent, RetrievalResult
+from common.llm import FakeLLMClient
+from test_evolving_harness import _task
 
 
 def test_typed_skill_lifecycle_is_exported_from_retrieval_package() -> None:
@@ -220,7 +223,15 @@ def test_prompt_projection_is_stage_and_applicability_filtered_and_clone_is_read
         ],
     )
 
-    assert [skill.skill_id for skill in library.for_stage("round1")] == ["explicit_window"]
+    assert [
+        skill.skill_id
+        for skill in library.for_stage(
+            "round1",
+            assumption_kinds=("future_event",),
+            gap_types=("missing_window",),
+            temporal_relations=("overlaps_future",),
+        )
+    ] == ["explicit_window"]
     assert [skill.skill_id for skill in library.for_stage("round2", gap_types=("missing_window",))] == ["round2_only"]
     assert "candidate" not in library.list_for_prompt("round1")
 
@@ -228,3 +239,57 @@ def test_prompt_projection_is_stage_and_applicability_filtered_and_clone_is_read
     clone.apply_operations((RetrievalSkillOperation.quarantine("explicit_window", "test"),))
     assert not path.exists()
     assert library.get_by_id("explicit_window").status == "accepted"
+
+
+def test_constrained_applicability_fails_closed_without_runtime_context(tmp_path) -> None:
+    applicability = RetrievalApplicability(
+        assumption_kinds=("future_event",),
+        gap_types=("missing_window",),
+        temporal_relations=("overlaps_future",),
+    )
+    library = RetrievalSkillLibrary(
+        tmp_path / "skills.json", [seed_skill(applicability=applicability)]
+    )
+
+    assert applicability.matches() is False
+    assert applicability.matches(
+        assumption_kinds=("future_event",),
+        gap_types=("missing_window",),
+        temporal_relations=("overlaps_future",),
+    )
+    assert not applicability.matches(
+        assumption_kinds=("future_event",),
+        gap_types=("missing_magnitude",),
+        temporal_relations=("overlaps_future",),
+    )
+    assert library.for_stage("round1") == ()
+
+
+def test_legacy_agent_projects_round_two_skills_with_prior_gap_context(tmp_path) -> None:
+    library = RetrievalSkillLibrary(
+        tmp_path / "skills.json",
+        [
+            seed_skill(
+                stage="round2",
+                applicability=RetrievalApplicability(gap_types=("missing_window",)),
+            )
+        ],
+    )
+    agent = RetrievalAgent(
+        FakeLLMClient(
+            [
+                json.dumps({"evidence": [], "impacts": []}),
+                json.dumps({"evidence": [], "impacts": []}),
+            ]
+        ),
+        library,
+    )
+    prior = RetrievalResult("", (), (), (), False, ("missing_window",))
+
+    agent.run(_task(), ())
+    agent.run(_task(), (), prior=prior, round_index=1)
+
+    first_payload = agent.llm.calls[0]["messages"][0]["content"]
+    second_payload = agent.llm.calls[1]["messages"][0]["content"]
+    assert "explicit_window_search" not in first_payload
+    assert "explicit_window_search" in second_payload

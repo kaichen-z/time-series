@@ -16,7 +16,12 @@ from evolving_loop.co_evolution import HarnessPolicy
 from evolving_loop.coding_agent.skill_library import SkillLibrary
 from evolving_loop.data import ContextTask, Task
 from evolving_loop.decision_agent.skill_library import DecisionSkillLibrary
-from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
+from evolving_loop.retrieval_agent.skill_library import (
+    RetrievalApplicability,
+    RetrievalSkill,
+    RetrievalSkillLibrary,
+    RetrievalSkillOperation,
+)
 from common.llm import FakeLLMClient
 
 
@@ -214,3 +219,60 @@ def test_harness_factory_hydrates_policy_embedded_skills(tmp_path) -> None:
     assert harness.coding.library.get("embedded_numeric") is not None
     assert harness.retrieval.library.get("embedded_retrieval") is not None
     assert harness.decision.library.get("embedded_decision") is not None
+
+
+def test_harness_factory_replays_complete_versioned_retrieval_skill_history(tmp_path) -> None:
+    def skill(*, stage="both", status="accepted", applicability=None, description="Find windows."):
+        return RetrievalSkill(
+            skill_id="window_skill",
+            version=1,
+            parent_version=None,
+            stage=stage,
+            status=status,
+            name="window_skill",
+            description=description,
+            applicability=applicability or RetrievalApplicability(),
+            query_steps=("Find event boundaries.",),
+            required_chain_fields=("entity", "target"),
+            counterevidence_rule="Search for cancellation.",
+            failure_conditions=("The event is outside the forecast window.",),
+            validated_task_ids=("train_1", "train_2", "train_3"),
+            validated_entities=("north", "south"),
+            validation_smae_gain=0.1,
+            validation_srmse_gain=0.1,
+        )
+
+    source = RetrievalSkillLibrary(tmp_path / "source.json", [skill()], persist=False)
+    source.apply_operations(
+        (
+            RetrievalSkillOperation.repair(
+                "window_skill", skill(description="Find inclusive event boundaries.")
+            ),
+            RetrievalSkillOperation.specialize(
+                "window_skill",
+                skill(
+                    stage="round2",
+                    status="specialized",
+                    applicability=RetrievalApplicability(gap_types=("missing_window",)),
+                ),
+            ),
+            RetrievalSkillOperation.quarantine("window_skill", "unsafe on ambiguous dates"),
+        )
+    )
+    policy = HarnessPolicy(
+        retrieval_skills=tuple(item.to_payload() for item in source.all())
+    )
+
+    harness = _factory(
+        SimpleNamespace(setting="llm_only"),
+        FakeLLMClient([]),
+        SkillLibrary(tmp_path / "coding.json"),
+        RetrievalSkillLibrary(tmp_path / "retrieval.json"),
+        DecisionSkillLibrary(tmp_path / "decision.json"),
+        None,
+        isolate_library=True,
+    )(policy)
+
+    history = harness.retrieval.library.history("window_skill")
+    assert [item.version for item in history] == [1, 2, 3, 4]
+    assert history[-1].status == "quarantined"

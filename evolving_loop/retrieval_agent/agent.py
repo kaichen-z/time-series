@@ -141,8 +141,12 @@ class RetrievalAgent:
                 "instruction": "Fill unresolved gaps, seek counterevidence, and avoid duplicating prior claims.",
             }
         payload["coding_hypotheses"] = assumptions
+        skill_stage = "round1" if round_index == 0 else "round2"
         payload["validated_retrieval_skills"] = (
-            self.library.list_for_prompt()
+            self.library.list_for_prompt(
+                skill_stage,
+                gap_types=(prior.missing_information if prior is not None else ()),
+            )
             if self.library is not None
             else "(retrieval skill library disabled)"
         )
