@@ -176,6 +176,31 @@ def _without_timestamps(text: str) -> str:
     )
 
 
+_TIMESTAMP = r"\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?"
+
+
+def _cited_intervals(span: str) -> tuple[tuple[str, str], ...]:
+    """Extract only explicit inclusive ranges; unknown or multiple ranges fail closed."""
+    return tuple(
+        re.findall(
+            rf"\bfrom\s+({_TIMESTAMP})\s+(?:through|to)\s+({_TIMESTAMP})\b",
+            span,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _has_cancellation(span: str) -> bool:
+    normalized = _normalize(span)
+    return bool(re.search(
+        r"\b(?:cancel(?:led|ed|lation)?|postpon(?:ed|ement)?|called\s+off|"
+        r"(?:will\s+)?not\s+(?:occur|happen|take\s+place|go\s+ahead)|"
+        r"(?:did|does)\s+not\s+(?:occur|happen|take\s+place)|"
+        r"no\s+longer\s+(?:occur|happen|take\s+place))\b",
+        normalized,
+    ))
+
+
 def _numbers(text: str) -> tuple[float, ...]:
     return tuple(
         float(item.replace(",", ""))
@@ -188,18 +213,20 @@ def _close(left: float, right: float) -> bool:
 
 
 def _magnitude_matches(span: str, kind: str, value: float) -> bool:
+    normalized = _normalize(span)
+    if kind == "multiplier":
+        factor_tokens = re.findall(
+            r"(?<![\w.])((?:\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?))\s*(?:x\b|times\b|multipl\w*)",
+            normalized.replace("×", "x"),
+        )
+        return any(_close(float(token.replace(",", "")), value) for token in factor_tokens)
     numbers = _numbers(span)
     if not numbers:
         return False
-    normalized = _normalize(span)
     if kind == "relative":
         if not any(marker in normalized for marker in ("%", "percent", "percentage", "rate")):
             return False
         expected = (value * 100.0,)
-    elif kind == "multiplier":
-        if not any(marker in normalized for marker in ("times", "multipl", "x ")):
-            return False
-        expected = (value, value + 1.0)
     else:
         expected = (value,)
     return any(_close(number, candidate) for number in numbers for candidate in expected)
@@ -256,17 +283,21 @@ def _verify_chain(
     ):
         missing.append("direction")
     future_indexes = {timestamp: index for index, timestamp in enumerate(task.future_timestamps)}
+    cited_intervals = {
+        interval
+        for item in anchors
+        for interval in _cited_intervals(item.exact_quote)
+    }
     if (
         chain.temporal_relation != "overlaps_future"
         or chain.start_timestamp not in future_indexes
         or chain.end_timestamp not in future_indexes
         or future_indexes.get(chain.start_timestamp, 0) > future_indexes.get(chain.end_timestamp, -1)
-        or not any(
-            chain.start_timestamp in item.exact_quote and chain.end_timestamp in item.exact_quote
-            for item in anchors
-        )
+        or cited_intervals != {(chain.start_timestamp, chain.end_timestamp)}
     ):
         missing.append("forecast_window")
+    if any(_has_cancellation(item.exact_quote) for item in anchors):
+        missing.append("causal_status")
     if chain.magnitude_kind in {"unknown", "none"} or chain.magnitude_value is None:
         missing.append("magnitude")
     elif not _magnitude_is_domain_safe(task, chain.magnitude_kind, chain.magnitude_value):

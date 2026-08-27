@@ -438,3 +438,92 @@ def test_multiplier_uses_factor_input_and_projects_factor_minus_one(context_task
     impact = _legacy_impact(multiplier)[0]
     assert impact.adjustment_kind == "multiply"
     assert impact.adjustment_value == 1.0
+
+
+def test_declared_window_must_exactly_equal_one_cited_inclusive_interval(context_task):
+    document = Document(
+        "doc_range",
+        "Entity A sales will increase by 20 percent from 2026-01-03 through 2026-01-05.",
+    )
+    ranged_task = replace(
+        context_task,
+        future_timestamps=("2026-01-03", "2026-01-04", "2026-01-05"),
+        documents=(document,),
+    )
+    citation = [{"document_id": "doc_range", "exact_quote": document.content}]
+
+    exact = _verified(ranged_task, _payload(_chain(
+        end_timestamp="2026-01-05", citations=citation,
+    )))
+    shortened = _verified(ranged_task, _payload(_chain(
+        end_timestamp="2026-01-03", citations=citation,
+    )))
+    swapped = _verified(ranged_task, _payload(_chain(
+        start_timestamp="2026-01-05", end_timestamp="2026-01-03", citations=citation,
+    )))
+
+    assert exact.chains[0].numeric_eligible is True
+    assert shortened.chains[0].numeric_eligible is False
+    assert "forecast_window" in shortened.chains[0].missing_links
+    assert swapped.chains == ()
+
+
+def test_multiple_cited_ranges_are_ambiguous_even_when_one_matches(context_task):
+    document = Document(
+        "doc_ranges",
+        "Entity A sales will increase by 20 percent from 2026-01-03 through 2026-01-05, "
+        "then recover from 2026-01-06 through 2026-01-07.",
+    )
+    ranged_task = replace(
+        context_task,
+        future_timestamps=("2026-01-03", "2026-01-04", "2026-01-05", "2026-01-06", "2026-01-07"),
+        documents=(document,),
+    )
+    verified = _verified(ranged_task, _payload(_chain(
+        end_timestamp="2026-01-05",
+        citations=[{"document_id": "doc_ranges", "exact_quote": document.content}],
+    )))
+
+    assert verified.chains[0].numeric_eligible is False
+    assert "forecast_window" in verified.chains[0].missing_links
+
+
+@pytest.mark.parametrize("text", [
+    "Entity A sales will increase by 20 percent from 2026-01-03 through 2026-01-04, but the promotion will not occur.",
+    "Entity A sales will increase by 20 percent from 2026-01-03 through 2026-01-04; the event was cancelled.",
+])
+def test_cancellation_or_nonoccurrence_in_an_anchored_span_blocks_numeric_eligibility(context_task, text):
+    task = replace(context_task, documents=(Document("doc_cancelled", text),))
+    verified = _verified(task, _payload(_chain(citations=[{
+        "document_id": "doc_cancelled", "exact_quote": text,
+    }])))
+
+    assert verified.chains[0].numeric_eligible is False
+    assert "causal_status" in verified.chains[0].missing_links
+
+
+@pytest.mark.parametrize("token", ["2x", "2×"])
+def test_compact_multiplier_tokens_are_normalized_as_factors(context_task, token):
+    text = f"Entity A sales will increase {token} from 2026-01-03 through 2026-01-04."
+    task = replace(context_task, documents=(Document("doc_multiplier_compact", text),))
+    verified = _verified(task, _payload(_chain(
+        magnitude_kind="multiplier",
+        magnitude_value=2.0,
+        citations=[{"document_id": "doc_multiplier_compact", "exact_quote": text}],
+    )))
+
+    assert verified.chains[0].numeric_eligible is True
+    assert _legacy_impact(verified)[0].adjustment_value == 1.0
+
+
+def test_malformed_compact_multiplier_token_is_not_numeric_evidence(context_task):
+    text = "Entity A sales will increase 2xboost from 2026-01-03 through 2026-01-04."
+    task = replace(context_task, documents=(Document("doc_multiplier_bad", text),))
+    verified = _verified(task, _payload(_chain(
+        magnitude_kind="multiplier",
+        magnitude_value=2.0,
+        citations=[{"document_id": "doc_multiplier_bad", "exact_quote": text}],
+    )))
+
+    assert verified.chains[0].numeric_eligible is False
+    assert "magnitude" in verified.chains[0].missing_links
