@@ -62,6 +62,15 @@ _GAP_TYPES = frozenset(
     }
 )
 _PRIORITIES = frozenset({"high", "medium", "low"})
+_FORBIDDEN_ROUND2_TERMS = (
+    "candidate_id",
+    "hindcast_smae",
+    "hindcast_srmse",
+    "future_values",
+    "gt_evidence",
+    "forecast_array",
+    "source_code",
+)
 
 
 def _mapping(raw: object, context: str) -> Mapping[str, object]:
@@ -163,6 +172,12 @@ def _enum(value: object, field: str, values: frozenset[str]) -> str:
     return result
 
 
+def _reject_round2_leakage(*values: str) -> None:
+    encoded = " ".join(values).lower()
+    if any(term in encoded for term in _FORBIDDEN_ROUND2_TERMS):
+        raise RetrievalContractError("forbidden round-two field")
+
+
 @dataclass(frozen=True)
 class RetrievalAssumption:
     assumption_id: str
@@ -175,11 +190,14 @@ class RetrievalAssumption:
         required = {"assumption_id", "kind", "claim", "failure_condition"}
         value = _exact(raw, required, context="round-two")
         kind = _enum(value["kind"], "assumption kind", _ASSUMPTION_KINDS)
+        claim = _text(value["claim"], "claim")
+        failure_condition = _text(value["failure_condition"], "failure_condition")
+        _reject_round2_leakage(claim, failure_condition)
         return cls(
             assumption_id=_identifier(value["assumption_id"], "assumption_id"),
             kind=kind,
-            claim=_text(value["claim"], "claim"),
-            failure_condition=_text(value["failure_condition"], "failure_condition"),
+            claim=claim,
+            failure_condition=failure_condition,
         )
 
     def to_payload(self) -> dict[str, str]:
@@ -320,10 +338,12 @@ class RetrievalGap:
             {"assumption_id", "gap_type", "missing_information", "priority"},
             context="retrieval gap",
         )
+        missing_information = _text(value["missing_information"], "missing_information")
+        _reject_round2_leakage(missing_information)
         return cls(
             assumption_id=_identifier(value["assumption_id"], "assumption_id"),
             gap_type=_enum(value["gap_type"], "gap type", _GAP_TYPES),
-            missing_information=_text(value["missing_information"], "missing_information"),
+            missing_information=missing_information,
             priority=_enum(value["priority"], "priority", _PRIORITIES),
         )
 
@@ -537,12 +557,16 @@ def build_round2_payload(
     skills: Sequence[object] = (),
 ) -> dict[str, object]:
     """Build Round 2 input from verified evidence and explicitly sanitized records."""
+    # Re-parse even typed instances: dataclass construction is intentionally not
+    # trusted as an input boundary because callers can instantiate forged values.
     parsed_gaps = tuple(
-        item if isinstance(item, RetrievalGap) else RetrievalGap.from_payload(item)
+        RetrievalGap.from_payload(item.to_payload() if isinstance(item, RetrievalGap) else item)
         for item in gaps
     )
     parsed_assumptions = tuple(
-        item if isinstance(item, RetrievalAssumption) else RetrievalAssumption.from_payload(item)
+        RetrievalAssumption.from_payload(
+            item.to_payload() if isinstance(item, RetrievalAssumption) else item
+        )
         for item in assumptions
     )
     assumption_ids = [item.assumption_id for item in parsed_assumptions]

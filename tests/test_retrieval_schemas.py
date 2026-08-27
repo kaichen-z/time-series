@@ -11,6 +11,7 @@ from evolving_loop.retrieval_agent.schemas import (
     FinalRetrievalCard,
     RetrievalAssumption,
     RetrievalContractError,
+    RetrievalGap,
     RetrievalRoundResult,
     build_round1_payload,
     build_round2_payload,
@@ -150,6 +151,39 @@ def test_round2_payload_contains_only_sanitized_fields(context_task: ContextTask
     }
     for forbidden in ("candidate_id", "forecast_values", "hindcast_smae", "hindcast_srmse", "code"):
         assert forbidden not in encoded
+
+
+def test_round2_revalidates_directly_constructed_invalid_assumption(context_task: ContextTask):
+    forged = RetrievalAssumption(
+        assumption_id="a_trend",
+        kind="candidate_score_leak",
+        claim="candidate_id=linear_trend hindcast_smae=0.8",
+        failure_condition="A reversal occurs.",
+    )
+    with pytest.raises(RetrievalContractError, match="invalid assumption kind"):
+        build_round2_payload(context_task, RetrievalRoundResult.from_payload(_round()), (), (forged,))
+
+
+def test_round2_revalidates_directly_constructed_invalid_gap(context_task: ContextTask):
+    assumption = RetrievalAssumption(
+        assumption_id="a_trend",
+        kind="trend_persistence",
+        claim="The recent trend persists.",
+        failure_condition="A reversal occurs.",
+    )
+    forged = RetrievalGap(
+        assumption_id="a_trend",
+        gap_type="candidate_score_leak",
+        missing_information="candidate_id=linear_trend hindcast_srmse=0.4",
+        priority="high",
+    )
+    with pytest.raises(RetrievalContractError, match="forbidden round-two field"):
+        build_round2_payload(
+            context_task,
+            RetrievalRoundResult.from_payload(_round()),
+            (forged,),
+            (assumption,),
+        )
 
 
 def test_final_card_requires_both_stages_and_rejects_duplicate_merged_ids():
