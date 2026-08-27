@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -60,8 +61,39 @@ _MANIFEST_FIELDS = frozenset(
         "round1_prompt_sha256",
         "round2_prompt_sha256",
         "skills_sha256",
+        "state",
+        "train_dev_split_sha256",
+        "verifier_sha256",
+        "evaluator_sha256",
+        "metric_sha256",
+        "metric_cap",
+        "resource_budgets",
+        "train_summary",
+        "dev_summary",
+        "acceptance_reason",
+        "audit_sha256",
     }
 )
+_AUDIT_FIELDS = frozenset(
+    {
+        "state",
+        "train_dev_split_sha256",
+        "verifier_sha256",
+        "evaluator_sha256",
+        "metric_sha256",
+        "metric_cap",
+        "train_summary",
+        "dev_summary",
+        "acceptance_reason",
+    }
+)
+_AUDIT_HASH_FIELDS = (
+    "train_dev_split_sha256",
+    "verifier_sha256",
+    "evaluator_sha256",
+    "metric_sha256",
+)
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 _SEED_ROUND1_PROMPT = """You are Retrieval Round 1 for contextual time-series forecasting.
 Construct an evidence ledger from the provided documents before any decision context is considered.
@@ -145,6 +177,81 @@ def _exact_mapping(raw: object, fields: frozenset[str], context: str) -> Mapping
             raise RetrievalPolicyError(f"forbidden {context} field: {sorted(unknown)[0]}")
         raise RetrievalPolicyError(f"missing {context} field: {sorted(missing)[0]}")
     return raw
+
+
+def _resource_budgets(genome: "RetrievalGenome") -> dict[str, int]:
+    return {
+        "max_selected_documents": genome.max_selected_documents,
+        "max_evidence_chains": genome.max_evidence_chains,
+        "max_citations_per_chain": genome.max_citations_per_chain,
+    }
+
+
+def _audit_payload(
+    genome: "RetrievalGenome", audit: Mapping[str, object] | None
+) -> dict[str, object]:
+    if audit is None:
+        audit = {
+            "state": "seed",
+            "train_dev_split_sha256": None,
+            "verifier_sha256": None,
+            "evaluator_sha256": None,
+            "metric_sha256": None,
+            "metric_cap": None,
+            "train_summary": None,
+            "dev_summary": None,
+            "acceptance_reason": "not_evaluated_seed",
+        }
+    value = _exact_mapping(audit, _AUDIT_FIELDS, "release audit")
+    return dict(value)
+
+
+def _audit_binding(manifest: Mapping[str, object]) -> dict[str, object]:
+    return {
+        field: manifest[field]
+        for field in _AUDIT_FIELDS | {"resource_budgets"}
+    }
+
+
+def _validate_release_audit(manifest: Mapping[str, object], genome: "RetrievalGenome") -> None:
+    state = manifest["state"]
+    if state not in {"seed", "accepted"}:
+        raise RetrievalPolicyError("invalid release state")
+    budgets = _exact_mapping(manifest["resource_budgets"], frozenset(BOUNDS), "resource_budgets")
+    if dict(budgets) != _resource_budgets(genome):
+        raise RetrievalPolicyError("resource_budgets must match genome")
+    if state == "seed":
+        if genome.version != "v000" or genome.parent is not None:
+            raise RetrievalPolicyError("only v000 without a parent may be a seed release")
+        if any(manifest[field] is not None for field in _AUDIT_HASH_FIELDS):
+            raise RetrievalPolicyError("seed release cannot invent evaluation hashes")
+        if manifest["metric_cap"] is not None:
+            raise RetrievalPolicyError("seed release cannot set metric_cap")
+        if manifest["train_summary"] is not None or manifest["dev_summary"] is not None:
+            raise RetrievalPolicyError("seed release cannot include evaluation summaries")
+        if manifest["acceptance_reason"] != "not_evaluated_seed":
+            raise RetrievalPolicyError("seed release requires not_evaluated_seed reason")
+        if manifest["audit_sha256"] is not None:
+            raise RetrievalPolicyError("seed release cannot invent audit hash")
+        return
+
+    if genome.version == "v000":
+        raise RetrievalPolicyError("v000 must remain a seed release")
+    for field in _AUDIT_HASH_FIELDS:
+        value = manifest[field]
+        if not isinstance(value, str) or not _SHA256.fullmatch(value):
+            raise RetrievalPolicyError(f"accepted release requires {field}")
+    metric_cap = manifest["metric_cap"]
+    if isinstance(metric_cap, bool) or not isinstance(metric_cap, (int, float)) or not math.isfinite(metric_cap):
+        raise RetrievalPolicyError("accepted release requires finite metric_cap")
+    for field in ("train_summary", "dev_summary"):
+        summary = manifest[field]
+        if not isinstance(summary, Mapping) or not summary:
+            raise RetrievalPolicyError(f"accepted release requires nonempty {field}")
+    _text(manifest["acceptance_reason"], "acceptance_reason")
+    expected_audit_hash = _digest(_canonical_json(_audit_binding(manifest)))
+    if manifest["audit_sha256"] != expected_audit_hash:
+        raise RetrievalPolicyError("accepted release audit hash mismatch")
 
 
 @dataclass(frozen=True)
@@ -313,8 +420,16 @@ def _read_json(path: Path, label: str) -> object:
 
 
 def _reject_git_path(path: Path) -> None:
-    if ".git" in path.parts:
+    try:
+        resolved = path.resolve(strict=False)
+    except (OSError, RuntimeError) as error:
+        raise RetrievalPolicyError(f"cannot resolve release path: {path}") from error
+    if ".git" in path.parts or ".git" in resolved.parts:
         raise RetrievalPolicyError("release paths cannot contain .git")
+
+
+def _lexists(path: Path) -> bool:
+    return os.path.lexists(os.fspath(path))
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -368,6 +483,7 @@ class RetrievalRelease:
             if manifest.get(field) != digest:
                 label = field.removesuffix("_sha256").replace("_", " ")
                 raise RetrievalPolicyError(f"release {label} hash or binding mismatch")
+        _validate_release_audit(manifest, genome)
         if round1_prompt != genome.round1_prompt or round2_prompt != genome.round2_prompt:
             raise RetrievalPolicyError("release prompt does not match genome")
         return cls(
@@ -385,6 +501,7 @@ def write_retrieval_release(
     genome: RetrievalGenome,
     *,
     skills: Sequence[object] = (),
+    audit: Mapping[str, object] | None = None,
 ) -> RetrievalRelease:
     """Atomically publish ``genome`` and its prompt/skill artifacts under ``releases/vNNN``."""
     releases = Path(releases_path)
@@ -392,9 +509,21 @@ def write_retrieval_release(
     validated = RetrievalGenome.from_payload(genome.to_payload())
     destination = releases / validated.version
     _reject_git_path(destination)
-    if destination.exists():
+    if _lexists(destination):
         raise RetrievalPolicyError(f"release destination already exists: {destination}")
     skills_payload = _skills_payload(skills)
+    audit_payload = _audit_payload(validated, audit)
+    manifest_audit = {
+        **audit_payload,
+        "resource_budgets": _resource_budgets(validated),
+    }
+    if manifest_audit["state"] == "accepted":
+        manifest_audit["audit_sha256"] = _digest(_canonical_json(manifest_audit))
+    else:
+        manifest_audit["audit_sha256"] = None
+    _validate_release_audit(manifest_audit, validated)
+    if _lexists(releases) and not releases.is_dir():
+        raise RetrievalPolicyError(f"release root is not a directory: {releases}")
     releases.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{validated.version}.", dir=releases))
     try:
@@ -410,9 +539,10 @@ def write_retrieval_release(
             "round1_prompt_sha256": _digest(validated.round1_prompt.encode("utf-8")),
             "round2_prompt_sha256": _digest(validated.round2_prompt.encode("utf-8")),
             "skills_sha256": _digest(_canonical_json(skills_payload)),
+            **manifest_audit,
         }
         _write_json(temporary / "manifest.json", manifest)
-        if destination.exists():  # Guard the check-to-publish interval without overwriting a release.
+        if _lexists(destination):  # Reject dangling symlinks without replacing them.
             raise RetrievalPolicyError(f"release destination already exists: {destination}")
         os.rename(temporary, destination)
     except Exception:

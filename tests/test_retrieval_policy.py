@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -85,6 +87,58 @@ def test_seed_release_is_self_consistent() -> None:
     assert release.round1_prompt == release.genome.round1_prompt
     assert release.round2_prompt == release.genome.round2_prompt
     assert release.skills == ()
+    assert release.manifest["state"] == "seed"
+    assert release.manifest["train_dev_split_sha256"] is None
+    assert release.manifest["verifier_sha256"] is None
+    assert release.manifest["evaluator_sha256"] is None
+    assert release.manifest["metric_sha256"] is None
+    assert release.manifest["metric_cap"] is None
+    assert release.manifest["train_summary"] is None
+    assert release.manifest["dev_summary"] is None
+    assert release.manifest["acceptance_reason"] == "not_evaluated_seed"
+
+
+def _accepted_audit() -> dict[str, object]:
+    return {
+        "state": "accepted",
+        "train_dev_split_sha256": "1" * 64,
+        "verifier_sha256": "2" * 64,
+        "evaluator_sha256": "3" * 64,
+        "metric_sha256": "4" * 64,
+        "metric_cap": 0.25,
+        "train_summary": {"task_count": 80, "mean_final_smae": 0.1},
+        "dev_summary": {"task_count": 20, "mean_final_smae": 0.09},
+        "acceptance_reason": "held-out Pareto and cap gates passed",
+    }
+
+
+def test_accepted_release_requires_and_binds_complete_audit_provenance(tmp_path: Path) -> None:
+    genome = replace(RetrievalGenome.seed(), version="v001", parent="v000")
+    release = write_retrieval_release(
+        tmp_path / "releases", genome, skills=(), audit=_accepted_audit()
+    )
+
+    assert release.manifest["state"] == "accepted"
+    assert release.manifest["resource_budgets"] == {
+        "max_selected_documents": 8,
+        "max_evidence_chains": 4,
+        "max_citations_per_chain": 4,
+    }
+
+    manifest_path = release.path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["verifier_sha256"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(RetrievalPolicyError, match="audit hash"):
+        RetrievalRelease.load(release.path)
+
+    with pytest.raises(RetrievalPolicyError, match="train_dev_split_sha256"):
+        write_retrieval_release(
+            tmp_path / "missing-audit",
+            genome,
+            skills=(),
+            audit={key: value for key, value in _accepted_audit().items() if key != "train_dev_split_sha256"},
+        )
 
 
 def test_release_load_rejects_an_artifact_that_does_not_match_its_hash(tmp_path: Path) -> None:
@@ -111,3 +165,26 @@ def test_release_writer_is_atomic_and_rejects_existing_or_git_paths(tmp_path: Pa
         write_retrieval_release(releases, genome, skills=())
     with pytest.raises(RetrievalPolicyError, match=r"\.git"):
         write_retrieval_release(tmp_path / ".git" / "releases", genome, skills=())
+
+
+def test_release_writer_rejects_resolved_git_and_dangling_destination_symlinks(
+    tmp_path: Path,
+) -> None:
+    genome = RetrievalGenome.seed()
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    git_link = tmp_path / "releases-link"
+    git_link.symlink_to(git_dir, target_is_directory=True)
+
+    with pytest.raises(RetrievalPolicyError, match=r"\.git"):
+        write_retrieval_release(git_link, genome, skills=())
+
+    releases = tmp_path / "releases"
+    releases.mkdir()
+    dangling_destination = releases / "v000"
+    dangling_destination.symlink_to(tmp_path / "does-not-exist")
+    assert not dangling_destination.exists()
+    assert os.path.lexists(dangling_destination)
+
+    with pytest.raises(RetrievalPolicyError, match="already exists"):
+        write_retrieval_release(releases, genome, skills=())
