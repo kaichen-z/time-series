@@ -1,6 +1,7 @@
 """Versioned, declarative retrieval skills and their auditable lifecycle."""
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import math
@@ -692,6 +693,30 @@ def _open_artifact_directory_entry(
 ) -> tuple[int, bool, tuple[int, int]]:
     if Path(name).name != name or name in {"", ".", ".."}:
         raise RetrievalSkillError("invalid retrieval Skill artifact directory name")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+    def cleanup_created_directory(
+        owned_identity: tuple[int, int] | None,
+    ) -> OSError | RetrievalSkillError | None:
+        cleanup_error: OSError | RetrievalSkillError | None = None
+        for _attempt in range(2):
+            try:
+                _remove_owned_empty_artifact_directory(
+                    parent_descriptor,
+                    name,
+                    owned_identity,
+                    operation_created=owned_identity is None,
+                )
+                return None
+            except (OSError, RetrievalSkillError) as candidate:
+                cleanup_error = candidate
+        return cleanup_error
+
     created = False
     if create:
         try:
@@ -699,26 +724,67 @@ def _open_artifact_directory_entry(
             created = True
         except FileExistsError:
             pass
+
+    descriptor: int | None = None
+    opened_identity: tuple[int, int] | None = None
+    open_error: OSError | RetrievalSkillError | None = None
+    if created:
+        try:
+            descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+            opened = os.fstat(descriptor)
+            if not stat.S_ISDIR(opened.st_mode):
+                raise RetrievalSkillError(
+                    "retrieval Skill artifact parent is not a directory"
+                )
+            opened_identity = (opened.st_dev, opened.st_ino)
+        except (OSError, RetrievalSkillError) as error:
+            if descriptor is not None:
+                os.close(descriptor)
+                descriptor = None
+            open_error = error
+
     try:
         entry = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
     except OSError as error:
+        if descriptor is not None:
+            os.close(descriptor)
+            descriptor = None
+        cleanup_error = None
+        if created:
+            cleanup_error = cleanup_created_directory(opened_identity)
+        if cleanup_error is not None:
+            raise RetrievalSkillError(
+                "retrieval Skill artifact directory cleanup failed"
+            ) from cleanup_error
         raise RetrievalSkillError(
             "cannot inspect retrieval Skill artifact directory"
         ) from error
     identity = (entry.st_dev, entry.st_ino)
     if not stat.S_ISDIR(entry.st_mode):
+        if descriptor is not None:
+            os.close(descriptor)
+        if created:
+            cleanup_error = cleanup_created_directory(opened_identity)
+            if cleanup_error is not None:
+                raise RetrievalSkillError(
+                    "retrieval Skill artifact directory cleanup failed"
+                ) from cleanup_error
         raise RetrievalSkillError(
             "retrieval Skill artifact parent is not a directory"
         )
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-    )
-    descriptor: int | None = None
+    if open_error is not None:
+        cleanup_error = cleanup_created_directory(identity)
+        if cleanup_error is not None:
+            raise RetrievalSkillError(
+                "retrieval Skill artifact directory cleanup failed"
+            ) from cleanup_error
+        raise RetrievalSkillError(
+            "cannot open retrieval Skill artifact directory"
+        ) from open_error
+
     try:
-        descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+        if descriptor is None:
+            descriptor = os.open(name, flags, dir_fd=parent_descriptor)
         metadata = os.fstat(descriptor)
         if not stat.S_ISDIR(metadata.st_mode) or (
             metadata.st_dev,
@@ -730,17 +796,11 @@ def _open_artifact_directory_entry(
     except OSError as error:
         if descriptor is not None:
             os.close(descriptor)
-        cleanup_error: OSError | None = None
+        cleanup_error = None
         if created:
-            for _attempt in range(2):
-                try:
-                    _remove_owned_empty_artifact_directory(
-                        parent_descriptor, name, identity
-                    )
-                    cleanup_error = None
-                    break
-                except OSError as candidate:
-                    cleanup_error = candidate
+            cleanup_error = cleanup_created_directory(
+                opened_identity or identity
+            )
         if cleanup_error is not None:
             raise RetrievalSkillError(
                 "retrieval Skill artifact directory cleanup failed"
@@ -752,33 +812,121 @@ def _open_artifact_directory_entry(
         if descriptor is not None:
             os.close(descriptor)
         if created:
-            for _attempt in range(2):
-                try:
-                    _remove_owned_empty_artifact_directory(
-                        parent_descriptor, name, identity
-                    )
-                    break
-                except OSError:
-                    continue
+            cleanup_created_directory(opened_identity or identity)
         raise
+    assert descriptor is not None
     return descriptor, created, identity
 
 
 def _remove_owned_empty_artifact_directory(
     parent_descriptor: int,
     name: str,
-    identity: tuple[int, int],
+    identity: tuple[int, int] | None,
+    *,
+    operation_created: bool = False,
+    _search_displaced: bool = True,
 ) -> None:
+    quarantine = _move_artifact_entry_to_quarantine(parent_descriptor, name)
+    if quarantine is None:
+        if identity is not None and _search_displaced:
+            displaced = _find_displaced_artifact_entry(
+                parent_descriptor,
+                identity,
+                exclude=frozenset({name}),
+            )
+            if displaced is not None:
+                _remove_owned_empty_artifact_directory(
+                    parent_descriptor,
+                    displaced,
+                    identity,
+                    _search_displaced=False,
+                )
+        return
+
     try:
-        metadata = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        metadata = os.stat(
+            quarantine,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except Exception as inspection_error:
+        _restore_quarantined_artifact_entry(
+            parent_descriptor,
+            quarantine,
+            name,
+            expected_identity=None,
+        )
+        raise RetrievalSkillError(
+            "cannot inspect quarantined retrieval Skill artifact directory"
+        ) from inspection_error
+
+    quarantined_identity = (metadata.st_dev, metadata.st_ino)
+    owned = stat.S_ISDIR(metadata.st_mode) and (
+        quarantined_identity == identity
+        or (identity is None and operation_created)
+    )
+    if not owned:
+        restore_error: RetrievalSkillError | None = None
+        try:
+            _restore_quarantined_artifact_entry(
+                parent_descriptor,
+                quarantine,
+                name,
+                expected_identity=quarantined_identity,
+            )
+        except RetrievalSkillError as error:
+            restore_error = error
+        if identity is not None and _search_displaced:
+            displaced = _find_displaced_artifact_entry(
+                parent_descriptor,
+                identity,
+                exclude=frozenset({name}),
+            )
+            if displaced is not None:
+                _remove_owned_empty_artifact_directory(
+                    parent_descriptor,
+                    displaced,
+                    identity,
+                    _search_displaced=False,
+                )
+        if restore_error is not None:
+            raise restore_error
+        return
+
+    try:
+        os.rmdir(quarantine, dir_fd=parent_descriptor)
     except FileNotFoundError:
         return
-    if (
-        not stat.S_ISDIR(metadata.st_mode)
-        or (metadata.st_dev, metadata.st_ino) != identity
-    ):
-        return
-    os.rmdir(name, dir_fd=parent_descriptor)
+    except OSError as first_error:
+        current = _artifact_entry_metadata(parent_descriptor, quarantine)
+        if current is None:
+            return
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or (current.st_dev, current.st_ino) != quarantined_identity
+        ):
+            _restore_quarantined_artifact_entry(
+                parent_descriptor,
+                quarantine,
+                name,
+                expected_identity=(current.st_dev, current.st_ino),
+            )
+            raise RetrievalSkillError(
+                "quarantined retrieval Skill artifact directory changed"
+            ) from first_error
+        try:
+            os.rmdir(quarantine, dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            return
+        except OSError:
+            _restore_quarantined_artifact_entry(
+                parent_descriptor,
+                quarantine,
+                name,
+                expected_identity=quarantined_identity,
+            )
+            raise
+        raise first_error
 
 
 def _read_optional_artifact_entry(
@@ -811,16 +959,264 @@ def _read_optional_artifact_entry_snapshot(
         return (metadata.st_dev, metadata.st_ino), handle.read()
 
 
+def _artifact_entry_metadata(
+    parent_descriptor: int, name: str
+) -> os.stat_result | None:
+    try:
+        return os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _find_displaced_artifact_entry(
+    parent_descriptor: int,
+    identity: tuple[int, int],
+    *,
+    exclude: frozenset[str],
+) -> str | None:
+    matches: list[str] = []
+    for candidate in os.listdir(parent_descriptor):
+        if candidate in exclude:
+            continue
+        metadata = _artifact_entry_metadata(parent_descriptor, candidate)
+        if metadata is not None and (
+            metadata.st_dev,
+            metadata.st_ino,
+        ) == identity:
+            matches.append(candidate)
+    if len(matches) > 1:
+        raise RetrievalSkillError(
+            "retrieval Skill owned artifact was displaced ambiguously"
+        )
+    return matches[0] if matches else None
+
+
+def _rename_artifact_entry_noreplace(
+    parent_descriptor: int,
+    source: str,
+    destination: str,
+) -> None:
+    for value in (source, destination):
+        if Path(value).name != value or value in {"", ".", ".."}:
+            raise RetrievalSkillError(
+                "invalid retrieval Skill artifact quarantine name"
+            )
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    if hasattr(libc, "renameatx_np"):
+        rename = libc.renameatx_np
+        rename.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename.restype = ctypes.c_int
+        result = rename(
+            parent_descriptor,
+            source_bytes,
+            parent_descriptor,
+            destination_bytes,
+            0x00000004,
+        )
+    elif hasattr(libc, "renameat2"):
+        rename = libc.renameat2
+        rename.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        rename.restype = ctypes.c_int
+        result = rename(
+            parent_descriptor,
+            source_bytes,
+            parent_descriptor,
+            destination_bytes,
+            0x00000001,
+        )
+    else:
+        raise RetrievalSkillError(
+            "atomic no-replace artifact quarantine is unavailable"
+        )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), source)
+
+
+def _move_artifact_entry_to_quarantine(
+    parent_descriptor: int,
+    name: str,
+) -> str | None:
+    for _attempt in range(128):
+        quarantine = f".retrieval-quarantine-{os.urandom(16).hex()}"
+        try:
+            _rename_artifact_entry_noreplace(
+                parent_descriptor,
+                name,
+                quarantine,
+            )
+        except FileExistsError:
+            continue
+        except Exception:
+            quarantined = _artifact_entry_metadata(
+                parent_descriptor,
+                quarantine,
+            )
+            if quarantined is not None:
+                return quarantine
+            if _artifact_entry_metadata(parent_descriptor, name) is None:
+                return None
+            raise
+        return quarantine
+    raise RetrievalSkillError(
+        "cannot allocate a unique retrieval Skill artifact quarantine"
+    )
+
+
+def _restore_quarantined_artifact_entry(
+    parent_descriptor: int,
+    quarantine: str,
+    name: str,
+    *,
+    expected_identity: tuple[int, int] | None,
+) -> None:
+    try:
+        _rename_artifact_entry_noreplace(
+            parent_descriptor,
+            quarantine,
+            name,
+        )
+    except FileExistsError as error:
+        raise RetrievalSkillError(
+            "retrieval Skill artifact restore name is occupied; "
+            f"entry retained in quarantine {quarantine}"
+        ) from error
+    except Exception as error:
+        quarantined = _artifact_entry_metadata(parent_descriptor, quarantine)
+        restored = _artifact_entry_metadata(parent_descriptor, name)
+        if quarantined is None and (
+            expected_identity is None
+            or (
+                restored is not None
+                and (restored.st_dev, restored.st_ino) == expected_identity
+            )
+        ):
+            return
+        raise RetrievalSkillError(
+            "retrieval Skill artifact restore failed; "
+            f"entry retained in quarantine {quarantine}"
+        ) from error
+
+
 def _unlink_owned_artifact_entry(
     parent_descriptor: int,
     name: str,
     identity: tuple[int, int],
     encoded: bytes,
+    *,
+    _search_displaced: bool = True,
 ) -> None:
-    current = _read_optional_artifact_entry_snapshot(parent_descriptor, name)
-    if current is None or current != (identity, encoded):
+    quarantine = _move_artifact_entry_to_quarantine(parent_descriptor, name)
+    if quarantine is None:
+        if _search_displaced:
+            displaced = _find_displaced_artifact_entry(
+                parent_descriptor,
+                identity,
+                exclude=frozenset({name}),
+            )
+            if displaced is not None:
+                _unlink_owned_artifact_entry(
+                    parent_descriptor,
+                    displaced,
+                    identity,
+                    encoded,
+                    _search_displaced=False,
+                )
         return
-    os.unlink(name, dir_fd=parent_descriptor)
+
+    try:
+        current = _read_optional_artifact_entry_snapshot(
+            parent_descriptor,
+            quarantine,
+        )
+    except Exception as inspection_error:
+        metadata = _artifact_entry_metadata(parent_descriptor, quarantine)
+        _restore_quarantined_artifact_entry(
+            parent_descriptor,
+            quarantine,
+            name,
+            expected_identity=(
+                None
+                if metadata is None
+                else (metadata.st_dev, metadata.st_ino)
+            ),
+        )
+        raise RetrievalSkillError(
+            "cannot inspect quarantined retrieval Skill artifact"
+        ) from inspection_error
+
+    if current is None:
+        return
+    if current != (identity, encoded):
+        restore_error: RetrievalSkillError | None = None
+        try:
+            _restore_quarantined_artifact_entry(
+                parent_descriptor,
+                quarantine,
+                name,
+                expected_identity=current[0],
+            )
+        except RetrievalSkillError as error:
+            restore_error = error
+        if _search_displaced:
+            displaced = _find_displaced_artifact_entry(
+                parent_descriptor,
+                identity,
+                exclude=frozenset({name}),
+            )
+            if displaced is not None:
+                _unlink_owned_artifact_entry(
+                    parent_descriptor,
+                    displaced,
+                    identity,
+                    encoded,
+                    _search_displaced=False,
+                )
+        if restore_error is not None:
+            raise restore_error
+        return
+
+    try:
+        os.unlink(quarantine, dir_fd=parent_descriptor)
+    except FileNotFoundError:
+        return
+    except OSError as first_error:
+        replacement = _read_optional_artifact_entry_snapshot(
+            parent_descriptor,
+            quarantine,
+        )
+        if replacement is None:
+            return
+        if replacement != (identity, encoded):
+            _restore_quarantined_artifact_entry(
+                parent_descriptor,
+                quarantine,
+                name,
+                expected_identity=replacement[0],
+            )
+            raise RetrievalSkillError(
+                "quarantined retrieval Skill artifact changed"
+            ) from first_error
+        try:
+            os.unlink(quarantine, dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            return
+        raise first_error
 
 
 def _replace_artifact_entry_bytes(
@@ -1722,6 +2118,8 @@ class RetrievalSkillLibrary:
                     witness_parent_descriptor,
                     witness_path.name,
                 )
+                if witness_before_link is None:
+                    witness_identity = proposed_witness_identity
                 try:
                     _revalidate_artifact_parent(
                         witness_path, witness_parent_descriptor
@@ -1744,7 +2142,6 @@ class RetrievalSkillLibrary:
                             and linked_snapshot
                             == (proposed_witness_identity, witness_encoded)
                         ):
-                            witness_identity = proposed_witness_identity
                             raise
                         if not isinstance(link_error, FileExistsError):
                             raise
@@ -1755,8 +2152,6 @@ class RetrievalSkillLibrary:
                             raise RetrievalSkillError(
                                 "immutable Retrieval Skill checkpoint witness changed"
                             )
-                    else:
-                        witness_identity = proposed_witness_identity
                 finally:
                     if witness_temporary is not None:
                         try:

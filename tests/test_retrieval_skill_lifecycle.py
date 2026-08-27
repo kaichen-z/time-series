@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import pickle
 import shutil
 from dataclasses import asdict, replace
@@ -1183,6 +1184,473 @@ def test_active_checkpoint_update_rolls_back_witness_link_that_committed_then_fa
         for artifact in tmp_path.rglob("*")
         if artifact.name.endswith(".tmp")
     ]
+
+
+def test_active_checkpoint_update_quarantines_owned_witness_before_unlink(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, library = _operator_active_checkpoint(tmp_path)
+    before = path.read_bytes()
+    provenance = path.parent / f".{path.name}.provenance"
+    before_witnesses = {
+        witness.name: witness.read_bytes() for witness in provenance.iterdir()
+    }
+    real_link = skill_library_module.os.link
+    real_unlink = skill_library_module.os.unlink
+    displaced_name = "displaced-owned-witness.json"
+    foreign = b"foreign witness must survive\n"
+    witness_name: str | None = None
+    replacement_attempted = False
+
+    def fail_after_witness_link(source, destination, *args, **kwargs):
+        nonlocal witness_name
+        result = real_link(source, destination, *args, **kwargs)
+        if destination != path.name:
+            witness_name = str(destination)
+            raise OSError("witness link failed after update publication")
+        return result
+
+    def replace_owned_witness_before_visible_unlink(name, *args, **kwargs):
+        nonlocal replacement_attempted
+        directory_fd = kwargs.get("dir_fd")
+        if witness_name is not None and name == witness_name and directory_fd is not None:
+            replacement_attempted = True
+            skill_library_module.os.rename(
+                name,
+                displaced_name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            descriptor = skill_library_module.os.open(
+                name,
+                skill_library_module.os.O_WRONLY
+                | skill_library_module.os.O_CREAT
+                | skill_library_module.os.O_EXCL,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            with skill_library_module.os.fdopen(descriptor, "wb") as handle:
+                handle.write(foreign)
+        return real_unlink(name, *args, **kwargs)
+
+    monkeypatch.setattr(skill_library_module.os, "link", fail_after_witness_link)
+    monkeypatch.setattr(
+        skill_library_module.os,
+        "unlink",
+        replace_owned_witness_before_visible_unlink,
+    )
+
+    with pytest.raises(OSError, match="failed after update publication"):
+        library.apply_operations(
+            (
+                RetrievalSkillOperation.quarantine(
+                    "historical_skill", "unsafe historical strategy"
+                ),
+            )
+        )
+
+    assert witness_name is not None
+    assert not replacement_attempted
+    assert not (provenance / displaced_name).exists()
+    assert path.read_bytes() == before
+    assert {
+        witness.name: witness.read_bytes() for witness in provenance.iterdir()
+    } == before_witnesses
+
+
+def test_owned_witness_cleanup_recovers_rename_that_committed_then_raised(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    witness = tmp_path / "owned.json"
+    encoded = b"owned witness\n"
+    witness.write_bytes(encoded)
+    metadata = witness.stat()
+    identity = (metadata.st_dev, metadata.st_ino)
+    rename_committed = False
+
+    def rename_then_raise(parent_descriptor, source, destination):
+        nonlocal rename_committed
+        os.rename(
+            source,
+            destination,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        rename_committed = True
+        raise OSError("quarantine rename raised after commit")
+
+    monkeypatch.setattr(
+        skill_library_module,
+        "_rename_artifact_entry_noreplace",
+        rename_then_raise,
+        raising=False,
+    )
+    parent_descriptor = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        skill_library_module._unlink_owned_artifact_entry(
+            parent_descriptor,
+            witness.name,
+            identity,
+            encoded,
+        )
+    finally:
+        os.close(parent_descriptor)
+
+    assert rename_committed
+    assert tuple(tmp_path.iterdir()) == ()
+
+
+def test_foreign_witness_is_retained_when_restore_name_is_occupied(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    witness = tmp_path / "witness.json"
+    foreign = b"foreign witness\n"
+    occupant = b"new current witness\n"
+    witness.write_bytes(foreign)
+    expected_identity = (witness.stat().st_dev, witness.stat().st_ino + 1)
+    real_rename = os.rename
+    quarantine_name: str | None = None
+
+    def occupy_name_after_quarantine(parent_descriptor, source, destination):
+        nonlocal quarantine_name
+        try:
+            os.stat(destination, dir_fd=parent_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise FileExistsError("restore name occupied")
+        real_rename(
+            source,
+            destination,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        if source == witness.name:
+            quarantine_name = destination
+            descriptor = os.open(
+                source,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(occupant)
+
+    monkeypatch.setattr(
+        skill_library_module,
+        "_rename_artifact_entry_noreplace",
+        occupy_name_after_quarantine,
+        raising=False,
+    )
+    parent_descriptor = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(RetrievalSkillError, match="restore|quarantine|occupied"):
+            skill_library_module._unlink_owned_artifact_entry(
+                parent_descriptor,
+                witness.name,
+                expected_identity,
+                b"expected owned witness\n",
+            )
+    finally:
+        os.close(parent_descriptor)
+
+    assert quarantine_name is not None
+    assert witness.read_bytes() == occupant
+    assert (tmp_path / quarantine_name).read_bytes() == foreign
+
+
+def test_foreign_witness_restore_recovers_rename_that_committed_then_raised(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    witness = tmp_path / "witness.json"
+    foreign = b"foreign witness\n"
+    witness.write_bytes(foreign)
+    expected_identity = (witness.stat().st_dev, witness.stat().st_ino + 1)
+    real_rename = skill_library_module._rename_artifact_entry_noreplace
+    rename_calls = 0
+
+    def fail_after_restore_commit(parent_descriptor, source, destination):
+        nonlocal rename_calls
+        real_rename(parent_descriptor, source, destination)
+        rename_calls += 1
+        if rename_calls == 2:
+            raise OSError("restore rename raised after commit")
+
+    monkeypatch.setattr(
+        skill_library_module,
+        "_rename_artifact_entry_noreplace",
+        fail_after_restore_commit,
+    )
+    parent_descriptor = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        skill_library_module._unlink_owned_artifact_entry(
+            parent_descriptor,
+            witness.name,
+            expected_identity,
+            b"expected owned witness\n",
+        )
+    finally:
+        os.close(parent_descriptor)
+
+    assert rename_calls == 2
+    assert witness.read_bytes() == foreign
+    assert tuple(tmp_path.iterdir()) == (witness,)
+
+
+def test_owned_witness_cleanup_finds_displaced_inode_and_restores_foreign_entry(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    witness = tmp_path / "witness.json"
+    displaced = tmp_path / "displaced-owned-witness.json"
+    owned = b"owned witness\n"
+    foreign = b"foreign witness\n"
+    witness.write_bytes(owned)
+    metadata = witness.stat()
+    identity = (metadata.st_dev, metadata.st_ino)
+    real_rename = skill_library_module._rename_artifact_entry_noreplace
+    replaced = False
+
+    def displace_before_quarantine(parent_descriptor, source, destination):
+        nonlocal replaced
+        if source == witness.name and not replaced:
+            replaced = True
+            os.rename(
+                source,
+                displaced.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+            descriptor = os.open(
+                source,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(foreign)
+        real_rename(parent_descriptor, source, destination)
+
+    monkeypatch.setattr(
+        skill_library_module,
+        "_rename_artifact_entry_noreplace",
+        displace_before_quarantine,
+    )
+    parent_descriptor = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        skill_library_module._unlink_owned_artifact_entry(
+            parent_descriptor,
+            witness.name,
+            identity,
+            owned,
+        )
+    finally:
+        os.close(parent_descriptor)
+
+    assert replaced
+    assert witness.read_bytes() == foreign
+    assert not displaced.exists()
+    assert not [entry for entry in tmp_path.iterdir() if "quarantine" in entry.name]
+
+
+def test_occupied_foreign_restore_still_cleans_displaced_owned_witness(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    witness = tmp_path / "witness.json"
+    displaced = tmp_path / "displaced-owned-witness.json"
+    owned = b"owned witness\n"
+    foreign = b"foreign witness\n"
+    occupant = b"new current witness\n"
+    witness.write_bytes(owned)
+    metadata = witness.stat()
+    identity = (metadata.st_dev, metadata.st_ino)
+    real_rename = skill_library_module._rename_artifact_entry_noreplace
+    quarantine_name: str | None = None
+
+    def displace_and_occupy_before_restore(
+        parent_descriptor, source, destination
+    ):
+        nonlocal quarantine_name
+        if source == witness.name:
+            os.rename(
+                source,
+                displaced.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+            descriptor = os.open(
+                source,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(foreign)
+            real_rename(parent_descriptor, source, destination)
+            quarantine_name = destination
+            descriptor = os.open(
+                source,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(occupant)
+            return
+        real_rename(parent_descriptor, source, destination)
+
+    monkeypatch.setattr(
+        skill_library_module,
+        "_rename_artifact_entry_noreplace",
+        displace_and_occupy_before_restore,
+    )
+    parent_descriptor = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        with pytest.raises(RetrievalSkillError, match="restore|occupied|quarantine"):
+            skill_library_module._unlink_owned_artifact_entry(
+                parent_descriptor,
+                witness.name,
+                identity,
+                owned,
+            )
+    finally:
+        os.close(parent_descriptor)
+
+    assert quarantine_name is not None
+    assert witness.read_bytes() == occupant
+    assert (tmp_path / quarantine_name).read_bytes() == foreign
+    assert not displaced.exists()
+
+
+def test_owned_empty_directory_cleanup_quarantines_before_rmdir(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owned = tmp_path / "owned-directory"
+    displaced = tmp_path / "displaced-owned-directory"
+    owned.mkdir()
+    metadata = owned.stat()
+    identity = (metadata.st_dev, metadata.st_ino)
+    real_rmdir = skill_library_module.os.rmdir
+    replacement_attempted = False
+
+    def replace_owned_directory_before_visible_rmdir(name, *args, **kwargs):
+        nonlocal replacement_attempted
+        directory_fd = kwargs.get("dir_fd")
+        if name == owned.name and directory_fd is not None:
+            replacement_attempted = True
+            skill_library_module.os.rename(
+                name,
+                displaced.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            skill_library_module.os.mkdir(name, dir_fd=directory_fd)
+        return real_rmdir(name, *args, **kwargs)
+
+    monkeypatch.setattr(
+        skill_library_module.os,
+        "rmdir",
+        replace_owned_directory_before_visible_rmdir,
+    )
+    parent_descriptor = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        skill_library_module._remove_owned_empty_artifact_directory(
+            parent_descriptor,
+            owned.name,
+            identity,
+        )
+    finally:
+        os.close(parent_descriptor)
+
+    assert not replacement_attempted
+    assert not owned.exists()
+    assert not displaced.exists()
+
+
+def test_owned_empty_directory_cleanup_finds_displaced_inode_and_restores_foreign(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owned = tmp_path / "owned-directory"
+    displaced = tmp_path / "displaced-owned-directory"
+    owned.mkdir()
+    metadata = owned.stat()
+    identity = (metadata.st_dev, metadata.st_ino)
+    foreign_marker = b"foreign directory must survive\n"
+    real_rename = skill_library_module._rename_artifact_entry_noreplace
+    replaced = False
+
+    def displace_before_quarantine(parent_descriptor, source, destination):
+        nonlocal replaced
+        if source == owned.name and not replaced:
+            replaced = True
+            os.rename(
+                source,
+                displaced.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+            os.mkdir(source, dir_fd=parent_descriptor)
+            (owned / "foreign.txt").write_bytes(foreign_marker)
+        real_rename(parent_descriptor, source, destination)
+
+    monkeypatch.setattr(
+        skill_library_module,
+        "_rename_artifact_entry_noreplace",
+        displace_before_quarantine,
+    )
+    parent_descriptor = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        skill_library_module._remove_owned_empty_artifact_directory(
+            parent_descriptor,
+            owned.name,
+            identity,
+        )
+    finally:
+        os.close(parent_descriptor)
+
+    assert replaced
+    assert (owned / "foreign.txt").read_bytes() == foreign_marker
+    assert not displaced.exists()
+    assert not [entry for entry in tmp_path.iterdir() if "quarantine" in entry.name]
+
+
+def test_owned_empty_directory_cleanup_recovers_rename_that_committed_then_raised(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owned = tmp_path / "owned-directory"
+    owned.mkdir()
+    metadata = owned.stat()
+    identity = (metadata.st_dev, metadata.st_ino)
+    rename_committed = False
+
+    def rename_then_raise(parent_descriptor, source, destination):
+        nonlocal rename_committed
+        os.rename(
+            source,
+            destination,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        rename_committed = True
+        raise OSError("directory quarantine rename raised after commit")
+
+    monkeypatch.setattr(
+        skill_library_module,
+        "_rename_artifact_entry_noreplace",
+        rename_then_raise,
+        raising=False,
+    )
+    parent_descriptor = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        skill_library_module._remove_owned_empty_artifact_directory(
+            parent_descriptor,
+            owned.name,
+            identity,
+        )
+    finally:
+        os.close(parent_descriptor)
+
+    assert rename_committed
+    assert tuple(tmp_path.iterdir()) == ()
 
 
 def test_active_checkpoint_rollback_preserves_preexisting_identical_witness(
