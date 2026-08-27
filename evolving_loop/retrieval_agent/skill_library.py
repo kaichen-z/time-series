@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import weakref
 from copy import copy
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -348,7 +349,12 @@ class RetrievalSkill:
         return skill_id, values
 
     @classmethod
-    def _from_legacy_payload(cls, raw: Mapping[str, object]) -> "RetrievalSkill":
+    def _from_legacy_payload(
+        cls,
+        raw: Mapping[str, object],
+        *,
+        authorize_historical_metrics: bool = False,
+    ) -> "RetrievalSkill":
         allowed = {
             "skill_id",
             "name",
@@ -388,10 +394,14 @@ class RetrievalSkill:
             skill_id,
             (),
             {key: value for key, value in raw.items() if key != "skill_id"},
-            historical_migration=True,
+            historical_migration=authorize_historical_metrics,
         )
         record = object.__new__(cls)
-        record._set_typed(skill_id, values, allow_active=True)
+        record._set_typed(
+            skill_id,
+            values,
+            allow_active=authorize_historical_metrics,
+        )
         return record
 
     def to_payload(self) -> dict[str, object]:
@@ -488,6 +498,227 @@ def _checkpoint_witness_path(path: Path, checkpoint_sha256: str) -> Path:
     return directory / f"{checkpoint_sha256}.json"
 
 
+def _checkpoint_authority_key(path: Path, checkpoint_sha256: str) -> tuple[str, str]:
+    return _checkpoint_path_digest(path), checkpoint_sha256
+
+
+def _build_skill_authority_boundary():
+    """Keep active authority outside serializable Skill and artifact state."""
+    authorized_checkpoints: set[tuple[str, str]] = set()
+    authorized_libraries: weakref.WeakSet[object] = weakref.WeakSet()
+    outstanding: dict[int, tuple[object, str, object]] = {}
+
+    def consume(capability: object | None, operation: str, target: object) -> None:
+        entry = outstanding.pop(id(capability), None)
+        if (
+            capability is None
+            or entry is None
+            or entry[0] is not capability
+            or entry[1:] != (operation, target)
+        ):
+            raise RetrievalSkillError(
+                "active Retrieval Skill operation requires evaluator/operator authority"
+            )
+
+    def run(operation: str, target: object, action):
+        capability = object()
+        outstanding[id(capability)] = (capability, operation, target)
+        try:
+            return action(capability)
+        finally:
+            outstanding.pop(id(capability), None)
+
+    def register_checkpoint(library: object, checkpoint_sha256: str | None) -> None:
+        authorized_libraries.add(library)
+        if checkpoint_sha256 is not None:
+            authorized_checkpoints.add(
+                _checkpoint_authority_key(library.path, checkpoint_sha256)
+            )
+
+    def commit_evaluator_records(
+        library: object,
+        proposed: Mapping[str, tuple[RetrievalSkill, ...]],
+        active_record_origins: Mapping[str, str],
+    ) -> None:
+        target = (id(library), _checkpoint_path_digest(library.path))
+
+        def commit(capability: object) -> None:
+            file_sha256 = library._file_sha256
+            if library.persist:
+                file_sha256 = library._write(
+                    proposed,
+                    active_record_origins=active_record_origins,
+                    _capability=capability,
+                    _operation="evaluator_checkpoint_commit",
+                    _target=target,
+                )
+            else:
+                consume(capability, "evaluator_checkpoint_commit", target)
+            library._skills = proposed
+            library._active_record_origins = dict(active_record_origins)
+            library._file_sha256 = file_sha256
+            register_checkpoint(library, file_sha256 if library.persist else None)
+
+        run("evaluator_checkpoint_commit", target, commit)
+
+    def commit_authorized_update(
+        library: object,
+        proposed: Mapping[str, tuple[RetrievalSkill, ...]],
+    ) -> None:
+        if library not in authorized_libraries:
+            raise RetrievalSkillError(
+                "active Retrieval Skill update requires evaluator/operator authority"
+            )
+        target = (id(library), _checkpoint_path_digest(library.path))
+
+        def commit(capability: object) -> None:
+            file_sha256 = library._file_sha256
+            if library.persist:
+                file_sha256 = library._write(
+                    proposed,
+                    _capability=capability,
+                    _operation="authorized_checkpoint_update",
+                    _target=target,
+                )
+            else:
+                consume(capability, "authorized_checkpoint_update", target)
+            library._skills = dict(proposed)
+            library._file_sha256 = file_sha256
+            register_checkpoint(library, file_sha256 if library.persist else None)
+
+        run("authorized_checkpoint_update", target, commit)
+
+    def activate_checkpoint(
+        library: object,
+        checkpoint_sha256: str,
+        *,
+        operator: bool,
+    ) -> object:
+        key = _checkpoint_authority_key(library.path, checkpoint_sha256)
+        if not operator and key not in authorized_checkpoints:
+            raise RetrievalSkillError(
+                "active Retrieval Skill checkpoint lacks evaluator/operator authority"
+            )
+        operation = "operator_checkpoint_load" if operator else "authorized_checkpoint_load"
+
+        def activate(capability: object) -> object:
+            consume(capability, operation, key)
+            if operator:
+                authorized_checkpoints.add(key)
+            authorized_libraries.add(library)
+            return library
+
+        return run(operation, key, activate)
+
+    def load_checkpoint_for_operator(
+        path: str | Path, *, persist: bool = True
+    ) -> object:
+        source = Path(path)
+        if not source.exists():
+            return RetrievalSkillLibrary(source, persist=persist)
+        encoded, payloads = RetrievalSkillLibrary._read_current_checkpoint(source)
+        if not any(
+            record.get("status") in {"accepted", "specialized"}
+            for record in payloads
+        ):
+            return RetrievalSkillLibrary.load(source, persist=persist)
+        library, checkpoint_sha256 = RetrievalSkillLibrary._hydrate_verified_checkpoint(
+            source,
+            persist=persist,
+            encoded=encoded,
+            payloads=payloads,
+        )
+        return activate_checkpoint(library, checkpoint_sha256, operator=True)
+
+    def migrate_legacy_for_operator(
+        path: str | Path, *, persist: bool = True
+    ) -> object:
+        library = RetrievalSkillLibrary._hydrate_legacy(
+            Path(path),
+            persist=persist,
+            authorize_historical_metrics=True,
+        )
+        if not any(skill.is_active for skill in library.all()):
+            if persist:
+                library.save()
+            return library
+        target = (id(library), _checkpoint_path_digest(library.path))
+
+        def migrate(capability: object) -> object:
+            file_sha256 = library._file_sha256
+            if persist:
+                file_sha256 = library._write(
+                    library._skills,
+                    _capability=capability,
+                    _operation="legacy_operator_migration",
+                    _target=target,
+                )
+            else:
+                consume(capability, "legacy_operator_migration", target)
+            library._file_sha256 = file_sha256
+            register_checkpoint(library, file_sha256 if persist else None)
+            return library
+
+        return run("legacy_operator_migration", target, migrate)
+
+    def activate_release_library(library: object) -> object:
+        target = id(library)
+
+        def activate(capability: object) -> object:
+            consume(capability, "verified_release_load", target)
+            authorized_libraries.add(library)
+            return library
+
+        return run("verified_release_load", target, activate)
+
+    def require_library(library: object) -> None:
+        if any(skill.is_active for skill in library.all()) and library not in authorized_libraries:
+            raise RetrievalSkillError(
+                "active Retrieval Skills lack evaluator/operator runtime authority"
+            )
+
+    def inherit_library(source: object, target_library: object) -> None:
+        if not any(skill.is_active for skill in target_library.all()):
+            return
+        if source not in authorized_libraries:
+            raise RetrievalSkillError(
+                "copied Retrieval Skill libraries do not inherit active authority"
+            )
+        target = (id(source), id(target_library))
+
+        def inherit(capability: object) -> None:
+            consume(capability, "verified_library_replay", target)
+            authorized_libraries.add(target_library)
+
+        run("verified_library_replay", target, inherit)
+
+    return (
+        consume,
+        commit_evaluator_records,
+        commit_authorized_update,
+        activate_checkpoint,
+        load_checkpoint_for_operator,
+        migrate_legacy_for_operator,
+        activate_release_library,
+        require_library,
+        inherit_library,
+    )
+
+
+(
+    _consume_skill_capability,
+    _commit_evaluator_records,
+    _commit_authorized_library_update,
+    _activate_checkpoint_library,
+    _load_verified_checkpoint_for_operator,
+    _migrate_legacy_for_operator,
+    _activate_verified_release_library,
+    _require_active_library_authority,
+    _inherit_active_library_authority,
+) = _build_skill_authority_boundary()
+del _build_skill_authority_boundary
+
+
 class RetrievalSkillLibrary:
     """An append-only skill history whose mutations commit atomically."""
 
@@ -576,6 +807,29 @@ class RetrievalSkillLibrary:
             for record in payloads
         ):
             return cls.load(source, persist=persist)
+        library, checkpoint_sha256 = cls._hydrate_verified_checkpoint(
+            source,
+            persist=persist,
+            encoded=encoded,
+            payloads=payloads,
+        )
+        return _activate_checkpoint_library(
+            library,
+            checkpoint_sha256,
+            operator=False,
+        )
+
+    @classmethod
+    def _hydrate_verified_checkpoint(
+        cls,
+        source: Path,
+        *,
+        persist: bool,
+        encoded: bytes | None = None,
+        payloads: tuple[Mapping[str, object], ...] | None = None,
+    ) -> tuple["RetrievalSkillLibrary", str]:
+        if encoded is None or payloads is None:
+            encoded, payloads = cls._read_current_checkpoint(source)
         checkpoint_sha256 = hashlib.sha256(encoded).hexdigest()
         witness_path = _checkpoint_witness_path(source, checkpoint_sha256)
         try:
@@ -602,14 +856,27 @@ class RetrievalSkillLibrary:
         library._skills = library._validated_index(
             skills, active_record_hashes=library._active_record_origins
         )
-        return library
+        return library, checkpoint_sha256
 
     @classmethod
     def migrate_legacy(
         cls, path: str | Path, *, persist: bool = True
     ) -> "RetrievalSkillLibrary":
-        """Explicitly hydrate only the historical flat on-disk schema."""
-        source = Path(path)
+        """Convert flat legacy rows to inactive candidates without granting authority."""
+        return cls._hydrate_legacy(
+            Path(path),
+            persist=persist,
+            authorize_historical_metrics=False,
+        )
+
+    @classmethod
+    def _hydrate_legacy(
+        cls,
+        source: Path,
+        *,
+        persist: bool,
+        authorize_historical_metrics: bool,
+    ) -> "RetrievalSkillLibrary":
         try:
             encoded = source.read_bytes()
             raw = json.loads(encoded.decode("utf-8"))
@@ -617,7 +884,13 @@ class RetrievalSkillLibrary:
             raise RetrievalSkillError(f"invalid legacy Retrieval Skill file: {source}") from error
         if not isinstance(raw, list) or any(not isinstance(record, dict) for record in raw):
             raise RetrievalSkillError("legacy migration requires an array of flat rows")
-        skills = tuple(RetrievalSkill._from_legacy_payload(record) for record in raw)
+        skills = tuple(
+            RetrievalSkill._from_legacy_payload(
+                record,
+                authorize_historical_metrics=authorize_historical_metrics,
+            )
+            for record in raw
+        )
         active_origins = {
             _record_digest(skill): "legacy_migration"
             for skill in skills
@@ -636,7 +909,10 @@ class RetrievalSkillLibrary:
     @classmethod
     def from_release(cls, path: str | Path) -> "RetrievalSkillLibrary":
         """Hydrate the Skill history bound to a freshly verified immutable release."""
-        from evolving_loop.retrieval_agent.policy import RetrievalRelease
+        from evolving_loop.retrieval_agent.policy import (
+            RetrievalRelease,
+            _authorize_active_release_load,
+        )
 
         release = RetrievalRelease.load(path)
         payloads = tuple(release.skills)
@@ -656,12 +932,15 @@ class RetrievalSkillLibrary:
             for skill_id, history in indexed.items()
             if history[-1].is_active
         }
+        has_active_history = any(skill.is_active for skill in skills)
         if active_ids != set(release.genome.active_skill_ids):
             raise RetrievalSkillError(
                 "release active_skill_ids do not match its active Skill history"
             )
-        if active_ids and release.manifest["state"] != "accepted":
+        if has_active_history and release.manifest["state"] != "accepted":
             raise RetrievalSkillError("only an accepted release may activate Skills")
+        if has_active_history:
+            _authorize_active_release_load(release)
         active_origins = {
             _record_digest(skill): "verified_release"
             for skill in skills
@@ -674,7 +953,11 @@ class RetrievalSkillLibrary:
         library._active_record_origins = dict(active_origins)
         library._file_sha256 = _file_digest(skills_path)
         library._skills = indexed
-        return library
+        return (
+            _activate_verified_release_library(library)
+            if has_active_history
+            else library
+        )
 
     @classmethod
     def _validate_checkpoint_witness(
@@ -799,13 +1082,19 @@ class RetrievalSkillLibrary:
 
     def save(self) -> None:
         if self.persist:
-            self._file_sha256 = self._write(self._skills)
+            if any(skill.is_active for skill in self.all()):
+                _commit_authorized_library_update(self, self._skills)
+            else:
+                self._file_sha256 = self._write(self._skills)
 
     def _write(
         self,
         proposed: Mapping[str, tuple[RetrievalSkill, ...]],
         *,
         active_record_origins: Mapping[str, str] | None = None,
+        _capability: object | None = None,
+        _operation: str | None = None,
+        _target: object | None = None,
     ) -> str:
         if self._file_sha256 is not None and (
             not self.path.exists() or _file_digest(self.path) != self._file_sha256
@@ -846,6 +1135,7 @@ class RetrievalSkillLibrary:
                     self._validate_active_origin(
                         skill, records, origins[_record_digest(skill)]
                     )
+            _consume_skill_capability(_capability, _operation or "", _target)
         encoded = (
             json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
         ).encode("utf-8")
@@ -934,11 +1224,14 @@ class RetrievalSkillLibrary:
                 self._all_from(proposed),
                 active_record_hashes=self._active_record_origins,
             )
-        file_sha256 = self._file_sha256
-        if self.persist:
-            file_sha256 = self._write(proposed)
-        self._skills = proposed
-        self._file_sha256 = file_sha256
+        if any(skill.is_active for skill in self._all_from(proposed)):
+            _commit_authorized_library_update(self, proposed)
+        else:
+            file_sha256 = self._file_sha256
+            if self.persist:
+                file_sha256 = self._write(proposed)
+            self._skills = proposed
+            self._file_sha256 = file_sha256
 
     def _apply_one(
         self,
@@ -1071,6 +1364,7 @@ class RetrievalSkillLibrary:
     ) -> tuple[RetrievalSkill, ...]:
         if stage not in {"round1", "round2"}:
             raise RetrievalSkillError("prompt projection requires round1 or round2")
+        _require_active_library_authority(self)
         return tuple(
             skill
             for skill in sorted((history[-1] for history in self._skills.values()), key=lambda item: item.skill_id)
@@ -1128,6 +1422,7 @@ class RetrievalSkillLibrary:
         clone._skills = {
             skill_id: tuple(history) for skill_id, history in self._skills.items()
         }
+        _inherit_active_library_authority(self, clone)
         return clone
 
     def replay_snapshot(
@@ -1179,6 +1474,7 @@ class RetrievalSkillLibrary:
         replay._skills = replay._validated_index(
             records, active_record_hashes=origins
         )
+        _inherit_active_library_authority(self, replay)
         return replay
 
     def __len__(self) -> int:

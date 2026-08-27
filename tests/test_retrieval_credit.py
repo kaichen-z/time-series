@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import pickle
 from dataclasses import FrozenInstanceError, asdict, replace
 from types import SimpleNamespace
@@ -20,9 +22,9 @@ from evolving_loop.decision_agent.agent import DecisionCandidate
 from evolving_loop.evaluation import score_after_resolution
 from evolving_loop.retrieval_agent.credit import (
     RetrievalSkillTaskEvidence,
+    _evaluate_and_promote_retrieval_skills,
     assign_chain_credit,
     derive_retrieval_skill_evidence,
-    evaluate_and_promote_retrieval_skills,
     validate_skill_necessity,
 )
 from evolving_loop.retrieval_agent.schemas import (
@@ -682,7 +684,7 @@ def test_skill_promotion_requires_trusted_evaluator_derived_evidence(tmp_path) -
         for index, entity in enumerate(("Alpha", "Alpha", "Beta"), start=1)
     )
 
-    promoted = evaluate_and_promote_retrieval_skills(
+    promoted = _evaluate_and_promote_retrieval_skills(
         library, task_results, split="train"
     )
 
@@ -704,13 +706,41 @@ def test_evaluator_checkpoint_cannot_be_copied_to_claim_file_provenance(tmp_path
         _promotion_task_result(index, entity)
         for index, entity in enumerate(("Alpha", "Alpha", "Beta"), start=1)
     )
-    assert evaluate_and_promote_retrieval_skills(
+    assert _evaluate_and_promote_retrieval_skills(
         library, task_results, split="train"
     ) == ("window_search",)
     copied = tmp_path / "copied.json"
     copied.write_bytes(library.path.read_bytes())
+    checkpoint_sha256 = hashlib.sha256(copied.read_bytes()).hexdigest()
+    original_witness = (
+        library.path.parent
+        / f".{library.path.name}.provenance"
+        / f"{checkpoint_sha256}.json"
+    )
+    witness = json.loads(original_witness.read_text(encoding="utf-8"))
+    witness["checkpoint_path_sha256"] = hashlib.sha256(
+        json.dumps(
+            str(copied.resolve()),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    copied_witness = (
+        copied.parent
+        / f".{copied.name}.provenance"
+        / f"{checkpoint_sha256}.json"
+    )
+    copied_witness.parent.mkdir()
+    copied_witness.write_text(
+        json.dumps(witness, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
-    with pytest.raises(RetrievalSkillError, match="checkpoint|provenance|witness"):
+    with pytest.raises(
+        RetrievalSkillError,
+        match="authority|checkpoint|provenance|operator|evaluator",
+    ):
         RetrievalSkillLibrary.load_verified_checkpoint(copied)
 
 
@@ -720,7 +750,7 @@ def test_evaluator_promotion_checkpoint_rejects_direct_record_tampering(tmp_path
         _promotion_task_result(index, entity)
         for index, entity in enumerate(("Alpha", "Alpha", "Beta"), start=1)
     )
-    assert evaluate_and_promote_retrieval_skills(
+    assert _evaluate_and_promote_retrieval_skills(
         library, task_results, split="train"
     ) == ("window_search",)
     payload = __import__("json").loads(library.path.read_text(encoding="utf-8"))
@@ -764,7 +794,7 @@ def test_evaluator_promotion_write_failure_is_atomic(
     monkeypatch.setattr(skill_library_module.os, "replace", fail_replace)
 
     with pytest.raises(OSError, match="simulated atomic replace failure"):
-        evaluate_and_promote_retrieval_skills(library, task_results, split="train")
+        _evaluate_and_promote_retrieval_skills(library, task_results, split="train")
 
     assert library.get_by_id("window_search").status == "candidate"
     assert library.get_by_id("window_search").version == 1
@@ -774,7 +804,11 @@ def test_evaluator_promotion_write_failure_is_atomic(
 
 
 def test_no_public_evidence_row_api_can_authorize_promotion(tmp_path) -> None:
-    for name in ("promote_retrieval_skills", "_TRUSTED_EVIDENCE_PROVENANCE"):
+    for name in (
+        "promote_retrieval_skills",
+        "evaluate_and_promote_retrieval_skills",
+        "_TRUSTED_EVIDENCE_PROVENANCE",
+    ):
         with pytest.raises(ImportError):
             exec(
                 f"from evolving_loop.retrieval_agent.credit import {name}",
@@ -797,7 +831,7 @@ def test_no_public_evidence_row_api_can_authorize_promotion(tmp_path) -> None:
             tmp_path / f"skills_{index}.json", (_candidate_skill(),)
         )
 
-        assert evaluate_and_promote_retrieval_skills(
+        assert _evaluate_and_promote_retrieval_skills(
             library, forged, split="train"  # type: ignore[arg-type]
         ) == ()
         assert library.get_by_id("window_search").status == "candidate"
@@ -813,7 +847,7 @@ def test_zero_leave_one_out_replays_cannot_promote(tmp_path) -> None:
     rows = derive_retrieval_skill_evidence(task_results, split="train")
 
     assert rows == ()
-    assert evaluate_and_promote_retrieval_skills(
+    assert _evaluate_and_promote_retrieval_skills(
         library, rows, split="train"  # type: ignore[arg-type]
     ) == ()
 
@@ -838,7 +872,7 @@ def test_trusted_evidence_still_requires_every_cross_train_gate(
 ) -> None:
     library = RetrievalSkillLibrary(tmp_path / "skills.json", (_candidate_skill(),))
 
-    assert evaluate_and_promote_retrieval_skills(
+    assert _evaluate_and_promote_retrieval_skills(
         library, task_results, split="train"
     ) == ()
     assert library.get_by_id("window_search").status == "candidate"
@@ -864,7 +898,7 @@ def test_skill_evidence_metrics_are_capped_to_formal_report_range() -> None:
 def test_caller_created_rows_never_bypass_train_gates(tmp_path, overrides) -> None:
     library = RetrievalSkillLibrary(tmp_path / "skills.json", (_candidate_skill(),))
 
-    assert evaluate_and_promote_retrieval_skills(
+    assert _evaluate_and_promote_retrieval_skills(
         library, _promotion_rows(**overrides), split="train"  # type: ignore[arg-type]
     ) == ()
     assert library.get_by_id("window_search").status == "candidate"
@@ -880,7 +914,7 @@ def test_dev_evidence_is_read_only_and_cannot_promote_skills(tmp_path) -> None:
         for index, entity in enumerate(("Alpha", "Alpha", "Beta"), start=1)
     )
 
-    assert evaluate_and_promote_retrieval_skills(
+    assert _evaluate_and_promote_retrieval_skills(
         library, task_results, split="dev"
     ) == ()
     assert library.get_by_id("window_search").status == "candidate"

@@ -12,6 +12,7 @@ from common.metrics import drcik_point_metrics
 from evolving_loop.data import ContextTask
 from evolving_loop.retrieval_agent.skill_library import (
     RetrievalSkillLibrary,
+    _commit_evaluator_records,
     _record_digest,
 )
 from evolving_loop.retrieval_agent.verifier import _verified_quote_spans
@@ -663,7 +664,7 @@ def derive_retrieval_skill_evidence(
     return _derive_retrieval_skill_evidence(task_results, split=split)
 
 
-def evaluate_and_promote_retrieval_skills(
+def _evaluate_and_promote_retrieval_skills(
     library: RetrievalSkillLibrary,
     task_results: Iterable[tuple[ContextTask, "HarnessResult"]],
     *,
@@ -747,14 +748,7 @@ def evaluate_and_promote_retrieval_skills(
             records,
             active_record_hashes=active_origins,
         )
-        file_sha256 = library._file_sha256
-        if library.persist:
-            file_sha256 = library._write(
-                proposed, active_record_origins=active_origins
-            )
-        library._skills = proposed
-        library._active_record_origins = active_origins
-        library._file_sha256 = file_sha256
+        _commit_evaluator_records(library, proposed, active_origins)
     return tuple(promoted)
 
 
@@ -767,6 +761,5 @@ __all__ = [
     "SkillNecessity",
     "assign_chain_credit",
     "derive_retrieval_skill_evidence",
-    "evaluate_and_promote_retrieval_skills",
     "validate_skill_necessity",
 ]

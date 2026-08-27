@@ -31,8 +31,14 @@ from evolving_loop.frozen_inference import run_frozen_inference
 from evolving_loop.harness import EvolvingForecastHarness, HarnessRuntimeConfig
 from evolving_loop.morphology_adapter import MorphologyProvider
 from evolving_loop.retrieval_agent.agent import RetrievalAgent
-from evolving_loop.retrieval_agent.policy import RetrievalRelease
-from evolving_loop.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
+from evolving_loop.retrieval_agent.policy import (
+    _load_retrieval_release_for_operator,
+)
+from evolving_loop.retrieval_agent.skill_library import (
+    RetrievalSkill,
+    RetrievalSkillLibrary,
+    _load_verified_checkpoint_for_operator,
+)
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 from evolving_loop.skill_learning import OutcomeSkillLearner
 from evolving_loop.source_evolution import (
@@ -626,7 +632,7 @@ def _components(args):
             kwargs["device"] = args.device
         llm = QwenClient(**kwargs)
     library = SkillLibrary.load(args.library_path)
-    retrieval_library = RetrievalSkillLibrary.load_verified_checkpoint(
+    retrieval_library = _load_verified_checkpoint_for_operator(
         args.retrieval_library_path
     )
     decision_library = DecisionSkillLibrary.load(args.decision_library_path)
@@ -682,7 +688,7 @@ def _factory(
         release_path = getattr(args, "retrieval_release_path", None)
         if not release_path:
             raise ValueError("two-stage construction requires --retrieval-release-path")
-        release = RetrievalRelease.load(release_path)
+        release = _load_retrieval_release_for_operator(release_path)
         release_library = RetrievalSkillLibrary.from_release(release_path)
         available_ids = {item.skill_id for item in release_library.all()}
         missing_ids = set(release.genome.active_skill_ids) - available_ids

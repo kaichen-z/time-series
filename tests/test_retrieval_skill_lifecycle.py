@@ -15,11 +15,12 @@ from evolving_loop.retrieval_agent.skill_library import (
     RetrievalSkillError,
     RetrievalSkillLibrary,
     RetrievalSkillOperation,
+    _migrate_legacy_for_operator,
 )
 from evolving_loop.retrieval_agent.policy import (
     RetrievalGenome,
     RetrievalPolicyError,
-    write_retrieval_release,
+    _write_accepted_retrieval_release,
 )
 from evolving_loop.retrieval_agent.agent import RetrievalAgent, RetrievalResult
 from common.llm import FakeLLMClient
@@ -88,7 +89,7 @@ def test_load_migrates_legacy_rows_and_saves_typed_schema(tmp_path) -> None:
         )
     )
 
-    library = RetrievalSkillLibrary.migrate_legacy(path)
+    library = _migrate_legacy_for_operator(path)
 
     skill = library.get_by_id("legacy_window")
     assert skill is not None
@@ -252,7 +253,7 @@ def _verified_active_library(
         parent="v000",
         active_skill_ids=(skill_id,),
     )
-    release = write_retrieval_release(
+    release = _write_accepted_retrieval_release(
         root / "releases",
         genome,
         skills=(
@@ -347,6 +348,55 @@ def test_current_schema_file_cannot_claim_active_status(tmp_path) -> None:
         RetrievalSkillLibrary.load_verified_checkpoint(path)
 
 
+def test_public_checkpoint_load_rejects_a_fully_recomputed_caller_witness(
+    tmp_path,
+) -> None:
+    path = tmp_path / "skills.json"
+    candidate = _candidate_seed().to_payload()
+    active = _active_payload(version=2, parent_version=1)
+    skills = [candidate, active]
+
+    def digest(value: object) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    encoded = (json.dumps(
+        {"schema_version": 1, "skills": skills},
+        indent=2,
+        ensure_ascii=False,
+    ) + "\n").encode("utf-8")
+    path.write_bytes(encoded)
+    checkpoint_sha256 = hashlib.sha256(encoded).hexdigest()
+    witness = {
+        "schema_version": 1,
+        "checkpoint_sha256": checkpoint_sha256,
+        "checkpoint_path_sha256": digest(str(path.resolve())),
+        "skills_sha256": digest(skills),
+        "active_records": [
+            {"sha256": digest(active), "origin": "evaluator_promotion"}
+        ],
+    }
+    witness_path = (
+        path.parent
+        / f".{path.name}.provenance"
+        / f"{checkpoint_sha256}.json"
+    )
+    witness_path.parent.mkdir()
+    witness_path.write_text(
+        json.dumps(witness, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RetrievalSkillError, match="authority|operator|evaluator"):
+        RetrievalSkillLibrary.load_verified_checkpoint(path)
+
+
 def test_replacing_candidate_library_path_with_active_payload_fails_closed(tmp_path) -> None:
     path = tmp_path / "skills.json"
     candidate = _candidate_seed()
@@ -374,7 +424,7 @@ def test_verified_release_hydrates_active_and_specialized_histories(tmp_path) ->
         parent="v000",
         active_skill_ids=("explicit_window",),
     )
-    release = write_retrieval_release(
+    release = _write_accepted_retrieval_release(
         tmp_path / "releases",
         genome,
         skills=(accepted, specialized),
@@ -452,14 +502,78 @@ def test_legacy_migration_is_explicit_and_requires_both_historical_metrics(
     with pytest.raises(RetrievalSkillError, match="legacy|migration"):
         RetrievalSkillLibrary.load(path)
 
-    library = RetrievalSkillLibrary.migrate_legacy(path)
+    library = _migrate_legacy_for_operator(path)
 
     assert library.get_by_id("validated_legacy").status == "accepted"
     assert library.get_by_id("partial_legacy").status == "candidate"
     with pytest.raises(RetrievalSkillError, match="legacy|typed|schema"):
         typed_path = tmp_path / "typed-list.json"
         typed_path.write_text(json.dumps([_active_payload()]), encoding="utf-8")
-        RetrievalSkillLibrary.migrate_legacy(typed_path)
+        _migrate_legacy_for_operator(typed_path)
+
+
+def test_public_legacy_migration_does_not_activate_caller_invented_metrics(
+    tmp_path,
+) -> None:
+    path = tmp_path / "invented-legacy.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "skill_id": "invented_legacy",
+                    "name": "invented_legacy",
+                    "description": "Caller claims this strategy was validated.",
+                    "applicability": "scheduled event",
+                    "query_strategy": "Trust the caller's event window.",
+                    "verification_rule": "Trust the caller's quote.",
+                    "created_from_task": "invented_train_task",
+                    "validation_smae": 0.9,
+                    "validation_srmse": 0.9,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    library = RetrievalSkillLibrary.migrate_legacy(path)
+
+    assert library.get_by_id("invented_legacy").status == "candidate"
+    assert library.for_stage("round1") == ()
+    library.save()
+    reloaded = RetrievalSkillLibrary.load(path)
+    assert reloaded.get_by_id("invented_legacy").status == "candidate"
+    assert reloaded.for_stage("round1") == ()
+
+
+def test_trusted_operator_migration_preserves_historical_accepted_records(
+    tmp_path,
+) -> None:
+    path = tmp_path / "operator-legacy.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "skill_id": "historical_skill",
+                    "name": "historical_skill",
+                    "description": "A genuinely operator-approved historical row.",
+                    "applicability": "scheduled event",
+                    "query_strategy": "Find the event window.",
+                    "verification_rule": "Require an exact quote.",
+                    "created_from_task": "train_1",
+                    "validation_smae": 0.1,
+                    "validation_srmse": 0.2,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    library = _migrate_legacy_for_operator(path)
+    reloaded = RetrievalSkillLibrary.load_verified_checkpoint(path)
+
+    assert library.get_by_id("historical_skill").status == "accepted"
+    assert reloaded.get_by_id("historical_skill").status == "accepted"
+    assert "historical_skill" in reloaded.list_for_prompt("round1")
 
 
 def test_clone_preserves_verified_active_history_without_generalizing_constructor(
@@ -473,6 +587,21 @@ def test_clone_preserves_verified_active_history_without_generalizing_constructo
     assert clone.for_stage("round1") == library.for_stage("round1")
     with pytest.raises(RetrievalSkillError, match="candidate|active|trusted"):
         RetrievalSkillLibrary(tmp_path / "copy.json", clone.all())
+
+
+def test_python_copy_loses_authority_while_clone_and_replay_preserve_it(
+    tmp_path,
+) -> None:
+    library = _verified_active_library(tmp_path)
+    copied = copy.copy(library)
+
+    with pytest.raises(RetrievalSkillError, match="authority|copied|operator"):
+        copied.list_for_prompt("round1")
+
+    clone = library.clone(persist=False)
+    replay = library.replay_snapshot(library.all(), persist=False)
+    assert "explicit_window_search" in clone.list_for_prompt("round1")
+    assert "explicit_window_search" in replay.list_for_prompt("round1")
 
 
 def test_verified_source_replays_only_the_exact_skill_history(tmp_path) -> None:
@@ -590,7 +719,7 @@ def test_loaded_legacy_active_skill_is_usable_but_not_publicly_revalidated(tmp_p
             ]
         )
     )
-    library = RetrievalSkillLibrary.migrate_legacy(path)
+    library = _migrate_legacy_for_operator(path)
 
     assert library.for_stage(
         "round1",
@@ -609,6 +738,9 @@ def test_loaded_legacy_active_skill_is_usable_but_not_publicly_revalidated(tmp_p
         (RetrievalSkillOperation.quarantine("explicit_window", "retire legacy record"),)
     )
     assert library.get_by_id("explicit_window").status == "quarantined"
+    reloaded = RetrievalSkillLibrary.load_verified_checkpoint(path)
+    assert reloaded.get_by_id("explicit_window").status == "quarantined"
+    assert reloaded.for_stage("round1") == ()
 
 
 def test_merge_retains_predecessors_and_records_ancestry(tmp_path) -> None:
@@ -673,7 +805,7 @@ def test_prompt_projection_is_stage_and_applicability_filtered_and_clone_is_read
         parent="v000",
         active_skill_ids=("explicit_window", "round2_only"),
     )
-    release = write_retrieval_release(
+    release = _write_accepted_retrieval_release(
         tmp_path / "projection-release",
         genome,
         skills=(

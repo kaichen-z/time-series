@@ -10,7 +10,6 @@ from .credit import (
     SkillNecessity,
     assign_chain_credit,
     derive_retrieval_skill_evidence,
-    evaluate_and_promote_retrieval_skills,
     validate_skill_necessity,
 )
 from .schemas import (
@@ -43,7 +42,6 @@ __all__ = [
     "SkillNecessity",
     "assign_chain_credit",
     "derive_retrieval_skill_evidence",
-    "evaluate_and_promote_retrieval_skills",
     "validate_skill_necessity",
     "RetrievalAgent",
     "RetrievalResult",

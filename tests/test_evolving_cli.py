@@ -26,7 +26,11 @@ from evolving_loop.retrieval_agent.skill_library import (
     RetrievalSkill,
     RetrievalSkillLibrary,
 )
-from evolving_loop.retrieval_agent.policy import RetrievalGenome, write_retrieval_release
+from evolving_loop.retrieval_agent.policy import (
+    RetrievalGenome,
+    _write_accepted_retrieval_release,
+    write_retrieval_release,
+)
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 from common.llm import FakeLLMClient
 
@@ -477,7 +481,7 @@ def test_harness_factory_replays_complete_versioned_retrieval_skill_history(tmp_
         "quarantine_reason": "unsafe on ambiguous dates",
     }
     genome = replace(RetrievalGenome.seed(), version="v001", parent="v000")
-    release = write_retrieval_release(
+    release = _write_accepted_retrieval_release(
         tmp_path / "releases",
         genome,
         skills=(base, version2, version3, version4),

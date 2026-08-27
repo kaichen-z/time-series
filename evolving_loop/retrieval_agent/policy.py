@@ -191,8 +191,9 @@ def _audit_payload(
     genome: "RetrievalGenome", audit: Mapping[str, object] | None
 ) -> dict[str, object]:
     if audit is None:
+        state = "seed" if genome.version == "v000" else "candidate"
         audit = {
-            "state": "seed",
+            "state": state,
             "train_dev_split_sha256": None,
             "verifier_sha256": None,
             "evaluator_sha256": None,
@@ -200,7 +201,7 @@ def _audit_payload(
             "metric_cap": None,
             "train_summary": None,
             "dev_summary": None,
-            "acceptance_reason": "not_evaluated_seed",
+            "acceptance_reason": f"not_evaluated_{state}",
         }
     value = _exact_mapping(audit, _AUDIT_FIELDS, "release audit")
     return dict(value)
@@ -215,24 +216,28 @@ def _audit_binding(manifest: Mapping[str, object]) -> dict[str, object]:
 
 def _validate_release_audit(manifest: Mapping[str, object], genome: "RetrievalGenome") -> None:
     state = manifest["state"]
-    if state not in {"seed", "accepted"}:
+    if state not in {"seed", "candidate", "accepted"}:
         raise RetrievalPolicyError("invalid release state")
     budgets = _exact_mapping(manifest["resource_budgets"], frozenset(BOUNDS), "resource_budgets")
     if dict(budgets) != _resource_budgets(genome):
         raise RetrievalPolicyError("resource_budgets must match genome")
-    if state == "seed":
-        if genome.version != "v000" or genome.parent is not None:
+    if state in {"seed", "candidate"}:
+        if state == "seed" and (genome.version != "v000" or genome.parent is not None):
             raise RetrievalPolicyError("only v000 without a parent may be a seed release")
+        if state == "candidate" and (genome.version == "v000" or genome.parent is None):
+            raise RetrievalPolicyError("candidate releases require a non-seed Genome with a parent")
         if any(manifest[field] is not None for field in _AUDIT_HASH_FIELDS):
-            raise RetrievalPolicyError("seed release cannot invent evaluation hashes")
+            raise RetrievalPolicyError(f"{state} release cannot invent evaluation hashes")
         if manifest["metric_cap"] is not None:
-            raise RetrievalPolicyError("seed release cannot set metric_cap")
+            raise RetrievalPolicyError(f"{state} release cannot set metric_cap")
         if manifest["train_summary"] is not None or manifest["dev_summary"] is not None:
-            raise RetrievalPolicyError("seed release cannot include evaluation summaries")
-        if manifest["acceptance_reason"] != "not_evaluated_seed":
-            raise RetrievalPolicyError("seed release requires not_evaluated_seed reason")
+            raise RetrievalPolicyError(f"{state} release cannot include evaluation summaries")
+        if manifest["acceptance_reason"] != f"not_evaluated_{state}":
+            raise RetrievalPolicyError(
+                f"{state} release requires not_evaluated_{state} reason"
+            )
         if manifest["audit_sha256"] is not None:
-            raise RetrievalPolicyError("seed release cannot invent audit hash")
+            raise RetrievalPolicyError(f"{state} release cannot invent audit hash")
         return
 
     if genome.version == "v000":
@@ -517,12 +522,31 @@ class RetrievalRelease:
         )
 
 
-def write_retrieval_release(
+def _release_operation_target(
+    releases_path: str | Path, genome: RetrievalGenome
+) -> str:
+    try:
+        return str((Path(releases_path) / genome.version).resolve(strict=False))
+    except (OSError, RuntimeError) as error:
+        raise RetrievalPolicyError("cannot resolve release publication target") from error
+
+
+def _release_artifact_key(release: RetrievalRelease) -> tuple[str, str]:
+    try:
+        path = str(release.path.resolve(strict=False))
+        manifest_sha256 = _digest((release.path / "manifest.json").read_bytes())
+    except (OSError, RuntimeError) as error:
+        raise RetrievalPolicyError("cannot bind Retrieval release authority") from error
+    return path, manifest_sha256
+
+
+def _write_retrieval_release_artifacts(
     releases_path: str | Path,
     genome: RetrievalGenome,
     *,
     skills: Sequence[object] = (),
     audit: Mapping[str, object] | None = None,
+    _capability: object | None = None,
 ) -> RetrievalRelease:
     """Atomically publish ``genome`` and its prompt/skill artifacts under ``releases/vNNN``."""
     releases = Path(releases_path)
@@ -543,6 +567,12 @@ def write_retrieval_release(
     else:
         manifest_audit["audit_sha256"] = None
     _validate_release_audit(manifest_audit, validated)
+    if manifest_audit["state"] == "accepted":
+        _consume_release_capability(
+            _capability,
+            "accepted_release_publication",
+            _release_operation_target(releases, validated),
+        )
     if _lexists(releases) and not releases.is_dir():
         raise RetrievalPolicyError(f"release root is not a directory: {releases}")
     releases.mkdir(parents=True, exist_ok=True)
@@ -578,6 +608,129 @@ def write_retrieval_release(
             shutil.rmtree(destination)
         raise
     return RetrievalRelease.load(destination)
+
+
+def _build_release_authority_boundary():
+    """Create non-serializable, one-shot authority for accepted release operations."""
+    authorized_artifacts: set[tuple[str, str]] = set()
+    outstanding: dict[int, tuple[object, str, object]] = {}
+
+    def consume(capability: object | None, operation: str, target: object) -> None:
+        entry = outstanding.pop(id(capability), None)
+        if (
+            capability is None
+            or entry is None
+            or entry[0] is not capability
+            or entry[1:] != (operation, target)
+        ):
+            raise RetrievalPolicyError(
+                "accepted Retrieval release operation requires trusted publisher authority"
+            )
+
+    def run(operation: str, target: object, action):
+        capability = object()
+        outstanding[id(capability)] = (capability, operation, target)
+        try:
+            return action(capability)
+        finally:
+            outstanding.pop(id(capability), None)
+
+    def write_accepted(
+        releases_path: str | Path,
+        genome: RetrievalGenome,
+        *,
+        skills: Sequence[object] = (),
+        audit: Mapping[str, object] | None = None,
+    ) -> RetrievalRelease:
+        validated = RetrievalGenome.from_payload(genome.to_payload())
+        audit_payload = _audit_payload(validated, audit)
+        if audit_payload["state"] != "accepted":
+            raise RetrievalPolicyError(
+                "trusted publisher requires an accepted release audit"
+            )
+        target = _release_operation_target(releases_path, validated)
+
+        def publish(capability: object) -> RetrievalRelease:
+            release = _write_retrieval_release_artifacts(
+                releases_path,
+                validated,
+                skills=skills,
+                audit=audit_payload,
+                _capability=capability,
+            )
+            authorized_artifacts.add(_release_artifact_key(release))
+            return release
+
+        return run("accepted_release_publication", target, publish)
+
+    def authorize_active_load(release: RetrievalRelease) -> None:
+        key = _release_artifact_key(release)
+        if key not in authorized_artifacts:
+            raise RetrievalPolicyError(
+                "active Retrieval release lacks trusted publisher or operator authority"
+            )
+
+        def authorize(capability: object) -> None:
+            consume(capability, "active_release_load", key)
+
+        run("active_release_load", key, authorize)
+
+    def load_for_operator(path: str | Path) -> RetrievalRelease:
+        release = RetrievalRelease.load(path)
+        key = _release_artifact_key(release)
+
+        def authorize(capability: object) -> RetrievalRelease:
+            consume(capability, "operator_release_load", key)
+            authorized_artifacts.add(key)
+            return release
+
+        return run("operator_release_load", key, authorize)
+
+    return consume, write_accepted, authorize_active_load, load_for_operator
+
+
+(
+    _consume_release_capability,
+    _write_accepted_retrieval_release,
+    _authorize_active_release_load,
+    _load_retrieval_release_for_operator,
+) = _build_release_authority_boundary()
+del _build_release_authority_boundary
+
+
+def write_retrieval_release(
+    releases_path: str | Path,
+    genome: RetrievalGenome,
+    *,
+    skills: Sequence[object] = (),
+    audit: Mapping[str, object] | None = None,
+) -> RetrievalRelease:
+    """Publish only an inactive seed or candidate release.
+
+    Accepted audit summaries and active Skills require the non-exported trusted
+    publisher flow.  Integrity hashes produced here never confer authority.
+    """
+    validated = RetrievalGenome.from_payload(genome.to_payload())
+    skills_payload = _skills_payload(skills)
+    audit_payload = _audit_payload(validated, audit)
+    if audit_payload["state"] == "accepted":
+        raise RetrievalPolicyError(
+            "accepted releases require the trusted publisher flow"
+        )
+    if validated.active_skill_ids or any(
+        isinstance(record, Mapping)
+        and record.get("status") in {"accepted", "specialized"}
+        for record in skills_payload
+    ):
+        raise RetrievalPolicyError(
+            "public release publication is seed/candidate-only; active Skills require the trusted publisher"
+        )
+    return _write_retrieval_release_artifacts(
+        releases_path,
+        validated,
+        skills=skills_payload,
+        audit=audit_payload,
+    )
 
 
 __all__ = [

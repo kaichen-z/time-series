@@ -12,7 +12,10 @@ from evolving_loop.data import ContextTask, Document
 from evolving_loop.decision_agent.agent import DecisionAgent, DecisionCandidate
 from evolving_loop.harness import EvolvingForecastHarness, HarnessRuntimeConfig
 from evolving_loop.morphology_adapter import MorphologyAdapter
-from evolving_loop.retrieval_agent.policy import RetrievalGenome, write_retrieval_release
+from evolving_loop.retrieval_agent.policy import (
+    RetrievalGenome,
+    _write_accepted_retrieval_release,
+)
 from evolving_loop.retrieval_agent.schemas import (
     RetrievalAssumption,
     RetrievalContractError,
@@ -515,7 +518,7 @@ def test_all_matching_stage_skills_see_materialized_generator_selectors(tmp_path
         parent="v000",
         active_skill_ids=("gap_alpha", "gap_beta"),
     )
-    release = write_retrieval_release(
+    release = _write_accepted_retrieval_release(
         tmp_path / "releases",
         genome,
         skills=(skill("gap_alpha"), skill("gap_beta")),
