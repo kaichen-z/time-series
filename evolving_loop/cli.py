@@ -29,8 +29,11 @@ from evolving_loop.decision_agent.agent import DecisionAgent
 from evolving_loop.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
 from evolving_loop.frozen_inference import run_frozen_inference
 from evolving_loop.harness import EvolvingForecastHarness, HarnessRuntimeConfig
+from evolving_loop.morphology_adapter import MorphologyProvider
 from evolving_loop.retrieval_agent.agent import RetrievalAgent
+from evolving_loop.retrieval_agent.policy import RetrievalRelease
 from evolving_loop.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
+from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 from evolving_loop.skill_learning import OutcomeSkillLearner
 from evolving_loop.source_evolution import (
     SourceEvaluation,
@@ -122,6 +125,15 @@ def _add_successive_halving_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--screen-tolerance", type=float, default=0.01)
 
 
+def _add_retrieval_topology_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--retrieval-mode",
+        choices=("single-pass", "two-stage"),
+        default="single-pass",
+    )
+    parser.add_argument("--retrieval-release-path", default=None)
+
+
 def _add_unified_evolution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tasks-file", default=str(DEFAULT_TASKS_FILE))
     parser.add_argument("--setting", choices=("llm_only", "statistics", "tsfm", "combined"), default="statistics")
@@ -140,6 +152,7 @@ def _add_unified_evolution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--library-path", default="runs/evolving/skills.json")
     parser.add_argument("--retrieval-library-path", default="runs/evolving/retrieval_skills.json")
     parser.add_argument("--decision-library-path", default="runs/evolving/decision_skills.json")
+    _add_retrieval_topology_arguments(parser)
     parser.add_argument("--chronos-device", default="cpu")
     parser.add_argument("--generations", type=int, default=3)
     parser.add_argument("--children", type=int, default=2)
@@ -268,6 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
             "--decision-library-path",
             default="runs/evolving/decision_skills.json",
         )
+        _add_retrieval_topology_arguments(child)
         child.add_argument("--chronos-model-id", default="amazon/chronos-bolt-small")
         child.add_argument("--chronos-device", default="cpu")
         child.add_argument("--chronos-cache-dir", default=None)
@@ -651,24 +665,53 @@ def _factory(
     tsfm,
     *,
     isolate_library: bool = False,
+    morphology_provider: MorphologyProvider | None = None,
 ):
+    retrieval_mode = getattr(args, "retrieval_mode", "single-pass")
+    if retrieval_mode not in {"single-pass", "two-stage"}:
+        raise ValueError("retrieval_mode must be single-pass or two-stage")
+    release = None
+    release_skills: tuple[RetrievalSkill, ...] = ()
+    if retrieval_mode == "two-stage":
+        if not isinstance(morphology_provider, MorphologyProvider) or not callable(
+            getattr(morphology_provider, "assumptions", None)
+        ):
+            raise ValueError("two-stage construction requires MorphologyProvider")
+        release_path = getattr(args, "retrieval_release_path", None)
+        if not release_path:
+            raise ValueError("two-stage construction requires --retrieval-release-path")
+        release = RetrievalRelease.load(release_path)
+        release_skills = tuple(
+            RetrievalSkill.from_payload(item) for item in release.skills
+        )
+        available_ids = {item.skill_id for item in release_skills}
+        missing_ids = set(release.genome.active_skill_ids) - available_ids
+        if missing_ids:
+            raise ValueError(
+                "retrieval release references unavailable active skills: "
+                + ", ".join(sorted(missing_ids))
+            )
+
     def build(policy: HarnessPolicy) -> EvolvingForecastHarness:
         coding_records = {skill.name: skill for skill in library.all()}
         coding_records.update(
             {record["name"]: Skill(**record) for record in policy.coding_skills}
         )
-        policy_retrieval_records = tuple(
-            RetrievalSkill(**record) for record in policy.retrieval_skills
-        )
-        policy_retrieval_ids = {
-            skill.skill_id for skill in policy_retrieval_records
-        }
-        retrieval_records = [
-            skill
-            for skill in retrieval_library.all()
-            if skill.skill_id not in policy_retrieval_ids
-        ]
-        retrieval_records.extend(policy_retrieval_records)
+        if release is None:
+            policy_retrieval_records = tuple(
+                RetrievalSkill(**record) for record in policy.retrieval_skills
+            )
+            policy_retrieval_ids = {
+                skill.skill_id for skill in policy_retrieval_records
+            }
+            retrieval_records = [
+                skill
+                for skill in retrieval_library.all()
+                if skill.skill_id not in policy_retrieval_ids
+            ]
+            retrieval_records.extend(policy_retrieval_records)
+        else:
+            retrieval_records = []
         decision_records = {skill.name: skill for skill in decision_library.all()}
         decision_records.update(
             {record["name"]: DecisionSkill(**record) for record in policy.decision_skills}
@@ -680,7 +723,7 @@ def _factory(
         )
         task_retrieval_library = RetrievalSkillLibrary(
             retrieval_library.path,
-            retrieval_records,
+            release_skills if release is not None else retrieval_records,
             persist=not isolate_library,
         )
         task_decision_library = DecisionSkillLibrary(
@@ -704,13 +747,18 @@ def _factory(
             generation_prompt=policy.coding_generation_prompt,
             revision_prompt=policy.coding_revision_prompt,
         )
-        return EvolvingForecastHarness(
-            coding,
-            RetrievalAgent(
+        retrieval_agent = (
+            TwoStageRetrievalAgent(llm, release.genome, task_retrieval_library)
+            if release is not None
+            else RetrievalAgent(
                 llm,
                 task_retrieval_library,
                 prompt=policy.retrieval_prompt,
-            ),
+            )
+        )
+        return EvolvingForecastHarness(
+            coding,
+            retrieval_agent,
             DecisionAgent(
                 llm,
                 task_decision_library,
@@ -723,10 +771,12 @@ def _factory(
             ),
             HarnessRuntimeConfig(
                 workflow=policy.workflow,
+                retrieval_mode=retrieval_mode.replace("-", "_"),
                 enable_evidence_adjustments=policy.enable_evidence_adjustments,
                 max_evidence_adjustments=policy.max_evidence_adjustments,
                 decision_aggregation=policy.decision_aggregation,
             ),
+            morphology=morphology_provider,
         )
     return build
 

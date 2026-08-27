@@ -9,7 +9,7 @@ from evolving_loop.coding_agent.skill_library import SkillLibrary
 from evolving_loop.co_evolution import HarnessPolicy, evaluate_policy
 from evolving_loop.data import ContextTask, Document, Task
 from evolving_loop.decision_agent.agent import DecisionAgent
-from evolving_loop.harness import EvolvingForecastHarness
+from evolving_loop.harness import EvolvingForecastHarness, HarnessRuntimeConfig
 from evolving_loop.retrieval_agent.agent import RetrievalAgent
 from common.llm import FakeLLMClient
 
@@ -136,7 +136,12 @@ def test_numbers_only_evolution_then_verified_context_decision() -> None:
                 ]
             )
         )
-        result = EvolvingForecastHarness(coding, retrieval, decision).run(_task())
+        result = EvolvingForecastHarness(
+            coding,
+            retrieval,
+            decision,
+            runtime=HarnessRuntimeConfig(retrieval_mode="single_pass"),
+        ).run(_task())
 
         assert result.coding.selected.program.name == "trend"
         assert result.coding.improvement > 0
@@ -144,6 +149,7 @@ def test_numbers_only_evolution_then_verified_context_decision() -> None:
         assert result.forecast == (26.0, 27.0)
         assert result.decision.llm_override_accepted
         assert result.retrieval.rejected == ()
+        assert len(retrieval.llm.calls) == 1
         outcome = EvolvingForecastHarness.score_after_resolution(_task(), result)
         assert outcome.candidate_count == len(result.candidates)
         assert outcome.coding_oracle_mae == 5.0

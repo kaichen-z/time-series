@@ -22,6 +22,8 @@ from evolving_loop.retrieval_agent.skill_library import (
     RetrievalSkillLibrary,
     RetrievalSkillOperation,
 )
+from evolving_loop.retrieval_agent.policy import RetrievalGenome, write_retrieval_release
+from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 from common.llm import FakeLLMClient
 
 
@@ -34,6 +36,19 @@ def test_evolve_cli_exposes_three_evolution_modes() -> None:
 
 def test_genome_remains_the_default_evolution_mode() -> None:
     assert build_parser().parse_args(["evolve"]).evolution_mode == "genome"
+
+
+def test_retrieval_topology_controls_are_explicit_for_both_interfaces() -> None:
+    parser = build_parser()
+    for prefix in (["evolve"], ["--evolution", "genome", "--tasks-file", "tasks"]):
+        legacy = parser.parse_args(prefix)
+        assert legacy.retrieval_mode == "single-pass"
+        assert legacy.retrieval_release_path is None
+        two_stage = parser.parse_args(
+            [*prefix, "--retrieval-mode", "two-stage", "--retrieval-release-path", "release"]
+        )
+        assert two_stage.retrieval_mode == "two-stage"
+        assert two_stage.retrieval_release_path == "release"
 
 
 def test_evolve_cli_exposes_targeted_agent_evolution() -> None:
@@ -219,6 +234,95 @@ def test_harness_factory_hydrates_policy_embedded_skills(tmp_path) -> None:
     assert harness.coding.library.get("embedded_numeric") is not None
     assert harness.retrieval.library.get("embedded_retrieval") is not None
     assert harness.decision.library.get("embedded_decision") is not None
+
+
+def test_factory_loads_retrieval_release_only_for_two_stage(tmp_path) -> None:
+    single_pass = _factory(
+        SimpleNamespace(
+            setting="llm_only",
+            retrieval_mode="single-pass",
+            retrieval_release_path=tmp_path / "does-not-exist",
+        ),
+        FakeLLMClient([]),
+        SkillLibrary(tmp_path / "coding.json"),
+        RetrievalSkillLibrary(tmp_path / "retrieval.json"),
+        DecisionSkillLibrary(tmp_path / "decision.json"),
+        None,
+        isolate_library=True,
+    )(HarnessPolicy())
+    assert not isinstance(single_pass.retrieval, TwoStageRetrievalAgent)
+
+    release = write_retrieval_release(tmp_path / "releases", RetrievalGenome.seed())
+
+    class Morphology:
+        def assumptions(self, task):
+            del task
+            return ()
+
+    two_stage = _factory(
+        SimpleNamespace(
+            setting="llm_only",
+            retrieval_mode="two-stage",
+            retrieval_release_path=release.path,
+        ),
+        FakeLLMClient([]),
+        SkillLibrary(tmp_path / "coding.json"),
+        RetrievalSkillLibrary(tmp_path / "retrieval.json"),
+        DecisionSkillLibrary(tmp_path / "decision.json"),
+        None,
+        isolate_library=True,
+        morphology_provider=Morphology(),
+    )(HarnessPolicy())
+    assert isinstance(two_stage.retrieval, TwoStageRetrievalAgent)
+    assert two_stage.runtime.retrieval_mode == "two_stage"
+
+
+def test_factory_rejects_two_stage_without_morphology_provider(tmp_path) -> None:
+    release = write_retrieval_release(tmp_path / "releases", RetrievalGenome.seed())
+
+    with pytest.raises(ValueError, match="MorphologyProvider"):
+        _factory(
+            SimpleNamespace(
+                setting="llm_only",
+                retrieval_mode="two-stage",
+                retrieval_release_path=release.path,
+            ),
+            FakeLLMClient([]),
+            SkillLibrary(tmp_path / "coding.json"),
+            RetrievalSkillLibrary(tmp_path / "retrieval.json"),
+            DecisionSkillLibrary(tmp_path / "decision.json"),
+            None,
+            isolate_library=True,
+        )
+
+
+def test_two_stage_factory_ignores_legacy_policy_retrieval_rows(tmp_path) -> None:
+    release = write_retrieval_release(tmp_path / "releases", RetrievalGenome.seed())
+
+    class Morphology:
+        def assumptions(self, task):
+            del task
+            return ()
+
+    factory = _factory(
+        SimpleNamespace(
+            setting="llm_only",
+            retrieval_mode="two-stage",
+            retrieval_release_path=release.path,
+        ),
+        FakeLLMClient([]),
+        SkillLibrary(tmp_path / "coding.json"),
+        RetrievalSkillLibrary(tmp_path / "retrieval.json"),
+        DecisionSkillLibrary(tmp_path / "decision.json"),
+        None,
+        isolate_library=True,
+        morphology_provider=Morphology(),
+    )
+
+    harness = factory(HarnessPolicy(retrieval_skills=({"legacy_free_form": True},)))
+
+    assert isinstance(harness.retrieval, TwoStageRetrievalAgent)
+    assert harness.retrieval.skills.all() == ()
 
 
 def test_harness_factory_replays_complete_versioned_retrieval_skill_history(tmp_path) -> None:

@@ -11,7 +11,14 @@ from evolving_loop.coding_agent.evolution import CodingEvolutionAgent, CodingEvo
 from evolving_loop.data import ContextTask
 from evolving_loop.decision_agent.agent import DecisionAgent, DecisionCandidate, DecisionResult
 from evolving_loop.evaluation import ResolvedOutcome, score_after_resolution
+from evolving_loop.morphology_adapter import MorphologyProvider
 from evolving_loop.retrieval_agent.agent import RetrievalAgent, RetrievalResult
+from evolving_loop.retrieval_agent.schemas import (
+    FinalRetrievalCard,
+    RetrievalAssumption,
+)
+from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
+from evolving_loop.retrieval_agent.verifier import merge_verified_rounds
 
 
 @dataclass(frozen=True)
@@ -22,6 +29,7 @@ class HarnessResult:
     decision: DecisionResult
     candidates: tuple[DecisionCandidate, ...]
     forecast: tuple[float, ...]
+    retrieval_card: FinalRetrievalCard | None = None
 
 
 @dataclass(frozen=True)
@@ -29,9 +37,14 @@ class HarnessRuntimeConfig:
     """Executable topology controls exposed to the outer Meta-Harness."""
 
     workflow: tuple[str, ...] = ("retrieve", "decide")
+    retrieval_mode: str = "single_pass"
     enable_evidence_adjustments: bool = True
     max_evidence_adjustments: int = 3
     decision_aggregation: str = "last"
+
+    def __post_init__(self) -> None:
+        if self.retrieval_mode not in {"single_pass", "two_stage"}:
+            raise ValueError("retrieval_mode must be single_pass or two_stage")
 
 
 class OutcomeLearner(Protocol):
@@ -48,12 +61,21 @@ class EvolvingForecastHarness:
         decision: DecisionAgent,
         outcome_learner: OutcomeLearner | None = None,
         runtime: HarnessRuntimeConfig | None = None,
+        morphology: MorphologyProvider | None = None,
     ) -> None:
         self.coding = coding
         self.retrieval = retrieval
         self.decision = decision
         self.outcome_learner = outcome_learner
         self.runtime = runtime or HarnessRuntimeConfig()
+        self.morphology = morphology
+        if self.runtime.retrieval_mode == "two_stage":
+            if not isinstance(self.retrieval, TwoStageRetrievalAgent):
+                raise ValueError("two_stage retrieval_mode requires TwoStageRetrievalAgent")
+            if not isinstance(self.morphology, MorphologyProvider) or not callable(
+                getattr(self.morphology, "assumptions", None)
+            ):
+                raise ValueError("two_stage retrieval_mode requires MorphologyProvider")
 
     def run(
         self, task: ContextTask, *, allow_skill_writes: bool = True
@@ -62,6 +84,8 @@ class EvolvingForecastHarness:
         coding = self.coding.run_task(
             task.numeric_view(), allow_skill_writes=allow_skill_writes
         )
+        if self.runtime.retrieval_mode == "two_stage":
+            return self._run_two_stage(task, coding)
         retrieval_runs = []
         retrieval = _empty_retrieval()
         candidates = self._decision_candidates(task, coding, retrieval)
@@ -115,6 +139,91 @@ class EvolvingForecastHarness:
             decision=decision,
             candidates=candidates,
             forecast=decision.selected.forecast,
+        )
+
+    def _run_two_stage(self, task: ContextTask, coding: CodingEvolutionResult) -> HarnessResult:
+        """Execute the fixed two-stage topology without interpreting ``workflow``."""
+        assert isinstance(self.retrieval, TwoStageRetrievalAgent)
+        assert self.morphology is not None
+        morphology_failure: str | None = None
+        try:
+            assumptions = tuple(
+                RetrievalAssumption.from_payload(
+                    item.to_payload() if isinstance(item, RetrievalAssumption) else item
+                )
+                for item in self.morphology.assumptions(task)
+            )
+        except Exception as error:
+            assumptions = ()
+            morphology_failure = f"morphology_provider_failed:{type(error).__name__}"
+
+        round1 = self.retrieval.run_round1(task)
+        round1_card = merge_verified_rounds(round1, None)
+        if morphology_failure is not None:
+            round1_card = replace(
+                round1_card,
+                rejected=tuple(dict.fromkeys((*round1_card.rejected, morphology_failure))),
+            )
+        provisional_retrieval = round1_card.to_legacy_result()
+        provisional_candidates = self._decision_candidates(
+            task,
+            coding,
+            provisional_retrieval,
+            enable_evidence_adjustments=self.runtime.enable_evidence_adjustments,
+            max_evidence_adjustments=self.runtime.max_evidence_adjustments,
+        )
+        provisional = self.decision.run(
+            provisional_candidates,
+            provisional_retrieval,
+            host_default_id=coding.selected.program.name,
+            round_index=0,
+            assumptions=assumptions,
+        )
+        provisional = _guard_raw_override(provisional, provisional_candidates, coding)
+
+        round2 = None
+        if morphology_failure is None and assumptions and _should_run_round2(
+            self.retrieval.genome.second_round_trigger,
+            round1,
+            provisional,
+        ):
+            round2 = self.retrieval.run_round2(
+                task,
+                round1,
+                provisional.gaps,
+                assumptions,
+            )
+        card = merge_verified_rounds(round1, round2)
+        if morphology_failure is not None:
+            card = replace(
+                card,
+                rejected=tuple(dict.fromkeys((*card.rejected, morphology_failure))),
+            )
+        retrieval = card.to_legacy_result()
+        candidates = self._decision_candidates(
+            task,
+            coding,
+            retrieval,
+            enable_evidence_adjustments=self.runtime.enable_evidence_adjustments,
+            max_evidence_adjustments=self.runtime.max_evidence_adjustments,
+        )
+        decision = self.decision.run(
+            candidates,
+            retrieval,
+            host_default_id=coding.selected.program.name,
+            prior_decisions=(provisional,),
+            round_index=1,
+            assumptions=assumptions,
+        )
+        decision = _guard_raw_override(decision, candidates, coding)
+        return HarnessResult(
+            task_id=task.numeric.task_id,
+            coding=coding,
+            retrieval=retrieval,
+            decision=decision,
+            candidates=candidates,
+            forecast=decision.selected.forecast,
+            retrieval_card=card,
         )
 
     def _historical_clean_candidate(
@@ -529,6 +638,26 @@ def _empty_retrieval() -> RetrievalResult:
         sufficient=False,
         missing_information=("No retrieval stage has run.",),
     )
+
+
+def _should_run_round2(
+    trigger: str,
+    round1: Any,
+    provisional: DecisionResult,
+) -> bool:
+    if trigger == "never":
+        return False
+    if trigger == "always":
+        return True
+    if trigger == "on_named_gap":
+        return provisional.requested_more_retrieval and bool(provisional.gaps)
+    if trigger == "on_incomplete_chain":
+        return (
+            not round1.sufficient
+            or not round1.chains
+            or any(item.missing_links or not item.numeric_eligible for item in round1.chains)
+        )
+    raise ValueError(f"Unknown second-round trigger: {trigger}")
 
 
 def _aggregate_decisions(

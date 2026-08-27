@@ -5,6 +5,11 @@ import json
 from dataclasses import asdict, dataclass
 
 from evolving_loop.retrieval_agent.agent import RetrievalResult
+from evolving_loop.retrieval_agent.schemas import (
+    RetrievalAssumption,
+    RetrievalContractError,
+    RetrievalGap,
+)
 from evolving_loop.decision_agent.skill_library import DecisionSkillLibrary
 from common.llm import JsonExtractionError, LLMClient, parse_json_object
 
@@ -25,6 +30,13 @@ or window. If one concrete missing discriminator or unresolved contradiction cou
 selected trajectory, set request_more_retrieval=true; do this only for a named gap, not generic
 uncertainty.
 
+When requesting more retrieval, emit one or more exact named gap records using only supplied
+Morphology assumption IDs:
+{"assumption_id": "a_trend", "gap_type": "continuation_or_reversal",
+"missing_information": "Evidence of continuation or reversal", "priority": "high"}.
+Use only the enumerated gap types and high, medium, or low priority; never copy candidate fields,
+forecast values, scores, source code, or candidate IDs into a gap.
+
 A historical defect can falsify a numeric candidate only when its verified affected window overlaps
 the supplied visible history. Earlier defects outside that history must not influence selection.
 When a history_cleaned candidate is present, the host has already replayed the same executable
@@ -41,7 +53,7 @@ time window. A resolved historical event is not a reason to apply a future multi
 Return exactly one JSON object:
 {"selected_candidate_id": "candidate_name", "supporting_document_ids": ["doc_1"],
 "rationale": "why verified evidence justifies this selection",
-"request_more_retrieval": false, "used_skill_names": []}
+"request_more_retrieval": false, "gaps": [], "used_skill_names": []}
 
 If validated decision skills are supplied, use only applicable rules and report their exact names
 in used_skill_names. A skill never overrides citation, provenance, or safe-host validation.
@@ -81,6 +93,7 @@ class DecisionResult:
     llm_override_accepted: bool
     rejection_reason: str | None = None
     used_skill_names: tuple[str, ...] = ()
+    gaps: tuple[RetrievalGap, ...] = ()
 
 
 class DecisionAgent:
@@ -103,6 +116,7 @@ class DecisionAgent:
         host_default_id: str | None = None,
         prior_decisions: tuple[DecisionResult, ...] = (),
         round_index: int = 0,
+        assumptions: tuple[RetrievalAssumption, ...] = (),
     ) -> DecisionResult:
         if not candidates:
             raise ValueError("Decision Agent requires at least one executed candidate")
@@ -145,6 +159,7 @@ class DecisionAgent:
                 }
                 for item in prior_decisions
             ],
+            "morphology_assumptions": [item.to_payload() for item in assumptions],
         }
         response = self.llm.complete(
             system=self.prompt,
@@ -177,19 +192,23 @@ class DecisionAgent:
                 used_skills.append(name)
             else:
                 unknown_skills.append(name)
+        gaps, gap_error = _parse_gaps(choice.get("gaps", ()), assumptions)
+        requested_more = bool(choice.get("request_more_retrieval", False)) and bool(gaps)
+        reasons = []
+        if unknown_skills:
+            reasons.append("unknown_decision_skills:" + ",".join(unknown_skills))
+        if gap_error is not None:
+            reasons.append("invalid_retrieval_gaps:" + gap_error)
         return DecisionResult(
             selected=chosen,
             host_default_id=host_default.candidate_id,
-            requested_more_retrieval=bool(choice.get("request_more_retrieval", False)),
+            requested_more_retrieval=requested_more,
             rationale=str(choice.get("rationale", "")),
             supporting_document_ids=cited,
             llm_override_accepted=override,
             used_skill_names=tuple(used_skills),
-            rejection_reason=(
-                "unknown_decision_skills:" + ",".join(unknown_skills)
-                if unknown_skills
-                else None
-            ),
+            rejection_reason=";".join(reasons) if reasons else None,
+            gaps=gaps,
         )
 
     @staticmethod
@@ -203,4 +222,25 @@ class DecisionAgent:
             llm_override_accepted=False,
             rejection_reason=reason,
             used_skill_names=(),
+            gaps=(),
         )
+
+
+def _parse_gaps(
+    raw: object,
+    assumptions: tuple[RetrievalAssumption, ...],
+) -> tuple[tuple[RetrievalGap, ...], str | None]:
+    """Project only strict named gaps from the richer Decision context."""
+    if not isinstance(raw, (list, tuple)):
+        return (), "gaps must be a list"
+    allowed_ids = {item.assumption_id for item in assumptions}
+    try:
+        gaps = tuple(RetrievalGap.from_payload(item) for item in raw)
+        identities = [item.assumption_id for item in gaps]
+        if len(identities) != len(set(identities)):
+            raise RetrievalContractError("duplicate retrieval gap assumption_id")
+        if not set(identities).issubset(allowed_ids):
+            raise RetrievalContractError("retrieval gap references unknown assumption")
+    except (RetrievalContractError, TypeError, ValueError) as error:
+        return (), str(error)
+    return gaps, None
