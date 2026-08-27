@@ -5,6 +5,8 @@ import hashlib
 import json
 import math
 import os
+import stat
+import tempfile
 import weakref
 from copy import copy
 from dataclasses import dataclass, replace
@@ -476,21 +478,85 @@ def _record_digest(skill: RetrievalSkill) -> str:
     return _canonical_digest(skill.to_payload())
 
 
-def _file_digest(path: Path) -> str:
+def _safe_artifact_path(path: Path) -> Path:
+    absolute = Path(os.path.abspath(path))
+    if len(absolute.parts) > 1:
+        root_alias = Path(absolute.anchor) / absolute.parts[1]
+        try:
+            if stat.S_ISLNK(os.lstat(root_alias).st_mode):
+                absolute = root_alias.resolve(strict=True).joinpath(
+                    *absolute.parts[2:]
+                )
+        except FileNotFoundError:
+            pass
+        except (OSError, RuntimeError) as error:
+            raise RetrievalSkillError(
+                f"cannot canonicalize retrieval Skill system path: {path}"
+            ) from error
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current = current / part
+        try:
+            mode = os.lstat(current).st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise RetrievalSkillError(
+                f"cannot inspect retrieval Skill checkpoint path: {path}"
+            ) from error
+        if stat.S_ISLNK(mode):
+            raise RetrievalSkillError(
+                f"retrieval Skill checkpoint path contains a symlink: {path}"
+            )
+    return absolute
+
+
+def _safe_read_bytes(path: Path) -> bytes:
+    safe = _safe_artifact_path(path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        descriptor = os.open(safe, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise RetrievalSkillError(
+                    f"retrieval Skill checkpoint is not a regular file: {path}"
+                )
+            return handle.read()
+    except RetrievalSkillError:
+        raise
     except OSError as error:
-        raise RetrievalSkillError(f"retrieval Skill checkpoint path changed: {path}") from error
+        raise RetrievalSkillError(
+            f"retrieval Skill checkpoint path changed: {path}"
+        ) from error
+
+
+def _unique_temporary(path: Path, encoded: bytes) -> Path:
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
+    return temporary
+
+
+def _file_digest(path: Path) -> str:
+    return hashlib.sha256(_safe_read_bytes(path)).hexdigest()
 
 
 def _checkpoint_path_digest(path: Path) -> str:
-    try:
-        resolved = str(path.resolve(strict=False))
-    except (OSError, RuntimeError) as error:
-        raise RetrievalSkillError(
-            f"cannot resolve retrieval Skill checkpoint path: {path}"
-        ) from error
-    return _canonical_digest(resolved)
+    return _canonical_digest(str(_safe_artifact_path(path)))
 
 
 def _checkpoint_witness_path(path: Path, checkpoint_sha256: str) -> Path:
@@ -559,6 +625,37 @@ def _build_skill_authority_boundary():
                 raise RetrievalSkillError(
                     "active Retrieval Skill library is not bound to the current checkpoint epoch"
                 )
+
+    def cache_identity(library: object) -> str:
+        """Return an opaque identity after revalidating live Skill authority."""
+        require_library(library)
+        authority = authorized_libraries.get(library)
+        if authority is None:
+            return _canonical_digest({"kind": "unbound"})
+        if authority[0] == "checkpoint":
+            _, path_sha256, checkpoint_sha256, epoch = authority
+            if current_checkpoints.get(path_sha256) != (
+                checkpoint_sha256,
+                epoch,
+            ):
+                raise RetrievalSkillError(
+                    "Retrieval Skill cache identity is not bound to the current authority epoch"
+                )
+            payload: object = {
+                "kind": "checkpoint",
+                "path_sha256": path_sha256,
+                "checkpoint_sha256": checkpoint_sha256,
+                "epoch": epoch,
+            }
+        elif authority[0] == "release":
+            payload = {
+                "kind": "release",
+                "path_sha256": authority[1],
+                "checkpoint_sha256": authority[2],
+            }
+        else:
+            payload = {"kind": authority[0], "grant": id(authority[1])}
+        return _canonical_digest(payload)
 
     def commit_evaluator_records(
         library: object,
@@ -702,7 +799,11 @@ def _build_skill_authority_boundary():
 
         def activate(capability: object) -> object:
             consume(capability, "verified_release_load", target)
-            authorized_libraries[library] = ("release", object())
+            authorized_libraries[library] = (
+                "release",
+                _checkpoint_path_digest(library.path),
+                library._file_sha256 or _canonical_digest(library.all()),
+            )
             return library
 
         return run("verified_release_load", target, activate)
@@ -738,6 +839,7 @@ def _build_skill_authority_boundary():
         migrate_legacy_for_operator,
         activate_release_library,
         require_library,
+        cache_identity,
         inherit_library,
     )
 
@@ -751,6 +853,7 @@ def _build_skill_authority_boundary():
     _migrate_legacy_for_operator,
     _activate_verified_release_library,
     _require_active_library_authority,
+    _skill_library_cache_identity,
     _inherit_active_library_authority,
 ) = _build_skill_authority_boundary()
 del _build_skill_authority_boundary
@@ -804,7 +907,7 @@ class RetrievalSkillLibrary:
         source: Path,
     ) -> tuple[bytes, tuple[Mapping[str, object], ...]]:
         try:
-            encoded = source.read_bytes()
+            encoded = _safe_read_bytes(source)
             raw = json.loads(encoded.decode("utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             raise RetrievalSkillError(f"invalid retrieval Skill checkpoint: {source}") from error
@@ -870,7 +973,7 @@ class RetrievalSkillLibrary:
         checkpoint_sha256 = hashlib.sha256(encoded).hexdigest()
         witness_path = _checkpoint_witness_path(source, checkpoint_sha256)
         try:
-            witness = json.loads(witness_path.read_text(encoding="utf-8"))
+            witness = json.loads(_safe_read_bytes(witness_path).decode("utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             raise RetrievalSkillError(
                 "active Retrieval Skill checkpoint has no valid immutable provenance witness"
@@ -915,7 +1018,7 @@ class RetrievalSkillLibrary:
         authorize_historical_metrics: bool,
     ) -> "RetrievalSkillLibrary":
         try:
-            encoded = source.read_bytes()
+            encoded = _safe_read_bytes(source)
             raw = json.loads(encoded.decode("utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             raise RetrievalSkillError(f"invalid legacy Retrieval Skill file: {source}") from error
@@ -1118,6 +1221,8 @@ class RetrievalSkillLibrary:
         return indexed
 
     def save(self) -> None:
+        if getattr(self, "_read_only", False):
+            raise RetrievalSkillError("read-only Retrieval Skill snapshots are immutable")
         if self.persist:
             if any(skill.is_active for skill in self.all()):
                 _commit_authorized_library_update(self, self._skills)
@@ -1133,14 +1238,20 @@ class RetrievalSkillLibrary:
         _operation: str | None = None,
         _target: object | None = None,
     ) -> str:
+        safe_path = _safe_artifact_path(self.path)
         if self._file_sha256 is not None and (
-            not self.path.exists() or _file_digest(self.path) != self._file_sha256
+            not safe_path.exists() or _file_digest(safe_path) != self._file_sha256
         ):
             raise RetrievalSkillError(
                 "retrieval Skill checkpoint path was replaced or changed"
             )
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        if self._file_sha256 is None and safe_path.exists():
+            raise RetrievalSkillError(
+                "retrieval Skill checkpoint path already exists without a loaded digest"
+            )
+        safe_path.parent.mkdir(parents=True, exist_ok=True)
+        safe_path = _safe_artifact_path(safe_path)
+        temporary: Path | None = None
         origins = dict(
             self._active_record_origins
             if active_record_origins is None
@@ -1181,17 +1292,19 @@ class RetrievalSkillLibrary:
         witness_created = False
         witness_directory_created = False
         try:
-            temporary.write_bytes(encoded)
+            temporary = _unique_temporary(safe_path, encoded)
             if active:
                 witness_path = _checkpoint_witness_path(
-                    self.path, checkpoint_sha256
+                    safe_path, checkpoint_sha256
                 )
+                _safe_artifact_path(witness_path)
                 witness_directory_created = not witness_path.parent.exists()
                 witness_path.parent.mkdir(parents=True, exist_ok=True)
+                witness_path = _safe_artifact_path(witness_path)
                 witness_payload = {
                     "schema_version": SKILL_CHECKPOINT_WITNESS_SCHEMA_VERSION,
                     "checkpoint_sha256": checkpoint_sha256,
-                    "checkpoint_path_sha256": _checkpoint_path_digest(self.path),
+                    "checkpoint_path_sha256": _checkpoint_path_digest(safe_path),
                     "skills_sha256": _canonical_digest(skills_payload),
                     "active_records": [
                         {"sha256": digest, "origin": origins[digest]}
@@ -1207,23 +1320,40 @@ class RetrievalSkillLibrary:
                     )
                     + "\n"
                 ).encode("utf-8")
-                witness_temporary = witness_path.with_suffix(
-                    witness_path.suffix + ".tmp"
+                witness_temporary = _unique_temporary(
+                    witness_path,
+                    witness_encoded,
                 )
                 try:
-                    witness_temporary.write_bytes(witness_encoded)
                     try:
-                        os.link(witness_temporary, witness_path)
+                        os.link(
+                            witness_temporary,
+                            witness_path,
+                            follow_symlinks=False,
+                        )
                         witness_created = True
                     except FileExistsError:
-                        if witness_path.read_bytes() != witness_encoded:
+                        if _safe_read_bytes(witness_path) != witness_encoded:
                             raise RetrievalSkillError(
                                 "immutable Retrieval Skill checkpoint witness changed"
                             )
                 finally:
                     if witness_temporary.exists():
                         witness_temporary.unlink()
-            os.replace(temporary, self.path)
+            if self._file_sha256 is None:
+                try:
+                    os.link(temporary, safe_path, follow_symlinks=False)
+                except FileExistsError as error:
+                    raise RetrievalSkillError(
+                        "retrieval Skill checkpoint appeared during no-replace commit"
+                    ) from error
+                temporary.unlink()
+            else:
+                if _file_digest(safe_path) != self._file_sha256:
+                    raise RetrievalSkillError(
+                        "retrieval Skill checkpoint changed before guarded replace"
+                    )
+                os.replace(temporary, safe_path)
         except Exception:
             if witness_created and witness_path is not None:
                 try:
@@ -1237,7 +1367,7 @@ class RetrievalSkillLibrary:
                     pass
             raise
         finally:
-            if temporary.exists():
+            if temporary is not None and temporary.exists():
                 temporary.unlink()
         return checkpoint_sha256
 
@@ -1252,6 +1382,8 @@ class RetrievalSkillLibrary:
         )
 
     def apply_operations(self, operations: Iterable[RetrievalSkillOperation]) -> None:
+        if getattr(self, "_read_only", False):
+            raise RetrievalSkillError("read-only Retrieval Skill snapshots are immutable")
         proposed = {skill_id: tuple(history) for skill_id, history in self._skills.items()}
         for operation in operations:
             if not isinstance(operation, RetrievalSkillOperation):
@@ -1448,12 +1580,20 @@ class RetrievalSkillLibrary:
         """Keep the legacy call site harmless; evaluator-owned credit is not skill state."""
         del name, smae, srmse
 
-    def clone(self, *, persist: bool = False) -> "RetrievalSkillLibrary":
+    def clone(
+        self,
+        *,
+        persist: bool = False,
+        read_only: bool = False,
+    ) -> "RetrievalSkillLibrary":
         if persist and "verified_release" in self._active_record_origins.values():
             raise RetrievalSkillError("verified release clones must remain read-only")
+        if persist and read_only:
+            raise RetrievalSkillError("read-only Retrieval Skill snapshots cannot persist")
         clone = object.__new__(type(self))
         clone.path = self.path
         clone.persist = persist
+        clone._read_only = read_only or getattr(self, "_read_only", False)
         clone._active_record_origins = dict(self._active_record_origins)
         clone._file_sha256 = self._file_sha256 if persist else None
         clone._skills = {

@@ -861,6 +861,41 @@ def test_skill_operations_are_atomic_and_non_destructive(tmp_path) -> None:
     assert not library.path.exists()
 
 
+def test_skill_writer_ignores_attacker_fixed_temp_symlink(tmp_path) -> None:
+    path = tmp_path / "skills.json"
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do-not-touch", encoding="utf-8")
+    fixed_temporary = path.with_suffix(path.suffix + ".tmp")
+    fixed_temporary.symlink_to(victim)
+    library = RetrievalSkillLibrary(path, (seed_skill(),))
+
+    library.save()
+
+    assert victim.read_text(encoding="utf-8") == "do-not-touch"
+    assert fixed_temporary.is_symlink()
+
+
+@pytest.mark.parametrize("symlink_kind", ("path", "parent"))
+def test_skill_writer_rejects_symlink_paths_and_parents(tmp_path, symlink_kind) -> None:
+    real_directory = tmp_path / "real"
+    real_directory.mkdir()
+    if symlink_kind == "path":
+        victim = real_directory / "victim.json"
+        victim.write_text("do-not-touch", encoding="utf-8")
+        path = tmp_path / "skills.json"
+        path.symlink_to(victim)
+    else:
+        linked_parent = tmp_path / "linked"
+        linked_parent.symlink_to(real_directory, target_is_directory=True)
+        path = linked_parent / "skills.json"
+    library = RetrievalSkillLibrary(path, (seed_skill(),))
+
+    with pytest.raises(RetrievalSkillError, match="symlink|unsafe|path"):
+        library.save()
+    if symlink_kind == "path":
+        assert victim.read_text(encoding="utf-8") == "do-not-touch"
+
+
 def test_prompt_projection_is_stage_and_applicability_filtered_and_clone_is_read_only(tmp_path) -> None:
     path = tmp_path / "skills.json"
     genome = replace(
