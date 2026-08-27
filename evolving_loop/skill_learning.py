@@ -3,13 +3,17 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 from evolving_loop.data import ContextTask
 from evolving_loop.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
 from evolving_loop.evaluation import ResolvedOutcome
 from evolving_loop.harness import HarnessResult
-from evolving_loop.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
+from evolving_loop.retrieval_agent.skill_library import (
+    RetrievalApplicability,
+    RetrievalSkill,
+    RetrievalSkillLibrary,
+)
 from common.llm import JsonExtractionError, LLMClient, parse_json_object
 
 SKILL_LEARNING_PROMPT = """You are the post-outcome Skill Curator for a forecasting harness.
@@ -158,15 +162,22 @@ class OutcomeSkillLearner:
                 retrieval_name = record["name"]
                 self.retrieval_library.add(
                     RetrievalSkill(
-                        skill_id=str(uuid.uuid4()),
+                        skill_id=f"retrieval_{uuid.uuid4().hex}",
+                        version=1,
+                        parent_version=None,
+                        stage="both",
+                        status="candidate",
                         name=record["name"],
                         description=record["description"],
-                        applicability=record["applicability"],
-                        query_strategy=record["query_strategy"],
-                        verification_rule=record["verification_rule"],
-                        created_from_task=task.numeric.task_id,
-                        validation_smae=retrieval_smae_gain,
-                        validation_srmse=retrieval_srmse_gain,
+                        applicability=RetrievalApplicability(),
+                        query_steps=(record["query_strategy"],),
+                        required_chain_fields=(),
+                        counterevidence_rule=record["verification_rule"],
+                        failure_conditions=(),
+                        validated_task_ids=(task.numeric.task_id,),
+                        validated_entities=(task.numeric.entity_name,),
+                        validation_smae_gain=retrieval_smae_gain,
+                        validation_srmse_gain=retrieval_srmse_gain,
                     )
                 )
         if decision_eligible and isinstance(proposal.get("decision_skill"), dict):

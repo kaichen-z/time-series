@@ -343,6 +343,44 @@ def test_snapshot_policy_skills_captures_every_harness_library(tmp_path) -> None
     assert snapshot.decision_skills[0]["name"] == "decision_skill"
 
 
+def test_snapshot_policy_skills_keeps_complete_typed_retrieval_history_by_identity(tmp_path) -> None:
+    retrieval = RetrievalSkillLibrary(tmp_path / "retrieval.json", persist=False)
+    retrieval.add(
+        RetrievalSkill(
+            "z_skill", "alpha", "retrieval", "always", "search", "quote", "task_train", 0.8
+        )
+    )
+    retrieval.add(
+        RetrievalSkill(
+            "a_skill", "zeta", "retrieval", "always", "search", "quote", "task_train", 0.8
+        )
+    )
+
+    class Agent:
+        def __init__(self, library):
+            self.library = library
+
+    class Harness:
+        def __init__(self):
+            self.retrieval = Agent(retrieval)
+
+    snapshot = snapshot_policy_skills(HarnessPolicy(), Harness())
+
+    assert [record["skill_id"] for record in snapshot.retrieval_skills] == ["a_skill", "z_skill"]
+    assert set(snapshot.retrieval_skills[0]) >= {
+        "version",
+        "parent_version",
+        "stage",
+        "status",
+        "applicability",
+        "query_steps",
+        "counterevidence_rule",
+        "validation_smae_gain",
+        "validation_srmse_gain",
+    }
+    assert "code" not in snapshot.retrieval_skills[0]
+
+
 def test_evaluation_diagnostics_separate_generation_from_selection_failure() -> None:
     outcomes = (
         ResolvedOutcome(

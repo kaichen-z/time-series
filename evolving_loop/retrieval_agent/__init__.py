@@ -12,15 +12,24 @@ from .schemas import (
     build_round1_payload,
     build_round2_payload,
 )
-from .skill_library import RetrievalSkill, RetrievalSkillLibrary
+from .skill_library import (
+    RetrievalApplicability,
+    RetrievalSkill,
+    RetrievalSkillError,
+    RetrievalSkillLibrary,
+    RetrievalSkillOperation,
+)
 
 __all__ = [
     "Evidence",
     "EvidenceImpact",
     "RetrievalAgent",
     "RetrievalResult",
+    "RetrievalApplicability",
     "RetrievalSkill",
+    "RetrievalSkillError",
     "RetrievalSkillLibrary",
+    "RetrievalSkillOperation",
     "EvidenceChain",
     "EvidenceCitation",
     "FinalRetrievalCard",

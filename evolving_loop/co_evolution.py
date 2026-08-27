@@ -124,8 +124,19 @@ def snapshot_policy_skills(
         if library is None:
             return current
         return tuple(
-            asdict(skill)
-            for skill in sorted(library.all(), key=lambda item: item.name)
+            (
+                skill.to_payload()
+                if callable(getattr(skill, "to_payload", None))
+                else asdict(skill)
+            )
+            for skill in sorted(
+                library.all(),
+                key=lambda item: (
+                    getattr(item, "skill_id", ""),
+                    getattr(item, "version", 0),
+                    getattr(item, "name", ""),
+                ),
+            )
         )
 
     return replace(

@@ -98,6 +98,7 @@ def test_public_outcome_generates_both_persistent_skill_libraries() -> None:
         assert retrieval_path.exists()
         assert decision_path.exists()
         assert len(retrieval_library) == 1
+        assert retrieval_library.get("retrieve_explicit_event_window").status == "candidate"
         assert len(decision_library) == 1
 
 
@@ -169,7 +170,7 @@ def test_decision_skill_gate_uses_mae_regret() -> None:
         assert len(decision_library) == 0
 
 
-def test_skill_summaries_are_available_but_unknown_claims_are_not_trusted() -> None:
+def test_candidate_retrieval_skills_are_not_projected_into_prompts() -> None:
     with tempfile.TemporaryDirectory() as directory:
         harness, retrieval_library, decision_library = _harness(directory)
         task = _task()
@@ -206,5 +207,5 @@ def test_skill_summaries_are_available_but_unknown_claims_are_not_trusted() -> N
 
         assert second.retrieval.used_skill_names == ("retrieve_explicit_event_window",)
         assert second.decision.used_skill_names == ("prefer_verified_window",)
-        assert "retrieve_explicit_event_window" in retrieval_llm.calls[0]["messages"][0]["content"]
+        assert "retrieve_explicit_event_window" not in retrieval_llm.calls[0]["messages"][0]["content"]
         assert "prefer_verified_window" in decision_llm.calls[0]["messages"][0]["content"]
