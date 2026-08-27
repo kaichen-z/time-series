@@ -787,8 +787,8 @@ def test_evaluator_promotion_write_failure_is_atomic(
         for index, entity in enumerate(("Alpha", "Alpha", "Beta"), start=1)
     )
 
-    def fail_replace(source, destination):
-        del source, destination
+    def fail_replace(source, destination, **kwargs):
+        del source, destination, kwargs
         raise OSError("simulated atomic replace failure")
 
     monkeypatch.setattr(skill_library_module.os, "replace", fail_replace)

@@ -6,7 +6,6 @@ import json
 import math
 import os
 import stat
-import tempfile
 import weakref
 from copy import copy
 from dataclasses import dataclass, replace
@@ -512,31 +511,165 @@ def _safe_artifact_path(path: Path) -> Path:
 
 
 def _safe_read_bytes(path: Path) -> bytes:
-    safe = _safe_artifact_path(path)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(safe, flags)
-        with os.fdopen(descriptor, "rb") as handle:
-            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                raise RetrievalSkillError(
-                    f"retrieval Skill checkpoint is not a regular file: {path}"
-                )
-            return handle.read()
+        safe, parent_descriptor = _open_artifact_parent(path, create=False)
+    except FileNotFoundError as error:
+        raise RetrievalSkillError(
+            f"retrieval Skill checkpoint does not exist: {path}"
+        ) from error
+    try:
+        _revalidate_artifact_parent(safe, parent_descriptor)
+        encoded = _read_artifact_entry(parent_descriptor, safe.name)
+        _revalidate_artifact_parent(safe, parent_descriptor)
+        return encoded
     except RetrievalSkillError:
         raise
     except OSError as error:
         raise RetrievalSkillError(
             f"retrieval Skill checkpoint path changed: {path}"
         ) from error
+    finally:
+        os.close(parent_descriptor)
 
 
-def _unique_temporary(path: Path, encoded: bytes) -> Path:
-    descriptor, name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=path.parent,
+def _open_artifact_parent(path: Path, *, create: bool) -> tuple[Path, int]:
+    safe = _safe_artifact_path(path)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
     )
-    temporary = Path(name)
+    try:
+        descriptor = os.open(safe.anchor, flags)
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise RetrievalSkillError(
+            "cannot open retrieval Skill checkpoint root"
+        ) from error
+    try:
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise RetrievalSkillError(
+                "retrieval Skill checkpoint root is not a directory"
+            )
+        for component in safe.parent.parts[1:]:
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(component, 0o755, dir_fd=descriptor)
+                child = os.open(component, flags, dir_fd=descriptor)
+            if not stat.S_ISDIR(os.fstat(child).st_mode):
+                os.close(child)
+                raise RetrievalSkillError(
+                    "retrieval Skill checkpoint parent is not a directory"
+                )
+            os.close(descriptor)
+            descriptor = child
+        return safe, descriptor
+    except FileNotFoundError:
+        os.close(descriptor)
+        raise
+    except RetrievalSkillError:
+        os.close(descriptor)
+        raise
+    except OSError as error:
+        os.close(descriptor)
+        raise RetrievalSkillError(
+            "retrieval Skill checkpoint parent path changed while opening"
+        ) from error
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _revalidate_artifact_parent(path: Path, descriptor: int) -> None:
+    try:
+        _safe, current_descriptor = _open_artifact_parent(path, create=False)
+    except FileNotFoundError as error:
+        raise RetrievalSkillError(
+            "retrieval Skill checkpoint parent path changed"
+        ) from error
+    try:
+        expected = os.fstat(descriptor)
+        current = os.fstat(current_descriptor)
+        if (expected.st_dev, expected.st_ino) != (current.st_dev, current.st_ino):
+            raise RetrievalSkillError(
+                "retrieval Skill checkpoint parent directory changed"
+            )
+    finally:
+        os.close(current_descriptor)
+
+
+def _read_artifact_entry(parent_descriptor: int, name: str) -> bytes:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+    with os.fdopen(descriptor, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise RetrievalSkillError(
+                "retrieval Skill checkpoint is not a regular file"
+            )
+        return handle.read()
+
+
+def _artifact_entry_exists(parent_descriptor: int, name: str) -> bool:
+    try:
+        metadata = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(metadata.st_mode):
+        raise RetrievalSkillError(
+            "retrieval Skill checkpoint path contains a symlink"
+        )
+    return True
+
+
+def _safe_artifact_exists(path: Path) -> bool:
+    try:
+        safe, parent_descriptor = _open_artifact_parent(path, create=False)
+    except FileNotFoundError:
+        return False
+    try:
+        _revalidate_artifact_parent(safe, parent_descriptor)
+        exists = _artifact_entry_exists(parent_descriptor, safe.name)
+        _revalidate_artifact_parent(safe, parent_descriptor)
+        return exists
+    finally:
+        os.close(parent_descriptor)
+
+
+def _unique_temporary(
+    parent_descriptor: int, target_name: str, encoded: bytes
+) -> str:
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    for _attempt in range(128):
+        temporary = f".{target_name}.{os.urandom(16).hex()}.tmp"
+        try:
+            descriptor = os.open(
+                temporary,
+                flags,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise RetrievalSkillError(
+            "cannot allocate a unique retrieval Skill checkpoint temporary"
+        )
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(encoded)
@@ -544,7 +677,7 @@ def _unique_temporary(path: Path, encoded: bytes) -> Path:
             os.fsync(handle.fileno())
     except Exception:
         try:
-            temporary.unlink()
+            os.unlink(temporary, dir_fd=parent_descriptor)
         except OSError:
             pass
         raise
@@ -747,7 +880,7 @@ def _build_skill_authority_boundary():
         path: str | Path, *, persist: bool = True
     ) -> object:
         source = Path(path)
-        if not source.exists():
+        if not _safe_artifact_exists(source):
             return RetrievalSkillLibrary(source, persist=persist)
         encoded, payloads = RetrievalSkillLibrary._read_current_checkpoint(source)
         if not any(
@@ -880,7 +1013,7 @@ class RetrievalSkillLibrary:
     @classmethod
     def load(cls, path: str | Path, *, persist: bool = True) -> "RetrievalSkillLibrary":
         source = Path(path)
-        if not source.exists():
+        if not _safe_artifact_exists(source):
             return cls(source, persist=persist)
         encoded, payloads = cls._read_current_checkpoint(source)
         if any(
@@ -939,7 +1072,7 @@ class RetrievalSkillLibrary:
         during the atomic trusted commit.
         """
         source = Path(path)
-        if not source.exists():
+        if not _safe_artifact_exists(source):
             return cls(source, persist=persist)
         encoded, payloads = cls._read_current_checkpoint(source)
         if not any(
@@ -1239,19 +1372,6 @@ class RetrievalSkillLibrary:
         _target: object | None = None,
     ) -> str:
         safe_path = _safe_artifact_path(self.path)
-        if self._file_sha256 is not None and (
-            not safe_path.exists() or _file_digest(safe_path) != self._file_sha256
-        ):
-            raise RetrievalSkillError(
-                "retrieval Skill checkpoint path was replaced or changed"
-            )
-        if self._file_sha256 is None and safe_path.exists():
-            raise RetrievalSkillError(
-                "retrieval Skill checkpoint path already exists without a loaded digest"
-            )
-        safe_path.parent.mkdir(parents=True, exist_ok=True)
-        safe_path = _safe_artifact_path(safe_path)
-        temporary: Path | None = None
         origins = dict(
             self._active_record_origins
             if active_record_origins is None
@@ -1288,19 +1408,40 @@ class RetrievalSkillLibrary:
             json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
         ).encode("utf-8")
         checkpoint_sha256 = hashlib.sha256(encoded).hexdigest()
+        safe_path, parent_descriptor = _open_artifact_parent(
+            safe_path, create=True
+        )
+        temporary: str | None = None
         witness_path: Path | None = None
+        witness_parent_descriptor: int | None = None
+        witness_temporary: str | None = None
         witness_created = False
         witness_directory_created = False
+        write_succeeded = False
         try:
-            temporary = _unique_temporary(safe_path, encoded)
+            _revalidate_artifact_parent(safe_path, parent_descriptor)
+            exists = _artifact_entry_exists(parent_descriptor, safe_path.name)
+            if self._file_sha256 is not None and (
+                not exists
+                or hashlib.sha256(
+                    _read_artifact_entry(parent_descriptor, safe_path.name)
+                ).hexdigest()
+                != self._file_sha256
+            ):
+                raise RetrievalSkillError(
+                    "retrieval Skill checkpoint path was replaced or changed"
+                )
+            if self._file_sha256 is None and exists:
+                raise RetrievalSkillError(
+                    "retrieval Skill checkpoint path already exists without a loaded digest"
+                )
+            temporary = _unique_temporary(
+                parent_descriptor, safe_path.name, encoded
+            )
             if active:
                 witness_path = _checkpoint_witness_path(
                     safe_path, checkpoint_sha256
                 )
-                _safe_artifact_path(witness_path)
-                witness_directory_created = not witness_path.parent.exists()
-                witness_path.parent.mkdir(parents=True, exist_ok=True)
-                witness_path = _safe_artifact_path(witness_path)
                 witness_payload = {
                     "schema_version": SKILL_CHECKPOINT_WITNESS_SCHEMA_VERSION,
                     "checkpoint_sha256": checkpoint_sha256,
@@ -1320,55 +1461,148 @@ class RetrievalSkillLibrary:
                     )
                     + "\n"
                 ).encode("utf-8")
+                witness_directory_name = witness_path.parent.name
+                try:
+                    os.mkdir(
+                        witness_directory_name,
+                        0o755,
+                        dir_fd=parent_descriptor,
+                    )
+                    witness_directory_created = True
+                except FileExistsError:
+                    pass
+                directory_flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0)
+                )
+                witness_parent_descriptor = os.open(
+                    witness_directory_name,
+                    directory_flags,
+                    dir_fd=parent_descriptor,
+                )
+                if not stat.S_ISDIR(
+                    os.fstat(witness_parent_descriptor).st_mode
+                ):
+                    raise RetrievalSkillError(
+                        "retrieval Skill provenance parent is not a directory"
+                    )
                 witness_temporary = _unique_temporary(
-                    witness_path,
+                    witness_parent_descriptor,
+                    witness_path.name,
                     witness_encoded,
                 )
                 try:
+                    _revalidate_artifact_parent(
+                        witness_path, witness_parent_descriptor
+                    )
                     try:
                         os.link(
                             witness_temporary,
-                            witness_path,
+                            witness_path.name,
+                            src_dir_fd=witness_parent_descriptor,
+                            dst_dir_fd=witness_parent_descriptor,
                             follow_symlinks=False,
                         )
                         witness_created = True
                     except FileExistsError:
-                        if _safe_read_bytes(witness_path) != witness_encoded:
+                        if (
+                            _read_artifact_entry(
+                                witness_parent_descriptor, witness_path.name
+                            )
+                            != witness_encoded
+                        ):
                             raise RetrievalSkillError(
                                 "immutable Retrieval Skill checkpoint witness changed"
                             )
                 finally:
-                    if witness_temporary.exists():
-                        witness_temporary.unlink()
+                    if witness_temporary is not None:
+                        try:
+                            os.unlink(
+                                witness_temporary,
+                                dir_fd=witness_parent_descriptor,
+                            )
+                        except FileNotFoundError:
+                            pass
+                        witness_temporary = None
+                _revalidate_artifact_parent(
+                    witness_path, witness_parent_descriptor
+                )
+                os.fsync(witness_parent_descriptor)
+            _revalidate_artifact_parent(safe_path, parent_descriptor)
             if self._file_sha256 is None:
                 try:
-                    os.link(temporary, safe_path, follow_symlinks=False)
+                    os.link(
+                        temporary,
+                        safe_path.name,
+                        src_dir_fd=parent_descriptor,
+                        dst_dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
                 except FileExistsError as error:
                     raise RetrievalSkillError(
                         "retrieval Skill checkpoint appeared during no-replace commit"
                     ) from error
-                temporary.unlink()
+                os.unlink(temporary, dir_fd=parent_descriptor)
+                temporary = None
             else:
-                if _file_digest(safe_path) != self._file_sha256:
+                if hashlib.sha256(
+                    _read_artifact_entry(parent_descriptor, safe_path.name)
+                ).hexdigest() != self._file_sha256:
                     raise RetrievalSkillError(
                         "retrieval Skill checkpoint changed before guarded replace"
                     )
-                os.replace(temporary, safe_path)
+                _revalidate_artifact_parent(safe_path, parent_descriptor)
+                os.replace(
+                    temporary,
+                    safe_path.name,
+                    src_dir_fd=parent_descriptor,
+                    dst_dir_fd=parent_descriptor,
+                )
+                temporary = None
+            _revalidate_artifact_parent(safe_path, parent_descriptor)
+            os.fsync(parent_descriptor)
+            write_succeeded = True
         except Exception:
-            if witness_created and witness_path is not None:
+            if (
+                witness_created
+                and witness_path is not None
+                and witness_parent_descriptor is not None
+            ):
                 try:
-                    witness_path.unlink()
-                except OSError:
-                    pass
-            if witness_directory_created and witness_path is not None:
-                try:
-                    witness_path.parent.rmdir()
+                    os.unlink(
+                        witness_path.name,
+                        dir_fd=witness_parent_descriptor,
+                    )
                 except OSError:
                     pass
             raise
         finally:
-            if temporary is not None and temporary.exists():
-                temporary.unlink()
+            if temporary is not None:
+                try:
+                    os.unlink(temporary, dir_fd=parent_descriptor)
+                except FileNotFoundError:
+                    pass
+            if witness_temporary is not None and witness_parent_descriptor is not None:
+                try:
+                    os.unlink(
+                        witness_temporary,
+                        dir_fd=witness_parent_descriptor,
+                    )
+                except FileNotFoundError:
+                    pass
+            if witness_parent_descriptor is not None:
+                os.close(witness_parent_descriptor)
+            if not write_succeeded and witness_directory_created:
+                try:
+                    os.rmdir(
+                        f".{safe_path.name}.provenance",
+                        dir_fd=parent_descriptor,
+                    )
+                except OSError:
+                    pass
+            os.close(parent_descriptor)
         return checkpoint_sha256
 
     @staticmethod
@@ -1523,6 +1757,18 @@ class RetrievalSkillLibrary:
     def all(self) -> tuple[RetrievalSkill, ...]:
         return self._all_from(self._skills)
 
+    def active_skills(self) -> tuple[RetrievalSkill, ...]:
+        """Return current prompt-active identities without applying task selectors."""
+        _require_active_library_authority(self)
+        return tuple(
+            skill
+            for skill in sorted(
+                (history[-1] for history in self._skills.values()),
+                key=lambda item: item.skill_id,
+            )
+            if skill.is_active
+        )
+
     def for_stage(
         self,
         stage: Literal["round1", "round2"],
@@ -1533,12 +1779,10 @@ class RetrievalSkillLibrary:
     ) -> tuple[RetrievalSkill, ...]:
         if stage not in {"round1", "round2"}:
             raise RetrievalSkillError("prompt projection requires round1 or round2")
-        _require_active_library_authority(self)
         return tuple(
             skill
-            for skill in sorted((history[-1] for history in self._skills.values()), key=lambda item: item.skill_id)
-            if skill.is_active
-            and skill.stage in {stage, "both"}
+            for skill in self.active_skills()
+            if skill.stage in {stage, "both"}
             and skill.applicability.matches(
                 assumption_kinds=assumption_kinds,
                 gap_types=gap_types,

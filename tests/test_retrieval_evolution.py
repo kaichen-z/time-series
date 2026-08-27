@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
+import subprocess
+import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
 
+import evolving_loop.retrieval_agent.evolution as evolution_module
 from common.data import Task
 from common.llm import FakeLLMClient, LLMResponse, TransientLLMError
 from evolving_loop.data import ContextTask, Document
@@ -14,6 +19,7 @@ from evolving_loop.retrieval_agent.evolution import (
     RetrievalEvaluation,
     RetrievalEvolutionConfig,
     RetrievalEvolutionEngine,
+    RetrievalEvolutionError,
     RetrievalEvolutionResult,
     RetrievalGenerationTrace,
     build_inference_cache_key,
@@ -202,11 +208,21 @@ class _FakeEvaluator:
             raise ValueError("forecasting candidate failed")
         error = self.errors.get(genome.version, 1.0)
         overrides = (
-            self.dev_overrides
+            dict(self.dev_overrides)
             if stage == "child_dev" and genome.version != "v000"
             else {}
         )
-        return _evaluation(genome.version, tasks, error=error, **overrides)
+        trace_final_smae = overrides.pop("trace_final_smae", None)
+        result = _evaluation(genome.version, tasks, error=error, **overrides)
+        if trace_final_smae is not None:
+            result = replace(
+                result,
+                task_traces=tuple(
+                    {**trace, "final_smae": trace_final_smae}
+                    for trace in result.task_traces
+                ),
+            )
+        return result
 
 
 def _engine(
@@ -326,6 +342,78 @@ def test_combined_tail_metrics_require_complete_finite_task_traces_and_linear_qu
                 ),
             ),
         )
+
+
+def test_screen_tail_gates_are_derived_from_complete_task_traces() -> None:
+    class MisreportedScreenTailEvaluator(_FakeEvaluator):
+        def evaluate(self, genome, tasks, **kwargs):
+            result = super().evaluate(genome, tasks, **kwargs)
+            if genome.version == "v001" and kwargs["stage"].endswith(
+                "child_A_screen_train"
+            ):
+                return replace(
+                    result,
+                    p90_smae=0.9,
+                    p95_smae=0.9,
+                    task_traces=tuple(
+                        {**trace, "final_smae": 9.0}
+                        for trace in result.task_traces
+                    ),
+                )
+            return result
+
+    evaluator = MisreportedScreenTailEvaluator(
+        errors={"v000": 1.0, "v001": 0.9, "v002": 1.2, "v003": 1.3}
+    )
+    engine, _llm = _engine(evaluator, _responses(1))
+
+    result = engine.evolve(
+        RetrievalGenome.seed(),
+        _tasks("train", 80),
+        _tasks("dev", 20, entity_offset=100),
+    )
+
+    assert result.generations[0].rejection_reasons["v001"].startswith(
+        "screen_gate:"
+    )
+    assert not any(
+        call.version == "v001" and "child_train_fold" in call.stage
+        for call in evaluator.calls
+    )
+
+
+def test_dev_tail_gates_are_derived_from_complete_task_traces() -> None:
+    class MisreportedDevTailEvaluator(_FakeEvaluator):
+        def evaluate(self, genome, tasks, **kwargs):
+            result = super().evaluate(genome, tasks, **kwargs)
+            if genome.version == "v001" and kwargs["stage"] == "child_dev":
+                return replace(
+                    result,
+                    p90_smae=0.9,
+                    p95_smae=0.9,
+                    task_traces=tuple(
+                        {**trace, "final_smae": 9.0}
+                        for trace in result.task_traces
+                    ),
+                )
+            return result
+
+    evaluator = MisreportedDevTailEvaluator(
+        errors={"v000": 1.0, "v001": 0.9, "v002": 1.2, "v003": 1.3}
+    )
+    engine, _llm = _engine(evaluator, _responses(1))
+
+    result = engine.evolve(
+        RetrievalGenome.seed(),
+        _tasks("train", 80),
+        _tasks("dev", 20, entity_offset=100),
+    )
+
+    assert result.accepted is False
+    assert result.child_dev is not None
+    assert result.child_dev.p90_smae == 9.0
+    assert result.child_dev.p95_smae == 9.0
+    assert {"p90_smae", "p95_smae"}.issubset(result.rejection_reasons)
 
 
 def test_complete_candidate_scope_validation_owns_only_a_b_or_c_fields(tmp_path) -> None:
@@ -478,7 +566,7 @@ def test_complete_candidate_scope_validation_owns_only_a_b_or_c_fields(tmp_path)
         ("B", "round1_skill", False),
         ("C", "round2_skill", True),
         ("C", "both_skill", False),
-        ("A", "constrained_round1", False),
+        ("A", "constrained_round1", True),
     ):
         payload = _proposal(parent, f"v{100 + len(skill_id) + ord(scope):03d}", scope)
         payload["active_skill_ids"] = [skill_id]
@@ -507,6 +595,90 @@ def test_complete_candidate_scope_validation_owns_only_a_b_or_c_fields(tmp_path)
     )
 
     assert rejections["v001"] == "invalid_scoped_candidate"
+
+
+def test_mutation_prompt_contains_only_the_sanitized_parent_skill_catalog(
+    tmp_path,
+) -> None:
+    parent = RetrievalGenome.seed()
+    release = _write_accepted_retrieval_release(
+        tmp_path / "releases",
+        replace(
+            parent,
+            version="v900",
+            parent=parent.version,
+            active_skill_ids=("future_only",),
+        ),
+        skills=(
+            {
+                "skill_id": "future_only",
+                "version": 1,
+                "parent_version": None,
+                "stage": "round1",
+                "status": "accepted",
+                "name": "future_only",
+                "description": "A validated future-event strategy.",
+                "applicability": {
+                    "assumption_kinds": ["future_event"],
+                    "gap_types": [],
+                    "temporal_relations": ["during"],
+                },
+                "query_steps": ["Search future events."],
+                "required_chain_fields": ["entity"],
+                "counterevidence_rule": "Search for cancellation.",
+                "failure_conditions": ["No target match."],
+                "validated_task_ids": ["private_train_task"],
+                "validated_entities": ["private_entity"],
+                "validation_smae_gain": 0.2,
+                "validation_srmse_gain": 0.1,
+                "merged_from_skill_ids": [],
+                "quarantine_reason": None,
+            },
+        ),
+        audit={
+            "state": "accepted",
+            "train_dev_split_sha256": "1" * 64,
+            "verifier_sha256": "2" * 64,
+            "evaluator_sha256": "3" * 64,
+            "metric_sha256": "4" * 64,
+            "metric_cap": 5.0,
+            "train_summary": {"task_count": 80},
+            "dev_summary": {"task_count": 20},
+            "acceptance_reason": "all gates passed",
+        },
+    )
+    library = RetrievalSkillLibrary.from_release(release.path)
+    engine, llm = _engine(_FakeEvaluator(), _responses(1))
+    engine.skill_library = library
+
+    engine.evolve(
+        parent,
+        _tasks("train", 80),
+        _tasks("dev", 20, entity_offset=100),
+    )
+
+    prompt = json.loads(llm.calls[0]["messages"][0]["content"])
+    assert prompt["active_skill_catalog"] == [
+        {
+            "skill_id": "future_only",
+            "stage": "round1",
+            "applicability": {
+                "assumption_kinds": ["future_event"],
+                "gap_types": [],
+                "temporal_relations": ["during"],
+            },
+        }
+    ]
+    encoded = json.dumps(prompt, sort_keys=True)
+    for forbidden in (
+        "private_train_task",
+        "private_entity",
+        "validation_smae_gain",
+        "validation_srmse_gain",
+        "validated_task_ids",
+        "validated_entities",
+    ):
+        assert forbidden not in encoded
 
 
 def test_invalid_scope_proposal_still_leaves_exactly_three_a_b_c_child_slots() -> None:
@@ -1154,35 +1326,56 @@ def test_checkpoint_scientific_binding_rejects_json_type_drift(tmp_path) -> None
         resumed.evolve(RetrievalGenome.seed(), train, dev)
 
 
-def test_checkpoint_binds_the_retrieval_harness_factory(tmp_path) -> None:
+def test_checkpoint_binds_explicit_harness_implementation_and_config_digest(
+    tmp_path,
+) -> None:
     checkpoint = tmp_path / "checkpoint.json"
     train = _tasks("train", 80)
     dev = _tasks("dev", 20, entity_offset=100)
     evaluator = _FakeEvaluator(errors={"v000": 1.0, "v001": 0.9, "v002": 0.95, "v003": 1.2})
     engine, llm = _engine(evaluator, _responses(1), checkpoint_path=checkpoint)
 
-    def factory_a(*_args, **_kwargs):
-        return None
+    def configured_factory(value):
+        def factory(*_args, **_kwargs):
+            return value
 
-    def factory_b(*_args, **_kwargs):
-        return None
+        return factory
+
+    factory_a = configured_factory("behavior-a")
+    factory_b = configured_factory("behavior-b")
+    assert factory_a.__qualname__ == factory_b.__qualname__
 
     first = RetrievalEvolutionEngine(
         llm,
         evaluator,
-        engine.config,
+        replace(engine.config, harness_hash="harness-implementation-config-a"),
         harness_factory=factory_a,
     )
     first.evolve(RetrievalGenome.seed(), train, dev)
     resumed = RetrievalEvolutionEngine(
         FakeLLMClient([]),
         _FakeEvaluator(),
-        engine.config,
+        replace(engine.config, harness_hash="harness-implementation-config-b"),
         harness_factory=factory_b,
     )
 
     with pytest.raises(RetrievalCheckpointError, match="scientific inputs"):
         resumed.evolve(RetrievalGenome.seed(), train, dev)
+
+
+def test_harness_factory_without_explicit_frozen_digest_fails_construction() -> None:
+    def factory(*_args, **_kwargs):
+        return None
+
+    with pytest.raises(
+        RetrievalEvolutionError, match="harness.*digest|harness_hash"
+    ):
+        RetrievalEvolutionEngine(
+            FakeLLMClient([]),
+            _FakeEvaluator(),
+            RetrievalEvolutionConfig(),
+            harness_factory=factory,
+        )
 
 
 def test_checkpoint_binds_transient_retry_science_policy(tmp_path) -> None:
@@ -1231,6 +1424,111 @@ def test_checkpoint_writer_ignores_attacker_fixed_temp_symlink(tmp_path) -> None
 
     assert victim.read_text(encoding="utf-8") == "do-not-touch"
     assert fixed_temporary.is_symlink()
+
+
+def test_checkpoint_read_rejects_parent_replacement_at_file_open(
+    tmp_path, monkeypatch
+) -> None:
+    run_directory = tmp_path / "run"
+    run_directory.mkdir()
+    checkpoint = run_directory / "checkpoint.json"
+    train = _tasks("train", 80)
+    dev = _tasks("dev", 20, entity_offset=100)
+    engine, _ = _engine(
+        _FakeEvaluator(
+            errors={"v000": 1.0, "v001": 0.9, "v002": 1.2, "v003": 1.3}
+        ),
+        _responses(1),
+        checkpoint_path=checkpoint,
+    )
+    engine.evolve(RetrievalGenome.seed(), train, dev)
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / checkpoint.name).write_bytes(checkpoint.read_bytes())
+    displaced = tmp_path / "displaced"
+    real_open = evolution_module.os.open
+    swapped = False
+
+    def swap_before_file_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        is_checkpoint_open = (
+            dir_fd is None and Path(path) == checkpoint
+        ) or (dir_fd is not None and path == checkpoint.name)
+        if not swapped and is_checkpoint_open:
+            swapped = True
+            run_directory.rename(displaced)
+            replacement.rename(run_directory)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(evolution_module.os, "open", swap_before_file_open)
+    resumed, _ = _engine(_FakeEvaluator(), [], checkpoint_path=checkpoint)
+
+    with pytest.raises(
+        RetrievalCheckpointError,
+        match="path|parent|directory|changed",
+    ):
+        resumed.evolve(RetrievalGenome.seed(), train, dev)
+    assert swapped
+
+
+@pytest.mark.parametrize("operation", ("link", "replace"))
+def test_checkpoint_commit_rejects_parent_replacement_at_entry_operation(
+    tmp_path, monkeypatch, operation
+) -> None:
+    run_directory = tmp_path / "run"
+    run_directory.mkdir()
+    checkpoint = run_directory / "checkpoint.json"
+    engine, _ = _engine(
+        _FakeEvaluator(),
+        [],
+        checkpoint_path=checkpoint,
+    )
+    engine._scientific_inputs = {"science": "frozen"}
+    engine._original_parent = RetrievalGenome.seed()
+    engine._current_parent = RetrievalGenome.seed()
+    if operation == "replace":
+        engine._save_checkpoint(status="running", result=None)
+
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    if operation == "replace":
+        (replacement / checkpoint.name).write_text(
+            "do-not-touch", encoding="utf-8"
+        )
+    displaced = tmp_path / "displaced"
+    real_operation = getattr(evolution_module.os, operation)
+    swapped = False
+
+    def swap_before_entry_operation(source, destination, *args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            run_directory.rename(displaced)
+            replacement.rename(run_directory)
+            if kwargs.get("src_dir_fd") is None:
+                shutil.copyfile(
+                    displaced / Path(source).name,
+                    run_directory / Path(source).name,
+                )
+        return real_operation(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(
+        evolution_module.os,
+        operation,
+        swap_before_entry_operation,
+    )
+    engine._trace.append({"kind": "force_distinct_checkpoint_bytes"})
+
+    with pytest.raises(
+        RetrievalCheckpointError,
+        match="path|parent|directory|changed",
+    ):
+        engine._save_checkpoint(status="running", result=None)
+    assert swapped
+    if operation == "replace":
+        assert checkpoint.read_text(encoding="utf-8") == "do-not-touch"
+    else:
+        assert not checkpoint.exists()
 
 
 @pytest.mark.parametrize("symlink_kind", ("path", "parent"))
@@ -1295,7 +1593,7 @@ def test_checkpoint_authority_rejects_a_fully_rewritten_release_decision(
     dev = _tasks("dev", 20, entity_offset=100)
     evaluator = _FakeEvaluator(
         errors={"v000": 1.0, "v001": 0.9, "v002": 0.95, "v003": 1.2},
-        dev_overrides={"p95_smae": 1.01},
+        dev_overrides={"trace_final_smae": 1.01},
     )
     engine, _llm = _engine(evaluator, _responses(1), checkpoint_path=checkpoint)
     result = engine.evolve(RetrievalGenome.seed(), train, dev)
@@ -1320,6 +1618,170 @@ def test_checkpoint_authority_rejects_a_fully_rewritten_release_decision(
         resumed.evolve(RetrievalGenome.seed(), train, dev)
 
 
+def test_fresh_operator_activation_requires_an_independently_trusted_digest_and_epoch(
+    tmp_path,
+) -> None:
+    checkpoint = tmp_path / "checkpoint.json"
+    train = _tasks("train", 80)
+    dev = _tasks("dev", 20, entity_offset=100)
+    engine, _llm = _engine(
+        _FakeEvaluator(
+            errors={"v000": 1.0, "v001": 0.9, "v002": 0.95, "v003": 1.2},
+            dev_overrides={"trace_final_smae": 4.0},
+        ),
+        _responses(1),
+        checkpoint_path=checkpoint,
+    )
+    result = engine.evolve(RetrievalGenome.seed(), train, dev)
+    assert result.accepted is False
+    trusted_sha256 = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    trusted_epoch = engine._checkpoint_authority_epoch
+    assert type(trusted_epoch) is int
+
+    forged = json.loads(checkpoint.read_text(encoding="utf-8"))
+    forged["result"].update(
+        {
+            "accepted": True,
+            "acceptance_reasons": ["all_dev_gates_passed"],
+            "rejection_reasons": [],
+            "selected_genome": forged["result"]["train_winner"],
+            "release_genome": forged["result"]["train_winner"],
+        }
+    )
+    checkpoint.write_text(
+        json.dumps(forged, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    script = f"""
+from pathlib import Path
+from evolving_loop.retrieval_agent.evolution import (
+    RetrievalCheckpointError,
+    _authorize_retrieval_evolution_checkpoint_for_operator,
+)
+try:
+    _authorize_retrieval_evolution_checkpoint_for_operator(
+        Path({str(checkpoint)!r}),
+        expected_sha256={trusted_sha256!r},
+        expected_epoch={trusted_epoch!r},
+    )
+except RetrievalCheckpointError:
+    raise SystemExit(0)
+raise SystemExit("forged checkpoint was activated")
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_authenticated_running_checkpoint_replays_completed_train_winner(
+    tmp_path,
+) -> None:
+    checkpoint = tmp_path / "checkpoint.json"
+    train = _tasks("train", 80)
+    dev = _tasks("dev", 20, entity_offset=100)
+    engine, _llm = _engine(
+        _FakeEvaluator(
+            errors={"v000": 1.0, "v001": 0.9, "v002": 0.95, "v003": 1.2}
+        ),
+        _responses(2),
+        checkpoint_path=checkpoint,
+        generations=2,
+    )
+    parent = RetrievalGenome.seed()
+    engine._validate_inputs(parent, train, dev)
+    screen, remaining_folds = engine._partition_train(train)
+    engine._scientific_inputs = engine._science_signature(parent, train, dev)
+    assert engine._load_checkpoint(
+        parent, train, dev, screen, remaining_folds
+    ) is None
+    engine._run_generation(0, screen, remaining_folds)
+    genuine = engine._generations[0]
+    forged_winner = RetrievalGenome.from_payload(genuine.child_proposals[2])
+    engine._generations[0] = replace(
+        genuine,
+        train_winner_version=forged_winner.version,
+        train_winner_fingerprint=forged_winner.fingerprint(),
+    )
+    engine._current_parent = forged_winner
+    for event in engine._trace:
+        if event.get("kind") == "generation_completed":
+            event["train_winner"] = forged_winner.version
+    engine._save_checkpoint(status="running", result=None)
+
+    resumed_evaluator = _FakeEvaluator()
+    resumed, _ = _engine(
+        resumed_evaluator,
+        [
+            json.dumps(_proposal(forged_winner, "v004", "A")),
+            json.dumps(_proposal(forged_winner, "v005", "B")),
+            json.dumps(_proposal(forged_winner, "v006", "C")),
+        ],
+        checkpoint_path=checkpoint,
+        generations=2,
+    )
+
+    with pytest.raises(
+        RetrievalCheckpointError,
+        match="replay|selection|winner|generation|Train",
+    ):
+        resumed.evolve(parent, train, dev)
+    assert resumed_evaluator.calls == []
+
+
+def test_running_checkpoint_rejects_out_of_order_partial_evaluation_coverage(
+    tmp_path,
+) -> None:
+    checkpoint = tmp_path / "checkpoint.json"
+    train = _tasks("train", 80)
+    dev = _tasks("dev", 20, entity_offset=100)
+    parent = RetrievalGenome.seed()
+    engine, _llm = _engine(
+        _FakeEvaluator(),
+        _responses(1),
+        checkpoint_path=checkpoint,
+    )
+    engine._validate_inputs(parent, train, dev)
+    screen, remaining_folds = engine._partition_train(train)
+    engine._scientific_inputs = engine._science_signature(parent, train, dev)
+    assert engine._load_checkpoint(
+        parent, train, dev, screen, remaining_folds
+    ) is None
+    children, _rejections = engine._children_for_generation(
+        0,
+        parent,
+        parent_library=engine._library_for(parent),
+    )
+    child_b = dict(children)["B"]
+    engine._evaluate_batch(
+        child_b,
+        screen,
+        stage="g0_child_B_screen_train",
+        readonly=False,
+        library=engine._library_for(child_b),
+    )
+
+    resumed_evaluator = _FakeEvaluator()
+    resumed, _ = _engine(
+        resumed_evaluator,
+        [],
+        checkpoint_path=checkpoint,
+    )
+
+    with pytest.raises(
+        RetrievalCheckpointError,
+        match="stage|cursor|coverage|schedule|outcome",
+    ):
+        resumed.evolve(parent, train, dev)
+    assert resumed_evaluator.calls == []
+
+
 def test_authenticated_checkpoint_rederives_rejected_dev_acceptance(tmp_path) -> None:
     checkpoint = tmp_path / "checkpoint.json"
     train = _tasks("train", 80)
@@ -1327,7 +1789,7 @@ def test_authenticated_checkpoint_rederives_rejected_dev_acceptance(tmp_path) ->
     engine, _llm = _engine(
         _FakeEvaluator(
             errors={"v000": 1.0, "v001": 0.9, "v002": 0.95, "v003": 1.2},
-            dev_overrides={"p95_smae": 1.01},
+            dev_overrides={"trace_final_smae": 1.01},
         ),
         _responses(1),
         checkpoint_path=checkpoint,
@@ -1538,7 +2000,7 @@ def test_completed_result_parser_never_coerces_json_types(
 
 
 @pytest.mark.parametrize("mutation", ("summary_integer", "trace_integer"))
-def test_checkpoint_evaluation_parser_requires_exact_metric_json_types(
+def test_checkpoint_evaluation_parser_normalizes_finite_integer_metrics(
     mutation,
 ) -> None:
     payload = _evaluation("v001", _tasks("train", 1)).to_payload()
@@ -1547,8 +2009,63 @@ def test_checkpoint_evaluation_parser_requires_exact_metric_json_types(
     else:
         payload["task_traces"][0]["final_smae"] = 1
 
-    with pytest.raises(RetrievalCheckpointError, match="evaluation|metric|trace"):
+    parsed = RetrievalEvaluation.from_payload(payload)
+
+    assert type(parsed.mean_final_smae) is float
+    assert type(parsed.task_traces[0]["final_smae"]) is float
+
+
+@pytest.mark.parametrize("mutation", ("summary_boolean", "trace_boolean"))
+def test_checkpoint_evaluation_parser_rejects_boolean_metrics(mutation) -> None:
+    payload = _evaluation("v001", _tasks("train", 1)).to_payload()
+    if mutation == "summary_boolean":
+        payload["mean_final_smae"] = True
+    else:
+        payload["task_traces"][0]["final_smae"] = False
+
+    with pytest.raises(RetrievalCheckpointError, match="evaluation|metric|trace|finite"):
         RetrievalEvaluation.from_payload(payload)
+
+
+def test_evaluator_integer_trace_metrics_persist_and_resume_as_floats(tmp_path) -> None:
+    class IntegerTraceEvaluator(_FakeEvaluator):
+        def evaluate(self, genome, tasks, **kwargs):
+            result = super().evaluate(genome, tasks, **kwargs)
+            return replace(
+                result,
+                task_traces=tuple(
+                    {**trace, "final_smae": 1}
+                    for trace in result.task_traces
+                ),
+            )
+
+    checkpoint = tmp_path / "checkpoint.json"
+    train = _tasks("train", 80)
+    dev = _tasks("dev", 20, entity_offset=100)
+    first, _ = _engine(
+        IntegerTraceEvaluator(
+            errors={"v000": 1.0, "v001": 0.9, "v002": 1.2, "v003": 1.3}
+        ),
+        _responses(1),
+        checkpoint_path=checkpoint,
+    )
+    expected = first.evolve(RetrievalGenome.seed(), train, dev)
+    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert all(
+        type(trace["final_smae"]) is float
+        for record in payload["evaluation_cache"].values()
+        for trace in record["evaluation"]["task_traces"]
+    )
+
+    resumed_evaluator = _FakeEvaluator()
+    resumed, _ = _engine(
+        resumed_evaluator,
+        [],
+        checkpoint_path=checkpoint,
+    )
+
+    assert resumed.evolve(RetrievalGenome.seed(), train, dev) == expected
+    assert resumed_evaluator.calls == []
 
 
 def test_duplicate_task_trace_is_a_forecasting_failure_not_full_coverage() -> None:
@@ -1746,7 +2263,7 @@ def test_resume_never_retries_a_checkpointed_terminal_forecasting_failure(
 def test_rejected_dev_gate_has_complete_trace_and_never_publishes_release() -> None:
     evaluator = _FakeEvaluator(
         errors={"v000": 1.0, "v001": 0.9, "v002": 0.95, "v003": 1.2},
-        dev_overrides={"p95_smae": 1.01},
+        dev_overrides={"trace_final_smae": 1.01},
     )
     engine, _llm = _engine(evaluator, _responses(1))
 

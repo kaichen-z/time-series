@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-import json
-import hashlib
 import copy
+import hashlib
+import json
 import pickle
+import shutil
 from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
 
+import evolving_loop.retrieval_agent.skill_library as skill_library_module
 from evolving_loop.retrieval_agent.skill_library import (
     RetrievalApplicability,
     RetrievalSkill,
@@ -873,6 +875,100 @@ def test_skill_writer_ignores_attacker_fixed_temp_symlink(tmp_path) -> None:
 
     assert victim.read_text(encoding="utf-8") == "do-not-touch"
     assert fixed_temporary.is_symlink()
+
+
+def test_skill_checkpoint_read_rejects_parent_replacement_at_file_open(
+    tmp_path, monkeypatch
+) -> None:
+    library_directory = tmp_path / "library"
+    library_directory.mkdir()
+    path = library_directory / "skills.json"
+    RetrievalSkillLibrary(path, (seed_skill(),)).save()
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / path.name).write_bytes(path.read_bytes())
+    displaced = tmp_path / "displaced"
+    real_open = skill_library_module.os.open
+    swapped = False
+
+    def swap_before_file_open(file, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        is_checkpoint_open = (
+            dir_fd is None and Path(file) == path
+        ) or (dir_fd is not None and file == path.name)
+        if not swapped and is_checkpoint_open:
+            swapped = True
+            library_directory.rename(displaced)
+            replacement.rename(library_directory)
+        return real_open(file, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(skill_library_module.os, "open", swap_before_file_open)
+
+    with pytest.raises(
+        RetrievalSkillError,
+        match="path|parent|directory|changed",
+    ):
+        RetrievalSkillLibrary.load(path)
+    assert swapped
+
+
+@pytest.mark.parametrize("operation", ("link", "replace"))
+def test_skill_checkpoint_commit_rejects_parent_replacement_at_entry_operation(
+    tmp_path, monkeypatch, operation
+) -> None:
+    library_directory = tmp_path / "library"
+    library_directory.mkdir()
+    path = library_directory / "skills.json"
+    library = RetrievalSkillLibrary(path, (seed_skill(),))
+    if operation == "replace":
+        library.save()
+
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    if operation == "replace":
+        (replacement / path.name).write_text("do-not-touch", encoding="utf-8")
+    displaced = tmp_path / "displaced"
+    real_operation = getattr(skill_library_module.os, operation)
+    swapped = False
+
+    def swap_before_entry_operation(source, destination, *args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            library_directory.rename(displaced)
+            replacement.rename(library_directory)
+            if kwargs.get("src_dir_fd") is None:
+                shutil.copyfile(
+                    displaced / Path(source).name,
+                    library_directory / Path(source).name,
+                )
+        return real_operation(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(
+        skill_library_module.os,
+        operation,
+        swap_before_entry_operation,
+    )
+
+    with pytest.raises(
+        RetrievalSkillError,
+        match="path|parent|directory|changed",
+    ):
+        if operation == "link":
+            library.save()
+        else:
+            library.apply_operations(
+                (
+                    RetrievalSkillOperation.repair(
+                        "explicit_window", repaired_skill()
+                    ),
+                )
+            )
+    assert swapped
+    if operation == "replace":
+        assert path.read_text(encoding="utf-8") == "do-not-touch"
+    else:
+        assert not path.exists()
 
 
 @pytest.mark.parametrize("symlink_kind", ("path", "parent"))

@@ -12,9 +12,8 @@ import math
 import os
 import random
 import stat
-import tempfile
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
@@ -161,31 +160,167 @@ def _safe_checkpoint_path(path: Path) -> Path:
 
 
 def _safe_checkpoint_read(path: Path) -> bytes:
-    safe = _safe_checkpoint_path(path)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(safe, flags)
-        with os.fdopen(descriptor, "rb") as handle:
-            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                raise RetrievalCheckpointError(
-                    "Retrieval evolution checkpoint is not a regular file"
-                )
-            return handle.read()
+        safe, parent_descriptor = _open_checkpoint_parent(path, create=False)
+    except FileNotFoundError as error:
+        raise RetrievalCheckpointError(
+            "Retrieval evolution checkpoint does not exist"
+        ) from error
+    try:
+        _revalidate_checkpoint_parent(safe, parent_descriptor)
+        encoded = _read_checkpoint_entry(parent_descriptor, safe.name)
+        _revalidate_checkpoint_parent(safe, parent_descriptor)
+        return encoded
     except RetrievalCheckpointError:
         raise
     except OSError as error:
         raise RetrievalCheckpointError(
             "Retrieval evolution checkpoint path changed while reading"
         ) from error
+    finally:
+        os.close(parent_descriptor)
 
 
-def _unique_checkpoint_temporary(path: Path, encoded: bytes) -> Path:
-    descriptor, name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=path.parent,
+def _open_checkpoint_parent(
+    path: Path, *, create: bool
+) -> tuple[Path, int]:
+    safe = _safe_checkpoint_path(path)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
     )
-    temporary = Path(name)
+    try:
+        descriptor = os.open(safe.anchor, flags)
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise RetrievalCheckpointError(
+            "cannot open Retrieval evolution checkpoint root"
+        ) from error
+    try:
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise RetrievalCheckpointError(
+                "Retrieval evolution checkpoint root is not a directory"
+            )
+        for component in safe.parent.parts[1:]:
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(component, 0o755, dir_fd=descriptor)
+                child = os.open(component, flags, dir_fd=descriptor)
+            if not stat.S_ISDIR(os.fstat(child).st_mode):
+                os.close(child)
+                raise RetrievalCheckpointError(
+                    "Retrieval evolution checkpoint parent is not a directory"
+                )
+            os.close(descriptor)
+            descriptor = child
+        return safe, descriptor
+    except FileNotFoundError:
+        os.close(descriptor)
+        raise
+    except RetrievalCheckpointError:
+        os.close(descriptor)
+        raise
+    except OSError as error:
+        os.close(descriptor)
+        raise RetrievalCheckpointError(
+            "Retrieval evolution checkpoint parent path changed while opening"
+        ) from error
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _revalidate_checkpoint_parent(path: Path, descriptor: int) -> None:
+    try:
+        _safe, current_descriptor = _open_checkpoint_parent(path, create=False)
+    except FileNotFoundError as error:
+        raise RetrievalCheckpointError(
+            "Retrieval evolution checkpoint parent path changed"
+        ) from error
+    try:
+        expected = os.fstat(descriptor)
+        current = os.fstat(current_descriptor)
+        if (expected.st_dev, expected.st_ino) != (current.st_dev, current.st_ino):
+            raise RetrievalCheckpointError(
+                "Retrieval evolution checkpoint parent directory changed"
+            )
+    finally:
+        os.close(current_descriptor)
+
+
+def _read_checkpoint_entry(parent_descriptor: int, name: str) -> bytes:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+    with os.fdopen(descriptor, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise RetrievalCheckpointError(
+                "Retrieval evolution checkpoint is not a regular file"
+            )
+        return handle.read()
+
+
+def _checkpoint_entry_exists(parent_descriptor: int, name: str) -> bool:
+    try:
+        metadata = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(metadata.st_mode):
+        raise RetrievalCheckpointError(
+            "Retrieval evolution checkpoint path contains a symlink"
+        )
+    return True
+
+
+def _safe_checkpoint_exists(path: Path) -> bool:
+    try:
+        safe, parent_descriptor = _open_checkpoint_parent(path, create=False)
+    except FileNotFoundError:
+        return False
+    try:
+        _revalidate_checkpoint_parent(safe, parent_descriptor)
+        exists = _checkpoint_entry_exists(parent_descriptor, safe.name)
+        _revalidate_checkpoint_parent(safe, parent_descriptor)
+        return exists
+    finally:
+        os.close(parent_descriptor)
+
+
+def _unique_checkpoint_temporary(
+    parent_descriptor: int, target_name: str, encoded: bytes
+) -> str:
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    for _attempt in range(128):
+        temporary = f".{target_name}.{os.urandom(16).hex()}.tmp"
+        try:
+            descriptor = os.open(
+                temporary,
+                flags,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise RetrievalCheckpointError(
+            "cannot allocate a unique Retrieval evolution checkpoint temporary"
+        )
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(encoded)
@@ -193,7 +328,7 @@ def _unique_checkpoint_temporary(path: Path, encoded: bytes) -> Path:
             os.fsync(handle.fileno())
     except Exception:
         try:
-            temporary.unlink()
+            os.unlink(temporary, dir_fd=parent_descriptor)
         except OSError:
             pass
         raise
@@ -221,12 +356,37 @@ def _build_checkpoint_authority_boundary():
             )
         return authorized[1]
 
-    def authorize_for_operator(path: str | Path) -> int:
+    def authorize_for_operator(
+        path: str | Path,
+        *,
+        expected_sha256: str,
+        expected_epoch: int,
+    ) -> int:
+        if (
+            type(expected_sha256) is not str
+            or len(expected_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in expected_sha256)
+            or type(expected_epoch) is not int
+            or expected_epoch < 1
+        ):
+            raise RetrievalCheckpointError(
+                "operator checkpoint authority requires an exact trusted digest and epoch"
+            )
         source = _safe_checkpoint_path(Path(path))
-        checkpoint_sha256 = hashlib.sha256(
-            _safe_checkpoint_read(source)
-        ).hexdigest()
-        return register(source, checkpoint_sha256)
+        checkpoint_sha256 = hashlib.sha256(_safe_checkpoint_read(source)).hexdigest()
+        if checkpoint_sha256 != expected_sha256:
+            raise RetrievalCheckpointError(
+                "Retrieval evolution checkpoint does not match the operator's trusted digest"
+            )
+        key = path_key(source)
+        prior = current.get(key)
+        requested = (expected_sha256, expected_epoch)
+        if prior is not None and prior != requested and expected_epoch <= prior[1]:
+            raise RetrievalCheckpointError(
+                "Retrieval evolution checkpoint authority epoch is stale"
+            )
+        current[key] = requested
+        return expected_epoch
 
     return register, require, authorize_for_operator
 
@@ -237,14 +397,6 @@ def _build_checkpoint_authority_boundary():
     _authorize_retrieval_evolution_checkpoint_for_operator,
 ) = _build_checkpoint_authority_boundary()
 del _build_checkpoint_authority_boundary
-
-
-def _callable_identity(value: object | None) -> str | None:
-    if value is None:
-        return None
-    module = getattr(value, "__module__", type(value).__module__)
-    qualname = getattr(value, "__qualname__", type(value).__qualname__)
-    return f"{module}.{qualname}"
 
 
 def _finite(value: object, field_name: str) -> float:
@@ -315,6 +467,14 @@ class RetrievalEvaluation:
             not isinstance(item, dict) for item in self.task_traces
         ):
             raise RetrievalEvolutionError("task_traces must be a tuple of trace objects")
+        normalized_traces: list[dict[str, object]] = []
+        for trace in self.task_traces:
+            normalized_trace = dict(trace)
+            normalized_trace["final_smae"] = _finite(
+                trace.get("final_smae"), "task trace final_smae"
+            )
+            normalized_traces.append(normalized_trace)
+        object.__setattr__(self, "task_traces", tuple(normalized_traces))
 
     def gate_failures(
         self,
@@ -463,26 +623,36 @@ class RetrievalEvaluation:
         }
         if (
             type(raw["version"]) is not str
-            or any(type(raw[field]) is not float for field in float_fields)
+            or any(
+                isinstance(raw[field], bool)
+                or not isinstance(raw[field], (int, float))
+                for field in float_fields
+            )
             or any(
                 type(raw[field]) is not int
                 for field in ("task_count", "invalid_count", "catastrophic_count")
             )
             or any(
                 type(trace.get("task_id")) is not str
-                or type(trace.get("final_smae")) is not float
+                or isinstance(trace.get("final_smae"), bool)
+                or not isinstance(trace.get("final_smae"), (int, float))
                 for trace in traces
             )
         ):
             raise RetrievalCheckpointError(
                 "checkpoint evaluation metric and trace types must be exact"
             )
-        return cls(
-            **{
-                **{key: raw[key] for key in fields if key != "task_traces"},
-                "task_traces": tuple(dict(item) for item in traces),
-            }
-        )
+        try:
+            return cls(
+                **{
+                    **{key: raw[key] for key in fields if key != "task_traces"},
+                    "task_traces": tuple(dict(item) for item in traces),
+                }
+            )
+        except RetrievalEvolutionError as error:
+            raise RetrievalCheckpointError(
+                "checkpoint evaluation contains an invalid metric"
+            ) from error
 
 
 def combine_retrieval_evaluations(
@@ -655,9 +825,7 @@ def parse_scoped_child(
         if skill_library is None:
             return None
         eligible_by_id = {
-            skill.skill_id: skill
-            for stage in ("round1", "round2")
-            for skill in skill_library.for_stage(stage)
+            skill.skill_id: skill for skill in skill_library.active_skills()
         }
         if not set(child.active_skill_ids).issubset(eligible_by_id):
             return None
@@ -668,18 +836,9 @@ def parse_scoped_child(
             child.active_skill_ids
         )
         owned_stage = _SCOPE_SKILL_STAGE[normalized]
-        prompt_stage = "round1" if owned_stage in {"round1", "both"} else "round2"
         eligible = {
-            skill.skill_id: skill
-            for skill in skill_library.for_stage(prompt_stage)
+            skill.skill_id: skill for skill in skill_library.active_skills()
         }
-        if owned_stage == "both":
-            eligible.update(
-                {
-                    skill.skill_id: skill
-                    for skill in skill_library.for_stage("round2")
-                }
-            )
         for skill_id in changed_skill_ids:
             skill = eligible.get(skill_id)
             if skill is None or skill.stage != owned_stage:
@@ -703,6 +862,7 @@ class RetrievalEvolutionConfig:
     evaluator_hash: str | None = None
     metric_hash: str | None = None
     mutation_model_hash: str | None = None
+    harness_hash: str | None = None
     metric_cap: float = 5.0
 
     def __post_init__(self) -> None:
@@ -730,6 +890,10 @@ class RetrievalEvolutionConfig:
             raise RetrievalEvolutionError("invalid tolerance or metric_cap")
         if isinstance(self.random_seed, bool) or not isinstance(self.random_seed, int):
             raise RetrievalEvolutionError("invalid random_seed")
+        if self.harness_hash is not None and (
+            type(self.harness_hash) is not str or not self.harness_hash
+        ):
+            raise RetrievalEvolutionError("harness_hash must be a non-empty digest")
         object.__setattr__(self, "tolerance", tolerance)
         object.__setattr__(self, "metric_cap", cap)
         if self.checkpoint_path is not None:
@@ -1069,6 +1233,10 @@ class RetrievalEvolutionEngine:
             )
         self.evaluator = evaluator
         self.config = config or RetrievalEvolutionConfig()
+        if harness_factory is not None and self.config.harness_hash is None:
+            raise RetrievalEvolutionError(
+                "harness_factory requires an explicit frozen harness_hash digest"
+            )
         self.skill_library = skill_library
         self.harness_factory = harness_factory
         self._scientific_inputs: dict[str, object] = {}
@@ -1248,7 +1416,8 @@ class RetrievalEvolutionEngine:
                 if self.skill_library is None
                 else _skill_library_cache_identity(self.skill_library)
             ),
-            "harness_factory": _callable_identity(self.harness_factory),
+            "harness_hash": self.config.harness_hash
+            or _digest({"kind": "no_retrieval_harness"}),
         }
 
     def _partition_train(
@@ -1590,7 +1759,13 @@ class RetrievalEvolutionEngine:
                 None,
             )
             if existing is None:
-                proposal = self._request_child(parent, scope, version, generation)
+                proposal = self._request_child(
+                    parent,
+                    scope,
+                    version,
+                    generation,
+                    skill_library=parent_library,
+                )
                 child = parse_scoped_child(
                     parent,
                     proposal,
@@ -1671,6 +1846,8 @@ class RetrievalEvolutionEngine:
         scope: RetrievalChildScope,
         version: str,
         generation: int,
+        *,
+        skill_library: RetrievalSkillLibrary | None,
     ) -> Mapping[str, object]:
         system = (
             "Return one complete typed Retrieval Genome JSON object. "
@@ -1686,6 +1863,16 @@ class RetrievalEvolutionEngine:
                 _PRIMARY_SCOPE_FIELDS[scope] | {"active_skill_ids"}
             ),
             "owned_skill_stage": _SCOPE_SKILL_STAGE[scope],
+            "active_skill_catalog": [
+                {
+                    "skill_id": skill.skill_id,
+                    "stage": skill.stage,
+                    "applicability": skill.applicability.to_payload(),
+                }
+                for skill in (
+                    () if skill_library is None else skill_library.active_skills()
+                )
+            ],
             "parent_genome": parent.to_payload(),
         }
         attempts = self.config.transient_retries + 1
@@ -1753,7 +1940,7 @@ class RetrievalEvolutionEngine:
         verifier_hash = str(self._scientific_inputs["verifier_hash"])
         evaluator_hash = str(self._scientific_inputs["evaluator_hash"])
         metric_hash = str(self._scientific_inputs["metric_hash"])
-        harness_hash = str(self._scientific_inputs["harness_factory"])
+        harness_hash = str(self._scientific_inputs["harness_hash"])
         scientific_inputs_hash = _digest(self._scientific_inputs)
         task_keys = tuple(
             build_inference_cache_key(
@@ -1843,7 +2030,7 @@ class RetrievalEvolutionEngine:
         else:
             raise AssertionError("unreachable evaluator retry loop")
         try:
-            self._validate_evaluator_result(genome, tasks, result)
+            result = self._validate_evaluator_result(genome, tasks, result)
         except Exception as error:
             self._record_terminal_outcome(
                 batch_key,
@@ -1877,7 +2064,7 @@ class RetrievalEvolutionEngine:
         genome: RetrievalGenome,
         tasks: tuple[ContextTask, ...],
         result: object,
-    ) -> None:
+    ) -> RetrievalEvaluation:
         if not isinstance(result, RetrievalEvaluation):
             raise RetrievalEvolutionError("trusted evaluator returned an untyped result")
         if result.version != genome.version:
@@ -1898,8 +2085,15 @@ class RetrievalEvolutionEngine:
             raise RetrievalEvolutionError(
                 "trusted evaluator task traces do not provide exact task coverage"
             )
-        for trace in result.task_traces:
+        trace_smae = tuple(
             _finite(trace.get("final_smae"), "task trace final_smae")
+            for trace in result.task_traces
+        )
+        return replace(
+            result,
+            p90_smae=linear_quantile(trace_smae, 0.90),
+            p95_smae=linear_quantile(trace_smae, 0.95),
+        )
 
     def _record_terminal_outcome(
         self,
@@ -1987,7 +2181,6 @@ class RetrievalEvolutionEngine:
         path = self._checkpoint_path()
         if path is None or self._original_parent is None or self._current_parent is None:
             return
-        path = _safe_checkpoint_path(path)
         task_completion = [
             {key: value for key, value in record.items() if key != "evaluation"}
             | {"cache_key": cache_key}
@@ -2011,49 +2204,77 @@ class RetrievalEvolutionEngine:
             "trace": self._trace,
             "result": result.to_payload() if result is not None else None,
         }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path = _safe_checkpoint_path(path)
-        if self._checkpoint_file_sha256 is None and path.exists():
-            raise RetrievalCheckpointError(
-                "Retrieval evolution checkpoint already exists without a loaded digest"
-            )
-        if self._checkpoint_file_sha256 is not None:
-            current_sha256 = hashlib.sha256(_safe_checkpoint_read(path)).hexdigest()
-            if current_sha256 != self._checkpoint_file_sha256:
-                raise RetrievalCheckpointError(
-                    "Retrieval evolution checkpoint changed before guarded replace"
-                )
         encoded = (
             json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True)
             + "\n"
         ).encode("utf-8")
-        temporary = _unique_checkpoint_temporary(path, encoded)
+        path, parent_descriptor = _open_checkpoint_parent(path, create=True)
+        temporary: str | None = None
         try:
+            _revalidate_checkpoint_parent(path, parent_descriptor)
+            exists = _checkpoint_entry_exists(parent_descriptor, path.name)
+            if self._checkpoint_file_sha256 is None and exists:
+                raise RetrievalCheckpointError(
+                    "Retrieval evolution checkpoint already exists without a loaded digest"
+                )
+            if self._checkpoint_file_sha256 is not None:
+                if not exists or hashlib.sha256(
+                    _read_checkpoint_entry(parent_descriptor, path.name)
+                ).hexdigest() != self._checkpoint_file_sha256:
+                    raise RetrievalCheckpointError(
+                        "Retrieval evolution checkpoint changed before guarded replace"
+                    )
+            temporary = _unique_checkpoint_temporary(
+                parent_descriptor, path.name, encoded
+            )
+            _revalidate_checkpoint_parent(path, parent_descriptor)
             if self._checkpoint_file_sha256 is None:
                 try:
-                    os.link(temporary, path, follow_symlinks=False)
+                    os.link(
+                        temporary,
+                        path.name,
+                        src_dir_fd=parent_descriptor,
+                        dst_dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
                 except FileExistsError as error:
                     raise RetrievalCheckpointError(
                         "Retrieval evolution checkpoint appeared during no-replace commit"
                     ) from error
-                temporary.unlink()
+                os.unlink(temporary, dir_fd=parent_descriptor)
+                temporary = None
             else:
                 if (
-                    hashlib.sha256(_safe_checkpoint_read(path)).hexdigest()
+                    hashlib.sha256(
+                        _read_checkpoint_entry(parent_descriptor, path.name)
+                    ).hexdigest()
                     != self._checkpoint_file_sha256
                 ):
                     raise RetrievalCheckpointError(
                         "Retrieval evolution checkpoint changed during guarded replace"
                     )
-                os.replace(temporary, path)
+                _revalidate_checkpoint_parent(path, parent_descriptor)
+                os.replace(
+                    temporary,
+                    path.name,
+                    src_dir_fd=parent_descriptor,
+                    dst_dir_fd=parent_descriptor,
+                )
+                temporary = None
+            _revalidate_checkpoint_parent(path, parent_descriptor)
+            os.fsync(parent_descriptor)
             self._checkpoint_file_sha256 = hashlib.sha256(encoded).hexdigest()
             self._checkpoint_authority_epoch = _register_evolution_checkpoint(
                 path,
                 self._checkpoint_file_sha256,
             )
         finally:
-            if temporary.exists():
-                temporary.unlink()
+            if temporary is not None:
+                try:
+                    os.unlink(temporary, dir_fd=parent_descriptor)
+                except FileNotFoundError:
+                    pass
+            os.close(parent_descriptor)
 
     def _load_checkpoint(
         self,
@@ -2069,7 +2290,7 @@ class RetrievalEvolutionEngine:
             self._current_parent = parent
             return None
         path = _safe_checkpoint_path(path)
-        if not path.exists() or not self.config.resume:
+        if not self.config.resume or not _safe_checkpoint_exists(path):
             self._original_parent = parent
             self._current_parent = parent
             return None
@@ -2246,6 +2467,14 @@ class RetrievalEvolutionEngine:
         self._terminal_outcomes = terminal_outcomes
         self._pending_children = None if pending is None else dict(pending)
         self._all_child_fingerprints = child_fingerprints
+        _, completed_outcomes = self._attest_completed_generations(
+            original=original,
+            current=current,
+            generations=tuple(generations),
+            trace=tuple(trace),
+            screen=screen,
+            remaining_folds=remaining_folds,
+        )
         if status == "complete":
             if raw["result"] is None:
                 raise RetrievalCheckpointError("completed checkpoint has no result")
@@ -2264,7 +2493,149 @@ class RetrievalEvolutionEngine:
             raise RetrievalCheckpointError("invalid checkpoint status")
         if not 0 <= next_generation <= self.config.generations:
             raise RetrievalCheckpointError("invalid checkpoint generation cursor")
+        self._attest_running_stage_cursor(
+            current=current,
+            pending=pending,
+            next_generation=next_generation,
+            consumed=completed_outcomes,
+            trace=tuple(trace),
+            screen=screen,
+            remaining_folds=remaining_folds,
+        )
         return None
+
+    def _attest_running_stage_cursor(
+        self,
+        *,
+        current: RetrievalGenome,
+        pending: object,
+        next_generation: int,
+        consumed: set[str],
+        trace: tuple[dict[str, object], ...],
+        screen: tuple[ContextTask, ...],
+        remaining_folds: tuple[tuple[ContextTask, ...], ...],
+    ) -> None:
+        all_outcomes = set(self._cache_records) | set(self._terminal_outcomes)
+
+        def finish() -> None:
+            if consumed != all_outcomes:
+                raise RetrievalCheckpointError(
+                    "running checkpoint evaluation stage cursor or coverage is invalid"
+                )
+
+        if any(
+            event.get("kind") in {
+                "dev_completed",
+                "release_accepted",
+                "release_rejected",
+            }
+            or (
+                event.get("kind") == "generation_completed"
+                and event.get("generation") not in range(next_generation)
+            )
+            for event in trace
+        ):
+            raise RetrievalCheckpointError(
+                "running checkpoint audit stage cursor is invalid"
+            )
+        if pending is None:
+            finish()
+            return
+        if next_generation >= self.config.generations:
+            raise RetrievalCheckpointError(
+                "running checkpoint cannot start a generation past the configured cursor"
+            )
+        assert isinstance(pending, dict)
+        rows = pending["children"]
+        assert isinstance(rows, list)
+        if len(rows) < len(CHILD_SCOPES):
+            finish()
+            return
+
+        parent_library = self._clone_library(self.skill_library)
+        children: list[tuple[RetrievalChildScope, RetrievalGenome | None]] = []
+        for scope, row in zip(CHILD_SCOPES, rows, strict=True):
+            assert isinstance(row, dict)
+            child = (
+                parse_scoped_child(
+                    current,
+                    row["proposal"],
+                    scope=scope,
+                    skill_library=parent_library,
+                )
+                if row["valid"]
+                else None
+            )
+            children.append((scope, child))
+
+        parent_screen = self._checkpoint_outcome(
+            f"g{next_generation}_parent_screen_train",
+            current,
+            consumed,
+            required=False,
+        )
+        if parent_screen is None or isinstance(
+            parent_screen, RetrievalForecastingFailure
+        ):
+            finish()
+            return
+
+        screen_evaluations: dict[str, RetrievalEvaluation] = {
+            current.version: parent_screen
+        }
+        eligible: list[tuple[RetrievalChildScope, RetrievalGenome]] = []
+        for scope, child in children:
+            if child is None:
+                continue
+            outcome = self._checkpoint_outcome(
+                f"g{next_generation}_child_{scope}_screen_train",
+                child,
+                consumed,
+                required=False,
+            )
+            if outcome is None:
+                finish()
+                return
+            if isinstance(outcome, RetrievalForecastingFailure):
+                continue
+            screen_evaluations[child.version] = outcome
+            if outcome.pareto_safe(parent_screen, self.config.tolerance):
+                eligible.append((scope, child))
+
+        eligible.sort(
+            key=lambda item: (
+                screen_evaluations[item[1].version].rank_key,
+                item[1].fingerprint(),
+            )
+        )
+        promoted = eligible[: self.config.promote]
+        for fold_index, _fold in enumerate(remaining_folds):
+            outcome = self._checkpoint_outcome(
+                f"g{next_generation}_parent_train_fold_{fold_index}",
+                current,
+                consumed,
+                required=False,
+            )
+            if outcome is None or isinstance(
+                outcome, RetrievalForecastingFailure
+            ):
+                finish()
+                return
+
+        for _scope, child in promoted:
+            for fold_index, _fold in enumerate(remaining_folds):
+                outcome = self._checkpoint_outcome(
+                    f"g{next_generation}_child_train_fold_{fold_index}",
+                    child,
+                    consumed,
+                    required=False,
+                )
+                if outcome is None:
+                    finish()
+                    return
+                if isinstance(outcome, RetrievalForecastingFailure):
+                    break
+        finish()
 
     def _stage_tasks(
         self,
@@ -2307,7 +2678,7 @@ class RetrievalEvolutionEngine:
                 evaluator_hash=self._scientific_inputs["evaluator_hash"],
                 metric_hash=self._scientific_inputs["metric_hash"],
                 metric_cap=self.config.metric_cap,
-                harness_hash=str(self._scientific_inputs["harness_factory"]),
+                harness_hash=str(self._scientific_inputs["harness_hash"]),
                 scientific_inputs_hash=_digest(self._scientific_inputs),
             )
             for task in tasks
@@ -2456,7 +2827,7 @@ class RetrievalEvolutionEngine:
             )
         evaluation = RetrievalEvaluation.from_payload(record["evaluation"])
         try:
-            self._validate_evaluator_result(genome, tasks, evaluation)
+            evaluation = self._validate_evaluator_result(genome, tasks, evaluation)
         except RetrievalEvolutionError as error:
             raise RetrievalCheckpointError(
                 "checkpoint evaluation coverage is invalid"
@@ -2549,9 +2920,8 @@ class RetrievalEvolutionEngine:
             children.append((scope, child))
         return tuple(children)
 
-    def _attest_completed_result(
+    def _attest_completed_generations(
         self,
-        result: RetrievalEvolutionResult,
         *,
         original: RetrievalGenome,
         current: RetrievalGenome,
@@ -2559,7 +2929,7 @@ class RetrievalEvolutionEngine:
         trace: tuple[dict[str, object], ...],
         screen: tuple[ContextTask, ...],
         remaining_folds: tuple[tuple[ContextTask, ...], ...],
-    ) -> None:
+    ) -> tuple[RetrievalGenome, set[str]]:
         consumed: set[str] = set()
         replay_parent = original
         for generation_index, record in enumerate(generations):
@@ -2754,6 +3124,27 @@ class RetrievalEvolutionEngine:
             raise RetrievalCheckpointError(
                 "checkpoint selected Parent does not replay from Train"
             )
+        return replay_parent, consumed
+
+    def _attest_completed_result(
+        self,
+        result: RetrievalEvolutionResult,
+        *,
+        original: RetrievalGenome,
+        current: RetrievalGenome,
+        generations: tuple[RetrievalGenerationTrace, ...],
+        trace: tuple[dict[str, object], ...],
+        screen: tuple[ContextTask, ...],
+        remaining_folds: tuple[tuple[ContextTask, ...], ...],
+    ) -> None:
+        replay_parent, consumed = self._attest_completed_generations(
+            original=original,
+            current=current,
+            generations=generations,
+            trace=trace,
+            screen=screen,
+            remaining_folds=remaining_folds,
+        )
         parent_dev = self._checkpoint_outcome(
             "parent_dev",
             original,
