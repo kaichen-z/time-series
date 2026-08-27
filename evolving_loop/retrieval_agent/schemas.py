@@ -249,6 +249,7 @@ class EvidenceChain:
     # wire contract and are populated only by the deterministic verifier.
     canonical_entity: str = field(default="", repr=False, compare=False)
     canonical_target: str = field(default="", repr=False, compare=False)
+    legacy_adjustment_value: float | None = field(default=None, repr=False, compare=False)
 
     @classmethod
     def from_payload(cls, raw: Mapping[str, object]) -> "EvidenceChain":
@@ -512,7 +513,14 @@ class FinalRetrievalCard:
                 adjustment_kind = "add"
             else:
                 adjustment_kind = "multiply"
-            value = chain.magnitude_value
+            computed_value = _legacy_adjustment_value(chain)
+            if computed_value is None:
+                continue
+            value = chain.legacy_adjustment_value
+            if value is None:
+                value = computed_value
+            elif not math.isclose(value, computed_value, rel_tol=1e-12, abs_tol=1e-12):
+                continue
             if value is None or not math.isfinite(value):
                 continue
             if adjustment_kind == "multiply" and not -0.95 <= value <= 20.0:
@@ -554,6 +562,28 @@ class FinalRetrievalCard:
                 dict.fromkeys(skill_id for chain in self.chains for skill_id in chain.used_skill_ids)
             ),
         )
+
+
+def _legacy_adjustment_value(chain: EvidenceChain) -> float | None:
+    """Fail closed for direct host-object construction outside the verifier."""
+    value = chain.magnitude_value
+    if value is None or not math.isfinite(value) or chain.direction not in {"up", "down"}:
+        return None
+    sign = 1.0 if chain.direction == "up" else -1.0
+    if chain.magnitude_kind == "absolute":
+        return sign * value if value > 0.0 else None
+    if chain.magnitude_kind == "relative":
+        return sign * value if 0.0 < value <= 1.0 else None
+    if chain.magnitude_kind == "multiplier":
+        if not 0.0 < value <= 21.0:
+            return None
+        adjustment = value - 1.0
+        if (chain.direction == "up" and adjustment <= 0.0) or (
+            chain.direction == "down" and adjustment >= 0.0
+        ):
+            return None
+        return adjustment
+    return None
 
 
 def _skill_payload(skill: object) -> dict[str, object]:

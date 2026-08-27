@@ -148,7 +148,13 @@ def _has_direction(span: str, direction: str) -> bool:
         "down": ("decrease", "decreased", "drop", "decline", "lower", "reduce"),
         "stable": ("stable", "unchanged", "constant", "flat"),
     }
-    return any(term in normalized for term in terms.get(direction, ()))
+    for term in terms.get(direction, ()):
+        for match in re.finditer(rf"\b{re.escape(term)}\b", normalized):
+            prefix = normalized[max(0, match.start() - 48):match.start()]
+            if re.search(r"\b(?:not|never|without|no\s+longer)(?:\s+\w+){0,2}\s*$", prefix):
+                continue
+            return True
+    return False
 
 
 def _has_mechanism(span: str, mechanism: str) -> bool:
@@ -186,10 +192,10 @@ def _magnitude_matches(span: str, kind: str, value: float) -> bool:
     if not numbers:
         return False
     normalized = _normalize(span)
-    if kind in {"relative", "rate", "explicit"}:
+    if kind == "relative":
         if not any(marker in normalized for marker in ("%", "percent", "percentage", "rate")):
             return False
-        expected = (value, value * 100.0)
+        expected = (value * 100.0,)
     elif kind == "multiplier":
         if not any(marker in normalized for marker in ("times", "multipl", "x ")):
             return False
@@ -202,8 +208,26 @@ def _magnitude_matches(span: str, kind: str, value: float) -> bool:
 def _magnitude_is_domain_safe(task: ContextTask, kind: str, value: float) -> bool:
     if kind == "absolute":
         history_scale = max((abs(item) for item in task.numeric.history_values), default=0.0)
-        return abs(value) <= max(1.0, history_scale) * 100.0
-    return -0.95 <= value <= 20.0 and (kind != "multiplier" or value > 0.0)
+        return 0.0 < value <= max(1.0, history_scale) * 100.0
+    if kind == "relative":
+        return 0.0 < value <= 1.0
+    return 0.0 < value <= 21.0 if kind == "multiplier" else False
+
+
+def _canonical_adjustment(kind: str, value: float, direction: str) -> float | None:
+    if direction not in {"up", "down"}:
+        return None
+    sign = 1.0 if direction == "up" else -1.0
+    if kind in {"absolute", "relative"}:
+        return sign * value
+    if kind == "multiplier":
+        adjustment = value - 1.0
+        if (direction == "up" and adjustment <= 0.0) or (
+            direction == "down" and adjustment >= 0.0
+        ):
+            return None
+        return adjustment
+    return None
 
 
 def _verify_chain(
@@ -231,9 +255,12 @@ def _verify_chain(
         _has_direction(item.exact_quote, chain.direction) for item in anchors
     ):
         missing.append("direction")
-    future = set(task.future_timestamps)
+    future_indexes = {timestamp: index for index, timestamp in enumerate(task.future_timestamps)}
     if (
         chain.temporal_relation != "overlaps_future"
+        or chain.start_timestamp not in future_indexes
+        or chain.end_timestamp not in future_indexes
+        or future_indexes.get(chain.start_timestamp, 0) > future_indexes.get(chain.end_timestamp, -1)
         or not any(
             chain.start_timestamp in item.exact_quote and chain.end_timestamp in item.exact_quote
             for item in anchors
@@ -249,6 +276,13 @@ def _verify_chain(
         for item in anchors
     ):
         missing.append("magnitude")
+    canonical_adjustment = _canonical_adjustment(
+        chain.magnitude_kind,
+        chain.magnitude_value,
+        chain.direction,
+    ) if chain.magnitude_value is not None else None
+    if chain.magnitude_value is not None and canonical_adjustment is None:
+        missing.append("magnitude_value")
     unknown_skills = tuple(
         item for item in chain.used_skill_ids if item not in allowed_skill_ids
     )
@@ -277,6 +311,7 @@ def _verify_chain(
         numeric_eligible=False,
         canonical_entity=task.numeric.entity_name,
         canonical_target=task.target_name,
+        legacy_adjustment_value=canonical_adjustment,
     )
     numeric_eligible = not missing_links and not counterevidence
     verified = replace(verified, numeric_eligible=numeric_eligible)

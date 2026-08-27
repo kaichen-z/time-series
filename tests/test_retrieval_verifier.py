@@ -52,6 +52,22 @@ def context_task() -> ContextTask:
                 "doc_counter",
                 "Entity A sales will decrease by 10 percent from 2026-01-03 through 2026-01-04.",
             ),
+            Document(
+                "doc_stale",
+                "Entity A sales will increase by 20 percent from 2025-01-03 through 2025-01-04.",
+            ),
+            Document(
+                "doc_negated",
+                "Entity A sales will not increase by 20 percent from 2026-01-03 through 2026-01-04.",
+            ),
+            Document(
+                "doc_multiplier",
+                "Entity A sales will increase 2 times from 2026-01-03 through 2026-01-04.",
+            ),
+            Document(
+                "doc_absolute_down",
+                "Entity A sales will decrease by 5 units from 2026-01-03 through 2026-01-04.",
+            ),
         ),
         labels_public=False,
     )
@@ -328,3 +344,97 @@ def test_stable_chain_identity_includes_host_canonical_entity_and_target(context
 
     assert chain_a.numeric_eligible and chain_b.numeric_eligible
     assert chain_a.chain_id != chain_b.chain_id
+
+
+def _legacy_impact(verified):
+    card = FinalRetrievalCard(
+        round1=verified,
+        round2=None,
+        chains=verified.chains,
+        selected_document_ids=tuple(
+            citation.document_id for chain in verified.chains for citation in chain.citations
+        ),
+        rejected=verified.rejected,
+        unresolved_contradictions=(),
+        complete=True,
+    )
+    return card.to_legacy_result().impacts
+
+
+def test_declared_window_must_belong_to_the_task_future_timestamps(context_task):
+    stale = _verified(context_task, _payload(_chain(
+        start_timestamp="2025-01-03",
+        end_timestamp="2025-01-04",
+        citations=[{
+            "document_id": "doc_stale",
+            "exact_quote": "Entity A sales will increase by 20 percent from 2025-01-03 through 2025-01-04.",
+        }],
+    )))
+
+    assert stale.chains[0].numeric_eligible is False
+    assert "forecast_window" in stale.chains[0].missing_links
+
+
+def test_relative_percentages_require_fractional_input_and_project_the_fraction(context_task):
+    ambiguous = _verified(context_task, _payload(_chain(magnitude_value=20.0)))
+    assert ambiguous.chains[0].numeric_eligible is False
+    assert "magnitude_value" in ambiguous.chains[0].missing_links
+
+    verified = _verified(context_task, _payload(_chain(magnitude_value=0.2)))
+    assert _legacy_impact(verified)[0].adjustment_value == 0.2
+
+
+def test_direction_canonicalizes_unsigned_relative_and_absolute_quantities_once(context_task):
+    down_relative = _verified(context_task, _payload(_chain(
+        direction="down",
+        magnitude_value=0.1,
+        citations=[{
+            "document_id": "doc_counter",
+            "exact_quote": "Entity A sales will decrease by 10 percent from 2026-01-03 through 2026-01-04.",
+        }],
+    )))
+    assert down_relative.chains[0].numeric_eligible is True
+    assert _legacy_impact(down_relative)[0].adjustment_value == -0.1
+
+    down_absolute = _verified(context_task, _payload(_chain(
+        direction="down",
+        magnitude_kind="absolute",
+        magnitude_value=5.0,
+        citations=[{
+            "document_id": "doc_absolute_down",
+            "exact_quote": "Entity A sales will decrease by 5 units from 2026-01-03 through 2026-01-04.",
+        }],
+    )))
+    assert down_absolute.chains[0].numeric_eligible is True
+    impact = _legacy_impact(down_absolute)[0]
+    assert impact.adjustment_kind == "add"
+    assert impact.adjustment_value == -5.0
+
+
+def test_negated_or_zero_effect_language_never_becomes_a_numeric_adjustment(context_task):
+    negated = _verified(context_task, _payload(_chain(citations=[{
+        "document_id": "doc_negated",
+        "exact_quote": "Entity A sales will not increase by 20 percent from 2026-01-03 through 2026-01-04.",
+    }])))
+    assert negated.chains[0].numeric_eligible is False
+    assert "direction" in negated.chains[0].missing_links
+
+    zero = _verified(context_task, _payload(_chain(magnitude_value=0.0)))
+    assert zero.chains[0].numeric_eligible is False
+    assert "magnitude_value" in zero.chains[0].missing_links
+
+
+def test_multiplier_uses_factor_input_and_projects_factor_minus_one(context_task):
+    multiplier = _verified(context_task, _payload(_chain(
+        magnitude_kind="multiplier",
+        magnitude_value=2.0,
+        citations=[{
+            "document_id": "doc_multiplier",
+            "exact_quote": "Entity A sales will increase 2 times from 2026-01-03 through 2026-01-04.",
+        }],
+    )))
+
+    assert multiplier.chains[0].numeric_eligible is True
+    impact = _legacy_impact(multiplier)[0]
+    assert impact.adjustment_kind == "multiply"
+    assert impact.adjustment_value == 1.0
