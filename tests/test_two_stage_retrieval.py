@@ -641,6 +641,129 @@ def test_decision_rejects_top_level_schema_drift_without_losing_selection(field)
     assert "forbidden_decision_fields" in result.rejection_reason
 
 
+@pytest.mark.parametrize(
+    ("field", "nested_value"),
+    [
+        ("selected_candidate_id", {"forecast": [999.0]}),
+        ("selected_candidate_id", ["numeric"]),
+        ("rationale", {"source_code": "unsafe candidate code"}),
+        ("rationale", ["unsafe nested rationale"]),
+        ("supporting_document_ids", [{"forecast": [999.0]}]),
+        ("supporting_document_ids", [["doc_1"]]),
+        ("used_skill_names", [{"source_code": "unsafe candidate code"}]),
+        ("used_skill_names", [["unsafe_skill"]]),
+    ],
+)
+def test_decision_rejects_nested_schema_drift_in_text_and_list_fields(
+    field: str,
+    nested_value: object,
+) -> None:
+    payload = json.loads(_decision(gaps=[_gap()], request=True))
+    payload[field] = nested_value
+    candidate = DecisionCandidate(
+        candidate_id="numeric",
+        forecast=(21.0, 22.0),
+        assumption="The local trend persists.",
+        failure_condition="A future event reverses the trend.",
+        hindcast_smae=0.1,
+        hindcast_srmse=0.2,
+    )
+    assumption = RetrievalAssumption(
+        "a_trend",
+        "trend_persistence",
+        "The historical trend continues.",
+        "A future event reverses the trend.",
+    )
+    agent = DecisionAgent(FakeLLMClient([json.dumps(payload)]))
+
+    result = agent.run(
+        (candidate,),
+        RetrievalResult("", (), (), (), False, ()),
+        assumptions=(assumption,),
+    )
+
+    assert result.selected == candidate
+    assert result.requested_more_retrieval is False
+    assert result.gaps == ()
+    assert result.rejection_reason is not None
+    assert "invalid_decision_response_schema" in result.rejection_reason
+
+
+@pytest.mark.parametrize(
+    "malformed_gaps",
+    [
+        {"a_trend": _gap()},
+        [[_gap()]],
+        [_gap(missing_information={"forecast": [999.0]})],
+        [_gap(priority=["high"])],
+    ],
+)
+def test_decision_rejects_malformed_nested_gap_schema(malformed_gaps: object) -> None:
+    payload = json.loads(_decision(request=True))
+    payload["gaps"] = malformed_gaps
+    candidate = DecisionCandidate(
+        candidate_id="numeric",
+        forecast=(21.0, 22.0),
+        assumption="The local trend persists.",
+        failure_condition="A future event reverses the trend.",
+        hindcast_smae=0.1,
+        hindcast_srmse=0.2,
+    )
+    assumption = RetrievalAssumption(
+        "a_trend",
+        "trend_persistence",
+        "The historical trend continues.",
+        "A future event reverses the trend.",
+    )
+    agent = DecisionAgent(FakeLLMClient([json.dumps(payload)]))
+
+    result = agent.run(
+        (candidate,),
+        RetrievalResult("", (), (), (), False, ()),
+        assumptions=(assumption,),
+    )
+
+    assert result.selected == candidate
+    assert result.requested_more_retrieval is False
+    assert result.gaps == ()
+    assert result.rejection_reason is not None
+    assert "invalid_retrieval_gaps" in result.rejection_reason
+
+
+def test_decision_accepts_complete_valid_gap_interface_response() -> None:
+    candidate = DecisionCandidate(
+        candidate_id="numeric",
+        forecast=(21.0, 22.0),
+        assumption="The local trend persists.",
+        failure_condition="A future event reverses the trend.",
+        hindcast_smae=0.1,
+        hindcast_srmse=0.2,
+    )
+    assumption = RetrievalAssumption(
+        "a_trend",
+        "trend_persistence",
+        "The historical trend continues.",
+        "A future event reverses the trend.",
+    )
+    agent = DecisionAgent(
+        FakeLLMClient([_decision(gaps=[_gap()], request=True)])
+    )
+
+    result = agent.run(
+        (candidate,),
+        RetrievalResult("", (), (), (), False, ()),
+        assumptions=(assumption,),
+    )
+
+    assert result.selected == candidate
+    assert result.requested_more_retrieval is True
+    assert tuple(gap.assumption_id for gap in result.gaps) == ("a_trend",)
+    assert result.rationale == (
+        "Preserve the numeric host while checking a named assumption gap."
+    )
+    assert result.rejection_reason is None
+
+
 def test_retrieval_gap_contract_is_strict_and_typed() -> None:
     assert RetrievalGap.from_payload(_gap()).priority == "high"
     with pytest.raises(ValueError, match="gap type"):

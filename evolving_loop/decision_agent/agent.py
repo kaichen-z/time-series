@@ -69,6 +69,10 @@ _DECISION_RESPONSE_FIELDS = frozenset(
         "used_skill_names",
     }
 )
+_DECISION_TEXT_FIELDS = frozenset({"selected_candidate_id", "rationale"})
+_DECISION_TEXT_LIST_FIELDS = frozenset(
+    {"supporting_document_ids", "used_skill_names"}
+)
 
 
 @dataclass(frozen=True)
@@ -182,11 +186,47 @@ class DecisionAgent:
         except JsonExtractionError as error:
             return self._fallback(host_default, f"invalid_decision_json:{error}")
 
-        candidate_id = str(choice.get("selected_candidate_id", ""))
+        missing_fields = _DECISION_RESPONSE_FIELDS - set(choice)
+        field_errors = _decision_field_errors(choice)
+        unknown_fields = set(choice) - _DECISION_RESPONSE_FIELDS
+        raw_requested_more = choice.get("request_more_retrieval", False)
+        request_error = (
+            None
+            if isinstance(raw_requested_more, bool)
+            else "request_more_retrieval must be a boolean"
+        )
+        gaps, gap_error = _parse_gaps(choice.get("gaps", ()), assumptions)
+        interface_reasons = []
+        if missing_fields:
+            interface_reasons.append(
+                "invalid_decision_response_schema:missing fields "
+                + ",".join(sorted(missing_fields))
+            )
+        if field_errors:
+            interface_reasons.append(
+                "invalid_decision_response_schema:" + ",".join(field_errors)
+            )
+        if gap_error is not None:
+            interface_reasons.append("invalid_retrieval_gaps:" + gap_error)
+        if unknown_fields:
+            interface_reasons.append(
+                "forbidden_decision_fields:" + ",".join(sorted(unknown_fields))
+            )
+        if request_error is not None:
+            interface_reasons.append("invalid_retrieval_request:" + request_error)
+
+        raw_candidate_id = choice.get("selected_candidate_id")
+        candidate_id = raw_candidate_id if isinstance(raw_candidate_id, str) else ""
         chosen = by_id.get(candidate_id)
         if chosen is None:
-            return self._fallback(host_default, "unknown_candidate")
-        cited = tuple(str(value) for value in choice.get("supporting_document_ids", ()))
+            reason = ";".join(interface_reasons) or "unknown_candidate"
+            return self._fallback(host_default, reason)
+        raw_citations = choice.get("supporting_document_ids")
+        cited = (
+            tuple(raw_citations)
+            if _is_text_list(raw_citations)
+            else ()
+        )
         verified_ids = {item.document_id for item in retrieval.evidence}
         if not set(cited).issubset(verified_ids):
             return self._fallback(host_default, "unverified_decision_citation")
@@ -197,34 +237,21 @@ class DecisionAgent:
             return self._fallback(host_default, "adjusted_candidate_requires_matching_citations")
         used_skills = []
         unknown_skills = []
-        for name in choice.get("used_skill_names", ()):
-            name = str(name)
+        raw_used_skills = choice.get("used_skill_names")
+        for name in raw_used_skills if _is_text_list(raw_used_skills) else ():
             if self.library is not None and self.library.get(name) is not None:
                 used_skills.append(name)
             else:
                 unknown_skills.append(name)
-        gaps, gap_error = _parse_gaps(choice.get("gaps", ()), assumptions)
-        unknown_fields = set(choice) - _DECISION_RESPONSE_FIELDS
-        raw_requested_more = choice.get("request_more_retrieval", False)
-        request_error = (
-            None
-            if "request_more_retrieval" not in choice
-            or isinstance(raw_requested_more, bool)
-            else "request_more_retrieval must be a boolean"
-        )
-        reasons = []
+        reasons = list(interface_reasons)
         if unknown_skills:
             reasons.append("unknown_decision_skills:" + ",".join(unknown_skills))
-        if gap_error is not None:
-            reasons.append("invalid_retrieval_gaps:" + gap_error)
-        if unknown_fields:
-            reasons.append(
-                "forbidden_decision_fields:" + ",".join(sorted(unknown_fields))
-            )
-        if request_error is not None:
-            reasons.append("invalid_retrieval_request:" + request_error)
         gap_interface_valid = (
-            gap_error is None and not unknown_fields and request_error is None
+            not missing_fields
+            and not field_errors
+            and gap_error is None
+            and not unknown_fields
+            and request_error is None
         )
         if not gap_interface_valid:
             gaps = ()
@@ -235,7 +262,11 @@ class DecisionAgent:
             selected=chosen,
             host_default_id=host_default.candidate_id,
             requested_more_retrieval=requested_more,
-            rationale=str(choice.get("rationale", "")),
+            rationale=(
+                choice["rationale"]
+                if isinstance(choice.get("rationale"), str)
+                else ""
+            ),
             supporting_document_ids=cited,
             llm_override_accepted=override,
             used_skill_names=tuple(used_skills),
@@ -258,12 +289,27 @@ class DecisionAgent:
         )
 
 
+def _decision_field_errors(choice: dict[str, object]) -> tuple[str, ...]:
+    errors = []
+    for field in sorted(_DECISION_TEXT_FIELDS & set(choice)):
+        if not isinstance(choice[field], str):
+            errors.append(f"{field} must be a string")
+    for field in sorted(_DECISION_TEXT_LIST_FIELDS & set(choice)):
+        if not _is_text_list(choice[field]):
+            errors.append(f"{field} must be a list of strings")
+    return tuple(errors)
+
+
+def _is_text_list(raw: object) -> bool:
+    return isinstance(raw, list) and all(isinstance(item, str) for item in raw)
+
+
 def _parse_gaps(
     raw: object,
     assumptions: tuple[RetrievalAssumption, ...],
 ) -> tuple[tuple[RetrievalGap, ...], str | None]:
     """Project only strict named gaps from the richer Decision context."""
-    if not isinstance(raw, (list, tuple)):
+    if not isinstance(raw, list):
         return (), "gaps must be a list"
     allowed_ids = {item.assumption_id for item in assumptions}
     try:
