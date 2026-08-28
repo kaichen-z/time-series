@@ -84,6 +84,14 @@ class PolicyError(ValueError):
     """A policy file or requested mutation violates the typed portfolio contract."""
 
 
+class PolicyNotApplicable(PolicyError):
+    """A reviewed policy is inapplicable to this history-only task."""
+
+
+class InvalidTSFMForecastError(PolicyError):
+    """A TSFM runtime returned a structurally invalid forecast."""
+
+
 @dataclass
 class PolicyCacheStats:
     hits: int = 0
@@ -613,27 +621,25 @@ def require_flagship_runtimes(
 def _run_tsfm(
     policy: TSFMPolicy, task: Task, runtimes: RuntimeRegistry
 ) -> Outcome:
-    profile = analyze_series(task.history, task.frequency)
-    if not _applicable(policy.applicability, profile):
+    try:
+        calibrated = forecast_tsfm(
+            policy,
+            history=task.history,
+            horizon=task.horizon,
+            frequency=task.frequency,
+            runtimes=runtimes,
+        )
+    except PolicyNotApplicable:
         return Outcome(
             policy.name,
             task.task_id,
             NOT_APPLICABLE,
             detail=f"history does not satisfy {policy.applicability} applicability",
         )
-    candidate = _candidate(policy.method_id)
-    resolution = runtimes.resolve(candidate)
-    if not resolution.available or resolution.runtime is None:
-        return Outcome(policy.name, task.task_id, CRASHED, detail=resolution.reason[:200])
-    history = tuple(task.history[-policy.context_window :])
-    transformed, inverse = _transform(history, policy.preprocess)
-    try:
-        raw = resolution.runtime.forecast(
-            candidate, transformed, task.horizon, task.frequency
-        )
-        forecast = tuple(float(inverse(float(value))) for value in raw)
     except RuntimeUnavailableError as error:
         return Outcome(policy.name, task.task_id, CRASHED, detail=str(error)[:200])
+    except InvalidTSFMForecastError as error:
+        return Outcome(policy.name, task.task_id, INVALID, detail=str(error)[:200])
     except Exception as error:
         return Outcome(
             policy.name,
@@ -641,14 +647,36 @@ def _run_tsfm(
             CRASHED,
             detail=f"{type(error).__name__}: {error}"[:200],
         )
-    if len(forecast) != task.horizon or not all(math.isfinite(value) for value in forecast):
-        return Outcome(
-            policy.name, task.task_id, INVALID, detail="TSFM returned invalid forecast"
-        )
-    shrinkage = policy.shrinkage_to_last
-    last = float(task.history[-1])
-    calibrated = tuple((1.0 - shrinkage) * value + shrinkage * last for value in forecast)
     return _scored(policy.name, task, calibrated)
+
+
+def forecast_tsfm(
+    policy: TSFMPolicy,
+    *,
+    history: Sequence[float],
+    horizon: int,
+    frequency: str,
+    runtimes: RuntimeRegistry,
+) -> tuple[float, ...]:
+    """Run one manifest-bound TSFM without constructing labels or invoking a scorer."""
+    profile = analyze_series(history, frequency)
+    if not _applicable(policy.applicability, profile):
+        raise PolicyNotApplicable(
+            f"history does not satisfy {policy.applicability} applicability"
+        )
+    candidate = _candidate(policy.method_id)
+    resolution = runtimes.resolve(candidate)
+    if not resolution.available or resolution.runtime is None:
+        raise RuntimeUnavailableError(resolution.reason[:200])
+    context = tuple(float(value) for value in history[-policy.context_window :])
+    transformed, inverse = _transform(context, policy.preprocess)
+    raw = resolution.runtime.forecast(candidate, transformed, horizon, frequency)
+    forecast = tuple(float(inverse(float(value))) for value in raw)
+    if len(forecast) != horizon or not all(math.isfinite(value) for value in forecast):
+        raise InvalidTSFMForecastError("TSFM returned invalid forecast")
+    shrinkage = policy.shrinkage_to_last
+    last = float(history[-1])
+    return tuple((1.0 - shrinkage) * value + shrinkage * last for value in forecast)
 
 
 def _run_combined(
@@ -656,39 +684,115 @@ def _run_combined(
     task: Task,
     outcomes: Mapping[tuple[str, str], Outcome],
 ) -> Outcome:
-    parent_outcomes = [outcomes[(parent, task.task_id)] for parent in policy.parents]
-    failed = [parent for parent in parent_outcomes if parent.status != SUCCESS]
+    parent_outcomes = tuple(
+        outcomes.get(
+            (parent, task.task_id),
+            Outcome(
+                parent,
+                task.task_id,
+                CRASHED,
+                detail="missing materialized parent outcome",
+            ),
+        )
+        for parent in policy.parents
+    )
+    failed = tuple(
+        outcome
+        for outcome in parent_outcomes
+        if not _is_successful_parent(outcome, task.horizon)
+    )
     if failed:
-        status = CRASHED if any(parent.status == CRASHED for parent in failed) else NOT_APPLICABLE
+        fallback = next(
+            outcome
+            for outcome in parent_outcomes
+            if outcome.method == policy.fallback_parent
+        )
         detail = "; ".join(
-            f"{parent.method}={parent.status}" for parent in failed
+            f"{parent.method}={_parent_failure_status(parent, task.horizon)}"
+            for parent in failed
+        )
+        if _is_successful_parent(fallback, task.horizon):
+            scored = _scored(policy.name, task, fallback.forecast)
+            if scored.status == SUCCESS:
+                return replace(
+                    scored,
+                    detail=f"fallback={policy.fallback_parent}; {detail}"[:200],
+                )
+        status = max(
+            (_parent_failure_status(parent, task.horizon) for parent in failed),
+            key=_failure_precedence,
         )
         return Outcome(policy.name, task.task_id, status, detail=detail[:200])
+    return _scored(
+        policy.name,
+        task,
+        _combine_forecasts(
+            policy,
+            {outcome.method: outcome for outcome in parent_outcomes},
+            task,
+        ),
+    )
+
+
+def _combine_forecasts(
+    policy: CombinedPolicy,
+    parent_outcomes: Mapping[str, Outcome],
+    task: Task,
+) -> tuple[float, ...]:
+    """Compose materialized successful forecasts using history-only policy inputs."""
+    parents = tuple(parent_outcomes[parent] for parent in policy.parents)
     if policy.operator == "weighted_mean":
         forecast = tuple(
-            sum(weight * outcome.forecast[index] for weight, outcome in zip(policy.weights, parent_outcomes, strict=True))
+            sum(
+                weight * outcome.forecast[index]
+                for weight, outcome in zip(policy.weights, parents, strict=True)
+            )
             for index in range(task.horizon)
         )
     elif policy.operator == "route":
         signal = _signal(policy.signal, task)
-        choose_tsfm = signal >= policy.threshold
-        selected = policy.above_parent if choose_tsfm else policy.below_parent
-        forecast = outcomes[(selected, task.task_id)].forecast
+        selected = policy.above_parent if signal >= policy.threshold else policy.below_parent
+        forecast = parent_outcomes[selected].forecast
     elif policy.operator == "median":
         forecast = tuple(
-            statistics.median(outcome.forecast[index] for outcome in parent_outcomes)
+            statistics.median(outcome.forecast[index] for outcome in parents)
             for index in range(task.horizon)
         )
     elif policy.operator == "trimmed_mean":
         forecast = tuple(
             statistics.fmean(
-                sorted(outcome.forecast[index] for outcome in parent_outcomes)[1:-1]
+                sorted(outcome.forecast[index] for outcome in parents)[1:-1]
             )
             for index in range(task.horizon)
         )
     else:  # pragma: no cover - CombinedPolicy validates operators
         raise PolicyError(f"unsupported Combined operator {policy.operator!r}")
-    return _scored(policy.name, task, forecast)
+    return tuple(float(value) for value in forecast)
+
+
+def _is_successful_parent(outcome: Outcome, horizon: int) -> bool:
+    return outcome.status == SUCCESS and _forecast_is_valid(outcome.forecast, horizon)
+
+
+def _forecast_is_valid(forecast: Sequence[float], horizon: int) -> bool:
+    try:
+        return len(forecast) == horizon and all(
+            math.isfinite(float(value)) for value in forecast
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _parent_failure_status(outcome: Outcome, horizon: int) -> str:
+    if outcome.status == CRASHED:
+        return CRASHED
+    if outcome.status == INVALID or not _forecast_is_valid(outcome.forecast, horizon):
+        return INVALID
+    return NOT_APPLICABLE
+
+
+def _failure_precedence(status: str) -> int:
+    return {NOT_APPLICABLE: 0, INVALID: 1, CRASHED: 2}[status]
 
 
 def _candidate(method_id: str) -> MethodCandidate:

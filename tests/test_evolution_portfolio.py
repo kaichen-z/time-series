@@ -5,8 +5,9 @@ from pathlib import Path
 import pytest
 
 from numerical_agent.dictionary import MethodCandidate
+import numerical_agent.evolution.portfolio as portfolio_module
 from numerical_agent.evolution.cache import CacheMissError, OutcomeCache
-from numerical_agent.evolution.execution import SUCCESS, Task
+from numerical_agent.evolution.execution import CRASHED, INVALID, NOT_APPLICABLE, SUCCESS, Outcome, Task
 from numerical_agent.evolution.module import MODULE_HEADER, parse_module
 from numerical_agent.evolution.portfolio import (
     FLAGSHIP_METHOD_IDS,
@@ -15,6 +16,8 @@ from numerical_agent.evolution.portfolio import (
     PolicyPortfolio,
     TSFMPolicy,
     PolicyOutcomeCache,
+    _run_combined,
+    _run_tsfm,
     evaluate_portfolio,
     parse_policy_source,
     render_policy_source,
@@ -529,3 +532,235 @@ def test_validate_parents_rejects_combined_name_colliding_with_statistical_leaf(
         portfolio.validate_parents(_module().names())
 
     assert render_policy_source(portfolio) == source
+
+
+def _operator_task() -> Task:
+    return Task(
+        "operator",
+        (0.0, 0.0, 0.0, 10.0),
+        2,
+        "1 day",
+        (20.0, 20.0),
+    )
+
+
+def _successful_parent(name: str, forecast: tuple[float, ...]) -> Outcome:
+    return Outcome(name, "operator", SUCCESS, forecast=forecast)
+
+
+def _operator_outcomes(*outcomes: Outcome) -> dict[tuple[str, str], Outcome]:
+    return {(outcome.method, outcome.task_id): outcome for outcome in outcomes}
+
+
+def test_weighted_mean_combines_two_tsfm_parent_forecasts_pointwise() -> None:
+    task = _operator_task()
+    policy = CombinedPolicy(
+        "combined_two_tsfm_weighted",
+        ("toto_2_0", "timesfm_2_5"),
+        "weighted_mean",
+        (0.25, 0.75),
+        fallback_parent="toto_2_0",
+    )
+
+    combined = _run_combined(
+        policy,
+        task,
+        _operator_outcomes(
+            _successful_parent("toto_2_0", (10.0, 10.0)),
+            _successful_parent("timesfm_2_5", (20.0, 20.0)),
+        ),
+    )
+
+    assert combined.status == SUCCESS
+    assert combined.forecast == (17.5, 17.5)
+
+
+def test_median_combines_three_tsfm_and_statistical_parent_forecasts_pointwise() -> None:
+    task = _operator_task()
+    policy = CombinedPolicy(
+        "combined_three_parent_median",
+        ("toto_2_0", "timesfm_2_5", "seasonal_naive"),
+        "median",
+        fallback_parent="toto_2_0",
+    )
+
+    combined = _run_combined(
+        policy,
+        task,
+        _operator_outcomes(
+            _successful_parent("toto_2_0", (10.0, 10.0)),
+            _successful_parent("timesfm_2_5", (20.0, 20.0)),
+            _successful_parent("seasonal_naive", (100.0, 100.0)),
+        ),
+    )
+
+    assert combined.forecast == (20.0, 20.0)
+
+
+def test_trimmed_mean_removes_one_low_and_one_high_parent_pointwise() -> None:
+    task = _operator_task()
+    policy = CombinedPolicy(
+        "combined_trimmed",
+        ("toto_2_0", "timesfm_2_5", "chronos_bolt", "granite_ttm_r2", "seasonal_naive"),
+        "trimmed_mean",
+        fallback_parent="toto_2_0",
+    )
+
+    combined = _run_combined(
+        policy,
+        task,
+        _operator_outcomes(
+            _successful_parent("toto_2_0", (0.0, 0.0)),
+            _successful_parent("timesfm_2_5", (10.0, 10.0)),
+            _successful_parent("chronos_bolt", (20.0, 20.0)),
+            _successful_parent("granite_ttm_r2", (30.0, 30.0)),
+            _successful_parent("seasonal_naive", (100.0, 100.0)),
+        ),
+    )
+
+    assert combined.forecast == (20.0, 20.0)
+
+
+def test_route_uses_a_history_only_signal_to_select_explicit_parent() -> None:
+    task = _operator_task()
+    policy = CombinedPolicy(
+        "combined_explicit_route",
+        ("toto_2_0", "seasonal_naive"),
+        "route",
+        signal="zero_fraction",
+        threshold=0.5,
+        above_parent="seasonal_naive",
+        below_parent="toto_2_0",
+        fallback_parent="toto_2_0",
+    )
+
+    combined = _run_combined(
+        policy,
+        task,
+        _operator_outcomes(
+            _successful_parent("toto_2_0", (10.0, 10.0)),
+            _successful_parent("seasonal_naive", (20.0, 20.0)),
+        ),
+    )
+
+    assert combined.forecast == (20.0, 20.0)
+
+
+def test_failed_nonfallback_parent_returns_successful_explicit_fallback() -> None:
+    task = _operator_task()
+    policy = CombinedPolicy(
+        "combined_explicit_fallback",
+        ("toto_2_0", "timesfm_2_5"),
+        "weighted_mean",
+        (0.5, 0.5),
+        fallback_parent="toto_2_0",
+    )
+
+    combined = _run_combined(
+        policy,
+        task,
+        _operator_outcomes(
+            _successful_parent("toto_2_0", (10.0, 10.0)),
+            Outcome("timesfm_2_5", "operator", INVALID, detail="wrong horizon"),
+        ),
+    )
+
+    assert combined.status == SUCCESS
+    assert combined.forecast == (10.0, 10.0)
+    assert "fallback=toto_2_0" in combined.detail
+
+
+def test_failed_fallback_returns_strongest_failure_without_a_forecast() -> None:
+    task = _operator_task()
+    policy = CombinedPolicy(
+        "combined_failed_fallback",
+        ("toto_2_0", "timesfm_2_5", "seasonal_naive"),
+        "median",
+        fallback_parent="toto_2_0",
+    )
+
+    combined = _run_combined(
+        policy,
+        task,
+        _operator_outcomes(
+            Outcome("toto_2_0", "operator", CRASHED, detail="runtime unavailable"),
+            Outcome("timesfm_2_5", "operator", INVALID, detail="wrong horizon"),
+            Outcome("seasonal_naive", "operator", NOT_APPLICABLE, detail="not seasonal"),
+        ),
+    )
+
+    assert combined.status == CRASHED
+    assert combined.forecast == ()
+
+
+def test_tsfm_runtime_executes_once_when_multiple_combined_policies_consume_it(
+    tmp_path: Path,
+) -> None:
+    base = PolicyPortfolio.flagship5()
+    portfolio = PolicyPortfolio(
+        base.tsfm,
+        (
+            CombinedPolicy(
+                "combined_tsfm_pair_mean",
+                ("toto_2_0", "timesfm_2_5"),
+                "weighted_mean",
+                (0.5, 0.5),
+                fallback_parent="toto_2_0",
+            ),
+            CombinedPolicy(
+                "combined_tsfm_stat_median",
+                ("toto_2_0", "seasonal_naive"),
+                "median",
+                fallback_parent="toto_2_0",
+            ),
+        ),
+    )
+    runtime = FakeTSFMRuntime({method_id: 1.0 for method_id in FLAGSHIP_METHOD_IDS})
+
+    outcomes = evaluate_portfolio(
+        _module(),
+        portfolio,
+        _tasks()[:1],
+        outcome_cache=OutcomeCache(tmp_path / "cache"),
+        runtimes=_registry(runtime),
+        isolated_methods=False,
+    )
+
+    assert all(outcome.status == SUCCESS for outcome in outcomes)
+    assert len(runtime.calls) == len(portfolio.tsfm)
+
+
+def test_forecast_tsfm_is_label_free_and_rejects_invalid_runtime_output() -> None:
+    class InvalidRuntime(FakeTSFMRuntime):
+        def forecast(self, candidate, history, horizon, frequency):
+            del candidate, history, horizon, frequency
+            return ()
+
+    assert hasattr(portfolio_module, "forecast_tsfm")
+    assert hasattr(portfolio_module, "InvalidTSFMForecastError")
+    with pytest.raises(portfolio_module.InvalidTSFMForecastError, match="invalid forecast"):
+        portfolio_module.forecast_tsfm(
+            _portfolio().tsfm[0],
+            history=_tasks()[0].history,
+            horizon=_tasks()[0].horizon,
+            frequency=_tasks()[0].frequency,
+            runtimes=_registry(
+                InvalidRuntime({method_id: 1.0 for method_id in FLAGSHIP_METHOD_IDS})
+            ),
+        )
+
+
+def test_scored_tsfm_preserves_invalid_status_for_wrong_length_output() -> None:
+    class InvalidRuntime(FakeTSFMRuntime):
+        def forecast(self, candidate, history, horizon, frequency):
+            del candidate, history, horizon, frequency
+            return ()
+
+    outcome = _run_tsfm(
+        _portfolio().tsfm[0],
+        _tasks()[0],
+        _registry(InvalidRuntime({method_id: 1.0 for method_id in FLAGSHIP_METHOD_IDS})),
+    )
+
+    assert outcome.status == INVALID
+    assert "invalid forecast" in outcome.detail
