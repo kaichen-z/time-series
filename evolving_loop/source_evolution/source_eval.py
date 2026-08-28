@@ -52,14 +52,14 @@ def main() -> None:
         train_result = evaluate_policy(
             policy, train, factory, learn_skills=False, harness=harness
         )
-        dev_result = evaluate_policy(
+        val_result = evaluate_policy(
             policy, dev, factory, learn_skills=False, harness=harness
         )
     print(
         json.dumps(
             {
                 "train": asdict(train_result),
-                "dev": asdict(dev_result),
+                "val": asdict(val_result),
             },
             ensure_ascii=False,
         )

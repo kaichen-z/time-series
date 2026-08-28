@@ -45,8 +45,8 @@ die() {
 }
 
 case "$MODE" in
-    smoke) NA_TRAIN_LIMIT="${NA_TRAIN_LIMIT:-4}"; NA_DEV_LIMIT="${NA_DEV_LIMIT:-2}" ;;
-    full)  NA_TRAIN_LIMIT="${NA_TRAIN_LIMIT:-0}"; NA_DEV_LIMIT="${NA_DEV_LIMIT:-0}" ;;
+    smoke) NA_TRAIN_LIMIT="${NA_TRAIN_LIMIT:-4}"; NA_VAL_LIMIT="${NA_VAL_LIMIT:-2}" ;;
+    full)  NA_TRAIN_LIMIT="${NA_TRAIN_LIMIT:-0}"; NA_VAL_LIMIT="${NA_VAL_LIMIT:-0}" ;;
     *)     die "mode must be smoke or full; got '$MODE'" ;;
 esac
 
@@ -74,7 +74,7 @@ BUILD_COMMAND=(
     --selection-horizon "$NA_SELECTION_HORIZON"
 )
 [[ "$NA_TRAIN_LIMIT" != "0" ]] && BUILD_COMMAND+=(--train-limit "$NA_TRAIN_LIMIT")
-[[ "$NA_DEV_LIMIT" != "0" ]] && BUILD_COMMAND+=(--dev-limit "$NA_DEV_LIMIT")
+[[ "$NA_VAL_LIMIT" != "0" ]] && BUILD_COMMAND+=(--val-limit "$NA_VAL_LIMIT")
 
 CURATE_COMMAND=(
     "$PYTHON" -m numerical_agent curate
@@ -104,7 +104,7 @@ Dictionary curation
   methods:       $METHOD_COUNT
   split:         $NA_SPLIT_FILE
   train limit:   ${NA_TRAIN_LIMIT/0/all (80)}
-  dev limit:     ${NA_DEV_LIMIT/0/all (20)}
+  dev limit:     ${NA_VAL_LIMIT/0/all (20)}
   backend:       $NA_LLM_BACKEND
   generations:   $NA_GENERATIONS (x $NA_CHILDREN child)
   llm calls:     up to $((METHOD_COUNT * NA_CHILDREN)) per generation

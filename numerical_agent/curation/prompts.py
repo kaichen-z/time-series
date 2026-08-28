@@ -5,13 +5,13 @@ import json
 from typing import Mapping, Sequence
 
 
-ALLOWED_IMPORTS_TEXT = (
+ALLOWED_IMPORTS_SENTENCE = (
     "numpy, math, statistics, itertools, functools, collections, torch and statsmodels"
 )
 
-CONTRACT_TEXT = f"""Every implementation must define exactly:
+METHOD_RULES = f"""Every implementation must define exactly:
     def forecast(history: list[float], horizon: int, frequency: str) -> list[float]
-It must return exactly horizon finite numbers. Allowed imports are {ALLOWED_IMPORTS_TEXT}.
+It must return exactly horizon finite numbers. Allowed imports are {ALLOWED_IMPORTS_SENTENCE}.
 Do not access files or the network, use randomness, call eval/exec, or hard-code any series.
 
 Only fall back to a simpler estimate for these specific degenerate inputs: an empty history,
@@ -26,7 +26,7 @@ Implement the method as described; do not substitute a different method you cons
 You may see only historical numbers, horizon, and frequency. You must not request or infer
 documents, retrieved evidence, ground-truth evidence, or future values.
 
-{CONTRACT_TEXT}
+{METHOD_RULES}
 
 Return exactly one JSON object:
 {{"code": "def forecast(history, horizon, frequency): ..."}}
@@ -42,7 +42,7 @@ Rewrite the implementation so it still implements the same named method, and no 
 the reported way. Use the sample error messages to diagnose the actual bug, not just to guess
 again. Keep the method's identity; do not replace it with a different method.
 
-{CONTRACT_TEXT}
+{METHOD_RULES}
 
 Return exactly one JSON object:
 {{"code": "def forecast(history, horizon, frequency): ..."}}

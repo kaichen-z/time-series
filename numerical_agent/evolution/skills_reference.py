@@ -9,21 +9,20 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from . import primite_ts_skills
+from . import analysis_skills
 
-SKILLS_PATH = Path(primite_ts_skills.__file__)
+SKILLS_PATH = Path(analysis_skills.__file__)
 
-# Section comments in the library carry the axis names; this maps each to its prompt heading.
-AXIS_TITLES: dict[str, str] = {
-    "Axis A": "Structure inference",
-    "Axis B": "Cleaning",
-    "Axis C": "Decomposition",
-    "Axis D": "Segmentation",
-    "Axis E": "Representation",
-    "Axis F": "Models",
-    "Axis G": "Matching",
-    "Axis H": "Features",
-}
+# The library's own section comments are the headings, in the order the prompt should show them.
+SECTION_TITLES: tuple[str, ...] = (
+    "Structure inference",
+    "Cleaning",
+    "Decomposition",
+    "Segmentation",
+    "Models",
+    "Matching",
+    "Features",
+)
 
 
 def _signature(node: ast.FunctionDef) -> str:
@@ -36,24 +35,24 @@ def _summary(node: ast.FunctionDef) -> str:
     return text.split("\n", 1)[0] if text else ""
 
 
-def _axis_lines(source: str) -> dict[int, str]:
+def _section_lines(source: str) -> dict[int, str]:
     """Map the line number of each axis banner to its axis key."""
     found: dict[int, str] = {}
     for number, line in enumerate(source.splitlines(), start=1):
         stripped = line.strip("# ").strip()
-        for key in AXIS_TITLES:
-            if stripped.startswith(key):
-                found[number] = key
+        for title in SECTION_TITLES:
+            if stripped == title:
+                found[number] = title
     return found
 
 
-def render_index(path: str | Path | None = None) -> str:
-    """Build the axis-grouped index of every public skill, its signature and its one-line doc."""
+def build_skills_reference(path: str | Path | None = None) -> str:
+    """List every public skill under its section heading, with its signature and one-line doc."""
     source = Path(path or SKILLS_PATH).read_text(encoding="utf-8")
     tree = ast.parse(source)
-    banners = _axis_lines(source)
+    banners = _section_lines(source)
 
-    grouped: dict[str, list[str]] = {key: [] for key in AXIS_TITLES}
+    grouped: dict[str, list[str]] = {title: [] for title in SECTION_TITLES}
     constants: list[str] = []
 
     for node in tree.body:
@@ -71,8 +70,8 @@ def render_index(path: str | Path | None = None) -> str:
             continue
         if not isinstance(node, ast.FunctionDef) or node.name.startswith("_"):
             continue
-        axis = max((line for line in banners if line < node.lineno), default=None)
-        key = banners.get(axis, "Axis A") if axis else "Axis A"
+        above = max((line for line in banners if line < node.lineno), default=None)
+        key = banners.get(above, SECTION_TITLES[0]) if above else SECTION_TITLES[0]
         grouped[key].append(f"    {_signature(node)}\n        {_summary(node)}")
 
     blocks = [
@@ -80,7 +79,7 @@ def render_index(path: str | Path | None = None) -> str:
         "reimplement one.",
         "",
         "Types: Series=list[float], Breaks=list[int], Spectrum=list[(freq, amplitude, phase)], "
-        "Atoms=list[Series], Codes=list[float], Features=dict[str, float].",
+        "Features=dict[str, float].",
         "",
         "Every fit_* returns a Model with .extrapolate(horizon) -> Series, .fitted() -> Series, "
         ".residuals() -> Series and .params. Extrapolation only ever happens through "
@@ -90,11 +89,11 @@ def render_index(path: str | Path | None = None) -> str:
         "does not need checking again.",
         "",
     ]
-    for key, title in AXIS_TITLES.items():
-        if not grouped[key]:
+    for title in SECTION_TITLES:
+        if not grouped[title]:
             continue
-        blocks.append(f"{key}: {title}")
-        blocks.extend(grouped[key])
+        blocks.append(f"{title}:")
+        blocks.extend(grouped[title])
         blocks.append("")
 
     if constants:
@@ -105,4 +104,4 @@ def render_index(path: str | Path | None = None) -> str:
 
 
 if __name__ == "__main__":  # pragma: no cover - convenience for eyeballing the output
-    print(render_index())
+    print(build_skills_reference())

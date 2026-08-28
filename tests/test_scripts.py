@@ -47,7 +47,7 @@ def test_pilot30_script_renders_auto_genome_protocol() -> None:
             "EA_RUNS_DIR": "/tmp/coevolution-pilot30-dry-run",
             "EA_SUCCESSIVE_HALVING": "1",
             "EA_SCREEN_TRAIN_TASKS": "6",
-            "EA_SCREEN_DEV_TASKS": "2",
+            "EA_SCREEN_VAL_TASKS": "2",
             "EA_SCREEN_PROMOTE": "1",
             "EA_SCREEN_TOLERANCE": "0.01",
             "PYTHON": "python",
@@ -65,7 +65,7 @@ def test_pilot30_script_renders_auto_genome_protocol() -> None:
     assert "successive halving:  1" in completed.stdout
     assert "--successive-halving" in completed.stdout
     assert "--screen-train-tasks 6" in completed.stdout
-    assert "--screen-dev-tasks 2" in completed.stdout
+    assert "--screen-val-tasks 2" in completed.stdout
     assert "--screen-promote 1" in completed.stdout
     assert "--screen-tolerance 0.01" in completed.stdout
 

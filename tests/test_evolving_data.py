@@ -215,18 +215,18 @@ def _records() -> list[dict]:
 def test_build_split_manifest_is_exact_deterministic_and_entity_disjoint() -> None:
     """Catches task loss, unstable assignment, or one entity leaking across partitions."""
     first = build_split_manifest(
-        _records(), seed=17, train_size=6, dev_size=3, public_test_size=3
+        _records(), seed=17, train_size=6, val_size=3, public_test_size=3
     )
     second = build_split_manifest(
-        list(reversed(_records())), seed=17, train_size=6, dev_size=3, public_test_size=3
+        list(reversed(_records())), seed=17, train_size=6, val_size=3, public_test_size=3
     )
 
     assert first == second
-    assert first["actual_sizes"] == {"train": 6, "dev": 3, "public_test": 3}
+    assert first["actual_sizes"] == {"train": 6, "val": 3, "public_test": 3}
 
     partitions = first["partitions"]
-    task_sets = [set(partitions[name]["task_ids"]) for name in ("train", "dev", "public_test")]
-    entity_sets = [set(partitions[name]["entities"]) for name in ("train", "dev", "public_test")]
+    task_sets = [set(partitions[name]["task_ids"]) for name in ("train", "val", "public_test")]
+    entity_sets = [set(partitions[name]["entities"]) for name in ("train", "val", "public_test")]
     assert set.union(*task_sets) == {
         "task_0_0", "task_0_1", "task_1_0", "task_1_1",
         "task_2_0", "task_2_1", "task_3_0", "task_3_1",
@@ -251,7 +251,7 @@ def test_build_split_manifest_rejects_invalid_requested_total() -> None:
     """Catches silently dropping tasks when requested split sizes do not cover the dataset."""
     with pytest.raises(ValueError, match="must sum to the number of public tasks"):
         build_split_manifest(
-            _records(), seed=17, train_size=5, dev_size=3, public_test_size=3
+            _records(), seed=17, train_size=5, val_size=3, public_test_size=3
         )
 
 
@@ -259,7 +259,7 @@ def test_recommended_public_split_reserves_dev_and_large_test() -> None:
     """Catches the formal protocol drifting away from 80/20 development and 99 test."""
     assert RECOMMENDED_PUBLIC_SPLIT_SIZES == {
         "train": 80,
-        "dev": 20,
+        "val": 20,
         "public_test": 99,
     }
 
@@ -267,7 +267,7 @@ def test_recommended_public_split_reserves_dev_and_large_test() -> None:
 def test_write_split_manifest_round_trips_json(tmp_path) -> None:
     """Catches writing a different artifact than the manifest that was validated."""
     manifest = build_split_manifest(
-        _records(), seed=17, train_size=6, dev_size=3, public_test_size=3
+        _records(), seed=17, train_size=6, val_size=3, public_test_size=3
     )
     destination = tmp_path / "drcik_public_v1.json"
 

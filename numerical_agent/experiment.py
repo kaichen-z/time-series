@@ -23,13 +23,13 @@ def build_experiment(
     selection_folds: int = 3,
     selection_horizon: int = 8,
     train_limit: int | None = None,
-    dev_limit: int | None = None,
+    val_limit: int | None = None,
 ) -> dict[str, object]:
     """Return an experiment config holding the split's Train/Dev tasks and their labels."""
     tasks = {task.task_id: task for task in load_tasks(tasks_file)}
     partitions = _partitions(Path(split_file))
     train = _select(tasks, partitions["train"], train_limit, "train")
-    dev = _select(tasks, partitions["dev"], dev_limit, "dev")
+    dev = _select(tasks, partitions["val"], val_limit, "val")
     return {
         "evolution": {
             "generations": generations,
@@ -51,11 +51,11 @@ def build_experiment(
         },
         "tasks": {
             "train": [_item(task) for task in train],
-            "dev": [_item(task) for task in dev],
+            "val": [_item(task) for task in dev],
         },
         "labels": {
             "train": {task.task_id: list(task.future_values) for task in train},
-            "dev": {task.task_id: list(task.future_values) for task in dev},
+            "val": {task.task_id: list(task.future_values) for task in dev},
         },
     }
 
@@ -89,7 +89,7 @@ def _partitions(split_file: Path) -> dict[str, tuple[str, ...]]:
     """Read the frozen split's Train and Dev task ids; Public Test is never used here."""
     payload = json.loads(split_file.read_text(encoding="utf-8"))
     return {
-        name: _partition_ids(payload, split_file, name) for name in ("train", "dev")
+        name: _partition_ids(payload, split_file, name) for name in ("train", "val")
     }
 
 

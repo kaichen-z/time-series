@@ -5,17 +5,14 @@ import json
 from typing import Mapping, Sequence
 
 from .history import History
-from .skills_index import render_index
 
 
-ALLOWED_IMPORTS_TEXT = (
+ALLOWED_IMPORTS_SENTENCE = (
     "numpy, scipy, pandas, statsmodels, sklearn, torch, lightgbm, xgboost, math, statistics, "
     "itertools, functools, and collections"
 )
 
-SKILLS_INDEX = render_index()
-
-CONTRACT_TEXT = f"""Every method is a module-level function named exactly after the method:
+METHOD_RULES = f"""Every method is a module-level function named exactly after the method:
 
     def method_name_in_snake_case(history, horizon, frequency):
         \"\"\"When to use it, why it wins there, and any caveat on how it behaves.\"\"\"
@@ -24,148 +21,115 @@ It receives history as a list of floats, horizon as an int, and frequency as a s
 "1 hour" or "1 day". It returns exactly horizon finite floats. Do not read files or the network,
 use randomness, call eval/exec, or hard-code any series.
 
-A frozen library of analysis skills is already imported as P at the top of the module, and
-NotApplicable comes from it too. Build methods by composing those skills. Reimplementing a
-skill inline is the single most common way to introduce a defect that the measurements cannot
-see, so do not do it: the library is tested and you are not. Reach for {ALLOWED_IMPORTS_TEXT}
-only for glue the library genuinely does not cover, and import it inside the function body --
-a module-level import you write is discarded when the module is rewritten, and every method
-that relied on it then fails.
+Every method is self-contained: it implements its own algorithm from {ALLOWED_IMPORTS_SENTENCE},
+imported inside the function body. A module-level import you write is discarded on the next
+rewrite, breaking every method that relied on it. NotApplicable is already defined at module
+level; do not redefine or import it.
 
-There are no fallbacks. If the series does not meet the method's requirements, raise
-NotApplicable with a message saying what was needed and what was received:
+There are no fallbacks. Check preconditions -- history length, unsupported frequency,
+non-positive values -- with a plain if BEFORE running the algorithm, and decline with the reason:
 
     raise NotApplicable(f"needs {{2 * period}} points, got {{len(history)}}")
 
-NotApplicable is only for conditions you check BEFORE running the algorithm: history length,
-an unsupported frequency, non-positive values. Check them with a plain if statement.
+Never catch a broad exception around your own logic, never return a forecast from an except
+handler, and never turn a caught exception into NotApplicable. A failing library call is a defect
+to repair, and silencing it hides it exactly as a fallback would. Both are rejected automatically.
 
-Never catch a broad exception around your own logic. Do not return a simpler forecast from an
-except handler, and do not convert a caught exception into NotApplicable. If a library call
-fails, let it propagate: that is a defect to be found and repaired, and silencing it as
-NotApplicable hides it exactly as a fallback would. Both patterns are rejected automatically.
+Write the docstring for someone choosing between methods: when to use it, why it wins there over
+the alternatives, and how it fails."""
 
-The docstring is written for someone choosing between methods. A single sentence is rarely
-enough to justify that choice: say when to use the method, why it wins there over the
-alternatives (cite the evidence), and any caveat on how it behaves or fails.
-
-# The skill library, available as P
-
-{SKILLS_INDEX}"""
-
-BOOTSTRAP_SYSTEM = f"""You implement one named classical statistical forecasting method as a
+WRITE_METHOD_PROMPT = f"""You implement one named classical statistical forecasting method as a
 Python function. Implement the method that is described; do not substitute a different method
 you consider stronger.
 
-{CONTRACT_TEXT}
+{METHOD_RULES}
 
 Return exactly one JSON object:
 {{"code": "<the complete function source, starting with def>"}}
 """
 
-EVOLVE_SYSTEM = f"""You are evolving a Python module of forecasting methods against measured
-results on a training set. You see the entire module and each method's measured behavior, and
-you grow it into a set of methods that between them cover the series types
-in the data.
+IMPROVE_METHODS_PROMPT = f"""You are evolving a Python module of forecasting methods against measured
+results on a training set. You see the whole module and every method's measured behavior, and
+work it into a set that between them covers the series types in the data.
 
-Methods are built by composing the frozen skill library. The interesting work is finding
-combinations that no current method tries: a different cost or search in the segmentation, a
-different decomposition feeding a different model, an analogue match under a different metric.
-Adding a well-motivated new combination is worth more than pruning a mediocre one, because the
-library spans far more combinations than any module will hold.
+You cannot write a new method from nothing. Your operations are repair (rewrite), consolidation
+(merge), and removal (delete), applied to the methods already in the module.
 
-{CONTRACT_TEXT}
+{METHOD_RULES}
+
+Judge every method on three metrics of equal weight: mean_smae, mean_srmse and
+mean_shape_correlation. None outranks the others; winning on error while losing badly on shape
+is not winning.
 
 Each method's report gives:
-- mean_rank: the method's average rank by scaled error among the methods that forecast the same task,
-  1.0 being best. This is the primary signal for comparing methods, because ranking within a
-  task before averaging stops one large-magnitude series from deciding the whole comparison,
-  which a mean over raw errors cannot avoid;
-- mean_variance_ratio, mean_shape_correlation and mean_change_smae: whether the forecast tracks
-  the series or merely sits near its level. A flat forecast has a variance ratio of 0.0 and a
-  shape correlation of 0.0 however good its error, and its mean_change_smae equals the series'
-  own volatility scaled the same way as mean_smae. A method with respectable error but a
-  variance ratio near zero has found the mean, not the dynamics; say so in its docstring, and
-  prefer a method that tracks the shape when the errors are close. Beware the opposite too:
-  a variance ratio far above 1.0 is a forecast
-  swinging more wildly than the truth;
-- mean_smae and mean_srmse: the Dr-CiK scaled metrics, and the primary way to judge accuracy.
-  Each task's error is divided by the mean absolute value of that task's truth over the
-  forecast horizon, so a slow expensive series and a fast cheap one count equally. Read them
-  as a fraction of the series' own typical magnitude: 0.1 means the average error is a tenth
-  of that, and 1.0 means the error is as large as the series itself, which is a method not
-  worth keeping. Lower is better with 0.0 the floor and no upper bound, so a very large value
-  is the evidence that separates an ordinarily bad method from a catastrophic one;
-- success / total and coverage;
-- not_applicable: tasks it declined by raising NotApplicable, which is correct behavior, not failure;
-- crashed: tasks where it raised something else, which is always a defect;
-- invalid: tasks where it returned the wrong shape or a non-finite value, also a defect;
-- by_characteristic_smae: the scaled error grouped by series type, which is the evidence for
-  its docstring and the way to see which series type a method is genuinely strong on;
+- mean_smae and mean_srmse. Each task's error is divided by the mean
+  absolute truth over its horizon, so a slow expensive series and a fast cheap one count equally.
+  Read as a fraction of the series' own magnitude: 0.1 is an error a tenth its size, 1.0 is an
+  error as large as the series. Lower is better, floor 0.0, no upper bound;
+- mean_shape_correlation: correlation between the forecast's shape and the truth's. 1.0 tracks
+  the series, 0.0 carries no information about which way it moves. A flat forecast scores 0.0
+  however good its error;
+- mean_variance_ratio and mean_change_smae: supporting evidence on the same question as shape.
+  0.0 is flat; far above 1.0 swings wider than the truth. Both are wrong;
+- success / total, coverage;
+- not_applicable: declined by raising NotApplicable -- correct behavior, not failure;
+- crashed: raised something else. Always a defect;
+- invalid: wrong shape or a non-finite value. Also a defect;
+- smae_by_series_type: error grouped by series type -- the evidence for the docstring, and how
+  to see which series a method is genuinely strong on;
 - sample_failures: real exception messages from crashed or invalid runs.
 
-Judge on evidence and prefer few strong methods over many weak ones:
-- crashed or invalid on most tasks means a bug: rewrite it, or delete it if the method cannot
-  work under this contract;
-- two or more methods with near-identical scores across the same tasks are computing the same
-  forecast: merge them into the one that is genuinely implemented, or delete the redundant ones;
-- a method that is poor overall but strong on one series type is worth keeping with a docstring
-  that says exactly that;
-- a method that is beaten everywhere by another method is worth deleting;
-- high not_applicable is fine when the docstring already says so; narrow the docstring rather
-  than loosening the guard. A method that declines most tasks but is excellent on the ones it
-  accepts is valuable, and its mean is not comparable with a method that accepts everything;
-- prefer measured evidence. Do not keep the worse of two methods because it looks
-  simpler or more familiar; if you keep it anyway, say in the reason that you are overriding
-  the measurement and why.
+Judge on evidence, and keep a set that covers the data rather than a small one:
+- crashed or invalid on most tasks is a bug: rewrite it, or delete it if the method cannot work
+  under this contract;
+- scores matching another method on all three metrics across the same tasks means they compute
+  the same forecast: merge into the one genuinely implemented, or delete the redundant one.
+  Similar mean_smae alone is not redundancy -- two methods failing on different tasks both
+  contribute;
+- a method beaten everywhere by another, on all three metrics across the same tasks, is worth
+  deleting. Beaten on error alone is not beaten;
+- a method poor overall but strong on one series type stays, with a docstring saying exactly that;
+- high not_applicable is fine when the docstring says so; narrow the docstring rather than
+  loosening the guard. A method declining most tasks but excellent on the rest is valuable, and
+  its mean is not comparable with one that accepts everything;
+- do not keep the worse of two methods because it looks simpler or more familiar. If you do
+  anyway, say in the reason that you are overriding the measurement, and why.
 
-Add methods deliberately, not only as a last resort:
-- a series type where every current method scores badly needs a method built for it;
-- a skill or option the module never uses -- an unused cost, search, dictionary, distance or
-  model -- is a hypothesis nobody has tested yet, unless the history above shows it was tried
-  and failed; that a skill is unused is a reason to look at it, never on its own a reason to
-  ship a method built from it;
-- two strong methods that fail on different tasks suggest a third combining what each does
-  well.
+Rewrite is the operation that improves the set, not delete:
+- a method crashing or scoring badly may be a repairable implementation rather than a bad idea;
+- a series type every current method scores badly on is a reason to rewrite the closest method to
+  handle it, stating in its docstring that this is what it now covers.
 
-Update the docstring of every method you rewrite, merge or add so it reflects the
-evidence rather than a textbook description.
+Update the docstring of every method you rewrite or merge so it reflects the evidence rather than
+a textbook description.
 
 Return exactly one JSON object with the operations to apply, in order:
 {{"operations": [
   {{"op": "delete",  "name": "<method name>", "reason": "<why, meaning the reason and reasoning>"}},
   {{"op": "rewrite", "name": "<method name>", "code": "<the complete function source>", "reason": "<why>"}},
-  {{"op": "merge",   "names": ["<method name>", "<method name>"], "into": "<method name>", "code": "<the complete function source>", "reason": "<why>"}},
-  {{"op": "add",     "code": "<the complete function source>", "reason": "<why>"}}
+  {{"op": "merge",   "names": ["<method name>", "<method name>"], "into": "<method name>", "code": "<the complete function source>", "reason": "<why>"}}
 ]}}
 
-Every `code` field carries the entire function, from its `def` line to its last line. Never
-abbreviate it, never write `...` or an ellipsis, never send a diff, and never leave a comment
-standing in for lines you did not change. A rewrite restates the whole method even when only
-its docstring differs. A batch containing an abbreviated `code` field is rejected in full, so
-if you are running short of room, return fewer operations rather than shortening any of them.
+Every `code` field carries the entire function, `def` line to last line. Never abbreviate it,
+never write `...`, never send a diff, never leave a comment standing in for lines you did not
+change. A rewrite restates the whole method even when only its docstring differs. An abbreviated
+`code` field rejects the whole batch, so if you are short of room return fewer operations rather
+than shortening any of them.
 
 Operations apply in sequence to the module as your earlier operations have already changed it.
-A merge removes every method it names, so do not also delete those methods afterwards, and do
-not name a method an earlier operation already deleted or merged away. Each method should be
-touched by exactly one operation.
+A merge removes every method it names, so do not also delete those afterwards, and do not name a
+method an earlier operation already consumed. Touch each method with exactly one operation.
 
-Anything the history above establishes is settled unless this generation's measurements
-contradict it. Do not re-derive it, and do not spend an operation rediscovering a bug an
-earlier generation already fixed. You may add back a method that was removed, but its reason
-must say what is different this time -- a different skill, a different configuration, a
-different precondition. A method earns its place by covering a task type the current set
-forecasts badly, not by covering a corner of the library.
+What the history above establishes is settled unless this generation's measurements contradict
+it: do not re-derive it, and do not spend an operation rediscovering a bug already fixed. A method
+removed in an earlier generation is gone for good; nothing here can bring it back.
 
 Every operation states a reason citing the measurement that justifies it; the reasons become the
 commit message. Return an empty operations list only if nothing in the report warrants a change.
 
-Prefer `add` and `rewrite`. `delete` and `merge` only shrink what the seed already contained,
-and a module that never adds anything can never become better than its seed.
 """
 
-
-def render_bootstrap_user(
+def build_write_request(
     *,
     name: str,
     description: str,
@@ -186,7 +150,7 @@ def render_bootstrap_user(
     )
 
 
-def render_history(history: History, live: Sequence[str]) -> str:
+def describe_past_generations(history: History, live: Sequence[str]) -> str:
     """What earlier generations already established, as evidence rather than as a changelog.
 
     Two views of the same operations: how each surviving method came to be what it is, and
@@ -223,7 +187,15 @@ def render_history(history: History, live: Sequence[str]) -> str:
     return "# What earlier generations already established\n\n" + "\n\n".join(sections)
 
 
-def render_evolve_user(
+EMPTY_MODULE_INSTRUCTION = """# The module is empty
+
+There are no methods yet and therefore no measurements, and no operation can create one: the
+module has to be seeded before evolution can run. Return an empty operations list.
+
+"""
+
+
+def build_improve_request(
     *,
     module_source: str,
     reports: Sequence[Mapping[str, object]],
@@ -244,16 +216,20 @@ def render_evolve_user(
         indent=2,
         sort_keys=True,
     )
-    established = render_history(history, live) if history is not None else ""
+    established = describe_past_generations(history, live) if history is not None else ""
     # The history reads as settled context, so it comes before this generation's numbers.
     prefix = f"{established}\n\n" if established else ""
+    # An empty module has no measurements, which reads as "nothing warrants a change" unless
+    # the request says outright that the whole set has to be written from scratch.
+    opening = EMPTY_MODULE_INSTRUCTION if not reports else ""
     return (
-        f"{prefix}# Measured results\n\n{summary}\n\n"
+        f"{prefix}{opening}# Measured results\n\n{summary}\n\n"
         f"# Current module\n\n```python\n{module_source}```\n"
     )
 
 
-def render_retry_user(error: str) -> str:
+
+def build_retry_request(error: str) -> str:
     """Ask again after a rejected batch, quoting the exact failure."""
     return (
         "Your previous operations were rejected and nothing was applied. Operations are "

@@ -6,7 +6,7 @@ noise for reporting and never worth carrying through a downstream mean.
 from __future__ import annotations
 
 
-ROUND_DIGITS = 3 # I added this to round the results, much better than just letting it go.
+ROUND_DIGITS = 3 # I added this to round the results, much better than just letting it go on and on and on ...
 
 
 def mae(y_true: list[float], y_pred: list[float]) -> float:
@@ -33,7 +33,7 @@ def rmse(y_true: list[float], y_pred: list[float]) -> float:
     return round(value, ROUND_DIGITS)
 
 
-def horizon_scale(y_true: list[float]) -> float:
+def mean_absolute_truth(y_true: list[float]) -> float:
     """Mean absolute value of the truth over the horizon, the denominator of sMAE and sRMSE.
     """
     if not y_true:
@@ -45,12 +45,12 @@ def horizon_scale(y_true: list[float]) -> float:
 def scaled_mae(y_true: list[float], y_pred: list[float]) -> float:
     """Dr-CiK sMAE: MAE divided by the mean absolute truth over the horizon.
     """
-    return round(mae(y_true, y_pred) / horizon_scale(y_true), ROUND_DIGITS)
+    return round(mae(y_true, y_pred) / mean_absolute_truth(y_true), ROUND_DIGITS)
 
 
 def scaled_rmse(y_true: list[float], y_pred: list[float]) -> float:
     """Dr-CiK sRMSE: RMSE over the same scale, so large errors still weigh more."""
-    return round(rmse(y_true, y_pred) / horizon_scale(y_true), ROUND_DIGITS)
+    return round(rmse(y_true, y_pred) / mean_absolute_truth(y_true), ROUND_DIGITS)
 
 
 def variance_ratio(y_true: list[float], y_pred: list[float]) -> float:
@@ -65,7 +65,7 @@ def variance_ratio(y_true: list[float], y_pred: list[float]) -> float:
 
 
 def shape_correlation(y_true: list[float], y_pred: list[float]) -> float:
-    """Pearson correlation between forecast and truth; 0.0 when either is constant."""
+    """Correlation between forecast and truth; 0.0 when either is constant. Can be done just by calculating COV of the shapes."""
     _check_same_length(y_true, y_pred)
     if len(y_true) < 2:
         return 0.0
@@ -95,7 +95,7 @@ def change_mae(y_true: list[float], y_pred: list[float], last_observed: float) -
 
 def change_smae(y_true: list[float], y_pred: list[float], last_observed: float) -> float:
     """change_mae divided by the same horizon scale as scaled_mae and scaled_rmse."""
-    value = change_mae(y_true, y_pred, last_observed) / horizon_scale(y_true)
+    value = change_mae(y_true, y_pred, last_observed) / mean_absolute_truth(y_true)
     return round(value, ROUND_DIGITS)
 
 

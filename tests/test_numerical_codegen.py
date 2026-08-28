@@ -30,7 +30,7 @@ from numerical_agent.dictionary import (
 )
 from numerical_agent.main import LLM_BACKENDS, _providers, build_parser
 from numerical_agent.curation.persistence import MethodSourceArtifactStore
-from numerical_agent.curation.prompts import ALLOWED_IMPORTS_TEXT
+from numerical_agent.curation.prompts import ALLOWED_IMPORTS_SENTENCE
 from numerical_agent.providers import ImplementationContext, SanitizedMethodFeedback
 
 
@@ -264,7 +264,7 @@ def test_transcripts_refuse_a_method_id_that_escapes_the_directory(tmp_path: Pat
 def test_prompt_advertises_exactly_the_sandbox_allow_list() -> None:
     advertised = {
         token.strip().strip(",")
-        for token in ALLOWED_IMPORTS_TEXT.replace("and ", "").split()
+        for token in ALLOWED_IMPORTS_SENTENCE.replace("and ", "").split()
     }
 
     assert advertised == set(ALLOWED_IMPORTS)

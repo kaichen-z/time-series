@@ -15,12 +15,12 @@
   "selection_uses_document_labels": false,
   "target_sizes": {
     "train": 80,
-    "dev": 20,
+    "val": 20,
     "public_test": 99
   },
   "actual_sizes": {
     "train": 80,
-    "dev": 20,
+    "val": 20,
     "public_test": 99
   },
   "partitions": {
@@ -178,7 +178,7 @@
         }
       }
     },
-    "dev": {
+    "val": {
       "task_ids": [
         "task_102",
         "task_103",
@@ -418,5 +418,5 @@
       }
     }
   },
-  "manifest_sha256": "3cc81f45878c1aae93e5ba48dc367df6553698db6661dbe06fbe5efb06afca92"
+  "manifest_sha256": "24607e1980f0d5bc51c4a1290580de8bd9624699ca7da413cc858b43daf9f2b8"
 }

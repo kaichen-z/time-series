@@ -56,7 +56,7 @@ def test_evolve_cli_exposes_successive_halving_controls() -> None:
         "--successive-halving",
         "--screen-train-tasks",
         "6",
-        "--screen-dev-tasks",
+        "--screen-val-tasks",
         "2",
         "--screen-promote",
         "1",
@@ -67,7 +67,7 @@ def test_evolve_cli_exposes_successive_halving_controls() -> None:
         args = parser.parse_args([*prefix, *values])
         assert args.successive_halving is True
         assert args.screen_train_tasks == 6
-        assert args.screen_dev_tasks == 2
+        assert args.screen_val_tasks == 2
         assert args.screen_promote == 1
         assert args.screen_tolerance == pytest.approx(0.01)
 

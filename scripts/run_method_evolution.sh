@@ -26,6 +26,8 @@ ME_CODEX_MODEL="${ME_CODEX_MODEL:-gpt-5.6-sol}"
 ME_REASONING_EFFORT="${ME_REASONING_EFFORT:-high}"
 ME_CODEX_TIMEOUT="${ME_CODEX_TIMEOUT:-900}"
 ME_DRY_RUN="${ME_DRY_RUN:-0}"
+ME_MEMORY_MODEL="${ME_MEMORY_MODEL:-Qwen/Qwen2.5-7B-Instruct}"
+ME_MEMORY_DEVICE="${ME_MEMORY_DEVICE:-}"
 
 die() {
     echo "error: $*" >&2
@@ -45,6 +47,8 @@ COMMAND=(
     --generations "$ME_GENERATIONS"
     --llm-backend "$ME_LLM_BACKEND"
 )
+[[ -n "$ME_MEMORY_MODEL" ]] && COMMAND+=(--memory-model "$ME_MEMORY_MODEL")
+[[ -n "$ME_MEMORY_DEVICE" ]] && COMMAND+=(--memory-device "$ME_MEMORY_DEVICE")
 case "$ME_LLM_BACKEND" in
     codex)
         COMMAND+=(--codex-model "$ME_CODEX_MODEL"
@@ -58,7 +62,9 @@ case "$ME_LLM_BACKEND" in
         ;;
 esac
 
-METHOD_COUNT="$(grep -c '^def ' "$ME_REPO/methods.py")"
+# grep -c exits 1 on zero matches, which set -e would treat as a failure; an empty module
+# (every method written by the model) is a legitimate starting point.
+METHOD_COUNT="$(grep -c '^def ' "$ME_REPO/methods.py" || true)"
 HEAD_COMMIT="$(git -C "$ME_REPO" rev-parse --short HEAD 2>/dev/null || echo none)"
 
 cat <<EOF
@@ -69,6 +75,7 @@ Method-module evolution
   split:       $ME_SPLIT_FILE
   backend:     $ME_LLM_BACKEND
   generations: $ME_GENERATIONS  (one real LLM call each)
+  memory:      ${ME_MEMORY_MODEL:-off}
   dry run:     $ME_DRY_RUN
 EOF
 

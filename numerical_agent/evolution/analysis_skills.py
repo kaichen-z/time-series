@@ -12,15 +12,11 @@ from typing import Literal, Protocol, Sequence
 import numpy as np
 
 
-# --------------------------------------------------------------------------------------
 # Type vocabulary
-# --------------------------------------------------------------------------------------
 
 Series = list[float]
 Breaks = list[int]                          # segment boundaries, ascending, exclusive of 0 and N
 Spectrum = list[tuple[float, float, float]]  # (cycles_per_sample, amplitude, phase_radians)
-Atoms = list[Series]
-Codes = list[float]
 Features = dict[str, float]
 
 
@@ -75,9 +71,7 @@ def _as_array(x: Sequence[float], *, minimum: int, what: str) -> np.ndarray:
     return values
 
 
-# --------------------------------------------------------------------------------------
-# Axis A: structure inference
-# --------------------------------------------------------------------------------------
+# Structure inference
 
 
 def acf(x: Sequence[float], max_lag: int) -> Series:
@@ -200,13 +194,11 @@ def infer_period(
     return 1
 
 
-# --------------------------------------------------------------------------------------
-# Axis D: segmentation
+# Segmentation
 #
 # Change-point detection is not one algorithm but three orthogonal choices: a cost function
 # that scores how homogeneous a segment is, a search method that decides where to cut, and a
 # penalty that decides how many cuts are worth making. Every combination below is valid.
-# --------------------------------------------------------------------------------------
 
 Cost = Literal["l2", "normal", "ar", "kernel_rbf", "rank"]
 Search = Literal["optimal", "window", "binseg", "bottomup", "pelt"]
@@ -553,9 +545,7 @@ def last_regime(x: Sequence[float], breaks: Sequence[int]) -> Series:
     return [float(v) for v in values[start:]]
 
 
-# --------------------------------------------------------------------------------------
-# Axis B: cleaning
-# --------------------------------------------------------------------------------------
+# Cleaning
 
 DenoiseMethod = Literal["moving_average", "median", "hampel", "savgol", "butterworth", "svd"]
 InterpolateMethod = Literal["linear", "spline", "polynomial", "low_rank"]
@@ -824,9 +814,7 @@ def remove_outliers(
     return interpolate_missing(gapped, "linear"), indices
 
 
-# --------------------------------------------------------------------------------------
-# Axis C: decomposition
-# --------------------------------------------------------------------------------------
+# Decomposition
 
 TrendMethod = Literal["least_squares", "spline", "hodrick_prescott", "moving_average"]
 SeasonalMethod = Literal["seasonal_means", "dft", "stl"]
@@ -971,12 +959,10 @@ def decompose(
     return Decomposition(trend, seasonal, residual, model)
 
 
-# --------------------------------------------------------------------------------------
-# Axis F: models
+# Models
 #
 # Every fit_* returns a Model. Extrapolation lives behind Model.extrapolate(horizon), so a
 # method can never train a direct h-step model and then apply it recursively by accident.
-# --------------------------------------------------------------------------------------
 
 ARMethod = Literal["yule_walker", "burg", "levinson", "ols"]
 StateSpaceKind = Literal["local_level", "local_linear_trend", "basic_structural"]
@@ -1371,207 +1357,7 @@ def fit_hmm(x: Sequence[float], n_states: int = 2, *, iterations: int = 50) -> M
     return _Fitted("hmm", values, fitted, forward, params)
 
 
-# --------------------------------------------------------------------------------------
-# Axis E: representation
-#
-# Sparse coding is two orthogonal choices: which dictionary to project onto (a fixed basis or
-# one learned from the data) and which pursuit finds the coefficients.
-# --------------------------------------------------------------------------------------
-
-DictionaryKind = Literal["dft", "dct", "gabor", "haar"]
-LearnMethod = Literal["ksvd", "mod", "online"]
-PursuitMethod = Literal["omp", "lasso", "threshold"]
-
-DICTIONARY_KINDS: tuple[str, ...] = ("dft", "dct", "gabor", "haar")
-LEARN_METHODS: tuple[str, ...] = ("ksvd", "mod", "online")
-PURSUIT_METHODS: tuple[str, ...] = ("omp", "lasso", "threshold")
-
-
-def make_dictionary(kind: DictionaryKind, atom_length: int, n_atoms: int | None = None) -> Atoms:
-    """Build a fixed dictionary of unit-norm atoms, each atom_length samples long."""
-    if atom_length < 2:
-        raise NotApplicable(f"atom_length must be at least 2, got {atom_length}")
-    if kind not in DICTIONARY_KINDS:
-        raise NotApplicable(f"unknown dictionary kind {kind!r}; expected one of {list(DICTIONARY_KINDS)}")
-    positions = np.arange(atom_length, dtype=float)
-    rows: list[np.ndarray] = []
-
-    if kind == "dft":
-        count = n_atoms or atom_length
-        for index in range(1, count // 2 + 1):
-            frequency = index / atom_length
-            rows.append(np.cos(2 * np.pi * frequency * positions))
-            rows.append(np.sin(2 * np.pi * frequency * positions))
-    elif kind == "dct":
-        for index in range(n_atoms or atom_length):
-            rows.append(np.cos(np.pi * (positions + 0.5) * index / atom_length))
-    elif kind == "gabor":
-        count = n_atoms or atom_length
-        centres = np.linspace(0, atom_length - 1, max(2, int(math.sqrt(count))))
-        scales = [atom_length / 4.0, atom_length / 8.0]
-        for centre in centres:
-            for scale in scales:
-                envelope = np.exp(-0.5 * ((positions - centre) / scale) ** 2)
-                for frequency in (1.0 / atom_length, 2.0 / atom_length, 4.0 / atom_length):
-                    rows.append(envelope * np.cos(2 * np.pi * frequency * positions))
-    else:
-        rows.append(np.ones(atom_length))
-        width = atom_length
-        while width > 1:
-            half = width // 2
-            for start in range(0, atom_length - width + 1, width):
-                atom = np.zeros(atom_length)
-                atom[start:start + half] = 1.0
-                atom[start + half:start + width] = -1.0
-                rows.append(atom)
-            width = half
-
-    atoms = []
-    for row in rows:
-        norm = float(np.linalg.norm(row))
-        if norm > 1e-12:
-            atoms.append([float(v) for v in row / norm])
-    if not atoms:
-        raise NotApplicable(f"{kind} produced no usable atoms at length {atom_length}")
-    return atoms[: n_atoms] if n_atoms else atoms
-
-
-def learn_dictionary(
-    windows: Sequence[Sequence[float]],
-    n_atoms: int = 16,
-    *,
-    sparsity: int = 3,
-    method: LearnMethod = "online",
-    iterations: int = 30,
-) -> Atoms:
-    """Learn a dictionary from example windows, all of which must be the same length."""
-    if method not in LEARN_METHODS:
-        raise NotApplicable(f"unknown learn method {method!r}; expected one of {list(LEARN_METHODS)}")
-    matrix = np.asarray([[float(v) for v in window] for window in windows], dtype=float)
-    if matrix.ndim != 2 or matrix.shape[0] < 2:
-        raise NotApplicable(f"need at least 2 windows of equal length, got shape {matrix.shape}")
-    if not np.all(np.isfinite(matrix)):
-        raise NotApplicable("windows must be finite")
-    if n_atoms < 1:
-        raise NotApplicable(f"n_atoms must be at least 1, got {n_atoms}")
-    if sparsity < 1 or sparsity > n_atoms:
-        raise NotApplicable(f"sparsity must be in [1, {n_atoms}], got {sparsity}")
-
-    if method == "online":
-        from sklearn.decomposition import MiniBatchDictionaryLearning
-
-        learner = MiniBatchDictionaryLearning(
-            n_components=n_atoms, transform_n_nonzero_coefs=sparsity,
-            transform_algorithm="omp", max_iter=iterations, random_state=0,
-        )
-        components = learner.fit(matrix).components_
-    else:
-        components = _alternating_dictionary(matrix, n_atoms, sparsity, method, iterations)
-
-    atoms = []
-    for row in components:
-        norm = float(np.linalg.norm(row))
-        atoms.append([float(v) for v in (row / norm if norm > 1e-12 else row)])
-    return atoms
-
-
-def _alternating_dictionary(
-    matrix: np.ndarray, n_atoms: int, sparsity: int, method: str, iterations: int
-) -> np.ndarray:
-    """MOD updates the whole dictionary at once; K-SVD updates one atom at a time."""
-    from sklearn.linear_model import orthogonal_mp
-
-    rng = np.random.default_rng(0)
-    picks = rng.choice(matrix.shape[0], size=min(n_atoms, matrix.shape[0]), replace=False)
-    dictionary = matrix[picks].copy()
-    if dictionary.shape[0] < n_atoms:
-        extra = rng.standard_normal((n_atoms - dictionary.shape[0], matrix.shape[1]))
-        dictionary = np.vstack([dictionary, extra])
-    dictionary /= np.maximum(np.linalg.norm(dictionary, axis=1, keepdims=True), 1e-12)
-
-    for _ in range(iterations):
-        codes = orthogonal_mp(dictionary.T, matrix.T, n_nonzero_coefs=sparsity).T
-        if method == "mod":
-            solution, *_ = np.linalg.lstsq(codes, matrix, rcond=None)
-            dictionary = solution
-        else:
-            for atom in range(n_atoms):
-                used = np.flatnonzero(np.abs(codes[:, atom]) > 1e-12)
-                if used.size == 0:
-                    continue
-                codes[used, atom] = 0.0
-                error = matrix[used] - codes[used] @ dictionary
-                left, singular, right = np.linalg.svd(error, full_matrices=False)
-                dictionary[atom] = right[0]
-                codes[used, atom] = left[:, 0] * singular[0]
-        dictionary /= np.maximum(np.linalg.norm(dictionary, axis=1, keepdims=True), 1e-12)
-    return dictionary
-
-
-def sparse_code(
-    x: Sequence[float],
-    atoms: Sequence[Sequence[float]],
-    method: PursuitMethod = "omp",
-    *,
-    sparsity: int = 3,
-    alpha: float = 0.1,
-) -> Codes:
-    """Coefficients of x over the dictionary, one per atom and mostly zero.
-
-    ``sparsity`` caps the non-zero count for ``omp`` and ``threshold``. ``lasso`` instead takes
-    ``alpha`` as a fraction of the penalty that would zero everything, so it is scale-free.
-    """
-    if method not in PURSUIT_METHODS:
-        raise NotApplicable(f"unknown pursuit {method!r}; expected one of {list(PURSUIT_METHODS)}")
-    values = _as_array(x, minimum=2, what="sparse_code")
-    dictionary = np.asarray([[float(v) for v in atom] for atom in atoms], dtype=float)
-    if dictionary.ndim != 2 or dictionary.shape[0] < 1:
-        raise NotApplicable(f"need at least one atom, got shape {dictionary.shape}")
-    if dictionary.shape[1] != values.size:
-        raise NotApplicable(
-            f"atoms are {dictionary.shape[1]} long but the signal is {values.size}"
-        )
-    if sparsity < 1:
-        raise NotApplicable(f"sparsity must be at least 1, got {sparsity}")
-
-    if method == "omp":
-        from sklearn.linear_model import orthogonal_mp
-
-        codes = orthogonal_mp(
-            dictionary.T, values, n_nonzero_coefs=min(sparsity, dictionary.shape[0])
-        )
-    elif method == "lasso":
-        from sklearn.linear_model import Lasso
-
-        if not 0.0 < alpha < 1.0:
-            raise NotApplicable(f"alpha is a fraction in (0, 1), got {alpha}")
-        # Scaled against the smallest penalty that zeroes every coefficient, so the same alpha
-        # means the same sparsity whatever the amplitude of the series.
-        ceiling = float(np.max(np.abs(dictionary @ values))) / values.size
-        model = Lasso(alpha=max(alpha * ceiling, 1e-12), fit_intercept=False, max_iter=5000)
-        codes = model.fit(dictionary.T, values).coef_
-    else:
-        projections = dictionary @ values
-        keep = np.argsort(np.abs(projections))[::-1][: min(sparsity, projections.size)]
-        codes = np.zeros_like(projections)
-        codes[keep] = projections[keep]
-    return [float(v) for v in np.asarray(codes).ravel()]
-
-
-def reconstruct(codes: Sequence[float], atoms: Sequence[Sequence[float]]) -> Series:
-    """Rebuild a signal from its sparse code."""
-    coefficients = np.asarray([float(v) for v in codes], dtype=float)
-    dictionary = np.asarray([[float(v) for v in atom] for atom in atoms], dtype=float)
-    if coefficients.size != dictionary.shape[0]:
-        raise NotApplicable(
-            f"{coefficients.size} codes for {dictionary.shape[0]} atoms"
-        )
-    return [float(v) for v in coefficients @ dictionary]
-
-
-# --------------------------------------------------------------------------------------
-# Axis G: matching
-# --------------------------------------------------------------------------------------
+# Matching
 
 DistanceMetric = Literal["euclidean", "normalized_euclidean", "dtw", "soft_dtw"]
 DISTANCE_METRICS: tuple[str, ...] = ("euclidean", "normalized_euclidean", "dtw", "soft_dtw")
@@ -1757,9 +1543,7 @@ def barycenter(
     return [float(v) for v in centre]
 
 
-# --------------------------------------------------------------------------------------
-# Axis H: features
-# --------------------------------------------------------------------------------------
+# Features
 
 FeatureGroup = Literal["statistical", "spectral", "entropy", "symbolic", "shape"]
 FEATURE_GROUPS: tuple[str, ...] = ("statistical", "spectral", "entropy", "symbolic", "shape")

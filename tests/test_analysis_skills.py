@@ -4,18 +4,15 @@ import math
 
 import pytest
 
-from numerical_agent.evolution.primite_ts_skills import (
+from numerical_agent.evolution.analysis_skills import (
     AR_METHODS,
     COSTS,
     DENOISE_METHODS,
-    DICTIONARY_KINDS,
     DISTANCE_METRICS,
     FEATURE_GROUPS,
     FREQUENCY_PERIODS,
     INTERPOLATE_METHODS,
-    LEARN_METHODS,
     OUTLIER_METHODS,
-    PURSUIT_METHODS,
     SEASONAL_METHODS,
     SINUSOIDAL_METHODS,
     TREND_METHODS,
@@ -38,13 +35,9 @@ from numerical_agent.evolution.primite_ts_skills import (
     barycenter,
     distance,
     features,
-    learn_dictionary,
-    make_dictionary,
     matrix_profile,
     nearest_windows,
-    reconstruct,
     sax,
-    sparse_code,
     infer_period,
     interpolate_missing,
     last_regime,
@@ -70,9 +63,7 @@ def ar1(coefficient: float, length: int, seed: int = 0) -> list[float]:
     return values
 
 
-# --------------------------------------------------------------------------------------
 # acf
-# --------------------------------------------------------------------------------------
 
 
 def test_acf_is_one_at_lag_zero() -> None:
@@ -101,9 +92,7 @@ def test_acf_rejects_a_non_finite_series() -> None:
         acf([1.0, float("nan"), 3.0, 4.0], 2)
 
 
-# --------------------------------------------------------------------------------------
 # pacf
-# --------------------------------------------------------------------------------------
 
 
 def test_pacf_of_an_ar1_process_cuts_off_after_lag_one() -> None:
@@ -122,9 +111,7 @@ def test_pacf_needs_more_than_twice_the_lag_in_points() -> None:
         pacf(list(range(10)), 5)
 
 
-# --------------------------------------------------------------------------------------
 # spectrum
-# --------------------------------------------------------------------------------------
 
 
 def test_dft_spectrum_recovers_the_frequency_of_a_pure_sinusoid() -> None:
@@ -160,9 +147,7 @@ def test_spectrum_rejects_an_unknown_method() -> None:
         spectrum(sinusoid(8, 64), method="wavelet")  # type: ignore[arg-type]
 
 
-# --------------------------------------------------------------------------------------
 # dominant_frequencies
-# --------------------------------------------------------------------------------------
 
 
 def test_dominant_frequencies_returns_k_components_strongest_first() -> None:
@@ -181,9 +166,7 @@ def test_dominant_frequencies_rejects_a_non_positive_k() -> None:
         dominant_frequencies(sinusoid(8, 64), k=0)
 
 
-# --------------------------------------------------------------------------------------
 # infer_period
-# --------------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("period", [7, 12, 24, 30])
@@ -215,9 +198,7 @@ def test_infer_period_rejects_a_series_too_short_to_judge() -> None:
         infer_period([1.0, 2.0])
 
 
-# --------------------------------------------------------------------------------------
-# Axis D: segmentation
-# --------------------------------------------------------------------------------------
+# Segmentation
 
 def mean_shift(levels: list[float], run: int = 60) -> list[float]:
     """Piecewise-constant signal with a small deterministic wobble so variance is non-zero."""
@@ -355,9 +336,7 @@ def test_asking_for_more_breaks_than_the_series_can_hold_is_rejected() -> None:
         detect_changepoints([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], n_breaks=5, min_size=2)
 
 
-# --------------------------------------------------------------------------------------
 # segment_cost and last_regime
-# --------------------------------------------------------------------------------------
 
 
 def test_segment_cost_is_zero_on_a_constant_segment_and_positive_otherwise() -> None:
@@ -394,9 +373,7 @@ def test_last_regime_rejects_a_break_outside_the_series() -> None:
         last_regime([1.0, 2.0, 3.0], [9])
 
 
-# --------------------------------------------------------------------------------------
-# Axis B: cleaning
-# --------------------------------------------------------------------------------------
+# Cleaning
 
 
 def noisy(period: int, length: int, scale: float = 0.4, seed: int = 5) -> tuple[list[float], list[float]]:
@@ -524,9 +501,7 @@ def test_remove_outliers_rejects_bad_arguments() -> None:
         remove_outliers(sinusoid(10, 50), threshold=0.0)
 
 
-# --------------------------------------------------------------------------------------
-# Axis C: decomposition
-# --------------------------------------------------------------------------------------
+# Decomposition
 
 
 def trended_seasonal(length: int = 120, period: int = 12, slope: float = 0.1) -> list[float]:
@@ -604,9 +579,7 @@ def test_decompose_rejects_an_unknown_model() -> None:
         decompose(trended_seasonal(), 12, "exponential")  # type: ignore[arg-type]
 
 
-# --------------------------------------------------------------------------------------
-# Axis F: models
-# --------------------------------------------------------------------------------------
+# Models
 
 
 def trended_cycle(length: int = 160, period: int = 12) -> list[float]:
@@ -781,116 +754,7 @@ def test_models_reject_a_series_too_short_to_fit() -> None:
         fit_hmm([1.0, 2.0, 3.0], 2)
 
 
-# --------------------------------------------------------------------------------------
-# Axis E: representation
-# --------------------------------------------------------------------------------------
-
-
-def two_tone(length: int = 64, period: int = 32) -> list[float]:
-    return [
-        math.sin(2 * math.pi * i / period) + 0.5 * math.cos(2 * math.pi * 3 * i / period)
-        for i in range(length)
-    ]
-
-
-@pytest.mark.parametrize("kind", DICTIONARY_KINDS)
-def test_every_dictionary_has_unit_norm_atoms_of_the_requested_length(kind: str) -> None:
-    atoms = make_dictionary(kind, 64)
-
-    assert atoms
-    for atom in atoms:
-        assert len(atom) == 64
-        assert math.sqrt(sum(v * v for v in atom)) == pytest.approx(1.0, abs=1e-9)
-
-
-def test_dictionary_size_can_be_capped() -> None:
-    assert len(make_dictionary("dct", 32, n_atoms=5)) == 5
-
-
-def test_make_dictionary_rejects_bad_arguments() -> None:
-    with pytest.raises(NotApplicable):
-        make_dictionary("wibble", 32)  # type: ignore[arg-type]
-    with pytest.raises(NotApplicable):
-        make_dictionary("dct", 1)
-
-
-def test_omp_recovers_a_two_tone_signal_exactly_from_the_dft_dictionary() -> None:
-    signal = two_tone()
-    atoms = make_dictionary("dft", 64)
-    codes = sparse_code(signal, atoms, "omp", sparsity=4)
-
-    assert sum(1 for v in codes if abs(v) > 1e-9) <= 4
-    assert reconstruct(codes, atoms) == pytest.approx(signal, abs=1e-8)
-
-
-@pytest.mark.parametrize("pursuit", PURSUIT_METHODS)
-def test_every_pursuit_produces_a_sparse_code_that_reduces_error(pursuit: str) -> None:
-    signal = two_tone()
-    atoms = make_dictionary("dft", 64)
-    codes = sparse_code(signal, atoms, pursuit, sparsity=6)
-    rebuilt = reconstruct(codes, atoms)
-
-    assert len(codes) == len(atoms)
-    assert sum(1 for v in codes if abs(v) > 1e-9) < len(atoms)
-    assert mae(rebuilt, signal) < mae([0.0] * len(signal), signal), pursuit
-
-
-def test_the_lasso_penalty_is_scale_free() -> None:
-    small = two_tone()
-    large = [value * 1000.0 for value in small]
-    atoms = make_dictionary("dft", 64)
-
-    small_codes = sparse_code(small, atoms, "lasso", alpha=0.1)
-    large_codes = sparse_code(large, atoms, "lasso", alpha=0.1)
-
-    assert sum(1 for v in small_codes if abs(v) > 1e-9) == sum(1 for v in large_codes if abs(v) > 1e-6)
-    assert [v * 1000.0 for v in small_codes] == pytest.approx(large_codes, rel=1e-3)
-
-
-def test_sparse_code_rejects_a_dictionary_of_the_wrong_length() -> None:
-    with pytest.raises(NotApplicable):
-        sparse_code(two_tone(), make_dictionary("dft", 32), "omp")
-    with pytest.raises(NotApplicable):
-        sparse_code(two_tone(), make_dictionary("dft", 64), "wibble")  # type: ignore[arg-type]
-    with pytest.raises(NotApplicable):
-        sparse_code(two_tone(), make_dictionary("dft", 64), "lasso", alpha=5.0)
-
-
-def test_reconstruct_rejects_a_code_of_the_wrong_size() -> None:
-    with pytest.raises(NotApplicable):
-        reconstruct([1.0, 2.0], make_dictionary("dft", 64))
-
-
-@pytest.mark.parametrize("method", LEARN_METHODS)
-def test_a_learned_dictionary_reconstructs_the_windows_it_was_trained_on(method: str) -> None:
-    period, width = 16, 16
-    signal = [math.sin(2 * math.pi * i / period) for i in range(width * 12)]
-    windows = [signal[start:start + width] for start in range(0, len(signal) - width, 4)]
-
-    atoms = learn_dictionary(windows, n_atoms=8, sparsity=2, method=method)
-
-    assert len(atoms) == 8
-    assert all(len(atom) == width for atom in atoms)
-    errors = [
-        mae(reconstruct(sparse_code(window, atoms, "omp", sparsity=2), atoms), window)
-        for window in windows
-    ]
-    assert sum(errors) / len(errors) < 0.2, method
-
-
-def test_learn_dictionary_rejects_bad_arguments() -> None:
-    windows = [[1.0, 2.0, 3.0, 4.0], [2.0, 3.0, 4.0, 5.0]]
-    with pytest.raises(NotApplicable):
-        learn_dictionary(windows, 4, method="wibble")  # type: ignore[arg-type]
-    with pytest.raises(NotApplicable):
-        learn_dictionary(windows, 4, sparsity=9)
-    with pytest.raises(NotApplicable):
-        learn_dictionary([[1.0, 2.0]], 4)
-
-
-# --------------------------------------------------------------------------------------
-# Axis G: matching
-# --------------------------------------------------------------------------------------
+# Matching
 
 
 @pytest.mark.parametrize("metric", DISTANCE_METRICS)
@@ -1003,9 +867,7 @@ def test_barycenter_rejects_bad_arguments() -> None:
         barycenter([])
 
 
-# --------------------------------------------------------------------------------------
-# Axis H: features
-# --------------------------------------------------------------------------------------
+# Features
 
 
 def test_features_returns_every_requested_group_and_only_finite_numbers() -> None:

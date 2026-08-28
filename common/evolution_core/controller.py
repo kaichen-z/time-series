@@ -54,12 +54,12 @@ class SelfEvolutionEngine(Generic[ArtifactT, ItemT, ResultT]):
         self,
         parent: ArtifactT,
         train_items: Sequence[ItemT],
-        dev_items: Sequence[ItemT],
+        val_items: Sequence[ItemT],
     ) -> EvolutionOutcome[ArtifactT]:
         if not train_items:
             raise ValueError("train_items must not be empty")
-        if not dev_items:
-            raise ValueError("dev_items must not be empty")
+        if not val_items:
+            raise ValueError("val_items must not be empty")
 
         adapter = self.components.artifact_adapter
         current = parent
@@ -108,16 +108,16 @@ class SelfEvolutionEngine(Generic[ArtifactT, ItemT, ResultT]):
                 )
 
             selected_pair = self._best_train_pair(train_pairs)
-            parent_dev: EvaluationReport | None = None
-            child_dev: EvaluationReport | None = None
+            parent_val: EvaluationReport | None = None
+            child_val: EvaluationReport | None = None
             accepted = False
             selected_id: str | None = None
             if selected_pair is not None:
                 selected, _ = selected_pair
                 selected_id = adapter.artifact_id(selected)
-                parent_dev = self._evaluate(current, dev_items, "dev")
-                child_dev = self._evaluate(selected, dev_items, "dev")
-                accepted = self.components.acceptance_gate.accept(parent_dev, child_dev)
+                parent_val = self._evaluate(current, val_items, "val")
+                child_val = self._evaluate(selected, val_items, "val")
+                accepted = self.components.acceptance_gate.accept(parent_val, child_val)
                 if accepted:
                     current = selected
 
@@ -131,8 +131,8 @@ class SelfEvolutionEngine(Generic[ArtifactT, ItemT, ResultT]):
                 accepted_artifact_id=adapter.artifact_id(current),
                 parent_train_report=parent_train,
                 child_train_reports=tuple(report for _, report in train_pairs),
-                parent_dev_report=parent_dev,
-                child_dev_report=child_dev,
+                parent_dev_report=parent_val,
+                child_dev_report=child_val,
             )
             steps.append(step)
             self.components.store.append_trace(self._step_payload(step))

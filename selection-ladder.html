@@ -1,0 +1,608 @@
+<title>How One Method Gets Picked</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+
+<style>
+  :root {
+    --bg:#F6F7F9; --surface:#FFFFFF; --plate:#FBFCFD;
+    --ink:#171B22; --ink-soft:#4A5361; --ink-faint:#7B8595;
+    --rule:#DDE2E9; --rule-firm:#C3CBD6; --grid:#E9EDF2;
+    --hindcast:#3B7A57; --hindcast-bg:#EAF3EE;
+    --routed:#0B6E99;   --routed-bg:#E5F1F7;
+    --ceiling:#9A7112;  --ceiling-bg:#F7F0DC;
+    --penalty:#A83A2B;  --penalty-bg:#F8EAE7;
+    --bark:#6B5540; --soil:#C9BCA8; --leaf-dead:#A08256;
+    --display:'Archivo','Helvetica Neue',Arial,sans-serif;
+    --body:'Source Serif 4',Georgia,serif;
+    --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:#0F1216; --surface:#171B21; --plate:#13171C;
+      --ink:#E6EAF0; --ink-soft:#A3ADBB; --ink-faint:#6F7A88;
+      --rule:#2A313A; --rule-firm:#3B444F; --grid:#1C222A;
+      --hindcast:#6FBF8E; --hindcast-bg:#16231C;
+      --routed:#4FB3DB;   --routed-bg:#10222B;
+      --ceiling:#D9AE4E;  --ceiling-bg:#241E10;
+      --penalty:#E0796B;  --penalty-bg:#271613;
+      --bark:#8A7054; --soil:#3A3227; --leaf-dead:#8A6E45;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#0F1216; --surface:#171B21; --plate:#13171C;
+    --ink:#E6EAF0; --ink-soft:#A3ADBB; --ink-faint:#6F7A88;
+    --rule:#2A313A; --rule-firm:#3B444F; --grid:#1C222A;
+    --hindcast:#6FBF8E; --hindcast-bg:#16231C;
+    --routed:#4FB3DB;   --routed-bg:#10222B;
+    --ceiling:#D9AE4E;  --ceiling-bg:#241E10;
+    --penalty:#E0796B;  --penalty-bg:#271613;
+    --bark:#8A7054; --soil:#3A3227; --leaf-dead:#8A6E45;
+  }
+
+  * { box-sizing:border-box; }
+  body {
+    background:var(--bg); color:var(--ink); font-family:var(--body);
+    font-size:17px; line-height:1.6; margin:0; padding:0 20px 90px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap { max-width:1000px; margin:0 auto; }
+
+  header.mast { padding:66px 0 32px; border-bottom:2px solid var(--ink); }
+  .eyebrow { font-family:var(--mono); font-size:11px; letter-spacing:.16em;
+             text-transform:uppercase; color:var(--ink-faint); margin:0 0 16px; }
+  h1 { font-family:var(--display); font-weight:700; font-size:clamp(32px,5.4vw,54px);
+       line-height:1.03; letter-spacing:-.022em; margin:0 0 16px; text-wrap:balance; }
+  .sub { font-size:19px; color:var(--ink-soft); max-width:52ch; margin:0; }
+
+  .plate { margin:64px 0 0; }
+  .phead { display:flex; align-items:baseline; gap:13px; border-bottom:1px solid var(--rule-firm);
+           padding-bottom:10px; margin-bottom:22px; flex-wrap:wrap; }
+  .pnum { font-family:var(--mono); font-size:11px; font-weight:600; letter-spacing:.14em;
+          color:var(--ink-faint); }
+  .phead h2 { font-family:var(--display); font-weight:600; font-size:23px;
+              letter-spacing:-.012em; margin:0; }
+  .plate > p { max-width:60ch; }
+
+  .fig { background:var(--plate);
+         background-image:linear-gradient(var(--grid) 1px,transparent 1px),
+                          linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+         background-size:22px 22px; border:1px solid var(--rule);
+         border-radius:3px; padding:26px 24px; margin:22px 0; overflow-x:auto; }
+  .fig.flat { background-image:none; }
+  .cap { font-size:14.5px; color:var(--ink-soft); margin:-8px 0 0; padding-left:12px;
+         border-left:2px solid var(--rule-firm); max-width:70ch; line-height:1.5; }
+
+  code,.m { font-family:var(--mono); font-size:.875em; }
+  .m { font-variant-numeric:tabular-nums; }
+  p code { background:var(--surface); border:1px solid var(--rule);
+           border-radius:2px; padding:1px 5px; }
+  svg { display:block; max-width:100%; height:auto; }
+  svg text { font-family:'IBM Plex Mono',monospace; }
+
+  /* key */
+  .key { display:grid; grid-template-columns:repeat(auto-fit,minmax(215px,1fr));
+         border:1px solid var(--rule); border-radius:3px; background:var(--surface);
+         margin:30px 0 0; overflow:hidden; }
+  .key > div { padding:15px 18px; border-right:1px solid var(--rule); }
+  .key > div:last-child { border-right:none; }
+  .kname { display:flex; align-items:center; gap:8px; font-family:var(--mono);
+           font-size:12.5px; font-weight:600; margin-bottom:5px; }
+  .sw { width:14px; height:14px; border-radius:2px; flex:none; }
+  .sw-h { background:var(--hindcast-bg); border:2px solid var(--hindcast); }
+  .sw-r { background:var(--routed-bg);   border:2px solid var(--routed); }
+  .sw-c { background:var(--ceiling-bg);  border:2px dashed var(--ceiling); }
+  .kh{color:var(--hindcast)} .kr{color:var(--routed)} .kc{color:var(--ceiling)}
+  .key p { margin:0; font-size:13.5px; line-height:1.45; color:var(--ink-soft); }
+
+  /* score strips */
+  .strip { display:flex; gap:12px; flex-wrap:wrap; margin-top:20px; }
+  .box { flex:1 1 165px; background:var(--surface); border:1px solid var(--rule);
+         border-radius:3px; padding:14px 16px; }
+  .box.hero { border-width:2px; border-color:var(--ink); }
+  .bname { font-family:var(--mono); font-size:10.5px; letter-spacing:.08em;
+           text-transform:uppercase; color:var(--ink-faint); margin:0 0 6px; }
+  .bval { font-family:var(--mono); font-size:28px; font-weight:600;
+          font-variant-numeric:tabular-nums; line-height:1; letter-spacing:-.02em; }
+  .bsub { font-size:13px; color:var(--ink-soft); margin:7px 0 0; line-height:1.4; }
+  .vr{color:var(--routed)} .vc{color:var(--ceiling)} .vh{color:var(--hindcast)}
+
+  .punch { display:flex; gap:12px; align-items:flex-start; background:var(--penalty-bg);
+           border-left:3px solid var(--penalty); border-radius:0 3px 3px 0;
+           padding:15px 18px; margin:24px 0 0; font-size:15.5px; line-height:1.55; }
+  .punch-m { font-family:var(--mono); font-size:11px; font-weight:600; letter-spacing:.08em;
+             color:var(--penalty); flex:none; padding-top:3px; }
+  .punch p { margin:0; max-width:62ch; }
+
+  .refs { list-style:none; padding:0; margin:26px 0 0; border-top:1px solid var(--rule); }
+  .refs li { display:grid; grid-template-columns:minmax(215px,270px) 1fr; gap:18px;
+             padding:10px 0; border-bottom:1px solid var(--rule); font-size:14.5px;
+             align-items:baseline; }
+  .refs .loc { font-family:var(--mono); font-size:12.5px; color:var(--routed); }
+  .refs .what { color:var(--ink-soft); }
+
+  .closing { margin-top:72px; padding-top:30px; border-top:2px solid var(--ink); }
+  .closing h2 { font-family:var(--display); font-weight:600; font-size:23px; margin:0 0 14px; }
+
+  @media (max-width:720px){
+    body{font-size:16px; padding:0 14px 60px;}
+    .refs li{grid-template-columns:1fr; gap:2px;}
+  }
+  .concept { background:var(--surface); border:1px solid var(--rule); border-radius:3px;
+             padding:26px 30px; margin:24px 0; }
+  .concept.h { border-left:3px solid var(--hindcast); }
+  .concept.c { border-left:3px solid var(--ceiling); }
+  .concept h3 { font-family:var(--display); font-weight:600; font-size:19px; margin:0 0 4px;
+                letter-spacing:-.01em; }
+  .concept .gloss { font-family:var(--mono); font-size:12.5px; color:var(--ink-faint);
+                    margin:0 0 16px; }
+  .concept p { max-width:64ch; }
+  .concept h4 { font-family:var(--mono); font-size:11px; letter-spacing:.1em;
+                text-transform:uppercase; color:var(--ink-faint); margin:22px 0 8px;
+                font-weight:600; }
+  .concept ol, .concept ul { max-width:64ch; padding-left:20px; }
+  .concept li { margin-bottom:7px; }
+  .aside { border-top:1px solid var(--rule); margin-top:20px; padding-top:16px;
+           font-size:14.5px; color:var(--ink-soft); }
+  .aside b { color:var(--ink); font-family:var(--display); }
+  .eq { font-family:var(--mono); font-size:14px; background:var(--plate);
+        border:1px solid var(--rule); border-radius:3px; padding:12px 16px;
+        margin:14px 0; overflow-x:auto; }
+  @media print {
+    body { background:#fff; color:#000; padding:0; font-size:11pt; }
+    .fig { background:#fff; background-image:none; break-inside:avoid; }
+    .plate { break-inside:avoid; margin-top:26px; }
+    header.mast { padding-top:0; }
+  }
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <p class="eyebrow">numerical_agent · curation + evolution_core · main</p>
+  <h1>How One Method Gets Picked</h1>
+  <p class="sub">166 catalogued methods. One task. One choice — made without ever seeing the future.</p>
+</header>
+
+<div class="key">
+  <div>
+    <div class="kname kh"><span class="sw sw-h"></span>selection_score</div>
+    <p>Scored on hidden slices of the <em>past</em>. The only number the router may read.</p>
+  </div>
+  <div>
+    <div class="kname kr"><span class="sw sw-r"></span>routed</div>
+    <p>What the chosen method actually scored on the real future.</p>
+  </div>
+  <div>
+    <div class="kname kc"><span class="sw sw-c"></span>ceiling <span style="font-weight:400;opacity:.7">(“oracle”)</span></div>
+    <p>What the <em>best</em> method scored. Knowable only afterwards. Always dashed.</p>
+  </div>
+</div>
+
+<!-- ============================ FIG 1 : SEARCH TREE ============================ -->
+<section class="plate">
+  <div class="phead"><span class="pnum">FIG 1</span><h2>The search tree</h2></div>
+  <p>Each node is one whole dictionary. Depth is generation, branching factor is
+     <span class="m">children_per_generation = 2</span>. Only one path is ever descended.</p>
+
+  <div class="fig flat">
+    <svg viewBox="0 0 940 570" role="img" aria-label="Search tree with branching factor four; one bold path is expanded while all sibling subtrees are elided as dashed triangles.">
+      <!-- depth guides -->
+      <g stroke="var(--rule)" stroke-dasharray="3 5">
+        <line x1="86" y1="62"  x2="906" y2="62"/>
+        <line x1="86" y1="182" x2="906" y2="182"/>
+        <line x1="86" y1="302" x2="906" y2="302"/>
+        <line x1="86" y1="422" x2="906" y2="422"/>
+      </g>
+      <g font-size="10.5" fill="var(--ink-faint)" text-anchor="end">
+        <text x="78" y="66">root</text>
+        <text x="78" y="186">gen 1</text>
+        <text x="78" y="306">gen 2</text>
+        <text x="78" y="426">gen 3</text>
+      </g>
+
+      <!-- pruned edges -->
+      <g fill="none" stroke="var(--rule-firm)" stroke-width="1.5" stroke-dasharray="5 4">
+        <line x1="470" y1="62" x2="180" y2="182"/>
+        <line x1="470" y1="62" x2="380" y2="182"/>
+        <line x1="470" y1="62" x2="780" y2="182"/>
+        <line x1="580" y1="182" x2="340" y2="302"/>
+        <line x1="580" y1="182" x2="660" y2="302"/>
+        <line x1="580" y1="182" x2="820" y2="302"/>
+        <line x1="500" y1="302" x2="260" y2="422"/>
+        <line x1="500" y1="302" x2="580" y2="422"/>
+        <line x1="500" y1="302" x2="740" y2="422"/>
+      </g>
+      <!-- accepted path -->
+      <g fill="none" stroke="var(--hindcast)" stroke-width="3.4">
+        <line x1="470" y1="62"  x2="580" y2="182"/>
+        <line x1="580" y1="182" x2="500" y2="302"/>
+        <line x1="500" y1="302" x2="420" y2="422"/>
+      </g>
+
+      <!-- elided subtrees -->
+      <g fill="var(--grid)" stroke="var(--rule-firm)" stroke-width="1.2" stroke-dasharray="4 4">
+        <path d="M180,196 L146,258 L214,258 Z"/>
+        <path d="M380,196 L346,258 L414,258 Z"/>
+        <path d="M780,196 L746,258 L814,258 Z"/>
+        <path d="M340,316 L306,378 L374,378 Z"/>
+        <path d="M660,316 L626,378 L694,378 Z"/>
+        <path d="M820,316 L786,378 L854,378 Z"/>
+        <path d="M260,436 L226,498 L294,498 Z"/>
+        <path d="M580,436 L546,498 L614,498 Z"/>
+        <path d="M740,436 L706,498 L774,498 Z"/>
+      </g>
+
+      <!-- pruned nodes -->
+      <g fill="var(--surface)" stroke="var(--rule-firm)" stroke-width="2">
+        <circle cx="180" cy="182" r="12"/><circle cx="380" cy="182" r="12"/><circle cx="780" cy="182" r="12"/>
+        <circle cx="340" cy="302" r="12"/><circle cx="660" cy="302" r="12"/><circle cx="820" cy="302" r="12"/>
+        <circle cx="260" cy="422" r="12"/><circle cx="580" cy="422" r="12"/><circle cx="740" cy="422" r="12"/>
+      </g>
+      <g font-size="10.5" fill="var(--ink-faint)" text-anchor="middle">
+        <text x="180" y="186">✕</text><text x="380" y="186">✕</text><text x="780" y="186">✕</text>
+        <text x="340" y="306">✕</text><text x="660" y="306">✕</text><text x="820" y="306">✕</text>
+        <text x="260" y="426">✕</text><text x="580" y="426">✕</text><text x="740" y="426">✕</text>
+      </g>
+      <g font-size="10.5" fill="var(--ink-faint)" text-anchor="middle">
+        <text x="180" y="164">0.449</text><text x="380" y="164">0.421</text><text x="780" y="164">0.433</text>
+        <text x="340" y="284">0.419</text><text x="660" y="284">0.408</text><text x="820" y="284">0.426</text>
+        <text x="260" y="404">0.402</text><text x="580" y="404">0.396</text><text x="740" y="404">0.411</text>
+      </g>
+
+      <!-- accepted nodes -->
+      <g fill="var(--hindcast-bg)" stroke="var(--hindcast)" stroke-width="3">
+        <circle cx="470" cy="62"  r="16"/>
+        <circle cx="580" cy="182" r="16"/>
+        <circle cx="500" cy="302" r="16"/>
+        <circle cx="420" cy="422" r="16"/>
+      </g>
+      <g font-size="11.5" fill="var(--hindcast)" text-anchor="middle" font-weight="600">
+        <text x="470" y="40">0.437</text>
+        <text x="604" y="164">0.418</text>
+        <text x="524" y="284">0.401</text>
+        <text x="444" y="404">0.388</text>
+      </g>
+
+      <text x="470" y="22" font-size="11.5" fill="var(--ink)" text-anchor="middle" font-weight="600">seed dictionary · 98 methods</text>
+      <text x="470" y="7" font-size="10" fill="var(--ink-faint)" text-anchor="middle">166 catalogued − 24 combined − 44 unusable</text>
+      <text x="420" y="452" font-size="11.5" fill="var(--hindcast)" text-anchor="middle" font-weight="600">current best</text>
+
+      <text x="470" y="536" font-size="11.5" fill="var(--ink-faint)" text-anchor="middle">every dashed triangle is a subtree the search can never enter</text>
+
+      <g font-size="11">
+        <circle cx="120" cy="530" r="8" fill="var(--hindcast-bg)" stroke="var(--hindcast)" stroke-width="2.5"/>
+        <text x="136" y="534" fill="var(--ink-soft)">accepted</text>
+        <circle cx="228" cy="530" r="8" fill="var(--surface)" stroke="var(--rule-firm)" stroke-width="2"/>
+        <text x="244" y="534" fill="var(--ink-soft)">rejected</text>
+      </g>
+    </svg>
+  </div>
+
+  <div class="strip">
+    <div class="box">
+      <p class="bname">nodes visited · 10 gens, b = 4</p>
+      <div class="bval vh">40</div>
+      <p class="bsub">4 children evaluated per generation</p>
+    </div>
+    <div class="box">
+      <p class="bname">leaves at depth 10</p>
+      <div class="bval" style="color:var(--ink-faint)">1 048 576</div>
+      <p class="bsub">4¹⁰ — what b = 4 implies</p>
+    </div>
+    <div class="box hero">
+      <p class="bname">backtracks</p>
+      <div class="bval">0</div>
+      <p class="bsub">a rejected node is never re-expanded</p>
+    </div>
+  </div>
+
+  <p style="font-size:14.5px;color:var(--ink-soft);max-width:66ch">
+    Drawn at <span class="m">b = 4</span>; <span class="m">main</span> defaults to
+    <span class="m">children_per_generation = 2</span>. Raising <em>b</em> widens each fan but does
+    not change the shape of the search — the explored sliver shrinks as
+    <span class="m">b·g ⁄ b<sup>g</sup></span>, so more children makes the unexplored fraction
+    <em>larger</em>, not smaller.
+  </p>
+
+  <p class="cap">Every dashed triangle is a subtree the search will never enter, because the only node
+  it can descend from was rejected once. A Darwin&nbsp;Gödel Machine keeps an <em>archive</em> and
+  samples parents from it, so those triangles stay reachable. Without one this is depth-first
+  descent with no backtracking — a <b>(1+λ) hill-climber</b>, λ&nbsp;=&nbsp;2.</p>
+</section>
+
+<!-- ============================ FIG 2 : AUDITION ============================ -->
+<section class="plate">
+  <div class="phead"><span class="pnum">FIG 2</span><h2>The audition — where <span class="m kh">selection_score</span> comes from</h2></div>
+  <p>One real task. <span class="m">task_186</span> · Vista-Point Node 4 · occupancy rate · hourly ·
+     <span class="m">seasonal_period&nbsp;=&nbsp;24</span>. Two candidates audition on hidden slices of its own past.</p>
+
+  <div class="fig">
+    <svg viewBox="0 0 940 300" role="img" aria-label="168-hour history with three 8-step backtest windows; a flat naive forecast tracks each window more closely than a seasonal one.">
+      <rect x="269.5" y="18" width="217.5" height="204" fill="var(--hindcast-bg)" opacity=".55"/>
+      <rect x="487.0" y="18" width="217.5" height="204" fill="var(--hindcast-bg)" opacity=".55"/>
+      <rect x="704.5" y="18" width="217.5" height="204" fill="var(--hindcast-bg)" opacity=".55"/>
+      <g stroke="var(--hindcast)" stroke-width="1" stroke-dasharray="3 3" opacity=".7">
+        <line x1="269.5" y1="18" x2="269.5" y2="222"/>
+        <line x1="487.0" y1="18" x2="487.0" y2="222"/>
+        <line x1="704.5" y1="18" x2="704.5" y2="222"/>
+      </g>
+
+      <path d="M52.0,178.7 L79.2,167.9 L106.4,146.2 L133.6,113.6 L160.8,113.6 L187.9,59.3 L215.1,70.1 L242.3,48.4 L269.5,59.3 L296.7,70.1 L323.9,59.3 L351.1,81.0 L378.2,70.1 L405.4,81.0 L432.6,91.8 L459.8,135.3 L487.0,157.0 L514.2,178.7 L541.4,167.9 L568.6,178.7 L595.8,167.9 L622.9,167.9 L650.1,157.0 L677.3,113.6 L704.5,70.1 L731.7,81.0 L758.9,91.8 L786.1,81.0 L813.2,70.1 L840.4,37.5 L867.6,81.0 L894.8,48.4"
+            fill="none" stroke="var(--ink)" stroke-width="2.2"/>
+
+      <g fill="none" stroke="var(--routed)" stroke-width="2.4">
+        <path d="M269.5,48.4 L296.7,48.4 L323.9,48.4 L351.1,48.4 L378.2,48.4 L405.4,48.4 L432.6,48.4 L459.8,48.4"/>
+        <path d="M487.0,135.3 L514.2,135.3 L541.4,135.3 L568.6,135.3 L595.8,135.3 L622.9,135.3 L650.1,135.3 L677.3,135.3"/>
+        <path d="M704.5,113.6 L731.7,113.6 L758.9,113.6 L786.1,113.6 L813.2,113.6 L840.4,113.6 L867.6,113.6 L894.8,113.6"/>
+      </g>
+      <g fill="none" stroke="var(--ceiling)" stroke-width="2.4" stroke-dasharray="5 4">
+        <path d="M269.5,91.8 L296.7,91.8 L323.9,102.7 L351.1,135.3 L378.2,135.3 L405.4,135.3 L432.6,146.2 L459.8,167.9"/>
+        <path d="M487.0,167.9 L514.2,178.7 L541.4,178.7 L568.6,189.6 L595.8,200.5 L622.9,200.5 L650.1,200.5 L677.3,189.6"/>
+        <path d="M704.5,178.7 L731.7,167.9 L758.9,146.2 L786.1,113.6 L813.2,113.6 L840.4,59.3 L867.6,70.1 L894.8,48.4"/>
+      </g>
+
+      <g font-size="10.5" fill="var(--ink-faint)" text-anchor="middle">
+        <text x="378.2" y="238">fold 2</text><text x="595.8" y="238">fold 1</text><text x="813.2" y="238">fold 0</text>
+      </g>
+      <g font-size="11.5" text-anchor="middle" font-weight="600">
+        <text x="378.2" y="256" fill="var(--routed)">23.79</text>
+        <text x="595.8" y="256" fill="var(--routed)">51.91</text>
+        <text x="813.2" y="256" fill="var(--routed)">35.56</text>
+        <text x="378.2" y="274" fill="var(--ceiling)">44.08</text>
+        <text x="595.8" y="274" fill="var(--ceiling)">73.92</text>
+        <text x="813.2" y="274" fill="var(--ceiling)">46.26</text>
+      </g>
+      <g font-size="11" text-anchor="end">
+        <text x="255" y="256" fill="var(--routed)" font-weight="600">naive_last</text>
+        <text x="255" y="274" fill="var(--ceiling)" font-weight="600">seasonal_naive</text>
+      </g>
+      <text x="52" y="238" font-size="10.5" fill="var(--ink-faint)">← 168 h of history</text>
+      <text x="150" y="30" font-size="11" fill="var(--ink-soft)">each shaded window = 8 steps hidden, then forecast</text>
+    </svg>
+
+    <div class="strip">
+      <div class="box">
+        <p class="bname">naive_last · selection_score</p>
+        <div class="bval vh">37.09</div>
+        <p class="bsub">fmean(23.79, 51.91, 35.56) — <b>lowest, so it is routed</b></p>
+      </div>
+      <div class="box">
+        <p class="bname">seasonal_naive · selection_score</p>
+        <div class="bval" style="color:var(--ink-faint)">54.76</div>
+        <p class="bsub">fmean(44.08, 73.92, 46.26) — looks worse, so it loses</p>
+      </div>
+    </div>
+  </div>
+
+  <p class="cap">Flat beats seasonal in every window. Note the window width: <span class="m">8</span> steps.</p>
+</section>
+
+<!-- ============================ FIG 3 : REAL TASK ============================ -->
+<section class="plate">
+  <div class="phead"><span class="pnum">FIG 3</span><h2>The real task — and the reversal</h2></div>
+
+  <div class="fig">
+    <svg viewBox="0 0 940 300" role="img" aria-label="The withheld 24-step future is a full daily cycle; the seasonal forecast tracks it while the flat routed forecast does not.">
+      <rect x="477.9" y="18" width="426" height="204" fill="var(--routed-bg)" opacity=".4"/>
+      <line x1="477.9" y1="18" x2="477.9" y2="222" stroke="var(--routed)" stroke-width="1.5" stroke-dasharray="4 3"/>
+      <text x="490" y="34" font-size="11" fill="var(--routed)">withheld future · 24 h = one full cycle</text>
+
+      <path d="M52.0,62.6 L70.1,75.1 L88.2,62.6 L106.4,87.7 L124.5,75.1 L142.6,87.7 L160.8,100.2 L178.9,150.3 L197.0,175.4 L215.1,200.5 L233.2,187.9 L251.4,200.5 L269.5,187.9 L287.6,187.9 L305.8,175.4 L323.9,125.3 L342.0,75.1 L360.1,87.7 L378.2,100.2 L396.4,87.7 L414.5,75.1 L432.6,37.5 L450.8,87.7 L468.9,50.1"
+            fill="none" stroke="var(--ink)" stroke-width="2.2"/>
+      <path d="M468.9,50.1 L487.0,50.1 L505.1,75.1 L523.2,100.2 L541.4,137.8 L559.5,150.3 L577.6,162.9 L595.8,175.4 L613.9,162.9 L632.0,175.4 L650.1,187.9 L668.2,200.5 L686.4,187.9 L704.5,187.9 L722.6,200.5 L740.8,175.4 L758.9,150.3 L777.0,100.2 L795.1,112.7 L813.2,100.2 L831.4,87.7 L849.5,75.1 L867.6,100.2 L885.8,75.1 L903.9,100.2"
+            fill="none" stroke="var(--ink)" stroke-width="2.6"/>
+      <path d="M468.9,50.1 L487.0,50.1 L505.1,50.1 L523.2,50.1 L541.4,50.1 L559.5,50.1 L577.6,50.1 L595.8,50.1 L613.9,50.1 L632.0,50.1 L650.1,50.1 L668.2,50.1 L686.4,50.1 L704.5,50.1 L722.6,50.1 L740.8,50.1 L758.9,50.1 L777.0,50.1 L795.1,50.1 L813.2,50.1 L831.4,50.1 L849.5,50.1 L867.6,50.1 L885.8,50.1 L903.9,50.1"
+            fill="none" stroke="var(--routed)" stroke-width="2.6"/>
+      <path d="M468.9,50.1 L487.0,62.6 L505.1,75.1 L523.2,62.6 L541.4,87.7 L559.5,75.1 L577.6,87.7 L595.8,100.2 L613.9,150.3 L632.0,175.4 L650.1,200.5 L668.2,187.9 L686.4,200.5 L704.5,187.9 L722.6,187.9 L740.8,175.4 L758.9,125.3 L777.0,75.1 L795.1,87.7 L813.2,100.2 L831.4,87.7 L849.5,75.1 L867.6,37.5 L885.8,87.7 L903.9,50.1"
+            fill="none" stroke="var(--ceiling)" stroke-width="2.6" stroke-dasharray="6 4"/>
+
+      <g font-size="11.5" font-weight="600">
+        <text x="912" y="50" fill="var(--routed)" text-anchor="end" dy="-6">naive_last (routed)</text>
+        <text x="700" y="228" fill="var(--ceiling)">seasonal_naive (ceiling)</text>
+        <text x="200" y="228" fill="var(--ink)">truth</text>
+      </g>
+      <text x="52" y="252" font-size="10.5" fill="var(--ink-faint)">the flat line ignores a cycle the seasonal forecast reproduces almost exactly</text>
+    </svg>
+
+    <div class="strip">
+      <div class="box">
+        <p class="bname">routed &nbsp;·&nbsp; dictionary_score</p>
+        <div class="bval vr">64.61</div>
+        <p class="bsub">what naive_last actually scored</p>
+      </div>
+      <div class="box">
+        <p class="bname">ceiling &nbsp;·&nbsp; oracle_score</p>
+        <div class="bval vc">22.41</div>
+        <p class="bsub">what seasonal_naive actually scored</p>
+      </div>
+      <div class="box hero">
+        <p class="bname">gap · cost of routing</p>
+        <div class="bval">42.20</div>
+        <p class="bsub">the right method was in the pool the whole time</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="punch">
+    <span class="punch-m">CAUSE</span>
+    <p><span class="m">selection_horizon = 8</span> &nbsp;but&nbsp; <span class="m">seasonal_period = 24</span>.
+    No audition window ever spans a full cycle, so seasonality cannot pay off in FIG&nbsp;2 — while the
+    real horizon is exactly one cycle. The audition measures the wrong thing.</p>
+  </div>
+</section>
+
+<!-- ============================ FIG 4 : THE TWO MINS ============================ -->
+<section class="plate">
+  <div class="phead"><span class="pnum">FIG 4</span><h2>Two minimums</h2></div>
+
+  <div class="fig flat">
+    <svg viewBox="0 0 900 250" role="img" aria-label="Both metrics take a minimum: the router over past scores, the ceiling over true errors.">
+      <rect x="30" y="26" width="380" height="176" rx="3" fill="var(--hindcast-bg)" stroke="var(--hindcast)" stroke-width="2"/>
+      <text x="56" y="58" font-size="12" fill="var(--hindcast)" font-weight="600" letter-spacing="1.2">THE ROUTER'S MIN</text>
+      <text x="56" y="92" font-size="17" fill="var(--ink)">min( selection_score )</text>
+      <text x="56" y="126" font-size="13.5" fill="var(--ink-soft)">ranks on the past</text>
+      <text x="56" y="150" font-size="13.5" fill="var(--ink-soft)">computable before the future arrives</text>
+      <text x="56" y="174" font-size="13.5" fill="var(--hindcast)" font-weight="600">can be wrong &nbsp;→&nbsp; 64.61</text>
+
+      <rect x="490" y="26" width="380" height="176" rx="3" fill="var(--ceiling-bg)" stroke="var(--ceiling)" stroke-width="2" stroke-dasharray="7 5"/>
+      <text x="516" y="58" font-size="12" fill="var(--ceiling)" font-weight="600" letter-spacing="1.2">THE CEILING'S MIN</text>
+      <text x="516" y="92" font-size="17" fill="var(--ink)">min( actual error )</text>
+      <text x="516" y="126" font-size="13.5" fill="var(--ink-soft)">ranks on the answer</text>
+      <text x="516" y="150" font-size="13.5" fill="var(--ink-soft)">needs the truth — unusable in practice</text>
+      <text x="516" y="174" font-size="13.5" fill="var(--ceiling)" font-weight="600">cannot be wrong &nbsp;→&nbsp; 22.41</text>
+
+      <text x="450" y="120" font-size="12" fill="var(--ink-faint)" text-anchor="middle">vs</text>
+      <path d="M410,150 L490,150" stroke="var(--ink-faint)" stroke-width="1.2" stroke-dasharray="3 3"/>
+      <text x="450" y="228" font-size="13" fill="var(--ink)" text-anchor="middle" font-weight="600">gap = 42.20</text>
+    </svg>
+  </div>
+
+  <p class="cap">Same operation, different domain. Everything called “routing quality” is this one difference.</p>
+
+  <div class="concept h">
+    <h3>selection_score</h3>
+    <p class="gloss">_hindcast_score() · curation/__init__.py:396</p>
+
+    <p>
+      At forecast time you hold two things: a history, and a horizon to fill. You do
+      <em>not</em> hold the answer. So any rule for choosing among 98 methods has to be computable
+      from history alone — that constraint is what <span class="m">selection_score</span> exists
+      to satisfy.
+    </p>
+    <p>
+      The trick is to manufacture a question you <em>can</em> mark. Hide the last stretch of the
+      history, forecast it as if it were the future, and compare against the values you hid.
+      Nothing withheld is touched; the method is graded on data it already had, held back on
+      purpose.
+    </p>
+
+    <h4>The procedure</h4>
+    <ol>
+      <li>Set <span class="m">fold_horizon = min(selection_horizon, len(history) // (folds+1))</span> — 8 by default.</li>
+      <li>For fold <em>i</em>, cut at <span class="m">validation_end = len(history) − i·fold_horizon</span> and
+          <span class="m">train_end = validation_end − fold_horizon</span>.</li>
+      <li>Fit on <span class="m">history[:train_end]</span>, forecast <span class="m">fold_horizon</span> steps,
+          score against <span class="m">history[train_end:validation_end]</span>.</li>
+      <li>Step the origin back and repeat, <span class="m">selection_folds = 3</span> times.</li>
+      <li><span class="m">selection_score = fmean(errors)</span>.</li>
+    </ol>
+
+    <p>
+      Three origins rather than one because a single split is a single sample: a method can win one
+      window on luck. Averaging across receding origins is a cheap variance reduction, and it is
+      why this is <em>rolling-origin</em> backtesting rather than a plain holdout.
+    </p>
+
+    <h4>What it is not</h4>
+    <p>
+      It is not an estimate of how accurate the method will be. Its absolute value is close to
+      meaningless — the folds are 8 steps, the real task may be 24 or 2 798. It is used for one
+      purpose only: <strong>to rank methods against each other</strong>. Only the ordering is
+      consumed, by a single <span class="m">min()</span>.
+    </p>
+
+    <h4>The assumption it rests on</h4>
+    <p>
+      That the ranking is stable across origins — that whichever method did best on the last few
+      chunks will do best on the next one. Your own catalog states it in
+      <span class="m">rolling_origin_champion_selector</span>: <em>“historical forecast-origin
+      errors rank candidate methods similarly to the next origin,”</em> failing when <em>“a regime
+      change after the last validation origin makes the historical champion obsolete.”</em>
+    </p>
+
+    <h4>Guards</h4>
+    <ul>
+      <li>A fold that raises, returns the wrong length, or emits a non-finite value is skipped, not scored.</li>
+      <li>Fewer than <span class="m">ceil(available_folds × 0.8)</span> surviving folds → returns
+          <span class="m">None</span> → the method is <em>unselectable</em>. Better absent than ranked on one lucky window.</li>
+      <li>Ties break on <span class="m">method_id</span>, so routing is deterministic.</li>
+      <li>If nothing scores, fall back to the alphabetically first success — arbitrary, but better than eating the 1000.0 penalty.</li>
+    </ul>
+
+    <div class="aside">
+      <b>Cost.</b> Every method runs <span class="m">1 + folds</span> times per task — the real
+      forecast plus three auditions. At 98 methods × 80 tasks that is roughly 31 000 forecasts,
+      which is why a cheap classical method and a foundation model are not interchangeable here.
+    </div>
+  </div>
+
+  <div class="concept c">
+    <h3>oracle_score — better called the ceiling</h3>
+    <p class="gloss">min(by_item_errors[task]) · curation/__init__.py:566</p>
+
+    <p>
+      Same shape, one word different:
+    </p>
+    <div class="eq">routed  = fmean( error of the <b>selected</b> method, per task )
+ceiling = fmean( error of the <b>best</b> method, per task )</div>
+    <p>
+      To know which method was best you must first know the answer. So the ceiling is computed
+      <em>after</em> the truth is revealed, by looking at every method's real error and taking the
+      smallest. It is not a strategy anyone can run. It is a bound.
+    </p>
+
+    <h4>Why the word “oracle”</h4>
+    <p>
+      From complexity theory, where an oracle is a black box that answers some hard question for
+      free, used to reason about what a machine <em>could</em> do if that part were solved. Here
+      the free answer is “which method wins on this task.” The name describes the cheating, not the
+      method — which is exactly why <strong>ceiling</strong> is the clearer word, and what this page
+      uses.
+    </p>
+
+    <h4>It is not “the best single method”</h4>
+    <p>
+      A common misreading. The ceiling is allowed to change its mind per task; a single method is
+      not. So the ceiling is always at least as good as the best fixed method, usually better:
+    </p>
+    <div class="eq">full98, 98 methods, per-series-type:
+  best single method (timesfm_2_5)   0.278
+  ceiling, switching per type        0.248</div>
+    <p>
+      That 0.030 is what <em>switching itself</em> is worth — before any question of whether a real
+      router can capture it.
+    </p>
+
+    <h4>Why compute a number nobody can reach</h4>
+    <p>
+      Because one bad score has two possible causes, and the pair separates them. On its own,
+      <span class="m">dictionary_score = 0.583</span> tells you the module is weak but not why:
+    </p>
+    <ul>
+      <li><strong>Ceiling poor.</strong> No method in the pool can handle these tasks. Routing is
+          irrelevant — a perfect router still picks from what is there. Fix the pool.</li>
+      <li><strong>Ceiling good, gap wide.</strong> The right answer was present on most tasks and
+          routing kept missing it. Adding methods is wasted effort; the loss is entirely in
+          selection. Fix the router.</li>
+    </ul>
+    <p>
+      Those are opposite prescriptions, and you cannot tell them apart from the routed score alone.
+      That is the whole reason the diagnostic is worth its cost.
+    </p>
+
+    <div class="aside">
+      <b>The gap is not a target.</b> No realizable router closes it — some tasks are genuinely
+      ambiguous from history alone, as <span class="m">task_186</span> shows. Treat it as headroom,
+      and treat a <em>shrinking</em> gap across generations as the signal that routing is improving.
+    </div>
+  </div>
+</section>
+
+<section class="closing">
+  <h2>Source</h2>
+  <ul class="refs">
+    <li><span class="loc">curation/__init__.py:379</span><span class="what">the router — <span class="m">min(selectable, key=selection_score)</span></span></li>
+    <li><span class="loc">curation/__init__.py:396</span><span class="what">the audition — <span class="m">_hindcast_score</span>, rolling origin</span></li>
+    <li><span class="loc">curation/__init__.py:560</span><span class="what">the collapse — <span class="m">oracle_errors</span>, <span class="m">dictionary_errors</span>, both fmeans</span></li>
+    <li><span class="loc">evolution_core/controller.py:92</span><span class="what">the fork — propose children, screen on train, gate on dev</span></li>
+    <li><span class="loc">config.py:37</span><span class="what"><span class="m">selection_folds=3</span>, <span class="m">selection_horizon=8</span></span></li>
+  </ul>
+  <p style="font-size:14.5px;color:var(--ink-soft);margin-top:20px;max-width:66ch">
+    Series and every number above are real: <span class="m">task_186</span> from
+    <span class="m">Dr-CiK/data/tasks/train.jsonl</span>, sMAPE, <span class="m">folds=3</span>,
+    <span class="m">fold_horizon=8</span>.
+  </p>
+</section>
+
+</div>

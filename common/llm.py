@@ -407,7 +407,30 @@ def _gpu_free_mib() -> dict[int, int]:
         ).stdout
     except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return {}
-    return _parse_gpu_free(output)
+    return _visible_only(_parse_gpu_free(output), os.environ.get("CUDA_VISIBLE_DEVICES"))
+
+
+def _visible_only(free: dict[int, int], visible: str | None) -> dict[int, int]:
+    """Rekey physical device indices to the indices torch actually sees.
+
+    nvidia-smi ignores CUDA_VISIBLE_DEVICES and always reports physical indices, but torch
+    numbers the visible cards from zero. Handing an unmapped physical index to max_memory
+    names a device torch cannot place a shard on.
+    """
+    if not visible:
+        return free
+    order: list[int] = []
+    for part in visible.split(","):
+        try:
+            order.append(int(part.strip()))
+        except ValueError:
+            # A UUID rather than an index: we cannot map it, so claim nothing.
+            return {}
+    return {
+        position: free[physical]
+        for position, physical in enumerate(order)
+        if physical in free
+    }
 
 
 def _parse_gpu_free(output: str) -> dict[int, int]:
@@ -499,6 +522,12 @@ class QwenClient:
 
         self._tokenizer = AutoTokenizer.from_pretrained(self.model_id, cache_dir=self.cache_dir)
         if self.device is not None:
+            # Some fused layers (e.g. fla's FusedRMSNormGated) allocate on
+            # torch.cuda.current_device() during __init__, ignoring the later .to(device).
+            # Without this, construction always targets cuda:0 no matter which GPU is asked for.
+            if isinstance(self.device, str) and self.device.startswith("cuda"):
+                index = int(self.device.split(":")[1]) if ":" in self.device else 0
+                torch.cuda.set_device(index)
             self._model = AutoModelForCausalLM.from_pretrained(
                 self.model_id, cache_dir=self.cache_dir, torch_dtype=torch.bfloat16
             ).to(self.device)
@@ -512,6 +541,15 @@ class QwenClient:
                 max_memory=shard_max_memory(self.reserve_gb) or None,
             )
         self._model.eval()
+
+    def preload(self) -> None:
+        """Put the weights on the card now rather than at the first call.
+
+        The caller may spend an hour measuring before it ever asks for a completion; loading
+        first claims the memory against other jobs on the same GPU and surfaces a load failure
+        in minutes instead of after that hour.
+        """
+        self._ensure_loaded()
 
     def _input_device(self):
         """Where to put input ids: the first shard once sharded, else the pinned device."""

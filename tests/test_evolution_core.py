@@ -164,7 +164,7 @@ def test_engine_accepts_only_the_improving_child(tmp_path: Path) -> None:
     outcome = engine.evolve(
         parent=FakeArtifact("v000", 0.0),
         train_items=(1, 2),
-        dev_items=(3, 4),
+        val_items=(3, 4),
     )
 
     assert outcome.accepted_artifact.quality == 1.0
@@ -186,7 +186,7 @@ def test_engine_requires_nonempty_train_and_dev(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="train_items"):
         engine.evolve(FakeArtifact("v000", 0.0), (), (1,))
-    with pytest.raises(ValueError, match="dev_items"):
+    with pytest.raises(ValueError, match="val_items"):
         engine.evolve(FakeArtifact("v000", 0.0), (1,), ())
 
 
@@ -207,7 +207,7 @@ def test_engine_resumes_from_persisted_generation(tmp_path: Path) -> None:
 def report(score: float) -> EvaluationReport:
     return EvaluationReport(
         artifact_id="v",
-        split="dev",
+        split="val",
         metrics={"smae": score},
         item_count=2,
         diagnostics={},
@@ -224,7 +224,7 @@ def test_acceptance_requires_strict_improvement() -> None:
 
 def test_acceptance_rejects_missing_metric() -> None:
     gate = MetricAcceptanceGate(MetricSpec("smae", "minimize"))
-    missing = EvaluationReport("v", "dev", {"mae": 1.0}, 2, {})
+    missing = EvaluationReport("v", "val", {"mae": 1.0}, 2, {})
 
     with pytest.raises(ValueError, match="smae"):
         gate.accept(report(10.0), missing)

@@ -15,6 +15,7 @@ from common.llm import (
     QwenClient,
     TransientLLMError,
     _parse_gpu_free,
+    _visible_only,
     parse_json_object,
     pick_free_gpu,
     shard_max_memory,
@@ -82,6 +83,23 @@ def test_parse_reads_free_memory_per_device() -> None:
 
 def test_parse_skips_malformed_rows() -> None:
     assert _parse_gpu_free("0, 10, 100\ngarbage\n1, x, 100\n") == {0: 90}
+
+
+def test_masked_devices_are_renumbered_the_way_torch_sees_them() -> None:
+    """CUDA_VISIBLE_DEVICES=0,7 makes physical card 7 torch's cuda:1, not cuda:7."""
+    free = _parse_gpu_free(NVIDIA_SMI)
+
+    assert _visible_only(free, "0,7") == {0: 81559 - 54696, 1: 81559 - 25055}
+    assert _visible_only(free, "7") == {0: 81559 - 25055}
+    assert _visible_only(free, None) == free
+
+
+def test_a_masked_device_that_does_not_exist_is_dropped() -> None:
+    assert _visible_only(_parse_gpu_free(NVIDIA_SMI), "0,4") == {0: 81559 - 54696}
+
+
+def test_uuid_masking_claims_nothing_rather_than_guessing() -> None:
+    assert _visible_only(_parse_gpu_free(NVIDIA_SMI), "GPU-abc123") == {}
 
 
 def test_pick_free_gpu_still_takes_the_freest_by_default() -> None:

@@ -503,7 +503,7 @@ def test_child_must_improve_train_before_dev_is_spent(monkeypatch) -> None:
         calls.append(stage)
         if stage == "parent_train":
             reward = 0.8
-        elif stage == "parent_dev":
+        elif stage == "parent_val":
             reward = 0.7
         elif stage == "child_train":
             reward = 0.6
@@ -520,7 +520,7 @@ def test_child_must_improve_train_before_dev_is_spent(monkeypatch) -> None:
     best, trace = engine.evolve(HarnessPolicy(), (object(),), (object(),))
 
     assert best.version == "v000"
-    assert calls == ["parent_train", "parent_dev", "child_train"]
+    assert calls == ["parent_train", "parent_val", "child_train"]
     assert trace[0].best_child_dev_reward is None
 
 
@@ -558,7 +558,7 @@ def test_successive_halving_prunes_screen_failures_and_only_fully_evaluates_top_
                 "parent_screen_train": 0.8,
                 "parent_screen_dev": 0.7,
                 "parent_train_remaining": 0.8,
-                "parent_dev": 0.7,
+                "parent_val": 0.7,
             }[stage]
         else:
             reward = {
@@ -567,7 +567,7 @@ def test_successive_halving_prunes_screen_failures_and_only_fully_evaluates_top_
                 ("v002", "child_screen_train"): 0.9,
                 ("v002", "child_screen_dev"): 0.75,
                 ("v002", "child_train_remaining"): 0.9,
-                ("v002", "child_dev"): 0.8,
+                ("v002", "child_val"): 0.8,
                 ("v003", "child_screen_train"): 0.85,
                 ("v003", "child_screen_dev"): 0.72,
             }[(policy.version, stage)]
@@ -590,7 +590,7 @@ def test_successive_halving_prunes_screen_failures_and_only_fully_evaluates_top_
     assert ("v001", "child_train_remaining", 2) not in calls
     assert ("v003", "child_train_remaining", 2) not in calls
     assert ("v002", "child_train_remaining", 2) in calls
-    assert ("v002", "child_dev", 2) in calls
+    assert ("v002", "child_val", 2) in calls
     assert trace[0].successive_halving is True
     assert trace[0].parent_screen_dev_reward == pytest.approx(0.7)
     assert trace[0].child_screen_dev_rewards == {
@@ -649,7 +649,7 @@ def test_successive_halving_keeps_parent_when_every_child_fails_screen(
 
     assert best.version == "v000"
     assert "child_train_remaining" not in calls
-    assert "child_dev" not in calls
+    assert "child_val" not in calls
     assert trace[0].promoted_versions == ()
     assert trace[0].screen_prune_reasons == {
         "v001": "below_parent_tolerance",
@@ -741,9 +741,9 @@ def test_accepted_child_contains_skills_learned_during_train(monkeypatch, tmp_pa
     def fake_evaluate(policy, _tasks, *, stage, harness, **_kwargs):
         rewards = {
             "parent_train": 0.5,
-            "parent_dev": 0.5,
+            "parent_val": 0.5,
             "child_train": 0.7,
-            "child_dev": 0.7,
+            "child_val": 0.7,
         }
         if stage.endswith("train"):
             harness.coding.library.add(

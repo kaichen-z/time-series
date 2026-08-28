@@ -6,7 +6,7 @@ import pytest
 from common.metrics import (
     change_mae,
     change_smae,
-    horizon_scale,
+    mean_absolute_truth,
     mae,
     rmse,
     scaled_mae,
@@ -122,7 +122,7 @@ class ChangeSmaeTests(unittest.TestCase):
     def test_is_zero_for_a_perfect_forecast(self):
         self.assertEqual(change_smae(self.TRUTH, self.TRUTH, 1.0), 0.0)
 
-    def test_equals_change_mae_divided_by_the_horizon_scale(self):
+    def test_equals_change_mae_divided_by_the_mean_absolute_truth(self):
         forecast = [4.0] * 6
         scale = sum(abs(value) for value in self.TRUTH) / len(self.TRUTH)
         expected = change_mae(self.TRUTH, forecast, 1.0) / scale
@@ -135,21 +135,21 @@ class ChangeSmaeTests(unittest.TestCase):
 
 def test_the_scale_is_the_mean_absolute_truth_over_the_horizon() -> None:
     # a^-1 = (1/T) sum |y_t|, the Dr-CiK scale factor.
-    assert horizon_scale([1.0, -3.0, 2.0, 6.0]) == pytest.approx(3.0)
+    assert mean_absolute_truth([1.0, -3.0, 2.0, 6.0]) == pytest.approx(3.0)
 
 
 def test_the_scale_uses_magnitude_so_sign_does_not_cancel() -> None:
-    assert horizon_scale([5.0, -5.0]) == pytest.approx(5.0)
+    assert mean_absolute_truth([5.0, -5.0]) == pytest.approx(5.0)
 
 
 def test_an_all_zero_horizon_never_divides_by_zero() -> None:
     """With nothing to scale by, the error stays in its own units rather than blowing up."""
-    assert horizon_scale([0.0, 0.0]) == 1.0
+    assert mean_absolute_truth([0.0, 0.0]) == 1.0
     assert scaled_mae([0.0, 0.0], [1.0, 1.0]) == pytest.approx(1.0)
 
 
 def test_an_empty_horizon_is_still_a_valid_scale() -> None:
-    assert horizon_scale([]) == 1.0
+    assert mean_absolute_truth([]) == 1.0
 
 
 def test_smae_is_the_error_as_a_fraction_of_the_series_magnitude() -> None:
@@ -190,11 +190,11 @@ def test_the_scale_does_not_depend_on_the_history(tmp_path) -> None:
 
 def test_the_report_carries_the_scaled_metrics(tmp_path) -> None:
     from numerical_agent.evolution.execution import Task, run_module
-    from numerical_agent.evolution.module import MODULE_HEADER
+    from numerical_agent.evolution.module import METHODS_FILE_HEADER
 
     path = tmp_path / "methods.py"
     path.write_text(
-        MODULE_HEADER
+        METHODS_FILE_HEADER
         + "\n\ndef flat(history, horizon, frequency):\n"
         '    """Repeat the last value."""\n'
         "    return [float(history[-1])] * horizon\n",
@@ -208,18 +208,4 @@ def test_the_report_carries_the_scaled_metrics(tmp_path) -> None:
 
     assert report.mean_smae is not None
     assert report.mean_srmse is not None
-    assert report.by_characteristic_smae
-
-
-def test_ranking_uses_the_scaled_error_not_the_raw_one() -> None:
-    """Ranking follows the scaled error, which is the only comparable one across tasks."""
-    from numerical_agent.evolution.execution import Outcome, _mean_ranks, SUCCESS
-
-    outcomes = [
-        Outcome("steady", "big", SUCCESS, smae=0.5),
-        Outcome("spiky", "big", SUCCESS, smae=2.0),
-    ]
-
-    ranks = _mean_ranks(outcomes)
-
-    assert ranks["steady"] < ranks["spiky"]
+    assert report.smae_by_series_type

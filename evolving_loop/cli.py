@@ -112,7 +112,7 @@ def _add_successive_halving_arguments(parser: argparse.ArgumentParser) -> None:
         help="Screen all children on small train/dev subsets before full evaluation.",
     )
     parser.add_argument("--screen-train-tasks", type=int, default=6)
-    parser.add_argument("--screen-dev-tasks", type=int, default=2)
+    parser.add_argument("--screen-val-tasks", type=int, default=2)
     parser.add_argument("--screen-promote", type=int, default=1)
     parser.add_argument("--screen-tolerance", type=float, default=0.01)
 
@@ -145,7 +145,7 @@ def _add_unified_evolution_arguments(parser: argparse.ArgumentParser) -> None:
         default="auto",
         help="Restrict prompt/genome mutations to one role; auto diagnoses the weakest role.",
     )
-    parser.add_argument("--dev-fraction", type=float, default=0.25)
+    parser.add_argument("--val-fraction", type=float, default=0.25)
     parser.add_argument(
         "--holdout-fraction",
         type=float,
@@ -164,7 +164,7 @@ def _add_unified_evolution_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--split-name",
-        choices=("all", "train", "dev", "holdout"),
+        choices=("all", "train", "val", "holdout"),
         default="all",
     )
     parser.add_argument(
@@ -293,7 +293,7 @@ def build_parser() -> argparse.ArgumentParser:
             "source edits agent/orchestration Python in isolated Git worktrees."
         ),
     )
-    evolve.add_argument("--dev-fraction", type=float, default=0.25)
+    evolve.add_argument("--val-fraction", type=float, default=0.25)
     evolve.add_argument("--holdout-fraction", type=float, default=0.20)
     evolve.add_argument(
         "--split-manifest-path", default="runs/evolving/split_manifest.json"
@@ -466,31 +466,31 @@ def baseline_command(args: argparse.Namespace) -> dict | None:
 
 
 def _entity_split(
-    tasks: list[ContextTask], seed: int, dev_fraction: float
+    tasks: list[ContextTask], seed: int, val_fraction: float
 ) -> tuple[list[ContextTask], list[ContextTask]]:
     entities = sorted({task.numeric.entity_name for task in tasks})
     random.Random(seed).shuffle(entities)
-    count = max(1, round(len(entities) * dev_fraction))
-    dev_entities = set(entities[:count])
+    count = max(1, round(len(entities) * val_fraction))
+    val_entities = set(entities[:count])
     return (
-        [task for task in tasks if task.numeric.entity_name not in dev_entities],
-        [task for task in tasks if task.numeric.entity_name in dev_entities],
+        [task for task in tasks if task.numeric.entity_name not in val_entities],
+        [task for task in tasks if task.numeric.entity_name in val_entities],
     )
 
 
 def _three_way_entity_split(
     tasks: list[ContextTask],
     seed: int,
-    dev_fraction: float,
+    val_fraction: float,
     holdout_fraction: float,
 ) -> tuple[list[ContextTask], list[ContextTask], list[ContextTask]]:
     """Create deterministic entity-disjoint train/dev/holdout partitions."""
-    if not 0 < dev_fraction < 1:
-        raise ValueError("--dev-fraction must be between 0 and 1")
+    if not 0 < val_fraction < 1:
+        raise ValueError("--val-fraction must be between 0 and 1")
     if not 0 < holdout_fraction < 1:
         raise ValueError("--holdout-fraction must be between 0 and 1")
-    if dev_fraction + holdout_fraction >= 1:
-        raise ValueError("dev and holdout fractions must sum to less than 1")
+    if val_fraction + holdout_fraction >= 1:
+        raise ValueError("val and holdout fractions must sum to less than 1")
     entities = sorted({task.numeric.entity_name for task in tasks})
     required = 3
     if len(entities) < required:
@@ -498,23 +498,23 @@ def _three_way_entity_split(
             f"entity split needs at least {required} distinct entities; got {len(entities)}"
         )
     random.Random(seed).shuffle(entities)
-    dev_count = max(1, round(len(entities) * dev_fraction))
+    val_count = max(1, round(len(entities) * val_fraction))
     holdout_count = max(1, round(len(entities) * holdout_fraction))
-    while dev_count + holdout_count >= len(entities):
-        if dev_count >= holdout_count and dev_count > 1:
-            dev_count -= 1
+    while val_count + holdout_count >= len(entities):
+        if val_count >= holdout_count and val_count > 1:
+            val_count -= 1
         elif holdout_count > 1:
             holdout_count -= 1
         else:
             raise ValueError("entity split cannot keep train/dev/holdout non-empty")
     holdout_entities = set(entities[:holdout_count])
-    dev_entities = set(entities[holdout_count : holdout_count + dev_count])
+    val_entities = set(entities[holdout_count : holdout_count + val_count])
     train, dev, holdout = [], [], []
     for task in tasks:
         entity = task.numeric.entity_name
         if entity in holdout_entities:
             holdout.append(task)
-        elif entity in dev_entities:
+        elif entity in val_entities:
             dev.append(task)
         else:
             train.append(task)
@@ -525,7 +525,7 @@ def _write_split_manifest(
     path: str | Path,
     *,
     seed: int,
-    dev_fraction: float,
+    val_fraction: float,
     holdout_fraction: float,
     train: list[ContextTask],
     dev: list[ContextTask],
@@ -543,10 +543,10 @@ def _write_split_manifest(
     payload = {
         "schema_version": 1,
         "seed": seed,
-        "dev_fraction": dev_fraction,
+        "val_fraction": val_fraction,
         "holdout_fraction": holdout_fraction,
         "train": partition(train),
-        "dev": partition(dev),
+        "val": partition(dev),
         "holdout": partition(holdout),
     }
     destination.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -795,13 +795,13 @@ def evolve_command(args) -> dict:
     train, dev, holdout = _three_way_entity_split(
         tasks,
         args.seed,
-        args.dev_fraction,
+        args.val_fraction,
         args.holdout_fraction,
     )
     manifest_path = _write_split_manifest(
         args.split_manifest_path,
         seed=args.seed,
-        dev_fraction=args.dev_fraction,
+        val_fraction=args.val_fraction,
         holdout_fraction=args.holdout_fraction,
         train=train,
         dev=dev,
@@ -846,7 +846,7 @@ def evolve_command(args) -> dict:
             resume=not args.no_resume,
             successive_halving=args.successive_halving,
             screening_train_tasks=args.screen_train_tasks,
-            screening_dev_tasks=args.screen_dev_tasks,
+            screening_dev_tasks=args.screen_val_tasks,
             screening_promote=args.screen_promote,
             screening_tolerance=args.screen_tolerance,
         ),
@@ -864,7 +864,7 @@ def evolve_command(args) -> dict:
         "checkpoint_path": str(checkpoint_path),
         "progress_path": str(progress_path),
         "train_tasks": len(train),
-        "dev_tasks": len(dev),
+        "val_tasks": len(dev),
         "holdout_tasks": len(holdout),
         "split_manifest_path": str(manifest_path),
         "holdout_status": "reserved_unscored_run_frozen_inference_to_evaluate",
@@ -1101,7 +1101,7 @@ def _source_evolve_command(
         "checkpoint_path": str(checkpoint_path),
         "progress_path": str(progress_path),
         "train_tasks": len(train),
-        "dev_tasks": len(dev),
+        "val_tasks": len(dev),
         "accepted_generations": sum(item.accepted_candidate is not None for item in trace),
     }
 

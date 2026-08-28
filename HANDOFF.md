@@ -37,7 +37,7 @@ sMAE  = a * (1/T) * sum(|forecast_t - truth_t|)
 sRMSE = a * sqrt((1/T) * sum((forecast_t - truth_t)^2))
 ```
 
-- `horizon_scale(y_true)` is the denominator — the mean absolute value of the **truth over the
+- `mean_absolute_truth(y_true)` is the denominator — the mean absolute value of the **truth over the
   horizon being scored**, not the history, and **no seasonal period is involved anywhere**. This
   replaced an earlier (wrong) implementation this session that scaled by a seasonal-naive error
   computed from history; caught and corrected mid-session.
@@ -112,7 +112,7 @@ updated).
 - **Untouched, no fragmentation to fix**: `test_co_evolution.py`, `test_source_evolution.py`,
   `test_knowledge_base.py`, `test_evolving_cli.py`, `test_dictionary_curation_adapter.py`,
   `test_numerical_codegen.py`, `test_evolution_history.py`, `test_evolution_loop.py`,
-  `test_skills_index.py`, `test_primite_ts_skills.py`, `test_minimal_system.py`,
+  `test_skills_reference.py`, `test_analysis_skills.py`, `test_minimal_system.py`,
   `test_gap_control.py`, `test_regime_normalization.py`, `test_explicit_values.py`,
   `test_forecast_workspace.py`, `test_code_evolution.py`.
 
@@ -133,7 +133,7 @@ the user is ready — review `git status`/`git diff` carefully before staging, s
 
 Plan file: `/PHShome/ik832/.claude/plans/ok-can-you-add-wise-hearth.md` (from a prior session).
 
-Problem it solves: `render_evolve_user` passed only the current module source and the current
+Problem it solves: `build_improve_request` passed only the current module source and the current
 generation's measurements, so every generation re-derived conclusions earlier generations already
 paid for.
 
@@ -143,10 +143,10 @@ subject, written by `commit_module`).
 
 Status: `numerical_agent/evolution/history.py` (untracked) has `Operation`, `History`,
 `parse_history`, fully covered by `tests/test_evolution_history.py` (untracked, 24 tests, all
-passing). `numerical_agent/evolution/prompts.py` already has `render_history()` and
-`render_evolve_user(history=..., live=...)`, wired into `evolve_once` in
+passing). `numerical_agent/evolution/prompts.py` already has `describe_past_generations()` and
+`build_improve_request(history=..., live=...)`, wired into `evolve_once` in
 `numerical_agent/evolution/__init__.py` (`parse_history(git(root, "log", ...))` feeds
-`render_evolve_user`), and `EVOLVE_SYSTEM` has the "Anything the history above establishes is
+`build_improve_request`), and `IMPROVE_METHODS_PROMPT` has the "Anything the history above establishes is
 settled" rule. This looks done, not partial — a prior handoff's "partially implemented" note was
 stale. Worth a final read-through against the original plan file before calling it fully closed,
 but no code gaps were found this session.

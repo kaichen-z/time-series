@@ -36,6 +36,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-id", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--max-new-tokens", type=int, default=None)
+    parser.add_argument(
+        "--memory-model",
+        default=None,
+        help="a small local model that summarizes each generation into memory.md; off when unset",
+    )
+    parser.add_argument("--memory-device", default=None)
     return parser
 
 
@@ -44,25 +50,34 @@ def main(argv: list[str] | None = None) -> int:
     repo = Path(args.repo)
     configure(repo / "run_evolution_trace.jsonl")
 
-    tasks = _train_tasks(args.split_file, args.tasks_file)
+    tasks = _split_tasks(args.split_file, args.tasks_file, "train")
+    val_tasks = _split_tasks(args.split_file, args.tasks_file, "val")
     llm = _llm_client(args)
 
-    outcomes = run_evolution(repo, tasks, llm, generations=args.generations)
+    outcomes = run_evolution(
+        repo, tasks, llm, generations=args.generations, val_tasks=val_tasks,
+        memory_llm=_memory_client(args),
+    )
     for outcome in outcomes:
         status = f"rejected: {outcome.rejected}" if outcome.rejected else f"{len(outcome.applied)} operations"
-        print(f"generation {outcome.number}: {outcome.method_count} methods, commit {outcome.commit}  ({status})")
+        val = "" if outcome.val_best_smae is None else f"  val_best_smae={outcome.val_best_smae}"
+        print(
+            f"generation {outcome.number}: {outcome.method_count} methods, "
+            f"commit {outcome.commit}  ({status}){val}"
+        )
     return 0
 
 
-def _train_tasks(split_file: str, tasks_file: str) -> tuple[Task, ...]:
+def _split_tasks(split_file: str, tasks_file: str, partition: str) -> tuple[Task, ...]:
+    """Load one partition of the frozen split. Never pass public_test to the evolution loop."""
     payload = read_json_object(split_file)
-    train_ids = set(payload["partitions"]["train"]["task_ids"])  # type: ignore[index]
+    wanted = set(payload["partitions"][partition]["task_ids"])  # type: ignore[index]
     catalog = {task.task_id: task for task in load_tasks(tasks_file)}
     return tuple(
         Task(task.task_id, tuple(task.history_values), task.prediction_length,
              task.frequency, tuple(task.future_values))
         for task_id, task in catalog.items()
-        if task_id in train_ids
+        if task_id in wanted
     )
 
 
@@ -79,6 +94,15 @@ def _llm_client(args: argparse.Namespace):
         )))
     return QwenClient(**_present(
         model_id=args.model_id, device=args.device, max_new_tokens=args.max_new_tokens,
+    ))
+
+
+def _memory_client(args: argparse.Namespace):
+    """The generation summarizer: a second, much smaller model, or None when unset."""
+    if not args.memory_model:
+        return None
+    return QwenClient(**_present(
+        model_id=args.memory_model, device=args.memory_device, max_new_tokens=1024,
     ))
 
 

@@ -9,11 +9,11 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 
-PARTITION_NAMES = ("train", "dev", "public_test")
+PARTITION_NAMES = ("train", "val", "public_test")
 STRATIFICATION_FEATURES = ("frequency", "horizon_bin", "reasoning_hops", "origin")
 RECOMMENDED_PUBLIC_SPLIT_SIZES = {
     "train": 80,
-    "dev": 20,
+    "val": 20,
     "public_test": 99,
 }
 
@@ -91,13 +91,13 @@ def _balance_score(partitions: dict[str, list[dict]], all_records: list[dict]) -
 
 
 def _partition_records(
-    records: list[dict], dev_entities: set[str], test_entities: set[str]
+    records: list[dict], val_entities: set[str], test_entities: set[str]
 ) -> dict[str, list[dict]]:
     result = {name: [] for name in PARTITION_NAMES}
     for record in records:
         entity = _entity(record)
-        if entity in dev_entities:
-            result["dev"].append(record)
+        if entity in val_entities:
+            result["val"].append(record)
         elif entity in test_entities:
             result["public_test"].append(record)
         else:
@@ -106,7 +106,7 @@ def _partition_records(
 
 
 def _best_assignment(
-    records: list[dict], *, seed: int, dev_size: int, public_test_size: int
+    records: list[dict], *, seed: int, val_size: int, public_test_size: int
 ) -> dict[str, list[dict]]:
     grouped: dict[str, list[dict]] = defaultdict(list)
     for record in records:
@@ -116,7 +116,7 @@ def _best_assignment(
     best: tuple[float, str, dict[str, list[dict]]] | None = None
     for trial in range(2048):
         ordered = sorted(entities, key=lambda item: _stable_key(seed, trial, item))
-        dev = _exact_subset(sizes, ordered, dev_size)
+        dev = _exact_subset(sizes, ordered, val_size)
         if dev is None:
             continue
         dev_set = set(dev)
@@ -144,14 +144,14 @@ def build_split_manifest(
     *,
     seed: int,
     train_size: int,
-    dev_size: int,
+    val_size: int,
     public_test_size: int,
 ) -> dict:
     rows = sorted(records, key=lambda item: str(item["benchmark_id"]))
-    requested_total = train_size + dev_size + public_test_size
+    requested_total = train_size + val_size + public_test_size
     if requested_total != len(rows):
         raise ValueError("requested split sizes must sum to the number of public tasks")
-    if min(train_size, dev_size, public_test_size) <= 0:
+    if min(train_size, val_size, public_test_size) <= 0:
         raise ValueError("every requested split size must be positive")
     ids = [str(record["benchmark_id"]) for record in rows]
     if len(ids) != len(set(ids)):
@@ -160,7 +160,7 @@ def build_split_manifest(
         raise ValueError("hidden/unlabeled tasks cannot enter a public evolution manifest")
 
     partitions = _best_assignment(
-        rows, seed=seed, dev_size=dev_size, public_test_size=public_test_size
+        rows, seed=seed, val_size=val_size, public_test_size=public_test_size
     )
 
     def summarize(items: list[dict]) -> dict:
@@ -182,7 +182,7 @@ def build_split_manifest(
         "selection_uses_document_labels": False,
         "target_sizes": {
             "train": train_size,
-            "dev": dev_size,
+            "val": val_size,
             "public_test": public_test_size,
         },
         "actual_sizes": {name: len(partitions[name]) for name in PARTITION_NAMES},
@@ -238,7 +238,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--train-size", type=int, default=RECOMMENDED_PUBLIC_SPLIT_SIZES["train"]
     )
     parser.add_argument(
-        "--dev-size", type=int, default=RECOMMENDED_PUBLIC_SPLIT_SIZES["dev"]
+        "--val-size", type=int, default=RECOMMENDED_PUBLIC_SPLIT_SIZES["val"]
     )
     parser.add_argument(
         "--public-test-size",
@@ -250,7 +250,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         load_public_records(args.tasks_path),
         seed=args.seed,
         train_size=args.train_size,
-        dev_size=args.dev_size,
+        val_size=args.val_size,
         public_test_size=args.public_test_size,
     )
     path = write_split_manifest(manifest, args.output)

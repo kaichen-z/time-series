@@ -650,9 +650,9 @@ class CoEvolutionEngine:
         self,
         seed: HarnessPolicy,
         train_tasks: Sequence[ContextTask],
-        dev_tasks: Sequence[ContextTask],
+        val_tasks: Sequence[ContextTask],
     ) -> tuple[HarnessPolicy, tuple[EvolutionStep, ...]]:
-        if not dev_tasks:
+        if not val_tasks:
             raise ValueError("a held-out dev split is required to accept harness mutations")
         incumbent, history, start_generation = self._load_checkpoint(seed)
         for generation in range(start_generation, self.config.generations):
@@ -661,7 +661,7 @@ class CoEvolutionEngine:
                 incumbent, step, child_dev_reward = self._successive_halving_generation(
                     incumbent,
                     train_tasks,
-                    dev_tasks,
+                    val_tasks,
                     generation=generation,
                 )
                 history.append(step)
@@ -684,10 +684,10 @@ class CoEvolutionEngine:
                 harness=parent_harness,
             )
             trained_parent = snapshot_policy_skills(incumbent, parent_harness)
-            parent_dev = self._evaluate(
+            parent_val = self._evaluate(
                 trained_parent,
-                dev_tasks,
-                stage="parent_dev",
+                val_tasks,
+                stage="parent_val",
                 generation=generation,
                 learn_skills=False,
                 harness=parent_harness,
@@ -753,13 +753,13 @@ class CoEvolutionEngine:
                 if improving_children
                 else None
             )
-            child_dev = None
+            child_val = None
             if train_best is not None:
                 try:
-                    child_dev = self._evaluate(
+                    child_val = self._evaluate(
                         train_best,
-                        dev_tasks,
-                        stage="child_dev",
+                        val_tasks,
+                        stage="child_val",
                         generation=generation,
                         learn_skills=False,
                         harness=child_harnesses[train_best.version],
@@ -776,8 +776,8 @@ class CoEvolutionEngine:
             accepted = (
                 train_best
                 if train_best is not None
-                and child_dev is not None
-                and child_dev.system_reward > parent_dev.system_reward
+                and child_val is not None
+                and child_val.system_reward > parent_val.system_reward
                 else trained_parent
             )
             history.append(
@@ -791,28 +791,28 @@ class CoEvolutionEngine:
                     child_train_rewards={
                         version: item.system_reward for version, item in train_evaluations.items()
                     },
-                    parent_dev_reward=parent_dev.system_reward,
-                    best_child_dev_reward=(child_dev.system_reward if child_dev else None),
+                    parent_dev_reward=parent_val.system_reward,
+                    best_child_dev_reward=(child_val.system_reward if child_val else None),
                     accepted_version=accepted.version,
                     parent_train_module_rewards=parent_train.module_rewards,
-                    parent_dev_module_rewards=parent_dev.module_rewards,
+                    parent_dev_module_rewards=parent_val.module_rewards,
                     best_child_train_module_rewards=(
                         train_evaluations[train_best.version].module_rewards
                         if train_best is not None
                         else None
                     ),
                     best_child_dev_module_rewards=(
-                        child_dev.module_rewards if child_dev is not None else None
+                        child_val.module_rewards if child_val is not None else None
                     ),
                     parent_train_diagnostics=parent_train.diagnostics,
-                    parent_dev_diagnostics=parent_dev.diagnostics,
+                    parent_dev_diagnostics=parent_val.diagnostics,
                     best_child_train_diagnostics=(
                         train_evaluations[train_best.version].diagnostics
                         if train_best is not None
                         else None
                     ),
                     best_child_dev_diagnostics=(
-                        child_dev.diagnostics if child_dev is not None else None
+                        child_val.diagnostics if child_val is not None else None
                     ),
                     child_changelogs={child.version: child.changelog for child in children},
                 )
@@ -823,8 +823,8 @@ class CoEvolutionEngine:
                 "generation_completed",
                 generation=generation,
                 accepted=incumbent.version,
-                parent_dev_reward=parent_dev.system_reward,
-                child_dev_reward=(child_dev.system_reward if child_dev else None),
+                parent_dev_reward=parent_val.system_reward,
+                child_dev_reward=(child_val.system_reward if child_val else None),
             )
         return incumbent, tuple(history)
 
@@ -832,7 +832,7 @@ class CoEvolutionEngine:
         self,
         incumbent: HarnessPolicy,
         train_tasks: Sequence[ContextTask],
-        dev_tasks: Sequence[ContextTask],
+        val_tasks: Sequence[ContextTask],
         *,
         generation: int,
     ) -> tuple[HarnessPolicy, EvolutionStep, float | None]:
@@ -840,16 +840,16 @@ class CoEvolutionEngine:
         screen_train_count = min(
             max(1, self.config.screening_train_tasks), len(train_tasks)
         )
-        screen_dev_count = min(max(1, self.config.screening_dev_tasks), len(dev_tasks))
+        screen_dev_count = min(max(1, self.config.screening_dev_tasks), len(val_tasks))
         screen_train_tasks = train_tasks[:screen_train_count]
         remaining_train_tasks = train_tasks[screen_train_count:]
-        screen_dev_tasks = dev_tasks[:screen_dev_count]
+        screen_val_tasks = val_tasks[:screen_dev_count]
         self._progress(
             "screening_started",
             generation=generation,
             parent=incumbent.version,
             screen_train_tasks=screen_train_count,
-            screen_dev_tasks=screen_dev_count,
+            screen_val_tasks=screen_dev_count,
             promote=self.config.screening_promote,
             tolerance=self.config.screening_tolerance,
         )
@@ -866,7 +866,7 @@ class CoEvolutionEngine:
         screen_trained_parent = snapshot_policy_skills(incumbent, parent_harness)
         parent_screen_dev = self._evaluate(
             screen_trained_parent,
-            screen_dev_tasks,
+            screen_val_tasks,
             stage="parent_screen_dev",
             generation=generation,
             learn_skills=False,
@@ -891,10 +891,10 @@ class CoEvolutionEngine:
         else:
             parent_train = parent_screen_train
         trained_parent = snapshot_policy_skills(incumbent, parent_harness)
-        parent_dev = self._evaluate(
+        parent_val = self._evaluate(
             trained_parent,
-            dev_tasks,
-            stage="parent_dev",
+            val_tasks,
+            stage="parent_val",
             generation=generation,
             learn_skills=False,
             harness=parent_harness,
@@ -924,7 +924,7 @@ class CoEvolutionEngine:
                 child_policies[child.version] = screen_child
                 child_screen_dev[child.version] = self._evaluate(
                     screen_child,
-                    screen_dev_tasks,
+                    screen_val_tasks,
                     stage="child_screen_dev",
                     generation=generation,
                     learn_skills=False,
@@ -935,7 +935,7 @@ class CoEvolutionEngine:
                     generation=generation,
                     child=child.version,
                     train_reward=child_screen_train[child.version].system_reward,
-                    dev_reward=child_screen_dev[child.version].system_reward,
+                    val_reward=child_screen_dev[child.version].system_reward,
                 )
             except TransientLLMError:
                 raise
@@ -1030,8 +1030,8 @@ class CoEvolutionEngine:
             try:
                 dev_evaluations[child.version] = self._evaluate(
                     full_child,
-                    dev_tasks,
-                    stage="child_dev",
+                    val_tasks,
+                    stage="child_val",
                     generation=generation,
                     learn_skills=False,
                     harness=child_harness,
@@ -1055,12 +1055,12 @@ class CoEvolutionEngine:
             if dev_evaluations
             else None
         )
-        child_dev = dev_evaluations.get(train_best.version) if train_best else None
+        child_val = dev_evaluations.get(train_best.version) if train_best else None
         accepted = (
             train_best
             if train_best is not None
-            and child_dev is not None
-            and child_dev.system_reward > parent_dev.system_reward
+            and child_val is not None
+            and child_val.system_reward > parent_val.system_reward
             else trained_parent
         )
         step = EvolutionStep(
@@ -1078,28 +1078,28 @@ class CoEvolutionEngine:
                 for child in children
                 if child.version in train_evaluations or child.version in child_screen_train
             },
-            parent_dev_reward=parent_dev.system_reward,
-            best_child_dev_reward=(child_dev.system_reward if child_dev else None),
+            parent_dev_reward=parent_val.system_reward,
+            best_child_dev_reward=(child_val.system_reward if child_val else None),
             accepted_version=accepted.version,
             parent_train_module_rewards=parent_train.module_rewards,
-            parent_dev_module_rewards=parent_dev.module_rewards,
+            parent_dev_module_rewards=parent_val.module_rewards,
             best_child_train_module_rewards=(
                 train_evaluations[train_best.version].module_rewards
                 if train_best is not None
                 else None
             ),
             best_child_dev_module_rewards=(
-                child_dev.module_rewards if child_dev is not None else None
+                child_val.module_rewards if child_val is not None else None
             ),
             parent_train_diagnostics=parent_train.diagnostics,
-            parent_dev_diagnostics=parent_dev.diagnostics,
+            parent_dev_diagnostics=parent_val.diagnostics,
             best_child_train_diagnostics=(
                 train_evaluations[train_best.version].diagnostics
                 if train_best is not None
                 else None
             ),
             best_child_dev_diagnostics=(
-                child_dev.diagnostics if child_dev is not None else None
+                child_val.diagnostics if child_val is not None else None
             ),
             child_changelogs={child.version: child.changelog for child in children},
             successive_halving=True,
@@ -1116,7 +1116,7 @@ class CoEvolutionEngine:
             promoted_versions=tuple(child.version for child in promoted),
             screen_prune_reasons=prune_reasons,
         )
-        return accepted, step, child_dev.system_reward if child_dev else None
+        return accepted, step, child_val.system_reward if child_val else None
 
     def _evaluate(
         self,

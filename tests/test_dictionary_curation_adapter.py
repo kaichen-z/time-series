@@ -98,7 +98,7 @@ def make_task(tmp_path: Path) -> tuple[DictionaryCurationTask, FakeImplementer]:
         runtimes=RuntimeRegistry({"fake": FakeRuntime()}),
         labels={
             "train": {"t1": (10.0,), "t2": (10.0,)},
-            "dev": {"d1": (10.0,)},
+            "val": {"d1": (10.0,)},
         },
         metric=absolute_error,
         store=JsonArtifactStore(tmp_path),
@@ -198,7 +198,7 @@ def test_adapter_marks_subset_winner_specialized_instead_of_discarded(tmp_path: 
         ),
         implementer=implementer,
         runtimes=RuntimeRegistry({"fake": FakeRuntime()}),
-        labels={"train": {"near": (40.0,), "far": (100.0,)}, "dev": {"d": (40.0,)}},
+        labels={"train": {"near": (40.0,), "far": (100.0,)}, "val": {"d": (40.0,)}},
         metric=absolute_error,
         store=JsonArtifactStore(tmp_path),
     )
@@ -230,11 +230,11 @@ def test_dev_evaluation_never_updates_or_revises_methods(tmp_path: Path) -> None
     )[0]
     calls_before = (len(implementer.implemented), len(implementer.revised))
     dev_results = components.executor.execute(
-        child, (NumericalTaskItem("d1", (1.0,), 1, "D"),), "dev"
+        child, (NumericalTaskItem("d1", (1.0,), 1, "D"),), "val"
     )
-    report = components.evaluator.evaluate(child.dictionary_id, dev_results, "dev")
+    report = components.evaluator.evaluate(child.dictionary_id, dev_results, "val")
 
-    assert report.split == "dev"
+    assert report.split == "val"
     assert (len(implementer.implemented), len(implementer.revised)) == calls_before
 
 
@@ -270,7 +270,7 @@ def test_execute_one_preserves_the_real_exception_message(tmp_path: Path) -> Non
         config=DictionaryCurationConfig(),
         implementer=OneShotImplementer(),
         runtimes=RuntimeRegistry({"fake": RaisingRuntime("list index out of range")}),
-        labels={"train": {"t1": (1.0,)}, "dev": {}},
+        labels={"train": {"t1": (1.0,)}, "val": {}},
         metric=absolute_error,
         store=JsonArtifactStore(tmp_path),
     )
@@ -335,7 +335,7 @@ def test_dictionary_score_uses_the_history_selected_method_not_oracle_minimum() 
     config = DictionaryCurationConfig()
     evaluator = DictionaryEvaluator(
         config,
-        {"dev": {"t1": (0.0,), "t2": (0.0,)}},
+        {"val": {"t1": (0.0,), "t2": (0.0,)}},
         absolute_error,
     )
     results = (
@@ -345,7 +345,7 @@ def test_dictionary_score_uses_the_history_selected_method_not_oracle_minimum() 
         MethodExecutionResult("d", "B", "t2", "success", (0.0,)),
     )
 
-    report = evaluator.evaluate("d", results, "dev")
+    report = evaluator.evaluate("d", results, "val")
 
     # Keyed by whichever metric the config names, not a hard-coded one.
     assert report.metrics[config.dictionary_metric] == 50.0
@@ -391,7 +391,7 @@ def test_executor_selects_a_method_using_history_only_hindcasting() -> None:
     results = executor.execute(
         dictionary,
         (NumericalTaskItem("t", (1.0, 2.0, 3.0, 4.0, 5.0), 1, "D"),),
-        "dev",
+        "val",
     )
 
     selected = [result.method_id for result in results if result.selected]
@@ -423,7 +423,7 @@ def test_executor_never_selects_a_quarantined_method() -> None:
     results = executor.execute(
         dictionary,
         (NumericalTaskItem("t", (5.0, 5.0, 5.0, 5.0, 5.0), 1, "D"),),
-        "dev",
+        "val",
     )
 
     assert [result.method_id for result in results if result.selected] == ["accepted"]
@@ -469,7 +469,7 @@ def test_selector_requires_hindcast_fold_coverage() -> None:
     results = executor.execute(
         ToolDictionary("d", None, 0, methods),
         (NumericalTaskItem("t", (5.0, 5.0, 5.0, 5.0, 5.0), 1, "D"),),
-        "dev",
+        "val",
     )
 
     assert [result.method_id for result in results if result.selected] == ["stable"]

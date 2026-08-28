@@ -89,18 +89,18 @@ _FORBIDDEN_ATTRIBUTES = frozenset(
 @dataclass(frozen=True)
 class SourceEvaluation:
     train_reward: float
-    dev_reward: float
+    val_reward: float
     train_module_rewards: dict[str, float]
-    dev_module_rewards: dict[str, float]
+    val_module_rewards: dict[str, float]
     failure_traces: tuple[dict, ...]
 
     @classmethod
     def from_dict(cls, payload: dict) -> "SourceEvaluation":
         return cls(
             train_reward=float(payload["train"]["system_reward"]),
-            dev_reward=float(payload["dev"]["system_reward"]),
+            val_reward=float(payload["val"]["system_reward"]),
             train_module_rewards=dict(payload["train"]["module_rewards"]),
-            dev_module_rewards=dict(payload["dev"]["module_rewards"]),
+            val_module_rewards=dict(payload["val"]["module_rewards"]),
             failure_traces=tuple(payload["train"].get("failure_traces", ())),
         )
 
@@ -165,7 +165,7 @@ class SourceEvolutionEngine:
             self._progress(
                 "seed_evaluation_completed",
                 train_reward=incumbent_evaluation.train_reward,
-                dev_reward=incumbent_evaluation.dev_reward,
+                val_reward=incumbent_evaluation.val_reward,
             )
             trace: list[SourceEvolutionStep] = []
             start_generation = 0
@@ -174,7 +174,7 @@ class SourceEvolutionEngine:
         for generation in range(start_generation, self.config.generations):
             self._progress("generation_started", generation=generation)
             parent_train_reward = incumbent_evaluation.train_reward
-            parent_dev_reward = incumbent_evaluation.dev_reward
+            parent_dev_reward = incumbent_evaluation.val_reward
             candidates = [
                 self._child(generation, index, incumbent_patch, incumbent_evaluation)
                 for index in range(self.config.children_per_generation)
@@ -188,7 +188,7 @@ class SourceEvolutionEngine:
             accepted = (
                 train_best
                 if train_best is not None
-                and train_best.evaluation.dev_reward > incumbent_evaluation.dev_reward
+                and train_best.evaluation.val_reward > incumbent_evaluation.val_reward
                 else None
             )
             if accepted is not None:
@@ -201,7 +201,7 @@ class SourceEvolutionEngine:
                     parent_dev_reward=parent_dev_reward,
                     candidates=tuple(self._candidate_summary(item) for item in candidates),
                     accepted_candidate=accepted.candidate_id if accepted else None,
-                    accepted_dev_reward=incumbent_evaluation.dev_reward,
+                    accepted_dev_reward=incumbent_evaluation.val_reward,
                 )
             )
             self._save_checkpoint(
@@ -214,7 +214,7 @@ class SourceEvolutionEngine:
                 "generation_completed",
                 generation=generation,
                 accepted=(accepted.candidate_id if accepted else None),
-                dev_reward=incumbent_evaluation.dev_reward,
+                val_reward=incumbent_evaluation.val_reward,
             )
         return incumbent_patch, tuple(trace)
 
@@ -327,7 +327,7 @@ class SourceEvolutionEngine:
                 generation=generation,
                 candidate=candidate_id,
                 train_reward=evaluation.train_reward,
-                dev_reward=evaluation.dev_reward,
+                val_reward=evaluation.val_reward,
             )
             return SourceCandidate(
                 candidate_id, patch, evaluation, True, True, None, changed, summary
@@ -342,7 +342,7 @@ class SourceEvolutionEngine:
         payload = {
             "candidate_id": candidate_id,
             "parent_train_reward": parent.train_reward,
-            "parent_dev_reward": parent.dev_reward,
+            "parent_dev_reward": parent.val_reward,
             "module_rewards": parent.train_module_rewards,
             "worst_training_failures": [
                 self._sanitized_failure(item)
@@ -534,7 +534,7 @@ class SourceEvolutionEngine:
             "rejection_reason": candidate.rejection_reason,
             "changed_files": list(candidate.changed_files),
             "train_reward": candidate.evaluation.train_reward if candidate.evaluation else None,
-            "dev_reward": candidate.evaluation.dev_reward if candidate.evaluation else None,
+            "val_reward": candidate.evaluation.val_reward if candidate.evaluation else None,
             "engineer_summary": candidate.engineer_summary[:1000],
         }
 
@@ -598,9 +598,9 @@ class SourceEvolutionEngine:
         raw_evaluation = payload["incumbent_evaluation"]
         evaluation = SourceEvaluation(
             train_reward=float(raw_evaluation["train_reward"]),
-            dev_reward=float(raw_evaluation["dev_reward"]),
+            val_reward=float(raw_evaluation["val_reward"]),
             train_module_rewards=dict(raw_evaluation["train_module_rewards"]),
-            dev_module_rewards=dict(raw_evaluation["dev_module_rewards"]),
+            val_module_rewards=dict(raw_evaluation["val_module_rewards"]),
             failure_traces=tuple(raw_evaluation.get("failure_traces", ())),
         )
         trace = []

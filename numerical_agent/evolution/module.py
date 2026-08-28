@@ -9,39 +9,38 @@ from typing import Mapping, Sequence
 from common.sandbox import ALLOWED_IMPORTS, check_code
 
 
-# The frozen skill library methods compose. Allowed by its exact dotted name, so the rest of
-# numerical_agent stays out of reach.
-SKILLS_MODULE = "numerical_agent.evolution.primite_ts_skills"
+# The zero-shot foundation-model adapters, allowed by exact dotted name so the rest of the
+# repository stays out of reach.
+TSFM_IMPORT_PATH = "common.tsfm"
 
 # The evolving module may use heavier forecasting stacks than evolving_loop's sandbox allows.
-EVOLUTION_IMPORTS = ALLOWED_IMPORTS | frozenset(
-    {"torch", "sklearn", "scipy", "lightgbm", "xgboost", "pandas", SKILLS_MODULE}
+ALLOWED_METHOD_IMPORTS = ALLOWED_IMPORTS | frozenset(
+    {"torch", "sklearn", "scipy", "lightgbm", "xgboost", "pandas", TSFM_IMPORT_PATH}
 )
 
 # torch.nn.Module subclasses cannot be written without super().__init__(); the escape-hatch
 # dunders (__globals__, __builtins__, __class__) stay blocked.
-EVOLUTION_DUNDERS = frozenset({"__init__"})
+ALLOWED_DUNDERS = frozenset({"__init__"})
 
 
 # No __future__ import: the shared sandbox gate allows only forecasting libraries.
 #
-# The header is the only module-level text that survives render(), so the skill import has to
-# live here: an import written anywhere else is silently dropped on the next write. NotApplicable
-# is imported rather than redefined so a skill raising it is the same class the runner catches.
-MODULE_HEADER = f'''"""Forecasting methods evolved from a frozen library of analysis skills.
+# The header is the only module-level text that survives render(), so NotApplicable is defined
+# here: a definition written anywhere else is silently dropped on the next write. Every method
+# is self-contained, so there is nothing else to import at module level.
+METHODS_FILE_HEADER = '''"""Self-contained forecasting methods, one function per method.
 
 Each function takes (history, horizon, frequency) and returns exactly horizon finite floats,
 or raises NotApplicable when the series does not meet its stated requirements.
-
-The frozen skill library is available as P; compose its skills rather than reimplementing them.
 """
 
-import {SKILLS_MODULE} as P
-from {SKILLS_MODULE} import NotApplicable
+
+class NotApplicable(Exception):
+    """Raised by a method whose stated preconditions the series does not meet."""
 '''
 
 SIGNATURE = ("history", "horizon", "frequency")
-OPERATIONS = ("delete", "rewrite", "merge", "add")
+OPERATIONS = ("delete", "rewrite", "merge")
 
 
 class ModuleError(ValueError):
@@ -71,7 +70,7 @@ class MethodModule:
 
     def render(self) -> str:
         """Render the complete module text, header first."""
-        blocks = [MODULE_HEADER.rstrip("\n")]
+        blocks = [METHODS_FILE_HEADER.rstrip("\n")]
         blocks.extend(method.source.strip("\n") for method in self.methods)
         return "\n\n\n".join(blocks) + "\n"
 
@@ -99,8 +98,6 @@ def parse_module(text: str) -> MethodModule:
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
         raise ModuleError(f"duplicate method names: {duplicates}")
-    if not methods:
-        raise ModuleError("module defines no methods")
     return MethodModule(tuple(methods))
 
 
@@ -174,12 +171,6 @@ def _apply_one(
         method = parse_method(_require_code(operation), expected_name=name)
         methods = tuple(method if m.name == name else m for m in module.methods)
         return replace(module, methods=methods), f"rewrite {name}: {reason}"
-
-    if op == "add":
-        method = parse_method(_require_code(operation))
-        if module.get(method.name) is not None:
-            raise ModuleError(f"{method.name!r} already exists; use rewrite")
-        return replace(module, methods=module.methods + (method,)), f"add {method.name}: {reason}"
 
     raw_names = operation.get("names")
     if not isinstance(raw_names, Sequence) or isinstance(raw_names, (str, bytes)):
@@ -280,7 +271,7 @@ def _is_broad(handler: ast.ExceptHandler) -> bool:
 def write_module(path: str | Path, module: MethodModule) -> Path:
     """Write the module only after it re-parses and clears the shared import gate."""
     text = module.render()
-    check_code(text, EVOLUTION_IMPORTS, EVOLUTION_DUNDERS)
+    check_code(text, ALLOWED_METHOD_IMPORTS, ALLOWED_DUNDERS)
     reparsed = parse_module(text)
     if reparsed.names() != module.names():
         raise ModuleError("module did not survive a render/parse round trip")

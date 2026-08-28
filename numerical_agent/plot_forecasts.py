@@ -222,7 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="/raid/home/air/khoutaibi/time_series_dataset/Dr-CiK/data/tasks/train.jsonl",
     )
     parser.add_argument("--split-file", default="splits/drcik_public_80_20_99_v1.json")
-    parser.add_argument("--partition", default="train", choices=("train", "dev", "public_test", "none"))
+    parser.add_argument("--partition", default="train", choices=("train", "val", "public_test", "none"))
     parser.add_argument("--output-dir", default="runs/method_evolution/v001/forecast_plots")
     parser.add_argument("--limit", type=int, default=None, help="plot at most this many tasks")
     parser.add_argument("--dpi", type=int, default=160)

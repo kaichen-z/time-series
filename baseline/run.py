@@ -7,11 +7,15 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from .classical import ARIMAForecaster, ETSForecaster, NaiveForecaster, SESForecaster
 from .data import DEV, HIDDEN, DEFAULT_TASKS_FILE, BenchmarkTask, load_benchmark
 from .forecasters import SeasonalNaive
 from .scoring import render, score_task, summarize
 
-BASELINES = ("seasonal_naive", "moirai", "aurora", "gemini_dp")
+BASELINES = (
+    "seasonal_naive", "naive", "ses", "ets", "arima",
+    "moirai", "aurora", "chronos", "gemini_dp",
+)
 
 
 def build_forecaster(name: str, task: BenchmarkTask, device: str, seed: int):
@@ -22,10 +26,20 @@ def build_forecaster(name: str, task: BenchmarkTask, device: str, seed: int):
     """
     if name == "seasonal_naive":
         return SeasonalNaive(task.frequency, task.seasonal_period, seed=seed)
+    if name == "naive":
+        return NaiveForecaster(seed=seed)
+    if name == "ses":
+        return SESForecaster(seed=seed)
+    if name == "ets":
+        return ETSForecaster(task.frequency, task.seasonal_period, seed=seed)
+    if name == "arima":
+        return ARIMAForecaster(seed=seed)
     if name == "moirai":
         return _shared_moirai(device, seed)
     if name == "aurora":
         return _shared_aurora(device, task)
+    if name == "chronos":
+        return _shared_chronos(device, seed)
     if name == "gemini_dp":
         return _shared_gemini(task)
     raise ValueError(f"unknown baseline {name!r}; choose from {', '.join(BASELINES)}")
@@ -55,6 +69,16 @@ def _shared_aurora(device: str, task: BenchmarkTask):
     return forecaster
 
 
+def _shared_chronos(device: str, seed: int):
+    if "chronos" not in _SHARED:
+        from common.tsfm import ChronosConfig
+
+        from .chronos_baseline import ChronosSampleForecaster
+
+        _SHARED["chronos"] = ChronosSampleForecaster(ChronosConfig(device_map=device), seed=seed)
+    return _SHARED["chronos"]
+
+
 def _shared_gemini(task: BenchmarkTask):
     """One client and one cache for the run; the series itself is set per task."""
     from .gemini import DirectPromptForecaster
@@ -77,7 +101,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--tasks-file", default=str(DEFAULT_TASKS_FILE))
     parser.add_argument("--out", default=None, help="write per-task forecasts as JSONL")
+    parser.add_argument("--resume", action="store_true",
+                         help="skip tasks already present in --out instead of overwriting it")
     return parser
+
+
+def _done_benchmark_ids(destination: Path) -> set[str]:
+    """Benchmark ids already written to --out, so a resumed sweep does not repeat them."""
+    if not destination.exists():
+        return set()
+    ids = set()
+    for line in destination.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            ids.add(json.loads(line)["benchmark_id"])
+    return ids
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -85,11 +122,16 @@ def main(argv: list[str] | None = None) -> int:
     tasks = load_benchmark(args.tasks_file, split=args.split)
     if args.limit:
         tasks = tasks[: args.limit]
+    destination = Path(args.out) if args.out else None
+    done = _done_benchmark_ids(destination) if args.resume and destination else set()
+    if done:
+        tasks = [task for task in tasks if task.benchmark_id not in done]
+        print(f"resuming: {len(done)} already done, {len(tasks)} remaining", flush=True)
     print(f"{args.baseline}: {len(tasks)} {args.split} tasks, {args.samples} samples each",
           flush=True)
 
     scores, written, started = [], 0, time.monotonic()
-    with _forecast_writer(Path(args.out) if args.out else None) as handle:
+    with _forecast_writer(destination, append=bool(done)) as handle:
         for index, task in enumerate(tasks, start=1):
             task_started = time.monotonic()
             try:
@@ -141,13 +183,13 @@ def _log(
 
 
 @contextmanager
-def _forecast_writer(destination: Path | None):
+def _forecast_writer(destination: Path | None, append: bool = False):
     """Open the JSONL sink, or yield None when the sweep is scoring only."""
     if destination is None:
         yield None
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("w", encoding="utf-8") as handle:
+    with destination.open("a" if append else "w", encoding="utf-8") as handle:
         yield handle
 
 

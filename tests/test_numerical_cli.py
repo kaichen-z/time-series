@@ -356,7 +356,7 @@ def split_ids(partition: str) -> list[str]:
 
 def build(tmp_path: Path, *extra: str) -> tuple[subprocess.CompletedProcess, Path]:
     tasks_file = write_tasks(
-        tmp_path / "tasks.jsonl", split_ids("train") + split_ids("dev")
+        tmp_path / "tasks.jsonl", split_ids("train") + split_ids("val")
     )
     output = tmp_path / "experiment.json"
     completed = subprocess.run(
@@ -387,7 +387,7 @@ def test_builder_emits_the_frozen_split_sizes(tmp_path: Path) -> None:
     assert completed.returncode == 0, completed.stderr
     summary = json.loads(completed.stdout)
     assert summary["train_tasks"] == 80
-    assert summary["dev_tasks"] == 20
+    assert summary["val_tasks"] == 20
     experiment = json.loads(output.read_text(encoding="utf-8"))
     assert set(experiment) == {"evolution", "curation", "tasks", "labels"}
 
@@ -398,22 +398,22 @@ def test_builder_output_loads_through_the_curate_config_readers(tmp_path: Path) 
 
     curation = _curation_config(experiment)
     _evolution_config(experiment, curation)
-    train_items, dev_items = _task_items(experiment)
+    train_items, val_items = _task_items(experiment)
     labels = _labels(experiment)
 
     assert len(train_items) == 80
-    assert len(dev_items) == 20
+    assert len(val_items) == 20
     # Every scored item needs a label trajectory exactly as long as its horizon.
     assert all(len(labels["train"][item.item_id]) == item.horizon for item in train_items)
-    assert all(len(labels["dev"][item.item_id]) == item.horizon for item in dev_items)
+    assert all(len(labels["val"][item.item_id]) == item.horizon for item in val_items)
 
 
 def test_builder_honours_task_limits(tmp_path: Path) -> None:
-    completed, _ = build(tmp_path, "--train-limit", "4", "--dev-limit", "2")
+    completed, _ = build(tmp_path, "--train-limit", "4", "--val-limit", "2")
 
     summary = json.loads(completed.stdout)
     assert summary["train_tasks"] == 4
-    assert summary["dev_tasks"] == 2
+    assert summary["val_tasks"] == 2
 
 
 def test_builder_persists_selector_coverage_and_retry_parameters(tmp_path: Path) -> None:
@@ -443,7 +443,7 @@ def test_builder_keeps_train_and_dev_disjoint(tmp_path: Path) -> None:
     experiment = json.loads(output.read_text(encoding="utf-8"))
 
     train = {item["item_id"] for item in experiment["tasks"]["train"]}
-    dev = {item["item_id"] for item in experiment["tasks"]["dev"]}
+    dev = {item["item_id"] for item in experiment["tasks"]["val"]}
     assert not train & dev
 
 
@@ -668,7 +668,7 @@ def test_evaluate_frozen_scores_public_test_without_mutating_dictionary(
                 "manifest_sha256": "fixture-manifest",
                 "partitions": {
                     "train": {"task_ids": []},
-                    "dev": {"task_ids": []},
+                    "val": {"task_ids": []},
                     "public_test": {"task_ids": ["test_1"]},
                 },
             }

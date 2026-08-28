@@ -52,13 +52,42 @@ def _floats(raw: Sequence | None) -> tuple[float, ...]:
     return tuple(float(value) for value in raw)
 
 
+def _interpolate_gaps(values: tuple[float, ...]) -> tuple[float, ...]:
+    """Linearly interpolate NaN gaps in a history; a handful of hidden tasks carry them.
+
+    Every forecaster in this package propagates a NaN straight into its output, so an
+    unfilled gap silently ruins the whole forecast rather than just the missing point.
+    """
+    if not any(value != value for value in values):
+        return values
+    filled = list(values)
+    n = len(filled)
+    index = 0
+    while index < n:
+        if filled[index] == filled[index]:  # not NaN
+            index += 1
+            continue
+        start = index - 1
+        end = index
+        while end < n and filled[end] != filled[end]:
+            end += 1
+        stop_value = filled[end] if end < n else None
+        start_value = filled[start] if start >= 0 else stop_value
+        stop_value = stop_value if stop_value is not None else start_value
+        span = end - start
+        for offset, position in enumerate(range(start + 1, end), start=1):
+            filled[position] = start_value + (stop_value - start_value) * offset / span
+        index = end
+    return tuple(filled)
+
+
 def _to_task(record: dict) -> BenchmarkTask:
     series = _series(record)
     metadata = _metadata(record)
     labels_public = record.get("labels_public", True) is not False
     return BenchmarkTask(
         benchmark_id=record["benchmark_id"],
-        history_values=_floats(series["history_values"]),
+        history_values=_interpolate_gaps(_floats(series["history_values"])),
         history_timestamps=tuple(str(t) for t in series.get("history_timestamps") or ()),
         future_values=_floats(series.get("future_values")) if labels_public else (),
         future_timestamps=tuple(str(t) for t in series.get("future_timestamps") or ()),

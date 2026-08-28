@@ -9,8 +9,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .evolution import MODULE_NAME, commit_module, git, init_repo
-from .evolution import exemplar_methods
+from .evolution import METHODS_FILENAME, commit_module, init_repo, run_git
+from .evolution import example_methods
 from .evolution.module import read_module, write_module
 
 
@@ -31,11 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
 def seed(repo: str | Path, methods_path: str | Path | None = None, *, force: bool = False) -> str:
     """Write the seed module into a fresh repository and return the seed commit."""
     root = Path(repo)
-    destination = root / MODULE_NAME
+    destination = root / METHODS_FILENAME
     if destination.exists() and not force:
         raise FileExistsError(f"{destination} already exists; pass force=True to overwrite it")
 
-    source = Path(methods_path) if methods_path else Path(exemplar_methods.__file__)
+    source = Path(methods_path) if methods_path else Path(example_methods.__file__)
     module = read_module(source)
 
     init_repo(root)
@@ -50,11 +50,11 @@ def seed(repo: str | Path, methods_path: str | Path | None = None, *, force: boo
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     commit = seed(args.repo, args.methods, force=args.force)
-    module = read_module(Path(args.repo) / MODULE_NAME)
+    module = read_module(Path(args.repo) / METHODS_FILENAME)
     print(f"seeded {len(module.names())} methods at {args.repo}, commit {commit}")
     for name in module.names():
         print(f"  {name}")
-    print(git(Path(args.repo), "log", "--oneline"))
+    print(run_git(Path(args.repo), "log", "--oneline"))
     return 0
 
 

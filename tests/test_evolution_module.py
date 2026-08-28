@@ -5,11 +5,10 @@ import pytest
 import json
 from pathlib import Path
 from numerical_agent.evolution.module import (
-    EVOLUTION_IMPORTS,
-    MODULE_HEADER,
+    ALLOWED_METHOD_IMPORTS,
+    METHODS_FILE_HEADER,
     MethodModule,
     ModuleError,
-    SKILLS_MODULE,
     apply_operations,
     parse_method,
     parse_module,
@@ -17,7 +16,14 @@ from numerical_agent.evolution.module import (
     write_module,
 )
 from common.sandbox import ALLOWED_IMPORTS, UnsafeCodeError, check_code
-from numerical_agent.evolution.seed import EXCLUDED_CATEGORIES, batches, seed_definitions
+from numerical_agent.evolution.seed import (
+    EXCLUDED_CATEGORIES,
+    FOUNDATION_SEEDS,
+    batches,
+    foundation_definitions,
+    full_seed_definitions,
+    seed_definitions,
+)
 
 
 def method_source(name: str, body: str = "    return [float(history[-1])] * horizon") -> str:
@@ -29,7 +35,7 @@ def method_source(name: str, body: str = "    return [float(history[-1])] * hori
 
 
 def module_text(*names: str) -> str:
-    return MODULE_HEADER + "\n\n" + "\n\n".join(method_source(n) for n in names)
+    return METHODS_FILE_HEADER + "\n\n" + "\n\n".join(method_source(n) for n in names)
 
 
 def test_parse_module_reads_every_method() -> None:
@@ -46,14 +52,14 @@ def test_render_and_parse_round_trip_preserves_methods() -> None:
 
 
 def test_parse_module_rejects_a_wrong_signature() -> None:
-    bad = MODULE_HEADER + '\n\ndef alpha(history, horizon):\n    """Doc."""\n    return []\n'
+    bad = METHODS_FILE_HEADER + '\n\ndef alpha(history, horizon):\n    """Doc."""\n    return []\n'
 
     with pytest.raises(ModuleError, match="must take exactly"):
         parse_module(bad)
 
 
 def test_parse_module_rejects_a_missing_docstring() -> None:
-    bad = MODULE_HEADER + "\n\ndef alpha(history, horizon, frequency):\n    return []\n"
+    bad = METHODS_FILE_HEADER + "\n\ndef alpha(history, horizon, frequency):\n    return []\n"
 
     with pytest.raises(ModuleError, match="docstring"):
         parse_module(bad)
@@ -66,7 +72,7 @@ def test_parse_module_rejects_duplicate_names() -> None:
 
 def test_parse_module_rejects_a_syntax_error() -> None:
     with pytest.raises(ModuleError, match="does not parse"):
-        parse_module(MODULE_HEADER + "\n\ndef alpha(:\n")
+        parse_module(METHODS_FILE_HEADER + "\n\ndef alpha(:\n")
 
 
 def test_delete_removes_one_method() -> None:
@@ -114,22 +120,13 @@ def test_rewrite_rejects_a_renamed_function() -> None:
         )
 
 
-def test_add_appends_a_new_method() -> None:
+def test_add_is_not_an_operation() -> None:
+    """The loop repairs and prunes what the seed holds; it cannot invent a new method."""
     module = parse_module(module_text("alpha"))
 
-    updated, _ = apply_operations(
-        module, [{"op": "add", "code": method_source("gamma"), "reason": "covers a gap"}]
-    )
-
-    assert updated.names() == ("alpha", "gamma")
-
-
-def test_add_rejects_an_existing_name() -> None:
-    module = parse_module(module_text("alpha"))
-
-    with pytest.raises(ModuleError, match="already exists"):
+    with pytest.raises(ModuleError, match="unsupported op"):
         apply_operations(
-            module, [{"op": "add", "code": method_source("alpha"), "reason": "dup"}]
+            module, [{"op": "add", "code": method_source("gamma"), "reason": "covers a gap"}]
         )
 
 
@@ -201,10 +198,10 @@ def test_write_and_read_round_trip(tmp_path: Path) -> None:
 
     text = destination.read_text(encoding="utf-8")
     assert read_module(destination).names() == ("alpha", "beta")
-    # NotApplicable is imported from the skill library, not redefined, so a skill raising it
-    # is the very class the runner catches.
-    assert f"from {SKILLS_MODULE} import NotApplicable" in text
-    assert f"import {SKILLS_MODULE} as P" in text
+    # NotApplicable is defined in the header, which is the only module-level text that
+    # survives a render, so it is the very class the runner catches.
+    assert "class NotApplicable(Exception):" in text
+    assert "import" not in text.split("def alpha")[0].replace("NotApplicable", "")
 
 
 def test_write_rejects_a_disallowed_import(tmp_path: Path) -> None:
@@ -237,7 +234,6 @@ def test_written_module_is_importable_and_callable(tmp_path: Path) -> None:
 
     assert loaded.naive_last([1.0, 2.0, 5.0], 3, "1 day") == [5.0, 5.0, 5.0]
     assert issubclass(loaded.NotApplicable, Exception)
-    assert loaded.P.infer_period([1.0, 2.0] * 20) == 2
 
 
 def test_notapplicable_from_an_except_handler_is_rejected() -> None:
@@ -361,14 +357,14 @@ def test_the_shared_allow_list_still_rejects_heavy_libraries() -> None:
 
 
 def test_the_evolution_allow_list_permits_them() -> None:
-    check_code("import torch\nimport sklearn\nimport xgboost\n", EVOLUTION_IMPORTS)
+    check_code("import torch\nimport sklearn\nimport xgboost\n", ALLOWED_METHOD_IMPORTS)
 
-    assert ALLOWED_IMPORTS < EVOLUTION_IMPORTS
+    assert ALLOWED_IMPORTS < ALLOWED_METHOD_IMPORTS
 
 
 def test_the_wider_list_still_blocks_dangerous_modules() -> None:
     with pytest.raises(UnsafeCodeError, match="os"):
-        check_code("import os\n", EVOLUTION_IMPORTS)
+        check_code("import os\n", ALLOWED_METHOD_IMPORTS)
 
 
 def test_seed_selection_splits_the_catalog_as_expected() -> None:
@@ -390,6 +386,28 @@ def test_no_seed_belongs_to_an_excluded_category() -> None:
     seeds, _ = seed_definitions(CATALOG)
 
     assert not {s["category"] for s in seeds} & set(EXCLUDED_CATEGORIES)
+
+
+def test_the_caller_can_exclude_further_categories() -> None:
+    """Dropping the 23 neural methods leaves the 70 classical ones."""
+    seeds, excluded = seed_definitions(CATALOG, exclude_categories=("neural",))
+
+    assert len(seeds) == 70
+    assert "neural" not in {s["category"] for s in seeds}
+    assert len([e for e in excluded if e["category"] == "neural"]) == 23
+
+
+def test_a_caller_exclusion_records_its_own_reason() -> None:
+    """Excluded-by-choice is recorded separately from what the contract cannot express."""
+    _, excluded = seed_definitions(CATALOG, exclude_categories=("neural",))
+    reasons = {e["category"]: e["reason"] for e in excluded}
+
+    assert reasons["neural"] == "excluded by the caller"
+    assert reasons["multivariate"] == EXCLUDED_CATEGORIES["multivariate"]
+
+
+def test_excluding_nothing_extra_matches_the_default() -> None:
+    assert seed_definitions(CATALOG, exclude_categories=()) == seed_definitions(CATALOG)
 
 
 def test_every_seed_name_is_a_usable_function_name() -> None:
@@ -430,3 +448,43 @@ def test_batches_keep_a_category_together() -> None:
         if item["category"] == "baseline"
     }
     assert len(baseline_batches) <= 2
+
+
+def test_the_full_seed_is_seventy_classical_plus_neural_plus_five_foundation() -> None:
+    seeds, _ = full_seed_definitions(CATALOG)
+    names = [str(s["name"]) for s in seeds]
+    foundation = [s for s in seeds if "catalog_name" in s]
+    neural = [s for s in seeds if s["category"] == "neural"]
+
+    assert len(seeds) == 98
+    assert len(names) == len(set(names))
+    assert (len(foundation), len(neural), len(seeds) - len(foundation) - len(neural)) == (5, 23, 70)
+
+
+def test_every_foundation_seed_is_renamed_to_a_function_name() -> None:
+    """The catalog names them "TimesFM 2.5"; a method has to be a Python identifier."""
+    seeds, _ = foundation_definitions(CATALOG)
+
+    assert {str(s["name"]) for s in seeds} == set(FOUNDATION_SEEDS.values())
+    assert all(str(s["name"]).isidentifier() for s in seeds)
+    assert {str(s["catalog_name"]) for s in seeds} == set(FOUNDATION_SEEDS)
+
+
+def test_the_unseeded_foundation_models_are_recorded_not_dropped() -> None:
+    seeds, excluded = foundation_definitions(CATALOG)
+
+    assert len(seeds) + len(excluded) == 31
+    assert all(entry["reason"] == "not one of the five seeded" for entry in excluded)
+
+
+def test_a_renamed_foundation_card_fails_loudly(tmp_path: Path) -> None:
+    """Silently seeding four models because a display name changed is the failure to avoid."""
+    payload = json.loads(Path(CATALOG).read_text(encoding="utf-8"))
+    for card in payload["methods"]:
+        if card.get("canonical_name") == "Chronos-2":
+            card["canonical_name"] = "Chronos-2 (renamed)"
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Chronos-2"):
+        foundation_definitions(str(catalog))

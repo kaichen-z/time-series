@@ -92,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--selection-folds", type=int, default=3)
     build.add_argument("--selection-horizon", type=int, default=8)
     build.add_argument("--train-limit", type=int, default=None)
-    build.add_argument("--dev-limit", type=int, default=None)
+    build.add_argument("--val-limit", type=int, default=None)
 
     frozen = subparsers.add_parser(
         "evaluate-frozen",
@@ -161,7 +161,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         allowed_families=curation.allowed_families,
     )
     evolution = _evolution_config(experiment, curation)
-    train_items, dev_items = _task_items(experiment)
+    train_items, val_items = _task_items(experiment)
     labels = _labels(experiment)
     output_dir = Path(args.output_dir)
     configure(output_dir / "curation_trace.jsonl")
@@ -178,7 +178,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         store=store,
     )
     engine = SelfEvolutionEngine(evolution, task.components())
-    outcome = engine.evolve(dictionary, train_items, dev_items)
+    outcome = engine.evolve(dictionary, train_items, val_items)
     best = outcome.accepted_artifact
     store.save_artifact("working_dictionary", best.to_payload())
     _write_method_evaluations(output_dir, outcome.steps)
@@ -217,7 +217,7 @@ def _build_experiment(args: argparse.Namespace) -> int:
         selection_folds=args.selection_folds,
         selection_horizon=args.selection_horizon,
         train_limit=args.train_limit,
-        dev_limit=args.dev_limit,
+        val_limit=args.val_limit,
     )
     destination = Path(args.output)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -228,7 +228,7 @@ def _build_experiment(args: argparse.Namespace) -> int:
     summary = {
         "output": str(destination),
         "train_tasks": len(experiment["tasks"]["train"]), # type: ignore
-        "dev_tasks": len(experiment["tasks"]["dev"]), # type: ignore
+        "val_tasks": len(experiment["tasks"]["val"]), # type: ignore
     }
     sys.stdout.write(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     return 0
@@ -270,7 +270,7 @@ def _evaluate_frozen(args: argparse.Namespace) -> int:
             f"frozen test report already exists and will not be overwritten: {report_path}"
         )
     output_dir.mkdir(parents=True, exist_ok=True)
-    report_payload = {
+    reports_as_json = {
         "artifact_id": report.artifact_id,
         "split": report.split,
         "item_count": report.item_count,
@@ -295,7 +295,7 @@ def _evaluate_frozen(args: argparse.Namespace) -> int:
                 payload["error"] = result.error
             handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
     # Write the report last: its presence is the immutable completion marker.
-    write_json(report_path, report_payload)
+    write_json(report_path, reports_as_json)
 
     score = float(report.metrics[curation.dictionary_metric])
     summary = {
@@ -552,7 +552,7 @@ def _task_items(
 ) -> tuple[tuple[NumericalTaskItem, ...], tuple[NumericalTaskItem, ...]]:
     return (
         _task_items_for_split(experiment, "train"),
-        _task_items_for_split(experiment, "dev"),
+        _task_items_for_split(experiment, "val"),
     )
 
 
@@ -588,7 +588,7 @@ def _task_items_for_split(
 def _labels(
     experiment: Mapping[str, object],
 ) -> dict[str, dict[str, tuple[float, ...]]]:
-    return _labels_for_splits(experiment, ("train", "dev"))
+    return _labels_for_splits(experiment, ("train", "val"))
 
 
 def _labels_for_splits(

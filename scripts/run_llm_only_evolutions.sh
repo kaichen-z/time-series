@@ -7,9 +7,9 @@
 #
 # Important environment overrides:
 #   EA_RUNS_DIR, EA_CODEX_MODEL, EA_GENERATIONS, EA_CHILDREN, EA_SEED,
-#   EA_DEV_FRACTION, EA_HOLDOUT_FRACTION, EA_EVOLVE_TARGET, EA_SEED_POLICY_PATH,
+#   EA_VAL_FRACTION, EA_HOLDOUT_FRACTION, EA_EVOLVE_TARGET, EA_SEED_POLICY_PATH,
 #   EA_CODEX_CACHE_DIR, EA_LIMIT, EA_DRY_RUN, EA_SUCCESSIVE_HALVING,
-#   EA_SCREEN_TRAIN_TASKS, EA_SCREEN_DEV_TASKS, EA_SCREEN_PROMOTE,
+#   EA_SCREEN_TRAIN_TASKS, EA_SCREEN_VAL_TASKS, EA_SCREEN_PROMOTE,
 #   EA_SCREEN_TOLERANCE
 set -euo pipefail
 
@@ -26,7 +26,7 @@ EA_REASONING_EFFORT="${EA_REASONING_EFFORT:-high}"
 EA_GENERATIONS="${EA_GENERATIONS:-2}"
 EA_CHILDREN="${EA_CHILDREN:-3}"
 EA_SEED="${EA_SEED:-7}"
-EA_DEV_FRACTION="${EA_DEV_FRACTION:-0.25}"
+EA_VAL_FRACTION="${EA_VAL_FRACTION:-0.25}"
 EA_HOLDOUT_FRACTION="${EA_HOLDOUT_FRACTION:-0.20}"
 EA_EVOLVE_TARGET="${EA_EVOLVE_TARGET:-auto}"
 EA_SEED_POLICY_PATH="${EA_SEED_POLICY_PATH:-}"
@@ -39,7 +39,7 @@ EA_SOURCE_TEST_TIMEOUT="${EA_SOURCE_TEST_TIMEOUT:-300}"
 EA_SOURCE_EVAL_TIMEOUT="${EA_SOURCE_EVAL_TIMEOUT:-7200}"
 EA_SUCCESSIVE_HALVING="${EA_SUCCESSIVE_HALVING:-0}"
 EA_SCREEN_TRAIN_TASKS="${EA_SCREEN_TRAIN_TASKS:-6}"
-EA_SCREEN_DEV_TASKS="${EA_SCREEN_DEV_TASKS:-2}"
+EA_SCREEN_VAL_TASKS="${EA_SCREEN_VAL_TASKS:-2}"
 EA_SCREEN_PROMOTE="${EA_SCREEN_PROMOTE:-1}"
 EA_SCREEN_TOLERANCE="${EA_SCREEN_TOLERANCE:-0.01}"
 
@@ -134,14 +134,14 @@ LLM-only evolution protocol
   generations:        $EA_GENERATIONS
   children:           $EA_CHILDREN
   seed:               $EA_SEED
-  dev fraction:       $EA_DEV_FRACTION
+  dev fraction:       $EA_VAL_FRACTION
   holdout fraction:   $EA_HOLDOUT_FRACTION
   evolution target:    $EA_EVOLVE_TARGET
   seed policy:         ${EA_SEED_POLICY_PATH:-hand-written v000}
   shared Codex cache:  ${EA_CODEX_CACHE_DIR:-per-mode cache}
   task limit:          ${EA_LIMIT:-none (full public set)}
   successive halving:  $EA_SUCCESSIVE_HALVING
-  screen train/dev:    $EA_SCREEN_TRAIN_TASKS/$EA_SCREEN_DEV_TASKS
+  screen train/dev:    $EA_SCREEN_TRAIN_TASKS/$EA_SCREEN_VAL_TASKS
   screen promote:      $EA_SCREEN_PROMOTE
   screen tolerance:    $EA_SCREEN_TOLERANCE
   output root:         $EA_RUNS_DIR
@@ -166,7 +166,7 @@ for evolution_mode in "${MODES[@]}"; do
         --children "$EA_CHILDREN"
         --evolve-target "$EA_EVOLVE_TARGET"
         --seed "$EA_SEED"
-        --dev-fraction "$EA_DEV_FRACTION"
+        --val-fraction "$EA_VAL_FRACTION"
         --holdout-fraction "$EA_HOLDOUT_FRACTION"
         --split-manifest-path "$run_dir/split_manifest.json"
         --trace-path "$run_dir/evolution_trace.json"
@@ -187,7 +187,7 @@ for evolution_mode in "${MODES[@]}"; do
             args+=(
                 --successive-halving
                 --screen-train-tasks "$EA_SCREEN_TRAIN_TASKS"
-                --screen-dev-tasks "$EA_SCREEN_DEV_TASKS"
+                --screen-val-tasks "$EA_SCREEN_VAL_TASKS"
                 --screen-promote "$EA_SCREEN_PROMOTE"
                 --screen-tolerance "$EA_SCREEN_TOLERANCE"
             )

@@ -1,25 +1,28 @@
 """Tests for numerical_agent/evolution/execution: running methods against tasks, scoring, ranking, and characterization, plus seeding the exemplar module."""
 from __future__ import annotations
 
+import statistics
+
 import pytest
 from pathlib import Path
 from numerical_agent.evolution.execution import (
     CRASHED,
+    Outcome,
     INVALID,
     NOT_APPLICABLE,
     SUCCESS,
     Task,
-    derive_characteristics,
+    describe_series,
     load_methods,
-    report_payload,
+    reports_as_json,
     run_module,
 )
-from numerical_agent.evolution.module import MODULE_HEADER, SKILLS_MODULE, read_module
-from numerical_agent.evolution import MODULE_NAME, exemplar_methods, git
+from numerical_agent.evolution.module import METHODS_FILE_HEADER, read_module
+from numerical_agent.evolution import METHODS_FILENAME, example_methods, run_git
 from numerical_agent.seed_evolution import seed
 
 
-FIXTURE = MODULE_HEADER + '''
+FIXTURE = METHODS_FILE_HEADER + '''
 
 def perfect_method(history, horizon, frequency):
     """Use when the future simply repeats the last observed value."""
@@ -115,14 +118,14 @@ def test_scores_are_grouped_by_series_characteristic(tmp_path: Path) -> None:
     _, reports = run_module(write_fixture(tmp_path), tasks())
     perfect = next(r for r in reports if r.method == "perfect_method")
 
-    assert "frequency:1 day" in perfect.by_characteristic_smae
-    assert any(tag.startswith("history:") for tag in perfect.by_characteristic_smae)
+    assert "frequency:1 day" in perfect.smae_by_series_type
+    assert any(tag.startswith("history:") for tag in perfect.smae_by_series_type)
 
 
 def test_characteristics_flag_intermittent_and_trending_series() -> None:
-    intermittent = derive_characteristics([0.0, 0.0, 5.0, 0.0, 0.0, 3.0, 0.0, 0.0], 4, "1 day")
-    trending = derive_characteristics([float(i) for i in range(40)], 4, "1 hour")
-    flat = derive_characteristics([5.0] * 40, 4, "1 hour")
+    intermittent = describe_series([0.0, 0.0, 5.0, 0.0, 0.0, 3.0, 0.0, 0.0], 4, "1 day")
+    trending = describe_series([float(i) for i in range(40)], 4, "1 hour")
+    flat = describe_series([5.0] * 40, 4, "1 hour")
 
     assert "intermittent" in intermittent
     assert "trending" in trending
@@ -133,14 +136,14 @@ def test_characteristics_never_read_the_future() -> None:
     task = Task("t", (1.0, 2.0, 3.0, 4.0), 2, "1 day", (999.0, 999.0))
 
     # Derived only from history/horizon/frequency, so an extreme future cannot leak in.
-    assert task.characteristics() == derive_characteristics(task.history, 2, "1 day")
+    assert task.describe() == describe_series(task.history, 2, "1 day")
 
 
-def test_report_payload_is_json_shaped(tmp_path: Path) -> None:
+def test_reports_as_json_is_json_shaped(tmp_path: Path) -> None:
     import json
 
     _, reports = run_module(write_fixture(tmp_path), tasks())
-    payload = report_payload(reports)
+    payload = reports_as_json(reports)
 
     assert json.loads(json.dumps(payload))
     assert {entry["method"] for entry in payload} == {
@@ -166,7 +169,7 @@ def test_an_imported_callable_is_never_measured_as_a_method(tmp_path: Path) -> N
     task, raise TypeError each time, and land in the report as a method that crashed everywhere
     -- evidence the model would then act on for a method that does not exist.
     """
-    source = MODULE_HEADER + '''
+    source = METHODS_FILE_HEADER + '''
 
 from math import sqrt
 
@@ -185,13 +188,16 @@ def real_method(history, horizon, frequency):
     assert "P" not in functions
 
 
-def test_methods_can_call_the_frozen_skill_library(tmp_path: Path) -> None:
-    source = MODULE_HEADER + '''
+def test_a_method_imports_its_libraries_inside_its_own_body(tmp_path: Path) -> None:
+    """The header is the only module-level text that survives, so imports live in the body."""
+    source = METHODS_FILE_HEADER + '''
 
 def period_repeat(history, horizon, frequency):
-    """Repeat the last full seasonal cycle the skill library detects."""
-    period = P.infer_period(history, frequency)
-    return [float(history[-period + (i % period)]) for i in range(horizon)]
+    """Repeat the last two observations forward."""
+    import numpy as np
+
+    tail = np.asarray(history[-2:], dtype=float)
+    return [float(tail[i % 2]) for i in range(horizon)]
 '''
     destination = tmp_path / "methods.py"
     destination.write_text(source, encoding="utf-8")
@@ -202,42 +208,33 @@ def period_repeat(history, horizon, frequency):
     assert functions["period_repeat"]([1.0, 9.0] * 30, 4, "1 day") == [1.0, 9.0, 1.0, 9.0]
 
 
-def test_mean_rank_orders_methods_within_a_task_not_by_raw_magnitude(tmp_path: Path) -> None:
-    """One large-magnitude series must not decide the whole comparison.
+def test_a_runaway_forecast_is_invalid_not_a_crash_that_ends_the_run(tmp_path: Path) -> None:
+    """A finite value can still overflow squaring in rmse; that must not kill every other method."""
+    source = METHODS_FILE_HEADER + '''
 
-    `steady` is beaten on the small task and wins the huge one; `spiky` is the reverse. Their
-    mean MAE is dominated by the huge task, but their mean ranks stay balanced. The huge task's
-    errors (1.0 against a scale of ~1001) are kept well clear of common/metrics.py's 3-decimal
-    rounding -- a relative error near 1e-6 would round to 0.0 for both methods and tie instead
-    of separating them.
-    """
-    source = MODULE_HEADER + '''
+def runaway(history, horizon, frequency):
+    """Returns a value so large that scoring it would overflow."""
+    return [1e200] * horizon
 
-def steady(history, horizon, frequency):
-    """Always predicts the last value."""
+
+def sane(history, horizon, frequency):
+    """A normal method measured in the same run as the runaway one."""
     return [float(history[-1])] * horizon
-
-
-def spiky(history, horizon, frequency):
-    """Always predicts the last value plus one."""
-    return [float(history[-1]) + 1.0] * horizon
 '''
     destination = tmp_path / "methods.py"
     destination.write_text(source, encoding="utf-8")
-    tasks = (
-        Task("small", (1.0, 2.0, 3.0), 2, "1 day", (3.0, 3.0)),
-        Task("huge", (0.0, 0.0, 1000.0), 2, "1 day", (1001.0, 1001.0)),
-    )
+    task = Task("t", (1.0, 2.0, 3.0), 2, "1 day", (3.0, 3.0))
 
-    _outcomes, reports = run_module(destination, tasks)
+    _outcomes, reports = run_module(destination, (task,))
     by_name = {report.method: report for report in reports}
 
-    assert by_name["steady"].mean_rank == pytest.approx(1.5)
-    assert by_name["spiky"].mean_rank == pytest.approx(1.5)
+    assert by_name["runaway"].invalid == 1
+    assert by_name["runaway"].mean_smae is None
+    assert by_name["sane"].success == 1
 
 
 def test_a_flat_method_is_visibly_flat_in_the_report(tmp_path: Path) -> None:
-    source = MODULE_HEADER + '''
+    source = METHODS_FILE_HEADER + '''
 
 def flat(history, horizon, frequency):
     """Predicts the mean of the history forever."""
@@ -264,7 +261,7 @@ def seeding_tasks() -> tuple[Task, ...]:
 
 
 def test_the_exemplar_module_satisfies_the_method_contract() -> None:
-    module = read_module(exemplar_methods.__file__)
+    module = read_module(example_methods.__file__)
 
     assert len(module.names()) >= 3
     for method in module.methods:
@@ -272,11 +269,15 @@ def test_the_exemplar_module_satisfies_the_method_contract() -> None:
         assert "def " in method.source
 
 
-def test_every_exemplar_composes_the_skill_library_rather_than_inlining_statistics() -> None:
-    module = read_module(exemplar_methods.__file__)
+def test_every_exemplar_is_self_contained(tmp_path: Path) -> None:
+    """No exemplar may depend on module-level text, which a rewrite would silently drop."""
+    module = read_module(example_methods.__file__)
 
     for method in module.methods:
-        assert "P." in method.source, f"{method.name} never calls a skill"
+        assert "P." not in method.source, f"{method.name} still calls the removed skill library"
+        for line in method.source.splitlines()[1:]:
+            if line.strip().startswith(("import ", "from ")):
+                assert line.startswith("    "), f"{method.name} imports outside its body"
 
 
 def test_seeding_creates_a_repository_with_one_commit(tmp_path: Path) -> None:
@@ -285,19 +286,18 @@ def test_seeding_creates_a_repository_with_one_commit(tmp_path: Path) -> None:
     commit = seed(repo)
 
     assert commit
-    assert (repo / MODULE_NAME).exists()
-    assert git(repo, "log", "--oneline").count("\n") == 0
-    assert "seed 5 composed forecasting methods" in git(repo, "log", "-1", "--format=%s")
+    assert (repo / METHODS_FILENAME).exists()
+    assert run_git(repo, "log", "--oneline").count("\n") == 0
+    assert "seed 5 composed forecasting methods" in run_git(repo, "log", "-1", "--format=%s")
 
 
-def test_the_seeded_module_carries_the_skill_import_in_its_header(tmp_path: Path) -> None:
+def test_the_seeded_module_defines_notapplicable_in_its_header(tmp_path: Path) -> None:
     repo = tmp_path / "evo"
     seed(repo)
 
-    text = (repo / MODULE_NAME).read_text(encoding="utf-8")
+    text = (repo / METHODS_FILENAME).read_text(encoding="utf-8")
 
-    assert f"import {SKILLS_MODULE} as P" in text
-    assert f"from {SKILLS_MODULE} import NotApplicable" in text
+    assert "class NotApplicable(Exception):" in text
 
 
 def test_seeding_refuses_to_overwrite_without_force(tmp_path: Path) -> None:
@@ -314,9 +314,9 @@ def test_the_seeded_module_loads_only_its_methods(tmp_path: Path) -> None:
     repo = tmp_path / "evo"
     seed(repo)
 
-    _module, functions = load_methods(repo / MODULE_NAME)
+    _module, functions = load_methods(repo / METHODS_FILENAME)
 
-    assert set(functions) == set(read_module(exemplar_methods.__file__).names())
+    assert set(functions) == set(read_module(example_methods.__file__).names())
     # Neither the skill namespace nor the imported exception is a measurable method.
     assert "P" not in functions
     assert "NotApplicable" not in functions
@@ -326,7 +326,7 @@ def test_no_exemplar_crashes_or_returns_an_invalid_forecast(tmp_path: Path) -> N
     repo = tmp_path / "evo"
     seed(repo)
 
-    _outcomes, reports = run_module(repo / MODULE_NAME, seeding_tasks())
+    _outcomes, reports = run_module(repo / METHODS_FILENAME, seeding_tasks())
 
     for report in reports:
         assert report.crashed == 0, f"{report.method}: {report.sample_failures}"
@@ -337,7 +337,7 @@ def test_at_least_one_exemplar_forecasts_every_task(tmp_path: Path) -> None:
     repo = tmp_path / "evo"
     seed(repo)
 
-    outcomes, _reports = run_module(repo / MODULE_NAME, seeding_tasks())
+    outcomes, _reports = run_module(repo / METHODS_FILENAME, seeding_tasks())
     covered = {o.task_id for o in outcomes if o.status == "success"}
 
     assert covered == {task.task_id for task in seeding_tasks()}
@@ -349,7 +349,7 @@ def test_a_skill_declining_a_series_is_not_applicable_rather_than_a_crash(tmp_pa
     seed(repo)
     short = Task("short", (1.0, 2.0, 3.0, 4.0, 5.0), 3, "1 hour", (6.0, 7.0, 8.0))
 
-    _outcomes, reports = run_module(repo / MODULE_NAME, (short,))
+    _outcomes, reports = run_module(repo / METHODS_FILENAME, (short,))
 
     for report in reports:
         assert report.crashed == 0, f"{report.method}: {report.sample_failures}"

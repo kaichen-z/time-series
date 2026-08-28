@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
-from common.metrics import horizon_scale
+from common.metrics import mean_absolute_truth
 
 
 class ScaledMetric:
@@ -29,6 +29,6 @@ class ScaledMetric:
         return (sum((t - p) ** 2 for t, p in zip(truth, prediction)) / len(truth)) ** 0.5
 
     def __call__(self, prediction: Sequence[float], truth: Sequence[float]) -> float:
-        value = self._raw(prediction, truth) / horizon_scale([float(t) for t in truth])
+        value = self._raw(prediction, truth) / mean_absolute_truth([float(t) for t in truth])
         # A non-finite error is a failed method, not a merely bad one: rank it last outright.
         return value if math.isfinite(value) else math.inf
