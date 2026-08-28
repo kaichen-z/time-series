@@ -15,6 +15,7 @@ from evolving_loop.co_evolution import (
     CoEvolutionEngine,
     HarnessPolicy,
     PolicyEvaluation,
+    embed_retrieval_release,
     evaluation_diagnostics,
     forecast_utility,
     snapshot_policy_skills,
@@ -23,6 +24,10 @@ from evolving_loop.coding_agent.skill_library import Skill, SkillLibrary
 from evolving_loop.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
 from evolving_loop.evaluation import ResolvedOutcome
 from evolving_loop.retrieval_agent.credit import RetrievalTaskDiagnostics
+from evolving_loop.retrieval_agent.policy import (
+    RetrievalGenome,
+    _write_accepted_retrieval_release,
+)
 from evolving_loop.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
 from common.llm import FakeLLMClient, TransientLLMError
 
@@ -111,22 +116,29 @@ def test_multiple_children_receive_distinct_payloads_without_full_skill_source()
     assert "FULL_EXECUTABLE_SOURCE" not in client.calls[0]["messages"][0]["content"]
 
 
-def test_accepted_retrieval_release_audit_never_enters_mutation_prompt() -> None:
-    embedded = {
-        "genome": {"version": "v001"},
-        "round1_prompt": "round one",
-        "round2_prompt": "round two",
-        "skills": [],
-        "manifest": {"dev_summary": "DEV_TRUSTED_SUMMARY_MUST_STAY_HOST_SIDE"},
-    }
-    digest = hashlib.sha256(
-        json.dumps(
-            embedded, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-    ).hexdigest()
-    parent = HarnessPolicy(
-        retrieval_release_payload=embedded,
-        retrieval_release_sha256=digest,
+def test_accepted_retrieval_release_audit_never_enters_mutation_prompt(tmp_path) -> None:
+    genome = replace(RetrievalGenome.seed(), version="v001", parent="v000")
+    release = _write_accepted_retrieval_release(
+        tmp_path / "releases",
+        genome,
+        audit={
+            "state": "accepted",
+            "train_dev_split_sha256": "1" * 64,
+            "verifier_sha256": "2" * 64,
+            "evaluator_sha256": "3" * 64,
+            "metric_sha256": "4" * 64,
+            "metric_cap": 5.0,
+            "train_summary": {"task_count": 80},
+            "dev_summary": {
+                "secret": "DEV_TRUSTED_SUMMARY_MUST_STAY_HOST_SIDE"
+            },
+            "acceptance_reason": "all gates passed",
+        },
+    )
+    parent = embed_retrieval_release(
+        HarnessPolicy(),
+        release,
+        changelog="Accepted Retrieval v001.",
     )
     evaluation = PolicyEvaluation(
         version="v000",

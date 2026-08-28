@@ -9,7 +9,8 @@ import tempfile
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Literal, Sequence
+from types import MappingProxyType
+from typing import Callable, Literal, Mapping, Sequence
 
 from evolving_loop.coding_agent.evolution import GENERATION_PROMPT, REVISION_PROMPT
 from evolving_loop.data import ContextTask, Document
@@ -17,6 +18,17 @@ from evolving_loop.decision_agent.agent import DECISION_PROMPT
 from evolving_loop.evaluation import ResolvedOutcome, score_after_resolution
 from evolving_loop.harness import EvolvingForecastHarness
 from evolving_loop.retrieval_agent.agent import RETRIEVAL_PROMPT
+from evolving_loop.retrieval_agent.policy import (
+    RetrievalGenome,
+    RetrievalRelease,
+    _MANIFEST_FIELDS,
+    _validate_release_audit,
+)
+from evolving_loop.retrieval_agent.skill_library import (
+    RetrievalSkill,
+    RetrievalSkillLibrary,
+    _record_digest,
+)
 from common.llm import (
     JsonExtractionError,
     LLMClient,
@@ -79,6 +91,137 @@ def _replace_policy_artifact(source: Path, destination: Path) -> None:
     os.replace(source, destination)
 
 
+def _plain_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _plain_json(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_plain_json(item) for item in value]
+    return value
+
+
+def _freeze_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("Retrieval release payload keys must be strings")
+        return MappingProxyType(
+            {str(key): _freeze_json(item) for key, item in value.items()}
+        )
+    if isinstance(value, (tuple, list)):
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    try:
+        return json.dumps(
+            _plain_json(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise ValueError("Retrieval release payload must be canonical JSON") from error
+
+
+def _sha256(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _canonical_retrieval_release_payload(
+    raw: Mapping[str, object],
+) -> Mapping[str, object]:
+    """Validate and deeply freeze one path-free Retrieval release snapshot.
+
+    This proves integrity and schema only.  Runtime authority still comes from
+    the operator release loader; a serialized HarnessPolicy never grants it.
+    """
+    if not isinstance(raw, Mapping) or set(raw) != {
+        "genome",
+        "round1_prompt",
+        "round2_prompt",
+        "skills",
+        "manifest",
+    }:
+        raise ValueError("Retrieval release payload has an invalid schema")
+    if any(not isinstance(key, str) for key in raw):
+        raise ValueError("Retrieval release payload keys must be strings")
+    plain = _plain_json(raw)
+    if not isinstance(plain, dict):  # pragma: no cover - guarded above.
+        raise ValueError("Retrieval release payload has an invalid schema")
+    genome_raw = plain["genome"]
+    if not isinstance(genome_raw, Mapping):
+        raise ValueError("Retrieval release Genome must be an object")
+    try:
+        genome = RetrievalGenome.from_payload(genome_raw)
+    except Exception as error:
+        raise ValueError("Retrieval release Genome is invalid") from error
+    round1_prompt = plain["round1_prompt"]
+    round2_prompt = plain["round2_prompt"]
+    if (
+        not isinstance(round1_prompt, str)
+        or not isinstance(round2_prompt, str)
+        or round1_prompt != genome.round1_prompt
+        or round2_prompt != genome.round2_prompt
+    ):
+        raise ValueError("Retrieval release prompt does not match its Genome")
+    skills_raw = plain["skills"]
+    if not isinstance(skills_raw, list) or any(
+        not isinstance(item, Mapping) for item in skills_raw
+    ):
+        raise ValueError("Retrieval release Skills must be typed objects")
+    try:
+        skills = tuple(
+            RetrievalSkill._from_storage_payload(item) for item in skills_raw
+        )
+        indexed = RetrievalSkillLibrary._validated_index(
+            skills,
+            active_record_hashes=(
+                _record_digest(skill) for skill in skills if skill.is_active
+            ),
+        )
+    except Exception as error:
+        raise ValueError("Retrieval release Skills are invalid") from error
+    active_ids = {
+        skill_id
+        for skill_id, history in indexed.items()
+        if history[-1].is_active
+    }
+    if active_ids != set(genome.active_skill_ids):
+        raise ValueError(
+            "Retrieval release active Skill history does not match its Genome"
+        )
+    manifest = plain["manifest"]
+    if not isinstance(manifest, Mapping) or set(manifest) != set(_MANIFEST_FIELDS):
+        raise ValueError("Retrieval release manifest has an invalid schema")
+    expected = {
+        "schema_version": 1,
+        "version": genome.version,
+        "parent": genome.parent,
+        "genome_sha256": genome.fingerprint(),
+        "round1_prompt_sha256": _sha256(round1_prompt.encode("utf-8")),
+        "round2_prompt_sha256": _sha256(round2_prompt.encode("utf-8")),
+        "skills_sha256": _sha256(_canonical_json_bytes(skills_raw)),
+    }
+    if any(manifest.get(key) != value for key, value in expected.items()):
+        raise ValueError("Retrieval release manifest binding mismatch")
+    try:
+        _validate_release_audit(manifest, genome)
+    except Exception as error:
+        raise ValueError("Retrieval release audit is invalid") from error
+    state = manifest["state"]
+    if not (
+        (genome.version == "v000" and state == "seed")
+        or (genome.version != "v000" and state == "accepted")
+    ):
+        raise ValueError(
+            "HarnessPolicy permits only the v000 seed or an accepted Retrieval release"
+        )
+    # Canonicalize every tuple/mapping distinction before freezing it.
+    canonical_plain = json.loads(_canonical_json_bytes(plain).decode("utf-8"))
+    return _freeze_json(canonical_plain)  # type: ignore[return-value]
+
+
 @dataclass(frozen=True)
 class HarnessPolicy:
     """A complete, inheritable genome for both Coding search and the whole harness."""
@@ -102,13 +245,28 @@ class HarnessPolicy:
     retrieval_skills: tuple[dict, ...] = ()
     decision_skills: tuple[dict, ...] = ()
     changelog: str = "Hand-written seed policy."
-    retrieval_release_payload: dict[str, object] | None = None
+    retrieval_release_payload: Mapping[str, object] | None = None
     retrieval_release_sha256: str | None = None
     retrieval_skill_source: object | None = field(
         default=None, repr=False, compare=False
     )
 
     def __post_init__(self) -> None:
+        for field_name in (
+            "coding_skills",
+            "retrieval_skills",
+            "decision_skills",
+        ):
+            records = getattr(self, field_name)
+            if not isinstance(records, (tuple, list)) or any(
+                not isinstance(record, Mapping) for record in records
+            ):
+                raise ValueError(f"{field_name} must contain JSON objects")
+            object.__setattr__(
+                self,
+                field_name,
+                tuple(_freeze_json(record) for record in records),
+            )
         self._validate_retrieval_release_binding()
 
     def _validate_retrieval_release_binding(self) -> None:
@@ -120,28 +278,59 @@ class HarnessPolicy:
             )
         if payload is None:
             return
-        if not isinstance(payload, dict) or set(payload) != {
-            "genome",
-            "round1_prompt",
-            "round2_prompt",
-            "skills",
-            "manifest",
-        }:
-            raise ValueError("Retrieval release payload has an invalid schema")
-        if "path" in payload:
-            raise ValueError("Retrieval release payload cannot embed a path")
-        try:
-            canonical = json.dumps(
-                payload,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        except (TypeError, ValueError) as error:
-            raise ValueError("Retrieval release payload must be canonical JSON") from error
-        expected = hashlib.sha256(canonical).hexdigest()
+        canonical_payload = _canonical_retrieval_release_payload(payload)
+        expected = self.retrieval_payload_fingerprint(canonical_payload)
         if digest != expected:
             raise ValueError("Retrieval release fingerprint mismatch")
+        genome_raw = canonical_payload["genome"]
+        if not isinstance(genome_raw, Mapping):  # pragma: no cover - proved above.
+            raise ValueError("Retrieval release Genome is invalid")
+        genome = RetrievalGenome.from_payload(genome_raw)
+        if self.retrieval_prompt != genome.round1_prompt:
+            raise ValueError(
+                "HarnessPolicy Retrieval prompt mirror does not match the accepted release"
+            )
+        canonical_skills = canonical_payload["skills"]
+        if _plain_json(self.retrieval_skills) != _plain_json(canonical_skills):
+            raise ValueError(
+                "HarnessPolicy Retrieval Skill mirror does not match the accepted release"
+            )
+        object.__setattr__(self, "retrieval_release_payload", canonical_payload)
+        object.__setattr__(
+            self,
+            "retrieval_skills",
+            tuple(_freeze_json(item) for item in canonical_skills),
+        )
+
+    @staticmethod
+    def retrieval_payload_fingerprint(payload: Mapping[str, object]) -> str:
+        return _sha256(_canonical_json_bytes(payload))
+
+    @property
+    def retrieval_genome(self) -> RetrievalGenome | None:
+        if self.retrieval_release_payload is None:
+            return None
+        genome = self.retrieval_release_payload["genome"]
+        if not isinstance(genome, Mapping):  # pragma: no cover - construction proved it.
+            raise ValueError("Retrieval release Genome is invalid")
+        return RetrievalGenome.from_payload(genome)
+
+    @property
+    def has_accepted_retrieval_release(self) -> bool:
+        if self.retrieval_release_payload is None:
+            return False
+        manifest = self.retrieval_release_payload["manifest"]
+        return (
+            isinstance(manifest, Mapping)
+            and manifest.get("state") == "accepted"
+            and self.retrieval_genome is not None
+            and self.retrieval_genome.version != "v000"
+        )
+
+    @property
+    def public_test_accessed(self) -> bool:
+        """Coordinate bundles never carry Public Regression access authority."""
+        return False
 
     def to_payload(self) -> dict[str, object]:
         """Return the durable policy fields; runtime Skill authority is excluded."""
@@ -151,15 +340,20 @@ class HarnessPolicy:
             for item in fields(self)
             if item.name != "retrieval_skill_source"
         }
+        for name in ("coding_skills", "retrieval_skills", "decision_skills"):
+            payload[name] = _plain_json(payload[name])
         if self.retrieval_release_payload is None:
             payload.pop("retrieval_release_payload")
             payload.pop("retrieval_release_sha256")
         # Never return the mutable object held by a frozen policy.
         else:
-            payload["retrieval_release_payload"] = json.loads(
-                json.dumps(self.retrieval_release_payload, ensure_ascii=False)
+            payload["retrieval_release_payload"] = _plain_json(
+                self.retrieval_release_payload
             )
         return payload
+
+    def canonical_bytes(self) -> bytes:
+        return _canonical_json_bytes(self.to_payload())
 
     def save(self, path: str | Path) -> None:
         destination = Path(path)
@@ -209,6 +403,37 @@ class HarnessPolicy:
             if field in payload:
                 payload[field] = tuple(payload[field])
         return cls(**payload)
+
+
+def embed_retrieval_release(
+    policy: HarnessPolicy,
+    release: RetrievalRelease,
+    *,
+    changelog: str,
+) -> HarnessPolicy:
+    """Embed one already verified release snapshot without granting authority."""
+    if not isinstance(policy, HarnessPolicy) or not isinstance(
+        release, RetrievalRelease
+    ):
+        raise ValueError("a verified RetrievalRelease is required")
+    embedded = {
+        "genome": release.genome.to_payload(),
+        "round1_prompt": release.round1_prompt,
+        "round2_prompt": release.round2_prompt,
+        "skills": _plain_json(release.skills),
+        "manifest": _plain_json(release.manifest),
+    }
+    digest = HarnessPolicy.retrieval_payload_fingerprint(embedded)
+    return replace(
+        policy,
+        version=release.genome.version,
+        parent=release.genome.parent,
+        retrieval_prompt=release.round1_prompt,
+        retrieval_skills=tuple(embedded["skills"]),
+        changelog=changelog,
+        retrieval_release_payload=embedded,
+        retrieval_release_sha256=digest,
+    )
 
 
 def snapshot_policy_skills(
@@ -995,6 +1220,11 @@ class CoEvolutionEngine:
             if not value:
                 return None, f"Illegal empty field: {field}."
             prompts[field] = value
+        if parent.retrieval_release_payload is not None:
+            # A generic Harness Genome cannot rewrite one field inside an
+            # authenticated typed Retrieval release.  Retrieval changes flow
+            # only through RetrievalEvolutionEngine and a newly loaded release.
+            prompts["retrieval_prompt"] = parent.retrieval_prompt
 
         workflow = tuple(str(item) for item in proposal.get("workflow", parent.workflow))
         if (

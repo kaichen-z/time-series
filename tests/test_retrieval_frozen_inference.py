@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -181,21 +180,11 @@ def test_hidden_retrieval_inference_is_write_free_and_reports_both_rounds(tmp_pa
             calls.append((task, allow_skill_writes))
             return _result()
 
-    embedded = {
-        "genome": {},
-        "round1_prompt": "one",
-        "round2_prompt": "two",
-        "skills": [],
-        "manifest": {},
-    }
-    release_sha256 = hashlib.sha256(
-        json.dumps(
-            embedded, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-    ).hexdigest()
-    policy = HarnessPolicy(
-        retrieval_release_payload=embedded,
-        retrieval_release_sha256=release_sha256,
+    release = write_retrieval_release(
+        outside / "release-root", RetrievalGenome.seed()
+    )
+    policy = cli_module._policy_with_retrieval_release(
+        HarnessPolicy(), release, changelog="Seed Retrieval."
     )
     summary = run_frozen_inference(
         policy,

@@ -37,6 +37,7 @@ from evolving_loop.retrieval_agent.policy import (
 from evolving_loop.retrieval_agent.evolution import (
     RetrievalCheckpointError,
     RetrievalEvaluation,
+    RetrievalEvolutionError,
     RetrievalForecastingFailure,
     RetrievalEvolutionResult,
     RetrievalGenerationTrace,
@@ -67,6 +68,152 @@ def test_retrieval_topology_controls_are_explicit_for_both_interfaces() -> None:
         )
         assert two_stage.retrieval_mode == "two-stage"
         assert two_stage.retrieval_release_path == "release"
+
+
+def test_coordinate_phase_controls_are_explicit_for_root_and_legacy_genome() -> None:
+    """Catches a coordinate selector that exists on only one CLI grammar."""
+    parser = build_parser()
+    for prefix in (["evolve"], ["--evolution", "genome", "--tasks-file", "tasks"]):
+        assert parser.parse_args(prefix).coordinate_phase is None
+        for phase in ("retrieval", "decision", "alternate"):
+            args = parser.parse_args([*prefix, "--coordinate-phase", phase])
+            assert args.coordinate_phase == phase
+
+
+@pytest.mark.parametrize("phase", ("retrieval", "decision", "alternate"))
+def test_coordinate_phases_inherit_frozen_two_stage_retrieval_defaults(
+    phase: str,
+) -> None:
+    """Catches Genome coordinate selection retaining unusable single-pass defaults."""
+    args = build_parser().parse_args(
+        ["--evolution", "genome", "--coordinate-phase", phase]
+    )
+
+    assert args.retrieval_mode == "two-stage"
+    assert args.screen_train_tasks == 8
+    assert args.screen_promote == 2
+    assert args.retrieval_release_path.endswith("/v000")
+
+
+@pytest.mark.parametrize("phase", ("decision", "alternate"))
+def test_coordinate_decision_phases_require_nonseed_accepted_embedded_retrieval_before_tasks(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """Catches task/component work beginning from v000 or an unembedded accepted release."""
+    seed_release = write_retrieval_release(
+        tmp_path / "releases", RetrievalGenome.seed()
+    )
+    args = build_parser().parse_args(
+        [
+            "--evolution",
+            "genome",
+            "--coordinate-phase",
+            phase,
+            "--retrieval-mode",
+            "two-stage",
+            "--retrieval-release-path",
+            str(seed_release.path),
+            "--tasks-file",
+            str(tmp_path / "must-not-load.jsonl"),
+        ]
+    )
+    args.evolution_mode = args.evolution
+    monkeypatch.setattr(
+        cli_module,
+        "load_context_tasks",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("task loading must occur after the coordinate release gate")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="accepted|v000|seed"):
+        cli_module.evolve_command(args)
+
+
+@pytest.mark.parametrize("phase", ("decision", "alternate"))
+def test_coordinate_decision_phases_reject_unembedded_accepted_release_before_tasks(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """Catches treating an operator path as a substitute for bundle provenance."""
+    release = _write_accepted_retrieval_release(
+        tmp_path / "releases",
+        replace(RetrievalGenome.seed(), version="v001", parent="v000"),
+        audit={
+            "state": "accepted",
+            "train_dev_split_sha256": "1" * 64,
+            "verifier_sha256": "2" * 64,
+            "evaluator_sha256": "3" * 64,
+            "metric_sha256": "4" * 64,
+            "metric_cap": 5.0,
+            "train_summary": {"task_count": 80},
+            "dev_summary": {"task_count": 20},
+            "acceptance_reason": "all gates passed",
+        },
+    )
+    args = build_parser().parse_args(
+        [
+            "--evolution",
+            "genome",
+            "--coordinate-phase",
+            phase,
+            "--retrieval-release-path",
+            str(release.path),
+            "--tasks-file",
+            str(tmp_path / "must-not-load.jsonl"),
+        ]
+    )
+    args.evolution_mode = args.evolution
+    monkeypatch.setattr(
+        cli_module,
+        "load_context_tasks",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("task loading must occur after embedded release validation")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="embedded accepted Retrieval release"):
+        cli_module.evolve_command(args)
+
+
+def test_coordinate_authority_environment_is_consumed_before_model_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches coordinate model subprocesses inheriting operator authority."""
+    args = SimpleNamespace(
+        checkpoint_authority_key_env="CUSTOM_COORDINATE_KEY",
+        checkpoint_authority_expected_env="CUSTOM_COORDINATE_ANCHOR",
+    )
+    monkeypatch.setenv("CUSTOM_COORDINATE_KEY", "k" * 64)
+    monkeypatch.setenv("CUSTOM_COORDINATE_ANCHOR", "0:" + "a" * 64)
+    monkeypatch.setenv("RETRIEVAL_CHECKPOINT_AUTHORITY_KEY", "default-key-secret")
+    monkeypatch.setenv(
+        "RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED", "default-anchor-secret"
+    )
+
+    key, anchor, subprocess_environment = (
+        cli_module._consume_coordinate_authority_environment(args)
+    )
+
+    assert key == ("k" * 64).encode("utf-8")
+    assert anchor == (0, "a" * 64)
+    for name in (
+        "CUSTOM_COORDINATE_KEY",
+        "CUSTOM_COORDINATE_ANCHOR",
+        "RETRIEVAL_CHECKPOINT_AUTHORITY_KEY",
+        "RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED",
+    ):
+        assert name not in os.environ
+        assert name not in subprocess_environment
+    assert not {
+        "k" * 64,
+        "0:" + "a" * 64,
+        "default-key-secret",
+        "default-anchor-secret",
+    }.intersection(subprocess_environment.values())
 
 
 def test_evolve_cli_exposes_targeted_agent_evolution() -> None:
@@ -479,6 +626,98 @@ def test_retrieval_evolution_dispatch_bypasses_generic_splitter(
     assert captured == [args]
 
 
+def test_coordinate_retrieval_dispatch_preserves_the_task8_protocol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches a second, weaker Retrieval path under the Genome selector."""
+    args = build_parser().parse_args(
+        ["--evolution", "genome", "--coordinate-phase", "retrieval"]
+    )
+    args.evolution_mode = args.evolution
+    captured = []
+
+    def retrieval_dispatch(received):
+        captured.append(received)
+        return {"accepted": False, "evolution_mode": "retrieval"}
+
+    monkeypatch.setattr(cli_module, "_retrieval_evolve_command", retrieval_dispatch)
+    monkeypatch.setattr(
+        cli_module,
+        "load_context_tasks",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("coordinate Retrieval must use the frozen Task 8 loader")
+        ),
+    )
+
+    result = cli_module.evolve_command(args)
+
+    assert result == {
+        "accepted": False,
+        "evolution_mode": "genome",
+        "coordinate_phase": "retrieval",
+    }
+    assert captured == [args]
+
+
+@pytest.mark.parametrize("mode", ("prompt", "source", "retrieval"))
+def test_coordinate_retrieval_is_rejected_outside_genome_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """Catches the Retrieval coordinate bypassing its Genome-only mode gate."""
+    args = build_parser().parse_args(
+        ["--evolution", mode, "--coordinate-phase", "retrieval"]
+    )
+    args.evolution_mode = args.evolution
+    monkeypatch.setattr(
+        cli_module,
+        "_retrieval_evolve_command",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("invalid coordinate mode must fail before dispatch")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="only for Genome evolution"):
+        cli_module.evolve_command(args)
+
+
+@pytest.mark.parametrize("phase", ("decision", "alternate"))
+def test_coordinate_dispatch_uses_authenticated_preflight_and_scoped_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """Catches a coordinate phase falling through to generic three-way evolution."""
+    args = build_parser().parse_args(
+        ["--evolution", "genome", "--coordinate-phase", phase]
+    )
+    args.evolution_mode = args.evolution
+    release = SimpleNamespace(marker="trusted-release")
+    policy = HarnessPolicy()
+    calls = []
+    monkeypatch.setattr(
+        cli_module,
+        "_coordinate_retrieval_preflight",
+        lambda received: (release, policy),
+    )
+    helper_name = f"_{phase}_coordinate_evolve_command"
+
+    def run(received, *, release: object, seed_policy: HarnessPolicy):
+        calls.append((received, release, seed_policy))
+        return {"coordinate_phase": phase}
+
+    monkeypatch.setattr(cli_module, helper_name, run)
+    monkeypatch.setattr(
+        cli_module,
+        "load_context_tasks",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("coordinate phase must not use the generic splitter")
+        ),
+    )
+
+    assert cli_module.evolve_command(args) == {"coordinate_phase": phase}
+    assert calls == [(args, release, policy)]
+
+
 def test_harness_policy_embeds_canonical_release_payload_without_a_path(
     tmp_path,
 ) -> None:
@@ -529,11 +768,10 @@ def test_harness_policy_embeds_canonical_release_payload_without_a_path(
     assert HarnessPolicy.load(destination) == policy
 
     mutated_in_memory = HarnessPolicy.load(destination)
-    mutated_in_memory.retrieval_release_payload["genome"]["round1_strategy"] = (
-        "entity_first"
-    )
-    with pytest.raises(ValueError, match="Retrieval release|retrieval release|fingerprint"):
-        mutated_in_memory.save(tmp_path / "mutated-policy.json")
+    with pytest.raises(TypeError):
+        mutated_in_memory.retrieval_release_payload["genome"]["round1_strategy"] = (
+            "entity_first"
+        )
 
     tampered = json.loads(destination.read_text(encoding="utf-8"))
     tampered["retrieval_release_payload"]["genome"]["round1_strategy"] = (
@@ -790,6 +1028,26 @@ def _retrieval_result(
         ),
         release_genome=winner if accepted else None,
     )
+
+
+def test_coordinate_retrieval_revalidates_complete_dev_provenance_before_publication() -> None:
+    """Catches alternate mode publishing an accepted result without Child Dev."""
+    parent = RetrievalGenome.seed()
+    train = tuple(_manifest_task(f"train_{index:03d}") for index in range(80))
+    dev = tuple(_manifest_task(f"dev_{index:03d}") for index in range(20))
+    incomplete = replace(
+        _retrieval_result(parent, train, dev, accepted=True),
+        child_dev=None,
+    )
+
+    with pytest.raises(RetrievalEvolutionError, match="incomplete trusted provenance"):
+        cli_module._validate_coordinate_retrieval_result_before_publication(
+            incomplete,
+            parent=parent,
+            train_tasks=train,
+            dev_tasks=dev,
+            public_ids=frozenset({"public_forbidden"}),
+        )
 
 
 def _install_fake_retrieval_engine(
@@ -1101,12 +1359,10 @@ def test_frozen_retrieval_rejects_matching_candidate_release_state(
         tmp_path / "releases",
         replace(RetrievalGenome.seed(), version="v001", parent="v000"),
     )
-    policy = cli_module._policy_with_retrieval_release(
-        HarnessPolicy(), candidate, changelog="Candidate only."
-    )
-
     with pytest.raises(ValueError, match="accepted|seed|candidate|state"):
-        cli_module._policy_for_retrieval_release(policy, candidate)
+        cli_module._policy_with_retrieval_release(
+            HarnessPolicy(), candidate, changelog="Candidate only."
+        )
 
 
 @pytest.mark.parametrize(
@@ -2354,6 +2610,61 @@ def test_factory_loads_retrieval_release_only_for_two_stage(tmp_path) -> None:
     )(HarnessPolicy())
     assert isinstance(two_stage.retrieval, TwoStageRetrievalAgent)
     assert two_stage.runtime.retrieval_mode == "two_stage"
+
+
+def test_decision_coordinate_factory_freezes_coding_and_retrieval_learning(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches actual Decision Train evaluation mutating a frozen coordinate."""
+    release = write_retrieval_release(
+        tmp_path / "releases", RetrievalGenome.seed()
+    )
+    release_library = RetrievalSkillLibrary._from_loaded_release(release)
+
+    class Morphology:
+        def assumptions(self, task):
+            del task
+            return ()
+
+    harness = _factory(
+        SimpleNamespace(
+            setting="llm_only",
+            retrieval_mode="two-stage",
+            retrieval_release_path=release.path,
+        ),
+        FakeLLMClient([]),
+        SkillLibrary(tmp_path / "coding.json"),
+        release_library,
+        DecisionSkillLibrary(tmp_path / "decision.json"),
+        None,
+        isolate_library=True,
+        morphology_provider=Morphology(),
+        retrieval_genome=release.genome,
+        retrieval_skill_source=release_library,
+        coordinate_target="decision",
+    )(
+        cli_module._policy_with_retrieval_release(
+            HarnessPolicy(), release, changelog="Seed Retrieval."
+        )
+    )
+    observed: list[bool] = []
+    monkeypatch.setattr(
+        harness.coding._delegate,
+        "run_task",
+        lambda _task, *, allow_skill_writes=True: observed.append(
+            allow_skill_writes
+        ),
+    )
+
+    harness.coding.run_task(object(), allow_skill_writes=True)
+
+    assert observed == [False]
+    assert harness.coding.config is harness.coding._delegate.config
+    assert harness.coding._folds.__self__ is harness.coding._delegate
+    assert harness.outcome_learner.retrieval_library is not harness.retrieval.skills
+    assert harness.outcome_learner.retrieval_library.all() == ()
+    assert harness.outcome_learner.decision_library is harness.decision.library
 
 
 def test_factory_rejects_two_stage_without_morphology_provider(tmp_path) -> None:

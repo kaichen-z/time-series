@@ -20,7 +20,15 @@ from evolving_loop.co_evolution import (
     CoEvolutionConfig,
     CoEvolutionEngine,
     HarnessPolicy,
+    embed_retrieval_release,
     evaluation_diagnostics,
+    evaluate_policy,
+)
+from evolving_loop.coordinate_evolution import (
+    CoordinateEvolutionConfig,
+    CoordinateEvolutionController,
+    DecisionEvolutionPhaseAdapter,
+    RetrievalEvolutionPhaseAdapter,
 )
 from evolving_loop.coding_agent.evolution import CodingEvolutionAgent, CodingEvolutionConfig
 from evolving_loop.coding_agent.skill_library import Skill, SkillLibrary
@@ -133,7 +141,11 @@ class _RetrievalDefaultsParser(argparse.ArgumentParser):
         retrieval = any(
             getattr(parsed, field, None) == "retrieval"
             for field in ("evolution", "inference", "evolution_mode")
-        )
+        ) or getattr(parsed, "coordinate_phase", None) in {
+            "retrieval",
+            "decision",
+            "alternate",
+        }
         defaults = {
             "retrieval_mode": "two-stage" if retrieval else "single-pass",
             "retrieval_release_path": (
@@ -225,6 +237,18 @@ def _add_retrieval_topology_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--retrieval-release-path", default=None)
 
 
+def _add_coordinate_evolution_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--coordinate-phase",
+        choices=("retrieval", "decision", "alternate"),
+        default=None,
+        help=(
+            "Run a coordinate-isolated Retrieval phase, Decision phase, or "
+            "Retrieval-first alternating schedule under Genome evolution."
+        ),
+    )
+
+
 def _add_retrieval_evolution_controls(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--run-root",
@@ -305,6 +329,7 @@ def _add_unified_evolution_arguments(parser: argparse.ArgumentParser) -> None:
         default="auto",
         help="Restrict prompt/genome mutations to one role; auto diagnoses the weakest role.",
     )
+    _add_coordinate_evolution_arguments(parser)
     parser.add_argument("--dev-fraction", type=float, default=0.25)
     parser.add_argument(
         "--holdout-fraction",
@@ -446,6 +471,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Restrict prompt/genome mutations to one role; auto diagnoses the weakest role.",
     )
+    _add_coordinate_evolution_arguments(evolve)
     evolve.add_argument(
         "--evolution-mode",
         choices=("prompt", "genome", "source", "retrieval"),
@@ -1112,24 +1138,7 @@ def _policy_with_retrieval_release(
     changelog: str,
 ) -> HarnessPolicy:
     """Embed an authenticated release snapshot without turning it into authority."""
-    embedded = {
-        "genome": release.genome.to_payload(),
-        "round1_prompt": release.round1_prompt,
-        "round2_prompt": release.round2_prompt,
-        "skills": _plain_json(release.skills),
-        "manifest": _plain_json(release.manifest),
-    }
-    digest = _canonical_sha256(embedded)
-    return replace(
-        policy,
-        version=release.genome.version,
-        parent=release.genome.parent,
-        retrieval_prompt=release.round1_prompt,
-        retrieval_skills=tuple(embedded["skills"]),
-        changelog=changelog,
-        retrieval_release_payload=embedded,
-        retrieval_release_sha256=digest,
-    )
+    return embed_retrieval_release(policy, release, changelog=changelog)
 
 
 def _require_authorized_retrieval_release_state(
@@ -1169,6 +1178,41 @@ def _policy_for_retrieval_release(
             "HarnessPolicy Retrieval release does not match the trusted operator release"
         )
     return policy
+
+
+def _coordinate_retrieval_preflight(
+    args,
+) -> tuple[RetrievalRelease, HarnessPolicy] | None:
+    """Authenticate the fixed Retrieval coordinate before any task/component work."""
+    phase = getattr(args, "coordinate_phase", None)
+    if phase is None:
+        return None
+    if getattr(args, "evolution_mode", None) != "genome":
+        raise ValueError("--coordinate-phase is available only for Genome evolution")
+    if phase not in {"retrieval", "decision", "alternate"}:
+        raise ValueError("invalid coordinate phase")
+    if phase == "retrieval":
+        return None
+    if getattr(args, "retrieval_mode", None) != "two-stage":
+        raise ValueError(
+            "Decision and alternate coordinates require --retrieval-mode two-stage"
+        )
+    release_path = getattr(args, "retrieval_release_path", None)
+    if not release_path:
+        raise ValueError(
+            "Decision and alternate coordinates require an accepted Retrieval release"
+        )
+    release = _load_retrieval_release_for_operator(release_path)
+    if release.genome.version == "v000" or release.manifest["state"] != "accepted":
+        raise ValueError(
+            "Decision and alternate coordinates require a non-v000 accepted Retrieval release"
+        )
+    policy = _seed_policy(args)
+    if not policy.has_accepted_retrieval_release:
+        raise ValueError(
+            "Decision and alternate coordinates require an embedded accepted Retrieval release"
+        )
+    return release, _policy_for_retrieval_release(policy, release)
 
 
 class _TrustedRetrievalEvaluator:
@@ -1419,6 +1463,21 @@ def _seed_policy(args) -> HarnessPolicy:
     )
 
 
+class _DecisionCoordinateCodingAgent:
+    """Run Numerical inference while suppressing Coding Skill mutations."""
+
+    def __init__(self, delegate: CodingEvolutionAgent) -> None:
+        self._delegate = delegate
+        self.library = delegate.library
+
+    def run_task(self, task, *, allow_skill_writes: bool = True):
+        del allow_skill_writes
+        return self._delegate.run_task(task, allow_skill_writes=False)
+
+    def __getattr__(self, name: str):
+        return getattr(self._delegate, name)
+
+
 def _factory(
     args,
     llm,
@@ -1431,7 +1490,12 @@ def _factory(
     morphology_provider: MorphologyProvider | None = None,
     retrieval_genome=None,
     retrieval_skill_source: RetrievalSkillLibrary | None = None,
+    coordinate_target: str | None = None,
 ):
+    if coordinate_target not in {None, "decision"}:
+        raise ValueError("unsupported coordinate runtime target")
+    if coordinate_target is not None and not isolate_library:
+        raise ValueError("coordinate runtimes require isolated libraries")
     retrieval_mode = getattr(args, "retrieval_mode", "single-pass")
     if retrieval_mode not in {"single-pass", "two-stage"}:
         raise ValueError("retrieval_mode must be single-pass or two-stage")
@@ -1479,7 +1543,7 @@ def _factory(
                 skill.to_payload()
                 for skill in policy.retrieval_skill_source.all()
             )
-            if tuple(policy.retrieval_skills) != source_records:
+            if _plain_json(policy.retrieval_skills) != _plain_json(source_records):
                 raise ValueError(
                     "policy snapshot changed its verified Retrieval Skill source"
                 )
@@ -1494,7 +1558,9 @@ def _factory(
             policy_retrieval_records = []
             for record in policy.retrieval_skills:
                 if record.get("status") in {"accepted", "specialized"}:
-                    matched = verified_by_payload.get(json.dumps(record, sort_keys=True))
+                    matched = verified_by_payload.get(
+                        json.dumps(_plain_json(record), sort_keys=True)
+                    )
                     if matched is None:
                         raise ValueError(
                             "policy snapshot contains an active Retrieval Skill without verified source provenance"
@@ -1565,8 +1631,18 @@ def _factory(
                 prompt=policy.retrieval_prompt,
             )
         )
+        runtime_coding = coding
+        learning_retrieval_library = task_retrieval_library
+        if coordinate_target == "decision":
+            runtime_coding = _DecisionCoordinateCodingAgent(coding)
+            # Retrieval learning stays entirely outside the accepted release
+            # snapshot while Decision-owned learning remains available.
+            learning_retrieval_library = RetrievalSkillLibrary(
+                task_retrieval_library.path,
+                persist=False,
+            )
         return EvolvingForecastHarness(
-            coding,
+            runtime_coding,
             retrieval_agent,
             DecisionAgent(
                 llm,
@@ -1575,7 +1651,7 @@ def _factory(
             ),
             OutcomeSkillLearner(
                 llm,
-                task_retrieval_library,
+                learning_retrieval_library,
                 task_decision_library,
             ),
             HarnessRuntimeConfig(
@@ -1777,6 +1853,16 @@ def _consume_retrieval_checkpoint_authority_environment(
         supplied_key.encode("utf-8"),
         expected_anchor,
         subprocess_environment,
+    )
+
+
+def _consume_coordinate_authority_environment(
+    args,
+) -> tuple[bytes, tuple[int, str] | None, dict[str, str]]:
+    """Consume operator authority before any coordinate model can inherit it."""
+    return _consume_retrieval_checkpoint_authority_environment(
+        args,
+        resume_required=False,
     )
 
 
@@ -2123,6 +2209,24 @@ def _validate_complete_retrieval_result(
             "engine result cannot claim release publication before operator validation"
         )
     _assert_no_public_regression_ids(result.to_payload(), public_ids)
+
+
+def _validate_coordinate_retrieval_result_before_publication(
+    result: RetrievalEvolutionResult,
+    *,
+    parent: RetrievalGenome,
+    train_tasks: Sequence[ContextTask],
+    dev_tasks: Sequence[ContextTask],
+    public_ids: frozenset[str],
+) -> None:
+    """Reuse the complete Task 8 provenance gate before coordinate publication."""
+    _validate_complete_retrieval_result(
+        result,
+        parent=parent,
+        train_ids=tuple(task.numeric.task_id for task in train_tasks),
+        dev_ids=tuple(task.numeric.task_id for task in dev_tasks),
+        public_ids=public_ids,
+    )
 
 
 def _validate_retrieval_checkpoint_payload(
@@ -3112,7 +3216,477 @@ def _retrieval_evolve_command(args) -> dict:
     }
 
 
+def _decision_coordinate_evolve_command(
+    args,
+    *,
+    release: RetrievalRelease,
+    seed_policy: HarnessPolicy,
+) -> dict:
+    """Run Decision-only Genome evolution on the authenticated 80/20 split."""
+    if not args.split_manifest:
+        raise ValueError("Decision coordinate evolution requires --split-manifest")
+    validated_paths = _validate_retrieval_evolution_paths(args)
+    _authority_key, _expected_anchor, llm_subprocess_env = (
+        _consume_coordinate_authority_environment(args)
+    )
+    del _authority_key, _expected_anchor
+    args.trace_path = str(validated_paths["trace"])
+    args.progress_path = str(validated_paths["progress"])
+    args.policy_path = str(validated_paths["policy"])
+    args.checkpoint_path = str(validated_paths["checkpoint"])
+    train, dev, split_sha256, public_ids = _load_retrieval_evolution_tasks(
+        args.tasks_file,
+        args.split_manifest,
+        expected_manifest_sha256=args.split_manifest_sha256,
+        include_public_ids=True,
+        expected_source_snapshot=validated_paths["task_source_snapshot"],
+    )
+    if any(task.numeric.task_id in public_ids for task in (*train, *dev)):
+        raise ValueError("Public Regression tasks cannot enter coordinate evolution")
+    _assert_no_public_regression_ids(seed_policy.to_payload(), public_ids)
+    release_library = RetrievalSkillLibrary._from_loaded_release(release)
+    llm, library, _retrieval_library, decision_library, tsfm = _components(
+        args,
+        retrieval_library_override=release_library,
+        llm_subprocess_env=llm_subprocess_env,
+    )
+    _assert_retrieval_prompt_inputs_clean(
+        seed_policy,
+        library,
+        decision_library,
+        public_ids,
+    )
+    factory = _factory(
+        args,
+        llm,
+        library,
+        release_library,
+        decision_library,
+        tsfm,
+        isolate_library=True,
+        morphology_provider=_ConservativeMorphologyProvider(),
+        retrieval_genome=release.genome,
+        retrieval_skill_source=release_library,
+        coordinate_target="decision",
+    )
+    trace_path = Path(args.trace_path)
+    engine = CoEvolutionEngine(
+        llm,
+        factory,
+        CoEvolutionConfig(
+            generations=args.generations,
+            children_per_generation=args.children,
+            mode="genome",
+            target="decision",
+            checkpoint_path=None,
+            progress_path=None,
+            resume=False,
+            successive_halving=args.successive_halving,
+            screening_train_tasks=args.screen_train_tasks,
+            screening_dev_tasks=args.screen_dev_tasks,
+            screening_promote=args.screen_promote,
+            screening_tolerance=args.screen_tolerance,
+        ),
+    )
+    controller = CoordinateEvolutionController(
+        None,
+        DecisionEvolutionPhaseAdapter(
+            engine,
+            accepted_release_path=release.path,
+        ),
+        CoordinateEvolutionConfig(phase="decision", generations=1),
+    )
+    best, trace = controller.run(seed_policy, train, dev)
+    trace_payload = [_plain_json(vars(item)) for item in trace]
+    _assert_no_public_regression_ids(
+        {"policy": best.to_payload(), "trace": trace_payload},
+        public_ids,
+    )
+    _write_json_artifact(
+        Path(args.policy_path),
+        best.to_payload(),
+        expected_identity=validated_paths["output_identities"]["policy"],
+        expected_parent_identity=validated_paths["output_parent_identities"][
+            "policy"
+        ],
+    )
+    _write_json_artifact(
+        trace_path,
+        trace_payload,
+        expected_identity=validated_paths["output_identities"]["trace"],
+        expected_parent_identity=validated_paths["output_parent_identities"][
+            "trace"
+        ],
+    )
+    return {
+        "best_policy": best.version,
+        "evolution_mode": "genome",
+        "coordinate_phase": "decision",
+        "policy_path": args.policy_path,
+        "trace_path": str(trace_path),
+        "checkpoint_path": None,
+        "progress_path": None,
+        "train_tasks": len(train),
+        "dev_tasks": len(dev),
+        "public_regression_tasks": 0,
+        "split_manifest_sha256": split_sha256,
+        "accepted": any(item.accepted for item in trace),
+    }
+
+
+def _alternate_coordinate_evolve_command(
+    args,
+    *,
+    release: RetrievalRelease,
+    seed_policy: HarnessPolicy,
+) -> dict:
+    """Alternate one trusted Retrieval or Decision coordinate per generation."""
+    if not args.split_manifest:
+        raise ValueError("alternate coordinate evolution requires --split-manifest")
+    validated_paths = _validate_retrieval_evolution_paths(args)
+    _authority_key, _expected_anchor, llm_subprocess_env = (
+        _consume_coordinate_authority_environment(args)
+    )
+    del _authority_key, _expected_anchor
+    args.trace_path = str(validated_paths["trace"])
+    args.progress_path = str(validated_paths["progress"])
+    args.policy_path = str(validated_paths["policy"])
+    args.checkpoint_path = str(validated_paths["checkpoint"])
+    train, dev, split_sha256, public_ids = _load_retrieval_evolution_tasks(
+        args.tasks_file,
+        args.split_manifest,
+        expected_manifest_sha256=args.split_manifest_sha256,
+        include_public_ids=True,
+        expected_source_snapshot=validated_paths["task_source_snapshot"],
+    )
+    if any(task.numeric.task_id in public_ids for task in (*train, *dev)):
+        raise ValueError("Public Regression tasks cannot enter coordinate evolution")
+    _assert_no_public_regression_ids(seed_policy.to_payload(), public_ids)
+    release_root = release.path.parent
+    initial_library = RetrievalSkillLibrary._from_loaded_release(release)
+    llm, library, _retrieval_library, decision_library, tsfm = _components(
+        args,
+        retrieval_library_override=initial_library,
+        llm_subprocess_env=llm_subprocess_env,
+    )
+    _assert_retrieval_prompt_inputs_clean(
+        seed_policy,
+        library,
+        decision_library,
+        public_ids,
+    )
+    verifier_hash = _frozen_sha256(
+        args.verifier_sha256,
+        "--verifier-sha256",
+        _sha256_sources("evolving_loop/retrieval_agent/verifier.py"),
+    )
+    evaluator_hash = _frozen_sha256(
+        args.evaluator_sha256,
+        "--evaluator-sha256",
+        _sha256_sources(
+            "evolving_loop/cli.py",
+            "evolving_loop/evaluation.py",
+            "evolving_loop/retrieval_agent/credit.py",
+        ),
+    )
+    metric_hash = _frozen_sha256(
+        args.metric_sha256,
+        "--metric-sha256",
+        _sha256_sources("common/metrics.py"),
+    )
+    mutation_model_hash = _frozen_sha256(
+        args.mutation_model_sha256,
+        "--mutation-model-sha256",
+        _canonical_sha256(
+            {
+                "backend": args.llm_backend,
+                "model": (
+                    args.codex_model
+                    if args.llm_backend == "codex"
+                    else args.claude_model
+                    if args.llm_backend == "claude"
+                    else args.model_id
+                ),
+                "reasoning_effort": getattr(args, "codex_reasoning_effort", None),
+                "client_source_sha256": _sha256_sources("common/llm.py"),
+            }
+        ),
+    )
+    harness_hash = _frozen_sha256(
+        args.harness_sha256,
+        "--harness-sha256",
+        _canonical_sha256(
+            {
+                "source_sha256": _sha256_sources(
+                    "evolving_loop/coordinate_evolution.py",
+                    "evolving_loop/co_evolution.py",
+                    "evolving_loop/harness.py",
+                    "evolving_loop/retrieval_agent/evolution.py",
+                    "evolving_loop/retrieval_agent/policy.py",
+                ),
+                "seed_policy": seed_policy.to_payload(),
+                "retrieval_mode": "two_stage",
+                "morphology_provider": "conservative_empty_v1",
+            }
+        ),
+    )
+    morphology = _ConservativeMorphologyProvider()
+
+    def release_path_for(policy: HarnessPolicy) -> Path:
+        genome = policy.retrieval_genome
+        if genome is None:
+            raise ValueError("coordinate bundle omitted its Retrieval release")
+        return release_root / genome.version
+
+    def runtime_factory(policy: HarnessPolicy):
+        trusted_release = _load_retrieval_release_for_operator(
+            release_path_for(policy)
+        )
+        _policy_for_retrieval_release(policy, trusted_release)
+        trusted_library = RetrievalSkillLibrary._from_loaded_release(
+            trusted_release
+        )
+        return _factory(
+            args,
+            llm,
+            library,
+            trusted_library,
+            decision_library,
+            tsfm,
+            isolate_library=True,
+            morphology_provider=morphology,
+            retrieval_genome=trusted_release.genome,
+            retrieval_skill_source=trusted_library,
+            coordinate_target="decision",
+        )(policy)
+
+    class RetrievalPhase:
+        def run(self, parent, train_tasks, dev_tasks):
+            parent_release = _load_retrieval_release_for_operator(
+                release_path_for(parent)
+            )
+            parent_library = RetrievalSkillLibrary._from_loaded_release(
+                parent_release
+            )
+
+            def harness_factory(genome, skill_library):
+                if skill_library is None:
+                    raise RetrievalEvolutionError(
+                        "coordinate Retrieval phase requires verified Skills"
+                    )
+                return _factory(
+                    args,
+                    llm,
+                    library,
+                    parent_library,
+                    decision_library,
+                    tsfm,
+                    isolate_library=True,
+                    morphology_provider=morphology,
+                    retrieval_genome=genome,
+                    retrieval_skill_source=skill_library,
+                )(parent)
+
+            engine = RetrievalEvolutionEngine(
+                llm,
+                _TrustedRetrievalEvaluator(),
+                RetrievalEvolutionConfig(
+                    generations=1,
+                    screen_tasks=8,
+                    promote=2,
+                    train_folds=args.train_folds,
+                    tolerance=args.evolution_tolerance,
+                    random_seed=args.seed,
+                    checkpoint_path=None,
+                    resume=False,
+                    dataset_split_hash=split_sha256,
+                    verifier_hash=verifier_hash,
+                    evaluator_hash=evaluator_hash,
+                    metric_hash=metric_hash,
+                    mutation_model_hash=mutation_model_hash,
+                    harness_hash=_canonical_sha256(
+                        {
+                            "coordinate_harness_sha256": harness_hash,
+                            "frozen_parent_policy": parent.to_payload(),
+                        }
+                    ),
+                    metric_cap=args.metric_cap,
+                ),
+                skill_library=parent_library,
+                harness_factory=harness_factory,
+            )
+
+            def publish(result: RetrievalEvolutionResult) -> Path:
+                _validate_coordinate_retrieval_result_before_publication(
+                    result,
+                    parent=parent_release.genome,
+                    train_tasks=train_tasks,
+                    dev_tasks=dev_tasks,
+                    public_ids=public_ids,
+                )
+                if result.release_genome is None:
+                    raise RetrievalEvolutionError(
+                        "accepted coordinate Retrieval phase omitted its Genome"
+                    )
+                if result.child_dev is None:
+                    raise RetrievalEvolutionError(
+                        "accepted coordinate Retrieval phase omitted Child Dev"
+                    )
+                release_library = engine._readonly_library(result.release_genome)
+                if release_library is None:
+                    raise RetrievalEvolutionError(
+                        "accepted coordinate Retrieval phase omitted its Skills"
+                    )
+                release_skills = tuple(
+                    skill.to_payload() for skill in release_library.all()
+                )
+                audit = {
+                    "state": "accepted",
+                    "train_dev_split_sha256": split_sha256,
+                    "verifier_sha256": verifier_hash,
+                    "evaluator_sha256": evaluator_hash,
+                    "metric_sha256": metric_hash,
+                    "metric_cap": args.metric_cap,
+                    "train_summary": _selected_train_summary(result),
+                    "dev_summary": result.child_dev.summary(),
+                    "acceptance_reason": ";".join(result.acceptance_reasons),
+                }
+                _assert_no_public_regression_ids(
+                    {
+                        "result": result.to_payload(),
+                        "skills": release_skills,
+                        "audit": audit,
+                    },
+                    public_ids,
+                )
+                published = _publish_or_resume_accepted_retrieval_release(
+                    release_root,
+                    result.release_genome,
+                    skills=release_skills,
+                    audit=audit,
+                    parent_release=parent_release,
+                )
+                return published.path
+
+            return RetrievalEvolutionPhaseAdapter(
+                engine,
+                parent_release_path=parent_release.path,
+                accepted_release_path=publish,
+            ).run(parent, train_tasks, dev_tasks)
+
+    class DecisionPhase:
+        def run(self, parent, train_tasks, dev_tasks):
+            engine = CoEvolutionEngine(
+                llm,
+                runtime_factory,
+                CoEvolutionConfig(
+                    generations=1,
+                    children_per_generation=args.children,
+                    mode="genome",
+                    target="decision",
+                    checkpoint_path=None,
+                    progress_path=None,
+                    resume=False,
+                    successive_halving=args.successive_halving,
+                    screening_train_tasks=args.screen_train_tasks,
+                    screening_dev_tasks=args.screen_dev_tasks,
+                    screening_promote=args.screen_promote,
+                    screening_tolerance=args.screen_tolerance,
+                ),
+            )
+            return DecisionEvolutionPhaseAdapter(
+                engine,
+                accepted_release_path=release_path_for,
+            ).run(parent, train_tasks, dev_tasks)
+
+    def diagnostics(policy: HarnessPolicy):
+        evaluation = evaluate_policy(
+            policy,
+            train,
+            runtime_factory,
+            learn_skills=False,
+        )
+        return evaluation.diagnostics
+
+    controller = CoordinateEvolutionController(
+        RetrievalPhase(),
+        DecisionPhase(),
+        CoordinateEvolutionConfig(
+            phase="alternate",
+            generations=args.generations,
+        ),
+        diagnostics=diagnostics,
+    )
+    best, trace = controller.run(seed_policy, train, dev)
+    _assert_no_public_regression_ids(
+        {
+            "policy": best.to_payload(),
+            "trace": [_plain_json(vars(item)) for item in trace],
+        },
+        public_ids,
+    )
+    trace_path = Path(args.trace_path)
+    _write_json_artifact(
+        Path(args.policy_path),
+        best.to_payload(),
+        expected_identity=validated_paths["output_identities"]["policy"],
+        expected_parent_identity=validated_paths["output_parent_identities"][
+            "policy"
+        ],
+    )
+    _write_json_artifact(
+        trace_path,
+        [_plain_json(vars(item)) for item in trace],
+        expected_identity=validated_paths["output_identities"]["trace"],
+        expected_parent_identity=validated_paths["output_parent_identities"][
+            "trace"
+        ],
+    )
+    selected_release = _load_retrieval_release_for_operator(
+        release_path_for(best)
+    )
+    return {
+        "best_policy": best.version,
+        "evolution_mode": "genome",
+        "coordinate_phase": "alternate",
+        "policy_path": args.policy_path,
+        "trace_path": str(trace_path),
+        "release_path": str(selected_release.path),
+        "release_sha256": best.retrieval_release_sha256,
+        "train_tasks": len(train),
+        "dev_tasks": len(dev),
+        "public_regression_tasks": 0,
+        "split_manifest_sha256": split_sha256,
+        "accepted_phases": sum(item.accepted for item in trace),
+    }
+
+
 def evolve_command(args) -> dict:
+    coordinate_phase = getattr(args, "coordinate_phase", None)
+    coordinate_preflight = None
+    if coordinate_phase is not None:
+        coordinate_preflight = _coordinate_retrieval_preflight(args)
+        if coordinate_phase == "retrieval":
+            result = _retrieval_evolve_command(args)
+            return {
+                **result,
+                "evolution_mode": "genome",
+                "coordinate_phase": "retrieval",
+            }
+        if coordinate_phase == "decision":
+            assert coordinate_preflight is not None
+            return _decision_coordinate_evolve_command(
+                args,
+                release=coordinate_preflight[0],
+                seed_policy=coordinate_preflight[1],
+            )
+        if coordinate_phase == "alternate":
+            assert coordinate_preflight is not None
+            return _alternate_coordinate_evolve_command(
+                args,
+                release=coordinate_preflight[0],
+                seed_policy=coordinate_preflight[1],
+            )
     if args.evolution_mode == "retrieval":
         return _retrieval_evolve_command(args)
     tasks = _task_subset(load_context_tasks(args.tasks_file), args.seed, args.limit)
