@@ -24,6 +24,30 @@ INVALID = "invalid"
 SUCCESS = "success"
 
 
+def require_unique_task_ids(tasks: Sequence["Task"]) -> None:
+    """Reject duplicate task IDs before an evaluation can collapse outcome rows."""
+    duplicates = _duplicates(task.task_id for task in tasks)
+    if duplicates:
+        raise ValueError("duplicate task IDs are not allowed: " + ", ".join(duplicates))
+
+
+def require_unique_outcome_keys(outcomes: Sequence["Outcome"]) -> None:
+    """Reject duplicate method/task rows before constructing an outcome map."""
+    duplicates = _duplicates(f"{row.method}/{row.task_id}" for row in outcomes)
+    if duplicates:
+        raise ValueError("duplicate outcome keys are not allowed: " + ", ".join(duplicates))
+
+
+def _duplicates(values: Sequence[str] | object) -> tuple[str, ...]:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for value in values:  # type: ignore[union-attr]
+        if value in seen:
+            duplicates.add(value)
+        seen.add(value)
+    return tuple(sorted(duplicates))
+
+
 @dataclass(frozen=True)
 class Task:
     """One label-free forecasting input plus the trusted future used only for scoring."""

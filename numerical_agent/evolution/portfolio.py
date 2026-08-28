@@ -30,6 +30,8 @@ from .execution import (
     SUCCESS,
     Outcome,
     Task,
+    require_unique_outcome_keys,
+    require_unique_task_ids,
 )
 from .module import MethodModule
 
@@ -576,6 +578,7 @@ def evaluate_portfolio(
     policy_cache: PolicyOutcomeCache | None = None,
 ) -> tuple[Outcome, ...]:
     """Evaluate Python, TSFM, and Combined candidates on one trusted task sequence."""
+    require_unique_task_ids(tasks)
     portfolio.validate_parents(module.names())
     python_outcomes = tuple(
         outcome
@@ -593,9 +596,11 @@ def evaluate_portfolio(
         for policy in portfolio.tsfm
         for task in tasks
     )
+    leaf_outcomes = python_outcomes + tsfm_outcomes
+    require_unique_outcome_keys(leaf_outcomes)
     by_key = {
         (outcome.method, outcome.task_id): outcome
-        for outcome in python_outcomes + tsfm_outcomes
+        for outcome in leaf_outcomes
     }
     combined_outcomes = tuple(
         _run_combined(policy, task, by_key)
@@ -684,12 +689,47 @@ def _run_combined(
     task: Task,
     outcomes: Mapping[tuple[str, str], Outcome],
 ) -> Outcome:
+    composed = combine_materialized_outcome(
+        policy,
+        {
+            parent: outcomes.get(
+                (parent, task.task_id),
+                Outcome(
+                    parent,
+                    task.task_id,
+                    CRASHED,
+                    detail="missing materialized parent outcome",
+                ),
+            )
+            for parent in policy.parents
+        },
+        task_id=task.task_id,
+        history=task.history,
+        horizon=task.horizon,
+        frequency=task.frequency,
+    )
+    if composed.status != SUCCESS:
+        return composed
+    scored = _scored(policy.name, task, composed.forecast)
+    return replace(scored, detail=composed.detail) if composed.detail else scored
+
+
+def combine_materialized_outcome(
+    policy: CombinedPolicy,
+    parent_outcomes: Mapping[str, Outcome],
+    *,
+    task_id: str,
+    history: Sequence[float],
+    horizon: int,
+    frequency: str,
+) -> Outcome:
+    """Compose materialized leaf outcomes without reading future labels or scoring."""
     parent_outcomes = tuple(
-        outcomes.get(
-            (parent, task.task_id),
+        parent_outcomes.get(
+            parent,
             Outcome(
                 parent,
-                task.task_id,
+                task_id,
                 CRASHED,
                 detail="missing materialized parent outcome",
             ),
@@ -699,7 +739,7 @@ def _run_combined(
     failed = tuple(
         outcome
         for outcome in parent_outcomes
-        if not _is_successful_parent(outcome, task.horizon)
+        if not _is_successful_parent(outcome, horizon)
     )
     if failed:
         fallback = next(
@@ -708,36 +748,43 @@ def _run_combined(
             if outcome.method == policy.fallback_parent
         )
         detail = "; ".join(
-            f"{parent.method}={_parent_failure_status(parent, task.horizon)}"
+            f"{parent.method}={_parent_failure_status(parent, horizon)}"
             for parent in failed
         )
-        if _is_successful_parent(fallback, task.horizon):
-            scored = _scored(policy.name, task, fallback.forecast)
-            if scored.status == SUCCESS:
-                return replace(
-                    scored,
-                    detail=f"fallback={policy.fallback_parent}; {detail}"[:200],
-                )
+        if _is_successful_parent(fallback, horizon):
+            return Outcome(
+                policy.name,
+                task_id,
+                SUCCESS,
+                detail=f"fallback={policy.fallback_parent}; {detail}"[:200],
+                forecast=fallback.forecast,
+            )
         status = max(
-            (_parent_failure_status(parent, task.horizon) for parent in failed),
+            (_parent_failure_status(parent, horizon) for parent in failed),
             key=_failure_precedence,
         )
-        return Outcome(policy.name, task.task_id, status, detail=detail[:200])
-    return _scored(
+        return Outcome(policy.name, task_id, status, detail=detail[:200])
+    return Outcome(
         policy.name,
-        task,
-        _combine_forecasts(
+        task_id,
+        SUCCESS,
+        forecast=combine_materialized_forecast(
             policy,
             {outcome.method: outcome for outcome in parent_outcomes},
-            task,
+            history=history,
+            horizon=horizon,
+            frequency=frequency,
         ),
     )
 
 
-def _combine_forecasts(
+def combine_materialized_forecast(
     policy: CombinedPolicy,
     parent_outcomes: Mapping[str, Outcome],
-    task: Task,
+    *,
+    history: Sequence[float],
+    horizon: int,
+    frequency: str,
 ) -> tuple[float, ...]:
     """Compose materialized successful forecasts using history-only policy inputs."""
     parents = tuple(parent_outcomes[parent] for parent in policy.parents)
@@ -747,27 +794,42 @@ def _combine_forecasts(
                 weight * outcome.forecast[index]
                 for weight, outcome in zip(policy.weights, parents, strict=True)
             )
-            for index in range(task.horizon)
+            for index in range(horizon)
         )
     elif policy.operator == "route":
-        signal = _signal(policy.signal, task)
+        signal = _history_signal(policy.signal, history, frequency)
         selected = policy.above_parent if signal >= policy.threshold else policy.below_parent
         forecast = parent_outcomes[selected].forecast
     elif policy.operator == "median":
         forecast = tuple(
             statistics.median(outcome.forecast[index] for outcome in parents)
-            for index in range(task.horizon)
+            for index in range(horizon)
         )
     elif policy.operator == "trimmed_mean":
         forecast = tuple(
             statistics.fmean(
                 sorted(outcome.forecast[index] for outcome in parents)[1:-1]
             )
-            for index in range(task.horizon)
+            for index in range(horizon)
         )
     else:  # pragma: no cover - CombinedPolicy validates operators
         raise PolicyError(f"unsupported Combined operator {policy.operator!r}")
     return tuple(float(value) for value in forecast)
+
+
+def _combine_forecasts(
+    policy: CombinedPolicy,
+    parent_outcomes: Mapping[str, Outcome],
+    task: Task,
+) -> tuple[float, ...]:
+    """Compatibility wrapper for the task-shaped canonical composition contract."""
+    return combine_materialized_forecast(
+        policy,
+        parent_outcomes,
+        history=task.history,
+        horizon=task.horizon,
+        frequency=task.frequency,
+    )
 
 
 def _is_successful_parent(outcome: Outcome, horizon: int) -> bool:
@@ -839,14 +901,18 @@ def _applicable(applicability: str, profile: Mapping[str, object]) -> bool:
 
 
 def _signal(name: str, task: Task) -> float:
-    profile = analyze_series(task.history, task.frequency)
+    return _history_signal(name, task.history, task.frequency)
+
+
+def _history_signal(name: str, history: Sequence[float], frequency: str) -> float:
+    profile = analyze_series(history, frequency)
     if name == "periodicity_strength":
         return float(cast(Mapping[str, object], profile["periodicity"])["strength"])
     if name == "zero_fraction":
         return float(cast(Mapping[str, object], profile["intermittency"])["zero_fraction"])
     if name == "outlier_fraction":
         outliers = cast(Mapping[str, object], profile["outliers"])
-        return len(cast(Sequence[int], outliers["indices"])) / len(task.history)
+        return len(cast(Sequence[int], outliers["indices"])) / len(history)
     if name == "trend_strength":
         return float(cast(Mapping[str, object], profile["trend"])["strength"])
     if name == "recent_regime_confidence":

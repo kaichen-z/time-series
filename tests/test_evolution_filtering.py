@@ -148,6 +148,20 @@ def test_cached_portfolio_loader_reuses_all_three_candidate_families(tmp_path: P
     assert len(actual) == 15
 
 
+def test_cached_portfolio_loader_rejects_duplicate_task_ids(tmp_path: Path) -> None:
+    task = _tasks("duplicate", 1)[0]
+
+    with pytest.raises(ValueError, match="duplicate task IDs"):
+        require_cached_portfolio_outcomes(
+            _portfolio_module(),
+            PolicyPortfolio.flagship5(),
+            (task, task),
+            outcome_cache=OutcomeCache(tmp_path / "cache"),
+            policy_cache=PolicyOutcomeCache(tmp_path / "policy-cache"),
+            isolated_methods=False,
+        )
+
+
 def test_specialized_requires_a_history_only_applicability_tag() -> None:
     with pytest.raises(FilterError, match="specialized.*applicability"):
         FilterEntry("croston", "statistical", "specialized", (), "specialist")

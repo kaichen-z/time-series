@@ -9,11 +9,13 @@ import pytest
 from numerical_agent.run_task_conditioned_screening import (
     _merge_cache_summaries,
     _report,
+    _training_outcomes,
     _train_constraints_met,
     _write_policy_artifacts,
     build_parser,
     load_frozen_partitions,
 )
+from numerical_agent.evolution.execution import Task
 from numerical_agent.evolution.screening import (
     ApplicabilityPolicy,
     ScreeningEntry,
@@ -85,6 +87,13 @@ def test_train_constraints_do_not_require_dev_and_cache_summaries_are_additive()
         {"statistical_hits": 10, "tsfm_misses": 2},
         {"statistical_hits": 3, "tsfm_misses": 1},
     ) == {"statistical_hits": 13, "tsfm_misses": 3}
+
+
+def test_training_outcomes_rejects_duplicate_task_ids_before_cache_access():
+    task = Task("duplicate", (1.0, 2.0), 1, "D", (3.0,))
+
+    with pytest.raises(ValueError, match="duplicate task IDs"):
+        _training_outcomes(SimpleNamespace(), None, None, None, (task, task))
 
 
 def test_screening_cli_has_train_dev_but_no_public_test_option():

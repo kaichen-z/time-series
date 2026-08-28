@@ -15,7 +15,7 @@ from common.llm import CodexCLIClient, CodexCLIConfig
 from common.payload import read_json_object, write_json
 
 from .evolution.cache import OutcomeCache
-from .evolution.execution import Outcome, Task
+from .evolution.execution import Outcome, Task, require_unique_outcome_keys, require_unique_task_ids
 from .evolution.filtering import build_filter_dictionary, parse_filter_source
 from .evolution.module import read_module
 from .evolution.portfolio import (
@@ -366,6 +366,7 @@ def load_frozen_partitions(
 
 
 def _training_outcomes(args, repo, module, portfolio, tasks) -> tuple[tuple[Outcome, ...], dict]:
+    require_unique_task_ids(tasks)
     method_cache = OutcomeCache(
         args.outcome_cache_dir,
         skills_path=repo / "skills.py" if (repo / "skills.py").is_file() else None,
@@ -383,6 +384,7 @@ def _training_outcomes(args, repo, module, portfolio, tasks) -> tuple[tuple[Outc
             rows.extend(policy_cache.evaluate(policy, task, runtimes) for task in tasks)
     finally:
         runtimes.close()
+    require_unique_outcome_keys(rows)
     by_key = {(row.method, row.task_id): row for row in rows}
     for policy in portfolio.combined:
         rows.extend(_run_combined(policy, task, by_key) for task in tasks)

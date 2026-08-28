@@ -764,3 +764,19 @@ def test_scored_tsfm_preserves_invalid_status_for_wrong_length_output() -> None:
 
     assert outcome.status == INVALID
     assert "invalid forecast" in outcome.detail
+
+
+def test_evaluate_portfolio_rejects_duplicate_task_ids_before_execution(tmp_path: Path) -> None:
+    task = _tasks()[0]
+
+    with pytest.raises(ValueError, match="duplicate task IDs"):
+        evaluate_portfolio(
+            _module(),
+            _portfolio(),
+            (task, task),
+            outcome_cache=OutcomeCache(tmp_path / "cache"),
+            runtimes=_registry(
+                FakeTSFMRuntime({method_id: 1.0 for method_id in FLAGSHIP_METHOD_IDS})
+            ),
+            isolated_methods=False,
+        )

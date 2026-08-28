@@ -19,7 +19,7 @@ from numerical_agent.evolution.numerical_selector import (
     DecisionPolicy,
     HindcastConfig,
 )
-from numerical_agent.evolution.portfolio import PolicyPortfolio
+from numerical_agent.evolution.portfolio import CombinedPolicy, PolicyPortfolio
 from numerical_agent.evolution.screening import (
     ApplicabilityClause,
     ApplicabilityPolicy,
@@ -126,6 +126,84 @@ def stable_method(history, horizon, frequency):
         assert second.misses == 0
     finally:
         second.close()
+
+
+def test_forecast_store_materializes_canonical_combined_leaf_forecasts_once(tmp_path):
+    methods = tmp_path / "methods.py"
+    methods.write_text(
+        MODULE_HEADER
+        + '''
+
+def seasonal_naive(history, horizon, frequency):
+    """Return a fixed statistical leaf forecast for combination tests."""
+    return [100.0] * horizon
+''',
+        encoding="utf-8",
+    )
+    module = read_module(methods)
+    base = PolicyPortfolio.flagship5()
+    portfolio = PolicyPortfolio(
+        base.tsfm,
+        (
+            CombinedPolicy(
+                "combined_two_tsfm_median",
+                ("toto_2_0", "timesfm_2_5"),
+                "median",
+                fallback_parent="toto_2_0",
+            ),
+            CombinedPolicy(
+                "combined_tsfm_statistical_weighted",
+                ("toto_2_0", "seasonal_naive"),
+                "weighted_mean",
+                (0.25, 0.75),
+                fallback_parent="toto_2_0",
+            ),
+            CombinedPolicy(
+                "combined_three_parent_weighted",
+                ("toto_2_0", "timesfm_2_5", "seasonal_naive"),
+                "weighted_mean",
+                (0.2, 0.3, 0.5),
+                fallback_parent="toto_2_0",
+            ),
+        ),
+    )
+
+    class CountingRuntime:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def supports(self, candidate):
+            return candidate.method_id in {"method_tsfm_0014", "method_tsfm_0031"}
+
+        def forecast(self, candidate, history, horizon, frequency):
+            del history, frequency
+            self.calls.append(candidate.method_id)
+            value = {"method_tsfm_0014": 10.0, "method_tsfm_0031": 20.0}[candidate.method_id]
+            return (value,) * horizon
+
+    runtime = CountingRuntime()
+    store = ForecastStore(
+        tmp_path / "cache",
+        methods,
+        None,
+        module,
+        portfolio,
+        RuntimeRegistry({"timesfm": runtime, "tsfm_worker": runtime}),
+        "screen-hash",
+    )
+    try:
+        assert store.forecast("combined_two_tsfm_median", (1.0, 2.0), 2, "D") == (15.0, 15.0)
+        assert store.forecast(
+            "combined_tsfm_statistical_weighted", (1.0, 2.0), 2, "D"
+        ) == (77.5, 77.5)
+        assert store.forecast(
+            "combined_three_parent_weighted", (1.0, 2.0), 2, "D"
+        ) == (58.0, 58.0)
+    finally:
+        store.close()
+
+    assert runtime.calls.count("method_tsfm_0014") == 1
+    assert runtime.calls.count("method_tsfm_0031") == 1
 
 
 def test_selector_cli_requires_frozen_screen_and_has_no_test_option():
