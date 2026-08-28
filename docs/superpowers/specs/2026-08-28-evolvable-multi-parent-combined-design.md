@@ -105,9 +105,9 @@ New policy artifacts use this shape:
     "operator": "weighted_mean",
     "weights": (0.50, 0.30, 0.20),
     "signal": "periodicity_strength",
-    "threshold": 0.45,
-    "above_parent": "toto_2_0",
-    "below_parent": "seasonal_naive",
+    "threshold": 0.0,
+    "above_parent": "",
+    "below_parent": "",
     "fallback_parent": "toto_2_0",
 }
 ```
