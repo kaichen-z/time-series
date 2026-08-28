@@ -882,6 +882,11 @@ def test_retrieval_evolution_publishes_only_accepted_release_and_keeps_traces_in
     authority_head_path = authority_directory / "checkpoint.head.json"
     authority_anchor_path = authority_directory / "checkpoint.anchors"
     authority_anchor_path.mkdir(mode=0o700)
+    # A crash before the bootstrap no-replace rename may leave only this
+    # private staged file; it is not a durable operator anchor or a resume.
+    (authority_anchor_path / ".anchor-ledger.interrupted.tmp").write_bytes(
+        b"incomplete bootstrap staging\n"
+    )
     operator_key = "task-8-cli-operator-authority-key-32-bytes"
     monkeypatch.setenv("RETRIEVAL_CHECKPOINT_AUTHORITY_KEY", operator_key)
     policy_path = runs / "best_policy.json"
@@ -1183,6 +1188,106 @@ def test_frozen_retrieval_output_cannot_target_release_artifacts_before_task_loa
 
     with pytest.raises(ValueError, match="output|release|collision|disjoint"):
         inference_command(args)
+
+
+@pytest.mark.parametrize("protected_kind", ("head", "anchor"))
+def test_frozen_retrieval_output_cannot_target_complete_checkpoint_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protected_kind: str,
+) -> None:
+    release = write_retrieval_release(
+        tmp_path / "releases", RetrievalGenome.seed()
+    )
+    policy_path = tmp_path / "policy.json"
+    cli_module._policy_with_retrieval_release(
+        HarnessPolicy(), release, changelog="Seed."
+    ).save(policy_path)
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "checkpoint.json"
+    authority_head_path = authority_directory / "checkpoint.head.json"
+    authority_anchor_path = authority_directory / "checkpoint.anchors"
+    authority_head_path.write_bytes(b"protected authority head\n")
+    authority_anchor_path.mkdir(mode=0o700)
+    output = (
+        authority_head_path
+        if protected_kind == "head"
+        else authority_anchor_path
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_inference_tasks",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("authority collision must fail before task loading")
+        ),
+    )
+    args = build_parser().parse_args(
+        [
+            "--inference",
+            "retrieval",
+            "--hidden-test",
+            "--policy-path",
+            str(policy_path),
+            "--retrieval-release-path",
+            str(release.path),
+            "--checkpoint-authority-path",
+            str(authority_path),
+            "--checkpoint-authority-head-path",
+            str(authority_head_path),
+            "--checkpoint-authority-anchor-path",
+            str(authority_anchor_path),
+            "--output-dir",
+            str(output),
+        ]
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="output|authority|head|anchor|ledger|protected|collision|disjoint",
+    ):
+        inference_command(args)
+
+
+@pytest.mark.parametrize(
+    "protected_member",
+    ("bootstrap", "anchor_record", "release_manifest"),
+)
+def test_frozen_retrieval_output_member_cannot_alias_authority_or_release(
+    tmp_path: Path,
+    protected_member: str,
+) -> None:
+    args = _retrieval_security_paths(tmp_path)
+    release = write_retrieval_release(
+        tmp_path / "releases", RetrievalGenome.seed()
+    )
+    output = tmp_path / "frozen-output"
+    output.mkdir()
+    args.output_dir = str(output)
+    args.output_root = str(output)
+    authority_anchor = Path(args.checkpoint_authority_anchor_path)
+    authority_anchor.mkdir(parents=True, mode=0o700)
+    if protected_member == "release_manifest":
+        protected = release.path / "manifest.json"
+    else:
+        protected = authority_anchor / (
+            "bootstrap.json"
+            if protected_member == "bootstrap"
+            else "anchor-00000000000000000001-" + "a" * 64 + ".json"
+        )
+        protected.write_bytes(b"protected operator anchor member\n")
+    output_member = output / "forecasts.jsonl"
+    os.link(protected, output_member)
+    original = protected.read_bytes()
+
+    with pytest.raises(
+        ValueError,
+        match="alias|inode|identity|hard|authority|anchor|release|protected",
+    ):
+        cli_module._validate_frozen_retrieval_paths(args, release)
+
+    assert protected.read_bytes() == original
+    assert output_member.read_bytes() == original
 
 
 def test_v000_operator_release_can_bind_an_old_unembedded_policy(tmp_path) -> None:

@@ -717,6 +717,153 @@ def test_operator_anchor_ledger_bridges_a_crash_after_durable_successor_commit(
     assert len(tuple(authority_anchor_path.glob("anchor-*.json"))) == 2
 
 
+def test_operator_bootstrap_anchor_is_durable_before_the_first_transaction(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    authority_anchor_path = authority_directory / "retrieval.anchors"
+
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+        authority_anchor_path=authority_anchor_path,
+    )
+    bootstrap_path = authority_anchor_path / "bootstrap.json"
+    bootstrap = json.loads(bootstrap_path.read_text(encoding="utf-8"))
+    expected_anchor = authority.current_anchor
+
+    assert expected_anchor[0] == 0
+    assert bootstrap["authority_epoch"] == 0
+    assert bootstrap["authority_head"] == expected_anchor[1]
+    assert bootstrap["external_anchor"] == f"0:{expected_anchor[1]}"
+    assert not checkpoint.exists()
+    assert not authority_path.exists()
+    assert not authority_head_path.exists()
+    authority.close()
+
+    with pytest.raises(
+        RetrievalCheckpointError,
+        match="external|anchor|resume|operator|authority",
+    ):
+        evolution_module._open_retrieval_checkpoint_authority_for_operator(
+            checkpoint,
+            authority_path,
+            authority_head_path,
+            authentication_key=_OPERATOR_AUTHORITY_KEY,
+            authority_anchor_path=authority_anchor_path,
+        )
+
+    resumed = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+        expected_authority_anchor=expected_anchor,
+        authority_anchor_path=authority_anchor_path,
+    )
+    resumed.close()
+
+
+def test_first_durable_checkpoint_resumes_from_only_published_bootstrap_anchor(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    authority_anchor_path = authority_directory / "retrieval.anchors"
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+        authority_anchor_path=authority_anchor_path,
+    )
+    bootstrap = json.loads(
+        (authority_anchor_path / "bootstrap.json").read_text(encoding="utf-8")
+    )
+    bootstrap_anchor = (
+        bootstrap["authority_epoch"],
+        bootstrap["authority_head"],
+    )
+    encoded = b"first durable checkpoint before CLI return\n"
+    staged, staged_identity = _staged_checkpoint(
+        checkpoint, encoded, suffix="first-post-bootstrap"
+    )
+    token = authority.prepare(
+        hashlib.sha256(encoded).hexdigest(),
+        checkpoint_identity=staged_identity,
+    )
+    staged.rename(checkpoint)
+    authority.commit(token)
+    committed_anchor = authority.current_anchor
+    authority.close()
+
+    resumed = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+        expected_authority_anchor=bootstrap_anchor,
+        authority_anchor_path=authority_anchor_path,
+    )
+    try:
+        assert resumed.current_anchor == committed_anchor
+        assert committed_anchor[0] == 1
+    finally:
+        resumed.close()
+
+
+def test_operator_bootstrap_anchor_is_authenticated_and_never_recreated(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    authority_anchor_path = authority_directory / "retrieval.anchors"
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+        authority_anchor_path=authority_anchor_path,
+    )
+    expected_anchor = authority.current_anchor
+    authority.close()
+    bootstrap_path = authority_anchor_path / "bootstrap.json"
+    tampered = json.loads(bootstrap_path.read_text(encoding="utf-8"))
+    tampered["authority_head"] = "0" * 64
+    bootstrap_path.write_text(json.dumps(tampered), encoding="utf-8")
+
+    with pytest.raises(
+        RetrievalCheckpointError,
+        match="bootstrap|anchor|authentication|authority|invalid",
+    ):
+        evolution_module._open_retrieval_checkpoint_authority_for_operator(
+            checkpoint,
+            authority_path,
+            authority_head_path,
+            authentication_key=_OPERATOR_AUTHORITY_KEY,
+            expected_authority_anchor=expected_anchor,
+            authority_anchor_path=authority_anchor_path,
+        )
+    assert json.loads(bootstrap_path.read_text(encoding="utf-8"))[
+        "authority_head"
+    ] == "0" * 64
+
+
 def test_operator_anchor_ledger_rejects_old_set_replay_after_unacknowledged_commit(
     tmp_path: Path,
 ) -> None:

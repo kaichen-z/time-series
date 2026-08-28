@@ -33,7 +33,12 @@ from evolving_loop.data import (
 )
 from evolving_loop.decision_agent.agent import DecisionAgent
 from evolving_loop.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
-from evolving_loop.frozen_inference import inference_view, run_frozen_inference
+from evolving_loop.frozen_inference import (
+    FrozenOutputTarget,
+    inference_view,
+    prepare_frozen_output_target,
+    run_frozen_inference,
+)
 from evolving_loop.harness import EvolvingForecastHarness, HarnessRuntimeConfig
 from evolving_loop.morphology_adapter import MorphologyProvider
 from evolving_loop.retrieval_agent.agent import RetrievalAgent
@@ -2663,7 +2668,13 @@ def _retrieval_evolve_command(args) -> dict:
     authority_anchor_snapshot = validated_paths["authority_anchor_snapshot"]
     authority_anchor_has_records = bool(
         authority_anchor_snapshot is not None
-        and authority_anchor_snapshot["members"]
+        and any(
+            not (
+                member_name.startswith(".anchor-ledger.")
+                and member_name.endswith(".tmp")
+            )
+            for member_name, _identity in authority_anchor_snapshot["members"]
+        )
     )
     resume_required = any(
         identity is not None
@@ -3219,7 +3230,9 @@ def _validate_frozen_retrieval_runtime(args) -> None:
         )
 
 
-def _validate_frozen_retrieval_paths(args, release: RetrievalRelease) -> Path:
+def _validate_frozen_retrieval_paths(
+    args, release: RetrievalRelease
+) -> FrozenOutputTarget:
     output = _canonical_cli_path(
         getattr(args, "output_dir", None) or "outputs/inference/retrieval",
         "frozen Retrieval output",
@@ -3250,6 +3263,7 @@ def _validate_frozen_retrieval_paths(args, release: RetrievalRelease) -> Path:
             _canonical_cli_path(args.decision_library_path, "Decision library"),
         ),
     ]
+    identity_overrides: dict[str, tuple[int, int]] = {}
     for label, value in (
         ("split manifest", getattr(args, "split_manifest", None)),
         ("seed policy", getattr(args, "seed_policy_path", None)),
@@ -3257,15 +3271,115 @@ def _validate_frozen_retrieval_paths(args, release: RetrievalRelease) -> Path:
             "checkpoint authority",
             getattr(args, "checkpoint_authority_path", None),
         ),
+        (
+            "checkpoint authority head",
+            getattr(args, "checkpoint_authority_head_path", None),
+        ),
+        (
+            "checkpoint monotonic anchor ledger",
+            getattr(args, "checkpoint_authority_anchor_path", None),
+        ),
     ):
         if value:
             protected.append((label, _canonical_cli_path(value, label)))
+    authority_anchor = getattr(
+        args, "checkpoint_authority_anchor_path", None
+    )
+    if authority_anchor:
+        anchor_path = _canonical_cli_path(
+            authority_anchor, "checkpoint monotonic anchor ledger"
+        )
+        anchor_snapshot = _snapshot_retrieval_task_source(anchor_path)
+        if anchor_snapshot is not None:
+            if anchor_snapshot["kind"] != "directory":
+                raise ValueError(
+                    "checkpoint monotonic anchor ledger must be a directory"
+                )
+            anchor_identity = anchor_snapshot["source_identity"]
+            assert isinstance(anchor_identity, tuple)
+            identity_overrides[
+                "checkpoint monotonic anchor ledger"
+            ] = anchor_identity
+            for member_name, member_identity in anchor_snapshot["members"]:
+                member_label = (
+                    f"checkpoint monotonic anchor member {member_name}"
+                )
+                protected.append(
+                    (member_label, anchor_path / member_name)
+                )
+                identity_overrides[member_label] = member_identity
+    for artifact_name in (
+        "genome.json",
+        "round1_prompt.md",
+        "round2_prompt.md",
+        "skills.json",
+        "manifest.json",
+    ):
+        protected.append(
+            (
+                f"Retrieval release artifact {artifact_name}",
+                _canonical_cli_path(
+                    release.path / artifact_name,
+                    f"Retrieval release artifact {artifact_name}",
+                ),
+            )
+        )
     for label, path in protected:
         if _paths_overlap(output, path):
             raise ValueError(
                 f"frozen Retrieval output must be disjoint from protected {label} path"
             )
-    return output
+
+    output_members = [
+        (
+            f"frozen Retrieval output member {name}",
+            output / name,
+        )
+        for name in (
+            "forecasts.jsonl",
+            "deep_research.jsonl",
+            "run_report.jsonl",
+            "summary.json",
+        )
+    ]
+    protected_identities: dict[tuple[int, int], tuple[str, Path]] = {}
+    for label, path in protected:
+        identity = identity_overrides.get(label)
+        if identity is None:
+            identity = _existing_cli_path_identity(path, label)
+        if identity is not None:
+            protected_identities.setdefault(identity, (label, path))
+    output_identities: dict[tuple[int, int], tuple[str, Path]] = {}
+    for label, path in (("frozen Retrieval output", output), *output_members):
+        identity = _existing_cli_path_identity(path, label)
+        if identity is None:
+            continue
+        protected_alias = protected_identities.get(identity)
+        if protected_alias is not None:
+            protected_label, protected_path = protected_alias
+            raise ValueError(
+                "frozen Retrieval output is an inode alias of protected "
+                f"{protected_label}: {path} / {protected_path}"
+            )
+        output_alias = output_identities.get(identity)
+        if output_alias is not None:
+            prior_label, prior_path = output_alias
+            raise ValueError(
+                "frozen Retrieval output paths are inode aliases: "
+                f"{prior_label} ({prior_path}) / {label} ({path})"
+            )
+        output_identities[identity] = (label, path)
+
+    target = prepare_frozen_output_target(output, output_root=output_root)
+    protected_after = set(protected_identities)
+    if target.directory_identity in protected_after:
+        raise ValueError("frozen Retrieval output aliases a protected path")
+    for _name, identity in target.member_identities:
+        if identity is not None and identity in protected_after:
+            raise ValueError(
+                "frozen Retrieval output member aliases a protected path"
+            )
+    return target
 
 
 def inference_command(args) -> dict:

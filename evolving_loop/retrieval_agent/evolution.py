@@ -716,6 +716,9 @@ class _OperatorCheckpointAuthority:
                 raise RetrievalCheckpointError(
                     "checkpoint monotonic anchor ledger identity changed after preflight"
                 )
+            self._bootstrap_created = self._ensure_bootstrap_anchor(
+                allow_create=allow_anchor_creation
+            )
             checkpoint_snapshot = self._checkpoint_snapshot()
             checkpoint_identity = (
                 checkpoint_snapshot[0] if checkpoint_snapshot is not None else None
@@ -743,7 +746,10 @@ class _OperatorCheckpointAuthority:
                     raise RetrievalCheckpointError(
                         "checkpoint authority record identity changed after path validation"
                     )
-            self._require_external_anchor(expected_authority_anchor)
+            self._require_external_anchor(
+                expected_authority_anchor,
+                bootstrap_created=self._bootstrap_created,
+            )
             self._reconcile()
         except Exception:
             self.close()
@@ -821,6 +827,149 @@ class _OperatorCheckpointAuthority:
             raise RetrievalCheckpointError(
                 "checkpoint monotonic anchor ledger identity changed"
             )
+
+    def _bootstrap_record(self) -> dict[str, object]:
+        authority_head = self._authority_head(None, 0, None)
+        core: dict[str, object] = {
+            "schema_version": 1,
+            "checkpoint_path": str(self.checkpoint_path),
+            "authority_epoch": 0,
+            "authority_head": authority_head,
+            "external_anchor": f"0:{authority_head}",
+        }
+        return {
+            **core,
+            "bootstrap_mac": self._mac(
+                b"retrieval-checkpoint-bootstrap-anchor-v1", core
+            ),
+        }
+
+    def _load_bootstrap_anchor(self) -> dict[str, object] | None:
+        self._revalidate_anchor_directory()
+        try:
+            identity, encoded = _read_checkpoint_entry_snapshot(
+                self._anchor_directory_descriptor, "bootstrap.json"
+            )
+            metadata = os.stat(
+                "bootstrap.json",
+                dir_fd=self._anchor_directory_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            raise RetrievalCheckpointError(
+                "checkpoint bootstrap anchor changed while reading"
+            ) from error
+        if (
+            (metadata.st_dev, metadata.st_ino) != identity
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+        ):
+            raise RetrievalCheckpointError(
+                "checkpoint bootstrap anchor is not operator-protected"
+            )
+        try:
+            raw = json.loads(encoded.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RetrievalCheckpointError(
+                "invalid checkpoint bootstrap anchor"
+            ) from error
+        expected_fields = {
+            "schema_version",
+            "checkpoint_path",
+            "authority_epoch",
+            "authority_head",
+            "external_anchor",
+            "bootstrap_mac",
+        }
+        core = (
+            {key: value for key, value in raw.items() if key != "bootstrap_mac"}
+            if isinstance(raw, dict)
+            else {}
+        )
+        expected_head = self._authority_head(None, 0, None)
+        supplied_mac = raw.get("bootstrap_mac") if isinstance(raw, dict) else None
+        if (
+            not isinstance(raw, dict)
+            or set(raw) != expected_fields
+            or raw["schema_version"] != 1
+            or raw["checkpoint_path"] != str(self.checkpoint_path)
+            or raw["authority_epoch"] != 0
+            or raw["authority_head"] != expected_head
+            or raw["external_anchor"] != f"0:{expected_head}"
+            or type(supplied_mac) is not str
+            or not hmac.compare_digest(
+                supplied_mac,
+                self._mac(
+                    b"retrieval-checkpoint-bootstrap-anchor-v1", core
+                ),
+            )
+        ):
+            raise RetrievalCheckpointError(
+                "checkpoint bootstrap anchor authentication failed"
+            )
+        self._revalidate_anchor_directory()
+        return raw
+
+    def _ensure_bootstrap_anchor(self, *, allow_create: bool) -> bool:
+        if self._load_bootstrap_anchor() is not None:
+            return False
+        if not allow_create:
+            raise RetrievalCheckpointError(
+                "checkpoint bootstrap anchor is missing from established authority"
+            )
+        for name in os.listdir(self._anchor_directory_descriptor):
+            if name.startswith(".anchor-ledger.") and name.endswith(".tmp"):
+                continue
+            raise RetrievalCheckpointError(
+                "checkpoint bootstrap anchor is missing from a non-pristine ledger"
+            )
+        payload = self._bootstrap_record()
+        encoded = (
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n"
+        ).encode("utf-8")
+        temporary = _unique_checkpoint_temporary(
+            self._anchor_directory_descriptor,
+            "anchor-ledger",
+            encoded,
+        )
+        staged_identity, staged_bytes = _read_checkpoint_entry_snapshot(
+            self._anchor_directory_descriptor, temporary
+        )
+        if staged_bytes != encoded:
+            raise RetrievalCheckpointError(
+                "checkpoint bootstrap anchor staging bytes changed"
+            )
+        try:
+            _rename_artifact_entry_noreplace(
+                self._anchor_directory_descriptor,
+                temporary,
+                "bootstrap.json",
+            )
+        except Exception as error:
+            try:
+                published_identity, published_bytes = (
+                    _read_checkpoint_entry_snapshot(
+                        self._anchor_directory_descriptor,
+                        "bootstrap.json",
+                    )
+                )
+            except FileNotFoundError:
+                published_identity, published_bytes = None, None
+            if (
+                published_identity != staged_identity
+                or published_bytes != encoded
+            ):
+                raise RetrievalCheckpointError(
+                    "checkpoint bootstrap anchor no-replace publication failed"
+                ) from error
+        os.fsync(self._anchor_directory_descriptor)
+        self._revalidate_anchor_directory()
+        self._load_bootstrap_anchor()
+        return True
 
     def _checkpoint_snapshot(self) -> tuple[tuple[int, int], str] | None:
         _revalidate_checkpoint_parent(
@@ -1073,9 +1222,15 @@ class _OperatorCheckpointAuthority:
 
     def _load_anchor_chain(self) -> dict[int, dict[str, object]]:
         self._revalidate_anchor_directory()
+        if self._load_bootstrap_anchor() is None:
+            raise RetrievalCheckpointError(
+                "checkpoint bootstrap anchor disappeared"
+            )
         records: dict[int, dict[str, object]] = {}
         for name in sorted(os.listdir(self._anchor_directory_descriptor)):
             if name.startswith(".anchor-ledger.") and name.endswith(".tmp"):
+                continue
+            if name == "bootstrap.json":
                 continue
             if not (name.startswith("anchor-") and name.endswith(".json")):
                 raise RetrievalCheckpointError(
@@ -1292,6 +1447,8 @@ class _OperatorCheckpointAuthority:
     def _require_external_anchor(
         self,
         expected: tuple[int, str] | None,
+        *,
+        bootstrap_created: bool,
     ) -> None:
         pristine = (
             self._record_identities[self.authority_path.name] is None
@@ -1300,7 +1457,7 @@ class _OperatorCheckpointAuthority:
             and not self._anchors
         )
         if expected is None:
-            if pristine:
+            if pristine and bootstrap_created:
                 return
             raise RetrievalCheckpointError(
                 "checkpoint resume requires an external authority anchor"

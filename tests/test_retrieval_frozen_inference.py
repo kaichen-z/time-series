@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+import evolving_loop.cli as cli_module
 import evolving_loop.frozen_inference as frozen_module
 from evolving_loop.co_evolution import HarnessPolicy
 from evolving_loop.data import ContextTask, Document, Task
@@ -13,6 +17,10 @@ from evolving_loop.frozen_inference import run_frozen_inference
 from evolving_loop.evaluation import ResolvedOutcome
 from evolving_loop.retrieval_agent.credit import RetrievalTaskDiagnostics
 from evolving_loop.retrieval_agent.schemas import FinalRetrievalCard
+from evolving_loop.retrieval_agent.policy import (
+    RetrievalGenome,
+    write_retrieval_release,
+)
 
 
 def _hidden_task() -> ContextTask:
@@ -127,6 +135,38 @@ def _result() -> SimpleNamespace:
         ),
         candidates=(candidate,),
     )
+
+
+def _frozen_path_args(
+    root: Path,
+    *,
+    release_path: Path,
+    output: Path,
+) -> SimpleNamespace:
+    authority = root / "authority"
+    return SimpleNamespace(
+        output_dir=str(output),
+        output_root=str(output),
+        policy_path=str(root / "policy.json"),
+        tasks_file=str(root / "tasks.jsonl"),
+        retrieval_release_path=str(release_path),
+        library_path=str(root / "coding-library.json"),
+        retrieval_library_path=str(root / "retrieval-library.json"),
+        decision_library_path=str(root / "decision-library.json"),
+        split_manifest=None,
+        seed_policy_path=None,
+        checkpoint_authority_path=str(authority / "checkpoint.json"),
+        checkpoint_authority_head_path=str(authority / "checkpoint.head.json"),
+        checkpoint_authority_anchor_path=str(authority / "checkpoint.anchors"),
+    )
+
+
+def _release_files(path: Path) -> dict[str, bytes]:
+    return {
+        child.name: child.read_bytes()
+        for child in path.iterdir()
+        if child.is_file()
+    }
 
 
 def test_hidden_retrieval_inference_is_write_free_and_reports_both_rounds(tmp_path) -> None:
@@ -265,3 +305,195 @@ def test_explicit_public_scoring_never_serializes_gt_or_document_role_fields(
     assert "secret_gt" not in encoded
     assert "secret_role" not in encoded
     assert "secret_subtype" not in encoded
+
+
+def test_frozen_publication_rejects_post_validation_output_symlink_to_release(
+    tmp_path: Path,
+) -> None:
+    release = write_retrieval_release(
+        tmp_path / "releases", RetrievalGenome.seed()
+    )
+    output = tmp_path / "frozen-output"
+    output.mkdir()
+    args = _frozen_path_args(
+        tmp_path,
+        release_path=release.path,
+        output=output,
+    )
+    validated_output = cli_module._validate_frozen_retrieval_paths(
+        args, release
+    )
+    release_before = _release_files(release.path)
+    displaced = tmp_path / "displaced-frozen-output"
+    output.rename(displaced)
+    output.symlink_to(release.path, target_is_directory=True)
+
+    class Harness:
+        def run(self, _task, *, allow_skill_writes=True):
+            assert allow_skill_writes is False
+            return _result()
+
+    with pytest.raises(
+        ValueError,
+        match="output|directory|identity|symlink|changed|replacement|safe",
+    ):
+        run_frozen_inference(
+            HarnessPolicy(),
+            [_hidden_task()],
+            lambda _policy: Harness(),
+            output_dir=validated_output,
+            artifact_kind="retrieval",
+        )
+
+    assert output.is_symlink()
+    assert _release_files(release.path) == release_before
+    assert {child.name for child in release.path.iterdir()} == set(release_before)
+
+
+def test_frozen_publication_retains_replaced_output_member_after_validation(
+    tmp_path: Path,
+) -> None:
+    release = write_retrieval_release(
+        tmp_path / "releases", RetrievalGenome.seed()
+    )
+    output = tmp_path / "frozen-output"
+    output.mkdir()
+    forecast = output / "forecasts.jsonl"
+    forecast.write_bytes(b"owned preflight output\n")
+    args = _frozen_path_args(
+        tmp_path,
+        release_path=release.path,
+        output=output,
+    )
+    validated_output = cli_module._validate_frozen_retrieval_paths(
+        args, release
+    )
+    displaced = output / "retained-owned-forecast.jsonl"
+    forecast.rename(displaced)
+    foreign = b"foreign output replacement must survive\n"
+    forecast.write_bytes(foreign)
+
+    class Harness:
+        def run(self, _task, *, allow_skill_writes=True):
+            return _result()
+
+    with pytest.raises(
+        ValueError,
+        match="output|identity|changed|replacement|publication",
+    ):
+        run_frozen_inference(
+            HarnessPolicy(),
+            [_hidden_task()],
+            lambda _policy: Harness(),
+            output_dir=validated_output,
+            artifact_kind="retrieval",
+        )
+
+    assert forecast.read_bytes() == foreign
+    assert displaced.read_bytes() == b"owned preflight output\n"
+    assert not (output / "summary.json").exists()
+
+
+@pytest.mark.parametrize("swap_after", (1, 4))
+def test_frozen_publication_mid_bundle_directory_swap_never_writes_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    swap_after: int,
+) -> None:
+    release = write_retrieval_release(
+        tmp_path / "releases", RetrievalGenome.seed()
+    )
+    output = tmp_path / "frozen-output"
+    output.mkdir()
+    (output / "summary.json").write_text(
+        '{"status":"prior successful run"}\n', encoding="utf-8"
+    )
+    args = _frozen_path_args(
+        tmp_path,
+        release_path=release.path,
+        output=output,
+    )
+    validated_output = cli_module._validate_frozen_retrieval_paths(
+        args, release
+    )
+    release_before = _release_files(release.path)
+    real_publish = getattr(
+        frozen_module, "_publish_frozen_output_entry", None
+    )
+    publication_count = 0
+    displaced = tmp_path / "displaced-mid-bundle-output"
+
+    def publish_then_swap(*publish_args, **publish_kwargs):
+        nonlocal publication_count
+        assert real_publish is not None
+        result = real_publish(*publish_args, **publish_kwargs)
+        publication_count += 1
+        if publication_count == swap_after:
+            output.rename(displaced)
+            output.symlink_to(release.path, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(
+        frozen_module,
+        "_publish_frozen_output_entry",
+        publish_then_swap,
+        raising=False,
+    )
+
+    class Harness:
+        def run(self, _task, *, allow_skill_writes=True):
+            return _result()
+
+    with pytest.raises(
+        ValueError,
+        match="output|directory|identity|symlink|changed|replacement",
+    ):
+        run_frozen_inference(
+            HarnessPolicy(),
+            [_hidden_task()],
+            lambda _policy: Harness(),
+            output_dir=validated_output,
+            artifact_kind="retrieval",
+        )
+
+    assert publication_count == swap_after
+    assert output.is_symlink()
+    assert _release_files(release.path) == release_before
+    assert not (release.path / "summary.json").exists()
+    assert not (displaced / "summary.json").exists()
+
+
+def test_frozen_publication_retires_summary_when_noreplace_commits_then_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "frozen-output"
+    real_rename = frozen_module._rename_artifact_entry_noreplace
+
+    def rename_then_raise(
+        directory_descriptor: int, source: str, destination: str
+    ) -> None:
+        real_rename(directory_descriptor, source, destination)
+        if destination == "summary.json":
+            raise OSError("simulated uncertainty after durable summary rename")
+
+    monkeypatch.setattr(
+        frozen_module,
+        "_rename_artifact_entry_noreplace",
+        rename_then_raise,
+    )
+
+    class Harness:
+        def run(self, _task, *, allow_skill_writes=True):
+            return _result()
+
+    with pytest.raises(ValueError, match="output|summary|publication|replacement"):
+        run_frozen_inference(
+            HarnessPolicy(),
+            [_hidden_task()],
+            lambda _policy: Harness(),
+            output_dir=output,
+            artifact_kind="retrieval",
+        )
+
+    assert not (output / "summary.json").exists()
