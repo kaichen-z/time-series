@@ -63,3 +63,48 @@ The adapter deliberately requires the caller to supply the complete reviewed
 Statistical namespace. This is necessary to validate the pre-existing Combined
 policies as well as the candidate atomically; formal 80/20 wiring remains a
 later controller concern.
+
+## Fix round 1: strict JSON and bounded diagnostics
+
+### Implementation
+
+- Replaced permissive object decoding at the proposal boundary with a strict
+  local one-object parser that preserves the shared parser's think-tag,
+  fenced-JSON, and embedded-object handling while rejecting duplicate keys at
+  every object level and `NaN`/`Infinity` constants.
+- Added finite-number preflight and `OverflowError` translation around canonical
+  policy construction, so enormous integer thresholds/weights cannot escape the
+  boundary as raw exceptions.
+- Reworked diagnostics sanitization around one monotonic traversal depth and one
+  shared node/item/byte budget across mappings and sequences. Forbidden keys are
+  filtered recursively, including within nested sequence members.
+
+### TDD evidence
+
+RED:
+
+```text
+../../.venv/bin/python -m pytest -q tests/test_evolution_combined_evolution.py \
+  -k 'duplicate_json_keys or nonfinite_json_constants or invalid_numeric_literals or bounds_deep_diagnostics'
+6 failed, 5 passed, 16 deselected in 0.16s
+```
+
+The failures reproduced silent last-write-wins duplicate handling, raw
+`OverflowError` for huge policy numbers, and diagnostics exceeding the bounded
+prompt size through nested-map depth resets.
+
+GREEN:
+
+```text
+11 passed, 16 deselected in 0.07s
+```
+
+Focused verification:
+
+```text
+../../.venv/bin/python -m pytest -q \
+  tests/test_evolution_combined_evolution.py \
+  tests/test_evolution_portfolio.py \
+  tests/test_evolving_agent_llm.py
+87 passed in 2.32s
+```

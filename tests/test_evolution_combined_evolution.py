@@ -104,6 +104,77 @@ def test_parse_combined_operations_rejects_noncanonical_or_unsafe_batches(respon
         parse_combined_operations(response)
 
 
+@pytest.mark.parametrize(
+    "response",
+    [
+        '{"operations": [], "operations": []}',
+        '{"operations": [{"op": "remove", "op": "add", "reason": "x", '
+        '"policy": {"name": "combined_x", "parents": ["toto_2_0", "timesfm_2_5"], '
+        '"operator": "median", "weights": [], "signal": "periodicity_strength", '
+        '"threshold": 0.0, "above_parent": "", "below_parent": "", '
+        '"fallback_parent": "toto_2_0"}}]}',
+        '{"operations": [{"op": "add", "reason": "x", "policy": '
+        '{"name": "combined_x", "name": "combined_x", '
+        '"parents": ["toto_2_0", "timesfm_2_5"], "operator": "median", '
+        '"weights": [], "signal": "periodicity_strength", "threshold": 0.0, '
+        '"above_parent": "", "below_parent": "", "fallback_parent": "toto_2_0"}}]}',
+    ],
+)
+def test_parse_combined_operations_rejects_duplicate_json_keys_at_every_level(response: str) -> None:
+    """Last-write-wins decoding would let a duplicate field bypass exact schemas."""
+    from numerical_agent.evolution.combined_evolution import (
+        CombinedEvolutionError,
+        parse_combined_operations,
+    )
+
+    with pytest.raises(CombinedEvolutionError):
+        parse_combined_operations(response)
+
+
+@pytest.mark.parametrize("literal", ("NaN", "Infinity", "-Infinity"))
+def test_parse_combined_operations_rejects_nonfinite_json_constants(literal: str) -> None:
+    """Accepting JSON constants would defer invalid numeric input past parsing."""
+    from numerical_agent.evolution.combined_evolution import (
+        CombinedEvolutionError,
+        parse_combined_operations,
+    )
+
+    response = _response(
+        {"op": "add", "reason": "x", "policy": _policy("combined_x")}
+    ).replace("0.0", literal, 1)
+
+    with pytest.raises(CombinedEvolutionError):
+        parse_combined_operations(response)
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {**_policy("combined_huge_threshold"), "threshold": 10**400},
+        {
+            **_policy("combined_huge_weight"),
+            "operator": "weighted_mean",
+            "weights": [10**400, 0.0, 0.0],
+        },
+        {**_policy("combined_bool_threshold"), "threshold": True},
+        {
+            **_policy("combined_bool_weight"),
+            "operator": "weighted_mean",
+            "weights": [True, 0.0, 0.0],
+        },
+    ],
+)
+def test_parse_combined_operations_sanitizes_invalid_numeric_literals(policy: dict[str, object]) -> None:
+    """Numeric conversion failures must not escape the typed proposal boundary."""
+    from numerical_agent.evolution.combined_evolution import (
+        CombinedEvolutionError,
+        parse_combined_operations,
+    )
+
+    with pytest.raises(CombinedEvolutionError):
+        parse_combined_operations(_response({"op": "add", "reason": "x", "policy": policy}))
+
+
 def test_apply_combined_operations_is_atomic_and_validates_final_namespace() -> None:
     """Applying a bad batch in place would corrupt the immutable Parent portfolio."""
     from numerical_agent.evolution.combined_evolution import (
@@ -214,3 +285,43 @@ def test_propose_combined_child_returns_exact_parent_with_sanitized_rejection() 
     assert result.rejection_reason
     assert "runtime_secret" not in result.rejection_reason
     assert "do-not-echo" not in result.rejection_reason
+
+
+def test_propose_combined_child_bounds_deep_diagnostics_without_resetting_depth() -> None:
+    """Nested mappings used to reset depth, allowing oversized prompt diagnostics."""
+    from numerical_agent.evolution.combined_evolution import propose_combined_child
+
+    nested: dict[str, object] = {"future_values": [99], "leaf": "safe"}
+    for index in range(20):
+        nested = {f"layer_{index}": nested, f"side_{index}": "x" * 200}
+    parent = PolicyPortfolio.flagship5()
+    agent = FakeLLMClient([_response()])
+
+    result = propose_combined_child(
+        parent,
+        statistical_names=(
+            "seasonal_naive",
+            "holt_damped_trend",
+            "croston_sba",
+            "robust_loess_trend",
+            "median_seasonal_profile_forecast",
+        ),
+        diagnostics={"aggregate": nested},
+        agent=agent,
+    )
+
+    assert result.child is parent
+    prompt = json.loads(agent.calls[0]["messages"][0]["content"])
+    diagnostics = prompt["diagnostics"]
+    rendered = json.dumps(diagnostics, sort_keys=True)
+    assert "future_values" not in rendered
+    assert len(rendered.encode("utf-8")) <= 4096
+    assert _max_mapping_depth(diagnostics) <= 4
+
+
+def _max_mapping_depth(value: object) -> int:
+    if isinstance(value, dict):
+        return 1 + max((_max_mapping_depth(item) for item in value.values()), default=0)
+    if isinstance(value, list):
+        return max((_max_mapping_depth(item) for item in value), default=0)
+    return 0

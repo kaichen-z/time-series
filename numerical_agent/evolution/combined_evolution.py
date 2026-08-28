@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from common.llm import LLMClient, parse_json_object
+from common.llm import LLMClient
 
 from .portfolio import CombinedPolicy, PolicyError, PolicyPortfolio
 
@@ -49,10 +49,46 @@ _FORBIDDEN_DIAGNOSTIC_KEY = re.compile(
     re.IGNORECASE,
 )
 _SAFE_DIAGNOSTIC_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+_DIAGNOSTIC_MAX_DEPTH = 3
+_DIAGNOSTIC_MAX_NODES = 64
+_DIAGNOSTIC_MAX_ITEMS = 64
+_DIAGNOSTIC_MAX_BYTES = 3072
+_DIAGNOSTIC_MAX_CHILDREN = 16
+_DROP = object()
 
 
 class CombinedEvolutionError(ValueError):
     """A structured Combined proposal violates the trusted mutation boundary."""
+
+
+class _StrictJsonError(ValueError):
+    """A JSON response violates strict object or numeric parsing rules."""
+
+
+@dataclass
+class _DiagnosticsBudget:
+    nodes: int = 0
+    items: int = 0
+    bytes: int = 0
+
+    def consume(self, value: object) -> bool:
+        try:
+            encoded = json.dumps(value, ensure_ascii=True, allow_nan=False)
+        except (OverflowError, TypeError, ValueError):
+            return False
+        size = len(encoded.encode("utf-8"))
+        if (
+            self.nodes >= _DIAGNOSTIC_MAX_NODES
+            or self.items >= _DIAGNOSTIC_MAX_ITEMS
+            or self.bytes + size > _DIAGNOSTIC_MAX_BYTES
+        ):
+            return False
+        self.nodes += 1
+        self.items += 1
+        self.bytes += size
+        return True
 
 
 @dataclass(frozen=True)
@@ -88,7 +124,7 @@ class CombinedProposalResult:
 def parse_combined_operations(response: str) -> tuple[CombinedOperation, ...]:
     """Parse one exact JSON batch into literal-only typed Combined operations."""
     try:
-        payload = parse_json_object(response)
+        payload = _parse_strict_json_object(response)
     except Exception as error:
         raise CombinedEvolutionError("response must contain one JSON object") from error
     if set(payload) != {"operations"} or not isinstance(payload["operations"], list):
@@ -101,6 +137,60 @@ def parse_combined_operations(response: str) -> tuple[CombinedOperation, ...]:
     if len(targets) != len(set(targets)):
         raise CombinedEvolutionError("operation targets must be unique")
     return operations
+
+
+def _parse_strict_json_object(text: str) -> dict[str, object]:
+    """Mirror the shared parser's wrappers while rejecting ambiguous JSON objects."""
+    if not isinstance(text, str):
+        raise _StrictJsonError("response must be text")
+    stripped = _THINK_RE.sub("", text).strip()
+    candidates = [match.group(1).strip() for match in _FENCE_RE.finditer(stripped)]
+    candidates.append(stripped)
+    decoder = json.JSONDecoder(
+        object_pairs_hook=_strict_object,
+        parse_constant=_reject_nonfinite_constant,
+    )
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            parsed = json.loads(
+                candidate,
+                object_pairs_hook=_strict_object,
+                parse_constant=_reject_nonfinite_constant,
+            )
+            if isinstance(parsed, dict):
+                return parsed
+        except _StrictJsonError:
+            raise
+        except (json.JSONDecodeError, RecursionError, ValueError) as error:
+            last_error = error
+        for index, character in enumerate(candidate):
+            if character != "{":
+                continue
+            try:
+                parsed, _end = decoder.raw_decode(candidate[index:])
+            except _StrictJsonError:
+                raise
+            except (json.JSONDecodeError, RecursionError, ValueError) as error:
+                last_error = error
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+    detail = str(last_error) if last_error is not None else "response contained no JSON object"
+    raise _StrictJsonError(f"no valid JSON object in response: {detail}")
+
+
+def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _StrictJsonError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_constant(value: str) -> object:
+    raise _StrictJsonError(f"non-finite JSON constant {value!r}")
 
 
 def apply_combined_operations(
@@ -134,7 +224,7 @@ def apply_combined_operations(
         return candidate
     except CombinedEvolutionError:
         raise
-    except (PolicyError, TypeError, ValueError) as error:
+    except (OverflowError, PolicyError, TypeError, ValueError) as error:
         raise CombinedEvolutionError("combined operations are invalid") from error
 
 
@@ -211,16 +301,13 @@ def _policy(raw: object) -> CombinedPolicy:
         raise CombinedEvolutionError("policy parents and weights must be JSON arrays")
     if not all(isinstance(value, str) for value in raw["parents"]):
         raise CombinedEvolutionError("policy parents must be strings")
-    if not all(
-        isinstance(value, (int, float)) and not isinstance(value, bool)
-        for value in raw["weights"]
-    ):
+    if not all(_finite_json_number(value) for value in raw["weights"]):
         raise CombinedEvolutionError("policy weights must be numbers")
     for field in ("name", "operator", "signal", "above_parent", "below_parent", "fallback_parent"):
         if not isinstance(raw[field], str):
             raise CombinedEvolutionError(f"policy {field} must be a string")
     threshold = raw["threshold"]
-    if not isinstance(threshold, (int, float)) or isinstance(threshold, bool):
+    if not _finite_json_number(threshold):
         raise CombinedEvolutionError("policy threshold must be a number")
     try:
         return CombinedPolicy(
@@ -234,8 +321,17 @@ def _policy(raw: object) -> CombinedPolicy:
             below_parent=raw["below_parent"],
             fallback_parent=raw["fallback_parent"],
         )
-    except PolicyError as error:
+    except (OverflowError, PolicyError, ValueError) as error:
         raise CombinedEvolutionError("policy violates the canonical Combined contract") from error
+
+
+def _finite_json_number(value: object) -> bool:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
 
 
 def _validate_operation_batch(operations: tuple[CombinedOperation, ...]) -> None:
@@ -278,47 +374,60 @@ def _sanitize_diagnostics(value: Mapping[str, object]) -> dict[str, object]:
     """Keep small aggregate, JSON-safe diagnostics and omit sensitive-looking keys."""
     if not isinstance(value, Mapping):
         return {}
-    sanitized: dict[str, object] = {}
-    for key in sorted(value, key=str):
-        if not isinstance(key, str) or not _SAFE_DIAGNOSTIC_KEY.fullmatch(key):
-            continue
-        if _FORBIDDEN_DIAGNOSTIC_KEY.search(key):
-            continue
-        cleaned = _sanitize_diagnostic_value(value[key], depth=0)
-        if cleaned is not None:
-            sanitized[key] = cleaned
-        if len(sanitized) == 16:
-            break
-    return sanitized
+    budget = _DiagnosticsBudget()
+    sanitized = _sanitize_diagnostic_mapping(value, depth=0, budget=budget)
+    return sanitized if isinstance(sanitized, dict) else {}
 
 
-def _sanitize_diagnostic_value(value: object, *, depth: int) -> object | None:
-    if depth > 2:
-        return None
-    if value is None or isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return value if math.isfinite(float(value)) else None
-    if isinstance(value, str):
-        return value[:200] if all(ord(character) >= 32 for character in value) else None
-    if isinstance(value, Mapping):
-        return _sanitize_diagnostics(value) if depth == 0 else _sanitize_nested_mapping(value, depth)
-    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
-        items = [_sanitize_diagnostic_value(item, depth=depth + 1) for item in value[:16]]
-        return [item for item in items if item is not None]
-    return None
-
-
-def _sanitize_nested_mapping(value: Mapping[object, object], depth: int) -> dict[str, object]:
+def _sanitize_diagnostic_mapping(
+    value: Mapping[object, object], *, depth: int, budget: _DiagnosticsBudget
+) -> dict[str, object] | object:
+    if depth > _DIAGNOSTIC_MAX_DEPTH or not budget.consume({}):
+        return _DROP
     result: dict[str, object] = {}
     for key in sorted(value, key=str):
-        if not isinstance(key, str) or not _SAFE_DIAGNOSTIC_KEY.fullmatch(key):
+        if len(result) >= _DIAGNOSTIC_MAX_CHILDREN or not _safe_diagnostic_key(key):
             continue
-        if _FORBIDDEN_DIAGNOSTIC_KEY.search(key):
+        cleaned = _sanitize_diagnostic_value(value[key], depth=depth + 1, budget=budget)
+        if cleaned is _DROP or not budget.consume(key):
             continue
-        cleaned = _sanitize_diagnostic_value(value[key], depth=depth + 1)
-        if cleaned is not None:
-            result[key] = cleaned
-        if len(result) == 16:
-            break
+        result[key] = cleaned
     return result
+
+
+def _sanitize_diagnostic_value(
+    value: object, *, depth: int, budget: _DiagnosticsBudget
+) -> object:
+    if depth > _DIAGNOSTIC_MAX_DEPTH:
+        return _DROP
+    if value is None or isinstance(value, bool):
+        return value if budget.consume(value) else _DROP
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value if _finite_json_number(value) and budget.consume(value) else _DROP
+    if isinstance(value, str):
+        if any(ord(character) < 32 for character in value):
+            return _DROP
+        bounded = value[:200]
+        return bounded if budget.consume(bounded) else _DROP
+    if isinstance(value, Mapping):
+        return _sanitize_diagnostic_mapping(value, depth=depth, budget=budget)
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
+        if not budget.consume([]):
+            return _DROP
+        result: list[object] = []
+        for index, item in enumerate(value):
+            if index == _DIAGNOSTIC_MAX_CHILDREN:
+                break
+            cleaned = _sanitize_diagnostic_value(item, depth=depth + 1, budget=budget)
+            if cleaned is not _DROP:
+                result.append(cleaned)
+        return result
+    return _DROP
+
+
+def _safe_diagnostic_key(key: object) -> bool:
+    return (
+        isinstance(key, str)
+        and _SAFE_DIAGNOSTIC_KEY.fullmatch(key) is not None
+        and _FORBIDDEN_DIAGNOSTIC_KEY.search(key) is None
+    )
