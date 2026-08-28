@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Time-Series Self-Evolution Pipeline · 2026-08-27</title>
+  <title>Time-Series Self-Evolution Pipeline · updated 2026-08-28</title>
   <style>
     :root {
       --bg: #f4f0e8;
@@ -60,7 +60,7 @@
     nav a:hover, nav a.active { color: var(--ink); background: var(--panel-2); }
     .nav-label { margin: 14px 8px 4px; color: var(--accent-2); font-weight: 800; font-size: .72rem; text-transform: uppercase; letter-spacing: .11em; }
     main { min-width: 0; display: grid; gap: 22px; }
-    .hero, section { padding: 32px; border: 1px solid var(--line); border-radius: var(--radius); background: color-mix(in srgb, var(--panel) 96%, transparent); box-shadow: var(--shadow); }
+    .hero, section { min-width: 0; overflow-wrap: anywhere; padding: 32px; border: 1px solid var(--line); border-radius: var(--radius); background: color-mix(in srgb, var(--panel) 96%, transparent); box-shadow: var(--shadow); }
     .hero { padding: 42px; }
     .eyebrow { color: var(--accent); font-weight: 800; text-transform: uppercase; letter-spacing: .12em; font-size: .76rem; }
     h1 { margin: 8px 0 14px; max-width: 900px; font-size: clamp(2.2rem, 5vw, 4.6rem); line-height: 1.02; letter-spacing: -.055em; }
@@ -101,7 +101,7 @@
     .event::before { content: ""; position: absolute; left: -29px; top: 9px; width: 11px; height: 11px; border-radius: 50%; background: var(--accent); }
     .event time { color: var(--accent-2); font-weight: 800; font-size: .8rem; }
     .event h3 { margin: 2px 0 4px; }
-    pre { overflow-x: auto; padding: 17px; border: 1px solid var(--line); border-radius: 13px; background: #101714; color: #edf5f0; font-size: .86rem; line-height: 1.55; }
+    pre { max-width: 100%; overflow-x: auto; padding: 17px; border: 1px solid var(--line); border-radius: 13px; background: #101714; color: #edf5f0; font-size: .86rem; line-height: 1.55; }
     details { margin: 12px 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); }
     summary { cursor: pointer; font-weight: 750; }
     .source-list { columns: 2; column-gap: 32px; }
@@ -115,7 +115,7 @@
   <div class="shell">
     <aside>
       <div class="brand">Forecasting Pipeline</div>
-      <div class="brand-sub">Complete project map · updated 2026-08-27</div>
+      <div class="brand-sub">Complete project map · updated 2026-08-28</div>
       <nav aria-label="Page contents">
         <div class="nav-label">Start here</div>
         <a href="#latest">Latest: three systems and 99-task result</a>
@@ -124,6 +124,7 @@
         <a href="#timeline">2. Timeline</a>
         <div class="nav-label">System</div>
         <a href="#architecture">3. End-to-end architecture</a>
+        <a href="#retrieval-self-evolution">3A. Two-stage Retrieval</a>
         <a href="#data">4. Data and leakage boundary</a>
         <a href="#portfolio">5. Candidate portfolio</a>
         <a href="#json-python">6. JSON, Python, and Git</a>
@@ -150,14 +151,16 @@
         <p class="lede">This is not a system that simply asks an LLM to guess the future. It builds an auditable forecasting pipeline: characterize the observed history, remove unsuitable methods, compare Statistical and TSFM candidates through history-only hindcasting, and evolve methods and policies under strict Train/Dev acceptance gates.</p>
         <div class="meta-row">
           <span class="pill">Repository <code>time-series</code></span>
-          <span class="pill">Branch <code>main</code></span>
-          <span class="pill">Code snapshot <code>78b4ca8</code></span>
-          <span class="pill">Updated 2026-08-27</span>
+          <span class="pill">Branch <code>feature/two-stage-retrieval-self-evolution</code></span>
+          <span class="pill">Implementation baseline <code>3f5e1e5</code></span>
+          <span class="pill">Updated 2026-08-28</span>
           <a class="pill" href="forecasting_pipeline_full_2026-08-26.html" lang="zh-CN">Chinese version</a>
         </div>
         <div class="pill-row">
           <span class="pill good"><span class="dot"></span>103-candidate framework implemented</span>
           <span class="pill good"><span class="dot"></span>80/20/99 split frozen</span>
+          <span class="pill good"><span class="dot"></span>Two-stage Retrieval code + fake E2E implemented</span>
+          <span class="pill warn"><span class="dot"></span>No real Retrieval 80/20 or Retrieval score yet</span>
           <span class="pill warn"><span class="dot"></span>Selector generalization remains unstable</span>
           <span class="pill warn"><span class="dot"></span>Protected Top-k passed Dev but not Toto on primary 99-task metrics</span>
         </div>
@@ -216,11 +219,11 @@
 
       <section id="now" data-section>
         <h2>0. What We Are Building Now</h2>
-        <p class="section-intro">The current focus is the Numerical Agent's two-stage self-evolution. We are not training LLM weights, and external Retrieval documents are not yet part of the formal new experiment.</p>
+        <p class="section-intro">The Numerical experiments below remain historical evidence. The two-stage Retrieval runtime and evolution protocol are now implemented, but the real Retrieval 80/20 LLM experiment has not started.</p>
         <div class="grid g3">
           <article class="card"><div class="kpi">A</div><h3>Task-conditioned Screening</h3><p>Use periodicity, trend, intermittency, regime, frequency, history length, and horizon to construct a different Active Dictionary for each task.</p><span class="status good">Implemented</span></article>
           <article class="card"><div class="kpi">B</div><h3>Numerical Selection</h3><p>Use history-only folds to choose a single method, a TSFM portfolio, or a protected Combined forecast.</p><span class="status warn">Implemented; tail-risk protection still evolving</span></article>
-          <article class="card"><div class="kpi">C</div><h3>Context + Decision</h3><p>A future Retrieval Agent will gather evidence and a Decision Agent will combine contextual evidence with numerical assumptions.</p><span class="status warn">Architecture exists; not the current experiment</span></article>
+          <article class="card"><div class="kpi">C</div><h3>Context + Decision</h3><p>Assumption-blind Round 1, provisional named gaps, sanitized Morphology assumptions, optional Round 2 counterevidence, and final Decision are wired through the public harness.</p><span class="status warn">Implemented and fake-tested; real experiment pending</span></article>
         </div>
         <div class="callout"><strong>Main technical problem:</strong> how can the system decide—without seeing the real future—when it is safe to override a strong TSFM baseline? The older selector often helped ordinary tasks, but a few bad choices dominated the mean.</div>
       </section>
@@ -250,6 +253,7 @@
           <div class="event"><time>2026-08-23—25</time><h3>103 Candidates and the Two-Stage Numerical System</h3><p>Built 93 Statistical + 5 TSFM + 5 Combined candidates and completed an 80/20/99 frozen evaluation.</p></div>
           <div class="event"><time>2026-08-26</time><h3>Safe Anchor and Protected Portfolios</h3><p>Moved the gate to Dr-CiK-aligned sMAE/sRMSE and protected a strong Parent from unsafe overrides.</p></div>
           <div class="event"><time>2026-08-27</time><h3>Protected Top-k Regression Evaluation</h3><p>The Child passed Dev, then improved typical-case and auxiliary metrics on the 99 tasks but did not beat Toto on mean sMAE/sRMSE.</p></div>
+          <div class="event"><time>2026-08-28</time><h3>Two-Stage Retrieval Safety Protocol</h3><p>Added strict stage schemas, deterministic verification, scoped Retrieval Genome evolution, authenticated resume, frozen inference, and a fake-LLM end-to-end proof. No real Retrieval 80/20 or Public/hidden evaluation was run.</p></div>
         </div>
       </section>
 
@@ -261,7 +265,7 @@
           <div class="node">Active Dictionary<small>screened Statistical / TSFM / Combined</small></div><div class="arrow">→</div>
           <div class="node">Hindcasting<small>multiple historical folds</small></div><div class="arrow">→</div>
           <div class="node">Numerical Selector<small>Parent, challenger, top-k, combined</small></div><div class="arrow">→</div>
-          <div class="node">Retrieval + Decision<small>future context integration</small></div><div class="arrow">→</div>
+          <div class="node">Retrieval + Decision<small>two-stage runtime implemented; formal run pending</small></div><div class="arrow">→</div>
           <div class="node">Frozen Forecast<small>labels become visible only to scorer</small></div>
         </div>
         <h3>Outer evolution after labels are available</h3>
@@ -274,6 +278,118 @@
           <div class="node">Frozen Test</div>
         </div>
         <div class="callout warnbox"><strong>This is artifact/harness self-evolution, not weight training.</strong> The LLM proposes a Child. Trusted Python enforces boundaries, executes it, scores it, and controls inheritance.</div>
+      </section>
+
+      <section id="retrieval-self-evolution" data-section>
+        <h2>3A. Two-Stage Retrieval Self-Evolution</h2>
+        <p class="section-intro">This is an implemented safety and evolution path, not a reported empirical win. The checked-in <code>v000</code> release is an unevaluated seed. No real Retrieval 80/20 LLM evolution, post-<code>v000</code> accepted release, Retrieval Public Regression evaluation, or hidden score exists as of 2026-08-28.</p>
+        <div class="callout warnbox"><strong>Result boundary:</strong> every metric elsewhere on this page belongs to earlier Numerical or contextual-baseline experiments. None is evidence for the new Retrieval Genome. Task 10 ran deterministic fake LLMs only.</div>
+
+        <h3>One preserved baseline, one explicit new topology</h3>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Mode</th><th>Contract</th><th>Calls</th><th>Status</th></tr></thead>
+          <tbody>
+            <tr><td><code>single-pass</code><br><small>runtime: <code>single_pass</code></small></td><td>One candidate-aware Retrieval call, then Decision</td><td>1 Retrieval + 1 Decision</td><td>Backward-compatible default runtime baseline</td></tr>
+            <tr><td><code>two-stage</code></td><td>Assumption-blind Round 1 → provisional Decision → sanitized named gaps/assumptions → optional Round 2 → final Decision</td><td>1–2 Retrieval + 2 Decision</td><td>Explicit Retrieval evolution/inference path</td></tr>
+          </tbody>
+        </table></div>
+        <div class="flow" aria-label="Two-stage Retrieval inference flow">
+          <div class="node">Safe Task View<small>target + document text; no labels/roles</small></div><div class="arrow">→</div>
+          <div class="node">Round 1<small>assumption blind</small></div><div class="arrow">→</div>
+          <div class="node">Host Verify<small>quotes, identity, time, budgets</small></div><div class="arrow">→</div>
+          <div class="node">Provisional Decision<small>named gaps only</small></div><div class="arrow">→</div>
+          <div class="node">Round 2<small>four-field assumptions + gaps</small></div><div class="arrow">→</div>
+          <div class="node">Final Decision<small>executed candidates only</small></div>
+        </div>
+        <p>A fatal Round 1 failure skips Round 2 and preserves the pure Numerical fallback. A malformed or transiently failed Round 2 preserves verified Round 1. A model cannot make a chain numerically actionable merely by setting <code>numeric_eligible=true</code>; trusted Python recomputes eligibility before projecting verified impacts into Decision.</p>
+
+        <h3>Exact safe schemas</h3>
+        <pre><code>Round1Input = {
+  "target": {"entity_name", "target_name", "description", "frequency", "forecast_window"},
+  "documents": [{"document_id", "content"}],
+  "retrieval_skills": [validated summaries]
+}
+
+Round2Input = {
+  "target", "documents", "round1", "gaps",
+  "assumptions": [{"assumption_id", "kind", "claim", "failure_condition"}],
+  "retrieval_skills"
+}
+
+RetrievalRoundResult = {
+  "evidence_chains": [EvidenceChain], "counterevidence": [EvidenceChain],
+  "missing_information": [str], "sufficient": bool,
+  "gaps"?: [RetrievalGap], "rejected"?: [str],
+  "unresolved_contradictions"?: [str]
+}
+
+EvidenceChain exact fields =
+  chain_id, claim, entity_match, target_match, temporal_relation,
+  mechanism, direction, magnitude_kind, magnitude_value,
+  start_timestamp, end_timestamp, citations[{document_id, exact_quote}],
+  missing_links, used_skill_ids, addressed_assumption_ids, stance,
+  numeric_eligible
+
+FinalRetrievalCard = {
+  "round1", "round2", "chains", "selected_document_ids", "rejected",
+  "unresolved_contradictions", "complete", "gaps"
+}</code></pre>
+        <p>Round 2 never receives candidate IDs, forecast arrays, hindcast sMAE/sRMSE, source code, future values, ground-truth evidence, or evaluator-only document <code>role</code>/<code>subtype</code>. Document, chain, and citation budgets are truncated before host verification and downstream use.</p>
+
+        <h3>Three immutable Child scopes and one-time Dev</h3>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Child</th><th>Fields it alone may mutate</th><th>Skill stage</th></tr></thead>
+          <tbody>
+            <tr><td>A · Round 1</td><td><code>round1_prompt</code>, <code>round1_strategy</code>, <code>max_selected_documents</code></td><td><code>round1</code></td></tr>
+            <tr><td>B · chain policy</td><td>chain/citation budgets and counterevidence, target-match, temporal-overlap requirements</td><td><code>both</code></td></tr>
+            <tr><td>C · Round 2</td><td><code>round2_prompt</code>, <code>round2_strategy</code>, <code>second_round_trigger</code></td><td><code>round2</code></td></tr>
+          </tbody>
+        </table></div>
+        <p>Each generation creates exactly A/B/C. The default schedule screens exactly 8 entity-disjoint Train tasks, promotes at most 2, evaluates remaining Train folds, and fixes one Train winner. Only then are Parent and Child evaluated once on all 20 Dev tasks with persistence, writers, and evolvers disabled. Acceptance requires strict contextual-oracle gain without regressions in final mean sMAE/sRMSE, P90/P95, exact-quote validity, invalid/catastrophic counts, or retrieval-quality tolerances. Public Regression IDs are absent from mutation, caches, prompts, checkpoints, and acceptance.</p>
+
+        <h3>Reproduce the proof; prepare but do not imply a real run</h3>
+        <pre><code>python -m pytest -q tests/test_retrieval_e2e.py
+python -m pytest -q tests/test_retrieval_e2e.py::test_fake_two_stage_smoke
+
+# Future authorized real run only — not executed for this page:
+read -r -s -p 'Retrieval checkpoint authority key: ' RETRIEVAL_CHECKPOINT_AUTHORITY_KEY
+printf '\n'
+export RETRIEVAL_CHECKPOINT_AUTHORITY_KEY
+TASKS_FILE=external/Dr-CiK/full-download/Dr-CiK_public/tasks \
+SPLIT_FILE=splits/drcik_public_80_20_99_v1.json \
+RUN_DIR=runs/retrieval_evolution/formal_80_20 \
+AUTHORITY_PATH=../retrieval-operator-state/formal_80_20.json \
+AUTHORITY_HEAD_PATH=../retrieval-operator-state/formal_80_20.head.json \
+AUTHORITY_ANCHOR_PATH=../retrieval-operator-state/formal_80_20.anchors \
+scripts/run_retrieval_evolution.sh</code></pre>
+        <p>On first invocation the host writes <code>$AUTHORITY_ANCHOR_PATH/bootstrap.json</code> before its first checkpoint transaction. Independently retain its <code>external_anchor</code> value outside the run tree and ledger. For every restart, supply that retained <code>epoch:head</code> through <code>RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED</code>; never reconstruct it from mutable run artifacts at resume time. The wrapper requires at least 32 shell characters and the CLI requires at least 32 UTF-8 bytes for the authority key; it must not enter commands, the repository, logs, or artifacts. Both values are removed before an LLM subprocess is built.</p>
+        <pre><code># Separate trusted operator process, immediately after bootstrap appears:
+RETAINED_ANCHOR_FILE=/absolute/operator-control-plane/formal_80_20.anchor
+umask 077
+python - ../retrieval-operator-state/formal_80_20.anchors/bootstrap.json \
+  &gt; "$RETAINED_ANCHOR_FILE" &lt;&lt;'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    anchor = json.load(source)["external_anchor"]
+if not isinstance(anchor, str) or ":" not in anchor:
+    raise SystemExit("invalid bootstrap external_anchor")
+print(anchor)
+PY
+
+# Every restart: re-enter the same key silently, then use the retained anchor.
+read -r -s -p 'Retrieval checkpoint authority key: ' RETRIEVAL_CHECKPOINT_AUTHORITY_KEY
+printf '\n'
+export RETRIEVAL_CHECKPOINT_AUTHORITY_KEY
+read -r RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED &lt; "$RETAINED_ANCHOR_FILE"
+export RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED
+TASKS_FILE=external/Dr-CiK/full-download/Dr-CiK_public/tasks \
+SPLIT_FILE=splits/drcik_public_80_20_99_v1.json \
+RUN_DIR=runs/retrieval_evolution/formal_80_20 \
+AUTHORITY_PATH=../retrieval-operator-state/formal_80_20.json \
+AUTHORITY_HEAD_PATH=../retrieval-operator-state/formal_80_20.head.json \
+AUTHORITY_ANCHOR_PATH=../retrieval-operator-state/formal_80_20.anchors \
+scripts/run_retrieval_evolution.sh</code></pre>
+        <div class="callout warnbox"><strong>Current integration limit:</strong> the unified CLI uses a conservative empty Morphology provider, so it safely skips Round 2 until a real accepted Numerical/Morphology assumption provider is integrated. Before any real 80/20 run, freeze the implementation commit, seed release hash, model/effort, task/token budgets, split/verifier/metric hashes, metric cap, and output directory in a run manifest.</div>
       </section>
 
       <section id="data" data-section>
@@ -406,7 +522,8 @@ Task-conditioned route:
       </section>
 
       <section id="results" data-section>
-        <h2>11. Results</h2>
+        <h2>11. Numerical and Earlier Baseline Results</h2>
+        <div class="callout warnbox"><strong>Scope:</strong> this section reports existing Numerical and earlier contextual-baseline artifacts only. The new two-stage Retrieval self-evolution has not had a real LLM 80/20 run and has no accepted Child, Public Regression result, or hidden score.</div>
         <p class="section-intro">Results from different task sets and metric definitions should not be ranked directly. Each table is scoped to its own experiment.</p>
         <h3>Early contextual and agent baselines</h3>
         <div class="table-wrap"><table>
@@ -495,7 +612,7 @@ Examples accepted on Train:
         <h2>14. Open Problems</h2>
         <div class="grid g2">
           <article class="card"><h3>Resolved</h3><ul><li>93 executable Statistical methods rather than prompt-only descriptions.</li><li>Deterministic JSON/manifest/checkpoint/license binding.</li><li>Entity-aware Train/Dev/Test and future-label firewall.</li><li>NotApplicable separated from Crash/Invalid.</li><li>Task-conditioned dictionaries and Dr-CiK-aligned sMAE/sRMSE.</li><li>Parent fallback and baseline protection.</li></ul></article>
-          <article class="card"><h3>Unresolved</h3><ul><li>Screening still shares a large common core across tasks.</li><li>Historical hindcasts do not reliably predict future regime shifts.</li><li>Strict Combined gates activate rarely; relaxed gates can be dangerous.</li><li>Decision-only slightly outperformed Full on the latest 99 tasks.</li><li>The 99-task Public Test is consumed and cannot select future versions.</li><li>External Retrieval/context is not yet integrated into the new formal experiment.</li></ul></article>
+          <article class="card"><h3>Unresolved</h3><ul><li>Screening still shares a large common core across tasks.</li><li>Historical hindcasts do not reliably predict future regime shifts.</li><li>Strict Combined gates activate rarely; relaxed gates can be dangerous.</li><li>Decision-only slightly outperformed Full on the latest 99 tasks.</li><li>The 99-task Public Test is consumed and cannot select future versions.</li><li>The real Numerical/Morphology assumption provider is not yet wired to the Retrieval CLI, and the formal Retrieval 80/20 experiment has not run.</li></ul></article>
         </div>
         <div class="callout"><strong>The latest evidence points to an A→B coupling problem.</strong> The candidate pool is rich enough. The next improvement should make task profiles alter eligibility, combination budgets, and baseline protection without introducing unsafe overrides.</div>
       </section>
@@ -506,7 +623,7 @@ Examples accepted on Train:
           <article class="card"><h3>1 · Keep Safe-Anchor as the regression champion</h3><p>Protected Top-k passed Dev but did not beat Safe-Anchor/Toto on the primary 99-task mean metrics.</p></article>
           <article class="card"><h3>2 · Improve A→B coupling on Train only</h3><p>Use profiles to change TSFM/Combined eligibility, portfolio size, correction budgets, and anchor identity.</p></article>
           <article class="card"><h3>3 · Add explicit tail-risk constraints</h3><p>Require improvement in mean sMAE, mean sRMSE, P90/P95, and worst-fold regret before opening Dev.</p></article>
-          <article class="card"><h3>4 · Integrate Retrieval afterward</h3><p>Start with independent base retrieval, then let a second round read Numerical assumptions and gaps to search for counterevidence and regime-change signals.</p></article>
+          <article class="card"><h3>4 · Freeze and run Retrieval only after integration review</h3><p>The two-stage and evolution code exists. Integrate the real accepted Numerical/Morphology provider, freeze the full run manifest, then run Train/Dev once without consulting Public Regression.</p></article>
         </div>
         <div class="callout warnbox"><strong>Stopping rule:</strong> do not use the 99 Public Regression tasks to tune another Child. Search on 80 Train, open 20 Dev only for a final acceptance decision, and use official hidden labels only through the benchmark evaluator.</div>
       </section>
@@ -526,7 +643,7 @@ pytest -q</code></pre>
         <h3>Inspect the unified harness</h3>
         <pre><code>python -m evolving_loop --list-methods
 python -m evolving_loop --baseline &lt;name&gt; [options]
-python -m evolving_loop --evolution &lt;prompt|genome|source&gt; [options]</code></pre>
+python -m evolving_loop --evolution &lt;prompt|genome|source|retrieval&gt; [options]</code></pre>
         <h3>Frozen evaluation principle</h3>
         <pre><code>frozen screening policy
   + frozen decision policy
@@ -548,6 +665,13 @@ python -m evolving_loop --evolution &lt;prompt|genome|source&gt; [options]</code
           <li><code>numerical_agent/evolution/numerical_selector.py</code></li>
           <li><code>numerical_agent/evolution/selector_evolution.py</code></li>
           <li><code>numerical_agent/tsfm/runtime_manifests.json</code></li>
+          <li><code>evolving_loop/retrieval_agent/schemas.py</code></li>
+          <li><code>evolving_loop/retrieval_agent/two_stage_agent.py</code></li>
+          <li><code>evolving_loop/retrieval_agent/verifier.py</code></li>
+          <li><code>evolving_loop/retrieval_agent/evolution.py</code></li>
+          <li><code>evolving_loop/frozen_inference.py</code></li>
+          <li><code>scripts/run_retrieval_evolution.sh</code></li>
+          <li><code>tests/test_retrieval_e2e.py</code></li>
           <li><code>docs/BASELINE_METHODS_AND_RESULTS.md</code></li>
           <li><code>docs/EVOLUTION_METHODS_AND_RESULTS.md</code></li>
           <li><code>docs/FROZEN_TWO_STAGE_80_20_99_REPORT.md</code></li>
@@ -560,7 +684,7 @@ python -m evolving_loop --evolution &lt;prompt|genome|source&gt; [options]</code
       </section>
 
       <footer>
-        <p>English edition generated from the local <code>time-series</code> worktree on 2026-08-27. The Protected Top-k result is a frozen 99-task Public Regression Test with zero LLM or mutation calls; it is not a new unseen-test claim.</p>
+        <p>English edition updated from the local <code>time-series</code> worktree on 2026-08-28. The displayed Protected Top-k result is a Numerical frozen 99-task Public Regression Test with zero LLM or mutation calls; it is not a new unseen-test claim and is not a Retrieval result. The Retrieval implementation has fake-LLM verification only; its real experiment has not run.</p>
       </footer>
     </main>
   </div>

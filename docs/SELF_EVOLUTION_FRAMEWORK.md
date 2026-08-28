@@ -79,7 +79,10 @@ evaluation interface.
 
 ## 4. Three-Agent Forecasting Harness
 
-The end-to-end system combines three restricted roles:
+The end-to-end system combines three restricted roles. The legacy candidate-aware Retrieval path
+remains available as `single-pass` at the CLI (`single_pass` in `HarnessRuntimeConfig`) and is the
+backward-compatible runtime default. The fixed two-stage path is explicit and uses a typed
+Retrieval release.
 
 | Role | Input | Output |
 |---|---|---|
@@ -103,7 +106,107 @@ Decision Agent
 The Decision Agent cannot invent a new numerical trajectory. It must select an already executed
 candidate, and a contextual override must cite verified evidence.
 
-## 5. Whole-Harness Co-Evolution
+## 5. Two-Stage Retrieval Boundary
+
+The implementation is in
+[`evolving_loop/retrieval_agent/two_stage_agent.py`](../evolving_loop/retrieval_agent/two_stage_agent.py),
+with the public assembly in [`evolving_loop/harness.py`](../evolving_loop/harness.py).
+
+```text
+safe task target + document text
+  -> assumption-blind Round 1
+  -> deterministic host verification
+  -> provisional Decision over executed candidates
+  -> named gaps + four-field sanitized Morphology assumptions
+  -> optional gap-directed Round 2
+  -> deterministic merge into FinalRetrievalCard
+  -> final Decision over executed host candidates
+```
+
+Round 1 has exactly the top-level keys `target`, `documents`, and `retrieval_skills`. Round 2 has
+exactly `target`, `documents`, `round1`, `gaps`, `assumptions`, and `retrieval_skills`. A Round 2
+assumption contains only `assumption_id`, `kind`, `claim`, and `failure_condition`; candidate IDs,
+forecasts, hindcast metrics, source code, future values, ground-truth evidence, and evaluator-only
+document `role`/`subtype` fields do not cross this boundary.
+
+Both stages return this strict wire shape (the last three keys are optional):
+
+```text
+{
+  "evidence_chains": [EvidenceChain],
+  "counterevidence": [EvidenceChain],
+  "missing_information": [str],
+  "sufficient": bool,
+  "gaps"?: [{"assumption_id", "gap_type", "missing_information", "priority"}],
+  "rejected"?: [str],
+  "unresolved_contradictions"?: [str]
+}
+```
+
+An `EvidenceChain` has exactly `chain_id`, `claim`, `entity_match`, `target_match`,
+`temporal_relation`, `mechanism`, `direction`, `magnitude_kind`, `magnitude_value`,
+`start_timestamp`, `end_timestamp`, `citations`, `missing_links`, `used_skill_ids`,
+`addressed_assumption_ids`, `stance`, and `numeric_eligible`. A citation has only `document_id` and
+`exact_quote`. The host rechecks the exact quote, identity, target, time window, mechanism,
+magnitude, assumption IDs, and configured document/chain/citation budgets; model-authored
+`numeric_eligible` is not authority.
+
+The merged host output has exactly `round1`, nullable `round2`, `chains`,
+`selected_document_ids`, `rejected`, `unresolved_contradictions`, `complete`, and `gaps`. Invalid
+Round 1 JSON fails to the pure numerical route and skips Round 2. Invalid Round 2 JSON keeps
+verified Round 1. Frozen Public/hidden inference disables scoring as appropriate, Skill writes,
+learning, and evolution.
+
+The current unified CLI deliberately supplies a conservative empty Morphology provider. It can
+exercise verified Round 1 safely, but it skips Round 2 because no sanitized Numerical assumptions
+exist. The complete two-stage public assembly is proven with a deterministic fake Morphology
+provider in `tests/test_retrieval_e2e.py`; a real accepted Numerical/Morphology provider remains a
+prerequisite for a real Round 2 experiment.
+
+## 6. Retrieval Genome Evolution
+
+Each generation creates exactly three complete typed Child Genomes, one per immutable mutation
+scope. Any out-of-scope change is rejected:
+
+| Child scope | Owned fields | Owned Skill stage |
+|---|---|---|
+| A · Round 1 | `round1_prompt`, `round1_strategy`, `max_selected_documents` | `round1` |
+| B · evidence-chain policy | `max_evidence_chains`, `max_citations_per_chain`, counterevidence-search, target-match, and temporal-overlap requirements | `both` |
+| C · Round 2 | `round2_prompt`, `round2_strategy`, `second_round_trigger` | `round2` |
+
+The fixed protocol requires exactly 80 Train and 20 Dev tasks. It chooses exactly eight
+entity-disjoint Train screening cases by default, promotes at most two children, evaluates them on
+the remaining entity-disjoint Train folds, and fixes one Train winner. Only then does it open Dev
+once for Parent and Child with persistence, writers, and evolvers disabled. The Child must make a
+strict contextual-oracle gain while preserving mean final sMAE/sRMSE, P90/P95, retrieval-quality
+tolerances, exact-quote validity, and invalid/catastrophic counts. Otherwise the original Parent is
+selected byte-for-byte. Public Regression is never loaded into the mutation/acceptance path.
+
+Checkpoint resume is authenticated and monotonic. The authority record, head, and append-only
+anchor ledger must be outside the run root; the wrapper requires at least 32 shell characters and
+the CLI requires at least 32 UTF-8 bytes through `RETRIEVAL_CHECKPOINT_AUTHORITY_KEY`. A fresh run atomically publishes
+`bootstrap.json` before the first checkpoint transaction. Its `external_anchor` value must be
+retained independently, then supplied on every restart through
+`RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED`; it must not be rediscovered from mutable run artifacts
+at resume time. The CLI removes both values from its environment before any LLM subprocess.
+
+The checked-in `evolving_loop/retrieval_agent/releases/v000` is an unevaluated seed, not an
+accepted Child. As of 2026-08-28, only deterministic fake-LLM tests have run: no real Retrieval
+80/20 LLM experiment, post-`v000` accepted Retrieval release, Retrieval Public Regression
+evaluation, or hidden score exists. Existing Numerical experiment tables elsewhere in the
+repository are Numerical results only.
+
+```bash
+python -m pytest -q tests/test_retrieval_e2e.py
+# Future authorized real run only; this command has not produced a reported result:
+scripts/run_retrieval_evolution.sh
+```
+
+Before that future command, freeze a run manifest containing the implementation commit, seed
+release hash, model and reasoning effort, task/token budgets, split hash, verifier hash, metric
+hash/cap, and output directory. Do not start it merely as part of documentation or verification.
+
+## 7. Whole-Harness Co-Evolution
 
 The structured three-agent Meta-Harness is implemented in
 [`evolving_loop/co_evolution.py`](../evolving_loop/co_evolution.py). During task inference, all
@@ -135,7 +238,7 @@ Accepted Parent Harness
 Train tasks may update each child's isolated skill libraries. Dev tasks are read-only and cannot
 write skills. Public Test is never used for mutation or acceptance.
 
-## 6. Three Evolution Depths
+## 8. Three Evolution Depths
 
 | Mode | Mutable surface | Accepted artifact |
 |---|---|---|
@@ -152,7 +255,7 @@ This is harness and artifact evolution, not LLM weight training. The system evol
 skills, dictionaries, candidate budgets, validation settings, communication topology, and—only in
 source mode—audited implementation code.
 
-## 7. Frozen Dr-CiK Data Protocol
+## 9. Frozen Dr-CiK Data Protocol
 
 The recommended public split is stored in
 [`splits/drcik_public_80_20_99_v1.json`](../splits/drcik_public_80_20_99_v1.json).
@@ -171,7 +274,7 @@ For dictionary curation, run `scripts/run_dictionary_frozen_test.sh` only after 
 `working_dictionary.json` is frozen. The command evaluates the 99 Public Test tasks without an LLM,
 without artifact write-back, and without exposing its result to mutation or Dev acceptance.
 
-## 8. Main Implementation Map
+## 10. Main Implementation Map
 
 | Responsibility | File |
 |---|---|
@@ -182,6 +285,10 @@ without artifact write-back, and without exposing its result to mutation or Dev 
 | Dictionary filtering and curation | `numerical_agent/curation/__init__.py` |
 | Numbers-only executable program evolution | `evolving_loop/coding_agent/evolution.py` |
 | Three-agent forecast runtime | `evolving_loop/harness.py` |
+| Two-stage Retrieval runtime and safe schemas | `evolving_loop/retrieval_agent/two_stage_agent.py`, `evolving_loop/retrieval_agent/schemas.py` |
+| Deterministic Retrieval verification | `evolving_loop/retrieval_agent/verifier.py` |
+| Retrieval Genome, release, and evolution protocol | `evolving_loop/retrieval_agent/policy.py`, `evolving_loop/retrieval_agent/evolution.py` |
+| Frozen Public/hidden inference | `evolving_loop/frozen_inference.py` |
 | Prompt/Genome co-evolution | `evolving_loop/co_evolution.py` |
 | Source-level evolution | `evolving_loop/source_evolution/__init__.py` |
 | Full operational guide | `docs/EVOLVING_AGENT.md` |

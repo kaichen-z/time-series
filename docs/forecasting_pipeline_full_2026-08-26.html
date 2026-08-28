@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Time-Series Self-Evolution Pipeline · 2026-08-27</title>
+  <title>Time-Series Self-Evolution Pipeline · 更新至 2026-08-28</title>
   <style>
     :root {
       --bg: #f4f0e8;
@@ -100,6 +100,8 @@
     }
     main { min-width: 0; }
     .hero {
+      min-width: 0;
+      overflow-wrap: anywhere;
       padding: clamp(30px, 5vw, 68px);
       background: var(--surface);
       border: 1px solid var(--line);
@@ -139,6 +141,8 @@
     .warn { color: var(--warn); }
     .bad { color: var(--bad); }
     section {
+      min-width: 0;
+      overflow-wrap: anywhere;
       scroll-margin-top: 24px;
       margin: 28px 0;
       padding: clamp(24px, 4vw, 44px);
@@ -201,6 +205,7 @@
     tr:last-child td { border-bottom: 0; }
     .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
     pre {
+      max-width: 100%;
       margin: 15px 0;
       padding: 17px;
       border-radius: 13px;
@@ -278,7 +283,7 @@
   <div class="shell">
     <aside>
       <div class="brand">Forecasting Pipeline</div>
-      <div class="brand-sub">完整项目地图 · 更新至 2026-08-27</div>
+      <div class="brand-sub">完整项目地图 · 更新至 2026-08-28</div>
       <nav aria-label="页面目录">
         <div class="nav-label">先看结论</div>
         <a href="#latest">最新：三代系统与 99 题结果</a>
@@ -287,6 +292,7 @@
         <a href="#timeline">2. 项目演进时间线</a>
         <div class="nav-label">系统结构</div>
         <a href="#architecture">3. 完整端到端流水线</a>
+        <a href="#retrieval-self-evolution">3A. 两阶段 Retrieval</a>
         <a href="#data">4. 数据与防泄漏边界</a>
         <a href="#portfolio">5. 103 个 Candidate</a>
         <a href="#json-python">6. JSON、Python 与 Git</a>
@@ -313,14 +319,16 @@
         <p class="lede">这不是“让一个 LLM 猜未来”，而是构建一套可审计的系统：先理解历史序列、筛掉不适用的方法，再用历史回测选择或组合 Statistical 与 TSFM，并让规则、策略和代码在 Train/Dev 门控下逐步演化。</p>
         <div class="meta-row">
           <span class="pill">仓库 <code>time-series</code></span>
-          <span class="pill">分支 <code>main</code></span>
-          <span class="pill">代码快照 <code>78b4ca8</code></span>
-          <span class="pill">页面更新 2026-08-27</span>
+          <span class="pill">分支 <code>feature/two-stage-retrieval-self-evolution</code></span>
+          <span class="pill">实现基线 <code>3f5e1e5</code></span>
+          <span class="pill">页面更新 2026-08-28</span>
           <a class="pill" href="forecasting_pipeline_full_2026-08-27_en.html" lang="en">English version</a>
         </div>
         <div class="pill-row">
           <span class="pill good"><span class="dot"></span>103-candidate 框架已实现</span>
           <span class="pill good"><span class="dot"></span>80/20/99 防泄漏划分已冻结</span>
+          <span class="pill good"><span class="dot"></span>两阶段 Retrieval 代码与 fake E2E 已实现</span>
+          <span class="pill warn"><span class="dot"></span>尚无真实 Retrieval 80/20 或 Retrieval 分数</span>
           <span class="pill warn"><span class="dot"></span>Selector 泛化仍不稳定</span>
           <span class="pill warn"><span class="dot"></span>Protected Top-k 已过 Dev，99题主指标未胜 Toto</span>
         </div>
@@ -380,7 +388,7 @@
 
       <section id="now" data-section>
         <h2>0. 现在到底在做什么</h2>
-        <p class="section-intro">一句话版本：我们正在完善 <strong>Numerical Agent 内部</strong>的两阶段自进化，而不是在训练 LLM 或把 Retrieval 文档直接塞进数值模型。</p>
+        <p class="section-intro">本页已有指标仍是历史 Numerical 实验结果。两阶段 Retrieval runtime 与进化协议已经实现，但真实 Retrieval 80/20 LLM 实验尚未启动。</p>
         <div class="grid g3">
           <article class="card">
             <div class="kpi">A</div>
@@ -397,8 +405,8 @@
           <article class="card">
             <div class="kpi">C</div>
             <h3>Context + Decision</h3>
-            <p>未来再接 Retrieval Agent：检索外部信息，让 Decision Agent 在数值假设和证据之间做最终决策。</p>
-            <span class="status warn">完整架构已有，当前实验重心不在此</span>
+            <p>Public Harness 已接通 assumption-blind Round 1、带命名 gap 的 provisional Decision、净化后的 Morphology assumptions、可选 Round 2 反证检索与 final Decision。</p>
+            <span class="status warn">已实现并通过 fake 测试；真实实验待运行</span>
           </article>
         </div>
         <div class="callout">
@@ -467,6 +475,10 @@
             <time>2026-08-27</time><h3>Protected Top-k 冻结回归评测</h3>
             <p>把安全 Parent、TSFM portfolio 和 Statistical residual 接成同一个 protected selector。Child 通过 20 Dev，但在 99 题回归测试中 mean sMAE/sRMSE 未超过 Toto；典型任务与若干辅助指标改善。</p>
           </div>
+          <div class="event">
+            <time>2026-08-28</time><h3>两阶段 Retrieval 安全协议</h3>
+            <p>加入严格 stage schema、确定性 verifier、分 scope Retrieval Genome 进化、认证 resume、冻结 inference 和 fake-LLM 端到端证明。没有运行真实 Retrieval 80/20、Public 或 hidden 评测。</p>
+          </div>
         </div>
       </section>
 
@@ -479,7 +491,7 @@
           <div class="node">Active Dictionary<small>筛后的 Statistical / TSFM / Combined</small></div><div class="arrow">→</div>
           <div class="node">Hindcasting<small>多折历史回测与稳定性诊断</small></div><div class="arrow">→</div>
           <div class="node">Numerical Selector<small>Parent / challenger / top-k / combined</small></div><div class="arrow">→</div>
-          <div class="node">Retrieval + Decision<small>未来接入 context 与最终 critic</small></div><div class="arrow">→</div>
+          <div class="node">Retrieval + Decision<small>两阶段 runtime 已实现，正式实验待运行</small></div><div class="arrow">→</div>
           <div class="node">Frozen Forecast<small>预测冻结后 trusted scorer 才看标签</small></div>
         </div>
         <h3>标签到达后的外层进化</h3>
@@ -492,6 +504,118 @@
           <div class="node">Frozen Test<small>零 mutation、零 write-back</small></div>
         </div>
         <div class="callout warnbox"><strong>重要：</strong>这叫 artifact/harness self-evolution，不是模型权重训练。LLM 负责提出 Child，Python 负责边界、执行、评分和继承。</div>
+      </section>
+
+      <section id="retrieval-self-evolution" data-section>
+        <h2>3A. 两阶段 Retrieval Self-Evolution</h2>
+        <p class="section-intro">这是已经实现的安全与进化路径，不是已经取得经验性提升的结果。仓库内 <code>v000</code> release 是未经评测的 seed。截至 2026-08-28，没有真实 Retrieval 80/20 LLM evolution、没有通过接受门的 <code>v000</code> 后续 release，也没有 Retrieval Public Regression 或 hidden 分数。</p>
+        <div class="callout warnbox"><strong>结果边界：</strong>本页其他位置的所有指标都来自更早的 Numerical 或 contextual baseline 产物，不能当作新 Retrieval Genome 的证据。Task 10 只运行确定性的 fake LLM。</div>
+
+        <h3>保留一个 baseline，显式增加一个新 topology</h3>
+        <div class="table-wrap"><table>
+          <thead><tr><th>模式</th><th>契约</th><th>调用次数</th><th>状态</th></tr></thead>
+          <tbody>
+            <tr><td><code>single-pass</code><br><small>runtime：<code>single_pass</code></small></td><td>一次可见 candidates 的 Retrieval，再做 Decision</td><td>1 Retrieval + 1 Decision</td><td>向后兼容的默认 runtime baseline</td></tr>
+            <tr><td><code>two-stage</code></td><td>不看 assumption 的 Round 1 → provisional Decision → 净化后的命名 gaps/assumptions → 可选 Round 2 → final Decision</td><td>1–2 Retrieval + 2 Decision</td><td>显式选择的 Retrieval evolution/inference 路径</td></tr>
+          </tbody>
+        </table></div>
+        <div class="flow" aria-label="两阶段 Retrieval inference 流程">
+          <div class="node">Safe Task View<small>target + 文档正文；无标签/role</small></div><div class="arrow">→</div>
+          <div class="node">Round 1<small>assumption blind</small></div><div class="arrow">→</div>
+          <div class="node">Host Verify<small>quote、identity、time、budget</small></div><div class="arrow">→</div>
+          <div class="node">Provisional Decision<small>只产生命名 gap</small></div><div class="arrow">→</div>
+          <div class="node">Round 2<small>四字段 assumption + gap</small></div><div class="arrow">→</div>
+          <div class="node">Final Decision<small>只能选择已执行 candidate</small></div>
+        </div>
+        <p>Round 1 的致命失败会跳过 Round 2，并保留纯 Numerical fallback。Round 2 的 malformed JSON 或 transient failure 会保留已经验证的 Round 1。模型即使写入 <code>numeric_eligible=true</code> 也不能自行授权数值修改；trusted Python 必须重新计算 eligibility，才会把 verified impact 投影到 Decision。</p>
+
+        <h3>准确的安全 schema</h3>
+        <pre><code>Round1Input = {
+  "target": {"entity_name", "target_name", "description", "frequency", "forecast_window"},
+  "documents": [{"document_id", "content"}],
+  "retrieval_skills": [validated summaries]
+}
+
+Round2Input = {
+  "target", "documents", "round1", "gaps",
+  "assumptions": [{"assumption_id", "kind", "claim", "failure_condition"}],
+  "retrieval_skills"
+}
+
+RetrievalRoundResult = {
+  "evidence_chains": [EvidenceChain], "counterevidence": [EvidenceChain],
+  "missing_information": [str], "sufficient": bool,
+  "gaps"?: [RetrievalGap], "rejected"?: [str],
+  "unresolved_contradictions"?: [str]
+}
+
+EvidenceChain 的全部字段 =
+  chain_id, claim, entity_match, target_match, temporal_relation,
+  mechanism, direction, magnitude_kind, magnitude_value,
+  start_timestamp, end_timestamp, citations[{document_id, exact_quote}],
+  missing_links, used_skill_ids, addressed_assumption_ids, stance,
+  numeric_eligible
+
+FinalRetrievalCard = {
+  "round1", "round2", "chains", "selected_document_ids", "rejected",
+  "unresolved_contradictions", "complete", "gaps"
+}</code></pre>
+        <p>Round 2 永远看不到 candidate ID、forecast array、hindcast sMAE/sRMSE、source code、future values、ground-truth evidence，也看不到 evaluator-only 的文档 <code>role</code>/<code>subtype</code>。文档、chain 和 citation budget 都在 host verification 与下游使用之前截断。</p>
+
+        <h3>三个不可越界的 Child scope 与一次性 Dev</h3>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Child</th><th>它独占的可变字段</th><th>Skill stage</th></tr></thead>
+          <tbody>
+            <tr><td>A · Round 1</td><td><code>round1_prompt</code>、<code>round1_strategy</code>、<code>max_selected_documents</code></td><td><code>round1</code></td></tr>
+            <tr><td>B · chain policy</td><td>chain/citation budgets，以及 counterevidence、target-match、temporal-overlap requirements</td><td><code>both</code></td></tr>
+            <tr><td>C · Round 2</td><td><code>round2_prompt</code>、<code>round2_strategy</code>、<code>second_round_trigger</code></td><td><code>round2</code></td></tr>
+          </tbody>
+        </table></div>
+        <p>每代恰好生成 A/B/C。默认先筛 8 个 entity-disjoint Train cases，最多晋级 2 个 Child，再跑剩余的 entity-disjoint Train folds 并固定唯一 Train winner。之后 Parent 与 Child 才各自对全部 20 Dev 运行一次；persistence、writer 和 evolver 全部关闭。接受要求 contextual-oracle 严格改善，同时 final mean sMAE/sRMSE、P90/P95、exact-quote validity、invalid/catastrophic counts 与 Retrieval quality tolerance 都不能退化。Public Regression ID 不得进入 mutation、cache、prompt、checkpoint 或 acceptance。</p>
+
+        <h3>复现证明；准备真实命令但不暗示已经运行</h3>
+        <pre><code>python -m pytest -q tests/test_retrieval_e2e.py
+python -m pytest -q tests/test_retrieval_e2e.py::test_fake_two_stage_smoke
+
+# 仅供未来授权后的真实运行；本页没有执行：
+read -r -s -p 'Retrieval checkpoint authority key: ' RETRIEVAL_CHECKPOINT_AUTHORITY_KEY
+printf '\n'
+export RETRIEVAL_CHECKPOINT_AUTHORITY_KEY
+TASKS_FILE=external/Dr-CiK/full-download/Dr-CiK_public/tasks \
+SPLIT_FILE=splits/drcik_public_80_20_99_v1.json \
+RUN_DIR=runs/retrieval_evolution/formal_80_20 \
+AUTHORITY_PATH=../retrieval-operator-state/formal_80_20.json \
+AUTHORITY_HEAD_PATH=../retrieval-operator-state/formal_80_20.head.json \
+AUTHORITY_ANCHOR_PATH=../retrieval-operator-state/formal_80_20.anchors \
+scripts/run_retrieval_evolution.sh</code></pre>
+        <p>第一次调用会在首个 checkpoint transaction 之前写入 <code>$AUTHORITY_ANCHOR_PATH/bootstrap.json</code>。Operator 必须把其中的 <code>external_anchor</code> 值独立保存在 run tree 与 anchor ledger 之外；每次 restart 都通过 <code>RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED</code> 提供这个已保留的 <code>epoch:head</code>，不能在 resume 时从可变 run artifact 重新推导。Wrapper 要求 authority key 至少 32 个 shell 字符，CLI 还会检查至少 32 个 UTF-8 bytes；它不能进入命令行、仓库、日志或产物。创建任何 LLM subprocess 之前，CLI 会从环境中删除这两个值。</p>
+        <pre><code># bootstrap 出现后，立即在独立的 trusted operator process 中执行：
+RETAINED_ANCHOR_FILE=/absolute/operator-control-plane/formal_80_20.anchor
+umask 077
+python - ../retrieval-operator-state/formal_80_20.anchors/bootstrap.json \
+  &gt; "$RETAINED_ANCHOR_FILE" &lt;&lt;'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    anchor = json.load(source)["external_anchor"]
+if not isinstance(anchor, str) or ":" not in anchor:
+    raise SystemExit("invalid bootstrap external_anchor")
+print(anchor)
+PY
+
+# 每次 restart：静默重输同一个 key，再使用独立保存的 anchor。
+read -r -s -p 'Retrieval checkpoint authority key: ' RETRIEVAL_CHECKPOINT_AUTHORITY_KEY
+printf '\n'
+export RETRIEVAL_CHECKPOINT_AUTHORITY_KEY
+read -r RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED &lt; "$RETAINED_ANCHOR_FILE"
+export RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED
+TASKS_FILE=external/Dr-CiK/full-download/Dr-CiK_public/tasks \
+SPLIT_FILE=splits/drcik_public_80_20_99_v1.json \
+RUN_DIR=runs/retrieval_evolution/formal_80_20 \
+AUTHORITY_PATH=../retrieval-operator-state/formal_80_20.json \
+AUTHORITY_HEAD_PATH=../retrieval-operator-state/formal_80_20.head.json \
+AUTHORITY_ANCHOR_PATH=../retrieval-operator-state/formal_80_20.anchors \
+scripts/run_retrieval_evolution.sh</code></pre>
+        <div class="callout warnbox"><strong>当前集成限制：</strong>统一 CLI 使用 conservative empty Morphology provider，因此在接入真实、已接受的 Numerical/Morphology assumption provider 前会安全跳过 Round 2。任何真实 80/20 运行之前，都必须在 run manifest 中冻结 implementation commit、seed release hash、model/effort、task/token budgets、split/verifier/metric hashes、metric cap 与 output directory。</div>
       </section>
 
       <section id="data" data-section>
@@ -703,7 +827,8 @@ Route:
       </section>
 
       <section id="results" data-section>
-        <h2>11. 已有结果总表</h2>
+        <h2>11. Numerical 与早期 Baseline 结果</h2>
+        <div class="callout warnbox"><strong>范围：</strong>本节只报告已有 Numerical 与早期 contextual baseline 产物。新的两阶段 Retrieval self-evolution 尚未运行真实 LLM 80/20，没有 accepted Child、Public Regression 结果或 hidden 分数。</div>
         <p class="section-intro">不同任务集、backbone 和指标不能直接横向排名。下面按实验阶段分组，并明确哪些是机制 smoke、哪些是 frozen regression。</p>
         <h3>早期 agent / contextual 基线</h3>
         <div class="table-wrap">
@@ -858,7 +983,7 @@ Route:
               <li>Combined 在严格 gate 下几乎从不激活；放松又容易产生灾难。</li>
               <li>五个 TSFM 的当前本地 worker 环境没有全部恢复。</li>
               <li>99 Public Test 已被消费，不能继续用它选版本。</li>
-              <li>Retrieval/context 尚未接入当前 Numerical 两阶段的正式新实验。</li>
+              <li>Retrieval CLI 尚未接入真实 Numerical/Morphology assumption provider，正式 Retrieval 80/20 实验也尚未运行。</li>
             </ul>
           </article>
         </div>
@@ -883,8 +1008,8 @@ Route:
             <p>不仅把危险方法筛掉，还要让 profile 影响 TSFM/Combined eligibility、portfolio size、correction budget 和 baseline identity。</p>
           </article>
           <article class="card">
-            <h3>4 · 再接 Retrieval</h3>
-            <p>Retrieval 不应完全忽略 Numerical assumptions。推荐基础检索先独立做，第二轮再读 Numerical gap/assumption，专门找反证和 regime evidence。</p>
+            <h3>4 · 集成复核后再冻结并运行 Retrieval</h3>
+            <p>两阶段与 evolution 代码已经存在。先接入真实、已接受的 Numerical/Morphology provider 并冻结完整 run manifest，再在完全不读取 Public Regression 的前提下运行一次 Train/Dev。</p>
           </article>
         </div>
         <div class="callout"><strong>停止规则：</strong>在 80 Train/20 Dev 没有稳定提升前，不再看 99 Public Test；没有新的 sealed labels，就只把 99 题称为 regression test，不声称新的 generalization。</div>
@@ -906,7 +1031,7 @@ pytest -q</code></pre>
         <h3>查看统一 Harness</h3>
         <pre><code>python -m evolving_loop --list-methods
 python -m evolving_loop --baseline &lt;name&gt; [options]
-python -m evolving_loop --evolution &lt;prompt|genome|source&gt; [options]</code></pre>
+python -m evolving_loop --evolution &lt;prompt|genome|source|retrieval&gt; [options]</code></pre>
         <h3>当前 R1/R2/R3 Train-only 命令</h3>
         <pre><code>.venv/bin/python -m numerical_agent.run_task_conditioned_audit_experiment \
   --repo runs/method_evolution/v001 \
@@ -939,6 +1064,13 @@ python -m evolving_loop --evolution &lt;prompt|genome|source&gt; [options]</code
           <li><code>numerical_agent/evolution/numerical_selector.py</code></li>
           <li><code>numerical_agent/evolution/selector_evolution.py</code></li>
           <li><code>numerical_agent/tsfm/runtime_manifests.json</code></li>
+          <li><code>evolving_loop/retrieval_agent/schemas.py</code></li>
+          <li><code>evolving_loop/retrieval_agent/two_stage_agent.py</code></li>
+          <li><code>evolving_loop/retrieval_agent/verifier.py</code></li>
+          <li><code>evolving_loop/retrieval_agent/evolution.py</code></li>
+          <li><code>evolving_loop/frozen_inference.py</code></li>
+          <li><code>scripts/run_retrieval_evolution.sh</code></li>
+          <li><code>tests/test_retrieval_e2e.py</code></li>
           <li><code>docs/BASELINE_METHODS_AND_RESULTS.md</code></li>
           <li><code>docs/EVOLUTION_METHODS_AND_RESULTS.md</code></li>
           <li><code>docs/FROZEN_TWO_STAGE_80_20_99_REPORT.md</code></li>
@@ -956,7 +1088,7 @@ python -m evolving_loop --evolution &lt;prompt|genome|source&gt; [options]</code
       </section>
 
       <footer>
-        <p>Updated from the local <code>time-series</code> worktree on 2026-08-27. Repository snapshot before this documentation update: <code>78b4ca8</code>. The Protected Top-k result is a frozen 99-task Public Regression Test with zero LLM/mutation calls; it is not a new unseen-test claim.</p>
+        <p>本页于 2026-08-28 从本地 <code>time-series</code> worktree 更新。页面展示的 Protected Top-k 是 Numerical 的冻结 99 题 Public Regression Test，零 LLM/mutation 调用；它既不是新的 unseen-test claim，也不是 Retrieval 结果。Retrieval 实现目前只有 fake-LLM 验证，真实实验尚未运行。</p>
       </footer>
     </main>
   </div>

@@ -9,9 +9,10 @@ self-evolving experiment. The original Fresh-vs-Skill-Library baseline is preser
 version adds numbers-only program evolution with historical hindcasting, outcome-validated
 Retrieval and Decision skill libraries, verified contextual retrieval, a citation-constrained
 Decision Agent, a real Chronos ablation, and failure-attributed three-agent co-evolution with
-held-out acceptance. The `evolve` entrypoint has three controlled levels:
+held-out acceptance. The `evolve` entrypoint has three general controlled levels:
 `--evolution-mode prompt` (one prompt only), `genome` (prompts, budgets, and topology), and
-`source` (audited Python source patches generated in isolated Git worktrees). See
+`source` (audited Python source patches generated in isolated Git worktrees), plus the dedicated
+`--evolution retrieval` coordinate described below. See
 [`docs/EVOLVING_AGENT.md`](docs/EVOLVING_AGENT.md) for the exact information boundaries, flow,
 metrics, and commands. The initial English experiment report is available at
 [`docs/EVOLUTION_METHODS_AND_RESULTS.md`](docs/EVOLUTION_METHODS_AND_RESULTS.md). A consolidated
@@ -118,10 +119,193 @@ writes submission-format files and never scores, learns skills, or evolves the h
 Baseline names are `skill-fresh`, `skill-library`, `chronos`, `timesfm`, `statistical`, `one-pass`, `iterative`,
 `iterative-unsafe`, `oracle-context`, `rules-triad`, `codex-triad`, `codex-direct`,
 `codex-contract`, and `evolving-harness`. Evolution names are `prompt`, `genome`, and `source`.
+`retrieval` is also available as a dedicated, fixed-protocol evolution coordinate.
 `chronos`, `timesfm`, and `statistical` are true numbers-only runs: they do not retrieve or consume
 documents. `oracle-context` is restricted to public development diagnostics. The previous
 `evolving-agent run/evolve` and `drcik-agent run-sample/run-hf` interfaces remain supported.
 The two `skill-*` baselines use the original numbers-only JSONL interface through `--tasks-file`.
+
+## Two-stage Retrieval self-evolution
+
+Implementation status as of 2026-08-28: the typed two-stage runtime, deterministic verifier,
+Retrieval Genome/release format, three scoped mutations, fixed 80 Train / 20 read-only Dev
+acceptance loop, authenticated checkpoint resume, frozen inference, and coordinate hand-off are
+implemented and covered by fake-LLM tests. The checked-in `v000` release is an unevaluated seed
+(`state: seed`, `acceptance_reason: not_evaluated_seed`), not an accepted experimental result.
+No real Retrieval 80/20 LLM evolution has been run, no post-`v000` Retrieval release has been
+accepted, and no Retrieval Public Regression or hidden-test score exists. The Numerical results
+below predate this Retrieval experiment and must not be read as Retrieval results.
+
+The legacy and two-stage paths remain deliberately distinct:
+
+| Path | Selection contract | Calls | Status |
+|---|---|---:|---|
+| Legacy `single-pass` CLI mode (`single_pass` runtime value) | One candidate-aware Retrieval call followed by Decision | 1 Retrieval + 1 Decision | Preserved as the backward-compatible default runtime baseline |
+| `two-stage` | Assumption-blind Round 1, provisional Decision with named gaps, sanitized Morphology assumptions, optional gap-directed Round 2, then final Decision | 1–2 Retrieval + 2 Decision | Implemented; explicitly selected for Retrieval evolution/inference |
+
+In both paths the Numerical Agent receives only the historical numerical view. In two-stage mode,
+Round 1 cannot see Numerical candidates or assumptions. Round 2 receives only the host-sanitized
+four-field assumptions and named gaps below; it never receives candidate IDs, forecast arrays,
+hindcast scores, source code, future values, ground-truth evidence, or evaluator-only document
+roles/subtypes. The Decision Agent can select only an executed host candidate. Invalid JSON fails
+closed: a fatal Round 1 response preserves the pure numerical fallback, while a failed Round 2
+preserves verified Round 1 evidence.
+
+The exact safe request shapes are:
+
+```text
+Round 1 input (exact top-level keys)
+{
+  "target": {
+    "entity_name": str, "target_name": str, "description": str,
+    "frequency": str, "forecast_window": [str, str] | []
+  },
+  "documents": [{"document_id": str, "content": str}],
+  "retrieval_skills": [validated skill summaries]
+}
+
+Round 2 input (exact top-level keys)
+{
+  "target": {same safe target shape},
+  "documents": [{"document_id": str, "content": str}],
+  "round1": {verified RetrievalRoundResult},
+  "gaps": [{
+    "assumption_id": str, "gap_type": str,
+    "missing_information": str, "priority": "high" | "medium" | "low"
+  }],
+  "assumptions": [{
+    "assumption_id": str, "kind": str, "claim": str, "failure_condition": str
+  }],
+  "retrieval_skills": [validated skill summaries]
+}
+```
+
+Both model stages return the same strict wire result. The first four fields are required; the last
+three are optional. Each `EvidenceChain` has exactly the fields shown here before the host checks
+the quote, entity, target, horizon, mechanism, magnitude, assumption identity, and budgets:
+
+```text
+RetrievalRoundResult = {
+  "evidence_chains": [EvidenceChain],
+  "counterevidence": [EvidenceChain],
+  "missing_information": [str],
+  "sufficient": bool,
+  "gaps"?: [RetrievalGap],
+  "rejected"?: [str],
+  "unresolved_contradictions"?: [str]
+}
+
+EvidenceChain = {
+  "chain_id": str, "claim": str,
+  "entity_match": bool, "target_match": bool,
+  "temporal_relation": str, "mechanism": str, "direction": str,
+  "magnitude_kind": str, "magnitude_value": float | null,
+  "start_timestamp": str | null, "end_timestamp": str | null,
+  "citations": [{"document_id": str, "exact_quote": str}],
+  "missing_links": [str], "used_skill_ids": [str],
+  "addressed_assumption_ids": [str], "stance": str,
+  "numeric_eligible": bool
+}
+
+FinalRetrievalCard = {
+  "round1": RetrievalRoundResult, "round2": RetrievalRoundResult | null,
+  "chains": [EvidenceChain], "selected_document_ids": [str],
+  "rejected": [str], "unresolved_contradictions": [str],
+  "complete": bool, "gaps": [RetrievalGap]
+}
+```
+
+`numeric_eligible` is never trusted merely because the model sets it. The deterministic verifier
+recomputes eligibility, and document/chain/citation budgets are applied before verification and
+downstream use. Only verified chains are projected into the legacy Decision interface.
+
+Every Retrieval generation requests exactly one child in each immutable scope:
+
+| Child | May mutate | Skill stage owned |
+|---|---|---|
+| A · Round 1 | `round1_prompt`, `round1_strategy`, `max_selected_documents` | `round1` |
+| B · evidence-chain policy | `max_evidence_chains`, `max_citations_per_chain`, counterevidence search, target-match and temporal-overlap requirements | `both` |
+| C · Round 2 | `round2_prompt`, `round2_strategy`, `second_round_trigger` | `round2` |
+
+The host rejects any child that changes a field outside its scope. On Train, it screens exactly
+eight entity-disjoint cases by default, promotes at most two children, then evaluates survivors
+over the remaining entity-disjoint folds. Dev opens once, after the Train winner is fixed, and
+runs Parent and Child with persistence, writers, and evolvers disabled. Acceptance requires a
+strict contextual-oracle gain with no regression in final mean sMAE/sRMSE, P90/P95, exact-quote
+validity, invalid/catastrophic counts, or the configured retrieval-quality tolerances. Public
+Regression IDs are excluded from mutation, evaluation caches, checkpoints, prompts, and
+acceptance; Public and hidden inference run only from a frozen release and never learn or evolve.
+
+Run the deterministic no-token end-to-end proof:
+
+```bash
+python -m pytest -q tests/test_retrieval_e2e.py
+python -m pytest -q tests/test_retrieval_e2e.py::test_fake_two_stage_smoke
+```
+
+The formal real-LLM command is provided for a future authorized run; it has **not** been run for
+the results in this repository. The operator authority paths must be outside `RUN_DIR`. Supply the
+key with at least 32 shell characters (the CLI also requires at least 32 UTF-8 bytes) without
+putting its value in the command line, repository, logs, or run artifacts:
+
+```bash
+read -r -s -p 'Retrieval checkpoint authority key: ' RETRIEVAL_CHECKPOINT_AUTHORITY_KEY
+printf '\n'
+export RETRIEVAL_CHECKPOINT_AUTHORITY_KEY
+
+TASKS_FILE=external/Dr-CiK/full-download/Dr-CiK_public/tasks \
+SPLIT_FILE=splits/drcik_public_80_20_99_v1.json \
+RUN_DIR=runs/retrieval_evolution/formal_80_20 \
+AUTHORITY_PATH=../retrieval-operator-state/formal_80_20.json \
+AUTHORITY_HEAD_PATH=../retrieval-operator-state/formal_80_20.head.json \
+AUTHORITY_ANCHOR_PATH=../retrieval-operator-state/formal_80_20.anchors \
+scripts/run_retrieval_evolution.sh
+```
+
+On a fresh invocation, the host atomically creates
+`$AUTHORITY_ANCHOR_PATH/bootstrap.json` before its first checkpoint transaction. An operator or
+control-plane process must retain that file's `external_anchor` value independently of both the
+run tree and anchor ledger. On every restart, restore that retained value and the same authority
+key before invoking the identical command:
+
+```bash
+# Run this from a separate trusted operator process as soon as bootstrap.json appears.
+# Replace this destination with an independently protected control-plane path.
+RETAINED_ANCHOR_FILE=/absolute/operator-control-plane/formal_80_20.anchor
+umask 077
+python - ../retrieval-operator-state/formal_80_20.anchors/bootstrap.json \
+  > "$RETAINED_ANCHOR_FILE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    anchor = json.load(source)["external_anchor"]
+if not isinstance(anchor, str) or ":" not in anchor:
+    raise SystemExit("invalid bootstrap external_anchor")
+print(anchor)
+PY
+
+# On resume, read the independently retained value; never reread the ledger.
+read -r -s -p 'Retrieval checkpoint authority key: ' RETRIEVAL_CHECKPOINT_AUTHORITY_KEY
+printf '\n'
+export RETRIEVAL_CHECKPOINT_AUTHORITY_KEY
+read -r RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED < "$RETAINED_ANCHOR_FILE"
+export RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED
+TASKS_FILE=external/Dr-CiK/full-download/Dr-CiK_public/tasks \
+SPLIT_FILE=splits/drcik_public_80_20_99_v1.json \
+RUN_DIR=runs/retrieval_evolution/formal_80_20 \
+AUTHORITY_PATH=../retrieval-operator-state/formal_80_20.json \
+AUTHORITY_HEAD_PATH=../retrieval-operator-state/formal_80_20.head.json \
+AUTHORITY_ANCHOR_PATH=../retrieval-operator-state/formal_80_20.anchors \
+scripts/run_retrieval_evolution.sh
+```
+
+The runner consumes and scrubs both authority environment variables before constructing any LLM
+subprocess and prints only the non-secret command. The current CLI uses the conservative empty
+Morphology provider; therefore the real CLI path safely skips Round 2 until a real accepted
+Numerical/Morphology assumption provider is integrated. That integration and the run manifest
+(implementation commit, seed release hash, model/effort, budgets, split/verifier/metric hashes,
+metric cap, and output directory) must be frozen before starting the real 80/20 experiment.
 
 ## Baseline methods and current results
 
