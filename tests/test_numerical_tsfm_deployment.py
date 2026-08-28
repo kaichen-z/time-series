@@ -54,8 +54,9 @@ def test_deployment_builds_only_fixed_reviewed_worker_commands(tmp_path: Path) -
         acknowledged_licenses=("CC-BY-NC-4.0",),
     )
 
+    expected_interpreter = os.path.normpath(str(Path(sys.executable).expanduser()))
     assert deployment.commands["uni2ts"].argv == (
-        sys.executable,
+        expected_interpreter,
         "-m",
         "numerical_agent.tsfm.worker_main",
         "--adapter",

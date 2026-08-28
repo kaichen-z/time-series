@@ -10,7 +10,6 @@ from numerical_agent.evolution.cache import CacheMissError, OutcomeCache
 from numerical_agent.evolution.execution import CRASHED, INVALID, NOT_APPLICABLE, SUCCESS, Outcome, Task
 from numerical_agent.evolution.module import MODULE_HEADER, parse_module
 from numerical_agent.evolution.portfolio import (
-    FLAGSHIP_COMBINED_NAMES,
     FLAGSHIP_METHOD_IDS,
     CombinedPolicy,
     PolicyError,
@@ -42,39 +41,23 @@ def _canonical_combined(**overrides: object) -> CombinedPolicy:
     return CombinedPolicy(**fields)
 
 
-def _legacy_source(first_mode: str) -> str:
-    portfolio = PolicyPortfolio.flagship5()
-    payloads: list[dict[str, object]] = []
-    for policy in portfolio.combined:
-        first_parent, second_parent = policy.parents
-        if policy.operator == "weighted_mean":
-            mode = "blend"
-            weight = policy.weights[0]
-            tsfm_when = "above"
-        else:
-            mode = "route"
-            weight = 0.65
-            tsfm_when = (
-                "below"
-                if (not payloads and first_mode == "route")
-                else ("below" if policy.below_parent == first_parent else "above")
-            )
-        payloads.append(
-            {
-                "name": policy.name,
-                "tsfm_parent": first_parent,
-                "statistical_parent": second_parent,
-                "mode": first_mode if not payloads else mode,
-                "weight": weight,
-                "signal": policy.signal,
-                "threshold": policy.threshold,
-                "tsfm_when": "below" if first_mode == "route" and not payloads else tsfm_when,
-            }
-        )
-    return (
-        f"TSFM_POLICIES = {tuple(policy.to_payload() for policy in portfolio.tsfm)!r}\n"
-        f"COMBINED_POLICIES = {tuple(payloads)!r}\n"
-    )
+def _legacy_source() -> str:
+    """Independent frozen v1 source; do not derive this fixture from flagship5()."""
+    return """TSFM_POLICIES = (
+    {'name': 'timesfm_2_5', 'method_id': 'method_tsfm_0031', 'applicability': 'all', 'context_window': 1024, 'preprocess': 'none', 'shrinkage_to_last': 0.0},
+    {'name': 'moirai_2_0', 'method_id': 'method_tsfm_0017', 'applicability': 'all', 'context_window': 512, 'preprocess': 'none', 'shrinkage_to_last': 0.0},
+    {'name': 'toto_2_0', 'method_id': 'method_tsfm_0014', 'applicability': 'all', 'context_window': 512, 'preprocess': 'none', 'shrinkage_to_last': 0.0},
+    {'name': 'chronos_bolt', 'method_id': 'method_tsfm_0018', 'applicability': 'all', 'context_window': 512, 'preprocess': 'none', 'shrinkage_to_last': 0.0},
+    {'name': 'granite_ttm_r2', 'method_id': 'method_tsfm_0006', 'applicability': 'all', 'context_window': 512, 'preprocess': 'none', 'shrinkage_to_last': 0.0},
+)
+COMBINED_POLICIES = (
+    {'name': 'combined_timesfm_seasonal', 'tsfm_parent': 'timesfm_2_5', 'statistical_parent': 'seasonal_naive', 'mode': 'blend', 'weight': 0.65, 'signal': 'periodicity_strength', 'threshold': 0.45, 'tsfm_when': 'above'},
+    {'name': 'combined_chronos_damped_trend', 'tsfm_parent': 'chronos_bolt', 'statistical_parent': 'holt_damped_trend', 'mode': 'blend', 'weight': 0.65, 'signal': 'trend_strength', 'threshold': 0.45, 'tsfm_when': 'above'},
+    {'name': 'combined_moirai_croston_router', 'tsfm_parent': 'moirai_2_0', 'statistical_parent': 'croston_sba', 'mode': 'route', 'weight': 0.65, 'signal': 'zero_fraction', 'threshold': 0.30, 'tsfm_when': 'below'},
+    {'name': 'combined_toto_robust_router', 'tsfm_parent': 'toto_2_0', 'statistical_parent': 'robust_loess_trend', 'mode': 'route', 'weight': 0.65, 'signal': 'outlier_fraction', 'threshold': 0.05, 'tsfm_when': 'below'},
+    {'name': 'combined_granite_regime_profile', 'tsfm_parent': 'granite_ttm_r2', 'statistical_parent': 'median_seasonal_profile_forecast', 'mode': 'blend', 'weight': 0.60, 'signal': 'recent_regime_confidence', 'threshold': 0.50, 'tsfm_when': 'above'},
+)
+"""
 
 
 def test_canonical_combined_policy_round_trips() -> None:
@@ -122,7 +105,7 @@ def test_route_canonical_policy_requires_branches_in_parents() -> None:
 
 
 def test_legacy_combined_payload_migrates_to_canonical_schema() -> None:
-    source = _legacy_source("blend")
+    source = _legacy_source()
 
     policy = parse_policy_source(source).combined[0]
 
@@ -138,15 +121,15 @@ def test_legacy_combined_payload_migrates_to_canonical_schema() -> None:
 
 
 def test_legacy_route_payload_migrates_to_explicit_branches() -> None:
-    source = _legacy_source("route")
+    source = _legacy_source()
 
-    policy = parse_policy_source(source).combined[0]
+    policy = parse_policy_source(source).combined[2]
 
     assert policy.operator == "route"
     assert policy.weights == ()
-    assert policy.above_parent == "seasonal_naive"
-    assert policy.below_parent == "timesfm_2_5"
-    assert policy.fallback_parent == "timesfm_2_5"
+    assert policy.above_parent == "croston_sba"
+    assert policy.below_parent == "moirai_2_0"
+    assert policy.fallback_parent == "moirai_2_0"
 
 
 def test_legacy_flagship_five_preserves_names_and_forecasts_after_migration(
@@ -154,11 +137,34 @@ def test_legacy_flagship_five_preserves_names_and_forecasts_after_migration(
 ) -> None:
     """Legacy policy files retain every identity and forecast after canonical migration."""
     canonical = PolicyPortfolio.flagship5()
-    migrated = parse_policy_source(_legacy_source("blend"))
+    migrated = parse_policy_source(_legacy_source())
 
-    assert tuple(policy.name for policy in migrated.combined) == FLAGSHIP_COMBINED_NAMES
-    assert migrated.names == canonical.names
-    assert migrated.combined == canonical.combined
+    expected_tsfm = (
+        TSFMPolicy("timesfm_2_5", "method_tsfm_0031", context_window=1024),
+        TSFMPolicy("moirai_2_0", "method_tsfm_0017", context_window=512),
+        TSFMPolicy("toto_2_0", "method_tsfm_0014", context_window=512),
+        TSFMPolicy("chronos_bolt", "method_tsfm_0018", context_window=512),
+        TSFMPolicy("granite_ttm_r2", "method_tsfm_0006", context_window=512),
+    )
+    expected_combined = (
+        CombinedPolicy("combined_timesfm_seasonal", ("timesfm_2_5", "seasonal_naive"), "weighted_mean", (0.65, 0.35), "periodicity_strength", 0.45, fallback_parent="timesfm_2_5"),
+        CombinedPolicy("combined_chronos_damped_trend", ("chronos_bolt", "holt_damped_trend"), "weighted_mean", (0.65, 0.35), "trend_strength", 0.45, fallback_parent="chronos_bolt"),
+        CombinedPolicy("combined_moirai_croston_router", ("moirai_2_0", "croston_sba"), "route", (), "zero_fraction", 0.30, above_parent="croston_sba", below_parent="moirai_2_0", fallback_parent="moirai_2_0"),
+        CombinedPolicy("combined_toto_robust_router", ("toto_2_0", "robust_loess_trend"), "route", (), "outlier_fraction", 0.05, above_parent="robust_loess_trend", below_parent="toto_2_0", fallback_parent="toto_2_0"),
+        CombinedPolicy("combined_granite_regime_profile", ("granite_ttm_r2", "median_seasonal_profile_forecast"), "weighted_mean", (0.60, 0.40), "recent_regime_confidence", 0.50, fallback_parent="granite_ttm_r2"),
+    )
+
+    assert tuple(policy.name for policy in migrated.combined) == (
+        "combined_timesfm_seasonal",
+        "combined_chronos_damped_trend",
+        "combined_moirai_croston_router",
+        "combined_toto_robust_router",
+        "combined_granite_regime_profile",
+    )
+    assert migrated.tsfm == expected_tsfm
+    assert migrated.combined == expected_combined
+    assert canonical.tsfm == expected_tsfm
+    assert canonical.combined == expected_combined
 
     runtime = FakeTSFMRuntime({method_id: 1.0 for method_id in FLAGSHIP_METHOD_IDS})
     canonical_outcomes = evaluate_portfolio(
@@ -178,13 +184,51 @@ def test_legacy_flagship_five_preserves_names_and_forecasts_after_migration(
         isolated_methods=False,
     )
 
-    assert tuple(
-        (outcome.method, outcome.task_id, outcome.status, outcome.forecast)
-        for outcome in migrated_outcomes
-    ) == tuple(
-        (outcome.method, outcome.task_id, outcome.status, outcome.forecast)
-        for outcome in canonical_outcomes
-    )
+    daily = {
+        "seasonal_naive": (27.0, 27.0),
+        "holt_damped_trend": (27.0, 27.0),
+        "croston_sba": (27.0, 27.0),
+        "robust_loess_trend": (27.0, 27.0),
+        "median_seasonal_profile_forecast": (27.0, 27.0),
+        "timesfm_2_5": (29.0, 29.0),
+        "moirai_2_0": (29.0, 29.0),
+        "toto_2_0": (29.0, 29.0),
+        "chronos_bolt": (29.0, 29.0),
+        "granite_ttm_r2": (29.0, 29.0),
+        "combined_timesfm_seasonal": (28.3, 28.3),
+        "combined_chronos_damped_trend": (28.3, 28.3),
+        "combined_moirai_croston_router": (29.0, 29.0),
+        "combined_toto_robust_router": (29.0, 29.0),
+        "combined_granite_regime_profile": (28.2, 28.2),
+    }
+    periodic = {
+        "seasonal_naive": (6.0, 6.0),
+        "holt_damped_trend": (6.0, 6.0),
+        "croston_sba": (6.0, 6.0),
+        "robust_loess_trend": (6.0, 6.0),
+        "median_seasonal_profile_forecast": (6.0, 6.0),
+        "timesfm_2_5": (8.0, 8.0),
+        "moirai_2_0": (8.0, 8.0),
+        "toto_2_0": (8.0, 8.0),
+        "chronos_bolt": (8.0, 8.0),
+        "granite_ttm_r2": (8.0, 8.0),
+        "combined_timesfm_seasonal": (7.3, 7.3),
+        "combined_chronos_damped_trend": (7.3, 7.3),
+        "combined_moirai_croston_router": (8.0, 8.0),
+        "combined_toto_robust_router": (8.0, 8.0),
+        "combined_granite_regime_profile": (7.2, 7.2),
+    }
+    golden = {
+        (method, task_id): (SUCCESS, forecast)
+        for task_id, forecasts in (("daily", daily), ("periodic", periodic))
+        for method, forecast in forecasts.items()
+    }
+    for outcomes in (canonical_outcomes, migrated_outcomes):
+        actual = {
+            (outcome.method, outcome.task_id): (outcome.status, outcome.forecast)
+            for outcome in outcomes
+        }
+        assert actual == golden
 
 
 class FakeTSFMRuntime:
@@ -391,12 +435,16 @@ def test_combined_forecast_is_computed_from_both_parent_forecasts(tmp_path: Path
     assert combined.status == SUCCESS
 
 
-def test_93_methods_plus_portfolio_reports_derived_candidate_count() -> None:
+def test_93_methods_plus_portfolio_reports_parent_and_child_counts() -> None:
     names = tuple(f"method_{index:03d}" for index in range(93))
-    portfolio = _portfolio()
+    parent = _portfolio()
+    child = parent.add_combined(_variable_combined("combined_count_child"))
 
     assert len(names) == 93
-    assert len(names) + len(portfolio.names) == 93 + len(portfolio.names)
+    assert len(parent.names) == 10
+    assert len(child.names) == 11
+    assert len(names) + len(parent.names) == 103
+    assert len(names) + len(child.names) == 104
 
 
 def _variable_combined(name: str = "combined_variable") -> CombinedPolicy:
