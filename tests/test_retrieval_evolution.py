@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -39,6 +40,9 @@ from evolving_loop.retrieval_agent.skill_library import (
     RetrievalSkillOperation,
     _migrate_legacy_for_operator,
 )
+
+
+_OPERATOR_AUTHORITY_KEY = b"task-8-test-operator-authority-key-32-bytes"
 
 
 def _tasks(prefix: str, count: int, *, entity_offset: int = 0) -> tuple[ContextTask, ...]:
@@ -351,11 +355,15 @@ def test_operator_checkpoint_authority_recovers_pending_commit_without_a_gap(
     authority_directory = tmp_path / "authority"
     authority_directory.mkdir(mode=0o700)
     authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
     first = b"first trusted checkpoint\n"
     first_digest = hashlib.sha256(first).hexdigest()
 
     authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
-        checkpoint, authority_path
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
     )
     token = authority.prepare(first_digest)
     checkpoint.write_bytes(first)
@@ -364,13 +372,367 @@ def test_operator_checkpoint_authority_recovers_pending_commit_without_a_gap(
     pending = json.loads(authority_path.read_text(encoding="utf-8"))
     assert pending["pending"]["checkpoint_sha256"] == first_digest
     reopened = evolution_module._open_retrieval_checkpoint_authority_for_operator(
-        checkpoint, authority_path
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
     )
     reopened.close()
     committed = json.loads(authority_path.read_text(encoding="utf-8"))
     assert committed["checkpoint_sha256"] == first_digest
     assert committed["authority_epoch"] == token.authority_epoch
     assert committed["pending"] is None
+
+
+def test_operator_checkpoint_authority_rejects_fabricated_protected_journal(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    checkpoint.write_bytes(b"caller checkpoint\n")
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    authority_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "checkpoint_path": str(checkpoint.resolve()),
+                "checkpoint_sha256": digest,
+                "authority_epoch": 9,
+                "authority_head": "1" * 64,
+                "pending": None,
+                "journal_mac": "2" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+    authority_head_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "checkpoint_path": str(checkpoint.resolve()),
+                "checkpoint_sha256": digest,
+                "authority_epoch": 9,
+                "authority_head": "1" * 64,
+                "head_mac": "3" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+    authority_path.chmod(0o600)
+    authority_head_path.chmod(0o600)
+
+    with pytest.raises(RetrievalCheckpointError, match="authentic|authority"):
+        evolution_module._open_retrieval_checkpoint_authority_for_operator(
+            checkpoint,
+            authority_path,
+            authority_head_path,
+            authentication_key=_OPERATOR_AUTHORITY_KEY,
+        )
+
+
+def test_operator_checkpoint_authority_rejects_missing_or_wrong_key(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+    )
+    encoded = b"trusted checkpoint\n"
+    token = authority.prepare(hashlib.sha256(encoded).hexdigest())
+    checkpoint.write_bytes(encoded)
+    authority.commit(token)
+    authority.close()
+
+    with pytest.raises(RetrievalCheckpointError, match="key|authentic|authority"):
+        evolution_module._open_retrieval_checkpoint_authority_for_operator(
+            checkpoint,
+            authority_path,
+            authority_head_path,
+            authentication_key=None,
+        )
+    with pytest.raises(RetrievalCheckpointError, match="authentic|authority"):
+        evolution_module._open_retrieval_checkpoint_authority_for_operator(
+            checkpoint,
+            authority_path,
+            authority_head_path,
+            authentication_key=b"wrong-task-8-operator-authority-key-32",
+        )
+
+
+def test_operator_checkpoint_authority_rejects_replayed_old_epoch(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+    )
+    first = b"first trusted checkpoint\n"
+    token = authority.prepare(hashlib.sha256(first).hexdigest())
+    checkpoint.write_bytes(first)
+    authority.commit(token)
+    old_journal = authority_path.read_bytes()
+
+    second = b"second trusted checkpoint\n"
+    token = authority.prepare(hashlib.sha256(second).hexdigest())
+    checkpoint.write_bytes(second)
+    authority.commit(token)
+    authority.close()
+    current_head = authority_head_path.read_bytes()
+
+    authority_path.write_bytes(old_journal)
+    with pytest.raises(RetrievalCheckpointError, match="replay|head|epoch|authority"):
+        evolution_module._open_retrieval_checkpoint_authority_for_operator(
+            checkpoint,
+            authority_path,
+            authority_head_path,
+            authentication_key=_OPERATOR_AUTHORITY_KEY,
+        )
+    assert authority_head_path.read_bytes() == current_head
+
+
+def test_operator_checkpoint_authority_never_persists_secret_key(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+    )
+    encoded = b"trusted checkpoint\n"
+    token = authority.prepare(hashlib.sha256(encoded).hexdigest())
+    checkpoint.write_bytes(encoded)
+    authority.commit(token)
+    authority.close()
+
+    persisted = authority_path.read_bytes() + authority_head_path.read_bytes()
+    assert _OPERATOR_AUTHORITY_KEY not in persisted
+
+
+def test_operator_checkpoint_authority_does_not_overwrite_replaced_journal(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+    )
+    first = b"first trusted checkpoint\n"
+    token = authority.prepare(hashlib.sha256(first).hexdigest())
+    checkpoint.write_bytes(first)
+    authority.commit(token)
+    displaced = authority_directory / "displaced-owned-journal.json"
+    authority_path.rename(displaced)
+    foreign = b"foreign journal replacement must survive\n"
+    authority_path.write_bytes(foreign)
+
+    with pytest.raises(RetrievalCheckpointError, match="changed|identity|replacement"):
+        authority.prepare(hashlib.sha256(b"second checkpoint\n").hexdigest())
+    authority.close()
+
+    assert authority_path.read_bytes() == foreign
+    assert displaced.read_bytes() != foreign
+
+
+def test_operator_checkpoint_authority_does_not_overwrite_replaced_head(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+    )
+    first = b"first trusted checkpoint\n"
+    token = authority.prepare(hashlib.sha256(first).hexdigest())
+    checkpoint.write_bytes(first)
+    authority.commit(token)
+    second = b"second trusted checkpoint\n"
+    token = authority.prepare(hashlib.sha256(second).hexdigest())
+    checkpoint.write_bytes(second)
+    displaced = authority_directory / "displaced-owned-head.json"
+    authority_head_path.rename(displaced)
+    foreign = b"foreign head replacement must survive\n"
+    authority_head_path.write_bytes(foreign)
+
+    with pytest.raises(RetrievalCheckpointError, match="changed|identity|replacement"):
+        authority.commit(token)
+    authority.close()
+
+    assert authority_head_path.read_bytes() == foreign
+    assert displaced.read_bytes() != foreign
+
+
+def test_operator_checkpoint_authority_rejects_same_bytes_new_checkpoint_inode(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+    )
+    first = b"first trusted checkpoint\n"
+    token = authority.prepare(hashlib.sha256(first).hexdigest())
+    checkpoint.write_bytes(first)
+    authority.commit(token)
+    displaced = checkpoint.with_name("displaced-checkpoint.json")
+    checkpoint.rename(displaced)
+    checkpoint.write_bytes(first)
+
+    with pytest.raises(RetrievalCheckpointError, match="changed|identity|replacement"):
+        authority.prepare(hashlib.sha256(b"second checkpoint\n").hexdigest())
+    authority.close()
+
+    assert checkpoint.read_bytes() == first
+    assert checkpoint.stat().st_ino != displaced.stat().st_ino
+
+
+def test_operator_checkpoint_authority_rejects_record_replacement_after_preflight(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+    )
+    encoded = b"trusted checkpoint\n"
+    token = authority.prepare(hashlib.sha256(encoded).hexdigest())
+    checkpoint.write_bytes(encoded)
+    authority.commit(token)
+    authority.close()
+    expected_checkpoint_identity = (
+        checkpoint.stat().st_dev,
+        checkpoint.stat().st_ino,
+    )
+    expected_authority_identity = (
+        authority_path.stat().st_dev,
+        authority_path.stat().st_ino,
+    )
+    expected_head_identity = (
+        authority_head_path.stat().st_dev,
+        authority_head_path.stat().st_ino,
+    )
+    displaced = authority_directory / "displaced-authority.json"
+    authority_path.rename(displaced)
+    authority_path.write_bytes(displaced.read_bytes())
+    authority_path.chmod(0o600)
+
+    with pytest.raises(RetrievalCheckpointError, match="changed|identity|replacement"):
+        evolution_module._open_retrieval_checkpoint_authority_for_operator(
+            checkpoint,
+            authority_path,
+            authority_head_path,
+            authentication_key=_OPERATOR_AUTHORITY_KEY,
+            expected_checkpoint_identity=expected_checkpoint_identity,
+            expected_authority_identity=expected_authority_identity,
+            expected_head_identity=expected_head_identity,
+        )
+
+    assert authority_path.read_bytes() == displaced.read_bytes()
+    assert authority_path.stat().st_ino != displaced.stat().st_ino
+
+
+def test_checkpoint_writer_quarantines_then_rejects_a_foreign_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkpoint = tmp_path / "checkpoint.json"
+    engine, _llm = _engine(_FakeEvaluator(), [], checkpoint_path=checkpoint)
+    parent = RetrievalGenome.seed()
+    engine._original_parent = parent
+    engine._current_parent = parent
+    engine._scientific_inputs = {"frozen": True}
+    engine._save_checkpoint(status="running", result=None)
+    owned = checkpoint.read_bytes()
+    displaced = checkpoint.with_name("displaced-owned-checkpoint.json")
+    foreign = b"foreign checkpoint replacement must survive\n"
+    real_move = evolution_module._move_artifact_entry_to_quarantine
+    replacement_installed = False
+
+    def replace_immediately_before_quarantine(parent_descriptor, name):
+        nonlocal replacement_installed
+        if name == checkpoint.name and not replacement_installed:
+            replacement_installed = True
+            os.rename(
+                name,
+                displaced.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+            descriptor = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(foreign)
+        return real_move(parent_descriptor, name)
+
+    monkeypatch.setattr(
+        evolution_module,
+        "_move_artifact_entry_to_quarantine",
+        replace_immediately_before_quarantine,
+    )
+
+    with pytest.raises(RetrievalCheckpointError, match="changed|identity|replacement"):
+        engine._save_checkpoint(status="running", result=None)
+
+    assert replacement_installed
+    assert checkpoint.read_bytes() == foreign
+    assert displaced.read_bytes() == owned
 
 
 def test_caller_authored_adjacent_checkpoint_sidecar_cannot_activate(
@@ -394,7 +756,10 @@ def test_caller_authored_adjacent_checkpoint_sidecar_cannot_activate(
 
     with pytest.raises(RetrievalCheckpointError, match="adjacent|independent|authority"):
         evolution_module._open_retrieval_checkpoint_authority_for_operator(
-            checkpoint, authority
+            checkpoint,
+            authority,
+            tmp_path / "checkpoint.authority.head.json",
+            authentication_key=_OPERATOR_AUTHORITY_KEY,
         )
 
 
@@ -1585,21 +1950,22 @@ def test_checkpoint_failure_retains_a_replacement_at_the_unique_temporary_name(
     engine._original_parent = parent
     engine._current_parent = parent
     engine._scientific_inputs = {}
-    real_link = evolution_module.os.link
+    real_publish = evolution_module._rename_artifact_entry_noreplace
     temporary_name: str | None = None
     displaced_name = ".owned-checkpoint-displaced.tmp"
     foreign_bytes = b"foreign replacement must survive\n"
 
-    def replace_temporary_then_fail(source, destination, *args, **kwargs):
+    def replace_temporary_then_fail(
+        parent_descriptor, source, destination
+    ):
         nonlocal temporary_name
         if destination == checkpoint.name:
             temporary_name = str(source)
-            directory_fd = kwargs["src_dir_fd"]
             evolution_module.os.rename(
                 source,
                 displaced_name,
-                src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
             )
             descriptor = evolution_module.os.open(
                 source,
@@ -1607,16 +1973,20 @@ def test_checkpoint_failure_retains_a_replacement_at_the_unique_temporary_name(
                 | evolution_module.os.O_CREAT
                 | evolution_module.os.O_EXCL,
                 0o600,
-                dir_fd=directory_fd,
+                dir_fd=parent_descriptor,
             )
             with evolution_module.os.fdopen(descriptor, "wb") as handle:
                 handle.write(foreign_bytes)
             raise OSError("checkpoint publication failed after replacement")
-        return real_link(source, destination, *args, **kwargs)
+        return real_publish(parent_descriptor, source, destination)
 
-    monkeypatch.setattr(evolution_module.os, "link", replace_temporary_then_fail)
+    monkeypatch.setattr(
+        evolution_module,
+        "_rename_artifact_entry_noreplace",
+        replace_temporary_then_fail,
+    )
 
-    with pytest.raises(OSError, match="publication failed"):
+    with pytest.raises(RetrievalCheckpointError, match="publication"):
         engine._save_checkpoint(status="running", result=None)
 
     assert temporary_name is not None
@@ -1669,9 +2039,9 @@ def test_checkpoint_read_rejects_parent_replacement_at_file_open(
     assert swapped
 
 
-@pytest.mark.parametrize("operation", ("link", "replace"))
+@pytest.mark.parametrize("existing", (False, True))
 def test_checkpoint_commit_rejects_parent_replacement_at_entry_operation(
-    tmp_path, monkeypatch, operation
+    tmp_path, monkeypatch, existing
 ) -> None:
     run_directory = tmp_path / "run"
     run_directory.mkdir()
@@ -1684,35 +2054,32 @@ def test_checkpoint_commit_rejects_parent_replacement_at_entry_operation(
     engine._scientific_inputs = {"science": "frozen"}
     engine._original_parent = RetrievalGenome.seed()
     engine._current_parent = RetrievalGenome.seed()
-    if operation == "replace":
+    if existing:
         engine._save_checkpoint(status="running", result=None)
 
     replacement = tmp_path / "replacement"
     replacement.mkdir()
-    if operation == "replace":
+    if existing:
         (replacement / checkpoint.name).write_text(
             "do-not-touch", encoding="utf-8"
         )
     displaced = tmp_path / "displaced"
-    real_operation = getattr(evolution_module.os, operation)
+    real_operation = evolution_module._rename_artifact_entry_noreplace
     swapped = False
 
-    def swap_before_entry_operation(source, destination, *args, **kwargs):
+    def swap_before_entry_operation(
+        parent_descriptor, source, destination
+    ):
         nonlocal swapped
         if not swapped:
             swapped = True
             run_directory.rename(displaced)
             replacement.rename(run_directory)
-            if kwargs.get("src_dir_fd") is None:
-                shutil.copyfile(
-                    displaced / Path(source).name,
-                    run_directory / Path(source).name,
-                )
-        return real_operation(source, destination, *args, **kwargs)
+        return real_operation(parent_descriptor, source, destination)
 
     monkeypatch.setattr(
-        evolution_module.os,
-        operation,
+        evolution_module,
+        "_rename_artifact_entry_noreplace",
         swap_before_entry_operation,
     )
     engine._trace.append({"kind": "force_distinct_checkpoint_bytes"})
@@ -1723,7 +2090,7 @@ def test_checkpoint_commit_rejects_parent_replacement_at_entry_operation(
     ):
         engine._save_checkpoint(status="running", result=None)
     assert swapped
-    if operation == "replace":
+    if existing:
         assert checkpoint.read_text(encoding="utf-8") == "do-not-touch"
     else:
         assert not checkpoint.exists()

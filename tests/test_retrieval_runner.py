@@ -25,6 +25,10 @@ def test_retrieval_runner_is_executable_bash_and_dispatches_exact_command(tmp_pa
     )
     fake_python.chmod(0o755)
     authority_path = tmp_path / "authority with spaces" / "checkpoint.json"
+    authority_head_path = (
+        tmp_path / "authority with spaces" / "checkpoint.head.json"
+    )
+    authority_key = "task-8-runner-operator-authority-key-32-bytes"
     environment = {
         **os.environ,
         "PATH": f"{binary}{os.pathsep}{os.environ['PATH']}",
@@ -35,6 +39,8 @@ def test_retrieval_runner_is_executable_bash_and_dispatches_exact_command(tmp_pa
         "EFFORT": "medium",
         "RUN_DIR": "run with spaces",
         "AUTHORITY_PATH": str(authority_path),
+        "AUTHORITY_HEAD_PATH": str(authority_head_path),
+        "RETRIEVAL_CHECKPOINT_AUTHORITY_KEY": authority_key,
     }
     completed = subprocess.run(
         [str(RUNNER)],
@@ -72,6 +78,8 @@ def test_retrieval_runner_is_executable_bash_and_dispatches_exact_command(tmp_pa
         "run with spaces",
         "--checkpoint-authority-path",
         str(authority_path),
+        "--checkpoint-authority-head-path",
+        str(authority_head_path),
         "--checkpoint-path",
         "run with spaces/checkpoint.json",
         "--progress-path",
@@ -83,5 +91,28 @@ def test_retrieval_runner_is_executable_bash_and_dispatches_exact_command(tmp_pa
     ]
     assert "python -m evolving_loop.cli" in completed.stdout
     assert "--evolution retrieval" in completed.stdout
+    assert authority_key not in completed.stdout
+    assert authority_key not in capture.read_text(encoding="utf-8")
     assert authority_path.parent.is_dir()
     assert stat.S_IMODE(authority_path.parent.stat().st_mode) == 0o700
+
+
+def test_retrieval_runner_fails_closed_without_operator_authority_key(
+    tmp_path: Path,
+) -> None:
+    environment = {
+        **os.environ,
+        "AUTHORITY_PATH": str(tmp_path / "authority" / "checkpoint.json"),
+    }
+    environment.pop("RETRIEVAL_CHECKPOINT_AUTHORITY_KEY", None)
+
+    completed = subprocess.run(
+        [str(RUNNER)],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert "authority key" in completed.stderr.lower()

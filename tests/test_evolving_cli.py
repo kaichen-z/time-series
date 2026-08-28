@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -868,6 +869,9 @@ def test_retrieval_evolution_publishes_only_accepted_release_and_keeps_traces_in
     authority_directory = tmp_path / "authority"
     authority_directory.mkdir(mode=0o700)
     authority_path = authority_directory / "checkpoint.json"
+    authority_head_path = authority_directory / "checkpoint.head.json"
+    operator_key = "task-8-cli-operator-authority-key-32-bytes"
+    monkeypatch.setenv("RETRIEVAL_CHECKPOINT_AUTHORITY_KEY", operator_key)
     policy_path = runs / "best_policy.json"
     if not accepted:
         policy_path.parent.mkdir(parents=True)
@@ -896,6 +900,8 @@ def test_retrieval_evolution_publishes_only_accepted_release_and_keeps_traces_in
             str(runs),
             "--checkpoint-authority-path",
             str(authority_path),
+            "--checkpoint-authority-head-path",
+            str(authority_head_path),
         ]
     )
     args.evolution_mode = "retrieval"
@@ -926,6 +932,14 @@ def test_retrieval_evolution_publishes_only_accepted_release_and_keeps_traces_in
     ).hexdigest()
     assert authority["authority_epoch"] == 1
     assert authority["pending"] is None
+    assert authority["schema_version"] == 3
+    assert authority_head_path.is_file()
+    persisted_authority = (
+        authority_path.read_text(encoding="utf-8")
+        + authority_head_path.read_text(encoding="utf-8")
+    )
+    assert operator_key not in persisted_authority
+    assert operator_key not in json.dumps(output)
     trace = json.loads((runs / "evolution_trace.json").read_text(encoding="utf-8"))
     public_ids = set(manifest["partitions"]["public_test"]["task_ids"])
     encoded_trace = json.dumps(trace)
@@ -1459,6 +1473,8 @@ def test_retrieval_path_collision_is_rejected_before_task_loading(
             str(run_root / "checkpoint.json"),
             "--checkpoint-authority-path",
             str(authority),
+            "--checkpoint-authority-head-path",
+            str(authority.with_name("checkpoint.head.json")),
         ]
     )
     args.run_root = str(run_root)
@@ -1473,6 +1489,132 @@ def test_retrieval_path_collision_is_rejected_before_task_loading(
 
     with pytest.raises(ValueError, match="path|disjoint|collision"):
         cli_module._retrieval_evolve_command(args)
+
+
+def _retrieval_security_paths(tmp_path: Path) -> SimpleNamespace:
+    run_root = tmp_path / "runs" / "formal"
+    authority_root = tmp_path / "authority"
+    return SimpleNamespace(
+        trace_path=str(run_root / "trace.json"),
+        run_root=str(run_root),
+        checkpoint_path=str(run_root / "checkpoint.json"),
+        progress_path=str(run_root / "progress.jsonl"),
+        policy_path=str(run_root / "policy.json"),
+        checkpoint_authority_path=str(authority_root / "checkpoint.json"),
+        checkpoint_authority_head_path=str(
+            authority_root / "checkpoint.head.json"
+        ),
+        tasks_file=str(tmp_path / "inputs" / "tasks.jsonl"),
+        split_manifest=str(tmp_path / "inputs" / "split.json"),
+        retrieval_release_path=str(tmp_path / "releases" / "v000"),
+        library_path=str(tmp_path / "libraries" / "coding.json"),
+        retrieval_library_path=str(
+            tmp_path / "libraries" / "retrieval.json"
+        ),
+        decision_library_path=str(tmp_path / "libraries" / "decision.json"),
+        seed_policy_path=None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("left_name", "right_name"),
+    (("trace_path", "policy_path"), ("checkpoint_path", "progress_path")),
+)
+def test_retrieval_output_hard_link_aliases_are_rejected_before_writes(
+    tmp_path: Path, left_name: str, right_name: str
+) -> None:
+    args = _retrieval_security_paths(tmp_path)
+    left = Path(getattr(args, left_name))
+    right = Path(getattr(args, right_name))
+    left.parent.mkdir(parents=True)
+    left.write_bytes(b"shared output inode\n")
+    os.link(left, right)
+
+    with pytest.raises(ValueError, match="alias|inode|identity|hard"):
+        cli_module._validate_retrieval_evolution_paths(args)
+
+
+def test_retrieval_output_rejects_hard_link_to_symlinked_protected_input(
+    tmp_path: Path,
+) -> None:
+    args = _retrieval_security_paths(tmp_path)
+    real_tasks = tmp_path / "protected" / "real-tasks.jsonl"
+    real_tasks.parent.mkdir(parents=True)
+    real_tasks.write_bytes(b"protected task bytes\n")
+    tasks_alias = Path(args.tasks_file)
+    tasks_alias.parent.mkdir(parents=True)
+    tasks_alias.symlink_to(real_tasks)
+    trace = Path(args.trace_path)
+    trace.parent.mkdir(parents=True)
+    os.link(real_tasks, trace)
+
+    with pytest.raises(ValueError, match="alias|inode|identity|hard"):
+        cli_module._validate_retrieval_evolution_paths(args)
+
+
+def test_retrieval_output_rejects_hard_link_to_release_artifact(
+    tmp_path: Path,
+) -> None:
+    args = _retrieval_security_paths(tmp_path)
+    release_manifest = Path(args.retrieval_release_path) / "manifest.json"
+    release_manifest.parent.mkdir(parents=True)
+    release_manifest.write_bytes(b"protected release manifest\n")
+    trace = Path(args.trace_path)
+    trace.parent.mkdir(parents=True)
+    os.link(release_manifest, trace)
+
+    with pytest.raises(ValueError, match="alias|inode|identity|hard|release"):
+        cli_module._validate_retrieval_evolution_paths(args)
+
+
+@pytest.mark.parametrize(
+    "protected_name",
+    (
+        "split_manifest",
+        "library_path",
+        "retrieval_library_path",
+        "decision_library_path",
+        "checkpoint_authority_path",
+        "checkpoint_authority_head_path",
+    ),
+)
+def test_retrieval_output_rejects_hard_link_to_every_protected_record(
+    tmp_path: Path, protected_name: str
+) -> None:
+    args = _retrieval_security_paths(tmp_path)
+    protected = Path(getattr(args, protected_name))
+    protected.parent.mkdir(parents=True, exist_ok=True)
+    protected.write_bytes(b"protected artifact inode\n")
+    trace = Path(args.trace_path)
+    trace.parent.mkdir(parents=True, exist_ok=True)
+    os.link(protected, trace)
+
+    with pytest.raises(ValueError, match="alias|inode|identity|hard"):
+        cli_module._validate_retrieval_evolution_paths(args)
+
+
+def test_retrieval_output_writer_rejects_replacement_after_path_validation(
+    tmp_path: Path,
+) -> None:
+    args = _retrieval_security_paths(tmp_path)
+    trace = Path(args.trace_path)
+    trace.parent.mkdir(parents=True)
+    trace.write_bytes(b"owned prior trace\n")
+    validated = cli_module._validate_retrieval_evolution_paths(args)
+    displaced = trace.with_name("displaced-owned-trace.json")
+    trace.rename(displaced)
+    foreign = b"foreign replacement must survive\n"
+    trace.write_bytes(foreign)
+
+    with pytest.raises(ValueError, match="changed|identity|replacement"):
+        cli_module._write_json_artifact(
+            trace,
+            {"safe": True},
+            expected_identity=validated["output_identities"]["trace"],
+        )
+
+    assert trace.read_bytes() == foreign
+    assert displaced.read_bytes() == b"owned prior trace\n"
 
 
 def test_retrieval_output_symlink_cannot_escape_approved_run_root(
@@ -1501,6 +1643,8 @@ def test_retrieval_output_symlink_cannot_escape_approved_run_root(
             str(run_root / "checkpoint.json"),
             "--checkpoint-authority-path",
             str(tmp_path / "authority" / "checkpoint.json"),
+            "--checkpoint-authority-head-path",
+            str(tmp_path / "authority" / "checkpoint.head.json"),
         ]
     )
     args.run_root = str(run_root)
@@ -1540,6 +1684,8 @@ def test_retrieval_authority_cannot_live_inside_a_release_or_library(
             str(run_root / "checkpoint.json"),
             "--checkpoint-authority-path",
             str(release / "authority.json"),
+            "--checkpoint-authority-head-path",
+            str(release / "authority.head.json"),
         ]
     )
     args.run_root = str(run_root)
@@ -1553,6 +1699,100 @@ def test_retrieval_authority_cannot_live_inside_a_release_or_library(
     )
 
     with pytest.raises(ValueError, match="authority|release|protected|collision"):
+        cli_module._retrieval_evolve_command(args)
+
+
+def test_retrieval_evolution_requires_operator_head_and_secret_before_task_loading(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_root = tmp_path / "runs" / "formal"
+    authority = tmp_path / "authority" / "checkpoint.json"
+    base_argv = [
+        "--evolution",
+        "retrieval",
+        "--tasks-file",
+        str(tmp_path / "tasks.jsonl"),
+        "--split-manifest",
+        str(tmp_path / "split.json"),
+        "--retrieval-release-path",
+        str(tmp_path / "releases" / "v000"),
+        "--trace-path",
+        str(run_root / "trace.json"),
+        "--policy-path",
+        str(run_root / "policy.json"),
+        "--checkpoint-path",
+        str(run_root / "checkpoint.json"),
+        "--checkpoint-authority-path",
+        str(authority),
+    ]
+    monkeypatch.setattr(
+        cli_module,
+        "_load_retrieval_evolution_tasks",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("authority prerequisites must fail before task loading")
+        ),
+    )
+    monkeypatch.delenv("RETRIEVAL_CHECKPOINT_AUTHORITY_KEY", raising=False)
+
+    missing_head = build_parser().parse_args(base_argv)
+    missing_head.run_root = str(run_root)
+    missing_head.evolution_mode = "retrieval"
+    with pytest.raises(ValueError, match="authority.*head|head.*authority"):
+        cli_module._retrieval_evolve_command(missing_head)
+
+    missing_key = build_parser().parse_args(
+        [
+            *base_argv,
+            "--checkpoint-authority-head-path",
+            str(authority.with_name("checkpoint.head.json")),
+        ]
+    )
+    missing_key.run_root = str(run_root)
+    missing_key.evolution_mode = "retrieval"
+    with pytest.raises(ValueError, match="authority.*key|key.*authority"):
+        cli_module._retrieval_evolve_command(missing_key)
+
+
+def test_retrieval_evolution_rejects_candidate_parent_before_tasks_or_components(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate = replace(
+        RetrievalGenome.seed(),
+        version="v001",
+        parent="v000",
+        round1_prompt=RetrievalGenome.seed().round1_prompt + "\nCandidate only.",
+    )
+    candidate_release = write_retrieval_release(
+        tmp_path / "releases", candidate
+    )
+    args = _retrieval_security_paths(tmp_path)
+    args.retrieval_release_path = str(candidate_release.path)
+    args.split_manifest_sha256 = cli_module.DRCIK_PUBLIC_80_20_99_SHA256
+    args.retrieval_mode = "two-stage"
+    args.evolution_mode = "retrieval"
+    args.checkpoint_authority_key_env = (
+        "RETRIEVAL_CHECKPOINT_AUTHORITY_KEY"
+    )
+    monkeypatch.setenv(
+        "RETRIEVAL_CHECKPOINT_AUTHORITY_KEY",
+        "task-8-parent-gate-operator-key-32-bytes",
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_load_retrieval_evolution_tasks",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("candidate parent must fail before task loading")
+        ),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_components",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("candidate parent must fail before component loading")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="seed|accepted|candidate|parent"):
         cli_module._retrieval_evolve_command(args)
 
 

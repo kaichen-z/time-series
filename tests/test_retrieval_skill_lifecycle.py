@@ -1360,6 +1360,132 @@ def test_first_checkpoint_rollback_never_unlinks_the_visible_name_after_inspecti
     assert b'"explicit_window"' in quarantines[0].read_bytes()
 
 
+def test_existing_checkpoint_rollback_retains_foreign_replacement_and_old_bytes(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, library = _operator_active_checkpoint(tmp_path)
+    before = path.read_bytes()
+    parent_metadata = path.parent.stat()
+    parent_identity = (parent_metadata.st_dev, parent_metadata.st_ino)
+    foreign = b"foreign main checkpoint replacement must survive\n"
+    displaced = path.parent / "displaced-published-checkpoint.json"
+    real_fsync = skill_library_module.os.fsync
+    real_move = skill_library_module._move_artifact_entry_to_quarantine
+    failed_after_publish = False
+    replacement_installed = False
+
+    def fail_parent_fsync_after_update(descriptor: int) -> None:
+        nonlocal failed_after_publish
+        metadata = skill_library_module.os.fstat(descriptor)
+        if (
+            not failed_after_publish
+            and (metadata.st_dev, metadata.st_ino) == parent_identity
+            and path.read_bytes() != before
+        ):
+            failed_after_publish = True
+            raise OSError("parent fsync failed after existing update")
+        real_fsync(descriptor)
+
+    def replace_immediately_before_rollback(parent_descriptor, name):
+        nonlocal replacement_installed
+        if name == path.name and not replacement_installed:
+            replacement_installed = True
+            os.rename(
+                name,
+                displaced.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+            descriptor = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(foreign)
+        return real_move(parent_descriptor, name)
+
+    monkeypatch.setattr(skill_library_module.os, "fsync", fail_parent_fsync_after_update)
+    monkeypatch.setattr(
+        skill_library_module,
+        "_move_artifact_entry_to_quarantine",
+        replace_immediately_before_rollback,
+    )
+
+    with pytest.raises(RetrievalSkillError, match="rollback|bundle"):
+        library.apply_operations(
+            (
+                RetrievalSkillOperation.quarantine(
+                    "historical_skill", "unsafe historical strategy"
+                ),
+            )
+        )
+
+    assert failed_after_publish
+    assert replacement_installed
+    assert path.read_bytes() == foreign
+    assert displaced.read_bytes() != before
+    rollback_artifacts = tuple(path.parent.glob("*.rollback*.tmp"))
+    assert rollback_artifacts
+    assert any(artifact.read_bytes() == before for artifact in rollback_artifacts)
+
+
+def test_existing_checkpoint_rollback_recovers_quarantine_commit_then_raise(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, library = _operator_active_checkpoint(tmp_path)
+    before = path.read_bytes()
+    parent_metadata = path.parent.stat()
+    parent_identity = (parent_metadata.st_dev, parent_metadata.st_ino)
+    real_fsync = skill_library_module.os.fsync
+    real_rename = skill_library_module._rename_artifact_entry_noreplace
+    failed_after_publish = False
+    rename_raised_after_commit = False
+
+    def fail_parent_fsync_after_update(descriptor: int) -> None:
+        nonlocal failed_after_publish
+        metadata = skill_library_module.os.fstat(descriptor)
+        if (
+            not failed_after_publish
+            and (metadata.st_dev, metadata.st_ino) == parent_identity
+            and path.read_bytes() != before
+        ):
+            failed_after_publish = True
+            raise OSError("parent fsync failed after existing update")
+        real_fsync(descriptor)
+
+    def quarantine_then_raise(parent_descriptor, source, destination):
+        nonlocal rename_raised_after_commit
+        real_rename(parent_descriptor, source, destination)
+        if source == path.name and not rename_raised_after_commit:
+            rename_raised_after_commit = True
+            raise OSError("rollback quarantine rename raised after commit")
+
+    monkeypatch.setattr(skill_library_module.os, "fsync", fail_parent_fsync_after_update)
+    monkeypatch.setattr(
+        skill_library_module,
+        "_rename_artifact_entry_noreplace",
+        quarantine_then_raise,
+    )
+
+    with pytest.raises(OSError, match="fsync failed after existing update"):
+        library.apply_operations(
+            (
+                RetrievalSkillOperation.quarantine(
+                    "historical_skill", "unsafe historical strategy"
+                ),
+            )
+        )
+
+    assert failed_after_publish
+    assert rename_raised_after_commit
+    assert path.read_bytes() == before
+    retained = tuple(path.parent.glob(".retrieval-quarantine-*"))
+    assert retained
+    assert any(artifact.read_bytes() != before for artifact in retained)
+
+
 def test_owned_witness_cleanup_recovers_rename_that_committed_then_raised(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

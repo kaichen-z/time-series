@@ -2273,12 +2273,70 @@ class RetrievalSkillLibrary:
                             f"{safe_path.name}.rollback",
                             previous_encoded,
                         )
-                    os.replace(
-                        rollback_temporary,
-                        safe_path.name,
-                        src_dir_fd=parent_descriptor,
-                        dst_dir_fd=parent_descriptor,
+                    rollback_snapshot = _read_optional_artifact_entry_snapshot(
+                        parent_descriptor, rollback_temporary
                     )
+                    if (
+                        rollback_snapshot is None
+                        or rollback_snapshot[1] != previous_encoded
+                    ):
+                        rollback_temporary = None
+                        raise RetrievalSkillError(
+                            "retrieval Skill rollback artifact identity is unavailable"
+                        )
+                    observed = _read_optional_artifact_entry_snapshot(
+                        parent_descriptor, safe_path.name
+                    )
+                    if observed is None:
+                        rollback_temporary = None
+                        raise RetrievalSkillError(
+                            "retrieval Skill checkpoint disappeared before rollback"
+                        )
+                    try:
+                        rollback_quarantine = (
+                            _move_artifact_entry_to_quarantine(
+                                parent_descriptor, safe_path.name
+                            )
+                        )
+                    except Exception:
+                        rollback_temporary = None
+                        raise
+                    if rollback_quarantine is None:
+                        rollback_temporary = None
+                        raise RetrievalSkillError(
+                            "retrieval Skill checkpoint rollback ownership is ambiguous"
+                        )
+                    moved = _read_optional_artifact_entry_snapshot(
+                        parent_descriptor, rollback_quarantine
+                    )
+                    if moved != observed:
+                        rollback_temporary = None
+                        if moved is not None:
+                            _restore_quarantined_artifact_entry(
+                                parent_descriptor,
+                                rollback_quarantine,
+                                safe_path.name,
+                                expected_identity=moved[0],
+                            )
+                        raise RetrievalSkillError(
+                            "retrieval Skill checkpoint changed during rollback quarantine"
+                        )
+                    try:
+                        _rename_artifact_entry_noreplace(
+                            parent_descriptor,
+                            rollback_temporary,
+                            safe_path.name,
+                        )
+                    except Exception:
+                        restored = _read_optional_artifact_entry_snapshot(
+                            parent_descriptor, safe_path.name
+                        )
+                        if restored != rollback_snapshot:
+                            rollback_temporary = None
+                            raise RetrievalSkillError(
+                                "retrieval Skill checkpoint rollback name is occupied; "
+                                "rollback and quarantined entries were retained"
+                            )
                     rollback_temporary = None
                 if previous_encoded is not None and (
                     _read_optional_artifact_entry(parent_descriptor, safe_path.name)

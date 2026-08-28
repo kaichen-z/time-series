@@ -48,6 +48,9 @@ from evolving_loop.retrieval_agent.skill_library import (
     RetrievalSkill,
     RetrievalSkillLibrary,
     _load_verified_checkpoint_for_operator,
+    _move_artifact_entry_to_quarantine,
+    _rename_artifact_entry_noreplace,
+    _restore_quarantined_artifact_entry,
 )
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 from evolving_loop.skill_learning import OutcomeSkillLearner
@@ -69,7 +72,10 @@ from evolving_loop.retrieval_agent.evolution import (
     RetrievalEvolutionResult,
     RetrievalForecastingFailure,
     RetrievalGenerationTrace,
+    _open_checkpoint_parent,
     _open_retrieval_checkpoint_authority_for_operator,
+    _revalidate_checkpoint_parent,
+    _unique_checkpoint_temporary,
 )
 from common.tsfm import ChronosConfig, ChronosForecaster
 
@@ -93,6 +99,9 @@ EVOLUTION_CHOICES = ("prompt", "genome", "source", "retrieval")
 INFERENCE_CHOICES = EVOLUTION_CHOICES
 DRCIK_PUBLIC_80_20_99_SHA256 = (
     "3cc81f45878c1aae93e5ba48dc367df6553698db6661dbe06fbe5efb06afca92"
+)
+RETRIEVAL_CHECKPOINT_AUTHORITY_KEY_ENV = (
+    "RETRIEVAL_CHECKPOINT_AUTHORITY_KEY"
 )
 _FROZEN_RETRIEVAL_MANIFEST_METADATA = {
     "dataset": "ServiceNow/Dr-CiK",
@@ -230,6 +239,16 @@ def _add_retrieval_evolution_controls(parser: argparse.ArgumentParser) -> None:
         "--checkpoint-authority-path",
         default=None,
         help="Out-of-band trusted digest/epoch record used for checkpoint resume.",
+    )
+    parser.add_argument(
+        "--checkpoint-authority-head-path",
+        default=None,
+        help="Protected monotonic head for the authenticated checkpoint journal.",
+    )
+    parser.add_argument(
+        "--checkpoint-authority-key-env",
+        default=RETRIEVAL_CHECKPOINT_AUTHORITY_KEY_ENV,
+        help="Environment variable holding the operator authority key.",
     )
 
 
@@ -952,11 +971,9 @@ def _policy_with_retrieval_release(
     )
 
 
-def _policy_for_retrieval_release(
-    policy: HarnessPolicy,
+def _require_authorized_retrieval_release_state(
     release: RetrievalRelease,
-) -> HarnessPolicy:
-    """Bind legacy v000 policies; require accepted policies to carry exact payloads."""
+) -> None:
     version = release.genome.version
     state = release.manifest["state"]
     if not (
@@ -964,8 +981,16 @@ def _policy_for_retrieval_release(
         or (version != "v000" and state == "accepted")
     ):
         raise ValueError(
-            "frozen Retrieval inference permits only the v000 seed or an accepted release state"
+            "Retrieval permits only the v000 seed or an authorized accepted release state"
         )
+
+
+def _policy_for_retrieval_release(
+    policy: HarnessPolicy,
+    release: RetrievalRelease,
+) -> HarnessPolicy:
+    """Bind legacy v000 policies; require accepted policies to carry exact payloads."""
+    _require_authorized_retrieval_release_state(release)
     expected = _policy_with_retrieval_release(
         policy, release, changelog=policy.changelog
     )
@@ -1514,6 +1539,25 @@ def _checkpoint_authority_path(args, checkpoint_path: Path) -> Path:
     return authority
 
 
+def _checkpoint_authority_key(args) -> bytes:
+    environment_name = getattr(
+        args,
+        "checkpoint_authority_key_env",
+        RETRIEVAL_CHECKPOINT_AUTHORITY_KEY_ENV,
+    )
+    if (
+        type(environment_name) is not str
+        or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", environment_name)
+    ):
+        raise ValueError("Retrieval checkpoint authority key environment is invalid")
+    supplied = os.environ.get(environment_name)
+    if supplied is None or len(supplied.encode("utf-8")) < 32:
+        raise ValueError(
+            "Retrieval checkpoint authority key is missing or too short"
+        )
+    return supplied.encode("utf-8")
+
+
 def _restore_retrieval_checkpoint_authority(
     checkpoint_path: Path,
     authority_path: Path,
@@ -2005,11 +2049,101 @@ def _validate_retrieval_checkpoint_payload(
         )
 
 
-def _write_json_artifact(path: Path, payload: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
-        encoding="utf-8",
+def _cli_entry_snapshot(
+    parent_descriptor: int, name: str
+) -> tuple[tuple[int, int], bytes] | None:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor, "rb") as handle:
+        metadata = os.fstat(handle.fileno())
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("Retrieval output target is not a regular file")
+        return (metadata.st_dev, metadata.st_ino), handle.read()
+
+
+def _publish_retrieval_output_bytes(
+    path: Path,
+    encoded: bytes,
+    *,
+    expected_identity: tuple[int, int] | None,
+) -> None:
+    safe, parent_descriptor = _open_checkpoint_parent(path, create=True)
+    temporary: str | None = None
+    quarantine: str | None = None
+    try:
+        _revalidate_checkpoint_parent(safe, parent_descriptor)
+        current = _cli_entry_snapshot(parent_descriptor, safe.name)
+        current_identity = current[0] if current is not None else None
+        if current_identity != expected_identity:
+            raise ValueError(
+                "Retrieval output identity changed after path validation"
+            )
+        temporary = _unique_checkpoint_temporary(
+            parent_descriptor, safe.name, encoded
+        )
+        staged = _cli_entry_snapshot(parent_descriptor, temporary)
+        if staged is None or staged[1] != encoded:
+            raise ValueError("Retrieval output staging identity is unavailable")
+        staged_identity = staged[0]
+        if expected_identity is not None:
+            quarantine = _move_artifact_entry_to_quarantine(
+                parent_descriptor, safe.name
+            )
+            if quarantine is None:
+                raise ValueError(
+                    "Retrieval output disappeared during guarded publication"
+                )
+            moved = _cli_entry_snapshot(parent_descriptor, quarantine)
+            if moved is None or moved[0] != expected_identity:
+                if moved is not None:
+                    _restore_quarantined_artifact_entry(
+                        parent_descriptor,
+                        quarantine,
+                        safe.name,
+                        expected_identity=moved[0],
+                    )
+                raise ValueError(
+                    "Retrieval output replacement was quarantined during publication"
+                )
+        _revalidate_checkpoint_parent(safe, parent_descriptor)
+        try:
+            _rename_artifact_entry_noreplace(
+                parent_descriptor, temporary, safe.name
+            )
+        except Exception:
+            published = _cli_entry_snapshot(parent_descriptor, safe.name)
+            if published is None or published[0] != staged_identity:
+                raise
+        temporary = None
+        published = _cli_entry_snapshot(parent_descriptor, safe.name)
+        if published != (staged_identity, encoded):
+            raise ValueError("Retrieval output publication verification failed")
+        os.fsync(parent_descriptor)
+        _revalidate_checkpoint_parent(safe, parent_descriptor)
+    finally:
+        # Unique unpublished and quarantine names are retained on uncertainty;
+        # deleting either by name after an ownership check can remove a replacement.
+        os.close(parent_descriptor)
+
+
+def _write_json_artifact(
+    path: Path,
+    payload: object,
+    *,
+    expected_identity: tuple[int, int] | None,
+) -> None:
+    encoded = (
+        json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    _publish_retrieval_output_bytes(
+        path, encoded, expected_identity=expected_identity
     )
 
 
@@ -2024,7 +2158,21 @@ def _paths_overlap(left: Path, right: Path) -> bool:
     return left == right or left in right.parents or right in left.parents
 
 
-def _validate_retrieval_evolution_paths(args) -> dict[str, Path]:
+def _existing_cli_path_identity(
+    path: Path, label: str
+) -> tuple[int, int] | None:
+    try:
+        metadata = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ValueError(f"cannot inspect {label} path identity") from error
+    if stat.S_ISLNK(metadata.st_mode):
+        raise ValueError(f"{label} path identity is a symlink")
+    return metadata.st_dev, metadata.st_ino
+
+
+def _validate_retrieval_evolution_paths(args) -> dict[str, object]:
     trace = _canonical_cli_path(args.trace_path, "trace")
     run_root = _canonical_cli_path(
         args.run_root if getattr(args, "run_root", None) else trace.parent,
@@ -2049,6 +2197,24 @@ def _validate_retrieval_evolution_paths(args) -> dict[str, Path]:
             "Retrieval evolution requires an independently provisioned --checkpoint-authority-path"
         )
     authority = _canonical_cli_path(configured_authority, "checkpoint authority")
+    configured_authority_head = getattr(
+        args, "checkpoint_authority_head_path", None
+    )
+    if not configured_authority_head:
+        raise ValueError(
+            "Retrieval evolution requires an independently provisioned "
+            "--checkpoint-authority-head-path"
+        )
+    authority_head = _canonical_cli_path(
+        configured_authority_head, "checkpoint authority head"
+    )
+    if (
+        authority_head == authority
+        or authority_head.parent != authority.parent
+    ):
+        raise ValueError(
+            "checkpoint authority journal and head must be distinct protected records"
+        )
     outputs = {
         "checkpoint": checkpoint,
         "progress": progress,
@@ -2065,9 +2231,12 @@ def _validate_retrieval_evolution_paths(args) -> dict[str, Path]:
                 raise ValueError(
                     f"Retrieval output paths must be pairwise disjoint: {left_label}/{right_label}"
                 )
-    if authority == run_root or run_root in authority.parents:
+    if any(
+        path == run_root or run_root in path.parents
+        for path in (authority, authority_head)
+    ):
         raise ValueError(
-            "checkpoint authority must be outside the approved run root"
+            "checkpoint authority records must be outside the approved run root"
         )
     protected_inputs: list[tuple[str, Path]] = [
         ("tasks", _canonical_cli_path(args.tasks_file, "tasks")),
@@ -2086,6 +2255,7 @@ def _validate_retrieval_evolution_paths(args) -> dict[str, Path]:
             _canonical_cli_path(args.decision_library_path, "Decision library"),
         ),
         ("checkpoint authority", authority),
+        ("checkpoint authority head", authority_head),
     ]
     if getattr(args, "seed_policy_path", None):
         protected_inputs.append(
@@ -2096,23 +2266,63 @@ def _validate_retrieval_evolution_paths(args) -> dict[str, Path]:
         )
     release_root = protected_inputs[2][1].parent
     protected_inputs.append(("Retrieval release root", release_root))
-    for input_label, input_path in protected_inputs:
-        if input_label != "checkpoint authority" and _paths_overlap(
-            authority, input_path
-        ):
-            raise ValueError(
-                f"checkpoint authority collides with protected {input_label} path"
+    release_path = protected_inputs[2][1]
+    for artifact_name in (
+        "genome.json",
+        "round1_prompt.md",
+        "round2_prompt.md",
+        "skills.json",
+        "manifest.json",
+    ):
+        protected_inputs.append(
+            (
+                f"Retrieval release artifact {artifact_name}",
+                release_path / artifact_name,
             )
+        )
+    for input_label, input_path in protected_inputs:
+        if input_label not in {
+            "checkpoint authority",
+            "checkpoint authority head",
+        }:
+            for record in (authority, authority_head):
+                if _paths_overlap(record, input_path):
+                    raise ValueError(
+                        "checkpoint authority collides with protected "
+                        f"{input_label} path"
+                    )
     for output_label, output_path in outputs.items():
         for input_label, input_path in protected_inputs:
             if _paths_overlap(output_path, input_path):
                 raise ValueError(
                     f"{output_label} path collides with protected {input_label} path"
                 )
+    identities: dict[tuple[int, int], tuple[str, Path]] = {}
+    output_identities: dict[str, tuple[int, int] | None] = {}
+    protected_identities: dict[str, tuple[int, int] | None] = {}
+    for label, path in (*outputs.items(), *protected_inputs):
+        identity = _existing_cli_path_identity(path, label)
+        if label in outputs:
+            output_identities[label] = identity
+        else:
+            protected_identities[label] = identity
+        if identity is None:
+            continue
+        prior = identities.get(identity)
+        if prior is not None:
+            prior_label, prior_path = prior
+            raise ValueError(
+                "Retrieval paths are inode aliases: "
+                f"{prior_label} ({prior_path}) / {label} ({path})"
+            )
+        identities[identity] = (label, path)
     return {
         **outputs,
         "run_root": run_root,
         "authority": authority,
+        "authority_head": authority_head,
+        "output_identities": output_identities,
+        "protected_identities": protected_identities,
     }
 
 
@@ -2128,6 +2338,15 @@ def _retrieval_evolve_command(args) -> dict:
     args.policy_path = str(validated_paths["policy"])
     args.checkpoint_path = str(validated_paths["checkpoint"])
     args.checkpoint_authority_path = str(validated_paths["authority"])
+    args.checkpoint_authority_head_path = str(
+        validated_paths["authority_head"]
+    )
+    authority_key = _checkpoint_authority_key(args)
+    parent_release = _load_retrieval_release_for_operator(
+        args.retrieval_release_path
+    )
+    _require_authorized_retrieval_release_state(parent_release)
+    parent_library = RetrievalSkillLibrary._from_loaded_release(parent_release)
     train, dev, split_sha256, public_ids = _load_retrieval_evolution_tasks(
         args.tasks_file,
         args.split_manifest,
@@ -2139,9 +2358,6 @@ def _retrieval_evolve_command(args) -> dict:
             "Public Regression tasks cannot enter Retrieval evolution"
         )
 
-    parent_release = _load_retrieval_release_for_operator(
-        args.retrieval_release_path
-    )
     _assert_no_public_regression_ids(
         {
             "genome": parent_release.genome.to_payload(),
@@ -2150,7 +2366,6 @@ def _retrieval_evolve_command(args) -> dict:
         },
         public_ids,
     )
-    parent_library = RetrievalSkillLibrary._from_loaded_release(parent_release)
     base_policy = _seed_policy(args)
     if base_policy.retrieval_release_payload is not None:
         expected_parent = _policy_with_retrieval_release(
@@ -2302,7 +2517,19 @@ def _retrieval_evolve_command(args) -> dict:
         metric_cap=args.metric_cap,
     )
     authority = _open_retrieval_checkpoint_authority_for_operator(
-        checkpoint_path, authority_path
+        checkpoint_path,
+        authority_path,
+        validated_paths["authority_head"],
+        authentication_key=authority_key,
+        expected_checkpoint_identity=validated_paths["output_identities"][
+            "checkpoint"
+        ],
+        expected_authority_identity=validated_paths["protected_identities"][
+            "checkpoint authority"
+        ],
+        expected_head_identity=validated_paths["protected_identities"][
+            "checkpoint authority head"
+        ],
     )
     train_task_ids = tuple(task.numeric.task_id for task in train)
     dev_task_ids = tuple(task.numeric.task_id for task in dev)
@@ -2397,7 +2624,11 @@ def _retrieval_evolve_command(args) -> dict:
                 for child in generation["children"]
             ),
         )
-        accepted_policy.save(args.policy_path)
+        _write_json_artifact(
+            Path(args.policy_path),
+            accepted_policy.to_payload(),
+            expected_identity=validated_paths["output_identities"]["policy"],
+        )
         saved_policy_path = str(args.policy_path)
         result = _published_retrieval_result(result, selected_release)
 
@@ -2429,17 +2660,22 @@ def _retrieval_evolve_command(args) -> dict:
     }
     _assert_no_public_regression_ids(trace_payload, public_ids)
     trace_path = Path(args.trace_path)
-    _write_json_artifact(trace_path, trace_payload)
+    _write_json_artifact(
+        trace_path,
+        trace_payload,
+        expected_identity=validated_paths["output_identities"]["trace"],
+    )
     progress_path = Path(args.progress_path) if args.progress_path else trace_path.with_name(
         "progress.jsonl"
     )
-    progress_path.parent.mkdir(parents=True, exist_ok=True)
-    progress_path.write_text(
-        "".join(
+    progress_encoded = "".join(
             json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n"
             for event in result.trace
-        ),
-        encoding="utf-8",
+        ).encode("utf-8")
+    _publish_retrieval_output_bytes(
+        progress_path,
+        progress_encoded,
+        expected_identity=validated_paths["output_identities"]["progress"],
     )
     return {
         "evolution_mode": "retrieval",
@@ -2450,6 +2686,9 @@ def _retrieval_evolve_command(args) -> dict:
         "trace_path": str(trace_path),
         "checkpoint_path": str(checkpoint_path),
         "checkpoint_authority_path": str(authority_path),
+        "checkpoint_authority_head_path": str(
+            validated_paths["authority_head"]
+        ),
         "progress_path": str(progress_path),
         "train_tasks": len(train),
         "dev_tasks": len(dev),
