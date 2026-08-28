@@ -256,5 +256,11 @@ runs/evolving/sample_evolve/
 before/
 .repo_memory/
 dictionary_curation/
+<<<<<<< Updated upstream
 runs/method_evolution/
 .worktrees/
+=======
+runs/method_evolution
+runs/*
+baseline/
+>>>>>>> Stashed changes
