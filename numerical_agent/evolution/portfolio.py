@@ -332,7 +332,12 @@ class PolicyPortfolio:
         if len(names) != len(set(names)):
             raise PolicyError("policy names must be unique")
         tsfm_names = {policy.name for policy in self.tsfm}
+        combined_names = {policy.name for policy in self.combined}
         for policy in self.combined:
+            if any(parent in combined_names for parent in policy.parents):
+                raise PolicyError(
+                    f"Combined policy {policy.name!r} cannot use a Combined parent"
+                )
             if not any(parent in tsfm_names for parent in policy.parents):
                 raise PolicyError(
                     f"Combined policy {policy.name!r} must include a TSFM parent"

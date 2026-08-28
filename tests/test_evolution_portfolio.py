@@ -248,6 +248,15 @@ def test_policy_parser_rejects_removing_a_combined_candidate() -> None:
         parse_policy_source(source)
 
 
+def test_policy_parser_rejects_combined_to_combined_parent_dependency() -> None:
+    source = render_policy_source(_portfolio()).replace(
+        "'seasonal_naive'", "'combined_chronos_damped_trend'", 1
+    )
+
+    with pytest.raises(PolicyError, match="Combined.*parent"):
+        parse_policy_source(source)
+
+
 def test_combined_repair_cannot_change_parent_identity() -> None:
     portfolio = _portfolio()
     parent = portfolio.combined[0]
