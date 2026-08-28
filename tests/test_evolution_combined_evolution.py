@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator, Mapping
 
 import pytest
 
@@ -222,6 +223,28 @@ def test_apply_combined_operations_is_atomic_and_validates_final_namespace() -> 
     assert parent.names == PolicyPortfolio.flagship5().names
 
 
+def test_apply_combined_operations_rejects_malformed_direct_operations_atomically() -> None:
+    """An asserting direct operation must not escape the trusted mutation boundary."""
+    from numerical_agent.evolution.combined_evolution import (
+        CombinedEvolutionError,
+        CombinedOperation,
+        apply_combined_operations,
+    )
+
+    parent = PolicyPortfolio.flagship5()
+    malformed = CombinedOperation("add", "missing required policy")
+
+    with pytest.raises(CombinedEvolutionError):
+        apply_combined_operations(
+            parent,
+            (malformed,),
+            statistical_names=("seasonal_naive",),
+        )
+
+    assert parent is parent
+    assert parent.names == PolicyPortfolio.flagship5().names
+
+
 def test_propose_combined_child_sends_only_bounded_allowed_inputs() -> None:
     """Forwarding task labels or runtime details would violate the Agent boundary."""
     from numerical_agent.evolution.combined_evolution import propose_combined_child
@@ -317,6 +340,83 @@ def test_propose_combined_child_bounds_deep_diagnostics_without_resetting_depth(
     assert "future_values" not in rendered
     assert len(rendered.encode("utf-8")) <= 4096
     assert _max_mapping_depth(diagnostics) <= 4
+
+
+def test_propose_combined_child_drops_secret_strings_under_allowed_keys() -> None:
+    """An allowed diagnostic key must not smuggle arbitrary secret-bearing text."""
+    from numerical_agent.evolution.combined_evolution import propose_combined_child
+
+    secret = "SENTINEL_SECRET_DO_NOT_FORWARD"
+    parent = PolicyPortfolio.flagship5()
+    agent = FakeLLMClient([_response()])
+
+    result = propose_combined_child(
+        parent,
+        statistical_names=("seasonal_naive",),
+        diagnostics={"aggregate_note": secret, "mean_smape": 0.25},
+        agent=agent,
+    )
+
+    assert result.child is parent
+    prompt = agent.calls[0]["messages"][0]["content"]
+    assert secret not in prompt
+    assert json.loads(prompt)["diagnostics"] == {"mean_smape": 0.25}
+
+
+def test_propose_combined_child_drops_oversized_diagnostics_before_traversal() -> None:
+    """Oversized containers and strings must fail closed before sorting or scanning."""
+    from numerical_agent.evolution.combined_evolution import propose_combined_child
+
+    parent = PolicyPortfolio.flagship5()
+    agent = FakeLLMClient([_response()])
+    large_map = _LargeMapping()
+    huge_string = "SENTINEL_" + "x" * 10_000
+
+    result = propose_combined_child(
+        parent,
+        statistical_names=("seasonal_naive",),
+        diagnostics={"large": large_map, "note": huge_string},
+        agent=agent,
+    )
+
+    assert result.child is parent
+    prompt = agent.calls[0]["messages"][0]["content"]
+    assert huge_string not in prompt
+    assert json.loads(prompt)["diagnostics"] == {}
+
+
+def test_propose_combined_child_keeps_cyclic_diagnostics_bounded() -> None:
+    """A self-referential mapping must not prevent a bounded proposal call."""
+    from numerical_agent.evolution.combined_evolution import propose_combined_child
+
+    cyclic: dict[str, object] = {}
+    cyclic["self"] = cyclic
+    parent = PolicyPortfolio.flagship5()
+    agent = FakeLLMClient([_response()])
+
+    result = propose_combined_child(
+        parent,
+        statistical_names=("seasonal_naive",),
+        diagnostics={"aggregate": cyclic},
+        agent=agent,
+    )
+
+    assert result.child is parent
+    prompt = agent.calls[0]["messages"][0]["content"]
+    assert len(prompt.encode("utf-8")) <= 8192
+
+
+class _LargeMapping(Mapping[str, object]):
+    """A map that exposes whether the sanitizer sorts before checking its hard cap."""
+
+    def __len__(self) -> int:
+        return 17
+
+    def __iter__(self) -> Iterator[str]:
+        raise AssertionError("oversized map must not be iterated")
+
+    def __getitem__(self, key: str) -> object:
+        raise KeyError(key)
 
 
 def _max_mapping_depth(value: object) -> int:

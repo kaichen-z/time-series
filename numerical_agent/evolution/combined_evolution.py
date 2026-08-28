@@ -56,6 +56,7 @@ _DIAGNOSTIC_MAX_NODES = 64
 _DIAGNOSTIC_MAX_ITEMS = 64
 _DIAGNOSTIC_MAX_BYTES = 3072
 _DIAGNOSTIC_MAX_CHILDREN = 16
+_DIAGNOSTIC_MAX_RAW_STRING_LENGTH = 256
 _DROP = object()
 
 
@@ -105,7 +106,8 @@ class CombinedOperation:
     def mutation_target(self) -> str:
         """The name this operation writes; a fork's source remains untouched."""
         if self.op in {"add", "fork"}:
-            assert self.policy is not None
+            if not isinstance(self.policy, CombinedPolicy):
+                raise CombinedEvolutionError("operation requires a Combined policy")
             return self.policy.name
         return self.target
 
@@ -209,14 +211,11 @@ def apply_combined_operations(
         candidate = parent
         for operation in parsed:
             if operation.op == "add":
-                assert operation.policy is not None
-                candidate = candidate.add_combined(operation.policy)
+                candidate = candidate.add_combined(_required_policy(operation))
             elif operation.op == "repair":
-                assert operation.policy is not None
-                candidate = candidate.replace(operation.target, operation.policy)
+                candidate = candidate.replace(operation.target, _required_policy(operation))
             elif operation.op == "fork":
-                assert operation.policy is not None
-                candidate = candidate.fork_combined(operation.source, operation.policy)
+                candidate = candidate.fork_combined(operation.source, _required_policy(operation))
             else:
                 candidate = candidate.remove_combined(operation.target)
         # Validation is intentionally deferred until the complete candidate exists.
@@ -224,7 +223,7 @@ def apply_combined_operations(
         return candidate
     except CombinedEvolutionError:
         raise
-    except (OverflowError, PolicyError, TypeError, ValueError) as error:
+    except (AssertionError, AttributeError, KeyError, OverflowError, PolicyError, TypeError, ValueError) as error:
         raise CombinedEvolutionError("combined operations are invalid") from error
 
 
@@ -339,9 +338,44 @@ def _validate_operation_batch(operations: tuple[CombinedOperation, ...]) -> None
         raise CombinedEvolutionError("operations must contain at most eight entries")
     if not all(isinstance(operation, CombinedOperation) for operation in operations):
         raise CombinedEvolutionError("operations must be parsed Combined operations")
-    targets = tuple(operation.mutation_target for operation in operations)
+    targets = tuple(_validate_direct_operation(operation) for operation in operations)
     if len(targets) != len(set(targets)):
         raise CombinedEvolutionError("operation targets must be unique")
+
+
+def _validate_direct_operation(operation: CombinedOperation) -> str:
+    _reason(operation.reason)
+    if operation.op == "add":
+        if not isinstance(operation.policy, CombinedPolicy) or operation.target or operation.source:
+            raise CombinedEvolutionError("add operation fields are invalid")
+        return operation.policy.name
+    if operation.op == "repair":
+        if (
+            not isinstance(operation.policy, CombinedPolicy)
+            or operation.source
+            or _name(operation.target, "repair target") != operation.policy.name
+        ):
+            raise CombinedEvolutionError("repair operation fields are invalid")
+        return operation.target
+    if operation.op == "fork":
+        if (
+            not isinstance(operation.policy, CombinedPolicy)
+            or operation.target
+            or not _name(operation.source, "fork source")
+        ):
+            raise CombinedEvolutionError("fork operation fields are invalid")
+        return operation.policy.name
+    if operation.op == "remove":
+        if operation.policy is not None or operation.source:
+            raise CombinedEvolutionError("remove operation fields are invalid")
+        return _name(operation.target, "remove target")
+    raise CombinedEvolutionError("unsupported operation")
+
+
+def _required_policy(operation: CombinedOperation) -> CombinedPolicy:
+    if not isinstance(operation.policy, CombinedPolicy):
+        raise CombinedEvolutionError("operation requires a Combined policy")
+    return operation.policy
 
 
 def _reviewed_statistical_names(names: Sequence[str]) -> tuple[str, ...]:
@@ -382,7 +416,11 @@ def _sanitize_diagnostics(value: Mapping[str, object]) -> dict[str, object]:
 def _sanitize_diagnostic_mapping(
     value: Mapping[object, object], *, depth: int, budget: _DiagnosticsBudget
 ) -> dict[str, object] | object:
-    if depth > _DIAGNOSTIC_MAX_DEPTH or not budget.consume({}):
+    if (
+        depth > _DIAGNOSTIC_MAX_DEPTH
+        or not _container_within_limit(value)
+        or not budget.consume({})
+    ):
         return _DROP
     result: dict[str, object] = {}
     for key in sorted(value, key=str):
@@ -405,14 +443,15 @@ def _sanitize_diagnostic_value(
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return value if _finite_json_number(value) and budget.consume(value) else _DROP
     if isinstance(value, str):
-        if any(ord(character) < 32 for character in value):
+        # Diagnostics are aggregate-only.  Never pass arbitrary text through
+        # this boundary, even beneath an otherwise allowed key.
+        if len(value) > _DIAGNOSTIC_MAX_RAW_STRING_LENGTH:
             return _DROP
-        bounded = value[:200]
-        return bounded if budget.consume(bounded) else _DROP
+        return _DROP
     if isinstance(value, Mapping):
         return _sanitize_diagnostic_mapping(value, depth=depth, budget=budget)
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
-        if not budget.consume([]):
+        if not _container_within_limit(value) or not budget.consume([]):
             return _DROP
         result: list[object] = []
         for index, item in enumerate(value):
@@ -428,6 +467,14 @@ def _sanitize_diagnostic_value(
 def _safe_diagnostic_key(key: object) -> bool:
     return (
         isinstance(key, str)
+        and len(key) <= 64
         and _SAFE_DIAGNOSTIC_KEY.fullmatch(key) is not None
         and _FORBIDDEN_DIAGNOSTIC_KEY.search(key) is None
     )
+
+
+def _container_within_limit(value: Mapping[object, object] | Sequence[object]) -> bool:
+    try:
+        return len(value) <= _DIAGNOSTIC_MAX_CHILDREN
+    except (OverflowError, TypeError, ValueError):
+        return False

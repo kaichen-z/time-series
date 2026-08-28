@@ -108,3 +108,49 @@ Focused verification:
   tests/test_evolving_agent_llm.py
 87 passed in 2.32s
 ```
+
+## Fix round 2: fail-closed diagnostics and direct-operation validation
+
+### Implementation
+
+- Diagnostics now carry only finite numeric, boolean, and null aggregate values.
+  All freeform strings are dropped, including values under otherwise allowed
+  keys, so diagnostic text cannot carry a secret into the LLM prompt.
+- Mapping and sequence containers are rejected when over the hard item cap
+  before sorting, iteration, or nested traversal. Key length is bounded before
+  regex checks; oversized raw strings are dropped before any full scan. The
+  monotonic depth/budget handling remains cycle-safe.
+- Directly constructed `CombinedOperation` values receive the same structural
+  checks as parsed operations before any portfolio method runs. Missing policies,
+  impossible field combinations, unknown operations, and invariant failures are
+  translated to `CombinedEvolutionError` without mutating the Parent.
+
+### TDD evidence
+
+RED:
+
+```text
+../../.venv/bin/python -m pytest -q tests/test_evolution_combined_evolution.py \
+  -k 'malformed_direct_operations or secret_strings or oversized_diagnostics or cyclic_diagnostics'
+3 failed, 1 passed, 27 deselected in 0.13s
+```
+
+The failures exposed the raw `AssertionError`, forwarding of an allowed-key
+sentinel secret string, and an oversized mapping being iterated before its cap
+was checked.
+
+GREEN:
+
+```text
+4 passed, 27 deselected in 0.07s
+```
+
+Focused verification:
+
+```text
+../../.venv/bin/python -m pytest -q \
+  tests/test_evolution_combined_evolution.py \
+  tests/test_evolution_portfolio.py \
+  tests/test_evolving_agent_llm.py
+91 passed in 0.67s
+```
