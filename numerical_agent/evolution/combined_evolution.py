@@ -22,7 +22,13 @@ Return exactly one JSON object with an operations array.  Each operation must be
 one of add, repair, fork, or remove and must use its exact allowed fields.  A
 policy uses only name, parents, operator, weights, signal, threshold,
 above_parent, below_parent, and fallback_parent.  Do not score, select, or
-accept a child.  Propose at most eight operations."""
+accept a child. Parents must be two to five unique leaf names, include at least
+one supplied TSFM name, and never name a Combined policy. weighted_mean needs
+one finite non-negative normalized weight per parent; median has no weights;
+trimmed_mean needs at least three parents and no weights; route has exactly two
+parents, no weights, two distinct branch parents from parents, and one supplied
+history-only signal plus a finite threshold. Every policy fallback parent occurs
+in parents. Propose at most eight operations."""
 
 _POLICY_FIELDS = frozenset(
     {
@@ -43,21 +49,15 @@ _OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "fork": frozenset({"op", "source", "reason", "policy"}),
     "remove": frozenset({"op", "target", "reason"}),
 }
-_FORBIDDEN_DIAGNOSTIC_KEY = re.compile(
-    r"(?:future|document|ground.?truth|\bgt\b|role|subtype|secret|token|"
-    r"password|credential|runtime|checkpoint|dev|public|hidden|label)",
-    re.IGNORECASE,
-)
-_SAFE_DIAGNOSTIC_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_THINK_PREFIX_RE = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
-_DIAGNOSTIC_MAX_DEPTH = 3
-_DIAGNOSTIC_MAX_NODES = 64
-_DIAGNOSTIC_MAX_ITEMS = 64
-_DIAGNOSTIC_MAX_BYTES = 3072
-_DIAGNOSTIC_MAX_CHILDREN = 16
-_DIAGNOSTIC_MAX_RAW_STRING_LENGTH = 256
-_DROP = object()
+_SIGNALS = (
+    "outlier_fraction",
+    "periodicity_strength",
+    "recent_regime_confidence",
+    "trend_strength",
+    "zero_fraction",
+)
 
 
 class CombinedEvolutionError(ValueError):
@@ -68,28 +68,36 @@ class _StrictJsonError(ValueError):
     """A JSON response violates strict object or numeric parsing rules."""
 
 
-@dataclass
-class _DiagnosticsBudget:
-    nodes: int = 0
-    items: int = 0
-    bytes: int = 0
+@dataclass(frozen=True)
+class CombinedProposalDiagnostics:
+    """Trusted label-free aggregate inputs for a single Combined proposal call."""
 
-    def consume(self, value: object) -> bool:
-        try:
-            encoded = json.dumps(value, ensure_ascii=True, allow_nan=False)
-        except (OverflowError, TypeError, ValueError):
-            return False
-        size = len(encoded.encode("utf-8"))
+    history_length: int
+    forecast_disagreement: float
+    successful_leaf_count: int
+    unavailable_leaf_count: int
+
+    def to_payload(self) -> dict[str, int | float]:
         if (
-            self.nodes >= _DIAGNOSTIC_MAX_NODES
-            or self.items >= _DIAGNOSTIC_MAX_ITEMS
-            or self.bytes + size > _DIAGNOSTIC_MAX_BYTES
+            isinstance(self.history_length, bool)
+            or not isinstance(self.history_length, int)
+            or not 1 <= self.history_length <= 1_000_000
         ):
-            return False
-        self.nodes += 1
-        self.items += 1
-        self.bytes += size
-        return True
+            raise CombinedEvolutionError("history_length must be a bounded integer")
+        if not _finite_json_number(self.forecast_disagreement) or float(self.forecast_disagreement) < 0.0:
+            raise CombinedEvolutionError("forecast_disagreement must be finite and non-negative")
+        for name, value in (
+            ("successful_leaf_count", self.successful_leaf_count),
+            ("unavailable_leaf_count", self.unavailable_leaf_count),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 32:
+                raise CombinedEvolutionError(f"{name} must be a bounded integer")
+        return {
+            "forecast_disagreement": self.forecast_disagreement,
+            "history_length": self.history_length,
+            "successful_leaf_count": self.successful_leaf_count,
+            "unavailable_leaf_count": self.unavailable_leaf_count,
+        }
 
 
 @dataclass(frozen=True)
@@ -142,44 +150,33 @@ def parse_combined_operations(response: str) -> tuple[CombinedOperation, ...]:
 
 
 def _parse_strict_json_object(text: str) -> dict[str, object]:
-    """Mirror the shared parser's wrappers while rejecting ambiguous JSON objects."""
+    """Accept exactly one object after at most one permitted wrapper."""
     if not isinstance(text, str):
         raise _StrictJsonError("response must be text")
-    stripped = _THINK_RE.sub("", text).strip()
-    candidates = [match.group(1).strip() for match in _FENCE_RE.finditer(stripped)]
-    candidates.append(stripped)
+    stripped = text.strip()
+    if stripped.startswith("<think>"):
+        match = _THINK_PREFIX_RE.match(stripped)
+        if match is None:
+            raise _StrictJsonError("invalid think wrapper")
+        stripped = stripped[match.end():].strip()
+    fences = tuple(_FENCE_RE.finditer(stripped))
+    if fences:
+        if len(fences) != 1 or fences[0].span() != (0, len(stripped)):
+            raise _StrictJsonError("response has ambiguous JSON fences")
+        stripped = fences[0].group(1).strip()
+    elif "```" in stripped:
+        raise _StrictJsonError("invalid JSON fence")
     decoder = json.JSONDecoder(
         object_pairs_hook=_strict_object,
         parse_constant=_reject_nonfinite_constant,
     )
-    last_error: Exception | None = None
-    for candidate in candidates:
-        try:
-            parsed = json.loads(
-                candidate,
-                object_pairs_hook=_strict_object,
-                parse_constant=_reject_nonfinite_constant,
-            )
-            if isinstance(parsed, dict):
-                return parsed
-        except _StrictJsonError:
-            raise
-        except (json.JSONDecodeError, RecursionError, ValueError) as error:
-            last_error = error
-        for index, character in enumerate(candidate):
-            if character != "{":
-                continue
-            try:
-                parsed, _end = decoder.raw_decode(candidate[index:])
-            except _StrictJsonError:
-                raise
-            except (json.JSONDecodeError, RecursionError, ValueError) as error:
-                last_error = error
-                continue
-            if isinstance(parsed, dict):
-                return parsed
-    detail = str(last_error) if last_error is not None else "response contained no JSON object"
-    raise _StrictJsonError(f"no valid JSON object in response: {detail}")
+    try:
+        parsed, end = decoder.raw_decode(stripped)
+    except (json.JSONDecodeError, RecursionError, ValueError) as error:
+        raise _StrictJsonError("response must contain one JSON object") from error
+    if stripped[end:].strip() or not isinstance(parsed, dict):
+        raise _StrictJsonError("response must contain exactly one JSON object")
+    return parsed
 
 
 def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -231,16 +228,18 @@ def propose_combined_child(
     parent: PolicyPortfolio,
     *,
     statistical_names: Sequence[str],
-    diagnostics: Mapping[str, object],
+    diagnostics: CombinedProposalDiagnostics,
     agent: LLMClient,
 ) -> CombinedProposalResult:
     """Request one bounded proposal and return Parent exactly on every failure."""
     try:
         reviewed_names = _reviewed_statistical_names(statistical_names)
+        diagnostic_payload = _proposal_diagnostics_payload(diagnostics)
         prompt = {
             "current_policies": [policy.to_payload() for policy in parent.combined],
             "statistical_names": list(reviewed_names),
-            "diagnostics": _sanitize_diagnostics(diagnostics),
+            "tsfm_names": [policy.name for policy in parent.tsfm],
+            "diagnostics": diagnostic_payload,
             "allowed_operations": _allowed_operations_payload(),
         }
         response = agent.complete(
@@ -379,7 +378,11 @@ def _required_policy(operation: CombinedOperation) -> CombinedPolicy:
 
 
 def _reviewed_statistical_names(names: Sequence[str]) -> tuple[str, ...]:
-    if isinstance(names, (str, bytes)) or not all(isinstance(name, str) for name in names):
+    if (
+        isinstance(names, (str, bytes))
+        or len(names) > 256
+        or not all(isinstance(name, str) and 1 <= len(name) <= 64 for name in names)
+    ):
         raise CombinedEvolutionError("statistical names must be a sequence of strings")
     if len(set(names)) != len(names):
         raise CombinedEvolutionError("statistical names must be unique")
@@ -400,88 +403,36 @@ def _reason(value: object) -> str:
     return value
 
 
-def _allowed_operations_payload() -> dict[str, list[str]]:
-    return {operation: sorted(fields) for operation, fields in sorted(_OPERATION_FIELDS.items())}
+def _allowed_operations_payload() -> dict[str, object]:
+    return {
+        "maximum_operations": 8,
+        "operations": {operation: sorted(fields) for operation, fields in sorted(_OPERATION_FIELDS.items())},
+        "policy": {
+            "fields": [
+                "name", "parents", "operator", "weights", "signal", "threshold",
+                "above_parent", "below_parent", "fallback_parent",
+            ],
+            "parents": {
+                "minimum": 2,
+                "maximum": 5,
+                "unique": True,
+                "leaf_parents_only": True,
+                "at_least_one_tsfm": True,
+                "combined_parents_allowed": False,
+            },
+            "operators": {
+                "weighted_mean": "weights match parents; finite, non-negative, sum to one",
+                "median": "weights must be empty",
+                "trimmed_mean": "three to five parents; weights must be empty",
+                "route": "two parents; empty weights; distinct branches from parents",
+            },
+            "fallback": "fallback_parent must occur in parents",
+            "signals": list(_SIGNALS),
+        },
+    }
 
 
-def _sanitize_diagnostics(value: Mapping[str, object]) -> dict[str, object]:
-    """Keep small aggregate, JSON-safe diagnostics and omit sensitive-looking keys."""
-    if type(value) is not dict:
-        raise CombinedEvolutionError("diagnostics must be a built-in dict")
-    budget = _DiagnosticsBudget()
-    sanitized = _sanitize_diagnostic_mapping(value, depth=0, budget=budget)
-    return sanitized if isinstance(sanitized, dict) else {}
-
-
-def _sanitize_diagnostic_mapping(
-    value: Mapping[object, object], *, depth: int, budget: _DiagnosticsBudget
-) -> dict[str, object] | object:
-    if type(value) is not dict:
-        raise CombinedEvolutionError("diagnostic mappings must be built-in dicts")
-    if (
-        depth > _DIAGNOSTIC_MAX_DEPTH
-        or not _container_within_limit(value)
-        or not budget.consume({})
-    ):
-        return _DROP
-    result: dict[str, object] = {}
-    pairs = tuple((key, raw) for key, raw in value.items() if _safe_diagnostic_key(key))
-    for key, raw in sorted(pairs, key=lambda pair: pair[0]):
-        if len(result) >= _DIAGNOSTIC_MAX_CHILDREN:
-            continue
-        cleaned = _sanitize_diagnostic_value(raw, depth=depth + 1, budget=budget)
-        if cleaned is _DROP or not budget.consume(key):
-            continue
-        result[key] = cleaned
-    return result
-
-
-def _sanitize_diagnostic_value(
-    value: object, *, depth: int, budget: _DiagnosticsBudget
-) -> object:
-    if depth > _DIAGNOSTIC_MAX_DEPTH:
-        return _DROP
-    if value is None or isinstance(value, bool):
-        return value if budget.consume(value) else _DROP
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return value if _finite_json_number(value) and budget.consume(value) else _DROP
-    if isinstance(value, str):
-        # Diagnostics are aggregate-only.  Never pass arbitrary text through
-        # this boundary, even beneath an otherwise allowed key.
-        if len(value) > _DIAGNOSTIC_MAX_RAW_STRING_LENGTH:
-            return _DROP
-        return _DROP
-    if isinstance(value, Mapping):
-        if type(value) is not dict:
-            raise CombinedEvolutionError("diagnostic mappings must be built-in dicts")
-        return _sanitize_diagnostic_mapping(value, depth=depth, budget=budget)
-    if type(value) in (list, tuple):
-        if not _container_within_limit(value) or not budget.consume([]):
-            return _DROP
-        result: list[object] = []
-        for index, item in enumerate(value):
-            if index == _DIAGNOSTIC_MAX_CHILDREN:
-                break
-            cleaned = _sanitize_diagnostic_value(item, depth=depth + 1, budget=budget)
-            if cleaned is not _DROP:
-                result.append(cleaned)
-        return result
-    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
-        raise CombinedEvolutionError("diagnostic sequences must be built-in lists or tuples")
-    return _DROP
-
-
-def _safe_diagnostic_key(key: object) -> bool:
-    return (
-        type(key) is str
-        and len(key) <= 64
-        and _SAFE_DIAGNOSTIC_KEY.fullmatch(key) is not None
-        and _FORBIDDEN_DIAGNOSTIC_KEY.search(key) is None
-    )
-
-
-def _container_within_limit(value: Mapping[object, object] | Sequence[object]) -> bool:
-    try:
-        return len(value) <= _DIAGNOSTIC_MAX_CHILDREN
-    except (OverflowError, TypeError, ValueError):
-        return False
+def _proposal_diagnostics_payload(value: object) -> dict[str, int | float]:
+    if type(value) is not CombinedProposalDiagnostics:
+        raise CombinedEvolutionError("diagnostics must use CombinedProposalDiagnostics")
+    return value.to_payload()

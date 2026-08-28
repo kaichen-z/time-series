@@ -229,3 +229,44 @@ GREEN and focused verification:
 1 passed, 33 deselected in 0.07s
 94 passed in 3.18s
 ```
+
+## Final broad fix round 5: typed diagnostics and unambiguous responses
+
+### Implementation
+
+- Replaced the generic caller-supplied diagnostics mapping with the exact
+  `CombinedProposalDiagnostics` contract. It has only bounded label-free
+  aggregate fields: history length, forecast disagreement, and successful or
+  unavailable leaf counts. Any mapping, list, custom object, invalid typed
+  instance, or disguised metric name returns the exact Parent before an LLM
+  call.
+- The response parser now accepts exactly one JSON object, optionally preceded
+  by one closed think wrapper or contained in one closed JSON fence. Concatenated
+  objects, trailing text, and multiple/ambiguous fences are rejected while
+  duplicate-key and non-finite-number rejection remains intact.
+- Proposal prompts now include fixed TSFM names only, reviewed Statistical
+  names, canonical current Combined policies, typed diagnostics, and a bounded
+  explicit DSL inventory covering parent, operator, weight, route, fallback,
+  signal, and operation constraints. No Train/Dev controller wiring changed.
+
+### TDD evidence
+
+RED:
+
+```text
+../../.venv/bin/python -m pytest -q tests/test_evolution_combined_evolution.py \
+  -k 'ambiguous_or_trailing or allows_one_think or noncontract_diagnostics or typed_label_free'
+7 failed, 2 passed, 34 deselected in 0.15s
+```
+
+The failures reproduced acceptance of concatenated/trailing JSON, forwarding of
+generic diagnostics including `future` and `mean_smape`, and the missing typed
+diagnostics/prompt DSL contract.
+
+GREEN and final focused verification:
+
+```text
+122 passed in 6.45s
+../../.venv/bin/python -m compileall -q numerical_agent tests
+git diff --check
+```
