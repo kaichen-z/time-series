@@ -10,6 +10,7 @@ from numerical_agent.evolution.cache import CacheMissError, OutcomeCache
 from numerical_agent.evolution.execution import CRASHED, INVALID, NOT_APPLICABLE, SUCCESS, Outcome, Task
 from numerical_agent.evolution.module import MODULE_HEADER, parse_module
 from numerical_agent.evolution.portfolio import (
+    FLAGSHIP_COMBINED_NAMES,
     FLAGSHIP_METHOD_IDS,
     CombinedPolicy,
     PolicyError,
@@ -146,6 +147,44 @@ def test_legacy_route_payload_migrates_to_explicit_branches() -> None:
     assert policy.above_parent == "seasonal_naive"
     assert policy.below_parent == "timesfm_2_5"
     assert policy.fallback_parent == "timesfm_2_5"
+
+
+def test_legacy_flagship_five_preserves_names_and_forecasts_after_migration(
+    tmp_path: Path,
+) -> None:
+    """Legacy policy files retain every identity and forecast after canonical migration."""
+    canonical = PolicyPortfolio.flagship5()
+    migrated = parse_policy_source(_legacy_source("blend"))
+
+    assert tuple(policy.name for policy in migrated.combined) == FLAGSHIP_COMBINED_NAMES
+    assert migrated.names == canonical.names
+    assert migrated.combined == canonical.combined
+
+    runtime = FakeTSFMRuntime({method_id: 1.0 for method_id in FLAGSHIP_METHOD_IDS})
+    canonical_outcomes = evaluate_portfolio(
+        _module(),
+        canonical,
+        _tasks(),
+        outcome_cache=OutcomeCache(tmp_path / "canonical-cache"),
+        runtimes=_registry(runtime),
+        isolated_methods=False,
+    )
+    migrated_outcomes = evaluate_portfolio(
+        _module(),
+        migrated,
+        _tasks(),
+        outcome_cache=OutcomeCache(tmp_path / "migrated-cache"),
+        runtimes=_registry(runtime),
+        isolated_methods=False,
+    )
+
+    assert tuple(
+        (outcome.method, outcome.task_id, outcome.status, outcome.forecast)
+        for outcome in migrated_outcomes
+    ) == tuple(
+        (outcome.method, outcome.task_id, outcome.status, outcome.forecast)
+        for outcome in canonical_outcomes
+    )
 
 
 class FakeTSFMRuntime:
@@ -352,11 +391,12 @@ def test_combined_forecast_is_computed_from_both_parent_forecasts(tmp_path: Path
     assert combined.status == SUCCESS
 
 
-def test_93_methods_plus_portfolio_reports_103_candidates() -> None:
+def test_93_methods_plus_portfolio_reports_derived_candidate_count() -> None:
     names = tuple(f"method_{index:03d}" for index in range(93))
     portfolio = _portfolio()
 
-    assert len(names) + len(portfolio.names) == 103
+    assert len(names) == 93
+    assert len(names) + len(portfolio.names) == 93 + len(portfolio.names)
 
 
 def _variable_combined(name: str = "combined_variable") -> CombinedPolicy:

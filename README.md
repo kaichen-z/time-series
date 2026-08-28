@@ -24,6 +24,34 @@ Meta-Harness, evolution depths, and data protocol, see
 The complete installation, baseline, Coding-setting, skill-learning, and evolution manual is
 available at [`docs/USAGE_GUIDE.md`](docs/USAGE_GUIDE.md).
 
+### Numerical multi-parent Combined evolution
+
+The Numerical Agent's initial executable portfolio is 93 history-only Statistical leaves, five
+manifest-bound TSFMs, and five legacy-compatible Combined policies. Combined policies now support
+two-to-five ordered leaf parents, including TSFM–TSFM and TSFM–Statistical combinations (at least
+one parent must be a TSFM), with reviewed `weighted_mean`, `median`, `trimmed_mean`, and two-parent
+`route` operators. Each policy has an explicit successful fallback; unavailable, crashed, invalid,
+or not-applicable non-fallback parents use that fallback only when it is structurally valid.
+Duplicate parents, unknown leaves, all-Statistical combinations, Combined-to-Combined references,
+invalid weights, and oversized portfolios are rejected.
+
+This is a no-weight-training, history-only flow:
+
+```text
+history-only materialized Statistical/TSFM leaves
+  -> LLM proposes strict add/repair/fork/remove Combined operations
+  -> Python validates atomic Child
+  -> future formal Train/Dev controller evaluates
+  -> accepted canonical policy source becomes next Git generation
+```
+
+The current proposal adapter is not yet wired into the formal 80/20 command. It does not train or
+modify LLM/TSFM weights, and no performance result is claimed. Python owns schema, namespace,
+parent, finite-forecast, horizon, fallback, and immutable TSFM-manifest checks; proposals cannot
+read future labels, documents, Retrieval artifacts, runtime/checkpoint bindings, scorers, or split
+definitions. See [`numerical_agent/README.md`](numerical_agent/README.md) for the portfolio contract,
+legacy migration behavior, and candidate-count formula (`93 + len(portfolio.names)`).
+
 ## Parameterized Self-Evolution framework
 
 The repository also contains a domain-independent Parent/Child evolution core plus a numerical

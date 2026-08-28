@@ -60,22 +60,51 @@ trusted Python evaluation assigns `accepted`, `specialized`, `quarantined`, `una
 `discarded` status. Held-out Dev performance decides whether a Child dictionary replaces its
 Parent.
 
-## Git-based 103-candidate evolution portfolio
+## Git-based numerical evolution portfolio
 
-The method-repository loop now supports a separate, explicitly enabled portfolio:
+The method-repository loop supports a separate, explicitly enabled portfolio. The initial
+portfolio has 93 Statistical methods, five manifest-bound TSFMs, and five reviewed Combined
+policies (103 executable candidates). The Combined tuple is now variable: one to 32 unique
+policies may be present, so the runtime candidate count is `93 + len(portfolio.names)` rather
+than a permanent 103-candidate contract.
 
 | Executable family | Count | Evolved artifact |
 |---|---:|---|
 | Python statistical forecasters | 93 | `methods.py` |
 | Flagship TSFMs | 5 | invocation settings in `policies.py` |
-| TSFM/statistical Combined policies | 5 | blend/route settings in `policies.py` |
-| **Total** | **103** | small auditable Git repository |
+| Initial Combined policies | 5 (bounded 1–32) | canonical typed settings in `policies.py` |
+| **Initial total** | **103** | small auditable Git repository |
 
 The five TSFMs are TimesFM 2.5, Moirai 2.0, Toto 2.0, Chronos-Bolt, and Granite TTM R2. Their
 checkpoint, adapter, license, and model identity are immutable. Evolution may change only
 history-only applicability, context window, reversible preprocessing, and bounded output
-shrinkage. The five Combined policies bind one TSFM parent and one statistical parent; evolution
-may change their weight or history-only routing rule but cannot substitute either parent.
+shrinkage. Combined policies use an ordered tuple of 2–5 unique leaf parents and must include a
+TSFM, supporting TSFM–TSFM, TSFM–Statistical, and mixed three-to-five-parent combinations. The
+reviewed operators are `weighted_mean`, `median`, `trimmed_mean`, and two-parent `route`.
+Weighted means require finite non-negative weights summing to one; route stores explicit
+above/below parents and a reviewed history-only signal. Every policy names an in-tuple fallback;
+it is used only when a non-fallback parent is unavailable, crashes, is invalid, or is not
+applicable, and fallback use is recorded rather than fabricating a forecast. Combined policies
+cannot reference another Combined policy.
+
+Combined evolution is a no-weight-training, history-only proposal flow:
+
+```text
+history-only materialized Statistical/TSFM leaves
+  -> LLM proposes strict add/repair/fork/remove Combined operations
+  -> Python validates atomic Child
+  -> future formal Train/Dev controller evaluates
+  -> accepted canonical policy source becomes next Git generation
+```
+
+The current adapter implements the strict proposal and atomic portfolio boundary, but is not yet
+wired into the formal 80/20 command. It does not train or modify LLM/TSFM weights, and no
+performance result is claimed for this adapter. Python materializes each Statistical/TSFM leaf
+once, validates exact horizon-length finite forecasts, and keeps labels, documents, Retrieval
+artifacts, runtime bindings, checkpoints, scorer settings, and split definitions outside the
+proposal boundary. Invalid operations fail closed and leave the Parent byte-identical; accepted
+source rendering always uses the canonical schema, while legacy five-policy `blend`/`route`
+records are read once and migrated in memory.
 
 Every Python forecaster can call the reviewed history-only functions in `skills.py`, including
 periodicity, outlier, trend, change-point, intermittency, noise, stationarity, and recent-regime
