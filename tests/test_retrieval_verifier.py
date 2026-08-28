@@ -218,6 +218,79 @@ def test_invalid_entity_target_window_magnitude_skill_or_assumption_never_become
     assert missing_link in chain.missing_links
 
 
+@pytest.mark.parametrize(
+    ("missing_link", "subject"),
+    [
+        ("entity", "PreEntity A sales"),
+        ("entity", "Entity Alpha sales"),
+        ("entity", "Entity A2 sales"),
+        ("target", "Entity A presales"),
+        ("target", "Entity A salesforce"),
+        ("target", "Entity A wholesales"),
+    ],
+)
+def test_entity_and_target_prefix_suffix_collisions_are_not_phrase_matches(
+    context_task: ContextTask,
+    missing_link: str,
+    subject: str,
+) -> None:
+    text = (
+        f"{subject} will increase by 20 percent from 2026-01-03 through "
+        "2026-01-04 because a scheduled promotion begins."
+    )
+    task = replace(context_task, documents=(Document("doc_collision", text),))
+
+    verified = _verified(
+        task,
+        _payload(
+            _chain(
+                citations=[
+                    {"document_id": "doc_collision", "exact_quote": text}
+                ]
+            )
+        ),
+    )
+
+    chain = verified.chains[0]
+    assert chain.numeric_eligible is False
+    assert missing_link in chain.missing_links
+    if missing_link == "entity":
+        assert chain.entity_match is False
+    else:
+        assert chain.target_match is False
+
+
+def test_canonical_exact_entity_and_target_phrase_variants_remain_eligible(
+    context_task: ContextTask,
+) -> None:
+    task = replace(
+        context_task,
+        numeric=replace(context_task.numeric, entity_name="Entity-A"),
+        target_name="Net Sales",
+    )
+    text = (
+        "ＥＮＴＩＴＹ－Ａ’s NET-SALES will increase by 20 percent from "
+        "2026-01-03 through 2026-01-04 because a scheduled promotion begins."
+    )
+    task = replace(task, documents=(Document("doc_variant", text),))
+
+    verified = _verified(
+        task,
+        _payload(
+            _chain(
+                citations=[
+                    {"document_id": "doc_variant", "exact_quote": text}
+                ]
+            )
+        ),
+    )
+
+    chain = verified.chains[0]
+    assert chain.entity_match is True
+    assert chain.target_match is True
+    assert chain.numeric_eligible is True
+
+
 def test_duplicate_citations_are_deduplicated_and_incomplete_chains_remain_qualitative(context_task):
     raw = _chain(citations=[
         {"document_id": "doc_1", "exact_quote": "Entity A sales will increase by 20 percent from 2026-01-03 through 2026-01-04."},

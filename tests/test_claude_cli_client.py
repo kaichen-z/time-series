@@ -6,11 +6,25 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from common.llm import ClaudeCLIClient, ClaudeCLIConfig, parse_json_object
+from common.llm import (
+    ClaudeCLIClient,
+    ClaudeCLIConfig,
+    JsonExtractionError,
+    TransientLLMError,
+    parse_json_object,
+)
 
 
-def _envelope(result_text: str, is_error: bool = False) -> str:
-    return json.dumps({"is_error": is_error, "result": result_text, "type": "result"})
+def _envelope(
+    result_text: str,
+    is_error: bool = False,
+    *,
+    subtype: str | None = None,
+) -> str:
+    payload = {"is_error": is_error, "result": result_text, "type": "result"}
+    if subtype is not None:
+        payload["subtype"] = subtype
+    return json.dumps(payload)
 
 
 def test_claude_cli_client_returns_and_caches_json() -> None:
@@ -98,3 +112,90 @@ def test_claude_cli_client_missing_binary_raises_clear_error() -> None:
             assert False, "expected a RuntimeError"
         except RuntimeError as exc:
             assert "was not found" in str(exc)
+
+
+def test_claude_cli_client_normalizes_subprocess_timeout_as_transient() -> None:
+    client = ClaudeCLIClient(
+        ClaudeCLIConfig(cache_dir=None, timeout_seconds=5)
+    )
+
+    def fake_run(command, **_kwargs):
+        raise subprocess.TimeoutExpired(command, timeout=5)
+
+    with patch("common.llm.subprocess.run", side_effect=fake_run):
+        try:
+            client.complete(system="s", messages=[{"role": "user", "content": "x"}])
+            assert False, "expected a TransientLLMError"
+        except TransientLLMError as exc:
+            assert "timed out" in str(exc)
+
+
+def test_claude_cli_client_normalizes_typed_transport_error() -> None:
+    client = ClaudeCLIClient(ClaudeCLIConfig(cache_dir=None, timeout_seconds=5))
+
+    def fake_run(command, **_kwargs):
+        raise ConnectionResetError("typed subprocess transport reset")
+
+    with patch("common.llm.subprocess.run", side_effect=fake_run):
+        try:
+            client.complete(system="s", messages=[{"role": "user", "content": "x"}])
+            assert False, "expected a TransientLLMError"
+        except TransientLLMError as exc:
+            assert "transport" in str(exc)
+
+
+def test_claude_cli_client_normalizes_structured_timeout_subtype() -> None:
+    client = ClaudeCLIClient(ClaudeCLIConfig(cache_dir=None, timeout_seconds=5))
+
+    def fake_run(command, **_kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            _envelope("backend timed out", is_error=True, subtype="error_timeout"),
+            "",
+        )
+
+    with patch("common.llm.subprocess.run", side_effect=fake_run):
+        try:
+            client.complete(system="s", messages=[{"role": "user", "content": "x"}])
+            assert False, "expected a TransientLLMError"
+        except TransientLLMError as exc:
+            assert "error_timeout" in str(exc)
+
+
+def test_claude_cli_client_keeps_permanent_model_and_parse_errors_nontransient() -> None:
+    client = ClaudeCLIClient(ClaudeCLIConfig(cache_dir=None, timeout_seconds=5))
+    results = iter(
+        (
+            subprocess.CompletedProcess(
+                ["claude"],
+                0,
+                _envelope(
+                    (
+                        "model_not_found; quoted backend_status_code=503 and "
+                        "error_timeout"
+                    ),
+                    is_error=True,
+                ),
+                "",
+            ),
+            subprocess.CompletedProcess(
+                ["claude"],
+                0,
+                _envelope("not json"),
+                "",
+            ),
+        )
+    )
+
+    with patch("common.llm.subprocess.run", side_effect=lambda *_a, **_k: next(results)):
+        try:
+            client.complete(system="s", messages=[{"role": "user", "content": "x"}])
+            assert False, "expected a permanent model RuntimeError"
+        except RuntimeError as exc:
+            assert type(exc) is RuntimeError
+        try:
+            client.complete(system="s", messages=[{"role": "user", "content": "y"}])
+            assert False, "expected a permanent JsonExtractionError"
+        except JsonExtractionError:
+            pass

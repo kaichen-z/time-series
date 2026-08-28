@@ -7,12 +7,14 @@ from types import SimpleNamespace
 import pytest
 
 from common.data import Task
-from common.llm import FakeLLMClient
+from common.llm import FakeLLMClient, TransientLLMError
 from evolving_loop.data import ContextTask, Document
 from evolving_loop.decision_agent.agent import DecisionAgent, DecisionCandidate
 from evolving_loop.harness import EvolvingForecastHarness, HarnessRuntimeConfig
 from evolving_loop.morphology_adapter import MorphologyAdapter
 from evolving_loop.retrieval_agent.policy import (
+    ROUND1_STRATEGIES,
+    ROUND2_STRATEGIES,
     RetrievalGenome,
     _write_accepted_retrieval_release,
 )
@@ -196,6 +198,15 @@ class _FailingThenRespondingLLM:
         if len(self.calls) == 1:
             raise OSError("candidate_id forecast hindcast_srmse must not cross stages")
         return LLMResponse(self.response)
+
+
+class _TransientRetrievalLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, **_kwargs):
+        self.calls += 1
+        raise TransientLLMError("temporary inner retrieval outage")
 
 
 def _agent(
@@ -402,6 +413,35 @@ def test_non_runtime_round1_failure_skips_incomplete_round2() -> None:
     assert "invalid_round1_response" in result.retrieval.rejected
 
 
+def test_two_stage_agent_reraises_transient_inner_llm_failures() -> None:
+    llm = _TransientRetrievalLLM()
+    retrieval = TwoStageRetrievalAgent(
+        llm,
+        RetrievalGenome.seed(),
+        RetrievalSkillLibrary("unused-two-stage-skills.json", persist=False),
+    )
+
+    with pytest.raises(TransientLLMError, match="temporary inner retrieval outage"):
+        retrieval.run_round1(_task())
+
+    assert llm.calls == 1
+
+
+def test_two_stage_harness_reraises_transient_morphology_failures() -> None:
+    class Provider:
+        def assumptions(self, task):
+            del task
+            raise TransientLLMError("temporary morphology outage")
+
+    retrieval = _agent([_round(_chain())])
+    harness = _harness(retrieval, [_decision(), _decision()], morphology=Provider())
+
+    with pytest.raises(TransientLLMError, match="temporary morphology outage"):
+        harness.run(_task())
+
+    assert retrieval.llm.calls == []
+
+
 def test_non_runtime_morphology_failure_is_recorded_and_skips_round2() -> None:
     class Provider:
         def assumptions(self, task):
@@ -478,13 +518,301 @@ def test_two_stage_agent_enforces_fixed_document_chain_and_citation_budgets() ->
         ],
         genome=genome,
     )
+    task = _task()
+    budget_task = replace(
+        task,
+        documents=(task.documents[0], task.documents[2]),
+    )
 
-    result = retrieval.run_round1(_task())
+    result = retrieval.run_round1(budget_task)
 
     prompt = json.loads(retrieval.llm.calls[0]["messages"][0]["content"])
     assert len(prompt["documents"]) == 1
     assert len(result.chains) + len(result.counterevidence) == 1
     assert len(result.chains[0].citations) == 1
+
+
+def test_document_budget_selection_is_content_ranked_and_permutation_invariant() -> None:
+    genome = replace(RetrievalGenome.seed(), max_selected_documents=1)
+    task = _task()
+    permutations = (
+        task.documents,
+        tuple(reversed(task.documents)),
+        (*task.documents[2:], *task.documents[:2]),
+    )
+    selected_payloads = []
+
+    for documents in permutations:
+        retrieval = _agent(["not json"], genome=genome)
+        retrieval.run_round1(replace(task, documents=documents))
+        selected_payloads.append(
+            json.loads(retrieval.llm.calls[0]["messages"][0]["content"])["documents"]
+        )
+
+    assert selected_payloads[0] == selected_payloads[1] == selected_payloads[2]
+    assert len(selected_payloads[0]) == 1
+    assert "Entity A sales" in selected_payloads[0][0]["content"]
+
+
+def test_document_ids_do_not_change_content_selection() -> None:
+    genome = replace(RetrievalGenome.seed(), max_selected_documents=1)
+    relevant = (
+        "Entity A sales will increase by 20 percent from 2026-01-21 through "
+        "2026-01-22 because a scheduled promotion begins."
+    )
+    distractor = "The office carpet is blue."
+    selected = []
+
+    for relevant_id, distractor_id in (("zzz", "aaa"), ("aaa", "zzz")):
+        task = replace(
+            _task(),
+            documents=(
+                Document(distractor_id, distractor),
+                Document(relevant_id, relevant),
+            ),
+        )
+        retrieval = _agent(["not json"], genome=genome)
+        retrieval.run_round1(task)
+        selected.append(
+            json.loads(retrieval.llm.calls[0]["messages"][0]["content"])["documents"]
+        )
+
+    assert [row[0]["content"] for row in selected] == [relevant, relevant]
+    assert [row[0]["document_id"] for row in selected] == ["zzz", "aaa"]
+
+
+def test_duplicate_content_groups_are_selected_all_or_none_within_budget() -> None:
+    genome = replace(RetrievalGenome.seed(), max_selected_documents=2)
+    duplicate = (
+        "Entity A sales will increase by 20 percent from 2026-01-21 through "
+        "2026-01-22 because a scheduled promotion begins."
+    )
+    unique = (
+        "Entity A sales will decrease by 10 percent from 2026-01-21 through "
+        "2026-01-22 because a supply outage begins."
+    )
+    task = replace(
+        _task(),
+        documents=(
+            Document("duplicate_c", duplicate),
+            Document("duplicate_a", duplicate),
+            Document("duplicate_b", duplicate),
+            Document("unique", unique),
+        ),
+    )
+    retrieval = _agent(["not json"], genome=genome)
+
+    retrieval.run_round1(task)
+
+    documents = json.loads(
+        retrieval.llm.calls[0]["messages"][0]["content"]
+    )["documents"]
+    assert documents == [{"document_id": "unique", "content": unique}]
+
+
+def test_unselected_documents_cannot_authorize_numeric_citations() -> None:
+    task = _task()
+    genome = replace(RetrievalGenome.seed(), max_selected_documents=1)
+
+    class UnselectedCitationLLM:
+        def __init__(self) -> None:
+            self.selected_ids: tuple[str, ...] = ()
+            self.cited_id = ""
+
+        def complete(self, *, messages, **_kwargs):
+            from common.llm import LLMResponse
+
+            payload = json.loads(messages[0]["content"])
+            self.selected_ids = tuple(
+                item["document_id"] for item in payload["documents"]
+            )
+            numeric_documents = {
+                document.document_id: document
+                for document in task.documents[:2]
+            }
+            self.cited_id = next(
+                document_id
+                for document_id in numeric_documents
+                if document_id not in self.selected_ids
+            )
+            document = numeric_documents[self.cited_id]
+            chain = _chain(
+                document_id=self.cited_id,
+                direction="up" if self.cited_id == "doc_1" else "down",
+                magnitude_value=0.2 if self.cited_id == "doc_1" else 0.1,
+                citations=[
+                    {
+                        "document_id": self.cited_id,
+                        "exact_quote": document.content.split(". ", 1)[0] + ".",
+                    }
+                ],
+            )
+            return LLMResponse(_round(chain))
+
+    llm = UnselectedCitationLLM()
+    retrieval = TwoStageRetrievalAgent(
+        llm,
+        genome,
+        RetrievalSkillLibrary("unused-two-stage-skills.json", persist=False),
+    )
+
+    result = retrieval.run_round1(task)
+
+    assert len(llm.selected_ids) == genome.max_selected_documents
+    assert llm.cited_id not in llm.selected_ids
+    assert result.chains[0].numeric_eligible is False
+    assert result.chains[0].citations == ()
+    assert result.quote_attempt_count == 1
+    assert result.valid_quote_count == 0
+    assert f"unselected_document:{llm.cited_id}" in result.rejected
+
+
+_ROUND1_QUERY_PLANS = {
+    "timeline_first": {
+        "ordered_objectives": [
+            "Anchor evidence to the forecast window before composing causal claims.",
+            "Order event evidence chronologically and flag ended events.",
+            "Search explicitly for cancellations, postponements, and reversals.",
+        ],
+        "selection_features": [
+            "forecast_window_overlap",
+            "explicit_event_dates",
+            "entity_target_phrase",
+        ],
+    },
+    "entity_first": {
+        "ordered_objectives": [
+            "Resolve the exact entity and target phrase before considering an event.",
+            "Reject evidence about neighboring entities or similarly named targets.",
+            "Then verify mechanism, magnitude, and forecast-window coverage.",
+        ],
+        "selection_features": [
+            "entity_target_phrase",
+            "canonical_name_boundaries",
+            "forecast_window_overlap",
+        ],
+    },
+    "contrastive": {
+        "ordered_objectives": [
+            "Build separate support and challenge hypotheses for each material event.",
+            "Seek matched counterevidence before declaring the ledger sufficient.",
+            "Retain unresolved contradictions rather than averaging them away.",
+        ],
+        "selection_features": [
+            "support_challenge_pairing",
+            "cancellation_or_reversal",
+            "entity_target_phrase",
+        ],
+    },
+}
+
+_ROUND2_QUERY_PLANS = {
+    "counterevidence_first": {
+        "ordered_objectives": [
+            "Search first for evidence that invalidates or limits each named assumption.",
+            "Prioritize cancellation, postponement, reversal, containment, or recovery.",
+            "Report unresolved assumptions when no exact counterevidence exists.",
+        ],
+        "selection_features": [
+            "assumption_failure_condition",
+            "counterevidence",
+            "named_gap_priority",
+        ],
+    },
+    "gap_first": {
+        "ordered_objectives": [
+            "Process named gaps in host-provided priority order.",
+            "Fill only the missing link stated for each gap.",
+            "Keep evidence attached to its addressed assumption ID.",
+        ],
+        "selection_features": [
+            "named_gap_priority",
+            "missing_information",
+            "assumption_id",
+        ],
+    },
+    "causal_chain_first": {
+        "ordered_objectives": [
+            "Complete entity, target, mechanism, window, and magnitude links in that order.",
+            "Prefer exact evidence that closes an incomplete verified Round 1 chain.",
+            "Preserve contradictions and do not overwrite Round 1 evidence.",
+        ],
+        "selection_features": [
+            "incomplete_chain_fields",
+            "verified_round1",
+            "causal_link_completeness",
+        ],
+    },
+}
+
+
+@pytest.mark.parametrize("strategy", sorted(ROUND1_STRATEGIES))
+def test_every_round1_strategy_projects_concrete_host_query_objectives(
+    strategy: str,
+) -> None:
+    genome = replace(RetrievalGenome.seed(), round1_strategy=strategy)
+    retrieval = _agent(["not json"], genome=genome)
+
+    retrieval.run_round1(_task())
+
+    payload = json.loads(retrieval.llm.calls[0]["messages"][0]["content"])
+    assert payload["query_plan"] == _ROUND1_QUERY_PLANS[strategy]
+
+
+@pytest.mark.parametrize("strategy", sorted(ROUND2_STRATEGIES))
+def test_every_round2_strategy_projects_concrete_host_query_objectives(
+    strategy: str,
+) -> None:
+    round1 = _agent([_round(_chain())]).run_round1(_task())
+    genome = replace(RetrievalGenome.seed(), round2_strategy=strategy)
+    retrieval = _agent(["not json"], genome=genome)
+
+    retrieval.run_round2(
+        _task(),
+        round1,
+        (RetrievalGap.from_payload(_gap()),),
+        (
+            RetrievalAssumption(
+                "a_trend",
+                "trend_persistence",
+                "The historical trend continues.",
+                "A future event reverses the trend.",
+            ),
+        ),
+    )
+
+    payload = json.loads(retrieval.llm.calls[0]["messages"][0]["content"])
+    assert payload["query_plan"] == _ROUND2_QUERY_PLANS[strategy]
+
+
+def test_strategy_only_genomes_change_only_the_owned_stage_wire_behavior() -> None:
+    gap = (RetrievalGap.from_payload(_gap()),)
+    assumptions = (
+        RetrievalAssumption(
+            "a_trend",
+            "trend_persistence",
+            "The historical trend continues.",
+            "A future event reverses the trend.",
+        ),
+    )
+
+    def calls(genome: RetrievalGenome) -> tuple[dict[str, object], dict[str, object]]:
+        retrieval = _agent([_round(_chain()), "not json"], genome=genome)
+        round1 = retrieval.run_round1(_task())
+        retrieval.run_round2(_task(), round1, gap, assumptions)
+        return retrieval.llm.calls[0], retrieval.llm.calls[1]
+
+    parent = RetrievalGenome.seed()
+    parent_round1, parent_round2 = calls(parent)
+    round1_child = replace(parent, round1_strategy="contrastive")
+    child_round1, child_round2 = calls(round1_child)
+    round2_child = replace(parent, round2_strategy="gap_first")
+    other_round1, other_round2 = calls(round2_child)
+
+    assert child_round1 != parent_round1
+    assert child_round2 == parent_round2
+    assert other_round1 == parent_round1
+    assert other_round2 != parent_round2
 
 
 def test_all_matching_stage_skills_see_materialized_generator_selectors(tmp_path) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from dataclasses import replace
 from typing import Mapping, Sequence
 
@@ -134,7 +135,9 @@ def _deduplicate_raw_citations(payload: object) -> object:
 
 
 def _raw_quote_audit(
-    task: ContextTask, payload: object
+    task: ContextTask,
+    payload: object,
+    allowed_document_ids: frozenset[str] | None,
 ) -> tuple[int, int]:
     """Count submitted quote attempts before any wire-level deduplication."""
     if not isinstance(payload, Mapping):
@@ -161,6 +164,10 @@ def _raw_quote_audit(
                 if (
                     isinstance(document_id, str)
                     and isinstance(quote, str)
+                    and (
+                        allowed_document_ids is None
+                        or document_id in allowed_document_ids
+                    )
                     and _verified_quote_spans(quote, documents.get(document_id, ""))
                 ):
                     valid += 1
@@ -172,13 +179,21 @@ def _missing(existing: Sequence[str], *additions: str) -> tuple[str, ...]:
 
 
 def _citation_spans(
-    task: ContextTask, citations: Sequence[EvidenceCitation]
+    task: ContextTask,
+    citations: Sequence[EvidenceCitation],
+    allowed_document_ids: frozenset[str] | None,
 ) -> tuple[tuple[EvidenceCitation, ...], tuple[str, ...]]:
     documents = {document.document_id: document.content for document in task.documents}
     accepted: list[EvidenceCitation] = []
     rejected: list[str] = []
     seen: set[tuple[str, str]] = set()
     for citation in citations:
+        if (
+            allowed_document_ids is not None
+            and citation.document_id not in allowed_document_ids
+        ):
+            rejected.append(f"unselected_document:{citation.document_id}")
+            continue
         document = documents.get(citation.document_id)
         spans = _verified_quote_spans(citation.exact_quote, document) if document is not None else ()
         if not spans:
@@ -193,7 +208,21 @@ def _citation_spans(
 
 
 def _has_term(text: str, term: str) -> bool:
-    return _normalize(term) in _normalize(text)
+    text_tokens = _canonical_phrase_tokens(text)
+    term_tokens = _canonical_phrase_tokens(term)
+    if not term_tokens or len(term_tokens) > len(text_tokens):
+        return False
+    width = len(term_tokens)
+    return any(
+        text_tokens[index : index + width] == term_tokens
+        for index in range(len(text_tokens) - width + 1)
+    )
+
+
+def _canonical_phrase_tokens(text: str) -> tuple[str, ...]:
+    """Canonicalize formatting while retaining exact token/phrase boundaries."""
+    normalized = unicodedata.normalize("NFKC", text).casefold().replace("&", " and ")
+    return tuple(re.findall(r"[^\W_]+", normalized, flags=re.UNICODE))
 
 
 def _entity_target_spans(
@@ -427,9 +456,14 @@ def _verify_chain(
     *,
     allowed_skill_ids: frozenset[str],
     allowed_assumption_ids: frozenset[str],
+    allowed_document_ids: frozenset[str] | None,
     counterevidence: bool,
 ) -> tuple[EvidenceChain, tuple[str, ...]]:
-    citations, rejected = _citation_spans(task, chain.citations)
+    citations, rejected = _citation_spans(
+        task,
+        chain.citations,
+        allowed_document_ids,
+    )
     anchors = _entity_target_spans(task, citations)
     missing: list[str] = list(chain.missing_links)
     if not citations:
@@ -519,6 +553,7 @@ def _verify_collection(
     *,
     allowed_skill_ids: frozenset[str],
     allowed_assumption_ids: frozenset[str],
+    allowed_document_ids: frozenset[str] | None,
     counterevidence: bool,
     submitted_conflicts: frozenset[str] = frozenset(),
 ) -> tuple[tuple[EvidenceChain, ...], tuple[str, ...]]:
@@ -534,6 +569,7 @@ def _verify_collection(
             chain,
             allowed_skill_ids=allowed_skill_ids,
             allowed_assumption_ids=allowed_assumption_ids,
+            allowed_document_ids=allowed_document_ids,
             counterevidence=counterevidence,
         )
         rejected.extend(item_rejected)
@@ -552,12 +588,22 @@ def verify_round_result(
     stage: str,
     allowed_skill_ids: Sequence[str],
     allowed_assumption_ids: Sequence[str],
+    allowed_document_ids: Sequence[str] | None = None,
     prior_round1: RetrievalRoundResult | None = None,
 ) -> RetrievalRoundResult:
     """Parse and deterministically verify one untrusted Retrieval stage response."""
     if stage not in {"round1", "round2"}:
         raise ValueError("stage must be round1 or round2")
-    quote_attempt_count, valid_quote_count = _raw_quote_audit(task, payload)
+    document_ids = (
+        None
+        if allowed_document_ids is None
+        else frozenset(allowed_document_ids)
+    )
+    quote_attempt_count, valid_quote_count = _raw_quote_audit(
+        task,
+        payload,
+        document_ids,
+    )
     try:
         raw = RetrievalRoundResult.from_payload(_deduplicate_raw_citations(payload))
     except (RetrievalContractError, TypeError, ValueError) as error:
@@ -579,6 +625,7 @@ def verify_round_result(
         raw.chains,
         allowed_skill_ids=skill_ids,
         allowed_assumption_ids=assumption_ids,
+        allowed_document_ids=document_ids,
         counterevidence=False,
         submitted_conflicts=submitted_conflicts,
     )
@@ -587,6 +634,7 @@ def verify_round_result(
         raw.counterevidence,
         allowed_skill_ids=skill_ids,
         allowed_assumption_ids=assumption_ids,
+        allowed_document_ids=document_ids,
         counterevidence=True,
         submitted_conflicts=submitted_conflicts,
     )

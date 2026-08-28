@@ -2,16 +2,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
 import evolving_loop.cli as cli_module
 import evolving_loop.retrieval_agent.evolution as evolution_module
 from common.data import Task
-from common.llm import FakeLLMClient, LLMResponse, TransientLLMError
+from common.llm import (
+    CodexCLIClient,
+    CodexCLIConfig,
+    FakeLLMClient,
+    LLMClient,
+    LLMResponse,
+    TransientLLMError,
+)
 from common.metrics import drcik_point_metrics
 from evolving_loop.coding_agent.evolution import (
     CodingEvolutionAgent,
@@ -347,6 +356,77 @@ def _candidate_retrieval_skill() -> RetrievalSkill:
         counterevidence_rule="Search for cancellation.",
         failure_conditions=("The event does not overlap the horizon.",),
     )
+
+
+def test_trusted_evaluator_is_document_permutation_invariant_on_the_real_harness(
+    tmp_path: Path,
+) -> None:
+    task = _task()
+    genome = replace(RetrievalGenome.seed(), max_selected_documents=3)
+    selected_payloads: list[list[list[dict[str, str]]]] = []
+    evaluations = []
+
+    for index, documents in enumerate(
+        (
+            task.documents,
+            tuple(reversed(task.documents)),
+            (*task.documents[2:], *task.documents[:2]),
+        )
+    ):
+        retrieval_clients: list[FakeLLMClient] = []
+
+        def harness_factory(
+            received_genome: RetrievalGenome,
+            _library: RetrievalSkillLibrary,
+        ) -> EvolvingForecastHarness:
+            harness, _coding, retrieval, _decision_client = _make_two_stage_harness(
+                tmp_path / f"permutation-{index}",
+                [_round(_promotion_chain()), _round(_supply_chain())],
+                [
+                    _decision(
+                        "trend",
+                        request_more=True,
+                        gaps=[_named_gap()],
+                    ),
+                    _decision("trend", request_more=False),
+                ],
+                genome=received_genome,
+            )
+            retrieval_clients.append(retrieval)
+            return harness
+
+        permuted = replace(task, documents=documents)
+        evaluation = cli_module._TrustedRetrievalEvaluator().evaluate(
+            genome,
+            (permuted,),
+            stage="parent_dev",
+            skill_library=RetrievalSkillLibrary(
+                tmp_path / f"permutation-{index}-skills.json",
+                persist=False,
+            ),
+            harness_factory=harness_factory,
+            persist=False,
+            writers_enabled=False,
+            evolver_enabled=False,
+            cache_keys=(SimpleNamespace(task_id=permuted.numeric.task_id),),
+            metric_cap=5.0,
+        )
+        payloads = [
+            json.loads(call["messages"][0]["content"])
+            for call in retrieval_clients[0].calls
+        ]
+        selected_payloads.append(
+            [payload["documents"] for payload in payloads]
+        )
+        evaluations.append(evaluation.to_payload())
+
+    assert selected_payloads[0] == selected_payloads[1] == selected_payloads[2]
+    assert len(selected_payloads[0]) == 2
+    assert all(
+        len(documents) == genome.max_selected_documents
+        for documents in selected_payloads[0]
+    )
+    assert evaluations[0] == evaluations[1] == evaluations[2]
 
 
 class _CandidateAwareRetrievalLLM:
@@ -2156,7 +2236,12 @@ def test_fake_two_stage_smoke(tmp_path: Path) -> None:
 
     round1_prompt = json.loads(retrieval_llm.calls[0]["messages"][0]["content"])
     round2_prompt = json.loads(retrieval_llm.calls[1]["messages"][0]["content"])
-    assert set(round1_prompt) == {"target", "documents", "retrieval_skills"}
+    assert set(round1_prompt) == {
+        "target",
+        "documents",
+        "retrieval_skills",
+        "query_plan",
+    }
     assert set(round2_prompt) == {
         "target",
         "documents",
@@ -2164,6 +2249,7 @@ def test_fake_two_stage_smoke(tmp_path: Path) -> None:
         "gaps",
         "assumptions",
         "retrieval_skills",
+        "query_plan",
     }
     assert round2_prompt["gaps"] == [
         {
@@ -2444,13 +2530,19 @@ def test_e2e_budget_exhaustion_returns_a_deterministic_bounded_card(
         ],
         genome=genome,
     )
+    task = _task()
+    budget_task = replace(
+        task,
+        documents=(task.documents[0], task.documents[-1]),
+    )
 
-    result = harness.run(_task())
+    result = harness.run(budget_task)
 
     prompt = json.loads(retrieval.calls[0]["messages"][0]["content"])
     assert len(retrieval.calls) == 1
     assert len(decision.calls) == 2
-    assert [item["document_id"] for item in prompt["documents"]] == ["doc_promo"]
+    assert len(prompt["documents"]) == genome.max_selected_documents
+    assert "Alpha Store sales" in prompt["documents"][0]["content"]
     assert result.retrieval_card is not None
     assert len(result.retrieval_card.chains) == 1
     assert len(result.retrieval_card.chains[0].citations) == 1
@@ -2733,6 +2825,248 @@ def _evolution_config(checkpoint: Path) -> RetrievalEvolutionConfig:
         mutation_model_hash="e2e-mutation-model-v1",
         metric_cap=5.0,
     )
+
+
+class _InnerRetrievalSequence:
+    def __init__(self, outcomes: list[str | Exception]) -> None:
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    def complete(self, **_kwargs) -> LLMResponse:
+        self.calls += 1
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return LLMResponse(outcome)
+
+
+class _AssembledCoding:
+    def __init__(self) -> None:
+        program = SimpleNamespace(
+            name="numeric",
+            assumption="The local trend persists.",
+            failure_condition="A future event changes the trend.",
+            source="generated",
+        )
+        self.candidate = SimpleNamespace(
+            program=program,
+            forecast=(4.0, 5.0),
+            hindcast_smae=0.1,
+            hindcast_srmse=0.1,
+            fold_smae=(0.1, 0.1),
+            fold_srmse=(0.1, 0.1),
+            fold_errors=(),
+        )
+
+    def run_task(self, task: Task, *, allow_skill_writes: bool):
+        assert task.future_values == ()
+        assert allow_skill_writes is False
+        return SimpleNamespace(candidates=(self.candidate,), selected=self.candidate)
+
+
+class _EmptyMorphology:
+    def assumptions(self, task: ContextTask) -> tuple[object, ...]:
+        assert task.numeric.future_values == ()
+        return ()
+
+
+def _prepared_real_evaluator_engine(
+    tmp_path: Path,
+    inner_retrieval: LLMClient,
+) -> tuple[
+    RetrievalEvolutionEngine,
+    RetrievalGenome,
+    ContextTask,
+    RetrievalSkillLibrary,
+]:
+    base_library = RetrievalSkillLibrary(
+        tmp_path / "assembled-skills.json",
+        persist=False,
+    )
+
+    def harness_factory(
+        genome: RetrievalGenome,
+        library: RetrievalSkillLibrary,
+    ) -> EvolvingForecastHarness:
+        return EvolvingForecastHarness(
+            _AssembledCoding(),
+            TwoStageRetrievalAgent(inner_retrieval, genome, library),
+            DecisionAgent(
+                FakeLLMClient(
+                    [
+                        _decision("numeric", request_more=False),
+                        _decision("numeric", request_more=False),
+                    ]
+                )
+            ),
+            runtime=HarnessRuntimeConfig(retrieval_mode="two_stage"),
+            morphology=_EmptyMorphology(),
+        )
+
+    config = RetrievalEvolutionConfig(
+        generations=1,
+        screen_tasks=8,
+        promote=2,
+        train_folds=4,
+        random_seed=17,
+        transient_retries=1,
+        checkpoint_path=tmp_path / "assembled-checkpoint.json",
+        dataset_split_hash="assembled-split-v1",
+        verifier_hash="assembled-verifier-v1",
+        evaluator_hash="assembled-evaluator-v1",
+        metric_hash="assembled-metric-v1",
+        mutation_model_hash="assembled-mutation-v1",
+        harness_hash="assembled-harness-v1",
+        metric_cap=5.0,
+    )
+    engine = RetrievalEvolutionEngine(
+        FakeLLMClient([]),
+        cli_module._TrustedRetrievalEvaluator(),
+        config,
+        skill_library=base_library,
+        harness_factory=harness_factory,
+    )
+    parent = RetrievalGenome.seed()
+    train = _evolution_tasks("assembled_train", 80, entity_offset=0, tasks_per_entity=8)
+    dev = _evolution_tasks("assembled_dev", 20, entity_offset=100, tasks_per_entity=2)
+    engine._validate_inputs(parent, train, dev)
+    screen, folds = engine._partition_train(train)
+    engine._scientific_inputs = engine._science_signature(parent, train, dev)
+    assert engine._load_checkpoint(parent, train, dev, screen, folds) is None
+    return engine, parent, train[0], base_library.clone(persist=False, read_only=True)
+
+
+def test_inner_retrieval_transient_reaches_real_evaluator_engine_retry_and_checkpoint(
+    tmp_path: Path,
+) -> None:
+    inner = CodexCLIClient(
+        CodexCLIConfig(
+            cache_dir=None,
+            transport_retries=0,
+            transport_retry_delay_seconds=0.0,
+        )
+    )
+    subprocess_attempts = 0
+
+    def fake_run(command, **_kwargs):
+        nonlocal subprocess_attempts
+        subprocess_attempts += 1
+        assert "--json" in command
+        if subprocess_attempts == 1:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                json.dumps(
+                    {
+                        "type": "turn.failed",
+                        "error": {
+                            "message": "sampling stream ended",
+                            "codex_error_info": "response_stream_disconnected",
+                        },
+                    }
+                ),
+                "sampling failed",
+            )
+        output = Path(command[command.index("--output-last-message") + 1])
+        output.write_text(_round(), encoding="utf-8")
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps({"type": "turn.completed"}),
+            "",
+        )
+
+    engine, parent, task, library = _prepared_real_evaluator_engine(tmp_path, inner)
+
+    with patch("common.llm.subprocess.run", side_effect=fake_run) as mocked:
+        evaluation = engine._evaluate_batch(
+            parent,
+            (task,),
+            stage="parent_dev",
+            readonly=True,
+            library=library,
+        )
+
+    assert evaluation.task_count == 1
+    assert inner.calls == 2
+    assert mocked.call_count == 2
+    assert (tmp_path / "assembled-checkpoint.json").exists()
+    assert [event["kind"] for event in engine._trace].count("transient_retry") == 1
+    assert not any(
+        event["kind"] == "forecasting_failure_completed"
+        for event in engine._trace
+    )
+
+
+def test_real_evaluator_engine_does_not_retry_codex_parse_failure(
+    tmp_path: Path,
+) -> None:
+    inner = CodexCLIClient(
+        CodexCLIConfig(
+            cache_dir=None,
+            transport_retries=0,
+            transport_retry_delay_seconds=0.0,
+        )
+    )
+
+    def fake_run(command, **_kwargs):
+        output = Path(command[command.index("--output-last-message") + 1])
+        output.write_text("not json", encoding="utf-8")
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps({"type": "turn.completed"}),
+            "",
+        )
+
+    engine, parent, task, library = _prepared_real_evaluator_engine(tmp_path, inner)
+
+    with patch("common.llm.subprocess.run", side_effect=fake_run) as mocked:
+        evaluation = engine._evaluate_batch(
+            parent,
+            (task,),
+            stage="parent_dev",
+            readonly=True,
+            library=library,
+        )
+
+    assert evaluation.task_count == 1
+    assert mocked.call_count == 1
+    assert inner.calls == 1
+    assert not any(event["kind"] == "transient_retry" for event in engine._trace)
+
+
+@pytest.mark.parametrize(
+    "permanent_outcome",
+    [
+        pytest.param(
+            json.dumps({"evidence_chains": []}),
+            id="schema_error",
+        ),
+        pytest.param(
+            RuntimeError("permanent model contract failure"),
+            id="model_error",
+        ),
+    ],
+)
+def test_real_evaluator_engine_does_not_retry_permanent_inner_failures(
+    tmp_path: Path,
+    permanent_outcome: str | Exception,
+) -> None:
+    inner = _InnerRetrievalSequence([permanent_outcome])
+    engine, parent, task, library = _prepared_real_evaluator_engine(tmp_path, inner)
+
+    evaluation = engine._evaluate_batch(
+        parent,
+        (task,),
+        stage="parent_dev",
+        readonly=True,
+        library=library,
+    )
+
+    assert evaluation.task_count == 1
+    assert inner.calls == 1
+    assert not any(event["kind"] == "transient_retry" for event in engine._trace)
 
 
 def test_evolution_retries_then_resumes_with_read_only_dev_and_no_public_access(

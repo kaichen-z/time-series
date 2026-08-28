@@ -1,10 +1,12 @@
 """LLM access for tests, local Qwen, and the installed Codex CLI."""
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import re
+import socket
 import subprocess
 import tempfile
 import time
@@ -19,6 +21,29 @@ DEFAULT_CACHE_DIR = "/raid/home/air/khoutaibi/models"
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+_TRANSIENT_PROCESS_ERRNOS = frozenset(
+    {
+        errno.ECONNABORTED,
+        errno.ECONNREFUSED,
+        errno.ECONNRESET,
+        errno.EHOSTUNREACH,
+        errno.ENETDOWN,
+        errno.ENETUNREACH,
+        errno.ETIMEDOUT,
+        socket.EAI_AGAIN,
+    }
+)
+_TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+_TRANSIENT_CODEX_ERROR_KINDS = frozenset(
+    {
+        "http_connection_failed",
+        "internal_server_error",
+        "response_stream_connection_failed",
+        "response_stream_disconnected",
+        "response_too_many_failed_attempts",
+        "server_overloaded",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -40,6 +65,57 @@ class JsonExtractionError(ValueError):
 
 class TransientLLMError(RuntimeError):
     """Raised when temporary infrastructure prevents an LLM call from completing."""
+
+
+def _is_transient_process_error(error: OSError) -> bool:
+    """Classify only typed process/pipe transport failures and explicit errnos."""
+    return isinstance(error, (ConnectionError, TimeoutError)) or (
+        error.errno in _TRANSIENT_PROCESS_ERRNOS
+    )
+
+
+def _structured_status_is_transient(value: Mapping[str, object]) -> bool:
+    for key in ("http_status_code", "codex_error_http_status_code"):
+        status = value.get(key)
+        if isinstance(status, int) and not isinstance(status, bool):
+            if status in _TRANSIENT_HTTP_STATUSES:
+                return True
+    return False
+
+
+def _codex_error_info_is_transient(value: object) -> bool:
+    if isinstance(value, str):
+        return value in _TRANSIENT_CODEX_ERROR_KINDS
+    if not isinstance(value, Mapping):
+        return False
+    kind = value.get("kind")
+    if isinstance(kind, str) and kind in _TRANSIENT_CODEX_ERROR_KINDS:
+        return True
+    if _structured_status_is_transient(value):
+        return True
+    if len(value) != 1:
+        return False
+    variant, _details = next(iter(value.items()))
+    return isinstance(variant, str) and variant in _TRANSIENT_CODEX_ERROR_KINDS
+
+
+def _codex_jsonl_reports_transient_failure(stdout: str) -> bool:
+    """Read only typed ``turn.failed`` JSONL events emitted by ``codex exec --json``."""
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, Mapping) or event.get("type") != "turn.failed":
+            continue
+        error = event.get("error")
+        if not isinstance(error, Mapping):
+            continue
+        if _structured_status_is_transient(error) or _codex_error_info_is_transient(
+            error.get("codex_error_info")
+        ):
+            return True
+    return False
 
 
 def parse_json_object(text: str) -> dict:
@@ -94,7 +170,6 @@ class CodexCLIConfig:
     reasoning_effort: str = "high"
     timeout_seconds: int = 900
     cache_dir: str | Path | None = "runs/evolving/codex-cache"
-    json_repair_attempts: int = 2
     transport_retries: int = 2
     transport_retry_delay_seconds: float = 1.0
     subprocess_env: Mapping[str, str] | None = None
@@ -135,10 +210,7 @@ class CodexCLIClient:
                 return LLMResponse(text=cached)
 
         text = self._execute(prompt)
-        try:
-            parsed = parse_json_object(text)
-        except JsonExtractionError as initial_error:
-            parsed = self._repair_json(text, initial_error)
+        parsed = parse_json_object(text)
         normalized = json.dumps(parsed, ensure_ascii=False)
         if cache_path is not None:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -160,6 +232,7 @@ class CodexCLIClient:
                 "--ignore-rules",
                 "--color",
                 "never",
+                "--json",
                 "--output-last-message",
                 str(result_path),
                 "--cd",
@@ -192,16 +265,30 @@ class CodexCLIClient:
                     raise TransientLLMError(
                         f"Codex CLI timed out after {self.config.timeout_seconds} seconds"
                     ) from exc
+                except OSError as exc:
+                    self.calls += 1
+                    if _is_transient_process_error(exc):
+                        if attempt < retries:
+                            self._transport_backoff(attempt)
+                            continue
+                        raise TransientLLMError(
+                            "Codex CLI process transport failed after "
+                            f"{retries + 1} attempts: {type(exc).__name__}"
+                        ) from exc
+                    raise RuntimeError(
+                        f"Codex CLI process failed: {type(exc).__name__}"
+                    ) from exc
                 self.calls += 1
                 if completed.returncode == 0:
                     break
                 details = (completed.stderr or completed.stdout).strip()[-2000:]
-                if self._is_transient_transport_error(details):
+                if _codex_jsonl_reports_transient_failure(completed.stdout):
                     if attempt < retries:
                         self._transport_backoff(attempt)
                         continue
                     raise TransientLLMError(
-                        f"Codex CLI transport failed after {retries + 1} attempts: {details}"
+                        "Codex CLI reported a structured transient failure after "
+                        f"{retries + 1} attempts: {completed.stdout.strip()[-2000:]}"
                     )
                 raise RuntimeError(
                     f"Codex CLI failed with exit code {completed.returncode}: {details}"
@@ -215,47 +302,6 @@ class CodexCLIClient:
         delay = max(float(self.config.transport_retry_delay_seconds), 0.0) * (2**attempt)
         if delay:
             time.sleep(delay)
-
-    @staticmethod
-    def _is_transient_transport_error(details: str) -> bool:
-        lowered = details.lower()
-        return any(
-            marker in lowered
-            for marker in (
-                "connection reset",
-                "connection refused",
-                "failed to connect",
-                "error sending request",
-                "stream disconnected",
-                "temporary failure in name resolution",
-                "network is unreachable",
-                "service unavailable",
-                "selected model is at capacity",
-                "rate limit",
-                "status code 429",
-                "status code 502",
-                "status code 503",
-                "status code 504",
-            )
-        )
-
-    def _repair_json(self, broken: str, initial_error: Exception) -> dict:
-        error: Exception = initial_error
-        candidate = broken
-        for attempt in range(1, max(self.config.json_repair_attempts, 0) + 1):
-            repair_prompt = (
-                "Repair only the JSON syntax in the text below. Preserve every key and semantic "
-                "value. Do not add analysis, markdown, or new claims. Return exactly one valid "
-                f"JSON object. Repair attempt {attempt}.\n\nBROKEN JSON:\n{candidate}"
-            )
-            candidate = self._execute(repair_prompt)
-            try:
-                return parse_json_object(candidate)
-            except JsonExtractionError as exc:
-                error = exc
-        raise JsonExtractionError(
-            f"JSON remained invalid after {self.config.json_repair_attempts} repair attempts: {error}"
-        ) from error
 
     def _cache_path(self, prompt: str) -> Path | None:
         if self.config.cache_dir is None:
@@ -360,8 +406,19 @@ class ClaudeCLIClient:
             except FileNotFoundError as exc:
                 raise RuntimeError(f"Claude Code CLI was not found: {self.config.binary}") from exc
             except subprocess.TimeoutExpired as exc:
-                raise RuntimeError(
+                self.calls += 1
+                raise TransientLLMError(
                     f"Claude Code CLI timed out after {self.config.timeout_seconds} seconds"
+                ) from exc
+            except OSError as exc:
+                self.calls += 1
+                if _is_transient_process_error(exc):
+                    raise TransientLLMError(
+                        "Claude Code CLI process transport failed: "
+                        f"{type(exc).__name__}"
+                    ) from exc
+                raise RuntimeError(
+                    f"Claude Code CLI process failed: {type(exc).__name__}"
                 ) from exc
             self.calls += 1
             if completed.returncode != 0:
@@ -374,6 +431,11 @@ class ClaudeCLIClient:
             except json.JSONDecodeError as exc:
                 raise RuntimeError(f"Claude Code CLI produced non-JSON output: {exc}") from exc
             if envelope.get("is_error"):
+                if envelope.get("subtype") == "error_timeout":
+                    raise TransientLLMError(
+                        "Claude Code CLI reported structured transient subtype "
+                        "error_timeout"
+                    )
                 raise RuntimeError(f"Claude Code CLI reported an error result: {envelope}")
             text = str(envelope.get("result", "")).strip()
 

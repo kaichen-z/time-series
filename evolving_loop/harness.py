@@ -7,6 +7,7 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
+from common.llm import TransientLLMError
 from evolving_loop.coding_agent.evolution import CodingEvolutionAgent, CodingEvolutionResult
 from evolving_loop.data import ContextTask
 from evolving_loop.decision_agent.agent import DecisionAgent, DecisionCandidate, DecisionResult
@@ -217,6 +218,8 @@ class EvolvingForecastHarness:
                 )
                 for item in self.morphology.assumptions(task)
             )
+        except TransientLLMError:
+            raise
         except Exception as error:
             assumptions = ()
             morphology_failure = f"morphology_provider_failed:{type(error).__name__}"

@@ -80,7 +80,14 @@ from evolving_loop.source_evolution import (
     save_source_trace,
 )
 from evolving_loop.source_evolution.source_inference import run_source_inference
-from common.llm import ClaudeCLIClient, ClaudeCLIConfig, CodexCLIClient, CodexCLIConfig, QwenClient
+from common.llm import (
+    ClaudeCLIClient,
+    ClaudeCLIConfig,
+    CodexCLIClient,
+    CodexCLIConfig,
+    QwenClient,
+    TransientLLMError,
+)
 from common.metrics import linear_quantile
 from evolving_loop.evaluation import score_after_resolution
 from evolving_loop.retrieval_agent.evolution import (
@@ -1286,6 +1293,8 @@ class _TrustedRetrievalEvaluator:
                 result = harness.run(
                     inference_view(task), allow_skill_writes=False
                 )
+            except TransientLLMError:
+                raise
             except Exception:
                 raise RetrievalForecastingFailure(
                     "InferenceRuntimeFailure"
@@ -1303,6 +1312,8 @@ class _TrustedRetrievalEvaluator:
             try:
                 outcome = score_after_resolution(task, result)
                 diagnostics = outcome.retrieval_diagnostics
+            except TransientLLMError:
+                raise
             except Exception:
                 raise RetrievalForecastingFailure(
                     "TrustedScoringFailure"
@@ -1449,6 +1460,8 @@ class _TrustedRetrievalEvaluator:
                 omitted = harness_factory(genome, projected).run(
                     inference_view(task), allow_skill_writes=False
                 )
+            except TransientLLMError:
+                raise
             except Exception:
                 raise RetrievalForecastingFailure("InferenceRuntimeFailure") from None
             if (
