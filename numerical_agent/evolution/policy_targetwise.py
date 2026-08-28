@@ -104,7 +104,7 @@ def evolve_policies_once(
     _require_clean(root)
     module = read_module(root / "methods.py")
     parent = read_policy_file(root / "policies.py")
-    parent.validate_statistical_parents(module.names())
+    parent.validate_parents(module.names())
     initial_hits = outcome_cache.stats.hits + policy_cache.stats.hits
     initial_misses = outcome_cache.stats.misses + policy_cache.stats.misses
 

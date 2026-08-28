@@ -185,7 +185,7 @@ def require_cached_portfolio_outcomes(
     isolated_methods: bool,
 ) -> tuple[Outcome, ...]:
     """Reconstruct all candidate outcomes from exact caches, never calling a model."""
-    portfolio.validate_statistical_parents(module.names())
+    portfolio.validate_parents(module.names())
     python_rows = tuple(
         row
         for method in module.methods

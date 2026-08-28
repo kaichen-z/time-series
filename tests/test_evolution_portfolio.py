@@ -240,11 +240,11 @@ def test_policy_parser_rejects_tsfm_identity_substitution() -> None:
         parse_policy_source(source)
 
 
-def test_policy_parser_rejects_removing_a_combined_candidate() -> None:
+def test_policy_parser_rejects_empty_combined_portfolio() -> None:
     source = render_policy_source(_portfolio())
     source = source[: source.index("COMBINED_POLICIES =")] + "COMBINED_POLICIES = ()\n"
 
-    with pytest.raises(PolicyError, match="Combined identities"):
+    with pytest.raises(PolicyError, match="between 1 and 32"):
         parse_policy_source(source)
 
 
@@ -257,12 +257,12 @@ def test_policy_parser_rejects_combined_to_combined_parent_dependency() -> None:
         parse_policy_source(source)
 
 
-def test_combined_repair_cannot_change_parent_identity() -> None:
+def test_combined_repair_can_change_parent_identity() -> None:
     portfolio = _portfolio()
     parent = portfolio.combined[0]
     replacement = CombinedPolicy(
         name=parent.name,
-        parents=(parent.parents[0], "naive_last"),
+        parents=(parent.parents[0], "holt_damped_trend"),
         operator=parent.operator,
         weights=parent.weights,
         signal=parent.signal,
@@ -270,8 +270,9 @@ def test_combined_repair_cannot_change_parent_identity() -> None:
         fallback_parent=parent.fallback_parent,
     )
 
-    with pytest.raises(PolicyError, match="parent identities"):
-        portfolio.replace(parent.name, replacement)
+    child = portfolio.replace(parent.name, replacement)
+
+    assert child.get(parent.name) == replacement
 
 
 def test_tsfm_repair_can_change_policy_but_not_method_id() -> None:
@@ -353,3 +354,160 @@ def test_93_methods_plus_portfolio_reports_103_candidates() -> None:
     portfolio = _portfolio()
 
     assert len(names) + len(portfolio.names) == 103
+
+
+def _variable_combined(name: str = "combined_variable") -> CombinedPolicy:
+    return CombinedPolicy(
+        name=name,
+        parents=("toto_2_0", "seasonal_naive"),
+        operator="weighted_mean",
+        weights=(0.5, 0.5),
+        fallback_parent="toto_2_0",
+    )
+
+
+def test_portfolio_shape_accepts_one_to_32_variable_combined_policies() -> None:
+    base = PolicyPortfolio.flagship5()
+    one = PolicyPortfolio(base.tsfm, (_variable_combined(),))
+    thirty_two = PolicyPortfolio(
+        base.tsfm,
+        tuple(_variable_combined(f"combined_{index}") for index in range(32)),
+    )
+
+    assert len(one.combined) == 1
+    assert len(thirty_two.combined) == 32
+
+
+@pytest.mark.parametrize("count", [0, 33])
+def test_portfolio_shape_rejects_combined_count_outside_one_to_32(count: int) -> None:
+    base = PolicyPortfolio.flagship5()
+    combined = tuple(_variable_combined(f"combined_{index}") for index in range(count))
+
+    with pytest.raises(PolicyError, match="between 1 and 32"):
+        PolicyPortfolio(base.tsfm, combined)
+
+
+def test_portfolio_preserves_fixed_tsfm_identity_and_order() -> None:
+    base = PolicyPortfolio.flagship5()
+    reordered = tuple(reversed(base.tsfm))
+
+    with pytest.raises(PolicyError, match="identities and order"):
+        PolicyPortfolio(reordered, (_variable_combined(),))
+
+
+def test_validate_parents_accepts_cross_family_leaf_parents() -> None:
+    base = PolicyPortfolio.flagship5()
+    policy = CombinedPolicy(
+        name="combined_cross_family",
+        parents=("toto_2_0", "timesfm_2_5", "seasonal_naive"),
+        operator="median",
+        fallback_parent="toto_2_0",
+    )
+    portfolio = PolicyPortfolio(base.tsfm, (policy,))
+
+    portfolio.validate_parents(_module().names())
+
+
+def test_validate_parents_accepts_two_tsfm_parents() -> None:
+    base = PolicyPortfolio.flagship5()
+    policy = CombinedPolicy(
+        name="combined_tsfm_pair",
+        parents=("toto_2_0", "timesfm_2_5"),
+        operator="median",
+        fallback_parent="toto_2_0",
+    )
+
+    PolicyPortfolio(base.tsfm, (policy,)).validate_parents(_module().names())
+
+
+def test_portfolio_rejects_duplicate_combined_names() -> None:
+    base = PolicyPortfolio.flagship5()
+    duplicate = _variable_combined("same_name")
+
+    with pytest.raises(PolicyError, match="unique"):
+        PolicyPortfolio(base.tsfm, (duplicate, duplicate))
+
+
+@pytest.mark.parametrize(
+    "parents",
+    [
+        ("seasonal_naive", "holt_damped_trend"),
+        ("toto_2_0", "unknown_leaf"),
+        ("toto_2_0", "combined_chronos_damped_trend"),
+    ],
+)
+def test_validate_parents_rejects_non_leaf_or_all_statistical_parents(
+    parents: tuple[str, str],
+) -> None:
+    base = PolicyPortfolio.flagship5()
+    policy = CombinedPolicy(
+        name="combined_parent_validation",
+        parents=parents,
+        operator="weighted_mean",
+        weights=(0.5, 0.5),
+        fallback_parent=parents[0],
+    )
+
+    if parents[1] == "combined_chronos_damped_trend":
+        other = _variable_combined(parents[1])
+        with pytest.raises(PolicyError, match="Combined.*parent"):
+            PolicyPortfolio(base.tsfm, (policy, other))
+    elif parents[0] == "seasonal_naive":
+        with pytest.raises(PolicyError, match="TSFM parent"):
+            PolicyPortfolio(base.tsfm, (policy,))
+    else:
+        portfolio = PolicyPortfolio(base.tsfm, (policy,))
+        with pytest.raises(PolicyError, match="unknown parent"):
+            portfolio.validate_parents(_module().names())
+
+
+def test_atomic_combined_mutations_are_immutable_and_allow_parent_repair() -> None:
+    parent = PolicyPortfolio.flagship5()
+    new_policy = _variable_combined()
+    changed = CombinedPolicy(
+        name=new_policy.name,
+        parents=("timesfm_2_5", "seasonal_naive"),
+        operator="weighted_mean",
+        weights=(0.25, 0.75),
+        fallback_parent="timesfm_2_5",
+    )
+    fork = _variable_combined("combined_fork")
+
+    child = parent.add_combined(new_policy)
+    repaired = child.replace(new_policy.name, changed)
+    forked = repaired.fork_combined(new_policy.name, fork)
+    removed = forked.remove_combined(fork.name)
+
+    assert parent == PolicyPortfolio.flagship5()
+    assert repaired.get(new_policy.name) == changed
+    assert forked.get(fork.name) == fork
+    assert removed.get(fork.name) is None
+
+
+def test_atomic_invalid_combined_mutations_leave_parent_byte_identical() -> None:
+    parent = PolicyPortfolio.flagship5()
+    source = render_policy_source(parent)
+
+    with pytest.raises(PolicyError):
+        parent.add_combined(parent.combined[0])
+    with pytest.raises(PolicyError):
+        parent.replace("missing_policy", _variable_combined("missing_policy"))
+    with pytest.raises(PolicyError):
+        parent.fork_combined("missing_policy", _variable_combined("forked"))
+    with pytest.raises(PolicyError):
+        parent.fork_combined(
+            parent.combined[0].name,
+            _variable_combined(parent.combined[1].name),
+        )
+    with pytest.raises(PolicyError):
+        parent.remove_combined("timesfm_2_5")
+
+    assert render_policy_source(parent) == source
+
+
+def test_atomic_remove_combined_refuses_to_remove_final_combined() -> None:
+    base = PolicyPortfolio.flagship5()
+    parent = PolicyPortfolio(base.tsfm, (_variable_combined(),))
+
+    with pytest.raises(PolicyError, match="final Combined"):
+        parent.remove_combined(parent.combined[0].name)

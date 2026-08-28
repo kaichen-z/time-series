@@ -326,8 +326,8 @@ class PolicyPortfolio:
             raise PolicyError("flagship TSFM identities and order must remain unchanged")
         if tuple(policy.name for policy in self.tsfm) != FLAGSHIP_TSFM_NAMES:
             raise PolicyError("flagship TSFM policy identities and order must remain unchanged")
-        if tuple(policy.name for policy in self.combined) != FLAGSHIP_COMBINED_NAMES:
-            raise PolicyError("Combined identities and order must remain unchanged")
+        if not isinstance(self.combined, tuple) or not 1 <= len(self.combined) <= 32:
+            raise PolicyError("Combined policies must contain between 1 and 32 entries")
         names = tuple(policy.name for policy in self.all_policies)
         if len(names) != len(set(names)):
             raise PolicyError("policy names must be unique")
@@ -354,11 +354,20 @@ class PolicyPortfolio:
     def get(self, name: str) -> TSFMPolicy | CombinedPolicy | None:
         return next((policy for policy in self.all_policies if policy.name == name), None)
 
-    def validate_statistical_parents(self, method_names: Sequence[str]) -> None:
+    def validate_parents(self, method_names: Sequence[str]) -> None:
         known = set(method_names)
         tsfm_names = {policy.name for policy in self.tsfm}
+        combined_names = {policy.name for policy in self.combined}
         for policy in self.combined:
+            if not any(parent in tsfm_names for parent in policy.parents):
+                raise PolicyError(
+                    f"Combined policy {policy.name!r} must include a TSFM parent"
+                )
             for parent in policy.parents:
+                if parent in combined_names:
+                    raise PolicyError(
+                        f"Combined policy {policy.name!r} cannot use a Combined parent"
+                    )
                 if parent not in tsfm_names and parent not in known:
                     raise PolicyError(
                         f"Combined policy {policy.name!r} has unknown parent {parent!r}"
@@ -381,14 +390,42 @@ class PolicyPortfolio:
                 tsfm=tuple(replacement if policy.name == name else policy for policy in self.tsfm),
             )
         assert isinstance(parent, CombinedPolicy) and isinstance(replacement, CombinedPolicy)
-        if replacement.parents != parent.parents:
-            raise PolicyError("Combined parent identities cannot change during repair")
         return replace(
             self,
             combined=tuple(
                 replacement if policy.name == name else policy for policy in self.combined
             ),
         )
+
+    def add_combined(self, policy: CombinedPolicy) -> "PolicyPortfolio":
+        """Return a portfolio with one new Combined policy."""
+        if not isinstance(policy, CombinedPolicy):
+            raise PolicyError("Combined mutation requires a CombinedPolicy")
+        if self.get(policy.name) is not None:
+            raise PolicyError(f"policy name {policy.name!r} already exists")
+        return replace(self, combined=self.combined + (policy,))
+
+    def remove_combined(self, name: str) -> "PolicyPortfolio":
+        """Return a portfolio without one Combined policy."""
+        if not any(policy.name == name for policy in self.combined):
+            raise PolicyError(f"unknown Combined policy {name!r}")
+        if len(self.combined) == 1:
+            raise PolicyError("cannot remove the final Combined policy")
+        return replace(
+            self,
+            combined=tuple(policy for policy in self.combined if policy.name != name),
+        )
+
+    def fork_combined(
+        self, source: str, child: CombinedPolicy
+    ) -> "PolicyPortfolio":
+        """Return a portfolio with a new child Combined policy."""
+        source_policy = self.get(source)
+        if not isinstance(source_policy, CombinedPolicy):
+            raise PolicyError(f"unknown Combined source {source!r}")
+        if not isinstance(child, CombinedPolicy):
+            raise PolicyError("Combined fork requires a CombinedPolicy child")
+        return self.add_combined(child)
 
     @classmethod
     def flagship5(cls) -> "PolicyPortfolio":
@@ -526,7 +563,7 @@ def evaluate_portfolio(
     policy_cache: PolicyOutcomeCache | None = None,
 ) -> tuple[Outcome, ...]:
     """Evaluate Python, TSFM, and Combined candidates on one trusted task sequence."""
-    portfolio.validate_statistical_parents(module.names())
+    portfolio.validate_parents(module.names())
     python_outcomes = tuple(
         outcome
         for method in module.methods
