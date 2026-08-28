@@ -441,6 +441,7 @@ del _build_checkpoint_authority_boundary
 class _CheckpointAuthorityToken:
     checkpoint_sha256: str
     authority_epoch: int
+    checkpoint_identity: tuple[int, int]
 
 
 _UNSPECIFIED_CHECKPOINT_IDENTITY = object()
@@ -457,6 +458,34 @@ def _exact_checkpoint_digest(value: object, field: str) -> str:
     return value
 
 
+def _checkpoint_identity_payload(
+    identity: tuple[int, int] | None,
+) -> dict[str, int] | None:
+    if identity is None:
+        return None
+    return {"st_dev": identity[0], "st_ino": identity[1]}
+
+
+def _exact_checkpoint_identity(
+    value: object,
+    field: str,
+    *,
+    allow_none: bool = False,
+) -> tuple[int, int] | None:
+    if value is None and allow_none:
+        return None
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != {"st_dev", "st_ino"}
+        or type(value["st_dev"]) is not int
+        or type(value["st_ino"]) is not int
+        or value["st_dev"] < 0
+        or value["st_ino"] <= 0
+    ):
+        raise RetrievalCheckpointError(f"invalid {field}")
+    return cast(tuple[int, int], (value["st_dev"], value["st_ino"]))
+
+
 class _OperatorCheckpointAuthority:
     """Protected two-phase digest/epoch journal for cross-process resume."""
 
@@ -467,6 +496,7 @@ class _OperatorCheckpointAuthority:
         authority_head_path: Path,
         *,
         authentication_key: bytes | None,
+        expected_authority_anchor: tuple[int, str] | None = None,
         expected_checkpoint_identity: tuple[int, int] | None | object = (
             _UNSPECIFIED_CHECKPOINT_IDENTITY
         ),
@@ -476,6 +506,8 @@ class _OperatorCheckpointAuthority:
         expected_head_identity: tuple[int, int] | None | object = (
             _UNSPECIFIED_AUTHORITY_RECORD_IDENTITY
         ),
+        expected_checkpoint_parent_identity: tuple[int, int] | None = None,
+        expected_authority_parent_identity: tuple[int, int] | None = None,
     ) -> None:
         if (
             not isinstance(authentication_key, bytes)
@@ -508,6 +540,18 @@ class _OperatorCheckpointAuthority:
                 "checkpoint authority parent must be independently provisioned"
             ) from error
         parent_metadata = os.fstat(parent_descriptor)
+        authority_parent_identity = (
+            parent_metadata.st_dev,
+            parent_metadata.st_ino,
+        )
+        if (
+            expected_authority_parent_identity is not None
+            and authority_parent_identity != expected_authority_parent_identity
+        ):
+            os.close(parent_descriptor)
+            raise RetrievalCheckpointError(
+                "checkpoint authority parent identity changed after path validation"
+            )
         if (
             parent_metadata.st_uid != os.geteuid()
             or stat.S_IMODE(parent_metadata.st_mode) & 0o022
@@ -525,6 +569,7 @@ class _OperatorCheckpointAuthority:
             ) from error
         self.authority_path = safe
         self._parent_descriptor = parent_descriptor
+        self._checkpoint_parent_identity = expected_checkpoint_parent_identity
         self._closed = False
         self._pending_token: _CheckpointAuthorityToken | None = None
         self._record_identities: dict[str, tuple[int, int] | None] = {
@@ -558,6 +603,7 @@ class _OperatorCheckpointAuthority:
                     raise RetrievalCheckpointError(
                         "checkpoint authority record identity changed after path validation"
                     )
+            self._require_external_anchor(expected_authority_anchor)
             self._reconcile()
         except Exception:
             self.close()
@@ -571,6 +617,15 @@ class _OperatorCheckpointAuthority:
         except FileNotFoundError:
             return None
         try:
+            parent_metadata = os.fstat(parent_descriptor)
+            if (
+                self._checkpoint_parent_identity is not None
+                and (parent_metadata.st_dev, parent_metadata.st_ino)
+                != self._checkpoint_parent_identity
+            ):
+                raise RetrievalCheckpointError(
+                    "checkpoint parent identity changed after path validation"
+                )
             _revalidate_checkpoint_parent(safe, parent_descriptor)
             try:
                 identity, encoded = _read_checkpoint_entry_snapshot(
@@ -589,11 +644,12 @@ class _OperatorCheckpointAuthority:
 
     def _default_state(self) -> dict[str, object]:
         core: dict[str, object] = {
-            "schema_version": 3,
+            "schema_version": 4,
             "checkpoint_path": str(self.checkpoint_path),
             "checkpoint_sha256": None,
+            "checkpoint_identity": None,
             "authority_epoch": 0,
-            "authority_head": self._authority_head(None, 0),
+            "authority_head": self._authority_head(None, 0, None),
             "pending": None,
         }
         return self._signed_journal(core)
@@ -611,12 +667,20 @@ class _OperatorCheckpointAuthority:
             hashlib.sha256,
         ).hexdigest()
 
-    def _authority_head(self, digest: str | None, epoch: int) -> str:
+    def _authority_head(
+        self,
+        digest: str | None,
+        epoch: int,
+        checkpoint_identity: tuple[int, int] | None,
+    ) -> str:
         return self._mac(
-            b"retrieval-checkpoint-authority-head-v1",
+            b"retrieval-checkpoint-authority-head-v2",
             {
                 "checkpoint_path": str(self.checkpoint_path),
                 "checkpoint_sha256": digest,
+                "checkpoint_identity": _checkpoint_identity_payload(
+                    checkpoint_identity
+                ),
                 "authority_epoch": epoch,
             },
         )
@@ -628,24 +692,75 @@ class _OperatorCheckpointAuthority:
         return {
             **core,
             "journal_mac": self._mac(
-                b"retrieval-checkpoint-authority-journal-v1", core
+                b"retrieval-checkpoint-authority-journal-v2", core
             ),
         }
 
-    def _head_state(self, digest: str | None, epoch: int) -> dict[str, object]:
+    def _head_state(
+        self,
+        digest: str | None,
+        epoch: int,
+        checkpoint_identity: tuple[int, int] | None,
+    ) -> dict[str, object]:
         core: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "checkpoint_path": str(self.checkpoint_path),
             "checkpoint_sha256": digest,
+            "checkpoint_identity": _checkpoint_identity_payload(
+                checkpoint_identity
+            ),
             "authority_epoch": epoch,
-            "authority_head": self._authority_head(digest, epoch),
+            "authority_head": self._authority_head(
+                digest, epoch, checkpoint_identity
+            ),
         }
         return {
             **core,
             "head_mac": self._mac(
-                b"retrieval-checkpoint-authority-monotonic-head-v1", core
+                b"retrieval-checkpoint-authority-monotonic-head-v2", core
             ),
         }
+
+    def _require_external_anchor(
+        self,
+        expected: tuple[int, str] | None,
+    ) -> None:
+        pristine = (
+            self._record_identities[self.authority_path.name] is None
+            and self._record_identities[self.authority_head_path.name] is None
+            and self._checkpoint_snapshot() is None
+        )
+        if expected is None:
+            if pristine:
+                return
+            raise RetrievalCheckpointError(
+                "checkpoint resume requires an external authority anchor"
+            )
+        if (
+            type(expected) is not tuple
+            or len(expected) != 2
+            or type(expected[0]) is not int
+            or expected[0] < 0
+        ):
+            raise RetrievalCheckpointError("invalid external authority anchor")
+        expected_head = _exact_checkpoint_digest(
+            expected[1], "external authority anchor head"
+        )
+        committed = (
+            self._state["authority_epoch"],
+            self._state["authority_head"],
+        )
+        if committed != (expected[0], expected_head):
+            raise RetrievalCheckpointError(
+                "external authority anchor does not match committed epoch and head"
+            )
+
+    @property
+    def current_anchor(self) -> tuple[int, str]:
+        return (
+            cast(int, self._state["authority_epoch"]),
+            cast(str, self._state["authority_head"]),
+        )
 
     def _read_protected_record(
         self, path: Path, label: str
@@ -699,6 +814,7 @@ class _OperatorCheckpointAuthority:
             "schema_version",
             "checkpoint_path",
             "checkpoint_sha256",
+            "checkpoint_identity",
             "authority_epoch",
             "authority_head",
             "pending",
@@ -706,7 +822,7 @@ class _OperatorCheckpointAuthority:
         }
         if set(raw) != expected:
             raise RetrievalCheckpointError("invalid checkpoint authority schema")
-        if raw["schema_version"] != 3:
+        if raw["schema_version"] != 4:
             raise RetrievalCheckpointError("unsupported checkpoint authority schema")
         supplied_mac = raw["journal_mac"]
         if type(supplied_mac) is not str or not hmac.compare_digest(
@@ -720,14 +836,25 @@ class _OperatorCheckpointAuthority:
             raise RetrievalCheckpointError("checkpoint authority path binding mismatch")
         epoch = raw["authority_epoch"]
         digest = raw["checkpoint_sha256"]
+        checkpoint_identity = _exact_checkpoint_identity(
+            raw["checkpoint_identity"],
+            "checkpoint authority identity",
+            allow_none=True,
+        )
         if type(epoch) is not int or epoch < 0:
             raise RetrievalCheckpointError("invalid checkpoint authority epoch")
         if epoch == 0:
-            if digest is not None:
+            if digest is not None or checkpoint_identity is not None:
                 raise RetrievalCheckpointError("invalid initial checkpoint authority")
         else:
             _exact_checkpoint_digest(digest, "checkpoint authority digest")
-        expected_head = self._authority_head(cast(str | None, digest), epoch)
+            if checkpoint_identity is None:
+                raise RetrievalCheckpointError(
+                    "invalid checkpoint authority identity"
+                )
+        expected_head = self._authority_head(
+            cast(str | None, digest), epoch, checkpoint_identity
+        )
         if raw["authority_head"] != expected_head:
             raise RetrievalCheckpointError(
                 "checkpoint authority journal head authentication failed"
@@ -739,6 +866,7 @@ class _OperatorCheckpointAuthority:
                 or set(pending)
                 != {
                     "checkpoint_sha256",
+                    "checkpoint_identity",
                     "authority_epoch",
                     "authority_head",
                 }
@@ -750,9 +878,14 @@ class _OperatorCheckpointAuthority:
                 pending["checkpoint_sha256"],
                 "pending checkpoint authority digest",
             )
+            pending_identity = _exact_checkpoint_identity(
+                pending["checkpoint_identity"],
+                "pending checkpoint authority identity",
+            )
             if pending["authority_head"] != self._authority_head(
                 cast(str, pending["checkpoint_sha256"]),
                 cast(int, pending["authority_epoch"]),
+                pending_identity,
             ):
                 raise RetrievalCheckpointError(
                     "pending checkpoint authority head authentication failed"
@@ -767,11 +900,12 @@ class _OperatorCheckpointAuthority:
             "schema_version",
             "checkpoint_path",
             "checkpoint_sha256",
+            "checkpoint_identity",
             "authority_epoch",
             "authority_head",
             "head_mac",
         }
-        if set(raw) != expected or raw["schema_version"] != 1:
+        if set(raw) != expected or raw["schema_version"] != 2:
             raise RetrievalCheckpointError(
                 "invalid checkpoint authority head schema"
             )
@@ -780,7 +914,7 @@ class _OperatorCheckpointAuthority:
         if type(supplied_mac) is not str or not hmac.compare_digest(
             supplied_mac,
             self._mac(
-                b"retrieval-checkpoint-authority-monotonic-head-v1", core
+                b"retrieval-checkpoint-authority-monotonic-head-v2", core
             ),
         ):
             raise RetrievalCheckpointError(
@@ -792,15 +926,24 @@ class _OperatorCheckpointAuthority:
             )
         epoch = raw["authority_epoch"]
         digest = raw["checkpoint_sha256"]
+        checkpoint_identity = _exact_checkpoint_identity(
+            raw["checkpoint_identity"],
+            "checkpoint authority head identity",
+            allow_none=True,
+        )
         if type(epoch) is not int or epoch < 0:
             raise RetrievalCheckpointError("invalid checkpoint authority head epoch")
         if epoch == 0:
-            if digest is not None:
+            if digest is not None or checkpoint_identity is not None:
                 raise RetrievalCheckpointError("invalid initial checkpoint authority head")
         else:
             _exact_checkpoint_digest(digest, "checkpoint authority head digest")
+            if checkpoint_identity is None:
+                raise RetrievalCheckpointError(
+                    "invalid checkpoint authority head identity"
+                )
         if raw["authority_head"] != self._authority_head(
-            cast(str | None, digest), epoch
+            cast(str | None, digest), epoch, checkpoint_identity
         ):
             raise RetrievalCheckpointError(
                 "checkpoint authority head authentication failed"
@@ -924,20 +1067,25 @@ class _OperatorCheckpointAuthority:
         self._write_record(self.authority_path, signed)
         return signed
 
-    def _write_head(self, digest: str | None, epoch: int) -> dict[str, object]:
-        head = self._head_state(digest, epoch)
+    def _write_head(
+        self,
+        digest: str | None,
+        epoch: int,
+        checkpoint_identity: tuple[int, int] | None,
+    ) -> dict[str, object]:
+        head = self._head_state(digest, epoch, checkpoint_identity)
         self._write_record(self.authority_head_path, head)
         return head
 
     def _reconcile(self) -> None:
         pending = self._state["pending"]
-        checkpoint_digest = self._checkpoint_digest()
+        checkpoint_snapshot = self._checkpoint_snapshot()
         if self._head is None:
             if (
                 _checkpoint_entry_exists(
                     self._parent_descriptor, self.authority_path.name
                 )
-                or checkpoint_digest is not None
+                or checkpoint_snapshot is not None
             ):
                 raise RetrievalCheckpointError(
                     "checkpoint authority journal exists without authenticated head"
@@ -951,20 +1099,40 @@ class _OperatorCheckpointAuthority:
                 raise RetrievalCheckpointError(
                     "checkpoint authority journal replay conflicts with monotonic head"
                 )
-            if checkpoint_digest == pending["checkpoint_sha256"]:
+            pending_identity = _exact_checkpoint_identity(
+                pending["checkpoint_identity"],
+                "pending checkpoint authority identity",
+            )
+            pending_snapshot = (
+                pending_identity,
+                pending["checkpoint_sha256"],
+            )
+            current_identity = _exact_checkpoint_identity(
+                self._state["checkpoint_identity"],
+                "checkpoint authority identity",
+                allow_none=True,
+            )
+            current_snapshot = (
+                None
+                if current_identity is None
+                else (current_identity, self._state["checkpoint_sha256"])
+            )
+            if checkpoint_snapshot == pending_snapshot:
                 if head_value == current_head:
                     self._head = self._write_head(
                         cast(str, pending["checkpoint_sha256"]),
                         cast(int, pending["authority_epoch"]),
+                        pending_identity,
                     )
                 self._state = self._write_state({
                     **self._state,
                     "checkpoint_sha256": pending["checkpoint_sha256"],
+                    "checkpoint_identity": pending["checkpoint_identity"],
                     "authority_epoch": pending["authority_epoch"],
                     "authority_head": pending["authority_head"],
                     "pending": None,
                 })
-            elif checkpoint_digest == self._state["checkpoint_sha256"]:
+            elif checkpoint_snapshot == current_snapshot:
                 if head_value != current_head:
                     raise RetrievalCheckpointError(
                         "checkpoint authority head advanced without durable checkpoint"
@@ -974,66 +1142,98 @@ class _OperatorCheckpointAuthority:
                 )
             else:
                 raise RetrievalCheckpointError(
-                    "pending checkpoint authority cannot reconcile durable bytes"
+                    "pending checkpoint authority cannot reconcile durable identity or bytes"
                 )
         elif head_value != self._state["authority_head"]:
             raise RetrievalCheckpointError(
                 "checkpoint authority journal replay conflicts with monotonic head"
             )
         expected_digest = self._state["checkpoint_sha256"]
+        expected_identity = _exact_checkpoint_identity(
+            self._state["checkpoint_identity"],
+            "checkpoint authority identity",
+            allow_none=True,
+        )
         expected_epoch = self._state["authority_epoch"]
-        checkpoint_digest = self._checkpoint_digest()
+        checkpoint_snapshot = self._checkpoint_snapshot()
         if expected_digest is None:
-            if checkpoint_digest is not None or expected_epoch != 0:
+            if (
+                checkpoint_snapshot is not None
+                or expected_identity is not None
+                or expected_epoch != 0
+            ):
                 raise RetrievalCheckpointError(
                     "checkpoint authority has no trusted initial state"
                 )
         else:
-            if checkpoint_digest != expected_digest:
+            if checkpoint_snapshot != (expected_identity, expected_digest):
                 raise RetrievalCheckpointError(
-                    "checkpoint does not match protected authority record"
+                    "checkpoint identity or digest does not match protected authority record"
                 )
+            self._checkpoint_identity = expected_identity
             _authorize_retrieval_evolution_checkpoint_for_operator(
                 self.checkpoint_path,
                 expected_sha256=cast(str, expected_digest),
                 expected_epoch=cast(int, expected_epoch),
             )
 
-    def prepare(self, checkpoint_sha256: str) -> _CheckpointAuthorityToken:
+    def prepare(
+        self,
+        checkpoint_sha256: str,
+        *,
+        checkpoint_identity: tuple[int, int],
+    ) -> _CheckpointAuthorityToken:
         if self._closed or self._pending_token is not None:
             raise RetrievalCheckpointError("checkpoint authority transaction is unavailable")
         digest = _exact_checkpoint_digest(
             checkpoint_sha256, "prepared checkpoint digest"
         )
         checkpoint_snapshot = self._checkpoint_snapshot()
-        checkpoint_identity = (
+        current_checkpoint_identity = (
             checkpoint_snapshot[0] if checkpoint_snapshot is not None else None
         )
         checkpoint_digest = (
             checkpoint_snapshot[1] if checkpoint_snapshot is not None else None
         )
         if (
-            checkpoint_identity != self._checkpoint_identity
+            current_checkpoint_identity != self._checkpoint_identity
             or checkpoint_digest != self._state["checkpoint_sha256"]
         ):
             raise RetrievalCheckpointError(
                 "checkpoint identity changed before authority transaction"
             )
+        intended_identity = _exact_checkpoint_identity(
+            _checkpoint_identity_payload(checkpoint_identity),
+            "prepared checkpoint identity",
+        )
+        assert intended_identity is not None
         token = _CheckpointAuthorityToken(
-            digest, cast(int, self._state["authority_epoch"]) + 1
+            digest,
+            cast(int, self._state["authority_epoch"]) + 1,
+            intended_identity,
         )
         if self._head is None:
             self._head = self._write_head(
                 cast(str | None, self._state["checkpoint_sha256"]),
                 cast(int, self._state["authority_epoch"]),
+                _exact_checkpoint_identity(
+                    self._state["checkpoint_identity"],
+                    "checkpoint authority identity",
+                    allow_none=True,
+                ),
             )
         proposed = {
             **self._state,
             "pending": {
                 "checkpoint_sha256": token.checkpoint_sha256,
+                "checkpoint_identity": _checkpoint_identity_payload(
+                    token.checkpoint_identity
+                ),
                 "authority_epoch": token.authority_epoch,
                 "authority_head": self._authority_head(
-                    token.checkpoint_sha256, token.authority_epoch
+                    token.checkpoint_sha256,
+                    token.authority_epoch,
+                    token.checkpoint_identity,
                 ),
             },
         }
@@ -1047,19 +1247,25 @@ class _OperatorCheckpointAuthority:
         checkpoint_snapshot = self._checkpoint_snapshot()
         if (
             checkpoint_snapshot is None
-            or checkpoint_snapshot[1] != token.checkpoint_sha256
+            or checkpoint_snapshot
+            != (token.checkpoint_identity, token.checkpoint_sha256)
         ):
             raise RetrievalCheckpointError(
-                "checkpoint commit does not match prepared authority digest"
+                "checkpoint commit does not match prepared authority identity and digest"
             )
         committed_checkpoint_identity = checkpoint_snapshot[0]
         pending = cast(Mapping[str, object], self._state["pending"])
         self._head = self._write_head(
-            token.checkpoint_sha256, token.authority_epoch
+            token.checkpoint_sha256,
+            token.authority_epoch,
+            token.checkpoint_identity,
         )
         committed = {
             **self._state,
             "checkpoint_sha256": token.checkpoint_sha256,
+            "checkpoint_identity": _checkpoint_identity_payload(
+                token.checkpoint_identity
+            ),
             "authority_epoch": token.authority_epoch,
             "authority_head": pending["authority_head"],
             "pending": None,
@@ -1077,20 +1283,25 @@ class _OperatorCheckpointAuthority:
     def abort(self, token: _CheckpointAuthorityToken) -> int | None:
         if self._pending_token is not token:
             return None
-        checkpoint_digest = self._checkpoint_digest()
-        if checkpoint_digest == token.checkpoint_sha256:
-            return self.commit(token)
-        if checkpoint_digest != self._state["checkpoint_sha256"]:
-            raise RetrievalCheckpointError(
-                "checkpoint authority abort found unknown durable bytes"
-            )
         checkpoint_snapshot = self._checkpoint_snapshot()
-        if (
-            checkpoint_snapshot is not None
-            and checkpoint_snapshot[0] != self._checkpoint_identity
+        if checkpoint_snapshot == (
+            token.checkpoint_identity,
+            token.checkpoint_sha256,
         ):
+            return self.commit(token)
+        current_identity = _exact_checkpoint_identity(
+            self._state["checkpoint_identity"],
+            "checkpoint authority identity",
+            allow_none=True,
+        )
+        current_snapshot = (
+            None
+            if current_identity is None
+            else (current_identity, self._state["checkpoint_sha256"])
+        )
+        if checkpoint_snapshot != current_snapshot:
             raise RetrievalCheckpointError(
-                "checkpoint identity changed during authority abort"
+                "checkpoint authority abort found unknown durable identity or bytes"
             )
         rolled_back = {**self._state, "pending": None}
         self._state = self._write_state(rolled_back)
@@ -1113,6 +1324,7 @@ def _open_retrieval_checkpoint_authority_for_operator(
     authority_head_path: str | Path,
     *,
     authentication_key: bytes | None,
+    expected_authority_anchor: tuple[int, str] | None = None,
     expected_checkpoint_identity: tuple[int, int] | None | object = (
         _UNSPECIFIED_CHECKPOINT_IDENTITY
     ),
@@ -1122,15 +1334,20 @@ def _open_retrieval_checkpoint_authority_for_operator(
     expected_head_identity: tuple[int, int] | None | object = (
         _UNSPECIFIED_AUTHORITY_RECORD_IDENTITY
     ),
+    expected_checkpoint_parent_identity: tuple[int, int] | None = None,
+    expected_authority_parent_identity: tuple[int, int] | None = None,
 ) -> _OperatorCheckpointAuthority:
     return _OperatorCheckpointAuthority(
         Path(checkpoint_path),
         Path(authority_path),
         Path(authority_head_path),
         authentication_key=authentication_key,
+        expected_authority_anchor=expected_authority_anchor,
         expected_checkpoint_identity=expected_checkpoint_identity,
         expected_authority_identity=expected_authority_identity,
         expected_head_identity=expected_head_identity,
+        expected_checkpoint_parent_identity=expected_checkpoint_parent_identity,
+        expected_authority_parent_identity=expected_authority_parent_identity,
     )
 
 
@@ -1962,6 +2179,7 @@ class RetrievalEvolutionEngine:
         harness_factory: Callable[..., object] | None = None,
         _checkpoint_authority: _OperatorCheckpointAuthority | None = None,
         _checkpoint_payload_validator: Callable[[object], None] | None = None,
+        _checkpoint_parent_identity: tuple[int, int] | None = None,
     ) -> None:
         self.mutation_llm = mutation_llm
         if not callable(getattr(evaluator, "evaluate", None)):
@@ -1986,6 +2204,7 @@ class RetrievalEvolutionEngine:
         ):
             raise RetrievalEvolutionError("invalid checkpoint payload validator")
         self._checkpoint_authority = _checkpoint_authority
+        self._checkpoint_parent_identity = _checkpoint_parent_identity
         self._checkpoint_payload_validator = _checkpoint_payload_validator
         self._scientific_inputs: dict[str, object] = {}
         self._original_parent: RetrievalGenome | None = None
@@ -2969,6 +3188,15 @@ class RetrievalEvolutionEngine:
         authority_token: _CheckpointAuthorityToken | None = None
         checkpoint_sha256 = hashlib.sha256(encoded).hexdigest()
         try:
+            parent_metadata = os.fstat(parent_descriptor)
+            if (
+                self._checkpoint_parent_identity is not None
+                and (parent_metadata.st_dev, parent_metadata.st_ino)
+                != self._checkpoint_parent_identity
+            ):
+                raise RetrievalCheckpointError(
+                    "Retrieval evolution checkpoint parent identity changed after preflight"
+                )
             _revalidate_checkpoint_parent(path, parent_descriptor)
             try:
                 current_identity, current_encoded = (
@@ -3004,7 +3232,8 @@ class RetrievalEvolutionEngine:
                 )
             if self._checkpoint_authority is not None:
                 authority_token = self._checkpoint_authority.prepare(
-                    checkpoint_sha256
+                    checkpoint_sha256,
+                    checkpoint_identity=staged_identity,
                 )
             _revalidate_checkpoint_parent(path, parent_descriptor)
             if self._checkpoint_file_identity is not None:
@@ -3123,6 +3352,15 @@ class RetrievalEvolutionEngine:
         try:
             safe, parent_descriptor = _open_checkpoint_parent(path, create=False)
             try:
+                parent_metadata = os.fstat(parent_descriptor)
+                if (
+                    self._checkpoint_parent_identity is not None
+                    and (parent_metadata.st_dev, parent_metadata.st_ino)
+                    != self._checkpoint_parent_identity
+                ):
+                    raise RetrievalCheckpointError(
+                        "Retrieval evolution checkpoint parent identity changed after preflight"
+                    )
                 _revalidate_checkpoint_parent(safe, parent_descriptor)
                 self._checkpoint_file_identity, encoded = (
                     _read_checkpoint_entry_snapshot(

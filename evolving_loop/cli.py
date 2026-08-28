@@ -103,6 +103,9 @@ DRCIK_PUBLIC_80_20_99_SHA256 = (
 RETRIEVAL_CHECKPOINT_AUTHORITY_KEY_ENV = (
     "RETRIEVAL_CHECKPOINT_AUTHORITY_KEY"
 )
+RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED_ENV = (
+    "RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED"
+)
 _FROZEN_RETRIEVAL_MANIFEST_METADATA = {
     "dataset": "ServiceNow/Dr-CiK",
     "source_split": "public_dev",
@@ -249,6 +252,14 @@ def _add_retrieval_evolution_controls(parser: argparse.ArgumentParser) -> None:
         "--checkpoint-authority-key-env",
         default=RETRIEVAL_CHECKPOINT_AUTHORITY_KEY_ENV,
         help="Environment variable holding the operator authority key.",
+    )
+    parser.add_argument(
+        "--checkpoint-authority-expected-env",
+        default=RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED_ENV,
+        help=(
+            "Environment variable holding the independently retained "
+            "expected authority epoch:head anchor for resume."
+        ),
     )
 
 
@@ -757,7 +768,11 @@ def _retrieval_task_record_id(raw: str) -> str:
     return matches[0]
 
 
-def _open_retrieval_task_source(path: Path):
+def _open_retrieval_task_source(
+    path: Path,
+    *,
+    expected_identity: tuple[int, int] | None = None,
+):
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
@@ -767,32 +782,163 @@ def _open_retrieval_task_source(path: Path):
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
             raise ValueError("Retrieval dataset source must be a regular file")
+        if (
+            expected_identity is not None
+            and (metadata.st_dev, metadata.st_ino) != expected_identity
+        ):
+            raise ValueError(
+                "Retrieval dataset source identity changed after preflight"
+            )
         return os.fdopen(descriptor, "r", encoding="utf-8")
     except Exception:
         os.close(descriptor)
         raise
 
 
-def _iter_retrieval_task_record_texts(tasks_file: str | Path):
+def _open_retrieval_task_member(
+    directory_descriptor: int,
+    name: str,
+    *,
+    expected_identity: tuple[int, int],
+):
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory_descriptor)
+    except OSError as error:
+        raise ValueError("Retrieval dataset member cannot be opened safely") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or (metadata.st_dev, metadata.st_ino) != expected_identity
+        ):
+            raise ValueError(
+                "Retrieval dataset member identity changed after preflight"
+            )
+        return os.fdopen(descriptor, "r", encoding="utf-8")
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _snapshot_retrieval_task_source(
+    path: Path,
+) -> dict[str, object] | None:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ValueError("Retrieval dataset source cannot be inspected safely") from error
+    try:
+        metadata = os.fstat(descriptor)
+        source_identity = (metadata.st_dev, metadata.st_ino)
+        if stat.S_ISREG(metadata.st_mode):
+            return {
+                "kind": "file",
+                "source_identity": source_identity,
+                "members": (),
+            }
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("Retrieval dataset source must be a file or directory")
+        try:
+            names = sorted(
+                name
+                for name in os.listdir(descriptor)
+                if Path(name).suffix.lower() == ".json"
+            )
+        except OSError as error:
+            raise ValueError(
+                "Retrieval dataset directory cannot be enumerated safely"
+            ) from error
+        members: list[tuple[str, tuple[int, int]]] = []
+        member_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        for name in names:
+            if name in {"", ".", ".."} or Path(name).name != name:
+                raise ValueError("Retrieval dataset member name is invalid")
+            try:
+                member_descriptor = os.open(
+                    name, member_flags, dir_fd=descriptor
+                )
+            except OSError as error:
+                raise ValueError(
+                    "Retrieval dataset member cannot be inspected safely"
+                ) from error
+            try:
+                member_metadata = os.fstat(member_descriptor)
+                if not stat.S_ISREG(member_metadata.st_mode):
+                    raise ValueError(
+                        "Retrieval dataset member must be a regular file"
+                    )
+                members.append(
+                    (
+                        name,
+                        (member_metadata.st_dev, member_metadata.st_ino),
+                    )
+                )
+            finally:
+                os.close(member_descriptor)
+        return {
+            "kind": "directory",
+            "source_identity": source_identity,
+            "members": tuple(members),
+        }
+    finally:
+        os.close(descriptor)
+
+
+def _iter_retrieval_task_record_texts(
+    tasks_file: str | Path,
+    *,
+    expected_source_snapshot: Mapping[str, object] | None = None,
+):
     """Yield one raw task record at a time while refusing source symlinks."""
     source = Path(tasks_file)
-    try:
-        metadata = source.lstat()
-    except OSError as error:
-        raise ValueError("Retrieval dataset source is unavailable") from error
-    if stat.S_ISLNK(metadata.st_mode):
-        raise ValueError("Retrieval dataset source cannot be a symlink")
-    if stat.S_ISDIR(metadata.st_mode):
-        paths = sorted(item for item in source.iterdir() if item.suffix.lower() == ".json")
-        for path in paths:
-            with _open_retrieval_task_source(path) as handle:
-                raw = handle.read()
-            if raw.strip():
-                yield raw
+    snapshot = _snapshot_retrieval_task_source(source)
+    if snapshot is None:
+        raise ValueError("Retrieval dataset source is unavailable")
+    if expected_source_snapshot is not None and snapshot != expected_source_snapshot:
+        raise ValueError("Retrieval dataset source identity changed after preflight")
+    if snapshot["kind"] == "directory":
+        directory_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            directory_descriptor = os.open(source, directory_flags)
+        except OSError as error:
+            raise ValueError(
+                "Retrieval dataset directory cannot be opened safely"
+            ) from error
+        try:
+            metadata = os.fstat(directory_descriptor)
+            if (metadata.st_dev, metadata.st_ino) != snapshot["source_identity"]:
+                raise ValueError(
+                    "Retrieval dataset directory identity changed after preflight"
+                )
+            for name, identity in snapshot["members"]:
+                with _open_retrieval_task_member(
+                    directory_descriptor,
+                    name,
+                    expected_identity=identity,
+                ) as handle:
+                    raw = handle.read()
+                if raw.strip():
+                    yield raw
+        finally:
+            os.close(directory_descriptor)
         return
-    if not stat.S_ISREG(metadata.st_mode):
-        raise ValueError("Retrieval dataset source must be a file or directory")
-    with _open_retrieval_task_source(source) as handle:
+    with _open_retrieval_task_source(
+        source,
+        expected_identity=snapshot["source_identity"],
+    ) as handle:
         for line in handle:
             if line.strip():
                 yield line
@@ -804,6 +950,7 @@ def _load_retrieval_evolution_tasks(
     *,
     expected_manifest_sha256: str | None = None,
     include_public_ids: bool = False,
+    expected_source_snapshot: Mapping[str, object] | None = None,
 ) -> (
     tuple[tuple[ContextTask, ...], tuple[ContextTask, ...], str]
     | tuple[
@@ -898,7 +1045,10 @@ def _load_retrieval_evolution_tasks(
     selected_ids = set((*partition_ids["train"], *partition_ids["dev"]))
     available_ids: set[str] = set()
     selected_records: dict[str, str] = {}
-    for raw in _iter_retrieval_task_record_texts(tasks_file):
+    for raw in _iter_retrieval_task_record_texts(
+        tasks_file,
+        expected_source_snapshot=expected_source_snapshot,
+    ):
         task_id = _retrieval_task_record_id(raw)
         if task_id in available_ids:
             raise ValueError("Retrieval dataset contains duplicate task metadata")
@@ -1558,6 +1708,36 @@ def _checkpoint_authority_key(args) -> bytes:
     return supplied.encode("utf-8")
 
 
+def _checkpoint_authority_expected_anchor(
+    args,
+    *,
+    resume_required: bool,
+) -> tuple[int, str] | None:
+    environment_name = getattr(
+        args,
+        "checkpoint_authority_expected_env",
+        RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED_ENV,
+    )
+    if (
+        type(environment_name) is not str
+        or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", environment_name)
+    ):
+        raise ValueError(
+            "Retrieval checkpoint authority expected-anchor environment is invalid"
+        )
+    supplied = os.environ.get(environment_name)
+    if supplied is None:
+        if resume_required:
+            raise ValueError(
+                "Retrieval checkpoint resume requires an external authority anchor"
+            )
+        return None
+    match = re.fullmatch(r"(0|[1-9][0-9]*):([0-9a-f]{64})", supplied)
+    if match is None:
+        raise ValueError("Retrieval checkpoint external authority anchor is invalid")
+    return int(match.group(1)), match.group(2)
+
+
 def _restore_retrieval_checkpoint_authority(
     checkpoint_path: Path,
     authority_path: Path,
@@ -2073,11 +2253,23 @@ def _publish_retrieval_output_bytes(
     encoded: bytes,
     *,
     expected_identity: tuple[int, int] | None,
+    expected_parent_identity: tuple[int, int] | None = None,
 ) -> None:
-    safe, parent_descriptor = _open_checkpoint_parent(path, create=True)
+    safe, parent_descriptor = _open_checkpoint_parent(
+        path, create=expected_parent_identity is None
+    )
     temporary: str | None = None
     quarantine: str | None = None
     try:
+        parent_metadata = os.fstat(parent_descriptor)
+        if (
+            expected_parent_identity is not None
+            and (parent_metadata.st_dev, parent_metadata.st_ino)
+            != expected_parent_identity
+        ):
+            raise ValueError(
+                "Retrieval output parent directory identity changed after preflight"
+            )
         _revalidate_checkpoint_parent(safe, parent_descriptor)
         current = _cli_entry_snapshot(parent_descriptor, safe.name)
         current_identity = current[0] if current is not None else None
@@ -2138,12 +2330,16 @@ def _write_json_artifact(
     payload: object,
     *,
     expected_identity: tuple[int, int] | None,
+    expected_parent_identity: tuple[int, int] | None = None,
 ) -> None:
     encoded = (
         json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
     ).encode("utf-8")
     _publish_retrieval_output_bytes(
-        path, encoded, expected_identity=expected_identity
+        path,
+        encoded,
+        expected_identity=expected_identity,
+        expected_parent_identity=expected_parent_identity,
     )
 
 
@@ -2238,8 +2434,10 @@ def _validate_retrieval_evolution_paths(args) -> dict[str, object]:
         raise ValueError(
             "checkpoint authority records must be outside the approved run root"
         )
+    tasks_path = _canonical_cli_path(args.tasks_file, "tasks")
+    task_source_snapshot = _snapshot_retrieval_task_source(tasks_path)
     protected_inputs: list[tuple[str, Path]] = [
-        ("tasks", _canonical_cli_path(args.tasks_file, "tasks")),
+        ("tasks", tasks_path),
         ("split manifest", _canonical_cli_path(args.split_manifest, "split manifest")),
         (
             "Retrieval release",
@@ -2264,6 +2462,16 @@ def _validate_retrieval_evolution_paths(args) -> dict[str, object]:
                 _canonical_cli_path(args.seed_policy_path, "seed policy"),
             )
         )
+    identity_overrides: dict[str, tuple[int, int]] = {}
+    if task_source_snapshot is not None:
+        source_identity = task_source_snapshot["source_identity"]
+        assert isinstance(source_identity, tuple)
+        identity_overrides["tasks"] = source_identity
+        if task_source_snapshot["kind"] == "directory":
+            for member_name, member_identity in task_source_snapshot["members"]:
+                label = f"Retrieval task member {member_name}"
+                protected_inputs.append((label, tasks_path / member_name))
+                identity_overrides[label] = member_identity
     release_root = protected_inputs[2][1].parent
     protected_inputs.append(("Retrieval release root", release_root))
     release_path = protected_inputs[2][1]
@@ -2301,7 +2509,9 @@ def _validate_retrieval_evolution_paths(args) -> dict[str, object]:
     output_identities: dict[str, tuple[int, int] | None] = {}
     protected_identities: dict[str, tuple[int, int] | None] = {}
     for label, path in (*outputs.items(), *protected_inputs):
-        identity = _existing_cli_path_identity(path, label)
+        identity = identity_overrides.get(label)
+        if identity is None:
+            identity = _existing_cli_path_identity(path, label)
         if label in outputs:
             output_identities[label] = identity
         else:
@@ -2316,13 +2526,37 @@ def _validate_retrieval_evolution_paths(args) -> dict[str, object]:
                 f"{prior_label} ({prior_path}) / {label} ({path})"
             )
         identities[identity] = (label, path)
+    output_parent_identities: dict[str, tuple[int, int]] = {}
+    for label, path in outputs.items():
+        try:
+            _safe, parent_descriptor = _open_checkpoint_parent(path, create=True)
+        except Exception as error:
+            raise ValueError(
+                f"cannot establish {label} output parent directory"
+            ) from error
+        try:
+            metadata = os.fstat(parent_descriptor)
+            output_parent_identities[label] = (
+                metadata.st_dev,
+                metadata.st_ino,
+            )
+            _revalidate_checkpoint_parent(path, parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
+    authority_parent_identity = _existing_cli_path_identity(
+        authority.parent,
+        "checkpoint authority parent",
+    )
     return {
         **outputs,
         "run_root": run_root,
         "authority": authority,
         "authority_head": authority_head,
         "output_identities": output_identities,
+        "output_parent_identities": output_parent_identities,
         "protected_identities": protected_identities,
+        "authority_parent_identity": authority_parent_identity,
+        "task_source_snapshot": task_source_snapshot,
     }
 
 
@@ -2342,6 +2576,53 @@ def _retrieval_evolve_command(args) -> dict:
         validated_paths["authority_head"]
     )
     authority_key = _checkpoint_authority_key(args)
+    checkpoint_path = validated_paths["checkpoint"]
+    authority_path = _checkpoint_authority_path(args, checkpoint_path)
+    resume_required = any(
+        identity is not None
+        for identity in (
+            validated_paths["output_identities"]["checkpoint"],
+            validated_paths["protected_identities"]["checkpoint authority"],
+            validated_paths["protected_identities"]["checkpoint authority head"],
+        )
+    )
+    expected_external_anchor = _checkpoint_authority_expected_anchor(
+        args,
+        resume_required=resume_required,
+    )
+    preflight_authority = _open_retrieval_checkpoint_authority_for_operator(
+        checkpoint_path,
+        authority_path,
+        validated_paths["authority_head"],
+        authentication_key=authority_key,
+        expected_authority_anchor=expected_external_anchor,
+        expected_checkpoint_identity=validated_paths["output_identities"][
+            "checkpoint"
+        ],
+        expected_authority_identity=validated_paths["protected_identities"][
+            "checkpoint authority"
+        ],
+        expected_head_identity=validated_paths["protected_identities"][
+            "checkpoint authority head"
+        ],
+        expected_checkpoint_parent_identity=validated_paths[
+            "output_parent_identities"
+        ]["checkpoint"],
+        expected_authority_parent_identity=validated_paths[
+            "authority_parent_identity"
+        ],
+    )
+    try:
+        active_authority_anchor = preflight_authority.current_anchor
+        active_checkpoint_identity = preflight_authority._checkpoint_identity
+        active_authority_identity = preflight_authority._record_identities[
+            authority_path.name
+        ]
+        active_head_identity = preflight_authority._record_identities[
+            Path(validated_paths["authority_head"]).name
+        ]
+    finally:
+        preflight_authority.close()
     parent_release = _load_retrieval_release_for_operator(
         args.retrieval_release_path
     )
@@ -2352,6 +2633,7 @@ def _retrieval_evolve_command(args) -> dict:
         args.split_manifest,
         expected_manifest_sha256=args.split_manifest_sha256,
         include_public_ids=True,
+        expected_source_snapshot=validated_paths["task_source_snapshot"],
     )
     if any(task.numeric.task_id in public_ids for task in (*train, *dev)):
         raise RetrievalEvolutionError(
@@ -2411,9 +2693,6 @@ def _retrieval_evolve_command(args) -> dict:
             retrieval_genome=genome,
             retrieval_skill_source=skill_library,
         )(base_policy)
-
-    checkpoint_path = validated_paths["checkpoint"]
-    authority_path = _checkpoint_authority_path(args, checkpoint_path)
 
     verifier_hash = _frozen_sha256(
         args.verifier_sha256,
@@ -2521,14 +2800,15 @@ def _retrieval_evolve_command(args) -> dict:
         authority_path,
         validated_paths["authority_head"],
         authentication_key=authority_key,
-        expected_checkpoint_identity=validated_paths["output_identities"][
-            "checkpoint"
-        ],
-        expected_authority_identity=validated_paths["protected_identities"][
-            "checkpoint authority"
-        ],
-        expected_head_identity=validated_paths["protected_identities"][
-            "checkpoint authority head"
+        expected_authority_anchor=active_authority_anchor,
+        expected_checkpoint_identity=active_checkpoint_identity,
+        expected_authority_identity=active_authority_identity,
+        expected_head_identity=active_head_identity,
+        expected_checkpoint_parent_identity=validated_paths[
+            "output_parent_identities"
+        ]["checkpoint"],
+        expected_authority_parent_identity=validated_paths[
+            "authority_parent_identity"
         ],
     )
     train_task_ids = tuple(task.numeric.task_id for task in train)
@@ -2552,8 +2832,12 @@ def _retrieval_evolve_command(args) -> dict:
             harness_factory=harness_factory,
             _checkpoint_authority=authority,
             _checkpoint_payload_validator=validate_checkpoint_payload,
+            _checkpoint_parent_identity=validated_paths[
+                "output_parent_identities"
+            ]["checkpoint"],
         )
         result = engine.evolve(parent_release.genome, train, dev)
+        committed_authority_anchor = authority.current_anchor
     finally:
         authority.close()
 
@@ -2628,6 +2912,9 @@ def _retrieval_evolve_command(args) -> dict:
             Path(args.policy_path),
             accepted_policy.to_payload(),
             expected_identity=validated_paths["output_identities"]["policy"],
+            expected_parent_identity=validated_paths[
+                "output_parent_identities"
+            ]["policy"],
         )
         saved_policy_path = str(args.policy_path)
         result = _published_retrieval_result(result, selected_release)
@@ -2664,6 +2951,9 @@ def _retrieval_evolve_command(args) -> dict:
         trace_path,
         trace_payload,
         expected_identity=validated_paths["output_identities"]["trace"],
+        expected_parent_identity=validated_paths["output_parent_identities"][
+            "trace"
+        ],
     )
     progress_path = Path(args.progress_path) if args.progress_path else trace_path.with_name(
         "progress.jsonl"
@@ -2676,6 +2966,9 @@ def _retrieval_evolve_command(args) -> dict:
         progress_path,
         progress_encoded,
         expected_identity=validated_paths["output_identities"]["progress"],
+        expected_parent_identity=validated_paths["output_parent_identities"][
+            "progress"
+        ],
     )
     return {
         "evolution_mode": "retrieval",
@@ -2689,6 +2982,10 @@ def _retrieval_evolve_command(args) -> dict:
         "checkpoint_authority_head_path": str(
             validated_paths["authority_head"]
         ),
+        "checkpoint_authority_anchor": {
+            "epoch": committed_authority_anchor[0],
+            "head": committed_authority_anchor[1],
+        },
         "progress_path": str(progress_path),
         "train_tasks": len(train),
         "dev_tasks": len(dev),
