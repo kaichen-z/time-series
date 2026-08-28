@@ -199,3 +199,33 @@ Focused verification:
   tests/test_evolving_agent_llm.py
 93 passed in 0.63s
 ```
+
+## Fix round 4: collision-safe built-in dict traversal
+
+### Implementation
+
+- Built-in diagnostic dictionaries are traversed once with `.items()`. Only
+  pairs with exact bounded string keys are retained; retained pairs are sorted
+  by that trusted key and their captured values are sanitized directly.
+- The sanitizer never performs a second `dict[key]` lookup, stringifies, or
+  renders rejected key objects. This prevents an untrusted hash-collision key
+  from running `__eq__` after filtering.
+
+### TDD evidence
+
+RED:
+
+```text
+../../.venv/bin/python -m pytest -q tests/test_evolution_combined_evolution.py \
+  -k collision_key_lookups
+1 failed, 33 deselected in 0.09s
+```
+
+The old second lookup invoked the armed collision key's `__eq__`.
+
+GREEN and focused verification:
+
+```text
+1 passed, 33 deselected in 0.07s
+94 passed in 3.18s
+```

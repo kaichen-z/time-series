@@ -425,11 +425,11 @@ def _sanitize_diagnostic_mapping(
     ):
         return _DROP
     result: dict[str, object] = {}
-    keys = tuple(key for key in value if _safe_diagnostic_key(key))
-    for key in sorted(keys):
+    pairs = tuple((key, raw) for key, raw in value.items() if _safe_diagnostic_key(key))
+    for key, raw in sorted(pairs, key=lambda pair: pair[0]):
         if len(result) >= _DIAGNOSTIC_MAX_CHILDREN:
             continue
-        cleaned = _sanitize_diagnostic_value(value[key], depth=depth + 1, budget=budget)
+        cleaned = _sanitize_diagnostic_value(raw, depth=depth + 1, budget=budget)
         if cleaned is _DROP or not budget.consume(key):
             continue
         result[key] = cleaned

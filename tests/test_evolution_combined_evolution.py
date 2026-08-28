@@ -446,6 +446,31 @@ def test_propose_combined_child_rejects_infinite_yield_mapping_before_iteration(
     assert agent.calls == []
 
 
+def test_propose_combined_child_avoids_collision_key_lookups_after_filtering() -> None:
+    """A rejected collision key must never be compared after the map is armed."""
+    from numerical_agent.evolution.combined_evolution import propose_combined_child
+
+    collision = _ArmedCollisionKey()
+    diagnostics: dict[object, object] = {collision: 0.75, "mean_smape": 0.25}
+    collision.armed = True
+    collision.comparisons = 0
+    parent = PolicyPortfolio.flagship5()
+    agent = FakeLLMClient([_response()])
+
+    result = propose_combined_child(
+        parent,
+        statistical_names=("seasonal_naive",),
+        diagnostics=diagnostics,  # type: ignore[arg-type]
+        agent=agent,
+    )
+
+    assert result.child is parent
+    assert collision.comparisons == 0
+    assert agent.calls
+    prompt = json.loads(agent.calls[0]["messages"][0]["content"])
+    assert prompt["diagnostics"] == {"mean_smape": 0.25}
+
+
 class _LargeMapping(Mapping[str, object]):
     """A map that exposes whether the sanitizer sorts before checking its hard cap."""
 
@@ -490,6 +515,29 @@ class _InfiniteYieldMapping(Mapping[str, object]):
 
     def __getitem__(self, key: str) -> object:
         return 0.25
+
+
+class _ArmedCollisionKey:
+    """Collides with a trusted key and faults on any post-arm comparison/render."""
+
+    def __init__(self) -> None:
+        self.armed = False
+        self.comparisons = 0
+
+    def __hash__(self) -> int:
+        return hash("mean_smape")
+
+    def __eq__(self, other: object) -> bool:
+        self.comparisons += 1
+        if self.armed:
+            raise AssertionError("collision key compared after arming")
+        return False
+
+    def __str__(self) -> str:
+        raise AssertionError("collision key stringified")
+
+    def __repr__(self) -> str:
+        raise AssertionError("collision key repr'd")
 
 
 def _max_mapping_depth(value: object) -> int:
