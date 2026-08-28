@@ -511,3 +511,21 @@ def test_atomic_remove_combined_refuses_to_remove_final_combined() -> None:
 
     with pytest.raises(PolicyError, match="final Combined"):
         parent.remove_combined(parent.combined[0].name)
+
+
+def test_validate_parents_rejects_combined_name_colliding_with_statistical_leaf() -> None:
+    base = PolicyPortfolio.flagship5()
+    policy = CombinedPolicy(
+        name="seasonal_naive",
+        parents=("toto_2_0", "holt_damped_trend"),
+        operator="weighted_mean",
+        weights=(0.5, 0.5),
+        fallback_parent="toto_2_0",
+    )
+    portfolio = PolicyPortfolio(base.tsfm, (policy,))
+    source = render_policy_source(portfolio)
+
+    with pytest.raises(PolicyError, match="collid"):
+        portfolio.validate_parents(_module().names())
+
+    assert render_policy_source(portfolio) == source

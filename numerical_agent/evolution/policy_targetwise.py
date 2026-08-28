@@ -432,8 +432,13 @@ def _policy_from_payload(
         raise PolicyError(
             f"replacement fields must exactly match {sorted(expected)!r}"
         )
+    values = dict(payload)
+    if isinstance(current, CombinedPolicy):
+        for field in ("parents", "weights"):
+            if isinstance(values.get(field), list):
+                values[field] = tuple(values[field])
     try:
-        replacement = type(current)(**dict(payload))
+        replacement = type(current)(**values)
     except (TypeError, ValueError) as error:
         raise PolicyError(str(error)) from error
     return replacement

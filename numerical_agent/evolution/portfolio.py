@@ -359,6 +359,11 @@ class PolicyPortfolio:
         tsfm_names = {policy.name for policy in self.tsfm}
         combined_names = {policy.name for policy in self.combined}
         for policy in self.combined:
+            if policy.name in known:
+                raise PolicyError(
+                    f"Combined policy name {policy.name!r} collides with an executable "
+                    "Statistical method"
+                )
             if not any(parent in tsfm_names for parent in policy.parents):
                 raise PolicyError(
                     f"Combined policy {policy.name!r} must include a TSFM parent"
