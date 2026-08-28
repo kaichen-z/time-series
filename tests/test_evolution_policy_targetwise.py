@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -155,3 +156,23 @@ def test_targetwise_combined_prompts_use_canonical_policy_schema() -> None:
     ):
         assert field in prompt
     assert "parent identities are immutable" not in prompt
+
+
+def test_targetwise_combined_prompt_declares_exact_canonical_field_sequence() -> None:
+    expected = (
+        "name",
+        "parents",
+        "operator",
+        "weights",
+        "signal",
+        "threshold",
+        "above_parent",
+        "below_parent",
+        "fallback_parent",
+    )
+    normalized = " ".join(POLICY_MUTATE_SYSTEM.split())
+    declaration = normalized.split(
+        "For a Combined policy, return all canonical fields:", 1
+    )[1].split("The `parents` tuple", 1)[0]
+
+    assert tuple(re.findall(r"`([^`]+)`", declaration)) == expected
