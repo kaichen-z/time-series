@@ -12,10 +12,11 @@ import json
 import math
 import os
 import random
+import re
 import stat
 import fcntl
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
@@ -28,6 +29,12 @@ from common.llm import (
 from common.metrics import linear_quantile
 from evolving_loop.data import ContextTask
 
+from .credit import (
+    RetrievalSkillReplayArtifact,
+    RetrievalSkillTaskEvidence,
+    _accepted_retrieval_skill_from_evidence,
+    recompute_retrieval_skill_evidence,
+)
 from .policy import RetrievalGenome, RetrievalPolicyError
 from .skill_library import (
     RetrievalSkillError,
@@ -39,9 +46,22 @@ from .skill_library import (
 )
 
 
-RETRIEVAL_EVOLUTION_CHECKPOINT_SCHEMA_VERSION = 1
+RETRIEVAL_EVOLUTION_CHECKPOINT_SCHEMA_VERSION = 2
 RetrievalChildScope = Literal["A", "B", "C"]
 CHILD_SCOPES: tuple[RetrievalChildScope, ...] = ("A", "B", "C")
+
+_TRUSTED_TRAIN_EVALUATION_STAGE = re.compile(
+    r"g[0-9]+_(?:"
+    r"parent_screen_train|"
+    r"child_[ABC]_screen_train|"
+    r"parent_train_fold_[0-9]+|"
+    r"child_train_fold_[0-9]+"
+    r")"
+)
+
+
+def _is_trusted_train_evaluation_stage(stage: str) -> bool:
+    return bool(_TRUSTED_TRAIN_EVALUATION_STAGE.fullmatch(stage))
 
 _SCOPE_ALIASES: dict[str, RetrievalChildScope] = {
     "a": "A",
@@ -2311,6 +2331,8 @@ class RetrievalEvaluation:
     invalid_count: int
     catastrophic_count: int
     task_traces: tuple[dict[str, object], ...]
+    promotion_evidence: tuple[RetrievalSkillTaskEvidence, ...] = ()
+    promotion_replays: tuple[RetrievalSkillReplayArtifact, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.version, str) or not self.version:
@@ -2359,6 +2381,20 @@ class RetrievalEvaluation:
             )
             normalized_traces.append(normalized_trace)
         object.__setattr__(self, "task_traces", tuple(normalized_traces))
+        if not isinstance(self.promotion_evidence, tuple) or any(
+            not isinstance(item, RetrievalSkillTaskEvidence)
+            for item in self.promotion_evidence
+        ):
+            raise RetrievalEvolutionError(
+                "promotion_evidence must contain trusted Skill evidence rows"
+            )
+        if not isinstance(self.promotion_replays, tuple) or any(
+            not isinstance(item, RetrievalSkillReplayArtifact)
+            for item in self.promotion_replays
+        ):
+            raise RetrievalEvolutionError(
+                "promotion_replays must contain canonical Skill replay artifacts"
+            )
 
     def gate_failures(
         self,
@@ -2448,6 +2484,8 @@ class RetrievalEvaluation:
     def summary(self) -> dict[str, object]:
         payload = self.to_payload()
         payload.pop("task_traces")
+        payload.pop("promotion_evidence")
+        payload.pop("promotion_replays")
         return payload
 
     def to_payload(self) -> dict[str, object]:
@@ -2467,6 +2505,12 @@ class RetrievalEvaluation:
             "invalid_count": self.invalid_count,
             "catastrophic_count": self.catastrophic_count,
             "task_traces": list(self.task_traces),
+            "promotion_evidence": [
+                asdict(item) for item in self.promotion_evidence
+            ],
+            "promotion_replays": [
+                item.to_payload() for item in self.promotion_replays
+            ],
         }
 
     @classmethod
@@ -2487,12 +2531,24 @@ class RetrievalEvaluation:
             "invalid_count",
             "catastrophic_count",
             "task_traces",
+            "promotion_evidence",
+            "promotion_replays",
         }
         if not isinstance(raw, Mapping) or set(raw) != fields:
             raise RetrievalCheckpointError("invalid checkpoint evaluation")
         traces = raw["task_traces"]
+        promotion_evidence = raw["promotion_evidence"]
+        promotion_replays = raw["promotion_replays"]
         if not isinstance(traces, list) or any(not isinstance(item, dict) for item in traces):
             raise RetrievalCheckpointError("invalid checkpoint task traces")
+        if not isinstance(promotion_evidence, list) or any(
+            not isinstance(item, dict) for item in promotion_evidence
+        ):
+            raise RetrievalCheckpointError("invalid checkpoint promotion evidence")
+        if not isinstance(promotion_replays, list) or any(
+            not isinstance(item, dict) for item in promotion_replays
+        ):
+            raise RetrievalCheckpointError("invalid checkpoint promotion replays")
         float_fields = {
             "mean_final_smae",
             "mean_final_srmse",
@@ -2529,11 +2585,27 @@ class RetrievalEvaluation:
         try:
             return cls(
                 **{
-                    **{key: raw[key] for key in fields if key != "task_traces"},
+                    **{
+                        key: raw[key]
+                        for key in fields
+                        if key not in {
+                            "task_traces",
+                            "promotion_evidence",
+                            "promotion_replays",
+                        }
+                    },
                     "task_traces": tuple(dict(item) for item in traces),
+                    "promotion_evidence": tuple(
+                        RetrievalSkillTaskEvidence(**item)
+                        for item in promotion_evidence
+                    ),
+                    "promotion_replays": tuple(
+                        RetrievalSkillReplayArtifact.from_payload(item)
+                        for item in promotion_replays
+                    ),
                 }
             )
-        except RetrievalEvolutionError as error:
+        except (RetrievalEvolutionError, TypeError, ValueError) as error:
             raise RetrievalCheckpointError(
                 "checkpoint evaluation contains an invalid metric"
             ) from error
@@ -2589,6 +2661,12 @@ def combine_retrieval_evaluations(
         invalid_count=sum(item.invalid_count for item in evaluations),
         catastrophic_count=sum(item.catastrophic_count for item in evaluations),
         task_traces=traces,
+        promotion_evidence=tuple(
+            row for item in evaluations for row in item.promotion_evidence
+        ),
+        promotion_replays=tuple(
+            row for item in evaluations for row in item.promotion_replays
+        ),
     )
 
 
@@ -2668,6 +2746,22 @@ def _normalize_scope(scope: str) -> RetrievalChildScope | None:
     return _SCOPE_ALIASES.get(str(scope).strip().lower())
 
 
+def _evolution_skill_catalog(
+    skill_library: RetrievalSkillLibrary,
+) -> tuple[object, ...]:
+    active = {
+        skill.skill_id: skill for skill in skill_library.active_skills()
+    }
+    candidates = {
+        skill_id: current
+        for skill_id in {skill.skill_id for skill in skill_library.all()}
+        if (current := skill_library.get_by_id(skill_id)) is not None
+        and current.status == "candidate"
+    }
+    eligible = {**candidates, **active}
+    return tuple(eligible[skill_id] for skill_id in sorted(eligible))
+
+
 def parse_scoped_child(
     parent: RetrievalGenome,
     proposal: Mapping[str, object],
@@ -2709,7 +2803,8 @@ def parse_scoped_child(
         if skill_library is None:
             return None
         eligible_by_id = {
-            skill.skill_id: skill for skill in skill_library.active_skills()
+            skill.skill_id: skill
+            for skill in _evolution_skill_catalog(skill_library)
         }
         if not set(child.active_skill_ids).issubset(eligible_by_id):
             return None
@@ -2720,11 +2815,8 @@ def parse_scoped_child(
             child.active_skill_ids
         )
         owned_stage = _SCOPE_SKILL_STAGE[normalized]
-        eligible = {
-            skill.skill_id: skill for skill in skill_library.active_skills()
-        }
         for skill_id in changed_skill_ids:
-            skill = eligible.get(skill_id)
+            skill = eligible_by_id.get(skill_id)
             if skill is None or skill.stage != owned_stage:
                 return None
     return child
@@ -3146,10 +3238,12 @@ class RetrievalEvolutionEngine:
         self._trace: list[dict[str, object]] = []
         self._evaluation_cache: dict[str, RetrievalEvaluation] = {}
         self._cache_records: dict[str, dict[str, object]] = {}
+        self._restored_completed_batches: set[str] = set()
         self._terminal_outcomes: dict[str, dict[str, object]] = {}
         self._pending_children: dict[str, object] | None = None
         self._all_child_fingerprints: list[str] = []
         self._candidate_libraries: dict[str, RetrievalSkillLibrary | None] = {}
+        self._library_snapshots: dict[str, dict[str, object]] = {}
         self._checkpoint_file_sha256: str | None = None
         self._checkpoint_file_identity: tuple[int, int] | None = None
         self._checkpoint_authority_epoch: int | None = None
@@ -3528,7 +3622,18 @@ class RetrievalEvolutionEngine:
                 self.config.tolerance,
                 require_strict_contextual_gain=True,
             )
-            if not fold_safe:
+            active_ids = (
+                frozenset()
+                if child_library is None
+                else frozenset(
+                    skill.skill_id for skill in child_library.active_skills()
+                )
+            )
+            if not set(child.active_skill_ids).issubset(active_ids):
+                rejection_reasons[child.version] = (
+                    "train_gate:unpromoted_retrieval_skill"
+                )
+            elif not fold_safe:
                 rejection_reasons[child.version] = "train_fold_vector:not_pareto_safe"
             elif failures:
                 rejection_reasons[child.version] = "train_gate:" + ",".join(failures)
@@ -3770,7 +3875,9 @@ class RetrievalEvolutionEngine:
                     "applicability": skill.applicability.to_payload(),
                 }
                 for skill in (
-                    () if skill_library is None else skill_library.active_skills()
+                    ()
+                    if skill_library is None
+                    else _evolution_skill_catalog(skill_library)
                 )
             ],
             "parent_genome": parent.to_payload(),
@@ -3838,6 +3945,21 @@ class RetrievalEvolutionEngine:
     ) -> RetrievalEvaluation:
         if not tasks:
             raise RetrievalEvolutionError("evaluation batches cannot be empty")
+        pre_library = (
+            None
+            if library is None
+            else library.clone(persist=False, read_only=True)
+        )
+        pre_library_snapshot_sha256 = self._capture_library_snapshot(library)
+        restored = self._consume_restored_completed_batch(
+            genome,
+            tasks,
+            stage=stage,
+            readonly=readonly,
+            current_library_snapshot_sha256=pre_library_snapshot_sha256,
+        )
+        if restored is not None:
+            return restored
         verifier_hash = str(self._scientific_inputs["verifier_hash"])
         evaluator_hash = str(self._scientific_inputs["evaluator_hash"])
         metric_hash = str(self._scientific_inputs["metric_hash"])
@@ -3896,6 +4018,10 @@ class RetrievalEvolutionEngine:
                 result = self._invoke_evaluator(genome, tasks, kwargs)
                 break
             except TransientLLMError as error:
+                if self._capture_library_snapshot(library) != pre_library_snapshot_sha256:
+                    raise RetrievalEvolutionError(
+                        "transient evaluator failure mutated its candidate Skill library"
+                    ) from error
                 if attempt + 1 >= attempts:
                     self._event(
                         "transient_exhausted",
@@ -3917,6 +4043,10 @@ class RetrievalEvolutionEngine:
             except (TypeError, RetrievalSkillError):
                 raise
             except Exception as error:
+                if self._capture_library_snapshot(library) != pre_library_snapshot_sha256:
+                    raise RetrievalEvolutionError(
+                        "failed evaluator mutated its candidate Skill library"
+                    ) from error
                 failure = RetrievalForecastingFailure(
                     (
                         error.error_type
@@ -3931,6 +4061,7 @@ class RetrievalEvolutionEngine:
                     task_keys,
                     stage,
                     failure,
+                    pre_library_snapshot_sha256,
                 )
                 raise failure from None
         else:
@@ -3938,6 +4069,10 @@ class RetrievalEvolutionEngine:
         try:
             result = self._validate_evaluator_result(genome, tasks, result)
         except Exception:
+            if self._capture_library_snapshot(library) != pre_library_snapshot_sha256:
+                raise RetrievalEvolutionError(
+                    "invalid evaluator result mutated its candidate Skill library"
+                ) from None
             failure = RetrievalForecastingFailure("InvalidEvaluatorResult")
             self._record_terminal_outcome(
                 batch_key,
@@ -3946,8 +4081,29 @@ class RetrievalEvolutionEngine:
                 task_keys,
                 stage,
                 failure,
+                pre_library_snapshot_sha256,
             )
             raise failure from None
+        post_library_snapshot_sha256 = self._capture_library_snapshot(library)
+        if (
+            not _is_trusted_train_evaluation_stage(stage)
+            and post_library_snapshot_sha256 != pre_library_snapshot_sha256
+        ):
+            raise RetrievalEvolutionError(
+                "non-Train evaluator mutated its candidate Skill library"
+            )
+        if post_library_snapshot_sha256 != pre_library_snapshot_sha256:
+            self._validate_skill_promotion_transition(
+                stage,
+                {
+                    "task_ids": [task.numeric.task_id for task in tasks],
+                    "genome": genome.to_payload(),
+                },
+                result,
+                pre_library,
+                library,
+                tasks,
+            )
         self._evaluation_cache[batch_key] = result
         self._cache_records[batch_key] = {
             "stage": stage,
@@ -3956,6 +4112,8 @@ class RetrievalEvolutionEngine:
             "genome_fingerprint": genome.fingerprint(),
             "skill_library_sha256": task_keys[0].skill_library_sha256,
             "skill_authority_sha256": task_keys[0].skill_authority_sha256,
+            "skill_library_snapshot_sha256": pre_library_snapshot_sha256,
+            "post_skill_library_snapshot_sha256": post_library_snapshot_sha256,
             "task_ids": [task.numeric.task_id for task in tasks],
             "task_cache_keys": [item.digest() for item in task_keys],
             "evaluation_sha256": _digest(result.to_payload()),
@@ -3963,6 +4121,61 @@ class RetrievalEvolutionEngine:
         }
         self._save_checkpoint(status="running", result=None)
         return result
+
+    def _consume_restored_completed_batch(
+        self,
+        genome: RetrievalGenome,
+        tasks: tuple[ContextTask, ...],
+        *,
+        stage: str,
+        readonly: bool,
+        current_library_snapshot_sha256: str | None,
+    ) -> RetrievalEvaluation | None:
+        task_ids = [task.numeric.task_id for task in tasks]
+        fingerprint = genome.fingerprint()
+        expected_library = self._candidate_libraries.get(fingerprint)
+        expected_final_snapshot = (
+            None
+            if expected_library is None
+            else cast(
+                str,
+                expected_library._evolution_snapshot_payload()["snapshot_sha256"],
+            )
+        )
+        if current_library_snapshot_sha256 != expected_final_snapshot:
+            return None
+        matching = [
+            cache_key
+            for cache_key in self._restored_completed_batches
+            if (
+                (record := self._cache_records[cache_key])["stage"] == stage
+                and record["readonly"] is readonly
+                and record["genome_fingerprint"] == fingerprint
+                and record["genome"] == genome.to_payload()
+                and record["task_ids"] == task_ids
+            )
+        ]
+        if not matching:
+            return None
+        if len(matching) != 1:
+            raise RetrievalCheckpointError(
+                "checkpoint contains duplicate completed evaluation batches"
+            )
+        cache_key = matching[0]
+        evaluation = self._evaluation_cache.get(cache_key)
+        if evaluation is None:
+            raise RetrievalCheckpointError(
+                "checkpoint completed batch omitted its attested evaluation"
+            )
+        self._restored_completed_batches.remove(cache_key)
+        self._event(
+            "evaluation_cache_hit",
+            stage=stage,
+            genome=genome.version,
+            task_count=len(tasks),
+            restored_completed_sequence=True,
+        )
+        return evaluation
 
     @staticmethod
     def _validate_evaluator_result(
@@ -4008,6 +4221,7 @@ class RetrievalEvolutionEngine:
         task_keys: tuple[RetrievalInferenceCacheKey, ...],
         stage: str,
         failure: RetrievalForecastingFailure,
+        skill_library_snapshot_sha256: str | None,
     ) -> None:
         core: dict[str, object] = {
             "stage": stage,
@@ -4016,6 +4230,7 @@ class RetrievalEvolutionEngine:
             "genome_fingerprint": genome.fingerprint(),
             "skill_library_sha256": task_keys[0].skill_library_sha256,
             "skill_authority_sha256": task_keys[0].skill_authority_sha256,
+            "skill_library_snapshot_sha256": skill_library_snapshot_sha256,
             "task_ids": [task.numeric.task_id for task in tasks],
             "task_cache_keys": [item.digest() for item in task_keys],
             "error_type": failure.error_type,
@@ -4053,12 +4268,47 @@ class RetrievalEvolutionEngine:
             self._candidate_libraries[fingerprint] = self._clone_library(
                 source if source is not None else self.skill_library
             )
-        return self._candidate_libraries[fingerprint]
+        library = self._candidate_libraries[fingerprint]
+        if (
+            library is not None
+            and self._checkpoint_file_sha256 is not None
+            and self._checkpoint_authority_epoch is not None
+            and self._capture_library_snapshot(library)
+            != self._capture_library_snapshot(self.skill_library)
+        ):
+            library._require_evolution_checkpoint(
+                self._checkpoint_file_sha256,
+                self._checkpoint_authority_epoch,
+            )
+        return library
 
     def _readonly_library(
         self, genome: RetrievalGenome
     ) -> RetrievalSkillLibrary | None:
         return self._clone_library(self._library_for(genome))
+
+    def _capture_library_snapshot(
+        self,
+        library: RetrievalSkillLibrary | None,
+    ) -> str | None:
+        if library is None:
+            return None
+        payload = library._evolution_snapshot_payload()
+        snapshot_sha256 = payload["snapshot_sha256"]
+        assert isinstance(snapshot_sha256, str)
+        previous = self._library_snapshots.get(snapshot_sha256)
+        if previous is not None and previous != payload:
+            raise RetrievalEvolutionError(
+                "candidate Skill snapshot digest collision"
+            )
+        self._library_snapshots[snapshot_sha256] = payload
+        return snapshot_sha256
+
+    def _candidate_library_checkpoint_state(self) -> dict[str, str | None]:
+        return {
+            fingerprint: self._capture_library_snapshot(library)
+            for fingerprint, library in sorted(self._candidate_libraries.items())
+        }
 
     @staticmethod
     def _clone_library(
@@ -4086,6 +4336,7 @@ class RetrievalEvolutionEngine:
         path = self._checkpoint_path()
         if path is None or self._original_parent is None or self._current_parent is None:
             return
+        candidate_libraries = self._candidate_library_checkpoint_state()
         task_completion = [
             {key: value for key, value in record.items() if key != "evaluation"}
             | {"cache_key": cache_key}
@@ -4102,6 +4353,11 @@ class RetrievalEvolutionEngine:
             "next_generation": self._next_generation,
             "pending_children": self._pending_children,
             "child_fingerprints": list(self._all_child_fingerprints),
+            "skill_library_snapshots": {
+                key: self._library_snapshots[key]
+                for key in sorted(self._library_snapshots)
+            },
+            "candidate_libraries": candidate_libraries,
             "task_completion": task_completion,
             "evaluation_cache": self._cache_records,
             "terminal_outcomes": self._terminal_outcomes,
@@ -4246,6 +4502,18 @@ class RetrievalEvolutionEngine:
                     self._checkpoint_authority.commit(authority_token)
                 )
                 authority_token = None
+            assert self._checkpoint_authority_epoch is not None
+            base_snapshot_sha256 = self._capture_library_snapshot(self.skill_library)
+            for library in self._candidate_libraries.values():
+                if (
+                    library is not None
+                    and self._capture_library_snapshot(library)
+                    != base_snapshot_sha256
+                ):
+                    library._bind_evolution_checkpoint(
+                        checkpoint_sha256,
+                        self._checkpoint_authority_epoch,
+                    )
         except Exception:
             if self._checkpoint_authority is not None and authority_token is not None:
                 recovered_epoch = self._checkpoint_authority.abort(authority_token)
@@ -4323,6 +4591,8 @@ class RetrievalEvolutionEngine:
             "next_generation",
             "pending_children",
             "child_fingerprints",
+            "skill_library_snapshots",
+            "candidate_libraries",
             "task_completion",
             "evaluation_cache",
             "terminal_outcomes",
@@ -4381,6 +4651,17 @@ class RetrievalEvolutionEngine:
                 )
                 or type(raw["task_completion"]) is not list
                 or any(type(item) is not dict for item in raw["task_completion"])
+                or type(raw["skill_library_snapshots"]) is not dict
+                or any(
+                    type(key) is not str or type(value) is not dict
+                    for key, value in raw["skill_library_snapshots"].items()
+                )
+                or type(raw["candidate_libraries"]) is not dict
+                or any(
+                    type(key) is not str
+                    or (value is not None and type(value) is not str)
+                    for key, value in raw["candidate_libraries"].items()
+                )
                 or type(raw["next_generation"]) is not int
             ):
                 raise TypeError
@@ -4399,6 +4680,11 @@ class RetrievalEvolutionEngine:
             }
             child_fingerprints = list(raw["child_fingerprints"])
             task_completion = list(raw["task_completion"])
+            library_snapshots = {
+                key: dict(value)
+                for key, value in raw["skill_library_snapshots"].items()
+            }
+            candidate_libraries = dict(raw["candidate_libraries"])
             next_generation = raw["next_generation"]
         except (AttributeError, TypeError, ValueError) as error:
             raise RetrievalCheckpointError("invalid checkpoint execution state") from error
@@ -4458,9 +4744,13 @@ class RetrievalEvolutionEngine:
             raise RetrievalCheckpointError(
                 "pending checkpoint generation does not match the current Parent"
             )
+        hydrated_library_snapshots = self._hydrate_library_snapshots(
+            library_snapshots
+        )
         evaluation_cache = self._attest_execution_records(
             cache_records,
             terminal_outcomes,
+            library_snapshots=hydrated_library_snapshots,
             screen=screen,
             remaining_folds=remaining_folds,
             dev=dev,
@@ -4475,6 +4765,21 @@ class RetrievalEvolutionEngine:
         self._terminal_outcomes = terminal_outcomes
         self._pending_children = None if pending is None else dict(pending)
         self._all_child_fingerprints = child_fingerprints
+        self._restore_candidate_library_state(
+            library_snapshots,
+            candidate_libraries,
+            cache_records,
+            terminal_outcomes,
+            evaluation_cache,
+            hydrated_library_snapshots,
+            original=original,
+            current=current,
+            pending=pending,
+            screen=screen,
+            remaining_folds=remaining_folds,
+            dev=dev,
+        )
+        self._restored_completed_batches = set(cache_records)
         _, completed_outcomes = self._attest_completed_generations(
             original=original,
             current=current,
@@ -4692,12 +4997,364 @@ class RetrievalEvolutionEngine:
             f"checkpoint contains an unknown evaluation stage: {stage}"
         )
 
+    def _hydrate_library_snapshots(
+        self,
+        snapshots: dict[str, dict[str, object]],
+    ) -> dict[str, RetrievalSkillLibrary]:
+        if not snapshots:
+            return {}
+        if self.skill_library is None:
+            raise RetrievalCheckpointError(
+                "checkpoint contains Skill snapshots without a seed library"
+            )
+        if (
+            self._checkpoint_file_sha256 is None
+            or self._checkpoint_authority_epoch is None
+        ):
+            raise RetrievalCheckpointError(
+                "Skill snapshots require an authenticated checkpoint digest and epoch"
+            )
+        hydrated: dict[str, RetrievalSkillLibrary] = {}
+        try:
+            for snapshot_sha256, payload in snapshots.items():
+                if payload.get("snapshot_sha256") != snapshot_sha256:
+                    raise RetrievalSkillError(
+                        "evolution Skill snapshot key does not match its digest"
+                    )
+                hydrated[snapshot_sha256] = (
+                    RetrievalSkillLibrary._from_authenticated_evolution_snapshot(
+                        payload,
+                        base_library=self.skill_library,
+                        checkpoint_sha256=self._checkpoint_file_sha256,
+                        checkpoint_epoch=self._checkpoint_authority_epoch,
+                    )
+                )
+        except (RetrievalSkillError, TypeError, ValueError) as error:
+            raise RetrievalCheckpointError(
+                "invalid authenticated candidate Skill library snapshot"
+            ) from error
+        return hydrated
+
+    @staticmethod
+    def _checkpoint_stage_order(stage: str) -> tuple[int, int, int]:
+        if stage == "parent_dev":
+            return (10**9, 0, 0)
+        if stage == "child_dev":
+            return (10**9, 1, 0)
+        match = re.fullmatch(
+            r"g([0-9]+)_(parent_screen_train|child_([ABC])_screen_train|"
+            r"parent_train_fold_([0-9]+)|child_train_fold_([0-9]+))",
+            stage,
+        )
+        if match is None:
+            raise RetrievalCheckpointError(
+                "checkpoint contains an unknown Skill transition stage"
+            )
+        generation = int(match.group(1))
+        body = match.group(2)
+        if body == "parent_screen_train":
+            return (generation, 0, 0)
+        if match.group(3) is not None:
+            return (generation, 1, CHILD_SCOPES.index(cast(RetrievalChildScope, match.group(3))))
+        if match.group(4) is not None:
+            return (generation, 2, int(match.group(4)))
+        assert match.group(5) is not None
+        return (generation, 3, int(match.group(5)))
+
+    @staticmethod
+    def _validate_skill_promotion_transition(
+        stage: str,
+        record: dict[str, object],
+        evaluation: RetrievalEvaluation,
+        before: RetrievalSkillLibrary | None,
+        after: RetrievalSkillLibrary | None,
+        tasks: tuple[ContextTask, ...],
+    ) -> None:
+        if before is after:
+            return
+        before_payload = (
+            None
+            if before is None
+            else before._evolution_snapshot_payload()["snapshot_sha256"]
+        )
+        after_payload = (
+            None
+            if after is None
+            else after._evolution_snapshot_payload()["snapshot_sha256"]
+        )
+        if before_payload == after_payload:
+            return
+        if (
+            not _is_trusted_train_evaluation_stage(stage)
+            or before is None
+            or after is None
+        ):
+            raise RetrievalCheckpointError(
+                "only an exact trusted Train batch may change a Skill snapshot"
+            )
+        if set(before._skills) != set(after._skills):
+            raise RetrievalCheckpointError(
+                "evaluator promotion changed the Skill identity set"
+            )
+        try:
+            genome = RetrievalGenome.from_payload(record.get("genome"))
+            canonical_evidence = recompute_retrieval_skill_evidence(
+                tasks,
+                evaluation.promotion_replays,
+                allowed_skill_ids=genome.active_skill_ids,
+                task_traces=evaluation.task_traces,
+            )
+        except (RetrievalPolicyError, TypeError, ValueError) as error:
+            raise RetrievalCheckpointError(
+                "evaluator promotion replay artifacts are invalid"
+            ) from error
+        if canonical_evidence != evaluation.promotion_evidence:
+            raise RetrievalCheckpointError(
+                "evaluator promotion evidence does not recompute from its replay artifacts"
+            )
+        added = []
+        for skill_id in sorted(before._skills):
+            old_history = before._skills[skill_id]
+            new_history = after._skills[skill_id]
+            if tuple(item.to_payload() for item in new_history[: len(old_history)]) != tuple(
+                item.to_payload() for item in old_history
+            ):
+                raise RetrievalCheckpointError(
+                    "evaluator promotion rewrote existing Skill history"
+                )
+            if len(new_history) == len(old_history):
+                continue
+            if len(new_history) != len(old_history) + 1:
+                raise RetrievalCheckpointError(
+                    "evaluator promotion appended an invalid Skill history vector"
+                )
+            previous = old_history[-1]
+            accepted = new_history[-1]
+            if (
+                previous.status != "candidate"
+                or accepted.status != "accepted"
+                or accepted.parent_version != previous.version
+                or accepted.version != previous.version + 1
+            ):
+                raise RetrievalCheckpointError(
+                    "evaluator promotion did not append candidate-to-accepted state"
+                )
+            expected = _accepted_retrieval_skill_from_evidence(
+                previous,
+                tuple(
+                    row
+                    for row in evaluation.promotion_evidence
+                    if row.skill_id == accepted.skill_id
+                ),
+            )
+            if expected is None or expected.to_payload() != accepted.to_payload():
+                raise RetrievalCheckpointError(
+                    "evaluator promotion does not replay from its canonical evidence"
+                )
+            added.append(accepted)
+        if not added:
+            raise RetrievalCheckpointError(
+                "changed Skill snapshot contains no evaluator promotion"
+            )
+        new_hashes = {_digest(skill.to_payload()) for skill in added}
+        expected_origins = dict(before._active_record_origins)
+        expected_origins.update(
+            {digest: "evaluator_promotion" for digest in new_hashes}
+        )
+        if after._active_record_origins != expected_origins:
+            raise RetrievalCheckpointError(
+                "evaluator promotion active-record provenance mismatch"
+            )
+        traces = {
+            trace["task_id"]: trace["entity_name"]
+            for trace in evaluation.task_traces
+        }
+        task_ids = cast(list[str], record["task_ids"])
+        for accepted in added:
+            validated = accepted.validated_task_ids
+            selected = set(validated)
+            if (
+                tuple(task_id for task_id in task_ids if task_id in selected)
+                != validated
+                or any(task_id not in traces for task_id in validated)
+                or tuple(sorted({cast(str, traces[task_id]) for task_id in validated}))
+                != accepted.validated_entities
+            ):
+                raise RetrievalCheckpointError(
+                    "evaluator promotion is not bound to its exact Train task provenance"
+                )
+
+    def _restore_candidate_library_state(
+        self,
+        raw_snapshots: dict[str, dict[str, object]],
+        candidate_refs: dict[str, object],
+        cache_records: dict[str, dict[str, object]],
+        terminal_outcomes: dict[str, dict[str, object]],
+        evaluations: dict[str, RetrievalEvaluation],
+        snapshots: dict[str, RetrievalSkillLibrary],
+        *,
+        original: RetrievalGenome,
+        current: RetrievalGenome,
+        pending: object,
+        screen: tuple[ContextTask, ...],
+        remaining_folds: tuple[tuple[ContextTask, ...], ...],
+        dev: tuple[ContextTask, ...],
+    ) -> None:
+        base_ref = (
+            None
+            if self.skill_library is None
+            else cast(
+                str,
+                self.skill_library._evolution_snapshot_payload()["snapshot_sha256"],
+            )
+        )
+        if base_ref is not None and base_ref not in snapshots:
+            raise RetrievalCheckpointError(
+                "checkpoint omitted its seed candidate Skill snapshot"
+            )
+        outcomes: list[tuple[str, dict[str, object], RetrievalEvaluation | None]] = [
+            (cache_key, record, evaluations[cache_key])
+            for cache_key, record in cache_records.items()
+        ] + [
+            (cache_key, record, None)
+            for cache_key, record in terminal_outcomes.items()
+        ]
+        known_fingerprints = {
+            original.fingerprint(),
+            current.fingerprint(),
+            *(cast(str, record["genome_fingerprint"]) for _key, record, _value in outcomes),
+        }
+        if isinstance(pending, Mapping):
+            rows = pending.get("children")
+            if isinstance(rows, list):
+                known_fingerprints.update(
+                    cast(str, row["fingerprint"])
+                    for row in rows
+                    if isinstance(row, Mapping)
+                    and row.get("valid") is True
+                    and type(row.get("fingerprint")) is str
+                )
+        if not set(candidate_refs).issubset(known_fingerprints):
+            raise RetrievalCheckpointError(
+                "candidate Skill snapshots contain an unknown Genome fingerprint"
+            )
+        for fingerprint in {cast(str, row[1]["genome_fingerprint"]) for row in outcomes}:
+            if fingerprint not in candidate_refs:
+                raise RetrievalCheckpointError(
+                    "checkpoint omitted a scored candidate Skill library"
+                )
+        referenced: set[str] = set()
+
+        def library_for(reference: object) -> RetrievalSkillLibrary | None:
+            if reference is None:
+                return None
+            if type(reference) is not str or reference not in snapshots:
+                raise RetrievalCheckpointError(
+                    "checkpoint references a missing candidate Skill snapshot"
+                )
+            referenced.add(reference)
+            return snapshots[reference]
+
+        grouped: dict[
+            str,
+            list[tuple[str, dict[str, object], RetrievalEvaluation | None]],
+        ] = {}
+        for item in outcomes:
+            grouped.setdefault(cast(str, item[1]["genome_fingerprint"]), []).append(item)
+        parent_screen_post: dict[int, object] = {}
+        for _key, record, evaluation in outcomes:
+            match = re.fullmatch(r"g([0-9]+)_parent_screen_train", cast(str, record["stage"]))
+            if match is not None and evaluation is not None:
+                parent_screen_post[int(match.group(1))] = record[
+                    "post_skill_library_snapshot_sha256"
+                ]
+
+        final_refs: dict[str, object] = {}
+        for fingerprint, records in grouped.items():
+            records.sort(key=lambda item: self._checkpoint_stage_order(cast(str, item[1]["stage"])))
+            first_stage = cast(str, records[0][1]["stage"])
+            child_match = re.fullmatch(r"g([0-9]+)_child_[ABC]_screen_train", first_stage)
+            state: object = base_ref if fingerprint == original.fingerprint() else None
+            if fingerprint != original.fingerprint():
+                if child_match is None:
+                    fold_match = re.fullmatch(r"g([0-9]+)_child_train_fold_[0-9]+", first_stage)
+                    generation = None if fold_match is None else int(fold_match.group(1))
+                else:
+                    generation = int(child_match.group(1))
+                if generation is None or generation not in parent_screen_post:
+                    raise RetrievalCheckpointError(
+                        "candidate Skill snapshot stage lacks Parent Train provenance"
+                    )
+                state = parent_screen_post[generation]
+            for cache_key, record, evaluation in records:
+                pre_ref = record["skill_library_snapshot_sha256"]
+                if pre_ref != state:
+                    raise RetrievalCheckpointError(
+                        "candidate Skill snapshot transition history is discontinuous"
+                    )
+                before = library_for(pre_ref)
+                if evaluation is None:
+                    continue
+                post_ref = record["post_skill_library_snapshot_sha256"]
+                after = library_for(post_ref)
+                scheduled_tasks, _readonly = self._stage_tasks(
+                    cast(str, record["stage"]),
+                    screen=screen,
+                    remaining_folds=remaining_folds,
+                    dev=dev,
+                )
+                self._validate_skill_promotion_transition(
+                    cast(str, record["stage"]),
+                    record,
+                    evaluation,
+                    before,
+                    after,
+                    scheduled_tasks,
+                )
+                state = post_ref
+            final_refs[fingerprint] = state
+
+        for fingerprint, reference in candidate_refs.items():
+            library_for(reference)
+            expected = final_refs.get(fingerprint)
+            if expected is None and fingerprint == original.fingerprint():
+                expected = base_ref
+            if expected is None:
+                pending_generation = (
+                    pending.get("generation")
+                    if isinstance(pending, Mapping)
+                    else None
+                )
+                expected = parent_screen_post.get(pending_generation)
+            if reference != expected:
+                raise RetrievalCheckpointError(
+                    "current candidate Skill snapshot does not match completed Train state"
+                )
+        if set(raw_snapshots) != referenced:
+            raise RetrievalCheckpointError(
+                "checkpoint contains an unbound candidate Skill snapshot"
+            )
+        self._library_snapshots = {
+            key: dict(value) for key, value in raw_snapshots.items()
+        }
+        self._candidate_libraries = {
+            fingerprint: (
+                None
+                if reference is None
+                else snapshots[cast(str, reference)].clone(
+                    persist=False,
+                    read_only=True,
+                )
+            )
+            for fingerprint, reference in candidate_refs.items()
+        }
+
     def _recomputed_task_keys(
         self,
         genome: RetrievalGenome,
         tasks: tuple[ContextTask, ...],
+        library: RetrievalSkillLibrary | None,
     ) -> tuple[RetrievalInferenceCacheKey, ...]:
-        library = self._clone_library(self.skill_library)
         return tuple(
             build_inference_cache_key(
                 task,
@@ -4718,6 +5375,7 @@ class RetrievalEvolutionEngine:
         cache_records: dict[str, dict[str, object]],
         terminal_outcomes: dict[str, dict[str, object]],
         *,
+        library_snapshots: dict[str, RetrievalSkillLibrary],
         screen: tuple[ContextTask, ...],
         remaining_folds: tuple[tuple[ContextTask, ...], ...],
         dev: tuple[ContextTask, ...],
@@ -4730,11 +5388,13 @@ class RetrievalEvolutionEngine:
             "genome_fingerprint",
             "skill_library_sha256",
             "skill_authority_sha256",
+            "skill_library_snapshot_sha256",
             "task_ids",
             "task_cache_keys",
         }
         for cache_key, record in cache_records.items():
             if set(record) != common_fields | {
+                "post_skill_library_snapshot_sha256",
                 "evaluation_sha256",
                 "evaluation",
             }:
@@ -4743,6 +5403,7 @@ class RetrievalEvolutionEngine:
                 cache_key,
                 record,
                 terminal=False,
+                library_snapshots=library_snapshots,
                 screen=screen,
                 remaining_folds=remaining_folds,
                 dev=dev,
@@ -4758,6 +5419,7 @@ class RetrievalEvolutionEngine:
                 cache_key,
                 record,
                 terminal=True,
+                library_snapshots=library_snapshots,
                 screen=screen,
                 remaining_folds=remaining_folds,
                 dev=dev,
@@ -4770,6 +5432,7 @@ class RetrievalEvolutionEngine:
         record: dict[str, object],
         *,
         terminal: bool,
+        library_snapshots: dict[str, RetrievalSkillLibrary],
         screen: tuple[ContextTask, ...],
         remaining_folds: tuple[tuple[ContextTask, ...], ...],
         dev: tuple[ContextTask, ...],
@@ -4782,6 +5445,10 @@ class RetrievalEvolutionEngine:
             or type(record["genome_fingerprint"]) is not str
             or type(record["skill_library_sha256"]) is not str
             or type(record["skill_authority_sha256"]) is not str
+            or (
+                record["skill_library_snapshot_sha256"] is not None
+                and type(record["skill_library_snapshot_sha256"]) is not str
+            )
             or type(record["task_ids"]) is not list
             or any(type(item) is not str for item in record["task_ids"])
             or type(record["task_cache_keys"]) is not list
@@ -4808,7 +5475,16 @@ class RetrievalEvolutionEngine:
             raise RetrievalCheckpointError(
                 "checkpoint evaluation task coverage does not match its schedule"
             )
-        task_keys = self._recomputed_task_keys(genome, tasks)
+        snapshot_sha256 = record["skill_library_snapshot_sha256"]
+        if snapshot_sha256 is None:
+            library = None
+        else:
+            library = library_snapshots.get(snapshot_sha256)
+            if library is None:
+                raise RetrievalCheckpointError(
+                    "checkpoint evaluation references a missing Skill snapshot"
+                )
+        task_keys = self._recomputed_task_keys(genome, tasks, library)
         expected_task_keys = [item.digest() for item in task_keys]
         if (
             record["task_cache_keys"] != expected_task_keys
@@ -4846,6 +5522,13 @@ class RetrievalEvolutionEngine:
                     "terminal forecasting outcome digest does not recompute"
                 )
             return None
+        if (
+            record["post_skill_library_snapshot_sha256"] is not None
+            and type(record["post_skill_library_snapshot_sha256"]) is not str
+        ):
+            raise RetrievalCheckpointError(
+                "invalid post-evaluation Skill snapshot reference"
+            )
         if (
             type(record["evaluation_sha256"]) is not str
             or type(record["evaluation"]) is not dict
@@ -5086,7 +5769,22 @@ class RetrievalEvolutionEngine:
                     self.config.tolerance,
                     require_strict_contextual_gain=True,
                 )
-                if not fold_safe:
+                child_library = self._candidate_libraries.get(
+                    child.fingerprint()
+                )
+                active_ids = (
+                    frozenset()
+                    if child_library is None
+                    else frozenset(
+                        skill.skill_id
+                        for skill in child_library.active_skills()
+                    )
+                )
+                if not set(child.active_skill_ids).issubset(active_ids):
+                    rejection_reasons[child.version] = (
+                        "train_gate:unpromoted_retrieval_skill"
+                    )
+                elif not fold_safe:
                     rejection_reasons[child.version] = (
                         "train_fold_vector:not_pareto_safe"
                     )

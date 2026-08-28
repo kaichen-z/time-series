@@ -1245,6 +1245,9 @@ def _build_skill_authority_boundary():
     authorized_libraries: weakref.WeakKeyDictionary[
         object, tuple[object, ...]
     ] = weakref.WeakKeyDictionary()
+    train_shadow_projections: weakref.WeakKeyDictionary[
+        object, frozenset[str]
+    ] = weakref.WeakKeyDictionary()
     outstanding: dict[int, tuple[object, str, object]] = {}
 
     def consume(capability: object | None, operation: str, target: object) -> None:
@@ -1280,6 +1283,34 @@ def _build_skill_authority_boundary():
             path_sha256,
             checkpoint_sha256,
             epoch,
+        )
+
+    def register_evolution_snapshot(
+        library: object,
+        checkpoint_sha256: str | None,
+        checkpoint_epoch: int | None,
+    ) -> None:
+        snapshot_sha256 = library._evolution_snapshot_payload()["snapshot_sha256"]
+        if (
+            type(snapshot_sha256) is not str
+            or (
+                checkpoint_sha256 is not None
+                and (
+                    type(checkpoint_sha256) is not str
+                    or type(checkpoint_epoch) is not int
+                    or checkpoint_epoch < 1
+                )
+            )
+            or (checkpoint_sha256 is None) != (checkpoint_epoch is None)
+        ):
+            raise RetrievalSkillError(
+                "invalid authenticated evolution Skill snapshot authority"
+            )
+        authorized_libraries[library] = (
+            "evolution_snapshot",
+            snapshot_sha256,
+            checkpoint_sha256,
+            checkpoint_epoch,
         )
 
     def require_library(library: object) -> None:
@@ -1324,6 +1355,11 @@ def _build_skill_authority_boundary():
                 "path_sha256": authority[1],
                 "checkpoint_sha256": authority[2],
             }
+        elif authority[0] == "evolution_snapshot":
+            payload = {
+                "kind": "evolution_snapshot",
+                "snapshot_sha256": authority[1],
+            }
         else:
             payload = {"kind": authority[0], "grant": id(authority[1])}
         return _canonical_digest(payload)
@@ -1350,7 +1386,10 @@ def _build_skill_authority_boundary():
             library._skills = proposed
             library._active_record_origins = dict(active_record_origins)
             library._file_sha256 = file_sha256
-            register_checkpoint(library, file_sha256 if library.persist else None)
+            if library.persist:
+                register_checkpoint(library, file_sha256)
+            else:
+                register_evolution_snapshot(library, None, None)
 
         run("evaluator_checkpoint_commit", target, commit)
 
@@ -1479,7 +1518,82 @@ def _build_skill_authority_boundary():
 
         return run("verified_release_load", target, activate)
 
+    def activate_evolution_snapshot(
+        library: object,
+        checkpoint_sha256: str,
+        checkpoint_epoch: int,
+    ) -> object:
+        register_evolution_snapshot(
+            library,
+            checkpoint_sha256,
+            checkpoint_epoch,
+        )
+        return library
+
+    def require_evolution_snapshot(
+        library: object,
+        checkpoint_sha256: str,
+        checkpoint_epoch: int,
+    ) -> None:
+        authority = authorized_libraries.get(library)
+        if (
+            authority is None
+            or authority[0] != "evolution_snapshot"
+            or authority[2:] != (checkpoint_sha256, checkpoint_epoch)
+        ):
+            raise RetrievalSkillError(
+                "candidate Skill snapshot is not bound to the current evolution checkpoint epoch"
+            )
+
+    def authorize_train_shadow_projection(
+        library: object,
+        named_skill_ids: Iterable[str],
+    ) -> object:
+        requested = frozenset(named_skill_ids)
+        available = {
+            skill.skill_id
+            for skill in library.all()
+            if skill.status in {"candidate", "accepted", "specialized"}
+        }
+        if not requested.issubset(available):
+            raise RetrievalSkillError(
+                "trusted Train shadow references an unavailable candidate Skill"
+            )
+        projected = library.clone(persist=False, read_only=True)
+        train_shadow_projections[projected] = requested
+        return projected
+
+    def train_shadow_skills(
+        library: object,
+        stage: str,
+        *,
+        assumption_kinds: Iterable[str] = (),
+        gap_types: Iterable[str] = (),
+        temporal_relations: Iterable[str] = (),
+    ) -> tuple[RetrievalSkill, ...]:
+        authorized = train_shadow_projections.get(library)
+        if authorized is None:
+            return ()
+        return tuple(
+            skill
+            for skill in sorted(
+                (history[-1] for history in library._skills.values()),
+                key=lambda item: item.skill_id,
+            )
+            if skill.skill_id in authorized
+            and skill.status == "candidate"
+            and skill.stage in {stage, "both"}
+            and skill.applicability.matches(
+                assumption_kinds=assumption_kinds,
+                gap_types=gap_types,
+                temporal_relations=temporal_relations,
+            )
+        )
+
     def inherit_library(source: object, target_library: object) -> None:
+        train_shadow = train_shadow_projections.get(source)
+        if train_shadow is not None:
+            train_shadow_projections[target_library] = train_shadow
         if not any(skill.is_active for skill in target_library.all()):
             return
         try:
@@ -1512,6 +1626,10 @@ def _build_skill_authority_boundary():
         require_library,
         cache_identity,
         inherit_library,
+        activate_evolution_snapshot,
+        require_evolution_snapshot,
+        authorize_train_shadow_projection,
+        train_shadow_skills,
     )
 
 
@@ -1526,6 +1644,10 @@ def _build_skill_authority_boundary():
     _require_active_library_authority,
     _skill_library_cache_identity,
     _inherit_active_library_authority,
+    _activate_evolution_snapshot_library,
+    _require_evolution_snapshot_library,
+    _authorize_train_shadow_projection,
+    _trusted_train_shadow_skills,
 ) = _build_skill_authority_boundary()
 del _build_skill_authority_boundary
 
@@ -1546,6 +1668,166 @@ class RetrievalSkillLibrary:
         self._file_sha256: str | None = None
         self._skills = self._validated_index(
             skills or (), active_record_hashes=self._active_record_origins
+        )
+
+    def _evolution_snapshot_payload(self) -> dict[str, object]:
+        """Return the canonical Skill state stored inside an authenticated run."""
+        skills = [skill.to_payload() for skill in self.all()]
+        active_hashes = {
+            _record_digest(skill)
+            for skill in self.all()
+            if skill.is_active
+        }
+        if active_hashes != set(self._active_record_origins):
+            raise RetrievalSkillError(
+                "Retrieval Skill snapshot active provenance is incomplete"
+            )
+        core: dict[str, object] = {
+            "schema_version": 1,
+            "skills": skills,
+            "active_records": [
+                {
+                    "sha256": digest,
+                    "origin": self._active_record_origins[digest],
+                }
+                for digest in sorted(self._active_record_origins)
+            ],
+        }
+        return {
+            **core,
+            "snapshot_sha256": _canonical_digest(core),
+        }
+
+    @classmethod
+    def _from_authenticated_evolution_snapshot(
+        cls,
+        raw: object,
+        *,
+        base_library: "RetrievalSkillLibrary",
+        checkpoint_sha256: str,
+        checkpoint_epoch: int,
+    ) -> "RetrievalSkillLibrary":
+        """Hydrate data only after the containing evolution checkpoint authenticated."""
+        expected = {
+            "schema_version",
+            "skills",
+            "active_records",
+            "snapshot_sha256",
+        }
+        if not isinstance(raw, Mapping) or set(raw) != expected:
+            raise RetrievalSkillError("invalid evolution Skill snapshot schema")
+        core = {key: raw[key] for key in expected if key != "snapshot_sha256"}
+        if (
+            type(raw["schema_version"]) is not int
+            or raw["schema_version"] != 1
+            or type(raw["snapshot_sha256"]) is not str
+            or raw["snapshot_sha256"] != _canonical_digest(core)
+            or type(raw["skills"]) is not list
+            or any(type(item) is not dict for item in raw["skills"])
+            or type(raw["active_records"]) is not list
+        ):
+            raise RetrievalSkillError("invalid evolution Skill snapshot digest")
+        skills = tuple(
+            RetrievalSkill._from_storage_payload(item)
+            for item in raw["skills"]
+        )
+        if [skill.to_payload() for skill in skills] != raw["skills"]:
+            raise RetrievalSkillError(
+                "evolution Skill snapshot history is not canonical"
+            )
+        claimed = raw["active_records"]
+        if any(
+            type(item) is not dict
+            or set(item) != {"sha256", "origin"}
+            or type(item["sha256"]) is not str
+            or item["origin"]
+            not in {
+                "verified_release",
+                "legacy_migration",
+                "evaluator_promotion",
+            }
+            for item in claimed
+        ):
+            raise RetrievalSkillError(
+                "invalid evolution Skill active-record provenance"
+            )
+        origins = {
+            str(item["sha256"]): str(item["origin"])
+            for item in claimed
+        }
+        if len(origins) != len(claimed) or claimed != [
+            {"sha256": digest, "origin": origins[digest]}
+            for digest in sorted(origins)
+        ]:
+            raise RetrievalSkillError(
+                "evolution Skill provenance must be unique and sorted"
+            )
+        actual_active = {
+            _record_digest(skill) for skill in skills if skill.is_active
+        }
+        if actual_active != set(origins):
+            raise RetrievalSkillError(
+                "evolution Skill active-record provenance mismatch"
+            )
+        base_origins = base_library._active_record_origins
+        for skill in skills:
+            if not skill.is_active:
+                continue
+            digest = _record_digest(skill)
+            origin = origins[digest]
+            if digest in base_origins:
+                if base_origins[digest] != origin:
+                    raise RetrievalSkillError(
+                        "evolution Skill changed seed active-record provenance"
+                    )
+            elif origin == "evaluator_promotion":
+                cls._validate_active_origin(skill, skills, origin)
+            else:
+                raise RetrievalSkillError(
+                    "evolution Skill snapshot forged non-evaluator authority"
+                )
+        indexed = cls._validated_index(
+            skills,
+            active_record_hashes=origins,
+        )
+        if raw["snapshot_sha256"] == base_library._evolution_snapshot_payload()[
+            "snapshot_sha256"
+        ]:
+            return base_library.clone(persist=False, read_only=True)
+        library = object.__new__(cls)
+        library.path = base_library.path
+        library.persist = False
+        library._read_only = True
+        library._active_record_origins = origins
+        library._file_sha256 = None
+        library._skills = indexed
+        return _activate_evolution_snapshot_library(
+            library,
+            checkpoint_sha256,
+            checkpoint_epoch,
+        )
+
+    def _bind_evolution_checkpoint(
+        self,
+        checkpoint_sha256: str,
+        checkpoint_epoch: int,
+    ) -> None:
+        if "evaluator_promotion" in self._active_record_origins.values():
+            _activate_evolution_snapshot_library(
+                self,
+                checkpoint_sha256,
+                checkpoint_epoch,
+            )
+
+    def _require_evolution_checkpoint(
+        self,
+        checkpoint_sha256: str,
+        checkpoint_epoch: int,
+    ) -> None:
+        _require_evolution_snapshot_library(
+            self,
+            checkpoint_sha256,
+            checkpoint_epoch,
         )
 
     @classmethod

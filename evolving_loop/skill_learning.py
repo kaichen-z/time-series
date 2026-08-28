@@ -14,9 +14,6 @@ from evolving_loop.retrieval_agent.skill_library import (
     RetrievalSkill,
     RetrievalSkillLibrary,
 )
-from evolving_loop.retrieval_agent.credit import (
-    _evaluate_and_promote_retrieval_skills,
-)
 from common.llm import JsonExtractionError, LLMClient, parse_json_object
 
 SKILL_LEARNING_PROMPT = """You are the post-outcome Skill Curator for a forecasting harness.
@@ -209,17 +206,6 @@ class OutcomeSkillLearner:
             retrieval_eligible,
             decision_eligible,
             tuple(rejected),
-        )
-
-    def _promote_retrieval_candidates(
-        self,
-        task_results: tuple[tuple[ContextTask, HarnessResult], ...],
-        *,
-        split: str = "train",
-    ) -> tuple[str, ...]:
-        """Apply evaluator-owned cross-Train gates after task aggregation."""
-        return _evaluate_and_promote_retrieval_skills(
-            self.retrieval_library, task_results, split=split
         )
 
     @staticmethod

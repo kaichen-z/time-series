@@ -1923,15 +1923,12 @@ def test_complete_candidate_scope_validation_owns_only_a_b_or_c_fields(tmp_path)
     assert parse_scoped_child(parent, incomplete, scope="A") is None
     stale_parent = replace(parent, active_skill_ids=("round1_skill",))
     retains_untrusted_skill = _proposal(stale_parent, "v001", "A")
-    assert (
-        parse_scoped_child(
-            stale_parent,
-            retains_untrusted_skill,
-            scope="A",
-            skill_library=library,
-        )
-        is None
-    )
+    assert parse_scoped_child(
+        stale_parent,
+        retains_untrusted_skill,
+        scope="A",
+        skill_library=library,
+    ) is not None
 
     for scope, skill_id in (
         ("A", "round1_skill"),
@@ -1943,7 +1940,7 @@ def test_complete_candidate_scope_validation_owns_only_a_b_or_c_fields(tmp_path)
         child = parse_scoped_child(
             parent, payload, scope=scope, skill_library=library
         )
-        assert child is None
+        assert child is not None
 
     def active_payload(skill_id: str, stage: str, *, constrained: bool = False):
         return {
@@ -2032,13 +2029,14 @@ def test_complete_candidate_scope_validation_owns_only_a_b_or_c_fields(tmp_path)
     engine.skill_library = active_library
     engine._original_parent = parent
 
-    _children, rejections = engine._children_for_generation(
+    parsed_children, rejections = engine._children_for_generation(
         0,
         parent,
         parent_library=library,
     )
 
-    assert rejections["v001"] == "invalid_scoped_candidate"
+    assert any(child.version == "v001" for _scope, child in parsed_children)
+    assert "v001" not in rejections
 
 
 def test_mutation_prompt_contains_only_the_sanitized_parent_skill_catalog(
@@ -2123,6 +2121,135 @@ def test_mutation_prompt_contains_only_the_sanitized_parent_skill_catalog(
         "validated_entities",
     ):
         assert forbidden not in encoded
+
+
+def test_internal_child_may_name_a_sanitized_candidate_skill_for_train_shadow(
+    tmp_path: Path,
+) -> None:
+    """Catch candidate Skills being unreachable from the internal mutation path."""
+    parent = RetrievalGenome.seed()
+    candidate = RetrievalSkill(
+        skill_id="candidate_round1",
+        version=1,
+        parent_version=None,
+        stage="round1",
+        status="candidate",
+        name="private_name_not_for_catalog",
+        description="Private candidate policy text.",
+        applicability=RetrievalApplicability(
+            temporal_relations=("overlaps_future",),
+        ),
+        query_steps=("Private query step.",),
+        required_chain_fields=("forecast_window",),
+        counterevidence_rule="Private counterevidence rule.",
+        failure_conditions=("Private failure.",),
+    )
+    library = RetrievalSkillLibrary(
+        tmp_path / "candidate-catalog.json",
+        (candidate,),
+        persist=False,
+    )
+    proposal = _proposal(parent, "v001", "A")
+    proposal["active_skill_ids"] = ["candidate_round1"]
+
+    child = parse_scoped_child(
+        parent,
+        proposal,
+        scope="A",
+        skill_library=library,
+    )
+
+    assert child is not None
+    assert child.active_skill_ids == ("candidate_round1",)
+    llm = FakeLLMClient([json.dumps(proposal)])
+    engine = RetrievalEvolutionEngine(llm, _FakeEvaluator())
+    response = engine._request_child(
+        parent,
+        "A",
+        "v001",
+        0,
+        skill_library=library,
+    )
+    assert response["active_skill_ids"] == ["candidate_round1"]
+    prompt = json.loads(llm.calls[0]["messages"][0]["content"])
+    assert prompt["active_skill_catalog"] == [
+        {
+            "skill_id": "candidate_round1",
+            "stage": "round1",
+            "applicability": {
+                "assumption_kinds": [],
+                "gap_types": [],
+                "temporal_relations": ["overlaps_future"],
+            },
+        }
+    ]
+    encoded = json.dumps(prompt, sort_keys=True)
+    for forbidden in (
+        "private_name_not_for_catalog",
+        "Private candidate policy text",
+        "Private query step",
+        "Private counterevidence rule",
+        "Private failure",
+    ):
+        assert forbidden not in encoded
+
+
+def test_unpromoted_named_candidate_cannot_become_train_winner_or_reach_dev(
+    tmp_path: Path,
+) -> None:
+    """Catch a desired-but-still-candidate ID reaching final acceptance."""
+    parent = RetrievalGenome.seed()
+    candidate = RetrievalSkill(
+        skill_id="candidate_round1",
+        version=1,
+        parent_version=None,
+        stage="round1",
+        status="candidate",
+        name="candidate_round1",
+        description="Candidate only.",
+        applicability=RetrievalApplicability(),
+        query_steps=("Search.",),
+        required_chain_fields=("forecast_window",),
+        counterevidence_rule="Search for cancellation.",
+        failure_conditions=("No target match.",),
+    )
+    library = RetrievalSkillLibrary(
+        tmp_path / "unpromoted.json",
+        (candidate,),
+        persist=False,
+    )
+    proposals = [
+        _proposal(parent, "v001", "A"),
+        _proposal(parent, "v002", "B"),
+        _proposal(parent, "v003", "C"),
+    ]
+    proposals[0]["active_skill_ids"] = ["candidate_round1"]
+    evaluator = _FakeEvaluator(
+        errors={"v000": 1.0, "v001": 0.5, "v002": 1.2, "v003": 1.3}
+    )
+    base, llm = _engine(evaluator, [json.dumps(item) for item in proposals])
+    engine = RetrievalEvolutionEngine(
+        llm,
+        evaluator,
+        base.config,
+        skill_library=library,
+    )
+
+    result = engine.evolve(
+        parent,
+        _tasks("train", 80),
+        _tasks("dev", 20, entity_offset=100),
+    )
+
+    assert result.train_winner == parent
+    assert result.release_genome is None
+    assert all(
+        not (call.version == "v001" and call.stage == "child_dev")
+        for call in evaluator.calls
+    )
+    assert result.generations[0].rejection_reasons["v001"] == (
+        "train_gate:unpromoted_retrieval_skill"
+    )
 
 
 def test_invalid_scope_proposal_still_leaves_exactly_three_a_b_c_child_slots() -> None:
@@ -2700,7 +2827,7 @@ def test_checkpoint_resume_binds_science_completion_and_child_fingerprints(tmp_p
     first = engine.evolve(RetrievalGenome.seed(), train, dev)
     payload = json.loads(checkpoint.read_text(encoding="utf-8"))
 
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["scientific_inputs"]["dataset_split_hash"] == "split-v1"
     assert payload["scientific_inputs"]["verifier_hash"] == "verifier-v1"
     assert payload["scientific_inputs"]["evaluator_hash"] == "evaluator-v1"

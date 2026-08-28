@@ -163,6 +163,21 @@ exist. The complete two-stage public assembly is proven with a deterministic fak
 provider in `tests/test_retrieval_e2e.py`; a real accepted Numerical/Morphology provider remains a
 prerequisite for a real Round 2 experiment.
 
+Post-resolution learning writes Retrieval Skills only as candidates. An internal mutation Child
+may name one of those candidates in its desired eventual `active_skill_ids`; only exact IDs named
+by that Child are projected through the real two-stage agent and verifier, and only during exact
+internal Train shadow stages. The trusted evaluator runs a second pre-label harness replay with a
+used candidate withheld and retains that omitted execution's actual final candidate pool,
+including any alternative contextual candidate. Inherited accepted Skills remain available as
+context; leave-one-out and promotion evidence apply only to named candidate IDs actually used by
+the Child. Once the complete screen/fold batch is fully scored, it applies the
+cross-task gate to the candidate-specific library: at least three tasks from two entities,
+exact-quote validity `1.0`, necessary leave-one-Skill-out replays, non-worse sMAE and sRMSE with one
+strict gain, and no added catastrophe. A named candidate that remains unpromoted cannot become the
+Train winner, reach Dev, or be published. The transition is one provenance-bound append; the
+shared seed/Parent library is not aliased, while Dev, Public, unknown stages, and frozen inference
+remain active-only and unchanged.
+
 ## 6. Retrieval Genome Evolution
 
 Each generation creates exactly three complete typed Child Genomes, one per immutable mutation
@@ -174,9 +189,11 @@ scope. Any out-of-scope change is rejected:
 | B · evidence-chain policy | `max_evidence_chains`, `max_citations_per_chain`, counterevidence-search, target-match, and temporal-overlap requirements | `both` |
 | C · Round 2 | `round2_prompt`, `round2_strategy`, `second_round_trigger` | `round2` |
 
-The fixed protocol requires exactly 80 Train and 20 Dev tasks. It chooses exactly eight
-entity-disjoint Train screening cases by default, promotes at most two children, evaluates them on
-the remaining entity-disjoint Train folds, and fixes one Train winner. Only then does it open Dev
+The fixed protocol requires exactly 80 Train and 20 Dev tasks. It chooses exactly eight Train
+screening cases from one or more complete entities by default. Those screening entities are
+disjoint from the entities in every remaining Train fold; the eight cases are not required to be
+internally entity-unique. It promotes at most two children, evaluates them on the remaining
+entity-disjoint Train folds, and fixes one Train winner. Only then does it open Dev
 once for Parent and Child with persistence, writers, and evolvers disabled. The Child must make a
 strict contextual-oracle gain while preserving mean final sMAE/sRMSE, P90/P95, retrieval-quality
 tolerances, exact-quote validity, and invalid/catastrophic counts. Otherwise the original Parent is
@@ -189,6 +206,29 @@ the CLI requires at least 32 UTF-8 bytes through `RETRIEVAL_CHECKPOINT_AUTHORITY
 retained independently, then supplied on every restart through
 `RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED`; it must not be rediscovered from mutable run artifacts
 at resume time. The CLI removes both values from its environment before any LLM subprocess.
+Checkpoint schema v2 additionally commits a canonical, deduplicated Skill snapshot table, the
+pre/post snapshot hashes of every completed evaluation, and the current snapshot for every Genome
+fingerprint in the same atomic publication. Before an evaluation-cache hit can be consumed, resume
+validates the checkpoint digest/epoch, exact Skill history and active origins, canonical promotion
+evidence recomputed from retained with-Skill and actual omitted candidate pools. Every contextual
+forecast must reproduce exactly from its source chain after that chain is reverified against the
+immutable task documents and the independently parsed Child Genome's named Skill IDs. All replays
+for one task must retain the same primary execution: the baseline must reproduce its trusted
+task-trace pool digest and coding-oracle metrics, and the final primary pool must reproduce its
+contextual-pool digest and contextual-oracle metrics. Evaluator-computed gates/metrics and an exact candidate-to-accepted copy whose policy
+fields are unchanged may then be checked. The authenticated ordered completed-batch sequence binds every pre-library cache key
+and pre/post snapshot. After its transition chain and final candidate snapshot validate, each
+matching record is consumed exactly once—including earlier unchanged batches and earlier
+promotions—without re-running it. Within an authenticated host record, missing, mismatched,
+semantically inconsistent, Dev-derived, unbound, or duplicate state is rejected.
+Schema-v1 checkpoints fail closed; there is no silent migration.
+
+The operator HMAC key and trusted host evaluator are the checkpoint trust root. Resume does not
+independently attest nondeterministic harness execution beyond the authenticated host record. A
+trusted operator holding the key and current external anchor may intentionally reissue or migrate
+coherent state; that administrative operation is outside the untrusted-model and unauthenticated-
+tamper boundary. Without current operator authority, even a coherent rewrite is rejected. The key
+and expected-anchor value are scrubbed before construction of any LLM subprocess.
 
 The checked-in `evolving_loop/retrieval_agent/releases/v000` is an unevaluated seed, not an
 accepted Child. As of 2026-08-28, only deterministic fake-LLM tests have run: no real Retrieval

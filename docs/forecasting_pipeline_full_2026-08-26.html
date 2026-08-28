@@ -562,6 +562,10 @@ FinalRetrievalCard = {
 }</code></pre>
         <p>Round 2 永远看不到 candidate ID、forecast array、hindcast sMAE/sRMSE、source code、future values、ground-truth evidence，也看不到 evaluator-only 的文档 <code>role</code>/<code>subtype</code>。文档、chain 和 citation budget 都在 host verification 与下游使用之前截断。</p>
 
+        <p>结果解析后的学习只会写入 candidate Retrieval Skill。内部 mutation Child 可以把某个 candidate ID 写入其期望最终生效的 <code>active_skill_ids</code>；只有该 Child 精确点名的 candidate 才会在精确的内部 Train shadow stage 中，通过真实 two-stage agent 与 verifier 投影。Trusted evaluator 还会在 label 不可见时再次运行 harness，并逐个拿掉已使用的 candidate；它保留 omitted execution 的真实最终候选池，包括其中任何替代 contextual candidate，绝不会从 primary run 合成候选池。继承的 accepted Skill 仍可作为上下文使用；leave-one-out 与 promotion evidence 只针对 Child 实际使用的已点名 candidate ID。完整 screen/fold batch 全部评分后，只有满足至少 3 个任务、2 个 entity、exact-quote validity = 1.0、必要的 leave-one-Skill-out replay、sMAE 与 sRMSE 均不变差且至少一项严格改善、且不增加 catastrophe，才会追加一个带 provenance 的 accepted 版本。仍未 promotion 的已点名 candidate 不能成为 Train winner、进入 Dev 或发布。共享 seed/Parent library 不被 alias；Dev、Public、未知 stage 与 frozen inference 都只解析 active Skill 并保持不变。</p>
+        <p>认证 checkpoint schema v2 会把规范化 Skill history 与 active origin 写入去重 snapshot table，把每个已完成 evaluation 绑定到精确的 pre/post snapshot hash，并在同一次原子发布中把每个 Genome fingerprint 绑定到其当前 candidate-library snapshot。Resume 会验证 checkpoint digest/epoch、精确 history、active provenance，以及从保留的 with-Skill 与真实 omitted candidate pool 重新计算的 promotion evidence。每个 contextual forecast 还必须在其 source chain 针对不可变 task document 重新验证后，从该 chain 精确重现，且所用 Skill 必须属于独立解析的 Child Genome 所点名 ID。同一任务的所有 replay 必须对同一 primary execution 一致：数值 baseline 的 digest 和得分必须等于 trusted task trace 的 baseline digest 与 coding-oracle metric，最终 primary pool 的 digest 和得分必须等于该 trace 的 contextual-pool digest 与 contextual-oracle metric。之后才能检查 evaluator gate/metric 与 policy 字段不变的精确 candidate-to-accepted copy。认证的有序 completed-batch sequence 会绑定每个 pre-state cache key 与 pre/post snapshot；完整 transition chain 和最终 candidate snapshot 验证通过后，每个匹配记录只消费一次，包括较早未变化的 batch 与较早的 promotion，而不会重复运行。在已认证的 host record 内，缺失、不匹配、语义不一致、来自 Dev、未绑定或重复的状态都会 fail closed；schema v1 checkpoint 不会被静默迁移。</p>
+        <p>Operator HMAC key 与 trusted host evaluator 是 checkpoint 的信任根。Resume 不会在该 authenticated host record 之外独立证明非确定性 harness execution。持有 key 与当前 external anchor 的 trusted operator 可以有意重新签发或迁移自洽状态；这种管理操作不属于 untrusted-model 和 unauthenticated-tamper 威胁边界。没有当前 operator authority 时，即使是自洽的改写也会被拒绝。创建任何 LLM subprocess 前，key 与 expected-anchor value 都会从环境中删除。</p>
+
         <h3>三个不可越界的 Child scope 与一次性 Dev</h3>
         <div class="table-wrap"><table>
           <thead><tr><th>Child</th><th>它独占的可变字段</th><th>Skill stage</th></tr></thead>
@@ -571,7 +575,7 @@ FinalRetrievalCard = {
             <tr><td>C · Round 2</td><td><code>round2_prompt</code>、<code>round2_strategy</code>、<code>second_round_trigger</code></td><td><code>round2</code></td></tr>
           </tbody>
         </table></div>
-        <p>每代恰好生成 A/B/C。默认先筛 8 个 entity-disjoint Train cases，最多晋级 2 个 Child，再跑剩余的 entity-disjoint Train folds 并固定唯一 Train winner。之后 Parent 与 Child 才各自对全部 20 Dev 运行一次；persistence、writer 和 evolver 全部关闭。接受要求 contextual-oracle 严格改善，同时 final mean sMAE/sRMSE、P90/P95、exact-quote validity、invalid/catastrophic counts 与 Retrieval quality tolerance 都不能退化。Public Regression ID 不得进入 mutation、cache、prompt、checkpoint 或 acceptance。</p>
+        <p>每代恰好生成 A/B/C。默认先从一个或多个完整 Train entity 中筛出正好 8 个 case；这些 screening entity 与所有剩余 Train fold 的 entity 不重叠，但 8 个 case 本身不要求来自 8 个不同 entity。最多晋级 2 个 Child，再跑剩余 Train folds 并固定唯一 Train winner。之后 Parent 与 Child 才各自对全部 20 Dev 运行一次；persistence、writer 和 evolver 全部关闭。接受要求 contextual-oracle 严格改善，同时 final mean sMAE/sRMSE、P90/P95、exact-quote validity、invalid/catastrophic counts 与 Retrieval quality tolerance 都不能退化。Public Regression ID 不得进入 mutation、cache、prompt、checkpoint 或 acceptance。</p>
 
         <h3>复现证明；准备真实命令但不暗示已经运行</h3>
         <pre><code>python -m pytest -q tests/test_retrieval_e2e.py

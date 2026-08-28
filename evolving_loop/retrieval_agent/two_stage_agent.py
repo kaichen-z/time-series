@@ -15,7 +15,11 @@ from evolving_loop.retrieval_agent.schemas import (
     build_round1_payload,
     build_round2_payload,
 )
-from evolving_loop.retrieval_agent.skill_library import RetrievalSkill, RetrievalSkillLibrary
+from evolving_loop.retrieval_agent.skill_library import (
+    RetrievalSkill,
+    RetrievalSkillLibrary,
+    _trusted_train_shadow_skills,
+)
 from evolving_loop.retrieval_agent.verifier import verify_round_result
 
 
@@ -147,15 +151,24 @@ class TwoStageRetrievalAgent:
             return ()
         assumption_kinds = tuple(value.kind for value in assumptions)
         gap_types = tuple(value.gap_type for value in gaps)
-        return tuple(
-            item
-            for item in self.skills.for_stage(
-                stage,
-                assumption_kinds=assumption_kinds,
-                gap_types=gap_types,
+        projected = {
+            item.skill_id: item
+            for item in (
+                *self.skills.for_stage(
+                    stage,
+                    assumption_kinds=assumption_kinds,
+                    gap_types=gap_types,
+                ),
+                *_trusted_train_shadow_skills(
+                    self.skills,
+                    stage,
+                    assumption_kinds=assumption_kinds,
+                    gap_types=gap_types,
+                ),
             )
             if item.skill_id in active_ids
-        )
+        }
+        return tuple(projected[skill_id] for skill_id in sorted(projected))
 
     @staticmethod
     def _skill_payloads(skills: Sequence[RetrievalSkill]) -> tuple[dict[str, str], ...]:

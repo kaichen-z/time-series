@@ -47,7 +47,12 @@ from evolving_loop.frozen_inference import (
     prepare_frozen_output_target,
     run_frozen_inference,
 )
-from evolving_loop.harness import EvolvingForecastHarness, HarnessRuntimeConfig
+from evolving_loop.harness import (
+    EvolvingForecastHarness,
+    HarnessResult,
+    HarnessRuntimeConfig,
+    SkillLeaveOneOutSnapshot,
+)
 from evolving_loop.morphology_adapter import MorphologyProvider
 from evolving_loop.retrieval_agent.agent import RetrievalAgent
 from evolving_loop.retrieval_agent.policy import (
@@ -60,6 +65,7 @@ from evolving_loop.retrieval_agent.policy import (
 from evolving_loop.retrieval_agent.skill_library import (
     RetrievalSkill,
     RetrievalSkillLibrary,
+    _authorize_train_shadow_projection,
     _load_verified_checkpoint_for_operator,
     _move_artifact_entry_to_quarantine,
     _rename_artifact_entry_noreplace,
@@ -85,10 +91,16 @@ from evolving_loop.retrieval_agent.evolution import (
     RetrievalEvolutionResult,
     RetrievalForecastingFailure,
     RetrievalGenerationTrace,
+    _is_trusted_train_evaluation_stage,
     _open_checkpoint_parent,
     _open_retrieval_checkpoint_authority_for_operator,
     _revalidate_checkpoint_parent,
     _unique_checkpoint_temporary,
+)
+from evolving_loop.retrieval_agent.credit import (
+    _evaluate_and_promote_retrieval_skills,
+    candidate_pool_sha256,
+    derive_retrieval_skill_attestation,
 )
 from common.tsfm import ChronosConfig, ChronosForecaster
 
@@ -1232,7 +1244,6 @@ class _TrustedRetrievalEvaluator:
         cache_keys,
         metric_cap,
     ) -> RetrievalEvaluation:
-        del stage
         if persist or writers_enabled or evolver_enabled:
             raise RetrievalEvolutionError(
                 "trusted Retrieval evaluation forbids persistence, writers, and evolvers"
@@ -1249,11 +1260,29 @@ class _TrustedRetrievalEvaluator:
                 "trusted Retrieval cache keys do not match exact task order"
             )
 
+        trusted_train = _is_trusted_train_evaluation_stage(stage)
+        if trusted_train and (
+            not isinstance(skill_library, RetrievalSkillLibrary)
+            or skill_library.persist
+            or not getattr(skill_library, "_read_only", False)
+        ):
+            raise RetrievalEvolutionError(
+                "trusted Train promotion requires a candidate-specific read-only snapshot"
+            )
         outcomes = []
+        task_results = []
         traces: list[dict[str, object]] = []
         for task in tasks:
             try:
-                harness = harness_factory(genome, skill_library)
+                inference_library = (
+                    _authorize_train_shadow_projection(
+                        skill_library,
+                        genome.active_skill_ids,
+                    )
+                    if trusted_train
+                    else skill_library
+                )
+                harness = harness_factory(genome, inference_library)
                 result = harness.run(
                     inference_view(task), allow_skill_writes=False
                 )
@@ -1263,6 +1292,14 @@ class _TrustedRetrievalEvaluator:
                 ) from None
             if getattr(result, "task_id", task.numeric.task_id) != task.numeric.task_id:
                 raise RetrievalForecastingFailure("InvalidHarnessResult") from None
+            if trusted_train:
+                result = self._attach_train_shadow_replays(
+                    genome,
+                    task,
+                    result,
+                    skill_library,
+                    harness_factory,
+                )
             try:
                 outcome = score_after_resolution(task, result)
                 diagnostics = outcome.retrieval_diagnostics
@@ -1280,6 +1317,13 @@ class _TrustedRetrievalEvaluator:
                 "contextual_oracle_smae": outcome.contextual_oracle_smae,
                 "contextual_oracle_srmse": outcome.contextual_oracle_srmse,
             }
+            if trusted_train:
+                metric_values.update(
+                    {
+                        "coding_oracle_smae": outcome.coding_oracle_smae,
+                        "coding_oracle_srmse": outcome.coding_oracle_srmse,
+                    }
+                )
             if any(
                 isinstance(value, bool)
                 or not isinstance(value, (int, float))
@@ -1289,13 +1333,24 @@ class _TrustedRetrievalEvaluator:
                     "InvalidTrustedMetric"
                 )
             outcomes.append((outcome, diagnostics))
-            traces.append(
-                {
-                    "task_id": task.numeric.task_id,
-                    "entity_name": task.numeric.entity_name,
-                    **{key: float(value) for key, value in metric_values.items()},
-                }
-            )
+            task_results.append((task, result))
+            trace: dict[str, object] = {
+                "task_id": task.numeric.task_id,
+                "entity_name": task.numeric.entity_name,
+                **{key: float(value) for key, value in metric_values.items()},
+            }
+            if trusted_train:
+                trace.update(
+                    {
+                        "numeric_baseline_sha256": candidate_pool_sha256(
+                            result.candidate_pool_snapshots[0].candidates
+                        ),
+                        "contextual_pool_sha256": candidate_pool_sha256(
+                            result.candidate_pool_snapshots[-1].candidates
+                        ),
+                    }
+                )
+            traces.append(trace)
 
         def mean_outcome(field: str) -> float:
             return statistics.fmean(float(getattr(outcome, field)) for outcome, _ in outcomes)
@@ -1304,7 +1359,7 @@ class _TrustedRetrievalEvaluator:
             return statistics.fmean(float(getattr(diagnostics, field)) for _, diagnostics in outcomes)
 
         final_smae = [float(trace["final_smae"]) for trace in traces]
-        return RetrievalEvaluation(
+        evaluation = RetrievalEvaluation(
             version=genome.version,
             task_count=len(tasks),
             mean_final_smae=mean_outcome("final_smae"),
@@ -1325,6 +1380,112 @@ class _TrustedRetrievalEvaluator:
             ),
             task_traces=tuple(traces),
         )
+        if trusted_train:
+            candidate_skill_ids = tuple(
+                skill.skill_id
+                for skill in skill_library.all()
+                if skill.status == "candidate"
+            )
+            promotion_evidence, promotion_replays = derive_retrieval_skill_attestation(
+                tuple(task_results),
+                split="train",
+                eligible_skill_ids=candidate_skill_ids,
+            )
+            _evaluate_and_promote_retrieval_skills(
+                skill_library,
+                tuple(task_results),
+                split="train",
+            )
+            evaluation = replace(
+                evaluation,
+                promotion_evidence=promotion_evidence,
+                promotion_replays=promotion_replays,
+            )
+        return evaluation
+
+    @staticmethod
+    def _attach_train_shadow_replays(
+        genome: RetrievalGenome,
+        task: ContextTask,
+        result: object,
+        skill_library: RetrievalSkillLibrary,
+        harness_factory,
+    ) -> HarnessResult:
+        if not isinstance(result, HarnessResult) or result.retrieval_card is None:
+            raise RetrievalForecastingFailure("InvalidHarnessResult")
+        candidates = {
+            skill_id
+            for skill_id in genome.active_skill_ids
+            if (
+                (skill := skill_library.get_by_id(skill_id)) is not None
+                and skill.status == "candidate"
+            )
+        }
+        used = {
+            skill_id
+            for chain in result.retrieval_card.chains
+            if chain.numeric_eligible
+            for skill_id in chain.used_skill_ids
+            if skill_id in candidates
+        }
+        if not used:
+            return replace(result, skill_leave_one_out_snapshots=())
+        main_snapshots = {
+            snapshot.after_chain_id: (index, snapshot)
+            for index, snapshot in enumerate(result.candidate_pool_snapshots)
+            if snapshot.after_chain_id is not None
+        }
+        replays: list[SkillLeaveOneOutSnapshot] = []
+        for skill_id in sorted(used):
+            projected = _authorize_train_shadow_projection(
+                skill_library,
+                tuple(
+                    named
+                    for named in genome.active_skill_ids
+                    if named != skill_id
+                ),
+            )
+            try:
+                omitted = harness_factory(genome, projected).run(
+                    inference_view(task), allow_skill_writes=False
+                )
+            except Exception:
+                raise RetrievalForecastingFailure("InferenceRuntimeFailure") from None
+            if (
+                not isinstance(omitted, HarnessResult)
+                or omitted.task_id != task.numeric.task_id
+                or omitted.retrieval_card is None
+            ):
+                raise RetrievalForecastingFailure("InvalidHarnessResult")
+            if (
+                not omitted.candidate_pool_snapshots
+                or omitted.candidate_pool_snapshots[0].after_chain_id is not None
+                or tuple(omitted.candidate_pool_snapshots[0].candidates)
+                != tuple(result.candidate_pool_snapshots[0].candidates)
+            ):
+                raise RetrievalForecastingFailure("InvalidHarnessResult")
+            omitted_pool = omitted.candidate_pool_snapshots[-1]
+            for chain in result.retrieval_card.chains:
+                if not chain.numeric_eligible or skill_id not in chain.used_skill_ids:
+                    continue
+                located = main_snapshots.get(chain.chain_id)
+                if located is None or located[0] < 1:
+                    raise RetrievalForecastingFailure("InvalidHarnessResult")
+                _index, _full = located
+                replay = replace(omitted_pool, after_chain_id=chain.chain_id)
+                replays.append(
+                    SkillLeaveOneOutSnapshot(
+                        chain.chain_id,
+                        skill_id,
+                        replay,
+                        tuple(
+                            omitted_chain
+                            for omitted_chain in omitted.retrieval_card.chains
+                            if omitted_chain.numeric_eligible
+                        ),
+                    )
+                )
+        return replace(result, skill_leave_one_out_snapshots=tuple(replays))
 
 
 class _ConservativeMorphologyProvider:

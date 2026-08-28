@@ -219,6 +219,49 @@ FinalRetrievalCard = {
 recomputes eligibility, and document/chain/citation budgets are applied before verification and
 downstream use. Only verified chains are projected into the legacy Decision interface.
 
+Resolved public outcome learning creates Retrieval Skills only as `candidate` records. After a
+mutation Child names a candidate ID in its desired eventual `active_skill_ids`, only that exact ID
+is projected through the real agent/verifier during exact internal Train shadow evaluation. The
+trusted evaluator runs a second pre-label harness replay with that candidate withheld. After the
+complete screen/fold batch has scored, it may append one `accepted` version to the
+candidate-specific library only when those replays show at least three tasks from two entities,
+exact-quote validity `1.0`, non-worse sMAE and sRMSE with one strict gain, necessity, and no added
+catastrophe. The replay retains the omitted harness's actual final candidate pool, including any
+alternative contextual candidate; it is never synthesized from the primary run. Inherited
+accepted Skills remain available as context, while leave-one-out and promotion evidence are
+required only for candidate IDs named and used by the Child. One task remains a candidate, and a
+Child with any named-but-unpromoted ID cannot
+become the Train winner, reach Dev, or be published. The shared seed/Parent library is not aliased;
+Dev, Public, unknown stages, and frozen inference resolve active Skills only and never project a
+candidate.
+
+Authenticated Retrieval evolution checkpoint schema v2 stores canonical Skill histories and
+active-record origins in a deduplicated snapshot table. Every completed evaluation binds its exact
+pre/post snapshot hashes, and every Genome fingerprint binds its current candidate-library
+snapshot in the same atomic checkpoint publication. Resume authenticates the checkpoint digest
+and epoch, then revalidates snapshot digests, exact history, active provenance, canonical promotion
+evidence against the retained with-Skill and actual omitted candidate pools. Each contextual
+forecast must also reproduce exactly from its evidence chain after that chain is reverified
+against the immutable task documents and the independently parsed Child Genome's named Skill
+IDs. Replays for the same task must agree on one primary execution: its numeric baseline score
+and canonical pool digest must equal the trusted task trace's coding-oracle metrics and baseline
+digest, while its fully projected primary pool's digest and score must equal that trace's
+contextual-pool digest and contextual-oracle metrics. Evaluator-computed gates/metrics and an exact
+candidate-to-accepted copy may then be checked. The
+authenticated ordered completed-batch sequence binds each pre-state cache key and pre/post
+snapshot. Once its complete transition chain and final candidate snapshot validate, resume
+consumes each matching completed record exactly once—including earlier unchanged batches and
+earlier promotions—without rerunning it. Within an authenticated host record, missing,
+mismatched, semantically inconsistent, Dev-derived, unbound, or duplicate state
+fails closed; schema-v1 checkpoints are incompatible and are not silently migrated.
+
+The operator HMAC key and trusted host evaluator are the Retrieval checkpoint trust root. Resume
+does not independently attest a nondeterministic harness execution beyond that authenticated host
+record. A trusted operator holding the key and current external anchor may intentionally reissue or
+migrate coherent state; that administrative action is outside the untrusted-model/tamper threat
+model above. Without current operator authority, even a coherently rewritten execution record is
+rejected. Authority key and expected-anchor values are removed before any LLM subprocess is built.
+
 Every Retrieval generation requests exactly one child in each immutable scope:
 
 | Child | May mutate | Skill stage owned |
@@ -228,8 +271,10 @@ Every Retrieval generation requests exactly one child in each immutable scope:
 | C · Round 2 | `round2_prompt`, `round2_strategy`, `second_round_trigger` | `round2` |
 
 The host rejects any child that changes a field outside its scope. On Train, it screens exactly
-eight entity-disjoint cases by default, promotes at most two children, then evaluates survivors
-over the remaining entity-disjoint folds. Dev opens once, after the Train winner is fixed, and
+eight cases drawn from one or more complete entities by default; those screening entities are
+disjoint from every remaining Train fold, but the eight cases need not name eight distinct
+entities. It promotes at most two children, then evaluates survivors over the remaining
+entity-disjoint folds. Dev opens once, after the Train winner is fixed, and
 runs Parent and Child with persistence, writers, and evolvers disabled. Acceptance requires a
 strict contextual-oracle gain with no regression in final mean sMAE/sRMSE, P90/P95, exact-quote
 validity, invalid/catastrophic counts, or the configured retrieval-quality tolerances. Public

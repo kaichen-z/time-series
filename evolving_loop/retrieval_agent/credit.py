@@ -1,9 +1,12 @@
 """Trusted, post-resolution Retrieval diagnostics and marginal credit."""
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 import statistics
+from collections.abc import Mapping
 from copy import copy
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Iterable, Sequence
@@ -15,7 +18,11 @@ from evolving_loop.retrieval_agent.skill_library import (
     _commit_evaluator_records,
     _record_digest,
 )
-from evolving_loop.retrieval_agent.verifier import _verified_quote_spans
+from evolving_loop.retrieval_agent.schemas import EvidenceChain
+from evolving_loop.retrieval_agent.verifier import (
+    _verified_quote_spans,
+    verify_round_result,
+)
 
 if TYPE_CHECKING:
     from evolving_loop.harness import CandidatePoolSnapshot, HarnessResult
@@ -113,6 +120,180 @@ class RetrievalSkillTaskEvidence:
             raise ValueError("Skill necessity must be boolean")
 
 
+@dataclass(frozen=True)
+class RetrievalSkillReplayArtifact:
+    """Canonical label-free pools retained to recompute one promotion row."""
+
+    skill_id: str
+    task_id: str
+    entity_name: str
+    split: str
+    chain_id: str
+    exact_quote_validity: float
+    baseline_candidates: tuple[tuple[str, tuple[float, ...]], ...]
+    with_skill_candidates: tuple[tuple[str, tuple[float, ...]], ...]
+    without_skill_candidates: tuple[tuple[str, tuple[float, ...]], ...]
+    primary_final_candidates: tuple[tuple[str, tuple[float, ...]], ...]
+    with_skill_chains: tuple[EvidenceChain, ...]
+    without_skill_chains: tuple[EvidenceChain, ...]
+    primary_chains: tuple[EvidenceChain, ...]
+
+    def __post_init__(self) -> None:
+        if not all(
+            isinstance(value, str) and value
+            for value in (
+                self.skill_id,
+                self.task_id,
+                self.entity_name,
+                self.chain_id,
+            )
+        ):
+            raise ValueError("Skill replay requires stable provenance IDs")
+        if self.split not in {"train", "dev"}:
+            raise ValueError("Skill replay split must be train or dev")
+        if isinstance(self.exact_quote_validity, bool) or not isinstance(
+            self.exact_quote_validity, (int, float)
+        ):
+            raise ValueError("Skill replay quote validity must be numeric")
+        quote_validity = float(self.exact_quote_validity)
+        if not math.isfinite(quote_validity) or not 0.0 <= quote_validity <= 1.0:
+            raise ValueError("Skill replay quote validity must be in [0, 1]")
+        object.__setattr__(self, "exact_quote_validity", quote_validity)
+        for field_name in (
+            "baseline_candidates",
+            "with_skill_candidates",
+            "without_skill_candidates",
+            "primary_final_candidates",
+        ):
+            raw = getattr(self, field_name)
+            if not isinstance(raw, tuple) or not raw:
+                raise ValueError("Skill replay candidate pools cannot be empty")
+            normalized: list[tuple[str, tuple[float, ...]]] = []
+            for item in raw:
+                if not isinstance(item, tuple) or len(item) != 2:
+                    raise ValueError("Skill replay candidates must be typed pairs")
+                candidate_id, forecast = item
+                if not isinstance(candidate_id, str) or not candidate_id:
+                    raise ValueError("Skill replay candidate IDs must be non-empty")
+                if not isinstance(forecast, tuple) or not forecast:
+                    raise ValueError("Skill replay forecasts cannot be empty")
+                if any(
+                    isinstance(value, bool) or not isinstance(value, (int, float))
+                    for value in forecast
+                ):
+                    raise ValueError("Skill replay forecasts must be numeric")
+                values = tuple(float(value) for value in forecast)
+                if not all(math.isfinite(value) for value in values):
+                    raise ValueError("Skill replay forecasts must be finite")
+                normalized.append((candidate_id, values))
+            identifiers = tuple(candidate_id for candidate_id, _ in normalized)
+            if len(identifiers) != len(set(identifiers)):
+                raise ValueError("Skill replay candidate IDs cannot repeat")
+            object.__setattr__(self, field_name, tuple(normalized))
+        for field_name in (
+            "with_skill_chains",
+            "without_skill_chains",
+            "primary_chains",
+        ):
+            chains = getattr(self, field_name)
+            if not isinstance(chains, tuple) or any(
+                not isinstance(chain, EvidenceChain) or not chain.numeric_eligible
+                for chain in chains
+            ):
+                raise ValueError("Skill replay sources require numeric evidence chains")
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "skill_id": self.skill_id,
+            "task_id": self.task_id,
+            "entity_name": self.entity_name,
+            "split": self.split,
+            "chain_id": self.chain_id,
+            "exact_quote_validity": self.exact_quote_validity,
+            "baseline_candidates": [
+                [candidate_id, list(forecast)]
+                for candidate_id, forecast in self.baseline_candidates
+            ],
+            "with_skill_candidates": [
+                [candidate_id, list(forecast)]
+                for candidate_id, forecast in self.with_skill_candidates
+            ],
+            "without_skill_candidates": [
+                [candidate_id, list(forecast)]
+                for candidate_id, forecast in self.without_skill_candidates
+            ],
+            "primary_final_candidates": [
+                [candidate_id, list(forecast)]
+                for candidate_id, forecast in self.primary_final_candidates
+            ],
+            "with_skill_chains": [
+                chain.to_payload() for chain in self.with_skill_chains
+            ],
+            "without_skill_chains": [
+                chain.to_payload() for chain in self.without_skill_chains
+            ],
+            "primary_chains": [
+                chain.to_payload() for chain in self.primary_chains
+            ],
+        }
+
+    @classmethod
+    def from_payload(cls, raw: object) -> "RetrievalSkillReplayArtifact":
+        fields = {
+            "skill_id",
+            "task_id",
+            "entity_name",
+            "split",
+            "chain_id",
+            "exact_quote_validity",
+            "baseline_candidates",
+            "with_skill_candidates",
+            "without_skill_candidates",
+            "primary_final_candidates",
+            "with_skill_chains",
+            "without_skill_chains",
+            "primary_chains",
+        }
+        if not isinstance(raw, dict) or set(raw) != fields:
+            raise ValueError("invalid Skill replay artifact")
+
+        def candidates(value: object) -> tuple[tuple[str, tuple[float, ...]], ...]:
+            if not isinstance(value, list):
+                raise ValueError("invalid Skill replay candidate pool")
+            parsed = []
+            for item in value:
+                if (
+                    not isinstance(item, list)
+                    or len(item) != 2
+                    or not isinstance(item[1], list)
+                ):
+                    raise ValueError("invalid Skill replay candidate")
+                parsed.append((item[0], tuple(item[1])))
+            return tuple(parsed)
+
+        return cls(
+            skill_id=raw["skill_id"],  # type: ignore[arg-type]
+            task_id=raw["task_id"],  # type: ignore[arg-type]
+            entity_name=raw["entity_name"],  # type: ignore[arg-type]
+            split=raw["split"],  # type: ignore[arg-type]
+            chain_id=raw["chain_id"],  # type: ignore[arg-type]
+            exact_quote_validity=raw["exact_quote_validity"],  # type: ignore[arg-type]
+            baseline_candidates=candidates(raw["baseline_candidates"]),
+            with_skill_candidates=candidates(raw["with_skill_candidates"]),
+            without_skill_candidates=candidates(raw["without_skill_candidates"]),
+            primary_final_candidates=candidates(raw["primary_final_candidates"]),
+            with_skill_chains=_replay_chains(raw["with_skill_chains"]),
+            without_skill_chains=_replay_chains(raw["without_skill_chains"]),
+            primary_chains=_replay_chains(raw["primary_chains"]),
+        )
+
+
+def _replay_chains(value: object) -> tuple[EvidenceChain, ...]:
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise ValueError("invalid Skill replay evidence chains")
+    return tuple(EvidenceChain.from_payload(item) for item in value)
+
+
 def _score_pool(
     truth: Sequence[float], snapshot: "CandidatePoolSnapshot"
 ) -> tuple[dict[str, float | bool], int]:
@@ -161,6 +342,27 @@ def _entry_tuple(candidates: Iterable[object]) -> tuple[tuple[str, tuple[float, 
         (str(candidate.candidate_id), tuple(float(value) for value in candidate.forecast))
         for candidate in candidates
     )
+
+
+def candidate_pool_sha256(candidates: Iterable[object]) -> str:
+    """Digest one executed candidate pool in canonical order."""
+    return _candidate_entries_sha256(_entry_tuple(candidates))
+
+
+def _candidate_entries_sha256(
+    candidates: tuple[tuple[str, tuple[float, ...]], ...],
+) -> str:
+    payload = [
+        [candidate_id, list(forecast)] for candidate_id, forecast in candidates
+    ]
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _coding_entry_tuple(result: "HarnessResult") -> tuple[tuple[str, tuple[float, ...]], ...]:
@@ -508,6 +710,7 @@ def validate_skill_necessity(
     chain_id: str,
     *,
     tolerance: float = 1e-12,
+    eligible_skill_ids: Iterable[str] | None = None,
 ) -> tuple[SkillNecessity, ...]:
     """Score explicit pre-label leave-one-Skill-out replays, failing closed if absent."""
     if not task.labels_public or not task.numeric.future_values:
@@ -534,11 +737,17 @@ def validate_skill_necessity(
     replay_keys = tuple((replay.chain_id, replay.skill_id) for replay in replay_rows)
     if len(replay_keys) != len(set(replay_keys)):
         raise ValueError("duplicate leave-one-out replay key")
+    eligible = (
+        None
+        if eligible_skill_ids is None
+        else frozenset(str(skill_id) for skill_id in eligible_skill_ids)
+    )
     expected_keys = tuple(
         (str(ledger_chain.chain_id), str(skill_id))
         for ledger_chain in _chain_ledger(result)
         if ledger_chain.numeric_eligible
         for skill_id in ledger_chain.used_skill_ids
+        if eligible is None or skill_id in eligible
     )
     if len(expected_keys) != len(set(expected_keys)):
         raise ValueError("duplicate used Skill ID in verified chain ledger")
@@ -556,13 +765,14 @@ def validate_skill_necessity(
         replay_previous = snapshots[replay_main_index - 1]
         prior_entries = _entry_tuple(replay_previous.candidates)
         replay_entries = _entry_tuple(replay.candidates)
-        full_entries = _entry_tuple(replay_full.candidates)
         if replay_entries[:len(prior_entries)] != prior_entries:
             raise ValueError("leave-one-out replay changed an unrelated candidate")
-        if replay_entries not in (prior_entries, full_entries):
-            raise ValueError("leave-one-out replay contains a non-executed candidate")
+        if len(replay_entries) != len({candidate_id for candidate_id, _ in replay_entries}):
+            raise ValueError("leave-one-out replay contains duplicate candidate IDs")
     validated = []
     for skill_id in chain.used_skill_ids:
+        if eligible is not None and skill_id not in eligible:
+            continue
         omitted = replays.get((chain_id, skill_id))
         if omitted is None:
             validated.append(SkillNecessity(skill_id, False))
@@ -592,11 +802,15 @@ def _catastrophic_count(
     return count
 
 
-def _derive_retrieval_skill_evidence(
+def _derive_retrieval_skill_attestation(
     task_results: Iterable[tuple[ContextTask, "HarnessResult"]],
     *,
     split: str,
-) -> tuple[RetrievalSkillTaskEvidence, ...]:
+    eligible_skill_ids: Iterable[str] | None = None,
+) -> tuple[
+    tuple[RetrievalSkillTaskEvidence, ...],
+    tuple[RetrievalSkillReplayArtifact, ...],
+]:
     """Build diagnostics from resolved labels and frozen inference replays.
 
     Any incomplete or malformed frozen replay invalidates the batch.  These
@@ -606,7 +820,13 @@ def _derive_retrieval_skill_evidence(
     if split not in {"train", "dev"}:
         raise ValueError("Skill evidence split must be train or dev")
     derived: list[RetrievalSkillTaskEvidence] = []
+    replay_artifacts: list[RetrievalSkillReplayArtifact] = []
     seen_task_skills: set[tuple[str, str]] = set()
+    eligible = (
+        None
+        if eligible_skill_ids is None
+        else frozenset(str(skill_id) for skill_id in eligible_skill_ids)
+    )
     try:
         for task, result in task_results:
             report = assign_chain_credit(task, result)
@@ -615,22 +835,35 @@ def _derive_retrieval_skill_evidence(
                 snapshot.after_chain_id: snapshot for snapshot in snapshots[1:]
             }
             replay_by_key = {
-                (replay.chain_id, replay.skill_id): replay.snapshot
+                (replay.chain_id, replay.skill_id): replay
                 for replay in result.skill_leave_one_out_snapshots
             }
+            primary_chains = tuple(
+                chain for chain in _chain_ledger(result) if chain.numeric_eligible
+            )
+            with_skill_chains: list[EvidenceChain] = []
             for chain in _chain_ledger(result):
-                if not chain.numeric_eligible or not chain.used_skill_ids:
+                if not chain.numeric_eligible:
                     continue
-                necessity = validate_skill_necessity(task, result, chain.chain_id)
+                with_skill_chains.append(chain)
+                if not chain.used_skill_ids:
+                    continue
+                necessity = validate_skill_necessity(
+                    task,
+                    result,
+                    chain.chain_id,
+                    eligible_skill_ids=eligible,
+                )
                 full = snapshot_by_chain[chain.chain_id]
                 full_score = _score_pool(task.numeric.future_values, full)[0]
                 full_catastrophes = _catastrophic_count(task.numeric.future_values, full)
                 for item in necessity:
                     task_skill_key = (task.numeric.task_id, item.skill_id)
                     if task_skill_key in seen_task_skills:
-                        return ()
+                        return (), ()
                     seen_task_skills.add(task_skill_key)
-                    omitted = replay_by_key[(chain.chain_id, item.skill_id)]
+                    replay_source = replay_by_key[(chain.chain_id, item.skill_id)]
+                    omitted = replay_source.snapshot
                     omitted_score = _score_pool(task.numeric.future_values, omitted)[0]
                     row = RetrievalSkillTaskEvidence(
                         skill_id=item.skill_id,
@@ -650,18 +883,421 @@ def _derive_retrieval_skill_evidence(
                         necessary=item.necessary,
                     )
                     derived.append(row)
+                    replay_artifacts.append(
+                        RetrievalSkillReplayArtifact(
+                            skill_id=item.skill_id,
+                            task_id=task.numeric.task_id,
+                            entity_name=task.numeric.entity_name,
+                            split=split,
+                            chain_id=chain.chain_id,
+                            exact_quote_validity=report.diagnostics.exact_quote_validity,
+                            baseline_candidates=_entry_tuple(
+                                snapshots[0].candidates
+                            ),
+                            with_skill_candidates=_entry_tuple(full.candidates),
+                            without_skill_candidates=_entry_tuple(omitted.candidates),
+                            primary_final_candidates=_entry_tuple(
+                                snapshots[-1].candidates
+                            ),
+                            with_skill_chains=tuple(with_skill_chains),
+                            without_skill_chains=replay_source.verified_chains,
+                            primary_chains=primary_chains,
+                        )
+                    )
     except (AttributeError, KeyError, TypeError, ValueError):
-        return ()
-    return tuple(derived)
+        return (), ()
+    return tuple(derived), tuple(replay_artifacts)
+
+
+def _derive_retrieval_skill_evidence(
+    task_results: Iterable[tuple[ContextTask, "HarnessResult"]],
+    *,
+    split: str,
+    eligible_skill_ids: Iterable[str] | None = None,
+) -> tuple[RetrievalSkillTaskEvidence, ...]:
+    return _derive_retrieval_skill_attestation(
+        task_results,
+        split=split,
+        eligible_skill_ids=eligible_skill_ids,
+    )[0]
+
+
+def derive_retrieval_skill_attestation(
+    task_results: Iterable[tuple[ContextTask, "HarnessResult"]],
+    *,
+    split: str,
+    eligible_skill_ids: Iterable[str] | None = None,
+) -> tuple[
+    tuple[RetrievalSkillTaskEvidence, ...],
+    tuple[RetrievalSkillReplayArtifact, ...],
+]:
+    """Return canonical evidence rows and their executed pre-label pool sources."""
+    return _derive_retrieval_skill_attestation(
+        task_results,
+        split=split,
+        eligible_skill_ids=eligible_skill_ids,
+    )
+
+
+def _score_replay_pool(
+    truth: Sequence[float],
+    candidates: tuple[tuple[str, tuple[float, ...]], ...],
+) -> tuple[dict[str, float | bool], int, int]:
+    scored: list[tuple[str, dict[str, float | bool]]] = []
+    invalid = 0
+    catastrophic = 0
+    for candidate_id, forecast in candidates:
+        score, row_invalid = _score_forecast_drcik(truth, forecast)
+        invalid += row_invalid
+        if row_invalid:
+            continue
+        if bool(score["smae_clipped"]) or bool(score["srmse_clipped"]):
+            catastrophic += 1
+        scored.append((candidate_id, score))
+    if not scored:
+        return _invalid_drcik_score(), invalid, catastrophic
+    _candidate_id, oracle = min(
+        scored,
+        key=lambda item: (
+            float(item[1]["srmse"]),
+            float(item[1]["smae"]),
+            item[0],
+        ),
+    )
+    return oracle, invalid, catastrophic
+
+
+def _verified_replay_chains(
+    task: ContextTask,
+    chains: tuple[EvidenceChain, ...],
+    allowed_skill_ids: frozenset[str],
+) -> tuple[EvidenceChain, ...]:
+    verified: list[EvidenceChain] = []
+    seen: set[str] = set()
+    for chain in chains:
+        if chain.chain_id in seen:
+            raise ValueError("Skill replay evidence chains cannot repeat")
+        seen.add(chain.chain_id)
+        if not set(chain.used_skill_ids).issubset(allowed_skill_ids):
+            raise ValueError("Skill replay evidence chain used an unauthorized Skill")
+        result = verify_round_result(
+            task,
+            {
+                "evidence_chains": [chain.to_payload()],
+                "counterevidence": [],
+                "missing_information": [],
+                "sufficient": True,
+            },
+            stage="round1",
+            allowed_skill_ids=allowed_skill_ids,
+            allowed_assumption_ids=chain.addressed_assumption_ids,
+        )
+        submitted_payload = chain.to_payload()
+        submitted_payload.pop("chain_id")
+        verified_payload = (
+            {} if len(result.chains) != 1 else result.chains[0].to_payload()
+        )
+        verified_payload.pop("chain_id", None)
+        if (
+            len(result.chains) != 1
+            or not result.chains[0].numeric_eligible
+            or verified_payload != submitted_payload
+        ):
+            raise ValueError(
+                "Skill replay evidence chain does not reverify against its task"
+            )
+        verified.append(result.chains[0])
+    return tuple(verified)
+
+
+def _validate_replay_projection(
+    task: ContextTask,
+    baseline: tuple[tuple[str, tuple[float, ...]], ...],
+    pool: tuple[tuple[str, tuple[float, ...]], ...],
+    chains: tuple[EvidenceChain, ...],
+    allowed_skill_ids: frozenset[str],
+) -> tuple[EvidenceChain, ...]:
+    if pool[: len(baseline)] != baseline:
+        raise ValueError("Skill replay changed its executed numeric baseline")
+    baseline_by_id = dict(baseline)
+    verified = _verified_replay_chains(task, chains, allowed_skill_ids)
+    for candidate_id, forecast in pool[len(baseline) :]:
+        base_id, separator, raw_index = candidate_id.rpartition("__evidence_")
+        if not separator or not raw_index.isdigit() or base_id not in baseline_by_id:
+            raise ValueError("Skill replay contains a non-projectable contextual candidate")
+        index = int(raw_index)
+        if index >= len(verified):
+            raise ValueError("Skill replay contextual candidate lacks its verified chain")
+        chain = verified[index]
+        if chain.start_timestamp is None or chain.end_timestamp is None:
+            raise ValueError("Skill replay contextual chain lacks its future window")
+        affected = tuple(
+            position
+            for position, timestamp in enumerate(task.future_timestamps)
+            if chain.start_timestamp <= timestamp <= chain.end_timestamp
+        )
+        if not affected or chain.magnitude_value is None:
+            raise ValueError("Skill replay contextual chain does not affect the horizon")
+        expected = list(baseline_by_id[base_id])
+        sign = 1.0 if chain.direction == "up" else -1.0
+        if chain.magnitude_kind == "absolute":
+            for position in affected:
+                expected[position] += sign * chain.magnitude_value
+        elif chain.magnitude_kind == "relative":
+            for position in affected:
+                expected[position] *= 1.0 + sign * chain.magnitude_value
+        elif chain.magnitude_kind == "multiplier":
+            adjustment = chain.magnitude_value - 1.0
+            for position in affected:
+                expected[position] *= 1.0 + adjustment
+        else:
+            raise ValueError("Skill replay contextual chain has no numeric projection")
+        if len(expected) != len(forecast) or any(
+            not math.isclose(left, right, rel_tol=1e-12, abs_tol=1e-12)
+            for left, right in zip(expected, forecast, strict=True)
+        ):
+            raise ValueError(
+                "Skill replay forecast does not match its reverified evidence chain"
+            )
+    return verified
+
+
+def _primary_trace_scores(
+    task: ContextTask,
+    replay: RetrievalSkillReplayArtifact,
+    trace: Mapping[str, object],
+    allowed_skill_ids: frozenset[str],
+) -> None:
+    _validate_replay_projection(
+        task,
+        replay.baseline_candidates,
+        replay.primary_final_candidates,
+        replay.primary_chains,
+        allowed_skill_ids,
+    )
+    coding, _coding_invalid, _coding_catastrophes = _score_replay_pool(
+        task.numeric.future_values,
+        replay.baseline_candidates,
+    )
+    contextual, _contextual_invalid, _contextual_catastrophes = _score_replay_pool(
+        task.numeric.future_values,
+        replay.primary_final_candidates,
+    )
+    for field, candidates in (
+        ("numeric_baseline_sha256", replay.baseline_candidates),
+        ("contextual_pool_sha256", replay.primary_final_candidates),
+    ):
+        expected = trace.get(field)
+        if (
+            type(expected) is not str
+            or expected != _candidate_entries_sha256(candidates)
+        ):
+            raise ValueError(
+                "Skill replay candidate pool does not match its trusted task trace"
+            )
+    for field, actual in (
+        ("coding_oracle_smae", coding["smae"]),
+        ("coding_oracle_srmse", coding["srmse"]),
+        ("contextual_oracle_smae", contextual["smae"]),
+        ("contextual_oracle_srmse", contextual["srmse"]),
+    ):
+        expected = trace.get(field)
+        if (
+            isinstance(expected, bool)
+            or not isinstance(expected, (int, float))
+            or not math.isfinite(float(expected))
+            or not math.isclose(
+                float(expected),
+                float(actual),
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+        ):
+            raise ValueError(
+                "Skill replay primary pool does not match its trusted task trace"
+            )
+
+
+def recompute_retrieval_skill_evidence(
+    tasks: Iterable[ContextTask],
+    replays: Iterable[RetrievalSkillReplayArtifact],
+    *,
+    allowed_skill_ids: Iterable[str],
+    task_traces: Iterable[Mapping[str, object]] | None = None,
+) -> tuple[RetrievalSkillTaskEvidence, ...]:
+    """Recompute promotion rows from immutable tasks and canonical replay pools."""
+    scheduled_tasks = tuple(tasks)
+    task_by_id = {task.numeric.task_id: task for task in scheduled_tasks}
+    artifacts = tuple(replays)
+    allowed = frozenset(str(skill_id) for skill_id in allowed_skill_ids)
+    traces = None if task_traces is None else tuple(task_traces)
+    trace_by_task = (
+        {}
+        if traces is None
+        else {
+            trace.get("task_id"): trace
+            for trace in traces
+            if type(trace.get("task_id")) is str
+        }
+    )
+    if len(task_by_id) != len(scheduled_tasks):
+        raise ValueError("Skill replay tasks must be unique")
+    if traces is not None and len(trace_by_task) != len(traces):
+        raise ValueError("Skill replay task traces must have unique string task IDs")
+    seen: set[tuple[str, str]] = set()
+    primary_by_task: dict[
+        str,
+        tuple[
+            tuple[tuple[str, tuple[float, ...]], ...],
+            tuple[tuple[str, tuple[float, ...]], ...],
+            tuple[dict[str, object], ...],
+        ],
+    ] = {}
+    rows: list[RetrievalSkillTaskEvidence] = []
+    tolerance = 1e-12
+    for replay in artifacts:
+        key = (replay.task_id, replay.skill_id)
+        task = task_by_id.get(replay.task_id)
+        if key in seen or task is None or not task.labels_public:
+            raise ValueError("Skill replay provenance does not match scheduled tasks")
+        seen.add(key)
+        if task.numeric.entity_name != replay.entity_name:
+            raise ValueError("Skill replay entity does not match scheduled task")
+        if replay.skill_id not in allowed:
+            raise ValueError("Skill replay targets a Skill absent from its Genome")
+        target = next(
+            (
+                chain
+                for chain in replay.with_skill_chains
+                if chain.chain_id == replay.chain_id
+            ),
+            None,
+        )
+        if target is None or replay.skill_id not in target.used_skill_ids:
+            raise ValueError("Skill replay target is absent from its primary chain")
+        _validate_replay_projection(
+            task,
+            replay.baseline_candidates,
+            replay.with_skill_candidates,
+            replay.with_skill_chains,
+            allowed,
+        )
+        verified_without = _validate_replay_projection(
+            task,
+            replay.baseline_candidates,
+            replay.without_skill_candidates,
+            replay.without_skill_chains,
+            allowed,
+        )
+        if any(replay.skill_id in chain.used_skill_ids for chain in verified_without):
+            raise ValueError("Skill replay omitted run still used its target Skill")
+        primary = (
+            replay.baseline_candidates,
+            replay.primary_final_candidates,
+            tuple(chain.to_payload() for chain in replay.primary_chains),
+        )
+        prior_primary = primary_by_task.setdefault(replay.task_id, primary)
+        if prior_primary != primary:
+            raise ValueError("Skill replays disagree about their primary execution")
+        if traces is not None:
+            trace = trace_by_task.get(replay.task_id)
+            if trace is None:
+                raise ValueError("Skill replay lacks its trusted primary task trace")
+            _primary_trace_scores(task, replay, trace, allowed)
+        full, _full_invalid, full_catastrophes = _score_replay_pool(
+            task.numeric.future_values,
+            replay.with_skill_candidates,
+        )
+        omitted, _omitted_invalid, omitted_catastrophes = _score_replay_pool(
+            task.numeric.future_values,
+            replay.without_skill_candidates,
+        )
+        smae_regret = float(omitted["smae"]) - float(full["smae"])
+        srmse_regret = float(omitted["srmse"]) - float(full["srmse"])
+        rows.append(
+            RetrievalSkillTaskEvidence(
+                skill_id=replay.skill_id,
+                task_id=replay.task_id,
+                entity_name=replay.entity_name,
+                split=replay.split,
+                exact_quote_validity=replay.exact_quote_validity,
+                without_skill_smae=float(omitted["smae"]),
+                without_skill_srmse=float(omitted["srmse"]),
+                with_skill_smae=float(full["smae"]),
+                with_skill_srmse=float(full["srmse"]),
+                added_catastrophic_count=max(
+                    0, full_catastrophes - omitted_catastrophes
+                ),
+                necessary=(
+                    smae_regret >= -tolerance
+                    and srmse_regret >= -tolerance
+                    and (smae_regret > tolerance or srmse_regret > tolerance)
+                ),
+            )
+        )
+    return tuple(rows)
 
 
 def derive_retrieval_skill_evidence(
     task_results: Iterable[tuple[ContextTask, "HarnessResult"]],
     *,
     split: str,
+    eligible_skill_ids: Iterable[str] | None = None,
 ) -> tuple[RetrievalSkillTaskEvidence, ...]:
     """Return evaluator diagnostics with no authority to promote a Skill."""
-    return _derive_retrieval_skill_evidence(task_results, split=split)
+    return _derive_retrieval_skill_evidence(
+        task_results,
+        split=split,
+        eligible_skill_ids=eligible_skill_ids,
+    )
+
+
+def _accepted_retrieval_skill_from_evidence(
+    current,
+    evidence: Iterable[RetrievalSkillTaskEvidence],
+):
+    rows = tuple(evidence)
+    tolerance = 1e-12
+    task_ids = tuple(dict.fromkeys(row.task_id for row in rows))
+    entities = tuple(sorted({row.entity_name for row in rows}))
+    if (
+        current is None
+        or current.status != "candidate"
+        or not rows
+        or any(row.skill_id != current.skill_id for row in rows)
+        or any(row.split != "train" for row in rows)
+        or len(task_ids) < 3
+        or len(entities) < 2
+        or len(task_ids) != len(rows)
+        or any(row.exact_quote_validity != 1.0 for row in rows)
+        or any(not row.necessary for row in rows)
+        or any(row.added_catastrophic_count != 0 for row in rows)
+    ):
+        return None
+    without_smae = statistics.fmean(row.without_skill_smae for row in rows)
+    without_srmse = statistics.fmean(row.without_skill_srmse for row in rows)
+    with_smae = statistics.fmean(row.with_skill_smae for row in rows)
+    with_srmse = statistics.fmean(row.with_skill_srmse for row in rows)
+    smae_gain = without_smae - with_smae
+    srmse_gain = without_srmse - with_srmse
+    if not (
+        smae_gain >= -tolerance
+        and srmse_gain >= -tolerance
+        and (smae_gain > tolerance or srmse_gain > tolerance)
+    ):
+        return None
+    accepted = copy(current)
+    for field, value in (
+        ("version", current.version + 1),
+        ("parent_version", current.version),
+        ("status", "accepted"),
+        ("validated_task_ids", task_ids),
+        ("validated_entities", entities),
+        ("validation_smae_gain", smae_gain),
+        ("validation_srmse_gain", srmse_gain),
+    ):
+        object.__setattr__(accepted, field, value)
+    return accepted
 
 
 def _evaluate_and_promote_retrieval_skills(
@@ -671,55 +1307,29 @@ def _evaluate_and_promote_retrieval_skills(
     split: str,
 ) -> tuple[str, ...]:
     """Derive and aggregate inside the only Skill-promotion entry point."""
-    evidence = _derive_retrieval_skill_evidence(task_results, split=split)
+    candidate_skill_ids = tuple(
+        skill.skill_id for skill in library.all() if skill.status == "candidate"
+    )
+    evidence = _derive_retrieval_skill_evidence(
+        task_results,
+        split=split,
+        eligible_skill_ids=candidate_skill_ids,
+    )
     if split != "train":
         return ()
-    tolerance = 1e-12
     grouped: dict[str, list[RetrievalSkillTaskEvidence]] = {}
     for row in evidence:
         grouped.setdefault(row.skill_id, []).append(row)
     accepted_records = []
     promoted = []
     for skill_id in sorted(grouped):
-        rows = grouped[skill_id]
         current = library.get_by_id(skill_id)
-        task_ids = tuple(dict.fromkeys(row.task_id for row in rows))
-        entities = tuple(sorted({row.entity_name for row in rows}))
-        if (
-            current is None
-            or current.status != "candidate"
-            or any(row.split != "train" for row in rows)
-            or len(task_ids) < 3
-            or len(entities) < 2
-            or len(task_ids) != len(rows)
-            or any(row.exact_quote_validity != 1.0 for row in rows)
-            or any(not row.necessary for row in rows)
-            or any(row.added_catastrophic_count != 0 for row in rows)
-        ):
+        accepted = _accepted_retrieval_skill_from_evidence(
+            current,
+            grouped[skill_id],
+        )
+        if accepted is None:
             continue
-        without_smae = statistics.fmean(row.without_skill_smae for row in rows)
-        without_srmse = statistics.fmean(row.without_skill_srmse for row in rows)
-        with_smae = statistics.fmean(row.with_skill_smae for row in rows)
-        with_srmse = statistics.fmean(row.with_skill_srmse for row in rows)
-        smae_gain = without_smae - with_smae
-        srmse_gain = without_srmse - with_srmse
-        if not (
-            smae_gain >= -tolerance
-            and srmse_gain >= -tolerance
-            and (smae_gain > tolerance or srmse_gain > tolerance)
-        ):
-            continue
-        accepted = copy(current)
-        for field, value in (
-            ("version", current.version + 1),
-            ("parent_version", current.version),
-            ("status", "accepted"),
-            ("validated_task_ids", task_ids),
-            ("validated_entities", entities),
-            ("validation_smae_gain", smae_gain),
-            ("validation_srmse_gain", srmse_gain),
-        ):
-            object.__setattr__(accepted, field, value)
         accepted_records.append(accepted)
         promoted.append(skill_id)
     if accepted_records:
@@ -755,11 +1365,15 @@ def _evaluate_and_promote_retrieval_skills(
 __all__ = [
     "EvidenceChainCredit",
     "RetrievalCreditReport",
+    "RetrievalSkillReplayArtifact",
     "RetrievalSkillTaskEvidence",
     "RetrievalTaskDiagnostics",
     "SkillCredit",
     "SkillNecessity",
     "assign_chain_credit",
+    "candidate_pool_sha256",
+    "derive_retrieval_skill_attestation",
     "derive_retrieval_skill_evidence",
+    "recompute_retrieval_skill_evidence",
     "validate_skill_necessity",
 ]

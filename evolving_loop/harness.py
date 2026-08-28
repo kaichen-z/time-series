@@ -14,6 +14,7 @@ from evolving_loop.evaluation import ResolvedOutcome, score_after_resolution
 from evolving_loop.morphology_adapter import MorphologyProvider
 from evolving_loop.retrieval_agent.agent import RetrievalAgent, RetrievalResult
 from evolving_loop.retrieval_agent.schemas import (
+    EvidenceChain,
     FinalRetrievalCard,
     RetrievalAssumption,
 )
@@ -67,12 +68,18 @@ class SkillLeaveOneOutSnapshot:
     chain_id: str
     skill_id: str
     snapshot: CandidatePoolSnapshot
+    verified_chains: tuple[EvidenceChain, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.chain_id or not self.skill_id:
             raise ValueError("leave-one-out snapshots require chain and Skill IDs")
         if not isinstance(self.snapshot, CandidatePoolSnapshot):
             raise ValueError("leave-one-out replay must contain a candidate pool snapshot")
+        if not isinstance(self.verified_chains, tuple) or any(
+            not isinstance(chain, EvidenceChain) or not chain.numeric_eligible
+            for chain in self.verified_chains
+        ):
+            raise ValueError("leave-one-out replay chains must be verified numeric chains")
 
 
 @dataclass(frozen=True)
