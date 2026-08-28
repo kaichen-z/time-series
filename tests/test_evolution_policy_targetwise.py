@@ -137,15 +137,18 @@ def test_targetwise_combined_prompts_use_canonical_policy_schema() -> None:
         "tsfm_parent",
         "statistical_parent",
         "tsfm_when",
+        "route_signal",
+        "route_threshold",
         "blend-versus-route mode",
     ):
         assert obsolete not in prompt
     for field in (
+        "name",
         "parents",
         "operator",
         "weights",
-        "route_signal",
-        "route_threshold",
+        "signal",
+        "threshold",
         "above_parent",
         "below_parent",
         "fallback_parent",

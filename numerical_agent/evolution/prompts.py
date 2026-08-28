@@ -204,8 +204,8 @@ For TSFM policies, the reviewed model/checkpoint identity is immutable. You may 
 history-only applicability, context window, reversible preprocessing, and bounded shrinkage.
 For Combined policies, preserve the name and use two to five unique reviewed leaf names in the
 canonical `parents` tuple, including at least one TSFM parent. A repair may change the ordered
-parent set, `operator`, `weights`, history-only `signal` (`route_signal`), finite `threshold`
-(`route_threshold`), explicit `above_parent`, `below_parent`, and `fallback_parent` fields.
+parent set, `operator`, `weights`, history-only `signal`, finite `threshold`, and explicit
+`above_parent`, `below_parent`, and `fallback_parent` fields.
 Low coverage caused by honest NotApplicable behavior is not a failure. Crashes and invalid
 forecasts are defects.
 
@@ -222,9 +222,9 @@ For a TSFM policy, preserve method_id exactly. Allowed evolvable fields are appl
 (all|periodic|intermittent|recent_regime|trending|stable), context_window (32..4096), preprocess
 (none|standardize|robust_scale|log1p_shift), and shrinkage_to_last (0..0.5).
 
-For a Combined policy, return all canonical fields: `parents`, `operator`, `weights`, `signal`
-(`route_signal`), `threshold` (`route_threshold`), `above_parent`, `below_parent`, and
-`fallback_parent`. The `parents` tuple has two to five unique reviewed leaf names and includes at
+For a Combined policy, return all canonical fields: `name`, `parents`, `operator`, `weights`,
+`signal`, `threshold`, `above_parent`, `below_parent`, and `fallback_parent`. The `parents` tuple
+has two to five unique reviewed leaf names and includes at
 least one TSFM parent; a repair may change its ordered parent set. `operator` is one of
 weighted_mean, median, trimmed_mean, or route. Weighted-mean `weights` are one nonnegative value
 per parent and sum to one; other operators use an empty tuple. Route has two parents and explicit
