@@ -406,8 +406,8 @@ def _allowed_operations_payload() -> dict[str, list[str]]:
 
 def _sanitize_diagnostics(value: Mapping[str, object]) -> dict[str, object]:
     """Keep small aggregate, JSON-safe diagnostics and omit sensitive-looking keys."""
-    if not isinstance(value, Mapping):
-        return {}
+    if type(value) is not dict:
+        raise CombinedEvolutionError("diagnostics must be a built-in dict")
     budget = _DiagnosticsBudget()
     sanitized = _sanitize_diagnostic_mapping(value, depth=0, budget=budget)
     return sanitized if isinstance(sanitized, dict) else {}
@@ -416,6 +416,8 @@ def _sanitize_diagnostics(value: Mapping[str, object]) -> dict[str, object]:
 def _sanitize_diagnostic_mapping(
     value: Mapping[object, object], *, depth: int, budget: _DiagnosticsBudget
 ) -> dict[str, object] | object:
+    if type(value) is not dict:
+        raise CombinedEvolutionError("diagnostic mappings must be built-in dicts")
     if (
         depth > _DIAGNOSTIC_MAX_DEPTH
         or not _container_within_limit(value)
@@ -423,8 +425,9 @@ def _sanitize_diagnostic_mapping(
     ):
         return _DROP
     result: dict[str, object] = {}
-    for key in sorted(value, key=str):
-        if len(result) >= _DIAGNOSTIC_MAX_CHILDREN or not _safe_diagnostic_key(key):
+    keys = tuple(key for key in value if _safe_diagnostic_key(key))
+    for key in sorted(keys):
+        if len(result) >= _DIAGNOSTIC_MAX_CHILDREN:
             continue
         cleaned = _sanitize_diagnostic_value(value[key], depth=depth + 1, budget=budget)
         if cleaned is _DROP or not budget.consume(key):
@@ -449,8 +452,10 @@ def _sanitize_diagnostic_value(
             return _DROP
         return _DROP
     if isinstance(value, Mapping):
+        if type(value) is not dict:
+            raise CombinedEvolutionError("diagnostic mappings must be built-in dicts")
         return _sanitize_diagnostic_mapping(value, depth=depth, budget=budget)
-    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
+    if type(value) in (list, tuple):
         if not _container_within_limit(value) or not budget.consume([]):
             return _DROP
         result: list[object] = []
@@ -461,12 +466,14 @@ def _sanitize_diagnostic_value(
             if cleaned is not _DROP:
                 result.append(cleaned)
         return result
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
+        raise CombinedEvolutionError("diagnostic sequences must be built-in lists or tuples")
     return _DROP
 
 
 def _safe_diagnostic_key(key: object) -> bool:
     return (
-        isinstance(key, str)
+        type(key) is str
         and len(key) <= 64
         and _SAFE_DIAGNOSTIC_KEY.fullmatch(key) is not None
         and _FORBIDDEN_DIAGNOSTIC_KEY.search(key) is None

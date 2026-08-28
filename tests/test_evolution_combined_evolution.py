@@ -380,9 +380,7 @@ def test_propose_combined_child_drops_oversized_diagnostics_before_traversal() -
     )
 
     assert result.child is parent
-    prompt = agent.calls[0]["messages"][0]["content"]
-    assert huge_string not in prompt
-    assert json.loads(prompt)["diagnostics"] == {}
+    assert agent.calls == []
 
 
 def test_propose_combined_child_keeps_cyclic_diagnostics_bounded() -> None:
@@ -406,6 +404,48 @@ def test_propose_combined_child_keeps_cyclic_diagnostics_bounded() -> None:
     assert len(prompt.encode("utf-8")) <= 8192
 
 
+def test_propose_combined_child_rejects_lying_length_mapping_before_iteration() -> None:
+    """A custom map can lie about its size and must not reach sorting or the LLM."""
+    from numerical_agent.evolution.combined_evolution import propose_combined_child
+
+    parent = PolicyPortfolio.flagship5()
+    agent = FakeLLMClient([_response()])
+
+    result = propose_combined_child(
+        parent,
+        statistical_names=("seasonal_naive",),
+        diagnostics={"aggregate": _LyingLengthMapping()},
+        agent=agent,
+    )
+
+    assert result.child is parent
+    assert result.changed is False
+    assert result.rejection_reason
+    assert agent.calls == []
+
+
+def test_propose_combined_child_rejects_infinite_yield_mapping_before_iteration() -> None:
+    """An unbounded key iterator must be rejected without asking it for one key."""
+    from numerical_agent.evolution.combined_evolution import propose_combined_child
+
+    parent = PolicyPortfolio.flagship5()
+    agent = FakeLLMClient([_response()])
+    infinite = _InfiniteYieldMapping()
+
+    result = propose_combined_child(
+        parent,
+        statistical_names=("seasonal_naive",),
+        diagnostics={"aggregate": infinite},
+        agent=agent,
+    )
+
+    assert result.child is parent
+    assert result.changed is False
+    assert result.rejection_reason
+    assert infinite.iterated is False
+    assert agent.calls == []
+
+
 class _LargeMapping(Mapping[str, object]):
     """A map that exposes whether the sanitizer sorts before checking its hard cap."""
 
@@ -417,6 +457,39 @@ class _LargeMapping(Mapping[str, object]):
 
     def __getitem__(self, key: str) -> object:
         raise KeyError(key)
+
+
+class _LyingLengthMapping(Mapping[str, object]):
+    """Claims it is empty, then exposes a normal finite key stream."""
+
+    def __len__(self) -> int:
+        return 0
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(("mean_smape",))
+
+    def __getitem__(self, key: str) -> object:
+        if key == "mean_smape":
+            return 0.25
+        raise KeyError(key)
+
+
+class _InfiniteYieldMapping(Mapping[str, object]):
+    """Raises if the sanitizer ever asks it to begin its unbounded key stream."""
+
+    def __init__(self) -> None:
+        self.iterated = False
+
+    def __len__(self) -> int:
+        return 0
+
+    def __iter__(self) -> Iterator[str]:
+        self.iterated = True
+        while True:
+            yield "mean_smape"
+
+    def __getitem__(self, key: str) -> object:
+        return 0.25
 
 
 def _max_mapping_depth(value: object) -> int:

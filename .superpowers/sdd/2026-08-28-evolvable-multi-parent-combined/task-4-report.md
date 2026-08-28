@@ -154,3 +154,48 @@ Focused verification:
   tests/test_evolving_agent_llm.py
 91 passed in 0.67s
 ```
+
+## Fix round 3: hostile container rejection
+
+### Implementation
+
+- Diagnostics accept only exact built-in `dict` mappings and exact built-in
+  `list`/`tuple` sequences. Mapping and sequence subclasses are rejected before
+  calling `len()`, iterating keys/items, converting keys to strings, applying a
+  regex, or sorting.
+- Built-in dictionary keys are first filtered to bounded raw built-in strings,
+  then regex-filtered and sorted. This prevents a hostile key object or
+  lying/infinite custom mapping from reaching any traversal work.
+- A rejected diagnostic container causes `propose_combined_child()` to return the
+  exact Parent with its generic rejection reason before an LLM completion call.
+
+### TDD evidence
+
+RED:
+
+```text
+../../.venv/bin/python -m pytest -q tests/test_evolution_combined_evolution.py \
+  -k 'oversized_diagnostics or lying_length_mapping'
+2 failed, 31 deselected in 0.14s
+```
+
+The prior sanitizer trusted custom `len()` values, sorted the lying mapping, and
+called the LLM. The infinite-yield case was added with the same no-iteration
+contract and run only after the fail-closed guard existed to avoid deliberately
+blocking a test worker.
+
+GREEN:
+
+```text
+3 passed, 30 deselected in 0.10s
+```
+
+Focused verification:
+
+```text
+../../.venv/bin/python -m pytest -q \
+  tests/test_evolution_combined_evolution.py \
+  tests/test_evolution_portfolio.py \
+  tests/test_evolving_agent_llm.py
+93 passed in 0.63s
+```
