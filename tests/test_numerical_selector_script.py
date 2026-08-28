@@ -12,14 +12,18 @@ import pytest
 
 from common.payload import write_json
 
-from numerical_agent.evolution.execution import Outcome, Task
+from numerical_agent.evolution.execution import CRASHED, INVALID, SUCCESS, Outcome, Task
 from numerical_agent.evolution.module import MODULE_HEADER, read_module
 from numerical_agent.evolution.numerical_selector import (
     CandidateDiagnostics,
     DecisionPolicy,
     HindcastConfig,
 )
-from numerical_agent.evolution.portfolio import CombinedPolicy, PolicyPortfolio
+from numerical_agent.evolution.portfolio import (
+    CombinedPolicy,
+    PolicyPortfolio,
+    combine_materialized_outcome,
+)
 from numerical_agent.evolution.screening import (
     ApplicabilityClause,
     ApplicabilityPolicy,
@@ -204,6 +208,158 @@ def seasonal_naive(history, horizon, frequency):
 
     assert runtime.calls.count("method_tsfm_0014") == 1
     assert runtime.calls.count("method_tsfm_0031") == 1
+
+
+def test_forecast_store_preserves_tsfm_invalid_and_crashed_parent_statuses(tmp_path):
+    methods = tmp_path / "methods.py"
+    methods.write_text(
+        MODULE_HEADER
+        + '''
+
+def unused_statistical_leaf(history, horizon, frequency):
+    """Satisfy the parsed module contract without entering this test graph."""
+    return [0.0] * horizon
+''',
+        encoding="utf-8",
+    )
+    module = read_module(methods)
+    base = PolicyPortfolio.flagship5()
+    policy = CombinedPolicy(
+        "combined_tsfm_failure_parity",
+        ("toto_2_0", "timesfm_2_5"),
+        "weighted_mean",
+        (0.5, 0.5),
+        fallback_parent="toto_2_0",
+    )
+    portfolio = PolicyPortfolio(base.tsfm, (policy,))
+
+    class FailureRuntime:
+        def __init__(
+            self,
+            toto_failure: Exception | None = None,
+            timesfm_failure: Exception | None = None,
+        ):
+            self.toto_failure = toto_failure
+            self.timesfm_failure = timesfm_failure
+
+        def supports(self, candidate):
+            return candidate.method_id in {"method_tsfm_0014", "method_tsfm_0031"}
+
+        def forecast(self, candidate, history, horizon, frequency):
+            del history, frequency
+            if candidate.method_id == "method_tsfm_0014":
+                if self.toto_failure is not None:
+                    raise self.toto_failure
+                return (10.0,) * horizon
+            if candidate.method_id == "method_tsfm_0031":
+                if self.timesfm_failure is not None:
+                    raise self.timesfm_failure
+                return ()
+            raise ValueError("unexpected candidate")
+
+    invalid_store = ForecastStore(
+        tmp_path / "invalid-cache",
+        methods,
+        None,
+        module,
+        portfolio,
+        RuntimeRegistry({"timesfm": FailureRuntime(), "tsfm_worker": FailureRuntime()}),
+        "screen-hash",
+    )
+    try:
+        invalid_parent = invalid_store._materialized_leaf_outcome(
+            "timesfm_2_5", (1.0, 2.0), 2, "D"
+        )
+        fallback = invalid_store._materialized_leaf_outcome(
+            "toto_2_0", (1.0, 2.0), 2, "D"
+        )
+        fallback_outcome = combine_materialized_outcome(
+            policy,
+            {"toto_2_0": fallback, "timesfm_2_5": invalid_parent},
+            task_id="history-only",
+            history=(1.0, 2.0),
+            horizon=2,
+            frequency="D",
+        )
+    finally:
+        invalid_store.close()
+
+    assert invalid_parent.status == INVALID
+    assert fallback_outcome.status == SUCCESS
+    assert fallback_outcome.forecast == (10.0, 10.0)
+
+    provider_store = ForecastStore(
+        tmp_path / "provider-cache",
+        methods,
+        None,
+        module,
+        portfolio,
+        RuntimeRegistry(
+            {
+                "timesfm": FailureRuntime(timesfm_failure=ValueError("provider rejected request")),
+                "tsfm_worker": FailureRuntime(timesfm_failure=ValueError("provider rejected request")),
+            }
+        ),
+        "screen-hash",
+    )
+    try:
+        crashed_parent = provider_store._materialized_leaf_outcome(
+            "timesfm_2_5", (1.0, 2.0), 2, "D"
+        )
+        fallback = provider_store._materialized_leaf_outcome(
+            "toto_2_0", (1.0, 2.0), 2, "D"
+        )
+        provider_fallback = combine_materialized_outcome(
+            policy,
+            {"toto_2_0": fallback, "timesfm_2_5": crashed_parent},
+            task_id="history-only",
+            history=(1.0, 2.0),
+            horizon=2,
+            frequency="D",
+        )
+    finally:
+        provider_store.close()
+
+    assert crashed_parent.status == CRASHED
+    assert provider_fallback.status == SUCCESS
+    assert provider_fallback.forecast == (10.0, 10.0)
+
+    crashed_store = ForecastStore(
+        tmp_path / "crashed-cache",
+        methods,
+        None,
+        module,
+        portfolio,
+        RuntimeRegistry(
+            {
+                "timesfm": FailureRuntime(ValueError("provider rejected request")),
+                "tsfm_worker": FailureRuntime(ValueError("provider rejected request")),
+            }
+        ),
+        "screen-hash",
+    )
+    try:
+        crashed_fallback = crashed_store._materialized_leaf_outcome(
+            "toto_2_0", (1.0, 2.0), 2, "D"
+        )
+        invalid_parent = crashed_store._materialized_leaf_outcome(
+            "timesfm_2_5", (1.0, 2.0), 2, "D"
+        )
+        failed = combine_materialized_outcome(
+            policy,
+            {"toto_2_0": crashed_fallback, "timesfm_2_5": invalid_parent},
+            task_id="history-only",
+            history=(1.0, 2.0),
+            horizon=2,
+            frequency="D",
+        )
+    finally:
+        crashed_store.close()
+
+    assert crashed_fallback.status == CRASHED
+    assert invalid_parent.status == INVALID
+    assert failed.status == CRASHED
+    assert failed.forecast == ()
 
 
 def test_selector_cli_requires_frozen_screen_and_has_no_test_option():

@@ -195,7 +195,7 @@ def require_cached_portfolio_outcomes(
 ) -> tuple[Outcome, ...]:
     """Reconstruct all candidate outcomes from exact caches, never calling a model."""
     require_unique_task_ids(tasks)
-    portfolio.validate_parents(module.names())
+    portfolio.validate_namespace(module.names())
     python_rows = tuple(
         row
         for method in module.methods

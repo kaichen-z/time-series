@@ -780,3 +780,53 @@ def test_evaluate_portfolio_rejects_duplicate_task_ids_before_execution(tmp_path
             ),
             isolated_methods=False,
         )
+
+
+def test_evaluate_portfolio_rejects_statistical_tsfm_name_collision_before_execution(
+    tmp_path: Path,
+) -> None:
+    module = parse_module(
+        MODULE_HEADER
+        + '''
+
+def seasonal_naive(history, horizon, frequency):
+    """Satisfy the reviewed Combined parent contract."""
+    return [0.0] * horizon
+
+def holt_damped_trend(history, horizon, frequency):
+    """Satisfy the reviewed Combined parent contract."""
+    return [0.0] * horizon
+
+def croston_sba(history, horizon, frequency):
+    """Satisfy the reviewed Combined parent contract."""
+    return [0.0] * horizon
+
+def robust_loess_trend(history, horizon, frequency):
+    """Satisfy the reviewed Combined parent contract."""
+    return [0.0] * horizon
+
+def median_seasonal_profile_forecast(history, horizon, frequency):
+    """Satisfy the reviewed Combined parent contract."""
+    return [0.0] * horizon
+
+def timesfm_2_5(history, horizon, frequency):
+    """An invalid statistical name collision fixture."""
+    return [0.0] * horizon
+'''
+    )
+    runtime = FakeTSFMRuntime({method_id: 1.0 for method_id in FLAGSHIP_METHOD_IDS})
+    cache = OutcomeCache(tmp_path / "cache")
+
+    with pytest.raises(PolicyError, match="namespace.*timesfm_2_5"):
+        evaluate_portfolio(
+            module,
+            _portfolio(),
+            _tasks()[:1],
+            outcome_cache=cache,
+            runtimes=_registry(runtime),
+            isolated_methods=False,
+        )
+
+    assert cache.stats.hits == 0
+    assert cache.stats.misses == 0
+    assert runtime.calls == []

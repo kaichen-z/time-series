@@ -367,6 +367,7 @@ def load_frozen_partitions(
 
 def _training_outcomes(args, repo, module, portfolio, tasks) -> tuple[tuple[Outcome, ...], dict]:
     require_unique_task_ids(tasks)
+    portfolio.validate_namespace(module.names())
     method_cache = OutcomeCache(
         args.outcome_cache_dir,
         skills_path=repo / "skills.py" if (repo / "skills.py").is_file() else None,

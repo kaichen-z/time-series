@@ -388,6 +388,16 @@ class PolicyPortfolio:
                         f"Combined policy {policy.name!r} has unknown parent {parent!r}"
                     )
 
+    def validate_namespace(self, method_names: Sequence[str]) -> None:
+        """Reject any Statistical/TSFM/Combined name collision before evaluation."""
+        names = tuple(method_names) + self.names
+        duplicates = tuple(sorted({name for name in names if names.count(name) > 1}))
+        if duplicates:
+            raise PolicyError(
+                "candidate namespace collision: " + ", ".join(duplicates)
+            )
+        self.validate_parents(method_names)
+
     def replace(
         self, name: str, replacement: TSFMPolicy | CombinedPolicy
     ) -> "PolicyPortfolio":
@@ -579,7 +589,7 @@ def evaluate_portfolio(
 ) -> tuple[Outcome, ...]:
     """Evaluate Python, TSFM, and Combined candidates on one trusted task sequence."""
     require_unique_task_ids(tasks)
-    portfolio.validate_parents(module.names())
+    portfolio.validate_namespace(module.names())
     python_outcomes = tuple(
         outcome
         for method in module.methods

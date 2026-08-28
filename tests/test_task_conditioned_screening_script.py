@@ -16,6 +16,8 @@ from numerical_agent.run_task_conditioned_screening import (
     load_frozen_partitions,
 )
 from numerical_agent.evolution.execution import Task
+from numerical_agent.evolution.module import MODULE_HEADER, parse_module
+from numerical_agent.evolution.portfolio import PolicyError, PolicyPortfolio
 from numerical_agent.evolution.screening import (
     ApplicabilityPolicy,
     ScreeningEntry,
@@ -94,6 +96,60 @@ def test_training_outcomes_rejects_duplicate_task_ids_before_cache_access():
 
     with pytest.raises(ValueError, match="duplicate task IDs"):
         _training_outcomes(SimpleNamespace(), None, None, None, (task, task))
+
+
+def test_training_outcomes_preflights_namespace_before_cache_or_runtime(
+    tmp_path, monkeypatch
+):
+    module = parse_module(
+        MODULE_HEADER
+        + '''
+
+def seasonal_naive(history, horizon, frequency):
+    """Satisfy the reviewed Combined parent contract."""
+    return [0.0] * horizon
+
+def holt_damped_trend(history, horizon, frequency):
+    """Satisfy the reviewed Combined parent contract."""
+    return [0.0] * horizon
+
+def croston_sba(history, horizon, frequency):
+    """Satisfy the reviewed Combined parent contract."""
+    return [0.0] * horizon
+
+def robust_loess_trend(history, horizon, frequency):
+    """Satisfy the reviewed Combined parent contract."""
+    return [0.0] * horizon
+
+def median_seasonal_profile_forecast(history, horizon, frequency):
+    """Satisfy the reviewed Combined parent contract."""
+    return [0.0] * horizon
+
+def timesfm_2_5(history, horizon, frequency):
+    """An invalid statistical name collision fixture."""
+    return [0.0] * horizon
+'''
+    )
+    constructed = []
+
+    def forbidden_cache(*args, **kwargs):
+        del args, kwargs
+        constructed.append("cache")
+        raise AssertionError("cache construction must not occur")
+
+    monkeypatch.setattr(
+        "numerical_agent.run_task_conditioned_screening.OutcomeCache", forbidden_cache
+    )
+    args = SimpleNamespace(
+        outcome_cache_dir=tmp_path / "cache",
+        policy_outcome_cache_dir=tmp_path / "policy-cache",
+    )
+    task = Task("task", (1.0, 2.0), 1, "D", (3.0,))
+
+    with pytest.raises(PolicyError, match="namespace.*timesfm_2_5"):
+        _training_outcomes(args, tmp_path, module, PolicyPortfolio.flagship5(), (task,))
+
+    assert constructed == []
 
 
 def test_screening_cli_has_train_dev_but_no_public_test_option():

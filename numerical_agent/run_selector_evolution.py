@@ -161,7 +161,7 @@ class ForecastStore:
             except PolicyNotApplicable as error:
                 raise self.not_applicable(str(error)) from None
             except InvalidTSFMForecastError as error:
-                raise ValueError(str(error)) from None
+                raise _StructuralForecastInvalid(str(error)) from None
         if policy := self.combined.get(name):
             return self._combined(policy, history, horizon, frequency)
         raise KeyError(f"unknown numerical candidate {name}")
@@ -213,7 +213,16 @@ class ForecastStore:
             )
         except self.not_applicable as error:
             return Outcome(name, "history-only", NOT_APPLICABLE, detail=str(error)[:200])
+        except _StructuralForecastInvalid as error:
+            return Outcome(name, "history-only", INVALID, detail=str(error)[:200])
         except ValueError as error:
+            if name in self.tsfm:
+                return Outcome(
+                    name,
+                    "history-only",
+                    CRASHED,
+                    detail=f"{type(error).__name__}: {error}"[:200],
+                )
             return Outcome(name, "history-only", INVALID, detail=str(error)[:200])
         except Exception as error:
             return Outcome(
@@ -253,6 +262,10 @@ class ForecastStore:
 
 class _HistoryOnlyNotApplicable(Exception):
     """Transport-safe applicability signal from the statistical worker."""
+
+
+class _StructuralForecastInvalid(ValueError):
+    """A known finite/horizon failure that maps to the canonical INVALID status."""
 
 
 class _IsolatedStatisticalRuntime:
