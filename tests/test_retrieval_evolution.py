@@ -274,6 +274,130 @@ def _complete_train_checkpoint(
     return screen, remaining_folds
 
 
+def test_checkpoint_payload_validator_runs_before_tainted_checkpoint_commit(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "checkpoint.json"
+    responses = _responses(1)
+    tainted = json.loads(responses[0])
+    tainted["round1_prompt"] += " prefix_task_100_suffix"
+    responses[0] = json.dumps(tainted)
+    config = RetrievalEvolutionConfig(
+        generations=1,
+        screen_tasks=8,
+        promote=2,
+        train_folds=4,
+        random_seed=17,
+        checkpoint_path=checkpoint,
+        dataset_split_hash="split-v1",
+    )
+
+    def reject_public_id(payload: object) -> None:
+        if "task_100" in json.dumps(payload, sort_keys=True):
+            raise RetrievalEvolutionError("Public Regression payload rejected")
+
+    engine = RetrievalEvolutionEngine(
+        FakeLLMClient(responses),
+        _FakeEvaluator(),
+        config,
+        _checkpoint_payload_validator=reject_public_id,
+    )
+
+    with pytest.raises(RetrievalEvolutionError, match="Public Regression"):
+        engine.evolve(
+            RetrievalGenome.seed(),
+            _tasks("train", 80),
+            _tasks("dev", 20, entity_offset=100),
+        )
+
+    encoded = checkpoint.read_text(encoding="utf-8") if checkpoint.exists() else ""
+    assert "task_100" not in encoded
+
+
+def test_terminal_evaluator_exception_is_sanitized_before_trace_and_checkpoint(
+    tmp_path: Path,
+) -> None:
+    secret = "SECRET_TRUSTED_SCORER_EXCEPTION_PAYLOAD"
+
+    class SecretEvaluator(_FakeEvaluator):
+        def evaluate(self, *_args, **_kwargs):
+            raise RuntimeError(secret)
+
+    checkpoint = tmp_path / "checkpoint.json"
+    engine, _llm = _engine(
+        SecretEvaluator(),
+        _responses(1),
+        checkpoint_path=checkpoint,
+    )
+
+    with pytest.raises(RetrievalForecastingFailure) as captured:
+        engine.evolve(
+            RetrievalGenome.seed(),
+            _tasks("train", 80),
+            _tasks("dev", 20, entity_offset=100),
+        )
+
+    assert captured.value.__cause__ is None
+    assert secret not in repr(captured.value.args)
+    assert secret not in checkpoint.read_text(encoding="utf-8")
+    assert secret not in json.dumps(engine._trace)
+
+
+def test_operator_checkpoint_authority_recovers_pending_commit_without_a_gap(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    first = b"first trusted checkpoint\n"
+    first_digest = hashlib.sha256(first).hexdigest()
+
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint, authority_path
+    )
+    token = authority.prepare(first_digest)
+    checkpoint.write_bytes(first)
+    authority.close()
+
+    pending = json.loads(authority_path.read_text(encoding="utf-8"))
+    assert pending["pending"]["checkpoint_sha256"] == first_digest
+    reopened = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint, authority_path
+    )
+    reopened.close()
+    committed = json.loads(authority_path.read_text(encoding="utf-8"))
+    assert committed["checkpoint_sha256"] == first_digest
+    assert committed["authority_epoch"] == token.authority_epoch
+    assert committed["pending"] is None
+
+
+def test_caller_authored_adjacent_checkpoint_sidecar_cannot_activate(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "checkpoint.json"
+    authority = tmp_path / "checkpoint.authority.json"
+    authority.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "checkpoint_path": str(checkpoint.resolve()),
+                "checkpoint_sha256": "1" * 64,
+                "authority_epoch": 1,
+                "pending": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    authority.chmod(0o600)
+
+    with pytest.raises(RetrievalCheckpointError, match="adjacent|independent|authority"):
+        evolution_module._open_retrieval_checkpoint_authority_for_operator(
+            checkpoint, authority
+        )
+
+
 def test_dev_acceptance_enforces_every_pareto_tail_recall_and_safety_gate() -> None:
     tasks = _tasks("dev", 20, entity_offset=100)
     parent = _evaluation("v000", tasks, error=1.0)
@@ -1448,6 +1572,58 @@ def test_checkpoint_writer_ignores_attacker_fixed_temp_symlink(tmp_path) -> None
     assert fixed_temporary.is_symlink()
 
 
+def test_checkpoint_failure_retains_a_replacement_at_the_unique_temporary_name(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    engine, _llm = _engine(
+        _FakeEvaluator(),
+        _responses(1),
+        checkpoint_path=checkpoint,
+    )
+    parent = RetrievalGenome.seed()
+    engine._original_parent = parent
+    engine._current_parent = parent
+    engine._scientific_inputs = {}
+    real_link = evolution_module.os.link
+    temporary_name: str | None = None
+    displaced_name = ".owned-checkpoint-displaced.tmp"
+    foreign_bytes = b"foreign replacement must survive\n"
+
+    def replace_temporary_then_fail(source, destination, *args, **kwargs):
+        nonlocal temporary_name
+        if destination == checkpoint.name:
+            temporary_name = str(source)
+            directory_fd = kwargs["src_dir_fd"]
+            evolution_module.os.rename(
+                source,
+                displaced_name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            descriptor = evolution_module.os.open(
+                source,
+                evolution_module.os.O_WRONLY
+                | evolution_module.os.O_CREAT
+                | evolution_module.os.O_EXCL,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            with evolution_module.os.fdopen(descriptor, "wb") as handle:
+                handle.write(foreign_bytes)
+            raise OSError("checkpoint publication failed after replacement")
+        return real_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(evolution_module.os, "link", replace_temporary_then_fail)
+
+    with pytest.raises(OSError, match="publication failed"):
+        engine._save_checkpoint(status="running", result=None)
+
+    assert temporary_name is not None
+    assert (checkpoint.parent / temporary_name).read_bytes() == foreign_bytes
+    assert (checkpoint.parent / displaced_name).is_file()
+
+
 def test_checkpoint_read_rejects_parent_replacement_at_file_open(
     tmp_path, monkeypatch
 ) -> None:
@@ -1850,7 +2026,8 @@ def test_running_checkpoint_resumes_each_legal_final_dev_prefix_exactly_once(
     if cursor in {"parent_child", "parent_child_terminal"}:
         if cursor == "parent_child_terminal":
             with pytest.raises(
-                RetrievalForecastingFailure, match="terminal Child Dev forecast"
+                RetrievalForecastingFailure,
+                match="EvaluatorExecutionFailure:trusted evaluator execution failed",
             ):
                 interrupted._evaluate_batch(
                     winner,
@@ -1900,7 +2077,8 @@ def test_running_checkpoint_resumes_each_legal_final_dev_prefix_exactly_once(
     if cursor == "parent_child_terminal":
         assert result.child_dev is None
         assert result.rejection_reasons == (
-            "child_dev_failure:RuntimeError:terminal Child Dev forecast",
+            "child_dev_failure:EvaluatorExecutionFailure:"
+            "trusted evaluator execution failed",
         )
     else:
         assert result.parent_dev is not None
@@ -2501,8 +2679,9 @@ def test_resume_never_retries_a_checkpointed_terminal_forecasting_failure(
         call.version == "v001" and call.stage == "g0_child_A_screen_train"
         for call in resumed_evaluator.calls
     )
-    assert result.generations[0].rejection_reasons["v001"].startswith(
-        "forecasting_failure:ValueError:"
+    assert result.generations[0].rejection_reasons["v001"] == (
+        "forecasting_failure:EvaluatorExecutionFailure:"
+        "trusted evaluator execution failed"
     )
 
 

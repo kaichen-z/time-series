@@ -840,7 +840,7 @@ def test_first_active_publication_rolls_back_main_link_that_committed_then_faile
     ]
 
 
-def test_first_active_publication_open_failure_removes_owned_witness_directory(
+def test_first_active_publication_open_failure_retains_owned_checkpoint_quarantine(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "skills.json"
@@ -867,10 +867,13 @@ def test_first_active_publication_open_failure_removes_owned_witness_directory(
     with pytest.raises(RetrievalSkillError, match="open|directory"):
         _evaluate_and_promote_retrieval_skills(
             library, task_results, split="train"
-        )
+    )
 
     assert open_failed
-    assert tuple(tmp_path.iterdir()) == ()
+    retained = tuple(tmp_path.iterdir())
+    assert len(retained) == 1
+    assert retained[0].name.startswith(".retrieval-quarantine-")
+    assert retained[0].is_file()
 
 
 def test_first_active_publication_stat_failure_retains_owned_witness_directory(
@@ -906,9 +909,15 @@ def test_first_active_publication_stat_failure_retains_owned_witness_directory(
 
     assert stat_failed
     retained = tuple(tmp_path.iterdir())
-    assert len(retained) == 1
-    assert retained[0].name == provenance_name
-    assert retained[0].is_dir()
+    assert len(retained) == 2
+    assert (tmp_path / provenance_name).is_dir()
+    checkpoint_quarantines = tuple(
+        item
+        for item in retained
+        if item.name.startswith(".retrieval-quarantine-")
+    )
+    assert len(checkpoint_quarantines) == 1
+    assert checkpoint_quarantines[0].is_file()
 
 
 def test_post_mkdir_stat_replacement_preserves_foreign_and_owned_directory(
@@ -986,9 +995,9 @@ def test_first_active_publication_rolls_back_witness_link_that_committed_then_fa
 
     assert witness_linked
     retained = tuple(tmp_path.iterdir())
-    assert len(retained) == 1
-    assert retained[0].name.startswith(".retrieval-quarantine-")
-    assert retained[0].is_dir()
+    assert len(retained) == 2
+    assert all(item.name.startswith(".retrieval-quarantine-") for item in retained)
+    assert sorted(item.is_dir() for item in retained) == [False, True]
 
 
 def test_first_active_publication_cleans_link_when_post_link_inspection_fails(
@@ -1036,9 +1045,9 @@ def test_first_active_publication_cleans_link_when_post_link_inspection_fails(
     assert witness_name is not None
     assert inspection_failed
     retained = tuple(tmp_path.iterdir())
-    assert len(retained) == 1
-    assert retained[0].name.startswith(".retrieval-quarantine-")
-    assert retained[0].is_dir()
+    assert len(retained) == 2
+    assert all(item.name.startswith(".retrieval-quarantine-") for item in retained)
+    assert sorted(item.is_dir() for item in retained) == [False, True]
 
 
 def test_first_active_publication_quarantines_owned_witness_before_unlink(
@@ -1104,9 +1113,9 @@ def test_first_active_publication_quarantines_owned_witness_before_unlink(
     assert not replacement_attempted
     assert not displaced.exists()
     retained = tuple(tmp_path.iterdir())
-    assert len(retained) == 1
-    assert retained[0].name.startswith(".retrieval-quarantine-")
-    assert retained[0].is_dir()
+    assert len(retained) == 2
+    assert all(item.name.startswith(".retrieval-quarantine-") for item in retained)
+    assert sorted(item.is_dir() for item in retained) == [False, True]
 
 
 def test_first_active_publication_does_not_unlink_retained_witness_quarantine(
@@ -1148,9 +1157,9 @@ def test_first_active_publication_does_not_unlink_retained_witness_quarantine(
 
     assert cleanup_failures == 0
     retained = tuple(tmp_path.iterdir())
-    assert len(retained) == 1
-    assert retained[0].name.startswith(".retrieval-quarantine-")
-    assert retained[0].is_dir()
+    assert len(retained) == 2
+    assert all(item.name.startswith(".retrieval-quarantine-") for item in retained)
+    assert sorted(item.is_dir() for item in retained) == [False, True]
 
 
 def test_first_active_publication_does_not_rmdir_uncertain_directory_name(
@@ -1190,10 +1199,13 @@ def test_first_active_publication_does_not_rmdir_uncertain_directory_name(
     with pytest.raises(RetrievalSkillError, match="open|directory|rollback"):
         _evaluate_and_promote_retrieval_skills(
             library, task_results, split="train"
-        )
+    )
 
     assert cleanup_failures == 0
-    assert tuple(tmp_path.iterdir()) == ()
+    retained = tuple(tmp_path.iterdir())
+    assert len(retained) == 1
+    assert retained[0].name.startswith(".retrieval-quarantine-")
+    assert retained[0].is_file()
 
 
 def test_no_public_evidence_row_api_can_authorize_promotion(tmp_path) -> None:

@@ -21,9 +21,9 @@ from evolving_loop.cli import (
     inference_command,
 )
 from evolving_loop.co_evolution import HarnessPolicy, snapshot_policy_skills
-from evolving_loop.coding_agent.skill_library import SkillLibrary
+from evolving_loop.coding_agent.skill_library import Skill, SkillLibrary
 from evolving_loop.data import ContextTask, Document, Task
-from evolving_loop.decision_agent.skill_library import DecisionSkillLibrary
+from evolving_loop.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
 from evolving_loop.retrieval_agent.skill_library import (
     RetrievalSkill,
     RetrievalSkillLibrary,
@@ -35,6 +35,7 @@ from evolving_loop.retrieval_agent.policy import (
 )
 from evolving_loop.retrieval_agent.evolution import (
     RetrievalEvaluation,
+    RetrievalForecastingFailure,
     RetrievalEvolutionResult,
     RetrievalGenerationTrace,
 )
@@ -182,8 +183,31 @@ def _manifest_task(task_id: str) -> ContextTask:
     )
 
 
+def _manifest_record(task_id: str) -> dict[str, object]:
+    return {
+        "benchmark_id": task_id,
+        "labels_public": True,
+        "series": {
+            "history_values": [1.0, 2.0],
+            "future_values": [3.0],
+            "history_timestamps": ["1", "2"],
+            "future_timestamps": ["3"],
+        },
+        "task_metadata": {
+            "prediction_length": 1,
+            "frequency": "1 day",
+            "target_description": "public target",
+        },
+        "showcase": {
+            "entity": {"name": f"entity_{task_id}"},
+            "time_series_variable": {"name": "target"},
+        },
+        "documents": [],
+    }
+
+
 def test_retrieval_manifest_loader_selects_exact_train_and_dev_only(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ) -> None:
     manifest_path = (
         Path(__file__).parents[1]
@@ -195,15 +219,18 @@ def test_retrieval_manifest_loader_selects_exact_train_and_dev_only(
     train_ids = tuple(partitions["train"]["task_ids"])
     dev_ids = tuple(partitions["dev"]["task_ids"])
     public_ids = tuple(partitions["public_test"]["task_ids"])
-    all_tasks = [
-        _manifest_task(task_id)
-        for task_id in (*public_ids, *dev_ids, *train_ids)
-    ]
-    monkeypatch.setattr(cli_module, "load_context_tasks", lambda _path: all_tasks)
+    dataset = tmp_path / "tasks.jsonl"
+    dataset.write_text(
+        "".join(
+            json.dumps(_manifest_record(task_id)) + "\n"
+            for task_id in (*public_ids, *dev_ids, *train_ids)
+        ),
+        encoding="utf-8",
+    )
 
     train, dev, manifest_sha256 = (
         cli_module._load_retrieval_evolution_tasks(
-            "ignored.jsonl",
+            dataset,
             manifest_path,
             expected_manifest_sha256=manifest["manifest_sha256"],
         )
@@ -217,6 +244,141 @@ def test_retrieval_manifest_loader_selects_exact_train_and_dev_only(
     assert not set(public_ids).intersection(
         task.numeric.task_id for task in (*train, *dev)
     )
+
+
+def test_retrieval_manifest_loader_never_instantiates_public_regression_rows(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = Path(__file__).parents[1] / "splits" / "drcik_public_80_20_99_v1.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    partitions = manifest["partitions"]
+    all_ids = tuple(
+        task_id
+        for name in ("public_test", "dev", "train")
+        for task_id in partitions[name]["task_ids"]
+    )
+    dataset = tmp_path / "tasks.jsonl"
+    dataset.write_text(
+        "".join(json.dumps(_manifest_record(task_id)) + "\n" for task_id in all_ids),
+        encoding="utf-8",
+    )
+    public_ids = frozenset(partitions["public_test"]["task_ids"])
+    selected_ids = frozenset(
+        (*partitions["train"]["task_ids"], *partitions["dev"]["task_ids"])
+    )
+    original_convert = getattr(cli_module, "_to_context_task", None)
+    instantiated: list[str] = []
+
+    def track_selected_only(record: dict[str, object]) -> ContextTask:
+        task_id = str(record["benchmark_id"])
+        if task_id in public_ids:
+            raise AssertionError("Public Regression labels were instantiated")
+        instantiated.append(task_id)
+        assert original_convert is not None
+        return original_convert(record)
+
+    monkeypatch.setattr(
+        cli_module,
+        "load_context_tasks",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk task loading materializes Public Regression labels")
+        ),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_to_context_task",
+        track_selected_only,
+        raising=False,
+    )
+
+    train, dev, _digest = cli_module._load_retrieval_evolution_tasks(
+        dataset,
+        manifest_path,
+        expected_manifest_sha256=manifest["manifest_sha256"],
+    )
+
+    assert len(train) == 80
+    assert len(dev) == 20
+    assert frozenset(instantiated) == selected_ids
+
+
+def test_retrieval_manifest_loader_rejects_incomplete_public_source_without_parsing_it(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = Path(__file__).parents[1] / "splits" / "drcik_public_80_20_99_v1.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    partitions = manifest["partitions"]
+    omitted_public = partitions["public_test"]["task_ids"][0]
+    ids = tuple(
+        task_id
+        for name in ("train", "dev", "public_test")
+        for task_id in partitions[name]["task_ids"]
+        if task_id != omitted_public
+    )
+    dataset = tmp_path / "incomplete.jsonl"
+    dataset.write_text(
+        "".join(json.dumps(_manifest_record(task_id)) + "\n" for task_id in ids),
+        encoding="utf-8",
+    )
+    original_convert = getattr(cli_module, "_to_context_task", None)
+
+    def reject_public_conversion(record: dict[str, object]) -> ContextTask:
+        assert str(record["benchmark_id"]) not in set(
+            partitions["public_test"]["task_ids"]
+        )
+        assert original_convert is not None
+        return original_convert(record)
+
+    monkeypatch.setattr(
+        cli_module,
+        "_to_context_task",
+        reject_public_conversion,
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="incomplete|missing|dataset"):
+        cli_module._load_retrieval_evolution_tasks(
+            dataset,
+            manifest_path,
+            expected_manifest_sha256=manifest["manifest_sha256"],
+        )
+
+
+def test_retrieval_manifest_loader_rejects_nested_public_id_spoof(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = Path(__file__).parents[1] / "splits" / "drcik_public_80_20_99_v1.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    partitions = manifest["partitions"]
+    public_ids = set(partitions["public_test"]["task_ids"])
+    spoofed_id = partitions["public_test"]["task_ids"][0]
+    records = []
+    for name in ("train", "dev", "public_test"):
+        for task_id in partitions[name]["task_ids"]:
+            record = _manifest_record(task_id)
+            if task_id == spoofed_id:
+                del record["benchmark_id"]
+                record["nested_metadata"] = {"benchmark_id": task_id}
+            records.append(record)
+    dataset = tmp_path / "spoofed.jsonl"
+    dataset.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    original_convert = cli_module._to_context_task
+
+    def selected_only(record):
+        assert record.get("benchmark_id") not in public_ids
+        return original_convert(record)
+
+    monkeypatch.setattr(cli_module, "_to_context_task", selected_only)
+
+    with pytest.raises(ValueError, match="metadata|dataset|record|incomplete"):
+        cli_module._load_retrieval_evolution_tasks(
+            dataset,
+            manifest_path,
+            expected_manifest_sha256=manifest["manifest_sha256"],
+        )
 
 
 @pytest.mark.parametrize("tamper", ("manifest", "expected_hash"))
@@ -251,6 +413,28 @@ def test_retrieval_manifest_loader_rejects_every_hash_mismatch(
             "ignored.jsonl",
             path,
             expected_manifest_sha256=expected,
+        )
+
+
+def test_retrieval_manifest_loader_rejects_a_self_consistent_nonfrozen_split(
+    tmp_path,
+) -> None:
+    source = Path(__file__).parents[1] / "splits" / "drcik_public_80_20_99_v1.json"
+    manifest = json.loads(source.read_text(encoding="utf-8"))
+    train_ids = manifest["partitions"]["train"]["task_ids"]
+    public_ids = manifest["partitions"]["public_test"]["task_ids"]
+    train_ids[0], public_ids[0] = public_ids[0], train_ids[0]
+    unsigned = {key: value for key, value in manifest.items() if key != "manifest_sha256"}
+    forged_hash = cli_module._canonical_sha256(unsigned)
+    manifest["manifest_sha256"] = forged_hash
+    manifest_path = tmp_path / "forged-split.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="frozen|hash|manifest"):
+        cli_module._load_retrieval_evolution_tasks(
+            tmp_path / "tasks.jsonl",
+            manifest_path,
+            expected_manifest_sha256=forged_hash,
         )
 
 
@@ -470,6 +654,45 @@ def test_trusted_retrieval_evaluator_sanitizes_before_inference_and_scores_after
     )
 
 
+def test_trusted_retrieval_evaluator_never_serializes_scorer_exception_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = _manifest_task("train_1")
+
+    class Harness:
+        def run(self, received, *, allow_skill_writes=True):
+            assert allow_skill_writes is False
+            return SimpleNamespace(task_id=received.numeric.task_id)
+
+    monkeypatch.setattr(
+        cli_module,
+        "score_after_resolution",
+        lambda *_args: (_ for _ in ()).throw(
+            RuntimeError("SECRET_LABEL_VALUE_FROM_TRUSTED_SCORER")
+        ),
+    )
+
+    with pytest.raises(RetrievalForecastingFailure) as captured:
+        cli_module._TrustedRetrievalEvaluator().evaluate(
+            RetrievalGenome.seed(),
+            (task,),
+            stage="screen_train_parent",
+            skill_library=object(),
+            harness_factory=lambda *_args: Harness(),
+            persist=False,
+            writers_enabled=False,
+            evolver_enabled=False,
+            cache_keys=(SimpleNamespace(task_id="train_1"),),
+            metric_cap=5.0,
+        )
+
+    failure = captured.value
+    encoded = repr((str(failure), repr(failure), failure.args))
+    assert "SECRET_LABEL_VALUE_FROM_TRUSTED_SCORER" not in encoded
+    assert failure.error_type == "TrustedScoringFailure"
+    assert failure.__cause__ is None
+
+
 def _retrieval_evaluation(
     version: str, tasks: tuple[ContextTask, ...], error: float
 ) -> RetrievalEvaluation:
@@ -588,11 +811,13 @@ def _install_fake_retrieval_engine(
             captured["dev"] = dev
             checkpoint = Path(self.config.checkpoint_path)
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            self._checkpoint_file_sha256 = hashlib.sha256(b"trusted-checkpoint").hexdigest()
+            authority = captured["engine_kwargs"]["_checkpoint_authority"]
+            token = authority.prepare(self._checkpoint_file_sha256)
             checkpoint.write_bytes(b"trusted-checkpoint")
-            self._checkpoint_file_sha256 = hashlib.sha256(
-                b"trusted-checkpoint"
-            ).hexdigest()
-            self._checkpoint_authority_epoch = 7
+            self._checkpoint_authority_epoch = authority.commit(token)
+            validator = captured["engine_kwargs"]["_checkpoint_payload_validator"]
+            validator(result.to_payload())
             return result
 
     monkeypatch.setattr(cli_module, "RetrievalEvolutionEngine", Engine, raising=False)
@@ -640,6 +865,9 @@ def test_retrieval_evolution_publishes_only_accepted_release_and_keeps_traces_in
         lambda *_args, **_kwargs: (lambda _policy: object()),
     )
     runs = tmp_path / "runs"
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "checkpoint.json"
     policy_path = runs / "best_policy.json"
     if not accepted:
         policy_path.parent.mkdir(parents=True)
@@ -664,6 +892,10 @@ def test_retrieval_evolution_publishes_only_accepted_release_and_keeps_traces_in
             str(runs / "evolution_trace.json"),
             "--policy-path",
             str(policy_path),
+            "--run-root",
+            str(runs),
+            "--checkpoint-authority-path",
+            str(authority_path),
         ]
     )
     args.evolution_mode = "retrieval"
@@ -687,12 +919,13 @@ def test_retrieval_evolution_publishes_only_accepted_release_and_keeps_traces_in
         )
     )
     authority = json.loads(
-        (runs / "checkpoint.authority.json").read_text(encoding="utf-8")
+        authority_path.read_text(encoding="utf-8")
     )
     assert authority["checkpoint_sha256"] == hashlib.sha256(
         b"trusted-checkpoint"
     ).hexdigest()
-    assert authority["authority_epoch"] == 7
+    assert authority["authority_epoch"] == 1
+    assert authority["pending"] is None
     trace = json.loads((runs / "evolution_trace.json").read_text(encoding="utf-8"))
     public_ids = set(manifest["partitions"]["public_test"]["task_ids"])
     encoded_trace = json.dumps(trace)
@@ -820,6 +1053,102 @@ def test_retrieval_inference_rejects_policy_release_mismatch_before_running(
         inference_command(args)
 
 
+def test_frozen_retrieval_rejects_matching_candidate_release_state(
+    tmp_path,
+) -> None:
+    candidate = write_retrieval_release(
+        tmp_path / "releases",
+        replace(RetrievalGenome.seed(), version="v001", parent="v000"),
+    )
+    policy = cli_module._policy_with_retrieval_release(
+        HarnessPolicy(), candidate, changelog="Candidate only."
+    )
+
+    with pytest.raises(ValueError, match="accepted|seed|candidate|state"):
+        cli_module._policy_for_retrieval_release(policy, candidate)
+
+
+@pytest.mark.parametrize(
+    ("backend", "setting"),
+    (("qwen", "statistics"), ("codex", "tsfm")),
+)
+def test_frozen_retrieval_rejects_cache_writing_runtime_before_task_loading(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    setting: str,
+) -> None:
+    release = write_retrieval_release(
+        tmp_path / "releases", RetrievalGenome.seed()
+    )
+    policy_path = tmp_path / "policy.json"
+    cli_module._policy_with_retrieval_release(
+        HarnessPolicy(), release, changelog="Seed."
+    ).save(policy_path)
+    monkeypatch.setattr(
+        cli_module,
+        "_inference_tasks",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("unsafe runtime must fail before task loading")
+        ),
+    )
+    args = build_parser().parse_args(
+        [
+            "--inference",
+            "retrieval",
+            "--hidden-test",
+            "--policy-path",
+            str(policy_path),
+            "--retrieval-release-path",
+            str(release.path),
+            "--llm-backend",
+            backend,
+            "--setting",
+            setting,
+            "--output-dir",
+            str(tmp_path / "output"),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="frozen|cache|local|write|backend"):
+        inference_command(args)
+
+
+def test_frozen_retrieval_output_cannot_target_release_artifacts_before_task_loading(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = write_retrieval_release(
+        tmp_path / "releases", RetrievalGenome.seed()
+    )
+    policy_path = tmp_path / "policy.json"
+    cli_module._policy_with_retrieval_release(
+        HarnessPolicy(), release, changelog="Seed."
+    ).save(policy_path)
+    monkeypatch.setattr(
+        cli_module,
+        "_inference_tasks",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("colliding output must fail before task loading")
+        ),
+    )
+    args = build_parser().parse_args(
+        [
+            "--inference",
+            "retrieval",
+            "--hidden-test",
+            "--policy-path",
+            str(policy_path),
+            "--retrieval-release-path",
+            str(release.path),
+            "--output-dir",
+            str(release.path),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="output|release|collision|disjoint"):
+        inference_command(args)
+
+
 def test_v000_operator_release_can_bind_an_old_unembedded_policy(tmp_path) -> None:
     release = write_retrieval_release(
         tmp_path / "releases", RetrievalGenome.seed()
@@ -849,26 +1178,392 @@ def test_accepted_release_publication_is_idempotent_for_checkpoint_resume(
         "acceptance_reason": "all gates passed",
     }
 
+    releases = tmp_path / "releases"
+    seed = write_retrieval_release(releases, RetrievalGenome.seed())
     first = cli_module._publish_or_resume_accepted_retrieval_release(
-        tmp_path / "releases", genome, skills=(), audit=audit
+        releases, genome, skills=(), audit=audit, parent_release=seed
     )
     second = cli_module._publish_or_resume_accepted_retrieval_release(
-        tmp_path / "releases", genome, skills=(), audit=audit
+        releases, genome, skills=(), audit=audit, parent_release=seed
     )
 
     assert first.path == second.path
     assert first.manifest == second.manifest
-    assert tuple((tmp_path / "releases").iterdir()) == (first.path,)
+    assert tuple(sorted(path.name for path in releases.iterdir())) == ("v000", "v001")
 
 
-def test_checkpoint_resume_requires_matching_out_of_band_digest_and_epoch(
+def test_accepted_internal_winner_is_rebased_to_next_contiguous_release(
+    tmp_path,
+) -> None:
+    releases = tmp_path / "releases"
+    parent = write_retrieval_release(releases, RetrievalGenome.seed())
+    audit = {
+        "state": "accepted",
+        "train_dev_split_sha256": "1" * 64,
+        "verifier_sha256": "2" * 64,
+        "evaluator_sha256": "3" * 64,
+        "metric_sha256": "4" * 64,
+        "metric_cap": 5.0,
+        "train_summary": {"task_count": 80},
+        "dev_summary": {"task_count": 20},
+        "acceptance_reason": "all gates passed",
+    }
+    for index in range(1, 7):
+        parent = _write_accepted_retrieval_release(
+            releases,
+            replace(
+                parent.genome,
+                version=f"v{index:03d}",
+                parent=parent.genome.version,
+            ),
+            audit=audit,
+        )
+    internal_winner = replace(
+        parent.genome,
+        version="v009",
+        parent="v006",
+        round1_prompt=parent.genome.round1_prompt + "\nAccepted internal winner.",
+    )
+
+    published = cli_module._publish_or_resume_accepted_retrieval_release(
+        releases,
+        internal_winner,
+        skills=(),
+        audit=audit,
+    )
+
+    assert published.path.name == "v007"
+    assert published.genome.version == "v007"
+    assert published.genome.parent == "v006"
+    assert not (releases / "v008").exists()
+    assert not (releases / "v009").exists()
+
+
+def test_published_result_records_the_authoritative_rebased_release(tmp_path) -> None:
+    releases = tmp_path / "releases"
+    parent = write_retrieval_release(releases, RetrievalGenome.seed())
+    internal_winner = replace(
+        parent.genome,
+        version="v009",
+        parent="v000",
+        round1_prompt=parent.genome.round1_prompt + "\nAccepted internal winner.",
+    )
+    result = replace(
+        _retrieval_result(
+            parent.genome,
+            (_manifest_task("train_000"),),
+            (_manifest_task("dev_000"),),
+            accepted=True,
+        ),
+        train_winner=internal_winner,
+        selected_genome=internal_winner,
+        release_genome=internal_winner,
+        trace=(
+            {
+                "kind": "release_accepted",
+                "genome": "v009",
+                "publication_deferred": True,
+            },
+        ),
+    )
+    audit = {
+        "state": "accepted",
+        "train_dev_split_sha256": "1" * 64,
+        "verifier_sha256": "2" * 64,
+        "evaluator_sha256": "3" * 64,
+        "metric_sha256": "4" * 64,
+        "metric_cap": 5.0,
+        "train_summary": {"task_count": 80},
+        "dev_summary": {"task_count": 20},
+        "acceptance_reason": "all gates passed",
+    }
+    published = cli_module._publish_or_resume_accepted_retrieval_release(
+        releases,
+        internal_winner,
+        skills=(),
+        audit=audit,
+        parent_release=parent,
+    )
+
+    traced = cli_module._published_retrieval_result(result, published)
+
+    assert traced.train_winner.version == "v009"
+    assert traced.selected_genome == published.genome
+    assert traced.release_genome == published.genome
+    assert traced.release_published is True
+    assert traced.trace[-1] == {
+        "kind": "release_accepted",
+        "genome": "v001",
+        "publication_deferred": False,
+    }
+
+
+def test_accepted_winner_rejects_replaced_parent_skill_lineage(tmp_path) -> None:
+    releases = tmp_path / "releases"
+    parent = write_retrieval_release(releases, RetrievalGenome.seed())
+    audit = {
+        "state": "accepted",
+        "train_dev_split_sha256": "1" * 64,
+        "verifier_sha256": "2" * 64,
+        "evaluator_sha256": "3" * 64,
+        "metric_sha256": "4" * 64,
+        "metric_cap": 5.0,
+        "train_summary": {"task_count": 80},
+        "dev_summary": {"task_count": 20},
+        "acceptance_reason": "all gates passed",
+    }
+    for index in range(1, 7):
+        parent = _write_accepted_retrieval_release(
+            releases,
+            replace(
+                parent.genome,
+                version=f"v{index:03d}",
+                parent=parent.genome.version,
+            ),
+            skills=({"lineage": "original"},),
+            audit=audit,
+        )
+    replacement = _write_accepted_retrieval_release(
+        tmp_path / "replacement",
+        parent.genome,
+        skills=({"lineage": "foreign replacement"},),
+        audit=audit,
+    )
+    (releases / "v006").rename(tmp_path / "displaced-v006")
+    replacement.path.rename(releases / "v006")
+    internal_winner = replace(
+        parent.genome,
+        version="v009",
+        parent="v006",
+        round1_prompt=parent.genome.round1_prompt + "\nInternal winner.",
+    )
+
+    with pytest.raises(Exception, match="Parent|Skill|history|authoritative"):
+        cli_module._publish_or_resume_accepted_retrieval_release(
+            releases,
+            internal_winner,
+            skills=({"lineage": "original"},),
+            audit=audit,
+            parent_release=parent,
+        )
+
+    assert not (releases / "v007").exists()
+
+
+def test_public_id_firewall_detects_ids_adjacent_to_underscores() -> None:
+    with pytest.raises(Exception, match="Public Regression"):
+        cli_module._assert_no_public_regression_ids(
+            {"message": "prefix_task_100_suffix"},
+            frozenset({"task_100"}),
+        )
+
+
+def test_public_ids_are_rejected_from_every_prompt_bearing_input(tmp_path) -> None:
+    public_ids = frozenset({"task_100"})
+    clean_policy = HarnessPolicy()
+    clean_coding = SkillLibrary(tmp_path / "coding.json")
+    clean_decision = DecisionSkillLibrary(tmp_path / "decision.json")
+    tainted_policy = replace(
+        clean_policy,
+        decision_prompt="Apply the rule learned from task_100.",
+    )
+    tainted_coding = SkillLibrary(
+        tmp_path / "tainted-coding.json",
+        [
+            Skill(
+                skill_id="coding-public",
+                name="public_example",
+                description="Derived from task_100.",
+                code="def forecast(history, horizon, frequency): return [0] * horizon",
+                created_from_task="task_100",
+            )
+        ],
+    )
+    tainted_decision = DecisionSkillLibrary(
+        tmp_path / "tainted-decision.json",
+        [
+            DecisionSkill(
+                skill_id="decision-public",
+                name="public_example",
+                description="Derived from task_100.",
+                applicability="Always.",
+                decision_rule="Keep the leader.",
+                failure_condition="Never.",
+                created_from_task="task_100",
+            )
+        ],
+    )
+
+    for policy, coding, decision in (
+        (tainted_policy, clean_coding, clean_decision),
+        (clean_policy, tainted_coding, clean_decision),
+        (clean_policy, clean_coding, tainted_decision),
+    ):
+        with pytest.raises(Exception, match="Public Regression"):
+            cli_module._assert_retrieval_prompt_inputs_clean(
+                policy,
+                coding,
+                decision,
+                public_ids,
+            )
+
+
+def test_complete_result_task_provenance_is_rejected_by_checkpoint_firewall() -> None:
+    parent = RetrievalGenome.seed()
+    train = tuple(_manifest_task(f"train_{index:03d}") for index in range(80))
+    dev = tuple(_manifest_task(f"dev_{index:03d}") for index in range(20))
+    result = _retrieval_result(parent, train, dev, accepted=True)
+    assert result.parent_dev is not None
+    tainted = replace(
+        result,
+        parent_dev=replace(
+            result.parent_dev,
+            task_traces=(
+                *result.parent_dev.task_traces,
+                dict(result.parent_dev.task_traces[0]),
+            ),
+        ),
+    )
+
+    with pytest.raises(Exception, match="provenance|Dev|task"):
+        cli_module._validate_retrieval_checkpoint_payload(
+            tainted.to_payload(),
+            parent=parent,
+            train_ids=tuple(task.numeric.task_id for task in train),
+            dev_ids=tuple(task.numeric.task_id for task in dev),
+            public_ids=frozenset({"task_100"}),
+        )
+
+
+def test_retrieval_path_collision_is_rejected_before_task_loading(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_root = tmp_path / "runs" / "formal"
+    authority = tmp_path / "authority" / "checkpoint.json"
+    collided = run_root / "artifact.json"
+    args = build_parser().parse_args(
+        [
+            "--evolution",
+            "retrieval",
+            "--tasks-file",
+            str(tmp_path / "tasks.jsonl"),
+            "--split-manifest",
+            str(tmp_path / "split.json"),
+            "--retrieval-release-path",
+            str(tmp_path / "releases" / "v000"),
+            "--trace-path",
+            str(collided),
+            "--policy-path",
+            str(collided),
+            "--checkpoint-path",
+            str(run_root / "checkpoint.json"),
+            "--checkpoint-authority-path",
+            str(authority),
+        ]
+    )
+    args.run_root = str(run_root)
+    args.evolution_mode = "retrieval"
+    monkeypatch.setattr(
+        cli_module,
+        "_load_retrieval_evolution_tasks",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("colliding paths must fail before task loading")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="path|disjoint|collision"):
+        cli_module._retrieval_evolve_command(args)
+
+
+def test_retrieval_output_symlink_cannot_escape_approved_run_root(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_root = tmp_path / "runs" / "formal"
+    outside = tmp_path / "outside"
+    run_root.mkdir(parents=True)
+    outside.mkdir()
+    (run_root / "escape").symlink_to(outside, target_is_directory=True)
+    args = build_parser().parse_args(
+        [
+            "--evolution",
+            "retrieval",
+            "--tasks-file",
+            str(tmp_path / "tasks.jsonl"),
+            "--split-manifest",
+            str(tmp_path / "split.json"),
+            "--retrieval-release-path",
+            str(tmp_path / "releases" / "v000"),
+            "--trace-path",
+            str(run_root / "escape" / "trace.json"),
+            "--policy-path",
+            str(run_root / "policy.json"),
+            "--checkpoint-path",
+            str(run_root / "checkpoint.json"),
+            "--checkpoint-authority-path",
+            str(tmp_path / "authority" / "checkpoint.json"),
+        ]
+    )
+    args.run_root = str(run_root)
+    args.evolution_mode = "retrieval"
+    monkeypatch.setattr(
+        cli_module,
+        "_load_retrieval_evolution_tasks",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("escaping paths must fail before task loading")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="root|escape|path"):
+        cli_module._retrieval_evolve_command(args)
+
+
+def test_retrieval_authority_cannot_live_inside_a_release_or_library(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_root = tmp_path / "runs" / "formal"
+    release = tmp_path / "releases" / "v000"
+    args = build_parser().parse_args(
+        [
+            "--evolution",
+            "retrieval",
+            "--tasks-file",
+            str(tmp_path / "tasks.jsonl"),
+            "--split-manifest",
+            str(tmp_path / "split.json"),
+            "--retrieval-release-path",
+            str(release),
+            "--trace-path",
+            str(run_root / "trace.json"),
+            "--policy-path",
+            str(run_root / "policy.json"),
+            "--checkpoint-path",
+            str(run_root / "checkpoint.json"),
+            "--checkpoint-authority-path",
+            str(release / "authority.json"),
+        ]
+    )
+    args.run_root = str(run_root)
+    args.evolution_mode = "retrieval"
+    monkeypatch.setattr(
+        cli_module,
+        "_load_retrieval_evolution_tasks",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("authority collision must fail before task loading")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="authority|release|protected|collision"):
+        cli_module._retrieval_evolve_command(args)
+
+
+def test_caller_authored_checkpoint_sidecar_never_confers_resume_authority(
     tmp_path,
 ) -> None:
     checkpoint = tmp_path / "checkpoint.json"
     authority = tmp_path / "checkpoint.authority.json"
     checkpoint.write_bytes(b"checkpoint-one")
 
-    with pytest.raises(ValueError, match="out-of-band authority"):
+    with pytest.raises(ValueError, match="sidecar|authority"):
         cli_module._restore_retrieval_checkpoint_authority(checkpoint, authority)
 
     digest = hashlib.sha256(b"checkpoint-one").hexdigest()
@@ -883,10 +1578,7 @@ def test_checkpoint_resume_requires_matching_out_of_band_digest_and_epoch(
         ),
         encoding="utf-8",
     )
-    cli_module._restore_retrieval_checkpoint_authority(checkpoint, authority)
-
-    checkpoint.write_bytes(b"checkpoint-replacement")
-    with pytest.raises(ValueError, match="digest|checkpoint|trusted"):
+    with pytest.raises(ValueError, match="sidecar|authority"):
         cli_module._restore_retrieval_checkpoint_authority(checkpoint, authority)
 
 

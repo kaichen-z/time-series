@@ -13,6 +13,7 @@ from evolving_loop.retrieval_agent.schemas import (
     EvidenceCitation,
     FinalRetrievalCard,
     RetrievalContractError,
+    RetrievalGap,
     RetrievalRoundResult,
 )
 
@@ -610,8 +611,16 @@ def verify_round_result(
 def merge_verified_rounds(
     round1: RetrievalRoundResult,
     round2: RetrievalRoundResult | None,
+    *,
+    gaps: Sequence[RetrievalGap] = (),
 ) -> FinalRetrievalCard:
     """Append Round 2 verification without allowing it to rewrite Round 1."""
+    final_gaps = tuple(gaps)
+    if any(not isinstance(item, RetrievalGap) for item in final_gaps):
+        raise RetrievalContractError("invalid final retrieval gaps")
+    gap_ids = [item.assumption_id for item in final_gaps]
+    if len(gap_ids) != len(set(gap_ids)):
+        raise RetrievalContractError("duplicate final retrieval gap assumption_id")
     if round2 is None:
         round2_chains: tuple[EvidenceChain, ...] = ()
         round2_counter: tuple[EvidenceChain, ...] = ()
@@ -655,6 +664,7 @@ def merge_verified_rounds(
         complete=bool(round1.chains or round2_chains) and all(
             item.numeric_eligible for item in (*round1.chains, *round2_chains)
         ),
+        gaps=final_gaps,
     )
 
 

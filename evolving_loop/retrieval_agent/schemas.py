@@ -448,6 +448,7 @@ class FinalRetrievalCard:
     rejected: tuple[str, ...]
     unresolved_contradictions: tuple[str, ...]
     complete: bool
+    gaps: tuple[RetrievalGap, ...] = ()
 
     @property
     def completeness(self) -> bool:
@@ -467,6 +468,7 @@ class FinalRetrievalCard:
                 "round1", "round2", "chains", "selected_document_ids", "rejected",
                 "unresolved_contradictions", "complete",
             },
+            optional={"gaps"},
             context="final retrieval card",
         )
         round1 = RetrievalRoundResult.from_payload(_mapping(value["round1"], "round1"))
@@ -476,6 +478,13 @@ class FinalRetrievalCard:
         )
         chains = _chains(value["chains"], "merged chains")
         selected = _identifier_list(value["selected_document_ids"], "selected_document_ids")
+        raw_gaps = value.get("gaps", ())
+        if not isinstance(raw_gaps, (list, tuple)):
+            raise RetrievalContractError("invalid final retrieval gaps")
+        gaps = tuple(RetrievalGap.from_payload(item) for item in raw_gaps)
+        gap_ids = [item.assumption_id for item in gaps]
+        if len(gap_ids) != len(set(gap_ids)):
+            raise RetrievalContractError("duplicate final retrieval gap assumption_id")
         return cls(
             round1=round1,
             round2=round2,
@@ -486,6 +495,7 @@ class FinalRetrievalCard:
                 value["unresolved_contradictions"], "unresolved_contradictions"
             ),
             complete=_bool(value["complete"], "complete"),
+            gaps=gaps,
         )
 
     def to_payload(self) -> dict[str, object]:
@@ -497,6 +507,7 @@ class FinalRetrievalCard:
             "rejected": list(self.rejected),
             "unresolved_contradictions": list(self.unresolved_contradictions),
             "complete": self.complete,
+            "gaps": [item.to_payload() for item in self.gaps],
         }
 
     def to_legacy_result(self):

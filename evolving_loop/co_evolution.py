@@ -179,6 +179,17 @@ class HarnessPolicy:
                 handle.flush()
                 os.fsync(handle.fileno())
             _replace_policy_artifact(temporary, destination)
+            parent_flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            parent_descriptor = os.open(destination.parent, parent_flags)
+            try:
+                os.fsync(parent_descriptor)
+            finally:
+                os.close(parent_descriptor)
         except Exception:
             # Keep the uniquely named unpublished inode rather than deleting a
             # possibly replaced name after descriptor ownership has ended.

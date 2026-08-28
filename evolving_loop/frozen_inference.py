@@ -156,6 +156,7 @@ def run_frozen_inference(
                     "rejected": list(result.retrieval.rejected),
                     "unresolved_contradictions": [],
                     "complete": bool(result.retrieval.sufficient),
+                    "gaps": [],
                 }
                 assumption_stances = []
                 used_skill_ids = []

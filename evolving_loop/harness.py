@@ -239,6 +239,7 @@ class EvolvingForecastHarness:
         provisional = _guard_raw_override(provisional, provisional_candidates, coding)
 
         round2 = None
+        sent_gaps = ()
         if (
             not _fatal_round1_failure(round1)
             and morphology_failure is None
@@ -249,13 +250,14 @@ class EvolvingForecastHarness:
                 provisional,
             )
         ):
+            sent_gaps = provisional.gaps
             round2 = self.retrieval.run_round2(
                 task,
                 round1,
-                provisional.gaps,
+                sent_gaps,
                 assumptions,
             )
-        card = merge_verified_rounds(round1, round2)
+        card = merge_verified_rounds(round1, round2, gaps=sent_gaps)
         if morphology_failure is not None:
             card = replace(
                 card,

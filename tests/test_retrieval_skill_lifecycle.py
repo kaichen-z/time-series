@@ -6,6 +6,7 @@ import json
 import os
 import pickle
 import shutil
+import stat
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -480,6 +481,34 @@ def test_verified_release_factory_rechecks_file_hashes_at_hydration(tmp_path) ->
 
     with pytest.raises(RetrievalPolicyError, match="skills hash"):
         RetrievalSkillLibrary.from_release(release_path)
+
+    assert library.get_by_id("explicit_window").status == "accepted"
+
+
+def test_verified_release_hydration_uses_the_single_loaded_artifact_snapshot(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    genome = replace(
+        RetrievalGenome.seed(),
+        version="v001",
+        parent="v000",
+        active_skill_ids=("explicit_window",),
+    )
+    release = _write_accepted_retrieval_release(
+        tmp_path / "releases",
+        genome,
+        skills=(_active_payload(),),
+        audit=_accepted_audit(),
+    )
+    monkeypatch.setattr(
+        skill_library_module,
+        "_file_digest",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("release skills must not be reopened after snapshot validation")
+        ),
+    )
+
+    library = RetrievalSkillLibrary.from_release(release.path)
 
     assert library.get_by_id("explicit_window").status == "accepted"
 
@@ -1272,6 +1301,63 @@ def test_active_checkpoint_update_quarantines_owned_witness_before_unlink(
     assert len(
         [name for name in after_witnesses if name.startswith(".retrieval-quarantine-")]
     ) == 1
+
+
+def test_first_checkpoint_rollback_never_unlinks_the_visible_name_after_inspection(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "library" / "skills.json"
+    library = RetrievalSkillLibrary(path, (seed_skill(),), persist=False)
+    path.parent.mkdir()
+    real_fsync = skill_library_module.os.fsync
+    real_unlink = skill_library_module.os.unlink
+    replacement_attempted = False
+    displaced_name = "displaced-owned-main.json"
+
+    def fail_after_main_publication(descriptor: int) -> None:
+        metadata = skill_library_module.os.fstat(descriptor)
+        if stat.S_ISDIR(metadata.st_mode) and os.path.lexists(path):
+            raise OSError("directory fsync failed after main publication")
+        real_fsync(descriptor)
+
+    def replace_owned_main_before_visible_unlink(name, *args, **kwargs):
+        nonlocal replacement_attempted
+        directory_fd = kwargs.get("dir_fd")
+        if name == path.name and directory_fd is not None:
+            replacement_attempted = True
+            skill_library_module.os.rename(
+                name,
+                displaced_name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            descriptor = skill_library_module.os.open(
+                name,
+                skill_library_module.os.O_WRONLY
+                | skill_library_module.os.O_CREAT
+                | skill_library_module.os.O_EXCL,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            with skill_library_module.os.fdopen(descriptor, "wb") as handle:
+                handle.write(b"foreign replacement must survive\n")
+        return real_unlink(name, *args, **kwargs)
+
+    monkeypatch.setattr(skill_library_module.os, "fsync", fail_after_main_publication)
+    monkeypatch.setattr(
+        skill_library_module.os,
+        "unlink",
+        replace_owned_main_before_visible_unlink,
+    )
+
+    with pytest.raises(OSError, match="failed after main publication"):
+        library._write(library._skills)
+
+    assert not replacement_attempted
+    assert not (path.parent / displaced_name).exists()
+    quarantines = tuple(path.parent.glob(".retrieval-quarantine-*"))
+    assert len(quarantines) == 1
+    assert b'"explicit_window"' in quarantines[0].read_bytes()
 
 
 def test_owned_witness_cleanup_recovers_rename_that_committed_then_raised(

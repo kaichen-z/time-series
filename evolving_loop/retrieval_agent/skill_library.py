@@ -1722,10 +1722,20 @@ class RetrievalSkillLibrary:
         """Hydrate the Skill history bound to a freshly verified immutable release."""
         from evolving_loop.retrieval_agent.policy import (
             RetrievalRelease,
+        )
+
+        return cls._from_loaded_release(RetrievalRelease.load(path))
+
+    @classmethod
+    def _from_loaded_release(cls, release: object) -> "RetrievalSkillLibrary":
+        """Hydrate from one already verified, single-read release snapshot."""
+        from evolving_loop.retrieval_agent.policy import (
+            RetrievalRelease,
             _authorize_active_release_load,
         )
 
-        release = RetrievalRelease.load(path)
+        if not isinstance(release, RetrievalRelease):
+            raise RetrievalSkillError("invalid verified Retrieval release snapshot")
         payloads = tuple(release.skills)
         if any(not isinstance(record, Mapping) for record in payloads):
             raise RetrievalSkillError("release Skill rows must be objects")
@@ -1762,7 +1772,7 @@ class RetrievalSkillLibrary:
         library.path = skills_path
         library.persist = False
         library._active_record_origins = dict(active_origins)
-        library._file_sha256 = _file_digest(skills_path)
+        library._file_sha256 = release.skills_file_sha256
         library._skills = indexed
         return (
             _activate_verified_release_library(library)
@@ -1962,6 +1972,7 @@ class RetrievalSkillLibrary:
         witness_directory_identity: tuple[int, int] | None = None
         previous_witness_name: str | None = None
         previous_witness_encoded: bytes | None = None
+        checkpoint_identity: tuple[int, int] | None = None
         write_succeeded = False
         try:
             _revalidate_artifact_parent(safe_path, parent_descriptor)
@@ -1988,6 +1999,17 @@ class RetrievalSkillLibrary:
             temporary = _unique_temporary(
                 parent_descriptor, safe_path.name, encoded
             )
+            checkpoint_snapshot = _read_optional_artifact_entry_snapshot(
+                parent_descriptor, temporary
+            )
+            if (
+                checkpoint_snapshot is None
+                or checkpoint_snapshot[1] != encoded
+            ):
+                raise RetrievalSkillError(
+                    "retrieval Skill checkpoint temporary changed"
+                )
+            checkpoint_identity = checkpoint_snapshot[0]
             if previous_encoded is not None:
                 rollback_temporary = _unique_temporary(
                     parent_descriptor,
@@ -2221,17 +2243,30 @@ class RetrievalSkillLibrary:
             write_succeeded = True
         except Exception:
             try:
-                current = _read_optional_artifact_entry(
-                    parent_descriptor, safe_path.name
-                )
                 if previous_encoded is None:
-                    if current == encoded:
-                        os.unlink(safe_path.name, dir_fd=parent_descriptor)
-                    elif current is not None:
+                    if checkpoint_identity is None:
+                        raise RetrievalSkillError(
+                            "first Retrieval Skill checkpoint ownership is unknown"
+                        )
+                    _unlink_owned_artifact_entry(
+                        parent_descriptor,
+                        safe_path.name,
+                        checkpoint_identity,
+                        encoded,
+                    )
+                    current_metadata = _artifact_entry_metadata(
+                        parent_descriptor, safe_path.name
+                    )
+                    if current_metadata is not None and (
+                        current_metadata.st_dev,
+                        current_metadata.st_ino,
+                    ) == checkpoint_identity:
                         raise RetrievalSkillError(
                             "first Retrieval Skill checkpoint publication could not roll back"
                         )
-                elif current != previous_encoded:
+                elif _read_optional_artifact_entry(
+                    parent_descriptor, safe_path.name
+                ) != previous_encoded:
                     if rollback_temporary is None:
                         rollback_temporary = _unique_temporary(
                             parent_descriptor,
@@ -2245,10 +2280,8 @@ class RetrievalSkillLibrary:
                         dst_dir_fd=parent_descriptor,
                     )
                     rollback_temporary = None
-                if (
-                    _read_optional_artifact_entry(
-                        parent_descriptor, safe_path.name
-                    )
+                if previous_encoded is not None and (
+                    _read_optional_artifact_entry(parent_descriptor, safe_path.name)
                     != previous_encoded
                 ):
                     raise RetrievalSkillError(

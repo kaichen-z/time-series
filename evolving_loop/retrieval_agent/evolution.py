@@ -12,6 +12,7 @@ import math
 import os
 import random
 import stat
+import fcntl
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -84,10 +85,27 @@ class RetrievalCheckpointError(RetrievalEvolutionError):
 class RetrievalForecastingFailure(RetrievalEvolutionError):
     """A completed non-transient forecasting outcome that must not be retried."""
 
-    def __init__(self, error_type: str, message: str) -> None:
-        self.error_type = error_type
-        self.original_message = message
-        super().__init__(f"{error_type}:{message}")
+    _FIXED_MESSAGES = {
+        "InferenceRuntimeFailure": "retrieval inference failed",
+        "InvalidHarnessResult": "retrieval harness returned an invalid result",
+        "TrustedScoringFailure": "trusted retrieval scoring failed",
+        "MissingRetrievalDiagnostics": "trusted retrieval diagnostics are missing",
+        "InvalidTrustedMetric": "trusted retrieval metrics are invalid",
+        "EvaluatorExecutionFailure": "trusted evaluator execution failed",
+        "InvalidEvaluatorResult": "trusted evaluator result is invalid",
+        "ForecastingFailure": "trusted forecasting failed",
+    }
+
+    def __init__(self, error_type: str, message: str = "") -> None:
+        del message
+        category = (
+            error_type
+            if error_type in self._FIXED_MESSAGES
+            else "ForecastingFailure"
+        )
+        self.error_type = category
+        self.original_message = self._FIXED_MESSAGES[category]
+        super().__init__(f"{category}:{self.original_message}")
 
     @property
     def rejection_reason(self) -> str:
@@ -327,10 +345,8 @@ def _unique_checkpoint_temporary(
             handle.flush()
             os.fsync(handle.fileno())
     except Exception:
-        try:
-            os.unlink(temporary, dir_fd=parent_descriptor)
-        except OSError:
-            pass
+        # Descriptor ownership has ended; retain the unique name rather than
+        # risk unlinking a replacement installed during the failed write.
         raise
     return temporary
 
@@ -397,6 +413,314 @@ def _build_checkpoint_authority_boundary():
     _authorize_retrieval_evolution_checkpoint_for_operator,
 ) = _build_checkpoint_authority_boundary()
 del _build_checkpoint_authority_boundary
+
+
+@dataclass(frozen=True)
+class _CheckpointAuthorityToken:
+    checkpoint_sha256: str
+    authority_epoch: int
+
+
+def _exact_checkpoint_digest(value: object, field: str) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise RetrievalCheckpointError(f"invalid {field}")
+    return value
+
+
+class _OperatorCheckpointAuthority:
+    """Protected two-phase digest/epoch journal for cross-process resume."""
+
+    def __init__(self, checkpoint_path: Path, authority_path: Path) -> None:
+        self.checkpoint_path = _safe_checkpoint_path(checkpoint_path)
+        self.authority_path = _safe_checkpoint_path(authority_path)
+        if self.checkpoint_path.parent == self.authority_path.parent:
+            raise RetrievalCheckpointError(
+                "checkpoint authority must be independently provisioned, not adjacent"
+            )
+        try:
+            safe, parent_descriptor = _open_checkpoint_parent(
+                self.authority_path, create=False
+            )
+        except FileNotFoundError as error:
+            raise RetrievalCheckpointError(
+                "checkpoint authority parent must be independently provisioned"
+            ) from error
+        parent_metadata = os.fstat(parent_descriptor)
+        if (
+            parent_metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(parent_metadata.st_mode) & 0o022
+        ):
+            os.close(parent_descriptor)
+            raise RetrievalCheckpointError(
+                "checkpoint authority parent is not operator-protected"
+            )
+        try:
+            fcntl.flock(parent_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            os.close(parent_descriptor)
+            raise RetrievalCheckpointError(
+                "checkpoint authority store is already in use"
+            ) from error
+        self.authority_path = safe
+        self._parent_descriptor = parent_descriptor
+        self._closed = False
+        self._pending_token: _CheckpointAuthorityToken | None = None
+        try:
+            self._state = self._load_state()
+            self._reconcile()
+        except Exception:
+            self.close()
+            raise
+
+    def _checkpoint_digest(self) -> str | None:
+        if not _safe_checkpoint_exists(self.checkpoint_path):
+            return None
+        return hashlib.sha256(
+            _safe_checkpoint_read(self.checkpoint_path)
+        ).hexdigest()
+
+    def _default_state(self) -> dict[str, object]:
+        return {
+            "schema_version": 2,
+            "checkpoint_path": str(self.checkpoint_path),
+            "checkpoint_sha256": None,
+            "authority_epoch": 0,
+            "pending": None,
+        }
+
+    def _load_state(self) -> dict[str, object]:
+        try:
+            metadata = os.stat(
+                self.authority_path.name,
+                dir_fd=self._parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            if self._checkpoint_digest() is not None:
+                raise RetrievalCheckpointError(
+                    "checkpoint exists without independently protected authority"
+                )
+            return self._default_state()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+        ):
+            raise RetrievalCheckpointError(
+                "checkpoint authority record is not operator-protected"
+            )
+        try:
+            encoded = _read_checkpoint_entry(
+                self._parent_descriptor, self.authority_path.name
+            )
+            raw = json.loads(encoded.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RetrievalCheckpointError(
+                "invalid checkpoint authority record"
+            ) from error
+        expected = {
+            "schema_version",
+            "checkpoint_path",
+            "checkpoint_sha256",
+            "authority_epoch",
+            "pending",
+        }
+        if not isinstance(raw, dict) or set(raw) != expected:
+            raise RetrievalCheckpointError("invalid checkpoint authority schema")
+        if raw["schema_version"] != 2:
+            raise RetrievalCheckpointError("unsupported checkpoint authority schema")
+        if raw["checkpoint_path"] != str(self.checkpoint_path):
+            raise RetrievalCheckpointError("checkpoint authority path binding mismatch")
+        epoch = raw["authority_epoch"]
+        digest = raw["checkpoint_sha256"]
+        if type(epoch) is not int or epoch < 0:
+            raise RetrievalCheckpointError("invalid checkpoint authority epoch")
+        if epoch == 0:
+            if digest is not None:
+                raise RetrievalCheckpointError("invalid initial checkpoint authority")
+        else:
+            _exact_checkpoint_digest(digest, "checkpoint authority digest")
+        pending = raw["pending"]
+        if pending is not None:
+            if (
+                not isinstance(pending, dict)
+                or set(pending) != {"checkpoint_sha256", "authority_epoch"}
+                or type(pending["authority_epoch"]) is not int
+                or pending["authority_epoch"] != epoch + 1
+            ):
+                raise RetrievalCheckpointError("invalid pending checkpoint authority")
+            _exact_checkpoint_digest(
+                pending["checkpoint_sha256"],
+                "pending checkpoint authority digest",
+            )
+        return raw
+
+    def _write_state(self, state: Mapping[str, object]) -> None:
+        encoded = (
+            json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n"
+        ).encode("utf-8")
+        temporary = _unique_checkpoint_temporary(
+            self._parent_descriptor,
+            self.authority_path.name,
+            encoded,
+        )
+        exists = _checkpoint_entry_exists(
+            self._parent_descriptor, self.authority_path.name
+        )
+        try:
+            if exists:
+                os.replace(
+                    temporary,
+                    self.authority_path.name,
+                    src_dir_fd=self._parent_descriptor,
+                    dst_dir_fd=self._parent_descriptor,
+                )
+            else:
+                try:
+                    os.link(
+                        temporary,
+                        self.authority_path.name,
+                        src_dir_fd=self._parent_descriptor,
+                        dst_dir_fd=self._parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError as error:
+                    raise RetrievalCheckpointError(
+                        "checkpoint authority record appeared during commit"
+                    ) from error
+                # The no-replace hard link publishes the authority inode. Keep
+                # its unique staging alias because unlink-by-name cannot be
+                # bound indivisibly to that inode.
+            temporary = ""
+            os.fsync(self._parent_descriptor)
+        except Exception:
+            # The unique unpublished authority inode is retained on uncertainty.
+            raise
+
+    def _reconcile(self) -> None:
+        pending = self._state["pending"]
+        checkpoint_digest = self._checkpoint_digest()
+        if isinstance(pending, Mapping):
+            if checkpoint_digest == pending["checkpoint_sha256"]:
+                self._state = {
+                    **self._state,
+                    "checkpoint_sha256": pending["checkpoint_sha256"],
+                    "authority_epoch": pending["authority_epoch"],
+                    "pending": None,
+                }
+                self._write_state(self._state)
+            elif checkpoint_digest == self._state["checkpoint_sha256"]:
+                self._state = {**self._state, "pending": None}
+                self._write_state(self._state)
+            else:
+                raise RetrievalCheckpointError(
+                    "pending checkpoint authority cannot reconcile durable bytes"
+                )
+        expected_digest = self._state["checkpoint_sha256"]
+        expected_epoch = self._state["authority_epoch"]
+        checkpoint_digest = self._checkpoint_digest()
+        if expected_digest is None:
+            if checkpoint_digest is not None or expected_epoch != 0:
+                raise RetrievalCheckpointError(
+                    "checkpoint authority has no trusted initial state"
+                )
+        else:
+            if checkpoint_digest != expected_digest:
+                raise RetrievalCheckpointError(
+                    "checkpoint does not match protected authority record"
+                )
+            _authorize_retrieval_evolution_checkpoint_for_operator(
+                self.checkpoint_path,
+                expected_sha256=cast(str, expected_digest),
+                expected_epoch=cast(int, expected_epoch),
+            )
+
+    def prepare(self, checkpoint_sha256: str) -> _CheckpointAuthorityToken:
+        if self._closed or self._pending_token is not None:
+            raise RetrievalCheckpointError("checkpoint authority transaction is unavailable")
+        digest = _exact_checkpoint_digest(
+            checkpoint_sha256, "prepared checkpoint digest"
+        )
+        if self._checkpoint_digest() != self._state["checkpoint_sha256"]:
+            raise RetrievalCheckpointError(
+                "checkpoint changed before authority transaction"
+            )
+        token = _CheckpointAuthorityToken(
+            digest, cast(int, self._state["authority_epoch"]) + 1
+        )
+        proposed = {
+            **self._state,
+            "pending": {
+                "checkpoint_sha256": token.checkpoint_sha256,
+                "authority_epoch": token.authority_epoch,
+            },
+        }
+        self._write_state(proposed)
+        self._state = proposed
+        self._pending_token = token
+        return token
+
+    def commit(self, token: _CheckpointAuthorityToken) -> int:
+        if self._pending_token is not token:
+            raise RetrievalCheckpointError("invalid checkpoint authority transaction")
+        if self._checkpoint_digest() != token.checkpoint_sha256:
+            raise RetrievalCheckpointError(
+                "checkpoint commit does not match prepared authority digest"
+            )
+        committed = {
+            **self._state,
+            "checkpoint_sha256": token.checkpoint_sha256,
+            "authority_epoch": token.authority_epoch,
+            "pending": None,
+        }
+        self._write_state(committed)
+        self._state = committed
+        self._pending_token = None
+        _authorize_retrieval_evolution_checkpoint_for_operator(
+            self.checkpoint_path,
+            expected_sha256=token.checkpoint_sha256,
+            expected_epoch=token.authority_epoch,
+        )
+        return token.authority_epoch
+
+    def abort(self, token: _CheckpointAuthorityToken) -> int | None:
+        if self._pending_token is not token:
+            return None
+        checkpoint_digest = self._checkpoint_digest()
+        if checkpoint_digest == token.checkpoint_sha256:
+            return self.commit(token)
+        if checkpoint_digest != self._state["checkpoint_sha256"]:
+            raise RetrievalCheckpointError(
+                "checkpoint authority abort found unknown durable bytes"
+            )
+        rolled_back = {**self._state, "pending": None}
+        self._write_state(rolled_back)
+        self._state = rolled_back
+        self._pending_token = None
+        return None
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            fcntl.flock(self._parent_descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(self._parent_descriptor)
+
+
+def _open_retrieval_checkpoint_authority_for_operator(
+    checkpoint_path: str | Path,
+    authority_path: str | Path,
+) -> _OperatorCheckpointAuthority:
+    return _OperatorCheckpointAuthority(
+        Path(checkpoint_path), Path(authority_path)
+    )
 
 
 def _finite(value: object, field_name: str) -> float:
@@ -1225,6 +1549,8 @@ class RetrievalEvolutionEngine:
         *,
         skill_library: RetrievalSkillLibrary | None = None,
         harness_factory: Callable[..., object] | None = None,
+        _checkpoint_authority: _OperatorCheckpointAuthority | None = None,
+        _checkpoint_payload_validator: Callable[[object], None] | None = None,
     ) -> None:
         self.mutation_llm = mutation_llm
         if not callable(getattr(evaluator, "evaluate", None)):
@@ -1239,6 +1565,17 @@ class RetrievalEvolutionEngine:
             )
         self.skill_library = skill_library
         self.harness_factory = harness_factory
+        if _checkpoint_authority is not None and self.config.checkpoint_path is None:
+            raise RetrievalEvolutionError(
+                "checkpoint authority requires a checkpoint path"
+            )
+        if (
+            _checkpoint_payload_validator is not None
+            and not callable(_checkpoint_payload_validator)
+        ):
+            raise RetrievalEvolutionError("invalid checkpoint payload validator")
+        self._checkpoint_authority = _checkpoint_authority
+        self._checkpoint_payload_validator = _checkpoint_payload_validator
         self._scientific_inputs: dict[str, object] = {}
         self._original_parent: RetrievalGenome | None = None
         self._current_parent: RetrievalGenome | None = None
@@ -1895,14 +2232,15 @@ class RetrievalEvolutionEngine:
                 try:
                     return parse_json_object(response.text)
                 except JsonExtractionError as error:
+                    del error
                     self._event(
                         "mutation_response_invalid",
                         generation=generation,
                         scope=scope,
-                        error=str(error),
+                        error="invalid_mutation_response",
                     )
                     return {
-                        "invalid_mutation_response": f"{type(error).__name__}:{error}"
+                        "invalid_mutation_response": "invalid_mutation_response"
                     }
             except TransientLLMError as error:
                 if attempt + 1 >= attempts:
@@ -1911,7 +2249,7 @@ class RetrievalEvolutionEngine:
                         operation="mutation",
                         generation=generation,
                         scope=scope,
-                        error=str(error),
+                        error="transient_model_failure",
                     )
                     self._save_checkpoint(status="running", result=None)
                     raise
@@ -2001,7 +2339,7 @@ class RetrievalEvolutionEngine:
                         operation="evaluation",
                         stage=stage,
                         genome=genome.version,
-                        error=str(error),
+                        error="transient_model_failure",
                     )
                     self._save_checkpoint(status="running", result=None)
                     raise
@@ -2016,33 +2354,37 @@ class RetrievalEvolutionEngine:
             except (TypeError, RetrievalSkillError):
                 raise
             except Exception as error:
+                failure = RetrievalForecastingFailure(
+                    (
+                        error.error_type
+                        if isinstance(error, RetrievalForecastingFailure)
+                        else "EvaluatorExecutionFailure"
+                    )
+                )
                 self._record_terminal_outcome(
                     batch_key,
                     genome,
                     tasks,
                     task_keys,
                     stage,
-                    error,
+                    failure,
                 )
-                raise RetrievalForecastingFailure(
-                    type(error).__name__, str(error)
-                ) from error
+                raise failure from None
         else:
             raise AssertionError("unreachable evaluator retry loop")
         try:
             result = self._validate_evaluator_result(genome, tasks, result)
-        except Exception as error:
+        except Exception:
+            failure = RetrievalForecastingFailure("InvalidEvaluatorResult")
             self._record_terminal_outcome(
                 batch_key,
                 genome,
                 tasks,
                 task_keys,
                 stage,
-                error,
+                failure,
             )
-            raise RetrievalForecastingFailure(
-                type(error).__name__, str(error)
-            ) from error
+            raise failure from None
         self._evaluation_cache[batch_key] = result
         self._cache_records[batch_key] = {
             "stage": stage,
@@ -2102,7 +2444,7 @@ class RetrievalEvolutionEngine:
         tasks: tuple[ContextTask, ...],
         task_keys: tuple[RetrievalInferenceCacheKey, ...],
         stage: str,
-        error: Exception,
+        failure: RetrievalForecastingFailure,
     ) -> None:
         core: dict[str, object] = {
             "stage": stage,
@@ -2113,8 +2455,8 @@ class RetrievalEvolutionEngine:
             "skill_authority_sha256": task_keys[0].skill_authority_sha256,
             "task_ids": [task.numeric.task_id for task in tasks],
             "task_cache_keys": [item.digest() for item in task_keys],
-            "error_type": type(error).__name__,
-            "error_message": str(error),
+            "error_type": failure.error_type,
+            "error_message": failure.original_message,
         }
         self._terminal_outcomes[batch_key] = {
             **core,
@@ -2124,8 +2466,8 @@ class RetrievalEvolutionEngine:
             "forecasting_failure_completed",
             stage=stage,
             genome=genome.version,
-            error_type=type(error).__name__,
-            error=str(error),
+            error_type=failure.error_type,
+            error=failure.original_message,
         )
         self._save_checkpoint(status="running", result=None)
 
@@ -2204,12 +2546,16 @@ class RetrievalEvolutionEngine:
             "trace": self._trace,
             "result": result.to_payload() if result is not None else None,
         }
+        if self._checkpoint_payload_validator is not None:
+            self._checkpoint_payload_validator(payload)
         encoded = (
             json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True)
             + "\n"
         ).encode("utf-8")
         path, parent_descriptor = _open_checkpoint_parent(path, create=True)
         temporary: str | None = None
+        authority_token: _CheckpointAuthorityToken | None = None
+        checkpoint_sha256 = hashlib.sha256(encoded).hexdigest()
         try:
             _revalidate_checkpoint_parent(path, parent_descriptor)
             exists = _checkpoint_entry_exists(parent_descriptor, path.name)
@@ -2227,6 +2573,10 @@ class RetrievalEvolutionEngine:
             temporary = _unique_checkpoint_temporary(
                 parent_descriptor, path.name, encoded
             )
+            if self._checkpoint_authority is not None:
+                authority_token = self._checkpoint_authority.prepare(
+                    checkpoint_sha256
+                )
             _revalidate_checkpoint_parent(path, parent_descriptor)
             if self._checkpoint_file_sha256 is None:
                 try:
@@ -2241,7 +2591,8 @@ class RetrievalEvolutionEngine:
                     raise RetrievalCheckpointError(
                         "Retrieval evolution checkpoint appeared during no-replace commit"
                     ) from error
-                os.unlink(temporary, dir_fd=parent_descriptor)
+                # Retain the unique staging hard link; deleting it by name after
+                # publication could remove a concurrent replacement.
                 temporary = None
             else:
                 if (
@@ -2263,17 +2614,28 @@ class RetrievalEvolutionEngine:
                 temporary = None
             _revalidate_checkpoint_parent(path, parent_descriptor)
             os.fsync(parent_descriptor)
-            self._checkpoint_file_sha256 = hashlib.sha256(encoded).hexdigest()
-            self._checkpoint_authority_epoch = _register_evolution_checkpoint(
-                path,
-                self._checkpoint_file_sha256,
-            )
+            self._checkpoint_file_sha256 = checkpoint_sha256
+            if self._checkpoint_authority is None:
+                self._checkpoint_authority_epoch = _register_evolution_checkpoint(
+                    path,
+                    checkpoint_sha256,
+                )
+            else:
+                assert authority_token is not None
+                self._checkpoint_authority_epoch = (
+                    self._checkpoint_authority.commit(authority_token)
+                )
+                authority_token = None
+        except Exception:
+            if self._checkpoint_authority is not None and authority_token is not None:
+                recovered_epoch = self._checkpoint_authority.abort(authority_token)
+                if recovered_epoch is not None:
+                    self._checkpoint_file_sha256 = checkpoint_sha256
+                    self._checkpoint_authority_epoch = recovered_epoch
+            raise
         finally:
-            if temporary is not None:
-                try:
-                    os.unlink(temporary, dir_fd=parent_descriptor)
-                except FileNotFoundError:
-                    pass
+            # Any unpublished unique name is deliberately retained on failure:
+            # after descriptor ownership ends, name-based cleanup is unsafe.
             os.close(parent_descriptor)
 
     def _load_checkpoint(

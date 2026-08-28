@@ -92,6 +92,14 @@ def _card() -> FinalRetrievalCard:
             "rejected": ["round1_bad_citation", "round2_bad_citation"],
             "unresolved_contradictions": ["direction_conflict"],
             "complete": True,
+            "gaps": [
+                {
+                    "assumption_id": "assumption_1",
+                    "gap_type": "counterevidence",
+                    "missing_information": "Could demand reverse?",
+                    "priority": "high",
+                }
+            ],
         }
     )
 
@@ -181,6 +189,7 @@ def test_hidden_retrieval_inference_is_write_free_and_reports_both_rounds(tmp_pa
         "round2_bad_citation",
     ]
     assert report["retrieval"]["round1"]["gaps"][0]["assumption_id"] == "assumption_1"
+    assert report["retrieval"]["gaps"][0]["assumption_id"] == "assumption_1"
     assert report["assumption_stances"] == [
         {
             "chain_id": "round1_chain",

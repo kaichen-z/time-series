@@ -264,6 +264,8 @@ def test_two_stage_prompt_boundaries_and_decision_gap_projection() -> None:
     assert result.retrieval.evidence
     assert result.retrieval_card is not None
     assert result.retrieval_card.round2 is not None
+    assert [item.to_payload() for item in result.retrieval_card.gaps] == [gap]
+    assert result.retrieval_card.to_payload()["gaps"] == [gap]
     for forbidden in (
         "candidate_id", "forecast", "hindcast_smae", "hindcast_srmse", "code",
         "future_values", "gt_evidence", "role", "subtype",

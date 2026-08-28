@@ -24,6 +24,7 @@ def test_retrieval_runner_is_executable_bash_and_dispatches_exact_command(tmp_pa
         encoding="utf-8",
     )
     fake_python.chmod(0o755)
+    authority_path = tmp_path / "authority with spaces" / "checkpoint.json"
     environment = {
         **os.environ,
         "PATH": f"{binary}{os.pathsep}{os.environ['PATH']}",
@@ -33,6 +34,7 @@ def test_retrieval_runner_is_executable_bash_and_dispatches_exact_command(tmp_pa
         "MODEL": "model-test",
         "EFFORT": "medium",
         "RUN_DIR": "run with spaces",
+        "AUTHORITY_PATH": str(authority_path),
     }
     completed = subprocess.run(
         [str(RUNNER)],
@@ -66,6 +68,10 @@ def test_retrieval_runner_is_executable_bash_and_dispatches_exact_command(tmp_pa
         "8",
         "--screen-promote",
         "2",
+        "--run-root",
+        "run with spaces",
+        "--checkpoint-authority-path",
+        str(authority_path),
         "--checkpoint-path",
         "run with spaces/checkpoint.json",
         "--progress-path",
@@ -77,3 +83,5 @@ def test_retrieval_runner_is_executable_bash_and_dispatches_exact_command(tmp_pa
     ]
     assert "python -m evolving_loop.cli" in completed.stdout
     assert "--evolution retrieval" in completed.stdout
+    assert authority_path.parent.is_dir()
+    assert stat.S_IMODE(authority_path.parent.stat().st_mode) == 0o700

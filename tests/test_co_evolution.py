@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
+import stat
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -164,6 +166,26 @@ def test_policy_save_is_atomic_and_preserves_existing_file_on_publish_failure(
         HarnessPolicy().save(destination)
 
     assert destination.read_text(encoding="utf-8") == "existing-policy\n"
+
+
+def test_policy_save_fsyncs_parent_directory_after_atomic_replace(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "policy.json"
+    real_fsync = co_evolution_module.os.fsync
+    directory_fsyncs = 0
+
+    def record_fsync(descriptor: int) -> None:
+        nonlocal directory_fsyncs
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            directory_fsyncs += 1
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(co_evolution_module.os, "fsync", record_fsync)
+
+    HarnessPolicy().save(destination)
+
+    assert directory_fsyncs == 1
 
 
 def test_evolver_prompt_firewall_excludes_all_evaluator_only_values() -> None:
