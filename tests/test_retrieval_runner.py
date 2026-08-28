@@ -28,6 +28,9 @@ def test_retrieval_runner_is_executable_bash_and_dispatches_exact_command(tmp_pa
     authority_head_path = (
         tmp_path / "authority with spaces" / "checkpoint.head.json"
     )
+    authority_anchor_path = (
+        tmp_path / "authority with spaces" / "checkpoint.anchors"
+    )
     authority_key = "task-8-runner-operator-authority-key-32-bytes"
     environment = {
         **os.environ,
@@ -40,6 +43,7 @@ def test_retrieval_runner_is_executable_bash_and_dispatches_exact_command(tmp_pa
         "RUN_DIR": "run with spaces",
         "AUTHORITY_PATH": str(authority_path),
         "AUTHORITY_HEAD_PATH": str(authority_head_path),
+        "AUTHORITY_ANCHOR_PATH": str(authority_anchor_path),
         "RETRIEVAL_CHECKPOINT_AUTHORITY_KEY": authority_key,
     }
     completed = subprocess.run(
@@ -80,6 +84,8 @@ def test_retrieval_runner_is_executable_bash_and_dispatches_exact_command(tmp_pa
         str(authority_path),
         "--checkpoint-authority-head-path",
         str(authority_head_path),
+        "--checkpoint-authority-anchor-path",
+        str(authority_anchor_path),
         "--checkpoint-path",
         "run with spaces/checkpoint.json",
         "--progress-path",

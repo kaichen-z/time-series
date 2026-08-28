@@ -8,6 +8,7 @@ import re
 import subprocess
 import tempfile
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -96,6 +97,7 @@ class CodexCLIConfig:
     json_repair_attempts: int = 2
     transport_retries: int = 2
     transport_retry_delay_seconds: float = 1.0
+    subprocess_env: Mapping[str, str] | None = None
 
 
 class CodexCLIClient:
@@ -108,6 +110,12 @@ class CodexCLIClient:
 
     def __init__(self, config: CodexCLIConfig | None = None) -> None:
         self.config = config or CodexCLIConfig()
+        source_environment = (
+            os.environ
+            if self.config.subprocess_env is None
+            else self.config.subprocess_env
+        )
+        self._subprocess_environment = dict(source_environment)
         self.calls = 0
         self.cache_hits = 0
 
@@ -172,6 +180,7 @@ class CodexCLIClient:
                         text=True,
                         timeout=self.config.timeout_seconds,
                         check=False,
+                        env=dict(self._subprocess_environment),
                     )
                 except FileNotFoundError as exc:
                     raise RuntimeError(f"Codex CLI was not found: {self.config.binary}") from exc
@@ -284,6 +293,7 @@ class ClaudeCLIConfig:
     model: str | None = None
     timeout_seconds: int = 900
     cache_dir: str | Path | None = "runs/evolving/claude-cache"
+    subprocess_env: Mapping[str, str] | None = None
 
 
 class ClaudeCLIClient:
@@ -298,6 +308,16 @@ class ClaudeCLIClient:
 
     def __init__(self, config: ClaudeCLIConfig | None = None) -> None:
         self.config = config or ClaudeCLIConfig()
+        source_environment = (
+            os.environ
+            if self.config.subprocess_env is None
+            else self.config.subprocess_env
+        )
+        self._subprocess_environment = {
+            key: value
+            for key, value in source_environment.items()
+            if not key.startswith("CLAUDE")
+        }
         self.calls = 0
         self.cache_hits = 0
 
@@ -385,14 +405,13 @@ class ClaudeCLIClient:
             for message in messages
         )
 
-    @staticmethod
-    def _subprocess_env() -> dict[str, str]:
+    def _subprocess_env(self) -> dict[str, str]:
         # Strip every CLAUDE*-prefixed variable: when this process is itself run inside a
         # Claude Code session, those leak into the child and make it behave as a "child
         # session" (inheriting the parent's mode/state) instead of a clean, isolated call --
         # verified directly: the same call produced a suspicious-injection refusal with them
         # present, and a clean JSON answer with them stripped.
-        return {key: value for key, value in os.environ.items() if not key.startswith("CLAUDE")}
+        return dict(self._subprocess_environment)
 
 
 def _gpu_free_mib() -> dict[int, int]:

@@ -37,6 +37,31 @@ def test_codex_cli_client_returns_and_caches_json() -> None:
     assert client.cache_hits == 1
 
 
+def test_codex_cli_client_passes_only_the_explicit_subprocess_environment() -> None:
+    explicit_environment = {"PATH": "/trusted/bin", "SAFE_SETTING": "enabled"}
+    client = CodexCLIClient(
+        CodexCLIConfig(
+            cache_dir=None,
+            timeout_seconds=5,
+            subprocess_env=explicit_environment,
+        )
+    )
+
+    def fake_run(command, **kwargs):
+        output = Path(command[command.index("--output-last-message") + 1])
+        output.write_text('{"answer": 13}')
+        assert kwargs["env"] == explicit_environment
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    with patch("common.llm.subprocess.run", side_effect=fake_run):
+        response = client.complete(
+            system="Return JSON.",
+            messages=[{"role": "user", "content": "x"}],
+        )
+
+    assert parse_json_object(response.text) == {"answer": 13}
+
+
 def test_codex_cli_client_repairs_malformed_json_once() -> None:
     with tempfile.TemporaryDirectory() as directory:
         client = CodexCLIClient(

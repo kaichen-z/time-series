@@ -856,17 +856,20 @@ def test_retrieval_evolution_publishes_only_accepted_release_and_keeps_traces_in
             frozenset(manifest["partitions"]["public_test"]["task_ids"]),
         ),
     )
-    monkeypatch.setattr(
-        cli_module,
-        "_components",
-        lambda *_args, **kwargs: (
+    def sanitized_components(*_args, **kwargs):
+        assert "RETRIEVAL_CHECKPOINT_AUTHORITY_KEY" not in os.environ
+        subprocess_env = kwargs["llm_subprocess_env"]
+        assert "RETRIEVAL_CHECKPOINT_AUTHORITY_KEY" not in subprocess_env
+        captured["llm_subprocess_env"] = subprocess_env
+        return (
             object(),
             SimpleNamespace(all=lambda: ()),
             kwargs.get("retrieval_library_override"),
             SimpleNamespace(all=lambda: ()),
             None,
-        ),
-    )
+        )
+
+    monkeypatch.setattr(cli_module, "_components", sanitized_components)
     monkeypatch.setattr(
         cli_module,
         "_factory",
@@ -877,6 +880,8 @@ def test_retrieval_evolution_publishes_only_accepted_release_and_keeps_traces_in
     authority_directory.mkdir(mode=0o700)
     authority_path = authority_directory / "checkpoint.json"
     authority_head_path = authority_directory / "checkpoint.head.json"
+    authority_anchor_path = authority_directory / "checkpoint.anchors"
+    authority_anchor_path.mkdir(mode=0o700)
     operator_key = "task-8-cli-operator-authority-key-32-bytes"
     monkeypatch.setenv("RETRIEVAL_CHECKPOINT_AUTHORITY_KEY", operator_key)
     policy_path = runs / "best_policy.json"
@@ -909,6 +914,8 @@ def test_retrieval_evolution_publishes_only_accepted_release_and_keeps_traces_in
             str(authority_path),
             "--checkpoint-authority-head-path",
             str(authority_head_path),
+            "--checkpoint-authority-anchor-path",
+            str(authority_anchor_path),
         ]
     )
     args.evolution_mode = "retrieval"
@@ -939,14 +946,18 @@ def test_retrieval_evolution_publishes_only_accepted_release_and_keeps_traces_in
     ).hexdigest()
     assert authority["authority_epoch"] == 1
     assert authority["pending"] is None
-    assert authority["schema_version"] == 4
+    assert authority["schema_version"] == 5
     assert authority_head_path.is_file()
+    authority_anchor_path = Path(output["checkpoint_authority_anchor_path"])
+    assert authority_anchor_path.is_dir()
+    assert len(tuple(authority_anchor_path.glob("anchor-*.json"))) == 1
     persisted_authority = (
         authority_path.read_text(encoding="utf-8")
         + authority_head_path.read_text(encoding="utf-8")
     )
     assert operator_key not in persisted_authority
     assert operator_key not in json.dumps(output)
+    assert operator_key not in captured["llm_subprocess_env"].values()
     assert output["checkpoint_authority_anchor"] == {
         "epoch": authority["authority_epoch"],
         "head": authority["authority_head"],
@@ -1486,6 +1497,8 @@ def test_retrieval_path_collision_is_rejected_before_task_loading(
             str(authority),
             "--checkpoint-authority-head-path",
             str(authority.with_name("checkpoint.head.json")),
+            "--checkpoint-authority-anchor-path",
+            str(authority.with_name("checkpoint.anchors")),
         ]
     )
     args.run_root = str(run_root)
@@ -1514,6 +1527,9 @@ def _retrieval_security_paths(tmp_path: Path) -> SimpleNamespace:
         checkpoint_authority_path=str(authority_root / "checkpoint.json"),
         checkpoint_authority_head_path=str(
             authority_root / "checkpoint.head.json"
+        ),
+        checkpoint_authority_anchor_path=str(
+            authority_root / "checkpoint.anchors"
         ),
         tasks_file=str(tmp_path / "inputs" / "tasks.jsonl"),
         split_manifest=str(tmp_path / "inputs" / "split.json"),
@@ -1591,6 +1607,38 @@ def test_retrieval_output_rejects_hard_link_to_task_directory_member(
     os.link(task_member, trace)
 
     with pytest.raises(ValueError, match="alias|inode|identity|hard|task"):
+        cli_module._validate_retrieval_evolution_paths(args)
+
+
+def test_retrieval_output_rejects_hard_link_to_non_json_task_directory_member(
+    tmp_path: Path,
+) -> None:
+    args = _retrieval_security_paths(tmp_path)
+    task_directory = Path(args.tasks_file)
+    task_directory.mkdir(parents=True)
+    readme = task_directory / "README.txt"
+    readme.write_bytes(b"protected task-source documentation\n")
+    trace = Path(args.trace_path)
+    trace.parent.mkdir(parents=True)
+    os.link(readme, trace)
+
+    with pytest.raises(ValueError, match="alias|inode|identity|hard|task"):
+        cli_module._validate_retrieval_evolution_paths(args)
+
+
+def test_retrieval_output_rejects_hard_link_to_monotonic_anchor_member(
+    tmp_path: Path,
+) -> None:
+    args = _retrieval_security_paths(tmp_path)
+    anchor_directory = Path(args.checkpoint_authority_anchor_path)
+    anchor_directory.mkdir(parents=True, mode=0o700)
+    anchor_member = anchor_directory / ("anchor-" + "0" * 20 + "-" + "a" * 64 + ".json")
+    anchor_member.write_bytes(b"protected monotonic anchor record\n")
+    trace = Path(args.trace_path)
+    trace.parent.mkdir(parents=True)
+    os.link(anchor_member, trace)
+
+    with pytest.raises(ValueError, match="alias|inode|identity|hard|anchor"):
         cli_module._validate_retrieval_evolution_paths(args)
 
 
@@ -1720,6 +1768,8 @@ def test_retrieval_output_symlink_cannot_escape_approved_run_root(
             str(tmp_path / "authority" / "checkpoint.json"),
             "--checkpoint-authority-head-path",
             str(tmp_path / "authority" / "checkpoint.head.json"),
+            "--checkpoint-authority-anchor-path",
+            str(tmp_path / "authority" / "checkpoint.anchors"),
         ]
     )
     args.run_root = str(run_root)
@@ -1761,6 +1811,8 @@ def test_retrieval_authority_cannot_live_inside_a_release_or_library(
             str(release / "authority.json"),
             "--checkpoint-authority-head-path",
             str(release / "authority.head.json"),
+            "--checkpoint-authority-anchor-path",
+            str(release / "authority.anchors"),
         ]
     )
     args.run_root = str(run_root)
@@ -1775,6 +1827,18 @@ def test_retrieval_authority_cannot_live_inside_a_release_or_library(
 
     with pytest.raises(ValueError, match="authority|release|protected|collision"):
         cli_module._retrieval_evolve_command(args)
+
+
+def test_retrieval_monotonic_anchor_cannot_live_inside_a_release(
+    tmp_path: Path,
+) -> None:
+    args = _retrieval_security_paths(tmp_path)
+    args.checkpoint_authority_anchor_path = str(
+        Path(args.retrieval_release_path) / "checkpoint.anchors"
+    )
+
+    with pytest.raises(ValueError, match="anchor|authority|release|protected|collision"):
+        cli_module._validate_retrieval_evolution_paths(args)
 
 
 def test_retrieval_evolution_requires_operator_head_and_secret_before_task_loading(
@@ -1799,6 +1863,8 @@ def test_retrieval_evolution_requires_operator_head_and_secret_before_task_loadi
         str(run_root / "checkpoint.json"),
         "--checkpoint-authority-path",
         str(authority),
+        "--checkpoint-authority-anchor-path",
+        str(authority.with_name("checkpoint.anchors")),
     ]
     monkeypatch.setattr(
         cli_module,
@@ -1815,6 +1881,18 @@ def test_retrieval_evolution_requires_operator_head_and_secret_before_task_loadi
     with pytest.raises(ValueError, match="authority.*head|head.*authority"):
         cli_module._retrieval_evolve_command(missing_head)
 
+    missing_anchor = build_parser().parse_args(
+        [
+            *base_argv[:-2],
+            "--checkpoint-authority-head-path",
+            str(authority.with_name("checkpoint.head.json")),
+        ]
+    )
+    missing_anchor.run_root = str(run_root)
+    missing_anchor.evolution_mode = "retrieval"
+    with pytest.raises(ValueError, match="anchor|ledger"):
+        cli_module._retrieval_evolve_command(missing_anchor)
+
     missing_key = build_parser().parse_args(
         [
             *base_argv,
@@ -1826,6 +1904,47 @@ def test_retrieval_evolution_requires_operator_head_and_secret_before_task_loadi
     missing_key.evolution_mode = "retrieval"
     with pytest.raises(ValueError, match="authority.*key|key.*authority"):
         cli_module._retrieval_evolve_command(missing_key)
+
+
+def test_retrieval_authority_environment_is_consumed_before_model_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    custom_key_name = "CUSTOM_RETRIEVAL_AUTHORITY_KEY"
+    custom_expected_name = "CUSTOM_RETRIEVAL_AUTHORITY_EXPECTED"
+    custom_key = "custom-private-authority-key-at-least-32-bytes"
+    default_key = "default-private-authority-key-at-least-32-bytes"
+    custom_expected = "7:" + "7" * 64
+    default_expected = "8:" + "8" * 64
+    args = SimpleNamespace(
+        checkpoint_authority_key_env=custom_key_name,
+        checkpoint_authority_expected_env=custom_expected_name,
+    )
+    monkeypatch.setenv(custom_key_name, custom_key)
+    monkeypatch.setenv(custom_expected_name, custom_expected)
+    monkeypatch.setenv("RETRIEVAL_CHECKPOINT_AUTHORITY_KEY", default_key)
+    monkeypatch.setenv(
+        "RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED", default_expected
+    )
+
+    key, expected, subprocess_env = (
+        cli_module._consume_retrieval_checkpoint_authority_environment(
+            args,
+            resume_required=True,
+        )
+    )
+
+    assert key == custom_key.encode("utf-8")
+    assert expected == (7, "7" * 64)
+    for name in (
+        custom_key_name,
+        custom_expected_name,
+        "RETRIEVAL_CHECKPOINT_AUTHORITY_KEY",
+        "RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED",
+    ):
+        assert name not in os.environ
+        assert name not in subprocess_env
+    for value in (custom_key, default_key, custom_expected, default_expected):
+        assert value not in subprocess_env.values()
 
 
 @pytest.mark.parametrize(

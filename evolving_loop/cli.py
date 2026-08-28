@@ -249,6 +249,14 @@ def _add_retrieval_evolution_controls(parser: argparse.ArgumentParser) -> None:
         help="Protected monotonic head for the authenticated checkpoint journal.",
     )
     parser.add_argument(
+        "--checkpoint-authority-anchor-path",
+        default=None,
+        help=(
+            "Operator-protected append-only monotonic anchor ledger outside "
+            "the Retrieval run tree."
+        ),
+    )
+    parser.add_argument(
         "--checkpoint-authority-key-env",
         default=RETRIEVAL_CHECKPOINT_AUTHORITY_KEY_ENV,
         help="Environment variable holding the operator authority key.",
@@ -843,11 +851,7 @@ def _snapshot_retrieval_task_source(
         if not stat.S_ISDIR(metadata.st_mode):
             raise ValueError("Retrieval dataset source must be a file or directory")
         try:
-            names = sorted(
-                name
-                for name in os.listdir(descriptor)
-                if Path(name).suffix.lower() == ".json"
-            )
+            names = sorted(os.listdir(descriptor))
         except OSError as error:
             raise ValueError(
                 "Retrieval dataset directory cannot be enumerated safely"
@@ -924,6 +928,8 @@ def _iter_retrieval_task_record_texts(
                     "Retrieval dataset directory identity changed after preflight"
                 )
             for name, identity in snapshot["members"]:
+                if Path(name).suffix.lower() != ".json":
+                    continue
                 with _open_retrieval_task_member(
                     directory_descriptor,
                     name,
@@ -1345,6 +1351,7 @@ def _components(
     *,
     retrieval_library_override: RetrievalSkillLibrary | None = None,
     disable_llm_cache: bool = False,
+    llm_subprocess_env: Mapping[str, str] | None = None,
 ):
     if args.llm_backend == "codex":
         llm = CodexCLIClient(
@@ -1353,6 +1360,7 @@ def _components(
                 reasoning_effort=args.codex_reasoning_effort,
                 timeout_seconds=args.codex_timeout,
                 cache_dir=None if disable_llm_cache else args.codex_cache_dir,
+                subprocess_env=llm_subprocess_env,
             )
         )
     elif args.llm_backend == "claude":
@@ -1361,6 +1369,7 @@ def _components(
                 model=args.claude_model,
                 timeout_seconds=args.claude_timeout,
                 cache_dir=None if disable_llm_cache else args.claude_cache_dir,
+                subprocess_env=llm_subprocess_env,
             )
         )
     else:
@@ -1689,53 +1698,81 @@ def _checkpoint_authority_path(args, checkpoint_path: Path) -> Path:
     return authority
 
 
-def _checkpoint_authority_key(args) -> bytes:
-    environment_name = getattr(
+def _consume_retrieval_checkpoint_authority_environment(
+    args,
+    *,
+    resume_required: bool,
+) -> tuple[bytes, tuple[int, str] | None, dict[str, str]]:
+    key_environment_name = getattr(
         args,
         "checkpoint_authority_key_env",
         RETRIEVAL_CHECKPOINT_AUTHORITY_KEY_ENV,
     )
-    if (
-        type(environment_name) is not str
-        or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", environment_name)
-    ):
-        raise ValueError("Retrieval checkpoint authority key environment is invalid")
-    supplied = os.environ.get(environment_name)
-    if supplied is None or len(supplied.encode("utf-8")) < 32:
-        raise ValueError(
-            "Retrieval checkpoint authority key is missing or too short"
-        )
-    return supplied.encode("utf-8")
-
-
-def _checkpoint_authority_expected_anchor(
-    args,
-    *,
-    resume_required: bool,
-) -> tuple[int, str] | None:
-    environment_name = getattr(
+    expected_environment_name = getattr(
         args,
         "checkpoint_authority_expected_env",
         RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED_ENV,
     )
+    selected_names = (key_environment_name, expected_environment_name)
+    names_to_scrub = {
+        RETRIEVAL_CHECKPOINT_AUTHORITY_KEY_ENV,
+        RETRIEVAL_CHECKPOINT_AUTHORITY_EXPECTED_ENV,
+        *(name for name in selected_names if isinstance(name, str)),
+    }
+    consumed = {
+        name: os.environ.pop(name, None) for name in names_to_scrub
+    }
     if (
-        type(environment_name) is not str
-        or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", environment_name)
+        type(key_environment_name) is not str
+        or not re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*", key_environment_name
+        )
+    ):
+        raise ValueError("Retrieval checkpoint authority key environment is invalid")
+    if (
+        type(expected_environment_name) is not str
+        or not re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*", expected_environment_name
+        )
+        or expected_environment_name == key_environment_name
     ):
         raise ValueError(
             "Retrieval checkpoint authority expected-anchor environment is invalid"
         )
-    supplied = os.environ.get(environment_name)
-    if supplied is None:
+    supplied_key = consumed.get(key_environment_name)
+    if supplied_key is None or len(supplied_key.encode("utf-8")) < 32:
+        raise ValueError(
+            "Retrieval checkpoint authority key is missing or too short"
+        )
+    supplied_expected = consumed.get(expected_environment_name)
+    if supplied_expected is None:
         if resume_required:
             raise ValueError(
                 "Retrieval checkpoint resume requires an external authority anchor"
             )
-        return None
-    match = re.fullmatch(r"(0|[1-9][0-9]*):([0-9a-f]{64})", supplied)
-    if match is None:
-        raise ValueError("Retrieval checkpoint external authority anchor is invalid")
-    return int(match.group(1)), match.group(2)
+        expected_anchor = None
+    else:
+        match = re.fullmatch(
+            r"(0|[1-9][0-9]*):([0-9a-f]{64})", supplied_expected
+        )
+        if match is None:
+            raise ValueError(
+                "Retrieval checkpoint external authority anchor is invalid"
+            )
+        expected_anchor = (int(match.group(1)), match.group(2))
+    sensitive_values = {
+        value for value in consumed.values() if value is not None
+    }
+    subprocess_environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in names_to_scrub and value not in sensitive_values
+    }
+    return (
+        supplied_key.encode("utf-8"),
+        expected_anchor,
+        subprocess_environment,
+    )
 
 
 def _restore_retrieval_checkpoint_authority(
@@ -2404,12 +2441,31 @@ def _validate_retrieval_evolution_paths(args) -> dict[str, object]:
     authority_head = _canonical_cli_path(
         configured_authority_head, "checkpoint authority head"
     )
+    configured_authority_anchor = getattr(
+        args, "checkpoint_authority_anchor_path", None
+    )
+    if not configured_authority_anchor:
+        raise ValueError(
+            "Retrieval evolution requires an independently provisioned "
+            "--checkpoint-authority-anchor-path ledger"
+        )
+    authority_anchor = _canonical_cli_path(
+        configured_authority_anchor,
+        "checkpoint monotonic anchor ledger",
+    )
     if (
         authority_head == authority
         or authority_head.parent != authority.parent
     ):
         raise ValueError(
             "checkpoint authority journal and head must be distinct protected records"
+        )
+    if (
+        authority_anchor in {authority, authority_head}
+        or authority_anchor.parent != authority.parent
+    ):
+        raise ValueError(
+            "checkpoint monotonic anchor ledger must be a distinct path in the pinned operator directory"
         )
     outputs = {
         "checkpoint": checkpoint,
@@ -2429,7 +2485,7 @@ def _validate_retrieval_evolution_paths(args) -> dict[str, object]:
                 )
     if any(
         path == run_root or run_root in path.parents
-        for path in (authority, authority_head)
+        for path in (authority, authority_head, authority_anchor)
     ):
         raise ValueError(
             "checkpoint authority records must be outside the approved run root"
@@ -2454,6 +2510,7 @@ def _validate_retrieval_evolution_paths(args) -> dict[str, object]:
         ),
         ("checkpoint authority", authority),
         ("checkpoint authority head", authority_head),
+        ("checkpoint monotonic anchor ledger", authority_anchor),
     ]
     if getattr(args, "seed_policy_path", None):
         protected_inputs.append(
@@ -2472,6 +2529,27 @@ def _validate_retrieval_evolution_paths(args) -> dict[str, object]:
                 label = f"Retrieval task member {member_name}"
                 protected_inputs.append((label, tasks_path / member_name))
                 identity_overrides[label] = member_identity
+    authority_anchor_snapshot = _snapshot_retrieval_task_source(
+        authority_anchor
+    )
+    if authority_anchor_snapshot is not None:
+        if authority_anchor_snapshot["kind"] != "directory":
+            raise ValueError(
+                "checkpoint monotonic anchor ledger must be a directory"
+            )
+        anchor_identity = authority_anchor_snapshot["source_identity"]
+        assert isinstance(anchor_identity, tuple)
+        identity_overrides["checkpoint monotonic anchor ledger"] = (
+            anchor_identity
+        )
+        for member_name, member_identity in authority_anchor_snapshot[
+            "members"
+        ]:
+            label = f"checkpoint monotonic anchor member {member_name}"
+            protected_inputs.append(
+                (label, authority_anchor / member_name)
+            )
+            identity_overrides[label] = member_identity
     release_root = protected_inputs[2][1].parent
     protected_inputs.append(("Retrieval release root", release_root))
     release_path = protected_inputs[2][1]
@@ -2552,10 +2630,12 @@ def _validate_retrieval_evolution_paths(args) -> dict[str, object]:
         "run_root": run_root,
         "authority": authority,
         "authority_head": authority_head,
+        "authority_anchor": authority_anchor,
         "output_identities": output_identities,
         "output_parent_identities": output_parent_identities,
         "protected_identities": protected_identities,
         "authority_parent_identity": authority_parent_identity,
+        "authority_anchor_snapshot": authority_anchor_snapshot,
         "task_source_snapshot": task_source_snapshot,
     }
 
@@ -2575,9 +2655,16 @@ def _retrieval_evolve_command(args) -> dict:
     args.checkpoint_authority_head_path = str(
         validated_paths["authority_head"]
     )
-    authority_key = _checkpoint_authority_key(args)
+    args.checkpoint_authority_anchor_path = str(
+        validated_paths["authority_anchor"]
+    )
     checkpoint_path = validated_paths["checkpoint"]
     authority_path = _checkpoint_authority_path(args, checkpoint_path)
+    authority_anchor_snapshot = validated_paths["authority_anchor_snapshot"]
+    authority_anchor_has_records = bool(
+        authority_anchor_snapshot is not None
+        and authority_anchor_snapshot["members"]
+    )
     resume_required = any(
         identity is not None
         for identity in (
@@ -2585,8 +2672,12 @@ def _retrieval_evolve_command(args) -> dict:
             validated_paths["protected_identities"]["checkpoint authority"],
             validated_paths["protected_identities"]["checkpoint authority head"],
         )
-    )
-    expected_external_anchor = _checkpoint_authority_expected_anchor(
+    ) or authority_anchor_has_records
+    (
+        authority_key,
+        expected_external_anchor,
+        llm_subprocess_env,
+    ) = _consume_retrieval_checkpoint_authority_environment(
         args,
         resume_required=resume_required,
     )
@@ -2611,6 +2702,12 @@ def _retrieval_evolve_command(args) -> dict:
         expected_authority_parent_identity=validated_paths[
             "authority_parent_identity"
         ],
+        authority_anchor_path=validated_paths["authority_anchor"],
+        expected_authority_anchor_identity=(
+            None
+            if authority_anchor_snapshot is None
+            else authority_anchor_snapshot["source_identity"]
+        ),
     )
     try:
         active_authority_anchor = preflight_authority.current_anchor
@@ -2621,6 +2718,9 @@ def _retrieval_evolve_command(args) -> dict:
         active_head_identity = preflight_authority._record_identities[
             Path(validated_paths["authority_head"]).name
         ]
+        active_authority_anchor_identity = (
+            preflight_authority._anchor_directory_identity
+        )
     finally:
         preflight_authority.close()
     parent_release = _load_retrieval_release_for_operator(
@@ -2663,7 +2763,9 @@ def _retrieval_evolve_command(args) -> dict:
     _assert_no_public_regression_ids(base_policy.to_payload(), public_ids)
 
     llm, library, _retrieval_library, decision_library, tsfm = _components(
-        args, retrieval_library_override=parent_library
+        args,
+        retrieval_library_override=parent_library,
+        llm_subprocess_env=llm_subprocess_env,
     )
     _assert_retrieval_prompt_inputs_clean(
         base_policy,
@@ -2810,6 +2912,8 @@ def _retrieval_evolve_command(args) -> dict:
         expected_authority_parent_identity=validated_paths[
             "authority_parent_identity"
         ],
+        authority_anchor_path=validated_paths["authority_anchor"],
+        expected_authority_anchor_identity=active_authority_anchor_identity,
     )
     train_task_ids = tuple(task.numeric.task_id for task in train)
     dev_task_ids = tuple(task.numeric.task_id for task in dev)
@@ -2981,6 +3085,9 @@ def _retrieval_evolve_command(args) -> dict:
         "checkpoint_authority_path": str(authority_path),
         "checkpoint_authority_head_path": str(
             validated_paths["authority_head"]
+        ),
+        "checkpoint_authority_anchor_path": str(
+            validated_paths["authority_anchor"]
         ),
         "checkpoint_authority_anchor": {
             "epoch": committed_authority_anchor[0],

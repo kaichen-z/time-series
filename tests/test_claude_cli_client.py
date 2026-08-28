@@ -38,6 +38,40 @@ def test_claude_cli_client_returns_and_caches_json() -> None:
     assert client.cache_hits == 1
 
 
+def test_claude_cli_client_filters_explicit_subprocess_environment() -> None:
+    client = ClaudeCLIClient(
+        ClaudeCLIConfig(
+            cache_dir=None,
+            timeout_seconds=5,
+            subprocess_env={
+                "PATH": "/trusted/bin",
+                "SAFE_SETTING": "enabled",
+                "CLAUDE_PARENT_SESSION": "must-not-cross",
+            },
+        )
+    )
+
+    def fake_run(command, **kwargs):
+        assert kwargs["env"] == {
+            "PATH": "/trusted/bin",
+            "SAFE_SETTING": "enabled",
+        }
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            _envelope('{"answer": 17}'),
+            "",
+        )
+
+    with patch("common.llm.subprocess.run", side_effect=fake_run):
+        response = client.complete(
+            system="Return JSON.",
+            messages=[{"role": "user", "content": "x"}],
+        )
+
+    assert parse_json_object(response.text) == {"answer": 17}
+
+
 def test_claude_cli_client_raises_on_error_result() -> None:
     client = ClaudeCLIClient(ClaudeCLIConfig(cache_dir=None, timeout_seconds=5))
 

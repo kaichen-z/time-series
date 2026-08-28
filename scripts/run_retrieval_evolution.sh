@@ -8,6 +8,7 @@ EFFORT=${EFFORT:-high}
 RUN_DIR=${RUN_DIR:-runs/retrieval_evolution/formal_80_20}
 AUTHORITY_PATH=${AUTHORITY_PATH:-runs/retrieval_evolution_authority/formal_80_20.json}
 AUTHORITY_HEAD_PATH=${AUTHORITY_HEAD_PATH:-${AUTHORITY_PATH}.head}
+AUTHORITY_ANCHOR_PATH=${AUTHORITY_ANCHOR_PATH:-${AUTHORITY_PATH}.anchors}
 AUTHORITY_DIR=${AUTHORITY_PATH%/*}
 OPERATOR_AUTHORITY_KEY=${RETRIEVAL_CHECKPOINT_AUTHORITY_KEY:-}
 
@@ -43,6 +44,7 @@ command=(
   --run-root "$RUN_DIR"
   --checkpoint-authority-path "$AUTHORITY_PATH"
   --checkpoint-authority-head-path "$AUTHORITY_HEAD_PATH"
+  --checkpoint-authority-anchor-path "$AUTHORITY_ANCHOR_PATH"
   --checkpoint-path "$RUN_DIR/checkpoint.json"
   --progress-path "$RUN_DIR/progress.jsonl"
   --policy-path "$RUN_DIR/best_policy.json"

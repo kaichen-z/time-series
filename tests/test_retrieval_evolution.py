@@ -657,6 +657,273 @@ else:
     )
 
 
+def test_operator_anchor_ledger_bridges_a_crash_after_durable_successor_commit(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    authority_anchor_path = authority_directory / "retrieval.anchors"
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+        authority_anchor_path=authority_anchor_path,
+    )
+
+    first = b"first acknowledged checkpoint\n"
+    staged_first, first_identity = _staged_checkpoint(
+        checkpoint, first, suffix="acknowledged-first"
+    )
+    first_token = authority.prepare(
+        hashlib.sha256(first).hexdigest(),
+        checkpoint_identity=first_identity,
+    )
+    staged_first.rename(checkpoint)
+    authority.commit(first_token)
+    last_acknowledged_anchor = authority.current_anchor
+
+    second = b"durable successor before process crash\n"
+    staged_second, second_identity = _staged_checkpoint(
+        checkpoint, second, suffix="durable-successor"
+    )
+    second_token = authority.prepare(
+        hashlib.sha256(second).hexdigest(),
+        checkpoint_identity=second_identity,
+    )
+    checkpoint.rename(checkpoint.with_name("retained-first-checkpoint.json"))
+    staged_second.rename(checkpoint)
+    authority.commit(second_token)
+    durable_successor_anchor = authority.current_anchor
+    authority.close()
+
+    resumed = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+        expected_authority_anchor=last_acknowledged_anchor,
+        authority_anchor_path=authority_anchor_path,
+    )
+    try:
+        assert resumed.current_anchor == durable_successor_anchor
+    finally:
+        resumed.close()
+    assert authority_anchor_path.is_dir()
+    assert len(tuple(authority_anchor_path.glob("anchor-*.json"))) == 2
+
+
+def test_operator_anchor_ledger_rejects_old_set_replay_after_unacknowledged_commit(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    authority_anchor_path = authority_directory / "retrieval.anchors"
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+        authority_anchor_path=authority_anchor_path,
+    )
+
+    first = b"first acknowledged checkpoint\n"
+    staged_first, first_identity = _staged_checkpoint(
+        checkpoint, first, suffix="rollback-first"
+    )
+    first_token = authority.prepare(
+        hashlib.sha256(first).hexdigest(),
+        checkpoint_identity=first_identity,
+    )
+    staged_first.rename(checkpoint)
+    authority.commit(first_token)
+    last_acknowledged_anchor = authority.current_anchor
+    old_checkpoint = checkpoint.with_name("saved-first-checkpoint.json")
+    old_journal = authority_path.with_name("saved-first-journal.json")
+    old_head = authority_head_path.with_name("saved-first-head.json")
+    os.link(checkpoint, old_checkpoint)
+    os.link(authority_path, old_journal)
+    os.link(authority_head_path, old_head)
+
+    second = b"unacknowledged durable successor\n"
+    staged_second, second_identity = _staged_checkpoint(
+        checkpoint, second, suffix="rollback-second"
+    )
+    second_token = authority.prepare(
+        hashlib.sha256(second).hexdigest(),
+        checkpoint_identity=second_identity,
+    )
+    checkpoint.rename(checkpoint.with_name("retained-live-first.json"))
+    staged_second.rename(checkpoint)
+    authority.commit(second_token)
+    authority.close()
+
+    checkpoint.rename(checkpoint.with_name("retained-second-checkpoint.json"))
+    authority_path.rename(authority_path.with_name("retained-second-journal.json"))
+    authority_head_path.rename(
+        authority_head_path.with_name("retained-second-head.json")
+    )
+    old_checkpoint.rename(checkpoint)
+    old_journal.rename(authority_path)
+    old_head.rename(authority_head_path)
+
+    with pytest.raises(
+        RetrievalCheckpointError,
+        match="anchor|rollback|replay|monotonic|authority",
+    ):
+        evolution_module._open_retrieval_checkpoint_authority_for_operator(
+            checkpoint,
+            authority_path,
+            authority_head_path,
+            authentication_key=_OPERATOR_AUTHORITY_KEY,
+            expected_authority_anchor=last_acknowledged_anchor,
+            authority_anchor_path=authority_anchor_path,
+        )
+    assert len(tuple(authority_anchor_path.glob("anchor-*.json"))) == 2
+
+
+def test_operator_anchor_ledger_is_never_recreated_after_disappearance(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    authority_anchor_path = authority_directory / "retrieval.anchors"
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+        authority_anchor_path=authority_anchor_path,
+    )
+    encoded = b"checkpoint with established monotonic ledger\n"
+    staged, staged_identity = _staged_checkpoint(
+        checkpoint, encoded, suffix="established-ledger"
+    )
+    token = authority.prepare(
+        hashlib.sha256(encoded).hexdigest(),
+        checkpoint_identity=staged_identity,
+    )
+    staged.rename(checkpoint)
+    authority.commit(token)
+    anchor = authority.current_anchor
+    authority.close()
+    retained_ledger = authority_directory / "retained-anchor-ledger"
+    authority_anchor_path.rename(retained_ledger)
+
+    with pytest.raises(
+        RetrievalCheckpointError,
+        match="anchor|ledger|missing|disappear|authority",
+    ):
+        evolution_module._open_retrieval_checkpoint_authority_for_operator(
+            checkpoint,
+            authority_path,
+            authority_head_path,
+            authentication_key=_OPERATOR_AUTHORITY_KEY,
+            expected_authority_anchor=anchor,
+            authority_anchor_path=authority_anchor_path,
+        )
+
+    assert not authority_anchor_path.exists()
+    assert len(tuple(retained_ledger.glob("anchor-*.json"))) == 1
+
+
+def test_operator_anchor_ledger_rejects_missing_replayable_commit_set(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    authority_anchor_path = authority_directory / "retrieval.anchors"
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+        authority_anchor_path=authority_anchor_path,
+    )
+    encoded = b"durable state retained by monotonic authority\n"
+    staged, staged_identity = _staged_checkpoint(
+        checkpoint, encoded, suffix="missing-replayable-set"
+    )
+    token = authority.prepare(
+        hashlib.sha256(encoded).hexdigest(),
+        checkpoint_identity=staged_identity,
+    )
+    staged.rename(checkpoint)
+    authority.commit(token)
+    anchor = authority.current_anchor
+    authority.close()
+    checkpoint.rename(checkpoint.with_name("retained-checkpoint.json"))
+    authority_path.rename(authority_path.with_name("retained-journal.json"))
+    authority_head_path.rename(
+        authority_head_path.with_name("retained-head.json")
+    )
+
+    with pytest.raises(
+        RetrievalCheckpointError,
+        match="anchor|rollback|replay|authority|checkpoint",
+    ):
+        evolution_module._open_retrieval_checkpoint_authority_for_operator(
+            checkpoint,
+            authority_path,
+            authority_head_path,
+            authentication_key=_OPERATOR_AUTHORITY_KEY,
+            expected_authority_anchor=anchor,
+            authority_anchor_path=authority_anchor_path,
+        )
+    assert len(tuple(authority_anchor_path.glob("anchor-*.json"))) == 1
+
+
+def test_operator_anchor_ledger_rejects_directory_recreation_after_preflight(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    authority_anchor_path = authority_directory / "retrieval.anchors"
+    authority_anchor_path.mkdir(mode=0o700)
+    anchor_metadata = authority_anchor_path.stat()
+    expected_anchor_identity = (
+        anchor_metadata.st_dev,
+        anchor_metadata.st_ino,
+    )
+    authority_anchor_path.rename(
+        authority_directory / "retained-retrieval.anchors"
+    )
+    authority_anchor_path.mkdir(mode=0o700)
+
+    with pytest.raises(
+        RetrievalCheckpointError,
+        match="anchor|ledger|identity|recreat|authority",
+    ):
+        evolution_module._open_retrieval_checkpoint_authority_for_operator(
+            checkpoint,
+            authority_path,
+            authority_head_path,
+            authentication_key=_OPERATOR_AUTHORITY_KEY,
+            authority_anchor_path=authority_anchor_path,
+            expected_authority_anchor_identity=expected_anchor_identity,
+        )
+
+
 def test_checkpoint_authority_binds_staged_inode_in_commit_and_reconciliation(
     tmp_path: Path,
 ) -> None:
@@ -708,6 +975,274 @@ def test_checkpoint_authority_binds_staged_inode_in_commit_and_reconciliation(
 
     assert intended.is_file()
     assert checkpoint.stat().st_ino == replacement_identity[1]
+
+
+def test_checkpoint_authority_rejects_same_bytes_inode_swap_during_head_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+    )
+    first = b"first checkpoint\n"
+    staged_first, first_identity = _staged_checkpoint(
+        checkpoint, first, suffix="mid-commit-first"
+    )
+    first_token = authority.prepare(
+        hashlib.sha256(first).hexdigest(),
+        checkpoint_identity=first_identity,
+    )
+    staged_first.rename(checkpoint)
+    authority.commit(first_token)
+
+    second = b"same bytes signed for one exact inode\n"
+    staged_second, second_identity = _staged_checkpoint(
+        checkpoint, second, suffix="mid-commit-second"
+    )
+    second_token = authority.prepare(
+        hashlib.sha256(second).hexdigest(),
+        checkpoint_identity=second_identity,
+    )
+    checkpoint.rename(checkpoint.with_name("retained-mid-commit-first.json"))
+    staged_second.rename(checkpoint)
+    real_write_head = authority._write_head
+    replacement_identity: tuple[int, int] | None = None
+
+    def write_head_then_swap(*args, **kwargs):
+        nonlocal replacement_identity
+        result = real_write_head(*args, **kwargs)
+        checkpoint.rename(checkpoint.with_name("signed-but-displaced.json"))
+        checkpoint.write_bytes(second)
+        metadata = checkpoint.stat()
+        replacement_identity = (metadata.st_dev, metadata.st_ino)
+        return result
+
+    monkeypatch.setattr(authority, "_write_head", write_head_then_swap)
+
+    with pytest.raises(
+        RetrievalCheckpointError,
+        match="identity|inode|replacement|checkpoint",
+    ):
+        authority.commit(second_token)
+    authority.close()
+
+    assert replacement_identity is not None
+    assert replacement_identity != second_identity
+    assert checkpoint.read_bytes() == second
+
+
+def test_checkpoint_authority_rechecks_exact_inode_after_process_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+    )
+    encoded = b"checkpoint held through the complete commit boundary\n"
+    staged, intended_identity = _staged_checkpoint(
+        checkpoint, encoded, suffix="post-authorization"
+    )
+    token = authority.prepare(
+        hashlib.sha256(encoded).hexdigest(),
+        checkpoint_identity=intended_identity,
+    )
+    staged.rename(checkpoint)
+    real_authorize = (
+        evolution_module._authorize_retrieval_evolution_checkpoint_for_operator
+    )
+
+    def authorize_then_swap(*args, **kwargs):
+        epoch = real_authorize(*args, **kwargs)
+        checkpoint.rename(checkpoint.with_name("retained-authorized-checkpoint.json"))
+        checkpoint.write_bytes(encoded)
+        return epoch
+
+    monkeypatch.setattr(
+        evolution_module,
+        "_authorize_retrieval_evolution_checkpoint_for_operator",
+        authorize_then_swap,
+    )
+
+    with pytest.raises(
+        RetrievalCheckpointError,
+        match="identity|inode|replacement|checkpoint",
+    ):
+        authority.commit(token)
+    authority.close()
+    with pytest.raises(OSError):
+        os.fstat(token.checkpoint_descriptor)
+    replacement = checkpoint.stat()
+    assert (replacement.st_dev, replacement.st_ino) != intended_identity
+
+
+def test_process_authority_rejects_post_open_same_bytes_checkpoint_inode(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    encoded = b"operator-authorized exact inode\n"
+    digest = hashlib.sha256(encoded).hexdigest()
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+    )
+    staged, intended_identity = _staged_checkpoint(
+        checkpoint, encoded, suffix="post-open-authorized"
+    )
+    token = authority.prepare(digest, checkpoint_identity=intended_identity)
+    staged.rename(checkpoint)
+    authority.commit(token)
+    anchor = authority.current_anchor
+    authority.close()
+
+    reopened = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+        expected_authority_anchor=anchor,
+    )
+    checkpoint.rename(checkpoint.with_name("retained-authorized-inode.json"))
+    checkpoint.write_bytes(encoded)
+    replacement = checkpoint.stat()
+    replacement_identity = (replacement.st_dev, replacement.st_ino)
+    assert replacement_identity != intended_identity
+
+    with pytest.raises(
+        RetrievalCheckpointError,
+        match="identity|inode|replacement|authority",
+    ):
+        evolution_module._require_evolution_checkpoint(
+            checkpoint,
+            digest,
+            checkpoint_identity=replacement_identity,
+        )
+    reopened.close()
+
+
+def test_process_authority_revalidates_visible_inode_at_load_boundary(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    encoded = b"load-boundary checkpoint bytes\n"
+    digest = hashlib.sha256(encoded).hexdigest()
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+    )
+    staged, intended_identity = _staged_checkpoint(
+        checkpoint, encoded, suffix="load-boundary-authorized"
+    )
+    token = authority.prepare(digest, checkpoint_identity=intended_identity)
+    staged.rename(checkpoint)
+    authority.commit(token)
+
+    checkpoint.rename(checkpoint.with_name("retained-load-boundary-inode.json"))
+    checkpoint.write_bytes(encoded)
+    replacement = checkpoint.stat()
+    assert (replacement.st_dev, replacement.st_ino) != intended_identity
+
+    with pytest.raises(
+        RetrievalCheckpointError,
+        match="identity|inode|replacement|authority|checkpoint",
+    ):
+        evolution_module._require_evolution_checkpoint(
+            checkpoint,
+            digest,
+            checkpoint_identity=intended_identity,
+        )
+    authority.close()
+
+
+def test_pending_checkpoint_reconciles_quarantine_gap_by_exact_staged_inode(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "run" / "checkpoint.json"
+    checkpoint.parent.mkdir()
+    authority_directory = tmp_path / "authority"
+    authority_directory.mkdir(mode=0o700)
+    authority_path = authority_directory / "retrieval.json"
+    authority_head_path = authority_directory / "retrieval.head.json"
+    authority_anchor_path = authority_directory / "retrieval.anchors"
+    authority = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+        authority_anchor_path=authority_anchor_path,
+    )
+    first = b"old durable checkpoint\n"
+    staged_first, first_identity = _staged_checkpoint(
+        checkpoint, first, suffix="quarantine-gap-first"
+    )
+    first_token = authority.prepare(
+        hashlib.sha256(first).hexdigest(),
+        checkpoint_identity=first_identity,
+    )
+    staged_first.rename(checkpoint)
+    authority.commit(first_token)
+    last_acknowledged_anchor = authority.current_anchor
+
+    second = b"new staged checkpoint survives crash gap\n"
+    staged_second, second_identity = _staged_checkpoint(
+        checkpoint, second, suffix="quarantine-gap-second"
+    )
+    authority.prepare(
+        hashlib.sha256(second).hexdigest(),
+        checkpoint_identity=second_identity,
+    )
+    retained_quarantine = checkpoint.with_name("retained-old-quarantine.json")
+    checkpoint.rename(retained_quarantine)
+    authority.close()
+
+    resumed = evolution_module._open_retrieval_checkpoint_authority_for_operator(
+        checkpoint,
+        authority_path,
+        authority_head_path,
+        authentication_key=_OPERATOR_AUTHORITY_KEY,
+        expected_authority_anchor=last_acknowledged_anchor,
+        authority_anchor_path=authority_anchor_path,
+    )
+    try:
+        assert resumed.current_anchor[0] == last_acknowledged_anchor[0] + 1
+    finally:
+        resumed.close()
+    published = checkpoint.stat()
+    assert (published.st_dev, published.st_ino) == second_identity
+    assert checkpoint.read_bytes() == second
+    assert retained_quarantine.read_bytes() == first
+    assert not staged_second.exists()
 
 
 def test_operator_checkpoint_authority_never_persists_secret_key(
@@ -2451,6 +2986,8 @@ def test_fresh_operator_activation_requires_an_independently_trusted_digest_and_
     result = engine.evolve(RetrievalGenome.seed(), train, dev)
     assert result.accepted is False
     trusted_sha256 = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    trusted_metadata = checkpoint.stat()
+    trusted_identity = (trusted_metadata.st_dev, trusted_metadata.st_ino)
     trusted_epoch = engine._checkpoint_authority_epoch
     assert type(trusted_epoch) is int
 
@@ -2480,6 +3017,7 @@ try:
         Path({str(checkpoint)!r}),
         expected_sha256={trusted_sha256!r},
         expected_epoch={trusted_epoch!r},
+        expected_identity={trusted_identity!r},
     )
 except RetrievalCheckpointError:
     raise SystemExit(0)
