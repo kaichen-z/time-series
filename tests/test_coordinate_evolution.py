@@ -642,6 +642,55 @@ def test_rejected_phase_cannot_mutate_parent_skill_snapshots_in_place(
     assert trace[0].accepted_bytes_sha256 == trace[0].parent_bytes_sha256
 
 
+def test_rejected_phase_cannot_mutate_parent_workflow_through_caller_alias(
+    tmp_path,
+) -> None:
+    """Catches a caller-owned workflow list changing an accepted bundle in place."""
+    release = _accepted_release(tmp_path / "releases", "v001", "v000")
+    workflow_alias = ["retrieve", "decide"]
+    parent = replace(_bound_policy(release), workflow=workflow_alias)
+
+    class Phase:
+        def run(self, received, *_args):
+            workflow_alias.append("retrieve")
+            return CoordinatePhaseOutcome(
+                target="decision",
+                bundle=received,
+                accepted=False,
+                improved=False,
+                reason="rejected",
+            )
+
+    controller = CoordinateEvolutionController(
+        None,
+        Phase(),
+        CoordinateEvolutionConfig(phase="decision", generations=1),
+    )
+    before = parent.canonical_bytes()
+
+    accepted, trace = controller.run(parent, (object(),), (object(),))
+
+    assert parent.workflow == ("retrieve", "decide")
+    assert isinstance(parent.workflow, tuple)
+    assert json.loads(parent.canonical_bytes())["workflow"] == [
+        "retrieve",
+        "decide",
+    ]
+    assert accepted is parent
+    assert accepted.canonical_bytes() == before
+    assert trace[0].accepted_bytes_sha256 == trace[0].parent_bytes_sha256
+
+
+@pytest.mark.parametrize(
+    "workflow",
+    ("retrieve", ["retrieve", 1]),
+)
+def test_harness_policy_rejects_nonsequence_or_nonstr_workflow(workflow) -> None:
+    """Catches malformed workflow values bypassing immutable normalization."""
+    with pytest.raises(ValueError, match="workflow"):
+        HarnessPolicy(workflow=workflow)
+
+
 def test_public_access_claim_is_rejected_without_changing_parent(tmp_path) -> None:
     """Catches a phase normalizing Public access into an ordinary rejection."""
     release = _accepted_release(tmp_path / "releases", "v001", "v000")

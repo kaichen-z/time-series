@@ -252,6 +252,11 @@ class HarnessPolicy:
     )
 
     def __post_init__(self) -> None:
+        if not isinstance(self.workflow, (tuple, list)) or any(
+            not isinstance(stage, str) for stage in self.workflow
+        ):
+            raise ValueError("workflow must be a list or tuple of strings")
+        object.__setattr__(self, "workflow", tuple(self.workflow))
         for field_name in (
             "coding_skills",
             "retrieval_skills",
