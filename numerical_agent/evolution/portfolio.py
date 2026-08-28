@@ -60,14 +60,14 @@ Applicability = Literal[
     "all", "periodic", "intermittent", "recent_regime", "trending", "stable"
 ]
 Preprocess = Literal["none", "standardize", "robust_scale", "log1p_shift"]
-CombinedMode = Literal["blend", "route"]
+CombinedOperator = Literal["weighted_mean", "median", "trimmed_mean", "route"]
 RouteDirection = Literal["above", "below"]
 
 _APPLICABILITY = frozenset(
     {"all", "periodic", "intermittent", "recent_regime", "trending", "stable"}
 )
 _PREPROCESS = frozenset({"none", "standardize", "robust_scale", "log1p_shift"})
-_COMBINED_MODES = frozenset({"blend", "route"})
+_COMBINED_OPERATORS = frozenset({"weighted_mean", "median", "trimmed_mean", "route"})
 _SIGNALS = frozenset(
     {
         "periodicity_strength",
@@ -230,41 +230,87 @@ class TSFMPolicy:
 
 @dataclass(frozen=True)
 class CombinedPolicy:
-    """One executable history-only blend or router over fixed parent identities."""
+    """One executable history-only operator over an ordered set of leaf parents."""
 
     name: str
-    tsfm_parent: str
-    statistical_parent: str
-    mode: CombinedMode
-    weight: float
-    signal: str
-    threshold: float
-    tsfm_when: RouteDirection = "above"
+    parents: tuple[str, ...]
+    operator: CombinedOperator
+    weights: tuple[float, ...] = ()
+    signal: str = "periodicity_strength"
+    threshold: float = 0.0
+    above_parent: str = ""
+    below_parent: str = ""
+    fallback_parent: str = ""
 
     def __post_init__(self) -> None:
         _identifier(self.name, "Combined policy name")
-        _identifier(self.tsfm_parent, "TSFM parent")
-        _identifier(self.statistical_parent, "statistical parent")
-        if self.mode not in _COMBINED_MODES:
-            raise PolicyError(f"unsupported Combined mode {self.mode!r}")
-        _bounded(self.weight, "weight", lower=0.05, upper=0.95)
-        if self.signal not in _SIGNALS:
+        if not isinstance(self.parents, tuple):
+            raise PolicyError("parents must be a tuple")
+        if not 2 <= len(self.parents) <= 5:
+            raise PolicyError("parents must contain between 2 and 5 entries")
+        if not all(isinstance(parent, str) for parent in self.parents):
+            raise PolicyError("Combined parents must be strings")
+        if len(set(self.parents)) != len(self.parents):
+            raise PolicyError("parents must be unique")
+        for parent in self.parents:
+            _identifier(parent, "Combined parent")
+        if not isinstance(self.operator, str) or self.operator not in _COMBINED_OPERATORS:
+            raise PolicyError(f"unsupported Combined operator {self.operator!r}")
+        if not isinstance(self.weights, tuple):
+            raise PolicyError("weights must be a tuple")
+        if self.operator == "weighted_mean":
+            if len(self.weights) != len(self.parents):
+                raise PolicyError("weighted_mean weights must match parents")
+            for weight in self.weights:
+                if (
+                    isinstance(weight, bool)
+                    or not isinstance(weight, (int, float))
+                    or not math.isfinite(float(weight))
+                    or float(weight) < 0.0
+                ):
+                    raise PolicyError("weights must be finite and non-negative")
+            if not math.isclose(
+                math.fsum(float(weight) for weight in self.weights),
+                1.0,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            ):
+                raise PolicyError("weights must sum to one")
+        elif self.weights:
+            raise PolicyError(f"{self.operator} does not accept weights")
+        if self.operator == "trimmed_mean" and len(self.parents) < 3:
+            raise PolicyError("trimmed_mean requires at least three parents")
+        if self.operator == "route":
+            if len(self.parents) != 2:
+                raise PolicyError("route requires exactly two parents")
+            if self.above_parent not in self.parents or self.below_parent not in self.parents:
+                raise PolicyError("route branch parents must occur in parents")
+            if self.above_parent == self.below_parent:
+                raise PolicyError("route branch parents must be distinct")
+        elif self.above_parent or self.below_parent:
+            raise PolicyError("non-route policies require empty route branches")
+        if self.fallback_parent not in self.parents:
+            raise PolicyError("fallback parent must occur in parents")
+        if not isinstance(self.signal, str) or self.signal not in _SIGNALS:
             raise PolicyError(f"unsupported history-only signal {self.signal!r}")
-        if not isinstance(self.threshold, (int, float)) or not math.isfinite(self.threshold):
+        if (
+            isinstance(self.threshold, bool)
+            or not isinstance(self.threshold, (int, float))
+            or not math.isfinite(float(self.threshold))
+        ):
             raise PolicyError("threshold must be finite")
-        if self.tsfm_when not in _ROUTE_DIRECTIONS:
-            raise PolicyError(f"unsupported route direction {self.tsfm_when!r}")
 
     def to_payload(self) -> dict[str, object]:
         return {
             "name": self.name,
-            "tsfm_parent": self.tsfm_parent,
-            "statistical_parent": self.statistical_parent,
-            "mode": self.mode,
-            "weight": self.weight,
+            "parents": self.parents,
+            "operator": self.operator,
+            "weights": self.weights,
             "signal": self.signal,
             "threshold": self.threshold,
-            "tsfm_when": self.tsfm_when,
+            "above_parent": self.above_parent,
+            "below_parent": self.below_parent,
+            "fallback_parent": self.fallback_parent,
         }
 
 
@@ -287,9 +333,9 @@ class PolicyPortfolio:
             raise PolicyError("policy names must be unique")
         tsfm_names = {policy.name for policy in self.tsfm}
         for policy in self.combined:
-            if policy.tsfm_parent not in tsfm_names:
+            if not any(parent in tsfm_names for parent in policy.parents):
                 raise PolicyError(
-                    f"Combined policy {policy.name!r} has unknown TSFM parent"
+                    f"Combined policy {policy.name!r} must include a TSFM parent"
                 )
 
     @property
@@ -305,12 +351,13 @@ class PolicyPortfolio:
 
     def validate_statistical_parents(self, method_names: Sequence[str]) -> None:
         known = set(method_names)
+        tsfm_names = {policy.name for policy in self.tsfm}
         for policy in self.combined:
-            if policy.statistical_parent not in known:
-                raise PolicyError(
-                    f"Combined policy {policy.name!r} has unknown statistical parent "
-                    f"{policy.statistical_parent!r}"
-                )
+            for parent in policy.parents:
+                if parent not in tsfm_names and parent not in known:
+                    raise PolicyError(
+                        f"Combined policy {policy.name!r} has unknown parent {parent!r}"
+                    )
 
     def replace(
         self, name: str, replacement: TSFMPolicy | CombinedPolicy
@@ -329,10 +376,7 @@ class PolicyPortfolio:
                 tsfm=tuple(replacement if policy.name == name else policy for policy in self.tsfm),
             )
         assert isinstance(parent, CombinedPolicy) and isinstance(replacement, CombinedPolicy)
-        if (
-            replacement.tsfm_parent != parent.tsfm_parent
-            or replacement.statistical_parent != parent.statistical_parent
-        ):
+        if replacement.parents != parent.parents:
             raise PolicyError("Combined parent identities cannot change during repair")
         return replace(
             self,
@@ -355,50 +399,52 @@ class PolicyPortfolio:
             combined=(
                 CombinedPolicy(
                     "combined_timesfm_seasonal",
-                    "timesfm_2_5",
-                    "seasonal_naive",
-                    "blend",
-                    0.65,
+                    ("timesfm_2_5", "seasonal_naive"),
+                    "weighted_mean",
+                    (0.65, 0.35),
                     "periodicity_strength",
                     0.45,
+                    fallback_parent="timesfm_2_5",
                 ),
                 CombinedPolicy(
                     "combined_chronos_damped_trend",
-                    "chronos_bolt",
-                    "holt_damped_trend",
-                    "blend",
-                    0.65,
+                    ("chronos_bolt", "holt_damped_trend"),
+                    "weighted_mean",
+                    (0.65, 0.35),
                     "trend_strength",
                     0.45,
+                    fallback_parent="chronos_bolt",
                 ),
                 CombinedPolicy(
                     "combined_moirai_croston_router",
-                    "moirai_2_0",
-                    "croston_sba",
+                    ("moirai_2_0", "croston_sba"),
                     "route",
-                    0.65,
+                    (),
                     "zero_fraction",
                     0.30,
-                    "below",
+                    above_parent="croston_sba",
+                    below_parent="moirai_2_0",
+                    fallback_parent="moirai_2_0",
                 ),
                 CombinedPolicy(
                     "combined_toto_robust_router",
-                    "toto_2_0",
-                    "robust_loess_trend",
+                    ("toto_2_0", "robust_loess_trend"),
                     "route",
-                    0.65,
+                    (),
                     "outlier_fraction",
                     0.05,
-                    "below",
+                    above_parent="robust_loess_trend",
+                    below_parent="toto_2_0",
+                    fallback_parent="toto_2_0",
                 ),
                 CombinedPolicy(
                     "combined_granite_regime_profile",
-                    "granite_ttm_r2",
-                    "median_seasonal_profile_forecast",
-                    "blend",
-                    0.60,
+                    ("granite_ttm_r2", "median_seasonal_profile_forecast"),
+                    "weighted_mean",
+                    (0.60, 0.40),
                     "recent_regime_confidence",
                     0.50,
+                    fallback_parent="granite_ttm_r2",
                 ),
             ),
         )
@@ -448,7 +494,7 @@ def parse_policy_source(source: str) -> PolicyPortfolio:
     try:
         tsfm = tuple(TSFMPolicy(**_exact_payload(payload, TSFMPolicy)) for payload in tsfm_payloads)
         combined = tuple(
-            CombinedPolicy(**_exact_payload(payload, CombinedPolicy))
+            _combined_from_payload(payload)
             for payload in combined_payloads
         )
     except TypeError as error:
@@ -563,26 +609,38 @@ def _run_combined(
     task: Task,
     outcomes: Mapping[tuple[str, str], Outcome],
 ) -> Outcome:
-    tsfm = outcomes[(policy.tsfm_parent, task.task_id)]
-    statistical = outcomes[(policy.statistical_parent, task.task_id)]
-    failed = [parent for parent in (tsfm, statistical) if parent.status != SUCCESS]
+    parent_outcomes = [outcomes[(parent, task.task_id)] for parent in policy.parents]
+    failed = [parent for parent in parent_outcomes if parent.status != SUCCESS]
     if failed:
         status = CRASHED if any(parent.status == CRASHED for parent in failed) else NOT_APPLICABLE
         detail = "; ".join(
             f"{parent.method}={parent.status}" for parent in failed
         )
         return Outcome(policy.name, task.task_id, status, detail=detail[:200])
-    if policy.mode == "blend":
+    if policy.operator == "weighted_mean":
         forecast = tuple(
-            policy.weight * left + (1.0 - policy.weight) * right
-            for left, right in zip(tsfm.forecast, statistical.forecast, strict=True)
+            sum(weight * outcome.forecast[index] for weight, outcome in zip(policy.weights, parent_outcomes, strict=True))
+            for index in range(task.horizon)
         )
-    else:
+    elif policy.operator == "route":
         signal = _signal(policy.signal, task)
         choose_tsfm = signal >= policy.threshold
-        if policy.tsfm_when == "below":
-            choose_tsfm = not choose_tsfm
-        forecast = tsfm.forecast if choose_tsfm else statistical.forecast
+        selected = policy.above_parent if choose_tsfm else policy.below_parent
+        forecast = outcomes[(selected, task.task_id)].forecast
+    elif policy.operator == "median":
+        forecast = tuple(
+            statistics.median(outcome.forecast[index] for outcome in parent_outcomes)
+            for index in range(task.horizon)
+        )
+    elif policy.operator == "trimmed_mean":
+        forecast = tuple(
+            statistics.fmean(
+                sorted(outcome.forecast[index] for outcome in parent_outcomes)[1:-1]
+            )
+            for index in range(task.horizon)
+        )
+    else:  # pragma: no cover - CombinedPolicy validates operators
+        raise PolicyError(f"unsupported Combined operator {policy.operator!r}")
     return _scored(policy.name, task, forecast)
 
 
@@ -678,6 +736,83 @@ def _exact_payload(payload: Mapping[str, object], cls: type) -> dict[str, object
     if unknown:
         raise PolicyError(f"unknown {cls.__name__} fields: {sorted(unknown)!r}")
     return dict(payload)
+
+
+_COMBINED_CANONICAL_FIELDS = frozenset(
+    {
+        "name",
+        "parents",
+        "operator",
+        "weights",
+        "signal",
+        "threshold",
+        "above_parent",
+        "below_parent",
+        "fallback_parent",
+    }
+)
+_COMBINED_LEGACY_FIELDS = frozenset(
+    {
+        "name",
+        "tsfm_parent",
+        "statistical_parent",
+        "mode",
+        "weight",
+        "signal",
+        "threshold",
+        "tsfm_when",
+    }
+)
+
+
+def _combined_from_payload(payload: Mapping[str, object]) -> CombinedPolicy:
+    """Build a canonical CombinedPolicy, migrating one exact legacy payload shape."""
+    keys = set(payload)
+    known = _COMBINED_CANONICAL_FIELDS | _COMBINED_LEGACY_FIELDS
+    unknown = keys - known
+    if unknown:
+        raise PolicyError(f"unknown CombinedPolicy fields: {sorted(unknown)!r}")
+    if keys == _COMBINED_CANONICAL_FIELDS:
+        return CombinedPolicy(**dict(payload))
+    if keys != _COMBINED_LEGACY_FIELDS:
+        raise PolicyError(
+            "CombinedPolicy fields must match exactly the canonical or legacy schema"
+        )
+
+    mode = payload["mode"]
+    tsfm_parent = payload["tsfm_parent"]
+    statistical_parent = payload["statistical_parent"]
+    tsfm_when = payload["tsfm_when"]
+    weight = payload["weight"]
+    _bounded(weight, "weight", lower=0.05, upper=0.95)
+    if mode == "blend":
+        return CombinedPolicy(
+            name=payload["name"],  # type: ignore[arg-type]
+            parents=(tsfm_parent, statistical_parent),  # type: ignore[assignment]
+            operator="weighted_mean",
+            weights=(weight, 1.0 - weight),  # type: ignore[operator]
+            signal=payload["signal"],  # type: ignore[arg-type]
+            threshold=payload["threshold"],  # type: ignore[arg-type]
+            fallback_parent=tsfm_parent,  # type: ignore[arg-type]
+        )
+    if mode == "route":
+        if tsfm_when == "above":
+            above_parent, below_parent = tsfm_parent, statistical_parent
+        elif tsfm_when == "below":
+            above_parent, below_parent = statistical_parent, tsfm_parent
+        else:
+            raise PolicyError(f"unsupported route direction {tsfm_when!r}")
+        return CombinedPolicy(
+            name=payload["name"],  # type: ignore[arg-type]
+            parents=(tsfm_parent, statistical_parent),  # type: ignore[assignment]
+            operator="route",
+            signal=payload["signal"],  # type: ignore[arg-type]
+            threshold=payload["threshold"],  # type: ignore[arg-type]
+            above_parent=above_parent,  # type: ignore[arg-type]
+            below_parent=below_parent,  # type: ignore[arg-type]
+            fallback_parent=tsfm_parent,  # type: ignore[arg-type]
+        )
+    raise PolicyError(f"unsupported Combined mode {mode!r}")
 
 
 def _identifier(value: str, field: str) -> None:
