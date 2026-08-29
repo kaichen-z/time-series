@@ -1169,6 +1169,36 @@ def test_tsfm_runtime_executes_once_when_multiple_combined_policies_consume_it(
     assert len(runtime.calls) == len(portfolio.tsfm)
 
 
+def test_successful_tsfm_and_combined_outcomes_record_scaled_metrics(
+    tmp_path: Path,
+) -> None:
+    policy_cache = PolicyOutcomeCache(tmp_path / "policy-cache")
+    outcomes = evaluate_portfolio(
+        _module(),
+        _portfolio(),
+        _tasks()[:1],
+        outcome_cache=OutcomeCache(tmp_path / "cache"),
+        runtimes=_registry(FakeTSFMRuntime({method_id: 1.0 for method_id in FLAGSHIP_METHOD_IDS})),
+        isolated_methods=False,
+        policy_cache=policy_cache,
+    )
+    cached = evaluate_portfolio(
+        _module(),
+        _portfolio(),
+        _tasks()[:1],
+        outcome_cache=OutcomeCache(tmp_path / "cache"),
+        runtimes=_registry(FakeTSFMRuntime({method_id: 1.0 for method_id in FLAGSHIP_METHOD_IDS})),
+        isolated_methods=False,
+        policy_cache=policy_cache,
+    )
+
+    for outcome in outcomes + cached:
+        if outcome.status == SUCCESS:
+            assert outcome.smae is not None and outcome.srmse is not None
+            assert outcome.smae_raw is not None and outcome.srmse_raw is not None
+            assert outcome.smae_clipped is not None and outcome.srmse_clipped is not None
+
+
 def test_forecast_tsfm_is_label_free_and_rejects_invalid_runtime_output() -> None:
     class InvalidRuntime(FakeTSFMRuntime):
         def forecast(self, candidate, history, horizon, frequency):

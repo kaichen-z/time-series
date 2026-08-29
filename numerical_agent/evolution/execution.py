@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from common.metrics import mae, mase, smape
+from common.metrics import drcik_point_metrics, mae, mase, smape
 
 from .analysis_skills import DEFAULT_SKILLS_PATH, skill_namespace
 
@@ -75,6 +75,12 @@ class Outcome:
     mase: float | None = None
     detail: str = ""
     forecast: tuple[float, ...] = ()
+    smae: float | None = None
+    srmse: float | None = None
+    smae_raw: float | None = None
+    srmse_raw: float | None = None
+    smae_clipped: bool | None = None
+    srmse_clipped: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -87,11 +93,15 @@ class MethodReport:
     not_applicable: int
     crashed: int
     invalid: int
+    mean_smae: float | None
+    mean_srmse: float | None
     mean_smape: float | None
     mean_mae: float | None
     mean_mase: float | None
     coverage: float
     by_characteristic: Mapping[str, float] = field(default_factory=dict)
+    by_characteristic_smae: Mapping[str, float] = field(default_factory=dict)
+    by_characteristic_srmse: Mapping[str, float] = field(default_factory=dict)
     by_characteristic_mae: Mapping[str, float] = field(default_factory=dict)
     by_characteristic_mase: Mapping[str, float] = field(default_factory=dict)
     sample_failures: tuple[str, ...] = ()
@@ -490,8 +500,12 @@ def _run_one(
         return Outcome(name, task.task_id, INVALID, detail="returned a non-finite value")
     truth = list(task.future)
     history = list(task.history)
+    point = drcik_point_metrics(truth, forecast)
     return Outcome(
         name, task.task_id, SUCCESS,
+        smae=float(point["smae"]), srmse=float(point["srmse"]),
+        smae_raw=float(point["smae_raw"]), srmse_raw=float(point["srmse_raw"]),
+        smae_clipped=bool(point["smae_clipped"]), srmse_clipped=bool(point["srmse_clipped"]),
         smape=smape(truth, forecast), mae=mae(truth, forecast),
         mase=mase(truth, forecast, history),
         forecast=tuple(forecast),
@@ -506,11 +520,15 @@ def _report(
     counts = Counter(o.status for o in outcomes)
 
     grouped: dict[str, list[float]] = {}
+    grouped_smae: dict[str, list[float]] = {}
+    grouped_srmse: dict[str, list[float]] = {}
     grouped_mae: dict[str, list[float]] = {}
     grouped_mase: dict[str, list[float]] = {}
     for outcome in scored:
         for tag in by_id[outcome.task_id].characteristics():
             grouped.setdefault(tag, []).append(float(outcome.smape))
+            grouped_smae.setdefault(tag, []).append(float(outcome.smae))
+            grouped_srmse.setdefault(tag, []).append(float(outcome.srmse))
             grouped_mae.setdefault(tag, []).append(float(outcome.mae))
             grouped_mase.setdefault(tag, []).append(float(outcome.mase))
 
@@ -529,12 +547,20 @@ def _report(
         not_applicable=counts.get(NOT_APPLICABLE, 0),
         crashed=counts.get(CRASHED, 0),
         invalid=counts.get(INVALID, 0),
+        mean_smae=statistics.fmean(o.smae for o in scored) if scored else None,
+        mean_srmse=statistics.fmean(o.srmse for o in scored) if scored else None,
         mean_smape=statistics.fmean(o.smape for o in scored) if scored else None,
         mean_mae=statistics.fmean(o.mae for o in scored) if scored else None,
         mean_mase=statistics.fmean(o.mase for o in scored) if scored else None,
         coverage=len(scored) / total if total else 0.0,
         by_characteristic={
             tag: statistics.fmean(values) for tag, values in sorted(grouped.items())
+        },
+        by_characteristic_smae={
+            tag: statistics.fmean(values) for tag, values in sorted(grouped_smae.items())
+        },
+        by_characteristic_srmse={
+            tag: statistics.fmean(values) for tag, values in sorted(grouped_srmse.items())
         },
         by_characteristic_mae={
             tag: statistics.fmean(values) for tag, values in sorted(grouped_mae.items())
@@ -551,6 +577,8 @@ def report_payload(reports: Sequence[MethodReport]) -> list[dict[str, object]]:
     return [
         {
             "method": report.method,
+            "mean_smae": report.mean_smae,
+            "mean_srmse": report.mean_srmse,
             "mean_smape": report.mean_smape,
             "mean_mae": report.mean_mae,
             "mean_mase": report.mean_mase,
@@ -562,6 +590,12 @@ def report_payload(reports: Sequence[MethodReport]) -> list[dict[str, object]]:
             "invalid": report.invalid,
             "by_characteristic": {
                 tag: round(value, 4) for tag, value in report.by_characteristic.items()
+            },
+            "by_characteristic_smae": {
+                tag: round(value, 4) for tag, value in report.by_characteristic_smae.items()
+            },
+            "by_characteristic_srmse": {
+                tag: round(value, 4) for tag, value in report.by_characteristic_srmse.items()
             },
             "by_characteristic_mae": {
                 tag: round(value, 4) for tag, value in report.by_characteristic_mae.items()

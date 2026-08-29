@@ -16,7 +16,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Literal, Mapping, Sequence, cast
 
-from common.metrics import mae, mase, smape
+from common.metrics import drcik_point_metrics, mae, mase, smape
 
 from numerical_agent.dictionary import MethodCandidate
 from numerical_agent.foundation import TSFM_IMPLEMENTATION_KIND
@@ -24,7 +24,12 @@ from numerical_agent.providers import RuntimeRegistry, RuntimeUnavailableError
 from numerical_agent.tsfm.manifests import ManifestRegistry
 
 from .analysis_skills_template import analyze_series
-from .cache import CacheMissError, OutcomeCache
+from .cache import (
+    CacheMissError,
+    OutcomeCache,
+    SCALED_METRIC_CAP,
+    SCALED_METRIC_SCHEMA,
+)
 from .execution import (
     CRASHED,
     INVALID,
@@ -148,7 +153,9 @@ class PolicyOutcomeCache:
     @staticmethod
     def _key(policy: "TSFMPolicy", task: Task) -> str:
         payload = {
-            "schema": 1,
+            "schema": 2,
+            "scaled_metric_schema": SCALED_METRIC_SCHEMA,
+            "scaled_metric_cap": SCALED_METRIC_CAP,
             "policy": policy.to_payload(),
             "reviewed_candidate": _candidate(policy.method_id).to_payload(),
             "task": asdict(task),
@@ -159,27 +166,22 @@ class PolicyOutcomeCache:
     def _read(self, key: str, method: str, task: Task) -> Outcome | None:
         try:
             payload = json.loads((self.root / f"{key}.json").read_text(encoding="utf-8"))
-            if payload.get("schema") != 1 or payload.get("key") != key:
+            if (
+                payload.get("schema") != 2
+                or payload.get("scaled_metric_schema") != SCALED_METRIC_SCHEMA
+                or payload.get("scaled_metric_cap") != SCALED_METRIC_CAP
+                or payload.get("key") != key
+            ):
                 return None
             raw = payload["outcome"]
-            outcome = Outcome(
-                method=str(raw["method"]),
-                task_id=str(raw["task_id"]),
-                status=str(raw["status"]),
-                smape=_optional_metric(raw.get("smape")),
-                mae=_optional_metric(raw.get("mae")),
-                mase=_optional_metric(raw.get("mase")),
-                detail=str(raw.get("detail", "")),
-                forecast=tuple(float(value) for value in raw.get("forecast", ())),
-            )
+            if not isinstance(raw, Mapping):
+                return None
+            outcome = OutcomeCache.from_payload(raw)
             if outcome.method != method or outcome.task_id != task.task_id:
                 return None
             if outcome.status not in {SUCCESS, NOT_APPLICABLE, CRASHED, INVALID}:
                 return None
-            if outcome.status == SUCCESS and (
-                len(outcome.forecast) != task.horizon
-                or any(value is None for value in (outcome.smape, outcome.mae, outcome.mase))
-            ):
+            if outcome.status == SUCCESS and len(outcome.forecast) != task.horizon:
                 return None
             return outcome
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
@@ -187,7 +189,13 @@ class PolicyOutcomeCache:
 
     def _write(self, key: str, outcome: Outcome) -> None:
         payload = json.dumps(
-            {"schema": 1, "key": key, "outcome": asdict(outcome)},
+            {
+                "schema": 2,
+                "scaled_metric_schema": SCALED_METRIC_SCHEMA,
+                "scaled_metric_cap": SCALED_METRIC_CAP,
+                "key": key,
+                "outcome": OutcomeCache.to_payload(outcome),
+            },
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
@@ -972,10 +980,17 @@ def _scored(name: str, task: Task, forecast: Sequence[float]) -> Outcome:
     values = tuple(float(value) for value in forecast)
     if len(values) != task.horizon or not all(math.isfinite(value) for value in values):
         return Outcome(name, task.task_id, INVALID, detail="combined forecast is invalid")
+    point = drcik_point_metrics(task.future, values)
     return Outcome(
         name,
         task.task_id,
         SUCCESS,
+        smae=float(point["smae"]),
+        srmse=float(point["srmse"]),
+        smae_raw=float(point["smae_raw"]),
+        srmse_raw=float(point["srmse_raw"]),
+        smae_clipped=bool(point["smae_clipped"]),
+        srmse_clipped=bool(point["srmse_clipped"]),
         smape=smape(task.future, values),
         mae=mae(task.future, values),
         mase=mase(task.future, values, task.history),
@@ -1161,12 +1176,3 @@ def _bounded(
         or not lower <= float(value) <= upper
     ):
         raise PolicyError(f"{field} must be between {lower:g} and {upper:g}")
-
-
-def _optional_metric(value: object) -> float | None:
-    if value is None:
-        return None
-    number = float(value)
-    if not math.isfinite(number):
-        raise ValueError("cached policy metric must be finite")
-    return number

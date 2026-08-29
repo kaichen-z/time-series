@@ -6,7 +6,7 @@ import shutil
 
 import pytest
 
-from numerical_agent.evolution.cache import CacheMissError, OutcomeCache
+from numerical_agent.evolution.cache import CacheError, CacheMissError, OutcomeCache
 from numerical_agent.evolution.execution import SUCCESS, Task
 from numerical_agent.evolution.module import parse_method
 
@@ -23,6 +23,33 @@ def tasks() -> tuple[Task, ...]:
         Task("t1", (1.0, 2.0, 3.0), 2, "1 day", (3.0, 3.0)),
         Task("t2", (4.0, 5.0, 6.0), 2, "1 day", (6.0, 6.0)),
     )
+
+
+def valid_cached_success_payload() -> dict[str, object]:
+    return {
+        "method": "cached_method",
+        "task_id": "t1",
+        "status": SUCCESS,
+        "smae": 0.0,
+        "srmse": 0.0,
+        "smae_raw": 0.0,
+        "srmse_raw": 0.0,
+        "smae_clipped": False,
+        "srmse_clipped": False,
+        "smape": 0.0,
+        "mae": 0.0,
+        "mase": 0.0,
+        "detail": "",
+        "forecast": [3.0, 3.0],
+    }
+
+
+def test_cache_rejects_success_without_both_scaled_metrics() -> None:
+    payload = valid_cached_success_payload()
+    del payload["srmse"]
+
+    with pytest.raises(CacheError, match="scaled metrics"):
+        OutcomeCache.from_payload(payload)
 
 
 def test_unchanged_method_and_tasks_hit_the_outcome_cache(tmp_path: Path) -> None:
@@ -118,6 +145,19 @@ def test_forecast_required_for_diagnosis_refreshes_a_legacy_cache_record(
 
     assert actual[0].forecast == (3.0, 3.0)
     assert (cache.stats.hits, cache.stats.misses) == (0, 2)
+
+
+def test_cache_round_trips_raw_infinite_scaled_tail_risk(tmp_path: Path) -> None:
+    cache = OutcomeCache(tmp_path / "cache")
+    method = parse_method(method_source())
+    task = Task("zero-scale", (1.0, 2.0, 3.0), 2, "1 day", (0.0, 0.0))
+
+    first = cache.evaluate_method(method, (task,), isolated=False)[0]
+    second = cache.evaluate_method(method, (task,), isolated=False)[0]
+
+    assert first.smae_clipped and first.srmse_clipped
+    assert first.smae_raw == float("inf") and first.srmse_raw == float("inf")
+    assert second == first
 
 
 def test_cache_only_lookup_never_executes_a_missing_method(tmp_path: Path) -> None:
