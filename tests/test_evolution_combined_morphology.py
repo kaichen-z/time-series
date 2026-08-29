@@ -1,8 +1,9 @@
 """Tests for sanitized Train-only morphology evidence in Combined proposals."""
 from __future__ import annotations
 
+import hashlib
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
@@ -41,7 +42,7 @@ def test_morphology_group_evidence_is_immutable_and_projects_only_canonical_aggr
     assert evidence.to_payload() == {
         "baseline": "toto_2_0",
         "coverage": 1.0,
-        "eligible_leaves": ["timesfm_2_5", "seasonal_naive"],
+        "eligible_leaves": ["seasonal_naive", "timesfm_2_5"],
         "entity_count": 3,
         "failure_rate": 0.0,
         "feature": "periodicity_strength",
@@ -131,6 +132,48 @@ def test_train_profiles_are_summarized_by_the_fixed_predicate_without_exposing_i
     assert "99.0" not in json.dumps(evidence.to_payload(), sort_keys=True)
 
 
+@pytest.mark.parametrize("measurement", (True, 1, type("FloatSubclass", (float,), {})(1.0)))
+def test_morphology_summarizer_rejects_nonexact_profile_measurements(
+    measurement: object,
+) -> None:
+    """Numeric coercion must not turn bools, ints, or subclasses into trusted evidence."""
+    from numerical_agent.evolution.combined_evolution import (
+        CombinedEvolutionError,
+        summarize_morphology_group_evidence,
+    )
+
+    base_profiles = tuple(
+        profile_task(
+            Task(
+                f"task-{index}",
+                tuple(float((step % 3) + 1) for step in range(36)),
+                3,
+                "1 day",
+                (0.0, 0.0, 0.0),
+            )
+        )
+        for index in range(3)
+    )
+    profiles = tuple(
+        replace(profile, periodicity_strength=measurement)  # type: ignore[arg-type]
+        for profile in base_profiles
+    )
+
+    with pytest.raises(CombinedEvolutionError):
+        summarize_morphology_group_evidence(
+            profiles,
+            entity_ids=("a", "b", "c"),
+            split="train",
+            group_id="periodic_high_confidence",
+            eligible_leaves=("timesfm_2_5", "seasonal_naive"),
+            baseline="toto_2_0",
+            reviewed_leaf_names=("timesfm_2_5", "seasonal_naive", "toto_2_0"),
+            winsorized_smae_deltas=(0.0, 0.0, 0.0),
+            winsorized_srmse_deltas=(0.0, 0.0, 0.0),
+            forecast_disagreements=(0.0, 0.0, 0.0),
+        )
+
+
 def test_morphology_summarizer_rejects_non_train_and_hostile_containers() -> None:
     """Dev/Public data and polymorphic sequences must fail before aggregate projection."""
     from numerical_agent.evolution.combined_evolution import (
@@ -204,6 +247,96 @@ def test_proposal_prompt_receives_only_reviewed_morphology_group_evidence() -> N
         "trend_strength",
         "zero_fraction",
     }
+
+
+def test_statistical_only_evidence_reaches_one_llm_call() -> None:
+    """Evidence leaves need not include a TSFM; only Combined policies have that rule."""
+    from numerical_agent.evolution.combined_evolution import (
+        CombinedProposalDiagnostics,
+        propose_combined_child,
+    )
+
+    parent = PolicyPortfolio.flagship5()
+    diagnostics = CombinedProposalDiagnostics(
+        128,
+        0.25,
+        4,
+        1,
+        (
+            _evidence(
+                eligible_leaves=("seasonal_naive", "holt_damped_trend")
+            ),
+        ),
+    )
+    agent = FakeLLMClient(['{"operations": []}'])
+
+    result = propose_combined_child(
+        parent,
+        statistical_names=("seasonal_naive", "holt_damped_trend"),
+        diagnostics=diagnostics,
+        agent=agent,
+    )
+
+    assert result.child is parent
+    assert len(agent.calls) == 1
+
+
+def test_evidence_and_group_permutations_have_one_canonical_prompt_and_fingerprint() -> None:
+    """Caller ordering must not change semantically equivalent prompt bytes or hashes."""
+    from numerical_agent.evolution.combined_evolution import (
+        CombinedProposalDiagnostics,
+        propose_combined_child,
+    )
+
+    parent = PolicyPortfolio.flagship5()
+    periodic_left = _evidence(
+        eligible_leaves=("timesfm_2_5", "seasonal_naive")
+    )
+    periodic_right = _evidence(
+        eligible_leaves=("seasonal_naive", "timesfm_2_5")
+    )
+    intermittent_left = _evidence(
+        group_id="intermittent",
+        feature="intermittency_adi",
+        threshold=1.32,
+        eligible_leaves=("seasonal_naive", "timesfm_2_5"),
+    )
+    intermittent_right = _evidence(
+        group_id="intermittent",
+        feature="intermittency_adi",
+        threshold=1.32,
+        eligible_leaves=("timesfm_2_5", "seasonal_naive"),
+    )
+    left_agent = FakeLLMClient(['{"operations": []}'])
+    right_agent = FakeLLMClient(['{"operations": []}'])
+
+    propose_combined_child(
+        parent,
+        statistical_names=("seasonal_naive",),
+        diagnostics=CombinedProposalDiagnostics(
+            128, 0.25, 4, 1, (periodic_left, intermittent_left)
+        ),
+        agent=left_agent,
+    )
+    propose_combined_child(
+        parent,
+        statistical_names=("seasonal_naive",),
+        diagnostics=CombinedProposalDiagnostics(
+            128, 0.25, 4, 1, (intermittent_right, periodic_right)
+        ),
+        agent=right_agent,
+    )
+
+    left_prompt = left_agent.calls[0]["messages"][0]["content"]
+    right_prompt = right_agent.calls[0]["messages"][0]["content"]
+    assert left_prompt == right_prompt
+    left_fingerprint = hashlib.sha256(
+        json.dumps(periodic_left.to_payload(), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    right_fingerprint = hashlib.sha256(
+        json.dumps(periodic_right.to_payload(), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    assert left_fingerprint == right_fingerprint
 
 
 def test_proposal_rejects_unknown_evidence_leaf_before_calling_llm() -> None:

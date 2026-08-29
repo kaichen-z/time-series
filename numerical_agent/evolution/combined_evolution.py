@@ -97,6 +97,15 @@ _MORPHOLOGY_GROUP_PREDICATES: dict[str, tuple[str, str, float]] = {
     "long_horizon": ("horizon", "at_least", 24.0),
     "long_horizon_ratio": ("horizon_ratio", "at_least", 0.25),
 }
+_PROFILE_PREDICATE_FLOAT_BOUNDS: dict[str, tuple[float, float]] = {
+    "periodicity_strength": (0.0, 1.0),
+    "zero_fraction": (0.0, 1.0),
+    "outlier_fraction": (0.0, 1.0),
+    "trend_strength": (0.0, 1.0),
+    "recent_regime_confidence": (0.0, 1.0),
+    "noise_relative_scale": (0.0, 1_000_000.0),
+    "intermittency_adi": (0.0, 1_000_000.0),
+}
 
 
 class CombinedEvolutionError(ValueError):
@@ -127,6 +136,7 @@ class MorphologyGroupEvidence:
 
     def __post_init__(self) -> None:
         _validate_morphology_group_evidence(self)
+        object.__setattr__(self, "eligible_leaves", tuple(sorted(self.eligible_leaves)))
 
     def to_payload(self) -> dict[str, object]:
         _validate_morphology_group_evidence(self)
@@ -151,6 +161,11 @@ class CombinedProposalDiagnostics:
             self.unavailable_leaf_count,
             self.morphology_groups,
         )
+        object.__setattr__(
+            self,
+            "morphology_groups",
+            tuple(sorted(self.morphology_groups, key=lambda evidence: evidence.group_id)),
+        )
 
     def to_payload(self) -> dict[str, object]:
         _validate_combined_diagnostics(
@@ -169,7 +184,9 @@ class CombinedProposalDiagnostics:
         if self.morphology_groups:
             payload["morphology_groups"] = [
                 _morphology_group_payload(evidence)
-                for evidence in self.morphology_groups
+                for evidence in sorted(
+                    self.morphology_groups, key=lambda evidence: evidence.group_id
+                )
             ]
         return payload
 
@@ -206,7 +223,11 @@ def summarize_morphology_group_evidence(
     if not all(type(profile) is TaskProfile for profile in profiles):
         raise CombinedEvolutionError("profiles must contain exact TaskProfile records")
     for profile in profiles:
-        TaskProfile.__post_init__(profile)
+        try:
+            TaskProfile.__post_init__(profile)
+        except (TypeError, ValueError) as error:
+            raise CombinedEvolutionError("profile values are invalid") from error
+        _validate_profile_predicate_inputs(profile)
     task_ids = tuple(profile.task_id for profile in profiles)
     if (
         any(type(task_id) is not str or not task_id for task_id in task_ids)
@@ -410,7 +431,6 @@ def propose_combined_child(
         diagnostic_payload = _proposal_diagnostics_payload(
             diagnostics,
             known_leaves=(*reviewed_names, *tsfm_names),
-            tsfm_names=tsfm_names,
         )
         prompt = {
             "current_policies": [_canonical_combined_payload(policy) for policy in parent.combined],
@@ -721,7 +741,6 @@ def _proposal_diagnostics_payload(
     value: object,
     *,
     known_leaves: tuple[str, ...],
-    tsfm_names: tuple[str, ...],
 ) -> dict[str, object]:
     if type(value) is not CombinedProposalDiagnostics:
         raise CombinedEvolutionError("diagnostics must use CombinedProposalDiagnostics")
@@ -733,15 +752,10 @@ def _proposal_diagnostics_payload(
         value.morphology_groups,
     )
     reviewed = frozenset(known_leaves)
-    tsfm = frozenset(tsfm_names)
     for evidence in value.morphology_groups:
         leaves = frozenset(evidence.eligible_leaves)
         if evidence.baseline not in reviewed or not leaves <= reviewed:
             raise CombinedEvolutionError("morphology evidence contains an unknown leaf")
-        if not leaves & tsfm:
-            raise CombinedEvolutionError(
-                "morphology evidence must include a reviewed TSFM leaf"
-            )
     payload: dict[str, object] = {
         "forecast_disagreement": value.forecast_disagreement,
         "history_length": value.history_length,
@@ -751,7 +765,9 @@ def _proposal_diagnostics_payload(
     if value.morphology_groups:
         payload["morphology_groups"] = [
             _morphology_group_payload(evidence)
-            for evidence in value.morphology_groups
+            for evidence in sorted(
+                value.morphology_groups, key=lambda evidence: evidence.group_id
+            )
         ]
     return payload
 
@@ -808,7 +824,7 @@ def _morphology_group_payload(value: MorphologyGroupEvidence) -> dict[str, objec
     return {
         "baseline": value.baseline,
         "coverage": value.coverage,
-        "eligible_leaves": list(value.eligible_leaves),
+        "eligible_leaves": sorted(value.eligible_leaves),
         "entity_count": value.entity_count,
         "failure_rate": value.failure_rate,
         "feature": value.feature,
@@ -872,6 +888,7 @@ def _bounded_exact_float(value: object, *, lower: float, upper: float) -> bool:
 def _profile_matches(
     profile: TaskProfile, feature: str, operator: str, threshold: float
 ) -> bool:
+    _validate_profile_predicate_inputs(profile)
     if feature == "horizon_ratio":
         measurement = float(profile.horizon / profile.history_length)
     else:
@@ -879,3 +896,17 @@ def _profile_matches(
     if operator == "at_least":
         return measurement >= threshold
     raise CombinedEvolutionError("unsupported fixed morphology operator")
+
+
+def _validate_profile_predicate_inputs(profile: TaskProfile) -> None:
+    for name, value in (
+        ("history_length", profile.history_length),
+        ("horizon", profile.horizon),
+    ):
+        if type(value) is not int or not 1 <= value <= 1_000_000:
+            raise CombinedEvolutionError(f"{name} must be a bounded exact integer")
+    for name, (lower, upper) in _PROFILE_PREDICATE_FLOAT_BOUNDS.items():
+        if not _bounded_exact_float(getattr(profile, name), lower=lower, upper=upper):
+            raise CombinedEvolutionError(
+                "profile predicate measurements must be bounded exact floats"
+            )
