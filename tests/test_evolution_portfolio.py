@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from numerical_agent.evolution.portfolio import (
     TSFMPolicy,
     PolicyOutcomeCache,
     _run_combined,
+    combine_materialized_outcome,
     _run_tsfm,
     evaluate_portfolio,
     parse_policy_source,
@@ -779,6 +781,176 @@ def test_failed_fallback_returns_strongest_failure_without_a_forecast() -> None:
 
     assert combined.status == CRASHED
     assert combined.forecast == ()
+
+
+@pytest.mark.parametrize(
+    ("policy", "outcomes", "expect_fallback"),
+    [
+        (
+            CombinedPolicy(
+                "combined_extreme_weighted",
+                ("toto_2_0", "timesfm_2_5"),
+                "weighted_mean",
+                (0.5, 0.5),
+                fallback_parent="toto_2_0",
+            ),
+            (
+                _successful_parent("toto_2_0", (sys.float_info.max,)),
+                _successful_parent("timesfm_2_5", (sys.float_info.max,)),
+            ),
+            False,
+        ),
+        (
+            CombinedPolicy(
+                "combined_extreme_median",
+                ("toto_2_0", "timesfm_2_5", "seasonal_naive"),
+                "median",
+                fallback_parent="toto_2_0",
+            ),
+            (
+                _successful_parent("toto_2_0", (sys.float_info.max,)),
+                _successful_parent("timesfm_2_5", (sys.float_info.max,)),
+                _successful_parent("seasonal_naive", (sys.float_info.max,)),
+            ),
+            False,
+        ),
+        (
+            CombinedPolicy(
+                "combined_extreme_trimmed",
+                (
+                    "toto_2_0",
+                    "timesfm_2_5",
+                    "chronos_bolt",
+                    "granite_ttm_r2",
+                    "seasonal_naive",
+                ),
+                "trimmed_mean",
+                fallback_parent="toto_2_0",
+            ),
+            (
+                _successful_parent("toto_2_0", (0.0,)),
+                _successful_parent("timesfm_2_5", (sys.float_info.max,)),
+                _successful_parent("chronos_bolt", (sys.float_info.max,)),
+                _successful_parent("granite_ttm_r2", (sys.float_info.max,)),
+                _successful_parent("seasonal_naive", (sys.float_info.max,)),
+            ),
+            False,
+        ),
+        (
+            CombinedPolicy(
+                "combined_extreme_route",
+                ("toto_2_0", "timesfm_2_5"),
+                "route",
+                signal="zero_fraction",
+                threshold=0.5,
+                above_parent="timesfm_2_5",
+                below_parent="toto_2_0",
+                fallback_parent="toto_2_0",
+            ),
+            (
+                _successful_parent("toto_2_0", (sys.float_info.max,)),
+                _successful_parent("timesfm_2_5", (sys.float_info.max,)),
+            ),
+            True,
+        ),
+    ],
+)
+def test_extreme_combined_operators_never_escape_arithmetic(
+    policy: CombinedPolicy,
+    outcomes: tuple[Outcome, ...],
+    expect_fallback: bool,
+) -> None:
+    task = Task(
+        "operator",
+        (sys.float_info.max,) * 4,
+        1,
+        "1 day",
+        (sys.float_info.max,),
+    )
+    materialized = {outcome.method: outcome for outcome in outcomes}
+
+    composed = combine_materialized_outcome(
+        policy,
+        materialized,
+        task_id=task.task_id,
+        history=task.history,
+        horizon=task.horizon,
+        frequency=task.frequency,
+    )
+    combined = _run_combined(policy, task, _operator_outcomes(*outcomes))
+
+    assert composed.status == SUCCESS
+    assert combined.status == SUCCESS
+    assert composed.forecast == (sys.float_info.max,)
+    assert combined.forecast == (sys.float_info.max,)
+    assert ("fallback=" in composed.detail) is expect_fallback
+    assert ("fallback=" in combined.detail) is expect_fallback
+
+
+def test_arithmetic_fallback_for_nonfinite_weighted_composition() -> None:
+    policy = CombinedPolicy(
+        "combined_nonfinite_weighted",
+        ("toto_2_0", "timesfm_2_5"),
+        "weighted_mean",
+        (0.50000000025, 0.50000000025),
+        fallback_parent="toto_2_0",
+    )
+    task = Task(
+        "operator",
+        (sys.float_info.max,) * 4,
+        1,
+        "1 day",
+        (sys.float_info.max,),
+    )
+    outcomes = (
+        _successful_parent("toto_2_0", (sys.float_info.max,)),
+        _successful_parent("timesfm_2_5", (sys.float_info.max,)),
+    )
+
+    composed = combine_materialized_outcome(
+        policy,
+        {outcome.method: outcome for outcome in outcomes},
+        task_id=task.task_id,
+        history=task.history,
+        horizon=task.horizon,
+        frequency=task.frequency,
+    )
+    combined = _run_combined(policy, task, _operator_outcomes(*outcomes))
+
+    assert composed.status == SUCCESS
+    assert combined.status == SUCCESS
+    assert composed.forecast == (sys.float_info.max,)
+    assert combined.forecast == (sys.float_info.max,)
+    assert "fallback=toto_2_0" in composed.detail
+    assert "fallback=toto_2_0" in combined.detail
+
+
+def test_invalid_fallback_returns_sanitized_invalid_outcome() -> None:
+    policy = CombinedPolicy(
+        "combined_invalid_fallback",
+        ("toto_2_0", "timesfm_2_5"),
+        "weighted_mean",
+        (0.5, 0.5),
+        fallback_parent="toto_2_0",
+    )
+
+    combined = combine_materialized_outcome(
+        policy,
+        {
+            "toto_2_0": Outcome(
+                "toto_2_0", "operator", INVALID, detail="sensitive runtime detail"
+            ),
+            "timesfm_2_5": _successful_parent("timesfm_2_5", (20.0, 20.0)),
+        },
+        task_id="operator",
+        history=(10.0, 10.0),
+        horizon=2,
+        frequency="1 day",
+    )
+
+    assert combined.status == INVALID
+    assert combined.forecast == ()
+    assert combined.detail == "toto_2_0=invalid"
 
 
 def test_tsfm_runtime_executes_once_when_multiple_combined_policies_consume_it(

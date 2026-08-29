@@ -8,6 +8,7 @@ import math
 import os
 import pprint
 import statistics
+import sys
 import tempfile
 from dataclasses import asdict
 from dataclasses import dataclass, replace
@@ -720,7 +721,10 @@ def _run_combined(
     )
     if composed.status != SUCCESS:
         return composed
-    scored = _scored(policy.name, task, composed.forecast)
+    try:
+        scored = _scored(policy.name, task, composed.forecast)
+    except (ArithmeticError, TypeError, ValueError):
+        return Outcome(policy.name, task.task_id, INVALID, detail="combined score is invalid")
     return replace(scored, detail=composed.detail) if composed.detail else scored
 
 
@@ -752,40 +756,75 @@ def combine_materialized_outcome(
         if not _is_successful_parent(outcome, horizon)
     )
     if failed:
-        fallback = next(
-            outcome
-            for outcome in parent_outcomes
-            if outcome.method == policy.fallback_parent
-        )
         detail = "; ".join(
             f"{parent.method}={_parent_failure_status(parent, horizon)}"
             for parent in failed
         )
-        if _is_successful_parent(fallback, horizon):
-            return Outcome(
-                policy.name,
-                task_id,
-                SUCCESS,
-                detail=f"fallback={policy.fallback_parent}; {detail}"[:200],
-                forecast=fallback.forecast,
-            )
-        status = max(
-            (_parent_failure_status(parent, horizon) for parent in failed),
-            key=_failure_precedence,
+        return _combined_fallback_or_failure(
+            policy,
+            parent_outcomes,
+            task_id=task_id,
+            horizon=horizon,
+            detail=detail,
+            failed=failed,
         )
-        return Outcome(policy.name, task_id, status, detail=detail[:200])
-    return Outcome(
-        policy.name,
-        task_id,
-        SUCCESS,
-        forecast=combine_materialized_forecast(
+    try:
+        forecast = combine_materialized_forecast(
             policy,
             {outcome.method: outcome for outcome in parent_outcomes},
             history=history,
             horizon=horizon,
             frequency=frequency,
-        ),
+        )
+    except (ArithmeticError, TypeError, ValueError):
+        return _combined_fallback_or_failure(
+            policy,
+            parent_outcomes,
+            task_id=task_id,
+            horizon=horizon,
+            detail="combined composition is invalid",
+            failed=(),
+        )
+    if not _forecast_is_valid(forecast, horizon):
+        return _combined_fallback_or_failure(
+            policy,
+            parent_outcomes,
+            task_id=task_id,
+            horizon=horizon,
+            detail="combined composition is invalid",
+            failed=(),
+        )
+    return Outcome(policy.name, task_id, SUCCESS, forecast=forecast)
+
+
+def _combined_fallback_or_failure(
+    policy: CombinedPolicy,
+    parent_outcomes: Sequence[Outcome],
+    *,
+    task_id: str,
+    horizon: int,
+    detail: str,
+    failed: Sequence[Outcome],
+) -> Outcome:
+    """Use the reviewed fallback or return the strongest sanitized failure."""
+    fallback = next(
+        outcome
+        for outcome in parent_outcomes
+        if outcome.method == policy.fallback_parent
     )
+    if _is_successful_parent(fallback, horizon):
+        return Outcome(
+            policy.name,
+            task_id,
+            SUCCESS,
+            detail=f"fallback={policy.fallback_parent}; {detail}"[:200],
+            forecast=fallback.forecast,
+        )
+    statuses = [_parent_failure_status(parent, horizon) for parent in failed]
+    if not statuses:
+        statuses.append(INVALID)
+    status = max(statuses, key=_failure_precedence)
+    return Outcome(policy.name, task_id, status, detail=detail[:200])
 
 
 def combine_materialized_forecast(
@@ -800,9 +839,11 @@ def combine_materialized_forecast(
     parents = tuple(parent_outcomes[parent] for parent in policy.parents)
     if policy.operator == "weighted_mean":
         forecast = tuple(
-            sum(
-                weight * outcome.forecast[index]
-                for weight, outcome in zip(policy.weights, parents, strict=True)
+            _stable_weighted_mean(
+                tuple(
+                    (weight, outcome.forecast[index])
+                    for weight, outcome in zip(policy.weights, parents, strict=True)
+                )
             )
             for index in range(horizon)
         )
@@ -817,7 +858,7 @@ def combine_materialized_forecast(
         )
     elif policy.operator == "trimmed_mean":
         forecast = tuple(
-            statistics.fmean(
+            _overflow_stable_mean(
                 sorted(outcome.forecast[index] for outcome in parents)[1:-1]
             )
             for index in range(horizon)
@@ -825,6 +866,31 @@ def combine_materialized_forecast(
     else:  # pragma: no cover - CombinedPolicy validates operators
         raise PolicyError(f"unsupported Combined operator {policy.operator!r}")
     return tuple(float(value) for value in forecast)
+
+
+def _stable_weighted_mean(values: Sequence[tuple[float, float]]) -> float:
+    """Return a weighted mean without overflowing intermediate additions."""
+    terms = tuple((float(weight), float(value)) for weight, value in values)
+    maximum = max((abs(value) for _, value in terms), default=0.0)
+    weight_sum = math.fsum(weight for weight, _ in terms)
+    if maximum == 0.0:
+        return 0.0
+    if maximum <= sys.float_info.max / max(weight_sum, 1.0):
+        return sum(weight * value for weight, value in terms)
+    return math.fsum(weight * (value / maximum) for weight, value in terms) * maximum
+
+
+def _overflow_stable_mean(values: Sequence[float]) -> float:
+    """Return an arithmetic mean while keeping intermediate sums finite."""
+    numbers = tuple(float(value) for value in values)
+    maximum = max((abs(value) for value in numbers), default=0.0)
+    if not numbers:
+        raise ValueError("mean requires at least one value")
+    if maximum == 0.0:
+        return 0.0
+    if maximum <= sys.float_info.max / len(numbers):
+        return statistics.fmean(numbers)
+    return math.fsum(value / maximum for value in numbers) / len(numbers) * maximum
 
 
 def _combine_forecasts(
@@ -851,7 +917,7 @@ def _forecast_is_valid(forecast: Sequence[float], horizon: int) -> bool:
         return len(forecast) == horizon and all(
             math.isfinite(float(value)) for value in forecast
         )
-    except (TypeError, ValueError):
+    except (ArithmeticError, TypeError, ValueError):
         return False
 
 
