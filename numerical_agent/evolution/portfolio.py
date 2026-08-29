@@ -79,6 +79,11 @@ _SIGNALS = frozenset(
         "outlier_fraction",
         "trend_strength",
         "recent_regime_confidence",
+        "noise_relative_scale",
+        "intermittency_adi",
+        "history_length",
+        "horizon",
+        "horizon_ratio",
     }
 )
 _ROUTE_DIRECTIONS = frozenset({"above", "below"})
@@ -849,7 +854,7 @@ def combine_materialized_forecast(
             for index in range(horizon)
         )
     elif policy.operator == "route":
-        signal = _history_signal(policy.signal, history, frequency)
+        signal = _history_signal(policy.signal, history, horizon, frequency)
         selected = policy.above_parent if signal >= policy.threshold else policy.below_parent
         forecast = parent_outcomes[selected].forecast
     elif policy.operator == "median":
@@ -996,10 +1001,18 @@ def _applicable(applicability: str, profile: Mapping[str, object]) -> bool:
 
 
 def _signal(name: str, task: Task) -> float:
-    return _history_signal(name, task.history, task.frequency)
+    return _history_signal(name, task.history, task.horizon, task.frequency)
 
 
-def _history_signal(name: str, history: Sequence[float], frequency: str) -> float:
+def _history_signal(
+    name: str, history: Sequence[float], horizon: int, frequency: str
+) -> float:
+    if name == "history_length":
+        return float(len(history))
+    if name == "horizon":
+        return float(horizon)
+    if name == "horizon_ratio":
+        return float(horizon / len(history))
     profile = analyze_series(history, frequency)
     if name == "periodicity_strength":
         return float(cast(Mapping[str, object], profile["periodicity"])["strength"])
@@ -1012,6 +1025,12 @@ def _history_signal(name: str, history: Sequence[float], frequency: str) -> floa
         return float(cast(Mapping[str, object], profile["trend"])["strength"])
     if name == "recent_regime_confidence":
         return float(cast(Mapping[str, object], profile["recent_regime"])["confidence"])
+    if name == "noise_relative_scale":
+        return float(cast(Mapping[str, object], profile["noise"])["relative_scale"])
+    if name == "intermittency_adi":
+        return float(
+            cast(Mapping[str, object], profile["intermittency"])["average_nonzero_gap"]
+        )
     raise PolicyError(f"unsupported signal {name!r}")
 
 

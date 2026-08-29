@@ -794,6 +794,49 @@ def test_route_uses_a_history_only_signal_to_select_explicit_parent() -> None:
     assert combined.forecast == (20.0, 20.0)
 
 
+@pytest.mark.parametrize(
+    ("signal", "threshold"),
+    (
+        ("noise_relative_scale", 2.0),
+        ("intermittency_adi", 2.5),
+        ("history_length", 7.0),
+        ("horizon", 1.0),
+        ("horizon_ratio", 0.2),
+    ),
+)
+def test_route_supports_extended_reviewed_python_signals(
+    signal: str, threshold: float
+) -> None:
+    """Missing host-side signal computation would reject or misroute valid policies."""
+    policy = CombinedPolicy(
+        "combined_morphology_route",
+        ("toto_2_0", "seasonal_naive"),
+        "route",
+        signal=signal,
+        threshold=threshold,
+        above_parent="seasonal_naive",
+        below_parent="toto_2_0",
+        fallback_parent="toto_2_0",
+    )
+
+    combined = combine_materialized_outcome(
+        policy,
+        {
+            "toto_2_0": Outcome("toto_2_0", "operator", SUCCESS, forecast=(10.0, 10.0)),
+            "seasonal_naive": Outcome(
+                "seasonal_naive", "operator", SUCCESS, forecast=(20.0, 20.0)
+            ),
+        },
+        task_id="operator",
+        history=(0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0),
+        horizon=2,
+        frequency="1 day",
+    )
+
+    assert combined.status == SUCCESS
+    assert combined.forecast == (20.0, 20.0)
+
+
 def test_failed_nonfallback_parent_returns_successful_explicit_fallback() -> None:
     task = _operator_task()
     policy = CombinedPolicy(
