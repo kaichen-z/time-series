@@ -7,25 +7,19 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from .morphology import AssumptionGrounding, MorphologyCard
-from .numerical_selector import CandidateDiagnostics, HindcastFold, SelectionDecision
+from .numerical_selector import (
+    CandidateDiagnostics,
+    HindcastFold,
+    SelectionArithmetic,
+    SelectionDecision,
+    replay_selection_forecast,
+)
 from .screening import TaskProfile
 
 
 _RETRIEVAL_FIELDS = frozenset(
     {"assumption_id", "kind", "claim", "failure_condition"}
 )
-_WEIGHTED_COMBINATION_TYPES = frozenset(
-    {
-        "joint_tsfm_statistical_portfolio",
-        "protected_tsfm_weighted_portfolio",
-        "statistical_shrinkage_overlay",
-        "tsfm_shrinkage_overlay",
-        "tsfm_weighted_portfolio",
-        "weighted_blend",
-    }
-)
-
-
 @dataclass(frozen=True)
 class RankedNumericalForecast:
     """One materialized candidate retained in deterministic diagnostic order."""
@@ -158,26 +152,20 @@ class NumericalForecastPackage:
             next(item for item in alternatives if item.name == name)
             for name in selection.selected
         )
-        if accepted and len(selected_artifacts) != 1:
+        if self.morphology_card is not None and len(selected_artifacts) != 1:
             raise ValueError("Morphology-guided selection must be single")
-        if selection.mode == "single":
-            if selection.forecast != selected_artifacts[0].forecast:
-                raise ValueError("single selection must equal its materialized forecast")
-        else:
-            if (
-                selection.mode == "ensemble"
-                and selection.combination_type is not None
-            ) or (
-                selection.mode == "combined"
-                and selection.combination_type not in _WEIGHTED_COMBINATION_TYPES
-            ):
-                raise ValueError("multi-member package requires a weighted selection mode")
-            if selection.forecast != _weighted_forecast(
-                selected_artifacts, selection.weights
-            ):
+        replayed = replay_selection_forecast(
+            selection, {item.name: item.forecast for item in alternatives}
+        )
+        if selection.forecast != replayed:
+            if selection.mode == "single":
                 raise ValueError(
-                    "multi-member forecast must equal the deterministic weighted combination"
+                    "single selection arithmetic replay must equal its materialized forecast"
                 )
+            raise ValueError(
+                "selection arithmetic replay does not match the weighted combination "
+                "or supported selector output"
+            )
         if not isinstance(self.protected_baseline, RankedNumericalForecast):
             raise ValueError("Numerical package requires a protected baseline")
         if self.protected_baseline.name not in alternative_names:
@@ -358,6 +346,10 @@ def _freeze_selection(
         not isinstance(decision.baseline_name, str) or not decision.baseline_name
     ):
         raise ValueError("selection baseline name must be a nonempty string or None")
+    if decision.arithmetic is not None and not isinstance(
+        decision.arithmetic, SelectionArithmetic
+    ):
+        raise ValueError("selection arithmetic must be immutable selector provenance")
     assumption_ids = _string_tuple(
         decision.assumption_ids, "selection assumption ids", allow_empty=True
     )
@@ -404,18 +396,6 @@ def _freeze_diagnostic(value: CandidateDiagnostics) -> CandidateDiagnostics:
             _finite_tuple(fold, allow_empty=False) for fold in value.fold_truths
         ),
         long_horizon_fold=long_horizon_fold,
-    )
-
-
-def _weighted_forecast(
-    artifacts: Sequence[RankedNumericalForecast], weights: Sequence[float]
-) -> tuple[float, ...]:
-    return tuple(
-        sum(
-            weight * artifact.forecast[index]
-            for artifact, weight in zip(artifacts, weights, strict=True)
-        )
-        for index in range(len(artifacts[0].forecast))
     )
 
 

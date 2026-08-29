@@ -255,6 +255,92 @@ class DecisionPolicy:
 
 
 @dataclass(frozen=True)
+class SelectionArithmetic:
+    """Immutable, selector-owned recipe for replaying a materialized decision."""
+
+    operation: str
+    candidate_name: str | None = None
+    inputs: tuple["SelectionArithmetic", ...] = ()
+    weights: tuple[float, ...] = ()
+    strength: float | None = None
+    clip_multiplier: float | None = None
+    scale: float | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.operation, str):
+            raise ValueError("selection arithmetic operation must be a string")
+        inputs = tuple(self.inputs)
+        raw_weights = tuple(self.weights)
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in raw_weights
+        ):
+            raise ValueError("selection arithmetic weights must be numerical")
+        weights = tuple(float(value) for value in raw_weights)
+        object.__setattr__(self, "inputs", inputs)
+        object.__setattr__(self, "weights", weights)
+        if self.operation == "leaf":
+            if not isinstance(self.candidate_name, str) or not self.candidate_name:
+                raise ValueError("selection arithmetic leaf requires a candidate")
+            if inputs or weights or any(
+                value is not None
+                for value in (self.strength, self.clip_multiplier, self.scale)
+            ):
+                raise ValueError("selection arithmetic leaf has unexpected fields")
+            return
+        if self.candidate_name is not None or len(inputs) < 2:
+            raise ValueError("selection arithmetic operation requires two or more inputs")
+        if any(not isinstance(item, SelectionArithmetic) for item in inputs):
+            raise ValueError("selection arithmetic inputs must be immutable recipes")
+        if self.operation == "weighted":
+            if (
+                len(weights) != len(inputs)
+                or any(not math.isfinite(value) or value < 0.0 for value in weights)
+                or math.fsum(weights) != 1.0
+            ):
+                raise ValueError("weighted arithmetic requires normalized finite weights")
+            if any(
+                value is not None
+                for value in (self.strength, self.clip_multiplier, self.scale)
+            ):
+                raise ValueError("weighted arithmetic has unexpected residual fields")
+            return
+        if self.operation in {"fmean", "median"}:
+            if weights or any(
+                value is not None
+                for value in (self.strength, self.clip_multiplier, self.scale)
+            ):
+                raise ValueError(f"{self.operation} arithmetic has unexpected fields")
+            return
+        if self.operation == "residual":
+            if len(inputs) != 2 or weights:
+                raise ValueError("residual arithmetic requires exactly two inputs")
+            parameters = (self.strength, self.clip_multiplier, self.scale)
+            if any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                for value in parameters
+            ):
+                raise ValueError("residual arithmetic requires finite parameters")
+            assert self.strength is not None
+            assert self.clip_multiplier is not None
+            assert self.scale is not None
+            strength = float(self.strength)
+            clip_multiplier = float(self.clip_multiplier)
+            scale = float(self.scale)
+            if not 0.0 < strength <= 0.5:
+                raise ValueError("residual strength must be within (0, 0.5]")
+            if clip_multiplier <= 0.0 or scale <= 0.0:
+                raise ValueError("residual clip and scale must be positive")
+            object.__setattr__(self, "strength", strength)
+            object.__setattr__(self, "clip_multiplier", clip_multiplier)
+            object.__setattr__(self, "scale", scale)
+            return
+        raise ValueError("unsupported selection arithmetic operation")
+
+
+@dataclass(frozen=True)
 class SelectionDecision:
     mode: str
     selected: tuple[str, ...]
@@ -268,6 +354,144 @@ class SelectionDecision:
     assumption_ids: tuple[str, ...] = ()
     assumption_kinds: tuple[str, ...] = ()
     considered_candidates: tuple[str, ...] = ()
+    arithmetic: SelectionArithmetic | None = None
+
+
+_WEIGHTED_SELECTION_TYPES = frozenset(
+    {
+        "joint_tsfm_statistical_portfolio",
+        "protected_tsfm_weighted_portfolio",
+        "statistical_shrinkage_overlay",
+        "tsfm_shrinkage_overlay",
+        "tsfm_weighted_portfolio",
+        "weighted_blend",
+    }
+)
+_MEDIAN_SELECTION_TYPES = frozenset(
+    {"protected_tsfm_median_portfolio", "tsfm_median_portfolio"}
+)
+_RESIDUAL_SELECTION_TYPES = frozenset(
+    {
+        "protected_joint_tsfm_statistical_residual",
+        "protected_statistical_residual",
+        "residual_correction",
+    }
+)
+
+
+def replay_selection_forecast(
+    decision: SelectionDecision,
+    forecasts: Mapping[str, Sequence[float]],
+) -> tuple[float, ...]:
+    """Replay a selector decision using only its trusted arithmetic and leaves."""
+    if not isinstance(decision, SelectionDecision):
+        raise ValueError("selection arithmetic replay requires a decision")
+    arithmetic = decision.arithmetic or _implicit_selection_arithmetic(decision)
+    expected_operation = _expected_arithmetic_operation(decision)
+    if arithmetic.operation != expected_operation:
+        raise ValueError("selection mode does not match its arithmetic replay")
+    if _arithmetic_leaf_names(arithmetic) != tuple(decision.selected):
+        raise ValueError("selection names do not match its arithmetic replay")
+    if _arithmetic_attribution_weights(arithmetic) != tuple(decision.weights):
+        raise ValueError("selection weights do not match its arithmetic replay")
+    return _replay_arithmetic(arithmetic, forecasts)
+
+
+def _implicit_selection_arithmetic(
+    decision: SelectionDecision,
+) -> SelectionArithmetic:
+    leaves = tuple(
+        SelectionArithmetic("leaf", candidate_name=name)
+        for name in decision.selected
+    )
+    operation = _expected_arithmetic_operation(decision)
+    if operation == "leaf":
+        return leaves[0]
+    if operation == "residual":
+        raise ValueError("residual selection requires trusted arithmetic replay")
+    if operation == "weighted":
+        return SelectionArithmetic(operation, inputs=leaves, weights=decision.weights)
+    return SelectionArithmetic(operation, inputs=leaves)
+
+
+def _expected_arithmetic_operation(decision: SelectionDecision) -> str:
+    if decision.mode == "single" and decision.combination_type is None:
+        return "leaf"
+    if decision.mode == "ensemble" and decision.combination_type is None:
+        if len(set(decision.weights)) == 1:
+            return "fmean"
+        return "weighted"
+    if decision.mode == "combined":
+        if decision.combination_type in _WEIGHTED_SELECTION_TYPES:
+            return "weighted"
+        if decision.combination_type in _MEDIAN_SELECTION_TYPES:
+            return "median"
+        if decision.combination_type in _RESIDUAL_SELECTION_TYPES:
+            return "residual"
+    raise ValueError("selection mode lacks a supported arithmetic replay")
+
+
+def _arithmetic_leaf_names(arithmetic: SelectionArithmetic) -> tuple[str, ...]:
+    if arithmetic.operation == "leaf":
+        assert arithmetic.candidate_name is not None
+        return (arithmetic.candidate_name,)
+    return tuple(
+        name for item in arithmetic.inputs for name in _arithmetic_leaf_names(item)
+    )
+
+
+def _arithmetic_attribution_weights(
+    arithmetic: SelectionArithmetic,
+) -> tuple[float, ...]:
+    if arithmetic.operation == "leaf":
+        return (1.0,)
+    if arithmetic.operation == "residual":
+        assert arithmetic.strength is not None
+        parent, specialist = arithmetic.inputs
+        return (
+            *(value * (1.0 - arithmetic.strength)
+              for value in _arithmetic_attribution_weights(parent)),
+            *(value * arithmetic.strength
+              for value in _arithmetic_attribution_weights(specialist)),
+        )
+    factors = (
+        arithmetic.weights
+        if arithmetic.operation == "weighted"
+        else (1.0 / len(arithmetic.inputs),) * len(arithmetic.inputs)
+    )
+    return tuple(
+        value * factor
+        for item, factor in zip(arithmetic.inputs, factors, strict=True)
+        for value in _arithmetic_attribution_weights(item)
+    )
+
+
+def _replay_arithmetic(
+    arithmetic: SelectionArithmetic,
+    forecasts: Mapping[str, Sequence[float]],
+) -> tuple[float, ...]:
+    if arithmetic.operation == "leaf":
+        assert arithmetic.candidate_name is not None
+        try:
+            values = forecasts[arithmetic.candidate_name]
+        except (KeyError, TypeError) as error:
+            raise ValueError("selection arithmetic references an unavailable forecast") from error
+        return tuple(float(value) for value in values)
+    values = tuple(_replay_arithmetic(item, forecasts) for item in arithmetic.inputs)
+    if arithmetic.operation == "weighted":
+        return _weighted_values(values, arithmetic.weights)
+    if arithmetic.operation == "fmean":
+        return _fmean_values(values)
+    if arithmetic.operation == "median":
+        return _median_values(values)
+    assert arithmetic.operation == "residual"
+    assert arithmetic.strength is not None
+    assert arithmetic.clip_multiplier is not None
+    assert arithmetic.scale is not None
+    return _residual_values(
+        values[0], values[1], arithmetic.strength,
+        arithmetic.clip_multiplier, arithmetic.scale,
+    )
 
 
 def select_assumption_guided_forecast(
@@ -950,6 +1174,7 @@ def select_numerical_forecast(
     weights = (1.0,)
     forecast = best_forecast
     mode = "single"
+    arithmetic = SelectionArithmetic("leaf", candidate_name=best.name)
     reasons = ["reliability_gate", "pareto_front", f"best_{order[0]}"]
     if baseline_protected:
         reasons.append(
@@ -972,7 +1197,7 @@ def select_numerical_forecast(
             profile=profile,
         )
         if proposal is not None:
-            chosen, weights, forecast, combination_type = proposal
+            chosen, weights, forecast, combination_type, arithmetic = proposal
             mode = "combined"
             reasons.extend((
                 "cross_family_combination",
@@ -987,6 +1212,13 @@ def select_numerical_forecast(
             if legacy is not None:
                 chosen, weights, forecast = legacy
                 mode = "ensemble"
+                arithmetic = SelectionArithmetic(
+                    "fmean",
+                    inputs=tuple(
+                        SelectionArithmetic("leaf", candidate_name=name)
+                        for name in chosen
+                    ),
+                )
                 reasons.extend(("diverse_members", "hindcast_blend_improvement"))
 
     all_ranked = sorted(eligible, key=lambda item: _rank_key(item, order))
@@ -1005,6 +1237,7 @@ def select_numerical_forecast(
         rejected=rejected,
         combination_type=combination_type,
         baseline_name=baseline.name if baseline is not None else None,
+        arithmetic=arithmetic,
     )
 
 
@@ -1112,6 +1345,14 @@ def _conservative_tsfm_soft_overlay(
         forecasts["timesfm_2_5"],
         anchor_weight,
     )
+    arithmetic = SelectionArithmetic(
+        "weighted",
+        inputs=(
+            parent.arithmetic or _implicit_selection_arithmetic(parent),
+            SelectionArithmetic("leaf", candidate_name="timesfm_2_5"),
+        ),
+        weights=(anchor_weight, challenger_weight),
+    )
     return SelectionDecision(
         mode="combined",
         selected=(anchor_name, "timesfm_2_5"),
@@ -1129,6 +1370,7 @@ def _conservative_tsfm_soft_overlay(
         assumption_ids=parent.assumption_ids,
         assumption_kinds=parent.assumption_kinds,
         considered_candidates=parent.considered_candidates,
+        arithmetic=arithmetic,
     )
 
 
@@ -1382,6 +1624,14 @@ def _conservative_multi_tsfm_portfolio(
         return parent
     proposal = min(proposals, key=lambda item: item[:6])
     _, _, _, kind, names, weights, _, final, _, _ = proposal
+    operation = "median" if kind == "tsfm_median_portfolio" else "weighted"
+    arithmetic = SelectionArithmetic(
+        operation,
+        inputs=tuple(
+            SelectionArithmetic("leaf", candidate_name=name) for name in names
+        ),
+        weights=weights if operation == "weighted" else (),
+    )
     return SelectionDecision(
         mode="combined",
         selected=names,
@@ -1400,6 +1650,7 @@ def _conservative_multi_tsfm_portfolio(
         assumption_ids=parent.assumption_ids,
         assumption_kinds=parent.assumption_kinds,
         considered_candidates=parent.considered_candidates,
+        arithmetic=arithmetic,
     )
 
 
@@ -1597,6 +1848,12 @@ def _weighted_values(
     )
 
 
+def _fmean_values(values: Sequence[Sequence[float]]) -> tuple[float, ...]:
+    if not values or any(len(item) != len(values[0]) for item in values):
+        raise ValueError("mean portfolio members must be nonempty and aligned")
+    return tuple(statistics.fmean(timestep) for timestep in zip(*values, strict=True))
+
+
 def _median_values(values: Sequence[Sequence[float]]) -> tuple[float, ...]:
     if not values or any(len(item) != len(values[0]) for item in values):
         raise ValueError("median portfolio members must be nonempty and aligned")
@@ -1754,6 +2011,14 @@ def _conservative_statistical_soft_overlay(
     final = _blend_values(
         parent.forecast, forecasts[specialist_name], anchor_weight
     )
+    arithmetic = SelectionArithmetic(
+        "weighted",
+        inputs=(
+            parent.arithmetic or _implicit_selection_arithmetic(parent),
+            SelectionArithmetic("leaf", candidate_name=specialist_name),
+        ),
+        weights=(anchor_weight, challenger_weight),
+    )
     reasons = [
         *parent.reason_codes,
         "conservative_statistical_soft_overlay",
@@ -1784,6 +2049,7 @@ def _conservative_statistical_soft_overlay(
         assumption_ids=parent.assumption_ids,
         assumption_kinds=parent.assumption_kinds,
         considered_candidates=parent.considered_candidates,
+        arithmetic=arithmetic,
     )
 
 
@@ -1876,6 +2142,16 @@ def _protected_statistical_residual_overlay(
         policy.ensemble_correction_clip,
         final_scale,
     )
+    arithmetic = SelectionArithmetic(
+        "residual",
+        inputs=(
+            parent.arithmetic or _implicit_selection_arithmetic(parent),
+            SelectionArithmetic("leaf", candidate_name=specialist_name),
+        ),
+        strength=strength,
+        clip_multiplier=policy.ensemble_correction_clip,
+        scale=final_scale,
+    )
     selected = (*parent.selected, specialist_name)
     weights = (
         *(float(weight) * (1.0 - strength) for weight in parent.weights),
@@ -1903,6 +2179,7 @@ def _protected_statistical_residual_overlay(
         assumption_ids=parent.assumption_ids,
         assumption_kinds=parent.assumption_kinds,
         considered_candidates=parent.considered_candidates,
+        arithmetic=arithmetic,
     )
 
 
@@ -2421,7 +2698,13 @@ def _best_guarded_combination(
     baseline: CandidateDiagnostics | None,
     conditioned_names: Sequence[str],
     profile=None,
-) -> tuple[tuple[str, ...], tuple[float, ...], tuple[float, ...], str] | None:
+) -> tuple[
+    tuple[str, ...],
+    tuple[float, ...],
+    tuple[float, ...],
+    str,
+    SelectionArithmetic,
+] | None:
     """Search a bounded TSFM+statistical portfolio using history-only folds."""
     ranked = sorted(eligible, key=lambda item: _rank_key(item, policy.ranking_order))
     anchors = [item for item in ranked if item.family in {"tsfm", "foundation"}][:2]
@@ -2445,6 +2728,7 @@ def _best_guarded_combination(
             float,
             tuple[float, ...],
             tuple[float, ...],
+            SelectionArithmetic,
         ]
     ] = []
     for anchor, specialist in itertools.product(anchors, specialists):
@@ -2504,6 +2788,14 @@ def _best_guarded_combination(
                 anchor_weight,
                 (anchor_weight, 1.0 - anchor_weight),
                 final,
+                SelectionArithmetic(
+                    "weighted",
+                    inputs=(
+                        SelectionArithmetic("leaf", candidate_name=anchor.name),
+                        SelectionArithmetic("leaf", candidate_name=specialist.name),
+                    ),
+                    weights=(anchor_weight, 1.0 - anchor_weight),
+                ),
             ))
 
         scales = _fold_correction_scales(anchor)
@@ -2556,13 +2848,23 @@ def _best_guarded_combination(
                 strength,
                 (1.0 - strength, strength),
                 final,
+                SelectionArithmetic(
+                    "residual",
+                    inputs=(
+                        SelectionArithmetic("leaf", candidate_name=anchor.name),
+                        SelectionArithmetic("leaf", candidate_name=specialist.name),
+                    ),
+                    strength=strength,
+                    clip_multiplier=policy.ensemble_correction_clip,
+                    scale=final_scale,
+                ),
             ))
 
     if not proposals:
         return None
     proposal = min(proposals, key=lambda item: item[:6])
-    _, _, kind, anchor_name, specialist_name, _, weights, final = proposal
-    return (anchor_name, specialist_name), weights, final, kind
+    _, _, kind, anchor_name, specialist_name, _, weights, final, arithmetic = proposal
+    return (anchor_name, specialist_name), weights, final, kind, arithmetic
 
 
 def _passes_combination_gates(
@@ -2937,10 +3239,7 @@ def _best_validated_ensemble(
                 key=lambda item: item[0],
             )
             names = tuple(item[0] for item in names_and_forecasts)
-            final = tuple(
-                statistics.fmean(values)
-                for values in zip(*(item[1] for item in names_and_forecasts), strict=True)
-            )
+            final = _fmean_values(tuple(item[1] for item in names_and_forecasts))
             proposal = (score, names, weights, final)
             if best_proposal is None or proposal[:2] < best_proposal[:2]:
                 best_proposal = proposal

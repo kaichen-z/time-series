@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 from collections import Counter
 from dataclasses import FrozenInstanceError, replace
 
@@ -21,6 +22,7 @@ from numerical_agent.evolution.numerical_selector import (
     DecisionPolicy,
     HindcastConfig,
     HindcastFold,
+    SelectionDecision,
     select_assumption_guided_forecast,
     select_numerical_forecast,
 )
@@ -82,6 +84,253 @@ def _diagnostic(
         ),
         **changes,
     )
+
+
+def _audited_diagnostic(
+    diagnostic: CandidateDiagnostics,
+    *,
+    forecast: tuple[float, ...],
+    truth: tuple[float, ...],
+    scale: float = 1.0,
+) -> CandidateDiagnostics:
+    folds = tuple(
+        HindcastFold(
+            train_end=10 * (index + 1),
+            validation_end=10 * (index + 1) + len(fold_truth),
+            status="success",
+            forecast=tuple(float(value) for value in fold_forecast),
+            truth=tuple(float(value) for value in fold_truth),
+            mase_scale=float(scale),
+        )
+        for index, (fold_forecast, fold_truth) in enumerate(
+            zip(diagnostic.fold_forecasts, diagnostic.fold_truths, strict=True)
+        )
+    )
+    return replace(
+        diagnostic,
+        folds=folds,
+        long_horizon_fold=HindcastFold(
+            train_end=24,
+            validation_end=48,
+            status="success",
+            forecast=forecast,
+            truth=truth,
+            mase_scale=float(scale),
+        ),
+        long_horizon_coverage=1.0,
+    )
+
+
+def _run_legacy_selection_package(
+    task: Task,
+    policy: DecisionPolicy,
+    diagnostics: dict[str, CandidateDiagnostics],
+    forecasts: dict[str, tuple[float, ...]],
+    *,
+    conditioned_names: tuple[str, ...] = (),
+) -> tuple[SelectionDecision, NumericalForecastPackage]:
+    active_names = tuple(diagnostics)
+    expected = select_numerical_forecast(
+        policy,
+        profile=profile_task(task),
+        active_names=active_names,
+        diagnostics=diagnostics,
+        forecasts=forecasts,
+        history=task.history,
+        conditioned_names=conditioned_names,
+    )
+    fallback = next(
+        (
+            name
+            for name in active_names
+            if diagnostics[name].family == "tsfm"
+        ),
+        active_names[0],
+    )
+    package = run_numerical_loop(
+        task,
+        screening_policy=ScreeningPolicy(
+            tuple(
+                _entry(
+                    name,
+                    diagnostics[name].family,
+                    applicability=(
+                        ApplicabilityPolicy(
+                            (
+                                ApplicabilityClause(
+                                    feature_tests=(
+                                        FeatureTest("history_length", ">=", 1),
+                                    )
+                                ),
+                            )
+                        )
+                        if name in conditioned_names
+                        else ApplicabilityPolicy()
+                    ),
+                )
+                for name in active_names
+            ),
+            (fallback,),
+        ),
+        candidate_runner=lambda name, history, horizon, frequency: forecasts[name],
+        diagnostics=diagnostics,
+        decision_policy=policy,
+    )
+    return expected, package
+
+
+def _legacy_replay_scenario(
+    kind: str,
+) -> tuple[SelectionDecision, NumericalForecastPackage]:
+    if kind == "residual_correction":
+        task = Task("residual", (0.0,) * 20, 2, "D", ())
+        truths = ((0.0, 0.0),) * 3
+        diagnostics = {
+            "toto_2_0": _diagnostic(
+                "toto_2_0",
+                "tsfm",
+                forecast=(2.0, 2.0),
+                truth=(0.0, 0.0),
+                median_mase=2.0,
+            ),
+            "wild_stat": _diagnostic(
+                "wild_stat",
+                "statistical",
+                forecast=(-6.0, -6.0),
+                truth=(0.0, 0.0),
+                median_mase=6.0,
+            ),
+        }
+        assert all(item.fold_truths == truths for item in diagnostics.values())
+        policy = DecisionPolicy(
+            ensemble_enabled=True,
+            ensemble_weight_grid=(),
+            ensemble_residual_strengths=(0.5,),
+            ensemble_correction_clip=0.5,
+            ensemble_min_diversity=0.1,
+            ensemble_min_improvement=0.01,
+            ensemble_min_fold_wins=2,
+            ensemble_max_worst_fold_regret=0.05,
+        )
+        return _run_legacy_selection_package(
+            task,
+            policy,
+            diagnostics,
+            {"toto_2_0": (2.0, 2.0), "wild_stat": (-6.0, -6.0)},
+        )
+    if kind == "protected_statistical_residual":
+        task = Task("protected-residual", (8.0, 9.0, 10.0, 11.0), 2, "D", ())
+        truths = ((10.0, 10.0),) * 3
+        diagnostics = {
+            "toto_2_0": _audited_diagnostic(
+                _diagnostic(
+                    "toto_2_0",
+                    "tsfm",
+                    forecast=(12.0, 12.0),
+                    truth=(10.0, 10.0),
+                    median_mase=2.0,
+                ),
+                forecast=(12.0, 12.0),
+                truth=(10.0, 10.0),
+            ),
+            "downward_specialist": _audited_diagnostic(
+                _diagnostic(
+                    "downward_specialist",
+                    "statistical",
+                    forecast=(0.0, 0.0),
+                    truth=(10.0, 10.0),
+                    median_mase=10.0,
+                ),
+                forecast=(0.0, 0.0),
+                truth=(10.0, 10.0),
+            ),
+        }
+        assert all(item.fold_truths == truths for item in diagnostics.values())
+        policy = DecisionPolicy(
+            baseline_strategy="protected_joint_residual",
+            ensemble_enabled=False,
+            recent_regime_first=False,
+            tsfm_router_min_improvement=0.02,
+            ensemble_residual_strengths=(0.2,),
+            ensemble_correction_clip=1.0,
+            long_horizon_min_coverage=0.75,
+            long_horizon_max_regret=0.0,
+        )
+        return _run_legacy_selection_package(
+            task,
+            policy,
+            diagnostics,
+            {
+                "toto_2_0": (12.0, 12.0),
+                "downward_specialist": (0.0, 0.0),
+            },
+            conditioned_names=("downward_specialist",),
+        )
+    if kind == "tsfm_median_portfolio":
+        task = Task("median", (10.0,) * 40, 2, "D", ())
+        truths = ((10.0, 10.0),) * 3
+        final_forecasts = {
+            "toto_2_0": (4.0, 8.0),
+            "timesfm_2_5": (14.0, 15.0),
+            "chronos_bolt": (10.0, 10.0),
+        }
+        diagnostics = {
+            name: _audited_diagnostic(
+                _diagnostic(
+                    name,
+                    "tsfm",
+                    forecast=forecast,
+                    truth=(10.0, 10.0),
+                    median_mase=1.0 + index * 0.1,
+                ),
+                forecast=forecast,
+                truth=(10.0, 10.0),
+            )
+            for index, (name, forecast) in enumerate(final_forecasts.items())
+        }
+        assert all(item.fold_truths == truths for item in diagnostics.values())
+        policy = DecisionPolicy(
+            baseline_strategy="conservative_tsfm_portfolio",
+            tsfm_router_min_improvement=0.02,
+            tsfm_router_blend_weight=0.5,
+            ensemble_enabled=False,
+            recent_regime_first=False,
+            long_horizon_guard_enabled=True,
+            long_horizon_min_coverage=0.75,
+            long_horizon_max_regret=0.0,
+        )
+        return _run_legacy_selection_package(
+            task, policy, diagnostics, final_forecasts
+        )
+    if kind == "equal_fmean":
+        task = Task("fmean", (0.0,) * 40, 1, "D", ())
+        final_forecasts = {
+            "low": (0.1,),
+            "middle": (0.2,),
+            "high": (0.4,),
+        }
+        truth = (statistics.fmean((0.1, 0.2, 0.4)),)
+        diagnostics = {
+            name: _diagnostic(
+                name,
+                "statistical",
+                forecast=forecast,
+                truth=truth,
+                median_mase=1.0,
+            )
+            for name, forecast in final_forecasts.items()
+        }
+        policy = DecisionPolicy(
+            ensemble_enabled=True,
+            ensemble_max_members=3,
+            ensemble_min_diversity=0.0,
+            ensemble_min_improvement=0.01,
+            recent_regime_first=False,
+        )
+        return _run_legacy_selection_package(
+            task, policy, diagnostics, final_forecasts
+        )
+    raise AssertionError(f"unknown replay scenario {kind!r}")
 
 
 def _combined() -> tuple[CombinedPolicy, ...]:
@@ -963,6 +1212,7 @@ def test_package_rejects_arbitrary_legacy_ensemble_forecast(
         weights=(0.25, 0.75),
         forecast=forecast,
         combination_type=None,
+        arithmetic=None,
     )
 
     with pytest.raises(ValueError, match="weighted combination"):
@@ -986,6 +1236,7 @@ def test_package_accepts_valid_legacy_weighted_ensemble() -> None:
         weights=(0.25, 0.75),
         forecast=weighted,
         combination_type=None,
+        arithmetic=None,
     )
 
     package = replace(base, selection_decision=legacy, final_forecast=weighted)
@@ -1011,9 +1262,10 @@ def test_package_rejects_non_weighted_multi_member_selection_mode() -> None:
         weights=(0.25, 0.75),
         forecast=weighted,
         combination_type="residual_correction",
+        arithmetic=None,
     )
 
-    with pytest.raises(ValueError, match="weighted selection mode"):
+    with pytest.raises(ValueError, match="trusted arithmetic replay"):
         replace(base, selection_decision=forged, final_forecast=weighted)
 
 
@@ -1041,6 +1293,86 @@ def test_package_rejects_morphology_guided_multi_member_selection() -> None:
 
     with pytest.raises(ValueError, match="Morphology-guided selection must be single"):
         replace(base, selection_decision=forged, final_forecast=weighted)
+
+
+def test_package_rejects_active_card_ensemble_even_without_accepted_assumptions() -> None:
+    base = run_numerical_loop(
+        _task(),
+        screening_policy=_screening(*_policy_entries()),
+        candidate_runner=_runner(Counter()),
+        combined_policies=_combined(),
+        diagnostics=_diagnostics_for_active(),
+        decision_policy=DecisionPolicy(ensemble_enabled=False),
+    )
+    weighted = (3.25, 4.0, 4.75)
+    forged = replace(
+        base.selection_decision,
+        mode="ensemble",
+        selected=("toto_2_0", "seasonal_specialist"),
+        weights=(0.25, 0.75),
+        forecast=weighted,
+        combination_type=None,
+    )
+
+    with pytest.raises(ValueError, match="Morphology-guided selection must be single"):
+        replace(
+            base,
+            morphology_card=_card(
+                _assumption("rejected_by_consistency", "seasonal_specialist")
+            ),
+            accepted_assumptions=(),
+            retrieval_handoff=(),
+            selection_decision=forged,
+            final_forecast=weighted,
+        )
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (
+        "residual_correction",
+        "protected_statistical_residual",
+        "tsfm_median_portfolio",
+    ),
+)
+def test_no_reasoner_package_preserves_real_legacy_non_linear_decision(
+    kind: str,
+) -> None:
+    expected, package = _legacy_replay_scenario(kind)
+
+    assert expected.combination_type == kind
+    assert package.selection_decision == expected
+    assert package.final_forecast == expected.forecast
+
+
+def test_no_reasoner_package_replays_equal_weight_ensemble_with_fmean() -> None:
+    expected, package = _legacy_replay_scenario("equal_fmean")
+
+    assert expected.mode == "ensemble"
+    assert expected.forecast == (0.23333333333333336,)
+    assert package.selection_decision == expected
+    assert package.final_forecast == expected.forecast
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (
+        "residual_correction",
+        "protected_statistical_residual",
+        "tsfm_median_portfolio",
+        "equal_fmean",
+    ),
+)
+def test_package_rejects_forged_forecast_for_every_replay_mode(kind: str) -> None:
+    _, package = _legacy_replay_scenario(kind)
+    forged_forecast = (
+        package.selection_decision.forecast[0] + 1.0,
+        *package.selection_decision.forecast[1:],
+    )
+    forged = replace(package.selection_decision, forecast=forged_forecast)
+
+    with pytest.raises(ValueError, match="replay"):
+        replace(package, selection_decision=forged, final_forecast=forged_forecast)
 
 
 def test_component_fingerprint_is_invariant_to_combined_policy_input_order() -> None:
