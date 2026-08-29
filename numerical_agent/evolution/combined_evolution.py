@@ -14,21 +14,38 @@ from typing import Literal
 
 from common.llm import LLMClient
 
-from .portfolio import CombinedPolicy, PolicyError, PolicyPortfolio
+from .portfolio import CombinedPolicy, PolicyError, PolicyPortfolio, TSFMPolicy
 
 
 COMBINED_EVOLUTION_SYSTEM = """You propose bounded, typed history-only Combined-policy edits.
-Return exactly one JSON object with an operations array.  Each operation must be
-one of add, repair, fork, or remove and must use its exact allowed fields.  A
-policy uses only name, parents, operator, weights, signal, threshold,
-above_parent, below_parent, and fallback_parent.  Do not score, select, or
-accept a child. Parents must be two to five unique leaf names, include at least
-one supplied TSFM name, and never name a Combined policy. weighted_mean needs
-one finite non-negative normalized weight per parent; median has no weights;
-trimmed_mean needs at least three parents and no weights; route has exactly two
-parents, no weights, two distinct branch parents from parents, and one supplied
-history-only signal plus a finite threshold. Every policy fallback parent occurs
-in parents. Propose at most eight operations."""
+Return exactly one JSON object with exactly an operations array. Do not use a
+think wrapper or JSON fence. Every value must use the exact canonical JSON types
+described in the user schema; do not add fields or use duplicate keys. Propose
+at most eight operations, and each operation must have a unique mutation target.
+
+The only permitted operations are add, repair, fork, and remove. Each uses its
+exact schema: add creates a new public Python identifier; repair targets an
+existing Combined name and its policy name must equal target; fork names an
+existing Combined source and creates a new public Python identifier; remove
+targets an existing Combined name and cannot remove the final Combined policy.
+Reasons are non-empty strings of at most 500 characters, with only tab and
+newline control characters allowed.
+
+A policy has exactly name, parents, operator, weights, signal, threshold,
+above_parent, below_parent, and fallback_parent. Name and every parent are
+public Python identifiers. Parents are two to five unique materialized leaf
+names, include at least one supplied fixed TSFM identity, and have no Combined parent.
+Never change the fixed TSFM identities or order. weighted_mean has one
+finite non-negative weight per parent summing to one; median has empty weights;
+trimmed_mean has three to five parents and empty weights; route has exactly two
+parents, empty weights, and distinct above_parent and below_parent values from
+parents. Non-route policies have empty branches. fallback_parent occurs in
+parents. signal is one supplied history-only signal and threshold is finite.
+
+Do not score, select, or accept a child. Use only history and materialized leaf
+information. Use no future values, documents, ground truth, task-role labels, Public, hidden data, secrets,
+model bindings, checkpoints, adapters, runtime options, licenses, caches, or evaluation labels.
+The child portfolio must retain one through 32 Combined policies."""
 
 _POLICY_FIELDS = frozenset(
     {
@@ -77,21 +94,21 @@ class CombinedProposalDiagnostics:
     successful_leaf_count: int
     unavailable_leaf_count: int
 
+    def __post_init__(self) -> None:
+        _validate_combined_diagnostics(
+            self.history_length,
+            self.forecast_disagreement,
+            self.successful_leaf_count,
+            self.unavailable_leaf_count,
+        )
+
     def to_payload(self) -> dict[str, int | float]:
-        if (
-            isinstance(self.history_length, bool)
-            or not isinstance(self.history_length, int)
-            or not 1 <= self.history_length <= 1_000_000
-        ):
-            raise CombinedEvolutionError("history_length must be a bounded integer")
-        if not _finite_json_number(self.forecast_disagreement) or float(self.forecast_disagreement) < 0.0:
-            raise CombinedEvolutionError("forecast_disagreement must be finite and non-negative")
-        for name, value in (
-            ("successful_leaf_count", self.successful_leaf_count),
-            ("unavailable_leaf_count", self.unavailable_leaf_count),
-        ):
-            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 32:
-                raise CombinedEvolutionError(f"{name} must be a bounded integer")
+        _validate_combined_diagnostics(
+            self.history_length,
+            self.forecast_disagreement,
+            self.successful_leaf_count,
+            self.unavailable_leaf_count,
+        )
         return {
             "forecast_disagreement": self.forecast_disagreement,
             "history_length": self.history_length,
@@ -154,11 +171,14 @@ def _parse_strict_json_object(text: str) -> dict[str, object]:
     if not isinstance(text, str):
         raise _StrictJsonError("response must be text")
     stripped = text.strip()
-    if stripped.startswith("<think>"):
+    has_think_prefix = stripped.startswith("<think>")
+    if has_think_prefix:
         match = _THINK_PREFIX_RE.match(stripped)
         if match is None:
             raise _StrictJsonError("invalid think wrapper")
         stripped = stripped[match.end():].strip()
+        if stripped.startswith("```"):
+            raise _StrictJsonError("response cannot stack think and JSON fence wrappers")
     fences = tuple(_FENCE_RE.finditer(stripped))
     if fences:
         if len(fences) != 1 or fences[0].span() != (0, len(stripped)):
@@ -233,10 +253,11 @@ def propose_combined_child(
 ) -> CombinedProposalResult:
     """Request one bounded proposal and return Parent exactly on every failure."""
     try:
+        _validate_proposal_parent(parent)
         reviewed_names = _reviewed_statistical_names(statistical_names)
         diagnostic_payload = _proposal_diagnostics_payload(diagnostics)
         prompt = {
-            "current_policies": [policy.to_payload() for policy in parent.combined],
+            "current_policies": [_canonical_combined_payload(policy) for policy in parent.combined],
             "statistical_names": list(reviewed_names),
             "tsfm_names": [policy.name for policy in parent.tsfm],
             "diagnostics": diagnostic_payload,
@@ -332,6 +353,61 @@ def _finite_json_number(value: object) -> bool:
         return False
 
 
+def _validate_combined_diagnostics(
+    history_length: object,
+    forecast_disagreement: object,
+    successful_leaf_count: object,
+    unavailable_leaf_count: object,
+) -> None:
+    """Reject every non-canonical diagnostic before it can enter a prompt."""
+    if type(history_length) is not int or not 1 <= history_length <= 1_000_000:
+        raise CombinedEvolutionError("history_length must be a bounded exact integer")
+    if (
+        type(forecast_disagreement) is not float
+        or not math.isfinite(forecast_disagreement)
+        or not 0.0 <= forecast_disagreement <= 1_000_000.0
+    ):
+        raise CombinedEvolutionError(
+            "forecast_disagreement must be a bounded exact finite float"
+        )
+    for name, value in (
+        ("successful_leaf_count", successful_leaf_count),
+        ("unavailable_leaf_count", unavailable_leaf_count),
+    ):
+        if type(value) is not int or not 0 <= value <= 1_000_000:
+            raise CombinedEvolutionError(f"{name} must be a bounded exact integer")
+
+
+def _validate_proposal_parent(parent: object) -> None:
+    """Reject polymorphic portfolio records before reading or serializing them."""
+    if type(parent) is not PolicyPortfolio:
+        raise CombinedEvolutionError("parent must be an exact PolicyPortfolio")
+    if type(parent.tsfm) is not tuple or type(parent.combined) is not tuple:
+        raise CombinedEvolutionError("portfolio policy collections must be exact tuples")
+    if not all(type(policy) is TSFMPolicy for policy in parent.tsfm):
+        raise CombinedEvolutionError("portfolio TSFM members must be exact TSFMPolicy records")
+    if not all(type(policy) is CombinedPolicy for policy in parent.combined):
+        raise CombinedEvolutionError(
+            "portfolio Combined members must be exact CombinedPolicy records"
+        )
+    PolicyPortfolio.__post_init__(parent)
+
+
+def _canonical_combined_payload(policy: CombinedPolicy) -> dict[str, object]:
+    """Serialize only canonical base-record fields without polymorphic dispatch."""
+    return {
+        "name": policy.name,
+        "parents": policy.parents,
+        "operator": policy.operator,
+        "weights": policy.weights,
+        "signal": policy.signal,
+        "threshold": policy.threshold,
+        "above_parent": policy.above_parent,
+        "below_parent": policy.below_parent,
+        "fallback_parent": policy.fallback_parent,
+    }
+
+
 def _validate_operation_batch(operations: tuple[CombinedOperation, ...]) -> None:
     if len(operations) > 8:
         raise CombinedEvolutionError("operations must contain at most eight entries")
@@ -406,28 +482,65 @@ def _reason(value: object) -> str:
 def _allowed_operations_payload() -> dict[str, object]:
     return {
         "maximum_operations": 8,
-        "operations": {operation: sorted(fields) for operation, fields in sorted(_OPERATION_FIELDS.items())},
+        "mutation_targets_unique": True,
+        "operations": {
+            "add": {
+                "exact_fields": ["op", "reason", "policy"],
+                "name_rule": "policy.name is a new public Python identifier",
+            },
+            "fork": {
+                "exact_fields": ["op", "source", "reason", "policy"],
+                "name_rule": "source is an existing Combined name; policy.name is a new public Python identifier",
+            },
+            "remove": {
+                "exact_fields": ["op", "target", "reason"],
+                "name_rule": "target is an existing Combined name and cannot remove the final Combined policy",
+            },
+            "repair": {
+                "exact_fields": ["op", "target", "reason", "policy"],
+                "name_rule": "target is an existing Combined name and equals policy.name",
+            },
+        },
         "policy": {
-            "fields": [
+            "exact_fields": [
                 "name", "parents", "operator", "weights", "signal", "threshold",
                 "above_parent", "below_parent", "fallback_parent",
             ],
+            "json_types": {
+                "above_parent": "string",
+                "below_parent": "string",
+                "fallback_parent": "string",
+                "name": "string",
+                "operator": "string",
+                "parents": "array of strings",
+                "signal": "string",
+                "threshold": "finite number",
+                "weights": "array of finite numbers",
+            },
+            "identifiers": "name and every parent are public Python identifiers",
             "parents": {
                 "minimum": 2,
                 "maximum": 5,
                 "unique": True,
                 "leaf_parents_only": True,
-                "at_least_one_tsfm": True,
+                "at_least_one_fixed_tsfm": True,
                 "combined_parents_allowed": False,
             },
             "operators": {
-                "weighted_mean": "weights match parents; finite, non-negative, sum to one",
-                "median": "weights must be empty",
+                "median": "two to five parents; weights must be empty",
+                "route": "exactly two parents; weights must be empty; above_parent and below_parent are distinct parents",
                 "trimmed_mean": "three to five parents; weights must be empty",
-                "route": "two parents; empty weights; distinct branches from parents",
+                "weighted_mean": "two to five parents; weights match parents and are finite, non-negative, and sum to one",
             },
+            "non_route_branches": "above_parent and below_parent must be empty",
             "fallback": "fallback_parent must occur in parents",
             "signals": list(_SIGNALS),
+        },
+        "portfolio": {"combined_policy_count": {"minimum": 1, "maximum": 32}},
+        "reason": {
+            "json_type": "non-empty string",
+            "maximum_length": 500,
+            "control_characters": "only newline and tab are allowed",
         },
     }
 

@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 
 import pytest
 
 from common.llm import FakeLLMClient
-from numerical_agent.evolution.portfolio import PolicyPortfolio
+from numerical_agent.evolution.portfolio import CombinedPolicy, PolicyPortfolio, TSFMPolicy
 
 
 def test_combined_evolution_module_exposes_typed_boundary() -> None:
@@ -52,6 +53,91 @@ def _diagnostics():
         successful_leaf_count=4,
         unavailable_leaf_count=1,
     )
+
+
+class _SentinelPortfolio(PolicyPortfolio):
+    """A valid subclass whose serializer must never be trusted at this boundary."""
+
+    def to_payload(self) -> dict[str, object]:
+        return {"sentinel": "PORTFOLIO_SERIALIZER_MUST_NOT_RUN"}
+
+
+class _SentinelCombinedPolicy(CombinedPolicy):
+    """A valid subclass whose serializer must never be trusted at this boundary."""
+
+    def to_payload(self) -> dict[str, object]:
+        return {"sentinel": "COMBINED_SERIALIZER_MUST_NOT_RUN"}
+
+
+class _SentinelTSFMPolicy(TSFMPolicy):
+    """A valid subclass whose serializer must never be trusted at this boundary."""
+
+    def to_payload(self) -> dict[str, object]:
+        return {"sentinel": "TSFM_SERIALIZER_MUST_NOT_RUN"}
+
+
+@pytest.mark.parametrize(
+    "values",
+    (
+        (True, 0.25, 4, 1),
+        (0, 0.25, 4, 1),
+        (1_000_001, 0.25, 4, 1),
+        (128, True, 4, 1),
+        (128, 1, 4, 1),
+        (128, float("nan"), 4, 1),
+        (128, float("inf"), 4, 1),
+        (128, -0.01, 4, 1),
+        (128, 1_000_000.01, 4, 1),
+        (128, 0.25, True, 1),
+        (128, 0.25, -1, 1),
+        (128, 0.25, 1_000_001, 1),
+        (128, 0.25, 4, True),
+        (128, 0.25, 4, -1),
+        (128, 0.25, 4, 1_000_001),
+    ),
+)
+def test_diagnostic_contract_rejects_noncanonical_or_unbounded_values(
+    values: tuple[object, object, object, object],
+) -> None:
+    """Weak or deferred diagnostics validation could reach the untrusted prompt."""
+    from numerical_agent.evolution.combined_evolution import (  # noqa: PLC0415
+        CombinedEvolutionError,
+        CombinedProposalDiagnostics,
+    )
+
+    with pytest.raises(CombinedEvolutionError):
+        CombinedProposalDiagnostics(*values)  # type: ignore[arg-type]
+
+
+def test_diagnostic_contract_accepts_only_exact_builtins_at_documented_caps() -> None:
+    """Accepting numeric subclasses would reintroduce polymorphic prompt values."""
+    from numerical_agent.evolution.combined_evolution import (  # noqa: PLC0415
+        CombinedEvolutionError,
+        CombinedProposalDiagnostics,
+    )
+
+    class IntSubclass(int):
+        pass
+
+    class FloatSubclass(float):
+        pass
+
+    valid = CombinedProposalDiagnostics(1_000_000, 1_000_000.0, 1_000_000, 0)
+    assert valid.to_payload() == {
+        "forecast_disagreement": 1_000_000.0,
+        "history_length": 1_000_000,
+        "successful_leaf_count": 1_000_000,
+        "unavailable_leaf_count": 0,
+    }
+
+    for values in (
+        (IntSubclass(128), 0.25, 4, 1),
+        (128, FloatSubclass(0.25), 4, 1),
+        (128, 0.25, IntSubclass(4), 1),
+        (128, 0.25, 4, IntSubclass(1)),
+    ):
+        with pytest.raises(CombinedEvolutionError):
+            CombinedProposalDiagnostics(*values)  # type: ignore[arg-type]
 
 
 def test_parse_combined_operations_accepts_each_exact_operation_schema() -> None:
@@ -162,12 +248,36 @@ def test_parse_combined_operations_rejects_ambiguous_or_trailing_objects(respons
         parse_combined_operations(response)
 
 
-def test_parse_combined_operations_allows_one_think_or_json_fence() -> None:
+def test_parse_combined_operations_accepts_wrapper_contract() -> None:
     """The permitted wrappers still carry exactly one complete JSON object."""
     from numerical_agent.evolution.combined_evolution import parse_combined_operations
 
+    assert parse_combined_operations("{\"operations\": []}") == ()
     assert parse_combined_operations("<think>internal</think>{\"operations\": []}") == ()
     assert parse_combined_operations("```json\n{\"operations\": []}\n```") == ()
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        "<think>internal</think>```json\n{\"operations\": []}\n```",
+        "<think>one</think><think>two</think>{\"operations\": []}",
+        "<think>unterminated{\"operations\": []}",
+        "{\"operations\": []}</think>",
+        "```json\n{\"operations\": []}\n```, trailing",
+        "```json\n{\"operations\": []}\n",
+        "{\"operations\": []} ```json",
+    ),
+)
+def test_parse_combined_operations_rejects_wrapper_contract_ambiguity(response: str) -> None:
+    """Stacked, unmatched, or trailing wrappers make the response boundary ambiguous."""
+    from numerical_agent.evolution.combined_evolution import (  # noqa: PLC0415
+        CombinedEvolutionError,
+        parse_combined_operations,
+    )
+
+    with pytest.raises(CombinedEvolutionError):
+        parse_combined_operations(response)
 
 
 @pytest.mark.parametrize("literal", ("NaN", "Infinity", "-Infinity"))
@@ -312,6 +422,59 @@ def test_propose_combined_child_sends_only_bounded_allowed_inputs() -> None:
     assert prompt["statistical_names"] == ["croston_sba", "holt_damped_trend", "median_seasonal_profile_forecast", "robust_loess_trend", "seasonal_naive"]
     assert prompt["diagnostics"] == _diagnostics().to_payload()
     assert prompt["tsfm_names"] == [policy.name for policy in parent.tsfm]
+
+
+def test_propose_combined_child_rejects_nonpolymorphic_portfolio_records_before_llm() -> None:
+    """Subclass serializers must not smuggle a payload across the trusted boundary."""
+    from numerical_agent.evolution.combined_evolution import propose_combined_child
+
+    base = PolicyPortfolio.flagship5()
+    sentinel_combined = _SentinelCombinedPolicy(**base.combined[0].to_payload())
+    sentinel_tsfm = _SentinelTSFMPolicy(**base.tsfm[0].to_payload())
+    parents = (
+        _SentinelPortfolio(base.tsfm, base.combined),
+        PolicyPortfolio(base.tsfm, (sentinel_combined, *base.combined[1:])),
+        PolicyPortfolio((sentinel_tsfm, *base.tsfm[1:]), base.combined),
+    )
+
+    for parent in parents:
+        agent = FakeLLMClient([_response()])
+        result = propose_combined_child(
+            parent,
+            statistical_names=("seasonal_naive",),
+            diagnostics=_diagnostics(),
+            agent=agent,
+        )
+
+        assert result.parent is parent
+        assert result.child is parent
+        assert result.changed is False
+        assert agent.calls == []
+
+
+def test_propose_combined_child_rejects_diagnostic_dataclass_subclass_before_llm() -> None:
+    """Only the trusted diagnostics dataclass may establish label-free aggregates."""
+    from numerical_agent.evolution.combined_evolution import (  # noqa: PLC0415
+        CombinedProposalDiagnostics,
+        propose_combined_child,
+    )
+
+    @dataclass(frozen=True)
+    class DiagnosticSubclass(CombinedProposalDiagnostics):
+        pass
+
+    parent = PolicyPortfolio.flagship5()
+    agent = FakeLLMClient([_response()])
+    result = propose_combined_child(
+        parent,
+        statistical_names=("seasonal_naive",),
+        diagnostics=DiagnosticSubclass(128, 0.25, 4, 1),
+        agent=agent,
+    )
+
+    assert result.parent is parent
+    assert result.child is parent
+    assert agent.calls == []
 
 
 def test_propose_combined_child_returns_exact_parent_with_sanitized_rejection() -> None:
@@ -517,7 +680,7 @@ def test_propose_combined_child_rejects_noncontract_diagnostics_without_llm(diag
     assert agent.calls == []
 
 
-def test_propose_combined_child_sends_only_typed_label_free_diagnostics_and_dsl() -> None:
+def test_propose_combined_child_sends_only_typed_label_free_diagnostics_and_complete_dsl() -> None:
     """The proposal prompt must expose only fixed names and the complete typed DSL."""
     from numerical_agent.evolution.combined_evolution import propose_combined_child
 
@@ -538,47 +701,115 @@ def test_propose_combined_child_sends_only_typed_label_free_diagnostics_and_dsl(
         "successful_leaf_count": 4,
         "unavailable_leaf_count": 1,
     }
-    assert prompt["tsfm_names"] == [policy.name for policy in parent.tsfm]
-    dsl = prompt["allowed_operations"]
-    assert dsl["maximum_operations"] == 8
-    assert set(dsl["operations"]) == {"add", "repair", "fork", "remove"}
-    assert dsl["policy"]["parents"] == {
-        "at_least_one_tsfm": True,
-        "combined_parents_allowed": False,
-        "leaf_parents_only": True,
-        "maximum": 5,
-        "minimum": 2,
-        "unique": True,
-    }
-    assert set(dsl["policy"]["operators"]) == {"weighted_mean", "median", "trimmed_mean", "route"}
-    assert dsl["policy"]["signals"] == [
-        "outlier_fraction",
-        "periodicity_strength",
-        "recent_regime_confidence",
-        "trend_strength",
-        "zero_fraction",
+    assert prompt["tsfm_names"] == [
+        "timesfm_2_5",
+        "moirai_2_0",
+        "toto_2_0",
+        "chronos_bolt",
+        "granite_ttm_r2",
     ]
+    dsl = prompt["allowed_operations"]
+    assert dsl == {
+        "maximum_operations": 8,
+        "mutation_targets_unique": True,
+        "operations": {
+            "add": {
+                "exact_fields": ["op", "reason", "policy"],
+                "name_rule": "policy.name is a new public Python identifier",
+            },
+            "fork": {
+                "exact_fields": ["op", "source", "reason", "policy"],
+                "name_rule": "source is an existing Combined name; policy.name is a new public Python identifier",
+            },
+            "remove": {
+                "exact_fields": ["op", "target", "reason"],
+                "name_rule": "target is an existing Combined name and cannot remove the final Combined policy",
+            },
+            "repair": {
+                "exact_fields": ["op", "target", "reason", "policy"],
+                "name_rule": "target is an existing Combined name and equals policy.name",
+            },
+        },
+        "policy": {
+            "exact_fields": [
+                "name",
+                "parents",
+                "operator",
+                "weights",
+                "signal",
+                "threshold",
+                "above_parent",
+                "below_parent",
+                "fallback_parent",
+            ],
+            "json_types": {
+                "above_parent": "string",
+                "below_parent": "string",
+                "fallback_parent": "string",
+                "name": "string",
+                "operator": "string",
+                "parents": "array of strings",
+                "signal": "string",
+                "threshold": "finite number",
+                "weights": "array of finite numbers",
+            },
+            "identifiers": "name and every parent are public Python identifiers",
+            "parents": {
+                "at_least_one_fixed_tsfm": True,
+                "combined_parents_allowed": False,
+                "leaf_parents_only": True,
+                "maximum": 5,
+                "minimum": 2,
+                "unique": True,
+            },
+            "operators": {
+                "median": "two to five parents; weights must be empty",
+                "route": "exactly two parents; weights must be empty; above_parent and below_parent are distinct parents",
+                "trimmed_mean": "three to five parents; weights must be empty",
+                "weighted_mean": "two to five parents; weights match parents and are finite, non-negative, and sum to one",
+            },
+            "non_route_branches": "above_parent and below_parent must be empty",
+            "fallback": "fallback_parent must occur in parents",
+            "signals": [
+                "outlier_fraction",
+                "periodicity_strength",
+                "recent_regime_confidence",
+                "trend_strength",
+                "zero_fraction",
+            ],
+        },
+        "portfolio": {"combined_policy_count": {"minimum": 1, "maximum": 32}},
+        "reason": {
+            "json_type": "non-empty string",
+            "maximum_length": 500,
+            "control_characters": "only newline and tab are allowed",
+        },
+    }
+    system = agent.calls[0]["system"]
+    for phrase in (
+        "exact canonical JSON types",
+        "fixed TSFM identities",
+        "no Combined parent",
+        "no future values, documents, ground truth, task-role labels, Public, hidden",
+        "public Python identifiers",
+        "unique mutation target",
+        "one through 32",
+    ):
+        assert phrase in system
+    serialized_prompt = json.dumps(prompt, sort_keys=True)
+    for forbidden in ("method_id", "checkpoint", "adapter", "runtime", "license", "scorer", "secret"):
+        assert forbidden not in serialized_prompt
 
 
 def test_propose_combined_child_rejects_invalid_typed_diagnostics_without_llm() -> None:
     """The host-owned diagnostic type validates its own finite label-free fields."""
     from numerical_agent.evolution.combined_evolution import (
+        CombinedEvolutionError,
         CombinedProposalDiagnostics,
-        propose_combined_child,
     )
 
-    parent = PolicyPortfolio.flagship5()
-    agent = FakeLLMClient([_response()])
-    invalid = CombinedProposalDiagnostics(True, 0.25, 4, 1)
-    result = propose_combined_child(
-        parent,
-        statistical_names=("seasonal_naive",),
-        diagnostics=invalid,
-        agent=agent,
-    )
-
-    assert result.child is parent
-    assert agent.calls == []
+    with pytest.raises(CombinedEvolutionError):
+        CombinedProposalDiagnostics(True, 0.25, 4, 1)
 
 
 class _LargeMapping(Mapping[str, object]):
