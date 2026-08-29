@@ -341,6 +341,8 @@ def select_grounded_morphology_forecast(
     policy: DecisionPolicy,
     *,
     assumptions: Sequence[object],
+    protected_anchor: SelectionDecision,
+    horizon: int,
     profile,
     active_names: Sequence[str],
     diagnostics: Mapping[str, CandidateDiagnostics],
@@ -350,9 +352,9 @@ def select_grounded_morphology_forecast(
 ) -> SelectionDecision:
     """Apply validated grounded assumptions without granting them numerical authority.
 
-    The caller owns card validation.  This final selector boundary uses only the typed
-    candidate names on those artifacts, retains reviewed TSFM anchors, and then re-runs the
-    ordinary protected numerical selector.  Assumption prose is deliberately unread here.
+    The caller owns card validation and supplies the exact protected Safe-Anchor computed
+    for the loop.  This boundary uses only typed candidate names, then requires any proposed
+    override to pass the ordinary numerical gates.  Assumption prose is deliberately unread.
     """
     from .morphology import AssumptionGrounding
 
@@ -372,31 +374,21 @@ def select_grounded_morphology_forecast(
             if name in active_set
         )
     )
-    available = [
-        diagnostic
-        for name in active
-        if name in forecasts and (diagnostic := diagnostics.get(name)) is not None
-    ]
-    protected = _stable_baseline(available, policy.baseline_strategy)
-    anchor_names = tuple(
-        dict.fromkeys(
-            name
-            for name in (
-                "toto_2_0",
-                "timesfm_2_5",
-                protected.name if protected is not None else "",
-            )
-            if name in active_set
-        )
+    if not is_materialized_single_selection(
+        protected_anchor,
+        active_names=active,
+        forecasts=forecasts,
+        horizon=horizon,
+    ):
+        raise ValueError("protected anchor must be one active materialized forecast")
+    anchor_name = protected_anchor.selected[0]
+    considered = tuple(
+        dict.fromkeys((*pool, anchor_name))
     )
-    anchors = tuple(
-        name for name in anchor_names if name not in pool
-    )
-    considered = (*pool, *anchors)
     if not pool:
         raise ValueError("grounded assumptions contain no active candidate")
 
-    decision = select_numerical_forecast(
+    proposal = select_numerical_forecast(
         policy,
         profile=profile,
         active_names=considered,
@@ -407,12 +399,77 @@ def select_grounded_morphology_forecast(
             dict.fromkeys((*conditioned_names, *pool))
         ),
     )
+    decision = proposal
+    protected = False
+    if proposal.selected != (anchor_name,):
+        reference = diagnostics.get(anchor_name)
+        challenger = (
+            diagnostics.get(proposal.selected[0])
+            if is_materialized_single_selection(
+                proposal,
+                active_names=considered,
+                forecasts=forecasts,
+                horizon=horizon,
+            )
+            else None
+        )
+        if (
+            reference is None
+            or challenger is None
+            or not _passes_reliability_gate(policy, reference)
+            or not _passes_reliability_gate(policy, challenger)
+            or not _passes_single_override(
+                policy, challenger, reference, profile=profile
+            )
+        ):
+            decision = protected_anchor
+            protected = True
     return replace(
         decision,
-        reason_codes=(*decision.reason_codes, "grounded_morphology_top_k_verifier"),
+        reason_codes=(
+            *decision.reason_codes,
+            "grounded_morphology_top_k_verifier",
+            *(("exact_safe_anchor_protection",) if protected else ()),
+        ),
+        baseline_name=anchor_name,
         assumption_ids=tuple(item.assumption_id for item in grounded),
         assumption_kinds=tuple(item.kind for item in grounded),
         considered_candidates=considered,
+    )
+
+
+def is_materialized_single_selection(
+    decision: SelectionDecision,
+    *,
+    active_names: Sequence[str],
+    forecasts: Mapping[str, Sequence[float]],
+    horizon: int,
+) -> bool:
+    """Validate the single executed-forecast boundary used by Morphology selection."""
+    if (
+        not isinstance(decision, SelectionDecision)
+        or decision.mode != "single"
+        or len(decision.selected) != 1
+    ):
+        return False
+    name = decision.selected[0]
+    materialized = forecasts.get(name)
+    return bool(
+        name in set(active_names)
+        and materialized is not None
+        and _valid_exact_forecast(materialized, horizon)
+        and tuple(float(value) for value in materialized) == tuple(decision.forecast)
+    )
+
+
+def _passes_reliability_gate(
+    policy: DecisionPolicy, diagnostic: CandidateDiagnostics
+) -> bool:
+    return bool(
+        diagnostic.eligible
+        and diagnostic.successful_folds >= policy.min_successful_folds
+        and not diagnostic.explosion
+        and diagnostic.worst_mase <= policy.catastrophic_mase
     )
 
 
@@ -549,7 +606,7 @@ def diagnose_candidate(
             if len(forecast) != fold_horizon or not all(map(math.isfinite, forecast)):
                 raise ValueError("candidate returned an invalid forecast")
             folds.append(_score_fold(prefix, truth, forecast, train_end, validation_end))
-        except BaseException as error:
+        except Exception as error:
             folds.append(HindcastFold(
                 train_end=train_end,
                 validation_end=validation_end,
@@ -607,7 +664,7 @@ def _long_horizon_audit_fold(
         if len(forecast) != audit_horizon or not all(map(math.isfinite, forecast)):
             raise ValueError("candidate returned an invalid long-horizon forecast")
         return _score_fold(prefix, truth, forecast, train_end, len(history)), coverage
-    except BaseException as error:
+    except Exception as error:
         return HindcastFold(
             train_end=train_end,
             validation_end=len(history),

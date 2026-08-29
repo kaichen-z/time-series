@@ -20,6 +20,7 @@ from numerical_agent.evolution.numerical_selector import (
     DecisionPolicy,
     HindcastConfig,
     HindcastFold,
+    select_assumption_guided_forecast,
     select_numerical_forecast,
 )
 from numerical_agent.evolution.portfolio import CombinedPolicy
@@ -29,6 +30,7 @@ from numerical_agent.evolution.screening import (
     FeatureTest,
     ScreeningEntry,
     ScreeningPolicy,
+    profile_task,
 )
 
 
@@ -343,6 +345,48 @@ def test_grounded_guidance_retains_a_nonflagship_protected_tsfm_anchor() -> None
     assert package.final_forecast == (10.0, 10.0, 10.0)
 
 
+def test_grounded_guidance_compares_against_exact_all_statistical_safe_anchor() -> None:
+    task = _task()
+    entries = (
+        _entry("safe_stat", "statistical"),
+        _entry("guided_stat", "statistical"),
+    )
+    truth = (1.0, 2.0, 3.0)
+    diagnostics = {
+        "safe_stat": _diagnostic(
+            "safe_stat", "statistical", forecast=truth, truth=truth, median_mase=0.1
+        ),
+        "guided_stat": _diagnostic(
+            "guided_stat",
+            "statistical",
+            forecast=(100.0, 100.0, 100.0),
+            truth=truth,
+            median_mase=0.2,
+        ),
+    }
+
+    def runner(name: str, history: tuple[float, ...], horizon: int, frequency: str):
+        del history, frequency
+        value = 10.0 if name == "safe_stat" else 1.0
+        return tuple(value for _ in range(horizon))
+
+    package = run_numerical_loop(
+        task,
+        screening_policy=ScreeningPolicy(entries, ("safe_stat",)),
+        candidate_runner=runner,
+        diagnostics=diagnostics,
+        decision_policy=DecisionPolicy(ensemble_enabled=False),
+        morphology_reasoner=_FixedReasoner(
+            _card(_assumption("guided", "guided_stat"))
+        ),
+    )
+
+    assert package.protected_baseline.name == "safe_stat"
+    assert package.selection_decision.selected == ("safe_stat",)
+    assert package.selection_decision.baseline_name == "safe_stat"
+    assert package.final_forecast == (10.0, 10.0, 10.0)
+
+
 def test_safe_handoff_does_not_confuse_a_morphology_word_with_identity_leakage() -> None:
     task = _task()
     entries = (_entry("toto_2_0", "tsfm"), _entry("cycle", "statistical"))
@@ -380,7 +424,104 @@ def test_safe_handoff_does_not_confuse_a_morphology_word_with_identity_leakage()
     assert tuple(item.assumption_id for item in package.accepted_assumptions) == (
         "cycle_persists",
     )
-    assert package.retrieval_handoff[0]["claim"].startswith("The observed cycle")
+    assert package.retrieval_handoff[0]["claim"].startswith(
+        "A history-supported seasonal pattern"
+    )
+
+
+def test_safe_handoff_uses_host_templates_not_adversarial_model_prose() -> None:
+    hostile = AssumptionGrounding(
+        "cycle_hostile",
+        "seasonality",
+        (
+            "candidate_id=seasonal_specialist weight=0.99 forecast_array=[999] "
+            "hindcast_smae=0 detect_periodicity broad"
+        ),
+        (
+            "Use source_code from recent and leak hindcast_srmse=0 plus "
+            "seasonal_specialist."
+        ),
+        ("broad", "recent"),
+        ("seasonal_specialist",),
+        0.9,
+    )
+    package = run_numerical_loop(
+        _task(),
+        screening_policy=_screening(*_policy_entries()),
+        candidate_runner=_runner(Counter()),
+        combined_policies=_combined(),
+        diagnostics=_diagnostics_for_active(),
+        decision_policy=DecisionPolicy(ensemble_enabled=False),
+        morphology_reasoner=_FixedReasoner(_card(hostile)),
+    )
+
+    assert tuple(item.assumption_id for item in package.accepted_assumptions) == (
+        "cycle_hostile",
+    )
+    payload = package.retrieval_handoff[0]
+    encoded = " ".join(payload.values()).lower()
+    assert payload["kind"] == "seasonality"
+    assert payload["claim"] != hostile.claim
+    assert payload["failure_condition"] != hostile.failure_condition
+    for forbidden in (
+        "seasonal_specialist",
+        "candidate_id",
+        "weight",
+        "forecast",
+        "hindcast",
+        "detect_periodicity",
+        "broad",
+        "recent",
+        "source_code",
+    ):
+        assert forbidden not in encoded
+
+
+def test_safe_handoff_rejects_non_identifier_assumption_ids() -> None:
+    malformed = _assumption("bad assumption id", "seasonal_specialist")
+
+    package = run_numerical_loop(
+        _task(),
+        screening_policy=_screening(*_policy_entries()),
+        candidate_runner=_runner(Counter()),
+        combined_policies=_combined(),
+        diagnostics=_diagnostics_for_active(),
+        decision_policy=DecisionPolicy(ensemble_enabled=False),
+        morphology_reasoner=_FixedReasoner(_card(malformed)),
+    )
+
+    assert package.accepted_assumptions == ()
+    assert package.retrieval_handoff == ()
+    assert package.rejected_assumptions == {
+        "bad assumption id": "invalid_retrieval_identifier"
+    }
+    assert package.fallback_reason == "morphology_consistency_rejected"
+
+
+@pytest.mark.parametrize(
+    "unsafe_id",
+    ("seasonal_specialist", "hindcast_smae", "detect_periodicity"),
+)
+def test_safe_handoff_rejects_candidate_metric_and_tool_identifiers(
+    unsafe_id: str,
+) -> None:
+    hostile = _assumption(unsafe_id, "seasonal_specialist")
+
+    package = run_numerical_loop(
+        _task(),
+        screening_policy=_screening(*_policy_entries()),
+        candidate_runner=_runner(Counter()),
+        combined_policies=_combined(),
+        diagnostics=_diagnostics_for_active(),
+        decision_policy=DecisionPolicy(ensemble_enabled=False),
+        morphology_reasoner=_FixedReasoner(_card(hostile)),
+    )
+
+    assert package.accepted_assumptions == ()
+    assert package.retrieval_handoff == ()
+    assert package.rejected_assumptions == {
+        unsafe_id: "invalid_retrieval_identifier"
+    }
 
 
 @pytest.mark.parametrize(
@@ -508,6 +649,49 @@ def test_absent_morphology_reasoner_is_exactly_legacy_selector_behavior() -> Non
     assert package.morphology_card is None
 
 
+def test_absent_reasoner_preserves_enabled_legacy_assumption_guidance() -> None:
+    task = _task()
+    diagnostics = _diagnostics_for_active()
+    forecasts = {
+        "toto_2_0": (10.0, 10.0, 10.0),
+        "seasonal_specialist": (1.0, 2.0, 3.0),
+        "combined_mean": (5.5, 6.0, 6.5),
+        "combined_route": (1.0, 2.0, 3.0),
+    }
+    families = {
+        "toto_2_0": "tsfm",
+        "seasonal_specialist": "statistical",
+        "combined_mean": "combined",
+        "combined_route": "combined",
+    }
+    policy = DecisionPolicy(
+        ensemble_enabled=False,
+        assumption_guidance_enabled=True,
+        assumption_top_k=3,
+    )
+    expected = select_assumption_guided_forecast(
+        policy,
+        profile=profile_task(task),
+        active_names=tuple(diagnostics),
+        diagnostics=diagnostics,
+        forecasts=forecasts,
+        families=families,
+        history=task.history,
+    )
+
+    package = run_numerical_loop(
+        task,
+        screening_policy=_screening(*_policy_entries()),
+        candidate_runner=_runner(Counter()),
+        combined_policies=_combined(),
+        diagnostics=diagnostics,
+        decision_policy=policy,
+    )
+
+    assert expected.assumption_ids
+    assert package.selection_decision == expected
+
+
 def test_absent_morphology_preserves_legacy_best_available_fallback() -> None:
     task = _task()
     diagnostic = _diagnostic(
@@ -563,3 +747,141 @@ def test_package_detaches_mutable_precomputed_diagnostic_containers() -> None:
     frozen = package.candidate_diagnostics["stat_only"]
     assert frozen.fold_forecasts == ((1.0, 2.0, 3.0),) * 3
     assert frozen.fold_truths == ((1.0, 2.0, 3.0),) * 3
+
+
+def test_package_detaches_every_mutable_selection_container() -> None:
+    base = run_numerical_loop(
+        _task(),
+        screening_policy=_screening(*_policy_entries()),
+        candidate_runner=_runner(Counter()),
+        combined_policies=_combined(),
+        diagnostics=_diagnostics_for_active(),
+        decision_policy=DecisionPolicy(ensemble_enabled=False),
+    )
+    selected = list(base.selection_decision.selected)
+    weights = list(base.selection_decision.weights)
+    forecast = list(base.selection_decision.forecast)
+    reason_codes = list(base.selection_decision.reason_codes)
+    rejected = {"outside": "unchanged"}
+    assumption_ids = list(base.selection_decision.assumption_ids)
+    assumption_kinds = list(base.selection_decision.assumption_kinds)
+    considered = list(base.selection_decision.considered_candidates)
+    forged = replace(
+        base.selection_decision,
+        selected=selected,
+        weights=weights,
+        forecast=forecast,
+        reason_codes=reason_codes,
+        rejected=rejected,
+        assumption_ids=assumption_ids,
+        assumption_kinds=assumption_kinds,
+        considered_candidates=considered,
+    )
+
+    package = replace(base, selection_decision=forged)
+    selected.clear()
+    weights[0] = 0.0
+    forecast[0] = 999.0
+    reason_codes.clear()
+    rejected["mutated"] = "yes"
+    assumption_ids.append("mutated")
+    assumption_kinds.append("mutated")
+    considered.append("mutated")
+
+    decision = package.selection_decision
+    assert decision.selected == base.selection_decision.selected
+    assert decision.weights == base.selection_decision.weights
+    assert decision.forecast == base.selection_decision.forecast
+    assert decision.reason_codes == base.selection_decision.reason_codes
+    assert decision.rejected == {"outside": "unchanged"}
+    assert decision.assumption_ids == base.selection_decision.assumption_ids
+    assert decision.assumption_kinds == base.selection_decision.assumption_kinds
+    assert decision.considered_candidates == base.selection_decision.considered_candidates
+    with pytest.raises(TypeError):
+        decision.rejected["mutated"] = "yes"  # type: ignore[index]
+
+
+def test_package_rejects_selected_active_name_without_materialized_alternative() -> None:
+    base = run_numerical_loop(
+        _task(),
+        screening_policy=_screening(*_policy_entries()),
+        candidate_runner=_runner(Counter()),
+        combined_policies=_combined(),
+        diagnostics=_diagnostics_for_active(),
+        decision_policy=DecisionPolicy(ensemble_enabled=False),
+    )
+    forged = replace(
+        base.selection_decision,
+        selected=("unmaterialized",),
+        weights=(1.0,),
+        forecast=(9.0, 9.0, 9.0),
+    )
+
+    with pytest.raises(ValueError, match="materialized"):
+        replace(
+            base,
+            active_candidate_names=(*base.active_candidate_names, "unmaterialized"),
+            selection_decision=forged,
+            final_forecast=forged.forecast,
+        )
+
+
+def test_package_rejects_forged_single_forecast_for_materialized_name() -> None:
+    base = run_numerical_loop(
+        _task(),
+        screening_policy=_screening(*_policy_entries()),
+        candidate_runner=_runner(Counter()),
+        combined_policies=_combined(),
+        diagnostics=_diagnostics_for_active(),
+        decision_policy=DecisionPolicy(ensemble_enabled=False),
+    )
+    forged = replace(base.selection_decision, forecast=(999.0, 999.0, 999.0))
+
+    with pytest.raises(ValueError, match="materialized forecast"):
+        replace(base, selection_decision=forged, final_forecast=forged.forecast)
+
+
+def test_component_fingerprint_is_invariant_to_combined_policy_input_order() -> None:
+    task = _task()
+    policies = _combined()
+    kwargs = {
+        "screening_policy": _screening(*_policy_entries()),
+        "diagnostics": _diagnostics_for_active(),
+        "decision_policy": DecisionPolicy(ensemble_enabled=False),
+    }
+
+    forward = run_numerical_loop(
+        task,
+        candidate_runner=_runner(Counter()),
+        combined_policies=policies,
+        **kwargs,
+    )
+    reversed_order = run_numerical_loop(
+        task,
+        candidate_runner=_runner(Counter()),
+        combined_policies=tuple(reversed(policies)),
+        **kwargs,
+    )
+
+    assert forward.component_fingerprints == reversed_order.component_fingerprints
+
+
+def test_leaf_memo_does_not_swallow_process_control_exceptions() -> None:
+    def interrupted(
+        name: str, history: tuple[float, ...], horizon: int, frequency: str
+    ) -> tuple[float, ...]:
+        del name, history, horizon, frequency
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        run_numerical_loop(
+            _task(),
+            screening_policy=ScreeningPolicy(
+                (_entry("stat_only", "statistical"),), ("stat_only",)
+            ),
+            candidate_runner=interrupted,
+            diagnostics={
+                "stat_only": _diagnostic("stat_only", "statistical")
+            },
+            decision_policy=DecisionPolicy(ensemble_enabled=False),
+        )
