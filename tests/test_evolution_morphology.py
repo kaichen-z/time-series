@@ -215,6 +215,38 @@ def test_model_prompt_spells_out_the_complete_final_contract() -> None:
     assert "full-history" in system and "recent" in system
 
 
+@pytest.mark.parametrize(
+    "response",
+    (
+        '{"action":"tool","call_id":"real_luna","tool":"detect_trend",'
+        '"window":{"start_inclusive":0,"end_exclusive":156}}',
+        '{"action":"tool","call_id":"real_terra","tool":"detect_trend",'
+        '"window":[0,156]}',
+    ),
+)
+def test_window_prompt_gives_the_canonical_contract_without_loosening_real_response_parsing(
+    response: str,
+) -> None:
+    client = FakeLLMClient([response])
+
+    with pytest.raises(MorphologyError, match="tool window schema drift"):
+        MorphologyReasoner(client).reason(
+            history=_history(),
+            frequency="D",
+            horizon=3,
+            active_names=("seasonal_naive", "toto_2_0"),
+            families={"seasonal_naive": "statistical", "toto_2_0": "tsfm"},
+        )
+
+    contract = '"window":{"start":0,"end":N}'
+    system = client.calls[0]["system"]
+    initial = client.calls[0]["messages"][0]["content"]
+    for prompt in (system, initial):
+        assert contract in prompt
+        assert "start is inclusive" in prompt
+        assert "end is exclusive" in prompt
+
+
 def test_reasoner_rejects_duplicate_json_keys_at_action_and_assumption_levels() -> None:
     duplicate_action = (
         '{"action":"tool","action":"tool","call_id":"broad_period",'

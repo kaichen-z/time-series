@@ -161,6 +161,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     result_path = _result_path(args.results_path, overwrite=args.overwrite)
     source = Path(args.task_file)
     task = _select_one_task(source, args.task_id)
+    _reject_output_input_aliases(result_path, task.source, args)
     package_task = Task(
         task.task.task_id,
         task.task.history_values,
@@ -207,6 +208,36 @@ def _result_path(value: str, *, overwrite: bool) -> Path:
     if path.exists() and not overwrite:
         raise FileExistsError(f"results path already exists; pass --overwrite: {path}")
     return path
+
+
+def _reject_output_input_aliases(
+    result_path: Path, task_source: Path, args: argparse.Namespace
+) -> None:
+    """Keep an overwrite target disjoint from every caller-owned input file."""
+    protected = [("task source", task_source)]
+    for name, (option, _filename) in _ARTIFACT_OPTIONS.items():
+        configured = getattr(args, option, None)
+        if configured:
+            protected.append((name.replace("reviewed_", "reviewed "), Path(configured)))
+    worker_config = getattr(args, "tsfm_workers_config", None)
+    if worker_config:
+        protected.append(("TSFM worker config", Path(worker_config)))
+    for label, source in protected:
+        if _paths_alias(result_path, source):
+            raise SmokeError(f"results path aliases protected {label}: {source}")
+
+
+def _paths_alias(left: Path, right: Path) -> bool:
+    """Compare resolved entries and inode identity, including symlink/hardlink aliases."""
+    try:
+        if left.samefile(right):
+            return True
+    except OSError:
+        pass
+    try:
+        return left.resolve(strict=False) == right.resolve(strict=False)
+    except OSError:
+        return False
 
 
 def _write_result(path: Path, payload: Mapping[str, object], *, overwrite: bool) -> None:
@@ -495,7 +526,7 @@ class _CandidateRunner:
         artifacts: _ArtifactSnapshots,
     ) -> None:
         self._unavailable: dict[str, str] = {}
-        self._runtimes = _runtime_registry(args)
+        self._runtimes = _smoke_runtime_registry(args)
         self._statistics = _statistical_functions(
             artifacts.path("reviewed_methods"), artifacts.path("reviewed_skills")
         )
@@ -525,6 +556,80 @@ class _CandidateRunner:
 
     def close(self) -> None:
         self._runtimes.close()
+
+
+def _smoke_runtime_registry(args: argparse.Namespace):
+    """Build smoke runtimes while treating absent optional worker venvs as unavailable."""
+    worker_config = getattr(args, "tsfm_workers_config", None)
+    if not worker_config:
+        return _runtime_registry(args)
+    try:
+        config_bytes = Path(worker_config).read_bytes()
+    except OSError as error:
+        raise ValueError(
+            f"cannot load TSFM deployment ({type(error).__name__})"
+        ) from None
+    with tempfile.TemporaryDirectory(prefix="numerical-smoke-workers-") as temporary:
+        snapshot = Path(temporary) / "workers.json"
+        snapshot.write_bytes(config_bytes)
+        snapshot_args = _args_with_worker_config(args, str(snapshot))
+        try:
+            return _runtime_registry(snapshot_args)
+        except ValueError as error:
+            if " interpreter does not exist" not in str(error):
+                raise
+            missing_interpreter_error = error
+        filtered, removed = _filter_absent_worker_environments(config_bytes)
+        if not removed:
+            raise missing_interpreter_error
+        if filtered is None:
+            return _runtime_registry(
+                _args_with_worker_config(args, None, clear_acknowledgements=True)
+            )
+        snapshot.write_bytes(filtered)
+        return _runtime_registry(snapshot_args)
+
+
+def _args_with_worker_config(
+    args: argparse.Namespace,
+    worker_config: str | None,
+    *,
+    clear_acknowledgements: bool = False,
+) -> argparse.Namespace:
+    values = vars(args).copy()
+    values["tsfm_workers_config"] = worker_config
+    if clear_acknowledgements:
+        values["acknowledged_model_licenses"] = ""
+    return argparse.Namespace(**values)
+
+
+def _filter_absent_worker_environments(config_bytes: bytes) -> tuple[bytes | None, bool]:
+    """Remove only absent interpreter paths; shared deployment validation handles the rest."""
+    try:
+        payload = json.loads(config_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return config_bytes, False
+    if not isinstance(payload, dict) or not isinstance(payload.get("environments"), dict):
+        return config_bytes, False
+    environments = payload["environments"]
+    filtered = {
+        name: entry
+        for name, entry in environments.items()
+        if not (
+            isinstance(name, str)
+            and isinstance(entry, dict)
+            and isinstance(entry.get("interpreter"), str)
+            and Path(entry["interpreter"]).expanduser().is_absolute()
+            and not Path(entry["interpreter"]).expanduser().exists()
+        )
+    }
+    if len(filtered) == len(environments):
+        return config_bytes, False
+    if not filtered:
+        return None, True
+    copied = dict(payload)
+    copied["environments"] = filtered
+    return json.dumps(copied, sort_keys=True, separators=(",", ":")).encode("utf-8"), True
 
 
 def _statistical_functions(
@@ -633,7 +738,8 @@ class _FakeMorphologyClient:
         del system, temperature
         from common.llm import LLMResponse
 
-        initial = json.loads(messages[0]["content"])
+        _instruction, _separator, context = messages[0]["content"].rpartition("\n")
+        initial = json.loads(context)
         history = initial["history"]
         active = initial["active_candidates"]
         recent_start = max(1, len(history) - max(2, len(history) // 3))

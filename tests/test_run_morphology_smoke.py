@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import subprocess
 import sys
 import threading
@@ -345,6 +346,105 @@ def test_task_id_selects_exactly_one_record_and_overwrite_is_explicit(tmp_path) 
         "--task-file", str(tasks), "--task-id", "two", "--results-path", str(result),
         "--llm-backend", "fake", "--overwrite",
     ]) == 0
+
+
+@pytest.mark.parametrize(
+    "input_kind",
+    ("task", "methods", "skills", "policies", "screening", "decision", "worker_config"),
+)
+@pytest.mark.parametrize("alias_kind", ("direct", "hardlink", "symlink"))
+def test_overwrite_rejects_task_and_configuration_identity_aliases_before_model_work(
+    tmp_path, monkeypatch, input_kind, alias_kind
+) -> None:
+    tasks = tmp_path / "tasks.jsonl"
+    _write_tasks(tasks, _record("one"))
+    target = tasks
+    argv = ["--task-file", str(tasks), "--llm-backend", "fake", "--overwrite"]
+    if input_kind != "task":
+        target = tmp_path / f"{input_kind}.input"
+        target.write_text("input must not be replaced\n", encoding="utf-8")
+        option = {
+            "methods": "--methods-path",
+            "skills": "--skills-path",
+            "policies": "--policies-path",
+            "screening": "--screening-path",
+            "decision": "--decision-path",
+            "worker_config": "--tsfm-workers-config",
+        }[input_kind]
+        argv.extend((option, str(target)))
+    if alias_kind == "direct":
+        result = target
+    else:
+        result = tmp_path / f"{input_kind}-{alias_kind}.json"
+        if alias_kind == "hardlink":
+            os.link(target, result)
+        else:
+            result.symlink_to(target)
+    before = target.read_bytes()
+    model_ran = False
+    runtime_initialized = False
+
+    def should_not_run(*_args, **_kwargs):
+        nonlocal model_ran
+        model_ran = True
+        raise AssertionError("model/runtime work must not start for output collisions")
+
+    def should_not_initialize_runtime(*_args, **_kwargs):
+        nonlocal runtime_initialized
+        runtime_initialized = True
+        raise AssertionError("runtime setup must not start for output collisions")
+
+    monkeypatch.setattr(smoke, "run_numerical_loop", should_not_run)
+    monkeypatch.setattr(smoke, "_smoke_runtime_registry", should_not_initialize_runtime)
+    with pytest.raises(smoke.SmokeError, match="results path aliases"):
+        main([*argv, "--results-path", str(result)])
+    assert target.read_bytes() == before
+    assert not model_ran
+    assert not runtime_initialized
+
+
+def test_absent_worker_interpreter_leaves_worker_tsfms_unavailable(tmp_path) -> None:
+    tasks = tmp_path / "tasks.jsonl"
+    result = tmp_path / "result.json"
+    config = tmp_path / "workers.json"
+    _write_tasks(tasks, _record("one"))
+    config.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "environments": {
+                    "uni2ts": {"interpreter": str(tmp_path / "absent-python")}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(
+        [
+            "--task-file", str(tasks), "--results-path", str(result),
+            "--llm-backend", "fake", "--tsfm-workers-config", str(config),
+        ]
+    ) == 0
+    payload = json.loads(result.read_text(encoding="utf-8"))
+    assert {item["name"] for item in payload["candidates"]["unavailable"]} >= {
+        "moirai_2_0",
+    }
+
+
+def test_malformed_worker_configuration_remains_fatal_in_smoke_mode(tmp_path) -> None:
+    tasks = tmp_path / "tasks.jsonl"
+    config = tmp_path / "workers.json"
+    _write_tasks(tasks, _record("one"))
+    config.write_text("not JSON", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="TSFM deployment must be valid JSON"):
+        main(
+            [
+                "--task-file", str(tasks), "--results-path", str(tmp_path / "result.json"),
+                "--llm-backend", "fake", "--tsfm-workers-config", str(config),
+            ]
+        )
 
 
 @pytest.mark.parametrize("task_file, results_path", [("missing.jsonl", "out.json"), ("bad.json", "")])

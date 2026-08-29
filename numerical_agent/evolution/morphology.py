@@ -421,7 +421,9 @@ class MorphologyReasoner:
             "intermittency, regime, noise, level. prior_confidence must be finite and within "
             "[0, 1]. candidate_names must be active candidate names. supporting_call_ids must be "
             "unique executed call IDs. Final assumptions must cite both a full-history inspection "
-            "and a distinct recent inspection ending at the history boundary."
+            "and a distinct recent inspection ending at the history boundary. Every tool action "
+            "must use the exact window contract \"window\":{\"start\":0,\"end\":N}; start is "
+            "inclusive and end is exclusive, with 0 <= start < end <= history length."
         )
 
     @staticmethod
@@ -432,7 +434,7 @@ class MorphologyReasoner:
         active_names: tuple[str, ...],
         families: Mapping[str, str],
     ) -> str:
-        return _canonical_bytes(
+        context = _canonical_bytes(
             {
                 "history": list(history),
                 "frequency": frequency,
@@ -448,6 +450,12 @@ class MorphologyReasoner:
                 },
             }
         ).decode("utf-8")
+        return (
+            "For every tool action, use the exact window contract "
+            "\"window\":{\"start\":0,\"end\":N}; start is inclusive and end is exclusive. "
+            "The JSON context follows on the next line.\n"
+            + context
+        )
 
     @staticmethod
     def _parse_action(text: str) -> dict[str, object]:
