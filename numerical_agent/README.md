@@ -65,9 +65,10 @@ Parent.
 The method-repository loop supports a separate, explicitly enabled portfolio. The initial
 portfolio has 93 Statistical methods, five manifest-bound TSFMs, and five reviewed Combined
 policies (103 executable candidates). The Combined tuple is now variable: one to 32 unique
-policies may be present, so the runtime candidate count is `93 + len(portfolio.names)` rather
-than a permanent 103-candidate contract. The initial `93 + 5 + 5 = 103` portfolio is an
-example only: each accepted Combined addition increases the screening runtime count.
+policies may be present, so the runtime candidate count is
+`len(module.names()) + len(portfolio.names)` rather than a permanent 103-candidate contract.
+The initial `93 + 5 + 5 = 103` portfolio is an example only: each accepted Combined addition
+increases the screening runtime count.
 
 | Executable family | Count | Evolved artifact |
 |---|---:|---|

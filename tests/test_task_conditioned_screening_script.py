@@ -275,6 +275,18 @@ def test_screening_cli_has_train_dev_but_no_public_test_option():
         ])
 
 
+def test_screening_public_contract_uses_the_runtime_namespace_formula():
+    formula = "len(module.names()) + len(portfolio.names)"
+    help_text = build_parser().format_help()
+
+    assert formula in help_text
+    for path in (ROOT / "README.md", ROOT / "numerical_agent" / "README.md"):
+        source = path.read_text(encoding="utf-8")
+        assert formula in source
+        assert "93 + len(portfolio.names)" not in source
+    assert "103-candidate method repository" not in help_text
+
+
 @pytest.mark.parametrize("combined_count, expected_count", ((5, 103), (6, 104)))
 def test_screening_cli_accepts_exact_runtime_candidate_namespace(
     tmp_path, monkeypatch, combined_count, expected_count,

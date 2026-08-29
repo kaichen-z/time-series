@@ -44,7 +44,11 @@ from .main import _add_tsfm_runtime_options, _runtime_registry
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", required=True, help="103-candidate method repository")
+    parser.add_argument(
+        "--repo",
+        required=True,
+        help="method repository with runtime count len(module.names()) + len(portfolio.names)",
+    )
     parser.add_argument("--split-file", default="splits/drcik_public_80_20_99_v1.json")
     parser.add_argument("--tasks-file", required=True)
     parser.add_argument("--outcome-cache-dir", required=True)
@@ -69,7 +73,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--screen-max-candidates",
         type=int,
         default=None,
-        help="optional safety ceiling; defaults to the runtime candidate count",
+        help=(
+            "optional safety ceiling; defaults to "
+            "len(module.names()) + len(portfolio.names)"
+        ),
     )
     parser.add_argument("--screen-min-unique-dictionaries", type=int, default=3)
     parser.add_argument("--screen-max-mean-jaccard", type=float, default=0.995)
