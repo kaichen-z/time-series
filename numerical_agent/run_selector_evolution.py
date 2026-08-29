@@ -18,7 +18,7 @@ from common.data import load_tasks
 from common.llm import CodexCLIClient, CodexCLIConfig
 from common.payload import read_json_object, write_json
 
-from .evolution.execution import NOT_APPLICABLE, SUCCESS, Outcome, Task, load_methods
+from .evolution.execution import CRASHED, INVALID, NOT_APPLICABLE, SUCCESS, Outcome, Task, load_methods
 from .evolution.module import MethodModule, read_module
 from .evolution.numerical_selector import (
     DecisionPolicy,
@@ -27,10 +27,12 @@ from .evolution.numerical_selector import (
 )
 from .evolution.portfolio import (
     CombinedPolicy,
+    InvalidTSFMForecastError,
+    PolicyNotApplicable,
     PolicyPortfolio,
     TSFMPolicy,
-    _run_tsfm,
-    _signal,
+    combine_materialized_outcome,
+    forecast_tsfm,
     read_policy_file,
 )
 from .evolution.screening import materialize_active_dictionary, profile_task
@@ -115,6 +117,7 @@ class ForecastStore:
         ).hexdigest()
         self.hits = 0
         self.misses = 0
+        self._materialized_leaf_outcomes: dict[str, Outcome] = {}
 
     def forecast(
         self, name: str, history: tuple[float, ...], horizon: int, frequency: str
@@ -148,13 +151,18 @@ class ForecastStore:
         if name in self.statistical_names:
             return self._statistical.forecast(name, history, horizon, frequency)
         if policy := self.tsfm.get(name):
-            dummy = Task("history-only", history, horizon, frequency, (0.0,) * horizon)
-            outcome = _run_tsfm(policy, dummy, self.runtimes)
-            if outcome.status == NOT_APPLICABLE:
-                raise self.not_applicable(outcome.detail)
-            if outcome.status != SUCCESS:
-                raise RuntimeError(outcome.detail or outcome.status)
-            return _valid_forecast(outcome.forecast, horizon)
+            try:
+                return forecast_tsfm(
+                    policy,
+                    history=history,
+                    horizon=horizon,
+                    frequency=frequency,
+                    runtimes=self.runtimes,
+                )
+            except PolicyNotApplicable as error:
+                raise self.not_applicable(str(error)) from None
+            except InvalidTSFMForecastError as error:
+                raise _StructuralForecastInvalid(str(error)) from None
         if policy := self.combined.get(name):
             return self._combined(policy, history, horizon, frequency)
         raise KeyError(f"unknown numerical candidate {name}")
@@ -169,18 +177,71 @@ class ForecastStore:
         horizon: int,
         frequency: str,
     ) -> tuple[float, ...]:
-        left = self.forecast(policy.tsfm_parent, history, horizon, frequency)
-        right = self.forecast(policy.statistical_parent, history, horizon, frequency)
-        if policy.mode == "blend":
-            return tuple(
-                policy.weight * a + (1.0 - policy.weight) * b
-                for a, b in zip(left, right, strict=True)
+        parent_outcomes = {
+            parent: self._materialized_leaf_outcome(parent, history, horizon, frequency)
+            for parent in policy.parents
+        }
+        combined = combine_materialized_outcome(
+            policy,
+            parent_outcomes,
+            task_id="history-only",
+            history=history,
+            horizon=horizon,
+            frequency=frequency,
+        )
+        if combined.status == SUCCESS:
+            return _valid_forecast(combined.forecast, horizon)
+        if combined.status == NOT_APPLICABLE:
+            raise self.not_applicable(combined.detail)
+        if combined.status == INVALID:
+            raise ValueError(combined.detail or combined.status)
+        raise RuntimeError(combined.detail or combined.status)
+
+    def _materialized_leaf_outcome(
+        self,
+        name: str,
+        history: tuple[float, ...],
+        horizon: int,
+        frequency: str,
+    ) -> Outcome:
+        """Resolve one cached leaf; Combined policies cannot be parents in this graph."""
+        key = self._key(name, history, horizon, frequency)
+        if key in self._materialized_leaf_outcomes:
+            return self._materialized_leaf_outcomes[key]
+        try:
+            outcome = Outcome(
+                name,
+                "history-only",
+                SUCCESS,
+                forecast=self.forecast(name, history, horizon, frequency),
             )
-        dummy = Task("history-only", history, horizon, frequency, (0.0,) * horizon)
-        choose_left = _signal(policy.signal, dummy) >= policy.threshold
-        if policy.tsfm_when == "below":
-            choose_left = not choose_left
-        return left if choose_left else right
+        except self.not_applicable as error:
+            outcome = Outcome(
+                name, "history-only", NOT_APPLICABLE, detail=str(error)[:200]
+            )
+        except _StructuralForecastInvalid as error:
+            outcome = Outcome(name, "history-only", INVALID, detail=str(error)[:200])
+        except ValueError as error:
+            if name in self.tsfm:
+                outcome = Outcome(
+                    name,
+                    "history-only",
+                    CRASHED,
+                    detail=f"{type(error).__name__}: {error}"[:200],
+                )
+            else:
+                outcome = Outcome(
+                    name, "history-only", INVALID, detail=str(error)[:200]
+                )
+        except Exception as error:
+            outcome = Outcome(
+                name,
+                "history-only",
+                CRASHED,
+                detail=f"{type(error).__name__}: {error}"[:200],
+            )
+        self._materialized_leaf_outcomes[key] = outcome
+        return outcome
 
     def _key(self, name, history, horizon, frequency) -> str:
         payload = json.dumps({
@@ -212,6 +273,10 @@ class ForecastStore:
 
 class _HistoryOnlyNotApplicable(Exception):
     """Transport-safe applicability signal from the statistical worker."""
+
+
+class _StructuralForecastInvalid(ValueError):
+    """A known finite/horizon failure that maps to the canonical INVALID status."""
 
 
 class _IsolatedStatisticalRuntime:

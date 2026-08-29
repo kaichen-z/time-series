@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from numerical_agent.evolution.portfolio import (
     read_policy_file,
     write_policy_file,
 )
+from numerical_agent.evolution.prompts import POLICY_MUTATE_SYSTEM, POLICY_SELECT_SYSTEM
 from numerical_agent.providers import RuntimeRegistry
 
 
@@ -73,7 +75,7 @@ def test_combined_policy_child_is_screened_validated_and_committed(tmp_path: Pat
         "reason": "the TSFM parent is consistently more accurate",
     }]})])
     replacement = PolicyPortfolio.flagship5().combined[0].to_payload()
-    replacement["weight"] = 0.90
+    replacement["weights"] = (0.90, 0.10)
     mutator = FakeLLMClient([json.dumps({
         "replacement": replacement,
         "reason": "increase TSFM weight after lower Train MASE",
@@ -96,11 +98,11 @@ def test_combined_policy_child_is_screened_validated_and_committed(tmp_path: Pat
     )
 
     assert result.candidates[0].accepted and result.candidates[0].promoted
-    assert read_policy_file(repo / "policies.py").combined[0].weight == 0.90
+    assert read_policy_file(repo / "policies.py").combined[0].weights == (0.90, 0.10)
     assert result.candidate_count == 15  # five test Python parents + ten policies
 
 
-def test_policy_mutator_cannot_substitute_combined_parents(tmp_path: Path) -> None:
+def test_policy_mutator_can_change_combined_parents(tmp_path: Path) -> None:
     repo = _repo(tmp_path / "repo")
     selector = FakeLLMClient([json.dumps({"targets": [{
         "name": "combined_timesfm_seasonal",
@@ -108,8 +110,11 @@ def test_policy_mutator_cannot_substitute_combined_parents(tmp_path: Path) -> No
         "reason": "test immutable lineage",
     }]})])
     replacement = PolicyPortfolio.flagship5().combined[0].to_payload()
-    replacement["statistical_parent"] = "holt_damped_trend"
-    mutator = FakeLLMClient([json.dumps({"replacement": replacement, "reason": "swap"})])
+    replacement["parents"] = ("timesfm_2_5", "holt_damped_trend")
+    replacement["weights"] = (0.90, 0.10)
+    mutator = FakeLLMClient(
+        [json.dumps({"replacement": replacement, "reason": "swap parent and improve weight"})]
+    )
 
     result = evolve_policies_once(
         repo, _tasks("train"), mutator, selector, generation=1,
@@ -119,6 +124,55 @@ def test_policy_mutator_cannot_substitute_combined_parents(tmp_path: Path) -> No
         max_targets=1, full_evaluation_candidates=1, isolate_methods=False,
     )
 
-    assert not result.candidates[0].accepted
-    assert "parent identities" in result.candidates[0].reason
-    assert read_policy_file(repo / "policies.py") == PolicyPortfolio.flagship5()
+    assert result.candidates[0].accepted and result.candidates[0].promoted
+    assert read_policy_file(repo / "policies.py").combined[0].parents == (
+        "timesfm_2_5",
+        "holt_damped_trend",
+    )
+
+
+def test_targetwise_combined_prompts_use_canonical_policy_schema() -> None:
+    prompt = f"{POLICY_SELECT_SYSTEM}\n{POLICY_MUTATE_SYSTEM}"
+
+    for obsolete in (
+        "tsfm_parent",
+        "statistical_parent",
+        "tsfm_when",
+        "route_signal",
+        "route_threshold",
+        "blend-versus-route mode",
+    ):
+        assert obsolete not in prompt
+    for field in (
+        "name",
+        "parents",
+        "operator",
+        "weights",
+        "signal",
+        "threshold",
+        "above_parent",
+        "below_parent",
+        "fallback_parent",
+    ):
+        assert field in prompt
+    assert "parent identities are immutable" not in prompt
+
+
+def test_targetwise_combined_prompt_declares_exact_canonical_field_sequence() -> None:
+    expected = (
+        "name",
+        "parents",
+        "operator",
+        "weights",
+        "signal",
+        "threshold",
+        "above_parent",
+        "below_parent",
+        "fallback_parent",
+    )
+    normalized = " ".join(POLICY_MUTATE_SYSTEM.split())
+    declaration = normalized.split(
+        "For a Combined policy, return all canonical fields:", 1
+    )[1].split("The `parents` tuple", 1)[0]
+
+    assert tuple(re.findall(r"`([^`]+)`", declaration)) == expected

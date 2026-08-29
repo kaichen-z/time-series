@@ -8,9 +8,11 @@ import math
 import os
 import pprint
 import statistics
+import sys
 import tempfile
 from dataclasses import asdict
 from dataclasses import dataclass, replace
+from fractions import Fraction
 from pathlib import Path
 from typing import Literal, Mapping, Sequence, cast
 
@@ -30,6 +32,8 @@ from .execution import (
     SUCCESS,
     Outcome,
     Task,
+    require_unique_outcome_keys,
+    require_unique_task_ids,
 )
 from .module import MethodModule
 
@@ -60,14 +64,14 @@ Applicability = Literal[
     "all", "periodic", "intermittent", "recent_regime", "trending", "stable"
 ]
 Preprocess = Literal["none", "standardize", "robust_scale", "log1p_shift"]
-CombinedMode = Literal["blend", "route"]
+CombinedOperator = Literal["weighted_mean", "median", "trimmed_mean", "route"]
 RouteDirection = Literal["above", "below"]
 
 _APPLICABILITY = frozenset(
     {"all", "periodic", "intermittent", "recent_regime", "trending", "stable"}
 )
 _PREPROCESS = frozenset({"none", "standardize", "robust_scale", "log1p_shift"})
-_COMBINED_MODES = frozenset({"blend", "route"})
+_COMBINED_OPERATORS = frozenset({"weighted_mean", "median", "trimmed_mean", "route"})
 _SIGNALS = frozenset(
     {
         "periodicity_strength",
@@ -82,6 +86,14 @@ _ROUTE_DIRECTIONS = frozenset({"above", "below"})
 
 class PolicyError(ValueError):
     """A policy file or requested mutation violates the typed portfolio contract."""
+
+
+class PolicyNotApplicable(PolicyError):
+    """A reviewed policy is inapplicable to this history-only task."""
+
+
+class InvalidTSFMForecastError(PolicyError):
+    """A TSFM runtime returned a structurally invalid forecast."""
 
 
 @dataclass
@@ -230,41 +242,87 @@ class TSFMPolicy:
 
 @dataclass(frozen=True)
 class CombinedPolicy:
-    """One executable history-only blend or router over fixed parent identities."""
+    """One executable history-only operator over an ordered set of leaf parents."""
 
     name: str
-    tsfm_parent: str
-    statistical_parent: str
-    mode: CombinedMode
-    weight: float
-    signal: str
-    threshold: float
-    tsfm_when: RouteDirection = "above"
+    parents: tuple[str, ...]
+    operator: CombinedOperator
+    weights: tuple[float, ...] = ()
+    signal: str = "periodicity_strength"
+    threshold: float = 0.0
+    above_parent: str = ""
+    below_parent: str = ""
+    fallback_parent: str = ""
 
     def __post_init__(self) -> None:
         _identifier(self.name, "Combined policy name")
-        _identifier(self.tsfm_parent, "TSFM parent")
-        _identifier(self.statistical_parent, "statistical parent")
-        if self.mode not in _COMBINED_MODES:
-            raise PolicyError(f"unsupported Combined mode {self.mode!r}")
-        _bounded(self.weight, "weight", lower=0.05, upper=0.95)
-        if self.signal not in _SIGNALS:
+        if not isinstance(self.parents, tuple):
+            raise PolicyError("parents must be a tuple")
+        if not 2 <= len(self.parents) <= 5:
+            raise PolicyError("parents must contain between 2 and 5 entries")
+        if not all(isinstance(parent, str) for parent in self.parents):
+            raise PolicyError("Combined parents must be strings")
+        if len(set(self.parents)) != len(self.parents):
+            raise PolicyError("parents must be unique")
+        for parent in self.parents:
+            _identifier(parent, "Combined parent")
+        if not isinstance(self.operator, str) or self.operator not in _COMBINED_OPERATORS:
+            raise PolicyError(f"unsupported Combined operator {self.operator!r}")
+        if not isinstance(self.weights, tuple):
+            raise PolicyError("weights must be a tuple")
+        if self.operator == "weighted_mean":
+            if len(self.weights) != len(self.parents):
+                raise PolicyError("weighted_mean weights must match parents")
+            for weight in self.weights:
+                if (
+                    isinstance(weight, bool)
+                    or not isinstance(weight, (int, float))
+                    or not math.isfinite(float(weight))
+                    or float(weight) < 0.0
+                ):
+                    raise PolicyError("weights must be finite and non-negative")
+            if not math.isclose(
+                math.fsum(float(weight) for weight in self.weights),
+                1.0,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            ):
+                raise PolicyError("weights must sum to one")
+        elif self.weights:
+            raise PolicyError(f"{self.operator} does not accept weights")
+        if self.operator == "trimmed_mean" and len(self.parents) < 3:
+            raise PolicyError("trimmed_mean requires at least three parents")
+        if self.operator == "route":
+            if len(self.parents) != 2:
+                raise PolicyError("route requires exactly two parents")
+            if self.above_parent not in self.parents or self.below_parent not in self.parents:
+                raise PolicyError("route branch parents must occur in parents")
+            if self.above_parent == self.below_parent:
+                raise PolicyError("route branch parents must be distinct")
+        elif self.above_parent or self.below_parent:
+            raise PolicyError("non-route policies require empty route branches")
+        if self.fallback_parent not in self.parents:
+            raise PolicyError("fallback parent must occur in parents")
+        if not isinstance(self.signal, str) or self.signal not in _SIGNALS:
             raise PolicyError(f"unsupported history-only signal {self.signal!r}")
-        if not isinstance(self.threshold, (int, float)) or not math.isfinite(self.threshold):
+        if (
+            isinstance(self.threshold, bool)
+            or not isinstance(self.threshold, (int, float))
+            or not math.isfinite(float(self.threshold))
+        ):
             raise PolicyError("threshold must be finite")
-        if self.tsfm_when not in _ROUTE_DIRECTIONS:
-            raise PolicyError(f"unsupported route direction {self.tsfm_when!r}")
 
     def to_payload(self) -> dict[str, object]:
         return {
             "name": self.name,
-            "tsfm_parent": self.tsfm_parent,
-            "statistical_parent": self.statistical_parent,
-            "mode": self.mode,
-            "weight": self.weight,
+            "parents": self.parents,
+            "operator": self.operator,
+            "weights": self.weights,
             "signal": self.signal,
             "threshold": self.threshold,
-            "tsfm_when": self.tsfm_when,
+            "above_parent": self.above_parent,
+            "below_parent": self.below_parent,
+            "fallback_parent": self.fallback_parent,
         }
 
 
@@ -280,16 +338,21 @@ class PolicyPortfolio:
             raise PolicyError("flagship TSFM identities and order must remain unchanged")
         if tuple(policy.name for policy in self.tsfm) != FLAGSHIP_TSFM_NAMES:
             raise PolicyError("flagship TSFM policy identities and order must remain unchanged")
-        if tuple(policy.name for policy in self.combined) != FLAGSHIP_COMBINED_NAMES:
-            raise PolicyError("Combined identities and order must remain unchanged")
+        if not isinstance(self.combined, tuple) or not 1 <= len(self.combined) <= 32:
+            raise PolicyError("Combined policies must contain between 1 and 32 entries")
         names = tuple(policy.name for policy in self.all_policies)
         if len(names) != len(set(names)):
             raise PolicyError("policy names must be unique")
         tsfm_names = {policy.name for policy in self.tsfm}
+        combined_names = {policy.name for policy in self.combined}
         for policy in self.combined:
-            if policy.tsfm_parent not in tsfm_names:
+            if any(parent in combined_names for parent in policy.parents):
                 raise PolicyError(
-                    f"Combined policy {policy.name!r} has unknown TSFM parent"
+                    f"Combined policy {policy.name!r} cannot use a Combined parent"
+                )
+            if not any(parent in tsfm_names for parent in policy.parents):
+                raise PolicyError(
+                    f"Combined policy {policy.name!r} must include a TSFM parent"
                 )
 
     @property
@@ -303,14 +366,39 @@ class PolicyPortfolio:
     def get(self, name: str) -> TSFMPolicy | CombinedPolicy | None:
         return next((policy for policy in self.all_policies if policy.name == name), None)
 
-    def validate_statistical_parents(self, method_names: Sequence[str]) -> None:
+    def validate_parents(self, method_names: Sequence[str]) -> None:
         known = set(method_names)
+        tsfm_names = {policy.name for policy in self.tsfm}
+        combined_names = {policy.name for policy in self.combined}
         for policy in self.combined:
-            if policy.statistical_parent not in known:
+            if policy.name in known:
                 raise PolicyError(
-                    f"Combined policy {policy.name!r} has unknown statistical parent "
-                    f"{policy.statistical_parent!r}"
+                    f"Combined policy name {policy.name!r} collides with an executable "
+                    "Statistical method"
                 )
+            if not any(parent in tsfm_names for parent in policy.parents):
+                raise PolicyError(
+                    f"Combined policy {policy.name!r} must include a TSFM parent"
+                )
+            for parent in policy.parents:
+                if parent in combined_names:
+                    raise PolicyError(
+                        f"Combined policy {policy.name!r} cannot use a Combined parent"
+                    )
+                if parent not in tsfm_names and parent not in known:
+                    raise PolicyError(
+                        f"Combined policy {policy.name!r} has unknown parent {parent!r}"
+                    )
+
+    def validate_namespace(self, method_names: Sequence[str]) -> None:
+        """Reject any Statistical/TSFM/Combined name collision before evaluation."""
+        names = tuple(method_names) + self.names
+        duplicates = tuple(sorted({name for name in names if names.count(name) > 1}))
+        if duplicates:
+            raise PolicyError(
+                "candidate namespace collision: " + ", ".join(duplicates)
+            )
+        self.validate_parents(method_names)
 
     def replace(
         self, name: str, replacement: TSFMPolicy | CombinedPolicy
@@ -329,17 +417,42 @@ class PolicyPortfolio:
                 tsfm=tuple(replacement if policy.name == name else policy for policy in self.tsfm),
             )
         assert isinstance(parent, CombinedPolicy) and isinstance(replacement, CombinedPolicy)
-        if (
-            replacement.tsfm_parent != parent.tsfm_parent
-            or replacement.statistical_parent != parent.statistical_parent
-        ):
-            raise PolicyError("Combined parent identities cannot change during repair")
         return replace(
             self,
             combined=tuple(
                 replacement if policy.name == name else policy for policy in self.combined
             ),
         )
+
+    def add_combined(self, policy: CombinedPolicy) -> "PolicyPortfolio":
+        """Return a portfolio with one new Combined policy."""
+        if not isinstance(policy, CombinedPolicy):
+            raise PolicyError("Combined mutation requires a CombinedPolicy")
+        if self.get(policy.name) is not None:
+            raise PolicyError(f"policy name {policy.name!r} already exists")
+        return replace(self, combined=self.combined + (policy,))
+
+    def remove_combined(self, name: str) -> "PolicyPortfolio":
+        """Return a portfolio without one Combined policy."""
+        if not any(policy.name == name for policy in self.combined):
+            raise PolicyError(f"unknown Combined policy {name!r}")
+        if len(self.combined) == 1:
+            raise PolicyError("cannot remove the final Combined policy")
+        return replace(
+            self,
+            combined=tuple(policy for policy in self.combined if policy.name != name),
+        )
+
+    def fork_combined(
+        self, source: str, child: CombinedPolicy
+    ) -> "PolicyPortfolio":
+        """Return a portfolio with a new child Combined policy."""
+        source_policy = self.get(source)
+        if not isinstance(source_policy, CombinedPolicy):
+            raise PolicyError(f"unknown Combined source {source!r}")
+        if not isinstance(child, CombinedPolicy):
+            raise PolicyError("Combined fork requires a CombinedPolicy child")
+        return self.add_combined(child)
 
     @classmethod
     def flagship5(cls) -> "PolicyPortfolio":
@@ -355,50 +468,52 @@ class PolicyPortfolio:
             combined=(
                 CombinedPolicy(
                     "combined_timesfm_seasonal",
-                    "timesfm_2_5",
-                    "seasonal_naive",
-                    "blend",
-                    0.65,
+                    ("timesfm_2_5", "seasonal_naive"),
+                    "weighted_mean",
+                    (0.65, 0.35),
                     "periodicity_strength",
                     0.45,
+                    fallback_parent="timesfm_2_5",
                 ),
                 CombinedPolicy(
                     "combined_chronos_damped_trend",
-                    "chronos_bolt",
-                    "holt_damped_trend",
-                    "blend",
-                    0.65,
+                    ("chronos_bolt", "holt_damped_trend"),
+                    "weighted_mean",
+                    (0.65, 0.35),
                     "trend_strength",
                     0.45,
+                    fallback_parent="chronos_bolt",
                 ),
                 CombinedPolicy(
                     "combined_moirai_croston_router",
-                    "moirai_2_0",
-                    "croston_sba",
+                    ("moirai_2_0", "croston_sba"),
                     "route",
-                    0.65,
+                    (),
                     "zero_fraction",
                     0.30,
-                    "below",
+                    above_parent="croston_sba",
+                    below_parent="moirai_2_0",
+                    fallback_parent="moirai_2_0",
                 ),
                 CombinedPolicy(
                     "combined_toto_robust_router",
-                    "toto_2_0",
-                    "robust_loess_trend",
+                    ("toto_2_0", "robust_loess_trend"),
                     "route",
-                    0.65,
+                    (),
                     "outlier_fraction",
                     0.05,
-                    "below",
+                    above_parent="robust_loess_trend",
+                    below_parent="toto_2_0",
+                    fallback_parent="toto_2_0",
                 ),
                 CombinedPolicy(
                     "combined_granite_regime_profile",
-                    "granite_ttm_r2",
-                    "median_seasonal_profile_forecast",
-                    "blend",
-                    0.60,
+                    ("granite_ttm_r2", "median_seasonal_profile_forecast"),
+                    "weighted_mean",
+                    (0.60, 0.40),
                     "recent_regime_confidence",
                     0.50,
+                    fallback_parent="granite_ttm_r2",
                 ),
             ),
         )
@@ -448,7 +563,7 @@ def parse_policy_source(source: str) -> PolicyPortfolio:
     try:
         tsfm = tuple(TSFMPolicy(**_exact_payload(payload, TSFMPolicy)) for payload in tsfm_payloads)
         combined = tuple(
-            CombinedPolicy(**_exact_payload(payload, CombinedPolicy))
+            _combined_from_payload(payload)
             for payload in combined_payloads
         )
     except TypeError as error:
@@ -475,7 +590,8 @@ def evaluate_portfolio(
     policy_cache: PolicyOutcomeCache | None = None,
 ) -> tuple[Outcome, ...]:
     """Evaluate Python, TSFM, and Combined candidates on one trusted task sequence."""
-    portfolio.validate_statistical_parents(module.names())
+    require_unique_task_ids(tasks)
+    portfolio.validate_namespace(module.names())
     python_outcomes = tuple(
         outcome
         for method in module.methods
@@ -492,9 +608,11 @@ def evaluate_portfolio(
         for policy in portfolio.tsfm
         for task in tasks
     )
+    leaf_outcomes = python_outcomes + tsfm_outcomes
+    require_unique_outcome_keys(leaf_outcomes)
     by_key = {
         (outcome.method, outcome.task_id): outcome
-        for outcome in python_outcomes + tsfm_outcomes
+        for outcome in leaf_outcomes
     }
     combined_outcomes = tuple(
         _run_combined(policy, task, by_key)
@@ -520,27 +638,25 @@ def require_flagship_runtimes(
 def _run_tsfm(
     policy: TSFMPolicy, task: Task, runtimes: RuntimeRegistry
 ) -> Outcome:
-    profile = analyze_series(task.history, task.frequency)
-    if not _applicable(policy.applicability, profile):
+    try:
+        calibrated = forecast_tsfm(
+            policy,
+            history=task.history,
+            horizon=task.horizon,
+            frequency=task.frequency,
+            runtimes=runtimes,
+        )
+    except PolicyNotApplicable:
         return Outcome(
             policy.name,
             task.task_id,
             NOT_APPLICABLE,
             detail=f"history does not satisfy {policy.applicability} applicability",
         )
-    candidate = _candidate(policy.method_id)
-    resolution = runtimes.resolve(candidate)
-    if not resolution.available or resolution.runtime is None:
-        return Outcome(policy.name, task.task_id, CRASHED, detail=resolution.reason[:200])
-    history = tuple(task.history[-policy.context_window :])
-    transformed, inverse = _transform(history, policy.preprocess)
-    try:
-        raw = resolution.runtime.forecast(
-            candidate, transformed, task.horizon, task.frequency
-        )
-        forecast = tuple(float(inverse(float(value))) for value in raw)
     except RuntimeUnavailableError as error:
         return Outcome(policy.name, task.task_id, CRASHED, detail=str(error)[:200])
+    except InvalidTSFMForecastError as error:
+        return Outcome(policy.name, task.task_id, INVALID, detail=str(error)[:200])
     except Exception as error:
         return Outcome(
             policy.name,
@@ -548,14 +664,36 @@ def _run_tsfm(
             CRASHED,
             detail=f"{type(error).__name__}: {error}"[:200],
         )
-    if len(forecast) != task.horizon or not all(math.isfinite(value) for value in forecast):
-        return Outcome(
-            policy.name, task.task_id, INVALID, detail="TSFM returned invalid forecast"
-        )
-    shrinkage = policy.shrinkage_to_last
-    last = float(task.history[-1])
-    calibrated = tuple((1.0 - shrinkage) * value + shrinkage * last for value in forecast)
     return _scored(policy.name, task, calibrated)
+
+
+def forecast_tsfm(
+    policy: TSFMPolicy,
+    *,
+    history: Sequence[float],
+    horizon: int,
+    frequency: str,
+    runtimes: RuntimeRegistry,
+) -> tuple[float, ...]:
+    """Run one manifest-bound TSFM without constructing labels or invoking a scorer."""
+    profile = analyze_series(history, frequency)
+    if not _applicable(policy.applicability, profile):
+        raise PolicyNotApplicable(
+            f"history does not satisfy {policy.applicability} applicability"
+        )
+    candidate = _candidate(policy.method_id)
+    resolution = runtimes.resolve(candidate)
+    if not resolution.available or resolution.runtime is None:
+        raise RuntimeUnavailableError(resolution.reason[:200])
+    context = tuple(float(value) for value in history[-policy.context_window :])
+    transformed, inverse = _transform(context, policy.preprocess)
+    raw = resolution.runtime.forecast(candidate, transformed, horizon, frequency)
+    forecast = tuple(float(inverse(float(value))) for value in raw)
+    if len(forecast) != horizon or not all(math.isfinite(value) for value in forecast):
+        raise InvalidTSFMForecastError("TSFM returned invalid forecast")
+    shrinkage = policy.shrinkage_to_last
+    last = float(history[-1])
+    return tuple((1.0 - shrinkage) * value + shrinkage * last for value in forecast)
 
 
 def _run_combined(
@@ -563,27 +701,255 @@ def _run_combined(
     task: Task,
     outcomes: Mapping[tuple[str, str], Outcome],
 ) -> Outcome:
-    tsfm = outcomes[(policy.tsfm_parent, task.task_id)]
-    statistical = outcomes[(policy.statistical_parent, task.task_id)]
-    failed = [parent for parent in (tsfm, statistical) if parent.status != SUCCESS]
+    composed = combine_materialized_outcome(
+        policy,
+        {
+            parent: outcomes.get(
+                (parent, task.task_id),
+                Outcome(
+                    parent,
+                    task.task_id,
+                    CRASHED,
+                    detail="missing materialized parent outcome",
+                ),
+            )
+            for parent in policy.parents
+        },
+        task_id=task.task_id,
+        history=task.history,
+        horizon=task.horizon,
+        frequency=task.frequency,
+    )
+    if composed.status != SUCCESS:
+        return composed
+    try:
+        scored = _scored(policy.name, task, composed.forecast)
+    except (ArithmeticError, TypeError, ValueError):
+        return Outcome(policy.name, task.task_id, INVALID, detail="combined score is invalid")
+    return replace(scored, detail=composed.detail) if composed.detail else scored
+
+
+def combine_materialized_outcome(
+    policy: CombinedPolicy,
+    parent_outcomes: Mapping[str, Outcome],
+    *,
+    task_id: str,
+    history: Sequence[float],
+    horizon: int,
+    frequency: str,
+) -> Outcome:
+    """Compose materialized leaf outcomes without reading future labels or scoring."""
+    parent_outcomes = tuple(
+        parent_outcomes.get(
+            parent,
+            Outcome(
+                parent,
+                task_id,
+                CRASHED,
+                detail="missing materialized parent outcome",
+            ),
+        )
+        for parent in policy.parents
+    )
+    failed = tuple(
+        outcome
+        for outcome in parent_outcomes
+        if not _is_successful_parent(outcome, horizon)
+    )
     if failed:
-        status = CRASHED if any(parent.status == CRASHED for parent in failed) else NOT_APPLICABLE
         detail = "; ".join(
-            f"{parent.method}={parent.status}" for parent in failed
+            f"{parent.method}={_parent_failure_status(parent, horizon)}"
+            for parent in failed
         )
-        return Outcome(policy.name, task.task_id, status, detail=detail[:200])
-    if policy.mode == "blend":
+        return _combined_fallback_or_failure(
+            policy,
+            parent_outcomes,
+            task_id=task_id,
+            horizon=horizon,
+            detail=detail,
+            failed=failed,
+        )
+    try:
+        forecast = combine_materialized_forecast(
+            policy,
+            {outcome.method: outcome for outcome in parent_outcomes},
+            history=history,
+            horizon=horizon,
+            frequency=frequency,
+        )
+    except (ArithmeticError, TypeError, ValueError):
+        return _combined_fallback_or_failure(
+            policy,
+            parent_outcomes,
+            task_id=task_id,
+            horizon=horizon,
+            detail="combined composition is invalid",
+            failed=(),
+        )
+    if not _forecast_is_valid(forecast, horizon):
+        return _combined_fallback_or_failure(
+            policy,
+            parent_outcomes,
+            task_id=task_id,
+            horizon=horizon,
+            detail="combined composition is invalid",
+            failed=(),
+        )
+    return Outcome(policy.name, task_id, SUCCESS, forecast=forecast)
+
+
+def _combined_fallback_or_failure(
+    policy: CombinedPolicy,
+    parent_outcomes: Sequence[Outcome],
+    *,
+    task_id: str,
+    horizon: int,
+    detail: str,
+    failed: Sequence[Outcome],
+) -> Outcome:
+    """Use the reviewed fallback or return the strongest sanitized failure."""
+    fallback = next(
+        outcome
+        for outcome in parent_outcomes
+        if outcome.method == policy.fallback_parent
+    )
+    if _is_successful_parent(fallback, horizon):
+        return Outcome(
+            policy.name,
+            task_id,
+            SUCCESS,
+            detail=f"fallback={policy.fallback_parent}; {detail}"[:200],
+            forecast=fallback.forecast,
+        )
+    statuses = [_parent_failure_status(parent, horizon) for parent in failed]
+    if not statuses:
+        statuses.append(INVALID)
+    status = max(statuses, key=_failure_precedence)
+    return Outcome(policy.name, task_id, status, detail=detail[:200])
+
+
+def combine_materialized_forecast(
+    policy: CombinedPolicy,
+    parent_outcomes: Mapping[str, Outcome],
+    *,
+    history: Sequence[float],
+    horizon: int,
+    frequency: str,
+) -> tuple[float, ...]:
+    """Compose materialized successful forecasts using history-only policy inputs."""
+    parents = tuple(parent_outcomes[parent] for parent in policy.parents)
+    if policy.operator == "weighted_mean":
         forecast = tuple(
-            policy.weight * left + (1.0 - policy.weight) * right
-            for left, right in zip(tsfm.forecast, statistical.forecast, strict=True)
+            _stable_weighted_mean(
+                tuple(
+                    (weight, outcome.forecast[index])
+                    for weight, outcome in zip(policy.weights, parents, strict=True)
+                )
+            )
+            for index in range(horizon)
         )
-    else:
-        signal = _signal(policy.signal, task)
-        choose_tsfm = signal >= policy.threshold
-        if policy.tsfm_when == "below":
-            choose_tsfm = not choose_tsfm
-        forecast = tsfm.forecast if choose_tsfm else statistical.forecast
-    return _scored(policy.name, task, forecast)
+    elif policy.operator == "route":
+        signal = _history_signal(policy.signal, history, frequency)
+        selected = policy.above_parent if signal >= policy.threshold else policy.below_parent
+        forecast = parent_outcomes[selected].forecast
+    elif policy.operator == "median":
+        forecast = tuple(
+            _overflow_stable_median(
+                tuple(outcome.forecast[index] for outcome in parents)
+            )
+            for index in range(horizon)
+        )
+    elif policy.operator == "trimmed_mean":
+        forecast = tuple(
+            _overflow_stable_mean(
+                sorted(outcome.forecast[index] for outcome in parents)[1:-1]
+            )
+            for index in range(horizon)
+        )
+    else:  # pragma: no cover - CombinedPolicy validates operators
+        raise PolicyError(f"unsupported Combined operator {policy.operator!r}")
+    return tuple(float(value) for value in forecast)
+
+
+def _stable_weighted_mean(values: Sequence[tuple[float, float]]) -> float:
+    """Return a weighted mean without overflowing intermediate additions."""
+    terms = tuple((float(weight), float(value)) for weight, value in values)
+    maximum = max((abs(value) for _, value in terms), default=0.0)
+    weight_sum = math.fsum(weight for weight, _ in terms)
+    if maximum == 0.0:
+        return 0.0
+    if maximum <= sys.float_info.max / max(weight_sum, 1.0):
+        return sum(weight * value for weight, value in terms)
+    return float(
+        sum(
+            Fraction.from_float(weight) * Fraction.from_float(value)
+            for weight, value in terms
+        )
+    )
+
+
+def _overflow_stable_mean(values: Sequence[float]) -> float:
+    """Return an arithmetic mean while keeping intermediate sums finite."""
+    numbers = tuple(float(value) for value in values)
+    maximum = max((abs(value) for value in numbers), default=0.0)
+    if not numbers:
+        raise ValueError("mean requires at least one value")
+    if maximum == 0.0:
+        return 0.0
+    if maximum <= sys.float_info.max / len(numbers):
+        return statistics.fmean(numbers)
+    return float(sum(Fraction.from_float(value) for value in numbers) / len(numbers))
+
+
+def _overflow_stable_median(values: Sequence[float]) -> float:
+    """Return the median while averaging an even pair without overflow."""
+    numbers = tuple(sorted(float(value) for value in values))
+    if not numbers:
+        raise ValueError("median requires at least one value")
+    middle = len(numbers) // 2
+    if len(numbers) % 2:
+        return numbers[middle]
+    return _overflow_stable_mean(numbers[middle - 1 : middle + 1])
+
+
+def _combine_forecasts(
+    policy: CombinedPolicy,
+    parent_outcomes: Mapping[str, Outcome],
+    task: Task,
+) -> tuple[float, ...]:
+    """Compatibility wrapper for the task-shaped canonical composition contract."""
+    return combine_materialized_forecast(
+        policy,
+        parent_outcomes,
+        history=task.history,
+        horizon=task.horizon,
+        frequency=task.frequency,
+    )
+
+
+def _is_successful_parent(outcome: Outcome, horizon: int) -> bool:
+    return outcome.status == SUCCESS and _forecast_is_valid(outcome.forecast, horizon)
+
+
+def _forecast_is_valid(forecast: Sequence[float], horizon: int) -> bool:
+    try:
+        return len(forecast) == horizon and all(
+            math.isfinite(float(value)) for value in forecast
+        )
+    except (ArithmeticError, TypeError, ValueError):
+        return False
+
+
+def _parent_failure_status(outcome: Outcome, horizon: int) -> str:
+    if outcome.status == CRASHED:
+        return CRASHED
+    if outcome.status == INVALID or not _forecast_is_valid(outcome.forecast, horizon):
+        return INVALID
+    return NOT_APPLICABLE
+
+
+def _failure_precedence(status: str) -> int:
+    return {NOT_APPLICABLE: 0, INVALID: 1, CRASHED: 2}[status]
 
 
 def _candidate(method_id: str) -> MethodCandidate:
@@ -630,14 +996,18 @@ def _applicable(applicability: str, profile: Mapping[str, object]) -> bool:
 
 
 def _signal(name: str, task: Task) -> float:
-    profile = analyze_series(task.history, task.frequency)
+    return _history_signal(name, task.history, task.frequency)
+
+
+def _history_signal(name: str, history: Sequence[float], frequency: str) -> float:
+    profile = analyze_series(history, frequency)
     if name == "periodicity_strength":
         return float(cast(Mapping[str, object], profile["periodicity"])["strength"])
     if name == "zero_fraction":
         return float(cast(Mapping[str, object], profile["intermittency"])["zero_fraction"])
     if name == "outlier_fraction":
         outliers = cast(Mapping[str, object], profile["outliers"])
-        return len(cast(Sequence[int], outliers["indices"])) / len(task.history)
+        return len(cast(Sequence[int], outliers["indices"])) / len(history)
     if name == "trend_strength":
         return float(cast(Mapping[str, object], profile["trend"])["strength"])
     if name == "recent_regime_confidence":
@@ -678,6 +1048,83 @@ def _exact_payload(payload: Mapping[str, object], cls: type) -> dict[str, object
     if unknown:
         raise PolicyError(f"unknown {cls.__name__} fields: {sorted(unknown)!r}")
     return dict(payload)
+
+
+_COMBINED_CANONICAL_FIELDS = frozenset(
+    {
+        "name",
+        "parents",
+        "operator",
+        "weights",
+        "signal",
+        "threshold",
+        "above_parent",
+        "below_parent",
+        "fallback_parent",
+    }
+)
+_COMBINED_LEGACY_FIELDS = frozenset(
+    {
+        "name",
+        "tsfm_parent",
+        "statistical_parent",
+        "mode",
+        "weight",
+        "signal",
+        "threshold",
+        "tsfm_when",
+    }
+)
+
+
+def _combined_from_payload(payload: Mapping[str, object]) -> CombinedPolicy:
+    """Build a canonical CombinedPolicy, migrating one exact legacy payload shape."""
+    keys = set(payload)
+    known = _COMBINED_CANONICAL_FIELDS | _COMBINED_LEGACY_FIELDS
+    unknown = keys - known
+    if unknown:
+        raise PolicyError(f"unknown CombinedPolicy fields: {sorted(unknown)!r}")
+    if keys == _COMBINED_CANONICAL_FIELDS:
+        return CombinedPolicy(**dict(payload))
+    if keys != _COMBINED_LEGACY_FIELDS:
+        raise PolicyError(
+            "CombinedPolicy fields must match exactly the canonical or legacy schema"
+        )
+
+    mode = payload["mode"]
+    tsfm_parent = payload["tsfm_parent"]
+    statistical_parent = payload["statistical_parent"]
+    tsfm_when = payload["tsfm_when"]
+    weight = payload["weight"]
+    _bounded(weight, "weight", lower=0.05, upper=0.95)
+    if mode == "blend":
+        return CombinedPolicy(
+            name=payload["name"],  # type: ignore[arg-type]
+            parents=(tsfm_parent, statistical_parent),  # type: ignore[assignment]
+            operator="weighted_mean",
+            weights=(weight, 1.0 - weight),  # type: ignore[operator]
+            signal=payload["signal"],  # type: ignore[arg-type]
+            threshold=payload["threshold"],  # type: ignore[arg-type]
+            fallback_parent=tsfm_parent,  # type: ignore[arg-type]
+        )
+    if mode == "route":
+        if tsfm_when == "above":
+            above_parent, below_parent = tsfm_parent, statistical_parent
+        elif tsfm_when == "below":
+            above_parent, below_parent = statistical_parent, tsfm_parent
+        else:
+            raise PolicyError(f"unsupported route direction {tsfm_when!r}")
+        return CombinedPolicy(
+            name=payload["name"],  # type: ignore[arg-type]
+            parents=(tsfm_parent, statistical_parent),  # type: ignore[assignment]
+            operator="route",
+            signal=payload["signal"],  # type: ignore[arg-type]
+            threshold=payload["threshold"],  # type: ignore[arg-type]
+            above_parent=above_parent,  # type: ignore[arg-type]
+            below_parent=below_parent,  # type: ignore[arg-type]
+            fallback_parent=tsfm_parent,  # type: ignore[arg-type]
+        )
+    raise PolicyError(f"unsupported Combined mode {mode!r}")
 
 
 def _identifier(value: str, field: str) -> None:

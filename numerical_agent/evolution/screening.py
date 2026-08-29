@@ -8,7 +8,16 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from .analysis_skills_template import analyze_series
-from .execution import CRASHED, INVALID, NOT_APPLICABLE, SUCCESS, Outcome, Task
+from .execution import (
+    CRASHED,
+    INVALID,
+    NOT_APPLICABLE,
+    SUCCESS,
+    Outcome,
+    Task,
+    require_unique_outcome_keys,
+    require_unique_task_ids,
+)
 
 
 _FEATURE_FIELDS = frozenset(
@@ -526,6 +535,8 @@ def evaluate_screening(
     outcomes: Sequence[Outcome],
 ) -> ScreeningScore:
     """Score candidate eligibility without choosing a final forecast."""
+    require_unique_task_ids(tasks)
+    require_unique_outcome_keys(outcomes)
     by_key = {(row.method, row.task_id): row for row in outcomes}
     active_counts: dict[str, int] = {}
     active_attempts = 0

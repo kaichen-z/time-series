@@ -104,7 +104,7 @@ def evolve_policies_once(
     _require_clean(root)
     module = read_module(root / "methods.py")
     parent = read_policy_file(root / "policies.py")
-    parent.validate_statistical_parents(module.names())
+    parent.validate_namespace(module.names())
     initial_hits = outcome_cache.stats.hits + policy_cache.stats.hits
     initial_misses = outcome_cache.stats.misses + policy_cache.stats.misses
 
@@ -432,8 +432,13 @@ def _policy_from_payload(
         raise PolicyError(
             f"replacement fields must exactly match {sorted(expected)!r}"
         )
+    values = dict(payload)
+    if isinstance(current, CombinedPolicy):
+        for field in ("parents", "weights"):
+            if isinstance(values.get(field), list):
+                values[field] = tuple(values[field])
     try:
-        replacement = type(current)(**dict(payload))
+        replacement = type(current)(**values)
     except (TypeError, ValueError) as error:
         raise PolicyError(str(error)) from error
     return replacement

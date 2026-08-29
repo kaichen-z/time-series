@@ -12,7 +12,16 @@ from typing import Mapping, Sequence
 
 from common.llm import LLMClient, parse_json_object
 
-from .execution import CRASHED, INVALID, NOT_APPLICABLE, SUCCESS, Outcome, Task
+from .execution import (
+    CRASHED,
+    INVALID,
+    NOT_APPLICABLE,
+    SUCCESS,
+    Outcome,
+    Task,
+    require_unique_outcome_keys,
+    require_unique_task_ids,
+)
 from .cache import OutcomeCache
 from .module import MethodModule
 from .portfolio import (
@@ -185,7 +194,8 @@ def require_cached_portfolio_outcomes(
     isolated_methods: bool,
 ) -> tuple[Outcome, ...]:
     """Reconstruct all candidate outcomes from exact caches, never calling a model."""
-    portfolio.validate_statistical_parents(module.names())
+    require_unique_task_ids(tasks)
+    portfolio.validate_namespace(module.names())
     python_rows = tuple(
         row
         for method in module.methods
@@ -201,8 +211,10 @@ def require_cached_portfolio_outcomes(
         for policy in portfolio.tsfm
         for task in tasks
     )
+    leaf_rows = python_rows + tsfm_rows
+    require_unique_outcome_keys(leaf_rows)
     by_key = {
-        (row.method, row.task_id): row for row in python_rows + tsfm_rows
+        (row.method, row.task_id): row for row in leaf_rows
     }
     combined_rows = tuple(
         _run_combined(policy, task, by_key)
@@ -312,6 +324,8 @@ def evaluate_filter(
     reference_outcomes: Sequence[Outcome],
 ) -> FilterScore:
     """Select by cross-task history traits, then score selected forecasts with trusted labels."""
+    require_unique_task_ids(tasks)
+    require_unique_outcome_keys(outcomes)
     by_key = {(row.method, row.task_id): row for row in outcomes}
     references = tuple(reference_outcomes)
     selected: dict[str, str] = {}
