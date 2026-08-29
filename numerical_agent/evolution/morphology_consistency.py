@@ -80,7 +80,9 @@ def check_morphology_assumptions(
 
     survivors: list[AssumptionGrounding] = []
     for assumption in assumptions:
-        reason = _profile_reason(assumption, profile)
+        reason = _supporting_window_reason(assumption, card, profile.history_length)
+        if reason is None:
+            reason = _profile_reason(assumption, profile)
         if reason is None and assumption.prior_confidence < policy.assumption_min_confidence:
             reason = "below_min_confidence"
         if reason is None:
@@ -91,6 +93,7 @@ def check_morphology_assumptions(
                 forecasts=stable_forecasts,
                 minimum_folds=minimum,
                 policy=policy,
+                horizon=profile.horizon,
             )
         if reason is None:
             survivors.append(assumption)
@@ -205,6 +208,16 @@ def _profile_reason(assumption: AssumptionGrounding, profile: TaskProfile) -> st
     return None if compatible.get(assumption.kind, False) else "profile_incompatible"
 
 
+def _supporting_window_reason(
+    assumption: AssumptionGrounding, card: MorphologyCard, history_length: int
+) -> str | None:
+    calls = {call.call_id: call for call in card.tool_calls}
+    cited = tuple(calls[call_id] for call_id in assumption.supporting_call_ids)
+    has_full_history = any(call.start == 0 and call.end == history_length for call in cited)
+    has_recent = any(call.start > 0 and call.end == history_length for call in cited)
+    return None if has_full_history and has_recent else "insufficient_window_evidence"
+
+
 def _candidate_reason(
     assumption: AssumptionGrounding,
     *,
@@ -213,6 +226,7 @@ def _candidate_reason(
     forecasts: Mapping[str, Sequence[float]],
     minimum_folds: int,
     policy: DecisionPolicy,
+    horizon: int,
 ) -> str | None:
     for name in assumption.candidate_names:
         if name not in active:
@@ -228,14 +242,24 @@ def _candidate_reason(
             return "candidate_ineligible"
         if diagnostic.successful_folds < minimum_folds:
             return "insufficient_successful_folds"
+        if not _valid_fold_evidence(diagnostic):
+            return "invalid_fold_evidence"
         if diagnostic.explosion or diagnostic.worst_mase > policy.catastrophic_mase:
             return "catastrophic_hindcast_tail"
+        if policy.long_horizon_guard_enabled:
+            if diagnostic.long_horizon_coverage < policy.long_horizon_min_coverage:
+                return "insufficient_long_horizon_coverage"
+            if not _valid_long_horizon_audit(diagnostic):
+                return "missing_long_horizon_audit"
         try:
             forecast = forecasts.get(name)
         except (AttributeError, TypeError, ValueError):
             return "invalid_forecasts"
         if not _valid_forecast(forecast):
             return "invalid_forecast"
+        assert forecast is not None
+        if len(forecast) != horizon:
+            return "forecast_horizon_mismatch"
     return None
 
 
@@ -276,13 +300,42 @@ def _valid_diagnostic(value: object, expected_name: str) -> bool:
         for number in optional_numbers
     ):
         return False
-    return _finite_fold_vectors(value.fold_forecasts) and _finite_fold_vectors(value.fold_truths)
+    return True
 
 
-def _finite_fold_vectors(value: object) -> bool:
-    if not isinstance(value, tuple):
+def _valid_fold_evidence(diagnostic: CandidateDiagnostics) -> bool:
+    forecasts = diagnostic.fold_forecasts
+    truths = diagnostic.fold_truths
+    if (
+        diagnostic.successful_folds < 1
+        or not isinstance(forecasts, tuple)
+        or not isinstance(truths, tuple)
+        or len(forecasts) != diagnostic.successful_folds
+        or len(truths) != diagnostic.successful_folds
+    ):
         return False
-    return all(_valid_forecast(fold) for fold in value)
+    return all(
+        _valid_forecast(forecast)
+        and _valid_forecast(truth)
+        and len(forecast) == len(truth)
+        for forecast, truth in zip(forecasts, truths)
+    )
+
+
+def _valid_long_horizon_audit(diagnostic: CandidateDiagnostics) -> bool:
+    audit = diagnostic.long_horizon_fold
+    return (
+        audit is not None
+        and audit.status == "success"
+        and _valid_forecast(audit.forecast)
+        and _valid_forecast(audit.truth)
+        and len(audit.forecast) == len(audit.truth)
+        and audit.mase_scale is not None
+        and isinstance(audit.mase_scale, (int, float))
+        and not isinstance(audit.mase_scale, bool)
+        and math.isfinite(audit.mase_scale)
+        and audit.mase_scale > 0.0
+    )
 
 
 def _valid_forecast(value: object) -> bool:

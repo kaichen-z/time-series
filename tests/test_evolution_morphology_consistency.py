@@ -208,6 +208,89 @@ def test_consistency_enforces_fold_worst_fold_catastrophe_and_forecast_gates() -
     }
 
 
+@pytest.mark.parametrize(
+    ("assumption_id", "supporting_call_ids"),
+    [
+        ("broad_only", ("broad",)),
+        ("recent_only", ("recent",)),
+    ],
+)
+def test_consistency_requires_each_assumption_to_cite_broad_and_recent_windows(
+    assumption_id: str, supporting_call_ids: tuple[str, ...]
+) -> None:
+    assumption = replace(
+        _assumption(assumption_id, "seasonality", "candidate"),
+        supporting_call_ids=supporting_call_ids,
+    )
+
+    result = _check(
+        _card(assumption),
+        _profile(),
+        {"candidate": _diagnostic("candidate")},
+        {"candidate": (1.0, 2.0, 3.0)},
+    )
+
+    assert result.accepted == ()
+    assert result.rejected == {assumption_id: "insufficient_window_evidence"}
+
+
+def test_consistency_enforces_enabled_long_horizon_coverage_gate() -> None:
+    result = _check(
+        _card(_assumption("weekly_cycle", "seasonality", "candidate")),
+        _profile(),
+        {"candidate": _diagnostic("candidate", long_horizon_coverage=0.74)},
+        {"candidate": (1.0, 2.0, 3.0)},
+        policy=DecisionPolicy(
+            long_horizon_guard_enabled=True,
+            long_horizon_min_coverage=0.75,
+        ),
+    )
+
+    assert result.accepted == ()
+    assert result.rejected == {"weekly_cycle": "insufficient_long_horizon_coverage"}
+
+
+@pytest.mark.parametrize(
+    ("fold_forecasts", "fold_truths"),
+    [
+        ((), ()),
+        (((1.0, 2.0, 3.0),) * 2, ((1.0, 2.0, 3.0),) * 3),
+    ],
+)
+def test_consistency_requires_fold_evidence_to_match_successful_fold_count(
+    fold_forecasts: tuple[tuple[float, ...], ...],
+    fold_truths: tuple[tuple[float, ...], ...],
+) -> None:
+    result = _check(
+        _card(_assumption("weekly_cycle", "seasonality", "candidate")),
+        _profile(),
+        {
+            "candidate": _diagnostic(
+                "candidate",
+                fold_forecasts=fold_forecasts,
+                fold_truths=fold_truths,
+                successful_folds=3,
+            )
+        },
+        {"candidate": (1.0, 2.0, 3.0)},
+    )
+
+    assert result.accepted == ()
+    assert result.rejected == {"weekly_cycle": "invalid_fold_evidence"}
+
+
+def test_consistency_rejects_final_forecast_with_wrong_profile_horizon() -> None:
+    result = _check(
+        _card(_assumption("weekly_cycle", "seasonality", "candidate")),
+        _profile(horizon=3),
+        {"candidate": _diagnostic("candidate")},
+        {"candidate": (1.0, 2.0)},
+    )
+
+    assert result.accepted == ()
+    assert result.rejected == {"weekly_cycle": "forecast_horizon_mismatch"}
+
+
 def test_consistency_fails_closed_on_nonfinite_diagnostics() -> None:
     result = _check(
         _card(_assumption("weekly_cycle", "seasonality", "candidate")),
