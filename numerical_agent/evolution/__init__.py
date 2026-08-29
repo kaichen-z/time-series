@@ -27,6 +27,15 @@ from .prompts import (
     render_mutate_user,
     render_select_user,
 )
+from .morphology import (
+    AssumptionGrounding,
+    MorphologyCard,
+    MorphologyError,
+    MorphologyInputError,
+    MorphologyObservation,
+    MorphologyReasoner,
+    MorphologyToolCall,
+)
 
 MODULE_NAME = "methods.py"
 
