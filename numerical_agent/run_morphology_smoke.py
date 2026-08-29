@@ -362,29 +362,86 @@ def _future_values_after_freeze(
 
 
 def _mask_future_values(raw: str) -> str:
-    """Replace raw future JSON values without decoding their numeric tokens."""
+    """Replace future-value spans while decoding property names only."""
+    _, spans = _scan_json_value(raw, _skip_json_whitespace(raw, 0))
     parts: list[str] = []
     cursor = 0
-    search = 0
-    while True:
-        key_start = raw.find('"future_values"', search)
-        if key_start < 0:
-            parts.append(raw[cursor:])
-            return "".join(parts)
-        key_end = _json_string_end(raw, key_start)
-        value_start = key_end
-        while value_start < len(raw) and raw[value_start].isspace():
-            value_start += 1
-        if value_start >= len(raw) or raw[value_start] != ":":
-            search = key_end
-            continue
-        value_start += 1
-        while value_start < len(raw) and raw[value_start].isspace():
-            value_start += 1
-        value_end = _json_value_end(raw, value_start)
+    for value_start, value_end in spans:
         parts.extend((raw[cursor:value_start], "null"))
         cursor = value_end
-        search = value_end
+    parts.append(raw[cursor:])
+    return "".join(parts)
+
+
+def _scan_json_value(raw: str, start: int) -> tuple[int, list[tuple[int, int]]]:
+    """Return a JSON value's end plus raw spans for decoded future-value keys."""
+    start = _skip_json_whitespace(raw, start)
+    if start >= len(raw):
+        raise SmokeError("task JSON is malformed")
+    if raw[start] == "{":
+        return _scan_json_object(raw, start)
+    if raw[start] == "[":
+        return _scan_json_array(raw, start)
+    return _json_value_end(raw, start), []
+
+
+def _scan_json_object(raw: str, start: int) -> tuple[int, list[tuple[int, int]]]:
+    index = _skip_json_whitespace(raw, start + 1)
+    spans: list[tuple[int, int]] = []
+    if index < len(raw) and raw[index] == "}":
+        return index + 1, spans
+    while True:
+        if index >= len(raw) or raw[index] != '"':
+            raise SmokeError("task JSON is malformed")
+        key_end = _json_string_end(raw, index)
+        try:
+            key = json.loads(raw[index:key_end])
+        except json.JSONDecodeError as error:
+            raise SmokeError("task JSON is malformed") from error
+        if not isinstance(key, str):
+            raise SmokeError("task JSON is malformed")
+        index = _skip_json_whitespace(raw, key_end)
+        if index >= len(raw) or raw[index] != ":":
+            raise SmokeError("task JSON is malformed")
+        value_start = _skip_json_whitespace(raw, index + 1)
+        if key == "future_values":
+            value_end = _json_value_end(raw, value_start)
+            spans.append((value_start, value_end))
+        else:
+            value_end, child_spans = _scan_json_value(raw, value_start)
+            spans.extend(child_spans)
+        index = _skip_json_whitespace(raw, value_end)
+        if index >= len(raw):
+            raise SmokeError("task JSON is malformed")
+        if raw[index] == "}":
+            return index + 1, spans
+        if raw[index] != ",":
+            raise SmokeError("task JSON is malformed")
+        index = _skip_json_whitespace(raw, index + 1)
+
+
+def _scan_json_array(raw: str, start: int) -> tuple[int, list[tuple[int, int]]]:
+    index = _skip_json_whitespace(raw, start + 1)
+    spans: list[tuple[int, int]] = []
+    if index < len(raw) and raw[index] == "]":
+        return index + 1, spans
+    while True:
+        value_end, child_spans = _scan_json_value(raw, index)
+        spans.extend(child_spans)
+        index = _skip_json_whitespace(raw, value_end)
+        if index >= len(raw):
+            raise SmokeError("task JSON is malformed")
+        if raw[index] == "]":
+            return index + 1, spans
+        if raw[index] != ",":
+            raise SmokeError("task JSON is malformed")
+        index = _skip_json_whitespace(raw, index + 1)
+
+
+def _skip_json_whitespace(raw: str, index: int) -> int:
+    while index < len(raw) and raw[index] in " \r\n\t":
+        index += 1
+    return index
 
 
 def _json_string_end(raw: str, start: int) -> int:

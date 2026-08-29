@@ -230,6 +230,56 @@ def test_selected_future_json_is_not_decoded_until_after_package_freeze(tmp_path
     ]) == 0
 
 
+@pytest.mark.parametrize("reordered", [False, True])
+def test_escaped_future_key_is_structurally_masked_before_freeze(
+    tmp_path, monkeypatch, reordered
+) -> None:
+    result = tmp_path / "result.json"
+    values = [99.0, 98.0, 97.0]
+    record = _record("one", future=values)
+    if reordered:
+        record = {
+            "task_metadata": record["task_metadata"],
+            "series": {
+                "future_values": values,
+                "history_values": record["series"]["history_values"],
+            },
+            "labels_public": True,
+            "benchmark_id": "one",
+        }
+    raw = json.dumps(record).replace(
+        '"future_values":', '"future\\u005fvalues"   :'
+    )
+    tasks = tmp_path / "tasks.jsonl"
+    tasks.write_text(raw + "\n", encoding="utf-8")
+    decode = smoke.json.loads
+    original = smoke.run_numerical_loop
+    frozen = False
+
+    def guarded_decode(value, *args, **kwargs):
+        if (
+            'future\\u005fvalues' in value
+            and '[99.0, 98.0, 97.0]' in value
+            and not frozen
+        ):
+            raise AssertionError("escaped future labels were decoded before package freeze")
+        return decode(value, *args, **kwargs)
+
+    def freeze(task, **kwargs):
+        nonlocal frozen
+        package = original(task, **kwargs)
+        frozen = True
+        return package
+
+    monkeypatch.setattr(smoke.json, "loads", guarded_decode)
+    monkeypatch.setattr(smoke, "run_numerical_loop", freeze)
+    assert main(
+        [
+            "--task-file", str(tasks), "--results-path", str(result), "--llm-backend", "fake",
+        ]
+    ) == 0
+
+
 def test_selected_task_uses_the_common_history_only_task_model(tmp_path) -> None:
     tasks = tmp_path / "tasks.jsonl"
     _write_tasks(tasks, _record("one"))
