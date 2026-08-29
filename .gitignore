@@ -256,7 +256,6 @@ runs/evolving/sample_evolve/
 before/
 .repo_memory/
 dictionary_curation/
-runs/method_evolution
-runs/baselines/
-runs/dictionary_curation_v007/
+/runs/
 baseline/
+tests/
