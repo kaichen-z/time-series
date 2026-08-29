@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import numerical_agent.run_task_conditioned_screening as screening_script
 from numerical_agent.run_task_conditioned_screening import (
     _merge_cache_summaries,
     _report,
@@ -14,10 +15,17 @@ from numerical_agent.run_task_conditioned_screening import (
     _write_policy_artifacts,
     build_parser,
     load_frozen_partitions,
+    main,
 )
 from numerical_agent.evolution.execution import Task
-from numerical_agent.evolution.module import MODULE_HEADER, parse_module
-from numerical_agent.evolution.portfolio import PolicyError, PolicyPortfolio
+from numerical_agent.evolution.filtering import build_filter_dictionary, render_filter_source
+from numerical_agent.evolution.module import MODULE_HEADER, parse_module, write_module
+from numerical_agent.evolution.portfolio import (
+    CombinedPolicy,
+    PolicyError,
+    PolicyPortfolio,
+    write_policy_file,
+)
 from numerical_agent.evolution.screening import (
     ApplicabilityPolicy,
     ScreeningEntry,
@@ -27,6 +35,89 @@ from numerical_agent.evolution.screening import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class _StopAfterValidation(Exception):
+    pass
+
+
+def _screening_module():
+    names = (
+        "seasonal_naive",
+        "holt_damped_trend",
+        "croston_sba",
+        "robust_loess_trend",
+        "median_seasonal_profile_forecast",
+        *(f"statistical_{index}" for index in range(88)),
+    )
+    source = "\n\n".join(
+        f'''def {name}(history, horizon, frequency):
+    """Screening namespace fixture."""
+    return [0.0] * horizon
+'''
+        for name in names
+    )
+    return parse_module(MODULE_HEADER + "\n\n" + source)
+
+
+def _screening_portfolio(combined_count: int) -> PolicyPortfolio:
+    portfolio = PolicyPortfolio.flagship5()
+    while len(portfolio.combined) < combined_count:
+        index = len(portfolio.combined)
+        portfolio = portfolio.add_combined(CombinedPolicy(
+            f"combined_extra_{index}",
+            ("toto_2_0", "seasonal_naive"),
+            "median",
+            fallback_parent="toto_2_0",
+        ))
+    return portfolio
+
+
+def _screening_argv(repo: Path, output: Path, *extra: str) -> list[str]:
+    return [
+        "--repo", str(repo),
+        "--tasks-file", "unused-tasks",
+        "--outcome-cache-dir", str(repo / "method-cache"),
+        "--policy-outcome-cache-dir", str(repo / "policy-cache"),
+        "--target-batches-file", "unused-batches.json",
+        "--output-dir", str(output),
+        *extra,
+    ]
+
+
+def _run_until_screening_validation(
+    tmp_path, monkeypatch, *, combined_count: int, max_candidates: int | None = None,
+    dictionary=None,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    module = _screening_module()
+    portfolio = _screening_portfolio(combined_count)
+    write_module(repo / "methods.py", module)
+    write_policy_file(repo / "policies.py", portfolio)
+    (repo / "frozen_dictionary.py").write_text(
+        render_filter_source(build_filter_dictionary(module, portfolio)),
+        encoding="utf-8",
+    )
+    task = Task("screening", (1.0, 2.0), 1, "D", (3.0,))
+    monkeypatch.setattr(screening_script, "load_frozen_partitions", lambda *args, **kwargs: ((task,), (task,)))
+    if dictionary is not None:
+        monkeypatch.setattr(screening_script, "build_filter_dictionary", lambda *args: dictionary)
+    captured = []
+    original_constraints = screening_script.ScreeningConstraints
+
+    def capture_constraints(**kwargs):
+        captured.append(kwargs["max_active_candidates"])
+        return original_constraints(**kwargs)
+
+    monkeypatch.setattr(screening_script, "ScreeningConstraints", capture_constraints)
+    monkeypatch.setattr(
+        screening_script,
+        "_training_outcomes",
+        lambda *args: (_ for _ in ()).throw(_StopAfterValidation()),
+    )
+    extra = () if max_candidates is None else ("--screen-max-candidates", str(max_candidates))
+    return _screening_argv(repo, tmp_path / "output", *extra), captured, module, portfolio
 
 
 def test_partition_loader_does_not_open_dev_records_in_train_only_mode(
@@ -169,7 +260,7 @@ def test_screening_cli_has_train_dev_but_no_public_test_option():
     assert args.seed_policy == "all"
     assert args.baseline_method == "toto_2_0"
     assert args.screen_min_candidates == 12
-    assert args.screen_max_candidates == 103
+    assert args.screen_max_candidates is None
     assert args.screen_min_unique_dictionaries == 3
     assert args.screen_min_dev_oracle_retention == 0.9
     assert args.screen_batch_size == 8
@@ -182,6 +273,84 @@ def test_screening_cli_has_train_dev_but_no_public_test_option():
             "--output-dir", "out", "--target-batches-file", "batch",
             "--public-test-limit", "99",
         ])
+
+
+@pytest.mark.parametrize("combined_count, expected_count", ((5, 103), (6, 104)))
+def test_screening_cli_accepts_exact_runtime_candidate_namespace(
+    tmp_path, monkeypatch, combined_count, expected_count,
+):
+    argv, captured, module, portfolio = _run_until_screening_validation(
+        tmp_path, monkeypatch, combined_count=combined_count,
+    )
+
+    with pytest.raises(_StopAfterValidation):
+        main(argv)
+
+    assert len(module.methods) + len(portfolio.names) == expected_count
+    assert captured == [expected_count]
+
+
+@pytest.mark.parametrize("mutation", ("missing", "duplicate", "extra"))
+def test_screening_cli_rejects_parent_namespace_mismatch_before_cache_or_runtime(
+    tmp_path, monkeypatch, mutation,
+):
+    module = _screening_module()
+    portfolio = _screening_portfolio(5)
+    entries = list(build_filter_dictionary(module, portfolio).entries)
+    if mutation == "missing":
+        entries.pop()
+    elif mutation == "duplicate":
+        entries[-1] = entries[0]
+    else:
+        entries.append(type(entries[0])(
+            "unexpected_candidate", "statistical", "keep", (), "unexpected",
+        ))
+    parent = SimpleNamespace(entries=tuple(entries))
+    argv, captured, _, _ = _run_until_screening_validation(
+        tmp_path,
+        monkeypatch,
+        combined_count=5,
+        dictionary=SimpleNamespace(entries=tuple(entries)),
+    )
+    monkeypatch.setattr(screening_script, "migrate_filter_dictionary", lambda *args, **kwargs: parent)
+
+    with pytest.raises(ValueError, match="screening parent namespace mismatch"):
+        main(argv)
+
+    assert captured == []
+
+
+@pytest.mark.parametrize(
+    ("provided_ceiling", "expected_ceiling"),
+    ((None, 104), (1, 1), (104, 104)),
+)
+def test_screening_cli_derives_or_bounds_candidate_ceiling(
+    tmp_path, monkeypatch, provided_ceiling, expected_ceiling,
+):
+    argv, captured, _, _ = _run_until_screening_validation(
+        tmp_path, monkeypatch, combined_count=6, max_candidates=provided_ceiling,
+    )
+    if provided_ceiling == 1:
+        argv.extend(("--screen-min-candidates", "1"))
+
+    with pytest.raises(_StopAfterValidation):
+        main(argv)
+
+    assert captured == [expected_ceiling]
+
+
+@pytest.mark.parametrize("provided_ceiling", (0, 105))
+def test_screening_cli_rejects_candidate_ceiling_outside_runtime_namespace(
+    tmp_path, monkeypatch, provided_ceiling,
+):
+    argv, captured, _, _ = _run_until_screening_validation(
+        tmp_path, monkeypatch, combined_count=6, max_candidates=provided_ceiling,
+    )
+
+    with pytest.raises(ValueError, match="screen max candidates must be between 1 and 104"):
+        main(argv)
+
+    assert captured == []
 
 
 def test_screening_shell_forwards_formal_configuration():
@@ -199,7 +368,9 @@ def test_screening_shell_forwards_formal_configuration():
             "--screen-min-dev-oracle-retention",
     ):
         assert option in source
-    assert 'MAX_CANDIDATES="${SCREEN_MAX_CANDIDATES:-103}"' in source
+    assert 'SCREEN_MAX_CANDIDATES:-103' not in source
+    assert 'MAX_CANDIDATES="${SCREEN_MAX_CANDIDATES:-}"' in source
+
 
 
 def test_report_exposes_task_conditioning_and_family_coverage():

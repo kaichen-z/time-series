@@ -68,8 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--screen-max-candidates",
         type=int,
-        default=103,
-        help="optional safety ceiling; 103 leaves compression as a soft objective",
+        default=None,
+        help="optional safety ceiling; defaults to the runtime candidate count",
     )
     parser.add_argument("--screen-min-unique-dictionaries", type=int, default=3)
     parser.add_argument("--screen-max-mean-jaccard", type=float, default=0.995)
@@ -101,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
 
     module = read_module(repo / "methods.py")
     portfolio = read_policy_file(repo / "policies.py")
+    portfolio.validate_namespace(module.names())
+    candidate_names = tuple(module.names()) + portfolio.names
     legacy_path = repo / "frozen_dictionary.py"
     if not legacy_path.is_file():
         legacy_path = repo / "dictionary.py"
@@ -114,12 +116,21 @@ def main(argv: list[str] | None = None) -> int:
         seed_dictionary,
         fallback_names=_fallback_names(module.names(), tuple(policy.name for policy in portfolio.tsfm)),
     )
-    if len(parent.entries) != 103:
-        raise ValueError(f"expected 103 screening entries, found {len(parent.entries)}")
+    candidate_count = _validate_screening_parent(parent, candidate_names)
+    max_candidates = (
+        candidate_count
+        if args.screen_max_candidates is None
+        else args.screen_max_candidates
+    )
+    if not 1 <= max_candidates <= candidate_count:
+        raise ValueError(
+            "screen max candidates must be between 1 and "
+            f"{candidate_count}, found {max_candidates}"
+        )
     constraints = ScreeningConstraints(
         baseline_method=args.baseline_method,
         min_active_candidates=args.screen_min_candidates,
-        max_active_candidates=args.screen_max_candidates,
+        max_active_candidates=max_candidates,
         min_unique_active_dictionaries=args.screen_min_unique_dictionaries,
         max_mean_pairwise_jaccard=args.screen_max_mean_jaccard,
         min_group_support=args.screen_min_group_support,
@@ -395,6 +406,28 @@ def _training_outcomes(args, repo, module, portfolio, tasks) -> tuple[tuple[Outc
         "tsfm_hits": policy_cache.stats.hits,
         "tsfm_misses": policy_cache.stats.misses,
     }
+
+
+def _validate_screening_parent(
+    parent: ScreeningPolicy, candidate_names: Sequence[str]
+) -> int:
+    """Require the parent to index the complete parsed runtime namespace."""
+    expected = set(candidate_names)
+    names = tuple(entry.name for entry in parent.entries)
+    actual = set(names)
+    duplicates = tuple(sorted(name for name in actual if names.count(name) > 1))
+    missing = tuple(sorted(expected - actual))
+    extra = tuple(sorted(actual - expected))
+    if duplicates or missing or extra:
+        details = []
+        if duplicates:
+            details.append("duplicate=" + ", ".join(duplicates))
+        if missing:
+            details.append("missing=" + ", ".join(missing))
+        if extra:
+            details.append("extra=" + ", ".join(extra))
+        raise ValueError("screening parent namespace mismatch: " + "; ".join(details))
+    return len(candidate_names)
 
 
 def _fallback_names(statistical: Sequence[str], tsfm: Sequence[str]) -> tuple[str, ...]:

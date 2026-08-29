@@ -45,6 +45,11 @@ history-only materialized Statistical/TSFM leaves
   -> accepted canonical policy source becomes next Git generation
 ```
 
+Task-conditioned screening derives its candidate namespace and default safety ceiling from the
+parsed Statistical module and current portfolio. The initial `93 + 5 + 5 = 103` composition is
+an example; accepted Combined additions increase the runtime count without changing the formal
+80/20 proposal-acceptance boundary.
+
 The current proposal adapter is not yet wired into the formal 80/20 command. It does not train or
 modify LLM/TSFM weights, and no performance result is claimed. Python owns schema, namespace,
 parent, finite-forecast, horizon, fallback, and immutable TSFM-manifest checks; proposals cannot
