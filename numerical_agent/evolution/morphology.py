@@ -8,7 +8,6 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
 
 from common.llm import LLMClient
 
@@ -29,7 +28,6 @@ _MAX_TOOL_CALLS_PER_TURN = 3
 _ASSUMPTION_KINDS = frozenset(
     {"seasonality", "trend", "intermittency", "regime", "noise", "level"}
 )
-_FREQUENCY_TOOLS = frozenset({"detect_periodicity", "analyze_series"})
 _TOOL_ACTION_KEYS = frozenset({"action", "call_id", "tool", "window"})
 _FINAL_ACTION_KEYS = frozenset({"action", "short_term", "long_term", "assumptions"})
 _ASSUMPTION_KEYS = frozenset(
@@ -95,6 +93,12 @@ def _required_string(value: object, field: str) -> str:
 def _required_string_list(value: object, field: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not value:
         raise MorphologyError(f"{field} must be a nonempty list of strings")
+    return _normalized_string_collection(value, field)
+
+
+def _normalized_string_collection(value: object, field: str) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or not value:
+        raise MorphologyError(f"{field} must be a nonempty collection of strings")
     result = tuple(_required_string(item, field) for item in value)
     if len(result) != len(set(result)):
         if field == "supporting_call_ids":
@@ -111,6 +115,22 @@ class MorphologyToolCall:
     tool: str
     start: int
     end: int
+
+    def __post_init__(self) -> None:
+        call_id = _required_string(self.call_id, "call_id")
+        tool = _required_string(self.tool, "tool")
+        if tool not in _reviewed_skills.ANALYSIS_SKILL_NAMES:
+            raise MorphologyError(f"unknown reviewed tool {tool!r}")
+        if (
+            isinstance(self.start, bool)
+            or isinstance(self.end, bool)
+            or not isinstance(self.start, int)
+            or not isinstance(self.end, int)
+            or not 0 <= self.start < self.end
+        ):
+            raise MorphologyError("invalid tool window")
+        object.__setattr__(self, "call_id", call_id)
+        object.__setattr__(self, "tool", tool)
 
     @property
     def window(self) -> Mapping[str, int]:
@@ -132,6 +152,8 @@ class MorphologyObservation:
     output: object
 
     def __post_init__(self) -> None:
+        if not isinstance(self.call, MorphologyToolCall):
+            raise MorphologyError("observation call must be a MorphologyToolCall")
         object.__setattr__(self, "output", _freeze_json(self.output))
 
     @property
@@ -153,6 +175,35 @@ class AssumptionGrounding:
     supporting_call_ids: tuple[str, ...]
     candidate_names: tuple[str, ...]
     prior_confidence: float
+
+    def __post_init__(self) -> None:
+        assumption_id = _required_string(self.assumption_id, "assumption_id")
+        kind = _required_string(self.kind, "kind")
+        if kind not in _ASSUMPTION_KINDS:
+            raise MorphologyError(f"unsupported assumption kind {kind!r}")
+        confidence = self.prior_confidence
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            raise MorphologyError("prior_confidence must be finite and within [0, 1]")
+        confidence = float(confidence)
+        if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+            raise MorphologyError("prior_confidence must be finite and within [0, 1]")
+        object.__setattr__(self, "assumption_id", assumption_id)
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "claim", _required_string(self.claim, "claim"))
+        object.__setattr__(
+            self, "failure_condition", _required_string(self.failure_condition, "failure_condition")
+        )
+        object.__setattr__(
+            self,
+            "supporting_call_ids",
+            _normalized_string_collection(self.supporting_call_ids, "supporting_call_ids"),
+        )
+        object.__setattr__(
+            self,
+            "candidate_names",
+            _normalized_string_collection(self.candidate_names, "candidate_names"),
+        )
+        object.__setattr__(self, "prior_confidence", confidence)
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -177,6 +228,25 @@ class MorphologyCard:
     assumptions: tuple[AssumptionGrounding, ...]
 
     def __post_init__(self) -> None:
+        if not isinstance(self.short_term, str) or not isinstance(self.long_term, str):
+            raise MorphologyError("card descriptions must be strings")
+        try:
+            tool_calls = tuple(self.tool_calls)
+            observations = tuple(self.observations)
+            assumptions = tuple(self.assumptions)
+        except TypeError as exc:
+            raise MorphologyError("card collections must be iterable") from exc
+        if any(not isinstance(item, MorphologyToolCall) for item in tool_calls):
+            raise MorphologyError("tool_calls must contain MorphologyToolCall artifacts")
+        if any(not isinstance(item, MorphologyObservation) for item in observations):
+            raise MorphologyError("observations must contain MorphologyObservation artifacts")
+        if any(not isinstance(item, AssumptionGrounding) for item in assumptions):
+            raise MorphologyError("assumptions must contain AssumptionGrounding artifacts")
+        object.__setattr__(self, "short_term", _required_string(self.short_term, "short_term"))
+        object.__setattr__(self, "long_term", _required_string(self.long_term, "long_term"))
+        object.__setattr__(self, "tool_calls", tool_calls)
+        object.__setattr__(self, "observations", observations)
+        object.__setattr__(self, "assumptions", assumptions)
         if len(self.tool_calls) != len(self.observations):
             raise MorphologyError("every tool call must have exactly one observation")
         if tuple(item.call for item in self.observations) != self.tool_calls:
@@ -186,6 +256,12 @@ class MorphologyCard:
         ids = tuple(item.assumption_id for item in self.assumptions)
         if len(ids) != len(set(ids)):
             raise MorphologyError("morphology card contains duplicate assumption ids")
+        call_ids = tuple(item.call_id for item in self.tool_calls)
+        if len(call_ids) != len(set(call_ids)):
+            raise MorphologyError("morphology card contains duplicate tool call ids")
+        executed = set(call_ids)
+        if any(set(item.supporting_call_ids) - executed for item in self.assumptions):
+            raise MorphologyError("assumption cites unknown call id")
         _canonical_bytes(self.to_payload())
 
     @property
@@ -244,11 +320,12 @@ class MorphologyReasoner:
         active_names: Sequence[str],
         families: Mapping[str, str],
     ) -> MorphologyCard:
-        values = self._validate_inputs(history, frequency, horizon, active_names, families)
-        active = tuple(active_names)
+        values, normalized_frequency, active, normalized_families = self._validate_inputs(
+            history, frequency, horizon, active_names, families
+        )
         tool_calls: list[MorphologyToolCall] = []
         observations: list[MorphologyObservation] = []
-        messages = [{"role": "user", "content": self._initial_prompt(values, frequency, horizon, active, families)}]
+        messages = [{"role": "user", "content": self._initial_prompt(values, normalized_frequency, horizon, active, normalized_families)}]
 
         for _turn in range(self._max_turns):
             response = self._llm.complete(
@@ -260,7 +337,7 @@ class MorphologyReasoner:
             if len(tool_calls) >= self._max_tool_calls:
                 raise MorphologyError("tool-call budget exceeded")
             call = self._parse_tool_action(action, len(values), {item.call_id for item in tool_calls})
-            output = self._execute_tool(call, values, frequency)
+            output = self._execute_tool(call, values, normalized_frequency)
             tool_calls.append(call)
             observation = MorphologyObservation(call, output)
             observations.append(observation)
@@ -282,7 +359,7 @@ class MorphologyReasoner:
         horizon: int,
         active_names: Sequence[str],
         families: Mapping[str, str],
-    ) -> tuple[float, ...]:
+    ) -> tuple[tuple[float, ...], str, tuple[str, ...], Mapping[str, str]]:
         if isinstance(history, (str, bytes)):
             raise MorphologyInputError("history must be a sequence of finite values")
         try:
@@ -293,20 +370,43 @@ class MorphologyReasoner:
             raise MorphologyInputError("history must contain at least two values")
         if not all(math.isfinite(value) for value in values):
             raise MorphologyInputError("history must contain only finite values")
-        if not isinstance(frequency, str) or not frequency.strip():
-            raise MorphologyInputError("frequency must be a nonempty string")
+        try:
+            normalized_frequency = _required_string(frequency, "frequency")
+        except MorphologyError as exc:
+            raise MorphologyInputError("frequency must be a nonempty string") from exc
         if isinstance(horizon, bool) or not isinstance(horizon, int) or horizon <= 0:
             raise MorphologyInputError("horizon must be a positive integer")
         if isinstance(active_names, (str, bytes)):
             raise MorphologyInputError("active_names must be a sequence of candidate names")
-        active = tuple(_required_string(name, "active_names") for name in active_names)
+        try:
+            raw_active = tuple(active_names)
+            active = tuple(_required_string(name, "active_names") for name in raw_active)
+        except MorphologyError as exc:
+            raise MorphologyInputError("active_names must be a sequence of candidate names") from exc
+        if any(raw != normalized for raw, normalized in zip(raw_active, active, strict=True)):
+            raise MorphologyInputError(
+                "active candidate names and families must not contain surrounding whitespace"
+            )
         if not active or len(active) != len(set(active)):
             raise MorphologyInputError("active_names must be nonempty and unique")
-        if set(families) != set(active):
+        if not isinstance(families, Mapping):
             raise MorphologyInputError("families must define exactly the active candidate names")
-        if any(not isinstance(family, str) or not family.strip() for family in families.values()):
-            raise MorphologyInputError("candidate families must be nonempty strings")
-        return values
+        try:
+            normalized_families: dict[str, str] = {}
+            for name, family in families.items():
+                normalized_name = _required_string(name, "families")
+                if name != normalized_name:
+                    raise MorphologyInputError(
+                        "active candidate names and families must not contain surrounding whitespace"
+                    )
+                normalized_families[normalized_name] = _required_string(
+                    family, "candidate family"
+                )
+        except MorphologyError as exc:
+            raise MorphologyInputError("candidate families must be nonempty strings") from exc
+        if len(normalized_families) != len(families) or set(normalized_families) != set(active):
+            raise MorphologyInputError("families must define exactly the active candidate names")
+        return values, normalized_frequency, active, MappingProxyType(normalized_families)
 
     @staticmethod
     def _system_prompt() -> str:
@@ -315,7 +415,13 @@ class MorphologyReasoner:
             "with action 'tool' or 'final'. Use only listed reviewed tools. Never forecast, use "
             "future labels, documents, code, or unlisted candidates. Tool action keys exactly are "
             "action, call_id, tool, window; final action keys exactly are action, short_term, "
-            "long_term, assumptions."
+            "long_term, assumptions. Final assumptions must be a list of one to seven objects with "
+            "keys exactly assumption_id, kind, claim, failure_condition, supporting_call_ids, "
+            "candidate_names, prior_confidence. kind must be one of seasonality, trend, "
+            "intermittency, regime, noise, level. prior_confidence must be finite and within "
+            "[0, 1]. candidate_names must be active candidate names. supporting_call_ids must be "
+            "unique executed call IDs. Final assumptions must cite both a full-history inspection "
+            "and a distinct recent inspection ending at the history boundary."
         )
 
     @staticmethod
@@ -345,8 +451,16 @@ class MorphologyReasoner:
 
     @staticmethod
     def _parse_action(text: str) -> dict[str, object]:
+        def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            action: dict[str, object] = {}
+            for key, value in pairs:
+                if key in action:
+                    raise MorphologyError(f"duplicate JSON key {key!r}")
+                action[key] = value
+            return action
+
         try:
-            action = json.loads(text)
+            action = json.loads(text, object_pairs_hook=reject_duplicate_keys)
         except json.JSONDecodeError as exc:
             raise MorphologyError("action must be an exact JSON object") from exc
         if not isinstance(action, dict):

@@ -6,7 +6,15 @@ import math
 import pytest
 
 from common.llm import FakeLLMClient
-from numerical_agent.evolution.morphology import MorphologyError, MorphologyReasoner
+from numerical_agent.evolution.morphology import (
+    AssumptionGrounding,
+    MorphologyCard,
+    MorphologyError,
+    MorphologyInputError,
+    MorphologyObservation,
+    MorphologyReasoner,
+    MorphologyToolCall,
+)
 
 
 def _history() -> list[float]:
@@ -144,4 +152,94 @@ def test_reasoner_enforces_turn_and_tool_call_budgets() -> None:
             ],
             max_turns=1,
             max_tool_calls=4,
+        )
+
+
+def test_directly_constructed_artifacts_freeze_nested_collections_and_validate_types() -> None:
+    broad_call = MorphologyToolCall("broad", "detect_periodicity", 0, 8)
+    recent_call = MorphologyToolCall("recent", "detect_periodicity", 4, 8)
+    supporting_ids = ["broad", "recent"]
+    candidate_names = ["seasonal_naive"]
+    assumption = AssumptionGrounding(
+        "weekly_cycle",
+        "seasonality",
+        "Weekly pattern persists.",
+        "The phase changes.",
+        supporting_ids,
+        candidate_names,
+        0.8,
+    )
+    card = MorphologyCard(
+        "Recent weekly pattern.",
+        "Full-history weekly pattern.",
+        (broad_call, recent_call),
+        (
+            MorphologyObservation(broad_call, {"strength": 0.8}),
+            MorphologyObservation(recent_call, {"strength": 0.7}),
+        ),
+        [assumption],
+    )
+    fingerprint = card.fingerprint
+
+    supporting_ids.append("invented")
+    candidate_names.append("invented_candidate")
+
+    assert isinstance(card.assumptions, tuple)
+    assert card.assumptions[0].supporting_call_ids == ("broad", "recent")
+    assert card.assumptions[0].candidate_names == ("seasonal_naive",)
+    assert card.fingerprint == fingerprint
+    with pytest.raises(MorphologyError, match="AssumptionGrounding"):
+        MorphologyCard("short", "long", (), (), [object()])
+
+
+def test_model_prompt_spells_out_the_complete_final_contract() -> None:
+    client = FakeLLMClient([_tool("bad_tool", start=0, end=84, tool="forecast")])
+
+    with pytest.raises(MorphologyError, match="unknown reviewed tool"):
+        MorphologyReasoner(client).reason(
+            history=_history(),
+            frequency="D",
+            horizon=3,
+            active_names=("seasonal_naive", "toto_2_0"),
+            families={"seasonal_naive": "statistical", "toto_2_0": "tsfm"},
+        )
+
+    system = client.calls[0]["system"]
+    assert "assumption_id, kind, claim, failure_condition, supporting_call_ids, candidate_names, prior_confidence" in system
+    assert "seasonality, trend, intermittency, regime, noise, level" in system
+    assert "finite" in system and "[0, 1]" in system
+    assert "active candidate" in system
+    assert "executed call IDs" in system
+    assert "full-history" in system and "recent" in system
+
+
+def test_reasoner_rejects_duplicate_json_keys_at_action_and_assumption_levels() -> None:
+    duplicate_action = (
+        '{"action":"tool","action":"tool","call_id":"broad_period",'
+        '"tool":"detect_periodicity","window":{"start":0,"end":84}}'
+    )
+    with pytest.raises(MorphologyError, match="duplicate JSON key"):
+        _reason([duplicate_action])
+
+    duplicate_assumption = _final().replace(
+        '"kind": "seasonality",', '"kind": "seasonality", "kind": "noise",'
+    )
+    with pytest.raises(MorphologyError, match="duplicate JSON key"):
+        _reason(
+            [
+                _tool("broad_period", start=0, end=84),
+                _tool("recent_period", start=42, end=84),
+                duplicate_assumption,
+            ]
+        )
+
+
+def test_whitespace_normalized_candidate_and_family_names_fail_with_typed_error() -> None:
+    with pytest.raises(MorphologyInputError, match="families"):
+        MorphologyReasoner(FakeLLMClient([])).reason(
+            history=_history(),
+            frequency="D",
+            horizon=3,
+            active_names=(" seasonal_naive ", "toto_2_0"),
+            families={"seasonal_naive": "statistical", "toto_2_0": "tsfm"},
         )
