@@ -36,6 +36,11 @@ from .morphology import (
     MorphologyReasoner,
     MorphologyToolCall,
 )
+from .numerical_loop import (
+    NumericalForecastPackage,
+    RankedNumericalForecast,
+    run_numerical_loop,
+)
 
 MODULE_NAME = "methods.py"
 

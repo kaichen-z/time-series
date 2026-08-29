@@ -337,6 +337,159 @@ def select_assumption_guided_forecast(
     )
 
 
+def select_grounded_morphology_forecast(
+    policy: DecisionPolicy,
+    *,
+    assumptions: Sequence[object],
+    profile,
+    active_names: Sequence[str],
+    diagnostics: Mapping[str, CandidateDiagnostics],
+    forecasts: Mapping[str, Sequence[float]],
+    history: Sequence[float] = (),
+    conditioned_names: Sequence[str] = (),
+) -> SelectionDecision:
+    """Apply validated grounded assumptions without granting them numerical authority.
+
+    The caller owns card validation.  This final selector boundary uses only the typed
+    candidate names on those artifacts, retains reviewed TSFM anchors, and then re-runs the
+    ordinary protected numerical selector.  Assumption prose is deliberately unread here.
+    """
+    from .morphology import AssumptionGrounding
+
+    grounded = tuple(assumptions)
+    if not grounded or any(not isinstance(item, AssumptionGrounding) for item in grounded):
+        raise ValueError("grounded morphology selection requires validated assumptions")
+    if len({item.assumption_id for item in grounded}) != len(grounded):
+        raise ValueError("grounded assumptions must have unique ids")
+
+    active = tuple(dict.fromkeys(active_names))
+    active_set = set(active)
+    pool = tuple(
+        dict.fromkeys(
+            name
+            for item in grounded
+            for name in item.candidate_names
+            if name in active_set
+        )
+    )
+    available = [
+        diagnostic
+        for name in active
+        if name in forecasts and (diagnostic := diagnostics.get(name)) is not None
+    ]
+    protected = _stable_baseline(available, policy.baseline_strategy)
+    anchor_names = tuple(
+        dict.fromkeys(
+            name
+            for name in (
+                "toto_2_0",
+                "timesfm_2_5",
+                protected.name if protected is not None else "",
+            )
+            if name in active_set
+        )
+    )
+    anchors = tuple(
+        name for name in anchor_names if name not in pool
+    )
+    considered = (*pool, *anchors)
+    if not pool:
+        raise ValueError("grounded assumptions contain no active candidate")
+
+    decision = select_numerical_forecast(
+        policy,
+        profile=profile,
+        active_names=considered,
+        diagnostics=diagnostics,
+        forecasts=forecasts,
+        history=history,
+        conditioned_names=tuple(
+            dict.fromkeys((*conditioned_names, *pool))
+        ),
+    )
+    return replace(
+        decision,
+        reason_codes=(*decision.reason_codes, "grounded_morphology_top_k_verifier"),
+        assumption_ids=tuple(item.assumption_id for item in grounded),
+        assumption_kinds=tuple(item.kind for item in grounded),
+        considered_candidates=considered,
+    )
+
+
+def select_protected_safe_anchor(
+    policy: DecisionPolicy,
+    *,
+    active_names: Sequence[str],
+    diagnostics: Mapping[str, CandidateDiagnostics],
+    forecasts: Mapping[str, Sequence[float]],
+    horizon: int,
+    fallback_reason: str,
+) -> SelectionDecision:
+    """Return one finite materialized anchor when advisory morphology fails closed."""
+    if isinstance(horizon, bool) or not isinstance(horizon, int) or horizon < 1:
+        raise ValueError("safe-anchor horizon must be positive")
+    active = set(active_names)
+    available = [
+        diagnostic
+        for name in sorted(active)
+        if (diagnostic := diagnostics.get(name)) is not None
+        and name in forecasts
+        and _valid_exact_forecast(forecasts[name], horizon)
+    ]
+    anchor = _stable_baseline(available, policy.baseline_strategy)
+    if anchor is None:
+        reliable = [
+            item
+            for item in available
+            if item.eligible
+            and item.successful_folds >= policy.min_successful_folds
+            and not item.explosion
+            and item.worst_mase <= policy.catastrophic_mase
+        ]
+        if reliable:
+            anchor = min(reliable, key=lambda item: _rank_key(item, policy.ranking_order))
+    if anchor is None and policy.fallback_to_best_available and available:
+        anchor = min(
+            available,
+            key=lambda item: (
+                -item.successful_folds,
+                not math.isfinite(item.median_mase),
+                item.median_mase,
+                item.recent_mase,
+                item.name,
+            ),
+        )
+    if anchor is None:
+        raise ValueError("no finite protected Safe-Anchor forecast is available")
+    return SelectionDecision(
+        mode="single",
+        selected=(anchor.name,),
+        weights=(1.0,),
+        forecast=tuple(float(value) for value in forecasts[anchor.name]),
+        confidence=0.0,
+        reason_codes=("protected_safe_anchor", fallback_reason),
+        rejected={},
+        baseline_name=anchor.name,
+        considered_candidates=(anchor.name,),
+    )
+
+
+def _valid_exact_forecast(values: Sequence[float], horizon: int) -> bool:
+    try:
+        return (
+            not isinstance(values, (str, bytes))
+            and len(values) == horizon
+            and all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                for value in values
+            )
+        )
+    except (ArithmeticError, TypeError, ValueError):
+        return False
+
+
 def hindcast_cache_key(
     task: Task,
     candidate_name: str,
