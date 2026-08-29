@@ -209,3 +209,59 @@ $ pytest -q tests/test_run_morphology_smoke.py \
 $ python -m py_compile numerical_agent/run_morphology_smoke.py
 $ git diff --check
 ```
+
+## Final review wave — output identity, worker availability, and tool-window contract
+
+Implemented `f8f359b3bdea1598bf04e93ba0cc154f4cf80060` for the final review wave:
+
+- Before artifact loading, worker setup, or model work, `--results-path` is compared by resolved
+  file identity and inode identity against the selected task source, each reviewed artifact, and
+  `--tsfm-workers-config`. `--overwrite` now rejects direct, symlink, and hardlink aliases
+  without replacing caller-owned inputs.
+- The smoke command snapshots a worker config before registry creation. If the shared validator
+  identifies an absent interpreter path, smoke-only filtering removes that environment and retries
+  the unchanged shared registry. Its affected TSFMs become per-candidate unavailable. Invalid JSON,
+  schema/security validation, non-executable interpreters, and virtual-environment/integrity
+  failures remain fatal; the global registry was not modified.
+- Both morphology prompts now include the exact tool-window template
+  `"window":{"start":0,"end":N}` and say that `start` is inclusive and `end` is exclusive.
+  The strict parser remains unchanged: observed Codex shapes with
+  `start_inclusive`/`end_exclusive` keys or a `[0,156]` window are still rejected.
+
+RED evidence before these production changes:
+
+```text
+$ pytest -q tests/test_run_morphology_smoke.py
+...............FFFFFFFFFFFFFFFFFFFFFF...                                 [100%]
+FAILED test_overwrite_rejects_task_and_configuration_identity_aliases_before_model_work
+  (21 direct/hardlink/symlink cases across task, five artifacts, and worker config)
+FAILED test_absent_worker_interpreter_leaves_worker_tsfms_unavailable
+22 failed, 18 passed in 2.21s
+
+ValueError: worker environment 'uni2ts' interpreter does not exist
+
+$ pytest -q tests/test_evolution_morphology.py
+...........FF....                                                        [100%]
+FAILED test_window_prompt_gives_the_canonical_contract_without_loosening_real_response_parsing
+  (real_luna start_inclusive/end_exclusive and real_terra [0,156] fixtures)
+2 failed, 15 passed in 0.10s
+```
+
+GREEN and compatibility evidence:
+
+```text
+$ pytest -q tests/test_run_morphology_smoke.py tests/test_evolution_morphology.py
+57 passed in 1.56s
+
+$ pytest -q tests/test_run_morphology_smoke.py \
+    tests/test_numerical_morphology_loop.py \
+    tests/test_evolution_morphology.py \
+    tests/test_evolution_morphology_consistency.py \
+    tests/test_evolution_policy_targetwise.py \
+    tests/test_numerical_tsfm_deployment.py \
+    tests/test_numerical_dictionary_contracts.py
+170 passed in 3.95s
+
+$ python -m py_compile numerical_agent/run_morphology_smoke.py numerical_agent/evolution/morphology.py
+$ git diff --check
+```
