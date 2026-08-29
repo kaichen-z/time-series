@@ -216,16 +216,30 @@ def test_model_prompt_spells_out_the_complete_final_contract() -> None:
 
 
 @pytest.mark.parametrize(
-    "response",
+    ("response", "expected_start", "expected_end"),
     (
-        '{"action":"tool","call_id":"real_luna","tool":"detect_trend",'
-        '"window":{"start_inclusive":0,"end_exclusive":156}}',
-        '{"action":"tool","call_id":"real_terra","tool":"detect_trend",'
-        '"window":[0,156]}',
+        (
+            '{"action":"tool","call_id":"real_luna","tool":"detect_trend",'
+            '"window":{"start_inclusive":0,"end_exclusive":84}}',
+            0,
+            84,
+        ),
+        (
+            '{"action":"tool","call_id":"real_sol","tool":"detect_trend",'
+            '"window":{"start_inclusive":42,"end_exclusive":84}}',
+            42,
+            84,
+        ),
+        (
+            '{"action":"tool","call_id":"real_terra","tool":"detect_trend",'
+            '"window":[0,84]}',
+            0,
+            84,
+        ),
     ),
 )
 def test_window_prompt_gives_the_canonical_contract_without_loosening_real_response_parsing(
-    response: str,
+    response: str, expected_start: int, expected_end: int
 ) -> None:
     client = FakeLLMClient([response])
 
@@ -238,13 +252,25 @@ def test_window_prompt_gives_the_canonical_contract_without_loosening_real_respo
             families={"seasonal_naive": "statistical", "toto_2_0": "tsfm"},
         )
 
-    contract = '"window":{"start":0,"end":N}'
     system = client.calls[0]["system"]
     initial = client.calls[0]["messages"][0]["content"]
-    for prompt in (system, initial):
-        assert contract in prompt
-        assert "start is inclusive" in prompt
-        assert "end is exclusive" in prompt
+    prompt = system + "\n" + initial
+
+    assert (
+        '{"action":"tool","call_id":"full_window","tool":"detect_trend",'
+        '"window":{"start":0,"end":N}}'
+    ) in prompt
+    assert (
+        '{"action":"tool","call_id":"recent_window","tool":"detect_trend",'
+        '"window":{"start":K,"end":N}}'
+    ) in prompt
+    assert "start is inclusive" in prompt
+    assert "end is exclusive" in prompt
+    assert "never an array" in prompt
+    assert "only keys are start and end" in prompt
+    assert "start_inclusive" not in prompt
+    assert "end_exclusive" not in prompt
+    assert expected_start < expected_end
 
 
 def test_reasoner_rejects_duplicate_json_keys_at_action_and_assumption_levels() -> None:

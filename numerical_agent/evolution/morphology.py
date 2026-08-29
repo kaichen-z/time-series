@@ -422,8 +422,12 @@ class MorphologyReasoner:
             "[0, 1]. candidate_names must be active candidate names. supporting_call_ids must be "
             "unique executed call IDs. Final assumptions must cite both a full-history inspection "
             "and a distinct recent inspection ending at the history boundary. Every tool action "
-            "must use the exact window contract \"window\":{\"start\":0,\"end\":N}; start is "
-            "inclusive and end is exclusive, with 0 <= start < end <= history length."
+            "must use a window object, never an array; its only keys are start and end, and do "
+            "not use any alternative window key names. start is inclusive and end is exclusive, "
+            "with 0 <= start < end <= history length. Use these exact canonical tool-action "
+            "examples: {\"action\":\"tool\",\"call_id\":\"full_window\",\"tool\":\"detect_trend\","
+            "\"window\":{\"start\":0,\"end\":N}} and {\"action\":\"tool\",\"call_id\":\"recent_window\","
+            "\"tool\":\"detect_trend\",\"window\":{\"start\":K,\"end\":N}}, where 0 < K < N."
         )
 
     @staticmethod
@@ -443,16 +447,9 @@ class MorphologyReasoner:
                     {"name": name, "family": families[name]} for name in active_names
                 ],
                 "reviewed_tools": list(_reviewed_skills.ANALYSIS_SKILL_NAMES),
-                "window_contract": {
-                    "start_inclusive": 0,
-                    "end_exclusive": len(history),
-                    "requires_full_history_and_distinct_recent": True,
-                },
             }
         ).decode("utf-8")
         return (
-            "For every tool action, use the exact window contract "
-            "\"window\":{\"start\":0,\"end\":N}; start is inclusive and end is exclusive. "
             "The JSON context follows on the next line.\n"
             + context
         )
