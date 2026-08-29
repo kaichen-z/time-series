@@ -3,43 +3,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from types import MappingProxyType
 
-from .analysis_skills_template import ANALYSIS_SKILL_NAMES
 from .morphology import AssumptionGrounding, MorphologyCard
-from .numerical_package import freeze_string_mapping
+from .numerical_package import freeze_string_mapping, host_assumption_ids
 from .numerical_selector import DecisionPolicy, HindcastConfig
 from .portfolio import CombinedPolicy
 from .screening import ActiveDictionary, ScreeningPolicy, TaskProfile
 
 
-_RETRIEVAL_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:-]*$")
-_FORBIDDEN_IDENTIFIER_PARTS = frozenset(
-    {
-        "array",
-        "candidate",
-        "code",
-        "coverage",
-        "explosion",
-        "fold",
-        "forecast",
-        "hindcast",
-        "mae",
-        "mase",
-        "metric",
-        "mse",
-        "rmse",
-        "score",
-        "smape",
-        "source",
-        "srmse",
-        "tool",
-        "weight",
-    }
-)
 _HANDOFF_TEMPLATES = {
     "seasonality": (
         "seasonality",
@@ -86,10 +60,8 @@ def safe_retrieval_projection(
     safe: list[AssumptionGrounding] = []
     trace = dict(rejected)
     payloads: list[Mapping[str, str]] = []
-    for item in accepted:
-        if not _safe_identifier(item):
-            trace[item.assumption_id] = "invalid_retrieval_identifier"
-            continue
+    opaque_ids = host_assumption_ids(len(accepted))
+    for opaque_id, item in zip(opaque_ids, accepted, strict=True):
         template = _HANDOFF_TEMPLATES.get(item.kind)
         if template is None:
             trace[item.assumption_id] = "unsupported_retrieval_kind"
@@ -98,7 +70,7 @@ def safe_retrieval_projection(
         payloads.append(
             MappingProxyType(
                 {
-                    "assumption_id": item.assumption_id,
+                    "assumption_id": opaque_id,
                     "kind": kind,
                     "claim": claim,
                     "failure_condition": failure_condition,
@@ -107,24 +79,6 @@ def safe_retrieval_projection(
         )
         safe.append(item)
     return tuple(safe), trace, tuple(payloads)
-
-
-def _safe_identifier(item: AssumptionGrounding) -> bool:
-    identifier = item.assumption_id
-    if _RETRIEVAL_IDENTIFIER.fullmatch(identifier) is None:
-        return False
-    normalized = identifier.casefold()
-    parts = frozenset(re.findall(r"[a-z0-9]+", normalized))
-    if parts & _FORBIDDEN_IDENTIFIER_PARTS:
-        return False
-    for name in item.candidate_names:
-        candidate = name.casefold()
-        if normalized == candidate or (
-            ("_" in candidate or any(character.isdigit() for character in candidate))
-            and candidate in normalized
-        ):
-            return False
-    return not any(tool.casefold() in normalized for tool in ANALYSIS_SKILL_NAMES)
 
 
 def component_fingerprints(

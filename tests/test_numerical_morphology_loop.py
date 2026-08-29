@@ -15,6 +15,7 @@ from numerical_agent.evolution.morphology import (
     MorphologyObservation,
     MorphologyToolCall,
 )
+from numerical_agent.evolution.numerical_handoff import safe_retrieval_projection
 from numerical_agent.evolution.numerical_selector import (
     CandidateDiagnostics,
     DecisionPolicy,
@@ -424,6 +425,7 @@ def test_safe_handoff_does_not_confuse_a_morphology_word_with_identity_leakage()
     assert tuple(item.assumption_id for item in package.accepted_assumptions) == (
         "cycle_persists",
     )
+    assert package.retrieval_handoff[0]["assumption_id"] == "assumption_001"
     assert package.retrieval_handoff[0]["claim"].startswith(
         "A history-supported seasonal pattern"
     )
@@ -477,7 +479,7 @@ def test_safe_handoff_uses_host_templates_not_adversarial_model_prose() -> None:
         assert forbidden not in encoded
 
 
-def test_safe_handoff_rejects_non_identifier_assumption_ids() -> None:
+def test_safe_handoff_opaque_id_handles_malformed_model_identifier() -> None:
     malformed = _assumption("bad assumption id", "seasonal_specialist")
 
     package = run_numerical_loop(
@@ -490,19 +492,19 @@ def test_safe_handoff_rejects_non_identifier_assumption_ids() -> None:
         morphology_reasoner=_FixedReasoner(_card(malformed)),
     )
 
-    assert package.accepted_assumptions == ()
-    assert package.retrieval_handoff == ()
-    assert package.rejected_assumptions == {
-        "bad assumption id": "invalid_retrieval_identifier"
-    }
-    assert package.fallback_reason == "morphology_consistency_rejected"
+    assert tuple(item.assumption_id for item in package.accepted_assumptions) == (
+        "bad assumption id",
+    )
+    assert package.retrieval_handoff[0]["assumption_id"] == "assumption_001"
+    assert "bad assumption id" not in " ".join(package.retrieval_handoff[0].values())
+    assert package.fallback_reason is None
 
 
 @pytest.mark.parametrize(
     "unsafe_id",
     ("seasonal_specialist", "hindcast_smae", "detect_periodicity"),
 )
-def test_safe_handoff_rejects_candidate_metric_and_tool_identifiers(
+def test_safe_handoff_opaque_id_hides_candidate_metric_and_tool_identifiers(
     unsafe_id: str,
 ) -> None:
     hostile = _assumption(unsafe_id, "seasonal_specialist")
@@ -517,11 +519,81 @@ def test_safe_handoff_rejects_candidate_metric_and_tool_identifiers(
         morphology_reasoner=_FixedReasoner(_card(hostile)),
     )
 
-    assert package.accepted_assumptions == ()
-    assert package.retrieval_handoff == ()
-    assert package.rejected_assumptions == {
-        unsafe_id: "invalid_retrieval_identifier"
+    assert tuple(item.assumption_id for item in package.accepted_assumptions) == (
+        unsafe_id,
+    )
+    assert package.retrieval_handoff[0]["assumption_id"] == "assumption_001"
+    assert unsafe_id.casefold() not in " ".join(
+        package.retrieval_handoff[0].values()
+    ).casefold()
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    (
+        "forecastArray999",
+        "hindcastScore0",
+        "detectPeriodicityLeak",
+        "cycle_persists",
+    ),
+)
+def test_safe_handoff_replaces_every_model_id_with_an_opaque_host_id(
+    model_id: str,
+) -> None:
+    task = _task()
+    entries = (_entry("toto_2_0", "tsfm"), _entry("cycle", "statistical"))
+    truth = (1.0, 2.0, 3.0)
+    diagnostics = {
+        "toto_2_0": _diagnostic(
+            "toto_2_0", "tsfm", forecast=(10.0,) * 3, truth=truth, median_mase=1.0
+        ),
+        "cycle": _diagnostic(
+            "cycle", "statistical", forecast=truth, truth=truth, median_mase=0.1
+        ),
     }
+
+    package = run_numerical_loop(
+        task,
+        screening_policy=ScreeningPolicy(entries, ("toto_2_0",)),
+        candidate_runner=lambda name, history, horizon, frequency: (
+            tuple(float(index + 1) for index in range(horizon))
+            if name == "cycle"
+            else (10.0,) * horizon
+        ),
+        diagnostics=diagnostics,
+        decision_policy=DecisionPolicy(ensemble_enabled=False),
+        morphology_reasoner=_FixedReasoner(
+            _card(_assumption(model_id, "cycle"))
+        ),
+    )
+
+    assert tuple(item.assumption_id for item in package.accepted_assumptions) == (
+        model_id,
+    )
+    assert package.retrieval_handoff[0]["assumption_id"] == "assumption_001"
+    assert model_id.casefold() not in " ".join(
+        package.retrieval_handoff[0].values()
+    ).casefold()
+
+
+def test_safe_handoff_host_ids_are_stable_for_identical_accepted_order() -> None:
+    accepted = (
+        _assumption("model_generated_first", "seasonal_specialist"),
+        _assumption(
+            "model_generated_second",
+            "seasonal_specialist",
+            kind="trend",
+        ),
+    )
+
+    first = safe_retrieval_projection(accepted, {})[2]
+    second = safe_retrieval_projection(accepted, {})[2]
+
+    assert tuple(item["assumption_id"] for item in first) == (
+        "assumption_001",
+        "assumption_002",
+    )
+    assert first == second
 
 
 @pytest.mark.parametrize(
@@ -839,6 +911,136 @@ def test_package_rejects_forged_single_forecast_for_materialized_name() -> None:
 
     with pytest.raises(ValueError, match="materialized forecast"):
         replace(base, selection_decision=forged, final_forecast=forged.forecast)
+
+
+@pytest.mark.parametrize(
+    "weights",
+    ((-0.25, 1.25), (0.25, 0.5), (0.5, 0.5000000000005)),
+)
+def test_package_rejects_negative_or_non_normalized_weights(
+    weights: tuple[float, float],
+) -> None:
+    base = run_numerical_loop(
+        _task(),
+        screening_policy=_screening(*_policy_entries()),
+        candidate_runner=_runner(Counter()),
+        combined_policies=_combined(),
+        diagnostics=_diagnostics_for_active(),
+        decision_policy=DecisionPolicy(ensemble_enabled=False),
+    )
+    forged = replace(
+        base.selection_decision,
+        mode="ensemble",
+        selected=("toto_2_0", "seasonal_specialist"),
+        weights=weights,
+        forecast=(3.25, 4.0, 4.75),
+        combination_type=None,
+    )
+
+    with pytest.raises(ValueError, match="weights"):
+        replace(base, selection_decision=forged, final_forecast=forged.forecast)
+
+
+@pytest.mark.parametrize(
+    "forecast",
+    ((999.0, 999.0, 999.0), (3.2500000000005, 4.0, 4.75)),
+)
+def test_package_rejects_arbitrary_legacy_ensemble_forecast(
+    forecast: tuple[float, float, float],
+) -> None:
+    base = run_numerical_loop(
+        _task(),
+        screening_policy=_screening(*_policy_entries()),
+        candidate_runner=_runner(Counter()),
+        combined_policies=_combined(),
+        diagnostics=_diagnostics_for_active(),
+        decision_policy=DecisionPolicy(ensemble_enabled=False),
+    )
+    forged = replace(
+        base.selection_decision,
+        mode="ensemble",
+        selected=("toto_2_0", "seasonal_specialist"),
+        weights=(0.25, 0.75),
+        forecast=forecast,
+        combination_type=None,
+    )
+
+    with pytest.raises(ValueError, match="weighted combination"):
+        replace(base, selection_decision=forged, final_forecast=forged.forecast)
+
+
+def test_package_accepts_valid_legacy_weighted_ensemble() -> None:
+    base = run_numerical_loop(
+        _task(),
+        screening_policy=_screening(*_policy_entries()),
+        candidate_runner=_runner(Counter()),
+        combined_policies=_combined(),
+        diagnostics=_diagnostics_for_active(),
+        decision_policy=DecisionPolicy(ensemble_enabled=False),
+    )
+    weighted = (3.25, 4.0, 4.75)
+    legacy = replace(
+        base.selection_decision,
+        mode="ensemble",
+        selected=("toto_2_0", "seasonal_specialist"),
+        weights=(0.25, 0.75),
+        forecast=weighted,
+        combination_type=None,
+    )
+
+    package = replace(base, selection_decision=legacy, final_forecast=weighted)
+
+    assert package.selection_decision.forecast == weighted
+    assert package.final_forecast == weighted
+
+
+def test_package_rejects_non_weighted_multi_member_selection_mode() -> None:
+    base = run_numerical_loop(
+        _task(),
+        screening_policy=_screening(*_policy_entries()),
+        candidate_runner=_runner(Counter()),
+        combined_policies=_combined(),
+        diagnostics=_diagnostics_for_active(),
+        decision_policy=DecisionPolicy(ensemble_enabled=False),
+    )
+    weighted = (3.25, 4.0, 4.75)
+    forged = replace(
+        base.selection_decision,
+        mode="combined",
+        selected=("toto_2_0", "seasonal_specialist"),
+        weights=(0.25, 0.75),
+        forecast=weighted,
+        combination_type="residual_correction",
+    )
+
+    with pytest.raises(ValueError, match="weighted selection mode"):
+        replace(base, selection_decision=forged, final_forecast=weighted)
+
+
+def test_package_rejects_morphology_guided_multi_member_selection() -> None:
+    base = run_numerical_loop(
+        _task(),
+        screening_policy=_screening(*_policy_entries()),
+        candidate_runner=_runner(Counter()),
+        combined_policies=_combined(),
+        diagnostics=_diagnostics_for_active(),
+        decision_policy=DecisionPolicy(ensemble_enabled=False),
+        morphology_reasoner=_FixedReasoner(
+            _card(_assumption("cycle_primary", "seasonal_specialist"))
+        ),
+    )
+    weighted = (3.25, 4.0, 4.75)
+    forged = replace(
+        base.selection_decision,
+        mode="ensemble",
+        selected=("toto_2_0", "seasonal_specialist"),
+        weights=(0.25, 0.75),
+        forecast=weighted,
+        combination_type=None,
+    )
+
+    with pytest.raises(ValueError, match="Morphology-guided selection must be single"):
+        replace(base, selection_decision=forged, final_forecast=weighted)
 
 
 def test_component_fingerprint_is_invariant_to_combined_policy_input_order() -> None:

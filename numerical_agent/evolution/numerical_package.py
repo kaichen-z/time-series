@@ -14,6 +14,16 @@ from .screening import TaskProfile
 _RETRIEVAL_FIELDS = frozenset(
     {"assumption_id", "kind", "claim", "failure_condition"}
 )
+_WEIGHTED_COMBINATION_TYPES = frozenset(
+    {
+        "joint_tsfm_statistical_portfolio",
+        "protected_tsfm_weighted_portfolio",
+        "statistical_shrinkage_overlay",
+        "tsfm_shrinkage_overlay",
+        "tsfm_weighted_portfolio",
+        "weighted_blend",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -144,12 +154,30 @@ class NumericalForecastPackage:
             and selection.baseline_name not in alternative_names
         ):
             raise ValueError("selection baseline must be a materialized ranked forecast")
+        selected_artifacts = tuple(
+            next(item for item in alternatives if item.name == name)
+            for name in selection.selected
+        )
+        if accepted and len(selected_artifacts) != 1:
+            raise ValueError("Morphology-guided selection must be single")
         if selection.mode == "single":
-            selected_artifact = next(
-                item for item in alternatives if item.name == selection.selected[0]
-            )
-            if selection.forecast != selected_artifact.forecast:
+            if selection.forecast != selected_artifacts[0].forecast:
                 raise ValueError("single selection must equal its materialized forecast")
+        else:
+            if (
+                selection.mode == "ensemble"
+                and selection.combination_type is not None
+            ) or (
+                selection.mode == "combined"
+                and selection.combination_type not in _WEIGHTED_COMBINATION_TYPES
+            ):
+                raise ValueError("multi-member package requires a weighted selection mode")
+            if selection.forecast != _weighted_forecast(
+                selected_artifacts, selection.weights
+            ):
+                raise ValueError(
+                    "multi-member forecast must equal the deterministic weighted combination"
+                )
         if not isinstance(self.protected_baseline, RankedNumericalForecast):
             raise ValueError("Numerical package requires a protected baseline")
         if self.protected_baseline.name not in alternative_names:
@@ -159,8 +187,8 @@ class NumericalForecastPackage:
         )
 
         handoff = tuple(_freeze_handoff(item) for item in self.retrieval_handoff)
-        if tuple(item["assumption_id"] for item in handoff) != tuple(
-            item.assumption_id for item in accepted
+        if tuple(item["assumption_id"] for item in handoff) != host_assumption_ids(
+            len(accepted)
         ):
             raise ValueError("Retrieval handoff must correspond exactly to accepted assumptions")
         fingerprints = freeze_string_mapping(
@@ -263,6 +291,13 @@ def freeze_string_mapping(
     return MappingProxyType(dict(sorted(result.items())))
 
 
+def host_assumption_ids(count: int) -> tuple[str, ...]:
+    """Mint opaque deterministic IDs from host-owned accepted-assumption order."""
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError("accepted assumption count must be a nonnegative integer")
+    return tuple(f"assumption_{index:03d}" for index in range(1, count + 1))
+
+
 def forecast_tuple(
     values: Sequence[float], *, horizon: int | None = None
 ) -> tuple[float, ...]:
@@ -304,6 +339,8 @@ def _freeze_selection(
     weights = tuple(float(value) for value in raw_weights)
     if len(weights) != len(selected) or any(not math.isfinite(value) for value in weights):
         raise ValueError("selection weights must be finite and align with selected names")
+    if any(value < 0.0 for value in weights) or math.fsum(weights) != 1.0:
+        raise ValueError("selection weights must be nonnegative and normalized")
     confidence = decision.confidence
     if (
         isinstance(confidence, bool)
@@ -367,6 +404,18 @@ def _freeze_diagnostic(value: CandidateDiagnostics) -> CandidateDiagnostics:
             _finite_tuple(fold, allow_empty=False) for fold in value.fold_truths
         ),
         long_horizon_fold=long_horizon_fold,
+    )
+
+
+def _weighted_forecast(
+    artifacts: Sequence[RankedNumericalForecast], weights: Sequence[float]
+) -> tuple[float, ...]:
+    return tuple(
+        sum(
+            weight * artifact.forecast[index]
+            for artifact, weight in zip(artifacts, weights, strict=True)
+        )
+        for index in range(len(artifacts[0].forecast))
     )
 
 
