@@ -1,7 +1,9 @@
 # Run Artifact Inventory
 
-Last audited: 2026-08-29  
-Repository: `time-series`  
+Last audited: 2026-08-29
+
+Repository: `time-series`
+
 Primary split used by the Numerical Agent experiments: 80 Train / 20 Dev / 99 Public Regression tasks from Dr-CiK.
 
 This directory contains both reproducible experiment artifacts and local execution caches. It is
