@@ -17,6 +17,7 @@ from numerical_agent.evolution.numerical_selector import (
     pairwise_diversity,
     select_assumption_guided_forecast,
     select_numerical_forecast,
+    select_protected_safe_anchor,
 )
 from numerical_agent.evolution.screening import TaskProfile, profile_task
 
@@ -45,6 +46,21 @@ def test_hindcasts_use_only_historical_prefixes_and_not_task_future():
     assert diagnostic.worst_mase == pytest.approx(0.0)
     assert diagnostic.mase_mad == pytest.approx(0.0)
     assert diagnostic.median_rmsse == pytest.approx(0.0)
+
+
+def test_hindcast_folds_record_capped_and_raw_scaled_metrics():
+    diagnostic = diagnose_candidate(
+        _task(tuple(float(index + 1) for index in range(40)), horizon=5),
+        "bad", "statistical", lambda *_: (10_000.0,) * 5,
+        HindcastConfig(folds=3),
+    )
+
+    fold = diagnostic.folds[0]
+    assert fold.smae == pytest.approx(5.0)
+    assert fold.srmse == pytest.approx(5.0)
+    assert fold.smae_raw is not None and fold.smae_raw > fold.smae
+    assert fold.srmse_raw is not None and fold.srmse_raw > fold.srmse
+    assert fold.smae_clipped and fold.srmse_clipped
 
 
 def test_hindcast_identity_is_independent_of_the_screening_policy():
@@ -121,6 +137,72 @@ def _diagnostic(name, *, median, recent=None, worst=None, mad=0.1, family="stati
         fold_forecasts=forecasts or ((1.0, 2.0), (2.0, 3.0), (3.0, 4.0)),
         fold_truths=truths or ((1.0, 2.0), (2.0, 3.0), (3.0, 4.0)),
     )
+
+
+def test_selector_ignores_mase_when_scaled_metrics_disagree():
+    """Active ranking is Dr-CiK scaled-only, even when legacy MASE disagrees."""
+    diagnostics = {
+        "anchor": CandidateDiagnostics.synthetic(
+            name="anchor", family="statistical", median_mase=0.01,
+            median_smae=1.0, median_srmse=1.0,
+        ),
+        "challenger": CandidateDiagnostics.synthetic(
+            name="challenger", family="statistical", median_mase=100.0,
+            median_smae=0.8, median_srmse=0.8,
+        ),
+    }
+
+    result = select_numerical_forecast(
+        DecisionPolicy(ensemble_enabled=False, recent_regime_first=False),
+        active_names=("anchor", "challenger"),
+        diagnostics=diagnostics,
+        forecasts={"anchor": (1.0, 2.0), "challenger": (1.0, 2.0)},
+        history=(0.0, 1.0, 2.0),
+    )
+
+    assert result.selected == ("challenger",)
+
+
+def test_safe_anchor_blocks_one_metric_tail_regression():
+    """A raw sRMSE tail regression cannot displace the protected Toto anchor."""
+    diagnostics = {
+        "toto_2_0": CandidateDiagnostics.synthetic(
+            name="toto_2_0", family="tsfm", median_mase=10.0,
+            median_smae=1.0, median_srmse=1.0,
+        ),
+        "challenger": CandidateDiagnostics.synthetic(
+            name="challenger", family="statistical", median_mase=0.01,
+            median_smae=0.6, median_srmse=1.2, worst_srmse_raw=2.0,
+        ),
+    }
+
+    result = select_protected_safe_anchor(
+        DecisionPolicy(),
+        active_names=("toto_2_0", "challenger"),
+        diagnostics=diagnostics,
+        forecasts={"toto_2_0": (1.0, 2.0), "challenger": (1.0, 2.0)},
+        horizon=2,
+        fallback_reason="test",
+    )
+
+    assert result.selected == ("toto_2_0",)
+
+
+def test_active_policy_rejects_legacy_error_ranking_fields():
+    with pytest.raises(ValueError, match="ranking_order"):
+        DecisionPolicy(ranking_order=("median_mase",))
+
+
+def test_active_policy_parser_requires_explicit_legacy_migration_flag():
+    with pytest.raises(ValueError, match="allow_legacy"):
+        DecisionPolicy.from_payload({"catastrophic_mase": 2.0})
+
+    migrated = DecisionPolicy.from_payload(
+        {"catastrophic_mase": 2.0}, allow_legacy=True
+    )
+
+    assert migrated.catastrophic_smae_raw == pytest.approx(2.0)
+    assert migrated.catastrophic_srmse_raw == pytest.approx(2.0)
 
 
 def _with_long_horizon_audit(diagnostic, *, forecast, truth, coverage, scale=1.0):

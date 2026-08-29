@@ -9,7 +9,9 @@ import statistics
 from dataclasses import asdict, dataclass, replace
 from typing import Callable, Mapping, Sequence
 
-from common.metrics import drcik_point_metrics, mae, mase, smape
+from common.metrics import (
+    drcik_point_metrics, joint_scaled_error, pareto_scaled_improvement, mae, mase, smape,
+)
 
 from .execution import Task
 
@@ -23,7 +25,8 @@ CandidateRunner = Callable[
 class HindcastConfig:
     folds: int = 3
     min_successful_folds: int = 2
-    catastrophic_mase: float = 10.0
+    catastrophic_smae_raw: float = 10.0
+    catastrophic_srmse_raw: float = 10.0
     long_horizon_audit: bool = False
 
     def __post_init__(self) -> None:
@@ -31,8 +34,8 @@ class HindcastConfig:
             raise ValueError("folds must be positive")
         if not 1 <= self.min_successful_folds <= self.folds:
             raise ValueError("min_successful_folds must be within folds")
-        if self.catastrophic_mase <= 0:
-            raise ValueError("catastrophic_mase must be positive")
+        if self.catastrophic_smae_raw <= 0 or self.catastrophic_srmse_raw <= 0:
+            raise ValueError("raw scaled catastrophe thresholds must be positive")
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,12 @@ class HindcastFold:
     phase_error: float | None = None
     amplitude_ratio: float | None = None
     mase_scale: float | None = None
+    smae: float | None = None
+    srmse: float | None = None
+    smae_raw: float | None = None
+    srmse_raw: float | None = None
+    smae_clipped: bool | None = None
+    srmse_clipped: bool | None = None
     detail: str = ""
 
 
@@ -79,6 +88,19 @@ class CandidateDiagnostics:
     cache_key: str = ""
     long_horizon_fold: HindcastFold | None = None
     long_horizon_coverage: float = 0.0
+    median_joint_scaled_error: float = math.inf
+    recent_joint_scaled_error: float = math.inf
+    worst_joint_scaled_error: float = math.inf
+    median_smae: float = math.inf
+    recent_smae: float = math.inf
+    worst_smae: float = math.inf
+    smae_mad: float = math.inf
+    median_srmse: float = math.inf
+    recent_srmse: float = math.inf
+    worst_srmse: float = math.inf
+    srmse_mad: float = math.inf
+    worst_smae_raw: float = math.inf
+    worst_srmse_raw: float = math.inf
 
     @classmethod
     def synthetic(
@@ -93,10 +115,39 @@ class CandidateDiagnostics:
         eligible: bool = True,
         fold_forecasts: Sequence[Sequence[float]] = (),
         fold_truths: Sequence[Sequence[float]] = (),
+        median_smae: float | None = None,
+        recent_smae: float | None = None,
+        worst_smae: float | None = None,
+        smae_mad: float = 0.0,
+        median_srmse: float | None = None,
+        recent_srmse: float | None = None,
+        worst_srmse: float | None = None,
+        srmse_mad: float = 0.0,
+        worst_smae_raw: float | None = None,
+        worst_srmse_raw: float | None = None,
     ) -> "CandidateDiagnostics":
         forecasts = tuple(tuple(map(float, fold)) for fold in fold_forecasts)
         truths = tuple(tuple(map(float, fold)) for fold in fold_truths)
         count = min(len(forecasts), len(truths)) or (3 if eligible else 0)
+        def legacy_scaled(value: float) -> float:
+            return min(5.0, max(0.0, float(value))) if math.isfinite(float(value)) else 5.0
+
+        legacy_recent = float(median_mase if recent_mase is None else recent_mase)
+        legacy_worst = float(median_mase if worst_mase is None else worst_mase)
+        legacy_median = float(median_mase)
+        uses_scaled_inputs = any(
+            value is not None
+            for value in (
+                median_smae, recent_smae, worst_smae,
+                median_srmse, recent_srmse, worst_srmse,
+            )
+        )
+        scaled_smae = float(legacy_scaled(legacy_median) if median_smae is None else median_smae)
+        scaled_srmse = float(legacy_scaled(legacy_median) if median_srmse is None else median_srmse)
+        scaled_recent_smae = float(legacy_scaled(legacy_recent) if recent_smae is None else recent_smae)
+        scaled_recent_srmse = float(legacy_scaled(legacy_recent) if recent_srmse is None else recent_srmse)
+        scaled_worst_smae = float(legacy_scaled(legacy_worst) if worst_smae is None else worst_smae)
+        scaled_worst_srmse = float(legacy_scaled(legacy_worst) if worst_srmse is None else worst_srmse)
         return cls(
             name=name,
             family=family,
@@ -105,8 +156,8 @@ class CandidateDiagnostics:
             eligible=eligible,
             reason_code="ok" if eligible else "insufficient_successful_folds",
             median_mase=float(median_mase),
-            recent_mase=float(median_mase if recent_mase is None else recent_mase),
-            worst_mase=float(median_mase if worst_mase is None else worst_mase),
+            recent_mase=legacy_recent,
+            worst_mase=legacy_worst,
             mase_mad=float(mase_mad),
             median_mae=float(median_mase),
             median_smape=float(median_mase),
@@ -118,13 +169,41 @@ class CandidateDiagnostics:
             explosion=False,
             fold_forecasts=forecasts,
             fold_truths=truths,
+            median_joint_scaled_error=joint_scaled_error(scaled_smae, scaled_srmse),
+            recent_joint_scaled_error=joint_scaled_error(
+                scaled_recent_smae, scaled_recent_srmse
+            ),
+            worst_joint_scaled_error=joint_scaled_error(
+                scaled_worst_smae, scaled_worst_srmse
+            ),
+            median_smae=scaled_smae,
+            recent_smae=scaled_recent_smae,
+            worst_smae=scaled_worst_smae,
+            smae_mad=float(smae_mad),
+            median_srmse=scaled_srmse,
+            recent_srmse=scaled_recent_srmse,
+            worst_srmse=scaled_worst_srmse,
+            srmse_mad=float(srmse_mad),
+            worst_smae_raw=float(
+                legacy_worst if worst_smae_raw is None and not uses_scaled_inputs else (
+                    scaled_worst_smae if worst_smae_raw is None else worst_smae_raw
+                )
+            ),
+            worst_srmse_raw=float(
+                legacy_worst if worst_srmse_raw is None and not uses_scaled_inputs else (
+                    scaled_worst_srmse if worst_srmse_raw is None else worst_srmse_raw
+                )
+            ),
         )
 
 
 @dataclass(frozen=True)
 class DecisionPolicy:
     min_successful_folds: int = 3
-    catastrophic_mase: float = 10.0
+    catastrophic_smae_raw: float = 10.0
+    catastrophic_srmse_raw: float = 10.0
+    max_smae_fold_regret: float = 0.02
+    max_srmse_fold_regret: float = 0.02
     baseline_strategy: str = "toto_first"
     tsfm_router_min_improvement: float = 0.02
     tsfm_router_blend_weight: float = 0.0
@@ -133,10 +212,11 @@ class DecisionPolicy:
     assumption_candidates_per_hypothesis: int = 2
     assumption_min_confidence: float = 0.25
     ranking_order: tuple[str, ...] = (
-        "median_mase",
-        "recent_mase",
-        "worst_mase",
-        "mase_mad",
+        "median_joint_scaled_error",
+        "recent_joint_scaled_error",
+        "worst_joint_scaled_error",
+        "median_smae",
+        "median_srmse",
         "normalized_bias",
     )
     recent_regime_first: bool = True
@@ -159,15 +239,53 @@ class DecisionPolicy:
     long_horizon_max_regret: float = 0.0
     fallback_to_best_available: bool = True
 
+    @property
+    def catastrophic_mase(self) -> float:
+        """Compatibility view for frozen legacy consumers during schema migration."""
+        return max(self.catastrophic_smae_raw, self.catastrophic_srmse_raw)
+
+    @classmethod
+    def from_payload(
+        cls, payload: Mapping[str, object], *, allow_legacy: bool = False
+    ) -> "DecisionPolicy":
+        """Parse active scaled policies; legacy MASE migration is opt-in only."""
+        raw = dict(payload)
+        legacy_keys = {"catastrophic_mase", "median_mase", "recent_mase", "worst_mase", "mase_mad"}
+        if legacy_keys & set(raw) and not allow_legacy:
+            raise ValueError("legacy MASE policy fields require allow_legacy=True")
+        if "catastrophic_mase" in raw:
+            legacy_threshold = raw.pop("catastrophic_mase")
+            raw.setdefault("catastrophic_smae_raw", legacy_threshold)
+            raw.setdefault("catastrophic_srmse_raw", legacy_threshold)
+        if "ranking_order" in raw:
+            ranking = raw["ranking_order"]
+            if isinstance(ranking, (str, bytes)):
+                raise ValueError("ranking_order must be a sequence")
+            raw["ranking_order"] = tuple(ranking)  # type: ignore[arg-type]
+        allowed = set(asdict(cls()))
+        unknown = set(raw) - allowed
+        if unknown:
+            raise ValueError(f"unsupported DecisionPolicy fields: {sorted(unknown)}")
+        return cls(**raw)  # type: ignore[arg-type]
+
     def __post_init__(self) -> None:
         allowed = {
-            "median_mase", "recent_mase", "worst_mase", "mase_mad",
-            "normalized_bias", "median_rmsse", "slope_error",
+            "median_joint_scaled_error", "recent_joint_scaled_error",
+            "worst_joint_scaled_error", "median_smae", "recent_smae",
+            "worst_smae", "smae_mad", "median_srmse", "recent_srmse",
+            "worst_srmse", "srmse_mad", "normalized_bias", "slope_error",
         }
         if not self.ranking_order or not set(self.ranking_order) <= allowed:
             raise ValueError("ranking_order contains unsupported fields")
         if self.min_successful_folds < 1:
             raise ValueError("min_successful_folds must be positive")
+        if (
+            self.catastrophic_smae_raw <= 0
+            or self.catastrophic_srmse_raw <= 0
+            or self.max_smae_fold_regret < 0
+            or self.max_srmse_fold_regret < 0
+        ):
+            raise ValueError("scaled safety thresholds must be nonnegative")
         if self.baseline_strategy not in {
             "toto_first",
             "minimax_tsfm",
@@ -706,7 +824,19 @@ def _passes_reliability_gate(
         diagnostic.eligible
         and diagnostic.successful_folds >= policy.min_successful_folds
         and not diagnostic.explosion
-        and diagnostic.worst_mase <= policy.catastrophic_mase
+        and _passes_scaled_tail_gate(policy, diagnostic)
+    )
+
+
+def _passes_scaled_tail_gate(
+    policy: DecisionPolicy, diagnostic: CandidateDiagnostics
+) -> bool:
+    """Use uncapped scaled errors for catastrophe discrimination."""
+    return bool(
+        math.isfinite(diagnostic.worst_smae_raw)
+        and math.isfinite(diagnostic.worst_srmse_raw)
+        and diagnostic.worst_smae_raw <= policy.catastrophic_smae_raw
+        and diagnostic.worst_srmse_raw <= policy.catastrophic_srmse_raw
     )
 
 
@@ -731,6 +861,8 @@ def select_protected_safe_anchor(
         and _valid_exact_forecast(forecasts[name], horizon)
     ]
     anchor = _stable_baseline(available, policy.baseline_strategy)
+    if anchor is not None and not _passes_reliability_gate(policy, anchor):
+        anchor = None
     if anchor is None:
         reliable = [
             item
@@ -738,7 +870,7 @@ def select_protected_safe_anchor(
             if item.eligible
             and item.successful_folds >= policy.min_successful_folds
             and not item.explosion
-            and item.worst_mase <= policy.catastrophic_mase
+            and _passes_scaled_tail_gate(policy, item)
         ]
         if reliable:
             anchor = min(reliable, key=lambda item: _rank_key(item, policy.ranking_order))
@@ -747,9 +879,9 @@ def select_protected_safe_anchor(
             available,
             key=lambda item: (
                 -item.successful_folds,
-                not math.isfinite(item.median_mase),
-                item.median_mase,
-                item.recent_mase,
+                not math.isfinite(item.median_joint_scaled_error),
+                item.median_joint_scaled_error,
+                item.recent_joint_scaled_error,
                 item.name,
             ),
         )
@@ -1112,7 +1244,7 @@ def select_numerical_forecast(
             rejected[name] = "missing_diagnostics_or_forecast"
         elif not diagnostic.eligible or diagnostic.successful_folds < policy.min_successful_folds:
             rejected[name] = "insufficient_hindcast_reliability"
-        elif diagnostic.explosion or diagnostic.worst_mase > policy.catastrophic_mase:
+        elif diagnostic.explosion or not _passes_scaled_tail_gate(policy, diagnostic):
             rejected[name] = "catastrophic_hindcast_tail"
         else:
             eligible.append(diagnostic)
@@ -1141,9 +1273,9 @@ def select_numerical_forecast(
             fallback,
             key=lambda item: (
                 -item.successful_folds,
-                not math.isfinite(item.median_mase),
-                item.median_mase,
-                item.recent_mase,
+                not math.isfinite(item.median_joint_scaled_error),
+                item.median_joint_scaled_error,
+                item.recent_joint_scaled_error,
                 item.name,
             ),
         )
@@ -1169,7 +1301,9 @@ def select_numerical_forecast(
     front = _pareto_front(eligible)
     order = policy.ranking_order
     if policy.recent_regime_first:
-        order = ("recent_mase",) + tuple(field for field in order if field != "recent_mase")
+        order = ("recent_joint_scaled_error",) + tuple(
+            field for field in order if field != "recent_joint_scaled_error"
+        )
     ranked = sorted(front, key=lambda item: _rank_key(item, order))
     best = ranked[0]
     baseline_protected = False
@@ -1237,8 +1371,12 @@ def select_numerical_forecast(
     all_ranked = sorted(eligible, key=lambda item: _rank_key(item, order))
     gap = 1.0
     if len(all_ranked) > 1:
-        numerator = max(0.0, all_ranked[1].median_mase - all_ranked[0].median_mase)
-        gap = numerator / (1.0 + abs(all_ranked[0].median_mase))
+        numerator = max(
+            0.0,
+            all_ranked[1].median_joint_scaled_error
+            - all_ranked[0].median_joint_scaled_error,
+        )
+        gap = numerator / (1.0 + abs(all_ranked[0].median_joint_scaled_error))
     confidence = max(0.0, min(1.0, gap))
     return SelectionDecision(
         mode=mode,
@@ -1281,7 +1419,7 @@ def _conservative_tsfm_soft_overlay(
         not item.eligible
         or item.successful_folds < policy.min_successful_folds
         or item.explosion
-        or item.worst_mase > policy.catastrophic_mase
+        or not _passes_scaled_tail_gate(policy, item)
         for item in (anchor, toto, timesfm)
     ):
         return parent
@@ -1423,7 +1561,7 @@ def _conservative_single_tsfm_decision(
         if item.eligible
         and item.successful_folds >= policy.min_successful_folds
         and not item.explosion
-        and item.worst_mase <= policy.catastrophic_mase
+        and _passes_scaled_tail_gate(policy, item)
     )
     anchor_reliable = anchor in candidates
     safe = [anchor]
@@ -1489,7 +1627,7 @@ def _protected_single_tsfm_challenger(
         and item.eligible
         and item.successful_folds >= policy.min_successful_folds
         and not item.explosion
-        and item.worst_mase <= policy.catastrophic_mase
+        and _passes_scaled_tail_gate(policy, item)
         and _passes_conservative_override(policy, item, reference)
     )
     if not safe:
@@ -1544,7 +1682,7 @@ def _conservative_multi_tsfm_portfolio(
             and item.eligible
             and item.successful_folds >= policy.min_successful_folds
             and not item.explosion
-            and item.worst_mase <= policy.catastrophic_mase
+            and _passes_scaled_tail_gate(policy, item)
         ),
         key=lambda item: _rank_key(item, policy.ranking_order),
     )[:3]
@@ -1845,7 +1983,9 @@ def _multi_member_long_horizon_fold(
         if kind == "weighted"
         else _median_values(all_forecasts)
     )
-    return replace(reference, forecast=forecast), coverage
+    return replace(
+        reference, forecast=forecast, **_scaled_fold_fields(reference.truth, forecast)
+    ), coverage
 
 
 def _weighted_values(
@@ -1907,7 +2047,7 @@ def _conservative_statistical_soft_overlay(
         not anchor.eligible
         or anchor.successful_folds < policy.min_successful_folds
         or anchor.explosion
-        or anchor.worst_mase > policy.catastrophic_mase
+        or not _passes_scaled_tail_gate(policy, anchor)
     ):
         return parent
 
@@ -1924,7 +2064,7 @@ def _conservative_statistical_soft_overlay(
             and item.eligible
             and item.successful_folds >= policy.min_successful_folds
             and not item.explosion
-            and item.worst_mase <= policy.catastrophic_mase
+            and _passes_scaled_tail_gate(policy, item)
         ),
         key=lambda item: _rank_key(item, policy.ranking_order),
     )
@@ -2092,7 +2232,7 @@ def _protected_statistical_residual_overlay(
             and item.eligible
             and item.successful_folds >= policy.min_successful_folds
             and not item.explosion
-            and item.worst_mase <= policy.catastrophic_mase
+            and _passes_scaled_tail_gate(policy, item)
         ),
         key=lambda item: _rank_key(item, policy.ranking_order),
     )[:6]
@@ -2255,7 +2395,11 @@ def _selection_diagnostic(
         return None
     reference = concrete[0]
     folds = tuple(
-        replace(fold, forecast=fold_forecasts[index])
+        replace(
+            fold,
+            forecast=fold_forecasts[index],
+            **_scaled_fold_fields(fold.truth, fold_forecasts[index]),
+        )
         for index, fold in enumerate(reference.folds)
     )
     scales = _fold_mase_scales(reference)
@@ -2283,6 +2427,7 @@ def _selection_diagnostic(
         explosion=any(not math.isfinite(value) for fold in fold_forecasts for value in fold),
         long_horizon_fold=audit,
         long_horizon_coverage=coverage,
+        **_scaled_candidate_summary(folds),
     )
 
 
@@ -2318,7 +2463,58 @@ def _score_fold(
         phase_error=phase,
         amplitude_ratio=amplitude,
         mase_scale=absolute_scale,
+        **_scaled_fold_fields(truth, forecast),
     )
+
+
+def _scaled_fold_fields(
+    truth: Sequence[float], forecast: Sequence[float]
+) -> dict[str, float | bool]:
+    metrics = drcik_point_metrics(list(truth), list(forecast))
+    return {
+        "smae": float(metrics["smae"]),
+        "srmse": float(metrics["srmse"]),
+        "smae_raw": float(metrics["smae_raw"]),
+        "srmse_raw": float(metrics["srmse_raw"]),
+        "smae_clipped": bool(metrics["smae_clipped"]),
+        "srmse_clipped": bool(metrics["srmse_clipped"]),
+    }
+
+
+def _scaled_candidate_summary(
+    folds: Sequence[HindcastFold],
+) -> dict[str, float]:
+    successful = tuple(fold for fold in folds if fold.status == "success")
+
+    def values(field: str) -> list[float]:
+        return [float(value) for fold in successful if (value := getattr(fold, field)) is not None]
+
+    smaes = values("smae")
+    srmses = values("srmse")
+    joints = [joint_scaled_error(smae, srmse) for smae, srmse in zip(smaes, srmses)]
+    def median_mad(items: list[float]) -> tuple[float, float]:
+        if not items:
+            return math.inf, math.inf
+        median = statistics.median(items)
+        return median, statistics.median(abs(value - median) for value in items)
+
+    median_smae, smae_mad = median_mad(smaes)
+    median_srmse, srmse_mad = median_mad(srmses)
+    return {
+        "median_joint_scaled_error": _median_or_inf(joints),
+        "recent_joint_scaled_error": joints[-1] if joints else math.inf,
+        "worst_joint_scaled_error": max(joints, default=math.inf),
+        "median_smae": median_smae,
+        "recent_smae": smaes[-1] if smaes else math.inf,
+        "worst_smae": max(smaes, default=math.inf),
+        "smae_mad": smae_mad,
+        "median_srmse": median_srmse,
+        "recent_srmse": srmses[-1] if srmses else math.inf,
+        "worst_srmse": max(srmses, default=math.inf),
+        "srmse_mad": srmse_mad,
+        "worst_smae_raw": max(values("smae_raw"), default=math.inf),
+        "worst_srmse_raw": max(values("srmse_raw"), default=math.inf),
+    }
 
 
 def _summarize(
@@ -2341,6 +2537,10 @@ def _summarize(
         return [float(value) for fold in successful if (value := getattr(fold, field)) is not None]
 
     mases = values("mase")
+    smaes = values("smae")
+    srmses = values("srmse")
+    smaes_raw = values("smae_raw")
+    srmses_raw = values("srmse_raw")
     median_mase = _median_or_inf(mases)
     med = median_mase
     mad = statistics.median(abs(value - med) for value in mases) if mases else math.inf
@@ -2364,7 +2564,13 @@ def _summarize(
         slope_error=_median_or_inf(values("slope_error")),
         phase_error=statistics.median(phases) if phases else None,
         amplitude_ratio=statistics.median(amplitudes) if amplitudes else None,
-        explosion=any(value > config.catastrophic_mase for value in mases),
+        explosion=any(
+            value > config.catastrophic_smae_raw
+            for value in smaes_raw
+        ) or any(
+            value > config.catastrophic_srmse_raw
+            for value in srmses_raw
+        ),
         fold_forecasts=tuple(fold.forecast for fold in successful),
         fold_truths=tuple(fold.truth for fold in successful),
         cache_key=hindcast_cache_key(
@@ -2374,6 +2580,37 @@ def _summarize(
         ),
         long_horizon_fold=long_horizon_fold,
         long_horizon_coverage=long_horizon_coverage,
+        median_joint_scaled_error=_median_or_inf([
+            joint_scaled_error(float(fold.smae), float(fold.srmse))
+            for fold in successful
+            if fold.smae is not None and fold.srmse is not None
+        ]),
+        recent_joint_scaled_error=(
+            joint_scaled_error(float(successful[-1].smae), float(successful[-1].srmse))
+            if successful and successful[-1].smae is not None and successful[-1].srmse is not None
+            else math.inf
+        ),
+        worst_joint_scaled_error=max((
+            joint_scaled_error(float(fold.smae), float(fold.srmse))
+            for fold in successful
+            if fold.smae is not None and fold.srmse is not None
+        ), default=math.inf),
+        median_smae=_median_or_inf(smaes),
+        recent_smae=float(successful[-1].smae) if successful and successful[-1].smae is not None else math.inf,
+        worst_smae=max(smaes, default=math.inf),
+        smae_mad=(
+            statistics.median(abs(value - statistics.median(smaes)) for value in smaes)
+            if smaes else math.inf
+        ),
+        median_srmse=_median_or_inf(srmses),
+        recent_srmse=float(successful[-1].srmse) if successful and successful[-1].srmse is not None else math.inf,
+        worst_srmse=max(srmses, default=math.inf),
+        srmse_mad=(
+            statistics.median(abs(value - statistics.median(srmses)) for value in srmses)
+            if srmses else math.inf
+        ),
+        worst_smae_raw=max(smaes_raw, default=math.inf),
+        worst_srmse_raw=max(srmses_raw, default=math.inf),
     )
 
 
@@ -2393,7 +2630,10 @@ def _empty_diagnostics(
 
 
 def _pareto_front(candidates: Sequence[CandidateDiagnostics]) -> list[CandidateDiagnostics]:
-    dimensions = ("median_mase", "recent_mase", "worst_mase", "mase_mad")
+    dimensions = (
+        "median_smae", "median_srmse", "recent_smae", "recent_srmse",
+        "worst_smae", "worst_srmse",
+    )
     front = []
     for candidate in candidates:
         dominated = any(
@@ -2433,9 +2673,9 @@ def _stable_baseline(
             return min(
                 reviewed,
                 key=lambda item: (
-                    item.worst_mase,
-                    item.median_mase,
-                    item.recent_mase,
+                    item.worst_joint_scaled_error,
+                    item.median_joint_scaled_error,
+                    item.recent_joint_scaled_error,
                     item.name,
                 ),
             )
@@ -2443,7 +2683,9 @@ def _stable_baseline(
         if name in by_name:
             return by_name[name]
     tsfm = [candidate for candidate in eligible if candidate.family in {"tsfm", "foundation"}]
-    return min(tsfm, key=lambda item: _rank_key(item, ("median_mase", "worst_mase"))) \
+    return min(tsfm, key=lambda item: _rank_key(item, (
+        "median_joint_scaled_error", "worst_joint_scaled_error"
+    ))) \
         if tsfm else None
 
 
@@ -2499,38 +2741,53 @@ def _passes_single_override(
     )
     if not challenger_scores or len(challenger_scores) != len(baseline_scores):
         return False
+    if not _passes_independent_scaled_regret(
+        challenger.fold_forecasts,
+        baseline.fold_forecasts,
+        baseline.fold_truths,
+        max_smae_regret=policy.max_smae_fold_regret,
+        max_srmse_regret=policy.max_srmse_fold_regret,
+    ):
+        return False
     minimum_improvement = policy.ensemble_min_improvement
-    maximum_regret = policy.ensemble_max_worst_fold_regret
     if challenger.family == "combined":
         minimum_improvement = max(0.05, minimum_improvement)
-        maximum_regret = min(0.02, maximum_regret)
-    baseline_median = statistics.median(baseline_scores)
-    challenger_median = statistics.median(challenger_scores)
-    short_advantage = (baseline_median - challenger_median) / (1.0 + baseline_median)
-    required_advantage = baseline_median * minimum_improvement / (1.0 + baseline_median)
-    adjusted_advantage = short_advantage - _long_horizon_penalty(
-        policy, challenger, baseline, profile=profile
+    baseline_smae, baseline_srmse = _median_scaled_metrics(
+        baseline.fold_forecasts, baseline.fold_truths
     )
-    if not adjusted_advantage > required_advantage:
+    challenger_smae, challenger_srmse = _median_scaled_metrics(
+        challenger.fold_forecasts, challenger.fold_truths
+    )
+    if not pareto_scaled_improvement(
+        baseline_smae, baseline_srmse, challenger_smae, challenger_srmse
+    ):
+        return False
+    if not (
+        challenger_smae < baseline_smae * (1.0 - minimum_improvement)
+        or challenger_srmse < baseline_srmse * (1.0 - minimum_improvement)
+    ):
         return False
     wins = sum(
-        candidate < reference
-        for candidate, reference in zip(challenger_scores, baseline_scores)
+        candidate_smae <= baseline_smae_fold + 1e-12
+        and candidate_srmse <= baseline_srmse_fold + 1e-12
+        and (
+            candidate_smae < baseline_smae_fold - 1e-12
+            or candidate_srmse < baseline_srmse_fold - 1e-12
+        )
+        for (candidate_smae, candidate_srmse), (baseline_smae_fold, baseline_srmse_fold)
+        in zip(
+            _scaled_fold_pairs(challenger.fold_forecasts, baseline.fold_truths),
+            _scaled_fold_pairs(baseline.fold_forecasts, baseline.fold_truths),
+            strict=True,
+        )
     )
     if wins < min(policy.ensemble_min_fold_wins, len(baseline_scores)):
         return False
-    regrets = tuple(
-        (candidate - reference) / (1.0 + reference)
-        for candidate, reference in zip(challenger_scores, baseline_scores)
-    )
     if policy.long_horizon_guard_enabled and not _passes_long_horizon_override_guard(
         policy, challenger, baseline
     ):
         return False
-    return (
-        max(regrets) <= maximum_regret
-        and regrets[-1] <= maximum_regret
-    )
+    return True
 
 
 def _passes_conservative_override(
@@ -2549,6 +2806,14 @@ def _passes_conservative_override(
         baseline.fold_forecasts, baseline.fold_truths, scales
     )
     if not challenger_scores or len(challenger_scores) != len(baseline_scores):
+        return False
+    if not _passes_independent_scaled_regret(
+        challenger.fold_forecasts,
+        baseline.fold_forecasts,
+        baseline.fold_truths,
+        max_smae_regret=0.0,
+        max_srmse_regret=0.0,
+    ):
         return False
     baseline_median = statistics.median(baseline_scores)
     challenger_median = statistics.median(challenger_scores)
@@ -2649,9 +2914,82 @@ def _passes_long_horizon_override_guard(
     )
     if comparison is None:
         return False
-    candidate_score, baseline_score = comparison
-    regret = (candidate_score - baseline_score) / (1.0 + baseline_score)
-    return regret <= policy.long_horizon_max_regret + 1e-12
+    audit = challenger.long_horizon_fold if challenger_fold is None else challenger_fold
+    reference = baseline.long_horizon_fold
+    if audit is None or reference is None:
+        return False
+    return _passes_independent_scaled_regret(
+        (audit.forecast,),
+        (reference.forecast,),
+        (reference.truth,),
+        max_smae_regret=policy.long_horizon_max_regret,
+        max_srmse_regret=policy.long_horizon_max_regret,
+    )
+
+
+def _passes_independent_scaled_regret(
+    candidate_forecasts: Sequence[Sequence[float]],
+    reference_forecasts: Sequence[Sequence[float]],
+    truths: Sequence[Sequence[float]],
+    *,
+    max_smae_regret: float,
+    max_srmse_regret: float,
+) -> bool:
+    """Fail closed unless each scaled metric respects every aligned fold guard."""
+    if (
+        not candidate_forecasts
+        or len(candidate_forecasts) != len(reference_forecasts)
+        or len(candidate_forecasts) != len(truths)
+    ):
+        return False
+    for candidate, reference, truth in zip(
+        candidate_forecasts, reference_forecasts, truths, strict=True
+    ):
+        if len(candidate) != len(reference) or len(candidate) != len(truth) or not truth:
+            return False
+        candidate_metrics = drcik_point_metrics(list(truth), list(candidate))
+        reference_metrics = drcik_point_metrics(list(truth), list(reference))
+        for metric, raw_metric, clipped_metric, limit in (
+            ("smae", "smae_raw", "smae_clipped", max_smae_regret),
+            ("srmse", "srmse_raw", "srmse_clipped", max_srmse_regret),
+        ):
+            if bool(candidate_metrics[clipped_metric]) and not bool(
+                reference_metrics[clipped_metric]
+            ):
+                return False
+            candidate_raw = float(candidate_metrics[raw_metric])
+            reference_raw = float(reference_metrics[raw_metric])
+            if not math.isfinite(candidate_raw) or not math.isfinite(reference_raw):
+                return False
+            if (candidate_raw - reference_raw) / (1.0 + reference_raw) > limit + 1e-12:
+                return False
+    return True
+
+
+def _scaled_fold_pairs(
+    forecasts: Sequence[Sequence[float]], truths: Sequence[Sequence[float]]
+) -> tuple[tuple[float, float], ...]:
+    if len(forecasts) != len(truths):
+        return ()
+    pairs = []
+    for forecast, truth in zip(forecasts, truths, strict=True):
+        if len(forecast) != len(truth) or not truth:
+            return ()
+        metrics = drcik_point_metrics(list(truth), list(forecast))
+        pairs.append((float(metrics["smae"]), float(metrics["srmse"])))
+    return tuple(pairs)
+
+
+def _median_scaled_metrics(
+    forecasts: Sequence[Sequence[float]], truths: Sequence[Sequence[float]]
+) -> tuple[float, float]:
+    pairs = _scaled_fold_pairs(forecasts, truths)
+    if not pairs:
+        return math.inf, math.inf
+    return (
+        statistics.median(pair[0] for pair in pairs),
+        statistics.median(pair[1] for pair in pairs),
+    )
 
 
 def _long_horizon_comparison(
@@ -2893,10 +3231,23 @@ def _passes_combination_gates(
         candidate_scores = _fold_scores(candidate_folds, reference.fold_truths, scales)
         if len(candidate_scores) != len(reference_scores) or not candidate_scores:
             return False
-        required = statistics.median(reference_scores) * (
-            1.0 - policy.ensemble_min_improvement
+        if not _passes_independent_scaled_regret(
+            candidate_folds,
+            reference.fold_forecasts,
+            reference.fold_truths,
+            max_smae_regret=policy.max_smae_fold_regret,
+            max_srmse_regret=policy.max_srmse_fold_regret,
+        ):
+            return False
+        baseline_smae, baseline_srmse = _median_scaled_metrics(
+            reference.fold_forecasts, reference.fold_truths
         )
-        if not statistics.median(candidate_scores) < required:
+        candidate_smae, candidate_srmse = _median_scaled_metrics(
+            candidate_folds, reference.fold_truths
+        )
+        if not pareto_scaled_improvement(
+            baseline_smae, baseline_srmse, candidate_smae, candidate_srmse
+        ):
             return False
         wins = sum(
             candidate < reference_score
@@ -2952,7 +3303,7 @@ def _combined_long_horizon_fold(
         )
     else:
         raise ValueError(f"unsupported Combined audit kind: {kind}")
-    return replace(left, forecast=forecast), coverage
+    return replace(left, forecast=forecast, **_scaled_fold_fields(left.truth, forecast)), coverage
 
 
 def _passes_combination_long_horizon_gate(
@@ -3039,18 +3390,16 @@ def _fold_scores(
     truths: Sequence[Sequence[float]],
     scales: Sequence[float] = (),
 ) -> tuple[float, ...]:
+    """Capped Dr-CiK joint diagnostics; ``scales`` is legacy-compatible only."""
+    del scales
     if len(forecasts) != len(truths):
         return ()
-    if scales and len(scales) != len(truths):
-        return ()
     scores = []
-    for index, (forecast, truth) in enumerate(zip(forecasts, truths)):
+    for forecast, truth in zip(forecasts, truths):
         if len(forecast) != len(truth) or not truth:
             return ()
-        scale = scales[index] if scales else max(1.0, max(truth) - min(truth))
-        if not math.isfinite(scale) or scale <= 0:
-            return ()
-        scores.append(statistics.fmean(abs(a - b) for a, b in zip(forecast, truth)) / scale)
+        metrics = drcik_point_metrics(list(truth), list(forecast))
+        scores.append(joint_scaled_error(float(metrics["smae"]), float(metrics["srmse"])))
     return tuple(scores)
 
 
