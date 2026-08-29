@@ -292,18 +292,23 @@ class SelectionArithmetic:
             raise ValueError("selection arithmetic operation requires two or more inputs")
         if any(not isinstance(item, SelectionArithmetic) for item in inputs):
             raise ValueError("selection arithmetic inputs must be immutable recipes")
-        if self.operation == "weighted":
+        if self.operation in {"blend", "weighted"}:
             if (
                 len(weights) != len(inputs)
+                or (self.operation == "blend" and len(inputs) != 2)
                 or any(not math.isfinite(value) or value < 0.0 for value in weights)
                 or math.fsum(weights) != 1.0
             ):
-                raise ValueError("weighted arithmetic requires normalized finite weights")
+                raise ValueError(
+                    f"{self.operation} arithmetic requires normalized finite weights"
+                )
             if any(
                 value is not None
                 for value in (self.strength, self.clip_multiplier, self.scale)
             ):
-                raise ValueError("weighted arithmetic has unexpected residual fields")
+                raise ValueError(
+                    f"{self.operation} arithmetic has unexpected residual fields"
+                )
             return
         if self.operation in {"fmean", "median"}:
             if weights or any(
@@ -359,11 +364,15 @@ class SelectionDecision:
 
 _WEIGHTED_SELECTION_TYPES = frozenset(
     {
-        "joint_tsfm_statistical_portfolio",
         "protected_tsfm_weighted_portfolio",
+        "tsfm_weighted_portfolio",
+    }
+)
+_BLEND_SELECTION_TYPES = frozenset(
+    {
+        "joint_tsfm_statistical_portfolio",
         "statistical_shrinkage_overlay",
         "tsfm_shrinkage_overlay",
-        "tsfm_weighted_portfolio",
         "weighted_blend",
     }
 )
@@ -409,7 +418,7 @@ def _implicit_selection_arithmetic(
         return leaves[0]
     if operation == "residual":
         raise ValueError("residual selection requires trusted arithmetic replay")
-    if operation == "weighted":
+    if operation in {"blend", "weighted"}:
         return SelectionArithmetic(operation, inputs=leaves, weights=decision.weights)
     return SelectionArithmetic(operation, inputs=leaves)
 
@@ -422,6 +431,8 @@ def _expected_arithmetic_operation(decision: SelectionDecision) -> str:
             return "fmean"
         return "weighted"
     if decision.mode == "combined":
+        if decision.combination_type in _BLEND_SELECTION_TYPES:
+            return "blend"
         if decision.combination_type in _WEIGHTED_SELECTION_TYPES:
             return "weighted"
         if decision.combination_type in _MEDIAN_SELECTION_TYPES:
@@ -456,7 +467,7 @@ def _arithmetic_attribution_weights(
         )
     factors = (
         arithmetic.weights
-        if arithmetic.operation == "weighted"
+        if arithmetic.operation in {"blend", "weighted"}
         else (1.0 / len(arithmetic.inputs),) * len(arithmetic.inputs)
     )
     return tuple(
@@ -478,6 +489,8 @@ def _replay_arithmetic(
             raise ValueError("selection arithmetic references an unavailable forecast") from error
         return tuple(float(value) for value in values)
     values = tuple(_replay_arithmetic(item, forecasts) for item in arithmetic.inputs)
+    if arithmetic.operation == "blend":
+        return _blend_values(values[0], values[1], arithmetic.weights[0])
     if arithmetic.operation == "weighted":
         return _weighted_values(values, arithmetic.weights)
     if arithmetic.operation == "fmean":
@@ -1346,7 +1359,7 @@ def _conservative_tsfm_soft_overlay(
         anchor_weight,
     )
     arithmetic = SelectionArithmetic(
-        "weighted",
+        "blend",
         inputs=(
             parent.arithmetic or _implicit_selection_arithmetic(parent),
             SelectionArithmetic("leaf", candidate_name="timesfm_2_5"),
@@ -2012,7 +2025,7 @@ def _conservative_statistical_soft_overlay(
         parent.forecast, forecasts[specialist_name], anchor_weight
     )
     arithmetic = SelectionArithmetic(
-        "weighted",
+        "blend",
         inputs=(
             parent.arithmetic or _implicit_selection_arithmetic(parent),
             SelectionArithmetic("leaf", candidate_name=specialist_name),
@@ -2789,7 +2802,7 @@ def _best_guarded_combination(
                 (anchor_weight, 1.0 - anchor_weight),
                 final,
                 SelectionArithmetic(
-                    "weighted",
+                    "blend",
                     inputs=(
                         SelectionArithmetic("leaf", candidate_name=anchor.name),
                         SelectionArithmetic("leaf", candidate_name=specialist.name),

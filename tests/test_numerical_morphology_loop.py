@@ -23,6 +23,7 @@ from numerical_agent.evolution.numerical_selector import (
     HindcastConfig,
     HindcastFold,
     SelectionDecision,
+    replay_selection_forecast,
     select_assumption_guided_forecast,
     select_numerical_forecast,
 )
@@ -329,6 +330,119 @@ def _legacy_replay_scenario(
         )
         return _run_legacy_selection_package(
             task, policy, diagnostics, final_forecasts
+        )
+    if kind == "tsfm_shrinkage_overlay":
+        task = Task("tsfm-blend", (0.0, 1.0) * 20, 2, "D", ())
+        truth = (0.0, 1.0)
+        truths = (truth,) * 3
+        inputs = (
+            ("toto_2_0", 1.0, (3.0, 4.0)),
+            ("timesfm_2_5", 0.8, (1.0, 2.0)),
+            ("chronos_bolt", 0.5, (2.0, 3.0)),
+        )
+        diagnostics = {
+            name: _audited_diagnostic(
+                _diagnostic(
+                    name,
+                    "tsfm",
+                    forecast=forecast,
+                    truth=truth,
+                    median_mase=median_mase,
+                ),
+                forecast=forecast,
+                truth=truth,
+            )
+            for name, median_mase, forecast in inputs
+        }
+        assert all(item.fold_truths == truths for item in diagnostics.values())
+        policy = DecisionPolicy(
+            baseline_strategy="conservative_tsfm",
+            tsfm_router_blend_weight=0.1,
+            ensemble_enabled=False,
+            recent_regime_first=False,
+        )
+        return _run_legacy_selection_package(
+            task,
+            policy,
+            diagnostics,
+            {name: forecast for name, _, forecast in inputs},
+        )
+    if kind == "statistical_shrinkage_overlay":
+        task = Task("statistical-blend", (0.0, 1.0) * 20, 2, "D", ())
+        truth = (0.0, 1.0)
+        truths = (truth,) * 3
+        inputs = (
+            ("toto_2_0", "tsfm", 0.5, (2.0, 3.0)),
+            ("seasonal_specialist", "statistical", 5.0, (1.0, 2.0)),
+        )
+        diagnostics = {
+            name: _audited_diagnostic(
+                _diagnostic(
+                    name,
+                    family,
+                    forecast=forecast,
+                    truth=truth,
+                    median_mase=median_mase,
+                ),
+                forecast=forecast,
+                truth=truth,
+            )
+            for name, family, median_mase, forecast in inputs
+        }
+        assert all(item.fold_truths == truths for item in diagnostics.values())
+        policy = DecisionPolicy(
+            baseline_strategy="conservative_combined",
+            tsfm_router_blend_weight=0.1,
+            ensemble_enabled=False,
+            recent_regime_first=False,
+        )
+        return _run_legacy_selection_package(
+            task,
+            policy,
+            diagnostics,
+            {name: forecast for name, _, _, forecast in inputs},
+            conditioned_names=("seasonal_specialist",),
+        )
+    if kind == "joint_tsfm_statistical_portfolio":
+        task = Task("joint-blend", (1.75,) * 40, 2, "D", ())
+        truth = (1.75, 1.75)
+        truths = (truth,) * 3
+        inputs = (
+            ("toto_2_0", "tsfm", 1.0, (2.5, 1.5)),
+            ("timesfm_2_5", "tsfm", 1.0, (1.5, 2.5)),
+            ("seasonal_specialist", "statistical", 4.0, (1.0, 1.0)),
+        )
+        diagnostics = {
+            name: _audited_diagnostic(
+                _diagnostic(
+                    name,
+                    family,
+                    forecast=forecast,
+                    truth=truth,
+                    median_mase=median_mase,
+                ),
+                forecast=forecast,
+                truth=truth,
+            )
+            for name, family, median_mase, forecast in inputs
+        }
+        assert all(item.fold_truths == truths for item in diagnostics.values())
+        policy = DecisionPolicy(
+            baseline_strategy="conservative_joint_portfolio",
+            tsfm_router_min_improvement=0.02,
+            tsfm_router_blend_weight=0.1,
+            ensemble_enabled=False,
+            recent_regime_first=False,
+            long_horizon_guard_enabled=True,
+            long_horizon_min_coverage=0.75,
+            long_horizon_max_regret=0.0,
+        )
+        return _run_legacy_selection_package(
+            task,
+            policy,
+            diagnostics,
+            {name: forecast for name, _, _, forecast in inputs},
+            conditioned_names=("seasonal_specialist",),
         )
     raise AssertionError(f"unknown replay scenario {kind!r}")
 
@@ -1352,6 +1466,55 @@ def test_no_reasoner_package_replays_equal_weight_ensemble_with_fmean() -> None:
     assert expected.forecast == (0.23333333333333336,)
     assert package.selection_decision == expected
     assert package.final_forecast == expected.forecast
+
+
+@pytest.mark.parametrize(
+    ("kind", "selected", "legacy_forecast", "generic_weighted_forecast"),
+    (
+        (
+            "tsfm_shrinkage_overlay",
+            ("chronos_bolt", "timesfm_2_5"),
+            (1.9, 2.9000000000000004),
+            (1.9000000000000001, 2.9000000000000004),
+        ),
+        (
+            "statistical_shrinkage_overlay",
+            ("toto_2_0", "seasonal_specialist"),
+            (1.9, 2.9000000000000004),
+            (1.9000000000000001, 2.9000000000000004),
+        ),
+        (
+            "joint_tsfm_statistical_portfolio",
+            ("timesfm_2_5", "toto_2_0", "seasonal_specialist"),
+            (1.9, 1.9),
+            (1.9000000000000001, 1.9000000000000001),
+        ),
+    ),
+)
+def test_no_reasoner_package_replays_shrinkage_with_exact_blend_primitive(
+    kind: str,
+    selected: tuple[str, ...],
+    legacy_forecast: tuple[float, ...],
+    generic_weighted_forecast: tuple[float, ...],
+) -> None:
+    expected, package = _legacy_replay_scenario(kind)
+    materialized = {item.name: item.forecast for item in package.ranked_alternatives}
+
+    assert expected.combination_type == kind
+    assert expected.selected == selected
+    assert expected.forecast == legacy_forecast
+    assert math.nextafter(legacy_forecast[0], math.inf) == generic_weighted_forecast[0]
+    assert replay_selection_forecast(expected, materialized) == legacy_forecast
+    assert package.selection_decision == expected
+    assert package.final_forecast == legacy_forecast
+
+    forged = replace(expected, forecast=generic_weighted_forecast)
+    with pytest.raises(ValueError, match="replay"):
+        replace(
+            package,
+            selection_decision=forged,
+            final_forecast=generic_weighted_forecast,
+        )
 
 
 @pytest.mark.parametrize(
