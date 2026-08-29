@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 .tsfm-envs/
+.worktrees/
 dist/
 build/
 *.egg-info/
