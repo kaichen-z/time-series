@@ -12,6 +12,7 @@ import sys
 import tempfile
 from dataclasses import asdict
 from dataclasses import dataclass, replace
+from fractions import Fraction
 from pathlib import Path
 from typing import Literal, Mapping, Sequence, cast
 
@@ -877,7 +878,12 @@ def _stable_weighted_mean(values: Sequence[tuple[float, float]]) -> float:
         return 0.0
     if maximum <= sys.float_info.max / max(weight_sum, 1.0):
         return sum(weight * value for weight, value in terms)
-    return math.fsum(weight * (value / maximum) for weight, value in terms) * maximum
+    return float(
+        sum(
+            Fraction.from_float(weight) * Fraction.from_float(value)
+            for weight, value in terms
+        )
+    )
 
 
 def _overflow_stable_mean(values: Sequence[float]) -> float:
@@ -890,7 +896,7 @@ def _overflow_stable_mean(values: Sequence[float]) -> float:
         return 0.0
     if maximum <= sys.float_info.max / len(numbers):
         return statistics.fmean(numbers)
-    return math.fsum(value / maximum for value in numbers) / len(numbers) * maximum
+    return float(sum(Fraction.from_float(value) for value in numbers) / len(numbers))
 
 
 def _combine_forecasts(

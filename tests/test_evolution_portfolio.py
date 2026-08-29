@@ -925,6 +925,84 @@ def test_arithmetic_fallback_for_nonfinite_weighted_composition() -> None:
     assert "fallback=toto_2_0" in combined.detail
 
 
+@pytest.mark.parametrize(
+    "weights",
+    [
+        (0.25, 0.25, 0.5),
+        (0.250000000125, 0.250000000125, 0.50000000025),
+    ],
+)
+def test_weighted_cancellation_preserves_subnormal_residual(
+    weights: tuple[float, float, float],
+) -> None:
+    policy = CombinedPolicy(
+        "combined_weighted_cancellation",
+        ("toto_2_0", "timesfm_2_5", "seasonal_naive"),
+        "weighted_mean",
+        weights,
+        fallback_parent="toto_2_0",
+    )
+    task = Task("operator", (1.0, 1.0), 1, "1 day", (5e-324,))
+    outcomes = (
+        _successful_parent("toto_2_0", (sys.float_info.max,)),
+        _successful_parent("timesfm_2_5", (-sys.float_info.max,)),
+        _successful_parent("seasonal_naive", (1e-323,)),
+    )
+
+    composed = combine_materialized_outcome(
+        policy,
+        {outcome.method: outcome for outcome in outcomes},
+        task_id=task.task_id,
+        history=task.history,
+        horizon=task.horizon,
+        frequency=task.frequency,
+    )
+    combined = _run_combined(policy, task, _operator_outcomes(*outcomes))
+
+    assert composed.status == SUCCESS
+    assert combined.status == SUCCESS
+    assert composed.forecast == (5e-324,)
+    assert combined.forecast == (5e-324,)
+
+
+def test_trimmed_cancellation_preserves_subnormal_residual() -> None:
+    policy = CombinedPolicy(
+        "combined_trimmed_cancellation",
+        (
+            "toto_2_0",
+            "timesfm_2_5",
+            "chronos_bolt",
+            "granite_ttm_r2",
+            "seasonal_naive",
+        ),
+        "trimmed_mean",
+        fallback_parent="toto_2_0",
+    )
+    task = Task("operator", (1.0, 1.0), 1, "1 day", (5e-324,))
+    outcomes = (
+        _successful_parent("toto_2_0", (-sys.float_info.max,)),
+        _successful_parent("timesfm_2_5", (-sys.float_info.max,)),
+        _successful_parent("chronos_bolt", (1e-323,)),
+        _successful_parent("granite_ttm_r2", (sys.float_info.max,)),
+        _successful_parent("seasonal_naive", (sys.float_info.max,)),
+    )
+
+    composed = combine_materialized_outcome(
+        policy,
+        {outcome.method: outcome for outcome in outcomes},
+        task_id=task.task_id,
+        history=task.history,
+        horizon=task.horizon,
+        frequency=task.frequency,
+    )
+    combined = _run_combined(policy, task, _operator_outcomes(*outcomes))
+
+    assert composed.status == SUCCESS
+    assert combined.status == SUCCESS
+    assert composed.forecast == (5e-324,)
+    assert combined.forecast == (5e-324,)
+
+
 def test_invalid_fallback_returns_sanitized_invalid_outcome() -> None:
     policy = CombinedPolicy(
         "combined_invalid_fallback",
