@@ -8,7 +8,7 @@ from types import MappingProxyType
 
 from .assumptions import ForecastAssumption, rank_diverse_assumptions
 from .morphology import AssumptionGrounding, MorphologyCard
-from .numerical_selector import CandidateDiagnostics, DecisionPolicy
+from .numerical_selector import CandidateDiagnostics, DecisionPolicy, HindcastFold
 from .screening import TaskProfile
 
 
@@ -249,8 +249,12 @@ def _candidate_reason(
         if policy.long_horizon_guard_enabled:
             if diagnostic.long_horizon_coverage < policy.long_horizon_min_coverage:
                 return "insufficient_long_horizon_coverage"
-            if not _valid_long_horizon_audit(diagnostic):
+            if diagnostic.long_horizon_fold is None:
                 return "missing_long_horizon_audit"
+            if not isinstance(diagnostic.long_horizon_fold, HindcastFold):
+                return "invalid_long_horizon_audit"
+            if not _valid_long_horizon_audit(diagnostic):
+                return "invalid_long_horizon_audit"
         try:
             forecast = forecasts.get(name)
         except (AttributeError, TypeError, ValueError):
@@ -325,7 +329,7 @@ def _valid_fold_evidence(diagnostic: CandidateDiagnostics) -> bool:
 def _valid_long_horizon_audit(diagnostic: CandidateDiagnostics) -> bool:
     audit = diagnostic.long_horizon_fold
     return (
-        audit is not None
+        isinstance(audit, HindcastFold)
         and audit.status == "success"
         and _valid_forecast(audit.forecast)
         and _valid_forecast(audit.truth)

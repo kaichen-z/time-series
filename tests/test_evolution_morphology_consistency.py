@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -248,6 +249,35 @@ def test_consistency_enforces_enabled_long_horizon_coverage_gate() -> None:
 
     assert result.accepted == ()
     assert result.rejected == {"weekly_cycle": "insufficient_long_horizon_coverage"}
+
+
+@pytest.mark.parametrize(
+    "audit",
+    [
+        object(),
+        SimpleNamespace(status="success", forecast=(1.0, 2.0, 3.0)),
+    ],
+)
+def test_consistency_rejects_hostile_long_horizon_audit_substitutes(audit: object) -> None:
+    result = _check(
+        _card(_assumption("weekly_cycle", "seasonality", "candidate")),
+        _profile(),
+        {
+            "candidate": _diagnostic(
+                "candidate",
+                long_horizon_coverage=0.75,
+                long_horizon_fold=audit,
+            )
+        },
+        {"candidate": (1.0, 2.0, 3.0)},
+        policy=DecisionPolicy(
+            long_horizon_guard_enabled=True,
+            long_horizon_min_coverage=0.75,
+        ),
+    )
+
+    assert result.accepted == ()
+    assert result.rejected == {"weekly_cycle": "invalid_long_horizon_audit"}
 
 
 @pytest.mark.parametrize(
