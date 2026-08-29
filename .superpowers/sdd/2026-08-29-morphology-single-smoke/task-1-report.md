@@ -167,3 +167,45 @@ $ pytest -q tests/test_run_morphology_smoke.py \
 $ python -m py_compile numerical_agent/run_morphology_smoke.py
 $ git diff --check
 ```
+
+## Fix round 3 — escaped future-key masking
+
+Implemented `1ca99d83871f9032f95b90b47174eb17e2517bf7` for the remaining review
+finding. The pre-freeze history projection now scans JSON objects and arrays
+structurally. It decodes only isolated quoted property-name tokens, so escaped
+spellings such as `"future\\u005fvalues"` are recognized, while the associated
+JSON value is kept as an unparsed raw span and replaced with `null`. All future
+labels remain decoded only by the post-freeze extraction step.
+
+The new regression parametrizes two real JSON layouts: the ordinary key order
+and a reordered series/task layout. Both use an escaped key and whitespace
+before the colon; each raises if a pre-freeze `json.loads` sees its label array.
+
+RED evidence before the structural scanner change:
+
+```text
+$ pytest -q tests/test_run_morphology_smoke.py
+.........FF......                                                        [100%]
+FAILED test_escaped_future_key_is_structurally_masked_before_freeze[True-False]
+FAILED test_escaped_future_key_is_structurally_masked_before_freeze[True-True]
+2 failed, 15 passed in 1.08s
+
+AssertionError: escaped future labels were decoded before package freeze
+```
+
+GREEN and compatibility evidence:
+
+```text
+$ pytest -q tests/test_run_morphology_smoke.py
+17 passed in 2.33s
+
+$ pytest -q tests/test_run_morphology_smoke.py \
+    tests/test_numerical_morphology_loop.py \
+    tests/test_evolution_morphology.py \
+    tests/test_evolution_morphology_consistency.py \
+    tests/test_evolution_policy_targetwise.py
+109 passed in 5.33s
+
+$ python -m py_compile numerical_agent/run_morphology_smoke.py
+$ git diff --check
+```
