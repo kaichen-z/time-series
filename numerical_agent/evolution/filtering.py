@@ -138,9 +138,17 @@ class FilterScore:
     eligible_successes: int
     eligible_not_applicable: int
     eligible_failures: int
+    eligible_crashed: int
+    eligible_invalid: int
+    eligible_missing: int
+    eligible_malformed_success: int
     eligible_success_rate: float
     eligible_not_applicable_rate: float
     eligible_failure_rate: float
+    eligible_crash_rate: float
+    eligible_invalid_rate: float
+    eligible_missing_rate: float
+    eligible_malformed_success_rate: float
 
 
 @dataclass(frozen=True)
@@ -339,6 +347,10 @@ def evaluate_filter(
     eligible_successes = 0
     eligible_not_applicable = 0
     eligible_failures = 0
+    eligible_crashed = 0
+    eligible_invalid = 0
+    eligible_missing = 0
+    eligible_malformed_success = 0
     penalty = 5.0
     for task in tasks:
         task_tags = frozenset(task.characteristics())
@@ -360,6 +372,16 @@ def evaluate_filter(
                 eligible_not_applicable += 1
             else:
                 eligible_failures += 1
+                if current is None:
+                    eligible_missing += 1
+                elif current.status == CRASHED:
+                    eligible_crashed += 1
+                elif current.status == INVALID:
+                    eligible_invalid += 1
+                elif current.status == SUCCESS:
+                    eligible_malformed_success += 1
+                else:
+                    eligible_invalid += 1
             history_rows = [
                 row
                 for row in references
@@ -400,20 +422,28 @@ def evaluate_filter(
     )
     denominator = max(1, eligible_attempts)
     return FilterScore(
-        statistics.fmean(smae_scores) if smae_scores else math.inf,
-        statistics.fmean(srmse_scores) if srmse_scores else math.inf,
-        statistics.median(smae_scores) if smae_scores else math.inf,
-        statistics.median(srmse_scores) if srmse_scores else math.inf,
-        successes / len(tasks) if tasks else 0.0,
-        selected,
-        eligible_counts,
-        eligible_attempts,
-        eligible_successes,
-        eligible_not_applicable,
-        eligible_failures,
-        eligible_successes / denominator,
-        eligible_not_applicable / denominator,
-        eligible_failures / denominator,
+        mean_smae=statistics.fmean(smae_scores) if smae_scores else math.inf,
+        mean_srmse=statistics.fmean(srmse_scores) if srmse_scores else math.inf,
+        median_smae=statistics.median(smae_scores) if smae_scores else math.inf,
+        median_srmse=statistics.median(srmse_scores) if srmse_scores else math.inf,
+        coverage=successes / len(tasks) if tasks else 0.0,
+        selected=selected,
+        eligible_counts=eligible_counts,
+        eligible_attempts=eligible_attempts,
+        eligible_successes=eligible_successes,
+        eligible_not_applicable=eligible_not_applicable,
+        eligible_failures=eligible_failures,
+        eligible_crashed=eligible_crashed,
+        eligible_invalid=eligible_invalid,
+        eligible_missing=eligible_missing,
+        eligible_malformed_success=eligible_malformed_success,
+        eligible_success_rate=eligible_successes / denominator,
+        eligible_not_applicable_rate=eligible_not_applicable / denominator,
+        eligible_failure_rate=eligible_failures / denominator,
+        eligible_crash_rate=eligible_crashed / denominator,
+        eligible_invalid_rate=eligible_invalid / denominator,
+        eligible_missing_rate=eligible_missing / denominator,
+        eligible_malformed_success_rate=eligible_malformed_success / denominator,
     )
 
 
@@ -512,17 +542,15 @@ def evolve_filter_once(
     train_reliability_ok = _reliability_non_regression(train_parent, train_child)
     dev_reliability_ok = _reliability_non_regression(dev_parent, dev_child)
     strict_forecast = _forecast_improved(train_parent, train_child)
-    strict_reliability = _reliability_improved(train_parent, train_child)
     train_ok = (
         train_forecast_ok
         and train_reliability_ok
-        and (strict_forecast or strict_reliability)
+        and strict_forecast
     )
     dev_ok = dev_forecast_ok and dev_reliability_ok
     accepted = train_ok and dev_ok
     if accepted:
-        improvement = "forecast" if strict_forecast else "dictionary reliability"
-        reason = f"accepted: Train and Dev non-regression with strict {improvement} improvement"
+        reason = "accepted: Train scaled forecast pair improved with Train and Dev safety"
     elif not train_ok:
         reason = "rejected: Train forecast/reliability regressed or did not improve"
     else:
@@ -546,35 +574,18 @@ def _forecast_non_regression(parent: FilterScore, child: FilterScore) -> bool:
 
 def _forecast_improved(parent: FilterScore, child: FilterScore) -> bool:
     tolerance = 1e-12
-    return any(
-        (
-            pareto_scaled_improvement(
-                parent.mean_smae,
-                parent.mean_srmse,
-                child.mean_smae,
-                child.mean_srmse,
-                tolerance=tolerance,
-            ),
-            pareto_scaled_improvement(
-                parent.median_smae,
-                parent.median_srmse,
-                child.median_smae,
-                child.median_srmse,
-                tolerance=tolerance,
-            ),
-            child.coverage > parent.coverage + tolerance,
-        )
+    return pareto_scaled_improvement(
+        parent.mean_smae,
+        parent.mean_srmse,
+        child.mean_smae,
+        child.mean_srmse,
+        tolerance=tolerance,
     )
 
 
 def _reliability_non_regression(parent: FilterScore, child: FilterScore) -> bool:
     tolerance = 1e-12
     return child.eligible_success_rate + tolerance >= parent.eligible_success_rate
-
-
-def _reliability_improved(parent: FilterScore, child: FilterScore) -> bool:
-    tolerance = 1e-12
-    return child.eligible_success_rate > parent.eligible_success_rate + tolerance
 
 
 def _selection_failures(
@@ -609,8 +620,8 @@ def _selection_failures(
         materially_bad = (
             selected_pair is None
             or best is None
-            or joint_scaled_error(*selected_pair)
-            > joint_scaled_error(float(best.smae), float(best.srmse)) * 1.25 + 1e-12
+            or selected_pair[0] > float(best.smae) * 1.25 + 1e-12
+            or selected_pair[1] > float(best.srmse) * 1.25 + 1e-12
         )
         if materially_bad:
             failures.append(

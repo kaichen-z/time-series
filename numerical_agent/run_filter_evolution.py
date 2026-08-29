@@ -233,6 +233,19 @@ def _markdown(payload: dict[str, object]) -> str:
             f"{left['mean_srmse']:.6f} | {right['mean_srmse']:.6f} | "
             f"{left['coverage']:.4f} | {right['coverage']:.4f} |"
         )
+    lines.extend((
+        "",
+        "| Split | Side | Crash / invalid / missing / malformed |",
+        "|---|---|---:|",
+    ))
+    for split in ("train", "dev"):
+        for side, scores in (("Parent", parent[split]), ("Child", child[split])):
+            assert isinstance(scores, dict)
+            lines.append(
+                f"| {split} | {side} | {scores['eligible_crashed']} / "
+                f"{scores['eligible_invalid']} / {scores['eligible_missing']} / "
+                f"{scores['eligible_malformed_success']} |"
+            )
     lines.extend(("", "## Proposed changes", ""))
     for change in payload["changes"]:
         assert isinstance(change, dict)

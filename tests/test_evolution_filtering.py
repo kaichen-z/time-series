@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ from numerical_agent.evolution.filtering import (
     render_filter_source,
     require_cached_portfolio_outcomes,
     _required_review_targets,
+    _selection_failures,
 )
 from numerical_agent.evolution.cache import OutcomeCache
 from numerical_agent.evolution.module import MODULE_HEADER, parse_module
@@ -355,7 +357,7 @@ def test_single_agent_child_is_accepted_only_after_train_and_dev_improve(
     assert (tmp_path / "generation_001_filter_response.json").is_file()
 
 
-def test_reliability_improvement_accepts_filter_when_forecast_is_unchanged(
+def test_reliability_improvement_cannot_replace_scaled_forecast_improvement(
     tmp_path: Path,
 ) -> None:
     train = _tasks("train", 4)
@@ -402,8 +404,57 @@ def test_reliability_improvement_accepts_filter_when_forecast_is_unchanged(
         result.train_child.eligible_not_applicable_rate
         > result.train_parent.eligible_not_applicable_rate
     )
-    assert result.accepted
-    assert "reliability" in result.reason.lower()
+    assert not result.accepted
+    assert "did not improve" in result.reason.lower()
+
+
+def test_filter_score_separates_execution_failure_categories() -> None:
+    task = _tasks("health", 1)[0]
+    dictionary = FilterDictionary(tuple(
+        FilterEntry(name, "statistical", "keep", (), name)
+        for name in ("valid", "crashed", "invalid", "missing", "malformed")
+    ))
+    outcomes = (
+        Outcome("valid", task.task_id, SUCCESS, smae=1.0, srmse=1.0),
+        Outcome("crashed", task.task_id, CRASHED),
+        Outcome("invalid", task.task_id, INVALID),
+        Outcome("malformed", task.task_id, SUCCESS, smae=None, srmse=1.0),
+    )
+
+    score = evaluate_filter(
+        dictionary, outcomes, (task,), reference_outcomes=outcomes
+    )
+
+    assert score.eligible_failures == 4
+    assert score.eligible_crashed == 1
+    assert score.eligible_invalid == 1
+    assert score.eligible_missing == 1
+    assert score.eligible_malformed_success == 1
+    assert score.eligible_crash_rate == pytest.approx(0.2)
+    assert score.eligible_invalid_rate == pytest.approx(0.2)
+    assert score.eligible_missing_rate == pytest.approx(0.2)
+    assert score.eligible_malformed_success_rate == pytest.approx(0.2)
+
+
+def test_selection_failure_membership_uses_each_scaled_metric() -> None:
+    task = _tasks("target", 1)[0]
+    dictionary = FilterDictionary((
+        FilterEntry("tradeoff", "statistical", "keep", (), "tradeoff"),
+        FilterEntry("balanced", "statistical", "keep", (), "balanced"),
+    ))
+    outcomes = (
+        Outcome("tradeoff", task.task_id, SUCCESS, smae=0.5, srmse=1.7),
+        Outcome("balanced", task.task_id, SUCCESS, smae=1.0, srmse=1.0),
+    )
+    score = evaluate_filter(
+        dictionary, outcomes, (task,), reference_outcomes=outcomes
+    )
+    forced_selection = replace(score, selected={task.task_id: "tradeoff"})
+
+    failures = _selection_failures(forced_selection, outcomes, (task,))
+
+    assert [failure["task_id"] for failure in failures] == [task.task_id]
+    assert failures[0]["best_available"] == "balanced"
 
 
 def test_filter_rejects_removing_healthy_candidate_without_any_quality_gain(

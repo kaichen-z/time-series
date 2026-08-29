@@ -29,6 +29,10 @@ def test_filter_report_and_manifest_lead_with_bound_scaled_objective() -> None:
         "median_smae": 0.7,
         "median_srmse": 0.8,
         "coverage": 1.0,
+        "eligible_crashed": 1,
+        "eligible_invalid": 2,
+        "eligible_missing": 3,
+        "eligible_malformed_success": 4,
     }
     payload = {
         "accepted": True,
@@ -45,6 +49,8 @@ def test_filter_report_and_manifest_lead_with_bound_scaled_objective() -> None:
 
     assert "Parent mean sMAE" in report
     assert "Parent mean sRMSE" in report
+    assert "Crash / invalid / missing / malformed" in report
+    assert "1 / 2 / 3 / 4" in report
     assert "MASE" not in report
     assert _manifest_fingerprint(payload) != _manifest_fingerprint(
         {**payload, "metric_policy": {**SCALED_METRIC_POLICY, "scaled_metric_cap": 4.0}}

@@ -343,6 +343,15 @@ class ScreeningScore:
     not_applicable_exposure: float
     mean_active_failures: float
     mean_active_not_applicable: float
+    active_failures: int
+    active_crashed: int
+    active_invalid: int
+    active_missing: int
+    active_malformed_success: int
+    crash_exposure: float
+    invalid_exposure: float
+    missing_exposure: float
+    malformed_success_exposure: float
     compression: float
     mean_active_candidates: float
     median_active_candidates: float
@@ -350,6 +359,8 @@ class ScreeningScore:
     mean_active_srmse: float
     global_oracle_retention: float
     mean_active_oracle_regret: float
+    mean_active_oracle_smae_regret: float
+    mean_active_oracle_srmse_regret: float
     mean_active_families: float
     fallback_rate: float
     active_counts: Mapping[str, int]
@@ -555,11 +566,17 @@ def evaluate_screening(
     active_attempts = 0
     active_successes = 0
     active_failures = 0
+    active_crashed = 0
+    active_invalid = 0
+    active_missing = 0
+    active_malformed_success = 0
     active_not_applicable = 0
     covered = 0
     oracle_tasks = 0
     oracle_retained = 0
     regrets: list[float] = []
+    smae_regrets: list[float] = []
+    srmse_regrets: list[float] = []
     active_smae_scores: list[float] = []
     active_srmse_scores: list[float] = []
     family_counts: list[int] = []
@@ -591,6 +608,16 @@ def evaluate_screening(
                 active_srmse_scores.append(5.0)
             else:
                 active_failures += 1
+                if row is None:
+                    active_missing += 1
+                elif row.status == CRASHED:
+                    active_crashed += 1
+                elif row.status == INVALID:
+                    active_invalid += 1
+                elif row.status == SUCCESS:
+                    active_malformed_success += 1
+                else:
+                    active_invalid += 1
                 active_smae_scores.append(5.0)
                 active_srmse_scores.append(5.0)
         covered += int(bool(active_rows))
@@ -606,6 +633,8 @@ def evaluate_screening(
         if not global_rows:
             oracle_names[task.task_id] = ()
             regrets.append(10.0)
+            smae_regrets.append(10.0)
+            srmse_regrets.append(10.0)
             continue
         oracle_tasks += 1
         best_global_row = min(global_rows, key=_scaled_order)
@@ -626,8 +655,20 @@ def evaluate_screening(
             )
             best_global = joint_scaled_error(best_global_smae, best_global_srmse)
             regrets.append(max(0.0, (best_active - best_global) / (1.0 + best_global)))
+            smae_regrets.append(max(
+                0.0,
+                (float(best_active_row.smae) - best_global_smae)
+                / (1.0 + best_global_smae),
+            ))
+            srmse_regrets.append(max(
+                0.0,
+                (float(best_active_row.srmse) - best_global_srmse)
+                / (1.0 + best_global_srmse),
+            ))
         else:
             regrets.append(10.0)
+            smae_regrets.append(10.0)
+            srmse_regrets.append(10.0)
 
     denominator = max(1, active_attempts)
     task_denominator = max(1, len(tasks))
@@ -649,6 +690,15 @@ def evaluate_screening(
         not_applicable_exposure=active_not_applicable / denominator,
         mean_active_failures=active_failures / task_denominator,
         mean_active_not_applicable=active_not_applicable / task_denominator,
+        active_failures=active_failures,
+        active_crashed=active_crashed,
+        active_invalid=active_invalid,
+        active_missing=active_missing,
+        active_malformed_success=active_malformed_success,
+        crash_exposure=active_crashed / denominator,
+        invalid_exposure=active_invalid / denominator,
+        missing_exposure=active_missing / denominator,
+        malformed_success_exposure=active_malformed_success / denominator,
         compression=active_attempts / max(1, len(policy.entries) * len(tasks)),
         mean_active_candidates=sum(counts) / task_denominator,
         median_active_candidates=_median(counts),
@@ -662,6 +712,8 @@ def evaluate_screening(
         ),
         global_oracle_retention=oracle_retained / max(1, oracle_tasks),
         mean_active_oracle_regret=sum(regrets) / task_denominator,
+        mean_active_oracle_smae_regret=sum(smae_regrets) / task_denominator,
+        mean_active_oracle_srmse_regret=sum(srmse_regrets) / task_denominator,
         mean_active_families=sum(family_counts) / task_denominator,
         fallback_rate=fallback_count / task_denominator,
         active_counts=active_counts,
@@ -710,8 +762,20 @@ def compare_screening(
             False,
             "rejected: Dev oracle retention is below the bounded safety floor",
         )
-    if dev_child.mean_active_oracle_regret > dev_parent.mean_active_oracle_regret + 0.01 + tolerance:
-        return ScreeningGateResult(False, "rejected: Dev active-oracle regret regressed")
+    if (
+        dev_child.mean_active_oracle_smae_regret
+        > dev_parent.mean_active_oracle_smae_regret + 0.01 + tolerance
+    ):
+        return ScreeningGateResult(False, "rejected: Dev sMAE oracle regret regressed")
+    if (
+        dev_child.mean_active_oracle_srmse_regret
+        > dev_parent.mean_active_oracle_srmse_regret + 0.01 + tolerance
+    ):
+        return ScreeningGateResult(False, "rejected: Dev sRMSE oracle regret regressed")
+    if dev_child.failure_exposure > dev_parent.failure_exposure + tolerance:
+        return ScreeningGateResult(False, "rejected: Dev failure exposure increased")
+    if train_child.failure_exposure > train_parent.failure_exposure + tolerance:
+        return ScreeningGateResult(False, "rejected: Train failure exposure increased")
     if dev_child.mean_active_failures > dev_parent.mean_active_failures + tolerance:
         return ScreeningGateResult(
             False, "rejected: Dev failure exposure count increased"

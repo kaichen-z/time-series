@@ -397,6 +397,12 @@ def test_report_exposes_task_conditioning_and_family_coverage():
         "mean_active_srmse": 0.9,
         "global_oracle_retention": 1.0,
         "mean_active_oracle_regret": 0.0,
+        "mean_active_oracle_smae_regret": 0.0,
+        "mean_active_oracle_srmse_regret": 0.0,
+        "active_crashed": 1,
+        "active_invalid": 2,
+        "active_missing": 3,
+        "active_malformed_success": 4,
         "compression": 0.4,
         "mean_active_candidates": 32.5,
         "min_active_candidates": 24,
@@ -428,6 +434,8 @@ def test_report_exposes_task_conditioning_and_family_coverage():
     assert "Pairwise Jaccard" in report
     assert "Statistical / TSFM / Combined" in report
     assert "9 / 2 / 3" in report
+    assert "Crash / invalid / missing / malformed" in report
+    assert "1 / 2 / 3 / 4" in report
     assert "Dev evaluations: 1" in report
     assert "safe on held-out Dev" in report
     assert "Mean active sMAE" in report

@@ -5,7 +5,13 @@ from dataclasses import replace
 import pytest
 
 from numerical_agent.evolution.execution import Task
-from numerical_agent.evolution.execution import CRASHED, NOT_APPLICABLE, SUCCESS, Outcome
+from numerical_agent.evolution.execution import (
+    CRASHED,
+    INVALID,
+    NOT_APPLICABLE,
+    SUCCESS,
+    Outcome,
+)
 from numerical_agent.evolution.screening import (
     ActiveDictionary,
     ApplicabilityClause,
@@ -290,6 +296,36 @@ def test_screening_score_is_independent_of_a_final_forecast_selector() -> None:
     assert child.min_active_candidates == child.max_active_candidates == 4
 
 
+def test_screening_score_separates_execution_failure_categories() -> None:
+    task = _screen_tasks()[0]
+    names = ("valid", "crashed", "invalid", "missing", "malformed")
+    policy = ScreeningPolicy(
+        tuple(
+            ScreeningEntry(name, "statistical", "keep", ApplicabilityPolicy(()), name)
+            for name in names
+        ),
+        ("valid", "crashed", "invalid"),
+    )
+    outcomes = (
+        Outcome("valid", task.task_id, SUCCESS, smae=1.0, srmse=1.0),
+        Outcome("crashed", task.task_id, CRASHED),
+        Outcome("invalid", task.task_id, INVALID),
+        Outcome("malformed", task.task_id, SUCCESS, smae=None, srmse=1.0),
+    )
+
+    score = evaluate_screening(policy, (task,), outcomes)
+
+    assert score.active_failures == 4
+    assert score.active_crashed == 1
+    assert score.active_invalid == 1
+    assert score.active_missing == 1
+    assert score.active_malformed_success == 1
+    assert score.crash_exposure == pytest.approx(0.2)
+    assert score.invalid_exposure == pytest.approx(0.2)
+    assert score.missing_exposure == pytest.approx(0.2)
+    assert score.malformed_success_exposure == pytest.approx(0.2)
+
+
 def test_screening_gate_rejects_compression_that_loses_the_dev_oracle() -> None:
     train = _screen_tasks("train")
     dev = _screen_tasks("dev")
@@ -428,6 +464,14 @@ def test_screening_gate_rejects_compression_that_worsens_scaled_pool_quality() -
     dev_parent = evaluate_screening(parent, dev, outcomes)
     dev_child = evaluate_screening(child, dev, outcomes)
 
+    train_child = replace(
+        evaluate_screening(_screen_policy(broken_status="repair"), train, outcomes),
+        failure_exposure=train_parent.failure_exposure + 0.01,
+        mean_active_failures=train_parent.mean_active_failures,
+    )
+    dev_child = evaluate_screening(
+        _screen_policy(broken_status="repair"), dev, outcomes
+    )
     assert train_child.failure_exposure > train_parent.failure_exposure
     assert train_child.mean_active_failures == train_parent.mean_active_failures
     result = compare_screening(
@@ -438,7 +482,7 @@ def test_screening_gate_rejects_compression_that_worsens_scaled_pool_quality() -
     )
 
     assert not result.accepted
-    assert "Pareto" in result.reason
+    assert "Train failure exposure" in result.reason
 
 
 def test_screening_gate_requires_full_train_and_dev_oracle_retention() -> None:
@@ -471,6 +515,8 @@ def test_final_gate_allows_bounded_dev_oracle_loss_when_regret_remains_small() -
         child,
         global_oracle_retention=0.9,
         mean_active_oracle_regret=0.005,
+        mean_active_oracle_smae_regret=0.005,
+        mean_active_oracle_srmse_regret=0.005,
     )
     constraints = ScreeningConstraints(
         baseline_method="timesfm",
@@ -493,3 +539,41 @@ def test_final_gate_allows_bounded_dev_oracle_loss_when_regret_remains_small() -
     )
 
     assert result.accepted
+
+
+def test_screening_gate_rejects_single_metric_oracle_regret_hidden_by_joint_score() -> None:
+    tasks = _screen_tasks()
+    outcomes = _screen_outcomes(tasks)
+    parent = evaluate_screening(_screen_policy(), tasks, outcomes)
+    child = evaluate_screening(_screen_policy(broken_status="repair"), tasks, outcomes)
+    dev_child = replace(
+        child,
+        global_oracle_retention=0.9,
+        mean_active_oracle_regret=parent.mean_active_oracle_regret,
+        mean_active_oracle_smae_regret=parent.mean_active_oracle_smae_regret,
+        mean_active_oracle_srmse_regret=(
+            parent.mean_active_oracle_srmse_regret + 0.02
+        ),
+    )
+    constraints = ScreeningConstraints(
+        baseline_method="timesfm",
+        min_active_candidates=1,
+        max_active_candidates=103,
+        min_unique_active_dictionaries=1,
+        max_mean_pairwise_jaccard=1.0,
+        min_group_support=1,
+        min_dev_oracle_retention=0.9,
+        required_conditioned_families=(),
+    )
+
+    result = compare_screening(
+        parent,
+        child,
+        parent,
+        dev_child,
+        constraints=constraints,
+        enforce_final_constraints=True,
+    )
+
+    assert not result.accepted
+    assert "sRMSE oracle regret" in result.reason

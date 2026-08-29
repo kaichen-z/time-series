@@ -817,6 +817,11 @@ def test_evolution_prompt_is_train_only_and_accepts_reliability_improvement(tmp_
     assert "periodicity:none" in payload["allowed_profile_tags"]
     assert payload["train_evidence"][0]["family"] == "combined"
     assert "relative_to_baseline" in payload["train_evidence"][0]
+    assert payload["parent_train_score"]["active_crashed"] == 2
+    assert payload["parent_train_score"]["crash_exposure"] > 0.0
+    assert "mean_active_oracle_smae_regret" in payload["parent_train_score"]
+    assert "mean_active_oracle_srmse_regret" in payload["parent_train_score"]
+    assert "mean_active_oracle_regret" not in payload["parent_train_score"]
     assert result.accepted
     assert result.child.get("broken").status == "repair"  # type: ignore[union-attr]
     assert result.gate.improved_dimensions == (
