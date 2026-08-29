@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from inspect import signature
 
 import pytest
 
@@ -15,6 +16,7 @@ from numerical_agent.evolution.morphology import (
     MorphologyReasoner,
     MorphologyToolCall,
 )
+from numerical_agent.evolution.morphology_credit import assign_tool_call_credit
 
 
 def _history() -> list[float]:
@@ -243,3 +245,60 @@ def test_whitespace_normalized_candidate_and_family_names_fail_with_typed_error(
             active_names=(" seasonal_naive ", "toto_2_0"),
             families={"seasonal_naive": "statistical", "toto_2_0": "tsfm"},
         )
+
+
+def test_train_credit_is_marginal_after_each_grounded_call_and_cannot_mutate_card() -> None:
+    card = _reason(
+        [
+            _tool("broad_period", start=0, end=84),
+            _tool("recent_period", start=42, end=84),
+            _final(),
+        ],
+        max_turns=3,
+        max_tool_calls=4,
+    )
+    fingerprint = card.fingerprint
+
+    trace = assign_tool_call_credit(
+        card,
+        split="train",
+        future_truth=(1.0, 1.0),
+        forecasts_by_call_ids={
+            frozenset(): (2.0, 2.0),
+            frozenset({"broad_period"}): (1.0, 2.0),
+            frozenset({"broad_period", "recent_period"}): (1.0, 1.0),
+        },
+    )
+
+    assert tuple(item.call_id for item in trace.credits) == ("broad_period", "recent_period")
+    assert trace.credits[0].smae_improvement == pytest.approx(0.5)
+    assert trace.credits[0].srmse_improvement == pytest.approx(1.0 - math.sqrt(0.5))
+    assert trace.credits[1].smae_improvement == pytest.approx(0.5)
+    assert trace.credits[1].srmse_improvement == pytest.approx(math.sqrt(0.5))
+    assert card.fingerprint == fingerprint
+    with pytest.raises(AttributeError):
+        card.assumptions = ()  # type: ignore[misc]
+
+
+def test_credit_refuses_to_learn_outside_train_before_reading_future_truth() -> None:
+    card = _reason(
+        [
+            _tool("broad_period", start=0, end=84),
+            _tool("recent_period", start=42, end=84),
+            _final(),
+        ],
+        max_turns=3,
+        max_tool_calls=4,
+    )
+
+    trace = assign_tool_call_credit(
+        card,
+        split="frozen",
+        future_truth=object(),
+        forecasts_by_call_ids={},
+    )
+
+    assert not trace.learning_enabled
+    assert trace.reason == "non_train_split"
+    assert trace.credits == ()
+    assert "future_truth" not in signature(MorphologyReasoner.reason).parameters
