@@ -225,6 +225,29 @@ def _screen_policy(*, broken_status: str = "keep", oracle_rule: ApplicabilityPol
     )
 
 
+def test_screening_oracles_use_scaled_metrics_and_only_retain_full_metric_ties() -> None:
+    task = _screen_tasks()[0]
+    policy = ScreeningPolicy(
+        entries=tuple(
+            ScreeningEntry(name, "statistical", "keep", ApplicabilityPolicy(()), name)
+            for name in ("joint_a", "tradeoff_a", "tradeoff_b", "mase_winner")
+        ),
+        fallback_names=("joint_a", "tradeoff_a", "tradeoff_b"),
+    )
+    outcomes = (
+        Outcome("joint_a", task.task_id, SUCCESS, smae=0.8, srmse=0.8, mase=50.0),
+        Outcome("tradeoff_a", task.task_id, SUCCESS, smae=0.7, srmse=0.9, mase=0.2),
+        Outcome("tradeoff_b", task.task_id, SUCCESS, smae=0.7, srmse=0.9, mase=40.0),
+        Outcome("mase_winner", task.task_id, SUCCESS, smae=0.9, srmse=0.9, mase=0.01),
+    )
+
+    score = evaluate_screening(policy, (task,), outcomes)
+
+    assert set(score.oracle_names[task.task_id]) == {"tradeoff_a", "tradeoff_b"}
+    assert score.mean_active_smae == pytest.approx(0.775)
+    assert score.mean_active_srmse == pytest.approx(0.875)
+
+
 def _screen_tasks(prefix: str = "task") -> tuple[Task, ...]:
     return (
         Task(f"{prefix}-dense", (1.0,) * 12, 2, "1 day", (1.0, 1.0)),
@@ -237,11 +260,11 @@ def _screen_outcomes(tasks: tuple[Task, ...]) -> tuple[Outcome, ...]:
     for task in tasks:
         rows.extend(
             (
-                Outcome("stable", task.task_id, SUCCESS, mase=1.0, mae=1.0, smape=1.0),
-                Outcome("oracle", task.task_id, SUCCESS, mase=0.5, mae=0.5, smape=0.5),
+                Outcome("stable", task.task_id, SUCCESS, smae=1.0, srmse=1.0, mase=1.0, mae=1.0, smape=1.0),
+                Outcome("oracle", task.task_id, SUCCESS, smae=0.5, srmse=0.5, mase=0.5, mae=0.5, smape=0.5),
                 Outcome("broken", task.task_id, CRASHED, detail="crash"),
                 Outcome("skip", task.task_id, NOT_APPLICABLE),
-                Outcome("timesfm", task.task_id, SUCCESS, mase=1.2, mae=1.2, smape=1.2),
+                Outcome("timesfm", task.task_id, SUCCESS, smae=1.2, srmse=1.2, mase=1.2, mae=1.2, smape=1.2),
             )
         )
     return tuple(rows)
@@ -384,7 +407,7 @@ def test_screening_gate_rejects_train_failure_exposure_increase() -> None:
     assert "Train failure exposure" in result.reason
 
 
-def test_screening_gate_uses_absolute_failure_burden_when_compressing_successes() -> None:
+def test_screening_gate_rejects_compression_that_worsens_scaled_pool_quality() -> None:
     """Removing a reliable broad candidate must not manufacture a failure regression."""
     train = _screen_tasks("train")
     dev = _screen_tasks("dev")
@@ -414,8 +437,8 @@ def test_screening_gate_uses_absolute_failure_burden_when_compressing_successes(
         dev_child,
     )
 
-    assert result.accepted
-    assert "compression" in result.improved_dimensions
+    assert not result.accepted
+    assert "Pareto" in result.reason
 
 
 def test_screening_gate_requires_full_train_and_dev_oracle_retention() -> None:

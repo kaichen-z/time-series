@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from common.llm import LLMClient, parse_json_object
+from common.metrics import joint_scaled_error, pareto_scaled_improvement
 
 from .execution import CRASHED, INVALID, NOT_APPLICABLE, SUCCESS, Outcome, Task
 from .filtering import FilterDictionary
@@ -40,10 +41,10 @@ Keep a method broad only when it is reliable across supported strata. Mark it sp
 evidence shows a coherent regime where it beats or safely complements the baseline. Statistical,
 TSFM, and Combined methods are equally eligible for typed specialization. Treat not_applicable as
 valid specialist behavior. Repair or quarantine requires observed Crash/Invalid Train evidence;
-poor MASE alone must remain keep or become specialized because a weak standalone method can still
+poor scaled forecast quality alone must remain keep or become specialized because a weak standalone method can still
 be useful as a diverse ensemble member. Every specialized clause must pass its exact joint Train subset: the supplied
-minimum support, at least 75% successful executions, at least 50% wins over the named baseline,
-and a negative median normalized MASE difference. Do not combine marginally supported tags into
+minimum support, at least 75% successful executions, at least 50% Pareto wins over the named
+baseline, and non-regressing median sMAE/sRMSE deltas with at least one strict improvement. Do not combine marginally supported tags into
 an unsupported conjunction. For every specialized action, trusted Python will compile your intent
 into at most three validated atomic Train strata; your any_of clauses are preferences, not an
 authority to bypass that compiler. oracle_profiles lists anonymous Train strata where a method is globally best; every
@@ -109,7 +110,8 @@ class SpecializedClauseEvidence:
     successes: int
     comparable: int
     win_rate: float
-    median_relative_mase: float
+    median_delta_smae: float
+    median_delta_srmse: float
 
 
 @dataclass(frozen=True)
@@ -163,7 +165,8 @@ def validate_specialized_evidence(
                     f"requires at least {min_group_support}"
                 )
             successes = 0
-            relative: list[float] = []
+            delta_smae: list[float] = []
+            delta_srmse: list[float] = []
             wins = 0
             for task in matched:
                 method = by_key.get((name, task.task_id))
@@ -179,13 +182,21 @@ def validate_specialized_evidence(
                     or not _finite_outcome(baseline)
                 ):
                     continue
-                method_mase = float(method.mase)
-                baseline_mase = float(baseline.mase)
-                wins += int(method_mase < baseline_mase - 1e-12)
-                relative.append(
-                    (method_mase - baseline_mase) / (1.0 + abs(baseline_mase))
+                method_smae = float(method.smae)
+                method_srmse = float(method.srmse)
+                baseline_smae = float(baseline.smae)
+                baseline_srmse = float(baseline.srmse)
+                wins += int(
+                    pareto_scaled_improvement(
+                        baseline_smae,
+                        baseline_srmse,
+                        method_smae,
+                        method_srmse,
+                    )
                 )
-            comparable = len(relative)
+                delta_smae.append(method_smae - baseline_smae)
+                delta_srmse.append(method_srmse - baseline_srmse)
+            comparable = len(delta_smae)
             if successes / support < 0.75 - 1e-12:
                 raise ScreeningEvolutionError(
                     f"{name} clause {clause_index} is unreliable on its joint support"
@@ -196,8 +207,14 @@ def validate_specialized_evidence(
                     f"Train outcomes; requires at least {min_group_support}"
                 )
             win_rate = wins / comparable
-            median_relative = statistics.median(relative)
-            if win_rate < 0.5 - 1e-12 or median_relative >= -1e-12:
+            median_smae = statistics.median(delta_smae)
+            median_srmse = statistics.median(delta_srmse)
+            median_pareto = (
+                median_smae <= 1e-12
+                and median_srmse <= 1e-12
+                and (median_smae < -1e-12 or median_srmse < -1e-12)
+            )
+            if win_rate < 0.5 - 1e-12 or not median_pareto:
                 raise ScreeningEvolutionError(
                     f"{name} clause {clause_index} lacks reliable baseline uplift"
                 )
@@ -209,7 +226,8 @@ def validate_specialized_evidence(
                     successes,
                     comparable,
                     win_rate,
-                    median_relative,
+                    median_smae,
+                    median_srmse,
                 )
             )
     return tuple(evidence)
@@ -305,7 +323,7 @@ def compile_supported_specialists(
             supported.append(
                 (
                     tag not in preferred,
-                    evidence.median_relative_mase,
+                    max(evidence.median_delta_smae, evidence.median_delta_srmse),
                     -evidence.win_rate,
                     -evidence.support,
                     tag,
@@ -344,7 +362,12 @@ def compile_supported_specialists(
 
 
 def _finite_outcome(outcome: Outcome) -> bool:
-    return outcome.mase is not None and math.isfinite(float(outcome.mase))
+    return (
+        outcome.smae is not None
+        and outcome.srmse is not None
+        and math.isfinite(float(outcome.smae))
+        and math.isfinite(float(outcome.srmse))
+    )
 
 
 def validate_failure_status_evidence(
@@ -358,7 +381,7 @@ def validate_failure_status_evidence(
     """Require trusted execution failures before making a method non-selectable.
 
     Forecast error is not an implementation failure. A method with weak
-    standalone MASE can still contribute a useful shape or residual to a
+    standalone scaled accuracy can still contribute a useful shape or residual to a
     guarded combination, so only Crash/Invalid outcomes authorize ``repair``
     or ``quarantine``.
     """
@@ -668,8 +691,13 @@ def select_refinement_targets(
         ]
         best_group = max(group_rates, default=-1.0)
         failures = float(row["crashed"]) + float(row["invalid"])
-        mean_relative = relative.get("mean_relative_mase")
-        harm = float(mean_relative) if mean_relative is not None else float("inf")
+        mean_delta_smae = relative.get("delta_smae")
+        mean_delta_srmse = relative.get("delta_srmse")
+        harm = (
+            (float(mean_delta_smae) + float(mean_delta_srmse)) / 2.0
+            if mean_delta_smae is not None and mean_delta_srmse is not None
+            else float("inf")
+        )
         return failures, harm, best_group, entry.name
 
     ordered: list[str] = []
@@ -711,16 +739,16 @@ def protect_train_oracles(
             if row.task_id == task.task_id
             and row.method in policy_names
             and row.status == SUCCESS
-            and row.mase is not None
-            and math.isfinite(float(row.mase))
+            and _finite_outcome(row)
         ]
         if not successful:
             continue
-        best_mase = min(float(row.mase) for row in successful)  # type: ignore[arg-type]
+        best = min(successful, key=_scaled_order)
         oracles = sorted(
             row.method
             for row in successful
-            if abs(float(row.mase) - best_mase) <= 1e-12  # type: ignore[arg-type]
+            if abs(float(row.smae) - float(best.smae)) <= 1e-12
+            and abs(float(row.srmse) - float(best.srmse)) <= 1e-12
         )
         profile = profile_task(task)
         active = {
@@ -1255,15 +1283,17 @@ def build_train_evidence(
             if row.task_id == task.task_id
             and row.method in policy_names
             and row.status == SUCCESS
-            and row.mase is not None
-            and math.isfinite(float(row.mase))
+            and _finite_outcome(row)
         ]
         if not successful:
             continue
-        best_mase = min(float(row.mase) for row in successful)  # type: ignore[arg-type]
+        best = min(successful, key=_scaled_order)
         signature = tuple(sorted(task_group_tags(profiles[task.task_id])))
         for row in successful:
-            if abs(float(row.mase) - best_mase) <= 1e-12:  # type: ignore[arg-type]
+            if (
+                abs(float(row.smae) - float(best.smae)) <= 1e-12
+                and abs(float(row.srmse) - float(best.srmse)) <= 1e-12
+            ):
                 oracle_profiles.setdefault(row.method, set()).add(signature)
     result = []
     for name in sorted(names):
@@ -1302,22 +1332,40 @@ def build_train_evidence(
 def _relative_summary(
     rows: Sequence[Outcome], baseline: Mapping[str, Outcome]
 ) -> dict[str, object]:
-    comparable = []
+    comparable: list[tuple[float, float, float, float]] = []
     for row in rows:
         reference = baseline.get(row.task_id)
         if (
             row.status == SUCCESS
-            and row.mase is not None
-            and math.isfinite(float(row.mase))
+            and _finite_outcome(row)
             and reference is not None
             and reference.status == SUCCESS
-            and reference.mase is not None
-            and math.isfinite(float(reference.mase))
+            and _finite_outcome(reference)
         ):
-            comparable.append((float(row.mase), float(reference.mase)))
+            comparable.append(
+                (
+                    float(row.smae),
+                    float(row.srmse),
+                    float(reference.smae),
+                    float(reference.srmse),
+                )
+            )
     tolerance = 1e-12
-    wins = sum(value < reference - tolerance for value, reference in comparable)
-    ties = sum(abs(value - reference) <= tolerance for value, reference in comparable)
+    wins = sum(
+        pareto_scaled_improvement(
+            reference_smae,
+            reference_srmse,
+            value_smae,
+            value_srmse,
+            tolerance=tolerance,
+        )
+        for value_smae, value_srmse, reference_smae, reference_srmse in comparable
+    )
+    ties = sum(
+        abs(value_smae - reference_smae) <= tolerance
+        and abs(value_srmse - reference_srmse) <= tolerance
+        for value_smae, value_srmse, reference_smae, reference_srmse in comparable
+    )
     losses = len(comparable) - wins - ties
     return {
         "comparable": len(comparable),
@@ -1325,15 +1373,21 @@ def _relative_summary(
         "ties": ties,
         "losses": losses,
         "win_rate": (wins + 0.5 * ties) / len(comparable) if comparable else None,
-        "mean_relative_mase": statistics.fmean(
-            (value - reference) / (1.0 + reference)
-            for value, reference in comparable
+        "delta_smae": statistics.fmean(
+            value_smae - reference_smae
+            for value_smae, _, reference_smae, _ in comparable
+        ) if comparable else None,
+        "delta_srmse": statistics.fmean(
+            value_srmse - reference_srmse
+            for _, value_srmse, _, reference_srmse in comparable
         ) if comparable else None,
     }
 
 
 def _score_payload(score: ScreeningScore) -> dict[str, object]:
     return {
+        "mean_active_smae": score.mean_active_smae,
+        "mean_active_srmse": score.mean_active_srmse,
         "active_success_rate": score.active_success_rate,
         "failure_exposure": score.failure_exposure,
         "not_applicable_exposure": score.not_applicable_exposure,
@@ -1353,7 +1407,7 @@ def _score_payload(score: ScreeningScore) -> dict[str, object]:
 def _row_summary(rows: Sequence[Outcome]) -> dict[str, object]:
     successful = [
         row for row in rows
-        if row.status == SUCCESS and row.mase is not None and math.isfinite(float(row.mase))
+        if row.status == SUCCESS and _finite_outcome(row)
     ]
     return {
         "tasks": len(rows),
@@ -1361,6 +1415,20 @@ def _row_summary(rows: Sequence[Outcome]) -> dict[str, object]:
         "not_applicable": sum(row.status == NOT_APPLICABLE for row in rows),
         "crashed": sum(row.status == CRASHED for row in rows),
         "invalid": sum(row.status == INVALID for row in rows),
-        "mean_mase": statistics.fmean(float(row.mase) for row in successful)
+        "mean_smae": statistics.fmean(float(row.smae) for row in successful)
         if successful else None,
+        "mean_srmse": statistics.fmean(float(row.srmse) for row in successful)
+        if successful else None,
+        "coverage": len(successful) / len(rows) if rows else 0.0,
+        "failure_rate": (
+            sum(row.status in {CRASHED, INVALID} for row in rows) / len(rows)
+            if rows else 0.0
+        ),
     }
+
+
+def _scaled_order(row: Outcome) -> tuple[float, float, float, str]:
+    assert row.smae is not None and row.srmse is not None
+    smae = float(row.smae)
+    srmse = float(row.srmse)
+    return joint_scaled_error(smae, srmse), smae, srmse, row.method

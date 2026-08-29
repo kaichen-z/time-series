@@ -8,6 +8,8 @@ import pytest
 
 import numerical_agent.run_task_conditioned_screening as screening_script
 from numerical_agent.run_task_conditioned_screening import (
+    SCALED_METRIC_POLICY,
+    _manifest_fingerprint,
     _merge_cache_summaries,
     _report,
     _training_outcomes,
@@ -391,6 +393,8 @@ def test_report_exposes_task_conditioning_and_family_coverage():
         "active_success_rate": 0.8,
         "failure_exposure": 0.1,
         "not_applicable_exposure": 0.1,
+        "mean_active_smae": 0.8,
+        "mean_active_srmse": 0.9,
         "global_oracle_retention": 1.0,
         "mean_active_oracle_regret": 0.0,
         "compression": 0.4,
@@ -426,6 +430,22 @@ def test_report_exposes_task_conditioning_and_family_coverage():
     assert "9 / 2 / 3" in report
     assert "Dev evaluations: 1" in report
     assert "safe on held-out Dev" in report
+    assert "Mean active sMAE" in report
+    assert "Mean active sRMSE" in report
+
+
+def test_screening_manifest_hash_binds_scaled_metric_objective():
+    manifest = {"schema_version": 2, "metric_policy": SCALED_METRIC_POLICY}
+
+    assert _manifest_fingerprint(manifest) != _manifest_fingerprint(
+        {
+            **manifest,
+            "metric_policy": {
+                **SCALED_METRIC_POLICY,
+                "objective": "legacy_mase",
+            },
+        }
+    )
 
 
 def test_rejected_candidate_is_not_published_as_frozen(tmp_path):

@@ -58,9 +58,17 @@ def diagnose_forecasts(
             {
                 "series_characteristics": list(task.characteristics()),
                 "horizon": task.horizon,
-                "mase": _finite_or_none(outcome.mase),
-                "mae": _finite_or_none(outcome.mae),
-                "smape": _finite_or_none(outcome.smape),
+                "smae": _finite_or_none(outcome.smae),
+                "srmse": _finite_or_none(outcome.srmse),
+                "smae_raw": _raw_scaled_or_none(outcome.smae_raw),
+                "srmse_raw": _raw_scaled_or_none(outcome.srmse_raw),
+                "smae_clipped": outcome.smae_clipped,
+                "srmse_clipped": outcome.srmse_clipped,
+                "diagnostic_only": {
+                    "mase": _finite_or_none(outcome.mase),
+                    "mae": _finite_or_none(outcome.mae),
+                    "smape": _finite_or_none(outcome.smape),
+                },
                 "mean_bias": _round(statistics.fmean(forecast) - statistics.fmean(truth)),
                 "early_mae": _round(early),
                 "late_mae": _round(late),
@@ -133,9 +141,10 @@ def _string_list(value: object, name: str, *, allow_empty: bool = False) -> list
 
 def _aggregate(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
     names = (
-        "mase",
-        "mae",
-        "smape",
+        "smae",
+        "srmse",
+        "smae_raw",
+        "srmse_raw",
         "mean_bias",
         "early_mae",
         "late_mae",
@@ -152,9 +161,22 @@ def _aggregate(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
     result["median_absolute_phase_shift_steps"] = (
         _round(statistics.median(abs(value) for value in shifts)) if shifts else None
     )
-    result["catastrophic_mase_tasks"] = sum(
-        1 for row in rows if isinstance(row.get("mase"), (int, float)) and float(row["mase"]) > 10.0
+    result["clipped_scaled_tasks"] = sum(
+        bool(row.get("smae_clipped")) or bool(row.get("srmse_clipped")) for row in rows
     )
+    diagnostic_summary: dict[str, float | None] = {}
+    for name in ("mase", "mae", "smape"):
+        values = []
+        for row in rows:
+            diagnostic = row.get("diagnostic_only")
+            if isinstance(diagnostic, Mapping) and isinstance(
+                diagnostic.get(name), (int, float)
+            ):
+                values.append(float(diagnostic[name]))
+        diagnostic_summary[f"median_{name}"] = (
+            _round(statistics.median(values)) if values else None
+        )
+    result["diagnostic_only"] = diagnostic_summary
     return result
 
 
@@ -231,7 +253,15 @@ def _correlation(left: Sequence[float], right: Sequence[float]) -> float | None:
 
 
 def _finite_or_none(value: float | None) -> float | None:
-    return _round(value) if value is not None and math.isfinite(value) else None
+    if value is None:
+        return None
+    return _round(value) if math.isfinite(value) else None
+
+
+def _raw_scaled_or_none(value: float | None) -> float | str | None:
+    if value is None:
+        return None
+    return _round(value) if math.isfinite(value) else "inf"
 
 
 def _round(value: float) -> float:

@@ -61,12 +61,14 @@ def _outcomes(tasks: tuple[Task, ...]) -> tuple[Outcome, ...]:
         index = int(task.task_id[-1])
         rows.extend(
             (
-                Outcome("stable", task.task_id, SUCCESS, mase=1.0, mae=1.0, smape=1.0),
-                Outcome("weak", task.task_id, SUCCESS, mase=5.0, mae=5.0, smape=5.0),
+                Outcome("stable", task.task_id, SUCCESS, smae=1.0, srmse=1.0, mase=1.0, mae=1.0, smape=1.0),
+                Outcome("weak", task.task_id, SUCCESS, smae=5.0, srmse=5.0, mase=5.0, mae=5.0, smape=5.0),
                 Outcome(
                     "intermittent",
                     task.task_id,
                     SUCCESS if index % 2 else NOT_APPLICABLE,
+                    smae=0.5 if index % 2 else None,
+                    srmse=0.5 if index % 2 else None,
                     mase=0.5 if index % 2 else None,
                     mae=0.5 if index % 2 else None,
                     smape=0.5 if index % 2 else None,
@@ -84,6 +86,36 @@ def _dictionary() -> FilterDictionary:
             FilterEntry("intermittent", "statistical", "keep", (), "specialist"),
         )
     )
+
+
+def test_filter_uses_joint_scaled_error_not_mase() -> None:
+    tasks = _tasks("scaled", 2)
+    dictionary = FilterDictionary(
+        (
+            FilterEntry("a", "statistical", "keep", (), "scaled winner"),
+            FilterEntry("b", "statistical", "keep", (), "legacy winner"),
+        )
+    )
+    rows = tuple(
+        row
+        for task in tasks
+        for row in (
+            Outcome(
+                "a", task.task_id, SUCCESS,
+                smae=0.8, srmse=0.8, mase=100.0,
+            ),
+            Outcome(
+                "b", task.task_id, SUCCESS,
+                smae=0.9, srmse=0.9, mase=0.01,
+            ),
+        )
+    )
+
+    score = evaluate_filter(dictionary, rows, tasks, reference_outcomes=rows)
+
+    assert set(score.selected.values()) == {"a"}
+    assert score.mean_smae == pytest.approx(0.8)
+    assert score.mean_srmse == pytest.approx(0.8)
 
 
 class _Runtime:
@@ -254,7 +286,8 @@ def test_history_feature_selector_reward_changes_when_bad_candidate_is_filtered(
     child = evaluate_filter(child_dictionary, outcomes, train, reference_outcomes=outcomes)
 
     assert child.coverage == 1.0
-    assert child.mean_mase < parent.mean_mase
+    assert child.mean_smae < parent.mean_smae
+    assert child.mean_srmse < parent.mean_srmse
 
 
 def test_applicability_is_checked_before_a_keep_method_is_ranked() -> None:
@@ -273,7 +306,8 @@ def test_applicability_is_checked_before_a_keep_method_is_ranked() -> None:
     child = evaluate_filter(child_dictionary, outcomes, train, reference_outcomes=outcomes)
 
     assert child.coverage == 1.0
-    assert child.mean_mase < parent.mean_mase
+    assert child.mean_smae < parent.mean_smae
+    assert child.mean_srmse < parent.mean_srmse
     assert child.eligible_counts == {
         "train0": 2,
         "train1": 3,
@@ -312,8 +346,10 @@ def test_single_agent_child_is_accepted_only_after_train_and_dev_improve(
 
     assert result.agent_calls == 1
     assert result.child.entries != result.parent.entries
-    assert result.train_child.mean_mase <= result.train_parent.mean_mase
-    assert result.dev_child.mean_mase <= result.dev_parent.mean_mase
+    assert result.train_child.mean_smae <= result.train_parent.mean_smae
+    assert result.train_child.mean_srmse <= result.train_parent.mean_srmse
+    assert result.dev_child.mean_smae <= result.dev_parent.mean_smae
+    assert result.dev_child.mean_srmse <= result.dev_parent.mean_srmse
     assert result.accepted
     assert (tmp_path / "generation_001_filter_request.txt").is_file()
     assert (tmp_path / "generation_001_filter_response.json").is_file()
@@ -335,7 +371,7 @@ def test_reliability_improvement_accepts_filter_when_forecast_is_unchanged(
         row
         for task in train + dev
         for row in (
-            Outcome("stable", task.task_id, SUCCESS, mase=1.0, mae=1.0, smape=1.0),
+            Outcome("stable", task.task_id, SUCCESS, smae=1.0, srmse=1.0, mase=1.0, mae=1.0, smape=1.0),
             Outcome("broken", task.task_id, CRASHED, detail="implementation failure"),
             Outcome("specialist", task.task_id, NOT_APPLICABLE),
         )
@@ -356,8 +392,10 @@ def test_reliability_improvement_accepts_filter_when_forecast_is_unchanged(
         required_targets=("broken",),
     )
 
-    assert result.train_child.mean_mase == result.train_parent.mean_mase
-    assert result.dev_child.mean_mase == result.dev_parent.mean_mase
+    assert result.train_child.mean_smae == result.train_parent.mean_smae
+    assert result.train_child.mean_srmse == result.train_parent.mean_srmse
+    assert result.dev_child.mean_smae == result.dev_parent.mean_smae
+    assert result.dev_child.mean_srmse == result.dev_parent.mean_srmse
     assert result.train_child.eligible_success_rate > result.train_parent.eligible_success_rate
     assert result.train_child.eligible_failure_rate < result.train_parent.eligible_failure_rate
     assert (
@@ -383,8 +421,8 @@ def test_filter_rejects_removing_healthy_candidate_without_any_quality_gain(
         row
         for task in train + dev
         for row in (
-            Outcome("stable", task.task_id, SUCCESS, mase=1.0, mae=1.0, smape=1.0),
-            Outcome("healthy", task.task_id, SUCCESS, mase=2.0, mae=2.0, smape=2.0),
+            Outcome("stable", task.task_id, SUCCESS, smae=1.0, srmse=1.0, mase=1.0, mae=1.0, smape=1.0),
+            Outcome("healthy", task.task_id, SUCCESS, smae=2.0, srmse=2.0, mase=2.0, mae=2.0, smape=2.0),
         )
     )
     agent = FakeLLMClient(
@@ -403,7 +441,8 @@ def test_filter_rejects_removing_healthy_candidate_without_any_quality_gain(
         required_targets=("healthy",),
     )
 
-    assert result.train_child.mean_mase == result.train_parent.mean_mase
+    assert result.train_child.mean_smae == result.train_parent.mean_smae
+    assert result.train_child.mean_srmse == result.train_parent.mean_srmse
     assert result.train_child.eligible_success_rate == result.train_parent.eligible_success_rate
     assert not result.accepted
 
@@ -446,7 +485,8 @@ def test_dev_failure_rejects_child_without_showing_dev_metrics_to_agent(tmp_path
         "not_applicable": 0,
         "crashed": 0,
         "invalid": 0,
-        "mean_mase": 0.5,
+        "mean_smae": 0.5,
+        "mean_srmse": 0.5,
     }
     assert conditional["dense"]["not_applicable"] == 2
     assert "dev0" not in request
@@ -465,7 +505,7 @@ def test_required_review_targets_are_prioritized_into_four_disjoint_batches() ->
             "not_applicable": 0,
             "crashed": 0,
             "invalid": 0,
-            "mean_mase": 10.0,
+            "mean_joint_scaled_error": 5.0,
         }
         for name in selected_names
     ]
@@ -476,7 +516,7 @@ def test_required_review_targets_are_prioritized_into_four_disjoint_batches() ->
             "not_applicable": 0,
             "crashed": 10,
             "invalid": 0,
-            "mean_mase": 5.0,
+            "mean_joint_scaled_error": 5.0,
         }
         for name in defective_names
     )
@@ -487,7 +527,7 @@ def test_required_review_targets_are_prioritized_into_four_disjoint_batches() ->
             "not_applicable": 40,
             "crashed": 0,
             "invalid": 0,
-            "mean_mase": 1.0,
+            "mean_joint_scaled_error": 1.0,
         }
         for name in specialist_names
     )

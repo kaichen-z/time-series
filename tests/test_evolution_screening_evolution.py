@@ -40,7 +40,9 @@ def test_screening_prompt_discloses_the_trusted_joint_clause_gate() -> None:
     assert "exact joint" in SCREENING_SYSTEM
     assert "75%" in SCREENING_SYSTEM
     assert "50%" in SCREENING_SYSTEM
-    assert "poor MASE alone" in SCREENING_SYSTEM
+    assert "poor scaled forecast quality alone" in SCREENING_SYSTEM
+    assert "Crash/Invalid" in SCREENING_SYSTEM
+    assert "not_applicable" in SCREENING_SYSTEM
 
 
 def test_failure_status_requires_real_crash_or_invalid_train_evidence() -> None:
@@ -66,7 +68,7 @@ def test_failure_status_requires_real_crash_or_invalid_train_evidence() -> None:
         )
 
     invalid_outcomes = tuple(
-        replace(row, status=INVALID, mase=None)
+        replace(row, status=INVALID, smae=None, srmse=None, mase=None)
         if row.method == "candidate" and row.task_id == tasks[0].task_id
         else row
         for row in outcomes
@@ -92,8 +94,8 @@ def _joint_support_fixture():
         row
         for task in tasks
         for row in (
-            Outcome("candidate", task.task_id, SUCCESS, mase=0.5),
-            Outcome("baseline", task.task_id, SUCCESS, mase=1.0),
+            Outcome("candidate", task.task_id, SUCCESS, smae=0.5, srmse=0.5, mase=0.5),
+            Outcome("baseline", task.task_id, SUCCESS, smae=1.0, srmse=1.0, mase=1.0),
         )
     )
     parent = ScreeningPolicy(
@@ -185,7 +187,8 @@ def test_specialized_clause_accepts_supported_reliable_baseline_uplift() -> None
     assert evidence[0].support == 2
     assert evidence[0].comparable == 2
     assert evidence[0].win_rate == 1.0
-    assert evidence[0].median_relative_mase < 0.0
+    assert evidence[0].median_delta_smae < 0.0
+    assert evidence[0].median_delta_srmse < 0.0
 
 
 def test_trusted_compiler_replaces_an_unsupported_conjunction_with_train_strata() -> None:
@@ -279,7 +282,7 @@ def test_screening_generations_never_use_dev_until_one_final_gate(tmp_path) -> N
     )
 
     dev_oracle_outcomes = tuple(
-        replace(row, status=SUCCESS, mase=0.1)
+        replace(row, status=SUCCESS, smae=0.1, srmse=0.1, mase=0.1)
         if row.method == "broken" and row.task_id.startswith("dev-")
         else row
         for row in _outcomes(train + dev)
@@ -498,10 +501,10 @@ def test_train_evidence_learns_grouped_performance_relative_to_baseline() -> Non
         Task("trend", tuple(float(i) for i in range(36)), 3, "1 day", (1.0,) * 3),
     )
     outcomes = (
-        Outcome("candidate", "secret-periodic-task", SUCCESS, mase=0.5),
-        Outcome("candidate", "trend", SUCCESS, mase=2.0),
-        Outcome("baseline", "secret-periodic-task", SUCCESS, mase=1.0),
-        Outcome("baseline", "trend", SUCCESS, mase=1.0),
+        Outcome("candidate", "secret-periodic-task", SUCCESS, smae=0.5, srmse=0.5, mase=0.5),
+        Outcome("candidate", "trend", SUCCESS, smae=2.0, srmse=2.0, mase=2.0),
+        Outcome("baseline", "secret-periodic-task", SUCCESS, smae=1.0, srmse=1.0, mase=1.0),
+        Outcome("baseline", "trend", SUCCESS, smae=1.0, srmse=1.0, mase=1.0),
     )
     policy = ScreeningPolicy(
         (
@@ -531,7 +534,8 @@ def test_train_evidence_learns_grouped_performance_relative_to_baseline() -> Non
         "ties": 0,
         "losses": 1,
         "win_rate": 0.5,
-        "mean_relative_mase": 0.125,
+        "delta_smae": 0.25,
+        "delta_srmse": 0.25,
     }
     groups = {row["group"]: row for row in evidence["groups"]}
     assert groups["periodicity:strong"]["wins"] == 1
@@ -540,6 +544,40 @@ def test_train_evidence_learns_grouped_performance_relative_to_baseline() -> Non
     assert len(evidence["oracle_profiles"]) == 1
     assert "periodicity:strong" in evidence["oracle_profiles"][0]
     assert "secret-periodic-task" not in repr(evidence["oracle_profiles"])
+
+
+def test_train_evidence_uses_scaled_pair_when_mase_disagrees() -> None:
+    task = Task("secret", (1.0,) * 12, 2, "1 day", (1.0, 1.0))
+    policy = ScreeningPolicy(
+        (
+            ScreeningEntry("candidate", "statistical", "keep", ApplicabilityPolicy(()), "candidate"),
+            ScreeningEntry("baseline", "tsfm", "keep", ApplicabilityPolicy(()), "baseline"),
+        ),
+        ("candidate", "baseline"),
+    )
+    outcomes = (
+        Outcome("candidate", "secret", SUCCESS, smae=0.8, srmse=0.9, mase=100.0),
+        Outcome("baseline", "secret", SUCCESS, smae=1.0, srmse=1.0, mase=0.01),
+    )
+
+    evidence = build_train_evidence(
+        frozenset({"candidate"}),
+        (task,),
+        outcomes,
+        policy=policy,
+        baseline_method="baseline",
+        min_group_support=1,
+    )[0]
+
+    assert evidence["relative_to_baseline"] == {
+        "comparable": 1,
+        "wins": 1,
+        "ties": 0,
+        "losses": 0,
+        "win_rate": 1.0,
+        "delta_smae": pytest.approx(-0.2),
+        "delta_srmse": pytest.approx(-0.1),
+    }
 
 
 def test_train_oracle_shield_adds_history_only_clause_without_exposing_ids() -> None:
@@ -555,11 +593,13 @@ def test_train_oracle_shield_adds_history_only_clause_without_exposing_ids() -> 
                 "candidate",
                 task.task_id,
                 SUCCESS,
+                smae=0.5 if task.task_id == "intermittent-id" else 2.0,
+                srmse=0.5 if task.task_id == "intermittent-id" else 2.0,
                 mase=0.5 if task.task_id == "intermittent-id" else 2.0,
                 ),
-                Outcome("baseline", task.task_id, SUCCESS, mase=1.0),
-                Outcome("stable_one", task.task_id, SUCCESS, mase=3.0),
-                Outcome("stable_two", task.task_id, SUCCESS, mase=3.0),
+                Outcome("baseline", task.task_id, SUCCESS, smae=1.0, srmse=1.0, mase=1.0),
+                Outcome("stable_one", task.task_id, SUCCESS, smae=3.0, srmse=3.0, mase=3.0),
+                Outcome("stable_two", task.task_id, SUCCESS, smae=3.0, srmse=3.0, mase=3.0),
         )
     )
     parent = ScreeningPolicy(
@@ -643,11 +683,11 @@ def test_refinement_targets_prioritize_missing_family_and_unsafe_broad_methods()
         row
         for task in tasks
         for row in (
-            Outcome("baseline", task.task_id, SUCCESS, mase=1.0),
-            Outcome("worker", task.task_id, SUCCESS, mase=0.8),
+            Outcome("baseline", task.task_id, SUCCESS, smae=1.0, srmse=1.0, mase=1.0),
+            Outcome("worker", task.task_id, SUCCESS, smae=0.8, srmse=0.8, mase=0.8),
             Outcome("bad", task.task_id, CRASHED),
-            Outcome("good", task.task_id, SUCCESS, mase=0.5),
-            Outcome("blend", task.task_id, SUCCESS, mase=0.7),
+            Outcome("good", task.task_id, SUCCESS, smae=0.5, srmse=0.5, mase=0.5),
+            Outcome("blend", task.task_id, SUCCESS, smae=0.7, srmse=0.7, mase=0.7),
         )
     )
     constraints = ScreeningConstraints(
@@ -687,9 +727,9 @@ def test_refinement_can_revisit_a_specialized_rule_that_did_not_generalize() -> 
         ("stable", "baseline", "blend"),
     )
     outcomes = (
-        Outcome("baseline", "one", SUCCESS, mase=1.0),
-        Outcome("stable", "one", SUCCESS, mase=0.8),
-        Outcome("blend", "one", SUCCESS, mase=0.7),
+        Outcome("baseline", "one", SUCCESS, smae=1.0, srmse=1.0, mase=1.0),
+        Outcome("stable", "one", SUCCESS, smae=0.8, srmse=0.8, mase=0.8),
+        Outcome("blend", "one", SUCCESS, smae=0.7, srmse=0.7, mase=0.7),
     )
     constraints = ScreeningConstraints(
         baseline_method="baseline",
@@ -724,10 +764,10 @@ def _outcomes(tasks: tuple[Task, ...]) -> tuple[Outcome, ...]:
         row
         for task in tasks
         for row in (
-            Outcome("stable", task.task_id, SUCCESS, mase=1.0, mae=1.0, smape=1.0),
-            Outcome("special", task.task_id, SUCCESS, mase=0.8, mae=0.8, smape=0.8),
+            Outcome("stable", task.task_id, SUCCESS, smae=1.0, srmse=1.0, mase=1.0, mae=1.0, smape=1.0),
+            Outcome("special", task.task_id, SUCCESS, smae=0.8, srmse=0.8, mase=0.8, mae=0.8, smape=0.8),
             Outcome("broken", task.task_id, CRASHED),
-            Outcome("timesfm", task.task_id, SUCCESS, mase=1.2, mae=1.2, smape=1.2),
+            Outcome("timesfm", task.task_id, SUCCESS, smae=1.2, srmse=1.2, mase=1.2, mae=1.2, smape=1.2),
         )
     )
 
@@ -779,7 +819,11 @@ def test_evolution_prompt_is_train_only_and_accepts_reliability_improvement(tmp_
     assert "relative_to_baseline" in payload["train_evidence"][0]
     assert result.accepted
     assert result.child.get("broken").status == "repair"  # type: ignore[union-attr]
-    assert result.gate.improved_dimensions == ("active_success_rate", "failure_exposure")
+    assert result.gate.improved_dimensions == (
+        "scaled_error",
+        "active_success_rate",
+        "failure_exposure",
+    )
 
 
 def test_evolution_repairs_one_malformed_response_without_guessing_actions(tmp_path) -> None:
@@ -864,7 +908,7 @@ def test_refinement_retries_when_required_family_is_left_broad(tmp_path) -> None
     )
     agent = FakeLLMClient([broad, conditioned])
     outcomes = tuple(
-        replace(row, mase=0.8)
+        replace(row, smae=0.8, srmse=0.8, mase=0.8)
         if row.method == "timesfm"
         else row
         for row in _outcomes(train + dev)
@@ -939,11 +983,11 @@ def test_rejected_batch_salvages_safe_train_generated_actions_individually(tmp_p
         row
         for task in train + dev
         for row in (
-            Outcome("stable", task.task_id, SUCCESS, mase=1.0),
-            Outcome("aux", task.task_id, SUCCESS, mase=1.1),
-            Outcome("oracle", task.task_id, SUCCESS, mase=0.5),
+            Outcome("stable", task.task_id, SUCCESS, smae=1.0, srmse=1.0, mase=1.0),
+            Outcome("aux", task.task_id, SUCCESS, smae=1.1, srmse=1.1, mase=1.1),
+            Outcome("oracle", task.task_id, SUCCESS, smae=0.5, srmse=0.5, mase=0.5),
             Outcome("broken", task.task_id, CRASHED),
-            Outcome("timesfm", task.task_id, SUCCESS, mase=1.2),
+            Outcome("timesfm", task.task_id, SUCCESS, smae=1.2, srmse=1.2, mase=1.2),
         )
     )
     response = json.dumps(

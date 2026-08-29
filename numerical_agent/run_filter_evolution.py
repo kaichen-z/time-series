@@ -12,7 +12,7 @@ from common.llm import CodexCLIClient, CodexCLIConfig
 from common.payload import write_json
 
 from .evolution import git
-from .evolution.cache import OutcomeCache
+from .evolution.cache import OutcomeCache, SCALED_METRIC_CAP, SCALED_METRIC_SCHEMA
 from .evolution.filtering import (
     build_filter_dictionary,
     evolve_filter_once,
@@ -23,6 +23,15 @@ from .evolution.filtering import (
 from .evolution.module import read_module
 from .evolution.portfolio import PolicyOutcomeCache, read_policy_file
 from .run_evolution import _evolution_tasks
+
+
+SCALED_METRIC_POLICY = {
+    "scaled_metric_schema": SCALED_METRIC_SCHEMA,
+    "scaled_metric_cap": SCALED_METRIC_CAP,
+    "objective": "pareto_minimize_smae_srmse",
+    "aggregation": "mean_capped_task_metrics",
+    "ordering": "joint_scaled_error_smae_srmse_name",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -136,7 +145,9 @@ def main(argv: list[str] | None = None) -> int:
         if before != after
     ]
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "metric_policy": SCALED_METRIC_POLICY,
+        "diagnostic_only_metrics": ["mase", "mae", "smape"],
         "generation": args.generation,
         "accepted": result.accepted,
         "reason": result.reason,
@@ -170,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
         "changes": changes,
         "source_hashes": source_hashes,
     }
+    payload["manifest_sha256"] = _manifest_fingerprint(payload)
     report_path = repo / f"generation_{args.generation:03d}_filter_result.json"
     write_json(report_path, payload)
     (repo / f"generation_{args.generation:03d}_filter_report.md").write_text(
@@ -190,6 +202,13 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _manifest_fingerprint(payload: dict[str, object]) -> str:
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _markdown(payload: dict[str, object]) -> str:
     parent = payload["parent"]
     child = payload["child"]
@@ -202,15 +221,16 @@ def _markdown(payload: dict[str, object]) -> str:
         f"- Elapsed: {float(payload['elapsed_seconds']):.2f} seconds",
         f"- Changes: {len(payload['changes'])}",
         "",
-        "| Split | Parent mean MASE | Child mean MASE | Parent coverage | Child coverage |",
-        "|---|---:|---:|---:|---:|",
+        "| Split | Parent mean sMAE | Child mean sMAE | Parent mean sRMSE | Child mean sRMSE | Parent coverage | Child coverage |",
+        "|---|---:|---:|---:|---:|---:|---:|",
     ]
     for split in ("train", "dev"):
         left = parent[split]
         right = child[split]
         assert isinstance(left, dict) and isinstance(right, dict)
         lines.append(
-            f"| {split} | {left['mean_mase']:.6f} | {right['mean_mase']:.6f} | "
+            f"| {split} | {left['mean_smae']:.6f} | {right['mean_smae']:.6f} | "
+            f"{left['mean_srmse']:.6f} | {right['mean_srmse']:.6f} | "
             f"{left['coverage']:.4f} | {right['coverage']:.4f} |"
         )
     lines.extend(("", "## Proposed changes", ""))

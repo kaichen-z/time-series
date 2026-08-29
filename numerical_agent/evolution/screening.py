@@ -7,7 +7,10 @@ import math
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
+from common.metrics import joint_scaled_error, pareto_scaled_improvement
+
 from .analysis_skills_template import analyze_series
+from .cache import SCALED_METRIC_CAP, SCALED_METRIC_SCHEMA
 from .execution import (
     CRASHED,
     INVALID,
@@ -43,6 +46,13 @@ _FEATURE_FIELDS = frozenset(
         "intermittency_cv2",
     }
 )
+_SCALED_METRIC_POLICY = {
+    "scaled_metric_schema": SCALED_METRIC_SCHEMA,
+    "scaled_metric_cap": SCALED_METRIC_CAP,
+    "objective": "pareto_minimize_smae_srmse",
+    "aggregation": "mean_capped_task_metrics",
+    "ordering": "joint_scaled_error_smae_srmse_name",
+}
 _FEATURE_OPERATORS = frozenset({"<", "<=", "==", ">=", ">", "in"})
 _SELECTABLE_STATUSES = frozenset({"keep", "specialized"})
 _STATUSES = frozenset({"keep", "specialized", "repair", "quarantine", "discard"})
@@ -336,6 +346,8 @@ class ScreeningScore:
     compression: float
     mean_active_candidates: float
     median_active_candidates: float
+    mean_active_smae: float
+    mean_active_srmse: float
     global_oracle_retention: float
     mean_active_oracle_regret: float
     mean_active_families: float
@@ -346,6 +358,7 @@ class ScreeningScore:
     unique_active_dictionaries: int
     mean_pairwise_jaccard: float
     conditioned_entries_by_family: Mapping[str, int]
+    oracle_names: Mapping[str, tuple[str, ...]]
 
 
 @dataclass(frozen=True)
@@ -547,11 +560,14 @@ def evaluate_screening(
     oracle_tasks = 0
     oracle_retained = 0
     regrets: list[float] = []
+    active_smae_scores: list[float] = []
+    active_srmse_scores: list[float] = []
     family_counts: list[int] = []
     fallback_count = 0
     policy_names = {entry.name for entry in policy.entries}
     active_signatures: list[frozenset[str]] = []
     profiles = {task.task_id: profile_task(task) for task in tasks}
+    oracle_names: dict[str, tuple[str, ...]] = {}
 
     for task in tasks:
         active_dictionary = materialize_active_dictionary(policy, profiles[task.task_id])
@@ -564,13 +580,19 @@ def evaluate_screening(
         active_rows = []
         for name in active_names:
             row = by_key.get((name, task.task_id))
-            if row is not None and row.status == SUCCESS and _finite_mase(row):
+            if row is not None and row.status == SUCCESS and _finite_scaled(row):
                 active_successes += 1
                 active_rows.append(row)
+                active_smae_scores.append(float(row.smae))
+                active_srmse_scores.append(float(row.srmse))
             elif row is not None and row.status == NOT_APPLICABLE:
                 active_not_applicable += 1
+                active_smae_scores.append(5.0)
+                active_srmse_scores.append(5.0)
             else:
                 active_failures += 1
+                active_smae_scores.append(5.0)
+                active_srmse_scores.append(5.0)
         covered += int(bool(active_rows))
 
         global_rows = [
@@ -579,21 +601,30 @@ def evaluate_screening(
             if row.task_id == task.task_id
             and row.method in policy_names
             and row.status == SUCCESS
-            and _finite_mase(row)
+            and _finite_scaled(row)
         ]
         if not global_rows:
+            oracle_names[task.task_id] = ()
             regrets.append(10.0)
             continue
         oracle_tasks += 1
-        best_global = min(float(row.mase) for row in global_rows)  # type: ignore[arg-type]
-        global_oracles = {
+        best_global_row = min(global_rows, key=_scaled_order)
+        best_global_smae = float(best_global_row.smae)
+        best_global_srmse = float(best_global_row.srmse)
+        global_oracles = tuple(sorted(
             row.method
             for row in global_rows
-            if abs(float(row.mase) - best_global) <= 1e-12  # type: ignore[arg-type]
-        }
-        oracle_retained += int(bool(global_oracles.intersection(active_names)))
+            if abs(float(row.smae) - best_global_smae) <= 1e-12
+            and abs(float(row.srmse) - best_global_srmse) <= 1e-12
+        ))
+        oracle_names[task.task_id] = global_oracles
+        oracle_retained += int(bool(set(global_oracles).intersection(active_names)))
         if active_rows:
-            best_active = min(float(row.mase) for row in active_rows)  # type: ignore[arg-type]
+            best_active_row = min(active_rows, key=_scaled_order)
+            best_active = joint_scaled_error(
+                float(best_active_row.smae), float(best_active_row.srmse)
+            )
+            best_global = joint_scaled_error(best_global_smae, best_global_srmse)
             regrets.append(max(0.0, (best_active - best_global) / (1.0 + best_global)))
         else:
             regrets.append(10.0)
@@ -621,6 +652,14 @@ def evaluate_screening(
         compression=active_attempts / max(1, len(policy.entries) * len(tasks)),
         mean_active_candidates=sum(counts) / task_denominator,
         median_active_candidates=_median(counts),
+        mean_active_smae=(
+            sum(active_smae_scores) / len(active_smae_scores)
+            if active_smae_scores else 5.0
+        ),
+        mean_active_srmse=(
+            sum(active_srmse_scores) / len(active_srmse_scores)
+            if active_srmse_scores else 5.0
+        ),
         global_oracle_retention=oracle_retained / max(1, oracle_tasks),
         mean_active_oracle_regret=sum(regrets) / task_denominator,
         mean_active_families=sum(family_counts) / task_denominator,
@@ -631,6 +670,7 @@ def evaluate_screening(
         unique_active_dictionaries=len(set(active_signatures)),
         mean_pairwise_jaccard=_mean_pairwise_jaccard(active_signatures),
         conditioned_entries_by_family=conditioned,
+        oracle_names=oracle_names,
     )
 
 
@@ -645,6 +685,17 @@ def compare_screening(
 ) -> ScreeningGateResult:
     """Apply the frozen Train-improvement and read-only Dev acceptance gate."""
     tolerance = 1e-12
+    train_scaled_improved = pareto_scaled_improvement(
+        train_parent.mean_active_smae,
+        train_parent.mean_active_srmse,
+        train_child.mean_active_smae,
+        train_child.mean_active_srmse,
+        tolerance=tolerance,
+    )
+    dev_scaled_safe = (
+        dev_child.mean_active_smae <= dev_parent.mean_active_smae + tolerance
+        and dev_child.mean_active_srmse <= dev_parent.mean_active_srmse + tolerance
+    )
     if train_child.coverage < 1.0 - tolerance or dev_child.coverage < 1.0 - tolerance:
         return ScreeningGateResult(False, "rejected: screening coverage is below 100%")
     if train_child.global_oracle_retention < 1.0 - tolerance:
@@ -669,6 +720,13 @@ def compare_screening(
         return ScreeningGateResult(
             False, "rejected: Train failure exposure count increased"
         )
+    if not train_scaled_improved:
+        return ScreeningGateResult(
+            False,
+            "rejected: Train sMAE/sRMSE did not improve under the Pareto gate",
+        )
+    if not dev_scaled_safe:
+        return ScreeningGateResult(False, "rejected: Dev sMAE or sRMSE regressed")
     if constraints is not None:
         if (
             train_child.min_active_candidates < constraints.min_active_candidates
@@ -703,6 +761,7 @@ def compare_screening(
             )
 
     dimensions = {
+        "scaled_error": (train_scaled_improved, dev_scaled_safe),
         "active_success_rate": (
             train_child.active_success_rate > train_parent.active_success_rate + tolerance,
             dev_child.active_success_rate + 0.005 >= dev_parent.active_success_rate,
@@ -748,8 +807,20 @@ def _needs_fallback(
     return "tsfm" in available_families and "tsfm" not in families
 
 
-def _finite_mase(row: Outcome) -> bool:
-    return row.mase is not None and math.isfinite(float(row.mase))
+def _finite_scaled(row: Outcome) -> bool:
+    return (
+        row.smae is not None
+        and row.srmse is not None
+        and math.isfinite(float(row.smae))
+        and math.isfinite(float(row.srmse))
+    )
+
+
+def _scaled_order(row: Outcome) -> tuple[float, float, float, str]:
+    assert row.smae is not None and row.srmse is not None
+    smae = float(row.smae)
+    srmse = float(row.srmse)
+    return joint_scaled_error(smae, srmse), smae, srmse, row.method
 
 
 def _median(values: Sequence[int]) -> float:
@@ -779,6 +850,7 @@ def _bucket(value: int, edges: Sequence[int]) -> str:
 
 def _policy_payload(policy: ScreeningPolicy) -> dict[str, object]:
     return {
+        "metric_policy": _SCALED_METRIC_POLICY,
         "entries": [
             {
                 "name": entry.name,

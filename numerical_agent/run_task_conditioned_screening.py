@@ -14,7 +14,7 @@ from common.data import load_tasks_by_id
 from common.llm import CodexCLIClient, CodexCLIConfig
 from common.payload import read_json_object, write_json
 
-from .evolution.cache import OutcomeCache
+from .evolution.cache import OutcomeCache, SCALED_METRIC_CAP, SCALED_METRIC_SCHEMA
 from .evolution.execution import Outcome, Task, require_unique_outcome_keys, require_unique_task_ids
 from .evolution.filtering import build_filter_dictionary, parse_filter_source
 from .evolution.module import read_module
@@ -40,6 +40,15 @@ from .evolution.screening_evolution import (
     select_refinement_targets,
 )
 from .main import _add_tsfm_runtime_options, _runtime_registry
+
+
+SCALED_METRIC_POLICY = {
+    "scaled_metric_schema": SCALED_METRIC_SCHEMA,
+    "scaled_metric_cap": SCALED_METRIC_CAP,
+    "objective": "pareto_minimize_smae_srmse",
+    "aggregation": "mean_capped_task_metrics",
+    "ordering": "joint_scaled_error_smae_srmse_name",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -303,7 +312,9 @@ def main(argv: list[str] | None = None) -> int:
     _write_active(output / "train_active_dictionaries.jsonl", parent, train)
     _write_active(output / "dev_active_dictionaries.jsonl", parent, dev)
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "metric_policy": SCALED_METRIC_POLICY,
+        "diagnostic_only_metrics": ["mase", "mae", "smape"],
         "phase": "task_conditioned_screening",
         "train_tasks": len(train),
         "dev_tasks": len(dev),
@@ -338,6 +349,7 @@ def main(argv: list[str] | None = None) -> int:
         "elapsed_seconds": time.monotonic() - started,
         "public_test_accessed": False,
     }
+    manifest["manifest_sha256"] = _manifest_fingerprint(manifest)
     write_json(output / "screening_manifest.json", manifest)
     (output / "SCREENING_REPORT.md").write_text(_report(manifest), encoding="utf-8")
     print(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True))
@@ -458,6 +470,13 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _manifest_fingerprint(payload: dict[str, object]) -> str:
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _write_policy_artifacts(
     output: Path,
     policy: ScreeningPolicy,
@@ -558,10 +577,10 @@ def _report(manifest: dict) -> str:
         f"- Dev evaluations: {manifest.get('dev_evaluations', 'not recorded')}",
         f"- Final Dev gate: {manifest.get('final_dev_gate', {}).get('reason', 'not recorded')}",
         "",
-        "| Split | Coverage | Active success | Failure exposure | N/A exposure | Oracle retention | Mean regret | Compression |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
-        f"| Train | {train['coverage']:.4f} | {train['active_success_rate']:.4f} | {train['failure_exposure']:.4f} | {train['not_applicable_exposure']:.4f} | {train['global_oracle_retention']:.4f} | {train['mean_active_oracle_regret']:.4f} | {train['compression']:.4f} |",
-        f"| Dev | {dev['coverage']:.4f} | {dev['active_success_rate']:.4f} | {dev['failure_exposure']:.4f} | {dev['not_applicable_exposure']:.4f} | {dev['global_oracle_retention']:.4f} | {dev['mean_active_oracle_regret']:.4f} | {dev['compression']:.4f} |",
+        "| Split | Mean active sMAE | Mean active sRMSE | Coverage | Active success | Failure exposure | N/A exposure | Oracle retention | Mean regret | Compression |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        f"| Train | {train['mean_active_smae']:.4f} | {train['mean_active_srmse']:.4f} | {train['coverage']:.4f} | {train['active_success_rate']:.4f} | {train['failure_exposure']:.4f} | {train['not_applicable_exposure']:.4f} | {train['global_oracle_retention']:.4f} | {train['mean_active_oracle_regret']:.4f} | {train['compression']:.4f} |",
+        f"| Dev | {dev['mean_active_smae']:.4f} | {dev['mean_active_srmse']:.4f} | {dev['coverage']:.4f} | {dev['active_success_rate']:.4f} | {dev['failure_exposure']:.4f} | {dev['not_applicable_exposure']:.4f} | {dev['global_oracle_retention']:.4f} | {dev['mean_active_oracle_regret']:.4f} | {dev['compression']:.4f} |",
         "",
         "| Split | Mean active | Min / Max | Unique dictionaries | Pairwise Jaccard | Conditioned Statistical / TSFM / Combined |",
         "|---|---:|---:|---:|---:|---:|",

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from common.llm import LLMClient, parse_json_object
+from common.metrics import joint_scaled_error, pareto_scaled_improvement
 
 from .execution import (
     CRASHED,
@@ -126,8 +127,10 @@ class FilterDictionary:
 
 @dataclass(frozen=True)
 class FilterScore:
-    mean_mase: float
-    median_mase: float
+    mean_smae: float
+    mean_srmse: float
+    median_smae: float
+    median_srmse: float
     coverage: float
     selected: Mapping[str, str]
     eligible_counts: Mapping[str, int]
@@ -330,19 +333,16 @@ def evaluate_filter(
     references = tuple(reference_outcomes)
     selected: dict[str, str] = {}
     eligible_counts: dict[str, int] = {}
-    scores: list[float] = []
+    smae_scores: list[float] = []
+    srmse_scores: list[float] = []
     eligible_attempts = 0
     eligible_successes = 0
     eligible_not_applicable = 0
     eligible_failures = 0
-    successful_mase = [
-        float(row.mase) for row in outcomes
-        if row.status == SUCCESS and row.mase is not None and math.isfinite(row.mase)
-    ]
-    penalty = max(100.0, 10.0 * statistics.median(successful_mase)) if successful_mase else 100.0
+    penalty = 5.0
     for task in tasks:
         task_tags = frozenset(task.characteristics())
-        ranked: list[tuple[float, str]] = []
+        ranked: list[tuple[float, float, float, str]] = []
         for entry in dictionary.entries:
             if entry.status not in {"keep", "specialized"}:
                 continue
@@ -353,36 +353,46 @@ def evaluate_filter(
             if (
                 current is not None
                 and current.status == SUCCESS
-                and current.mase is not None
-                and math.isfinite(current.mase)
+                and _finite_scaled(current)
             ):
                 eligible_successes += 1
             elif current is not None and current.status == NOT_APPLICABLE:
                 eligible_not_applicable += 1
             else:
                 eligible_failures += 1
-            history_scores = [
-                float(row.mase)
+            history_rows = [
+                row
                 for row in references
                 if row.method == entry.name
                 and row.task_id != task.task_id
                 and row.status == SUCCESS
-                and row.mase is not None
-                and math.isfinite(row.mase)
+                and _finite_scaled(row)
             ]
-            if history_scores:
-                ranked.append((statistics.fmean(history_scores), entry.name))
+            if history_rows:
+                mean_smae = statistics.fmean(float(row.smae) for row in history_rows)
+                mean_srmse = statistics.fmean(float(row.srmse) for row in history_rows)
+                ranked.append(
+                    (
+                        joint_scaled_error(mean_smae, mean_srmse),
+                        mean_smae,
+                        mean_srmse,
+                        entry.name,
+                    )
+                )
         eligible_counts[task.task_id] = len(ranked)
         if not ranked:
-            scores.append(penalty)
+            smae_scores.append(penalty)
+            srmse_scores.append(penalty)
             continue
-        name = min(ranked)[1]
+        name = min(ranked)[3]
         selected[task.task_id] = name
         row = by_key.get((name, task.task_id))
-        if row is None or row.status != SUCCESS or row.mase is None or not math.isfinite(row.mase):
-            scores.append(penalty)
+        if row is None or row.status != SUCCESS or not _finite_scaled(row):
+            smae_scores.append(penalty)
+            srmse_scores.append(penalty)
         else:
-            scores.append(float(row.mase))
+            smae_scores.append(float(row.smae))
+            srmse_scores.append(float(row.srmse))
     successes = sum(
         by_key.get((name, task_id)) is not None
         and by_key[(name, task_id)].status == SUCCESS
@@ -390,8 +400,10 @@ def evaluate_filter(
     )
     denominator = max(1, eligible_attempts)
     return FilterScore(
-        statistics.fmean(scores) if scores else math.inf,
-        statistics.median(scores) if scores else math.inf,
+        statistics.fmean(smae_scores) if smae_scores else math.inf,
+        statistics.fmean(srmse_scores) if srmse_scores else math.inf,
+        statistics.median(smae_scores) if smae_scores else math.inf,
+        statistics.median(srmse_scores) if srmse_scores else math.inf,
         successes / len(tasks) if tasks else 0.0,
         selected,
         eligible_counts,
@@ -525,17 +537,33 @@ def _forecast_non_regression(parent: FilterScore, child: FilterScore) -> bool:
     tolerance = 1e-12
     return (
         child.coverage + tolerance >= parent.coverage
-        and child.mean_mase <= parent.mean_mase + tolerance
-        and child.median_mase <= parent.median_mase + tolerance
+        and child.mean_smae <= parent.mean_smae + tolerance
+        and child.mean_srmse <= parent.mean_srmse + tolerance
+        and child.median_smae <= parent.median_smae + tolerance
+        and child.median_srmse <= parent.median_srmse + tolerance
     )
 
 
 def _forecast_improved(parent: FilterScore, child: FilterScore) -> bool:
     tolerance = 1e-12
-    return (
-        child.mean_mase < parent.mean_mase - tolerance
-        or child.median_mase < parent.median_mase - tolerance
-        or child.coverage > parent.coverage + tolerance
+    return any(
+        (
+            pareto_scaled_improvement(
+                parent.mean_smae,
+                parent.mean_srmse,
+                child.mean_smae,
+                child.mean_srmse,
+                tolerance=tolerance,
+            ),
+            pareto_scaled_improvement(
+                parent.median_smae,
+                parent.median_srmse,
+                child.median_smae,
+                child.median_srmse,
+                tolerance=tolerance,
+            ),
+            child.coverage > parent.coverage + tolerance,
+        )
     )
 
 
@@ -570,18 +598,19 @@ def _selection_failures(
         selected = next((row for row in rows if row.method == selected_name), None)
         successful = [
             row for row in rows
-            if row.status == SUCCESS and row.mase is not None and math.isfinite(row.mase)
+            if row.status == SUCCESS and _finite_scaled(row)
         ]
-        best = min(successful, key=lambda row: (float(row.mase), row.method)) if successful else None
-        selected_mase = (
-            float(selected.mase)
-            if selected is not None and selected.status == SUCCESS and selected.mase is not None
+        best = min(successful, key=_scaled_order) if successful else None
+        selected_pair = (
+            (float(selected.smae), float(selected.srmse))
+            if selected is not None and selected.status == SUCCESS and _finite_scaled(selected)
             else None
         )
         materially_bad = (
-            selected_mase is None
+            selected_pair is None
             or best is None
-            or selected_mase > float(best.mase) * 1.25 + 1e-12
+            or joint_scaled_error(*selected_pair)
+            > joint_scaled_error(float(best.smae), float(best.srmse)) * 1.25 + 1e-12
         )
         if materially_bad:
             failures.append(
@@ -590,9 +619,11 @@ def _selection_failures(
                     "history_tags": list(task.characteristics()),
                     "selected": selected_name,
                     "selected_status": selected.status if selected is not None else "missing",
-                    "selected_mase": selected_mase,
+                    "selected_smae": selected_pair[0] if selected_pair is not None else None,
+                    "selected_srmse": selected_pair[1] if selected_pair is not None else None,
                     "best_available": best.method if best is not None else None,
-                    "best_mase": float(best.mase) if best is not None else None,
+                    "best_smae": float(best.smae) if best is not None else None,
+                    "best_srmse": float(best.srmse) if best is not None else None,
                 }
             )
     return failures
@@ -645,10 +676,10 @@ def _required_review_targets(
         report = by_name.get(name, {})
         defects = int(report.get("crashed", 0)) + int(report.get("invalid", 0))
         not_applicable = int(report.get("not_applicable", 0))
-        mean_mase = report.get("mean_mase")
-        finite_mase = (
-            float(mean_mase)
-            if isinstance(mean_mase, (int, float)) and math.isfinite(float(mean_mase))
+        mean_joint = report.get("mean_joint_scaled_error")
+        finite_joint = (
+            float(mean_joint)
+            if isinstance(mean_joint, (int, float)) and math.isfinite(float(mean_joint))
             else -1.0
         )
         tier = 0 if name in selected else (1 if defects else 2)
@@ -657,7 +688,7 @@ def _required_review_targets(
             -selected_counts.get(name, 0),
             -defects,
             -not_applicable,
-            -finite_mase,
+            -finite_joint,
             name,
         )
 
@@ -683,7 +714,7 @@ def _conditional_evidence(
                 continue
             successful = [
                 row for row in subset
-                if row.status == SUCCESS and row.mase is not None and math.isfinite(row.mase)
+                if row.status == SUCCESS and _finite_scaled(row)
             ]
             tag_rows[tag] = {
                 "tasks": len(subset),
@@ -691,7 +722,9 @@ def _conditional_evidence(
                 "not_applicable": sum(row.status == NOT_APPLICABLE for row in subset),
                 "crashed": sum(row.status == CRASHED for row in subset),
                 "invalid": sum(row.status == INVALID for row in subset),
-                "mean_mase": statistics.fmean(float(row.mase) for row in successful)
+                "mean_smae": statistics.fmean(float(row.smae) for row in successful)
+                if successful else None,
+                "mean_srmse": statistics.fmean(float(row.srmse) for row in successful)
                 if successful else None,
             }
         result[name] = tag_rows
@@ -709,17 +742,19 @@ def _evidence(
     payload = []
     for entry in dictionary.entries:
         rows = [row for row in outcomes if row.method == entry.name]
-        successes = [row for row in rows if row.status == SUCCESS and row.mase is not None]
+        successes = [row for row in rows if row.status == SUCCESS and _finite_scaled(row)]
         ranks = []
         top_quartile = 0
         for row in successes:
             peers = sorted(
-                float(peer.mase) for peer in by_task.get(row.task_id, ())
-                if peer.status == SUCCESS and peer.mase is not None and math.isfinite(peer.mase)
+                joint_scaled_error(float(peer.smae), float(peer.srmse))
+                for peer in by_task.get(row.task_id, ())
+                if peer.status == SUCCESS and _finite_scaled(peer)
             )
             if not peers:
                 continue
-            rank = sum(value < float(row.mase) for value in peers) / max(1, len(peers) - 1)
+            row_score = joint_scaled_error(float(row.smae), float(row.srmse))
+            rank = sum(value < row_score for value in peers) / max(1, len(peers) - 1)
             ranks.append(rank)
             top_quartile += rank <= 0.25
         payload.append(
@@ -732,8 +767,14 @@ def _evidence(
                 "not_applicable": sum(row.status == NOT_APPLICABLE for row in rows),
                 "crashed": sum(row.status == CRASHED for row in rows),
                 "invalid": sum(row.status == INVALID for row in rows),
-                "mean_mase": statistics.fmean(float(row.mase) for row in successes)
+                "mean_smae": statistics.fmean(float(row.smae) for row in successes)
                 if successes else None,
+                "mean_srmse": statistics.fmean(float(row.srmse) for row in successes)
+                if successes else None,
+                "mean_joint_scaled_error": statistics.fmean(
+                    joint_scaled_error(float(row.smae), float(row.srmse))
+                    for row in successes
+                ) if successes else None,
                 "median_rank_percentile": statistics.median(ranks) if ranks else None,
                 "top_quartile_rate": top_quartile / len(ranks) if ranks else 0.0,
             }
@@ -760,21 +801,39 @@ def _strictly_discardable(
             if other == entry.name or set(other_rows) != task_ids:
                 continue
             comparisons = [
-                (
-                    other_rows[task_id].status == SUCCESS
-                    and other_rows[task_id].mase is not None
-                    and rows[task_id].mase is not None
-                    and float(other_rows[task_id].mase) <= float(rows[task_id].mase)
-                )
+                other_rows[task_id].status == SUCCESS
+                and _finite_scaled(other_rows[task_id])
+                and _finite_scaled(rows[task_id])
+                and float(other_rows[task_id].smae) <= float(rows[task_id].smae) + 1e-12
+                and float(other_rows[task_id].srmse) <= float(rows[task_id].srmse) + 1e-12
                 for task_id in task_ids
             ]
             strict = any(
-                other_rows[task_id].mase is not None
-                and rows[task_id].mase is not None
-                and float(other_rows[task_id].mase) < float(rows[task_id].mase)
+                _finite_scaled(other_rows[task_id])
+                and _finite_scaled(rows[task_id])
+                and (
+                    float(other_rows[task_id].smae) < float(rows[task_id].smae) - 1e-12
+                    or float(other_rows[task_id].srmse) < float(rows[task_id].srmse) - 1e-12
+                )
                 for task_id in task_ids
             )
             if all(comparisons) and strict:
                 discardable.add(entry.name)
                 break
     return frozenset(discardable)
+
+
+def _finite_scaled(row: Outcome) -> bool:
+    return (
+        row.smae is not None
+        and row.srmse is not None
+        and math.isfinite(float(row.smae))
+        and math.isfinite(float(row.srmse))
+    )
+
+
+def _scaled_order(row: Outcome) -> tuple[float, float, float, str]:
+    assert row.smae is not None and row.srmse is not None
+    smae = float(row.smae)
+    srmse = float(row.srmse)
+    return joint_scaled_error(smae, srmse), smae, srmse, row.method
