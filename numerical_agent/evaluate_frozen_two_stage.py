@@ -181,6 +181,8 @@ def main(argv: list[str] | None = None) -> int:
     selector_dir = Path(args.selector_dir).resolve()
     module = read_module(repo / "methods.py")
     portfolio = read_policy_file(repo / "policies.py")
+    portfolio.validate_namespace(module.names())
+    candidate_names = tuple(module.names()) + portfolio.names
     screening = parse_screening_source(
         (screen_dir / "frozen_screening_policy.py").read_text(encoding="utf-8")
     )
@@ -193,8 +195,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     selector_manifest = read_json_object(selector_dir / "selector_manifest.json")
     ranking = tuple(str(name) for name in selector_manifest.get("frozen_global_ranking", ()))
-    if len(ranking) != 103 or len(set(ranking)) != 103:
-        raise ValueError("selector manifest does not contain one frozen 103-candidate ranking")
+    _validate_frozen_ranking(ranking, candidate_names)
 
     outcomes, final_cache = _training_outcomes(args, repo, module, portfolio, tasks)
     by_key = {(row.method, row.task_id): row for row in outcomes}
@@ -295,6 +296,27 @@ def main(argv: list[str] | None = None) -> int:
         "paired_vs_A": paired,
     }, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
+
+
+def _validate_frozen_ranking(
+    ranking: Sequence[str], candidate_names: Sequence[str]
+) -> None:
+    """Require one unique ranking over the complete runtime namespace."""
+    names = tuple(ranking)
+    expected = set(candidate_names)
+    actual = set(names)
+    duplicates = tuple(sorted(name for name in actual if names.count(name) > 1))
+    missing = tuple(sorted(expected - actual))
+    extra = tuple(sorted(actual - expected))
+    if duplicates or missing or extra:
+        details = []
+        if duplicates:
+            details.append("duplicate=" + ", ".join(duplicates))
+        if missing:
+            details.append("missing=" + ", ".join(missing))
+        if extra:
+            details.append("extra=" + ", ".join(extra))
+        raise ValueError("selector ranking namespace mismatch: " + "; ".join(details))
 
 
 def _public_test_tasks(split_file: str | Path, tasks_file: str | Path) -> tuple[Task, ...]:

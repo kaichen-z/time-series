@@ -117,6 +117,7 @@ class ForecastStore:
         ).hexdigest()
         self.hits = 0
         self.misses = 0
+        self._materialized_leaf_outcomes: dict[str, Outcome] = {}
 
     def forecast(
         self, name: str, history: tuple[float, ...], horizon: int, frequency: str
@@ -204,33 +205,43 @@ class ForecastStore:
         frequency: str,
     ) -> Outcome:
         """Resolve one cached leaf; Combined policies cannot be parents in this graph."""
+        key = self._key(name, history, horizon, frequency)
+        if key in self._materialized_leaf_outcomes:
+            return self._materialized_leaf_outcomes[key]
         try:
-            return Outcome(
+            outcome = Outcome(
                 name,
                 "history-only",
                 SUCCESS,
                 forecast=self.forecast(name, history, horizon, frequency),
             )
         except self.not_applicable as error:
-            return Outcome(name, "history-only", NOT_APPLICABLE, detail=str(error)[:200])
+            outcome = Outcome(
+                name, "history-only", NOT_APPLICABLE, detail=str(error)[:200]
+            )
         except _StructuralForecastInvalid as error:
-            return Outcome(name, "history-only", INVALID, detail=str(error)[:200])
+            outcome = Outcome(name, "history-only", INVALID, detail=str(error)[:200])
         except ValueError as error:
             if name in self.tsfm:
-                return Outcome(
+                outcome = Outcome(
                     name,
                     "history-only",
                     CRASHED,
                     detail=f"{type(error).__name__}: {error}"[:200],
                 )
-            return Outcome(name, "history-only", INVALID, detail=str(error)[:200])
+            else:
+                outcome = Outcome(
+                    name, "history-only", INVALID, detail=str(error)[:200]
+                )
         except Exception as error:
-            return Outcome(
+            outcome = Outcome(
                 name,
                 "history-only",
                 CRASHED,
                 detail=f"{type(error).__name__}: {error}"[:200],
             )
+        self._materialized_leaf_outcomes[key] = outcome
+        return outcome
 
     def _key(self, name, history, horizon, frequency) -> str:
         payload = json.dumps({

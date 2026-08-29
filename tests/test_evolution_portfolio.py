@@ -687,6 +687,64 @@ def test_median_combines_three_tsfm_and_statistical_parent_forecasts_pointwise()
     assert combined.forecast == (20.0, 20.0)
 
 
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    (
+        ((sys.float_info.max, sys.float_info.max), sys.float_info.max),
+        ((-sys.float_info.max, sys.float_info.max), 0.0),
+        (
+            (
+                sys.float_info.max,
+                sys.float_info.max,
+                sys.float_info.max,
+                sys.float_info.max,
+            ),
+            sys.float_info.max,
+        ),
+        (
+            (
+                -sys.float_info.max,
+                -sys.float_info.max,
+                sys.float_info.max,
+                sys.float_info.max,
+            ),
+            0.0,
+        ),
+    ),
+)
+def test_even_median_is_finite_for_extreme_values(
+    values: tuple[float, ...], expected: float
+) -> None:
+    parent_names = (
+        "toto_2_0",
+        "timesfm_2_5",
+        "chronos_bolt",
+        "granite_ttm_r2",
+    )[: len(values)]
+    policy = CombinedPolicy(
+        "combined_even_extreme_median",
+        parent_names,
+        "median",
+        fallback_parent="toto_2_0",
+    )
+
+    combined = combine_materialized_outcome(
+        policy,
+        {
+            name: _successful_parent(name, (value,))
+            for name, value in zip(parent_names, values, strict=True)
+        },
+        task_id="operator",
+        history=(1.0, 2.0),
+        horizon=1,
+        frequency="D",
+    )
+
+    assert combined.status == SUCCESS
+    assert combined.forecast == (expected,)
+    assert combined.detail == ""
+
+
 def test_trimmed_mean_removes_one_low_and_one_high_parent_pointwise() -> None:
     task = _operator_task()
     policy = CombinedPolicy(

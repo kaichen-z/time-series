@@ -854,7 +854,9 @@ def combine_materialized_forecast(
         forecast = parent_outcomes[selected].forecast
     elif policy.operator == "median":
         forecast = tuple(
-            statistics.median(outcome.forecast[index] for outcome in parents)
+            _overflow_stable_median(
+                tuple(outcome.forecast[index] for outcome in parents)
+            )
             for index in range(horizon)
         )
     elif policy.operator == "trimmed_mean":
@@ -897,6 +899,17 @@ def _overflow_stable_mean(values: Sequence[float]) -> float:
     if maximum <= sys.float_info.max / len(numbers):
         return statistics.fmean(numbers)
     return float(sum(Fraction.from_float(value) for value in numbers) / len(numbers))
+
+
+def _overflow_stable_median(values: Sequence[float]) -> float:
+    """Return the median while averaging an even pair without overflow."""
+    numbers = tuple(sorted(float(value) for value in values))
+    if not numbers:
+        raise ValueError("median requires at least one value")
+    middle = len(numbers) // 2
+    if len(numbers) % 2:
+        return numbers[middle]
+    return _overflow_stable_mean(numbers[middle - 1 : middle + 1])
 
 
 def _combine_forecasts(

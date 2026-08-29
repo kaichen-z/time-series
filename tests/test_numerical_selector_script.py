@@ -210,6 +210,81 @@ def seasonal_naive(history, horizon, frequency):
     assert runtime.calls.count("method_tsfm_0031") == 1
 
 
+@pytest.mark.parametrize("failure_status", (INVALID, CRASHED))
+def test_forecast_store_materializes_shared_failed_tsfm_leaf_once_in_memory(
+    tmp_path, failure_status
+):
+    methods = tmp_path / "methods.py"
+    methods.write_text(
+        MODULE_HEADER
+        + '''
+
+def unused_statistical_leaf(history, horizon, frequency):
+    """Satisfy the parsed module contract without entering this test graph."""
+    return [0.0] * horizon
+''',
+        encoding="utf-8",
+    )
+    module = read_module(methods)
+    base = PolicyPortfolio.flagship5()
+    combined = tuple(
+        CombinedPolicy(
+            f"combined_failed_leaf_{index}",
+            ("toto_2_0", "timesfm_2_5"),
+            "median",
+            fallback_parent="toto_2_0",
+        )
+        for index in range(3)
+    )
+    portfolio = PolicyPortfolio(base.tsfm, combined)
+
+    class FailedLeafRuntime:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def supports(self, candidate):
+            return candidate.method_id in {"method_tsfm_0014", "method_tsfm_0031"}
+
+        def forecast(self, candidate, history, horizon, frequency):
+            del history, frequency
+            self.calls.append(candidate.method_id)
+            if candidate.method_id == "method_tsfm_0014":
+                return (10.0,) * horizon
+            if failure_status == INVALID:
+                return ()
+            raise RuntimeError("transport failed")
+
+    runtime = FailedLeafRuntime()
+    registry = RuntimeRegistry({"timesfm": runtime, "tsfm_worker": runtime})
+    cache = tmp_path / "cache"
+    first = ForecastStore(
+        cache, methods, None, module, portfolio, registry, "screen-hash"
+    )
+    try:
+        assert first.forecast(
+            "combined_failed_leaf_0", (1.0, 2.0), 2, "D"
+        ) == (10.0, 10.0)
+        assert first.forecast(
+            "combined_failed_leaf_1", (1.0, 2.0), 2, "D"
+        ) == (10.0, 10.0)
+    finally:
+        first.close()
+
+    assert runtime.calls.count("method_tsfm_0031") == 1
+
+    second = ForecastStore(
+        cache, methods, None, module, portfolio, registry, "screen-hash"
+    )
+    try:
+        assert second.forecast(
+            "combined_failed_leaf_2", (1.0, 2.0), 2, "D"
+        ) == (10.0, 10.0)
+    finally:
+        second.close()
+
+    assert runtime.calls.count("method_tsfm_0031") == 2
+
+
 def test_forecast_store_preserves_tsfm_invalid_and_crashed_parent_statuses(tmp_path):
     methods = tmp_path / "methods.py"
     methods.write_text(
