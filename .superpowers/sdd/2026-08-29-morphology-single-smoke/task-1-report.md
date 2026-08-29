@@ -120,3 +120,50 @@ $ git diff --check
 Review follow-up concern: the previously suggested v13 screening artifact hashes differently
 from the supplied frozen Decision artifact's declared binding; the CLI now rejects that mismatch
 instead of silently combining incompatible reviewed artifacts.
+
+## Fix round 2 — re-review boundary hardening
+
+Implemented `7e28894944aa8c8aa1527280ee22dcd7878329a1` to address the second re-review:
+
+- The selected task remains raw bytes until post-freeze scoring. Pre-freeze JSON decoding uses a
+  structural scanner that replaces every `future_values` JSON value with `null`, so label numeric
+  tokens are never decoded. The history projection is a normal `common.data.Task` with an empty
+  `future_values` tuple before it is converted to the Numerical loop task.
+- `--task-id` is rejected unless it is one exact basename component; directory candidates cannot
+  escape their source, and the decoded top-level `benchmark_id` must equal the selected ID for
+  directory, JSON, and JSONL inputs.
+- Reviewed artifacts are read exactly once into a private temporary snapshot. SHA-256 values are
+  calculated from those bytes and every methods/skills/policy/screening/Decision consumer reads
+  the snapshot rather than the caller path.
+
+RED evidence before these changes:
+
+```text
+$ pytest -q tests/test_run_morphology_smoke.py
+FAILED test_selected_future_json_is_not_decoded_until_after_package_freeze
+AssertionError: future labels were decoded before package freeze
+FAILED test_selected_task_uses_the_common_history_only_task_model
+AttributeError: '_LoadedTask' object has no attribute 'task'
+FAILED test_task_id_rejects_traversal_and_decoded_id_mismatches
+Failed: DID NOT RAISE SmokeError
+FAILED test_artifact_snapshot_binds_the_hashed_bytes_to_execution_input
+AttributeError: module ... has no attribute '_ArtifactSnapshots'
+4 failed, 11 passed
+```
+
+GREEN evidence:
+
+```text
+$ pytest -q tests/test_run_morphology_smoke.py
+15 passed
+
+$ pytest -q tests/test_run_morphology_smoke.py \
+    tests/test_numerical_morphology_loop.py \
+    tests/test_evolution_morphology.py \
+    tests/test_evolution_morphology_consistency.py \
+    tests/test_evolution_policy_targetwise.py
+107 passed
+
+$ python -m py_compile numerical_agent/run_morphology_smoke.py
+$ git diff --check
+```
