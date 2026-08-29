@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+from common.data import Task as DrCiKTask
 from common.llm import CodexCLIClient, CodexCLIConfig
 from common.metrics import drcik_point_metrics, mase
 from numerical_agent.evolution import MorphologyReasoner, run_numerical_loop
@@ -48,13 +49,83 @@ _BENCHMARK_ID = re.compile(r'"benchmark_id"\s*:\s*("(?:[^"\\]|\\.)*")')
 
 @dataclass(frozen=True)
 class _LoadedTask:
-    """One selected task with its history decoded and future left unread until freeze."""
+    """One normal history-only Dr-CiK task plus deferred raw task bytes."""
 
-    task_id: str
-    history_values: tuple[float, ...]
-    prediction_length: int
-    frequency: str
-    record: Mapping[str, object]
+    task: DrCiKTask
+    raw_record: bytes
+    source: Path
+
+
+_ARTIFACT_OPTIONS = {
+    "reviewed_methods": ("methods_path", "methods.py"),
+    "reviewed_skills": ("skills_path", "skills.py"),
+    "reviewed_policies": ("policies_path", "policies.py"),
+    "reviewed_screening": ("screening_path", "screening.py"),
+    "reviewed_decision": ("decision_path", "decision.py"),
+}
+
+
+@dataclass
+class _ArtifactSnapshots:
+    """Immutable local copies whose hashes exactly bind the executed artifact bytes."""
+
+    fingerprints: Mapping[str, str]
+    paths: Mapping[str, Path]
+    _texts: Mapping[str, str]
+    _temporary: tempfile.TemporaryDirectory
+
+    @classmethod
+    def capture(cls, args: argparse.Namespace) -> "_ArtifactSnapshots":
+        configured = {
+            name: getattr(args, option)
+            for name, (option, _filename) in _ARTIFACT_OPTIONS.items()
+        }
+        if args.llm_backend != "fake":
+            missing = [
+                f"--{option.replace('_', '-')}"
+                for name, (option, _filename) in _ARTIFACT_OPTIONS.items()
+                if not configured[name]
+            ]
+            if missing:
+                raise SmokeError(
+                    "real mode requires explicit reviewed artifacts: " + ", ".join(missing)
+                )
+        temporary = tempfile.TemporaryDirectory(prefix="numerical-smoke-artifacts-")
+        root = Path(temporary.name)
+        paths: dict[str, Path] = {}
+        texts: dict[str, str] = {}
+        fingerprints: dict[str, str] = {}
+        try:
+            for name, (option, filename) in _ARTIFACT_OPTIONS.items():
+                configured_path = configured[name]
+                if configured_path is None:
+                    continue
+                source = Path(configured_path)
+                if not source.is_file():
+                    raise FileNotFoundError(
+                        f"{name.replace('_', ' ')} path does not exist: {source}"
+                    )
+                content = source.read_bytes()
+                destination = root / filename
+                destination.write_bytes(content)
+                paths[name] = destination
+                texts[name] = content.decode("utf-8")
+                fingerprints[name] = hashlib.sha256(content).hexdigest()
+        except BaseException:
+            temporary.cleanup()
+            raise
+        if args.llm_backend == "fake" and not paths:
+            fingerprints["smoke_artifact_mode"] = "fake_synthetic_only"
+        return cls(fingerprints, paths, texts, temporary)
+
+    def text(self, name: str) -> str:
+        return self._texts[name]
+
+    def path(self, name: str) -> Path | None:
+        return self.paths.get(name)
+
+    def close(self) -> None:
+        self._temporary.cleanup()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -90,19 +161,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     result_path = _result_path(args.results_path, overwrite=args.overwrite)
     source = Path(args.task_file)
     task = _select_one_task(source, args.task_id)
-    artifact_fingerprints = _validate_artifact_bundle(args)
     package_task = Task(
-        task.task_id,
-        task.history_values,
-        task.prediction_length,
-        task.frequency,
+        task.task.task_id,
+        task.task.history_values,
+        task.task.prediction_length,
+        task.task.frequency,
         (),
     )
-    portfolio = _portfolio(args)
-    runner, close_runner = _candidate_runner(args, portfolio)
+    artifacts = _ArtifactSnapshots.capture(args)
+    runner: _CandidateRunner | None = None
     try:
-        screening, policies = _policies(args, runner.statistical_names, portfolio)
-        decision = _decision_policy(args, artifact_fingerprints.get("reviewed_screening"))
+        portfolio = _portfolio(artifacts)
+        runner = _CandidateRunner(args, portfolio, artifacts)
+        screening, policies = _policies(runner.statistical_names, portfolio, artifacts)
+        decision = _decision_policy(artifacts)
         morphology = _morphology_reasoner(args)
         package = run_numerical_loop(
             package_task,
@@ -112,13 +184,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             decision_policy=decision,
             hindcast_config=HindcastConfig(folds=args.hindcast_folds, min_successful_folds=2),
             morphology_reasoner=morphology,
-            component_fingerprints={**runner.fingerprints, **artifact_fingerprints},
+            component_fingerprints={**runner.fingerprints, **artifacts.fingerprints},
         )
     finally:
-        close_runner()
+        if runner is not None:
+            runner.close()
+        artifacts.close()
 
-    future = _future_values_after_freeze(task.record, task.prediction_length)
-    metrics = _post_freeze_metrics(task.history_values, future, package.final_forecast)
+    future = _future_values_after_freeze(task.raw_record, task.task.prediction_length)
+    metrics = _post_freeze_metrics(task.task.history_values, future, package.final_forecast)
     payload = _result_payload(task, package, runner, metrics)
     _write_result(result_path, payload, overwrite=args.overwrite)
     return 0
@@ -161,57 +235,31 @@ def _write_result(path: Path, payload: Mapping[str, object], *, overwrite: bool)
             Path(temporary).unlink(missing_ok=True)
 
 
-def _validate_artifact_bundle(args: argparse.Namespace) -> dict[str, str]:
-    paths = {
-        "reviewed_methods": args.methods_path,
-        "reviewed_skills": args.skills_path,
-        "reviewed_policies": args.policies_path,
-        "reviewed_screening": args.screening_path,
-        "reviewed_decision": args.decision_path,
-    }
-    if args.llm_backend != "fake":
-        missing = [f"--{key.removeprefix('reviewed_')}-path" for key, value in paths.items() if not value]
-        if missing:
-            raise SmokeError("real mode requires explicit reviewed artifacts: " + ", ".join(missing))
-    present = {
-        key: Path(value)
-        for key, value in paths.items()
-        if value is not None
-    }
-    for key, path in present.items():
-        if not path.is_file():
-            raise FileNotFoundError(f"{key.replace('_', ' ')} path does not exist: {path}")
-    if args.llm_backend == "fake" and not present:
-        return {"smoke_artifact_mode": "fake_synthetic_only"}
-    return {key: _sha256(path) for key, path in sorted(present.items())}
-
-
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _select_one_task(path: Path, task_id: str | None) -> _LoadedTask:
-    return _to_history_task(_select_one_record(path, task_id))
+    raw, source = _select_one_record(path, task_id)
+    return _to_history_task(raw, source, task_id)
 
 
-def _select_one_record(path: Path, task_id: str | None) -> Mapping[str, object]:
+def _select_one_record(path: Path, task_id: str | None) -> tuple[bytes, Path]:
     if not path.exists():
         raise FileNotFoundError(f"task path does not exist: {path}")
+    _validate_task_id(task_id)
     if path.is_dir():
         records = tuple(sorted(path.glob("task_*.json")))
         if task_id is not None:
             candidate = path / f"{task_id}.json"
             if not candidate.is_file():
                 raise SmokeError(f"--task-id {task_id!r} selected 0 tasks")
-            return _read_record(candidate)
+            return candidate.read_bytes(), candidate
         if len(records) != 1:
             raise SmokeError("task input contains multiple tasks; pass --task-id before model/runtime work")
-        return _read_record(records[0])
+        return records[0].read_bytes(), records[0]
     if path.suffix.lower() == ".json":
-        record = _read_record(path)
-        if task_id is not None and record.get("benchmark_id") != task_id:
-            raise SmokeError(f"--task-id {task_id!r} selected 0 tasks")
-        return record
+        return path.read_bytes(), path
     if task_id is None:
         only: str | None = None
         count = 0
@@ -223,7 +271,7 @@ def _select_one_record(path: Path, task_id: str | None) -> Mapping[str, object]:
                     if count > 1:
                         break
         if count == 1 and only is not None:
-            return _decode_record(only, path)
+            return only.encode("utf-8"), path
         raise SmokeError("task input contains multiple tasks; pass --task-id before model/runtime work")
     selected: str | None = None
     count = 0
@@ -235,52 +283,67 @@ def _select_one_record(path: Path, task_id: str | None) -> Mapping[str, object]:
                 selected = line
     if count != 1 or selected is None:
         raise SmokeError(f"--task-id {task_id!r} selected {count} tasks")
-    return _decode_record(selected, path)
+    return selected.encode("utf-8"), path
 
 
-def _read_record(path: Path) -> Mapping[str, object]:
+def _validate_task_id(task_id: str | None) -> None:
+    if task_id is None:
+        return
+    if not task_id or Path(task_id).name != task_id or task_id in {".", ".."}:
+        raise SmokeError("--task-id must be an exact basename component")
+
+
+def _decode_history_record(raw: bytes, source: Path) -> Mapping[str, object]:
     try:
-        return _decode_record(path.read_text(encoding="utf-8"), path)
-    except OSError:
-        raise
-
-
-def _decode_record(value: str, source: Path) -> Mapping[str, object]:
-    try:
-        raw = json.loads(value)
+        record = json.loads(_mask_future_values(raw.decode("utf-8")))
     except json.JSONDecodeError as error:
         raise SmokeError(f"task JSON is malformed: {source}") from error
-    if not isinstance(raw, Mapping):
+    if not isinstance(record, Mapping):
         raise SmokeError("task path must contain a Dr-CiK task object")
-    return raw
+    return record
 
 
-def _to_history_task(record: Mapping[str, object]) -> _LoadedTask:
+def _to_history_task(raw: bytes, source: Path, expected_task_id: str | None) -> _LoadedTask:
+    record = _decode_history_record(raw, source)
     try:
         series = record.get("series", record)
         metadata = record.get("task_metadata", record)
         if not isinstance(series, Mapping) or not isinstance(metadata, Mapping):
             raise TypeError("missing series or task_metadata")
         history = tuple(float(value) for value in series["history_values"])
-        task = _LoadedTask(
+        task = DrCiKTask(
             task_id=str(record["benchmark_id"]),
             history_values=history,
             prediction_length=int(metadata["prediction_length"]),
             frequency=str(metadata["frequency"]),
-            record=record,
+            future_values=(),
+            seasonal_period=(
+                str(metadata["seasonal_period"])
+                if metadata.get("seasonal_period") is not None
+                else None
+            ),
+            entity_name="unknown",
         )
     except (KeyError, TypeError, ValueError) as error:
         raise SmokeError("task does not match the numeric Dr-CiK task model") from error
     if not task.task_id or not task.history_values or task.prediction_length < 1 or not task.frequency:
         raise SmokeError("task has an empty ID, history, horizon, or frequency")
+    if expected_task_id is not None and task.task_id != expected_task_id:
+        raise SmokeError("decoded benchmark_id does not match --task-id")
     if not all(math.isfinite(value) for value in task.history_values):
         raise SmokeError("task history contains non-finite numeric values")
-    return task
+    return _LoadedTask(task=task, raw_record=raw, source=source)
 
 
 def _future_values_after_freeze(
-    record: Mapping[str, object], prediction_length: int
+    raw: bytes, prediction_length: int
 ) -> tuple[float, ...]:
+    try:
+        record = json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError as error:
+        raise SmokeError("task JSON is malformed") from error
+    if not isinstance(record, Mapping):
+        raise SmokeError("task path must contain a Dr-CiK task object")
     if record.get("labels_public", True) is False:
         return ()
     series = record.get("series", record)
@@ -298,14 +361,94 @@ def _future_values_after_freeze(
     return future
 
 
+def _mask_future_values(raw: str) -> str:
+    """Replace raw future JSON values without decoding their numeric tokens."""
+    parts: list[str] = []
+    cursor = 0
+    search = 0
+    while True:
+        key_start = raw.find('"future_values"', search)
+        if key_start < 0:
+            parts.append(raw[cursor:])
+            return "".join(parts)
+        key_end = _json_string_end(raw, key_start)
+        value_start = key_end
+        while value_start < len(raw) and raw[value_start].isspace():
+            value_start += 1
+        if value_start >= len(raw) or raw[value_start] != ":":
+            search = key_end
+            continue
+        value_start += 1
+        while value_start < len(raw) and raw[value_start].isspace():
+            value_start += 1
+        value_end = _json_value_end(raw, value_start)
+        parts.extend((raw[cursor:value_start], "null"))
+        cursor = value_end
+        search = value_end
+
+
+def _json_string_end(raw: str, start: int) -> int:
+    if start >= len(raw) or raw[start] != '"':
+        raise SmokeError("task JSON is malformed")
+    index = start + 1
+    while index < len(raw):
+        if raw[index] == "\\":
+            index += 2
+            continue
+        if raw[index] == '"':
+            return index + 1
+        index += 1
+    raise SmokeError("task JSON is malformed")
+
+
+def _json_value_end(raw: str, start: int) -> int:
+    if start >= len(raw):
+        raise SmokeError("task JSON is malformed")
+    if raw[start] == '"':
+        return _json_string_end(raw, start)
+    if raw[start] not in "[{":
+        index = start
+        while index < len(raw) and raw[index] not in ",}]\r\n\t ":
+            index += 1
+        return index
+    stack = [raw[start]]
+    index = start + 1
+    while index < len(raw) and stack:
+        current = raw[index]
+        if current == '"':
+            index = _json_string_end(raw, index)
+            continue
+        if current in "[{":
+            stack.append(current)
+        elif current in "]}":
+            opener = stack.pop()
+            if (opener, current) not in {("[", "]"), ("{", "}")}:
+                raise SmokeError("task JSON is malformed")
+        index += 1
+    if stack:
+        raise SmokeError("task JSON is malformed")
+    return index
+
+
 class _CandidateRunner:
-    def __init__(self, args: argparse.Namespace, portfolio: PolicyPortfolio) -> None:
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        portfolio: PolicyPortfolio,
+        artifacts: _ArtifactSnapshots,
+    ) -> None:
         self._unavailable: dict[str, str] = {}
         self._runtimes = _runtime_registry(args)
-        self._statistics = _statistical_functions(args.methods_path, args.skills_path)
+        self._statistics = _statistical_functions(
+            artifacts.path("reviewed_methods"), artifacts.path("reviewed_skills")
+        )
         self.statistical_names = tuple(self._statistics)
         self._tsfm = {policy.name: policy for policy in portfolio.tsfm}
-        self.fingerprints = {"smoke_statistical_source": _source_fingerprint(args.methods_path)}
+        self.fingerprints = {
+            "smoke_statistical_source": artifacts.fingerprints.get(
+                "reviewed_methods", "builtin_deterministic_smoke_statistics"
+            )
+        }
 
     def __call__(self, name: str, history: tuple[float, ...], horizon: int, frequency: str) -> tuple[float, ...]:
         function = self._statistics.get(name)
@@ -327,13 +470,8 @@ class _CandidateRunner:
         self._runtimes.close()
 
 
-def _candidate_runner(args: argparse.Namespace, portfolio: PolicyPortfolio) -> tuple[_CandidateRunner, Callable[[], None]]:
-    runner = _CandidateRunner(args, portfolio)
-    return runner, runner.close
-
-
 def _statistical_functions(
-    path: str | None, skills_path: str | None
+    path: Path | None, skills_path: Path | None
 ) -> dict[str, Callable[[Sequence[float], int, str], Sequence[float]]]:
     if path is None:
         return {
@@ -346,10 +484,7 @@ def _statistical_functions(
         }
     from numerical_agent.evolution.execution import load_methods
 
-    source = Path(path)
-    if not source.is_file():
-        raise FileNotFoundError(f"methods path does not exist: {source}")
-    _module, functions = load_methods(source, skills_path=skills_path)
+    _module, functions = load_methods(path, skills_path=skills_path)
     return {
         name: (lambda history, horizon, frequency, function=function: function(list(history), horizon, frequency))
         for name, function in functions.items()
@@ -366,27 +501,22 @@ def _damped_drift(history: Sequence[float], horizon: int, _frequency: str) -> tu
     return tuple(float(history[-1]) + slope * (index + 1) * 0.8 for index in range(horizon))
 
 
-def _portfolio(args: argparse.Namespace) -> PolicyPortfolio:
-    if not args.policies_path:
+def _portfolio(artifacts: _ArtifactSnapshots) -> PolicyPortfolio:
+    source = artifacts.path("reviewed_policies")
+    if source is None:
         return PolicyPortfolio.flagship5()
-    source = Path(args.policies_path)
-    if not source.is_file():
-        raise FileNotFoundError(f"policies path does not exist: {source}")
     return read_policy_file(source)
 
 
 def _policies(
-    args: argparse.Namespace,
     statistical_names: Sequence[str],
     portfolio: PolicyPortfolio,
+    artifacts: _ArtifactSnapshots,
 ) -> tuple[ScreeningPolicy, tuple[CombinedPolicy, ...]]:
     leaves = tuple(dict.fromkeys((*statistical_names, *(item.name for item in portfolio.tsfm))))
     combined = tuple(policy for policy in portfolio.combined if set(policy.parents) <= set(leaves))
-    if args.screening_path:
-        source = Path(args.screening_path)
-        if not source.is_file():
-            raise FileNotFoundError(f"screening path does not exist: {source}")
-        screening = parse_screening_source(source.read_text(encoding="utf-8"))
+    if artifacts.path("reviewed_screening") is not None:
+        screening = parse_screening_source(artifacts.text("reviewed_screening"))
         unknown = {entry.name for entry in screening.entries} - set((*leaves, *(item.name for item in combined)))
         if unknown:
             raise SmokeError(f"screening references candidates unavailable to supplied artifacts: {sorted(unknown)!r}")
@@ -404,16 +534,14 @@ def _policies(
     return ScreeningPolicy(entries, (statistical_names[0],)), combined
 
 
-def _decision_policy(args: argparse.Namespace, screening_hash: str | None) -> DecisionPolicy:
-    if not args.decision_path:
+def _decision_policy(artifacts: _ArtifactSnapshots) -> DecisionPolicy:
+    source = artifacts.path("reviewed_decision")
+    if source is None:
         return DecisionPolicy(assumption_guidance_enabled=True)
-    source = Path(args.decision_path)
-    if not source.is_file():
-        raise FileNotFoundError(f"decision path does not exist: {source}")
-    declared = _screening_hash_from_decision(source.read_text(encoding="utf-8"))
-    if screening_hash is None or declared != screening_hash:
+    declared = _screening_hash_from_decision(artifacts.text("reviewed_decision"))
+    if declared != artifacts.fingerprints.get("reviewed_screening"):
         raise SmokeError("Decision SCREENING_POLICY_HASH does not bind the supplied screening artifact")
-    return parse_decision_source(source.read_text(encoding="utf-8"))
+    return parse_decision_source(artifacts.text("reviewed_decision"))
 
 
 def _screening_hash_from_decision(source: str) -> str:
@@ -495,7 +623,7 @@ def _result_payload(
     selected = package.selection_decision
     rejected_counts = dict(sorted(Counter(package.rejected_assumptions.values()).items()))
     return {
-        "task_id": task.task_id,
+        "task_id": task.task.task_id,
         "selected": {
             "recipe": asdict(selected.arithmetic) if selected.arithmetic is not None else None,
             "methods": list(selected.selected),
@@ -558,12 +686,6 @@ def _post_freeze_metrics(
     if not all(math.isfinite(value) for value in values.values()):
         raise SmokeError("post-freeze metrics contain non-finite values")
     return values
-
-
-def _source_fingerprint(path: str | None) -> str:
-    if path is None:
-        return "builtin_deterministic_smoke_statistics"
-    return _sha256(Path(path))
 
 
 def _finite_or_none(value: float) -> float | None:

@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import sys
 import threading
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 
 import numerical_agent.run_morphology_smoke as smoke
+from common.data import Task as DrCiKTask
+from numerical_agent.evolution.portfolio import PolicyPortfolio, render_policy_source
 from numerical_agent.run_morphology_smoke import main
 
 
@@ -124,11 +128,19 @@ def test_reviewed_artifacts_are_content_hashed_and_decision_binds_screening(tmp_
         policies_path=str(policies), screening_path=str(screening), decision_path=str(decision),
     )
 
-    first = smoke._validate_artifact_bundle(args)
+    first_snapshots = smoke._ArtifactSnapshots.capture(args)
+    try:
+        first = dict(first_snapshots.fingerprints)
+    finally:
+        first_snapshots.close()
     methods.write_text("reviewed changed\n", encoding="utf-8")
-    assert smoke._validate_artifact_bundle(args)["reviewed_methods"] != first["reviewed_methods"]
-    with pytest.raises(smoke.SmokeError, match="SCREENING_POLICY_HASH"):
-        smoke._decision_policy(args, smoke._sha256(screening))
+    snapshots = smoke._ArtifactSnapshots.capture(args)
+    try:
+        assert snapshots.fingerprints["reviewed_methods"] != first["reviewed_methods"]
+        with pytest.raises(smoke.SmokeError, match="SCREENING_POLICY_HASH"):
+            smoke._decision_policy(snapshots)
+    finally:
+        snapshots.close()
 
 
 def test_non_overwrite_result_creation_has_one_winner_under_a_race(tmp_path) -> None:
@@ -190,6 +202,78 @@ def test_labels_are_withheld_from_the_numerical_path_until_post_freeze_scoring(t
     ]) == 0
     payload = json.loads(result.read_text(encoding="utf-8"))
     assert payload["freeze"]["post_freeze_trusted_diagnostics"]["mae"] > 0.0
+
+
+def test_selected_future_json_is_not_decoded_until_after_package_freeze(tmp_path, monkeypatch) -> None:
+    tasks = tmp_path / "tasks.jsonl"
+    result = tmp_path / "result.json"
+    _write_tasks(tasks, _record("one", future=[99.0, 98.0, 97.0]))
+    decode = smoke.json.loads
+    original = smoke.run_numerical_loop
+    frozen = False
+
+    def guarded_decode(value, *args, **kwargs):
+        if '"future_values": [99.0, 98.0, 97.0]' in value and not frozen:
+            raise AssertionError("future labels were decoded before package freeze")
+        return decode(value, *args, **kwargs)
+
+    def freeze(task, **kwargs):
+        nonlocal frozen
+        package = original(task, **kwargs)
+        frozen = True
+        return package
+
+    monkeypatch.setattr(smoke.json, "loads", guarded_decode)
+    monkeypatch.setattr(smoke, "run_numerical_loop", freeze)
+    assert main([
+        "--task-file", str(tasks), "--results-path", str(result), "--llm-backend", "fake",
+    ]) == 0
+
+
+def test_selected_task_uses_the_common_history_only_task_model(tmp_path) -> None:
+    tasks = tmp_path / "tasks.jsonl"
+    _write_tasks(tasks, _record("one"))
+
+    selected = smoke._select_one_task(tasks, None)
+
+    assert isinstance(selected.task, DrCiKTask)
+    assert selected.task.future_values == ()
+
+
+def test_task_id_rejects_traversal_and_decoded_id_mismatches(tmp_path) -> None:
+    directory = tmp_path / "tasks"
+    directory.mkdir()
+    (tmp_path / "outside.json").write_text(json.dumps(_record("outside")), encoding="utf-8")
+    with pytest.raises(smoke.SmokeError, match="task-id"):
+        smoke._select_one_task(directory, "../outside")
+
+    mismatch = {"nested": {"benchmark_id": "selected"}, **_record("other")}
+    tasks = tmp_path / "tasks.jsonl"
+    _write_tasks(tasks, mismatch)
+    with pytest.raises(smoke.SmokeError, match="benchmark_id"):
+        smoke._select_one_task(tasks, "selected")
+
+
+def test_artifact_snapshot_binds_the_hashed_bytes_to_execution_input(tmp_path) -> None:
+    paths = {}
+    for name in ("methods", "skills", "policies", "screening", "decision"):
+        path = tmp_path / f"{name}.py"
+        path.write_text(f"{name}-original\n", encoding="utf-8")
+        paths[f"{name}_path"] = str(path)
+    Path(paths["policies_path"]).write_text(
+        render_policy_source(PolicyPortfolio.flagship5()), encoding="utf-8"
+    )
+    snapshots = smoke._ArtifactSnapshots.capture(Namespace(llm_backend="fake", **paths))
+    try:
+        Path(paths["methods_path"]).write_text("methods-mutated\n", encoding="utf-8")
+        Path(paths["policies_path"]).write_text("not valid policy source\n", encoding="utf-8")
+        assert snapshots.text("reviewed_methods") == "methods-original\n"
+        assert snapshots.fingerprints["reviewed_methods"] == hashlib.sha256(
+            b"methods-original\n"
+        ).hexdigest()
+        assert smoke._portfolio(snapshots).names == PolicyPortfolio.flagship5().names
+    finally:
+        snapshots.close()
 
 
 def test_task_id_selects_exactly_one_record_and_overwrite_is_explicit(tmp_path) -> None:
