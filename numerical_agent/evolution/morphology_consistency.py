@@ -244,7 +244,11 @@ def _candidate_reason(
             return "insufficient_successful_folds"
         if not _valid_fold_evidence(diagnostic):
             return "invalid_fold_evidence"
-        if diagnostic.explosion or diagnostic.worst_mase > policy.catastrophic_mase:
+        if (
+            diagnostic.explosion
+            or diagnostic.worst_smae_raw > policy.catastrophic_smae_raw
+            or diagnostic.worst_srmse_raw > policy.catastrophic_srmse_raw
+        ):
             return "catastrophic_hindcast_tail"
         if policy.long_horizon_guard_enabled:
             if diagnostic.long_horizon_coverage < policy.long_horizon_min_coverage:

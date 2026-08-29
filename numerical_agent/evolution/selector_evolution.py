@@ -481,11 +481,11 @@ def bounded_combined_candidates(
         proposal.ranking_order,
         parent.ranking_order,
         (
-            "worst_mase",
-            "recent_mase",
-            "median_mase",
-            "median_rmsse",
-            "mase_mad",
+            "worst_joint_scaled_error",
+            "recent_joint_scaled_error",
+            "median_joint_scaled_error",
+            "median_srmse",
+            "smae_mad",
         ),
     )
     fold_requirements = (

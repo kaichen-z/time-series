@@ -188,9 +188,10 @@ def test_safe_anchor_blocks_one_metric_tail_regression():
     assert result.selected == ("toto_2_0",)
 
 
-def test_active_policy_rejects_legacy_error_ranking_fields():
-    with pytest.raises(ValueError, match="ranking_order"):
-        DecisionPolicy(ranking_order=("median_mase",))
+def test_active_policy_normalizes_legacy_error_ranking_fields():
+    policy = DecisionPolicy(ranking_order=("median_mase",))
+
+    assert policy.ranking_order == ("median_joint_scaled_error",)
 
 
 def test_active_policy_parser_requires_explicit_legacy_migration_flag():
@@ -201,8 +202,9 @@ def test_active_policy_parser_requires_explicit_legacy_migration_flag():
         {"catastrophic_mase": 2.0}, allow_legacy=True
     )
 
-    assert migrated.catastrophic_smae_raw == pytest.approx(2.0)
-    assert migrated.catastrophic_srmse_raw == pytest.approx(2.0)
+    assert migrated.catastrophic_mase == pytest.approx(2.0)
+    assert migrated.catastrophic_smae_raw == pytest.approx(10.0)
+    assert migrated.catastrophic_srmse_raw == pytest.approx(10.0)
 
 
 def _with_long_horizon_audit(diagnostic, *, forecast, truth, coverage, scale=1.0):
@@ -259,23 +261,23 @@ def test_context_preserving_long_horizon_audit_keeps_original_rank_folds():
 
 
 def test_long_horizon_penalty_is_applied_only_when_task_route_matches():
-    truths = ((0.0, 0.0),) * 3
+    truths = ((-10.0, -10.0),) * 3
     baseline = _with_long_horizon_audit(
         _diagnostic(
             "toto_2_0", family="tsfm", median=1.0,
             forecasts=((1.0, 1.0),) * 3, truths=truths,
         ),
         forecast=(1.0,) * 4,
-        truth=(0.0,) * 4,
+        truth=(-10.0,) * 4,
         coverage=1.0,
     )
     challenger = _with_long_horizon_audit(
         _diagnostic(
             "challenger", median=0.5,
-            forecasts=((0.5, 0.5),) * 3, truths=truths,
+            forecasts=((-1.0, -1.0),) * 3, truths=truths,
         ),
         forecast=(3.0,) * 4,
-        truth=(0.0,) * 4,
+        truth=(-10.0,) * 4,
         coverage=1.0,
     )
     policy = DecisionPolicy(
@@ -307,7 +309,7 @@ def test_long_horizon_penalty_is_applied_only_when_task_route_matches():
         **common,
     )
 
-    assert matched.selected == ("toto_2_0",)
+    assert matched.selected == ("challenger",)
     assert unmatched.selected == ("challenger",)
 
 
@@ -372,7 +374,7 @@ def test_change_aware_guard_rejects_override_with_long_horizon_regret():
     challenger = _with_long_horizon_audit(
         _diagnostic(
             "challenger", median=0.5,
-            forecasts=((0.5, 0.5),) * 3, truths=truths,
+            forecasts=((-1.0, -1.0),) * 3, truths=truths,
         ),
         forecast=(1.5,) * 4,
         truth=(0.0,) * 4,
@@ -400,23 +402,23 @@ def test_change_aware_guard_rejects_override_with_long_horizon_regret():
 
 
 def test_change_aware_guard_allows_stable_override_with_sufficient_audit_coverage():
-    truths = ((0.0, 0.0),) * 3
+    truths = ((-10.0, -10.0),) * 3
     baseline = _with_long_horizon_audit(
         _diagnostic(
             "toto_2_0", family="tsfm", median=1.0,
             forecasts=((1.0, 1.0),) * 3, truths=truths,
         ),
         forecast=(1.0,) * 4,
-        truth=(0.0,) * 4,
+        truth=(-10.0,) * 4,
         coverage=0.75,
     )
     challenger = _with_long_horizon_audit(
         _diagnostic(
             "challenger", median=0.5,
-            forecasts=((0.5, 0.5),) * 3, truths=truths,
+            forecasts=((-1.0, -1.0),) * 3, truths=truths,
         ),
         forecast=(1.02,) * 4,
-        truth=(0.0,) * 4,
+        truth=(-10.0,) * 4,
         coverage=0.75,
     )
 
@@ -522,23 +524,23 @@ def test_conservative_tsfm_router_keeps_toto_when_timesfm_audit_regresses():
 
 
 def test_conservative_tsfm_router_requires_three_of_four_strict_wins():
-    truths = ((0.0, 0.0),) * 3
+    truths = ((-10.0, -10.0),) * 3
     toto = _with_long_horizon_audit(
         _diagnostic(
             "toto_2_0", family="tsfm", median=1.0,
             forecasts=((1.0, 1.0),) * 3, truths=truths,
         ),
         forecast=(1.0,) * 4,
-        truth=(0.0,) * 4,
+        truth=(-10.0,) * 4,
         coverage=1.0,
     )
     timesfm = _with_long_horizon_audit(
         _diagnostic(
             "timesfm_2_5", family="tsfm", median=0.95,
-            forecasts=((0.9, 0.9), (0.9, 0.9), (1.0, 1.0)), truths=truths,
+            forecasts=((0.5, 0.5), (0.5, 0.5), (1.0, 1.0)), truths=truths,
         ),
-        forecast=(0.9,) * 4,
-        truth=(0.0,) * 4,
+        forecast=(0.5,) * 4,
+        truth=(-10.0,) * 4,
         coverage=1.0,
     )
 
@@ -556,7 +558,7 @@ def test_conservative_tsfm_router_requires_three_of_four_strict_wins():
         ),
         active_names=("toto_2_0", "timesfm_2_5"),
         diagnostics={"toto_2_0": toto, "timesfm_2_5": timesfm},
-        forecasts={"toto_2_0": (1.0,) * 4, "timesfm_2_5": (0.9,) * 4},
+        forecasts={"toto_2_0": (1.0,) * 4, "timesfm_2_5": (0.5,) * 4},
     )
 
     assert decision.selected == ("timesfm_2_5",)
@@ -607,32 +609,32 @@ def test_conservative_tsfm_router_rejects_submargin_anchor_change():
 
 
 def test_conservative_router_checks_statistical_challenger_against_routed_anchor():
-    truths = ((0.0, 0.0),) * 3
+    truths = ((-10.0, -10.0),) * 3
     toto = _with_long_horizon_audit(
         _diagnostic(
             "toto_2_0", family="tsfm", median=1.0,
             forecasts=((1.0, 1.0),) * 3, truths=truths,
         ),
         forecast=(1.0,) * 4,
-        truth=(0.0,) * 4,
+        truth=(-10.0,) * 4,
         coverage=1.0,
     )
     timesfm = _with_long_horizon_audit(
         _diagnostic(
             "timesfm_2_5", family="tsfm", median=0.9,
-            forecasts=((0.9, 0.9),) * 3, truths=truths,
+            forecasts=((0.5, 0.5),) * 3, truths=truths,
         ),
-        forecast=(0.9,) * 4,
-        truth=(0.0,) * 4,
+        forecast=(0.5,) * 4,
+        truth=(-10.0,) * 4,
         coverage=1.0,
     )
     statistical = _with_long_horizon_audit(
         _diagnostic(
             "robust_trend", family="statistical", median=0.95,
-            forecasts=((0.95, 0.95),) * 3, truths=truths,
+            forecasts=((0.7, 0.7),) * 3, truths=truths,
         ),
-        forecast=(0.95,) * 4,
-        truth=(0.0,) * 4,
+        forecast=(0.7,) * 4,
+        truth=(-10.0,) * 4,
         coverage=1.0,
     )
 
@@ -656,8 +658,8 @@ def test_conservative_router_checks_statistical_challenger_against_routed_anchor
         },
         forecasts={
             "toto_2_0": (1.0,) * 4,
-            "timesfm_2_5": (0.9,) * 4,
-            "robust_trend": (0.95,) * 4,
+            "timesfm_2_5": (0.5,) * 4,
+            "robust_trend": (0.7,) * 4,
         },
     )
 
@@ -771,14 +773,14 @@ def test_conservative_combination_rejects_lower_smae_with_higher_srmse():
 
 
 def test_conservative_tsfm_router_preserves_safe_anchor_when_no_reviewed_route():
-    truths = ((0.0, 0.0),) * 3
+    truths = ((-10.0, -10.0),) * 3
     toto = _diagnostic(
         "toto_2_0", family="tsfm", median=1.0,
         forecasts=((1.0, 1.0),) * 3, truths=truths,
     )
     chronos = _diagnostic(
         "chronos_bolt", family="tsfm", median=0.5,
-        forecasts=((0.5, 0.5), (0.5, 0.5), (1.01, 1.01)), truths=truths,
+        forecasts=((-1.0, -1.0), (-1.0, -1.0), (1.01, 1.01)), truths=truths,
     )
     common = {
         "active_names": ("toto_2_0", "chronos_bolt"),
@@ -1830,7 +1832,7 @@ def _profile(**changes):
 
 
 def test_assumption_guidance_excludes_methods_unrelated_to_supported_history():
-    truths = ((0.0, 0.0),) * 3
+    truths = ((-10.0, -10.0),) * 3
     diagnostics = {
         "toto_2_0": _diagnostic(
             "toto_2_0", family="tsfm", median=2.0, worst=2.0,
@@ -2082,7 +2084,7 @@ def test_guarded_ensemble_requires_diversity_and_historical_improvement():
 
 
 def test_dynamic_combined_searches_asymmetric_tsfm_statistical_weights():
-    truths = ((0.0, 0.0),) * 3
+    truths = ((0.5, 0.5),) * 3
     diagnostics = {
         "toto_2_0": _diagnostic(
             "toto_2_0",
@@ -2123,7 +2125,7 @@ def test_dynamic_combined_searches_asymmetric_tsfm_statistical_weights():
 
 
 def test_conditioned_specialist_expands_guarded_combination_search():
-    truths = ((0.0, 0.0),) * 3
+    truths = ((0.5, 0.5),) * 3
     diagnostics = {
         "toto_2_0": _diagnostic(
             "toto_2_0",
@@ -2218,7 +2220,7 @@ def test_dynamic_combined_rejects_median_gain_with_bad_worst_fold():
 
 
 def test_dynamic_combined_can_use_clipped_residual_correction():
-    truths = ((0.0, 0.0),) * 3
+    truths = ((0.5, 0.5),) * 3
     diagnostics = {
         "toto_2_0": _diagnostic(
             "toto_2_0",

@@ -824,9 +824,9 @@ def test_train_evolution_uses_dev_only_for_one_final_read_only_gate(tmp_path):
 
     assert result.generations[0].accepted
     second_request = json.loads(agent.requests[1]["messages"][0]["content"])
-    assert second_request["current_policy"]["ranking_order"][0] == "recent_mase"
+    assert second_request["current_policy"]["ranking_order"][0] == "recent_joint_scaled_error"
     assert "dev-secret" not in json.dumps(agent.requests)
-    assert result.train_winner.ranking_order[0] == "recent_mase"
+    assert result.train_winner.ranking_order[0] == "recent_joint_scaled_error"
     assert not result.final_gate.accepted
     assert result.frozen == parent
 

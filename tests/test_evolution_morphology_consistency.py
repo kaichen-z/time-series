@@ -183,7 +183,7 @@ def test_consistency_enforces_fold_worst_fold_catastrophe_and_forecast_gates() -
     )
     diagnostics = {
         "few": _diagnostic("few", successful_folds=2),
-        "worst": _diagnostic("worst", worst_mase=10.1),
+        "worst": _diagnostic("worst", worst_smae_raw=10.1),
         "exploded": _diagnostic("exploded", explosion=True),
         "malformed": _diagnostic("malformed"),
     }
@@ -198,7 +198,7 @@ def test_consistency_enforces_fold_worst_fold_catastrophe_and_forecast_gates() -
             "exploded": (1.0, 2.0, 3.0),
             "malformed": (1.0, float("nan"), 3.0),
         },
-        policy=DecisionPolicy(catastrophic_mase=10.0),
+        policy=DecisionPolicy(),
     )
 
     assert result.rejected == {

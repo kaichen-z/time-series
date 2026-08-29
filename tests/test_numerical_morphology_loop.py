@@ -185,20 +185,20 @@ def _legacy_replay_scenario(
 ) -> tuple[SelectionDecision, NumericalForecastPackage]:
     if kind == "residual_correction":
         task = Task("residual", (0.0,) * 20, 2, "D", ())
-        truths = ((0.0, 0.0),) * 3
+        truths = ((0.5, 0.5),) * 3
         diagnostics = {
             "toto_2_0": _diagnostic(
                 "toto_2_0",
                 "tsfm",
                 forecast=(2.0, 2.0),
-                truth=(0.0, 0.0),
+                truth=(0.5, 0.5),
                 median_mase=2.0,
             ),
             "wild_stat": _diagnostic(
                 "wild_stat",
                 "statistical",
                 forecast=(-6.0, -6.0),
-                truth=(0.0, 0.0),
+                truth=(0.5, 0.5),
                 median_mase=6.0,
             ),
         }
@@ -963,7 +963,7 @@ def test_safe_handoff_host_ids_are_stable_for_identical_accepted_order() -> None
     ("candidate", "diagnostic_changes", "expected_reason"),
     [
         ("too_few", {"successful_folds": 2}, "insufficient_successful_folds"),
-        ("bad_tail", {"worst_mase": 10.1}, "catastrophic_hindcast_tail"),
+        ("bad_tail", {"worst_smae_raw": 10.1}, "catastrophic_hindcast_tail"),
         ("exploded", {"explosion": True}, "catastrophic_hindcast_tail"),
         (
             "low_coverage",

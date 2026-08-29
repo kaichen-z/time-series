@@ -27,6 +27,8 @@ class HindcastConfig:
     min_successful_folds: int = 2
     catastrophic_smae_raw: float = 10.0
     catastrophic_srmse_raw: float = 10.0
+    # Compatibility-only: retained for frozen callers; never read by selector gates.
+    catastrophic_mase: float = 10.0
     long_horizon_audit: bool = False
 
     def __post_init__(self) -> None:
@@ -36,6 +38,8 @@ class HindcastConfig:
             raise ValueError("min_successful_folds must be within folds")
         if self.catastrophic_smae_raw <= 0 or self.catastrophic_srmse_raw <= 0:
             raise ValueError("raw scaled catastrophe thresholds must be positive")
+        if not math.isfinite(self.catastrophic_mase) or self.catastrophic_mase <= 0:
+            raise ValueError("legacy catastrophic_mase must be positive")
 
 
 @dataclass(frozen=True)
@@ -202,6 +206,8 @@ class DecisionPolicy:
     min_successful_folds: int = 3
     catastrophic_smae_raw: float = 10.0
     catastrophic_srmse_raw: float = 10.0
+    # Compatibility-only: downstream frozen payloads may still supply this field.
+    catastrophic_mase: float = 10.0
     max_smae_fold_regret: float = 0.02
     max_srmse_fold_regret: float = 0.02
     baseline_strategy: str = "toto_first"
@@ -239,11 +245,6 @@ class DecisionPolicy:
     long_horizon_max_regret: float = 0.0
     fallback_to_best_available: bool = True
 
-    @property
-    def catastrophic_mase(self) -> float:
-        """Compatibility view for frozen legacy consumers during schema migration."""
-        return max(self.catastrophic_smae_raw, self.catastrophic_srmse_raw)
-
     @classmethod
     def from_payload(
         cls, payload: Mapping[str, object], *, allow_legacy: bool = False
@@ -253,10 +254,6 @@ class DecisionPolicy:
         legacy_keys = {"catastrophic_mase", "median_mase", "recent_mase", "worst_mase", "mase_mad"}
         if legacy_keys & set(raw) and not allow_legacy:
             raise ValueError("legacy MASE policy fields require allow_legacy=True")
-        if "catastrophic_mase" in raw:
-            legacy_threshold = raw.pop("catastrophic_mase")
-            raw.setdefault("catastrophic_smae_raw", legacy_threshold)
-            raw.setdefault("catastrophic_srmse_raw", legacy_threshold)
         if "ranking_order" in raw:
             ranking = raw["ranking_order"]
             if isinstance(ranking, (str, bytes)):
@@ -269,19 +266,33 @@ class DecisionPolicy:
         return cls(**raw)  # type: ignore[arg-type]
 
     def __post_init__(self) -> None:
+        legacy_ranking = {
+            "median_mase": "median_joint_scaled_error",
+            "recent_mase": "recent_joint_scaled_error",
+            "worst_mase": "worst_joint_scaled_error",
+            "mase_mad": "smae_mad",
+            "median_rmsse": "median_srmse",
+        }
+        normalized_order = tuple(
+            legacy_ranking.get(field, field) for field in self.ranking_order
+        )
+        # Old frozen payloads are read-only inputs; the live object never carries
+        # an MASE ranking field into selection or override logic.
+        object.__setattr__(self, "ranking_order", normalized_order)
         allowed = {
             "median_joint_scaled_error", "recent_joint_scaled_error",
             "worst_joint_scaled_error", "median_smae", "recent_smae",
             "worst_smae", "smae_mad", "median_srmse", "recent_srmse",
             "worst_srmse", "srmse_mad", "normalized_bias", "slope_error",
         }
-        if not self.ranking_order or not set(self.ranking_order) <= allowed:
+        if not normalized_order or not set(normalized_order) <= allowed:
             raise ValueError("ranking_order contains unsupported fields")
         if self.min_successful_folds < 1:
             raise ValueError("min_successful_folds must be positive")
         if (
             self.catastrophic_smae_raw <= 0
             or self.catastrophic_srmse_raw <= 0
+            or self.catastrophic_mase <= 0
             or self.max_smae_fold_regret < 0
             or self.max_srmse_fold_regret < 0
         ):
