@@ -1590,6 +1590,17 @@ def _build_skill_authority_boundary():
             )
         )
 
+    def train_shadow_skill_ids(library: object) -> tuple[str, ...]:
+        authorized = train_shadow_projections.get(library)
+        if authorized is None:
+            return ()
+        available_candidates = {
+            history[-1].skill_id
+            for history in library._skills.values()
+            if history[-1].status == "candidate"
+        }
+        return tuple(sorted(authorized.intersection(available_candidates)))
+
     def inherit_train_shadow_projection(
         source: object,
         target_library: object,
@@ -1655,6 +1666,7 @@ def _build_skill_authority_boundary():
         require_evolution_snapshot,
         authorize_train_shadow_projection,
         inherit_train_shadow_projection,
+        train_shadow_skill_ids,
         train_shadow_skills,
     )
 
@@ -1674,6 +1686,7 @@ def _build_skill_authority_boundary():
     _require_evolution_snapshot_library,
     _authorize_train_shadow_projection,
     _inherit_train_shadow_projection,
+    _trusted_train_shadow_skill_ids,
     _trusted_train_shadow_skills,
 ) = _build_skill_authority_boundary()
 del _build_skill_authority_boundary

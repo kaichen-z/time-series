@@ -34,7 +34,10 @@ from evolving_loop.retrieval_agent.schemas import (
     build_round1_payload,
     build_round2_payload,
 )
-from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
+from evolving_loop.retrieval_agent.skill_library import (
+    RetrievalSkillLibrary,
+    _trusted_train_shadow_skill_ids,
+)
 from evolving_loop.retrieval_agent.two_stage_agent import (
     TwoStageRetrievalAgent,
     _select_documents,
@@ -904,6 +907,20 @@ def _execution_fingerprints(
     decision: DecisionAgent,
     candidates: tuple[DecisionCandidate, ...],
 ) -> Mapping[str, str]:
+    skill_payloads = [
+        item.to_payload()
+        for item in sorted(
+            retrieval.skills.all(),
+            key=lambda value: (value.skill_id, value.version),
+        )
+    ]
+    skills_fingerprint = _fingerprint(skill_payloads)
+    active_ids = frozenset(retrieval.genome.active_skill_ids)
+    train_shadow_ids = tuple(
+        skill_id
+        for skill_id in _trusted_train_shadow_skill_ids(retrieval.skills)
+        if skill_id in active_ids
+    )
     result = {
         "bridge_contract": _fingerprint(_BRIDGE_CONTRACT),
         "context_projection": _fingerprint(task.retrieval_view()),
@@ -930,14 +947,14 @@ def _execution_fingerprints(
         "numerical_package": _numerical_package_fingerprint(numerical),
         "retrieval_verifier_contract": _fingerprint(_RETRIEVAL_VERIFIER_CONTRACT),
         "retrieval_genome": retrieval.genome.fingerprint(),
-        "retrieval_skills": _fingerprint(
-            [
-                item.to_payload()
-                for item in sorted(
-                    retrieval.skills.all(),
-                    key=lambda value: (value.skill_id, value.version),
-                )
-            ]
+        "retrieval_skills": skills_fingerprint,
+        "retrieval_skill_scope": _fingerprint(
+            {
+                "schema_version": 1,
+                "retrieval_genome_sha256": retrieval.genome.fingerprint(),
+                "retrieval_skills_sha256": skills_fingerprint,
+                "trusted_train_shadow_skill_ids": list(train_shadow_ids),
+            }
         ),
         "decision_prompt": hashlib.sha256(decision.prompt.encode("utf-8")).hexdigest(),
         "decision_skills": _fingerprint(

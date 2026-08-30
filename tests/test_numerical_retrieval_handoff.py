@@ -7,6 +7,7 @@ from datetime import date, timedelta
 
 import pytest
 
+import evolving_loop.retrieval_agent.skill_library as skill_library_module
 from common.data import Task as ContextNumericTask
 from common.llm import FakeLLMClient, LLMResponse, TransientLLMError
 from evolving_loop.data import ContextTask, Document
@@ -785,6 +786,85 @@ def test_retrieval_execution_snapshot_does_not_share_captured_skill_rows(
     assert skill.description.startswith("Mutated")
     assert observed_descriptions == ["Original preflight description."]
     assert result.fingerprints["retrieval_skills"] == expected_fingerprint
+
+
+def test_execution_fingerprint_binds_effective_train_shadow_ids(tmp_path) -> None:
+    def candidate(skill_id: str) -> RetrievalSkill:
+        return RetrievalSkill.from_payload(
+            {
+                "skill_id": skill_id,
+                "version": 1,
+                "parent_version": None,
+                "stage": "round1",
+                "status": "candidate",
+                "name": skill_id,
+                "description": f"Candidate {skill_id}.",
+                "applicability": {
+                    "assumption_kinds": [],
+                    "gap_types": [],
+                    "temporal_relations": [],
+                },
+                "query_steps": [f"Apply {skill_id}."],
+                "required_chain_fields": ["entity", "target"],
+                "counterevidence_rule": "Search for cancellation.",
+                "failure_conditions": ["No exact evidence exists."],
+                "validated_task_ids": [],
+                "validated_entities": [],
+                "validation_smae_gain": None,
+                "validation_srmse_gain": None,
+                "merged_from_skill_ids": [],
+                "quarantine_reason": None,
+            }
+        )
+
+    library = RetrievalSkillLibrary(
+        tmp_path / "all_candidates.json",
+        (candidate("shadow_a"), candidate("shadow_b")),
+        persist=False,
+    )
+    shadow_a = skill_library_module._authorize_train_shadow_projection(
+        library,
+        ("shadow_a",),
+    )
+    shadow_b = skill_library_module._authorize_train_shadow_projection(
+        library,
+        ("shadow_b",),
+    )
+    genome = replace(
+        RetrievalGenome.seed(),
+        second_round_trigger="never",
+        active_skill_ids=("shadow_a", "shadow_b"),
+    )
+
+    def execute(current_library):
+        llm = FakeLLMClient([_round()])
+        result = run_numerical_two_stage(
+            _context_task(),
+            _package(),
+            TwoStageRetrievalAgent(llm, genome, current_library),
+            DecisionAgent(
+                FakeLLMClient(
+                    [_decision("safe_anchor"), _decision("safe_anchor")]
+                )
+            ),
+        )
+        prompt = json.loads(llm.calls[0]["messages"][0]["content"])
+        visible_ids = tuple(
+            item["skill_id"] for item in prompt["retrieval_skills"]
+        )
+        return result, visible_ids
+
+    result_a, visible_a = execute(shadow_a)
+    result_b, visible_b = execute(shadow_b)
+
+    assert visible_a == ("shadow_a",)
+    assert visible_b == ("shadow_b",)
+    assert result_a.fingerprints["retrieval_skills"] == result_b.fingerprints[
+        "retrieval_skills"
+    ]
+    assert result_a.fingerprints["retrieval_skill_scope"] != result_b.fingerprints[
+        "retrieval_skill_scope"
+    ]
 
 
 def test_empty_handoff_keeps_round1_audit_and_safe_numerical_default(tmp_path) -> None:
