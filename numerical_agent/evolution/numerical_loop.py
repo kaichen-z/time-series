@@ -247,6 +247,7 @@ def run_numerical_loop(
                 forecasts=forecasts,
                 policy=decision_policy,
                 min_successful_folds=hindcast_config.min_successful_folds,
+                protected_anchor_name=protected.selected[0],
             )
             accepted, rejected, handoff = safe_retrieval_projection(
                 consistency.accepted,

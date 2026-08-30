@@ -5,7 +5,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
-from common.metrics import drcik_point_metrics
+from common.metrics import drcik_point_metrics, joint_scaled_error
 
 from .morphology import MorphologyCard
 
@@ -18,7 +18,12 @@ class ToolCallCredit:
     available_call_ids: frozenset[str]
     smae_improvement: float
     srmse_improvement: float
-    reward: float
+    joint_improvement: float
+
+    @property
+    def reward(self) -> float:
+        """Compatibility-only alias for the read-only joint diagnostic."""
+        return self.joint_improvement
 
 
 @dataclass(frozen=True)
@@ -86,7 +91,10 @@ def assign_tool_call_credit(
                 available_call_ids=available,
                 smae_improvement=smae_improvement,
                 srmse_improvement=srmse_improvement,
-                reward=(smae_improvement + srmse_improvement) / 2.0,
+                joint_improvement=(
+                    joint_scaled_error(prior["smae"], prior["srmse"])
+                    - joint_scaled_error(current["smae"], current["srmse"])
+                ),
             )
         )
         prior = current

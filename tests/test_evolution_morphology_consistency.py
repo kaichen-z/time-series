@@ -12,6 +12,7 @@ from numerical_agent.evolution.morphology import (
     MorphologyToolCall,
 )
 from numerical_agent.evolution.morphology_consistency import check_morphology_assumptions
+from numerical_agent.evolution.morphology_credit import assign_tool_call_credit
 from numerical_agent.evolution.numerical_selector import (
     CandidateDiagnostics,
     DecisionPolicy,
@@ -223,6 +224,51 @@ def test_consistency_rejects_nonfinite_scaled_tail_diagnostics() -> None:
     )
 
     assert result.rejected == {"bad-tail": "invalid_diagnostics"}
+
+
+def test_assumption_cannot_bypass_srmse_safe_anchor_guard() -> None:
+    """Assumption guidance must not admit a challenger that regresses anchor sRMSE."""
+    assumption = _assumption("guided", "seasonality", "challenger")
+    diagnostics = {
+        "safe_anchor": _diagnostic(
+            "safe_anchor", median_smae=1.0, median_srmse=1.0
+        ),
+        "challenger": _diagnostic(
+            "challenger", median_smae=0.7, median_srmse=1.4
+        ),
+    }
+
+    result = _check(
+        _card(assumption),
+        _profile(),
+        diagnostics,
+        {name: (1.0, 2.0, 3.0) for name in diagnostics},
+        protected_anchor_name="safe_anchor",
+    )
+
+    assert result.accepted == ()
+    assert result.rejected == {"guided": "safe_anchor_scaled_regret"}
+
+
+def test_train_credit_reports_explicit_joint_scaled_improvement() -> None:
+    """Credit must expose the canonical joint diagnostic beside both formal metrics."""
+    card = _card(_assumption("guided", "seasonality", "candidate"))
+
+    trace = assign_tool_call_credit(
+        card,
+        split="train",
+        future_truth=(1.0, 1.0, 1.0),
+        forecasts_by_call_ids={
+            frozenset(): (2.0, 2.0, 2.0),
+            frozenset({"broad"}): (1.0, 2.0, 2.0),
+            frozenset({"broad", "recent"}): (1.0, 1.0, 1.0),
+        },
+    )
+
+    for credit in trace.credits:
+        assert credit.joint_improvement == pytest.approx(
+            (credit.smae_improvement + credit.srmse_improvement) / 2.0
+        )
 
 
 @pytest.mark.parametrize("field", ("median_smae", "worst_srmse_raw"))
@@ -445,3 +491,49 @@ def test_consistency_retains_only_diverse_top_k_assumptions() -> None:
 
     assert tuple(item.assumption_id for item in result.accepted) == ("weekly_cycle", "stable_level")
     assert result.rejected["weekly_cycle_alt"] == "diversity_rejected"
+
+
+def test_consistency_ranks_assumptions_by_scaled_metrics_not_legacy_mase() -> None:
+    """Legacy MASE must not steer which grounded assumption survives Top-k."""
+    legacy_favorite = _assumption("legacy_favorite", "seasonality", "legacy")
+    scaled_favorite = _assumption("scaled_favorite", "seasonality", "scaled")
+    fold_forecasts = ((1.0, 2.0, 3.0),) * 3
+    fold_truths = ((1.0, 2.0, 3.0),) * 3
+    diagnostics = {
+        "legacy": CandidateDiagnostics.synthetic(
+            name="legacy",
+            family="statistical",
+            median_mase=0.1,
+            fold_forecasts=fold_forecasts,
+            fold_truths=fold_truths,
+            median_smae=1.5,
+            recent_smae=1.5,
+            worst_smae=1.5,
+            median_srmse=1.5,
+            recent_srmse=1.5,
+            worst_srmse=1.5,
+        ),
+        "scaled": CandidateDiagnostics.synthetic(
+            name="scaled",
+            family="statistical",
+            median_mase=9.0,
+            fold_forecasts=fold_forecasts,
+            fold_truths=fold_truths,
+            median_smae=0.5,
+            recent_smae=0.5,
+            worst_smae=0.5,
+            median_srmse=0.5,
+            recent_srmse=0.5,
+            worst_srmse=0.5,
+        ),
+    }
+
+    result = _check(
+        _card(legacy_favorite, scaled_favorite),
+        _profile(),
+        diagnostics,
+        {name: (1.0, 2.0, 3.0) for name in diagnostics},
+        policy=DecisionPolicy(assumption_top_k=1),
+    )
+
+    assert tuple(item.assumption_id for item in result.accepted) == ("scaled_favorite",)

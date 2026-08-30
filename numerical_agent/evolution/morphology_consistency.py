@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
+
+from common.metrics import drcik_point_metrics
 
 from .assumptions import ForecastAssumption, rank_diverse_assumptions
 from .morphology import AssumptionGrounding, MorphologyCard
@@ -43,6 +45,7 @@ def check_morphology_assumptions(
     forecasts: Mapping[str, Sequence[float]],
     policy: DecisionPolicy | None = None,
     min_successful_folds: int | None = None,
+    protected_anchor_name: str | None = None,
 ) -> AssumptionConsistencyResult:
     """Fail closed before a grounded assumption may advise numerical selection.
 
@@ -71,12 +74,31 @@ def check_morphology_assumptions(
         return _reject_all(assumptions, "invalid_diagnostics")
     if not isinstance(forecasts, Mapping):
         return _reject_all(assumptions, "invalid_forecasts")
-    stable_diagnostics = _stable_diagnostics(assumptions, diagnostics)
+    if protected_anchor_name is not None and (
+        not isinstance(protected_anchor_name, str)
+        or not protected_anchor_name
+        or protected_anchor_name not in active
+    ):
+        return _reject_all(assumptions, "invalid_protected_anchor")
+    stable_diagnostics = _stable_diagnostics(
+        assumptions,
+        diagnostics,
+        required_names=(protected_anchor_name,) if protected_anchor_name else (),
+    )
     if stable_diagnostics is None:
         return _reject_all(assumptions, "invalid_diagnostics")
     stable_forecasts = _stable_forecasts(assumptions, forecasts)
     if stable_forecasts is None:
         return _reject_all(assumptions, "invalid_forecasts")
+    protected_anchor = (
+        stable_diagnostics.get(protected_anchor_name)
+        if protected_anchor_name is not None
+        else None
+    )
+    if protected_anchor_name is not None and not _valid_diagnostic(
+        protected_anchor, protected_anchor_name
+    ):
+        return _reject_all(assumptions, "invalid_protected_anchor")
 
     survivors: list[AssumptionGrounding] = []
     for assumption in assumptions:
@@ -94,6 +116,7 @@ def check_morphology_assumptions(
                 minimum_folds=minimum,
                 policy=policy,
                 horizon=profile.horizon,
+                protected_anchor=protected_anchor,
             )
         if reason is None:
             survivors.append(assumption)
@@ -102,7 +125,7 @@ def check_morphology_assumptions(
 
     ranked = rank_diverse_assumptions(
         tuple(_as_rankable(assumption) for assumption in survivors),
-        stable_diagnostics,
+        _scaled_ranking_diagnostics(stable_diagnostics),
         top_k=policy.assumption_top_k,
         candidates_per_assumption=policy.assumption_candidates_per_hypothesis,
         min_confidence=policy.assumption_min_confidence,
@@ -113,6 +136,22 @@ def check_morphology_assumptions(
             rejected[assumption.assumption_id] = "diversity_rejected"
     accepted = tuple(assumption for assumption in survivors if assumption.assumption_id in accepted_ids)
     return AssumptionConsistencyResult(accepted=accepted, rejected=rejected)
+
+
+def _scaled_ranking_diagnostics(
+    diagnostics: Mapping[str, CandidateDiagnostics],
+) -> dict[str, CandidateDiagnostics]:
+    """Adapt the shared ranker without granting legacy metrics active authority."""
+    return {
+        name: replace(
+            diagnostic,
+            worst_mase=diagnostic.worst_joint_scaled_error,
+            median_mase=diagnostic.median_joint_scaled_error,
+            recent_mase=diagnostic.recent_joint_scaled_error,
+            mase_mad=max(diagnostic.smae_mad, diagnostic.srmse_mad),
+        )
+        for name, diagnostic in diagnostics.items()
+    }
 
 
 def _reject_all(
@@ -148,16 +187,22 @@ def _active_set(active_names: Sequence[str]) -> frozenset[str] | None:
 
 
 def _stable_diagnostics(
-    assumptions: Sequence[AssumptionGrounding], diagnostics: Mapping[str, CandidateDiagnostics]
+    assumptions: Sequence[AssumptionGrounding],
+    diagnostics: Mapping[str, CandidateDiagnostics],
+    *,
+    required_names: Sequence[str] = (),
 ) -> dict[str, CandidateDiagnostics] | None:
     """Reject changing mappings, then rank only a stable local diagnostic snapshot."""
     stable: dict[str, CandidateDiagnostics] = {}
     try:
         names = dict.fromkeys(
-            candidate
-            for assumption in assumptions
-            for candidate in assumption.candidate_names
+            (
+                candidate
+                for assumption in assumptions
+                for candidate in assumption.candidate_names
+            ),
         )
+        names.update(dict.fromkeys(required_names))
         for name in names:
             value = diagnostics.get(name)
             if diagnostics.get(name) != value:
@@ -227,6 +272,7 @@ def _candidate_reason(
     minimum_folds: int,
     policy: DecisionPolicy,
     horizon: int,
+    protected_anchor: CandidateDiagnostics | None,
 ) -> str | None:
     for name in assumption.candidate_names:
         if name not in active:
@@ -250,6 +296,10 @@ def _candidate_reason(
             or diagnostic.worst_srmse_raw > policy.catastrophic_srmse_raw
         ):
             return "catastrophic_hindcast_tail"
+        if protected_anchor is not None and not _passes_safe_anchor_regret(
+            diagnostic, protected_anchor, policy
+        ):
+            return "safe_anchor_scaled_regret"
         if policy.long_horizon_guard_enabled:
             if diagnostic.long_horizon_coverage < policy.long_horizon_min_coverage:
                 return "insufficient_long_horizon_coverage"
@@ -269,6 +319,52 @@ def _candidate_reason(
         if len(forecast) != horizon:
             return "forecast_horizon_mismatch"
     return None
+
+
+def _passes_safe_anchor_regret(
+    candidate: CandidateDiagnostics,
+    anchor: CandidateDiagnostics,
+    policy: DecisionPolicy,
+) -> bool:
+    """Protect both capped scaled metrics independently against the exact anchor."""
+    tolerance = 1e-12
+    if (
+        candidate.median_smae
+        > anchor.median_smae * (1.0 + policy.max_smae_fold_regret) + tolerance
+        or candidate.median_srmse
+        > anchor.median_srmse * (1.0 + policy.max_srmse_fold_regret) + tolerance
+    ):
+        return False
+    if not candidate.fold_forecasts or not anchor.fold_forecasts:
+        return True
+    if (
+        len(candidate.fold_forecasts) != len(anchor.fold_forecasts)
+        or len(candidate.fold_forecasts) != len(anchor.fold_truths)
+    ):
+        return False
+    for candidate_forecast, anchor_forecast, truth in zip(
+        candidate.fold_forecasts,
+        anchor.fold_forecasts,
+        anchor.fold_truths,
+        strict=True,
+    ):
+        if (
+            len(candidate_forecast) != len(anchor_forecast)
+            or len(candidate_forecast) != len(truth)
+            or not truth
+        ):
+            return False
+        candidate_metrics = drcik_point_metrics(list(truth), list(candidate_forecast))
+        anchor_metrics = drcik_point_metrics(list(truth), list(anchor_forecast))
+        for metric, maximum_regret in (
+            ("smae", policy.max_smae_fold_regret),
+            ("srmse", policy.max_srmse_fold_regret),
+        ):
+            if float(candidate_metrics[metric]) > float(anchor_metrics[metric]) * (
+                1.0 + maximum_regret
+            ) + tolerance:
+                return False
+    return True
 
 
 def _valid_diagnostic(value: object, expected_name: str) -> bool:

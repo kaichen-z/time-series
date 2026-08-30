@@ -14,7 +14,9 @@ from dataclasses import dataclass
 from typing import Literal
 
 from common.llm import LLMClient
+from common.metrics import drcik_point_metrics
 
+from .cache import SCALED_METRIC_CAP
 from .portfolio import CombinedPolicy, PolicyError, PolicyPortfolio, TSFMPolicy
 from .screening import TaskProfile
 
@@ -114,6 +116,45 @@ class CombinedEvolutionError(ValueError):
 
 class _StrictJsonError(ValueError):
     """A JSON response violates strict object or numeric parsing rules."""
+
+
+def winsorized_scaled_metric_delta(
+    *,
+    truth: Sequence[float] | object,
+    candidate_forecast: Sequence[float] | object,
+    baseline_forecast: Sequence[float] | object,
+) -> tuple[float, float]:
+    """Score one complete candidate/baseline pair under the canonical capped contract."""
+    if any(
+        isinstance(value, (str, bytes)) or not isinstance(value, Sequence)
+        for value in (truth, candidate_forecast, baseline_forecast)
+    ):
+        raise CombinedEvolutionError("scaled metric evidence requires complete sequences")
+    try:
+        if (
+            not truth
+            or len(candidate_forecast) != len(truth)  # type: ignore[arg-type]
+            or len(baseline_forecast) != len(truth)  # type: ignore[arg-type]
+        ):
+            raise CombinedEvolutionError(
+                "scaled metric evidence requires a complete forecast pair"
+            )
+        candidate = drcik_point_metrics(
+            truth, candidate_forecast, cap=SCALED_METRIC_CAP  # type: ignore[arg-type]
+        )
+        baseline = drcik_point_metrics(
+            truth, baseline_forecast, cap=SCALED_METRIC_CAP  # type: ignore[arg-type]
+        )
+    except CombinedEvolutionError:
+        raise
+    except (OverflowError, TypeError, ValueError) as error:
+        raise CombinedEvolutionError(
+            "scaled metric evidence requires a complete finite forecast pair"
+        ) from error
+    return (
+        float(candidate["smae"]) - float(baseline["smae"]),
+        float(candidate["srmse"]) - float(baseline["srmse"]),
+    )
 
 
 @dataclass(frozen=True)

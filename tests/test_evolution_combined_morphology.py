@@ -132,6 +132,27 @@ def test_train_profiles_are_summarized_by_the_fixed_predicate_without_exposing_i
     assert "99.0" not in json.dumps(evidence.to_payload(), sort_keys=True)
 
 
+def test_combined_delta_producer_uses_canonical_cap_and_rejects_incomplete_pairs() -> None:
+    """A hand-rolled or single-metric producer could leak uncapped proposal evidence."""
+    from numerical_agent.evolution.combined_evolution import (
+        CombinedEvolutionError,
+        winsorized_scaled_metric_delta,
+    )
+
+    assert winsorized_scaled_metric_delta(
+        truth=(1.0, 1.0, 1.0, 1.0),
+        candidate_forecast=(1.0, 1.0, 1.0, 25.0),
+        baseline_forecast=(1.0, 1.0, 1.0, 1.0),
+    ) == (5.0, 5.0)
+
+    with pytest.raises(CombinedEvolutionError, match="complete"):
+        winsorized_scaled_metric_delta(
+            truth=(1.0, 1.0),
+            candidate_forecast=(1.0,),
+            baseline_forecast=(1.0, 1.0),
+        )
+
+
 @pytest.mark.parametrize("measurement", (True, 1, type("FloatSubclass", (float,), {})(1.0)))
 def test_morphology_summarizer_rejects_nonexact_profile_measurements(
     measurement: object,

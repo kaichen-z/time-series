@@ -134,7 +134,7 @@ def test_decision_policy_round_trip_and_strict_mutation_schema():
         },
     }))
     assert child.recent_regime_first
-    assert child.catastrophic_mase == 8.0
+    assert child.catastrophic_mase == parent.catastrophic_mase
 
     for forbidden in ("future", "split", "candidates", "scorer", "screening_policy"):
         with pytest.raises(SelectorEvolutionError):
@@ -523,6 +523,37 @@ def test_gate_uses_clipped_smae_as_primary_and_guards_srmse_and_tail():
     assert not compare_decisions(parent, improved, parent, missing).accepted
 
 
+def test_combined_child_is_rejected_when_train_srmse_regresses() -> None:
+    """A Train sMAE gain must not hide regression in the paired scaled metric."""
+    observed = evaluate_decision(DecisionPolicy(ensemble_enabled=False), (_case("t1"),))
+    parent = replace(
+        observed,
+        mean_smae=1.0,
+        mean_srmse=1.0,
+        p90_smae=1.0,
+        p95_smae=1.0,
+    )
+    train_child = replace(parent, mean_smae=0.8, mean_srmse=1.001)
+    dev_child = replace(parent, mean_smae=0.9, mean_srmse=0.9)
+
+    assert not compare_decisions(parent, train_child, parent, dev_child).accepted
+
+
+def test_combined_child_accepts_pareto_gain_in_srmse_with_smae_unchanged() -> None:
+    """Requiring an sMAE win would incorrectly reject a valid two-metric Pareto gain."""
+    observed = evaluate_decision(DecisionPolicy(ensemble_enabled=False), (_case("t1"),))
+    parent = replace(
+        observed,
+        mean_smae=1.0,
+        mean_srmse=1.0,
+        p90_smae=1.0,
+        p95_smae=1.0,
+    )
+    child = replace(parent, mean_srmse=0.9)
+
+    assert compare_decisions(parent, child, parent, child).accepted
+
+
 def test_active_oracle_regret_uses_the_same_scaled_smae_contract():
     task = Task("t", tuple(float(i) for i in range(1, 21)), 2, "D", (1.0, 2.0))
     case = DecisionCase(
@@ -626,6 +657,8 @@ def test_evolution_prompt_contains_train_aggregates_not_ids_or_futures(tmp_path)
     assert "train-secret" not in prompt
     assert "dev-secret" not in prompt
     assert "future" not in prompt.lower()
+    assert "mase" not in prompt.lower()
+    assert "smape" not in prompt.lower()
     assert "screen-sha" in prompt
     assert not result.accepted
 

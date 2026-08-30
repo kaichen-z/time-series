@@ -1042,6 +1042,51 @@ def test_assumption_guidance_cannot_bypass_protected_reliability_gates(
     assert package.fallback_reason == "morphology_consistency_rejected"
 
 
+def test_assumption_guidance_cannot_bypass_srmse_safe_anchor_guard() -> None:
+    task = _task()
+    entries = (_entry("safe_anchor", "tsfm"), _entry("challenger", "statistical"))
+    truth = (1.0, 2.0, 3.0)
+    diagnostics = {
+        "safe_anchor": _diagnostic(
+            "safe_anchor",
+            "tsfm",
+            forecast=truth,
+            truth=truth,
+            median_smae=1.0,
+            median_srmse=1.0,
+        ),
+        "challenger": _diagnostic(
+            "challenger",
+            "statistical",
+            forecast=truth,
+            truth=truth,
+            median_smae=0.7,
+            median_srmse=1.4,
+        ),
+    }
+
+    package = run_numerical_loop(
+        task,
+        screening_policy=ScreeningPolicy(entries, ("safe_anchor",)),
+        candidate_runner=lambda name, history, horizon, frequency: (
+            tuple(float(index + 1) for index in range(horizon))
+            if name == "challenger"
+            else (10.0,) * horizon
+        ),
+        diagnostics=diagnostics,
+        decision_policy=DecisionPolicy(ensemble_enabled=False),
+        morphology_reasoner=_FixedReasoner(
+            _card(_assumption("guided", "challenger"))
+        ),
+    )
+
+    assert package.accepted_assumptions == ()
+    assert package.rejected_assumptions == {
+        "guided": "safe_anchor_scaled_regret"
+    }
+    assert package.selection_decision.selected == ("safe_anchor",)
+
+
 @pytest.mark.parametrize("result", [{"not": "a card"}, RuntimeError("bad morphology")])
 def test_malformed_or_failed_morphology_returns_protected_safe_anchor(result: object) -> None:
     class MalformedReasoner(_FixedReasoner):
