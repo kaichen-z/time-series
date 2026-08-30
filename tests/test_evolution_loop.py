@@ -7,6 +7,7 @@ import pytest
 
 from common.llm import FakeLLMClient
 from numerical_agent.evolution import (
+    _validate_candidate,
     bootstrap,
     commit_module,
     evolve_once,
@@ -16,7 +17,13 @@ from numerical_agent.evolution import (
 )
 from numerical_agent.evolution.execution import Task
 from numerical_agent.evolution.module import MODULE_HEADER, read_module, write_module, parse_module
-from numerical_agent.evolution.prompts import MUTATE_SYSTEM
+from numerical_agent.evolution.prompts import (
+    EVOLVE_SYSTEM,
+    MUTATE_SYSTEM,
+    SELECT_SYSTEM,
+    render_evolve_user,
+    render_select_user,
+)
 from numerical_agent.run_evolution import (
     _evolution_tasks,
     _llm_clients,
@@ -62,6 +69,72 @@ def tasks() -> tuple[Task, ...]:
 
 def scripted(operations: list[dict]) -> FakeLLMClient:
     return FakeLLMClient([json.dumps({"operations": operations})])
+
+
+def test_active_batch_prompts_ignore_legacy_metric_variation() -> None:
+    active = {
+        "method": "m",
+        "mean_smae": 0.8,
+        "mean_srmse": 0.9,
+        "mean_mase": 1.0,
+        "mean_smape": 10.0,
+        "mean_mae": 2.0,
+        "success": 1,
+        "total": 1,
+        "coverage": 1.0,
+        "not_applicable": 0,
+        "crashed": 0,
+        "invalid": 0,
+    }
+    legacy_varied = {
+        **active,
+        "mean_mase": 999.0,
+        "mean_smape": 199.0,
+        "mean_mae": 999.0,
+    }
+
+    first = render_select_user(
+        reports=[active], method_inventory=[], generation=1, task_count=1
+    )
+    second = render_select_user(
+        reports=[legacy_varied], method_inventory=[], generation=1, task_count=1
+    )
+    evolve = render_evolve_user(
+        module_source="", reports=[active], generation=1, task_count=1
+    )
+
+    assert first == second
+    assert "mean_mase" not in first + evolve + SELECT_SYSTEM + EVOLVE_SYSTEM
+    assert "mean_smape" not in first + evolve + SELECT_SYSTEM + EVOLVE_SYSTEM
+    assert "mean_smae" in first
+    assert "mean_srmse" in first
+
+
+def test_batch_validation_rejects_srmse_regression_despite_smae_improvement(
+    tmp_path: Path,
+) -> None:
+    parent = parse_module(
+        MODULE_HEADER
+        + "\n\ndef parent(history, horizon, frequency):\n"
+        '    """Use for pair-gate testing."""\n'
+        "    return [8.0, 8.0]\n"
+    )
+    child = parse_module(
+        MODULE_HEADER
+        + "\n\ndef parent(history, horizon, frequency):\n"
+        '    """Use for pair-gate testing."""\n'
+        "    return [10.0, 7.0]\n"
+    )
+    parent_path = write_module(tmp_path / "parent.py", parent)
+    task = Task("t", (10.0, 10.0, 10.0), 2, "1 day", (10.0, 10.0))
+
+    accepted, metrics = _validate_candidate(
+        tmp_path, 1, parent_path, child, (task,), isolate_methods=False
+    )
+
+    assert metrics["child_mean_smae"] < metrics["parent_mean_smae"]
+    assert metrics["child_mean_srmse"] > metrics["parent_mean_srmse"]
+    assert not accepted
 
 
 def test_bootstrap_writes_and_commits_a_module(tmp_path: Path) -> None:
@@ -163,7 +236,8 @@ def test_the_whole_module_reaches_the_prompt(tmp_path: Path) -> None:
 
     sent = llm.calls[0]["messages"][0]["content"]
     assert "def alpha(" in sent and "def beta(" in sent
-    assert "mean_smape" in sent
+    assert "mean_smae" in sent and "mean_srmse" in sent
+    assert "mean_smape" not in sent and "mean_mase" not in sent
 
 
 def test_run_evolution_stops_when_a_generation_changes_nothing(tmp_path: Path) -> None:
@@ -221,7 +295,8 @@ def test_two_stage_generation_selects_before_sending_only_target_code(
     selector_prompt = selector.calls[0]["messages"][0]["content"]
     selector_system = selector.calls[0]["system"]
     mutator_prompt = mutator.calls[0]["messages"][0]["content"]
-    assert "mean_mase" in selector_prompt
+    assert "mean_smae" in selector_prompt and "mean_srmse" in selector_prompt
+    assert "mean_mase" not in selector_prompt
     assert "def alpha(" not in selector_prompt
     assert "def beta(" not in selector_prompt
     assert "def gamma(" not in selector_prompt
@@ -470,7 +545,7 @@ def test_two_stage_generation_rejects_deleting_an_untested_specialist(
     assert "specialist" in read_module(repo / "methods.py").names()
 
 
-def test_validation_tasks_reject_a_child_with_worse_oracle_mase(tmp_path: Path) -> None:
+def test_validation_tasks_reject_a_child_with_worse_scaled_pair(tmp_path: Path) -> None:
     repo = init_repo(tmp_path / "evo")
     alpha = method("alpha", "    return [float(history[-1])] * horizon")
     beta = method("beta", "    return [0.0] * horizon")
@@ -501,7 +576,7 @@ def test_validation_tasks_reject_a_child_with_worse_oracle_mase(tmp_path: Path) 
     )
 
     assert outcome.applied == ()
-    assert "validation MASE regressed" in outcome.rejected
+    assert "validation scaled pair failed Pareto acceptance" in outcome.rejected
     assert read_module(repo / "methods.py").names() == ("alpha", "beta")
 
 

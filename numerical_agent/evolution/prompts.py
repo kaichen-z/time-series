@@ -62,18 +62,15 @@ you restructure the module so it becomes a smaller set of genuinely distinct, wo
 {CONTRACT_TEXT}
 
 Each method's report gives:
-- mean_mase, mean_smape, and mean_mae over the tasks it actually produced a forecast for
-  (lower is better for all three). mean_mase is the primary metric to compare methods by: it
-  scales MAE by the in-sample naive error, so it stays finite and comparable across series
-  instead of blowing up near zero the way sMAPE does. Treat mean_mase as the deciding signal
-  when it disagrees with sMAPE, especially on intermittent or near-zero series;
+- mean_smae and mean_srmse under the canonical [0, 5] cap. Treat them as one Pareto pair:
+  neither metric may regress, and use their equal-weight joint value only for deterministic
+  ordering when multiple non-regressing choices remain;
 - success / total and coverage;
 - not_applicable: tasks it declined by raising NotApplicable, which is correct behavior, not failure;
 - crashed: tasks where it raised something else, which is always a defect;
 - invalid: tasks where it returned the wrong shape or a non-finite value, also a defect;
-- by_characteristic, by_characteristic_mae, and by_characteristic_mase: the same three metrics
-  grouped by series type, which is the evidence for its docstring. Lead with by_characteristic_mase
-  when picking which series type a method is genuinely strong on;
+- by_characteristic_smae and by_characteristic_srmse: the same pair grouped by series type,
+  which is the evidence for its docstring;
 - sample_failures: real exception messages from crashed or invalid runs.
 
 Judge on evidence and prefer few strong methods over many weak ones:
@@ -107,7 +104,8 @@ For merge, `into` must be one of `names` whenever that method already exists. Fo
 """
 
 SELECT_SYSTEM = """You are the low-cost screening stage of forecasting-method evolution.
-Use mean_mase as the primary metric, with mean_smape and mean_mae as supporting evidence.
+Use mean_smae and mean_srmse as one capped Pareto pair. Neither may regress; their equal-weight
+joint value is for deterministic ordering only. Legacy error diagnostics are intentionally absent.
 Select at most ten existing methods that warrant repair, forking, deletion, or merging. For a merge,
 select every participating method. Do not write Python code and do not invent method names.
 
@@ -132,7 +130,7 @@ Return an empty targets list when the evidence is insufficient.
 
 MUTATE_SYSTEM = f"""You are the code-writing stage of forecasting-method evolution. You receive
 only methods selected by a screening model. Produce conservative, schema-valid changes supported
-by the measured results. mean_mase is primary; mean_smape and mean_mae are supporting metrics.
+by measured mean_smae and mean_srmse. They are a capped Pareto pair; joint is ordering only.
 
 {CONTRACT_TEXT}
 
@@ -163,7 +161,8 @@ Return exactly one JSON object:
 """
 
 TARGETWISE_SELECT_SYSTEM = """You are the low-cost screening stage of target-wise forecasting
-method evolution. Use mean_mase as the primary metric. Select no more than the requested
+method evolution. Use capped mean_smae and mean_srmse as a Pareto pair, with joint ordering only.
+Select no more than the requested
 max_targets, with a hard ceiling of ten unique existing methods. Each target action is repair,
 fork, or delete; never merge targets in this mode.
 
@@ -197,7 +196,8 @@ and `reason`. Return {{"operations": []}} when no compliant change is justified.
 
 POLICY_SELECT_SYSTEM = """You are the low-cost screening stage for the non-Python forecast
 portfolio: five reviewed time-series foundation-model invocation policies and a variable number
-of typed Combined policies. Use mean_mase as the primary metric. Select no more than the requested
+of typed Combined policies. Use capped mean_smae and mean_srmse as a Pareto pair; use their joint
+value only for deterministic ordering. Select no more than the requested
 max_targets. A policy is repaired in place; it is never deleted, renamed, or forked.
 
 For TSFM policies, the reviewed model/checkpoint identity is immutable. You may improve only
@@ -270,7 +270,7 @@ def render_evolve_user(
             "generation": generation,
             "train_tasks": task_count,
             "method_count": len(reports),
-            "reports": list(reports),
+            "reports": _active_reports(reports),
         },
         ensure_ascii=False,
         indent=2,
@@ -294,7 +294,7 @@ def render_select_user(
             "train_tasks": task_count,
             "method_count": len(reports),
             "max_targets": max_targets,
-            "reports": list(reports),
+            "reports": _active_reports(reports),
             "method_inventory": list(method_inventory),
         },
         ensure_ascii=False,
@@ -320,7 +320,7 @@ def render_mutate_user(
             "generation": generation,
             "train_tasks": task_count,
             "selected_targets": list(selected),
-            "selected_reports": list(reports),
+            "selected_reports": _active_reports(reports),
             "all_method_names": list(all_method_names),
             "identity_contracts": list(identity_contracts),
             "failure_diagnosis": dict(failure_diagnosis or {}),
@@ -346,7 +346,7 @@ def render_policy_select_user(
             "generation": generation,
             "train_tasks": task_count,
             "max_targets": max_targets,
-            "reports": list(reports),
+            "reports": _active_reports(reports),
             "policy_inventory": list(policies),
         },
         ensure_ascii=False,
@@ -369,10 +369,38 @@ def render_policy_mutate_user(
             "generation": generation,
             "train_tasks": task_count,
             "current_policy": dict(policy),
-            "measured_report": dict(report),
+            "measured_report": _active_reports((report,))[0],
             "failure_diagnosis": dict(diagnosis),
         },
         ensure_ascii=False,
         indent=2,
         sort_keys=True,
     )
+
+
+_ACTIVE_REPORT_FIELDS = frozenset(
+    {
+        "method",
+        "mean_smae",
+        "mean_srmse",
+        "success",
+        "total",
+        "coverage",
+        "not_applicable",
+        "crashed",
+        "invalid",
+        "by_characteristic_smae",
+        "by_characteristic_srmse",
+        "sample_failures",
+    }
+)
+
+
+def _active_reports(
+    reports: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Project only authoritative scaled evidence into mutation/selection prompts."""
+    return [
+        {key: value for key, value in report.items() if key in _ACTIVE_REPORT_FIELDS}
+        for report in reports
+    ]

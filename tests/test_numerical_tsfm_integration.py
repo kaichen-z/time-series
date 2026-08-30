@@ -146,6 +146,7 @@ def test_mixed_fake_worker_curation_and_frozen_evaluation_cover_runtime_contract
         experiment_path,
         {
             "evolution": {
+                **metric_policy_metadata(),
                 "generations": 1,
                 "children_per_generation": 1,
                 "resume": False,
@@ -153,8 +154,10 @@ def test_mixed_fake_worker_curation_and_frozen_evaluation_cover_runtime_contract
             "curation": {
                 **metric_policy_metadata(),
                 "allowed_families": ["statistical", "foundation"],
-                "accepted_max_error": 1000.0,
-                "specialized_max_error": 1000.0,
+                "accepted_max_smae": 5.0,
+                "accepted_max_srmse": 5.0,
+                "specialized_max_smae": 5.0,
+                "specialized_max_srmse": 5.0,
                 "selection_folds": 2,
                 "selection_horizon": 1,
             },
@@ -203,9 +206,10 @@ def test_mixed_fake_worker_curation_and_frozen_evaluation_cover_runtime_contract
         record for record in working["methods"]
         if record["definition"]["method_id"] == "method_tsfm_0005"
     )
-    assert moment["candidate"]["implementation"]["unavailable_reason"] == (
-        "forecast_head_requires_training"
-    )
+    # The capped pair ties the all-missing Parent at the cap, so Pareto acceptance
+    # rejects the child and the published working dictionary remains exact Parent.
+    assert moment["candidate"] is None
+    assert moment["status"] == "unimplemented"
 
     frozen_tasks = tmp_path / "frozen-tasks.jsonl"
     frozen_tasks.write_text(

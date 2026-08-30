@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from common.metrics import drcik_point_metrics, mae, mase, smape
+from common.metrics import drcik_point_metrics, joint_scaled_error, mae, mase, smape
 
 from .analysis_skills import DEFAULT_SKILLS_PATH, skill_namespace
 
@@ -258,6 +258,53 @@ def reports_from_outcomes(
         _report(name, [outcome for outcome in outcomes if outcome.method == name], tasks)
         for name in method_names
     )
+
+
+def oracle_scaled_summary(
+    outcomes: Sequence[Outcome], tasks: Sequence[Task]
+) -> dict[str, float]:
+    """Aggregate the per-task oracle selected only by the capped scaled pair."""
+    smaes: list[float] = []
+    srmses: list[float] = []
+    for task in tasks:
+        usable: list[tuple[float, float, str]] = []
+        for outcome in outcomes:
+            if outcome.task_id != task.task_id or outcome.status != SUCCESS:
+                continue
+            if outcome.smae is None or outcome.srmse is None:
+                raise ValueError("active oracle outcome is missing the scaled metric pair")
+            smae = float(outcome.smae)
+            srmse = float(outcome.srmse)
+            if not (
+                math.isfinite(smae)
+                and math.isfinite(srmse)
+                and 0.0 <= smae <= 5.0
+                and 0.0 <= srmse <= 5.0
+            ):
+                raise ValueError("active oracle outcome has an invalid scaled metric pair")
+            usable.append((smae, srmse, outcome.method))
+        if usable:
+            smae, srmse, _ = min(
+                usable,
+                key=lambda item: (
+                    joint_scaled_error(item[0], item[1]),
+                    item[0],
+                    item[1],
+                    item[2],
+                ),
+            )
+        else:
+            smae, srmse = 5.0, 5.0
+        smaes.append(smae)
+        srmses.append(srmse)
+    if not smaes:
+        raise ValueError("active oracle requires at least one task")
+    return {
+        "mean_smae": statistics.fmean(smaes),
+        "mean_srmse": statistics.fmean(srmses),
+        "median_smae": statistics.median(smaes),
+        "median_srmse": statistics.median(srmses),
+    }
 
 
 def _run_isolated(

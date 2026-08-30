@@ -5,7 +5,12 @@ import json
 import pytest
 
 from common.evolution_core.acceptance import MetricAcceptanceGate
-from common.evolution_core.contracts import EvaluationReport, MetricSpec
+from common.evolution_core.contracts import (
+    METRIC_POLICY_FINGERPRINT,
+    EvaluationReport,
+    MetricSpec,
+    metric_policy_metadata,
+)
 from common.evolution_core.persistence import JsonArtifactStore
 
 
@@ -46,9 +51,40 @@ def test_json_store_round_trips_checkpoint_and_artifact(tmp_path) -> None:
     assert json.loads(artifact_path.read_text())["id"] == "v000"
     assert checkpoint_path.name == "checkpoint.json"
     assert store.load_checkpoint() == {
+        "schema_version": 2,
+        **metric_policy_metadata(),
         "generation": 2,
         "accepted_artifact": {"id": "v002"},
     }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"generation": 1, "accepted_artifact": {"id": "v001"}},
+        {
+            "schema_version": 2,
+            **metric_policy_metadata(),
+            "metric_policy_fingerprint": "forged",
+            "generation": 1,
+            "accepted_artifact": {"id": "v001"},
+        },
+    ),
+)
+def test_json_store_rejects_missing_or_wrong_checkpoint_policy(tmp_path, payload) -> None:
+    (tmp_path / "checkpoint.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="metric policy|fingerprint"):
+        JsonArtifactStore(tmp_path).load_checkpoint()
+
+
+def test_json_store_checkpoint_persists_exact_canonical_fingerprint(tmp_path) -> None:
+    path = JsonArtifactStore(tmp_path).save_checkpoint(
+        {"generation": 3, "accepted_artifact": {"id": "v003"}}
+    )
+
+    payload = json.loads(path.read_text())
+    assert payload["metric_policy_fingerprint"] == METRIC_POLICY_FINGERPRINT
 
 
 def test_json_store_appends_one_trace_object_per_line(tmp_path) -> None:

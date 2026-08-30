@@ -8,6 +8,7 @@ import pytest
 
 import numerical_agent.evaluate_frozen_two_stage as frozen_evaluation
 import common.evolution_core.contracts as evolution_contracts
+from common.payload import canonical_json_bytes
 from numerical_agent.evaluate_frozen_two_stage import (
     ForecastResult,
     _hindcast_config_for_policy,
@@ -226,6 +227,45 @@ def test_active_release_rejects_legacy_ranking_even_with_forged_current_binding(
 
     with pytest.raises(ValueError, match="legacy metric policy"):
         evolution_contracts.load_active_release(payload)
+
+
+def test_exported_metric_policy_cannot_mutate_canonical_authority():
+    try:
+        with pytest.raises(TypeError):
+            evolution_contracts.METRIC_POLICY["cap"] = 4.0
+    finally:
+        # Keep this RED probe isolated if an old mutable implementation is under test.
+        if evolution_contracts.METRIC_POLICY["cap"] != 5.0:
+            evolution_contracts.METRIC_POLICY["cap"] = 5.0
+
+    first = evolution_contracts.metric_policy_metadata()
+    first["metric_policy"]["cap"] = 4.0
+    second = evolution_contracts.metric_policy_metadata()
+
+    assert second["metric_policy"]["cap"] == 5.0
+    evolution_contracts.require_active_metric_policy(second)
+
+
+def test_active_release_recomputes_and_rejects_a_forged_fingerprint():
+    payload = {
+        "schema_version": 2,
+        **evolution_contracts.metric_policy_metadata(),
+    }
+    payload["metric_policy_fingerprint"] = "0" * 64
+
+    with pytest.raises(ValueError, match="fingerprint mismatch"):
+        evolution_contracts.load_active_release(payload)
+
+
+def test_raw_infinite_tail_uses_an_explicit_standards_json_sentinel():
+    encoded = canonical_json_bytes({"p95_smae_raw": float("inf")})
+
+    assert b"Infinity" not in encoded
+    decoded = json.loads(encoded)
+    assert decoded["p95_smae_raw"] == {
+        "status": "positive_infinity",
+        "value": None,
+    }
 
 
 def test_evaluation_cli_has_no_llm_or_mutation_options():

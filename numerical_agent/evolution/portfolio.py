@@ -16,6 +16,11 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Literal, Mapping, Sequence, cast
 
+from common.evolution_core.contracts import (
+    metric_policy_metadata,
+    require_active_metric_policy,
+)
+
 from common.metrics import drcik_point_metrics, mae, mase, smape
 
 from numerical_agent.dictionary import MethodCandidate
@@ -153,7 +158,8 @@ class PolicyOutcomeCache:
     @staticmethod
     def _key(policy: "TSFMPolicy", task: Task) -> str:
         payload = {
-            "schema": 2,
+            "cache_schema": 3,
+            **metric_policy_metadata(),
             "scaled_metric_schema": SCALED_METRIC_SCHEMA,
             "scaled_metric_cap": SCALED_METRIC_CAP,
             "policy": policy.to_payload(),
@@ -164,33 +170,49 @@ class PolicyOutcomeCache:
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     def _read(self, key: str, method: str, task: Task) -> Outcome | None:
+        path = self.root / f"{key}.json"
+        if not path.exists():
+            return None
         try:
-            payload = json.loads((self.root / f"{key}.json").read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise PolicyError("malformed active policy outcome cache row") from error
+        try:
+            if not isinstance(payload, Mapping):
+                raise PolicyError("active policy outcome cache row must be an object")
+            require_active_metric_policy(payload, context="active policy outcome cache row")
+            if payload.get("cache_schema") != 3:
+                raise PolicyError("active policy outcome cache row schema mismatch")
+            if payload.get("key") != key:
+                raise PolicyError("active policy outcome cache row key mismatch")
             if (
-                payload.get("schema") != 2
-                or payload.get("scaled_metric_schema") != SCALED_METRIC_SCHEMA
+                payload.get("scaled_metric_schema") != SCALED_METRIC_SCHEMA
                 or payload.get("scaled_metric_cap") != SCALED_METRIC_CAP
-                or payload.get("key") != key
             ):
-                return None
+                raise PolicyError("active policy outcome cache scaled schema mismatch")
             raw = payload["outcome"]
             if not isinstance(raw, Mapping):
-                return None
+                raise PolicyError("active policy outcome must be an object")
             outcome = OutcomeCache.from_payload(raw)
             if outcome.method != method or outcome.task_id != task.task_id:
-                return None
+                raise PolicyError("active policy outcome cache identity mismatch")
             if outcome.status not in {SUCCESS, NOT_APPLICABLE, CRASHED, INVALID}:
-                return None
+                raise PolicyError("active policy outcome cache status mismatch")
             if outcome.status == SUCCESS and len(outcome.forecast) != task.horizon:
-                return None
+                raise PolicyError("active policy outcome cache forecast horizon mismatch")
             return outcome
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
-            return None
+        except PolicyError:
+            raise
+        except ValueError:
+            raise
+        except (TypeError, KeyError) as error:
+            raise PolicyError("malformed active policy outcome cache row") from error
 
     def _write(self, key: str, outcome: Outcome) -> None:
         payload = json.dumps(
             {
-                "schema": 2,
+                "cache_schema": 3,
+                **metric_policy_metadata(),
                 "scaled_metric_schema": SCALED_METRIC_SCHEMA,
                 "scaled_metric_cap": SCALED_METRIC_CAP,
                 "key": key,

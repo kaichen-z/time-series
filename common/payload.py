@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -9,8 +10,48 @@ from typing import Mapping, Sequence
 def canonical_json_bytes(payload: Mapping[str, object]) -> bytes:
     """Serialize a payload deterministically so content hashes stay reproducible."""
     return (
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        json.dumps(
+            standards_json_value(payload),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n"
     ).encode("utf-8")
+
+
+def standards_json_value(value: object) -> object:
+    """Replace raw infinities with explicit typed sentinels; reject NaN."""
+    if isinstance(value, float):
+        if math.isnan(value):
+            raise ValueError("NaN is not valid standards JSON")
+        if math.isinf(value):
+            return {
+                "status": "positive_infinity" if value > 0 else "negative_infinity",
+                "value": None,
+            }
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): standards_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [standards_json_value(item) for item in value]
+    return value
+
+
+def decode_infinity_sentinel(value: object, field_name: str) -> float:
+    """Decode one explicit raw-tail infinity sentinel under the active schema."""
+    if value == {"status": "positive_infinity", "value": None}:
+        return math.inf
+    if value == {"status": "negative_infinity", "value": None}:
+        return -math.inf
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{field_name} must be numeric or an infinity sentinel") from error
+    if math.isnan(number):
+        raise ValueError(f"{field_name} must not be NaN")
+    return number
 
 
 def write_json(path: str | Path, payload: Mapping[str, object]) -> Path:

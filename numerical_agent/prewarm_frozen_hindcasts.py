@@ -71,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         portfolio,
         RuntimeRegistry(),
         screening_hash,
+        runtime_identity={"provider": "isolated_statistical", "checkpoint": None},
     )
     try:
         config = HindcastConfig(folds=args.folds)

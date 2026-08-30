@@ -211,8 +211,6 @@ class DecisionPolicy:
     min_successful_folds: int = 3
     catastrophic_smae_raw: float = 10.0
     catastrophic_srmse_raw: float = 10.0
-    # Compatibility-only: downstream frozen payloads may still supply this field.
-    catastrophic_mase: float = 10.0
     max_smae_fold_regret: float = 0.02
     max_srmse_fold_regret: float = 0.02
     baseline_strategy: str = "toto_first"
@@ -259,6 +257,7 @@ class DecisionPolicy:
         legacy_keys = {"catastrophic_mase", "median_mase", "recent_mase", "worst_mase", "mase_mad"}
         if legacy_keys & set(raw) and not allow_legacy:
             raise ValueError("legacy MASE policy fields require allow_legacy=True")
+        raw.pop("catastrophic_mase", None)
         if "ranking_order" in raw:
             ranking = raw["ranking_order"]
             if isinstance(ranking, (str, bytes)):
@@ -306,7 +305,6 @@ class DecisionPolicy:
         safety_values = (
             self.catastrophic_smae_raw,
             self.catastrophic_srmse_raw,
-            self.catastrophic_mase,
             self.max_smae_fold_regret,
             self.max_srmse_fold_regret,
         )
@@ -314,7 +312,6 @@ class DecisionPolicy:
             not all(math.isfinite(value) for value in safety_values)
             or self.catastrophic_smae_raw <= 0
             or self.catastrophic_srmse_raw <= 0
-            or self.catastrophic_mase <= 0
             or self.max_smae_fold_regret < 0
             or self.max_srmse_fold_regret < 0
         ):

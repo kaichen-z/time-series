@@ -43,8 +43,10 @@ class DictionaryCurationConfig:
     metric_policy_fingerprint: str = METRIC_POLICY_FINGERPRINT
     discard_requires_dominance_evidence: bool = True
     allow_dev_learning: bool = False
-    accepted_max_error: float = 50.0
-    specialized_max_error: float = 100.0
+    accepted_max_smae: float = 1.0
+    accepted_max_srmse: float = 1.0
+    specialized_max_smae: float = 2.5
+    specialized_max_srmse: float = 2.5
     min_success_rate: float = 0.8
     selection_folds: int = 3
     selection_horizon: int = 8
@@ -71,10 +73,25 @@ class DictionaryCurationConfig:
             },
             context="active curation config",
         )
-        if self.accepted_max_error < 0 or self.specialized_max_error < 0:
-            raise ValueError("status thresholds must be non-negative")
-        if self.specialized_max_error < self.accepted_max_error:
-            raise ValueError("specialized_max_error must not be below accepted_max_error")
+        object.__setattr__(self, "metric_policy", dict(METRIC_POLICY))
+        thresholds = {
+            "accepted_max_smae": self.accepted_max_smae,
+            "accepted_max_srmse": self.accepted_max_srmse,
+            "specialized_max_smae": self.specialized_max_smae,
+            "specialized_max_srmse": self.specialized_max_srmse,
+        }
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not 0.0 <= float(value) <= 5.0
+            for value in thresholds.values()
+        ):
+            raise ValueError("scaled status thresholds must be between zero and five")
+        if (
+            self.specialized_max_smae < self.accepted_max_smae
+            or self.specialized_max_srmse < self.accepted_max_srmse
+        ):
+            raise ValueError("specialized pair thresholds must not be below accepted thresholds")
         if not 0.0 <= self.min_success_rate <= 1.0:
             raise ValueError("min_success_rate must be between 0 and 1")
         if self.selection_folds <= 0 or self.selection_horizon <= 0:

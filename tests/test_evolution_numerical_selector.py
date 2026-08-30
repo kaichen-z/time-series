@@ -241,7 +241,7 @@ def test_active_policy_parser_requires_explicit_legacy_migration_flag():
         {"catastrophic_mase": 2.0}, allow_legacy=True
     )
 
-    assert migrated.catastrophic_mase == pytest.approx(2.0)
+    assert not hasattr(migrated, "catastrophic_mase")
     assert migrated.catastrophic_smae_raw == pytest.approx(10.0)
     assert migrated.catastrophic_srmse_raw == pytest.approx(10.0)
 

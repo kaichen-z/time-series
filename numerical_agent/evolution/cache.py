@@ -10,6 +10,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from common.evolution_core.contracts import (
+    metric_policy_metadata,
+    require_active_metric_policy,
+)
+
 from .execution import (
     CRASHED,
     INVALID,
@@ -23,7 +28,7 @@ from .module import Method
 from .analysis_skills import DEFAULT_SKILLS_PATH
 
 
-CACHE_SCHEMA = 2
+CACHE_SCHEMA = 3
 SCALED_METRIC_SCHEMA = 1
 SCALED_METRIC_CAP = 5.0
 _STATUSES = {SUCCESS, NOT_APPLICABLE, CRASHED, INVALID}
@@ -162,7 +167,8 @@ class OutcomeCache:
 
     def _key(self, method: Method, task: Task, *, isolated: bool) -> str:
         payload = {
-            "schema": CACHE_SCHEMA,
+            "cache_schema": CACHE_SCHEMA,
+            **metric_policy_metadata(),
             "scaled_metric_schema": SCALED_METRIC_SCHEMA,
             "scaled_metric_cap": SCALED_METRIC_CAP,
             "method": {"name": method.name, "source": method.source},
@@ -187,33 +193,51 @@ class OutcomeCache:
         expected_horizon: int,
         require_forecast: bool,
     ) -> Outcome | None:
+        path = self.root / f"{key}.json"
+        if not path.exists():
+            return None
         try:
-            payload = json.loads((self.root / f"{key}.json").read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise CacheError("malformed active outcome cache row") from error
+        try:
+            if not isinstance(payload, Mapping):
+                raise CacheError("active outcome cache row must be an object")
+            require_active_metric_policy(payload, context="active outcome cache row")
+            if payload.get("cache_schema") != CACHE_SCHEMA:
+                raise CacheError("active outcome cache row schema mismatch")
+            if payload.get("key") != key:
+                raise CacheError("active outcome cache row key mismatch")
             if (
-                payload.get("schema") != CACHE_SCHEMA
-                or payload.get("scaled_metric_schema") != SCALED_METRIC_SCHEMA
+                payload.get("scaled_metric_schema") != SCALED_METRIC_SCHEMA
                 or payload.get("scaled_metric_cap") != SCALED_METRIC_CAP
-                or payload.get("key") != key
             ):
-                return None
+                raise CacheError("active outcome cache scaled schema mismatch")
             raw = _mapping(payload["outcome"])
             outcome = self.from_payload(raw)
-            if outcome.method != method or outcome.task_id != task_id or outcome.status not in _STATUSES:
-                return None
+            if outcome.method != method or outcome.task_id != task_id:
+                raise CacheError("active outcome cache identity mismatch")
+            if outcome.status not in _STATUSES:
+                raise CacheError("active outcome cache status mismatch")
             if (
                 require_forecast
                 and outcome.status == SUCCESS
                 and len(outcome.forecast) != expected_horizon
             ):
-                return None
+                raise CacheError("active outcome cache forecast horizon mismatch")
             return outcome
-        except (OSError, CacheError, TypeError, KeyError, json.JSONDecodeError):
-            return None
+        except CacheError:
+            raise
+        except ValueError:
+            raise
+        except (TypeError, KeyError) as error:
+            raise CacheError("malformed active outcome cache row") from error
 
     def _write(self, key: str, outcome: Outcome) -> None:
         payload = json.dumps(
             {
-                "schema": CACHE_SCHEMA,
+                "cache_schema": CACHE_SCHEMA,
+                **metric_policy_metadata(),
                 "scaled_metric_schema": SCALED_METRIC_SCHEMA,
                 "scaled_metric_cap": SCALED_METRIC_CAP,
                 "key": key,

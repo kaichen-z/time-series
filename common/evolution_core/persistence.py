@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import Mapping
 
+from .contracts import load_active_release, metric_policy_metadata
 from common.payload import canonical_json_bytes, is_simple_filename
 
 
@@ -26,7 +27,14 @@ class JsonArtifactStore:
 
     def save_checkpoint(self, payload: Mapping[str, object]) -> Path:
         destination = self.root / "checkpoint.json"
-        self._write_json(destination, payload)
+        self._write_json(
+            destination,
+            {
+                **dict(payload),
+                "schema_version": 2,
+                **metric_policy_metadata(),
+            },
+        )
         return destination
 
     def load_checkpoint(self) -> dict[str, object] | None:
@@ -36,7 +44,7 @@ class JsonArtifactStore:
         payload = json.loads(source.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("checkpoint must contain a JSON object")
-        return payload
+        return load_active_release(payload)
 
     def append_trace(self, payload: Mapping[str, object]) -> None:
         if not isinstance(payload, Mapping):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -411,6 +412,21 @@ def test_policy_cache_only_lookup_never_calls_runtime_on_a_miss(tmp_path: Path) 
         cache.require_cached(policy, _tasks()[0])
 
     assert runtime.calls == []
+
+
+def test_policy_cache_existing_wrong_policy_binding_fails_closed(tmp_path: Path) -> None:
+    cache = PolicyOutcomeCache(tmp_path / "policy-cache")
+    runtime = FakeTSFMRuntime({method_id: 1.0 for method_id in FLAGSHIP_METHOD_IDS})
+    policy = _portfolio().tsfm[0]
+    task = _tasks()[0]
+    cache.evaluate(policy, task, _registry(runtime))
+    entry = next((tmp_path / "policy-cache").glob("*.json"))
+    payload = json.loads(entry.read_text(encoding="utf-8"))
+    payload["metric_policy_fingerprint"] = "0" * 64
+    entry.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="fingerprint"):
+        cache.evaluate(policy, task, _registry(runtime))
 
 
 def test_combined_forecast_is_computed_from_both_parent_forecasts(tmp_path: Path) -> None:

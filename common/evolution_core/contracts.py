@@ -7,6 +7,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Generic, Literal, Mapping, Protocol, Sequence, TypeVar
 
 
@@ -15,13 +16,16 @@ ItemT = TypeVar("ItemT")
 ResultT = TypeVar("ResultT")
 
 
-METRIC_POLICY = {
+_CANONICAL_METRIC_POLICY = MappingProxyType({
     "schema_version": 2,
     "primary": ("smae", "srmse"),
     "cap": 5.0,
     "ordering": "mean_pair",
     "acceptance": "pareto_non_regression",
-}
+})
+# Compatibility export: callers may inspect this view, but no caller can mutate
+# the private authority used for validation and fingerprinting.
+METRIC_POLICY: Mapping[str, object] = _CANONICAL_METRIC_POLICY
 DIAGNOSTIC_ONLY_METRICS = ("mase", "mae", "smape", "rmsse")
 
 
@@ -32,13 +36,20 @@ def _metric_policy_fingerprint(policy: Mapping[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-METRIC_POLICY_FINGERPRINT = _metric_policy_fingerprint(METRIC_POLICY)
+METRIC_POLICY_FINGERPRINT = _metric_policy_fingerprint(_CANONICAL_METRIC_POLICY)
+
+
+def _metric_policy_payload() -> dict[str, object]:
+    return {
+        **dict(_CANONICAL_METRIC_POLICY),
+        "primary": list(_CANONICAL_METRIC_POLICY["primary"]),
+    }
 
 
 def metric_policy_metadata() -> dict[str, object]:
     """Return the canonical versioned binding for an active serialized artifact."""
     return {
-        "metric_policy": dict(METRIC_POLICY),
+        "metric_policy": _metric_policy_payload(),
         "metric_policy_fingerprint": METRIC_POLICY_FINGERPRINT,
     }
 
@@ -47,7 +58,7 @@ def metric_report_metadata() -> dict[str, object]:
     """Return metric provenance plus explicit primary/diagnostic report roles."""
     return {
         **metric_policy_metadata(),
-        "primary_metrics": list(METRIC_POLICY["primary"]),
+        "primary_metrics": list(_CANONICAL_METRIC_POLICY["primary"]),
         "diagnostic_only": list(DIAGNOSTIC_ONLY_METRICS),
     }
 
@@ -64,7 +75,10 @@ def require_active_metric_policy(
     if not _is_canonical_metric_policy(raw):
         if _mentions_legacy_metric(raw):
             raise ValueError(f"{context} uses a legacy metric policy")
-        raise ValueError(f"{context} metric policy does not match the active contract")
+    try:
+        loaded_fingerprint = _metric_policy_fingerprint(raw)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{context} metric policy is not canonical JSON") from error
     legacy_controls = (
         "ranking_order",
         "metric",
@@ -78,10 +92,15 @@ def require_active_metric_policy(
     ):
         raise ValueError(f"{context} uses a legacy metric policy")
     fingerprint = payload.get("metric_policy_fingerprint")
-    if fingerprint != METRIC_POLICY_FINGERPRINT:
-        if fingerprint is None:
-            raise ValueError(f"{context} is missing metric policy fingerprint")
+    if fingerprint is None:
+        raise ValueError(f"{context} is missing metric policy fingerprint")
+    if fingerprint != loaded_fingerprint:
         raise ValueError(f"{context} metric policy fingerprint mismatch")
+    if (
+        loaded_fingerprint != METRIC_POLICY_FINGERPRINT
+        or not _is_canonical_metric_policy(raw)
+    ):
+        raise ValueError(f"{context} metric policy does not match the active contract")
 
 
 def load_active_release(payload: Mapping[str, object]) -> dict[str, object]:
@@ -102,14 +121,15 @@ def _normalized_metric_policy(policy: Mapping[str, object]) -> dict[str, object]
 def _is_canonical_metric_policy(policy: Mapping[str, object]) -> bool:
     primary = policy.get("primary")
     return (
-        set(policy) == set(METRIC_POLICY)
+        set(policy) == set(_CANONICAL_METRIC_POLICY)
         and type(policy.get("schema_version")) is int
         and isinstance(primary, (list, tuple))
         and all(isinstance(name, str) for name in primary)
         and type(policy.get("cap")) is float
         and isinstance(policy.get("ordering"), str)
         and isinstance(policy.get("acceptance"), str)
-        and _normalized_metric_policy(policy) == _normalized_metric_policy(METRIC_POLICY)
+        and _normalized_metric_policy(policy)
+        == _normalized_metric_policy(_CANONICAL_METRIC_POLICY)
     )
 
 
@@ -160,7 +180,7 @@ class EvolutionConfig:
     seed: int = 20260816
     metric: MetricSpec = field(default_factory=lambda: MetricSpec("smae"))
     metric_policy: Mapping[str, object] = field(
-        default_factory=lambda: dict(METRIC_POLICY)
+        default_factory=lambda: dict(_CANONICAL_METRIC_POLICY)
     )
     metric_policy_fingerprint: str = METRIC_POLICY_FINGERPRINT
     acceptance_margin: float = 0.0
@@ -180,6 +200,7 @@ class EvolutionConfig:
             raise ValueError("metric_policy must match the active scaled metric contract")
         if self.metric_policy_fingerprint != METRIC_POLICY_FINGERPRINT:
             raise ValueError("metric_policy_fingerprint does not match metric_policy")
+        object.__setattr__(self, "metric_policy", dict(_CANONICAL_METRIC_POLICY))
 
 
 @dataclass(frozen=True)

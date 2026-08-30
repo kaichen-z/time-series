@@ -13,11 +13,16 @@ from typing import Sequence
 from common.data import load_tasks_by_id
 from common.evolution_core.contracts import METRIC_POLICY, metric_report_metadata
 from common.llm import CodexCLIClient, CodexCLIConfig
-from common.payload import read_json_object, write_json
+from common.payload import (
+    canonical_json_bytes,
+    read_json_object,
+    standards_json_value,
+    write_json,
+)
 
 from .evolution.cache import OutcomeCache
 from .evolution.execution import Outcome, Task, require_unique_outcome_keys, require_unique_task_ids
-from .evolution.filtering import build_filter_dictionary, parse_filter_source
+from .evolution.filtering import build_filter_dictionary
 from .evolution.module import read_module
 from .evolution.portfolio import (
     PolicyOutcomeCache,
@@ -41,6 +46,7 @@ from .evolution.screening_evolution import (
     select_refinement_targets,
 )
 from .main import _add_tsfm_runtime_options, _runtime_registry
+from .run_filter_evolution import _validate_seed_manifest
 
 
 SCALED_METRIC_POLICY = METRIC_POLICY
@@ -61,10 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--train-limit", type=int, default=80)
     parser.add_argument("--dev-limit", type=int, default=20)
-    parser.add_argument(
-        "--seed-policy", choices=("all", "legacy"), default="all",
-        help="start from the complete selectable Master Dictionary or the legacy global filter",
-    )
+    parser.add_argument("--seed-manifest", default=None)
     parser.add_argument("--codex-model", default="gpt-5.6-luna")
     parser.add_argument(
         "--codex-reasoning-effort", choices=("none", "low", "medium", "high"), default="low"
@@ -114,15 +117,15 @@ def main(argv: list[str] | None = None) -> int:
     portfolio = read_policy_file(repo / "policies.py")
     portfolio.validate_namespace(module.names())
     candidate_names = tuple(module.names()) + portfolio.names
-    legacy_path = repo / "frozen_dictionary.py"
-    if not legacy_path.is_file():
-        legacy_path = repo / "dictionary.py"
-    legacy_dictionary = parse_filter_source(legacy_path.read_text(encoding="utf-8"))
-    seed_dictionary = (
-        build_filter_dictionary(module, portfolio)
-        if args.seed_policy == "all"
-        else legacy_dictionary
+    seed_manifest_path = (
+        Path(args.seed_manifest) if args.seed_manifest else repo / "seed_manifest.json"
     )
+    _validate_seed_manifest(
+        seed_manifest_path,
+        repo,
+        seed_kind="complete_master_dictionary",
+    )
+    seed_dictionary = build_filter_dictionary(module, portfolio)
     parent = migrate_filter_dictionary(
         seed_dictionary,
         fallback_names=_fallback_names(module.names(), tuple(policy.name for policy in portfolio.tsfm)),
@@ -187,6 +190,8 @@ def main(argv: list[str] | None = None) -> int:
             child_source, encoding="utf-8"
         )
         generation_payload = {
+            "schema_version": 2,
+            **metric_report_metadata(),
             "generation": number,
             "phase": "review",
             "evaluation_scope": "train_only",
@@ -197,6 +202,9 @@ def main(argv: list[str] | None = None) -> int:
             "child_hash": result.child.fingerprint(),
             "train_parent": asdict(result.train_parent),
             "train_child": asdict(result.train_child),
+            "paired_joint_wtl": _paired_screening_counts(
+                result.train_parent, result.train_child
+            ),
             "oracle_shields": [asdict(shield) for shield in result.oracle_shields],
             "action_decisions": [
                 asdict(decision) for decision in result.action_decisions
@@ -253,6 +261,8 @@ def main(argv: list[str] | None = None) -> int:
             child_source, encoding="utf-8"
         )
         generation_payload = {
+            "schema_version": 2,
+            **metric_report_metadata(),
             "generation": number,
             "phase": "refinement",
             "evaluation_scope": "train_only",
@@ -265,6 +275,9 @@ def main(argv: list[str] | None = None) -> int:
             "child_hash": result.child.fingerprint(),
             "train_parent": asdict(result.train_parent),
             "train_child": asdict(result.train_child),
+            "paired_joint_wtl": _paired_screening_counts(
+                result.train_parent, result.train_child
+            ),
             "oracle_shields": [asdict(shield) for shield in result.oracle_shields],
             "action_decisions": [
                 asdict(decision) for decision in result.action_decisions
@@ -319,17 +332,20 @@ def main(argv: list[str] | None = None) -> int:
         "refinement_batch_size": args.screen_refinement_batch_size,
         "constraints": asdict(constraints),
         "final_constraints_met": final_constraints_met,
-        "seed_policy": args.seed_policy,
+        "seed_policy": "complete_master_dictionary",
         **policy_artifacts,
         "source_hashes": {
             "methods.py": _sha256(repo / "methods.py"),
             "policies.py": _sha256(repo / "policies.py"),
-            "legacy_dictionary.py": _sha256(legacy_path),
         },
         "cache": _merge_cache_summaries(train_cache_summary, dev_cache_summary),
         "train": asdict(train_score),
         "dev": asdict(dev_score),
         "final_dev_gate": asdict(final_gate),
+        "paired_joint_wtl": {
+            "train": _paired_screening_counts(original_train_score, train_score),
+            "dev": _paired_screening_counts(original_dev_score, dev_score),
+        },
         "dev_evaluations": 1,
         "generations": generations,
         "accepted_train_generations": [
@@ -346,7 +362,13 @@ def main(argv: list[str] | None = None) -> int:
     manifest["manifest_sha256"] = _manifest_fingerprint(manifest)
     write_json(output / "screening_manifest.json", manifest)
     (output / "SCREENING_REPORT.md").write_text(_report(manifest), encoding="utf-8")
-    print(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(
+        standards_json_value(manifest),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    ))
     return 0 if final_constraints_met else 2
 
 
@@ -464,11 +486,25 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _paired_screening_counts(parent, child) -> dict[str, int]:
+    result = {"wins": 0, "ties": 0, "losses": 0, "missing": 0}
+    for task_id in sorted(set(parent.task_scaled_pairs) | set(child.task_scaled_pairs)):
+        if task_id not in parent.task_scaled_pairs or task_id not in child.task_scaled_pairs:
+            result["missing"] += 1
+            continue
+        left = sum(parent.task_scaled_pairs[task_id]) / 2.0
+        right = sum(child.task_scaled_pairs[task_id]) / 2.0
+        if right < left - 1e-12:
+            result["wins"] += 1
+        elif right > left + 1e-12:
+            result["losses"] += 1
+        else:
+            result["ties"] += 1
+    return result
+
+
 def _manifest_fingerprint(payload: dict[str, object]) -> str:
-    encoded = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 
 def _write_policy_artifacts(

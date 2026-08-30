@@ -23,7 +23,7 @@ from common.evolution_core.contracts import (
 )
 from common.llm import CodexCLIClient, CodexCLIConfig
 from common.metrics import joint_scaled_error
-from common.payload import read_json_object, write_json
+from common.payload import read_json_object, standards_json_value, write_json
 
 from .evolution.execution import CRASHED, INVALID, NOT_APPLICABLE, SUCCESS, Outcome, Task, load_methods
 from .evolution.module import MethodModule, read_module
@@ -98,6 +98,7 @@ class ForecastStore:
         screening_hash: str,
         statistical_time_budget_s: float = 20.0,
         statistical_failure_limit: int = 2,
+        runtime_identity: Mapping[str, object] | None = None,
     ) -> None:
         if statistical_time_budget_s <= 0:
             raise ValueError("statistical_time_budget_s must be positive")
@@ -119,8 +120,21 @@ class ForecastStore:
         self.screening_hash = screening_hash
         self.tsfm = {policy.name: policy for policy in portfolio.tsfm}
         self.combined = {policy.name: policy for policy in portfolio.combined}
+        identity = {
+            "module_source": module_path.read_text(encoding="utf-8"),
+            "skills_source": (
+                skills_path.read_text(encoding="utf-8") if skills_path is not None else None
+            ),
+            "portfolio": asdict(portfolio),
+            "reviewed_manifests_sha256": _sha256(
+                Path(__file__).parent / "tsfm" / "runtime_manifests.json"
+            ),
+            "runtime": dict(runtime_identity or {}),
+        }
         self.identity_hash = hashlib.sha256(
-            (module_path.read_text(encoding="utf-8") + repr(portfolio)).encode("utf-8")
+            json.dumps(identity, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
+                "utf-8"
+            )
         ).hexdigest()
         self.hits = 0
         self.misses = 0
@@ -131,27 +145,37 @@ class ForecastStore:
     ) -> tuple[float, ...]:
         key = self._key(name, history, horizon, frequency)
         path = self.root / f"{key}.json"
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, TypeError, json.JSONDecodeError):
+        if not path.exists():
             payload = None
+        else:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, TypeError, json.JSONDecodeError) as error:
+                raise ValueError("active hindcast cache row is malformed") from error
         if payload is not None:
             if not isinstance(payload, Mapping):
                 raise ValueError("active hindcast cache row must be an object")
             require_active_metric_policy(payload, context="active hindcast cache row")
-            if payload.get("key") == key and payload.get("status") == SUCCESS:
+            if payload.get("cache_schema") != 3:
+                raise ValueError("active hindcast cache row schema mismatch")
+            if payload.get("key") != key:
+                raise ValueError("active hindcast cache row key mismatch")
+            if payload.get("status") == SUCCESS:
                 values = tuple(float(value) for value in payload["forecast"])
                 if len(values) == horizon and all(map(math.isfinite, values)):
                     self.hits += 1
                     return values
-            if payload.get("key") == key and payload.get("status") == NOT_APPLICABLE:
+                raise ValueError("active hindcast cache row forecast is noncanonical")
+            if payload.get("status") == NOT_APPLICABLE:
                 self.hits += 1
                 raise self.not_applicable(str(payload.get("detail", "not applicable")))
+            raise ValueError("active hindcast cache row status is noncanonical")
         self.misses += 1
         try:
             values = self._execute(name, history, horizon, frequency)
         except self.not_applicable as error:
             self._write(path, {
+                "cache_schema": 3,
                 **metric_policy_metadata(),
                 "key": key,
                 "status": NOT_APPLICABLE,
@@ -159,6 +183,7 @@ class ForecastStore:
             })
             raise
         self._write(path, {
+            "cache_schema": 3,
             **metric_policy_metadata(),
             "key": key,
             "status": SUCCESS,
@@ -480,6 +505,7 @@ def main(argv: list[str] | None = None) -> int:
             portfolio,
             runtimes,
             actual_screening_hash,
+            runtime_identity=_forecast_runtime_identity(args),
         )
         try:
             config = HindcastConfig(folds=args.folds)
@@ -543,6 +569,9 @@ def main(argv: list[str] | None = None) -> int:
             "gate": asdict(result.gate),
             "train_parent": asdict(result.train_parent),
             "train_child": asdict(result.train_child),
+            "paired_joint_wtl": _score_pair_wtl(
+                result.train_parent, result.train_child
+            ),
             "candidate_count": result.candidate_count,
             "parent_hash": decision_policy_hash(
                 result.parent, screening_policy_hash=actual_screening_hash
@@ -578,6 +607,10 @@ def main(argv: list[str] | None = None) -> int:
         "dev_parent": asdict(evolution.dev_parent),
         "dev_train_winner": asdict(evolution.dev_winner),
         "final_dev_gate": asdict(evolution.final_gate),
+        "paired_joint_wtl": {
+            "train": _score_pair_wtl(evolution.train_parent, evolution.train_winner_score),
+            "dev": _score_pair_wtl(evolution.dev_parent, evolution.dev_winner),
+        },
         "dev_accepted": evolution.final_gate.accepted,
         "train_winner_sha256": decision_policy_hash(
             evolution.train_winner, screening_policy_hash=actual_screening_hash
@@ -604,7 +637,13 @@ def main(argv: list[str] | None = None) -> int:
     }
     write_json(output / "selector_manifest.json", manifest)
     (output / "SELECTOR_REPORT.md").write_text(_report(manifest), encoding="utf-8")
-    print(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(
+        standards_json_value(manifest),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    ))
     return 0
 
 
@@ -707,9 +746,33 @@ def _global_ranking(
     return tuple(name for _, name in sorted(scores))
 
 
+def _score_pair_wtl(parent, child) -> dict[str, int]:
+    result = {"wins": 0, "ties": 0, "losses": 0, "missing": 0}
+    parent_pairs = parent.task_scaled_pairs
+    child_pairs = child.task_scaled_pairs
+    for task_id in sorted(set(parent_pairs) | set(child_pairs)):
+        if task_id not in parent_pairs or task_id not in child_pairs:
+            result["missing"] += 1
+            continue
+        parent_joint = joint_scaled_error(*parent_pairs[task_id])
+        child_joint = joint_scaled_error(*child_pairs[task_id])
+        if child_joint < parent_joint - 1e-12:
+            result["wins"] += 1
+        elif child_joint > parent_joint + 1e-12:
+            result["losses"] += 1
+        else:
+            result["ties"] += 1
+    return result
+
+
 def _finite_json(value):
     if isinstance(value, float) and not math.isfinite(value):
-        return None
+        if math.isnan(value):
+            raise ValueError("active hindcast payload cannot contain NaN")
+        return {
+            "status": "positive_infinity" if value > 0 else "negative_infinity",
+            "value": None,
+        }
     if isinstance(value, Mapping):
         return {str(key): _finite_json(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -719,6 +782,24 @@ def _finite_json(value):
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _forecast_runtime_identity(args: argparse.Namespace) -> dict[str, object]:
+    """Canonical provider/deployment/checkpoint identity for hindcast cache keys."""
+    deployment = getattr(args, "tsfm_workers_config", None)
+    deployment_hash = None
+    if deployment:
+        deployment_path = Path(deployment).expanduser().resolve()
+        deployment_hash = _sha256(deployment_path)
+    return {
+        "tsfm_runtimes": getattr(args, "tsfm_runtimes", "") or "",
+        "chronos_device_map": getattr(args, "chronos_device_map", "cpu"),
+        "model_cache_dir": str(getattr(args, "model_cache_dir", None) or ""),
+        "deployment_sha256": deployment_hash,
+        "acknowledged_model_licenses": getattr(
+            args, "acknowledged_model_licenses", ""
+        ) or "",
+    }
 
 
 def _report(manifest: Mapping[str, object]) -> str:
@@ -739,8 +820,8 @@ def _report(manifest: Mapping[str, object]) -> str:
         f"- Final Dev gate: {manifest.get('final_dev_gate', {}).get('reason', 'not recorded')}",
         f"- Public Test accessed: `{manifest['public_test_accessed']}`",
         "",
-        "| Split | Coverage | Mean sMAE | sMAE SE | Mean sRMSE | sRMSE SE | P90/P95 sMAE | Clipped sMAE/sRMSE | Mean MASE | Mean MAE | Mean sMAPE | Oracle regret | Methods | Families | Ensemble | Assumptions | Verifier pool | Pool families | Assumption kinds |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Split | Coverage | Mean sMAE | sMAE SE | Mean sRMSE | sRMSE SE | P90/P95 sMAE | P90/P95 sRMSE | Raw P90/P95 sMAE | Raw P90/P95 sRMSE | Clipped sMAE/sRMSE | Mean MASE | Mean MAE | Mean sMAPE | Oracle regret | Methods | Families | Ensemble | Assumptions | Verifier pool | Pool families | Assumption kinds |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         _score_row("Train", train),
         _score_row("Dev", dev),
         "",
@@ -752,6 +833,9 @@ def _score_row(label: str, score: Mapping[str, object]) -> str:
         f"| {label} | {score['coverage']:.4f} | {score['mean_smae']:.6f} | "
         f"{score['se_smae']:.6f} | {score['mean_srmse']:.6f} | {score['se_srmse']:.6f} | "
         f"{score['p90_smae']:.6f}/{score['p95_smae']:.6f} | "
+        f"{score['p90_srmse']:.6f}/{score['p95_srmse']:.6f} | "
+        f"{score['p90_smae_raw']:.6f}/{score['p95_smae_raw']:.6f} | "
+        f"{score['p90_srmse_raw']:.6f}/{score['p95_srmse_raw']:.6f} | "
         f"{score['smae_clipped_count']}/{score['srmse_clipped_count']} | "
         f"{score['mean_mase']:.6f} | {score['mean_mae']:.6f} | {score['mean_smape']:.6f} | "
         f"{score['mean_active_oracle_regret']:.6f} | "

@@ -180,6 +180,78 @@ def stable_method(history, horizon, frequency):
         store.close()
 
 
+def test_forecast_store_identity_binds_skills_runtime_and_checkpoint(tmp_path):
+    methods = tmp_path / "methods.py"
+    methods.write_text(
+        MODULE_HEADER
+        + '''
+
+def stable_method(history, horizon, frequency):
+    """Use when a last-value forecast is sufficient."""
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+    skills = tmp_path / "skills.py"
+    skills.write_text("SKILL_VERSION = 1\n", encoding="utf-8")
+    module = read_module(methods)
+    args = (module, PolicyPortfolio.flagship5(), RuntimeRegistry(), "screen")
+    first = ForecastStore(
+        tmp_path / "a", methods, skills, *args,
+        runtime_identity={"provider": "p", "checkpoint": "v1"},
+    )
+    second = ForecastStore(
+        tmp_path / "b", methods, skills, *args,
+        runtime_identity={"provider": "p", "checkpoint": "v2"},
+    )
+    key1 = first._key("stable_method", (1.0, 2.0), 1, "D")
+    key2 = second._key("stable_method", (1.0, 2.0), 1, "D")
+    first.close()
+    second.close()
+    skills.write_text("SKILL_VERSION = 2\n", encoding="utf-8")
+    third = ForecastStore(
+        tmp_path / "c", methods, skills, *args,
+        runtime_identity={"provider": "p", "checkpoint": "v1"},
+    )
+    key3 = third._key("stable_method", (1.0, 2.0), 1, "D")
+    third.close()
+
+    assert len({key1, key2, key3}) == 3
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "not-json",
+        json.dumps({**evolution_contracts.metric_policy_metadata(), "key": "wrong", "status": SUCCESS, "forecast": [2.0]}),
+        json.dumps({**evolution_contracts.metric_policy_metadata(), "key": "PLACEHOLDER", "status": "unknown"}),
+    ],
+)
+def test_forecast_store_existing_malformed_or_noncanonical_row_fails_closed(tmp_path, row):
+    methods = tmp_path / "methods.py"
+    methods.write_text(
+        MODULE_HEADER
+        + '''
+
+def stable_method(history, horizon, frequency):
+    """Use when a last-value forecast is sufficient."""
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+    store = ForecastStore(
+        tmp_path / "cache", methods, None, read_module(methods),
+        PolicyPortfolio.flagship5(), RuntimeRegistry(), "screen",
+    )
+    try:
+        key = store._key("stable_method", (1.0, 2.0), 1, "D")
+        (store.root / f"{key}.json").write_text(row.replace("PLACEHOLDER", key), encoding="utf-8")
+        with pytest.raises(ValueError, match="active hindcast cache row"):
+            store.forecast("stable_method", (1.0, 2.0), 1, "D")
+    finally:
+        store.close()
+
+
 def test_forecast_store_materializes_canonical_combined_leaf_forecasts_once(tmp_path):
     methods = tmp_path / "methods.py"
     methods.write_text(
@@ -990,7 +1062,7 @@ def test_selector_shell_forwards_runtime_and_freeze_inputs():
         assert option in source
 
 
-def test_case_artifact_serializes_ineligible_infinite_diagnostics_as_null(tmp_path):
+def test_case_artifact_serializes_ineligible_infinite_diagnostics_as_sentinel(tmp_path):
     diagnostic = CandidateDiagnostics.synthetic(
         name="failed", family="statistical", median_mase=float("inf"), eligible=False
     )
@@ -1003,7 +1075,11 @@ def test_case_artifact_serializes_ineligible_infinite_diagnostics_as_null(tmp_pa
     )
     target = tmp_path / "cases.jsonl"
     _write_cases(target, (case,))
-    assert '"median_mase": null' in target.read_text(encoding="utf-8")
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["diagnostics"]["failed"]["median_mase"] == {
+        "status": "positive_infinity",
+        "value": None,
+    }
 
 
 def test_case_artifact_preserves_entity_group_for_train_cross_validation(tmp_path):

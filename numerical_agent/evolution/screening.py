@@ -4,10 +4,16 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+import statistics
+from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
-from common.metrics import joint_scaled_error, pareto_scaled_improvement
+from common.metrics import (
+    joint_scaled_error,
+    linear_quantile,
+    pareto_scaled_improvement,
+    standard_error,
+)
 
 from .analysis_skills_template import analyze_series
 from .cache import SCALED_METRIC_CAP, SCALED_METRIC_SCHEMA
@@ -370,6 +376,25 @@ class ScreeningScore:
     mean_pairwise_jaccard: float
     conditioned_entries_by_family: Mapping[str, int]
     oracle_names: Mapping[str, tuple[str, ...]]
+    mean_smae: float = math.inf
+    median_smae: float = math.inf
+    se_smae: float = math.inf
+    mean_srmse: float = math.inf
+    median_srmse: float = math.inf
+    se_srmse: float = math.inf
+    p90_smae: float = math.inf
+    p95_smae: float = math.inf
+    p90_srmse: float = math.inf
+    p95_srmse: float = math.inf
+    p90_smae_raw: float = math.inf
+    p95_smae_raw: float = math.inf
+    p90_srmse_raw: float = math.inf
+    p95_srmse_raw: float = math.inf
+    smae_clipped_count: int = 0
+    smae_clipped_rate: float = 1.0
+    srmse_clipped_count: int = 0
+    srmse_clipped_rate: float = 1.0
+    task_scaled_pairs: Mapping[str, tuple[float, float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -579,6 +604,11 @@ def evaluate_screening(
     srmse_regrets: list[float] = []
     active_smae_scores: list[float] = []
     active_srmse_scores: list[float] = []
+    active_smae_raw_scores: list[float] = []
+    active_srmse_raw_scores: list[float] = []
+    smae_clipped_count = 0
+    srmse_clipped_count = 0
+    task_scaled_pairs: dict[str, tuple[float, float]] = {}
     family_counts: list[int] = []
     fallback_count = 0
     policy_names = {entry.name for entry in policy.entries}
@@ -602,10 +632,22 @@ def evaluate_screening(
                 active_rows.append(row)
                 active_smae_scores.append(float(row.smae))
                 active_srmse_scores.append(float(row.srmse))
+                active_smae_raw_scores.append(
+                    float(row.smae_raw) if row.smae_raw is not None else math.inf
+                )
+                active_srmse_raw_scores.append(
+                    float(row.srmse_raw) if row.srmse_raw is not None else math.inf
+                )
+                smae_clipped_count += int(bool(row.smae_clipped))
+                srmse_clipped_count += int(bool(row.srmse_clipped))
             elif row is not None and row.status == NOT_APPLICABLE:
                 active_not_applicable += 1
                 active_smae_scores.append(5.0)
                 active_srmse_scores.append(5.0)
+                active_smae_raw_scores.append(math.inf)
+                active_srmse_raw_scores.append(math.inf)
+                smae_clipped_count += 1
+                srmse_clipped_count += 1
             else:
                 active_failures += 1
                 if row is None:
@@ -620,7 +662,19 @@ def evaluate_screening(
                     active_invalid += 1
                 active_smae_scores.append(5.0)
                 active_srmse_scores.append(5.0)
+                active_smae_raw_scores.append(math.inf)
+                active_srmse_raw_scores.append(math.inf)
+                smae_clipped_count += 1
+                srmse_clipped_count += 1
         covered += int(bool(active_rows))
+        if active_rows:
+            task_best = min(active_rows, key=_scaled_order)
+            task_scaled_pairs[task.task_id] = (
+                float(task_best.smae),
+                float(task_best.srmse),
+            )
+        else:
+            task_scaled_pairs[task.task_id] = (5.0, 5.0)
 
         global_rows = [
             row
@@ -723,6 +777,33 @@ def evaluate_screening(
         mean_pairwise_jaccard=_mean_pairwise_jaccard(active_signatures),
         conditioned_entries_by_family=conditioned,
         oracle_names=oracle_names,
+        mean_smae=(statistics.fmean(active_smae_scores) if active_smae_scores else 5.0),
+        median_smae=(statistics.median(active_smae_scores) if active_smae_scores else 5.0),
+        se_smae=standard_error(active_smae_scores) if active_smae_scores else math.inf,
+        mean_srmse=(statistics.fmean(active_srmse_scores) if active_srmse_scores else 5.0),
+        median_srmse=(statistics.median(active_srmse_scores) if active_srmse_scores else 5.0),
+        se_srmse=standard_error(active_srmse_scores) if active_srmse_scores else math.inf,
+        p90_smae=linear_quantile(active_smae_scores, 0.90) if active_smae_scores else 5.0,
+        p95_smae=linear_quantile(active_smae_scores, 0.95) if active_smae_scores else 5.0,
+        p90_srmse=linear_quantile(active_srmse_scores, 0.90) if active_srmse_scores else 5.0,
+        p95_srmse=linear_quantile(active_srmse_scores, 0.95) if active_srmse_scores else 5.0,
+        p90_smae_raw=linear_quantile(active_smae_raw_scores, 0.90) if active_smae_raw_scores else math.inf,
+        p95_smae_raw=linear_quantile(active_smae_raw_scores, 0.95) if active_smae_raw_scores else math.inf,
+        p90_srmse_raw=linear_quantile(active_srmse_raw_scores, 0.90) if active_srmse_raw_scores else math.inf,
+        p95_srmse_raw=linear_quantile(active_srmse_raw_scores, 0.95) if active_srmse_raw_scores else math.inf,
+        smae_clipped_count=smae_clipped_count,
+        smae_clipped_rate=(
+            smae_clipped_count / len(active_smae_scores)
+            if active_smae_scores
+            else 1.0
+        ),
+        srmse_clipped_count=srmse_clipped_count,
+        srmse_clipped_rate=(
+            srmse_clipped_count / len(active_srmse_scores)
+            if active_srmse_scores
+            else 1.0
+        ),
+        task_scaled_pairs=task_scaled_pairs,
     )
 
 

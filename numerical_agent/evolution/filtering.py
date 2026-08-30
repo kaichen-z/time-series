@@ -6,12 +6,17 @@ import json
 import math
 import pprint
 import statistics
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
 from common.llm import LLMClient, parse_json_object
-from common.metrics import joint_scaled_error, pareto_scaled_improvement
+from common.metrics import (
+    joint_scaled_error,
+    linear_quantile,
+    pareto_scaled_improvement,
+    standard_error,
+)
 
 from .execution import (
     CRASHED,
@@ -149,6 +154,21 @@ class FilterScore:
     eligible_invalid_rate: float
     eligible_missing_rate: float
     eligible_malformed_success_rate: float
+    se_smae: float = math.inf
+    se_srmse: float = math.inf
+    p90_smae: float = math.inf
+    p95_smae: float = math.inf
+    p90_srmse: float = math.inf
+    p95_srmse: float = math.inf
+    p90_smae_raw: float = math.inf
+    p95_smae_raw: float = math.inf
+    p90_srmse_raw: float = math.inf
+    p95_srmse_raw: float = math.inf
+    smae_clipped_count: int = 0
+    smae_clipped_rate: float = 1.0
+    srmse_clipped_count: int = 0
+    srmse_clipped_rate: float = 1.0
+    task_scaled_pairs: Mapping[str, tuple[float, float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -343,6 +363,11 @@ def evaluate_filter(
     eligible_counts: dict[str, int] = {}
     smae_scores: list[float] = []
     srmse_scores: list[float] = []
+    smae_raw_scores: list[float] = []
+    srmse_raw_scores: list[float] = []
+    smae_clipped_count = 0
+    srmse_clipped_count = 0
+    task_scaled_pairs: dict[str, tuple[float, float]] = {}
     eligible_attempts = 0
     eligible_successes = 0
     eligible_not_applicable = 0
@@ -405,6 +430,11 @@ def evaluate_filter(
         if not ranked:
             smae_scores.append(penalty)
             srmse_scores.append(penalty)
+            smae_raw_scores.append(math.inf)
+            srmse_raw_scores.append(math.inf)
+            smae_clipped_count += 1
+            srmse_clipped_count += 1
+            task_scaled_pairs[task.task_id] = (penalty, penalty)
             continue
         name = min(ranked)[3]
         selected[task.task_id] = name
@@ -412,9 +442,20 @@ def evaluate_filter(
         if row is None or row.status != SUCCESS or not _finite_scaled(row):
             smae_scores.append(penalty)
             srmse_scores.append(penalty)
+            smae_raw_scores.append(math.inf)
+            srmse_raw_scores.append(math.inf)
+            smae_clipped_count += 1
+            srmse_clipped_count += 1
+            task_scaled_pairs[task.task_id] = (penalty, penalty)
         else:
-            smae_scores.append(float(row.smae))
-            srmse_scores.append(float(row.srmse))
+            pair = (float(row.smae), float(row.srmse))
+            smae_scores.append(pair[0])
+            srmse_scores.append(pair[1])
+            smae_raw_scores.append(float(row.smae_raw) if row.smae_raw is not None else math.inf)
+            srmse_raw_scores.append(float(row.srmse_raw) if row.srmse_raw is not None else math.inf)
+            smae_clipped_count += int(bool(row.smae_clipped))
+            srmse_clipped_count += int(bool(row.srmse_clipped))
+            task_scaled_pairs[task.task_id] = pair
     successes = sum(
         by_key.get((name, task_id)) is not None
         and by_key[(name, task_id)].status == SUCCESS
@@ -444,6 +485,21 @@ def evaluate_filter(
         eligible_invalid_rate=eligible_invalid / denominator,
         eligible_missing_rate=eligible_missing / denominator,
         eligible_malformed_success_rate=eligible_malformed_success / denominator,
+        se_smae=standard_error(smae_scores) if smae_scores else math.inf,
+        se_srmse=standard_error(srmse_scores) if srmse_scores else math.inf,
+        p90_smae=linear_quantile(smae_scores, 0.90) if smae_scores else math.inf,
+        p95_smae=linear_quantile(smae_scores, 0.95) if smae_scores else math.inf,
+        p90_srmse=linear_quantile(srmse_scores, 0.90) if srmse_scores else math.inf,
+        p95_srmse=linear_quantile(srmse_scores, 0.95) if srmse_scores else math.inf,
+        p90_smae_raw=linear_quantile(smae_raw_scores, 0.90) if smae_raw_scores else math.inf,
+        p95_smae_raw=linear_quantile(smae_raw_scores, 0.95) if smae_raw_scores else math.inf,
+        p90_srmse_raw=linear_quantile(srmse_raw_scores, 0.90) if srmse_raw_scores else math.inf,
+        p95_srmse_raw=linear_quantile(srmse_raw_scores, 0.95) if srmse_raw_scores else math.inf,
+        smae_clipped_count=smae_clipped_count,
+        smae_clipped_rate=smae_clipped_count / len(tasks) if tasks else 1.0,
+        srmse_clipped_count=srmse_clipped_count,
+        srmse_clipped_rate=srmse_clipped_count / len(tasks) if tasks else 1.0,
+        task_scaled_pairs=task_scaled_pairs,
     )
 
 

@@ -9,7 +9,7 @@ from pathlib import Path
 import common.evolution_core.contracts as evolution_contracts
 import pytest
 from numerical_agent.config import DictionaryCurationConfig
-from numerical_agent.main import _curation_config
+from numerical_agent.main import _curation_config, _evolution_config
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "numerical_agent"
@@ -34,6 +34,23 @@ def test_active_curation_config_load_fails_closed_without_metric_policy() -> Non
                 }
             }
         )
+
+
+def test_active_evolution_config_load_fails_closed_without_metric_policy() -> None:
+    curation = DictionaryCurationConfig()
+    with pytest.raises(ValueError, match="missing metric policy"):
+        _evolution_config({"evolution": {"generations": 1}}, curation)
+
+
+def test_active_evolution_config_round_trips_exact_metric_policy() -> None:
+    curation = DictionaryCurationConfig()
+    config = _evolution_config(
+        {"evolution": {"generations": 1, **evolution_contracts.metric_policy_metadata()}},
+        curation,
+    )
+
+    assert config.metric_policy == evolution_contracts.METRIC_POLICY
+    assert config.metric_policy_fingerprint == evolution_contracts.METRIC_POLICY_FINGERPRINT
 
 
 @pytest.mark.parametrize("legacy_metric", ["smape", "mae"])
@@ -234,32 +251,45 @@ def test_evaluate_frozen_scores_public_test_without_mutating_dictionary(
 
     assert completed.returncode == 0, completed.stderr
     summary = json.loads(completed.stdout)
-    assert summary == {
-        "artifact_id": "fixture.g001",
-        "metric": "smae",
-        "public_test_tasks": 1,
-        "score": 0.0,
-    }
+    assert summary["artifact_id"] == "fixture.g001"
+    assert summary["public_test_tasks"] == 1
+    assert summary["smae"] == summary["srmse"] == 0.0
+    assert summary["primary_metrics"] == ["smae", "srmse"]
     report = json.loads((output_dir / "frozen_test_report.json").read_text())
     assert report["split"] == "public_test"
     assert report["item_count"] == 1
-    assert report["metrics"] == {"smae": 0.0}
+    assert report["metrics"] == {"smae": 0.0, "srmse": 0.0}
     assert report["manifest_sha256"] == "fixture-manifest"
     assert report["dictionary_sha256"] == before
+    assert report["metric_policy_fingerprint"] == (
+        evolution_contracts.METRIC_POLICY_FINGERPRINT
+    )
+    for field in (
+        "mean_smae", "mean_srmse", "p95_smae_raw", "p95_srmse_raw",
+        "smae_clipped_count", "srmse_clipped_count", "coverage", "paired_joint_wtl",
+    ):
+        assert field in report
     forecasts = [
         json.loads(line)
         for line in (output_dir / "frozen_test_forecasts.jsonl").read_text().splitlines()
     ]
-    assert forecasts == [
-        {
-            "forecast": [3.0, 3.0],
-            "item_id": "test_1",
-            "method_id": "last_value",
-            "selected": True,
-            "selection_score": 1.0 / 3.0,
-            "status": "success",
-        }
-    ]
+    assert len(forecasts) == 1
+    assert {
+        key: forecasts[0][key]
+        for key in (
+            "forecast", "item_id", "method_id", "selected", "selection_score", "status"
+        )
+    } == {
+        "forecast": [3.0, 3.0],
+        "item_id": "test_1",
+        "method_id": "last_value",
+        "selected": True,
+        "selection_score": 1.0 / 3.0,
+        "status": "success",
+    }
+    assert forecasts[0]["metric_policy_fingerprint"] == (
+        evolution_contracts.METRIC_POLICY_FINGERPRINT
+    )
     assert hashlib.sha256(dictionary.read_bytes()).hexdigest() == before
     assert not (output_dir / "checkpoint.json").exists()
     assert not (output_dir / "best_artifact.json").exists()

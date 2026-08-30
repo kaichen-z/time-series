@@ -18,8 +18,10 @@ def build_experiment(
     seed: int = 20260816,
     max_revisions_per_method: int = 1,
     max_implementation_attempts: int = 3,
-    accepted_max_error: float = 50.0,
-    specialized_max_error: float = 100.0,
+    accepted_max_smae: float = 1.0,
+    accepted_max_srmse: float = 1.0,
+    specialized_max_smae: float = 2.5,
+    specialized_max_srmse: float = 2.5,
     min_success_rate: float = 0.8,
     selection_folds: int = 3,
     selection_horizon: int = 8,
@@ -33,6 +35,7 @@ def build_experiment(
     dev = _select(tasks, partitions["dev"], dev_limit, "dev")
     return {
         "evolution": {
+            **metric_policy_metadata(),
             "generations": generations,
             "children_per_generation": children_per_generation,
             "seed": seed,
@@ -45,8 +48,10 @@ def build_experiment(
             "max_implementation_attempts": max_implementation_attempts,
             "dictionary_metric": "smae",
             "method_metric": "smae",
-            "accepted_max_error": accepted_max_error,
-            "specialized_max_error": specialized_max_error,
+            "accepted_max_smae": accepted_max_smae,
+            "accepted_max_srmse": accepted_max_srmse,
+            "specialized_max_smae": specialized_max_smae,
+            "specialized_max_srmse": specialized_max_srmse,
             "min_success_rate": min_success_rate,
             "selection_folds": selection_folds,
             "selection_horizon": selection_horizon,

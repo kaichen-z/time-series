@@ -5,6 +5,8 @@ import argparse
 import hashlib
 import json
 import os
+import math
+import statistics
 import sys
 from pathlib import Path
 from typing import Callable, Mapping, Sequence, cast
@@ -12,6 +14,7 @@ from typing import Callable, Mapping, Sequence, cast
 from common.evolution_core.contracts import (
     EvolutionConfig,
     MetricSpec,
+    metric_report_metadata,
     require_active_metric_policy,
 )
 from common.evolution_core.controller import SelfEvolutionEngine
@@ -22,8 +25,19 @@ from common.llm import (
     CodexCLIConfig,
     QwenClient,
 )
-from common.metrics import drcik_point_metrics, mae, smape
-from common.payload import read_json_object, require_object, write_json
+from common.metrics import (
+    drcik_point_metrics,
+    linear_quantile,
+    mae,
+    smape,
+    standard_error,
+)
+from common.payload import (
+    read_json_object,
+    require_object,
+    standards_json_value,
+    write_json,
+)
 from common.tracing import configure
 
 from .curation import (
@@ -122,8 +136,10 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--seed", type=int, default=20260816)
     build.add_argument("--max-revisions-per-method", type=int, default=1)
     build.add_argument("--max-implementation-attempts", type=int, default=3)
-    build.add_argument("--accepted-max-error", type=float, default=50.0)
-    build.add_argument("--specialized-max-error", type=float, default=100.0)
+    build.add_argument("--accepted-max-smae", type=float, default=1.0)
+    build.add_argument("--accepted-max-srmse", type=float, default=1.0)
+    build.add_argument("--specialized-max-smae", type=float, default=2.5)
+    build.add_argument("--specialized-max-srmse", type=float, default=2.5)
     build.add_argument("--min-success-rate", type=float, default=0.8)
     build.add_argument("--selection-folds", type=int, default=3)
     build.add_argument("--selection-horizon", type=int, default=8)
@@ -251,8 +267,10 @@ def _build_experiment(args: argparse.Namespace) -> int:
         seed=args.seed,
         max_revisions_per_method=args.max_revisions_per_method,
         max_implementation_attempts=args.max_implementation_attempts,
-        accepted_max_error=args.accepted_max_error,
-        specialized_max_error=args.specialized_max_error,
+        accepted_max_smae=args.accepted_max_smae,
+        accepted_max_srmse=args.accepted_max_srmse,
+        specialized_max_smae=args.specialized_max_smae,
+        specialized_max_srmse=args.specialized_max_srmse,
         min_success_rate=args.min_success_rate,
         selection_folds=args.selection_folds,
         selection_horizon=args.selection_horizon,
@@ -315,6 +333,8 @@ def _evaluate_frozen(args: argparse.Namespace) -> int:
         )
     output_dir.mkdir(parents=True, exist_ok=True)
     report_payload = {
+        "schema_version": 2,
+        **metric_report_metadata(),
         "artifact_id": report.artifact_id,
         "split": report.split,
         "item_count": report.item_count,
@@ -322,12 +342,14 @@ def _evaluate_frozen(args: argparse.Namespace) -> int:
         "diagnostics": dict(report.diagnostics),
         "manifest_sha256": frozen["manifest_sha256"],
         "dictionary_sha256": dictionary_sha256,
+        **_frozen_curation_surface(results, labels["public_test"]),
     }
     with (output_dir / "frozen_test_forecasts.jsonl").open(
         "w", encoding="utf-8"
     ) as handle:
         for result in results:
             payload: dict[str, object] = {
+                **metric_report_metadata(),
                 "item_id": result.item_id,
                 "method_id": result.method_id,
                 "status": result.status,
@@ -337,20 +359,90 @@ def _evaluate_frozen(args: argparse.Namespace) -> int:
             }
             if result.error:
                 payload["error"] = result.error
-            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.write(
+                json.dumps(
+                    standards_json_value(payload),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+                + "\n"
+            )
     # Write the report last: its presence is the immutable completion marker.
     write_json(report_path, report_payload)
 
     score = float(report.metrics[curation.dictionary_metric])
     summary = {
         "artifact_id": dictionary.dictionary_id,
-        "metric": curation.dictionary_metric,
+        **metric_report_metadata(),
         "public_test_tasks": len(items),
-        "score": score,
+        "smae": score,
+        "srmse": float(report.metrics["srmse"]),
     }
     sys.stdout.write(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     sys.stdout.write("\n")
     return 0
+
+
+def _frozen_curation_surface(results, labels) -> dict[str, object]:
+    selected = {
+        result.item_id: result
+        for result in results
+        if result.selected and result.status == "success"
+    }
+    smaes: list[float] = []
+    srmses: list[float] = []
+    smaes_raw: list[float] = []
+    srmses_raw: list[float] = []
+    smae_clipped = 0
+    srmse_clipped = 0
+    for item_id, truth in labels.items():
+        result = selected.get(item_id)
+        if result is None:
+            point = {
+                "smae": 5.0,
+                "srmse": 5.0,
+                "smae_raw": math.inf,
+                "srmse_raw": math.inf,
+                "smae_clipped": True,
+                "srmse_clipped": True,
+            }
+        else:
+            point = drcik_point_metrics(list(truth), list(result.forecast))
+        smaes.append(float(point["smae"]))
+        srmses.append(float(point["srmse"]))
+        smaes_raw.append(float(point["smae_raw"]))
+        srmses_raw.append(float(point["srmse_raw"]))
+        smae_clipped += int(bool(point["smae_clipped"]))
+        srmse_clipped += int(bool(point["srmse_clipped"]))
+    count = len(smaes)
+    return {
+        "mean_smae": statistics.fmean(smaes) if smaes else math.inf,
+        "median_smae": statistics.median(smaes) if smaes else math.inf,
+        "se_smae": standard_error(smaes) if smaes else math.inf,
+        "mean_srmse": statistics.fmean(srmses) if srmses else math.inf,
+        "median_srmse": statistics.median(srmses) if srmses else math.inf,
+        "se_srmse": standard_error(srmses) if srmses else math.inf,
+        "p90_smae": linear_quantile(smaes, 0.90) if smaes else math.inf,
+        "p95_smae": linear_quantile(smaes, 0.95) if smaes else math.inf,
+        "p90_srmse": linear_quantile(srmses, 0.90) if srmses else math.inf,
+        "p95_srmse": linear_quantile(srmses, 0.95) if srmses else math.inf,
+        "p90_smae_raw": linear_quantile(smaes_raw, 0.90) if smaes_raw else math.inf,
+        "p95_smae_raw": linear_quantile(smaes_raw, 0.95) if smaes_raw else math.inf,
+        "p90_srmse_raw": linear_quantile(srmses_raw, 0.90) if srmses_raw else math.inf,
+        "p95_srmse_raw": linear_quantile(srmses_raw, 0.95) if srmses_raw else math.inf,
+        "smae_clipped_count": smae_clipped,
+        "smae_clipped_rate": smae_clipped / count if count else 1.0,
+        "srmse_clipped_count": srmse_clipped,
+        "srmse_clipped_rate": srmse_clipped / count if count else 1.0,
+        "coverage": len(selected) / count if count else 0.0,
+        "paired_joint_wtl": {
+            "wins": 0,
+            "ties": len(selected),
+            "losses": 0,
+            "missing": count - len(selected),
+        },
+    }
 
 
 def _collect_methods(args: argparse.Namespace) -> int:
@@ -576,12 +668,15 @@ def _evolution_config(
     experiment: Mapping[str, object], curation: DictionaryCurationConfig
 ) -> EvolutionConfig:
     payload = require_object(experiment.get("evolution", {}), "evolution config")
+    require_active_metric_policy(payload, context="active evolution config")
     allowed = {
         "generations",
         "children_per_generation",
         "seed",
         "acceptance_margin",
         "resume",
+        "metric_policy",
+        "metric_policy_fingerprint",
     }
     unknown = set(payload) - allowed
     if unknown:

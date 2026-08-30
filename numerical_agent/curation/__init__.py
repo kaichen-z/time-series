@@ -7,14 +7,14 @@ import statistics
 from dataclasses import dataclass, replace
 from typing import Callable, Mapping, Sequence, cast
 
-from common.evolution_core.acceptance import MetricAcceptanceGate
+from common.evolution_core.acceptance import ScaledPairAcceptanceGate
 from common.evolution_core.contracts import (
     EvaluationReport,
     EvolutionComponents,
-    MetricSpec,
     MutationContext,
 )
 from common.evolution_core.persistence import JsonArtifactStore
+from common.metrics import drcik_point_metrics, joint_scaled_error
 
 from ..config import DictionaryCurationConfig
 from ..dictionary import (
@@ -130,11 +130,19 @@ class DictionaryArtifactAdapter:
         success_rate = float(summary.get("success_rate", 0.0))
         if success_rate < self.config.min_success_rate:
             return "quarantined"
-        mean_error = float(summary.get("mean_error", math.inf))
+        mean_smae = float(summary.get("mean_smae", math.inf))
+        mean_srmse = float(summary.get("mean_srmse", math.inf))
         subset_win_rate = float(summary.get("subset_win_rate", 0.0))
-        if mean_error <= self.config.accepted_max_error:
+        if (
+            mean_smae <= self.config.accepted_max_smae
+            and mean_srmse <= self.config.accepted_max_srmse
+        ):
             return "accepted"
-        if subset_win_rate > 0 and mean_error <= self.config.specialized_max_error:
+        if (
+            subset_win_rate > 0
+            and mean_smae <= self.config.specialized_max_smae
+            and mean_srmse <= self.config.specialized_max_srmse
+        ):
             return "specialized"
         dominated = bool(summary.get("dominated", False))
         if dominated and self.config.discard_requires_dominance_evidence:
@@ -303,7 +311,10 @@ class DictionaryMutator:
             categories.append("unavailable")
         if int(summary.get("invalid_count", 0)) > 0:
             categories.append("invalid")
-        if float(summary.get("mean_error", 0.0)) > self.config.accepted_max_error:
+        if (
+            float(summary.get("mean_smae", 0.0)) > self.config.accepted_max_smae
+            or float(summary.get("mean_srmse", 0.0)) > self.config.accepted_max_srmse
+        ):
             categories.append("high_error")
         # A tuple of strings, so it must bypass the float-only metrics filter above.
         raw_errors = summary.get("sample_errors", ())
@@ -434,7 +445,10 @@ class DictionaryExecutor:
                 not math.isfinite(value) for value in forecast
             ):
                 continue
-            error = float(self.selection_metric(forecast, truth))
+            point = drcik_point_metrics(list(truth), list(forecast))
+            error = joint_scaled_error(
+                float(point["smae"]), float(point["srmse"])
+            )
             if math.isfinite(error):
                 errors.append(error)
         required = math.ceil(available_folds * self.min_selection_success_rate)
@@ -538,42 +552,50 @@ class DictionaryEvaluator:
         if split_labels is None:
             raise ValueError(f"labels are unavailable for split {split!r}")
         by_method: dict[str, list[MethodExecutionResult]] = {}
-        by_item_errors: dict[str, list[float]] = {}
-        selected_errors: dict[str, float] = {}
+        by_item_pairs: dict[str, list[tuple[float, float]]] = {}
+        selected_pairs: dict[str, tuple[float, float]] = {}
         for result in results:
             by_method.setdefault(result.method_id, []).append(result)
             if result.status == "success":
                 truth = split_labels.get(result.item_id)
                 if truth is None:
                     raise ValueError(f"missing trusted label for item {result.item_id!r}")
-                error = float(self.metric(result.forecast, truth))
-                if not math.isfinite(error):
-                    raise ValueError("method metric must be finite")
-                by_item_errors.setdefault(result.item_id, []).append(error)
+                point = drcik_point_metrics(list(truth), list(result.forecast))
+                pair = (float(point["smae"]), float(point["srmse"]))
+                if not all(math.isfinite(value) for value in pair):
+                    raise ValueError("scaled method metric pair must be finite")
+                by_item_pairs.setdefault(result.item_id, []).append(pair)
                 if result.selected:
-                    if result.item_id in selected_errors:
+                    if result.item_id in selected_pairs:
                         raise ValueError(
                             f"multiple methods were selected for item {result.item_id!r}"
                         )
-                    selected_errors[result.item_id] = error
+                    selected_pairs[result.item_id] = pair
 
         per_method = {
             method_id: self._method_summary(method_results, split_labels)
             for method_id, method_results in by_method.items()
         }
-        penalty = self.config.specialized_max_error * 10.0
-        oracle_errors = [
-            min(by_item_errors.get(item_id, (penalty,))) for item_id in split_labels
+        penalty = (5.0, 5.0)
+        oracle_pairs = [
+            min(
+                by_item_pairs.get(item_id, (penalty,)),
+                key=lambda pair: (joint_scaled_error(*pair), pair),
+            )
+            for item_id in split_labels
         ]
-        dictionary_errors = [
-            selected_errors.get(item_id, penalty) for item_id in split_labels
+        dictionary_pairs = [
+            selected_pairs.get(item_id, penalty) for item_id in split_labels
         ]
-        dictionary_score = statistics.fmean(dictionary_errors)
-        oracle_score = statistics.fmean(oracle_errors)
+        dictionary_smae = statistics.fmean(pair[0] for pair in dictionary_pairs)
+        dictionary_srmse = statistics.fmean(pair[1] for pair in dictionary_pairs)
+        oracle_smae = statistics.fmean(pair[0] for pair in oracle_pairs)
+        oracle_srmse = statistics.fmean(pair[1] for pair in oracle_pairs)
         failure_traces = [
             {
                 "method_id": method_id,
-                "mean_error": summary.get("mean_error"),
+                "mean_smae": summary.get("mean_smae"),
+                "mean_srmse": summary.get("mean_srmse"),
                 "failure": self._failure_category(summary),
             }
             for method_id, summary in per_method.items()
@@ -582,12 +604,14 @@ class DictionaryEvaluator:
         return EvaluationReport(
             artifact_id=artifact_id,
             split=split,
-            metrics={self.config.dictionary_metric: dictionary_score},
+            metrics={"smae": dictionary_smae, "srmse": dictionary_srmse},
             item_count=len(split_labels),
             diagnostics={
                 "per_method": per_method,
                 "failure_traces": failure_traces,
-                "oracle_score": oracle_score,
+                "oracle_smae": oracle_smae,
+                "oracle_srmse": oracle_srmse,
+                "oracle_score": joint_scaled_error(oracle_smae, oracle_srmse),
                 "selected_method_ids": {
                     item_id: next(
                         (
@@ -607,35 +631,45 @@ class DictionaryEvaluator:
         results: Sequence[MethodExecutionResult],
         labels: Mapping[str, Sequence[float]],
     ) -> dict[str, object]:
-        errors = []
+        pairs: list[tuple[float, float]] = []
         for result in results:
             if result.status == "success":
                 truth = labels.get(result.item_id)
                 if truth is None:
                     raise ValueError(f"missing trusted label for item {result.item_id!r}")
-                errors.append(float(self.metric(result.forecast, truth)))
+                point = drcik_point_metrics(list(truth), list(result.forecast))
+                pairs.append((float(point["smae"]), float(point["srmse"])))
         total_count = len(results)
         summary: dict[str, object] = {
             "total_count": total_count,
-            "success_count": len(errors),
+            "success_count": len(pairs),
             "unavailable_count": sum(result.status == "unavailable" for result in results),
             "unsafe_count": sum(result.status == "unsafe" for result in results),
             "invalid_count": sum(result.status == "invalid" for result in results),
-            "success_rate": len(errors) / total_count if total_count else 0.0,
+            "success_rate": len(pairs) / total_count if total_count else 0.0,
             "sample_errors": self._sample_errors(results),
         }
-        if errors:
+        if pairs:
+            smaes = [pair[0] for pair in pairs]
+            srmses = [pair[1] for pair in pairs]
             summary.update(
                 {
-                    "mean_error": statistics.fmean(errors),
-                    "median_error": statistics.median(errors),
-                    "worst_error": max(errors),
+                    "mean_smae": statistics.fmean(smaes),
+                    "mean_srmse": statistics.fmean(srmses),
+                    "median_smae": statistics.median(smaes),
+                    "median_srmse": statistics.median(srmses),
+                    "worst_smae": max(smaes),
+                    "worst_srmse": max(srmses),
                     "subset_win_rate": sum(
-                        error <= self.config.accepted_max_error for error in errors
+                        smae <= self.config.accepted_max_smae
+                        and srmse <= self.config.accepted_max_srmse
+                        for smae, srmse in pairs
                     )
-                    / len(errors),
+                    / len(pairs),
                     "dominated": all(
-                        error > self.config.specialized_max_error for error in errors
+                        smae > self.config.specialized_max_smae
+                        and srmse > self.config.specialized_max_srmse
+                        for smae, srmse in pairs
                     ),
                 }
             )
@@ -692,8 +726,6 @@ class DictionaryCurationTask:
                 min_selection_success_rate=self.config.min_success_rate,
             ),
             evaluator=DictionaryEvaluator(self.config, self.labels, self.metric),
-            acceptance_gate=MetricAcceptanceGate(
-                MetricSpec(self.config.dictionary_metric, "minimize")
-            ),
+            acceptance_gate=ScaledPairAcceptanceGate(),
             store=self.store,
         )

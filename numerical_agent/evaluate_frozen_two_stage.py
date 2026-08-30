@@ -26,7 +26,7 @@ from common.metrics import (
     smape,
     standard_error,
 )
-from common.payload import read_json_object, write_json
+from common.payload import read_json_object, standards_json_value, write_json
 
 from .evolution.execution import SUCCESS, Task
 from .evolution.filtering import build_filter_dictionary
@@ -41,7 +41,7 @@ from .evolution.screening_evolution import migrate_filter_dictionary, parse_scre
 from .evolution.screening import profile_task
 from .evolution.selector_evolution import parse_decision_source
 from .main import _add_tsfm_runtime_options, _runtime_registry
-from .run_selector_evolution import ForecastStore, _build_case
+from .run_selector_evolution import ForecastStore, _build_case, _forecast_runtime_identity
 from .run_task_conditioned_screening import _training_outcomes
 
 
@@ -229,6 +229,7 @@ def main(argv: list[str] | None = None) -> int:
             portfolio,
             runtimes,
             screening_hash,
+            runtime_identity=_forecast_runtime_identity(args),
         )
         try:
             config = _hindcast_config_for_policy(decision_policy)
@@ -313,12 +314,12 @@ def main(argv: list[str] | None = None) -> int:
         "results_sha256": _sha256(output / "frozen_two_stage_results.json"),
         "per_task_sha256": _sha256(output / "per_task_results.jsonl"),
     })
-    print(json.dumps({
+    print(json.dumps(standards_json_value({
         "task_count": 99,
         "rows": {name: {key: value for key, value in score.items() if key != "per_task"}
                  for name, score in scores.items()},
         "paired_vs_A": paired,
-    }, ensure_ascii=False, indent=2, sort_keys=True))
+    }), ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False))
     return 0
 
 

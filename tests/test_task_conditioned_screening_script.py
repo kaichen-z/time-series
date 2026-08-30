@@ -19,7 +19,8 @@ from numerical_agent.run_task_conditioned_screening import (
     load_frozen_partitions,
     main,
 )
-from common.evolution_core.contracts import METRIC_POLICY
+from common.evolution_core.contracts import METRIC_POLICY, metric_policy_metadata
+from common.payload import write_json
 from numerical_agent.evolution.execution import Task
 from numerical_agent.evolution.filtering import build_filter_dictionary, render_filter_source
 from numerical_agent.evolution.module import MODULE_HEADER, parse_module, write_module
@@ -102,6 +103,15 @@ def _run_until_screening_validation(
         render_filter_source(build_filter_dictionary(module, portfolio)),
         encoding="utf-8",
     )
+    write_json(repo / "seed_manifest.json", {
+        "schema_version": 2,
+        **metric_policy_metadata(),
+        "seed_kind": "complete_master_dictionary",
+        "source_hashes": {
+            "methods.py": screening_script._sha256(repo / "methods.py"),
+            "policies.py": screening_script._sha256(repo / "policies.py"),
+        },
+    })
     task = Task("screening", (1.0, 2.0), 1, "D", (3.0,))
     monkeypatch.setattr(screening_script, "load_frozen_partitions", lambda *args, **kwargs: ((task,), (task,)))
     if dictionary is not None:
@@ -260,7 +270,7 @@ def test_screening_cli_has_train_dev_but_no_public_test_option():
     ])
     assert args.train_limit == 80
     assert args.dev_limit == 20
-    assert args.seed_policy == "all"
+    assert args.seed_manifest is None
     assert args.baseline_method == "toto_2_0"
     assert args.screen_min_candidates == 12
     assert args.screen_max_candidates is None
@@ -275,6 +285,13 @@ def test_screening_cli_has_train_dev_but_no_public_test_option():
             "--outcome-cache-dir", "cache", "--policy-outcome-cache-dir", "cache2",
             "--output-dir", "out", "--target-batches-file", "batch",
             "--public-test-limit", "99",
+        ])
+    with pytest.raises(SystemExit):
+        parser.parse_args([
+            "--repo", "repo", "--tasks-file", "tasks",
+            "--outcome-cache-dir", "cache", "--policy-outcome-cache-dir", "cache2",
+            "--output-dir", "out", "--target-batches-file", "batch",
+            "--seed-policy", "legacy",
         ])
 
 

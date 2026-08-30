@@ -9,13 +9,21 @@ from dataclasses import asdict
 from pathlib import Path
 
 from common.llm import CodexCLIClient, CodexCLIConfig
-from common.evolution_core.contracts import METRIC_POLICY, metric_report_metadata
-from common.payload import write_json
+from common.evolution_core.contracts import (
+    METRIC_POLICY,
+    metric_report_metadata,
+    require_active_metric_policy,
+)
+from common.payload import (
+    canonical_json_bytes,
+    read_json_object,
+    standards_json_value,
+    write_json,
+)
 
 from .evolution import git
 from .evolution.cache import OutcomeCache
 from .evolution.filtering import (
-    build_filter_dictionary,
     evolve_filter_once,
     parse_filter_source,
     render_filter_source,
@@ -36,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tasks-file", required=True)
     parser.add_argument("--outcome-cache-dir", required=True)
     parser.add_argument("--policy-outcome-cache-dir", required=True)
+    parser.add_argument("--seed-manifest", default=None)
     parser.add_argument("--train-limit", type=int, default=8)
     parser.add_argument("--validation-tail", type=int, default=2)
     parser.add_argument("--generation", type=int, default=1)
@@ -63,15 +72,16 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("filter evolution repository has tracked modifications")
     module = read_module(module_path)
     portfolio = read_policy_file(policy_path)
-    parent = (
-        parse_filter_source(dictionary_path.read_text(encoding="utf-8"))
-        if dictionary_path.is_file()
-        else build_filter_dictionary(module, portfolio)
-    )
     if not dictionary_path.is_file():
-        dictionary_path.write_text(render_filter_source(parent), encoding="utf-8")
-        git(repo, "add", "dictionary.py")
-        git(repo, "commit", "--quiet", "-m", "seed unified 103-candidate filter dictionary")
+        raise ValueError("active filter evolution requires a pre-existing dictionary.py seed")
+    seed_manifest_path = Path(args.seed_manifest) if args.seed_manifest else repo / "seed_manifest.json"
+    _validate_seed_manifest(
+        seed_manifest_path,
+        repo,
+        seed_kind="filter_dictionary",
+        dictionary_path=dictionary_path,
+    )
+    parent = parse_filter_source(dictionary_path.read_text(encoding="utf-8"))
 
     train, dev = _evolution_tasks(
         args.split_file,
@@ -172,6 +182,10 @@ def main(argv: list[str] | None = None) -> int:
             "dev": asdict(result.dev_child),
             "status_counts": _status_counts(result.child),
         },
+        "paired_joint_wtl": {
+            "train": _paired_filter_counts(result.train_parent, result.train_child),
+            "dev": _paired_filter_counts(result.dev_parent, result.dev_child),
+        },
         "changes": changes,
         "source_hashes": source_hashes,
     }
@@ -181,7 +195,13 @@ def main(argv: list[str] | None = None) -> int:
     (repo / f"generation_{args.generation:03d}_filter_report.md").write_text(
         _markdown(payload), encoding="utf-8"
     )
-    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(
+        standards_json_value(payload),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    ))
     return 0
 
 
@@ -192,15 +212,51 @@ def _status_counts(dictionary) -> dict[str, int]:
     }
 
 
+def _paired_filter_counts(parent, child) -> dict[str, int]:
+    result = {"wins": 0, "ties": 0, "losses": 0, "missing": 0}
+    for task_id in sorted(set(parent.task_scaled_pairs) | set(child.task_scaled_pairs)):
+        if task_id not in parent.task_scaled_pairs or task_id not in child.task_scaled_pairs:
+            result["missing"] += 1
+            continue
+        left = sum(parent.task_scaled_pairs[task_id]) / 2.0
+        right = sum(child.task_scaled_pairs[task_id]) / 2.0
+        if right < left - 1e-12:
+            result["wins"] += 1
+        elif right > left + 1e-12:
+            result["losses"] += 1
+        else:
+            result["ties"] += 1
+    return result
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _validate_seed_manifest(
+    path: Path,
+    repo: Path,
+    *,
+    seed_kind: str,
+    dictionary_path: Path | None = None,
+) -> dict[str, object]:
+    payload = read_json_object(path)
+    require_active_metric_policy(payload, context="active evolution seed")
+    if payload.get("schema_version") != 2 or payload.get("seed_kind") != seed_kind:
+        raise ValueError("active evolution seed manifest schema or kind mismatch")
+    expected = {
+        "methods.py": _sha256(repo / "methods.py"),
+        "policies.py": _sha256(repo / "policies.py"),
+    }
+    if dictionary_path is not None:
+        expected["dictionary.py"] = _sha256(dictionary_path)
+    if payload.get("source_hashes") != expected:
+        raise ValueError("active evolution seed manifest source hash mismatch")
+    return payload
+
+
 def _manifest_fingerprint(payload: dict[str, object]) -> str:
-    encoded = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 
 def _markdown(payload: dict[str, object]) -> str:

@@ -117,10 +117,14 @@ def test_decision_policy_round_trip_and_strict_mutation_schema():
     child = apply_decision_response(parent, json.dumps({
         "summary": "prefer recent evidence",
         "policy": {
-            "ranking_order": ["recent_mase", "median_mase", "worst_mase", "mase_mad"],
+            "ranking_order": [
+                "recent_joint_scaled_error",
+                "median_joint_scaled_error",
+                "worst_joint_scaled_error",
+                "smae_mad",
+            ],
             "recent_regime_first": True,
             "min_successful_folds": 2,
-            "catastrophic_mase": 8.0,
             "ensemble_enabled": False,
             "ensemble_max_members": 2,
             "ensemble_min_diversity": 0.1,
@@ -134,7 +138,7 @@ def test_decision_policy_round_trip_and_strict_mutation_schema():
         },
     }))
     assert child.recent_regime_first
-    assert child.catastrophic_mase == parent.catastrophic_mase
+    assert child.catastrophic_smae_raw == parent.catastrophic_smae_raw
 
     for forbidden in ("future", "split", "candidates", "scorer", "screening_policy"):
         with pytest.raises(SelectorEvolutionError):
@@ -155,7 +159,6 @@ def test_guarded_combination_parameters_round_trip_through_evolution_schema():
         "ranking_order": list(policy.ranking_order),
         "recent_regime_first": policy.recent_regime_first,
         "min_successful_folds": policy.min_successful_folds,
-        "catastrophic_mase": policy.catastrophic_mase,
         "ensemble_enabled": policy.ensemble_enabled,
         "ensemble_max_members": policy.ensemble_max_members,
         "ensemble_min_diversity": policy.ensemble_min_diversity,
@@ -174,6 +177,19 @@ def test_guarded_combination_parameters_round_trip_through_evolution_schema():
     assert child.ensemble_weight_grid == (0.7, 0.9)
     assert child.ensemble_residual_strengths == (0.1, 0.25)
     assert child.ensemble_max_worst_fold_regret == pytest.approx(0.04)
+
+
+def test_active_decision_payload_omits_catastrophic_mase_and_legacy_is_opt_in():
+    source = render_decision_source(DecisionPolicy())
+    assert "catastrophic_mase" not in source
+
+    legacy = source.replace(
+        "'catastrophic_smae_raw': 10.0,",
+        "'catastrophic_smae_raw': 10.0,\n 'catastrophic_mase': 999.0,",
+    )
+    with pytest.raises(SelectorEvolutionError, match="legacy"):
+        parse_decision_source(legacy)
+    assert parse_decision_source(legacy, allow_legacy=True) == DecisionPolicy()
 
 
 def test_task_conditioned_long_horizon_route_round_trips_and_legacy_defaults_are_safe():
@@ -631,7 +647,6 @@ def test_evolution_prompt_contains_train_aggregates_not_ids_or_futures(tmp_path)
             "ranking_order": list(parent.ranking_order),
             "recent_regime_first": parent.recent_regime_first,
             "min_successful_folds": parent.min_successful_folds,
-            "catastrophic_mase": parent.catastrophic_mase,
             "ensemble_enabled": parent.ensemble_enabled,
             "ensemble_max_members": parent.ensemble_max_members,
             "ensemble_min_diversity": parent.ensemble_min_diversity,
@@ -669,7 +684,6 @@ def test_evolution_rejects_child_requiring_more_folds_than_exist(tmp_path):
         "ranking_order": list(parent.ranking_order),
         "recent_regime_first": parent.recent_regime_first,
         "min_successful_folds": 4,
-        "catastrophic_mase": parent.catastrophic_mase,
         "ensemble_enabled": parent.ensemble_enabled,
         "ensemble_max_members": parent.ensemble_max_members,
         "ensemble_min_diversity": parent.ensemble_min_diversity,
@@ -707,7 +721,6 @@ def test_evolution_passes_prior_rejections_without_task_labels(tmp_path):
         "ranking_order": list(parent.ranking_order),
         "recent_regime_first": parent.recent_regime_first,
         "min_successful_folds": parent.min_successful_folds,
-        "catastrophic_mase": parent.catastrophic_mase,
         "ensemble_enabled": parent.ensemble_enabled,
         "ensemble_max_members": parent.ensemble_max_members,
         "ensemble_min_diversity": parent.ensemble_min_diversity,
@@ -749,7 +762,6 @@ def test_generation_sequence_feeds_rejection_reason_to_next_child(tmp_path):
                 "ranking_order": list(parent.ranking_order),
                 "recent_regime_first": parent.recent_regime_first,
                 "min_successful_folds": minimum_folds,
-                "catastrophic_mase": parent.catastrophic_mase,
                 "ensemble_enabled": parent.ensemble_enabled,
                 "ensemble_max_members": parent.ensemble_max_members,
                 "ensemble_min_diversity": parent.ensemble_min_diversity,
@@ -829,7 +841,6 @@ def test_train_evolution_uses_dev_only_for_one_final_read_only_gate(tmp_path):
                 "ranking_order": list(policy.ranking_order),
                 "recent_regime_first": policy.recent_regime_first,
                 "min_successful_folds": policy.min_successful_folds,
-                "catastrophic_mase": policy.catastrophic_mase,
                 "ensemble_enabled": policy.ensemble_enabled,
                 "ensemble_max_members": policy.ensemble_max_members,
                 "ensemble_min_diversity": policy.ensemble_min_diversity,
@@ -1062,7 +1073,6 @@ def test_train_only_evolution_rejects_child_that_fails_crossfold_stability(tmp_p
             "ranking_order": list(child.ranking_order),
             "recent_regime_first": child.recent_regime_first,
             "min_successful_folds": child.min_successful_folds,
-            "catastrophic_mase": child.catastrophic_mase,
             "ensemble_enabled": child.ensemble_enabled,
             "ensemble_max_members": child.ensemble_max_members,
             "ensemble_min_diversity": child.ensemble_min_diversity,

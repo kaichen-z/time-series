@@ -7,7 +7,7 @@ import json
 import math
 import pprint
 import statistics
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -106,6 +106,12 @@ class DecisionScore:
     se_srmse: float = math.inf
     p90_smae: float = math.inf
     p95_smae: float = math.inf
+    p90_srmse: float = math.inf
+    p95_srmse: float = math.inf
+    p90_smae_raw: float = math.inf
+    p95_smae_raw: float = math.inf
+    p90_srmse_raw: float = math.inf
+    p95_srmse_raw: float = math.inf
     smae_clipped_count: int = 0
     smae_clipped_rate: float = 1.0
     srmse_clipped_count: int = 0
@@ -114,6 +120,7 @@ class DecisionScore:
     mean_considered_candidates: float = 0.0
     mean_considered_families: float = 0.0
     assumption_kind_diversity: int = 0
+    task_scaled_pairs: Mapping[str, tuple[float, float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -177,7 +184,6 @@ _FIELDS = (
     "catastrophic_srmse_raw",
     "max_smae_fold_regret",
     "max_srmse_fold_regret",
-    "catastrophic_mase",
     "baseline_strategy",
     "tsfm_router_min_improvement",
     "tsfm_router_blend_weight",
@@ -213,7 +219,7 @@ _SCALED_SAFETY_FIELDS = frozenset(
         "max_srmse_fold_regret",
     }
 )
-_MUTATION_FIELDS = tuple(field for field in _FIELDS if field != "catastrophic_mase")
+_MUTATION_FIELDS = _FIELDS
 
 _ASSUMPTION_FIELDS = frozenset(
     {
@@ -272,7 +278,9 @@ def render_decision_source(policy: DecisionPolicy, *, screening_policy_hash: str
     )
 
 
-def parse_decision_source(source: str) -> DecisionPolicy:
+def parse_decision_source(
+    source: str, *, allow_legacy: bool = False
+) -> DecisionPolicy:
     try:
         tree = ast.parse(source)
     except SyntaxError as error:
@@ -293,7 +301,7 @@ def parse_decision_source(source: str) -> DecisionPolicy:
                 raise SelectorEvolutionError("decision source must contain literals") from error
     if not isinstance(payload, Mapping):
         raise SelectorEvolutionError("decision source needs a DECISION_POLICY mapping")
-    return _parse_policy(payload)
+    return _parse_policy(payload, allow_legacy=allow_legacy)
 
 
 def decision_policy_hash(policy: DecisionPolicy, *, screening_policy_hash: str = "") -> str:
@@ -326,22 +334,15 @@ def apply_decision_response(parent: DecisionPolicy, response: str) -> DecisionPo
         *accepted_fields,
         *(fields - _TSFM_ROUTER_FIELDS for fields in accepted_fields),
     )
-    # Frozen pre-migration callers may still submit the diagnostic-only MASE
-    # threshold and omit the new scaled safety fields. It is never mutable.
     accepted_fields = (
         *accepted_fields,
-        *(
-            (fields - _SCALED_SAFETY_FIELDS) | {"catastrophic_mase"}
-            for fields in accepted_fields
-        ),
+        *(fields - _SCALED_SAFETY_FIELDS for fields in accepted_fields),
     )
     if not isinstance(raw, Mapping) or set(raw) not in accepted_fields:
         raise SelectorEvolutionError("policy must contain exactly the approved fields")
     normalized = dict(raw)
-    normalized.pop("catastrophic_mase", None)
     for field in _SCALED_SAFETY_FIELDS:
         normalized.setdefault(field, getattr(parent, field))
-    normalized["catastrophic_mase"] = parent.catastrophic_mase
     return _parse_policy(normalized)
 
 
@@ -398,6 +399,8 @@ def evaluate_decision(
     smapes = [record[4] for record in records]
     smaes = [float(record[6]["smae"]) for record in records]
     srmses = [float(record[6]["srmse"]) for record in records]
+    smaes_raw = [float(record[6]["smae_raw"]) for record in records]
+    srmses_raw = [float(record[6]["srmse_raw"]) for record in records]
     smae_clipped_count = sum(bool(record[6]["smae_clipped"]) for record in records)
     srmse_clipped_count = sum(bool(record[6]["srmse_clipped"]) for record in records)
     selected = {name for _, decision, *_ in records for name in decision.selected}
@@ -450,6 +453,12 @@ def evaluate_decision(
         se_srmse=standard_error(srmses) if srmses else math.inf,
         p90_smae=linear_quantile(smaes, 0.90) if smaes else math.inf,
         p95_smae=linear_quantile(smaes, 0.95) if smaes else math.inf,
+        p90_srmse=linear_quantile(srmses, 0.90) if srmses else math.inf,
+        p95_srmse=linear_quantile(srmses, 0.95) if srmses else math.inf,
+        p90_smae_raw=linear_quantile(smaes_raw, 0.90) if smaes_raw else math.inf,
+        p95_smae_raw=linear_quantile(smaes_raw, 0.95) if smaes_raw else math.inf,
+        p90_srmse_raw=linear_quantile(srmses_raw, 0.90) if srmses_raw else math.inf,
+        p95_srmse_raw=linear_quantile(srmses_raw, 0.95) if srmses_raw else math.inf,
         smae_clipped_count=smae_clipped_count,
         smae_clipped_rate=smae_clipped_count / completed if completed else 1.0,
         srmse_clipped_count=srmse_clipped_count,
@@ -458,6 +467,13 @@ def evaluate_decision(
         mean_considered_candidates=(statistics.fmean(considered_counts) if records else 0.0),
         mean_considered_families=(statistics.fmean(considered_family_counts) if records else 0.0),
         assumption_kind_diversity=len(assumption_kinds),
+        task_scaled_pairs={
+            record[0].task.task_id: (
+                float(record[6]["smae"]),
+                float(record[6]["srmse"]),
+            )
+            for record in records
+        },
     )
 
 
@@ -1323,7 +1339,16 @@ def evolve_selector_generations(
     return current, tuple(results)
 
 
-def _parse_policy(raw: Mapping[str, object]) -> DecisionPolicy:
+def _parse_policy(
+    raw: Mapping[str, object], *, allow_legacy: bool = False
+) -> DecisionPolicy:
+    raw = dict(raw)
+    if "catastrophic_mase" in raw:
+        if not allow_legacy:
+            raise SelectorEvolutionError(
+                "legacy catastrophic_mase requires allow_legacy=True report-only parsing"
+            )
+        raw.pop("catastrophic_mase")
     legacy_fields = (
         set(_FIELDS) - _TSFM_BLEND_FIELDS,
         set(_PRE_COMBINED_FIELDS),
@@ -1369,7 +1394,6 @@ def _parse_policy(raw: Mapping[str, object]) -> DecisionPolicy:
             min_successful_folds=_strict_int(raw["min_successful_folds"]),
             catastrophic_smae_raw=_finite_float(raw["catastrophic_smae_raw"]),
             catastrophic_srmse_raw=_finite_float(raw["catastrophic_srmse_raw"]),
-            catastrophic_mase=_finite_float(raw["catastrophic_mase"]),
             max_smae_fold_regret=_finite_float(raw["max_smae_fold_regret"]),
             max_srmse_fold_regret=_finite_float(raw["max_srmse_fold_regret"]),
             baseline_strategy=str(raw["baseline_strategy"]),
@@ -1419,7 +1443,6 @@ def _policy_payload(policy: DecisionPolicy) -> dict[str, object]:
         "min_successful_folds": policy.min_successful_folds,
         "catastrophic_smae_raw": policy.catastrophic_smae_raw,
         "catastrophic_srmse_raw": policy.catastrophic_srmse_raw,
-        "catastrophic_mase": policy.catastrophic_mase,
         "max_smae_fold_regret": policy.max_smae_fold_regret,
         "max_srmse_fold_regret": policy.max_srmse_fold_regret,
         "baseline_strategy": policy.baseline_strategy,
@@ -1452,9 +1475,7 @@ def _policy_payload(policy: DecisionPolicy) -> dict[str, object]:
 
 def _mutation_policy_payload(policy: DecisionPolicy) -> dict[str, object]:
     """Project only live scaled mutation fields; legacy metrics stay read-only."""
-    payload = _policy_payload(policy)
-    payload.pop("catastrophic_mase")
-    return payload
+    return _policy_payload(policy)
 
 
 def _scaled_train_summary(score: DecisionScore) -> dict[str, object]:
@@ -1467,6 +1488,7 @@ def _scaled_train_summary(score: DecisionScore) -> dict[str, object]:
         "median_mae",
         "mean_smape",
         "catastrophic_rate",
+        "task_scaled_pairs",
     ):
         payload.pop(field)
     return payload

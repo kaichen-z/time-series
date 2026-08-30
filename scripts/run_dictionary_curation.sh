@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run Phase 1 dictionary curation: an LLM implements each statistical method, the
-# sandbox runs it, and measured Train/Dev sMAPE decides what is kept.
+# sandbox runs it, and the capped Train/Dev sMAE+sRMSE pair decides what is kept.
 #
 # Usage:
 #   scripts/run_dictionary_curation.sh smoke
@@ -32,8 +32,10 @@ NA_GENERATIONS="${NA_GENERATIONS:-3}"
 NA_CHILDREN="${NA_CHILDREN:-1}"
 NA_MAX_REVISIONS="${NA_MAX_REVISIONS:-1}"
 NA_MAX_IMPLEMENTATION_ATTEMPTS="${NA_MAX_IMPLEMENTATION_ATTEMPTS:-3}"
-NA_ACCEPTED_MAX_ERROR="${NA_ACCEPTED_MAX_ERROR:-50.0}"
-NA_SPECIALIZED_MAX_ERROR="${NA_SPECIALIZED_MAX_ERROR:-100.0}"
+NA_ACCEPTED_MAX_SMAE="${NA_ACCEPTED_MAX_SMAE:-1.0}"
+NA_ACCEPTED_MAX_SRMSE="${NA_ACCEPTED_MAX_SRMSE:-1.0}"
+NA_SPECIALIZED_MAX_SMAE="${NA_SPECIALIZED_MAX_SMAE:-2.5}"
+NA_SPECIALIZED_MAX_SRMSE="${NA_SPECIALIZED_MAX_SRMSE:-2.5}"
 NA_MIN_SUCCESS_RATE="${NA_MIN_SUCCESS_RATE:-0.8}"
 NA_SELECTION_FOLDS="${NA_SELECTION_FOLDS:-3}"
 NA_SELECTION_HORIZON="${NA_SELECTION_HORIZON:-8}"
@@ -67,8 +69,10 @@ BUILD_COMMAND=(
     --children-per-generation "$NA_CHILDREN"
     --max-revisions-per-method "$NA_MAX_REVISIONS"
     --max-implementation-attempts "$NA_MAX_IMPLEMENTATION_ATTEMPTS"
-    --accepted-max-error "$NA_ACCEPTED_MAX_ERROR"
-    --specialized-max-error "$NA_SPECIALIZED_MAX_ERROR"
+    --accepted-max-smae "$NA_ACCEPTED_MAX_SMAE"
+    --accepted-max-srmse "$NA_ACCEPTED_MAX_SRMSE"
+    --specialized-max-smae "$NA_SPECIALIZED_MAX_SMAE"
+    --specialized-max-srmse "$NA_SPECIALIZED_MAX_SRMSE"
     --min-success-rate "$NA_MIN_SUCCESS_RATE"
     --selection-folds "$NA_SELECTION_FOLDS"
     --selection-horizon "$NA_SELECTION_HORIZON"

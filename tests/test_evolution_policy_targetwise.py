@@ -9,9 +9,9 @@ from common.llm import FakeLLMClient
 from numerical_agent.dictionary import MethodCandidate
 from numerical_agent.evolution import commit_module, init_repo
 from numerical_agent.evolution.cache import OutcomeCache
-from numerical_agent.evolution.execution import Task
+from numerical_agent.evolution.execution import Outcome, Task
 from numerical_agent.evolution.module import MODULE_HEADER, parse_module, write_module
-from numerical_agent.evolution.policy_targetwise import evolve_policies_once
+from numerical_agent.evolution.policy_targetwise import _accept, evolve_policies_once
 from numerical_agent.evolution.portfolio import (
     FLAGSHIP_METHOD_IDS,
     PolicyOutcomeCache,
@@ -65,6 +65,40 @@ def _tasks(prefix: str) -> tuple[Task, ...]:
         Task(f"{prefix}1", tuple(float(value) for value in range(1, 29)), 2, "1 day", (30.0, 30.0)),
         Task(f"{prefix}2", tuple(float(value) for value in range(2, 30)), 2, "1 day", (31.0, 31.0)),
     )
+
+
+def test_policy_gate_rejects_srmse_regression_despite_legacy_mase_gain() -> None:
+    tasks = (Task("t", (1.0, 2.0), 1, "1 day", (2.0,)),)
+    parent = (
+        Outcome(
+            "p", "t", "success", smape=100.0, mae=1.0, mase=100.0,
+            smae=1.0, srmse=1.0,
+        ),
+    )
+    child = (
+        Outcome(
+            "p", "t", "success", smape=0.0, mae=0.8, mase=0.0,
+            smae=0.8, srmse=1.1,
+        ),
+    )
+    metrics = {
+        "parent_mean_smae": 1.0,
+        "parent_mean_srmse": 1.0,
+        "parent_median_smae": 1.0,
+        "parent_median_srmse": 1.0,
+        "child_mean_smae": 0.8,
+        "child_mean_srmse": 1.1,
+        "child_median_smae": 0.8,
+        "child_median_srmse": 1.1,
+        "parent_mean_mase": 100.0,
+        "parent_median_mase": 100.0,
+        "child_mean_mase": 0.0,
+        "child_median_mase": 0.0,
+    }
+
+    accepted, _ = _accept(parent, child, tasks, "p", metrics)
+
+    assert not accepted
 
 
 def test_combined_policy_child_is_screened_validated_and_committed(tmp_path: Path) -> None:

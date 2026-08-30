@@ -40,7 +40,7 @@ python -m numerical_agent.run_task_conditioned_screening \
   --output-dir "$OUTPUT_DIR" \
   --train-limit "$TRAIN_LIMIT" \
   --dev-limit "$DEV_LIMIT" \
-  --seed-policy all \
+  --seed-manifest "$RUN_REPO/seed_manifest.json" \
   --codex-model "$CODEX_MODEL" \
   --codex-reasoning-effort "$CODEX_REASONING" \
   --baseline-method "$BASELINE_METHOD" \

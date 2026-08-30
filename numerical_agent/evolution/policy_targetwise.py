@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import math
-import statistics
 import subprocess
 import time
 from dataclasses import dataclass, field, replace
@@ -11,6 +10,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from common.llm import LLMClient, parse_json_object
+from common.metrics import joint_scaled_error, pareto_scaled_improvement
 from common.payload import write_json
 
 from numerical_agent.providers import RuntimeRegistry
@@ -22,7 +22,13 @@ from .diagnostics import (
     parse_failure_diagnosis,
     render_failure_judge_user,
 )
-from .execution import Outcome, SUCCESS, Task, report_payload, reports_from_outcomes
+from .execution import (
+    Outcome,
+    Task,
+    oracle_scaled_summary,
+    report_payload,
+    reports_from_outcomes,
+)
 from .module import MethodModule, ModuleError, read_module
 from .portfolio import (
     CombinedPolicy,
@@ -272,8 +278,14 @@ def evolve_policies_once(
     commit = _head(root)
     eligible.sort(
         key=lambda item: (
-            candidates[item].validation_metrics["child_method_mean_mase"],
-            candidates[item].validation_metrics["child_mean_mase"],
+            joint_scaled_error(
+                candidates[item].validation_metrics["child_method_mean_smae"],
+                candidates[item].validation_metrics["child_method_mean_srmse"],
+            ),
+            joint_scaled_error(
+                candidates[item].validation_metrics["child_mean_smae"],
+                candidates[item].validation_metrics["child_mean_srmse"],
+            ),
         )
     )
     for candidate_index in eligible:
@@ -450,22 +462,22 @@ def _metrics(
     tasks: Sequence[Task],
     target: str,
 ) -> dict[str, float]:
-    parent_mean, parent_median = _oracle(parent, tasks)
-    child_mean, child_median = _oracle(child, tasks)
+    parent_metrics = oracle_scaled_summary(parent, tasks)
+    child_metrics = oracle_scaled_summary(child, tasks)
     parent_report = reports_from_outcomes((target,), parent, tasks)[0]
     child_report = reports_from_outcomes((target,), child, tasks)[0]
     metrics = {
-        "parent_mean_mase": parent_mean,
-        "parent_median_mase": parent_median,
-        "child_mean_mase": child_mean,
-        "child_median_mase": child_median,
+        **{f"parent_{name}": value for name, value in parent_metrics.items()},
+        **{f"child_{name}": value for name, value in child_metrics.items()},
         "parent_method_coverage": parent_report.coverage,
         "child_method_coverage": child_report.coverage,
     }
-    if parent_report.mean_mase is not None:
-        metrics["parent_method_mean_mase"] = parent_report.mean_mase
-    if child_report.mean_mase is not None:
-        metrics["child_method_mean_mase"] = child_report.mean_mase
+    if parent_report.mean_smae is not None and parent_report.mean_srmse is not None:
+        metrics["parent_method_mean_smae"] = parent_report.mean_smae
+        metrics["parent_method_mean_srmse"] = parent_report.mean_srmse
+    if child_report.mean_smae is not None and child_report.mean_srmse is not None:
+        metrics["child_method_mean_smae"] = child_report.mean_smae
+        metrics["child_method_mean_srmse"] = child_report.mean_srmse
     return metrics
 
 
@@ -485,38 +497,41 @@ def _accept(
         return False, "changed policy has no successful applicable task"
     if child_report.coverage + tolerance < parent_report.coverage:
         return False, "changed policy reduced applicable-task coverage"
-    if parent_report.mean_mase is None or child_report.mean_mase is None:
-        return False, "changed policy lacks comparable MASE"
-    if child_report.mean_mase >= parent_report.mean_mase - tolerance:
-        return False, "changed policy MASE did not improve"
     if (
-        metrics["child_mean_mase"] > metrics["parent_mean_mase"] + tolerance
-        or metrics["child_median_mase"] > metrics["parent_median_mase"] + tolerance
+        parent_report.mean_smae is None
+        or parent_report.mean_srmse is None
+        or child_report.mean_smae is None
+        or child_report.mean_srmse is None
     ):
-        return False, "portfolio MASE regressed"
+        return False, "changed policy lacks a comparable scaled metric pair"
+    if not pareto_scaled_improvement(
+        parent_report.mean_smae,
+        parent_report.mean_srmse,
+        child_report.mean_smae,
+        child_report.mean_srmse,
+    ):
+        return False, "changed policy scaled metric pair did not Pareto-improve"
+    fields = ("mean_smae", "mean_srmse", "median_smae", "median_srmse")
+    if any(
+        metrics[f"child_{field}"] > metrics[f"parent_{field}"] + tolerance
+        for field in fields
+    ):
+        return False, "portfolio scaled metric pair regressed"
     return True, "improved"
-
-
-def _oracle(outcomes: Sequence[Outcome], tasks: Sequence[Task]) -> tuple[float, float]:
-    scores = []
-    for task in tasks:
-        usable = [
-            float(outcome.mase)
-            for outcome in outcomes
-            if outcome.task_id == task.task_id
-            and outcome.status == SUCCESS
-            and outcome.mase is not None
-            and math.isfinite(outcome.mase)
-        ]
-        scores.append(min(usable) if usable else math.inf)
-    return statistics.fmean(scores), statistics.median(scores)
 
 
 def _rank(metrics: Mapping[str, float]) -> tuple[float, float]:
     return (
-        metrics.get("child_method_mean_mase", math.inf)
-        - metrics.get("parent_method_mean_mase", math.inf),
-        metrics["child_mean_mase"] - metrics["parent_mean_mase"],
+        joint_scaled_error(
+            metrics.get("child_method_mean_smae", 5.0),
+            metrics.get("child_method_mean_srmse", 5.0),
+        )
+        - joint_scaled_error(
+            metrics.get("parent_method_mean_smae", 5.0),
+            metrics.get("parent_method_mean_srmse", 5.0),
+        ),
+        joint_scaled_error(metrics["child_mean_smae"], metrics["child_mean_srmse"])
+        - joint_scaled_error(metrics["parent_mean_smae"], metrics["parent_mean_srmse"]),
     )
 
 
