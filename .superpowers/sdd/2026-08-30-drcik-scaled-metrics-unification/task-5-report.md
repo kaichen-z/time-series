@@ -173,3 +173,47 @@ Complete in the fix-round-2 changeset. Batch and targetwise acceptance now use o
 ### Concerns
 
 None.
+
+---
+
+## Fix round 3
+
+### Status and changes
+
+Complete in the fix-round-3 changeset. Active schema-v2 ToolDictionary reads now require the exact canonical nested MethodRecord/definition/candidate shape, exact field sets and scalar types, finite train summaries, explicit record state, and matching definition/candidate method IDs. Flat/coercive/defaulted dictionary rows remain available only through the explicitly named report-only legacy reader. Frozen paired comparisons now consume the exact expected task-ID universe, reject duplicate or unexpected identities, and conserve every task across win/tie/loss/missing/unscored. Historical point-forecast rescoring now uses the shared strict JSON decoder, exact row schemas and types, finite oracle values, and explicit `allow_legacy=True` report-only parsing.
+
+### TDD RED evidence
+
+1. Exact active dictionary and paired-universe boundary:
+
+   `pytest -q tests/test_numerical_dictionary_contracts.py::test_active_dictionary_requires_exact_canonical_nested_records tests/test_numerical_dictionary_contracts.py::test_legacy_dictionary_reader_is_explicit_and_report_only tests/test_frozen_two_stage_evaluation.py::test_paired_counts_compare_the_joint_scaled_metric_pair tests/test_frozen_two_stage_evaluation.py::test_paired_counts_conserve_the_exact_expected_task_universe tests/test_frozen_two_stage_evaluation.py::test_paired_counts_reject_unexpected_task_identity tests/test_frozen_two_stage_evaluation.py::test_paired_counts_reject_duplicate_expected_or_observed_ids tests/test_rescore_point_forecasts.py::test_rescore_rejects_duplicate_keys_and_nonstandard_constants_before_scoring tests/test_rescore_point_forecasts.py::test_rescore_legacy_reader_requires_exact_finite_row_schema tests/test_rescore_point_forecasts.py::test_rescore_uses_cached_forecasts_without_probabilistic_metrics`
+
+   Output: `22 failed, 5 passed in 0.22s`.
+
+2. Explicit rescore legacy opt-in:
+
+   `pytest -q tests/test_rescore_point_forecasts.py::test_legacy_forecast_reader_requires_explicit_report_only_opt_in`
+
+   Output: `1 failed in 0.12s`.
+
+### GREEN and compatibility evidence
+
+- Exact dictionary/paired/strict-rescore focused rerun: `30 passed in 0.14s`.
+- Complete rescore file after the explicit legacy-reader split: `14 passed in 0.11s`.
+- Dictionary, frozen, rescore, curation, selector, and screening compatibility sweep: `185 passed in 2.87s`.
+- Expanded focused lifecycle suite: `329 passed in 5.96s`; final fresh rerun after self-review: `329 passed in 5.60s`.
+- `python -m compileall -q numerical_agent`: passed. `git diff --check`: passed.
+
+### Files and self-review
+
+- Active/legacy dictionary boundary: `numerical_agent/dictionary.py` and `tests/test_numerical_dictionary_contracts.py`.
+- Exact paired task universe: `numerical_agent/evaluate_frozen_two_stage.py` and `tests/test_frozen_two_stage_evaluation.py`.
+- Strict historical rescore reader: `numerical_agent/rescore_point_forecasts.py` and `tests/test_rescore_point_forecasts.py`.
+- Confirmed canonical nested dictionary round trips still pass while flat rows, missing/unknown fields, string numerics, bool integers, and mismatched method IDs fail active parsing.
+- Confirmed W/T/L/M/U sums to the expected task count across both-missing and one-sided-missing cases, with unexpected/duplicate identities rejected; rescore exercises the same counter.
+- Confirmed duplicate keys at both JSON levels, NaN/Infinity constants, nonfinite oracle values, unknown fields, and type coercions reject before scoring; valid finite historical rows work only through explicit report-only opt-in.
+- Confirmed the diff does not touch Retrieval/Decision, docs/final smoke, or historical `runs/`; untracked `runs/numerical_morphology/` remains untouched and unstaged.
+
+### Concerns
+
+None.

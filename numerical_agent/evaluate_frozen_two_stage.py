@@ -265,7 +265,9 @@ def main(argv: list[str] | None = None) -> int:
         for row in scores["A_current_global_ranker"]["per_task"]
     }
     paired = {
-        name: _paired_counts(score["per_task"], baseline_by_task)
+        name: _paired_counts(
+            score["per_task"], baseline_by_task, tuple(task.task_id for task in tasks)
+        )
         for name, score in scores.items()
     }
     with (output / "per_task_results.jsonl").open("w", encoding="utf-8") as handle:
@@ -435,20 +437,55 @@ def _result(case, selected, weights, forecast, mode, *, assumption_ids=()) -> Fo
 
 
 def _paired_counts(
-    per_task, baseline: Mapping[str, tuple[float, float]]
+    per_task,
+    baseline: Mapping[str, tuple[float, float]],
+    expected_task_ids: Sequence[str],
 ) -> dict[str, int]:
     result = {"wins": 0, "ties": 0, "losses": 0, "missing": 0, "unscored": 0}
-    seen = set()
+    if isinstance(expected_task_ids, (str, bytes)):
+        raise ValueError("expected task IDs must be a sequence")
+    expected = tuple(expected_task_ids)
+    if any(type(task_id) is not str or not task_id for task_id in expected):
+        raise ValueError("expected task IDs must be non-empty strings")
+    if len(expected) != len(set(expected)):
+        raise ValueError("duplicate expected task IDs")
+    expected_set = set(expected)
+    observed: dict[str, tuple[float, float]] = {}
     for row in per_task:
-        task_id = str(row["task_id"])
-        seen.add(task_id)
-        if task_id not in baseline:
+        if not isinstance(row, Mapping):
+            raise ValueError("paired score rows must be objects")
+        task_id = row.get("task_id")
+        if type(task_id) is not str or not task_id:
+            raise ValueError("paired score task_id must be a non-empty string")
+        if task_id in observed:
+            raise ValueError(f"duplicate observed task ID {task_id!r}")
+        if task_id not in expected_set:
+            raise ValueError(f"unexpected observed task ID {task_id!r}")
+        observed[task_id] = (
+            _finite_pair_value(row.get("smae"), f"{task_id}.smae"),
+            _finite_pair_value(row.get("srmse"), f"{task_id}.srmse"),
+        )
+    unexpected_baseline = set(baseline) - expected_set
+    if unexpected_baseline:
+        raise ValueError(
+            f"unexpected baseline task IDs: {sorted(unexpected_baseline)!r}"
+        )
+    normalized_baseline = {
+        task_id: _validated_pair(pair, f"baseline {task_id!r}")
+        for task_id, pair in baseline.items()
+    }
+    for task_id in expected:
+        candidate_pair = observed.get(task_id)
+        baseline_pair = normalized_baseline.get(task_id)
+        if candidate_pair is None and baseline_pair is None:
+            result["unscored"] += 1
+            continue
+        if candidate_pair is None or baseline_pair is None:
             result["missing"] += 1
             continue
-        baseline_pair = baseline[task_id]
         delta = (
-            (float(row["smae"]) + float(row["srmse"]))
-            - (float(baseline_pair[0]) + float(baseline_pair[1]))
+            (candidate_pair[0] + candidate_pair[1])
+            - (baseline_pair[0] + baseline_pair[1])
         ) / 2.0
         if abs(delta) <= 1e-12:
             result["ties"] += 1
@@ -456,8 +493,25 @@ def _paired_counts(
             result["wins"] += 1
         else:
             result["losses"] += 1
-    result["missing"] += len(set(baseline) - seen)
     return result
+
+
+def _finite_pair_value(value: object, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be numeric")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{field_name} must be finite")
+    return number
+
+
+def _validated_pair(value: object, field_name: str) -> tuple[float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"{field_name} must be a two-value pair")
+    return (
+        _finite_pair_value(value[0], f"{field_name}.smae"),
+        _finite_pair_value(value[1], f"{field_name}.srmse"),
+    )
 
 
 def _rmsse(history: Sequence[float], truth: Sequence[float], forecast: Sequence[float]) -> float:

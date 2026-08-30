@@ -418,11 +418,56 @@ def test_paired_counts_compare_the_joint_scaled_metric_pair():
     comparison = _paired_counts(
         ({"task_id": "t", "smae": 0.5, "srmse": 2.5},),
         {"t": (1.0, 1.0)},
+        ("t",),
     )
 
     assert comparison == {
         "wins": 0, "ties": 0, "losses": 1, "missing": 0, "unscored": 0,
     }
+
+
+def test_paired_counts_conserve_the_exact_expected_task_universe():
+    expected = ("win", "tie", "loss", "candidate_only", "baseline_only", "both_missing")
+    candidate = (
+        {"task_id": "win", "smae": 0.5, "srmse": 0.5},
+        {"task_id": "tie", "smae": 1.0, "srmse": 1.0},
+        {"task_id": "loss", "smae": 2.0, "srmse": 2.0},
+        {"task_id": "candidate_only", "smae": 1.0, "srmse": 1.0},
+    )
+    baseline = {
+        "win": (1.0, 1.0),
+        "tie": (1.0, 1.0),
+        "loss": (1.0, 1.0),
+        "baseline_only": (1.0, 1.0),
+    }
+
+    counts = _paired_counts(candidate, baseline, expected)
+
+    assert counts == {
+        "wins": 1, "ties": 1, "losses": 1, "missing": 2, "unscored": 1,
+    }
+    assert sum(counts.values()) == len(expected)
+
+
+@pytest.mark.parametrize("source", ("candidate", "baseline"))
+def test_paired_counts_reject_unexpected_task_identity(source):
+    candidate = ({"task_id": "expected", "smae": 1.0, "srmse": 1.0},)
+    baseline = {"expected": (1.0, 1.0)}
+    if source == "candidate":
+        candidate += ({"task_id": "unexpected", "smae": 1.0, "srmse": 1.0},)
+    else:
+        baseline["unexpected"] = (1.0, 1.0)
+
+    with pytest.raises(ValueError, match="unexpected"):
+        _paired_counts(candidate, baseline, ("expected",))
+
+
+def test_paired_counts_reject_duplicate_expected_or_observed_ids():
+    row = {"task_id": "task", "smae": 1.0, "srmse": 1.0}
+    with pytest.raises(ValueError, match="duplicate expected"):
+        _paired_counts((row,), {"task": (1.0, 1.0)}, ("task", "task"))
+    with pytest.raises(ValueError, match="duplicate observed"):
+        _paired_counts((row, row), {"task": (1.0, 1.0)}, ("task",))
 
 
 def test_frozen_selector_records_history_only_top_k_assumptions():

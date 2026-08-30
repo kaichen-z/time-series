@@ -1,6 +1,7 @@
 """JSON-compatible schemas for externally supplied numerical methods."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Literal, Mapping, Sequence, cast
 
@@ -19,6 +20,36 @@ MethodStatus = Literal[
     "unavailable",
     "discarded",
 ]
+
+
+def _require_exact_fields(
+    payload: Mapping[str, object], expected: frozenset[str], context: str
+) -> None:
+    missing = expected - set(payload)
+    unknown = set(payload) - expected
+    if missing or unknown:
+        raise ValueError(
+            f"{context} fields mismatch: missing={sorted(missing)}, "
+            f"unknown={sorted(unknown)}"
+        )
+
+
+def _strict_string(value: object, field_name: str, *, allow_empty: bool = False) -> str:
+    if type(value) is not str or (not allow_empty and not value.strip()):
+        raise ValueError(f"{field_name} must be a string")
+    return value
+
+
+def _strict_integer(value: object, field_name: str) -> int:
+    if type(value) is not int:
+        raise ValueError(f"{field_name} must be an exact integer")
+    return value
+
+
+def _strict_string_list(value: object, field_name: str) -> tuple[str, ...]:
+    if type(value) is not list or any(type(item) is not str or not item.strip() for item in value):
+        raise ValueError(f"{field_name} must be a list of non-empty strings")
+    return tuple(value)
 
 
 @dataclass(frozen=True)
@@ -72,6 +103,30 @@ class MethodDefinition:
             status=cast(MethodStatus, payload.get("status", "unimplemented")),
         )
 
+    @classmethod
+    def from_active_payload(cls, payload: Mapping[str, object]) -> "MethodDefinition":
+        _require_exact_fields(payload, frozenset({
+            "method_id", "family", "description", "assumptions",
+            "failure_conditions", "implementation_spec", "dependencies", "status",
+        }), "active method definition")
+        spec = payload["implementation_spec"]
+        if not isinstance(spec, Mapping):
+            raise ValueError("implementation_spec must be an object")
+        if any(type(key) is not str for key in spec):
+            raise ValueError("implementation_spec keys must be strings")
+        return cls(
+            method_id=_strict_string(payload["method_id"], "method_id"),
+            family=cast(MethodFamily, _strict_string(payload["family"], "family")),
+            description=_strict_string(payload["description"], "description"),
+            assumptions=_strict_string_list(payload["assumptions"], "assumptions"),
+            failure_conditions=_strict_string_list(
+                payload["failure_conditions"], "failure_conditions"
+            ),
+            implementation_spec=dict(spec),
+            dependencies=_strict_string_list(payload["dependencies"], "dependencies"),
+            status=cast(MethodStatus, _strict_string(payload["status"], "definition status")),
+        )
+
 
 @dataclass(frozen=True)
 class MethodCandidate:
@@ -113,6 +168,31 @@ class MethodCandidate:
             implementation=dict(implementation),
             version=int(payload.get("version", 1)),
             parent_version=int(parent_version) if parent_version is not None else None,
+        )
+
+    @classmethod
+    def from_active_payload(cls, payload: Mapping[str, object]) -> "MethodCandidate":
+        _require_exact_fields(payload, frozenset({
+            "method_id", "provider", "implementation_kind", "implementation",
+            "version", "parent_version",
+        }), "active method candidate")
+        implementation = payload["implementation"]
+        if not isinstance(implementation, Mapping):
+            raise ValueError("candidate implementation must be an object")
+        if any(type(key) is not str for key in implementation):
+            raise ValueError("candidate implementation keys must be strings")
+        parent_version = payload["parent_version"]
+        if parent_version is not None:
+            parent_version = _strict_integer(parent_version, "candidate parent_version")
+        return cls(
+            method_id=_strict_string(payload["method_id"], "candidate method_id"),
+            provider=_strict_string(payload["provider"], "candidate provider"),
+            implementation_kind=_strict_string(
+                payload["implementation_kind"], "candidate implementation_kind"
+            ),
+            implementation=dict(implementation),
+            version=_strict_integer(payload["version"], "candidate version"),
+            parent_version=parent_version,
         )
 
 
@@ -169,6 +249,46 @@ class MethodRecord:
             implementation_attempts=int(payload.get("implementation_attempts", 0)),
         )
 
+    @classmethod
+    def from_active_payload(cls, payload: Mapping[str, object]) -> "MethodRecord":
+        _require_exact_fields(payload, frozenset({
+            "definition", "candidate", "status", "revision_count",
+            "train_summary", "implementation_attempts",
+        }), "active method record")
+        definition = payload["definition"]
+        if not isinstance(definition, Mapping):
+            raise ValueError("method record definition must be an object")
+        candidate_payload = payload["candidate"]
+        if candidate_payload is not None and not isinstance(candidate_payload, Mapping):
+            raise ValueError("method record candidate must be an object or null")
+        summary = payload["train_summary"]
+        if not isinstance(summary, Mapping):
+            raise ValueError("train_summary must be an object")
+        normalized_summary: dict[str, float] = {}
+        for key, value in summary.items():
+            if type(key) is not str:
+                raise ValueError("train_summary keys must be strings")
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("train_summary values must be numeric")
+            number = float(value)
+            if not math.isfinite(number):
+                raise ValueError("train_summary values must be finite")
+            normalized_summary[key] = number
+        return cls(
+            definition=MethodDefinition.from_active_payload(definition),
+            candidate=(
+                MethodCandidate.from_active_payload(candidate_payload)
+                if isinstance(candidate_payload, Mapping)
+                else None
+            ),
+            status=cast(MethodStatus, _strict_string(payload["status"], "record status")),
+            revision_count=_strict_integer(payload["revision_count"], "revision_count"),
+            train_summary=normalized_summary,
+            implementation_attempts=_strict_integer(
+                payload["implementation_attempts"], "implementation_attempts"
+            ),
+        )
+
 
 @dataclass(frozen=True)
 class ToolDictionary:
@@ -215,24 +335,44 @@ class ToolDictionary:
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> "ToolDictionary":
         load_active_release(payload)
-        if "generation" not in payload or type(payload["generation"]) is not int:
-            raise ValueError("active dictionary generation must be an explicit integer")
-        return cls._from_payload(payload, require_explicit_status=True)
+        _require_exact_fields(payload, frozenset({
+            "schema_version", "metric_policy", "metric_policy_fingerprint",
+            "dictionary_id", "parent_dictionary_id", "generation", "methods",
+        }), "active dictionary")
+        methods = payload["methods"]
+        if type(methods) is not list:
+            raise ValueError("active dictionary methods must be a list")
+        records = []
+        for method in methods:
+            if not isinstance(method, Mapping):
+                raise ValueError("active dictionary method must be an object")
+            records.append(MethodRecord.from_active_payload(method))
+        parent = payload["parent_dictionary_id"]
+        if parent is not None:
+            parent = _strict_string(parent, "parent_dictionary_id")
+        return cls(
+            dictionary_id=_strict_string(payload["dictionary_id"], "dictionary_id"),
+            parent_dictionary_id=parent,
+            generation=_strict_integer(payload["generation"], "dictionary generation"),
+            methods=tuple(records),
+        )
+
+    @classmethod
+    def from_legacy_payload(
+        cls, payload: Mapping[str, object]
+    ) -> "ToolDictionary":
+        """Parse a historical dictionary for reporting, never active evolution."""
+        return cls._from_legacy_payload(payload)
 
     @classmethod
     def from_legacy_report_payload(
         cls, payload: Mapping[str, object]
     ) -> "ToolDictionary":
-        """Parse a historical dictionary for reporting, never active evolution."""
-        return cls._from_payload(payload, require_explicit_status=False)
+        """Compatibility alias for the explicit report-only legacy reader."""
+        return cls.from_legacy_payload(payload)
 
     @classmethod
-    def _from_payload(
-        cls,
-        payload: Mapping[str, object],
-        *,
-        require_explicit_status: bool,
-    ) -> "ToolDictionary":
+    def _from_legacy_payload(cls, payload: Mapping[str, object]) -> "ToolDictionary":
         methods = payload.get("methods")
         if not isinstance(methods, Sequence) or isinstance(methods, (str, bytes)):
             raise ValueError("dictionary methods must be a list")
@@ -240,8 +380,6 @@ class ToolDictionary:
         for method in methods:
             if not isinstance(method, Mapping):
                 raise ValueError("dictionary method must be an object")
-            if require_explicit_status and "status" not in method:
-                raise ValueError("active dictionary method status must be explicit")
             if "definition" in method:
                 records.append(MethodRecord.from_payload(method))
             else:
