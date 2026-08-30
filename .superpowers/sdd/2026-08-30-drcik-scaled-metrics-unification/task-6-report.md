@@ -162,3 +162,28 @@ with new failing tests before production changes:
 - Per the review-fix instruction, the already-passing full suite was not run a second time.
 - `runs/numerical_morphology/` remains untouched with the same aggregate SHA-256:
   `703fbe89573c7e86a6e96a50f79629c08d8a7bddc90113663ddd340a52501b25`.
+
+## Fix round 2: indirect authority audit
+
+A later review found that statement hashing alone remained fail-open under one indirect pattern:
+an allowed diagnostic statement such as `observed = score.mean_mase` could remain byte-for-byte
+unchanged while a later statement in the same function used `observed` to accept a policy.
+
+Strict TDD captured that exact attack. Before the fix, the diagnostic and authority variants both
+produced the same audit identity
+`active:attribute:mean_mase@7c38aada28e06802`, so the adversarial test failed. Each allowance is
+now bound to two normalized AST identities:
+
+- the exact enclosing statement SHA-256 prefix; and
+- the complete enclosing function-body SHA-256 prefix.
+
+Consequently, changing either the metric operation itself or any downstream logic in its function
+changes the audit identity and fails closed. The exact existing diagnostic, report-only, and
+explicit legacy-reader bodies remain individually allowlisted.
+
+Verification for this bounded fix:
+
+- Exact indirect adversary: RED before the function-body binding, GREEN afterward.
+- Semantic audit slice: `4 passed in 0.40s`.
+- Audit plus smoke/report focused tests: `89 passed in 2.99s`.
+- No full suite was run, as explicitly required for this bounded round.

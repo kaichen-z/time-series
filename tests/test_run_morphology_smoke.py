@@ -101,8 +101,18 @@ def _legacy_metric_operations(module) -> list[str]:
             statement = parents[statement]
         normalized = ast.dump(statement, annotate_fields=True, include_attributes=False)
         statement_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+        scope = node
+        while not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if scope not in parents:
+                scope = tree
+                break
+            scope = parents[scope]
+        body = ast.Module(body=list(scope.body), type_ignores=[])
+        normalized_body = ast.dump(body, annotate_fields=True, include_attributes=False)
+        function_hash = hashlib.sha256(normalized_body.encode("utf-8")).hexdigest()[:16]
         operations.append(
-            f"{functions[-1] if functions else '<module>'}:{kind}:{field}@{statement_hash}"
+            f"{functions[-1] if functions else '<module>'}:{kind}:{field}"
+            f"@{statement_hash}#{function_hash}"
         )
 
     class Visitor(ast.NodeVisitor):
@@ -232,8 +242,43 @@ def active(score):
     )
 
 
-def _allowed_statement(statement_hash: str, *operations: str) -> Counter[str]:
-    return Counter(f"{operation}@{statement_hash}" for operation in operations)
+def test_semantic_metric_audit_rejects_indirect_same_function_authority(tmp_path) -> None:
+    diagnostic_source = tmp_path / "indirect_diagnostic.py"
+    diagnostic_source.write_text(
+        """
+def active(score):
+    observed = score.mean_mase
+    return {"diagnostic": observed}
+""",
+        encoding="utf-8",
+    )
+    authority_source = tmp_path / "indirect_authority.py"
+    authority_source.write_text(
+        """
+def active(score):
+    observed = score.mean_mase
+    if observed < 1.0:
+        return "accept"
+    return "reject"
+""",
+        encoding="utf-8",
+    )
+    diagnostic_module = types.ModuleType("indirect_diagnostic")
+    diagnostic_module.__file__ = str(diagnostic_source)
+    authority_module = types.ModuleType("indirect_authority")
+    authority_module.__file__ = str(authority_source)
+
+    assert _legacy_metric_operations(diagnostic_module) != _legacy_metric_operations(
+        authority_module
+    )
+
+
+def _allowed_statement(
+    statement_hash: str, function_hash: str, *operations: str
+) -> Counter[str]:
+    return Counter(
+        f"{operation}@{statement_hash}#{function_hash}" for operation in operations
+    )
 
 
 def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_paths() -> None:
@@ -243,12 +288,14 @@ def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_pat
         cache: sum((
             _allowed_statement(
                 "520fb57f169dbcc9",
+                "2f613f81ed2e4ac6",
                 "_outcome_from_payload:attribute:mae",
                 "_outcome_from_payload:attribute:mase",
                 "_outcome_from_payload:attribute:smape",
             ),
             _allowed_statement(
                 "05d8aea1701e7552",
+                "2f613f81ed2e4ac6",
                 *(
                     f"_outcome_from_payload:{kind}:{field}"
                     for kind in ("keyword", "mapping_get", "string_config")
@@ -259,12 +306,14 @@ def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_pat
         diagnostics: sum((
             _allowed_statement(
                 "0dbcb434449879c6",
+                "ff6f320b7247b513",
                 "_aggregate:string_config:mae",
                 "_aggregate:string_config:mase",
                 "_aggregate:string_config:smape",
             ),
             _allowed_statement(
                 "d4444a06598cce63",
+                "785818b3b8dd018c",
                 *(
                     f"diagnose_forecasts:{kind}:{field}"
                     for kind in ("attribute", "string_config")
@@ -273,9 +322,10 @@ def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_pat
             ),
         ), Counter()),
         execution: sum((
-            _allowed_statement("bf3998705f24429e", "_report:attribute:mae"),
+            _allowed_statement("bf3998705f24429e", "5758000b8fa028cf", "_report:attribute:mae"),
             _allowed_statement(
                 "c1a439729c061faa",
+                "5758000b8fa028cf",
                 *(
                     f"_report:attribute:{field}"
                     for field in ("mae", "mase", "smape")
@@ -285,10 +335,11 @@ def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_pat
                     for field in ("mean_mae", "mean_mase", "mean_smape")
                 ),
             ),
-            _allowed_statement("4646b75ce3c7f3f1", "_report:attribute:mase"),
-            _allowed_statement("656d7b1ec514f595", "_report:attribute:smape"),
+            _allowed_statement("4646b75ce3c7f3f1", "5758000b8fa028cf", "_report:attribute:mase"),
+            _allowed_statement("656d7b1ec514f595", "5758000b8fa028cf", "_report:attribute:smape"),
             _allowed_statement(
                 "006890beae4ad0e2",
+                "6efe2b84d133f2c7",
                 *(
                     f"_run_one:{kind}:{field}"
                     for kind in ("keyword", "name_call")
@@ -297,6 +348,7 @@ def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_pat
             ),
             _allowed_statement(
                 "56079bd6efbd80b8",
+                "16080e9239b3ec91",
                 *(
                     f"report_payload:{kind}:{field}"
                     for kind in ("attribute", "string_config")
@@ -307,6 +359,7 @@ def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_pat
         numerical_selector: sum((
             _allowed_statement(
                 "7d777ed564775a67",
+                "5fb33106a6fae688",
                 *(
                     f"_normalize_legacy_decision_ranking:string_config:{field}"
                     for field in ("median_mase", "recent_mase", "worst_mase")
@@ -314,6 +367,7 @@ def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_pat
             ),
             _allowed_statement(
                 "e112c82a57aeda5e",
+                "a93ff5498acdf9ee",
                 *(
                     f"_score_fold:keyword:{field}"
                     for field in ("mae", "mase", "mase_scale", "rmsse", "smape")
@@ -325,6 +379,7 @@ def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_pat
             ),
             _allowed_statement(
                 "bfd3922b9088ec02",
+                "c58afd503ca11acb",
                 *(
                     f"_selection_diagnostic:keyword:{field}"
                     for field in ("mase_mad", "median_mase", "recent_mase", "worst_mase")
@@ -332,6 +387,7 @@ def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_pat
             ),
             _allowed_statement(
                 "a8c3ef77cce5cd2b",
+                "3fc6d41b2fcacd06",
                 "_summarize:attribute:mase",
                 *(
                     f"_summarize:keyword:{field}"
@@ -345,11 +401,12 @@ def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_pat
                     for field in ("mae", "rmsse", "smape")
                 ),
             ),
-            _allowed_statement("27a857442157da00", "_summarize:string_config:mase"),
-            _allowed_statement("07d2bf27d46bbfb4", "from_payload:string_config:catastrophic_mase"),
-            _allowed_statement("6c7a47156995f494", "from_payload:string_config:catastrophic_mase"),
+            _allowed_statement("27a857442157da00", "3fc6d41b2fcacd06", "_summarize:string_config:mase"),
+            _allowed_statement("07d2bf27d46bbfb4", "f75dea98ad56894f", "from_payload:string_config:catastrophic_mase"),
+            _allowed_statement("6c7a47156995f494", "f75dea98ad56894f", "from_payload:string_config:catastrophic_mase"),
             _allowed_statement(
                 "e669f93211913e53",
+                "de3a68d82ae6e8ed",
                 *(
                     f"from_payload:string_config:{field}"
                     for field in (
@@ -360,6 +417,7 @@ def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_pat
             ),
             _allowed_statement(
                 "fb9855c476512bc7",
+                "de3a68d82ae6e8ed",
                 *(
                     f"from_payload:string_config:{field}"
                     for field in (
@@ -368,9 +426,10 @@ def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_pat
                     )
                 ),
             ),
-            _allowed_statement("90b8dc8c04d5ff3f", "from_payload:string_config:median_smape"),
+            _allowed_statement("90b8dc8c04d5ff3f", "de3a68d82ae6e8ed", "from_payload:string_config:median_smape"),
             _allowed_statement(
                 "02016f55256c8018",
+                "5dfeda650cfee443",
                 *(
                     f"synthetic:keyword:{field}"
                     for field in (
@@ -382,6 +441,7 @@ def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_pat
         ), Counter()),
         portfolio: _allowed_statement(
             "b473b2e31ed49e42",
+            "5e534911f58f3b8b",
             *(
                 f"_scored:{kind}:{field}"
                 for kind in ("keyword", "name_call")
@@ -391,6 +451,7 @@ def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_pat
         selector_evolution: sum((
             _allowed_statement(
                 "e669f93211913e53",
+                "4f6385dd48cfa27c",
                 *(
                     f"_parse_policy:string_config:{field}"
                     for field in (
@@ -399,9 +460,10 @@ def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_pat
                     )
                 ),
             ),
-            _allowed_statement("485cdc11a41e4a57", "_parse_policy:string_config:median_smape"),
+            _allowed_statement("485cdc11a41e4a57", "4f6385dd48cfa27c", "_parse_policy:string_config:median_smape"),
             _allowed_statement(
                 "7ce93841d63789ff",
+                "69556cd42ff0bdd5",
                 *(
                     f"_scaled_train_summary:string_config:{field}"
                     for field in (
@@ -411,6 +473,7 @@ def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_pat
             ),
             _allowed_statement(
                 "f8410ad12e58d206",
+                "2085ab9508a9d2a6",
                 *(
                     f"evaluate_decision:keyword:{field}"
                     for field in (
@@ -418,9 +481,9 @@ def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_pat
                     )
                 ),
             ),
-            _allowed_statement("68f739f795a66307", "evaluate_decision:name_call:mae"),
-            _allowed_statement("b904f68bebae9a01", "evaluate_decision:name_call:mase"),
-            _allowed_statement("047c8a7f7c85d51d", "evaluate_decision:name_call:smape"),
+            _allowed_statement("68f739f795a66307", "2085ab9508a9d2a6", "evaluate_decision:name_call:mae"),
+            _allowed_statement("b904f68bebae9a01", "2085ab9508a9d2a6", "evaluate_decision:name_call:mase"),
+            _allowed_statement("047c8a7f7c85d51d", "2085ab9508a9d2a6", "evaluate_decision:name_call:smape"),
         ), Counter()),
     }
     audited = (
