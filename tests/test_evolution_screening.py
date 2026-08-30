@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 
 import pytest
 
 from numerical_agent.evolution.execution import Task
-from numerical_agent.evolution.execution import CRASHED, NOT_APPLICABLE, SUCCESS, Outcome
+from numerical_agent.evolution.execution import (
+    CRASHED,
+    INVALID,
+    NOT_APPLICABLE,
+    SUCCESS,
+    Outcome,
+)
 from numerical_agent.evolution.screening import (
     ActiveDictionary,
     ApplicabilityClause,
@@ -225,6 +232,29 @@ def _screen_policy(*, broken_status: str = "keep", oracle_rule: ApplicabilityPol
     )
 
 
+def test_screening_oracles_use_scaled_metrics_and_only_retain_full_metric_ties() -> None:
+    task = _screen_tasks()[0]
+    policy = ScreeningPolicy(
+        entries=tuple(
+            ScreeningEntry(name, "statistical", "keep", ApplicabilityPolicy(()), name)
+            for name in ("joint_a", "tradeoff_a", "tradeoff_b", "mase_winner")
+        ),
+        fallback_names=("joint_a", "tradeoff_a", "tradeoff_b"),
+    )
+    outcomes = (
+        Outcome("joint_a", task.task_id, SUCCESS, smae=0.8, srmse=0.8, mase=50.0),
+        Outcome("tradeoff_a", task.task_id, SUCCESS, smae=0.7, srmse=0.9, mase=0.2),
+        Outcome("tradeoff_b", task.task_id, SUCCESS, smae=0.7, srmse=0.9, mase=40.0),
+        Outcome("mase_winner", task.task_id, SUCCESS, smae=0.9, srmse=0.9, mase=0.01),
+    )
+
+    score = evaluate_screening(policy, (task,), outcomes)
+
+    assert set(score.oracle_names[task.task_id]) == {"tradeoff_a", "tradeoff_b"}
+    assert score.mean_active_smae == pytest.approx(0.775)
+    assert score.mean_active_srmse == pytest.approx(0.875)
+
+
 def _screen_tasks(prefix: str = "task") -> tuple[Task, ...]:
     return (
         Task(f"{prefix}-dense", (1.0,) * 12, 2, "1 day", (1.0, 1.0)),
@@ -237,11 +267,11 @@ def _screen_outcomes(tasks: tuple[Task, ...]) -> tuple[Outcome, ...]:
     for task in tasks:
         rows.extend(
             (
-                Outcome("stable", task.task_id, SUCCESS, mase=1.0, mae=1.0, smape=1.0),
-                Outcome("oracle", task.task_id, SUCCESS, mase=0.5, mae=0.5, smape=0.5),
+                Outcome("stable", task.task_id, SUCCESS, smae=1.0, srmse=1.0, mase=1.0, mae=1.0, smape=1.0),
+                Outcome("oracle", task.task_id, SUCCESS, smae=0.5, srmse=0.5, mase=0.5, mae=0.5, smape=0.5),
                 Outcome("broken", task.task_id, CRASHED, detail="crash"),
                 Outcome("skip", task.task_id, NOT_APPLICABLE),
-                Outcome("timesfm", task.task_id, SUCCESS, mase=1.2, mae=1.2, smape=1.2),
+                Outcome("timesfm", task.task_id, SUCCESS, smae=1.2, srmse=1.2, mase=1.2, mae=1.2, smape=1.2),
             )
         )
     return tuple(rows)
@@ -265,6 +295,36 @@ def test_screening_score_is_independent_of_a_final_forecast_selector() -> None:
     assert child.unique_active_dictionaries == 1
     assert child.mean_pairwise_jaccard == 1.0
     assert child.min_active_candidates == child.max_active_candidates == 4
+
+
+def test_screening_score_separates_execution_failure_categories() -> None:
+    task = _screen_tasks()[0]
+    names = ("valid", "crashed", "invalid", "missing", "malformed")
+    policy = ScreeningPolicy(
+        tuple(
+            ScreeningEntry(name, "statistical", "keep", ApplicabilityPolicy(()), name)
+            for name in names
+        ),
+        ("valid", "crashed", "invalid"),
+    )
+    outcomes = (
+        Outcome("valid", task.task_id, SUCCESS, smae=1.0, srmse=1.0),
+        Outcome("crashed", task.task_id, CRASHED),
+        Outcome("invalid", task.task_id, INVALID),
+        Outcome("malformed", task.task_id, SUCCESS, smae=None, srmse=1.0),
+    )
+
+    score = evaluate_screening(policy, (task,), outcomes)
+
+    assert score.active_failures == 4
+    assert score.active_crashed == 1
+    assert score.active_invalid == 1
+    assert score.active_missing == 1
+    assert score.active_malformed_success == 1
+    assert score.crash_exposure == pytest.approx(0.2)
+    assert score.invalid_exposure == pytest.approx(0.2)
+    assert score.missing_exposure == pytest.approx(0.2)
+    assert score.malformed_success_exposure == pytest.approx(0.2)
 
 
 def test_screening_gate_rejects_compression_that_loses_the_dev_oracle() -> None:
@@ -384,7 +444,7 @@ def test_screening_gate_rejects_train_failure_exposure_increase() -> None:
     assert "Train failure exposure" in result.reason
 
 
-def test_screening_gate_uses_absolute_failure_burden_when_compressing_successes() -> None:
+def test_screening_gate_rejects_compression_that_worsens_scaled_pool_quality() -> None:
     """Removing a reliable broad candidate must not manufacture a failure regression."""
     train = _screen_tasks("train")
     dev = _screen_tasks("dev")
@@ -405,6 +465,14 @@ def test_screening_gate_uses_absolute_failure_burden_when_compressing_successes(
     dev_parent = evaluate_screening(parent, dev, outcomes)
     dev_child = evaluate_screening(child, dev, outcomes)
 
+    train_child = replace(
+        evaluate_screening(_screen_policy(broken_status="repair"), train, outcomes),
+        failure_exposure=train_parent.failure_exposure + 0.01,
+        mean_active_failures=train_parent.mean_active_failures,
+    )
+    dev_child = evaluate_screening(
+        _screen_policy(broken_status="repair"), dev, outcomes
+    )
     assert train_child.failure_exposure > train_parent.failure_exposure
     assert train_child.mean_active_failures == train_parent.mean_active_failures
     result = compare_screening(
@@ -414,8 +482,8 @@ def test_screening_gate_uses_absolute_failure_burden_when_compressing_successes(
         dev_child,
     )
 
-    assert result.accepted
-    assert "compression" in result.improved_dimensions
+    assert not result.accepted
+    assert "Train failure exposure" in result.reason
 
 
 def test_screening_gate_requires_full_train_and_dev_oracle_retention() -> None:
@@ -448,6 +516,8 @@ def test_final_gate_allows_bounded_dev_oracle_loss_when_regret_remains_small() -
         child,
         global_oracle_retention=0.9,
         mean_active_oracle_regret=0.005,
+        mean_active_oracle_smae_regret=0.005,
+        mean_active_oracle_srmse_regret=0.005,
     )
     constraints = ScreeningConstraints(
         baseline_method="timesfm",
@@ -468,5 +538,167 @@ def test_final_gate_allows_bounded_dev_oracle_loss_when_regret_remains_small() -
         constraints=constraints,
         enforce_final_constraints=True,
     )
+
+    assert result.accepted
+
+
+def test_screening_gate_rejects_single_metric_oracle_regret_hidden_by_joint_score() -> None:
+    tasks = _screen_tasks()
+    outcomes = _screen_outcomes(tasks)
+    parent = evaluate_screening(_screen_policy(), tasks, outcomes)
+    child = evaluate_screening(_screen_policy(broken_status="repair"), tasks, outcomes)
+    dev_child = replace(
+        child,
+        global_oracle_retention=0.9,
+        mean_active_oracle_regret=parent.mean_active_oracle_regret,
+        mean_active_oracle_smae_regret=parent.mean_active_oracle_smae_regret,
+        mean_active_oracle_srmse_regret=(
+            parent.mean_active_oracle_srmse_regret + 0.02
+        ),
+    )
+    constraints = ScreeningConstraints(
+        baseline_method="timesfm",
+        min_active_candidates=1,
+        max_active_candidates=103,
+        min_unique_active_dictionaries=1,
+        max_mean_pairwise_jaccard=1.0,
+        min_group_support=1,
+        min_dev_oracle_retention=0.9,
+        required_conditioned_families=(),
+    )
+
+    result = compare_screening(
+        parent,
+        child,
+        parent,
+        dev_child,
+        constraints=constraints,
+        enforce_final_constraints=True,
+    )
+
+    assert not result.accepted
+    assert "sRMSE oracle regret" in result.reason
+
+
+def _safe_gate_score(**changes: object) -> ScreeningScore:
+    tasks = _screen_tasks()
+    score = evaluate_screening(
+        _screen_policy(broken_status="repair"), tasks, _screen_outcomes(tasks)
+    )
+    defaults = {
+        "mean_active_smae": 1.0,
+        "mean_active_srmse": 1.0,
+        "p90_smae": 1.0,
+        "p95_smae": 1.0,
+        "p90_srmse": 1.0,
+        "p95_srmse": 1.0,
+        "p90_smae_raw": 1.0,
+        "p95_smae_raw": 1.0,
+        "p90_srmse_raw": 1.0,
+        "p95_srmse_raw": 1.0,
+        "smae_clipped_count": 0,
+        "srmse_clipped_count": 0,
+    }
+    defaults.update(changes)
+    return replace(score, **defaults)
+
+
+def test_screening_gate_requires_strict_pareto_improvement_on_each_split() -> None:
+    parent = _safe_gate_score()
+    train_regression = _safe_gate_score(
+        mean_active_smae=0.8, mean_active_srmse=1.1
+    )
+    dev_improvement = _safe_gate_score(
+        mean_active_smae=0.8, mean_active_srmse=1.0
+    )
+
+    train_result = compare_screening(
+        parent, train_regression, parent, dev_improvement
+    )
+    equal_dev_result = compare_screening(
+        parent, dev_improvement, parent, parent
+    )
+
+    assert not train_result.accepted
+    assert "Train" in train_result.reason
+    assert not equal_dev_result.accepted
+    assert "Dev" in equal_dev_result.reason
+
+
+def test_screening_rejects_train_before_inspecting_bad_dev_constraints() -> None:
+    parent = _safe_gate_score()
+    train_regression = _safe_gate_score(
+        mean_active_smae=0.8, mean_active_srmse=1.1
+    )
+    unsafe_dev = _safe_gate_score(coverage=0.0, global_oracle_retention=0.0)
+
+    result = compare_screening(parent, train_regression, parent, unsafe_dev)
+
+    assert not result.accepted
+    assert "Train sMAE/sRMSE" in result.reason
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "p90_smae",
+        "p95_smae",
+        "p90_srmse",
+        "p95_srmse",
+        "p90_smae_raw",
+        "p95_smae_raw",
+        "p90_srmse_raw",
+        "p95_srmse_raw",
+    ),
+)
+@pytest.mark.parametrize("split", ("train", "dev"))
+def test_screening_gate_rejects_each_capped_and_raw_tail_regression(
+    field: str, split: str
+) -> None:
+    parent = _safe_gate_score()
+    improved = _safe_gate_score(mean_active_smae=0.8, mean_active_srmse=1.0)
+    unsafe = replace(
+        improved, **{field: math.inf if field.endswith("_raw") else 1.01}
+    )
+
+    result = compare_screening(
+        parent,
+        unsafe if split == "train" else improved,
+        parent,
+        unsafe if split == "dev" else improved,
+    )
+
+    assert not result.accepted
+    assert split.title() in result.reason
+    assert field in result.reason
+
+
+@pytest.mark.parametrize("field", ("smae_clipped_count", "srmse_clipped_count"))
+@pytest.mark.parametrize("split", ("train", "dev"))
+def test_screening_gate_rejects_each_clipped_count_increase(
+    field: str, split: str
+) -> None:
+    parent = _safe_gate_score()
+    improved = _safe_gate_score(mean_active_smae=0.8, mean_active_srmse=1.0)
+    unsafe = replace(improved, **{field: 1})
+
+    result = compare_screening(
+        parent,
+        unsafe if split == "train" else improved,
+        parent,
+        unsafe if split == "dev" else improved,
+    )
+
+    assert not result.accepted
+    assert split.title() in result.reason
+    assert field in result.reason
+
+
+def test_screening_gate_accepts_safe_pareto_child_on_both_splits() -> None:
+    parent = _safe_gate_score()
+    train_child = _safe_gate_score(mean_active_smae=0.8, mean_active_srmse=1.0)
+    dev_child = _safe_gate_score(mean_active_smae=1.0, mean_active_srmse=0.8)
+
+    result = compare_screening(parent, train_child, parent, dev_child)
 
     assert result.accepted

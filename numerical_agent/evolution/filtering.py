@@ -6,11 +6,17 @@ import json
 import math
 import pprint
 import statistics
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
 from common.llm import LLMClient, parse_json_object
+from common.metrics import (
+    joint_scaled_error,
+    linear_quantile,
+    pareto_scaled_improvement,
+    standard_error,
+)
 
 from .execution import (
     CRASHED,
@@ -126,8 +132,10 @@ class FilterDictionary:
 
 @dataclass(frozen=True)
 class FilterScore:
-    mean_mase: float
-    median_mase: float
+    mean_smae: float
+    mean_srmse: float
+    median_smae: float
+    median_srmse: float
     coverage: float
     selected: Mapping[str, str]
     eligible_counts: Mapping[str, int]
@@ -135,9 +143,33 @@ class FilterScore:
     eligible_successes: int
     eligible_not_applicable: int
     eligible_failures: int
+    eligible_crashed: int
+    eligible_invalid: int
+    eligible_missing: int
+    eligible_malformed_success: int
     eligible_success_rate: float
     eligible_not_applicable_rate: float
     eligible_failure_rate: float
+    eligible_crash_rate: float
+    eligible_invalid_rate: float
+    eligible_missing_rate: float
+    eligible_malformed_success_rate: float
+    se_smae: float = math.inf
+    se_srmse: float = math.inf
+    p90_smae: float = math.inf
+    p95_smae: float = math.inf
+    p90_srmse: float = math.inf
+    p95_srmse: float = math.inf
+    p90_smae_raw: float = math.inf
+    p95_smae_raw: float = math.inf
+    p90_srmse_raw: float = math.inf
+    p95_srmse_raw: float = math.inf
+    smae_clipped_count: int = 0
+    smae_clipped_rate: float = 1.0
+    srmse_clipped_count: int = 0
+    srmse_clipped_rate: float = 1.0
+    task_scaled_pairs: Mapping[str, tuple[float, float]] = field(default_factory=dict)
+    task_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -147,12 +179,18 @@ class FilterGeneration:
     child: FilterDictionary
     train_parent: FilterScore
     train_child: FilterScore
-    dev_parent: FilterScore
-    dev_child: FilterScore
+    dev_parent: FilterScore | None
+    dev_child: FilterScore | None
     accepted: bool
     reason: str
     agent_calls: int
     required_targets: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FilterGateResult:
+    accepted: bool
+    reason: str
 
 
 def build_filter_dictionary(
@@ -330,19 +368,25 @@ def evaluate_filter(
     references = tuple(reference_outcomes)
     selected: dict[str, str] = {}
     eligible_counts: dict[str, int] = {}
-    scores: list[float] = []
+    smae_scores: list[float] = []
+    srmse_scores: list[float] = []
+    smae_raw_scores: list[float] = []
+    srmse_raw_scores: list[float] = []
+    smae_clipped_count = 0
+    srmse_clipped_count = 0
+    task_scaled_pairs: dict[str, tuple[float, float]] = {}
     eligible_attempts = 0
     eligible_successes = 0
     eligible_not_applicable = 0
     eligible_failures = 0
-    successful_mase = [
-        float(row.mase) for row in outcomes
-        if row.status == SUCCESS and row.mase is not None and math.isfinite(row.mase)
-    ]
-    penalty = max(100.0, 10.0 * statistics.median(successful_mase)) if successful_mase else 100.0
+    eligible_crashed = 0
+    eligible_invalid = 0
+    eligible_missing = 0
+    eligible_malformed_success = 0
+    penalty = 5.0
     for task in tasks:
         task_tags = frozenset(task.characteristics())
-        ranked: list[tuple[float, str]] = []
+        ranked: list[tuple[float, float, float, str]] = []
         for entry in dictionary.entries:
             if entry.status not in {"keep", "specialized"}:
                 continue
@@ -353,36 +397,72 @@ def evaluate_filter(
             if (
                 current is not None
                 and current.status == SUCCESS
-                and current.mase is not None
-                and math.isfinite(current.mase)
+                and _finite_scaled(current)
             ):
                 eligible_successes += 1
             elif current is not None and current.status == NOT_APPLICABLE:
                 eligible_not_applicable += 1
             else:
                 eligible_failures += 1
-            history_scores = [
-                float(row.mase)
+                if current is None:
+                    eligible_missing += 1
+                elif current.status == CRASHED:
+                    eligible_crashed += 1
+                elif current.status == INVALID:
+                    eligible_invalid += 1
+                elif current.status == SUCCESS:
+                    eligible_malformed_success += 1
+                else:
+                    eligible_invalid += 1
+            history_rows = [
+                row
                 for row in references
                 if row.method == entry.name
                 and row.task_id != task.task_id
                 and row.status == SUCCESS
-                and row.mase is not None
-                and math.isfinite(row.mase)
+                and _finite_scaled(row)
             ]
-            if history_scores:
-                ranked.append((statistics.fmean(history_scores), entry.name))
+            if history_rows:
+                mean_smae = statistics.fmean(float(row.smae) for row in history_rows)
+                mean_srmse = statistics.fmean(float(row.srmse) for row in history_rows)
+                ranked.append(
+                    (
+                        joint_scaled_error(mean_smae, mean_srmse),
+                        mean_smae,
+                        mean_srmse,
+                        entry.name,
+                    )
+                )
         eligible_counts[task.task_id] = len(ranked)
         if not ranked:
-            scores.append(penalty)
+            smae_scores.append(penalty)
+            srmse_scores.append(penalty)
+            smae_raw_scores.append(math.inf)
+            srmse_raw_scores.append(math.inf)
+            smae_clipped_count += 1
+            srmse_clipped_count += 1
+            task_scaled_pairs[task.task_id] = (penalty, penalty)
             continue
-        name = min(ranked)[1]
+        name = min(ranked)[3]
         selected[task.task_id] = name
         row = by_key.get((name, task.task_id))
-        if row is None or row.status != SUCCESS or row.mase is None or not math.isfinite(row.mase):
-            scores.append(penalty)
+        if row is None or row.status != SUCCESS or not _finite_scaled(row):
+            smae_scores.append(penalty)
+            srmse_scores.append(penalty)
+            smae_raw_scores.append(math.inf)
+            srmse_raw_scores.append(math.inf)
+            smae_clipped_count += 1
+            srmse_clipped_count += 1
+            task_scaled_pairs[task.task_id] = (penalty, penalty)
         else:
-            scores.append(float(row.mase))
+            pair = (float(row.smae), float(row.srmse))
+            smae_scores.append(pair[0])
+            srmse_scores.append(pair[1])
+            smae_raw_scores.append(float(row.smae_raw) if row.smae_raw is not None else math.inf)
+            srmse_raw_scores.append(float(row.srmse_raw) if row.srmse_raw is not None else math.inf)
+            smae_clipped_count += int(bool(row.smae_clipped))
+            srmse_clipped_count += int(bool(row.srmse_clipped))
+            task_scaled_pairs[task.task_id] = pair
     successes = sum(
         by_key.get((name, task_id)) is not None
         and by_key[(name, task_id)].status == SUCCESS
@@ -390,18 +470,44 @@ def evaluate_filter(
     )
     denominator = max(1, eligible_attempts)
     return FilterScore(
-        statistics.fmean(scores) if scores else math.inf,
-        statistics.median(scores) if scores else math.inf,
-        successes / len(tasks) if tasks else 0.0,
-        selected,
-        eligible_counts,
-        eligible_attempts,
-        eligible_successes,
-        eligible_not_applicable,
-        eligible_failures,
-        eligible_successes / denominator,
-        eligible_not_applicable / denominator,
-        eligible_failures / denominator,
+        mean_smae=statistics.fmean(smae_scores) if smae_scores else math.inf,
+        mean_srmse=statistics.fmean(srmse_scores) if srmse_scores else math.inf,
+        median_smae=statistics.median(smae_scores) if smae_scores else math.inf,
+        median_srmse=statistics.median(srmse_scores) if srmse_scores else math.inf,
+        coverage=successes / len(tasks) if tasks else 0.0,
+        selected=selected,
+        eligible_counts=eligible_counts,
+        eligible_attempts=eligible_attempts,
+        eligible_successes=eligible_successes,
+        eligible_not_applicable=eligible_not_applicable,
+        eligible_failures=eligible_failures,
+        eligible_crashed=eligible_crashed,
+        eligible_invalid=eligible_invalid,
+        eligible_missing=eligible_missing,
+        eligible_malformed_success=eligible_malformed_success,
+        eligible_success_rate=eligible_successes / denominator,
+        eligible_not_applicable_rate=eligible_not_applicable / denominator,
+        eligible_failure_rate=eligible_failures / denominator,
+        eligible_crash_rate=eligible_crashed / denominator,
+        eligible_invalid_rate=eligible_invalid / denominator,
+        eligible_missing_rate=eligible_missing / denominator,
+        eligible_malformed_success_rate=eligible_malformed_success / denominator,
+        se_smae=standard_error(smae_scores) if smae_scores else math.inf,
+        se_srmse=standard_error(srmse_scores) if srmse_scores else math.inf,
+        p90_smae=linear_quantile(smae_scores, 0.90) if smae_scores else math.inf,
+        p95_smae=linear_quantile(smae_scores, 0.95) if smae_scores else math.inf,
+        p90_srmse=linear_quantile(srmse_scores, 0.90) if srmse_scores else math.inf,
+        p95_srmse=linear_quantile(srmse_scores, 0.95) if srmse_scores else math.inf,
+        p90_smae_raw=linear_quantile(smae_raw_scores, 0.90) if smae_raw_scores else math.inf,
+        p95_smae_raw=linear_quantile(smae_raw_scores, 0.95) if smae_raw_scores else math.inf,
+        p90_srmse_raw=linear_quantile(srmse_raw_scores, 0.90) if srmse_raw_scores else math.inf,
+        p95_srmse_raw=linear_quantile(srmse_raw_scores, 0.95) if srmse_raw_scores else math.inf,
+        smae_clipped_count=smae_clipped_count,
+        smae_clipped_rate=smae_clipped_count / len(tasks) if tasks else 1.0,
+        srmse_clipped_count=srmse_clipped_count,
+        srmse_clipped_rate=srmse_clipped_count / len(tasks) if tasks else 1.0,
+        task_scaled_pairs=task_scaled_pairs,
+        task_count=len(tasks),
     )
 
 
@@ -489,35 +595,62 @@ def evolve_filter_once(
     train_child = evaluate_filter(
         child, train_outcomes, train_tasks, reference_outcomes=train_outcomes
     )
+    train_gate = _compare_filter_split(
+        train_parent, train_child, split="Train"
+    )
+    if not train_gate.accepted:
+        return FilterGeneration(
+            generation, parent, child, train_parent, train_child,
+            None, None, False, train_gate.reason, 1, target_batch,
+        )
     dev_parent = evaluate_filter(
         parent, dev_outcomes, dev_tasks, reference_outcomes=train_outcomes
     )
     dev_child = evaluate_filter(
         child, dev_outcomes, dev_tasks, reference_outcomes=train_outcomes
     )
-    train_forecast_ok = _forecast_non_regression(train_parent, train_child)
-    dev_forecast_ok = _forecast_non_regression(dev_parent, dev_child)
-    train_reliability_ok = _reliability_non_regression(train_parent, train_child)
-    dev_reliability_ok = _reliability_non_regression(dev_parent, dev_child)
-    strict_forecast = _forecast_improved(train_parent, train_child)
-    strict_reliability = _reliability_improved(train_parent, train_child)
-    train_ok = (
-        train_forecast_ok
-        and train_reliability_ok
-        and (strict_forecast or strict_reliability)
-    )
-    dev_ok = dev_forecast_ok and dev_reliability_ok
-    accepted = train_ok and dev_ok
-    if accepted:
-        improvement = "forecast" if strict_forecast else "dictionary reliability"
-        reason = f"accepted: Train and Dev non-regression with strict {improvement} improvement"
-    elif not train_ok:
-        reason = "rejected: Train forecast/reliability regressed or did not improve"
-    else:
-        reason = "rejected: Dev forecast or reliability regressed"
+    gate = _compare_filter_split(dev_parent, dev_child, split="Dev")
     return FilterGeneration(
         generation, parent, child, train_parent, train_child,
-        dev_parent, dev_child, accepted, reason, 1, target_batch,
+        dev_parent, dev_child, gate.accepted, gate.reason, 1, target_batch,
+    )
+
+
+def compare_filter_scores(
+    train_parent: FilterScore,
+    train_child: FilterScore,
+    dev_parent: FilterScore,
+    dev_child: FilterScore,
+) -> FilterGateResult:
+    """Require independent Train and Dev Pareto gains plus scaled safety."""
+    train_gate = _compare_filter_split(train_parent, train_child, split="Train")
+    if not train_gate.accepted:
+        return train_gate
+    return _compare_filter_split(dev_parent, dev_child, split="Dev")
+
+
+def _compare_filter_split(
+    parent: FilterScore, child: FilterScore, *, split: str
+) -> FilterGateResult:
+    if not _forecast_improved(parent, child):
+        return FilterGateResult(
+            False,
+            f"rejected: {split} sMAE/sRMSE did not improve under the Pareto gate",
+        )
+    safety_regression = _scaled_safety_regression(parent, child)
+    if safety_regression is not None:
+        return FilterGateResult(
+            False, f"rejected: {split} {safety_regression} regressed"
+        )
+    if not _forecast_non_regression(parent, child):
+        return FilterGateResult(
+            False, f"rejected: {split} coverage or median scaled error regressed"
+        )
+    if not _reliability_non_regression(parent, child):
+        return FilterGateResult(False, f"rejected: {split} reliability regressed")
+    return FilterGateResult(
+        True,
+        f"accepted: {split} scaled forecast pair improved with safety",
     )
 
 
@@ -525,28 +658,52 @@ def _forecast_non_regression(parent: FilterScore, child: FilterScore) -> bool:
     tolerance = 1e-12
     return (
         child.coverage + tolerance >= parent.coverage
-        and child.mean_mase <= parent.mean_mase + tolerance
-        and child.median_mase <= parent.median_mase + tolerance
+        and child.mean_smae <= parent.mean_smae + tolerance
+        and child.mean_srmse <= parent.mean_srmse + tolerance
+        and child.median_smae <= parent.median_smae + tolerance
+        and child.median_srmse <= parent.median_srmse + tolerance
     )
 
 
 def _forecast_improved(parent: FilterScore, child: FilterScore) -> bool:
     tolerance = 1e-12
-    return (
-        child.mean_mase < parent.mean_mase - tolerance
-        or child.median_mase < parent.median_mase - tolerance
-        or child.coverage > parent.coverage + tolerance
+    return pareto_scaled_improvement(
+        parent.mean_smae,
+        parent.mean_srmse,
+        child.mean_smae,
+        child.mean_srmse,
+        tolerance=tolerance,
     )
+
+
+def _scaled_safety_regression(
+    parent: FilterScore, child: FilterScore
+) -> str | None:
+    tolerance = 1e-12
+    tail_fields = (
+        "p90_smae",
+        "p95_smae",
+        "p90_srmse",
+        "p95_srmse",
+        "p90_smae_raw",
+        "p95_smae_raw",
+        "p90_srmse_raw",
+        "p95_srmse_raw",
+    )
+    for field_name in tail_fields:
+        parent_value = float(getattr(parent, field_name))
+        child_value = float(getattr(child, field_name))
+        if not child_value <= parent_value + tolerance:
+            return field_name
+    for field_name in ("smae_clipped_count", "srmse_clipped_count"):
+        if int(getattr(child, field_name)) > int(getattr(parent, field_name)):
+            return field_name
+    return None
 
 
 def _reliability_non_regression(parent: FilterScore, child: FilterScore) -> bool:
     tolerance = 1e-12
     return child.eligible_success_rate + tolerance >= parent.eligible_success_rate
-
-
-def _reliability_improved(parent: FilterScore, child: FilterScore) -> bool:
-    tolerance = 1e-12
-    return child.eligible_success_rate > parent.eligible_success_rate + tolerance
 
 
 def _selection_failures(
@@ -570,18 +727,19 @@ def _selection_failures(
         selected = next((row for row in rows if row.method == selected_name), None)
         successful = [
             row for row in rows
-            if row.status == SUCCESS and row.mase is not None and math.isfinite(row.mase)
+            if row.status == SUCCESS and _finite_scaled(row)
         ]
-        best = min(successful, key=lambda row: (float(row.mase), row.method)) if successful else None
-        selected_mase = (
-            float(selected.mase)
-            if selected is not None and selected.status == SUCCESS and selected.mase is not None
+        best = min(successful, key=_scaled_order) if successful else None
+        selected_pair = (
+            (float(selected.smae), float(selected.srmse))
+            if selected is not None and selected.status == SUCCESS and _finite_scaled(selected)
             else None
         )
         materially_bad = (
-            selected_mase is None
+            selected_pair is None
             or best is None
-            or selected_mase > float(best.mase) * 1.25 + 1e-12
+            or selected_pair[0] > float(best.smae) * 1.25 + 1e-12
+            or selected_pair[1] > float(best.srmse) * 1.25 + 1e-12
         )
         if materially_bad:
             failures.append(
@@ -590,9 +748,11 @@ def _selection_failures(
                     "history_tags": list(task.characteristics()),
                     "selected": selected_name,
                     "selected_status": selected.status if selected is not None else "missing",
-                    "selected_mase": selected_mase,
+                    "selected_smae": selected_pair[0] if selected_pair is not None else None,
+                    "selected_srmse": selected_pair[1] if selected_pair is not None else None,
                     "best_available": best.method if best is not None else None,
-                    "best_mase": float(best.mase) if best is not None else None,
+                    "best_smae": float(best.smae) if best is not None else None,
+                    "best_srmse": float(best.srmse) if best is not None else None,
                 }
             )
     return failures
@@ -645,10 +805,10 @@ def _required_review_targets(
         report = by_name.get(name, {})
         defects = int(report.get("crashed", 0)) + int(report.get("invalid", 0))
         not_applicable = int(report.get("not_applicable", 0))
-        mean_mase = report.get("mean_mase")
-        finite_mase = (
-            float(mean_mase)
-            if isinstance(mean_mase, (int, float)) and math.isfinite(float(mean_mase))
+        mean_joint = report.get("mean_joint_scaled_error")
+        finite_joint = (
+            float(mean_joint)
+            if isinstance(mean_joint, (int, float)) and math.isfinite(float(mean_joint))
             else -1.0
         )
         tier = 0 if name in selected else (1 if defects else 2)
@@ -657,7 +817,7 @@ def _required_review_targets(
             -selected_counts.get(name, 0),
             -defects,
             -not_applicable,
-            -finite_mase,
+            -finite_joint,
             name,
         )
 
@@ -683,7 +843,7 @@ def _conditional_evidence(
                 continue
             successful = [
                 row for row in subset
-                if row.status == SUCCESS and row.mase is not None and math.isfinite(row.mase)
+                if row.status == SUCCESS and _finite_scaled(row)
             ]
             tag_rows[tag] = {
                 "tasks": len(subset),
@@ -691,7 +851,9 @@ def _conditional_evidence(
                 "not_applicable": sum(row.status == NOT_APPLICABLE for row in subset),
                 "crashed": sum(row.status == CRASHED for row in subset),
                 "invalid": sum(row.status == INVALID for row in subset),
-                "mean_mase": statistics.fmean(float(row.mase) for row in successful)
+                "mean_smae": statistics.fmean(float(row.smae) for row in successful)
+                if successful else None,
+                "mean_srmse": statistics.fmean(float(row.srmse) for row in successful)
                 if successful else None,
             }
         result[name] = tag_rows
@@ -709,17 +871,19 @@ def _evidence(
     payload = []
     for entry in dictionary.entries:
         rows = [row for row in outcomes if row.method == entry.name]
-        successes = [row for row in rows if row.status == SUCCESS and row.mase is not None]
+        successes = [row for row in rows if row.status == SUCCESS and _finite_scaled(row)]
         ranks = []
         top_quartile = 0
         for row in successes:
             peers = sorted(
-                float(peer.mase) for peer in by_task.get(row.task_id, ())
-                if peer.status == SUCCESS and peer.mase is not None and math.isfinite(peer.mase)
+                joint_scaled_error(float(peer.smae), float(peer.srmse))
+                for peer in by_task.get(row.task_id, ())
+                if peer.status == SUCCESS and _finite_scaled(peer)
             )
             if not peers:
                 continue
-            rank = sum(value < float(row.mase) for value in peers) / max(1, len(peers) - 1)
+            row_score = joint_scaled_error(float(row.smae), float(row.srmse))
+            rank = sum(value < row_score for value in peers) / max(1, len(peers) - 1)
             ranks.append(rank)
             top_quartile += rank <= 0.25
         payload.append(
@@ -732,8 +896,14 @@ def _evidence(
                 "not_applicable": sum(row.status == NOT_APPLICABLE for row in rows),
                 "crashed": sum(row.status == CRASHED for row in rows),
                 "invalid": sum(row.status == INVALID for row in rows),
-                "mean_mase": statistics.fmean(float(row.mase) for row in successes)
+                "mean_smae": statistics.fmean(float(row.smae) for row in successes)
                 if successes else None,
+                "mean_srmse": statistics.fmean(float(row.srmse) for row in successes)
+                if successes else None,
+                "mean_joint_scaled_error": statistics.fmean(
+                    joint_scaled_error(float(row.smae), float(row.srmse))
+                    for row in successes
+                ) if successes else None,
                 "median_rank_percentile": statistics.median(ranks) if ranks else None,
                 "top_quartile_rate": top_quartile / len(ranks) if ranks else 0.0,
             }
@@ -760,21 +930,39 @@ def _strictly_discardable(
             if other == entry.name or set(other_rows) != task_ids:
                 continue
             comparisons = [
-                (
-                    other_rows[task_id].status == SUCCESS
-                    and other_rows[task_id].mase is not None
-                    and rows[task_id].mase is not None
-                    and float(other_rows[task_id].mase) <= float(rows[task_id].mase)
-                )
+                other_rows[task_id].status == SUCCESS
+                and _finite_scaled(other_rows[task_id])
+                and _finite_scaled(rows[task_id])
+                and float(other_rows[task_id].smae) <= float(rows[task_id].smae) + 1e-12
+                and float(other_rows[task_id].srmse) <= float(rows[task_id].srmse) + 1e-12
                 for task_id in task_ids
             ]
             strict = any(
-                other_rows[task_id].mase is not None
-                and rows[task_id].mase is not None
-                and float(other_rows[task_id].mase) < float(rows[task_id].mase)
+                _finite_scaled(other_rows[task_id])
+                and _finite_scaled(rows[task_id])
+                and (
+                    float(other_rows[task_id].smae) < float(rows[task_id].smae) - 1e-12
+                    or float(other_rows[task_id].srmse) < float(rows[task_id].srmse) - 1e-12
+                )
                 for task_id in task_ids
             )
             if all(comparisons) and strict:
                 discardable.add(entry.name)
                 break
     return frozenset(discardable)
+
+
+def _finite_scaled(row: Outcome) -> bool:
+    return (
+        row.smae is not None
+        and row.srmse is not None
+        and math.isfinite(float(row.smae))
+        and math.isfinite(float(row.srmse))
+    )
+
+
+def _scaled_order(row: Outcome) -> tuple[float, float, float, str]:
+    assert row.smae is not None and row.srmse is not None
+    smae = float(row.smae)
+    srmse = float(row.srmse)
+    return joint_scaled_error(smae, srmse), smae, srmse, row.method

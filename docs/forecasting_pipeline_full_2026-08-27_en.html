@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Time-Series Self-Evolution Pipeline · updated 2026-08-28</title>
+  <title>Time-Series Self-Evolution Pipeline · updated 2026-08-30</title>
   <style>
     :root {
       --bg: #f4f0e8;
@@ -115,9 +115,10 @@
   <div class="shell">
     <aside>
       <div class="brand">Forecasting Pipeline</div>
-      <div class="brand-sub">Complete project map · updated 2026-08-28</div>
+      <div class="brand-sub">Complete project map · updated 2026-08-30</div>
       <nav aria-label="Page contents">
         <div class="nav-label">Start here</div>
+        <a href="#metric-migration">Latest: pipeline-wide sMAE + sRMSE</a>
         <a href="#latest">Latest: three systems and 99-task result</a>
         <a href="#now">0. What we are building</a>
         <a href="#question">1. Research question</a>
@@ -151,13 +152,14 @@
         <p class="lede">This is not a system that simply asks an LLM to guess the future. It builds an auditable forecasting pipeline: characterize the observed history, remove unsuitable methods, compare Statistical and TSFM candidates through history-only hindcasting, and evolve methods and policies under strict Train/Dev acceptance gates.</p>
         <div class="meta-row">
           <span class="pill">Repository <code>time-series</code></span>
-          <span class="pill">Branch <code>feature/two-stage-retrieval-self-evolution</code></span>
-          <span class="pill">Implementation baseline <code>3f5e1e5</code></span>
-          <span class="pill">Updated 2026-08-28</span>
+          <span class="pill">Active schema <code>v2</code></span>
+          <span class="pill">Metric policy <code>sMAE + sRMSE</code></span>
+          <span class="pill">Updated 2026-08-30</span>
           <a class="pill" href="forecasting_pipeline_full_2026-08-26.html" lang="zh-CN">Chinese version</a>
         </div>
         <div class="pill-row">
           <span class="pill good"><span class="dot"></span>103-candidate framework implemented</span>
+          <span class="pill good"><span class="dot"></span>Numerical performance gates unified</span>
           <span class="pill good"><span class="dot"></span>80/20/99 split frozen</span>
           <span class="pill good"><span class="dot"></span>Two-stage Retrieval code + fake E2E implemented</span>
           <span class="pill warn"><span class="dot"></span>No real Retrieval 80/20 or Retrieval score yet</span>
@@ -166,9 +168,28 @@
         </div>
       </header>
 
+      <section id="metric-migration" data-section>
+        <h2>2026-08-30 · One Metric Contract Across Numerical Evolution</h2>
+        <p class="section-intro">This is an active decision-contract migration, not a heading change. Every Numerical stage that filters, ranks, evolves, accepts, or freezes something on performance now uses capped Dr-CiK sMAE and capped sRMSE as its only performance authority.</p>
+        <div class="flow">
+          <div class="node">Method execution<small>One scorer for Statistical / TSFM / Combined</small></div><div class="arrow">→</div>
+          <div class="node">Screening<small>Group-wise ΔsMAE + ΔsRMSE</small></div><div class="arrow">→</div>
+          <div class="node">History hindcast<small>Joint mean orders; both fields remain explicit</small></div><div class="arrow">→</div>
+          <div class="node">Safe selection<small>Independent regret and tail gates</small></div><div class="arrow">→</div>
+          <div class="node">Train / read-only Dev<small>Pareto non-regression before inheritance</small></div>
+        </div>
+        <div class="grid g3">
+          <article class="card"><h3>One definition</h3><p>Per-task MAE and RMSE are divided by the mean absolute scored truth horizon and independently capped at 5.0. <code>(sMAE+sRMSE)/2</code> is only a deterministic ordering key.</p></article>
+          <article class="card"><h3>One acceptance gate</h3><p>Neither Child sMAE nor sRMSE may regress and at least one must improve. Coverage, clipping, crash/invalid exposure, and configured tails must also remain safe.</p></article>
+          <article class="card"><h3>Legacy metrics are diagnostic</h3><p>MASE, MAE, sMAPE, and RMSSE may appear only in explicitly labelled <code>diagnostic_only</code> output. They cannot control active ranking or acceptance.</p></article>
+        </div>
+        <div class="callout"><strong>Leakage boundary:</strong> runtime scores only validation windows cut from observed history; Train labels stay in the trusted Train evaluator; Dev is read-only; Public/hidden cannot create mutations, Skills, or Children.</div>
+        <div class="callout warnbox"><strong>Historical-result boundary:</strong> the 99-task tables below are legacy experimental evidence produced under their recorded historical objectives. Their numbers are preserved, not rewritten, and they are not silently promoted into a schema-v2 active release. This stage claims migration audit and one-task smoke coverage, not a new benchmark gain.</div>
+      </section>
+
       <section id="latest" data-section>
-        <h2>Latest: What the Three Generations Actually Do</h2>
-        <p class="section-intro">These are successive versions of the same Numerical Selector, not three unrelated projects. The design progressed from conservative single-method overrides to a protected system that may combine multiple TSFMs and a small Statistical residual while retaining a strong baseline anchor.</p>
+        <h2>Historical Record: What the Three Generations Actually Did</h2>
+        <p class="section-intro">The numbers below retain their original experimental objectives and are legacy evidence from before the metric-contract migration. These are successive versions of the same Numerical Selector, not three unrelated projects.</p>
         <div class="grid g3">
           <article class="card">
             <div class="kpi">1</div>
@@ -491,7 +512,7 @@ Eligibility does not mean it will be selected in Phase B.</code></pre>
         <h2>9. Phase B: Numerical Selection and Combined Forecasting</h2>
         <p class="section-intro">Given an Active Dictionary, Phase B chooses a method, decides whether to combine methods, and determines when it must fall back to a strong baseline.</p>
         <div class="grid g3">
-          <article class="card"><h3>Central performance</h3><p>Median/recent sMAE, mean MAE, and mean sRMSE.</p></article>
+          <article class="card"><h3>Central performance</h3><p>Median/recent joint scaled error plus separate median/recent sMAE and sRMSE.</p></article>
           <article class="card"><h3>Stability</h3><p>Worst fold, MAD, bias, slope error, phase error, and explosion checks.</p></article>
           <article class="card"><h3>Executability</h3><p>Successful folds, coverage, Crash/Invalid, NotApplicable, and fallback behavior.</p></article>
         </div>
@@ -505,7 +526,7 @@ Clipped residual correction:
 Task-conditioned route:
   if profile matches: use Statistical
   else: use TSFM</code></pre>
-        <p>It is not checkpoint or parameter merging. A challenger may override Toto/TimesFM only when sMAE improves, sRMSE does not regress, enough folds are won, recent/worst-fold regret is bounded, coverage is sufficient, and no explosion or catastrophic pattern appears.</p>
+        <p>It is not checkpoint or parameter merging. A challenger may override Toto/TimesFM only when neither sMAE nor sRMSE regresses and at least one improves, enough folds are won, recent/worst-fold regret is bounded for both metrics, coverage is sufficient, and no explosion or catastrophic pattern appears.</p>
       </section>
 
       <section id="metrics" data-section>
@@ -688,7 +709,7 @@ python -m evolving_loop --evolution &lt;prompt|genome|source|retrieval&gt; [opti
       </section>
 
       <footer>
-        <p>English edition updated from the local <code>time-series</code> worktree on 2026-08-28. The displayed Protected Top-k result is a Numerical frozen 99-task Public Regression Test with zero LLM or mutation calls; it is not a new unseen-test claim and is not a Retrieval result. The Retrieval implementation has fake-LLM verification only; its real experiment has not run.</p>
+        <p>English edition updated from the local <code>time-series</code> worktree on 2026-08-30. The displayed Protected Top-k result is a legacy 99-task Public Regression Test from the pre-migration Numerical policy, with zero LLM or mutation calls. Its numbers retain the original objective; it is not a new schema-v2 unseen-test claim and is not a Retrieval result. The Retrieval implementation has fake-LLM verification only; its real experiment has not run.</p>
       </footer>
     </main>
   </div>

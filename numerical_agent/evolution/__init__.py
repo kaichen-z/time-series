@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import math
-import statistics
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -11,10 +10,12 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from common.llm import LLMClient, parse_json_object
+from common.evolution_core.contracts import metric_report_metadata
+from common.metrics import pareto_scaled_improvement
 from common.payload import write_json
 from common.tracing import TraceEvent, emit
 
-from .execution import Outcome, SUCCESS, Task, report_payload, run_module
+from .execution import Outcome, Task, oracle_scaled_summary, report_payload, run_module
 from .identity import IdentityError, identity_contract, validate_repair
 from .module import MethodModule, ModuleError, apply_operations, parse_method, read_module, write_module
 from .prompts import (
@@ -27,6 +28,17 @@ from .prompts import (
     render_mutate_user,
     render_select_user,
 )
+from .morphology import (
+    AssumptionGrounding,
+    MorphologyCard,
+    MorphologyError,
+    MorphologyInputError,
+    MorphologyObservation,
+    MorphologyReasoner,
+    MorphologyToolCall,
+)
+from .numerical_loop import run_numerical_loop
+from .numerical_package import NumericalForecastPackage, RankedNumericalForecast
 
 MODULE_NAME = "methods.py"
 
@@ -136,7 +148,15 @@ def evolve_once(
 
     _, reports = run_module(module_path, tasks, isolated=isolate_methods)
     payload = report_payload(reports)
-    write_json(root / f"generation_{generation:03d}_metrics.json", {"reports": payload})
+    write_json(
+        root / f"generation_{generation:03d}_metrics.json",
+        {
+            "schema_version": 2,
+            **metric_report_metadata(),
+            "generation": generation,
+            "reports": payload,
+        },
+    )
 
     if selector_llm is None:
         system = EVOLVE_SYSTEM
@@ -274,9 +294,11 @@ def evolve_once(
                 len(module.names()),
                 _head(root),
                 (
-                    "validation MASE regressed: "
-                    f"parent={validation['parent_mean_mase']:.6g}, "
-                    f"child={validation['child_mean_mase']:.6g}"
+                    "validation scaled pair failed Pareto acceptance: "
+                    f"parent=({validation['parent_mean_smae']:.6g}, "
+                    f"{validation['parent_mean_srmse']:.6g}), "
+                    f"child=({validation['child_mean_smae']:.6g}, "
+                    f"{validation['child_mean_srmse']:.6g})"
                 ),
             )
 
@@ -450,38 +472,32 @@ def _validate_candidate(
     with tempfile.TemporaryDirectory(prefix="method-evolution-child-") as directory:
         child_path = write_module(Path(directory) / MODULE_NAME, child)
         child_outcomes, _ = run_module(child_path, tasks, isolated=isolate_methods)
-    parent_mean, parent_median = _oracle_mase(parent_outcomes, tasks)
-    child_mean, child_median = _oracle_mase(child_outcomes, tasks)
+    parent_metrics = oracle_scaled_summary(parent_outcomes, tasks)
+    child_metrics = oracle_scaled_summary(child_outcomes, tasks)
     payload = {
-        "parent_mean_mase": parent_mean,
-        "parent_median_mase": parent_median,
-        "child_mean_mase": child_mean,
-        "child_median_mase": child_median,
+        **{f"parent_{name}": value for name, value in parent_metrics.items()},
+        **{f"child_{name}": value for name, value in child_metrics.items()},
     }
-    write_json(root / f"generation_{generation:03d}_validation.json", payload)
-    tolerance = 1e-12
-    accepted = (
-        math.isfinite(child_mean)
-        and child_mean <= parent_mean + tolerance
-        and child_median <= parent_median + tolerance
+    write_json(
+        root / f"generation_{generation:03d}_validation.json",
+        {
+            "schema_version": 2,
+            **metric_report_metadata(),
+            "generation": generation,
+            **payload,
+        },
     )
+    accepted = _scaled_validation_accepts(payload)
     return accepted, payload
 
 
-def _oracle_mase(
-    outcomes: Sequence[Outcome], tasks: Sequence[Task]
-) -> tuple[float, float]:
-    scores = []
-    for task in tasks:
-        available = [
-            float(outcome.mase)
-            for outcome in outcomes
-            if outcome.task_id == task.task_id
-            and outcome.status == SUCCESS
-            and outcome.mase is not None
-        ]
-        scores.append(min(available) if available else math.inf)
-    return statistics.fmean(scores), statistics.median(scores)
+def _scaled_validation_accepts(metrics: Mapping[str, float]) -> bool:
+    return pareto_scaled_improvement(
+        float(metrics["parent_mean_smae"]),
+        float(metrics["parent_mean_srmse"]),
+        float(metrics["child_mean_smae"]),
+        float(metrics["child_mean_srmse"]),
+    )
 
 
 def _head(repo: Path) -> str:

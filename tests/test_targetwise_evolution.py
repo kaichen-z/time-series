@@ -6,13 +6,18 @@ from pathlib import Path
 
 import pytest
 
+from common.evolution_core.contracts import require_active_metric_policy
 from common.llm import FakeLLMClient, LLMResponse
 from numerical_agent.evolution import commit_module, init_repo
 from numerical_agent.evolution.cache import OutcomeCache
 from numerical_agent.evolution.execution import Task
 from numerical_agent.evolution.module import MODULE_HEADER, ModuleError, parse_module
 from numerical_agent.evolution.module import read_module, write_module
-from numerical_agent.evolution.targetwise import evolve_targets_once, parse_target_proposals
+from numerical_agent.evolution.targetwise import (
+    _strict_non_regression,
+    evolve_targets_once,
+    parse_target_proposals,
+)
 
 
 SARIMA = '''def sarima_auto(history, horizon, frequency):
@@ -95,6 +100,40 @@ def evolution_tasks(prefix: str) -> tuple[Task, ...]:
     )
 
 
+def test_targetwise_gate_rejects_srmse_regression_and_ignores_legacy_gain() -> None:
+    metrics = {
+        "parent_mean_smae": 1.0,
+        "parent_mean_srmse": 1.0,
+        "parent_median_smae": 1.0,
+        "parent_median_srmse": 1.0,
+        "child_mean_smae": 0.8,
+        "child_mean_srmse": 1.1,
+        "child_median_smae": 0.8,
+        "child_median_srmse": 1.1,
+        "parent_mean_mase": 100.0,
+        "parent_median_mase": 100.0,
+        "child_mean_mase": 0.0,
+        "child_median_mase": 0.0,
+    }
+
+    assert not _strict_non_regression(metrics)
+
+
+def test_targetwise_gate_rejects_median_only_improvement() -> None:
+    metrics = {
+        "parent_mean_smae": 1.0,
+        "parent_mean_srmse": 1.0,
+        "parent_median_smae": 1.0,
+        "parent_median_srmse": 1.0,
+        "child_mean_smae": 1.0,
+        "child_mean_srmse": 1.0,
+        "child_median_smae": 0.7,
+        "child_median_srmse": 0.8,
+    }
+
+    assert not _strict_non_regression(metrics)
+
+
 def test_invalid_target_does_not_block_a_later_improving_child(tmp_path: Path) -> None:
     repo = init_repo(tmp_path / "repo")
     parent = parse_module(
@@ -142,6 +181,11 @@ def test_invalid_target_does_not_block_a_later_improving_child(tmp_path: Path) -
     assert outcome.applied == (
         "fork beta -> beta_last: replace the biased zero forecast with a distinct challenger",
     )
+    generation_payload = json.loads(
+        (repo / "generation_001_targetwise.json").read_text(encoding="utf-8")
+    )
+    assert generation_payload["schema_version"] == 2
+    require_active_metric_policy(generation_payload)
     assert read_module(repo / "methods.py").names() == ("alpha", "beta", "beta_last")
     assert outcome.cache_misses > 0
 
@@ -223,12 +267,13 @@ def test_multiple_independent_children_are_rebased_and_promoted(tmp_path: Path) 
 
     assert all(candidate.accepted and candidate.promoted for candidate in result.candidates)
     assert all(
-        "child_method_mean_mase" in candidate.validation_metrics
+        "child_method_mean_smae" in candidate.validation_metrics
+        and "child_method_mean_srmse" in candidate.validation_metrics
         for candidate in result.candidates
     )
-    assert read_module(repo / "methods.py").names() == (
+    assert set(read_module(repo / "methods.py").names()) == {
         "alpha", "beta", "beta_high", "alpha_low"
-    )
+    }
     log = subprocess.run(
         ["git", "rev-list", "--count", "HEAD"], cwd=repo,
         capture_output=True, text=True, check=True,

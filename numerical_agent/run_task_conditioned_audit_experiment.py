@@ -10,7 +10,11 @@ from dataclasses import asdict
 from pathlib import Path
 
 from common.data import load_tasks_by_id
-from common.payload import read_json_object, write_json
+from common.evolution_core.contracts import (
+    metric_report_metadata,
+    load_active_release,
+)
+from common.payload import read_json_object, standards_json_value, write_json
 
 from .evolution.module import read_module
 from .evolution.numerical_selector import HindcastConfig
@@ -36,7 +40,12 @@ from .evolution.selector_evolution import (
     _select_case,
 )
 from .main import _add_tsfm_runtime_options, _runtime_registry
-from .run_selector_evolution import ForecastStore, _build_case
+from .run_selector_evolution import (
+    ForecastStore,
+    _build_case,
+    _forecast_runtime_identity,
+    _score_pair_wtl,
+)
 from .run_task_conditioned_screening import _training_outcomes, load_frozen_partitions
 
 
@@ -92,9 +101,11 @@ def main(argv: list[str] | None = None) -> int:
     screen_path = screen_dir / "frozen_screening_policy.py"
     screen_hash = _sha256(screen_path)
     screen_manifest = read_json_object(screen_dir / "screening_manifest.json")
+    load_active_release(screen_manifest)
     if screen_manifest.get("frozen_screening_policy_sha256") != screen_hash:
         raise ValueError("frozen screening policy hash does not match its manifest")
     parent_manifest = read_json_object(selector_dir / "selector_manifest.json")
+    load_active_release(parent_manifest)
     if parent_manifest.get("screening_policy_sha256") != screen_hash:
         raise ValueError("parent Decision policy is bound to a different screening policy")
 
@@ -129,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
             portfolio,
             runtimes,
             screen_hash,
+            runtime_identity=_forecast_runtime_identity(args),
         )
         try:
             config = HindcastConfig(folds=args.folds, long_horizon_audit=True)
@@ -232,7 +244,8 @@ def main(argv: list[str] | None = None) -> int:
         train_only=args.train_only,
     )
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
+        **metric_report_metadata(),
         "experiment": args.candidate_family,
         "selection": (
             "Train-only search with entity-disjoint cross-validation; Dev not accessed"
@@ -269,6 +282,17 @@ def main(argv: list[str] | None = None) -> int:
         "dev_parent": asdict(dev_parent) if dev_parent is not None else None,
         "dev_winner": asdict(dev_winner) if dev_winner is not None else None,
         "dev_gate": asdict(dev_gate),
+        "paired_joint_wtl": {
+            "train": _score_pair_wtl(parent_train, winner_train),
+            "dev": (
+                _score_pair_wtl(dev_parent, dev_winner)
+                if dev_parent is not None and dev_winner is not None
+                else {
+                    "wins": 0, "ties": 0, "losses": 0,
+                    "missing": 0, "unscored": 0,
+                }
+            ),
+        },
         "dev_evaluated": not args.train_only,
         "accepted": accepted,
         "audit_statuses": {
@@ -284,7 +308,13 @@ def main(argv: list[str] | None = None) -> int:
         "public_test_accessed": False,
     }
     write_json(output / "evaluation.json", payload)
-    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(
+        standards_json_value(payload),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    ))
     return 0
 
 
@@ -491,6 +521,8 @@ def _write_selector_manifest(
         }
     manifest = {
         **inherited,
+        "schema_version": 2,
+        **metric_report_metadata(),
         "experiment": experiment,
         "screening_policy_sha256": screening_hash,
         "frozen_decision_policy_sha256": _sha256(policy_path),

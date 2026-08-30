@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from common.data import load_tasks
+from common.evolution_core.contracts import (
+    metric_policy_metadata,
+    metric_report_metadata,
+    load_active_release,
+)
 from common.metrics import (
     drcik_point_metrics,
     linear_quantile,
@@ -20,7 +25,7 @@ from common.metrics import (
     smape,
     standard_error,
 )
-from common.payload import read_json_object, write_json
+from common.payload import read_json_object, standards_json_value, write_json
 
 from .evolution.execution import SUCCESS, Task
 from .evolution.filtering import build_filter_dictionary
@@ -35,7 +40,7 @@ from .evolution.screening_evolution import migrate_filter_dictionary, parse_scre
 from .evolution.screening import profile_task
 from .evolution.selector_evolution import parse_decision_source
 from .main import _add_tsfm_runtime_options, _runtime_registry
-from .run_selector_evolution import ForecastStore, _build_case
+from .run_selector_evolution import ForecastStore, _build_case, _forecast_runtime_identity
 from .run_task_conditioned_screening import _training_outcomes
 
 
@@ -77,6 +82,8 @@ def verify_frozen_policies(
         raise ValueError("Public Test evaluation has already completed")
     screen_manifest = read_json_object(screen_dir / "screening_manifest.json")
     selector_manifest = read_json_object(decision_dir / "selector_manifest.json")
+    load_active_release(screen_manifest)
+    load_active_release(selector_manifest)
     screen_hash = _sha256(screen_dir / "frozen_screening_policy.py")
     decision_hash = _sha256(decision_dir / "frozen_decision_policy.py")
     if screen_manifest.get("frozen_screening_policy_sha256") != screen_hash:
@@ -130,6 +137,8 @@ def score_forecast_results(
     mases = values("mase")
     smaes = values("smae")
     srmses = values("srmse")
+    smaes_raw = values("smae_raw")
+    srmses_raw = values("srmse_raw")
     smae_clipped_count = sum(bool(row["smae_clipped"]) for row in task_scores)
     srmse_clipped_count = sum(bool(row["srmse_clipped"]) for row in task_scores)
     return {
@@ -145,6 +154,12 @@ def score_forecast_results(
         "se_srmse": standard_error(srmses) if srmses else math.inf,
         "p90_smae": linear_quantile(smaes, 0.90) if smaes else math.inf,
         "p95_smae": linear_quantile(smaes, 0.95) if smaes else math.inf,
+        "p90_srmse": linear_quantile(srmses, 0.90) if srmses else math.inf,
+        "p95_srmse": linear_quantile(srmses, 0.95) if srmses else math.inf,
+        "p90_smae_raw": linear_quantile(smaes_raw, 0.90) if smaes_raw else math.inf,
+        "p95_smae_raw": linear_quantile(smaes_raw, 0.95) if smaes_raw else math.inf,
+        "p90_srmse_raw": linear_quantile(srmses_raw, 0.90) if srmses_raw else math.inf,
+        "p95_srmse_raw": linear_quantile(srmses_raw, 0.95) if srmses_raw else math.inf,
         "smae_clipped_count": smae_clipped_count,
         "smae_clipped_rate": smae_clipped_count / count if count else 1.0,
         "srmse_clipped_count": srmse_clipped_count,
@@ -209,6 +224,7 @@ def main(argv: list[str] | None = None) -> int:
             portfolio,
             runtimes,
             screening_hash,
+            runtime_identity=_forecast_runtime_identity(args),
         )
         try:
             config = _hindcast_config_for_policy(decision_policy)
@@ -244,16 +260,20 @@ def main(argv: list[str] | None = None) -> int:
     }
     scores = {name: score_forecast_results(tasks, results) for name, results in rows.items()}
     baseline_by_task = {
-        row["task_id"]: row["smae"]
+        row["task_id"]: (row["smae"], row["srmse"])
         for row in scores["A_current_global_ranker"]["per_task"]
     }
     paired = {
-        name: _paired_counts(score["per_task"], baseline_by_task)
+        name: _paired_counts(
+            score["per_task"], baseline_by_task, tuple(task.task_id for task in tasks)
+        )
         for name, score in scores.items()
     }
     with (output / "per_task_results.jsonl").open("w", encoding="utf-8") as handle:
         for task in tasks:
             payload = {
+                "schema_version": 2,
+                **metric_policy_metadata(),
                 "task_id": task.task_id,
                 "rows": {
                     name: asdict(next(result for result in results if result.task_id == task.task_id))
@@ -262,7 +282,8 @@ def main(argv: list[str] | None = None) -> int:
             }
             handle.write(json.dumps(payload, sort_keys=True, allow_nan=False) + "\n")
     report_payload = {
-        "schema_version": 1,
+        "schema_version": 2,
+        **metric_report_metadata(),
         "task_count": 99,
         "screening_policy_sha256": screening_hash,
         "decision_policy_sha256": decision_hash,
@@ -283,18 +304,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     # This marker is written last. Its presence makes the one-time command refuse a retry.
     write_json(output / "evaluation_complete.json", {
+        "schema_version": 2,
+        **metric_policy_metadata(),
         "task_count": 99,
         "screening_policy_sha256": screening_hash,
         "decision_policy_sha256": decision_hash,
         "results_sha256": _sha256(output / "frozen_two_stage_results.json"),
         "per_task_sha256": _sha256(output / "per_task_results.jsonl"),
     })
-    print(json.dumps({
+    print(json.dumps(standards_json_value({
         "task_count": 99,
         "rows": {name: {key: value for key, value in score.items() if key != "per_task"}
                  for name, score in scores.items()},
         "paired_vs_A": paired,
-    }, ensure_ascii=False, indent=2, sort_keys=True))
+    }), ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False))
     return 0
 
 
@@ -412,24 +435,82 @@ def _result(case, selected, weights, forecast, mode, *, assumption_ids=()) -> Fo
     )
 
 
-def _paired_counts(per_task, baseline: Mapping[str, float]) -> dict[str, int]:
-    result = {"wins": 0, "ties": 0, "losses": 0, "missing": 0}
-    seen = set()
+def _paired_counts(
+    per_task,
+    baseline: Mapping[str, tuple[float, float]],
+    expected_task_ids: Sequence[str],
+) -> dict[str, int]:
+    result = {"wins": 0, "ties": 0, "losses": 0, "missing": 0, "unscored": 0}
+    if isinstance(expected_task_ids, (str, bytes)):
+        raise ValueError("expected task IDs must be a sequence")
+    expected = tuple(expected_task_ids)
+    if any(type(task_id) is not str or not task_id for task_id in expected):
+        raise ValueError("expected task IDs must be non-empty strings")
+    if len(expected) != len(set(expected)):
+        raise ValueError("duplicate expected task IDs")
+    expected_set = set(expected)
+    observed: dict[str, tuple[float, float]] = {}
     for row in per_task:
-        task_id = str(row["task_id"])
-        seen.add(task_id)
-        if task_id not in baseline:
+        if not isinstance(row, Mapping):
+            raise ValueError("paired score rows must be objects")
+        task_id = row.get("task_id")
+        if type(task_id) is not str or not task_id:
+            raise ValueError("paired score task_id must be a non-empty string")
+        if task_id in observed:
+            raise ValueError(f"duplicate observed task ID {task_id!r}")
+        if task_id not in expected_set:
+            raise ValueError(f"unexpected observed task ID {task_id!r}")
+        observed[task_id] = (
+            _finite_pair_value(row.get("smae"), f"{task_id}.smae"),
+            _finite_pair_value(row.get("srmse"), f"{task_id}.srmse"),
+        )
+    unexpected_baseline = set(baseline) - expected_set
+    if unexpected_baseline:
+        raise ValueError(
+            f"unexpected baseline task IDs: {sorted(unexpected_baseline)!r}"
+        )
+    normalized_baseline = {
+        task_id: _validated_pair(pair, f"baseline {task_id!r}")
+        for task_id, pair in baseline.items()
+    }
+    for task_id in expected:
+        candidate_pair = observed.get(task_id)
+        baseline_pair = normalized_baseline.get(task_id)
+        if candidate_pair is None and baseline_pair is None:
+            result["unscored"] += 1
+            continue
+        if candidate_pair is None or baseline_pair is None:
             result["missing"] += 1
             continue
-        delta = float(row["smae"]) - float(baseline[task_id])
+        delta = (
+            (candidate_pair[0] + candidate_pair[1])
+            - (baseline_pair[0] + baseline_pair[1])
+        ) / 2.0
         if abs(delta) <= 1e-12:
             result["ties"] += 1
         elif delta < 0:
             result["wins"] += 1
         else:
             result["losses"] += 1
-    result["missing"] += len(set(baseline) - seen)
     return result
+
+
+def _finite_pair_value(value: object, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be numeric")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{field_name} must be finite")
+    return number
+
+
+def _validated_pair(value: object, field_name: str) -> tuple[float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"{field_name} must be a two-value pair")
+    return (
+        _finite_pair_value(value[0], f"{field_name}.smae"),
+        _finite_pair_value(value[1], f"{field_name}.srmse"),
+    )
 
 
 def _rmsse(history: Sequence[float], truth: Sequence[float], forecast: Sequence[float]) -> float:
@@ -455,24 +536,32 @@ def _report(payload: Mapping[str, object]) -> str:
         f"- Tasks: {payload['task_count']}",
         f"- Screening SHA-256: `{payload['screening_policy_sha256']}`",
         f"- Decision SHA-256: `{payload['decision_policy_sha256']}`",
+        f"- Metric policy SHA-256: `{payload['metric_policy_fingerprint']}`",
+        "- Primary metrics: sMAE, sRMSE",
+        "- Diagnostic only: MASE, MAE, sMAPE, RMSSE",
         f"- LLM / mutation calls: {payload['llm_calls']} / {payload['mutation_calls']}",
         "",
-        "| Row | Mean sMAE | sMAE SE | Mean sRMSE | sRMSE SE | P90/P95 sMAE | Clipped sMAE/sRMSE | Mean MASE | Mean RMSSE | Mean MAE | Coverage | Methods | Families | Ensemble | W/T/L vs A (sMAE) |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Row | Mean sMAE | Median sMAE | sMAE SE | Mean sRMSE | Median sRMSE | sRMSE SE | Raw P90/P95 sMAE/sRMSE | Clipped sMAE/sRMSE | Coverage | W/T/L/M/U vs A (joint) | Mean MASE [diagnostic] | Mean RMSSE [diagnostic] | Mean MAE [diagnostic] | Methods | Families | Ensemble |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name, raw in scores.items():
         score = raw
         comparison = paired[name]
         lines.append(
-            f"| {name} | {score['mean_smae']:.6f} | {score['se_smae']:.6f} | "
-            f"{score['mean_srmse']:.6f} | {score['se_srmse']:.6f} | "
-            f"{score['p90_smae']:.6f}/{score['p95_smae']:.6f} | "
+            f"| {name} | {score['mean_smae']:.6f} | {score['median_smae']:.6f} | "
+            f"{score['se_smae']:.6f} | {score['mean_srmse']:.6f} | "
+            f"{score['median_srmse']:.6f} | {score['se_srmse']:.6f} | "
+            f"{score['p90_smae_raw']:.6f}/{score['p95_smae_raw']:.6f} / "
+            f"{score['p90_srmse_raw']:.6f}/{score['p95_srmse_raw']:.6f} | "
             f"{score['smae_clipped_count']}/{score['srmse_clipped_count']} | "
+            f"{score['coverage']:.4f} | "
+            f"{comparison['wins']}/{comparison['ties']}/{comparison['losses']}/"
+            f"{comparison['missing']}/{comparison['unscored']} | "
             f"{score['mean_mase']:.6f} | {score['mean_rmsse']:.6f} | "
-            f"{score['mean_mae']:.6f} | {score['coverage']:.4f} | "
+            f"{score['mean_mae']:.6f} | "
             f"{score['method_diversity']} | "
             f"{score['family_diversity']} | {score['ensemble_rate']:.4f} | "
-            f"{comparison['wins']}/{comparison['ties']}/{comparison['losses']} |"
+            ""
         )
     return "\n".join(lines) + "\n"
 

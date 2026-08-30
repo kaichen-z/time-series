@@ -1,0 +1,794 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from types import SimpleNamespace
+
+import pytest
+
+from common.metrics import drcik_point_metrics, joint_scaled_error
+from numerical_agent.evolution.morphology import (
+    AssumptionGrounding,
+    MorphologyCard,
+    MorphologyObservation,
+    MorphologyToolCall,
+)
+from numerical_agent.evolution.morphology_consistency import check_morphology_assumptions
+from numerical_agent.evolution.morphology_credit import assign_tool_call_credit
+from numerical_agent.evolution.numerical_selector import (
+    CandidateDiagnostics,
+    DecisionPolicy,
+    HindcastFold,
+)
+from numerical_agent.evolution.screening import TaskProfile
+
+
+def _profile(**changes: object) -> TaskProfile:
+    base = dict(
+        task_id="train-1",
+        frequency="D",
+        history_length=84,
+        horizon=3,
+        zero_fraction=0.0,
+        signed=False,
+        integer_valued=False,
+        trend_direction="flat",
+        trend_strength=0.05,
+        periodicity_periods=(7,),
+        periodicity_strength=0.8,
+        periodicity_confidence=0.9,
+        outlier_fraction=0.0,
+        noise_relative_scale=0.05,
+        likely_stationary=True,
+        stationarity_score=0.8,
+        recent_regime_start=None,
+        recent_regime_confidence=0.0,
+        intermittency_adi=1.0,
+        intermittency_cv2=0.0,
+    )
+    base.update(changes)
+    return TaskProfile(**base)
+
+
+def _card(*assumptions: AssumptionGrounding) -> MorphologyCard:
+    broad = MorphologyToolCall("broad", "detect_periodicity", 0, 84)
+    recent = MorphologyToolCall("recent", "detect_periodicity", 42, 84)
+    return MorphologyCard(
+        "Recent history.",
+        "Full history.",
+        (broad, recent),
+        (
+            MorphologyObservation(broad, {"strength": 0.8}),
+            MorphologyObservation(recent, {"strength": 0.7}),
+        ),
+        assumptions,
+    )
+
+
+def _assumption(
+    assumption_id: str,
+    kind: str,
+    *candidates: str,
+    confidence: float = 0.8,
+) -> AssumptionGrounding:
+    return AssumptionGrounding(
+        assumption_id,
+        kind,
+        "A grounded historical condition persists.",
+        "The historical condition does not persist.",
+        ("broad", "recent"),
+        candidates,
+        confidence,
+    )
+
+
+def _diagnostic(name: str, **changes: object) -> CandidateDiagnostics:
+    return replace(
+        CandidateDiagnostics.synthetic(
+            name=name,
+            family="statistical",
+            median_mase=0.4,
+            fold_forecasts=((1.0, 2.0, 3.0),) * 3,
+            fold_truths=((1.0, 2.0, 3.0),) * 3,
+        ),
+        **changes,
+    )
+
+
+def _scaled_diagnostic(
+    name: str,
+    *,
+    forecast: tuple[float, ...],
+    truth: tuple[float, ...],
+    family: str = "statistical",
+) -> CandidateDiagnostics:
+    metrics = drcik_point_metrics(truth, forecast)
+    return CandidateDiagnostics.synthetic(
+        name=name,
+        family=family,
+        median_mase=float(metrics["smae"]),
+        fold_forecasts=(forecast,) * 3,
+        fold_truths=(truth,) * 3,
+        median_smae=float(metrics["smae"]),
+        recent_smae=float(metrics["smae"]),
+        worst_smae=float(metrics["smae"]),
+        median_srmse=float(metrics["srmse"]),
+        recent_srmse=float(metrics["srmse"]),
+        worst_srmse=float(metrics["srmse"]),
+        worst_smae_raw=float(metrics["smae_raw"]),
+        worst_srmse_raw=float(metrics["srmse_raw"]),
+    )
+
+
+def _check(card: MorphologyCard, profile: TaskProfile, diagnostics: dict[str, CandidateDiagnostics], forecasts: dict[str, tuple[float, ...]], **kwargs: object):
+    return check_morphology_assumptions(
+        card,
+        profile=profile,
+        active_names=tuple(diagnostics),
+        diagnostics=diagnostics,
+        forecasts=forecasts,
+        min_successful_folds=3,
+        **kwargs,
+    )
+
+
+def test_consistency_accepts_supported_weekly_cycle_and_rejects_flat_trend() -> None:
+    weekly = _assumption("weekly_cycle", "seasonality", "seasonal_naive")
+    trend = _assumption("trend_persistence", "trend", "trend_model")
+    diagnostics = {
+        "seasonal_naive": _diagnostic("seasonal_naive"),
+        "trend_model": _diagnostic("trend_model"),
+    }
+
+    result = _check(
+        _card(weekly, trend),
+        _profile(),
+        diagnostics,
+        {"seasonal_naive": (1.0, 2.0, 3.0), "trend_model": (1.0, 2.0, 3.0)},
+    )
+
+    assert tuple(x.assumption_id for x in result.accepted) == ("weekly_cycle",)
+    assert result.rejected["trend_persistence"] == "profile_incompatible"
+
+
+@pytest.mark.parametrize(
+    ("kind", "profile_changes"),
+    [
+        ("seasonality", {}),
+        ("trend", {"trend_direction": "up", "trend_strength": 0.7}),
+        ("intermittency", {"zero_fraction": 0.6}),
+        ("regime", {"recent_regime_start": 60, "recent_regime_confidence": 0.8}),
+        ("noise", {"noise_relative_scale": 0.8}),
+        ("level", {}),
+    ],
+)
+def test_consistency_uses_only_typed_profile_predicates(
+    kind: str, profile_changes: dict[str, object]
+) -> None:
+    assumption = _assumption(f"{kind}_supported", kind, "candidate")
+
+    result = _check(
+        _card(assumption),
+        _profile(**profile_changes),
+        {"candidate": _diagnostic("candidate")},
+        {"candidate": (1.0, 2.0, 3.0)},
+    )
+
+    assert tuple(item.assumption_id for item in result.accepted) == (f"{kind}_supported",)
+
+
+def test_consistency_rejects_bad_candidates_without_mutating_candidates_or_fallback() -> None:
+    active = ("good", "failed", "toto_2_0")
+    diagnostics = {
+        "good": _diagnostic("good"),
+        "failed": _diagnostic("failed", eligible=False, successful_folds=0),
+        "toto_2_0": _diagnostic("toto_2_0"),
+    }
+    forecasts = {name: (1.0, 2.0, 3.0) for name in active}
+    card = _card(
+        _assumption("inactive", "seasonality", "missing"),
+        _assumption("failed", "seasonality", "failed"),
+    )
+
+    result = check_morphology_assumptions(
+        card,
+        profile=_profile(),
+        active_names=active,
+        diagnostics=diagnostics,
+        forecasts=forecasts,
+        min_successful_folds=3,
+    )
+
+    assert result.accepted == ()
+    assert result.rejected == {"inactive": "inactive_candidate", "failed": "candidate_ineligible"}
+    assert active == ("good", "failed", "toto_2_0")
+    assert tuple(diagnostics) == active
+    assert forecasts["toto_2_0"] == (1.0, 2.0, 3.0)
+
+
+def test_consistency_enforces_fold_worst_fold_catastrophe_and_forecast_gates() -> None:
+    assumptions = _card(
+        _assumption("few_folds", "seasonality", "few"),
+        _assumption("bad_worst_fold", "seasonality", "worst"),
+        _assumption("exploded", "seasonality", "exploded"),
+        _assumption("bad_forecast", "seasonality", "malformed"),
+    )
+    diagnostics = {
+        "few": _diagnostic("few", successful_folds=2),
+        "worst": _diagnostic(
+            "worst",
+            worst_smae=5.0,
+            worst_smae_raw=10.1,
+            worst_joint_scaled_error=joint_scaled_error(5.0, 0.4),
+        ),
+        "exploded": _diagnostic("exploded", explosion=True),
+        "malformed": _diagnostic("malformed"),
+    }
+
+    result = _check(
+        assumptions,
+        _profile(),
+        diagnostics,
+        {
+            "few": (1.0, 2.0, 3.0),
+            "worst": (1.0, 2.0, 3.0),
+            "exploded": (1.0, 2.0, 3.0),
+            "malformed": (1.0, float("nan"), 3.0),
+        },
+        policy=DecisionPolicy(),
+    )
+
+    assert result.rejected == {
+        "few_folds": "insufficient_successful_folds",
+        "bad_worst_fold": "catastrophic_hindcast_tail",
+        "exploded": "catastrophic_hindcast_tail",
+        "bad_forecast": "invalid_forecast",
+    }
+
+
+def test_consistency_rejects_nonfinite_scaled_tail_diagnostics() -> None:
+    result = _check(
+        _card(_assumption("bad-tail", "seasonality", "candidate")),
+        _profile(),
+        {"candidate": _diagnostic("candidate", worst_srmse_raw=float("nan"))},
+        {"candidate": (1.0, 2.0, 3.0)},
+        policy=DecisionPolicy(),
+    )
+
+    assert result.rejected == {"bad-tail": "invalid_diagnostics"}
+
+
+def test_assumption_cannot_bypass_srmse_safe_anchor_guard() -> None:
+    """Assumption guidance must not admit a challenger that regresses anchor sRMSE."""
+    assumption = _assumption("guided", "seasonality", "challenger")
+    truth = (1.0, 2.0, 3.0)
+    diagnostics = {
+        "safe_anchor": _scaled_diagnostic(
+            "safe_anchor", forecast=(2.0, 3.0, 4.0), truth=truth
+        ),
+        "challenger": _scaled_diagnostic(
+            "challenger", forecast=(1.0, 2.0, 5.5), truth=truth
+        ),
+    }
+
+    result = _check(
+        _card(assumption),
+        _profile(),
+        diagnostics,
+        {"safe_anchor": (2.0, 3.0, 4.0), "challenger": (1.0, 2.0, 5.5)},
+        protected_anchor_name="safe_anchor",
+    )
+
+    assert result.accepted == ()
+    assert result.rejected == {"guided": "safe_anchor_scaled_regret"}
+
+
+def test_consistency_matches_runtime_raw_guard_for_capped_tie() -> None:
+    from numerical_agent.evolution.numerical_selector import (
+        passes_independent_scaled_regret,
+    )
+
+    truths = ((1.0, 1.0),) * 3
+    anchor_forecasts = ((7.0, 7.0),) * 3
+    challenger_forecasts = ((8.0, 8.0),) * 3
+    anchor = CandidateDiagnostics.synthetic(
+        name="safe_anchor",
+        family="tsfm",
+        median_mase=6.0,
+        fold_forecasts=anchor_forecasts,
+        fold_truths=truths,
+        median_smae=5.0,
+        recent_smae=5.0,
+        worst_smae=5.0,
+        median_srmse=5.0,
+        recent_srmse=5.0,
+        worst_srmse=5.0,
+        worst_smae_raw=6.0,
+        worst_srmse_raw=6.0,
+    )
+    challenger = CandidateDiagnostics.synthetic(
+        name="challenger",
+        family="statistical",
+        median_mase=7.0,
+        fold_forecasts=challenger_forecasts,
+        fold_truths=truths,
+        median_smae=5.0,
+        recent_smae=5.0,
+        worst_smae=5.0,
+        median_srmse=5.0,
+        recent_srmse=5.0,
+        worst_srmse=5.0,
+        worst_smae_raw=7.0,
+        worst_srmse_raw=7.0,
+    )
+    runtime_accepted = passes_independent_scaled_regret(
+        challenger_forecasts,
+        anchor_forecasts,
+        truths,
+        max_smae_regret=0.02,
+        max_srmse_regret=0.02,
+    )
+
+    result = _check(
+        _card(_assumption("guided", "seasonality", "challenger")),
+        _profile(horizon=2),
+        {"safe_anchor": anchor, "challenger": challenger},
+        {"safe_anchor": (7.0, 7.0), "challenger": (8.0, 8.0)},
+        protected_anchor_name="safe_anchor",
+    )
+
+    assert bool(result.accepted) is runtime_accepted
+    assert result.rejected == {"guided": "safe_anchor_scaled_regret"}
+
+
+@pytest.mark.parametrize("broken", ("absent", "misaligned"))
+def test_consistency_rejects_absent_or_misaligned_anchor_folds(broken: str) -> None:
+    truths = ((1.0, 1.0),) * 3
+    anchor = CandidateDiagnostics.synthetic(
+        name="safe_anchor",
+        family="tsfm",
+        median_mase=1.0,
+        fold_forecasts=() if broken == "absent" else ((1.0, 1.0),) * 3,
+        fold_truths=() if broken == "absent" else truths,
+    )
+    challenger = CandidateDiagnostics.synthetic(
+        name="challenger",
+        family="statistical",
+        median_mase=0.5,
+        fold_forecasts=((1.0, 1.0),) * 3,
+        fold_truths=(
+            ((2.0, 2.0),) * 3 if broken == "misaligned" else truths
+        ),
+    )
+
+    result = _check(
+        _card(_assumption("guided", "seasonality", "challenger")),
+        _profile(horizon=2),
+        {"safe_anchor": anchor, "challenger": challenger},
+        {"safe_anchor": (1.0, 1.0), "challenger": (1.0, 1.0)},
+        protected_anchor_name="safe_anchor",
+    )
+
+    assert result.accepted == ()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"median_smae": 5.1},
+        {"median_joint_scaled_error": 0.0},
+        {"median_smae": float("nan")},
+    ),
+)
+def test_consistency_rejects_forged_scaled_summaries(changes: dict[str, object]) -> None:
+    result = _check(
+        _card(_assumption("forged", "seasonality", "candidate")),
+        _profile(),
+        {"candidate": _diagnostic("candidate", **changes)},
+        {"candidate": (1.0, 2.0, 3.0)},
+    )
+
+    assert result.rejected == {"forged": "invalid_diagnostics"}
+
+
+def test_consistency_validates_joint_distribution_summary_against_aligned_folds() -> None:
+    """A forged joint aggregate must not pass, nor may marginal pairing reject valid folds."""
+    truth = (1.0, 1.0, 1.0, 1.0)
+    forecasts = (
+        (5.0, 5.0, 5.0, 5.0),
+        (1.0, 1.0, 1.0, 9.0),
+        (1.0, 1.0, 1.0, 11.0),
+    )
+    folds = tuple(
+        HindcastFold(
+            train_end=20 + index * 4,
+            validation_end=24 + index * 4,
+            status="success",
+            forecast=forecast,
+            truth=truth,
+            smae=float(metrics["smae"]),
+            srmse=float(metrics["srmse"]),
+            smae_raw=float(metrics["smae_raw"]),
+            srmse_raw=float(metrics["srmse_raw"]),
+            smae_clipped=bool(metrics["smae_clipped"]),
+            srmse_clipped=bool(metrics["srmse_clipped"]),
+        )
+        for index, forecast in enumerate(forecasts)
+        for metrics in (drcik_point_metrics(truth, forecast),)
+    )
+    valid = replace(
+        CandidateDiagnostics.synthetic(
+            name="candidate",
+            family="statistical",
+            median_mase=2.5,
+            fold_forecasts=forecasts,
+            fold_truths=(truth,) * 3,
+        ),
+        folds=folds,
+        median_joint_scaled_error=3.75,
+        recent_joint_scaled_error=3.75,
+        worst_joint_scaled_error=4.0,
+        median_smae=2.5,
+        recent_smae=2.5,
+        worst_smae=4.0,
+        smae_mad=0.5,
+        median_srmse=4.0,
+        recent_srmse=5.0,
+        worst_srmse=5.0,
+        srmse_mad=0.0,
+        worst_smae_raw=4.0,
+        worst_srmse_raw=5.0,
+    )
+
+    accepted = _check(
+        _card(_assumption("valid", "seasonality", "candidate")),
+        _profile(horizon=4),
+        {"candidate": valid},
+        {"candidate": forecasts[-1]},
+    )
+    forged = _check(
+        _card(_assumption("forged", "seasonality", "candidate")),
+        _profile(horizon=4),
+        {"candidate": replace(valid, median_joint_scaled_error=3.25)},
+        {"candidate": forecasts[-1]},
+    )
+    misaligned = _check(
+        _card(_assumption("misaligned", "seasonality", "candidate")),
+        _profile(horizon=4),
+        {
+            "candidate": replace(
+                valid,
+                fold_forecasts=((1.0, 1.0, 1.0, 1.0),) * 3,
+            )
+        },
+        {"candidate": forecasts[-1]},
+    )
+
+    assert tuple(item.assumption_id for item in accepted.accepted) == ("valid",)
+    assert forged.rejected == {"forged": "invalid_diagnostics"}
+    assert misaligned.rejected == {"misaligned": "invalid_fold_evidence"}
+
+
+@pytest.mark.parametrize(
+    "fold_changes",
+    (
+        {"smae": 4.0, "smae_raw": 6.0, "smae_clipped": True},
+        {"smae": 5.0, "smae_raw": 6.0, "smae_clipped": False},
+        {"srmse_raw": float("nan")},
+    ),
+)
+def test_consistency_rejects_inconsistent_fold_cap_raw_or_flag(
+    fold_changes: dict[str, object],
+) -> None:
+    base_fold = HindcastFold(
+        train_end=80,
+        validation_end=84,
+        status="success",
+        forecast=(1.0, 2.0, 3.0),
+        truth=(1.0, 2.0, 3.0),
+        smae=0.0,
+        srmse=0.0,
+        smae_raw=0.0,
+        srmse_raw=0.0,
+        smae_clipped=False,
+        srmse_clipped=False,
+    )
+    forged_fold = replace(base_fold, **fold_changes)
+    diagnostic = _diagnostic("candidate", folds=(forged_fold,) * 3)
+
+    result = _check(
+        _card(_assumption("forged", "seasonality", "candidate")),
+        _profile(),
+        {"candidate": diagnostic},
+        {"candidate": (1.0, 2.0, 3.0)},
+    )
+
+    assert result.rejected == {"forged": "invalid_fold_evidence"}
+
+
+def test_train_credit_reports_explicit_joint_scaled_improvement() -> None:
+    """Credit must expose the canonical joint diagnostic beside both formal metrics."""
+    card = _card(_assumption("guided", "seasonality", "candidate"))
+
+    trace = assign_tool_call_credit(
+        card,
+        split="train",
+        future_truth=(1.0, 1.0, 1.0),
+        forecasts_by_call_ids={
+            frozenset(): (2.0, 2.0, 2.0),
+            frozenset({"broad"}): (1.0, 2.0, 2.0),
+            frozenset({"broad", "recent"}): (1.0, 1.0, 1.0),
+        },
+    )
+
+    for credit in trace.credits:
+        assert credit.joint_improvement == pytest.approx(
+            (credit.smae_improvement + credit.srmse_improvement) / 2.0
+        )
+
+
+@pytest.mark.parametrize("field", ("median_smae", "worst_srmse_raw"))
+@pytest.mark.parametrize("value", (float("nan"), float("inf"), float("-inf")))
+def test_consistency_fails_closed_on_nonfinite_scaled_diagnostics(field: str, value: float) -> None:
+    result = _check(
+        _card(_assumption("bad-scaled", "seasonality", "candidate")),
+        _profile(),
+        {"candidate": _diagnostic("candidate", **{field: value})},
+        {"candidate": (1.0, 2.0, 3.0)},
+    )
+
+    assert result.rejected == {"bad-scaled": "invalid_diagnostics"}
+
+
+def test_consistency_rejects_missing_scaled_long_horizon_metrics() -> None:
+    audit = HindcastFold(
+        train_end=80,
+        validation_end=84,
+        status="success",
+        forecast=(1.0, 2.0, 3.0),
+        truth=(1.0, 2.0, 3.0),
+    )
+    result = _check(
+        _card(_assumption("bad-audit", "seasonality", "candidate")),
+        _profile(),
+        {"candidate": _diagnostic(
+            "candidate", long_horizon_coverage=1.0, long_horizon_fold=audit,
+        )},
+        {"candidate": (1.0, 2.0, 3.0)},
+        policy=DecisionPolicy(long_horizon_guard_enabled=True),
+    )
+
+    assert result.rejected == {"bad-audit": "invalid_long_horizon_audit"}
+
+
+@pytest.mark.parametrize(
+    ("assumption_id", "supporting_call_ids"),
+    [
+        ("broad_only", ("broad",)),
+        ("recent_only", ("recent",)),
+    ],
+)
+def test_consistency_requires_each_assumption_to_cite_broad_and_recent_windows(
+    assumption_id: str, supporting_call_ids: tuple[str, ...]
+) -> None:
+    assumption = replace(
+        _assumption(assumption_id, "seasonality", "candidate"),
+        supporting_call_ids=supporting_call_ids,
+    )
+
+    result = _check(
+        _card(assumption),
+        _profile(),
+        {"candidate": _diagnostic("candidate")},
+        {"candidate": (1.0, 2.0, 3.0)},
+    )
+
+    assert result.accepted == ()
+    assert result.rejected == {assumption_id: "insufficient_window_evidence"}
+
+
+def test_consistency_enforces_enabled_long_horizon_coverage_gate() -> None:
+    result = _check(
+        _card(_assumption("weekly_cycle", "seasonality", "candidate")),
+        _profile(),
+        {"candidate": _diagnostic("candidate", long_horizon_coverage=0.74)},
+        {"candidate": (1.0, 2.0, 3.0)},
+        policy=DecisionPolicy(
+            long_horizon_guard_enabled=True,
+            long_horizon_min_coverage=0.75,
+        ),
+    )
+
+    assert result.accepted == ()
+    assert result.rejected == {"weekly_cycle": "insufficient_long_horizon_coverage"}
+
+
+@pytest.mark.parametrize(
+    "audit",
+    [
+        object(),
+        SimpleNamespace(status="success", forecast=(1.0, 2.0, 3.0)),
+    ],
+)
+def test_consistency_rejects_hostile_long_horizon_audit_substitutes(audit: object) -> None:
+    result = _check(
+        _card(_assumption("weekly_cycle", "seasonality", "candidate")),
+        _profile(),
+        {
+            "candidate": _diagnostic(
+                "candidate",
+                long_horizon_coverage=0.75,
+                long_horizon_fold=audit,
+            )
+        },
+        {"candidate": (1.0, 2.0, 3.0)},
+        policy=DecisionPolicy(
+            long_horizon_guard_enabled=True,
+            long_horizon_min_coverage=0.75,
+        ),
+    )
+
+    assert result.accepted == ()
+    assert result.rejected == {"weekly_cycle": "invalid_long_horizon_audit"}
+
+
+@pytest.mark.parametrize(
+    ("fold_forecasts", "fold_truths"),
+    [
+        ((), ()),
+        (((1.0, 2.0, 3.0),) * 2, ((1.0, 2.0, 3.0),) * 3),
+    ],
+)
+def test_consistency_requires_fold_evidence_to_match_successful_fold_count(
+    fold_forecasts: tuple[tuple[float, ...], ...],
+    fold_truths: tuple[tuple[float, ...], ...],
+) -> None:
+    result = _check(
+        _card(_assumption("weekly_cycle", "seasonality", "candidate")),
+        _profile(),
+        {
+            "candidate": _diagnostic(
+                "candidate",
+                fold_forecasts=fold_forecasts,
+                fold_truths=fold_truths,
+                successful_folds=3,
+            )
+        },
+        {"candidate": (1.0, 2.0, 3.0)},
+    )
+
+    assert result.accepted == ()
+    assert result.rejected == {"weekly_cycle": "invalid_fold_evidence"}
+
+
+def test_consistency_rejects_final_forecast_with_wrong_profile_horizon() -> None:
+    result = _check(
+        _card(_assumption("weekly_cycle", "seasonality", "candidate")),
+        _profile(horizon=3),
+        {"candidate": _diagnostic("candidate")},
+        {"candidate": (1.0, 2.0)},
+    )
+
+    assert result.accepted == ()
+    assert result.rejected == {"weekly_cycle": "forecast_horizon_mismatch"}
+
+
+def test_consistency_fails_closed_on_nonfinite_diagnostics() -> None:
+    result = _check(
+        _card(_assumption("weekly_cycle", "seasonality", "candidate")),
+        _profile(),
+        {"candidate": _diagnostic("candidate", phase_error=float("nan"))},
+        {"candidate": (1.0, 2.0, 3.0)},
+    )
+
+    assert result.accepted == ()
+    assert result.rejected == {"weekly_cycle": "invalid_diagnostics"}
+
+
+def test_consistency_fails_closed_when_a_hostile_diagnostics_mapping_changes() -> None:
+    class _ChangingDiagnostics(dict[str, CandidateDiagnostics]):
+        calls = 0
+
+        def get(self, key: str, default: object = None):  # type: ignore[override]
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("changed after validation")
+            return super().get(key, default)
+
+    result = _check(
+        _card(_assumption("weekly_cycle", "seasonality", "candidate")),
+        _profile(),
+        _ChangingDiagnostics({"candidate": _diagnostic("candidate")}),
+        {"candidate": (1.0, 2.0, 3.0)},
+    )
+
+    assert result.accepted == ()
+    assert result.rejected == {"weekly_cycle": "invalid_diagnostics"}
+
+
+def test_consistency_fails_closed_when_a_hostile_forecast_mapping_changes() -> None:
+    class _ChangingForecasts(dict[str, tuple[float, ...]]):
+        calls = 0
+
+        def get(self, key: str, default: object = None):  # type: ignore[override]
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("changed after validation")
+            return super().get(key, default)
+
+    result = _check(
+        _card(_assumption("weekly_cycle", "seasonality", "candidate")),
+        _profile(),
+        {"candidate": _diagnostic("candidate")},
+        _ChangingForecasts({"candidate": (1.0, 2.0, 3.0)}),
+    )
+
+    assert result.accepted == ()
+    assert result.rejected == {"weekly_cycle": "invalid_forecasts"}
+
+
+def test_consistency_retains_only_diverse_top_k_assumptions() -> None:
+    first = _assumption("weekly_cycle", "seasonality", "seasonal_a", confidence=0.9)
+    second = _assumption("weekly_cycle_alt", "seasonality", "seasonal_b", confidence=0.8)
+    level = _assumption("stable_level", "level", "level_model", confidence=0.7)
+    diagnostics = {
+        "seasonal_a": _diagnostic("seasonal_a"),
+        "seasonal_b": _diagnostic("seasonal_b", median_mase=0.5),
+        "level_model": _diagnostic("level_model", median_mase=0.6),
+    }
+
+    result = _check(
+        _card(first, second, level),
+        _profile(),
+        diagnostics,
+        {name: (1.0, 2.0, 3.0) for name in diagnostics},
+        policy=DecisionPolicy(assumption_top_k=3),
+    )
+
+    assert tuple(item.assumption_id for item in result.accepted) == ("weekly_cycle", "stable_level")
+    assert result.rejected["weekly_cycle_alt"] == "diversity_rejected"
+
+
+def test_consistency_ranks_assumptions_by_scaled_metrics_not_legacy_mase() -> None:
+    """Legacy MASE must not steer which grounded assumption survives Top-k."""
+    legacy_favorite = _assumption("legacy_favorite", "seasonality", "legacy")
+    scaled_favorite = _assumption("scaled_favorite", "seasonality", "scaled")
+    fold_forecasts = ((1.0, 2.0, 3.0),) * 3
+    fold_truths = ((1.0, 2.0, 3.0),) * 3
+    diagnostics = {
+        "legacy": CandidateDiagnostics.synthetic(
+            name="legacy",
+            family="statistical",
+            median_mase=0.1,
+            fold_forecasts=fold_forecasts,
+            fold_truths=fold_truths,
+            median_smae=1.5,
+            recent_smae=1.5,
+            worst_smae=1.5,
+            median_srmse=1.5,
+            recent_srmse=1.5,
+            worst_srmse=1.5,
+        ),
+        "scaled": CandidateDiagnostics.synthetic(
+            name="scaled",
+            family="statistical",
+            median_mase=9.0,
+            fold_forecasts=fold_forecasts,
+            fold_truths=fold_truths,
+            median_smae=0.5,
+            recent_smae=0.5,
+            worst_smae=0.5,
+            median_srmse=0.5,
+            recent_srmse=0.5,
+            worst_srmse=0.5,
+        ),
+    }
+
+    result = _check(
+        _card(legacy_favorite, scaled_favorite),
+        _profile(),
+        diagnostics,
+        {name: (1.0, 2.0, 3.0) for name in diagnostics},
+        policy=DecisionPolicy(assumption_top_k=1),
+    )
+
+    assert tuple(item.assumption_id for item in result.accepted) == ("scaled_favorite",)

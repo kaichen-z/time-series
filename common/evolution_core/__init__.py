@@ -13,7 +13,7 @@ from .contracts import (
     MutationContext,
     Mutator,
 )
-from .acceptance import MetricAcceptanceGate
+from .acceptance import MetricAcceptanceGate, ScaledPairAcceptanceGate
 from .persistence import JsonArtifactStore
 from .controller import EvolutionOutcome, EvolutionStep, SelfEvolutionEngine
 
@@ -30,6 +30,7 @@ __all__ = [
     "MutationContext",
     "Mutator",
     "MetricAcceptanceGate",
+    "ScaledPairAcceptanceGate",
     "JsonArtifactStore",
     "EvolutionOutcome",
     "EvolutionStep",

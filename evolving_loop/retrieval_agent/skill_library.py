@@ -1590,6 +1590,42 @@ def _build_skill_authority_boundary():
             )
         )
 
+    def train_shadow_skill_ids(library: object) -> tuple[str, ...]:
+        authorized = train_shadow_projections.get(library)
+        if authorized is None:
+            return ()
+        available_candidates = {
+            history[-1].skill_id
+            for history in library._skills.values()
+            if history[-1].status == "candidate"
+        }
+        return tuple(sorted(authorized.intersection(available_candidates)))
+
+    def inherit_train_shadow_projection(
+        source: object,
+        target_library: object,
+    ) -> None:
+        requested = train_shadow_projections.get(source)
+        if requested is None:
+            return
+        allowed = {
+            skill.skill_id
+            for skill in target_library.all()
+            if skill.status in {"candidate", "accepted", "specialized"}
+        }
+        if not requested.issubset(allowed):
+            raise RetrievalSkillError(
+                "detached snapshot lost a trusted Train-shadow Skill"
+            )
+        candidates = {
+            skill.skill_id
+            for skill in target_library.all()
+            if skill.status == "candidate"
+        }
+        train_shadow_projections[target_library] = requested.intersection(
+            candidates
+        )
+
     def inherit_library(source: object, target_library: object) -> None:
         train_shadow = train_shadow_projections.get(source)
         if train_shadow is not None:
@@ -1629,6 +1665,8 @@ def _build_skill_authority_boundary():
         activate_evolution_snapshot,
         require_evolution_snapshot,
         authorize_train_shadow_projection,
+        inherit_train_shadow_projection,
+        train_shadow_skill_ids,
         train_shadow_skills,
     )
 
@@ -1647,6 +1685,8 @@ def _build_skill_authority_boundary():
     _activate_evolution_snapshot_library,
     _require_evolution_snapshot_library,
     _authorize_train_shadow_projection,
+    _inherit_train_shadow_projection,
+    _trusted_train_shadow_skill_ids,
     _trusted_train_shadow_skills,
 ) = _build_skill_authority_boundary()
 del _build_skill_authority_boundary
@@ -3018,6 +3058,35 @@ class RetrievalSkillLibrary:
         }
         _inherit_active_library_authority(self, clone)
         return clone
+
+    def frozen_execution_snapshot(self) -> "RetrievalSkillLibrary":
+        """Deep-copy all Skill history into detached, read-only runtime authority."""
+        if type(self) is not RetrievalSkillLibrary:
+            raise RetrievalSkillError(
+                "execution snapshots require a canonical Retrieval Skill library"
+            )
+        _require_active_library_authority(self)
+        records = self._all_from(self._skills)
+        if any(type(skill) is not RetrievalSkill for skill in records):
+            raise RetrievalSkillError(
+                "execution snapshots require canonical Retrieval Skill records"
+            )
+        copied = tuple(
+            RetrievalSkill._from_storage_payload(
+                RetrievalSkill.to_payload(skill)
+            )
+            for skill in records
+        )
+        origins = dict(self._active_record_origins)
+        snapshot = RetrievalSkillLibrary(self.path, persist=False)
+        proposed = snapshot._validated_index(
+            copied,
+            active_record_hashes=origins,
+        )
+        _commit_evaluator_records(snapshot, proposed, origins)
+        _inherit_train_shadow_projection(self, snapshot)
+        snapshot._read_only = True
+        return snapshot
 
     def replay_snapshot(
         self,

@@ -8,15 +8,25 @@ import pytest
 
 import numerical_agent.run_task_conditioned_screening as screening_script
 from numerical_agent.run_task_conditioned_screening import (
+    SCALED_METRIC_POLICY,
+    _manifest_fingerprint,
     _merge_cache_summaries,
+    _paired_screening_counts,
     _report,
     _training_outcomes,
     _train_constraints_met,
     _write_policy_artifacts,
+    _write_active,
     build_parser,
     load_frozen_partitions,
     main,
 )
+from common.evolution_core.contracts import (
+    METRIC_POLICY,
+    metric_policy_metadata,
+    require_active_metric_policy,
+)
+from common.payload import strict_json_loads, write_json
 from numerical_agent.evolution.execution import Task
 from numerical_agent.evolution.filtering import build_filter_dictionary, render_filter_source
 from numerical_agent.evolution.module import MODULE_HEADER, parse_module, write_module
@@ -99,6 +109,15 @@ def _run_until_screening_validation(
         render_filter_source(build_filter_dictionary(module, portfolio)),
         encoding="utf-8",
     )
+    write_json(repo / "seed_manifest.json", {
+        "schema_version": 2,
+        **metric_policy_metadata(),
+        "seed_kind": "complete_master_dictionary",
+        "source_hashes": {
+            "methods.py": screening_script._sha256(repo / "methods.py"),
+            "policies.py": screening_script._sha256(repo / "policies.py"),
+        },
+    })
     task = Task("screening", (1.0, 2.0), 1, "D", (3.0,))
     monkeypatch.setattr(screening_script, "load_frozen_partitions", lambda *args, **kwargs: ((task,), (task,)))
     if dictionary is not None:
@@ -257,7 +276,7 @@ def test_screening_cli_has_train_dev_but_no_public_test_option():
     ])
     assert args.train_limit == 80
     assert args.dev_limit == 20
-    assert args.seed_policy == "all"
+    assert args.seed_manifest is None
     assert args.baseline_method == "toto_2_0"
     assert args.screen_min_candidates == 12
     assert args.screen_max_candidates is None
@@ -272,6 +291,13 @@ def test_screening_cli_has_train_dev_but_no_public_test_option():
             "--outcome-cache-dir", "cache", "--policy-outcome-cache-dir", "cache2",
             "--output-dir", "out", "--target-batches-file", "batch",
             "--public-test-limit", "99",
+        ])
+    with pytest.raises(SystemExit):
+        parser.parse_args([
+            "--repo", "repo", "--tasks-file", "tasks",
+            "--outcome-cache-dir", "cache", "--policy-outcome-cache-dir", "cache2",
+            "--output-dir", "out", "--target-batches-file", "batch",
+            "--seed-policy", "legacy",
         ])
 
 
@@ -391,8 +417,30 @@ def test_report_exposes_task_conditioning_and_family_coverage():
         "active_success_rate": 0.8,
         "failure_exposure": 0.1,
         "not_applicable_exposure": 0.1,
+        "mean_active_smae": 0.8,
+        "mean_active_srmse": 0.9,
+        "mean_smae": 0.8,
+        "median_smae": 0.7,
+        "se_smae": 0.01,
+        "mean_srmse": 0.9,
+        "median_srmse": 0.8,
+        "se_srmse": 0.02,
+        "p90_smae_raw": 6.0,
+        "p95_smae_raw": 7.0,
+        "p90_srmse_raw": 8.0,
+        "p95_srmse_raw": 9.0,
+        "smae_clipped_count": 1,
+        "smae_clipped_rate": 0.1,
+        "srmse_clipped_count": 2,
+        "srmse_clipped_rate": 0.2,
         "global_oracle_retention": 1.0,
         "mean_active_oracle_regret": 0.0,
+        "mean_active_oracle_smae_regret": 0.0,
+        "mean_active_oracle_srmse_regret": 0.0,
+        "active_crashed": 1,
+        "active_invalid": 2,
+        "active_missing": 3,
+        "active_malformed_success": 4,
         "compression": 0.4,
         "mean_active_candidates": 32.5,
         "min_active_candidates": 24,
@@ -418,14 +466,74 @@ def test_report_exposes_task_conditioning_and_family_coverage():
         "final_dev_gate": {"accepted": True, "reason": "safe on held-out Dev"},
         "train": score,
         "dev": score,
+        "paired_joint_wtl": {
+            "train": {"wins": 1, "ties": 2, "losses": 3, "missing": 4, "unscored": 5},
+            "dev": {"wins": 5, "ties": 4, "losses": 3, "missing": 2, "unscored": 1},
+        },
     })
 
     assert "Unique dictionaries" in report
     assert "Pairwise Jaccard" in report
     assert "Statistical / TSFM / Combined" in report
     assert "9 / 2 / 3" in report
+    assert "Crash / invalid / missing / malformed" in report
+    assert "1 / 2 / 3 / 4" in report
     assert "Dev evaluations: 1" in report
     assert "safe on held-out Dev" in report
+    assert "Mean active sMAE" in report
+    assert "Mean active sRMSE" in report
+    assert "Median sMAE" in report
+    assert "sMAE SE" in report
+    assert "Raw P90/P95 sMAE" in report
+    assert "Clipped sMAE/sRMSE" in report
+    assert "Wins / Ties / Losses / Missing / Unscored" in report
+
+
+def test_screening_paired_counts_conserve_both_missing_tasks() -> None:
+    parent = SimpleNamespace(task_count=4, task_scaled_pairs={"same": (1.0, 1.0), "left": (1.0, 1.0)})
+    child = SimpleNamespace(task_count=4, task_scaled_pairs={"same": (1.0, 1.0), "right": (1.0, 1.0)})
+
+    counts = _paired_screening_counts(parent, child)
+
+    assert counts == {"wins": 0, "ties": 1, "losses": 0, "missing": 2, "unscored": 1}
+    assert sum(counts.values()) == 4
+
+
+def test_materialized_active_dictionary_rows_are_schema_v2_policy_bound(tmp_path) -> None:
+    policy = ScreeningPolicy(
+        entries=(ScreeningEntry(
+            "fallback", "statistical", "keep", ApplicabilityPolicy(), "safe fallback"
+        ),),
+        fallback_names=("fallback",),
+    )
+    target = tmp_path / "active.jsonl"
+
+    _write_active(
+        target,
+        policy,
+        (Task("task", (1.0, 2.0), 1, "D", (3.0,)),),
+    )
+
+    payload = strict_json_loads(target.read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+    assert payload["schema_version"] == 2
+    require_active_metric_policy(payload)
+
+
+def test_screening_manifest_hash_binds_scaled_metric_objective():
+    manifest = {"schema_version": 2, "metric_policy": SCALED_METRIC_POLICY}
+
+    assert SCALED_METRIC_POLICY == METRIC_POLICY
+
+    assert _manifest_fingerprint(manifest) != _manifest_fingerprint(
+        {
+            **manifest,
+            "metric_policy": {
+                **SCALED_METRIC_POLICY,
+                "objective": "legacy_mase",
+            },
+        }
+    )
 
 
 def test_rejected_candidate_is_not_published_as_frozen(tmp_path):

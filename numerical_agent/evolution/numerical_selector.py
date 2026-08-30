@@ -9,7 +9,9 @@ import statistics
 from dataclasses import asdict, dataclass, replace
 from typing import Callable, Mapping, Sequence
 
-from common.metrics import drcik_point_metrics, mae, mase, smape
+from common.metrics import (
+    drcik_point_metrics, joint_scaled_error, pareto_scaled_improvement, mae, mase, smape,
+)
 
 from .execution import Task
 
@@ -19,20 +21,102 @@ CandidateRunner = Callable[
 ]
 
 
+_CANONICAL_JOINT_RANKING_FIELDS = frozenset(
+    {
+        "median_joint_scaled_error",
+        "recent_joint_scaled_error",
+        "worst_joint_scaled_error",
+    }
+)
+_CANONICAL_PAIRED_TIE_BREAKERS = ("median_smae", "median_srmse")
+_CANONICAL_RANKING_SAFETY_FIELDS = frozenset({"normalized_bias", "slope_error"})
+_REQUIRED_DUAL_METRIC_RANKING_FIELDS = (
+    _CANONICAL_JOINT_RANKING_FIELDS
+    | frozenset(_CANONICAL_PAIRED_TIE_BREAKERS)
+)
+
+
+def _normalize_legacy_decision_ranking(ranking: Sequence[object]) -> tuple[str, ...]:
+    """Project an explicit legacy reader onto the complete paired contract."""
+    joint_aliases = {
+        "median_mase": "median_joint_scaled_error",
+        "recent_mase": "recent_joint_scaled_error",
+        "worst_mase": "worst_joint_scaled_error",
+    }
+    values = tuple(joint_aliases.get(str(value), str(value)) for value in ranking)
+    joint = tuple(
+        dict.fromkeys(
+            value for value in values if value in _CANONICAL_JOINT_RANKING_FIELDS
+        )
+    )
+    joint = joint + tuple(
+        value
+        for value in (
+            "median_joint_scaled_error",
+            "recent_joint_scaled_error",
+            "worst_joint_scaled_error",
+        )
+        if value not in joint
+    )
+    safety = tuple(
+        dict.fromkeys(
+            value for value in values if value in _CANONICAL_RANKING_SAFETY_FIELDS
+        )
+    ) or ("normalized_bias",)
+    return (*joint, *_CANONICAL_PAIRED_TIE_BREAKERS, *safety)
+
+
 @dataclass(frozen=True)
 class HindcastConfig:
     folds: int = 3
     min_successful_folds: int = 2
-    catastrophic_mase: float = 10.0
+    catastrophic_smae_raw: float = 10.0
+    catastrophic_srmse_raw: float = 10.0
     long_horizon_audit: bool = False
+
+    @classmethod
+    def from_payload(
+        cls, payload: Mapping[str, object], *, allow_legacy: bool = False
+    ) -> "HindcastConfig":
+        """Parse an active config, or explicitly consume a report-only legacy row."""
+        raw = dict(payload)
+        if "catastrophic_mase" in raw:
+            if not allow_legacy:
+                raise ValueError(
+                    "legacy catastrophic_mase requires allow_legacy=True report-only parsing"
+                )
+            raw.pop("catastrophic_mase")
+        defaults = asdict(cls())
+        if allow_legacy:
+            raw = {**defaults, **raw}
+        missing = set(defaults) - set(raw)
+        unknown = set(raw) - set(defaults)
+        if missing or unknown:
+            raise ValueError(
+                "invalid HindcastConfig fields: "
+                f"missing={sorted(missing)}, unknown={sorted(unknown)}"
+            )
+        if type(raw["folds"]) is not int or type(raw["min_successful_folds"]) is not int:
+            raise ValueError("HindcastConfig fold counts must be exact integers")
+        if type(raw["long_horizon_audit"]) is not bool:
+            raise ValueError("long_horizon_audit must be a boolean")
+        for field in ("catastrophic_smae_raw", "catastrophic_srmse_raw"):
+            if isinstance(raw[field], bool) or not isinstance(raw[field], (int, float)):
+                raise ValueError(f"{field} must be numeric")
+        return cls(**raw)  # type: ignore[arg-type]
 
     def __post_init__(self) -> None:
         if self.folds < 1:
             raise ValueError("folds must be positive")
         if not 1 <= self.min_successful_folds <= self.folds:
             raise ValueError("min_successful_folds must be within folds")
-        if self.catastrophic_mase <= 0:
-            raise ValueError("catastrophic_mase must be positive")
+        if (
+            not math.isfinite(self.catastrophic_smae_raw)
+            or not math.isfinite(self.catastrophic_srmse_raw)
+            or self.catastrophic_smae_raw <= 0
+            or self.catastrophic_srmse_raw <= 0
+        ):
+            raise ValueError("raw scaled catastrophe thresholds must be positive")
 
 
 @dataclass(frozen=True)
@@ -51,6 +135,12 @@ class HindcastFold:
     phase_error: float | None = None
     amplitude_ratio: float | None = None
     mase_scale: float | None = None
+    smae: float | None = None
+    srmse: float | None = None
+    smae_raw: float | None = None
+    srmse_raw: float | None = None
+    smae_clipped: bool | None = None
+    srmse_clipped: bool | None = None
     detail: str = ""
 
 
@@ -79,6 +169,19 @@ class CandidateDiagnostics:
     cache_key: str = ""
     long_horizon_fold: HindcastFold | None = None
     long_horizon_coverage: float = 0.0
+    median_joint_scaled_error: float = math.inf
+    recent_joint_scaled_error: float = math.inf
+    worst_joint_scaled_error: float = math.inf
+    median_smae: float = math.inf
+    recent_smae: float = math.inf
+    worst_smae: float = math.inf
+    smae_mad: float = math.inf
+    median_srmse: float = math.inf
+    recent_srmse: float = math.inf
+    worst_srmse: float = math.inf
+    srmse_mad: float = math.inf
+    worst_smae_raw: float = math.inf
+    worst_srmse_raw: float = math.inf
 
     @classmethod
     def synthetic(
@@ -93,10 +196,39 @@ class CandidateDiagnostics:
         eligible: bool = True,
         fold_forecasts: Sequence[Sequence[float]] = (),
         fold_truths: Sequence[Sequence[float]] = (),
+        median_smae: float | None = None,
+        recent_smae: float | None = None,
+        worst_smae: float | None = None,
+        smae_mad: float = 0.0,
+        median_srmse: float | None = None,
+        recent_srmse: float | None = None,
+        worst_srmse: float | None = None,
+        srmse_mad: float = 0.0,
+        worst_smae_raw: float | None = None,
+        worst_srmse_raw: float | None = None,
     ) -> "CandidateDiagnostics":
         forecasts = tuple(tuple(map(float, fold)) for fold in fold_forecasts)
         truths = tuple(tuple(map(float, fold)) for fold in fold_truths)
         count = min(len(forecasts), len(truths)) or (3 if eligible else 0)
+        def legacy_scaled(value: float) -> float:
+            return min(5.0, max(0.0, float(value))) if math.isfinite(float(value)) else 5.0
+
+        legacy_recent = float(median_mase if recent_mase is None else recent_mase)
+        legacy_worst = float(median_mase if worst_mase is None else worst_mase)
+        legacy_median = float(median_mase)
+        uses_scaled_inputs = any(
+            value is not None
+            for value in (
+                median_smae, recent_smae, worst_smae,
+                median_srmse, recent_srmse, worst_srmse,
+            )
+        )
+        scaled_smae = float(legacy_scaled(legacy_median) if median_smae is None else median_smae)
+        scaled_srmse = float(legacy_scaled(legacy_median) if median_srmse is None else median_srmse)
+        scaled_recent_smae = float(legacy_scaled(legacy_recent) if recent_smae is None else recent_smae)
+        scaled_recent_srmse = float(legacy_scaled(legacy_recent) if recent_srmse is None else recent_srmse)
+        scaled_worst_smae = float(legacy_scaled(legacy_worst) if worst_smae is None else worst_smae)
+        scaled_worst_srmse = float(legacy_scaled(legacy_worst) if worst_srmse is None else worst_srmse)
         return cls(
             name=name,
             family=family,
@@ -105,8 +237,8 @@ class CandidateDiagnostics:
             eligible=eligible,
             reason_code="ok" if eligible else "insufficient_successful_folds",
             median_mase=float(median_mase),
-            recent_mase=float(median_mase if recent_mase is None else recent_mase),
-            worst_mase=float(median_mase if worst_mase is None else worst_mase),
+            recent_mase=legacy_recent,
+            worst_mase=legacy_worst,
             mase_mad=float(mase_mad),
             median_mae=float(median_mase),
             median_smape=float(median_mase),
@@ -118,13 +250,41 @@ class CandidateDiagnostics:
             explosion=False,
             fold_forecasts=forecasts,
             fold_truths=truths,
+            median_joint_scaled_error=joint_scaled_error(scaled_smae, scaled_srmse),
+            recent_joint_scaled_error=joint_scaled_error(
+                scaled_recent_smae, scaled_recent_srmse
+            ),
+            worst_joint_scaled_error=joint_scaled_error(
+                scaled_worst_smae, scaled_worst_srmse
+            ),
+            median_smae=scaled_smae,
+            recent_smae=scaled_recent_smae,
+            worst_smae=scaled_worst_smae,
+            smae_mad=float(smae_mad),
+            median_srmse=scaled_srmse,
+            recent_srmse=scaled_recent_srmse,
+            worst_srmse=scaled_worst_srmse,
+            srmse_mad=float(srmse_mad),
+            worst_smae_raw=float(
+                legacy_worst if worst_smae_raw is None and not uses_scaled_inputs else (
+                    scaled_worst_smae if worst_smae_raw is None else worst_smae_raw
+                )
+            ),
+            worst_srmse_raw=float(
+                legacy_worst if worst_srmse_raw is None and not uses_scaled_inputs else (
+                    scaled_worst_srmse if worst_srmse_raw is None else worst_srmse_raw
+                )
+            ),
         )
 
 
 @dataclass(frozen=True)
 class DecisionPolicy:
     min_successful_folds: int = 3
-    catastrophic_mase: float = 10.0
+    catastrophic_smae_raw: float = 10.0
+    catastrophic_srmse_raw: float = 10.0
+    max_smae_fold_regret: float = 0.02
+    max_srmse_fold_regret: float = 0.02
     baseline_strategy: str = "toto_first"
     tsfm_router_min_improvement: float = 0.02
     tsfm_router_blend_weight: float = 0.0
@@ -133,10 +293,11 @@ class DecisionPolicy:
     assumption_candidates_per_hypothesis: int = 2
     assumption_min_confidence: float = 0.25
     ranking_order: tuple[str, ...] = (
-        "median_mase",
-        "recent_mase",
-        "worst_mase",
-        "mase_mad",
+        "median_joint_scaled_error",
+        "recent_joint_scaled_error",
+        "worst_joint_scaled_error",
+        "median_smae",
+        "median_srmse",
         "normalized_bias",
     )
     recent_regime_first: bool = True
@@ -159,15 +320,93 @@ class DecisionPolicy:
     long_horizon_max_regret: float = 0.0
     fallback_to_best_available: bool = True
 
-    def __post_init__(self) -> None:
-        allowed = {
-            "median_mase", "recent_mase", "worst_mase", "mase_mad",
-            "normalized_bias", "median_rmsse", "slope_error",
+    @classmethod
+    def from_payload(
+        cls, payload: Mapping[str, object], *, allow_legacy: bool = False
+    ) -> "DecisionPolicy":
+        """Parse active scaled policies; legacy MASE migration is opt-in only."""
+        raw = dict(payload)
+        legacy_keys = {
+            "catastrophic_mase", "median_mase", "recent_mase", "worst_mase",
+            "mase_mad", "median_rmsse", "median_smape",
         }
-        if not self.ranking_order or not set(self.ranking_order) <= allowed:
-            raise ValueError("ranking_order contains unsupported fields")
+        present_legacy = legacy_keys & set(raw)
+        if present_legacy and not allow_legacy:
+            raise ValueError("legacy MASE policy fields require allow_legacy=True")
+        if allow_legacy:
+            for field in legacy_keys:
+                raw.pop(field, None)
+        if "ranking_order" in raw:
+            ranking = raw["ranking_order"]
+            if isinstance(ranking, (str, bytes)):
+                raise ValueError("ranking_order must be a sequence")
+            ranking = tuple(ranking)  # type: ignore[arg-type]
+            if allow_legacy and "median_smape" in {str(field) for field in ranking}:
+                raise ValueError(
+                    "legacy median_smape cannot be migrated into the scaled metric policy"
+                )
+            legacy_ranking = {
+                "median_mase", "recent_mase", "worst_mase", "mase_mad",
+                "median_rmsse", "median_smape",
+            }
+            if any(str(field) in legacy_ranking for field in ranking) and not allow_legacy:
+                raise ValueError("legacy MASE policy fields require allow_legacy=True")
+            if allow_legacy:
+                ranking = _normalize_legacy_decision_ranking(ranking)
+            raw["ranking_order"] = ranking
+        defaults = asdict(cls())
+        if allow_legacy:
+            raw = {**defaults, **raw}
+        allowed = set(defaults)
+        missing = allowed - set(raw)
+        unknown = set(raw) - allowed
+        if missing or unknown:
+            raise ValueError(
+                "invalid DecisionPolicy fields: "
+                f"missing={sorted(missing)}, unsupported={sorted(unknown)}"
+            )
+        return cls(**raw)  # type: ignore[arg-type]
+
+    def __post_init__(self) -> None:
+        normalized_order = tuple(self.ranking_order)
+        allowed = (
+            _REQUIRED_DUAL_METRIC_RANKING_FIELDS
+            | _CANONICAL_RANKING_SAFETY_FIELDS
+        )
+        if (
+            len(normalized_order) != len(set(normalized_order))
+            or not set(normalized_order) <= allowed
+        ):
+            raise ValueError(
+                "ranking_order contains unsupported fields or lacks the complete canonical "
+                "joint fields followed by paired sMAE and sRMSE tie-breakers"
+            )
+        canonical_prefix = normalized_order[:5]
+        if (
+            set(canonical_prefix[:3]) != _CANONICAL_JOINT_RANKING_FIELDS
+            or canonical_prefix[3:] != _CANONICAL_PAIRED_TIE_BREAKERS
+        ):
+            raise ValueError(
+                "ranking_order must contain the complete canonical joint fields followed "
+                "by paired sMAE and sRMSE tie-breakers"
+            )
         if self.min_successful_folds < 1:
             raise ValueError("min_successful_folds must be positive")
+        safety_values = (
+            self.catastrophic_smae_raw,
+            self.catastrophic_srmse_raw,
+            self.max_smae_fold_regret,
+            self.max_srmse_fold_regret,
+        )
+        if (
+            not all(math.isfinite(value) for value in safety_values)
+            or self.catastrophic_smae_raw <= 0
+            or self.catastrophic_srmse_raw <= 0
+            or self.max_smae_fold_regret < 0
+            or self.max_srmse_fold_regret < 0
+        ):
+            raise ValueError("scaled safety thresholds must be nonnegative")
+
         if self.baseline_strategy not in {
             "toto_first",
             "minimax_tsfm",
@@ -253,6 +492,114 @@ class DecisionPolicy:
         if not 0.0 <= self.long_horizon_max_regret <= 1.0:
             raise ValueError("long-horizon maximum regret must be within [0, 1]")
 
+    @property
+    def decision_metrics(self) -> tuple[str, str]:
+        """Derive the active metric pair from a validated complete ranking policy."""
+        normalized_order = tuple(self.ranking_order)
+        if not _REQUIRED_DUAL_METRIC_RANKING_FIELDS <= set(normalized_order):
+            raise ValueError(
+                "ranking_order must contain the complete joint, sMAE, and sRMSE contract"
+            )
+        metrics = tuple(
+            metric
+            for metric in ("smae", "srmse")
+            if f"median_{metric}" in normalized_order
+        )
+        if metrics != ("smae", "srmse"):
+            raise ValueError("DecisionPolicy does not bind the canonical metric pair")
+        return metrics
+
+
+@dataclass(frozen=True)
+class SelectionArithmetic:
+    """Immutable, selector-owned recipe for replaying a materialized decision."""
+
+    operation: str
+    candidate_name: str | None = None
+    inputs: tuple["SelectionArithmetic", ...] = ()
+    weights: tuple[float, ...] = ()
+    strength: float | None = None
+    clip_multiplier: float | None = None
+    scale: float | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.operation, str):
+            raise ValueError("selection arithmetic operation must be a string")
+        inputs = tuple(self.inputs)
+        raw_weights = tuple(self.weights)
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in raw_weights
+        ):
+            raise ValueError("selection arithmetic weights must be numerical")
+        weights = tuple(float(value) for value in raw_weights)
+        object.__setattr__(self, "inputs", inputs)
+        object.__setattr__(self, "weights", weights)
+        if self.operation == "leaf":
+            if not isinstance(self.candidate_name, str) or not self.candidate_name:
+                raise ValueError("selection arithmetic leaf requires a candidate")
+            if inputs or weights or any(
+                value is not None
+                for value in (self.strength, self.clip_multiplier, self.scale)
+            ):
+                raise ValueError("selection arithmetic leaf has unexpected fields")
+            return
+        if self.candidate_name is not None or len(inputs) < 2:
+            raise ValueError("selection arithmetic operation requires two or more inputs")
+        if any(not isinstance(item, SelectionArithmetic) for item in inputs):
+            raise ValueError("selection arithmetic inputs must be immutable recipes")
+        if self.operation in {"blend", "weighted"}:
+            if (
+                len(weights) != len(inputs)
+                or (self.operation == "blend" and len(inputs) != 2)
+                or any(not math.isfinite(value) or value < 0.0 for value in weights)
+                or math.fsum(weights) != 1.0
+            ):
+                raise ValueError(
+                    f"{self.operation} arithmetic requires normalized finite weights"
+                )
+            if any(
+                value is not None
+                for value in (self.strength, self.clip_multiplier, self.scale)
+            ):
+                raise ValueError(
+                    f"{self.operation} arithmetic has unexpected residual fields"
+                )
+            return
+        if self.operation in {"fmean", "median"}:
+            if weights or any(
+                value is not None
+                for value in (self.strength, self.clip_multiplier, self.scale)
+            ):
+                raise ValueError(f"{self.operation} arithmetic has unexpected fields")
+            return
+        if self.operation == "residual":
+            if len(inputs) != 2 or weights:
+                raise ValueError("residual arithmetic requires exactly two inputs")
+            parameters = (self.strength, self.clip_multiplier, self.scale)
+            if any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                for value in parameters
+            ):
+                raise ValueError("residual arithmetic requires finite parameters")
+            assert self.strength is not None
+            assert self.clip_multiplier is not None
+            assert self.scale is not None
+            strength = float(self.strength)
+            clip_multiplier = float(self.clip_multiplier)
+            scale = float(self.scale)
+            if not 0.0 < strength <= 0.5:
+                raise ValueError("residual strength must be within (0, 0.5]")
+            if clip_multiplier <= 0.0 or scale <= 0.0:
+                raise ValueError("residual clip and scale must be positive")
+            object.__setattr__(self, "strength", strength)
+            object.__setattr__(self, "clip_multiplier", clip_multiplier)
+            object.__setattr__(self, "scale", scale)
+            return
+        raise ValueError("unsupported selection arithmetic operation")
+
 
 @dataclass(frozen=True)
 class SelectionDecision:
@@ -268,6 +615,152 @@ class SelectionDecision:
     assumption_ids: tuple[str, ...] = ()
     assumption_kinds: tuple[str, ...] = ()
     considered_candidates: tuple[str, ...] = ()
+    arithmetic: SelectionArithmetic | None = None
+
+
+_WEIGHTED_SELECTION_TYPES = frozenset(
+    {
+        "protected_tsfm_weighted_portfolio",
+        "tsfm_weighted_portfolio",
+    }
+)
+_BLEND_SELECTION_TYPES = frozenset(
+    {
+        "joint_tsfm_statistical_portfolio",
+        "statistical_shrinkage_overlay",
+        "tsfm_shrinkage_overlay",
+        "weighted_blend",
+    }
+)
+_MEDIAN_SELECTION_TYPES = frozenset(
+    {"protected_tsfm_median_portfolio", "tsfm_median_portfolio"}
+)
+_RESIDUAL_SELECTION_TYPES = frozenset(
+    {
+        "protected_joint_tsfm_statistical_residual",
+        "protected_statistical_residual",
+        "residual_correction",
+    }
+)
+
+
+def replay_selection_forecast(
+    decision: SelectionDecision,
+    forecasts: Mapping[str, Sequence[float]],
+) -> tuple[float, ...]:
+    """Replay a selector decision using only its trusted arithmetic and leaves."""
+    if not isinstance(decision, SelectionDecision):
+        raise ValueError("selection arithmetic replay requires a decision")
+    arithmetic = decision.arithmetic or _implicit_selection_arithmetic(decision)
+    expected_operation = _expected_arithmetic_operation(decision)
+    if arithmetic.operation != expected_operation:
+        raise ValueError("selection mode does not match its arithmetic replay")
+    if _arithmetic_leaf_names(arithmetic) != tuple(decision.selected):
+        raise ValueError("selection names do not match its arithmetic replay")
+    if _arithmetic_attribution_weights(arithmetic) != tuple(decision.weights):
+        raise ValueError("selection weights do not match its arithmetic replay")
+    return _replay_arithmetic(arithmetic, forecasts)
+
+
+def _implicit_selection_arithmetic(
+    decision: SelectionDecision,
+) -> SelectionArithmetic:
+    leaves = tuple(
+        SelectionArithmetic("leaf", candidate_name=name)
+        for name in decision.selected
+    )
+    operation = _expected_arithmetic_operation(decision)
+    if operation == "leaf":
+        return leaves[0]
+    if operation == "residual":
+        raise ValueError("residual selection requires trusted arithmetic replay")
+    if operation in {"blend", "weighted"}:
+        return SelectionArithmetic(operation, inputs=leaves, weights=decision.weights)
+    return SelectionArithmetic(operation, inputs=leaves)
+
+
+def _expected_arithmetic_operation(decision: SelectionDecision) -> str:
+    if decision.mode == "single" and decision.combination_type is None:
+        return "leaf"
+    if decision.mode == "ensemble" and decision.combination_type is None:
+        if len(set(decision.weights)) == 1:
+            return "fmean"
+        return "weighted"
+    if decision.mode == "combined":
+        if decision.combination_type in _BLEND_SELECTION_TYPES:
+            return "blend"
+        if decision.combination_type in _WEIGHTED_SELECTION_TYPES:
+            return "weighted"
+        if decision.combination_type in _MEDIAN_SELECTION_TYPES:
+            return "median"
+        if decision.combination_type in _RESIDUAL_SELECTION_TYPES:
+            return "residual"
+    raise ValueError("selection mode lacks a supported arithmetic replay")
+
+
+def _arithmetic_leaf_names(arithmetic: SelectionArithmetic) -> tuple[str, ...]:
+    if arithmetic.operation == "leaf":
+        assert arithmetic.candidate_name is not None
+        return (arithmetic.candidate_name,)
+    return tuple(
+        name for item in arithmetic.inputs for name in _arithmetic_leaf_names(item)
+    )
+
+
+def _arithmetic_attribution_weights(
+    arithmetic: SelectionArithmetic,
+) -> tuple[float, ...]:
+    if arithmetic.operation == "leaf":
+        return (1.0,)
+    if arithmetic.operation == "residual":
+        assert arithmetic.strength is not None
+        parent, specialist = arithmetic.inputs
+        return (
+            *(value * (1.0 - arithmetic.strength)
+              for value in _arithmetic_attribution_weights(parent)),
+            *(value * arithmetic.strength
+              for value in _arithmetic_attribution_weights(specialist)),
+        )
+    factors = (
+        arithmetic.weights
+        if arithmetic.operation in {"blend", "weighted"}
+        else (1.0 / len(arithmetic.inputs),) * len(arithmetic.inputs)
+    )
+    return tuple(
+        value * factor
+        for item, factor in zip(arithmetic.inputs, factors, strict=True)
+        for value in _arithmetic_attribution_weights(item)
+    )
+
+
+def _replay_arithmetic(
+    arithmetic: SelectionArithmetic,
+    forecasts: Mapping[str, Sequence[float]],
+) -> tuple[float, ...]:
+    if arithmetic.operation == "leaf":
+        assert arithmetic.candidate_name is not None
+        try:
+            values = forecasts[arithmetic.candidate_name]
+        except (KeyError, TypeError) as error:
+            raise ValueError("selection arithmetic references an unavailable forecast") from error
+        return tuple(float(value) for value in values)
+    values = tuple(_replay_arithmetic(item, forecasts) for item in arithmetic.inputs)
+    if arithmetic.operation == "blend":
+        return _blend_values(values[0], values[1], arithmetic.weights[0])
+    if arithmetic.operation == "weighted":
+        return _weighted_values(values, arithmetic.weights)
+    if arithmetic.operation == "fmean":
+        return _fmean_values(values)
+    if arithmetic.operation == "median":
+        return _median_values(values)
+    assert arithmetic.operation == "residual"
+    assert arithmetic.strength is not None
+    assert arithmetic.clip_multiplier is not None
+    assert arithmetic.scale is not None
+    return _residual_values(
+        values[0], values[1], arithmetic.strength,
+        arithmetic.clip_multiplier, arithmetic.scale,
+    )
 
 
 def select_assumption_guided_forecast(
@@ -337,6 +830,230 @@ def select_assumption_guided_forecast(
     )
 
 
+def select_grounded_morphology_forecast(
+    policy: DecisionPolicy,
+    *,
+    assumptions: Sequence[object],
+    protected_anchor: SelectionDecision,
+    horizon: int,
+    profile,
+    active_names: Sequence[str],
+    diagnostics: Mapping[str, CandidateDiagnostics],
+    forecasts: Mapping[str, Sequence[float]],
+    history: Sequence[float] = (),
+    conditioned_names: Sequence[str] = (),
+) -> SelectionDecision:
+    """Apply validated grounded assumptions without granting them numerical authority.
+
+    The caller owns card validation and supplies the exact protected Safe-Anchor computed
+    for the loop.  This boundary uses only typed candidate names, then requires any proposed
+    override to pass the ordinary numerical gates.  Assumption prose is deliberately unread.
+    """
+    from .morphology import AssumptionGrounding
+
+    grounded = tuple(assumptions)
+    if not grounded or any(not isinstance(item, AssumptionGrounding) for item in grounded):
+        raise ValueError("grounded morphology selection requires validated assumptions")
+    if len({item.assumption_id for item in grounded}) != len(grounded):
+        raise ValueError("grounded assumptions must have unique ids")
+
+    active = tuple(dict.fromkeys(active_names))
+    active_set = set(active)
+    pool = tuple(
+        dict.fromkeys(
+            name
+            for item in grounded
+            for name in item.candidate_names
+            if name in active_set
+        )
+    )
+    if not is_materialized_single_selection(
+        protected_anchor,
+        active_names=active,
+        forecasts=forecasts,
+        horizon=horizon,
+    ):
+        raise ValueError("protected anchor must be one active materialized forecast")
+    anchor_name = protected_anchor.selected[0]
+    considered = tuple(
+        dict.fromkeys((*pool, anchor_name))
+    )
+    if not pool:
+        raise ValueError("grounded assumptions contain no active candidate")
+
+    proposal = select_numerical_forecast(
+        policy,
+        profile=profile,
+        active_names=considered,
+        diagnostics=diagnostics,
+        forecasts=forecasts,
+        history=history,
+        conditioned_names=tuple(
+            dict.fromkeys((*conditioned_names, *pool))
+        ),
+    )
+    decision = proposal
+    protected = False
+    if proposal.selected != (anchor_name,):
+        reference = diagnostics.get(anchor_name)
+        challenger = (
+            diagnostics.get(proposal.selected[0])
+            if is_materialized_single_selection(
+                proposal,
+                active_names=considered,
+                forecasts=forecasts,
+                horizon=horizon,
+            )
+            else None
+        )
+        if (
+            reference is None
+            or challenger is None
+            or not _passes_reliability_gate(policy, reference)
+            or not _passes_reliability_gate(policy, challenger)
+            or not _passes_single_override(
+                policy, challenger, reference, profile=profile
+            )
+        ):
+            decision = protected_anchor
+            protected = True
+    return replace(
+        decision,
+        reason_codes=(
+            *decision.reason_codes,
+            "grounded_morphology_top_k_verifier",
+            *(("exact_safe_anchor_protection",) if protected else ()),
+        ),
+        baseline_name=anchor_name,
+        assumption_ids=tuple(item.assumption_id for item in grounded),
+        assumption_kinds=tuple(item.kind for item in grounded),
+        considered_candidates=considered,
+    )
+
+
+def is_materialized_single_selection(
+    decision: SelectionDecision,
+    *,
+    active_names: Sequence[str],
+    forecasts: Mapping[str, Sequence[float]],
+    horizon: int,
+) -> bool:
+    """Validate the single executed-forecast boundary used by Morphology selection."""
+    if (
+        not isinstance(decision, SelectionDecision)
+        or decision.mode != "single"
+        or len(decision.selected) != 1
+    ):
+        return False
+    name = decision.selected[0]
+    materialized = forecasts.get(name)
+    return bool(
+        name in set(active_names)
+        and materialized is not None
+        and _valid_exact_forecast(materialized, horizon)
+        and tuple(float(value) for value in materialized) == tuple(decision.forecast)
+    )
+
+
+def _passes_reliability_gate(
+    policy: DecisionPolicy, diagnostic: CandidateDiagnostics
+) -> bool:
+    return bool(
+        diagnostic.eligible
+        and diagnostic.successful_folds >= policy.min_successful_folds
+        and not diagnostic.explosion
+        and _passes_scaled_tail_gate(policy, diagnostic)
+    )
+
+
+def _passes_scaled_tail_gate(
+    policy: DecisionPolicy, diagnostic: CandidateDiagnostics
+) -> bool:
+    """Use uncapped scaled errors for catastrophe discrimination."""
+    return bool(
+        math.isfinite(diagnostic.worst_smae_raw)
+        and math.isfinite(diagnostic.worst_srmse_raw)
+        and diagnostic.worst_smae_raw <= policy.catastrophic_smae_raw
+        and diagnostic.worst_srmse_raw <= policy.catastrophic_srmse_raw
+    )
+
+
+def select_protected_safe_anchor(
+    policy: DecisionPolicy,
+    *,
+    active_names: Sequence[str],
+    diagnostics: Mapping[str, CandidateDiagnostics],
+    forecasts: Mapping[str, Sequence[float]],
+    horizon: int,
+    fallback_reason: str,
+) -> SelectionDecision:
+    """Return one finite materialized anchor when advisory morphology fails closed."""
+    if isinstance(horizon, bool) or not isinstance(horizon, int) or horizon < 1:
+        raise ValueError("safe-anchor horizon must be positive")
+    active = set(active_names)
+    available = [
+        diagnostic
+        for name in sorted(active)
+        if (diagnostic := diagnostics.get(name)) is not None
+        and name in forecasts
+        and _valid_exact_forecast(forecasts[name], horizon)
+    ]
+    anchor = _stable_baseline(available, policy.baseline_strategy)
+    if anchor is not None and not _passes_reliability_gate(policy, anchor):
+        anchor = None
+    if anchor is None:
+        reliable = [
+            item
+            for item in available
+            if item.eligible
+            and item.successful_folds >= policy.min_successful_folds
+            and not item.explosion
+            and _passes_scaled_tail_gate(policy, item)
+        ]
+        if reliable:
+            anchor = min(reliable, key=lambda item: _rank_key(item, policy.ranking_order))
+    if anchor is None and policy.fallback_to_best_available and available:
+        anchor = min(
+            available,
+            key=lambda item: (
+                -item.successful_folds,
+                not math.isfinite(item.median_joint_scaled_error),
+                item.median_joint_scaled_error,
+                item.recent_joint_scaled_error,
+                item.name,
+            ),
+        )
+    if anchor is None:
+        raise ValueError("no finite protected Safe-Anchor forecast is available")
+    return SelectionDecision(
+        mode="single",
+        selected=(anchor.name,),
+        weights=(1.0,),
+        forecast=tuple(float(value) for value in forecasts[anchor.name]),
+        confidence=0.0,
+        reason_codes=("protected_safe_anchor", fallback_reason),
+        rejected={},
+        baseline_name=anchor.name,
+        considered_candidates=(anchor.name,),
+    )
+
+
+def _valid_exact_forecast(values: Sequence[float], horizon: int) -> bool:
+    try:
+        return (
+            not isinstance(values, (str, bytes))
+            and len(values) == horizon
+            and all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                for value in values
+            )
+        )
+    except (ArithmeticError, TypeError, ValueError):
+        return False
+
+
 def hindcast_cache_key(
     task: Task,
     candidate_name: str,
@@ -396,7 +1113,7 @@ def diagnose_candidate(
             if len(forecast) != fold_horizon or not all(map(math.isfinite, forecast)):
                 raise ValueError("candidate returned an invalid forecast")
             folds.append(_score_fold(prefix, truth, forecast, train_end, validation_end))
-        except BaseException as error:
+        except Exception as error:
             folds.append(HindcastFold(
                 train_end=train_end,
                 validation_end=validation_end,
@@ -454,7 +1171,7 @@ def _long_horizon_audit_fold(
         if len(forecast) != audit_horizon or not all(map(math.isfinite, forecast)):
             raise ValueError("candidate returned an invalid long-horizon forecast")
         return _score_fold(prefix, truth, forecast, train_end, len(history)), coverage
-    except BaseException as error:
+    except Exception as error:
         return HindcastFold(
             train_end=train_end,
             validation_end=len(history),
@@ -665,7 +1382,7 @@ def select_numerical_forecast(
             rejected[name] = "missing_diagnostics_or_forecast"
         elif not diagnostic.eligible or diagnostic.successful_folds < policy.min_successful_folds:
             rejected[name] = "insufficient_hindcast_reliability"
-        elif diagnostic.explosion or diagnostic.worst_mase > policy.catastrophic_mase:
+        elif diagnostic.explosion or not _passes_scaled_tail_gate(policy, diagnostic):
             rejected[name] = "catastrophic_hindcast_tail"
         else:
             eligible.append(diagnostic)
@@ -694,9 +1411,9 @@ def select_numerical_forecast(
             fallback,
             key=lambda item: (
                 -item.successful_folds,
-                not math.isfinite(item.median_mase),
-                item.median_mase,
-                item.recent_mase,
+                not math.isfinite(item.median_joint_scaled_error),
+                item.median_joint_scaled_error,
+                item.recent_joint_scaled_error,
                 item.name,
             ),
         )
@@ -722,15 +1439,17 @@ def select_numerical_forecast(
     front = _pareto_front(eligible)
     order = policy.ranking_order
     if policy.recent_regime_first:
-        order = ("recent_mase",) + tuple(field for field in order if field != "recent_mase")
+        order = ("recent_joint_scaled_error",) + tuple(
+            field for field in order if field != "recent_joint_scaled_error"
+        )
     ranked = sorted(front, key=lambda item: _rank_key(item, order))
     best = ranked[0]
     baseline_protected = False
     baseline_is_eligible = baseline is not None and any(
         candidate.name == baseline.name for candidate in eligible
     )
-    if baseline is not None and best.name != baseline.name:
-        if not baseline_is_eligible or not _passes_single_override(
+    if baseline is not None and baseline_is_eligible and best.name != baseline.name:
+        if not _passes_single_override(
             policy, best, baseline, profile=profile
         ):
             best = baseline
@@ -740,6 +1459,7 @@ def select_numerical_forecast(
     weights = (1.0,)
     forecast = best_forecast
     mode = "single"
+    arithmetic = SelectionArithmetic("leaf", candidate_name=best.name)
     reasons = ["reliability_gate", "pareto_front", f"best_{order[0]}"]
     if baseline_protected:
         reasons.append(
@@ -762,7 +1482,7 @@ def select_numerical_forecast(
             profile=profile,
         )
         if proposal is not None:
-            chosen, weights, forecast, combination_type = proposal
+            chosen, weights, forecast, combination_type, arithmetic = proposal
             mode = "combined"
             reasons.extend((
                 "cross_family_combination",
@@ -777,13 +1497,24 @@ def select_numerical_forecast(
             if legacy is not None:
                 chosen, weights, forecast = legacy
                 mode = "ensemble"
+                arithmetic = SelectionArithmetic(
+                    "fmean",
+                    inputs=tuple(
+                        SelectionArithmetic("leaf", candidate_name=name)
+                        for name in chosen
+                    ),
+                )
                 reasons.extend(("diverse_members", "hindcast_blend_improvement"))
 
     all_ranked = sorted(eligible, key=lambda item: _rank_key(item, order))
     gap = 1.0
     if len(all_ranked) > 1:
-        numerator = max(0.0, all_ranked[1].median_mase - all_ranked[0].median_mase)
-        gap = numerator / (1.0 + abs(all_ranked[0].median_mase))
+        numerator = max(
+            0.0,
+            all_ranked[1].median_joint_scaled_error
+            - all_ranked[0].median_joint_scaled_error,
+        )
+        gap = numerator / (1.0 + abs(all_ranked[0].median_joint_scaled_error))
     confidence = max(0.0, min(1.0, gap))
     return SelectionDecision(
         mode=mode,
@@ -795,6 +1526,7 @@ def select_numerical_forecast(
         rejected=rejected,
         combination_type=combination_type,
         baseline_name=baseline.name if baseline is not None else None,
+        arithmetic=arithmetic,
     )
 
 
@@ -825,7 +1557,7 @@ def _conservative_tsfm_soft_overlay(
         not item.eligible
         or item.successful_folds < policy.min_successful_folds
         or item.explosion
-        or item.worst_mase > policy.catastrophic_mase
+        or not _passes_scaled_tail_gate(policy, item)
         for item in (anchor, toto, timesfm)
     ):
         return parent
@@ -834,11 +1566,6 @@ def _conservative_tsfm_soft_overlay(
     if not _strictly_aligned_successful_folds(
         (anchor, toto, timesfm), minimum_folds=policy.min_successful_folds
     ):
-        return parent
-
-    scales = _fold_mase_scales(anchor)
-    parent_scores = _fold_scores(anchor.fold_forecasts, anchor.fold_truths, scales)
-    if not parent_scores:
         return parent
 
     selected = None
@@ -850,16 +1577,13 @@ def _conservative_tsfm_soft_overlay(
             (anchor.fold_forecasts, timesfm.fold_forecasts),
             (anchor_weight, challenger_weight),
         )
-        blended_scores = _fold_scores(blended_folds, anchor.fold_truths, scales)
-        if len(blended_scores) != len(parent_scores) or any(
-            not blended + 1e-12 < reference
-            for blended, reference in zip(blended_scores, parent_scores, strict=True)
-        ):
-            continue
-        if not _passes_srmse_strict_improvement(
+        if not _passes_scaled_fold_acceptance(
+            policy,
             blended_folds,
             anchor.fold_forecasts,
             anchor.fold_truths,
+            required_wins=len(anchor.fold_forecasts),
+            maximum_regret=0.0,
         ):
             continue
 
@@ -870,23 +1594,17 @@ def _conservative_tsfm_soft_overlay(
             parameter=anchor_weight,
             clip_multiplier=policy.ensemble_correction_clip,
         )
-        audit_scores = _long_horizon_comparison(
-            policy,
-            anchor,
-            anchor,
-            challenger_fold=audit_fold,
-            coverage=audit_coverage,
-        )
         anchor_audit = anchor.long_horizon_fold
         if (
             audit_fold is None
             or anchor_audit is None
-            or audit_scores is None
-            or not audit_scores[0] + 1e-12 < audit_scores[1]
-            or not _passes_srmse_strict_improvement(
+            or not _passes_scaled_fold_acceptance(
+                policy,
                 (audit_fold.forecast,),
                 (anchor_audit.forecast,),
                 (anchor_audit.truth,),
+                required_wins=1,
+                maximum_regret=0.0,
             )
         ):
             continue
@@ -901,6 +1619,14 @@ def _conservative_tsfm_soft_overlay(
         forecasts[anchor_name],
         forecasts["timesfm_2_5"],
         anchor_weight,
+    )
+    arithmetic = SelectionArithmetic(
+        "blend",
+        inputs=(
+            parent.arithmetic or _implicit_selection_arithmetic(parent),
+            SelectionArithmetic("leaf", candidate_name="timesfm_2_5"),
+        ),
+        weights=(anchor_weight, challenger_weight),
     )
     return SelectionDecision(
         mode="combined",
@@ -919,6 +1645,7 @@ def _conservative_tsfm_soft_overlay(
         assumption_ids=parent.assumption_ids,
         assumption_kinds=parent.assumption_kinds,
         considered_candidates=parent.considered_candidates,
+        arithmetic=arithmetic,
     )
 
 
@@ -958,7 +1685,7 @@ def _conservative_single_tsfm_decision(
         if item.eligible
         and item.successful_folds >= policy.min_successful_folds
         and not item.explosion
-        and item.worst_mase <= policy.catastrophic_mase
+        and _passes_scaled_tail_gate(policy, item)
     )
     anchor_reliable = anchor in candidates
     safe = [anchor]
@@ -1024,7 +1751,7 @@ def _protected_single_tsfm_challenger(
         and item.eligible
         and item.successful_folds >= policy.min_successful_folds
         and not item.explosion
-        and item.worst_mase <= policy.catastrophic_mase
+        and _passes_scaled_tail_gate(policy, item)
         and _passes_conservative_override(policy, item, reference)
     )
     if not safe:
@@ -1079,7 +1806,7 @@ def _conservative_multi_tsfm_portfolio(
             and item.eligible
             and item.successful_folds >= policy.min_successful_folds
             and not item.explosion
-            and item.worst_mase <= policy.catastrophic_mase
+            and _passes_scaled_tail_gate(policy, item)
         ),
         key=lambda item: _rank_key(item, policy.ranking_order),
     )[:3]
@@ -1172,6 +1899,14 @@ def _conservative_multi_tsfm_portfolio(
         return parent
     proposal = min(proposals, key=lambda item: item[:6])
     _, _, _, kind, names, weights, _, final, _, _ = proposal
+    operation = "median" if kind == "tsfm_median_portfolio" else "weighted"
+    arithmetic = SelectionArithmetic(
+        operation,
+        inputs=tuple(
+            SelectionArithmetic("leaf", candidate_name=name) for name in names
+        ),
+        weights=weights if operation == "weighted" else (),
+    )
     return SelectionDecision(
         mode="combined",
         selected=names,
@@ -1190,6 +1925,7 @@ def _conservative_multi_tsfm_portfolio(
         assumption_ids=parent.assumption_ids,
         assumption_kinds=parent.assumption_kinds,
         considered_candidates=parent.considered_candidates,
+        arithmetic=arithmetic,
     )
 
 
@@ -1238,9 +1974,7 @@ def _tsfm_portfolio_proposal(
     weights: tuple[float, ...],
     final: tuple[float, ...],
 ):
-    scores = _fold_scores(
-        candidate_folds, anchor.fold_truths, _fold_mase_scales(anchor)
-    )
+    scores = _fold_scores(candidate_folds, anchor.fold_truths)
     srmses = tuple(
         float(drcik_point_metrics(list(truth), list(forecast))["srmse"])
         for forecast, truth in zip(candidate_folds, anchor.fold_truths, strict=True)
@@ -1280,6 +2014,14 @@ def _passes_tsfm_portfolio_gate(
         return False
     minimum = policy.tsfm_router_min_improvement
     maximum_regret = policy.long_horizon_max_regret
+    if not _passes_scaled_fold_acceptance(
+        policy,
+        candidate_folds,
+        anchor.fold_forecasts,
+        anchor.fold_truths,
+        minimum_improvement=minimum,
+    ):
+        return False
     pairs = tuple(zip(
         candidate_folds,
         anchor.fold_forecasts,
@@ -1328,7 +2070,16 @@ def _passes_tsfm_portfolio_gate(
         list(reference_audit.truth), list(reference_audit.forecast)
     )
     return bool(
-        float(audit_candidate["smae"])
+        _passes_scaled_fold_acceptance(
+            policy,
+            (audit.forecast,),
+            (reference_audit.forecast,),
+            (reference_audit.truth,),
+            required_wins=1,
+            maximum_regret=maximum_regret,
+            minimum_improvement=minimum,
+        )
+        and float(audit_candidate["smae"])
         < float(audit_reference["smae"]) * (1.0 - minimum)
         and float(audit_candidate["srmse"])
         < float(audit_reference["srmse"]) * (1.0 - minimum)
@@ -1371,7 +2122,9 @@ def _multi_member_long_horizon_fold(
         if kind == "weighted"
         else _median_values(all_forecasts)
     )
-    return replace(reference, forecast=forecast), coverage
+    return replace(
+        reference, forecast=forecast, **_scaled_fold_fields(reference.truth, forecast)
+    ), coverage
 
 
 def _weighted_values(
@@ -1385,6 +2138,12 @@ def _weighted_values(
         sum(weight * float(value) for weight, value in zip(weights, timestep, strict=True))
         for timestep in zip(*values, strict=True)
     )
+
+
+def _fmean_values(values: Sequence[Sequence[float]]) -> tuple[float, ...]:
+    if not values or any(len(item) != len(values[0]) for item in values):
+        raise ValueError("mean portfolio members must be nonempty and aligned")
+    return tuple(statistics.fmean(timestep) for timestep in zip(*values, strict=True))
 
 
 def _median_values(values: Sequence[Sequence[float]]) -> tuple[float, ...]:
@@ -1427,7 +2186,7 @@ def _conservative_statistical_soft_overlay(
         not anchor.eligible
         or anchor.successful_folds < policy.min_successful_folds
         or anchor.explosion
-        or anchor.worst_mase > policy.catastrophic_mase
+        or not _passes_scaled_tail_gate(policy, anchor)
     ):
         return parent
 
@@ -1444,7 +2203,7 @@ def _conservative_statistical_soft_overlay(
             and item.eligible
             and item.successful_folds >= policy.min_successful_folds
             and not item.explosion
-            and item.worst_mase <= policy.catastrophic_mase
+            and _passes_scaled_tail_gate(policy, item)
         ),
         key=lambda item: _rank_key(item, policy.ranking_order),
     )
@@ -1454,11 +2213,6 @@ def _conservative_statistical_soft_overlay(
     if not _strictly_aligned_successful_folds(
         (anchor,), minimum_folds=policy.min_successful_folds
     ):
-        return parent
-
-    scales = _fold_mase_scales(anchor)
-    parent_scores = _fold_scores(anchor.fold_forecasts, anchor.fold_truths, scales)
-    if not parent_scores:
         return parent
 
     proposals = []
@@ -1475,20 +2229,13 @@ def _conservative_statistical_soft_overlay(
                 (anchor.fold_forecasts, specialist.fold_forecasts),
                 (anchor_weight, challenger_weight),
             )
-            blended_scores = _fold_scores(blended_folds, anchor.fold_truths, scales)
-            if len(blended_scores) != len(parent_scores) or any(
-                not blended + 1e-12 < reference * (
-                    1.0 - policy.tsfm_router_min_improvement
-                )
-                for blended, reference in zip(
-                    blended_scores, parent_scores, strict=True
-                )
-            ):
-                continue
-            if not _passes_srmse_relative_improvement(
+            if not _passes_scaled_fold_acceptance(
+                policy,
                 blended_folds,
                 anchor.fold_forecasts,
                 anchor.fold_truths,
+                required_wins=len(anchor.fold_forecasts),
+                maximum_regret=0.0,
                 minimum_improvement=policy.tsfm_router_min_improvement,
             ):
                 continue
@@ -1500,25 +2247,17 @@ def _conservative_statistical_soft_overlay(
                 parameter=anchor_weight,
                 clip_multiplier=policy.ensemble_correction_clip,
             )
-            audit_scores = _long_horizon_comparison(
-                policy,
-                anchor,
-                anchor,
-                challenger_fold=audit_fold,
-                coverage=audit_coverage,
-            )
             anchor_audit = anchor.long_horizon_fold
             if (
                 audit_fold is None
                 or anchor_audit is None
-                or audit_scores is None
-                or not audit_scores[0] + 1e-12 < audit_scores[1] * (
-                    1.0 - policy.tsfm_router_min_improvement
-                )
-                or not _passes_srmse_relative_improvement(
+                or not _passes_scaled_fold_acceptance(
+                    policy,
                     (audit_fold.forecast,),
                     (anchor_audit.forecast,),
                     (anchor_audit.truth,),
+                    required_wins=1,
+                    maximum_regret=0.0,
                     minimum_improvement=policy.tsfm_router_min_improvement,
                 )
             ):
@@ -1529,6 +2268,7 @@ def _conservative_statistical_soft_overlay(
                     blended_folds, anchor.fold_truths, strict=True
                 )
             )
+            blended_scores = _fold_scores(blended_folds, anchor.fold_truths)
             proposals.append((
                 statistics.median(blended_scores),
                 statistics.median(blended_srmse),
@@ -1543,6 +2283,14 @@ def _conservative_statistical_soft_overlay(
     _, _, _, challenger_weight, specialist_name, anchor_weight = min(proposals)
     final = _blend_values(
         parent.forecast, forecasts[specialist_name], anchor_weight
+    )
+    arithmetic = SelectionArithmetic(
+        "blend",
+        inputs=(
+            parent.arithmetic or _implicit_selection_arithmetic(parent),
+            SelectionArithmetic("leaf", candidate_name=specialist_name),
+        ),
+        weights=(anchor_weight, challenger_weight),
     )
     reasons = [
         *parent.reason_codes,
@@ -1574,6 +2322,7 @@ def _conservative_statistical_soft_overlay(
         assumption_ids=parent.assumption_ids,
         assumption_kinds=parent.assumption_kinds,
         considered_candidates=parent.considered_candidates,
+        arithmetic=arithmetic,
     )
 
 
@@ -1603,7 +2352,7 @@ def _protected_statistical_residual_overlay(
             and item.eligible
             and item.successful_folds >= policy.min_successful_folds
             and not item.explosion
-            and item.worst_mase <= policy.catastrophic_mase
+            and _passes_scaled_tail_gate(policy, item)
         ),
         key=lambda item: _rank_key(item, policy.ranking_order),
     )[:6]
@@ -1666,6 +2415,16 @@ def _protected_statistical_residual_overlay(
         policy.ensemble_correction_clip,
         final_scale,
     )
+    arithmetic = SelectionArithmetic(
+        "residual",
+        inputs=(
+            parent.arithmetic or _implicit_selection_arithmetic(parent),
+            SelectionArithmetic("leaf", candidate_name=specialist_name),
+        ),
+        strength=strength,
+        clip_multiplier=policy.ensemble_correction_clip,
+        scale=final_scale,
+    )
     selected = (*parent.selected, specialist_name)
     weights = (
         *(float(weight) * (1.0 - strength) for weight in parent.weights),
@@ -1693,6 +2452,7 @@ def _protected_statistical_residual_overlay(
         assumption_ids=parent.assumption_ids,
         assumption_kinds=parent.assumption_kinds,
         considered_candidates=parent.considered_candidates,
+        arithmetic=arithmetic,
     )
 
 
@@ -1755,11 +2515,14 @@ def _selection_diagnostic(
         return None
     reference = concrete[0]
     folds = tuple(
-        replace(fold, forecast=fold_forecasts[index])
+        replace(
+            fold,
+            forecast=fold_forecasts[index],
+            **_scaled_fold_fields(fold.truth, fold_forecasts[index]),
+        )
         for index, fold in enumerate(reference.folds)
     )
-    scales = _fold_mase_scales(reference)
-    scores = _fold_scores(fold_forecasts, reference.fold_truths, scales)
+    scores = _fold_scores(fold_forecasts, reference.fold_truths)
     if not scores:
         return None
     return replace(
@@ -1783,6 +2546,7 @@ def _selection_diagnostic(
         explosion=any(not math.isfinite(value) for fold in fold_forecasts for value in fold),
         long_horizon_fold=audit,
         long_horizon_coverage=coverage,
+        **_scaled_candidate_summary(folds),
     )
 
 
@@ -1818,7 +2582,67 @@ def _score_fold(
         phase_error=phase,
         amplitude_ratio=amplitude,
         mase_scale=absolute_scale,
+        **_scaled_fold_fields(truth, forecast),
     )
+
+
+def _scaled_fold_fields(
+    truth: Sequence[float], forecast: Sequence[float]
+) -> dict[str, float | bool]:
+    metrics = drcik_point_metrics(list(truth), list(forecast))
+    return {
+        "smae": float(metrics["smae"]),
+        "srmse": float(metrics["srmse"]),
+        "smae_raw": float(metrics["smae_raw"]),
+        "srmse_raw": float(metrics["srmse_raw"]),
+        "smae_clipped": bool(metrics["smae_clipped"]),
+        "srmse_clipped": bool(metrics["srmse_clipped"]),
+    }
+
+
+def _scaled_candidate_summary(
+    folds: Sequence[HindcastFold],
+) -> dict[str, float]:
+    successful = tuple(fold for fold in folds if fold.status == "success")
+
+    def values(field: str) -> list[float]:
+        return [float(value) for fold in successful if (value := getattr(fold, field)) is not None]
+
+    smaes = values("smae")
+    srmses = values("srmse")
+    joints = [
+        joint_scaled_error(float(fold.smae), float(fold.srmse))
+        for fold in successful
+        if fold.smae is not None and fold.srmse is not None
+    ]
+
+    def median_mad(items: list[float]) -> tuple[float, float]:
+        if not items:
+            return math.inf, math.inf
+        median = statistics.median(items)
+        return median, statistics.median(abs(value - median) for value in items)
+
+    median_smae, smae_mad = median_mad(smaes)
+    median_srmse, srmse_mad = median_mad(srmses)
+    recent_smae = smaes[-1] if smaes else math.inf
+    recent_srmse = srmses[-1] if srmses else math.inf
+    worst_smae = max(smaes, default=math.inf)
+    worst_srmse = max(srmses, default=math.inf)
+    return {
+        "median_joint_scaled_error": _median_or_inf(joints),
+        "recent_joint_scaled_error": joints[-1] if joints else math.inf,
+        "worst_joint_scaled_error": max(joints, default=math.inf),
+        "median_smae": median_smae,
+        "recent_smae": recent_smae,
+        "worst_smae": worst_smae,
+        "smae_mad": smae_mad,
+        "median_srmse": median_srmse,
+        "recent_srmse": recent_srmse,
+        "worst_srmse": worst_srmse,
+        "srmse_mad": srmse_mad,
+        "worst_smae_raw": max(values("smae_raw"), default=math.inf),
+        "worst_srmse_raw": max(values("srmse_raw"), default=math.inf),
+    }
 
 
 def _summarize(
@@ -1841,6 +2665,15 @@ def _summarize(
         return [float(value) for fold in successful if (value := getattr(fold, field)) is not None]
 
     mases = values("mase")
+    smaes = values("smae")
+    srmses = values("srmse")
+    smaes_raw = values("smae_raw")
+    srmses_raw = values("srmse_raw")
+    joints = [
+        joint_scaled_error(float(fold.smae), float(fold.srmse))
+        for fold in successful
+        if fold.smae is not None and fold.srmse is not None
+    ]
     median_mase = _median_or_inf(mases)
     med = median_mase
     mad = statistics.median(abs(value - med) for value in mases) if mases else math.inf
@@ -1864,7 +2697,13 @@ def _summarize(
         slope_error=_median_or_inf(values("slope_error")),
         phase_error=statistics.median(phases) if phases else None,
         amplitude_ratio=statistics.median(amplitudes) if amplitudes else None,
-        explosion=any(value > config.catastrophic_mase for value in mases),
+        explosion=any(
+            value > config.catastrophic_smae_raw
+            for value in smaes_raw
+        ) or any(
+            value > config.catastrophic_srmse_raw
+            for value in srmses_raw
+        ),
         fold_forecasts=tuple(fold.forecast for fold in successful),
         fold_truths=tuple(fold.truth for fold in successful),
         cache_key=hindcast_cache_key(
@@ -1874,6 +2713,29 @@ def _summarize(
         ),
         long_horizon_fold=long_horizon_fold,
         long_horizon_coverage=long_horizon_coverage,
+        median_joint_scaled_error=_median_or_inf(joints),
+        recent_joint_scaled_error=(
+            joint_scaled_error(float(successful[-1].smae), float(successful[-1].srmse))
+            if successful and successful[-1].smae is not None and successful[-1].srmse is not None
+            else math.inf
+        ),
+        worst_joint_scaled_error=max(joints, default=math.inf),
+        median_smae=_median_or_inf(smaes),
+        recent_smae=float(successful[-1].smae) if successful and successful[-1].smae is not None else math.inf,
+        worst_smae=max(smaes, default=math.inf),
+        smae_mad=(
+            statistics.median(abs(value - statistics.median(smaes)) for value in smaes)
+            if smaes else math.inf
+        ),
+        median_srmse=_median_or_inf(srmses),
+        recent_srmse=float(successful[-1].srmse) if successful and successful[-1].srmse is not None else math.inf,
+        worst_srmse=max(srmses, default=math.inf),
+        srmse_mad=(
+            statistics.median(abs(value - statistics.median(srmses)) for value in srmses)
+            if srmses else math.inf
+        ),
+        worst_smae_raw=max(smaes_raw, default=math.inf),
+        worst_srmse_raw=max(srmses_raw, default=math.inf),
     )
 
 
@@ -1893,7 +2755,10 @@ def _empty_diagnostics(
 
 
 def _pareto_front(candidates: Sequence[CandidateDiagnostics]) -> list[CandidateDiagnostics]:
-    dimensions = ("median_mase", "recent_mase", "worst_mase", "mase_mad")
+    dimensions = (
+        "median_smae", "median_srmse", "recent_smae", "recent_srmse",
+        "worst_smae", "worst_srmse",
+    )
     front = []
     for candidate in candidates:
         dominated = any(
@@ -1933,9 +2798,9 @@ def _stable_baseline(
             return min(
                 reviewed,
                 key=lambda item: (
-                    item.worst_mase,
-                    item.median_mase,
-                    item.recent_mase,
+                    item.worst_joint_scaled_error,
+                    item.median_joint_scaled_error,
+                    item.recent_joint_scaled_error,
                     item.name,
                 ),
             )
@@ -1943,7 +2808,9 @@ def _stable_baseline(
         if name in by_name:
             return by_name[name]
     tsfm = [candidate for candidate in eligible if candidate.family in {"tsfm", "foundation"}]
-    return min(tsfm, key=lambda item: _rank_key(item, ("median_mase", "worst_mase"))) \
+    return min(tsfm, key=lambda item: _rank_key(item, (
+        "median_joint_scaled_error", "worst_joint_scaled_error"
+    ))) \
         if tsfm else None
 
 
@@ -1990,47 +2857,22 @@ def _passes_single_override(
         return _passes_conservative_override(policy, challenger, baseline)
     if not _aligned_folds((challenger, baseline)):
         return False
-    scales = _fold_mase_scales(baseline)
-    challenger_scores = _fold_scores(
-        challenger.fold_forecasts, challenger.fold_truths, scales
-    )
-    baseline_scores = _fold_scores(
-        baseline.fold_forecasts, baseline.fold_truths, scales
-    )
-    if not challenger_scores or len(challenger_scores) != len(baseline_scores):
-        return False
     minimum_improvement = policy.ensemble_min_improvement
-    maximum_regret = policy.ensemble_max_worst_fold_regret
     if challenger.family == "combined":
         minimum_improvement = max(0.05, minimum_improvement)
-        maximum_regret = min(0.02, maximum_regret)
-    baseline_median = statistics.median(baseline_scores)
-    challenger_median = statistics.median(challenger_scores)
-    short_advantage = (baseline_median - challenger_median) / (1.0 + baseline_median)
-    required_advantage = baseline_median * minimum_improvement / (1.0 + baseline_median)
-    adjusted_advantage = short_advantage - _long_horizon_penalty(
-        policy, challenger, baseline, profile=profile
-    )
-    if not adjusted_advantage > required_advantage:
+    if not _passes_scaled_fold_acceptance(
+        policy,
+        challenger.fold_forecasts,
+        baseline.fold_forecasts,
+        baseline.fold_truths,
+        minimum_improvement=minimum_improvement,
+    ):
         return False
-    wins = sum(
-        candidate < reference
-        for candidate, reference in zip(challenger_scores, baseline_scores)
-    )
-    if wins < min(policy.ensemble_min_fold_wins, len(baseline_scores)):
-        return False
-    regrets = tuple(
-        (candidate - reference) / (1.0 + reference)
-        for candidate, reference in zip(challenger_scores, baseline_scores)
-    )
     if policy.long_horizon_guard_enabled and not _passes_long_horizon_override_guard(
         policy, challenger, baseline
     ):
         return False
-    return (
-        max(regrets) <= maximum_regret
-        and regrets[-1] <= maximum_regret
-    )
+    return True
 
 
 def _passes_conservative_override(
@@ -2041,44 +2883,27 @@ def _passes_conservative_override(
     """Require stable absolute and squared-error evidence across 3+1 folds."""
     if not _aligned_folds((challenger, baseline)):
         return False
-    scales = _fold_mase_scales(baseline)
-    challenger_scores = _fold_scores(
-        challenger.fold_forecasts, challenger.fold_truths, scales
-    )
-    baseline_scores = _fold_scores(
-        baseline.fold_forecasts, baseline.fold_truths, scales
-    )
-    if not challenger_scores or len(challenger_scores) != len(baseline_scores):
-        return False
-    baseline_median = statistics.median(baseline_scores)
-    challenger_median = statistics.median(challenger_scores)
-    if not challenger_median < baseline_median * (
-        1.0 - policy.tsfm_router_min_improvement
-    ):
-        return False
-    ordinary_regrets = tuple(
-        (candidate - reference) / (1.0 + reference)
-        for candidate, reference in zip(challenger_scores, baseline_scores)
-    )
-    if max(ordinary_regrets) > 1e-12:
-        return False
-    audit = _long_horizon_comparison(policy, challenger, baseline)
-    if audit is None:
-        return False
-    audit_candidate, audit_baseline = audit
-    audit_regret = (audit_candidate - audit_baseline) / (1.0 + audit_baseline)
-    if audit_regret > policy.long_horizon_max_regret + 1e-12:
-        return False
-    wins = sum(
-        candidate < reference
-        for candidate, reference in zip(challenger_scores, baseline_scores)
-    ) + int(audit_candidate < audit_baseline)
-    if wins < math.ceil(0.75 * (len(challenger_scores) + 1)):
-        return False
-    if not _passes_srmse_noninferiority(
+    required_ordinary_wins = math.ceil(
+        0.75 * (len(challenger.fold_forecasts) + 1)
+    ) - 1
+    if not _passes_scaled_fold_acceptance(
+        policy,
         challenger.fold_forecasts,
         baseline.fold_forecasts,
         baseline.fold_truths,
+        required_wins=required_ordinary_wins,
+        maximum_regret=0.0,
+    ):
+        return False
+    baseline_smae, baseline_srmse = _median_scaled_metrics(
+        baseline.fold_forecasts, baseline.fold_truths
+    )
+    challenger_smae, challenger_srmse = _median_scaled_metrics(
+        challenger.fold_forecasts, challenger.fold_truths
+    )
+    if not (
+        challenger_smae < baseline_smae * (1.0 - policy.tsfm_router_min_improvement)
+        and challenger_srmse < baseline_srmse * (1.0 - policy.tsfm_router_min_improvement)
     ):
         return False
     audit_fold = challenger.long_horizon_fold
@@ -2086,10 +2911,13 @@ def _passes_conservative_override(
     return bool(
         audit_fold is not None
         and baseline_audit is not None
-        and _passes_srmse_noninferiority(
+        and _passes_scaled_fold_acceptance(
+            policy,
             (audit_fold.forecast,),
             (baseline_audit.forecast,),
             (baseline_audit.truth,),
+            required_wins=1,
+            maximum_regret=policy.long_horizon_max_regret,
         )
     )
 
@@ -2119,13 +2947,8 @@ def _long_horizon_penalty(
         or not audit.truth
     ):
         return 0.0
-    scale = reference.mase_scale
-    if scale is None or not math.isfinite(scale) or scale <= 0:
-        return 0.0
-    candidate_scores = _fold_scores((audit.forecast,), (audit.truth,), (float(scale),))
-    reference_scores = _fold_scores(
-        (reference.forecast,), (reference.truth,), (float(scale),)
-    )
+    candidate_scores = _fold_scores((audit.forecast,), (audit.truth,))
+    reference_scores = _fold_scores((reference.forecast,), (reference.truth,))
     if not candidate_scores or not reference_scores:
         return 0.0
     regret = (candidate_scores[0] - reference_scores[0]) / (1.0 + reference_scores[0])
@@ -2149,9 +2972,82 @@ def _passes_long_horizon_override_guard(
     )
     if comparison is None:
         return False
-    candidate_score, baseline_score = comparison
-    regret = (candidate_score - baseline_score) / (1.0 + baseline_score)
-    return regret <= policy.long_horizon_max_regret + 1e-12
+    audit = challenger.long_horizon_fold if challenger_fold is None else challenger_fold
+    reference = baseline.long_horizon_fold
+    if audit is None or reference is None:
+        return False
+    return passes_independent_scaled_regret(
+        (audit.forecast,),
+        (reference.forecast,),
+        (reference.truth,),
+        max_smae_regret=policy.long_horizon_max_regret,
+        max_srmse_regret=policy.long_horizon_max_regret,
+    )
+
+
+def passes_independent_scaled_regret(
+    candidate_forecasts: Sequence[Sequence[float]],
+    reference_forecasts: Sequence[Sequence[float]],
+    truths: Sequence[Sequence[float]],
+    *,
+    max_smae_regret: float,
+    max_srmse_regret: float,
+) -> bool:
+    """Fail closed unless each scaled metric respects every aligned fold guard."""
+    if (
+        not candidate_forecasts
+        or len(candidate_forecasts) != len(reference_forecasts)
+        or len(candidate_forecasts) != len(truths)
+    ):
+        return False
+    for candidate, reference, truth in zip(
+        candidate_forecasts, reference_forecasts, truths, strict=True
+    ):
+        if len(candidate) != len(reference) or len(candidate) != len(truth) or not truth:
+            return False
+        candidate_metrics = drcik_point_metrics(list(truth), list(candidate))
+        reference_metrics = drcik_point_metrics(list(truth), list(reference))
+        for metric, raw_metric, clipped_metric, limit in (
+            ("smae", "smae_raw", "smae_clipped", max_smae_regret),
+            ("srmse", "srmse_raw", "srmse_clipped", max_srmse_regret),
+        ):
+            if bool(candidate_metrics[clipped_metric]) and not bool(
+                reference_metrics[clipped_metric]
+            ):
+                return False
+            candidate_raw = float(candidate_metrics[raw_metric])
+            reference_raw = float(reference_metrics[raw_metric])
+            if not math.isfinite(candidate_raw) or not math.isfinite(reference_raw):
+                return False
+            if (candidate_raw - reference_raw) / (1.0 + reference_raw) > limit + 1e-12:
+                return False
+    return True
+
+
+def _scaled_fold_pairs(
+    forecasts: Sequence[Sequence[float]], truths: Sequence[Sequence[float]]
+) -> tuple[tuple[float, float], ...]:
+    if len(forecasts) != len(truths):
+        return ()
+    pairs = []
+    for forecast, truth in zip(forecasts, truths, strict=True):
+        if len(forecast) != len(truth) or not truth:
+            return ()
+        metrics = drcik_point_metrics(list(truth), list(forecast))
+        pairs.append((float(metrics["smae"]), float(metrics["srmse"])))
+    return tuple(pairs)
+
+
+def _median_scaled_metrics(
+    forecasts: Sequence[Sequence[float]], truths: Sequence[Sequence[float]]
+) -> tuple[float, float]:
+    pairs = _scaled_fold_pairs(forecasts, truths)
+    if not pairs:
+        return math.inf, math.inf
+    return (
+        statistics.median(pair[0] for pair in pairs),
+        statistics.median(pair[1] for pair in pairs),
+    )
 
 
 def _long_horizon_comparison(
@@ -2176,13 +3072,8 @@ def _long_horizon_comparison(
         or not audit.truth
     ):
         return None
-    scale = reference.mase_scale
-    if scale is None or not math.isfinite(scale) or scale <= 0:
-        return None
-    candidate_scores = _fold_scores((audit.forecast,), (audit.truth,), (float(scale),))
-    baseline_scores = _fold_scores(
-        (reference.forecast,), (reference.truth,), (float(scale),)
-    )
+    candidate_scores = _fold_scores((audit.forecast,), (audit.truth,))
+    baseline_scores = _fold_scores((reference.forecast,), (reference.truth,))
     if not candidate_scores or not baseline_scores:
         return None
     return candidate_scores[0], baseline_scores[0]
@@ -2211,7 +3102,13 @@ def _best_guarded_combination(
     baseline: CandidateDiagnostics | None,
     conditioned_names: Sequence[str],
     profile=None,
-) -> tuple[tuple[str, ...], tuple[float, ...], tuple[float, ...], str] | None:
+) -> tuple[
+    tuple[str, ...],
+    tuple[float, ...],
+    tuple[float, ...],
+    str,
+    SelectionArithmetic,
+] | None:
     """Search a bounded TSFM+statistical portfolio using history-only folds."""
     ranked = sorted(eligible, key=lambda item: _rank_key(item, policy.ranking_order))
     anchors = [item for item in ranked if item.family in {"tsfm", "foundation"}][:2]
@@ -2235,6 +3132,7 @@ def _best_guarded_combination(
             float,
             tuple[float, ...],
             tuple[float, ...],
+            SelectionArithmetic,
         ]
     ] = []
     for anchor, specialist in itertools.product(anchors, specialists):
@@ -2280,20 +3178,24 @@ def _best_guarded_combination(
                 forecasts[specialist.name],
                 anchor_weight,
             )
-            score = _fold_score(
-                fold_forecasts, anchor.fold_truths, _fold_mase_scales(anchor)
-            )
+            score = _fold_score(fold_forecasts, anchor.fold_truths)
             proposals.append((
                 score,
-                _worst_fold_score(
-                    fold_forecasts, anchor.fold_truths, _fold_mase_scales(anchor)
-                ),
+                _worst_fold_score(fold_forecasts, anchor.fold_truths),
                 "weighted_blend",
                 anchor.name,
                 specialist.name,
                 anchor_weight,
                 (anchor_weight, 1.0 - anchor_weight),
                 final,
+                SelectionArithmetic(
+                    "blend",
+                    inputs=(
+                        SelectionArithmetic("leaf", candidate_name=anchor.name),
+                        SelectionArithmetic("leaf", candidate_name=specialist.name),
+                    ),
+                    weights=(anchor_weight, 1.0 - anchor_weight),
+                ),
             ))
 
         scales = _fold_correction_scales(anchor)
@@ -2332,27 +3234,33 @@ def _best_guarded_combination(
                 policy.ensemble_correction_clip,
                 final_scale,
             )
-            score = _fold_score(
-                fold_forecasts, anchor.fold_truths, _fold_mase_scales(anchor)
-            )
+            score = _fold_score(fold_forecasts, anchor.fold_truths)
             proposals.append((
                 score,
-                _worst_fold_score(
-                    fold_forecasts, anchor.fold_truths, _fold_mase_scales(anchor)
-                ),
+                _worst_fold_score(fold_forecasts, anchor.fold_truths),
                 "residual_correction",
                 anchor.name,
                 specialist.name,
                 strength,
                 (1.0 - strength, strength),
                 final,
+                SelectionArithmetic(
+                    "residual",
+                    inputs=(
+                        SelectionArithmetic("leaf", candidate_name=anchor.name),
+                        SelectionArithmetic("leaf", candidate_name=specialist.name),
+                    ),
+                    strength=strength,
+                    clip_multiplier=policy.ensemble_correction_clip,
+                    scale=final_scale,
+                ),
             ))
 
     if not proposals:
         return None
     proposal = min(proposals, key=lambda item: item[:6])
-    _, _, kind, anchor_name, specialist_name, _, weights, final = proposal
-    return (anchor_name, specialist_name), weights, final, kind
+    _, _, kind, anchor_name, specialist_name, _, weights, final, arithmetic = proposal
+    return (anchor_name, specialist_name), weights, final, kind, arithmetic
 
 
 def _passes_combination_gates(
@@ -2361,31 +3269,75 @@ def _passes_combination_gates(
     references: Sequence[CandidateDiagnostics],
 ) -> bool:
     for reference in references:
-        scales = _fold_mase_scales(reference)
-        reference_scores = _fold_scores(
-            reference.fold_forecasts, reference.fold_truths, scales
-        )
-        candidate_scores = _fold_scores(candidate_folds, reference.fold_truths, scales)
-        if len(candidate_scores) != len(reference_scores) or not candidate_scores:
+        if not _passes_scaled_fold_acceptance(
+            policy,
+            candidate_folds,
+            reference.fold_forecasts,
+            reference.fold_truths,
+        ):
             return False
-        required = statistics.median(reference_scores) * (
-            1.0 - policy.ensemble_min_improvement
-        )
-        if not statistics.median(candidate_scores) < required:
-            return False
+    return True
+
+
+def _passes_scaled_fold_acceptance(
+    policy: DecisionPolicy,
+    candidate_forecasts: Sequence[Sequence[float]],
+    reference_forecasts: Sequence[Sequence[float]],
+    truths: Sequence[Sequence[float]],
+    *,
+    required_wins: int | None = None,
+    maximum_regret: float | None = None,
+    minimum_improvement: float = 0.0,
+) -> bool:
+    """Accept only independently safe capped sMAE and sRMSE fold evidence."""
+    if not passes_independent_scaled_regret(
+        candidate_forecasts, reference_forecasts, truths,
+        max_smae_regret=(
+            policy.max_smae_fold_regret if maximum_regret is None else maximum_regret
+        ),
+        max_srmse_regret=(
+            policy.max_srmse_fold_regret if maximum_regret is None else maximum_regret
+        ),
+    ):
+        return False
+    candidate = _scaled_fold_pairs(candidate_forecasts, truths)
+    reference = _scaled_fold_pairs(reference_forecasts, truths)
+    if not candidate or len(candidate) != len(reference):
+        return False
+    candidate_smae, candidate_srmse = _median_scaled_metrics(candidate_forecasts, truths)
+    reference_smae, reference_srmse = _median_scaled_metrics(reference_forecasts, truths)
+    if not pareto_scaled_improvement(
+        reference_smae, reference_srmse, candidate_smae, candidate_srmse
+    ):
+        return False
+    if not (
+        candidate_smae < reference_smae * (1.0 - minimum_improvement)
+        and candidate_srmse < reference_srmse * (1.0 - minimum_improvement)
+    ):
+        return False
+    wins_required = min(
+        policy.ensemble_min_fold_wins if required_wins is None else required_wins,
+        len(candidate),
+    )
+    for metric_index in (0, 1):
         wins = sum(
-            candidate < reference_score
-            for candidate, reference_score in zip(candidate_scores, reference_scores)
+            candidate_fold[metric_index] < reference_fold[metric_index] - 1e-12
+            for candidate_fold, reference_fold in zip(candidate, reference, strict=True)
         )
-        if wins < min(policy.ensemble_min_fold_wins, len(reference_scores)):
+        if wins < wins_required:
             return False
-        regrets = tuple(
-            (candidate - reference_score) / (1.0 + reference_score)
-            for candidate, reference_score in zip(candidate_scores, reference_scores)
+        regret_limit = (
+            policy.ensemble_max_worst_fold_regret
+            if maximum_regret is None else maximum_regret
         )
-        if max(regrets) > policy.ensemble_max_worst_fold_regret:
+        capped_regrets = tuple(
+            (candidate_fold[metric_index] - reference_fold[metric_index])
+            / (1.0 + reference_fold[metric_index])
+            for candidate_fold, reference_fold in zip(candidate, reference, strict=True)
+        )
+        if max(capped_regrets) > regret_limit + 1e-12:
             return False
-        if regrets[-1] > policy.ensemble_max_worst_fold_regret:
+        if capped_regrets[-1] > regret_limit + 1e-12:
             return False
     return True
 
@@ -2415,9 +3367,7 @@ def _combined_long_horizon_fold(
     if kind == "weighted_blend":
         forecast = _blend_values(left.forecast, right.forecast, parameter)
     elif kind == "residual_correction":
-        scale = left.mase_scale
-        if scale is None or not math.isfinite(scale) or scale <= 0:
-            scale = _forecast_scale(left.truth)
+        scale = _forecast_scale(left.truth)
         forecast = _residual_values(
             left.forecast,
             right.forecast,
@@ -2427,7 +3377,7 @@ def _combined_long_horizon_fold(
         )
     else:
         raise ValueError(f"unsupported Combined audit kind: {kind}")
-    return replace(left, forecast=forecast), coverage
+    return replace(left, forecast=forecast, **_scaled_fold_fields(left.truth, forecast)), coverage
 
 
 def _passes_combination_long_horizon_gate(
@@ -2440,72 +3390,31 @@ def _passes_combination_long_horizon_gate(
 ) -> bool:
     if baseline is None:
         return True
-    scales = _fold_mase_scales(baseline)
-    baseline_scores = _fold_scores(baseline.fold_forecasts, baseline.fold_truths, scales)
-    candidate_scores = _fold_scores(candidate_folds, baseline.fold_truths, scales)
-    if not baseline_scores or len(candidate_scores) != len(baseline_scores):
-        return False
-    baseline_median = statistics.median(baseline_scores)
-    candidate_median = statistics.median(candidate_scores)
-    advantage = (baseline_median - candidate_median) / (1.0 + baseline_median)
-    required = baseline_median * policy.ensemble_min_improvement / (1.0 + baseline_median)
-    penalty = _long_horizon_penalty(
+    if not _passes_scaled_fold_acceptance(
         policy,
-        baseline,
-        baseline,
-        profile=profile,
-        challenger_fold=audit_fold,
-        coverage=audit_coverage,
-    )
-    if not advantage - penalty > required:
+        candidate_folds,
+        baseline.fold_forecasts,
+        baseline.fold_truths,
+    ):
         return False
+    del profile
     if (
         policy.baseline_strategy == "conservative_tsfm"
         and baseline.name == "timesfm_2_5"
     ):
-        audit = _long_horizon_comparison(
-            policy,
-            baseline,
-            baseline,
-            challenger_fold=audit_fold,
-            coverage=audit_coverage,
-        )
-        if audit is None:
-            return False
-        if not _passes_srmse_noninferiority(
-            candidate_folds,
-            baseline.fold_forecasts,
-            baseline.fold_truths,
-        ):
-            return False
         baseline_audit = baseline.long_horizon_fold
-        if (
-            audit_fold is None
-            or baseline_audit is None
-            or not _passes_srmse_noninferiority(
-                (audit_fold.forecast,),
-                (baseline_audit.forecast,),
-                (baseline_audit.truth,),
-            )
-        ):
+        if audit_fold is None or baseline_audit is None:
             return False
-        audit_candidate, audit_baseline = audit
-        ordinary_wins = sum(
-            candidate < reference
-            for candidate, reference in zip(candidate_scores, baseline_scores)
-        )
-        required_wins = math.ceil(0.75 * (len(candidate_scores) + 1))
-        audit_regret = (audit_candidate - audit_baseline) / (1.0 + audit_baseline)
-        return (
-            ordinary_wins + int(audit_candidate < audit_baseline) >= required_wins
-            and audit_regret <= policy.long_horizon_max_regret + 1e-12
+        return _passes_scaled_fold_acceptance(
+            policy,
+            (audit_fold.forecast,),
+            (baseline_audit.forecast,),
+            (baseline_audit.truth,),
+            required_wins=1,
+            maximum_regret=policy.long_horizon_max_regret,
         )
     return not policy.long_horizon_guard_enabled or _passes_long_horizon_override_guard(
-        policy,
-        baseline,
-        baseline,
-        challenger_fold=audit_fold,
-        coverage=audit_coverage,
+        policy, baseline, baseline, challenger_fold=audit_fold, coverage=audit_coverage
     )
 
 
@@ -2514,18 +3423,16 @@ def _fold_scores(
     truths: Sequence[Sequence[float]],
     scales: Sequence[float] = (),
 ) -> tuple[float, ...]:
+    """Capped Dr-CiK joint diagnostics; ``scales`` is legacy-compatible only."""
+    del scales
     if len(forecasts) != len(truths):
         return ()
-    if scales and len(scales) != len(truths):
-        return ()
     scores = []
-    for index, (forecast, truth) in enumerate(zip(forecasts, truths)):
+    for forecast, truth in zip(forecasts, truths):
         if len(forecast) != len(truth) or not truth:
             return ()
-        scale = scales[index] if scales else max(1.0, max(truth) - min(truth))
-        if not math.isfinite(scale) or scale <= 0:
-            return ()
-        scores.append(statistics.fmean(abs(a - b) for a, b in zip(forecast, truth)) / scale)
+        metrics = drcik_point_metrics(list(truth), list(forecast))
+        scores.append(joint_scaled_error(float(metrics["smae"]), float(metrics["srmse"])))
     return tuple(scores)
 
 
@@ -2643,21 +3550,10 @@ def _blend_values(
 def _fold_correction_scales(candidate: CandidateDiagnostics) -> tuple[float, ...]:
     successful = tuple(fold for fold in candidate.folds if fold.status == "success")
     if len(successful) == len(candidate.fold_forecasts):
-        scales = tuple(
-            float(fold.mase_scale)
-            if fold.mase_scale is not None and fold.mase_scale > 0
-            else max(1e-8, float(fold.mae) / float(fold.mase))
-            if fold.mae is not None and fold.mase is not None and fold.mase > 0
-            else _forecast_scale(fold.truth)
-            for fold in successful
-        )
+        scales = tuple(_forecast_scale(fold.truth) for fold in successful)
         if scales:
             return scales
     return tuple(_forecast_scale(truth) for truth in candidate.fold_truths)
-
-
-def _fold_mase_scales(candidate: CandidateDiagnostics) -> tuple[float, ...]:
-    return _fold_correction_scales(candidate)
 
 
 def _forecast_scale(values: Sequence[float]) -> float:
@@ -2705,7 +3601,6 @@ def _best_validated_ensemble(
     best: CandidateDiagnostics,
 ) -> tuple[tuple[str, ...], tuple[float, ...], tuple[float, ...]] | None:
     pool = sorted(eligible, key=lambda item: _rank_key(item, policy.ranking_order))[:5]
-    best_score = _fold_score(best.fold_forecasts, best.fold_truths)
     best_proposal = None
     for size in range(2, min(policy.ensemble_max_members, len(pool)) + 1):
         for members in itertools.combinations(pool, size):
@@ -2718,25 +3613,27 @@ def _best_validated_ensemble(
                 continue
             weights = tuple(1.0 / size for _ in members)
             fold_forecasts = _blend_folds(tuple(member.fold_forecasts for member in members), weights)
-            score = _fold_score(fold_forecasts, members[0].fold_truths)
-            required = best_score * (1.0 - policy.ensemble_min_improvement)
-            if not score < required:
+            if not _passes_combination_gates(policy, fold_forecasts, members):
+                continue
+            audit, coverage = _multi_member_long_horizon_fold(
+                members, weights=weights, kind="weighted"
+            )
+            if not _passes_combination_long_horizon_gate(
+                policy, fold_forecasts, best, audit, coverage, profile=None
+            ):
                 continue
             names_and_forecasts = sorted(
                 ((member.name, tuple(map(float, forecasts[member.name]))) for member in members),
                 key=lambda item: item[0],
             )
             names = tuple(item[0] for item in names_and_forecasts)
-            final = tuple(
-                statistics.fmean(values)
-                for values in zip(*(item[1] for item in names_and_forecasts), strict=True)
-            )
-            proposal = (score, names, weights, final)
-            if best_proposal is None or proposal[:2] < best_proposal[:2]:
+            final = _fmean_values(tuple(item[1] for item in names_and_forecasts))
+            proposal = (names, weights, final)
+            if best_proposal is None or proposal[0] < best_proposal[0]:
                 best_proposal = proposal
     if best_proposal is None:
         return None
-    _, names, weights, final = best_proposal
+    names, weights, final = best_proposal
     return names, weights, final
 
 

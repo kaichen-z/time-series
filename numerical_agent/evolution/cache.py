@@ -8,7 +8,13 @@ import os
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
+
+from common.evolution_core.contracts import (
+    metric_policy_metadata,
+    require_active_metric_policy,
+)
+from common.payload import strict_json_loads
 
 from .execution import (
     CRASHED,
@@ -23,8 +29,14 @@ from .module import Method
 from .analysis_skills import DEFAULT_SKILLS_PATH
 
 
-CACHE_SCHEMA = 1
+CACHE_SCHEMA = 3
+SCALED_METRIC_SCHEMA = 1
+SCALED_METRIC_CAP = 5.0
 _STATUSES = {SUCCESS, NOT_APPLICABLE, CRASHED, INVALID}
+
+
+class CacheError(ValueError):
+    """A serialized outcome cannot satisfy the active cache contract."""
 
 
 class CacheMissError(RuntimeError):
@@ -139,9 +151,27 @@ class OutcomeCache:
         """Return the content key used for one method/task execution."""
         return self._key(method, task, isolated=isolated)
 
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> Outcome:
+        """Reconstruct one active cache outcome under the scaled-metric contract."""
+        return cls._outcome_from_payload(payload, require_scaled_metrics=True)
+
+    @classmethod
+    def to_payload(cls, outcome: Outcome) -> dict[str, object]:
+        """Serialize one active cache outcome without losing raw infinite tail risk."""
+        return cls._outcome_payload(outcome)
+
+    @classmethod
+    def from_legacy_report_payload(cls, payload: Mapping[str, object]) -> Outcome:
+        """Read a diagnostic-only legacy report row; never use it as an active outcome."""
+        return cls._outcome_from_payload(payload, require_scaled_metrics=False)
+
     def _key(self, method: Method, task: Task, *, isolated: bool) -> str:
         payload = {
-            "schema": CACHE_SCHEMA,
+            "cache_schema": CACHE_SCHEMA,
+            **metric_policy_metadata(),
+            "scaled_metric_schema": SCALED_METRIC_SCHEMA,
+            "scaled_metric_cap": SCALED_METRIC_CAP,
             "method": {"name": method.name, "source": method.source},
             "analysis_skills": self.skills_path.read_text(encoding="utf-8"),
             "task": asdict(task),
@@ -164,40 +194,62 @@ class OutcomeCache:
         expected_horizon: int,
         require_forecast: bool,
     ) -> Outcome | None:
+        path = self.root / f"{key}.json"
+        if not path.exists():
+            return None
         try:
-            payload = json.loads((self.root / f"{key}.json").read_text(encoding="utf-8"))
-            if payload.get("schema") != CACHE_SCHEMA or payload.get("key") != key:
-                return None
-            raw = payload["outcome"]
-            outcome = Outcome(
-                method=str(raw["method"]),
-                task_id=str(raw["task_id"]),
-                status=str(raw["status"]),
-                smape=_optional_float(raw.get("smape")),
-                mae=_optional_float(raw.get("mae")),
-                mase=_optional_float(raw.get("mase")),
-                detail=str(raw.get("detail", "")),
-                forecast=tuple(_finite_float(value) for value in raw.get("forecast", ())),
+            payload = strict_json_loads(
+                path.read_text(encoding="utf-8"), context="active outcome cache row"
             )
-            if outcome.method != method or outcome.task_id != task_id or outcome.status not in _STATUSES:
-                return None
-            if outcome.status == SUCCESS and any(
-                metric is None for metric in (outcome.smape, outcome.mae, outcome.mase)
+        except (OSError, ValueError) as error:
+            raise CacheError("malformed active outcome cache row") from error
+        try:
+            if not isinstance(payload, Mapping):
+                raise CacheError("active outcome cache row must be an object")
+            require_active_metric_policy(payload, context="active outcome cache row")
+            if (
+                type(payload.get("cache_schema")) is not int
+                or payload["cache_schema"] != CACHE_SCHEMA
             ):
-                return None
+                raise CacheError("active outcome cache row schema mismatch")
+            if payload.get("key") != key:
+                raise CacheError("active outcome cache row key mismatch")
+            if (
+                type(payload.get("scaled_metric_schema")) is not int
+                or payload["scaled_metric_schema"] != SCALED_METRIC_SCHEMA
+                or payload.get("scaled_metric_cap") != SCALED_METRIC_CAP
+            ):
+                raise CacheError("active outcome cache scaled schema mismatch")
+            raw = _mapping(payload["outcome"])
+            outcome = self.from_payload(raw)
+            if outcome.method != method or outcome.task_id != task_id:
+                raise CacheError("active outcome cache identity mismatch")
+            if outcome.status not in _STATUSES:
+                raise CacheError("active outcome cache status mismatch")
             if (
                 require_forecast
                 and outcome.status == SUCCESS
                 and len(outcome.forecast) != expected_horizon
             ):
-                return None
+                raise CacheError("active outcome cache forecast horizon mismatch")
             return outcome
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
-            return None
+        except CacheError:
+            raise
+        except ValueError:
+            raise
+        except (TypeError, KeyError) as error:
+            raise CacheError("malformed active outcome cache row") from error
 
     def _write(self, key: str, outcome: Outcome) -> None:
         payload = json.dumps(
-            {"schema": CACHE_SCHEMA, "key": key, "outcome": asdict(outcome)},
+            {
+                "cache_schema": CACHE_SCHEMA,
+                **metric_policy_metadata(),
+                "scaled_metric_schema": SCALED_METRIC_SCHEMA,
+                "scaled_metric_cap": SCALED_METRIC_CAP,
+                "key": key,
+                "outcome": self.to_payload(outcome),
+            },
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
@@ -219,6 +271,71 @@ class OutcomeCache:
                 except OSError:
                     pass
 
+    @classmethod
+    def _outcome_from_payload(
+        cls,
+        payload: Mapping[str, object],
+        *,
+        require_scaled_metrics: bool,
+    ) -> Outcome:
+        try:
+            outcome = Outcome(
+                method=str(payload["method"]),
+                task_id=str(payload["task_id"]),
+                status=str(payload["status"]),
+                smae=_optional_scaled_float(payload.get("smae")),
+                srmse=_optional_scaled_float(payload.get("srmse")),
+                smae_raw=_optional_raw_scaled_float(payload.get("smae_raw")),
+                srmse_raw=_optional_raw_scaled_float(payload.get("srmse_raw")),
+                smae_clipped=_optional_bool(payload.get("smae_clipped")),
+                srmse_clipped=_optional_bool(payload.get("srmse_clipped")),
+                smape=_optional_float(payload.get("smape")),
+                mae=_optional_float(payload.get("mae")),
+                mase=_optional_float(payload.get("mase")),
+                detail=str(payload.get("detail", "")),
+                forecast=tuple(_finite_float(value) for value in payload.get("forecast", ())),
+            )
+        except (TypeError, ValueError, KeyError) as error:
+            raise CacheError("invalid cached outcome") from error
+        if outcome.status not in _STATUSES:
+            raise CacheError("cached outcome has an unknown status")
+        if outcome.status != SUCCESS:
+            return outcome
+        scaled = (
+            outcome.smae,
+            outcome.srmse,
+            outcome.smae_raw,
+            outcome.srmse_raw,
+            outcome.smae_clipped,
+            outcome.srmse_clipped,
+        )
+        if require_scaled_metrics and any(value is None for value in scaled):
+            raise CacheError("successful cached outcome requires complete scaled metrics")
+        if not require_scaled_metrics:
+            return outcome
+        assert outcome.smae is not None and outcome.srmse is not None
+        assert outcome.smae_raw is not None and outcome.srmse_raw is not None
+        assert outcome.smae_clipped is not None and outcome.srmse_clipped is not None
+        if (
+            outcome.smae != min(SCALED_METRIC_CAP, outcome.smae_raw)
+            or outcome.srmse != min(SCALED_METRIC_CAP, outcome.srmse_raw)
+            or outcome.smae_clipped != (outcome.smae_raw > SCALED_METRIC_CAP)
+            or outcome.srmse_clipped != (outcome.srmse_raw > SCALED_METRIC_CAP)
+        ):
+            raise CacheError("cached scaled metrics do not match the active cap policy")
+        if any(metric is None for metric in (outcome.smape, outcome.mae, outcome.mase)):
+            raise CacheError("successful cached outcome requires complete diagnostic metrics")
+        return outcome
+
+    @staticmethod
+    def _outcome_payload(outcome: Outcome) -> dict[str, object]:
+        payload = asdict(outcome)
+        for name in ("smae_raw", "srmse_raw"):
+            value = payload[name]
+            if value == math.inf:
+                payload[name] = "inf"
+        return payload
+
 
 def _optional_float(value: object) -> float | None:
     if value is None:
@@ -227,6 +344,38 @@ def _optional_float(value: object) -> float | None:
     if not math.isfinite(number):
         raise ValueError("cached metrics must be finite")
     return number
+
+
+def _optional_scaled_float(value: object) -> float | None:
+    number = _optional_float(value)
+    if number is not None and (number < 0.0 or number > SCALED_METRIC_CAP):
+        raise ValueError("cached scaled metrics must be in the capped range")
+    return number
+
+
+def _optional_raw_scaled_float(value: object) -> float | None:
+    if value is None:
+        return None
+    if value == "inf":
+        return math.inf
+    number = float(value)
+    if math.isnan(number) or number < 0.0:
+        raise ValueError("cached raw scaled metrics must be nonnegative")
+    return number
+
+
+def _optional_bool(value: object) -> bool | None:
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ValueError("cached clipping flags must be booleans")
+    return value
+
+
+def _mapping(value: object) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise CacheError("cached outcome payload must be an object")
+    return value
 
 
 def _finite_float(value: object) -> float:

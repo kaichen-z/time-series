@@ -383,12 +383,13 @@ def _correlation(left: Sequence[float], right: Sequence[float]) -> float:
 
 def _diagnostic_rank(
     diagnostic: CandidateDiagnostics,
-) -> tuple[float, float, float, float, str]:
+) -> tuple[float, float, float, float, float, str]:
     return (
-        _finite_or_inf(diagnostic.worst_mase),
-        _finite_or_inf(diagnostic.median_mase),
-        _finite_or_inf(diagnostic.recent_mase),
-        _finite_or_inf(diagnostic.mase_mad),
+        _finite_or_inf(diagnostic.median_joint_scaled_error),
+        _finite_or_inf(diagnostic.recent_joint_scaled_error),
+        _finite_or_inf(diagnostic.worst_joint_scaled_error),
+        _finite_or_inf(diagnostic.median_smae),
+        _finite_or_inf(diagnostic.median_srmse),
         diagnostic.name,
     )
 

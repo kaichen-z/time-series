@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 import math
 import random
 
 import pytest
 
+from common.metrics import drcik_point_metrics
 from numerical_agent.evolution.execution import Task
 from numerical_agent.evolution.numerical_selector import (
     CandidateDiagnostics,
@@ -15,10 +16,23 @@ from numerical_agent.evolution.numerical_selector import (
     diagnose_candidate,
     hindcast_cache_key,
     pairwise_diversity,
+    passes_independent_scaled_regret,
     select_assumption_guided_forecast,
     select_numerical_forecast,
+    select_protected_safe_anchor,
 )
+from numerical_agent.evolution import numerical_selector as selector_module
 from numerical_agent.evolution.screening import TaskProfile, profile_task
+
+
+def test_exported_scaled_regret_guard_uses_raw_error_when_capped_metrics_tie() -> None:
+    assert not passes_independent_scaled_regret(
+        candidate_forecasts=((8.0, 8.0),),
+        reference_forecasts=((7.0, 7.0),),
+        truths=((1.0, 1.0),),
+        max_smae_regret=0.02,
+        max_srmse_regret=0.02,
+    )
 
 
 def _task(history=tuple(float(i) for i in range(1, 41)), horizon=5):
@@ -45,6 +59,48 @@ def test_hindcasts_use_only_historical_prefixes_and_not_task_future():
     assert diagnostic.worst_mase == pytest.approx(0.0)
     assert diagnostic.mase_mad == pytest.approx(0.0)
     assert diagnostic.median_rmsse == pytest.approx(0.0)
+
+
+def test_hindcast_folds_record_capped_and_raw_scaled_metrics():
+    diagnostic = diagnose_candidate(
+        _task(tuple(float(index + 1) for index in range(40)), horizon=5),
+        "bad", "statistical", lambda *_: (10_000.0,) * 5,
+        HindcastConfig(folds=3),
+    )
+
+    fold = diagnostic.folds[0]
+    assert fold.smae == pytest.approx(5.0)
+    assert fold.srmse == pytest.approx(5.0)
+    assert fold.smae_raw is not None and fold.smae_raw > fold.smae
+    assert fold.srmse_raw is not None and fold.srmse_raw > fold.srmse
+    assert fold.smae_clipped and fold.srmse_clipped
+
+
+def test_joint_summaries_follow_per_fold_distribution_on_cross_trading_folds() -> None:
+    """Pairing marginal summaries invents a joint score no observed fold produced."""
+    forecasts = iter(
+        (
+            (5.0, 5.0, 5.0, 5.0),  # sMAE=4, sRMSE=4, joint=4
+            (1.0, 1.0, 1.0, 9.0),  # sMAE=2, sRMSE=4, joint=3
+            (1.0, 1.0, 1.0, 11.0),  # sMAE=2.5, sRMSE=5, joint=3.75
+        )
+    )
+    diagnostic = diagnose_candidate(
+        _task((1.0,) * 40, horizon=4),
+        "cross_trading",
+        "statistical",
+        lambda *_: next(forecasts),
+        HindcastConfig(folds=3),
+    )
+
+    assert diagnostic.median_joint_scaled_error == pytest.approx(3.75)
+    assert diagnostic.worst_joint_scaled_error == pytest.approx(4.0)
+    assert diagnostic.median_joint_scaled_error != pytest.approx(
+        (diagnostic.median_smae + diagnostic.median_srmse) / 2.0
+    )
+    assert diagnostic.worst_joint_scaled_error != pytest.approx(
+        (diagnostic.worst_smae + diagnostic.worst_srmse) / 2.0
+    )
 
 
 def test_hindcast_identity_is_independent_of_the_screening_policy():
@@ -123,7 +179,192 @@ def _diagnostic(name, *, median, recent=None, worst=None, mad=0.1, family="stati
     )
 
 
+def test_selector_ignores_mase_when_scaled_metrics_disagree():
+    """Active ranking is Dr-CiK scaled-only, even when legacy MASE disagrees."""
+    diagnostics = {
+        "anchor": CandidateDiagnostics.synthetic(
+            name="anchor", family="statistical", median_mase=0.01,
+            median_smae=1.0, median_srmse=1.0,
+        ),
+        "challenger": CandidateDiagnostics.synthetic(
+            name="challenger", family="statistical", median_mase=100.0,
+            median_smae=0.8, median_srmse=0.8,
+        ),
+    }
+
+    result = select_numerical_forecast(
+        DecisionPolicy(ensemble_enabled=False, recent_regime_first=False),
+        active_names=("anchor", "challenger"),
+        diagnostics=diagnostics,
+        forecasts={"anchor": (1.0, 2.0), "challenger": (1.0, 2.0)},
+        history=(0.0, 1.0, 2.0),
+    )
+
+    assert result.selected == ("challenger",)
+
+
+def test_safe_anchor_blocks_one_metric_tail_regression():
+    """A raw sRMSE tail regression cannot displace the protected Toto anchor."""
+    diagnostics = {
+        "toto_2_0": CandidateDiagnostics.synthetic(
+            name="toto_2_0", family="tsfm", median_mase=10.0,
+            median_smae=1.0, median_srmse=1.0,
+        ),
+        "challenger": CandidateDiagnostics.synthetic(
+            name="challenger", family="statistical", median_mase=0.01,
+            median_smae=0.6, median_srmse=1.2, worst_srmse_raw=2.0,
+        ),
+    }
+
+    result = select_protected_safe_anchor(
+        DecisionPolicy(),
+        active_names=("toto_2_0", "challenger"),
+        diagnostics=diagnostics,
+        forecasts={"toto_2_0": (1.0, 2.0), "challenger": (1.0, 2.0)},
+        horizon=2,
+        fallback_reason="test",
+    )
+
+    assert result.selected == ("toto_2_0",)
+
+
+def test_active_policy_rejects_legacy_error_ranking_fields():
+    with pytest.raises(ValueError, match="unsupported"):
+        DecisionPolicy(ranking_order=("median_mase",))
+
+
+@pytest.mark.parametrize(
+    "ranking_order",
+    (
+        ("median_smae",),
+        (
+            "median_joint_scaled_error",
+            "recent_joint_scaled_error",
+            "worst_joint_scaled_error",
+            "median_smae",
+        ),
+        (
+            "recent_smae",
+            "median_joint_scaled_error",
+            "recent_joint_scaled_error",
+            "worst_joint_scaled_error",
+            "median_smae",
+            "median_srmse",
+        ),
+    ),
+)
+def test_active_policy_requires_the_complete_dual_metric_ranking_contract(
+    ranking_order,
+):
+    with pytest.raises(ValueError, match="complete.*sMAE.*sRMSE"):
+        DecisionPolicy(ranking_order=ranking_order)
+
+
+def test_active_policy_parser_requires_explicit_legacy_migration_flag():
+    with pytest.raises(ValueError, match="allow_legacy"):
+        DecisionPolicy.from_payload({"catastrophic_mase": 2.0})
+
+    migrated = DecisionPolicy.from_payload(
+        {"catastrophic_mase": 2.0}, allow_legacy=True
+    )
+
+    assert not hasattr(migrated, "catastrophic_mase")
+    assert migrated.catastrophic_smae_raw == pytest.approx(10.0)
+    assert migrated.catastrophic_srmse_raw == pytest.approx(10.0)
+
+
+def test_active_policy_payload_requires_every_canonical_field():
+    payload = asdict(DecisionPolicy())
+    payload.pop("median_mase", None)
+    payload.pop("long_horizon_max_regret")
+
+    with pytest.raises(ValueError, match="missing"):
+        DecisionPolicy.from_payload(payload)
+
+    assert DecisionPolicy.from_payload(payload, allow_legacy=True) == DecisionPolicy()
+
+
+def test_hindcast_config_has_no_active_catastrophic_mase_and_legacy_is_explicit():
+    active = asdict(HindcastConfig())
+    assert "catastrophic_mase" not in active
+    with pytest.raises(ValueError, match="legacy"):
+        HindcastConfig.from_payload({**active, "catastrophic_mase": 2.0})
+
+    migrated = HindcastConfig.from_payload(
+        {"folds": 3, "catastrophic_mase": 2.0}, allow_legacy=True
+    )
+    assert migrated == HindcastConfig()
+    assert not hasattr(migrated, "catastrophic_mase")
+
+
+def test_unreliable_toto_cannot_displace_a_reliable_scaled_challenger():
+    diagnostics = {
+        "toto_2_0": CandidateDiagnostics.synthetic(
+            name="toto_2_0", family="tsfm", median_mase=0.01,
+            median_smae=0.1, median_srmse=0.1,
+            worst_smae_raw=float("inf"),
+        ),
+        "challenger": CandidateDiagnostics.synthetic(
+            name="challenger", family="statistical", median_mase=100.0,
+            median_smae=0.8, median_srmse=0.8,
+        ),
+    }
+
+    result = select_numerical_forecast(
+        DecisionPolicy(ensemble_enabled=False, recent_regime_first=False),
+        active_names=tuple(diagnostics), diagnostics=diagnostics,
+        forecasts={name: (1.0, 2.0) for name in diagnostics}, history=(1.0, 2.0),
+    )
+
+    assert result.selected == ("challenger",)
+
+
+@pytest.mark.parametrize("field", (
+    "catastrophic_smae_raw",
+    "catastrophic_srmse_raw",
+    "max_smae_fold_regret",
+    "max_srmse_fold_regret",
+))
+@pytest.mark.parametrize("value", (float("nan"), float("inf"), float("-inf")))
+def test_scaled_safety_thresholds_require_finite_values(field, value):
+    with pytest.raises(ValueError, match="scaled safety thresholds"):
+        DecisionPolicy(**{field: value})
+
+
+def test_policy_parser_rejects_legacy_ranking_without_legacy_flag():
+    with pytest.raises(ValueError, match="allow_legacy"):
+        DecisionPolicy.from_payload({"ranking_order": ["median_mase"]})
+
+
+def test_explicit_legacy_reader_rejects_median_smape_ranking_without_a_surrogate():
+    payload = asdict(DecisionPolicy())
+    payload["ranking_order"] = ["median_smape"]
+
+    with pytest.raises(ValueError, match="median_smape cannot be migrated"):
+        DecisionPolicy.from_payload(payload, allow_legacy=True)
+
+
+def test_explicit_legacy_reader_normalizes_unpaired_ranking_to_canonical_pair() -> None:
+    payload = asdict(DecisionPolicy())
+    payload["ranking_order"] = [
+        "median_mase",
+        "recent_mase",
+        "worst_mase",
+        "mase_mad",
+        "median_rmsse",
+    ]
+
+    assert DecisionPolicy.from_payload(payload, allow_legacy=True) == DecisionPolicy()
+
+
 def _with_long_horizon_audit(diagnostic, *, forecast, truth, coverage, scale=1.0):
+    def scaled_fields(fold_truth, fold_forecast):
+        metrics = drcik_point_metrics(fold_truth, fold_forecast)
+        return {
+            key: metrics[key]
+            for key in ("smae", "srmse", "smae_raw", "srmse_raw", "smae_clipped", "srmse_clipped")
+        }
+
     folds = tuple(
         HindcastFold(
             train_end=10 * (index + 1),
@@ -132,6 +373,7 @@ def _with_long_horizon_audit(diagnostic, *, forecast, truth, coverage, scale=1.0
             forecast=tuple(float(value) for value in fold_forecast),
             truth=tuple(float(value) for value in fold_truth),
             mase_scale=float(scale),
+            **scaled_fields(fold_truth, fold_forecast),
         )
         for index, (fold_forecast, fold_truth) in enumerate(
             zip(diagnostic.fold_forecasts, diagnostic.fold_truths, strict=True)
@@ -147,9 +389,38 @@ def _with_long_horizon_audit(diagnostic, *, forecast, truth, coverage, scale=1.0
             forecast=tuple(float(value) for value in forecast),
             truth=tuple(float(value) for value in truth),
             mase_scale=float(scale),
+            **scaled_fields(truth, forecast),
         ),
         long_horizon_coverage=float(coverage),
     )
+
+
+def test_residual_correction_scale_is_independent_of_legacy_mase_diagnostics():
+    base = _diagnostic(
+        "anchor",
+        median=1.0,
+        forecasts=((2.0, 3.0),) * 3,
+        truths=((1.0, 5.0),) * 3,
+    )
+    small_legacy_scale = _with_long_horizon_audit(
+        base,
+        forecast=(2.0, 3.0),
+        truth=(1.0, 5.0),
+        coverage=1.0,
+        scale=0.01,
+    )
+    large_legacy_scale = _with_long_horizon_audit(
+        base,
+        forecast=(2.0, 3.0),
+        truth=(1.0, 5.0),
+        coverage=1.0,
+        scale=10_000.0,
+    )
+
+    assert selector_module._fold_correction_scales(
+        small_legacy_scale
+    ) == selector_module._fold_correction_scales(large_legacy_scale)
+    assert selector_module._fold_correction_scales(small_legacy_scale) == (4.0,) * 3
 
 
 def test_context_preserving_long_horizon_audit_keeps_original_rank_folds():
@@ -177,23 +448,23 @@ def test_context_preserving_long_horizon_audit_keeps_original_rank_folds():
 
 
 def test_long_horizon_penalty_is_applied_only_when_task_route_matches():
-    truths = ((0.0, 0.0),) * 3
+    truths = ((-10.0, -10.0),) * 3
     baseline = _with_long_horizon_audit(
         _diagnostic(
             "toto_2_0", family="tsfm", median=1.0,
             forecasts=((1.0, 1.0),) * 3, truths=truths,
         ),
         forecast=(1.0,) * 4,
-        truth=(0.0,) * 4,
+        truth=(-10.0,) * 4,
         coverage=1.0,
     )
     challenger = _with_long_horizon_audit(
         _diagnostic(
             "challenger", median=0.5,
-            forecasts=((0.5, 0.5),) * 3, truths=truths,
+            forecasts=((-1.0, -1.0),) * 3, truths=truths,
         ),
         forecast=(3.0,) * 4,
-        truth=(0.0,) * 4,
+        truth=(-10.0,) * 4,
         coverage=1.0,
     )
     policy = DecisionPolicy(
@@ -225,7 +496,7 @@ def test_long_horizon_penalty_is_applied_only_when_task_route_matches():
         **common,
     )
 
-    assert matched.selected == ("toto_2_0",)
+    assert matched.selected == ("challenger",)
     assert unmatched.selected == ("challenger",)
 
 
@@ -290,7 +561,7 @@ def test_change_aware_guard_rejects_override_with_long_horizon_regret():
     challenger = _with_long_horizon_audit(
         _diagnostic(
             "challenger", median=0.5,
-            forecasts=((0.5, 0.5),) * 3, truths=truths,
+            forecasts=((-1.0, -1.0),) * 3, truths=truths,
         ),
         forecast=(1.5,) * 4,
         truth=(0.0,) * 4,
@@ -318,23 +589,23 @@ def test_change_aware_guard_rejects_override_with_long_horizon_regret():
 
 
 def test_change_aware_guard_allows_stable_override_with_sufficient_audit_coverage():
-    truths = ((0.0, 0.0),) * 3
+    truths = ((-10.0, -10.0),) * 3
     baseline = _with_long_horizon_audit(
         _diagnostic(
             "toto_2_0", family="tsfm", median=1.0,
             forecasts=((1.0, 1.0),) * 3, truths=truths,
         ),
         forecast=(1.0,) * 4,
-        truth=(0.0,) * 4,
+        truth=(-10.0,) * 4,
         coverage=0.75,
     )
     challenger = _with_long_horizon_audit(
         _diagnostic(
             "challenger", median=0.5,
-            forecasts=((0.5, 0.5),) * 3, truths=truths,
+            forecasts=((-1.0, -1.0),) * 3, truths=truths,
         ),
         forecast=(1.02,) * 4,
-        truth=(0.0,) * 4,
+        truth=(-10.0,) * 4,
         coverage=0.75,
     )
 
@@ -440,23 +711,23 @@ def test_conservative_tsfm_router_keeps_toto_when_timesfm_audit_regresses():
 
 
 def test_conservative_tsfm_router_requires_three_of_four_strict_wins():
-    truths = ((0.0, 0.0),) * 3
+    truths = ((-10.0, -10.0),) * 3
     toto = _with_long_horizon_audit(
         _diagnostic(
             "toto_2_0", family="tsfm", median=1.0,
             forecasts=((1.0, 1.0),) * 3, truths=truths,
         ),
         forecast=(1.0,) * 4,
-        truth=(0.0,) * 4,
+        truth=(-10.0,) * 4,
         coverage=1.0,
     )
     timesfm = _with_long_horizon_audit(
         _diagnostic(
             "timesfm_2_5", family="tsfm", median=0.95,
-            forecasts=((0.9, 0.9), (0.9, 0.9), (1.0, 1.0)), truths=truths,
+            forecasts=((0.5, 0.5), (0.5, 0.5), (1.0, 1.0)), truths=truths,
         ),
-        forecast=(0.9,) * 4,
-        truth=(0.0,) * 4,
+        forecast=(0.5,) * 4,
+        truth=(-10.0,) * 4,
         coverage=1.0,
     )
 
@@ -474,7 +745,7 @@ def test_conservative_tsfm_router_requires_three_of_four_strict_wins():
         ),
         active_names=("toto_2_0", "timesfm_2_5"),
         diagnostics={"toto_2_0": toto, "timesfm_2_5": timesfm},
-        forecasts={"toto_2_0": (1.0,) * 4, "timesfm_2_5": (0.9,) * 4},
+        forecasts={"toto_2_0": (1.0,) * 4, "timesfm_2_5": (0.5,) * 4},
     )
 
     assert decision.selected == ("timesfm_2_5",)
@@ -525,32 +796,32 @@ def test_conservative_tsfm_router_rejects_submargin_anchor_change():
 
 
 def test_conservative_router_checks_statistical_challenger_against_routed_anchor():
-    truths = ((0.0, 0.0),) * 3
+    truths = ((-10.0, -10.0),) * 3
     toto = _with_long_horizon_audit(
         _diagnostic(
             "toto_2_0", family="tsfm", median=1.0,
             forecasts=((1.0, 1.0),) * 3, truths=truths,
         ),
         forecast=(1.0,) * 4,
-        truth=(0.0,) * 4,
+        truth=(-10.0,) * 4,
         coverage=1.0,
     )
     timesfm = _with_long_horizon_audit(
         _diagnostic(
             "timesfm_2_5", family="tsfm", median=0.9,
-            forecasts=((0.9, 0.9),) * 3, truths=truths,
+            forecasts=((0.5, 0.5),) * 3, truths=truths,
         ),
-        forecast=(0.9,) * 4,
-        truth=(0.0,) * 4,
+        forecast=(0.5,) * 4,
+        truth=(-10.0,) * 4,
         coverage=1.0,
     )
     statistical = _with_long_horizon_audit(
         _diagnostic(
             "robust_trend", family="statistical", median=0.95,
-            forecasts=((0.95, 0.95),) * 3, truths=truths,
+            forecasts=((0.7, 0.7),) * 3, truths=truths,
         ),
-        forecast=(0.95,) * 4,
-        truth=(0.0,) * 4,
+        forecast=(0.7,) * 4,
+        truth=(-10.0,) * 4,
         coverage=1.0,
     )
 
@@ -574,8 +845,8 @@ def test_conservative_router_checks_statistical_challenger_against_routed_anchor
         },
         forecasts={
             "toto_2_0": (1.0,) * 4,
-            "timesfm_2_5": (0.9,) * 4,
-            "robust_trend": (0.95,) * 4,
+            "timesfm_2_5": (0.5,) * 4,
+            "robust_trend": (0.7,) * 4,
         },
     )
 
@@ -689,14 +960,14 @@ def test_conservative_combination_rejects_lower_smae_with_higher_srmse():
 
 
 def test_conservative_tsfm_router_preserves_safe_anchor_when_no_reviewed_route():
-    truths = ((0.0, 0.0),) * 3
+    truths = ((-10.0, -10.0),) * 3
     toto = _diagnostic(
         "toto_2_0", family="tsfm", median=1.0,
         forecasts=((1.0, 1.0),) * 3, truths=truths,
     )
     chronos = _diagnostic(
         "chronos_bolt", family="tsfm", median=0.5,
-        forecasts=((0.5, 0.5), (0.5, 0.5), (1.01, 1.01)), truths=truths,
+        forecasts=((-1.0, -1.0), (-1.0, -1.0), (1.01, 1.01)), truths=truths,
     )
     common = {
         "active_names": ("toto_2_0", "chronos_bolt"),
@@ -1152,6 +1423,50 @@ def test_conservative_combined_abstains_when_any_fold_regresses():
     assert child == parent
 
 
+def test_conservative_combined_abstains_when_srmse_regresses_alone():
+    """Lower sMAE cannot admit an overlay whose sRMSE becomes worse."""
+    truths = ((10.0, 10.0),) * 3
+    diagnostics = {
+        "toto_2_0": _with_long_horizon_audit(
+            _diagnostic(
+                "toto_2_0", family="tsfm", median=0.5,
+                forecasts=((12.0, 12.0),) * 3, truths=truths,
+            ),
+            forecast=(12.0, 12.0), truth=(10.0, 10.0), coverage=1.0,
+        ),
+        "srmse_regressing_specialist": _with_long_horizon_audit(
+            _diagnostic(
+                "srmse_regressing_specialist", family="statistical", median=5.0,
+                forecasts=((-28.0, 30.0),) * 3, truths=truths,
+            ),
+            forecast=(-28.0, 30.0), truth=(10.0, 10.0), coverage=1.0,
+        ),
+    }
+    common = {
+        "active_names": tuple(diagnostics),
+        "diagnostics": diagnostics,
+        "forecasts": {
+            "toto_2_0": (12.0, 12.0),
+            "srmse_regressing_specialist": (-28.0, 30.0),
+        },
+        "conditioned_names": ("srmse_regressing_specialist",),
+    }
+    parent = select_numerical_forecast(
+        DecisionPolicy(ensemble_enabled=False, recent_regime_first=False), **common
+    )
+    child = select_numerical_forecast(
+        DecisionPolicy(
+            baseline_strategy="conservative_combined",
+            tsfm_router_blend_weight=0.25,
+            ensemble_enabled=False,
+            recent_regime_first=False,
+        ),
+        **common,
+    )
+
+    assert child == parent
+
+
 def test_conservative_combined_rejects_submargin_fold_improvements():
     truths = ((10.0, 10.0),) * 3
     diagnostics = {
@@ -1501,9 +1816,7 @@ def test_joint_portfolio_adds_one_conditioned_statistical_specialist():
     )
 
     assert decision.mode == "combined"
-    assert decision.selected == (
-        "timesfm_2_5", "toto_2_0", "seasonal_specialist"
-    )
+    assert decision.selected == ("timesfm_2_5", "toto_2_0", "seasonal_specialist")
     assert decision.weights == pytest.approx((0.375, 0.375, 0.25))
     assert decision.forecast == pytest.approx((10.0, 10.0))
     assert decision.combination_type == "joint_tsfm_statistical_portfolio"
@@ -1748,7 +2061,7 @@ def _profile(**changes):
 
 
 def test_assumption_guidance_excludes_methods_unrelated_to_supported_history():
-    truths = ((0.0, 0.0),) * 3
+    truths = ((-10.0, -10.0),) * 3
     diagnostics = {
         "toto_2_0": _diagnostic(
             "toto_2_0", family="tsfm", median=2.0, worst=2.0,
@@ -1980,10 +2293,8 @@ def test_guarded_ensemble_requires_diversity_and_historical_improvement():
         diagnostics=diagnostics,
         forecasts={"positive": (2.0, 2.0), "negative": (-2.0, -2.0)},
     )
-    assert decision.mode == "ensemble"
-    assert decision.selected == ("negative", "positive")
-    assert decision.weights == pytest.approx((0.5, 0.5))
-    assert decision.forecast == pytest.approx((0.0, 0.0))
+    assert decision.mode == "single"
+    assert decision.selected == ("negative",)
 
     duplicate = dict(diagnostics)
     duplicate["negative"] = _diagnostic(
@@ -1999,8 +2310,44 @@ def test_guarded_ensemble_requires_diversity_and_historical_improvement():
     assert single.mode == "single"
 
 
+def test_same_family_ensemble_rejects_audit_srmse_regret_despite_joint_gain():
+    """A scalar joint gain cannot hide the ensemble's long-audit RMSE regression."""
+    truths = ((10.0, 10.0),) * 3
+    anchor = _with_long_horizon_audit(
+        _diagnostic(
+            "anchor", median=0.2,
+            forecasts=((13.0, 9.0),) * 3, truths=truths,
+        ),
+        forecast=(12.0, 12.0), truth=(10.0, 10.0), coverage=1.0,
+    )
+    peer = _with_long_horizon_audit(
+        _diagnostic(
+            "peer", median=0.3,
+            forecasts=((9.0, 13.0),) * 3, truths=truths,
+        ),
+        forecast=(8.0, 14.0), truth=(10.0, 10.0), coverage=1.0,
+    )
+
+    decision = select_numerical_forecast(
+        DecisionPolicy(
+            ensemble_enabled=True,
+            ensemble_min_diversity=0.1,
+            ensemble_min_fold_wins=2,
+            long_horizon_guard_enabled=True,
+            long_horizon_min_coverage=1.0,
+            long_horizon_max_regret=0.0,
+        ),
+        active_names=("anchor", "peer"),
+        diagnostics={"anchor": anchor, "peer": peer},
+        forecasts={"anchor": (13.0, 9.0), "peer": (9.0, 13.0)},
+    )
+
+    assert decision.mode == "single"
+    assert decision.selected == ("anchor",)
+
+
 def test_dynamic_combined_searches_asymmetric_tsfm_statistical_weights():
-    truths = ((0.0, 0.0),) * 3
+    truths = ((0.5, 0.5),) * 3
     diagnostics = {
         "toto_2_0": _diagnostic(
             "toto_2_0",
@@ -2041,7 +2388,7 @@ def test_dynamic_combined_searches_asymmetric_tsfm_statistical_weights():
 
 
 def test_conditioned_specialist_expands_guarded_combination_search():
-    truths = ((0.0, 0.0),) * 3
+    truths = ((0.5, 0.5),) * 3
     diagnostics = {
         "toto_2_0": _diagnostic(
             "toto_2_0",
@@ -2136,7 +2483,7 @@ def test_dynamic_combined_rejects_median_gain_with_bad_worst_fold():
 
 
 def test_dynamic_combined_can_use_clipped_residual_correction():
-    truths = ((0.0, 0.0),) * 3
+    truths = ((0.5, 0.5),) * 3
     diagnostics = {
         "toto_2_0": _diagnostic(
             "toto_2_0",
@@ -2252,7 +2599,7 @@ def test_fixed_combined_challenger_uses_stricter_baseline_protection():
     assert "stable_baseline_protection" in decision.reason_codes
 
 
-def test_unreliable_toto_remains_the_safe_final_forecast_anchor():
+def test_unreliable_toto_cannot_displace_the_reliable_final_forecast():
     truths = ((0.0, 0.0),) * 3
     diagnostics = {
         "toto_2_0": CandidateDiagnostics.synthetic(
@@ -2281,9 +2628,9 @@ def test_unreliable_toto_remains_the_safe_final_forecast_anchor():
     )
 
     assert decision.mode == "single"
-    assert decision.selected == ("toto_2_0",)
+    assert decision.selected == ("tempting_stat",)
     assert decision.baseline_name == "toto_2_0"
-    assert "unverified_baseline_fallback" in decision.reason_codes
+    assert "unverified_baseline_fallback" not in decision.reason_codes
 
 
 def test_selector_never_returns_more_than_three_members():

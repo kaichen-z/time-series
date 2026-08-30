@@ -9,12 +9,21 @@ from dataclasses import asdict
 from pathlib import Path
 
 from common.llm import CodexCLIClient, CodexCLIConfig
-from common.payload import write_json
+from common.evolution_core.contracts import (
+    METRIC_POLICY,
+    metric_report_metadata,
+    require_active_metric_policy,
+)
+from common.payload import (
+    canonical_json_bytes,
+    read_json_object,
+    standards_json_value,
+    write_json,
+)
 
 from .evolution import git
 from .evolution.cache import OutcomeCache
 from .evolution.filtering import (
-    build_filter_dictionary,
     evolve_filter_once,
     parse_filter_source,
     render_filter_source,
@@ -25,6 +34,9 @@ from .evolution.portfolio import PolicyOutcomeCache, read_policy_file
 from .run_evolution import _evolution_tasks
 
 
+SCALED_METRIC_POLICY = METRIC_POLICY
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True)
@@ -32,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tasks-file", required=True)
     parser.add_argument("--outcome-cache-dir", required=True)
     parser.add_argument("--policy-outcome-cache-dir", required=True)
+    parser.add_argument("--seed-manifest", default=None)
     parser.add_argument("--train-limit", type=int, default=8)
     parser.add_argument("--validation-tail", type=int, default=2)
     parser.add_argument("--generation", type=int, default=1)
@@ -59,15 +72,16 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("filter evolution repository has tracked modifications")
     module = read_module(module_path)
     portfolio = read_policy_file(policy_path)
-    parent = (
-        parse_filter_source(dictionary_path.read_text(encoding="utf-8"))
-        if dictionary_path.is_file()
-        else build_filter_dictionary(module, portfolio)
-    )
     if not dictionary_path.is_file():
-        dictionary_path.write_text(render_filter_source(parent), encoding="utf-8")
-        git(repo, "add", "dictionary.py")
-        git(repo, "commit", "--quiet", "-m", "seed unified 103-candidate filter dictionary")
+        raise ValueError("active filter evolution requires a pre-existing dictionary.py seed")
+    seed_manifest_path = Path(args.seed_manifest) if args.seed_manifest else repo / "seed_manifest.json"
+    _validate_seed_manifest(
+        seed_manifest_path,
+        repo,
+        seed_kind="filter_dictionary",
+        dictionary_path=dictionary_path,
+    )
+    parent = parse_filter_source(dictionary_path.read_text(encoding="utf-8"))
 
     train, dev = _evolution_tasks(
         args.split_file,
@@ -136,7 +150,8 @@ def main(argv: list[str] | None = None) -> int:
         if before != after
     ]
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
+        **metric_report_metadata(),
         "generation": args.generation,
         "accepted": result.accepted,
         "reason": result.reason,
@@ -159,23 +174,38 @@ def main(argv: list[str] | None = None) -> int:
         },
         "parent": {
             "train": asdict(result.train_parent),
-            "dev": asdict(result.dev_parent),
+            "dev": asdict(result.dev_parent) if result.dev_parent is not None else None,
             "status_counts": _status_counts(result.parent),
         },
         "child": {
             "train": asdict(result.train_child),
-            "dev": asdict(result.dev_child),
+            "dev": asdict(result.dev_child) if result.dev_child is not None else None,
             "status_counts": _status_counts(result.child),
+        },
+        "paired_joint_wtl": {
+            "train": _paired_filter_counts(result.train_parent, result.train_child),
+            "dev": (
+                _paired_filter_counts(result.dev_parent, result.dev_child)
+                if result.dev_parent is not None and result.dev_child is not None
+                else None
+            ),
         },
         "changes": changes,
         "source_hashes": source_hashes,
     }
+    payload["manifest_sha256"] = _manifest_fingerprint(payload)
     report_path = repo / f"generation_{args.generation:03d}_filter_result.json"
     write_json(report_path, payload)
     (repo / f"generation_{args.generation:03d}_filter_report.md").write_text(
         _markdown(payload), encoding="utf-8"
     )
-    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(
+        standards_json_value(payload),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    ))
     return 0
 
 
@@ -186,8 +216,62 @@ def _status_counts(dictionary) -> dict[str, int]:
     }
 
 
+def _paired_filter_counts(parent, child) -> dict[str, int]:
+    result = {"wins": 0, "ties": 0, "losses": 0, "missing": 0, "unscored": 0}
+    observed = set(parent.task_scaled_pairs) | set(child.task_scaled_pairs)
+    for task_id in sorted(observed):
+        if task_id not in parent.task_scaled_pairs or task_id not in child.task_scaled_pairs:
+            result["missing"] += 1
+            continue
+        left = sum(parent.task_scaled_pairs[task_id]) / 2.0
+        right = sum(child.task_scaled_pairs[task_id]) / 2.0
+        if right < left - 1e-12:
+            result["wins"] += 1
+        elif right > left + 1e-12:
+            result["losses"] += 1
+        else:
+            result["ties"] += 1
+    expected = max(
+        int(getattr(parent, "task_count", len(observed))),
+        int(getattr(child, "task_count", len(observed))),
+        len(observed),
+    )
+    result["unscored"] = expected - len(observed)
+    return result
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _validate_seed_manifest(
+    path: Path,
+    repo: Path,
+    *,
+    seed_kind: str,
+    dictionary_path: Path | None = None,
+) -> dict[str, object]:
+    payload = read_json_object(path)
+    require_active_metric_policy(payload, context="active evolution seed")
+    if (
+        type(payload.get("schema_version")) is not int
+        or payload["schema_version"] != 2
+        or payload.get("seed_kind") != seed_kind
+    ):
+        raise ValueError("active evolution seed manifest schema or kind mismatch")
+    expected = {
+        "methods.py": _sha256(repo / "methods.py"),
+        "policies.py": _sha256(repo / "policies.py"),
+    }
+    if dictionary_path is not None:
+        expected["dictionary.py"] = _sha256(dictionary_path)
+    if payload.get("source_hashes") != expected:
+        raise ValueError("active evolution seed manifest source hash mismatch")
+    return payload
+
+
+def _manifest_fingerprint(payload: dict[str, object]) -> str:
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 
 def _markdown(payload: dict[str, object]) -> str:
@@ -202,17 +286,71 @@ def _markdown(payload: dict[str, object]) -> str:
         f"- Elapsed: {float(payload['elapsed_seconds']):.2f} seconds",
         f"- Changes: {len(payload['changes'])}",
         "",
-        "| Split | Parent mean MASE | Child mean MASE | Parent coverage | Child coverage |",
-        "|---|---:|---:|---:|---:|",
+        "| Split | Parent mean sMAE | Parent median sMAE | Parent sMAE SE | Child mean sMAE | Child median sMAE | Child sMAE SE | Parent mean sRMSE | Parent median sRMSE | Parent sRMSE SE | Child mean sRMSE | Child median sRMSE | Child sRMSE SE | Parent coverage | Child coverage |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for split in ("train", "dev"):
         left = parent[split]
         right = child[split]
+        if left is None or right is None:
+            lines.append(f"| {split} | not evaluated (Train gate rejected Child) |")
+            continue
         assert isinstance(left, dict) and isinstance(right, dict)
         lines.append(
-            f"| {split} | {left['mean_mase']:.6f} | {right['mean_mase']:.6f} | "
+            f"| {split} | {left['mean_smae']:.6f} | {left['median_smae']:.6f} | {left['se_smae']:.6f} | "
+            f"{right['mean_smae']:.6f} | {right['median_smae']:.6f} | {right['se_smae']:.6f} | "
+            f"{left['mean_srmse']:.6f} | {left['median_srmse']:.6f} | {left['se_srmse']:.6f} | "
+            f"{right['mean_srmse']:.6f} | {right['median_srmse']:.6f} | {right['se_srmse']:.6f} | "
             f"{left['coverage']:.4f} | {right['coverage']:.4f} |"
         )
+    lines.extend((
+        "",
+        "| Split | Side | Raw P90/P95 sMAE | Raw P90/P95 sRMSE | Clipped sMAE/sRMSE |",
+        "|---|---|---:|---:|---:|",
+    ))
+    for split in ("train", "dev"):
+        for side, scores in (("Parent", parent[split]), ("Child", child[split])):
+            if scores is None:
+                continue
+            assert isinstance(scores, dict)
+            lines.append(
+                f"| {split} | {side} | {scores['p90_smae_raw']:.6f}/{scores['p95_smae_raw']:.6f} | "
+                f"{scores['p90_srmse_raw']:.6f}/{scores['p95_srmse_raw']:.6f} | "
+                f"{scores['smae_clipped_count']} ({scores['smae_clipped_rate']:.4f}) / "
+                f"{scores['srmse_clipped_count']} ({scores['srmse_clipped_rate']:.4f}) |"
+            )
+    lines.extend((
+        "",
+        "| Split | Wins / Ties / Losses / Missing / Unscored |",
+        "|---|---:|",
+    ))
+    paired = payload["paired_joint_wtl"]
+    assert isinstance(paired, dict)
+    for split in ("train", "dev"):
+        counts = paired[split]
+        if counts is None:
+            lines.append(f"| {split} | not evaluated (Train gate rejected Child) |")
+            continue
+        assert isinstance(counts, dict)
+        lines.append(
+            f"| {split} | {counts['wins']} / {counts['ties']} / {counts['losses']} / "
+            f"{counts['missing']} / {counts['unscored']} |"
+        )
+    lines.extend((
+        "",
+        "| Split | Side | Crash / invalid / missing / malformed |",
+        "|---|---|---:|",
+    ))
+    for split in ("train", "dev"):
+        for side, scores in (("Parent", parent[split]), ("Child", child[split])):
+            if scores is None:
+                continue
+            assert isinstance(scores, dict)
+            lines.append(
+                f"| {split} | {side} | {scores['eligible_crashed']} / "
+                f"{scores['eligible_invalid']} / {scores['eligible_missing']} / "
+                f"{scores['eligible_malformed_success']} |"
+            )
     lines.extend(("", "## Proposed changes", ""))
     for change in payload["changes"]:
         assert isinstance(change, dict)

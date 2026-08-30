@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -413,6 +414,37 @@ def test_policy_cache_only_lookup_never_calls_runtime_on_a_miss(tmp_path: Path) 
     assert runtime.calls == []
 
 
+def test_policy_cache_existing_wrong_policy_binding_fails_closed(tmp_path: Path) -> None:
+    cache = PolicyOutcomeCache(tmp_path / "policy-cache")
+    runtime = FakeTSFMRuntime({method_id: 1.0 for method_id in FLAGSHIP_METHOD_IDS})
+    policy = _portfolio().tsfm[0]
+    task = _tasks()[0]
+    cache.evaluate(policy, task, _registry(runtime))
+    entry = next((tmp_path / "policy-cache").glob("*.json"))
+    payload = json.loads(entry.read_text(encoding="utf-8"))
+    payload["metric_policy_fingerprint"] = "0" * 64
+    entry.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="fingerprint"):
+        cache.evaluate(policy, task, _registry(runtime))
+
+
+@pytest.mark.parametrize("schema", (True, 3.0))
+def test_policy_cache_rejects_noninteger_schema_aliases(tmp_path: Path, schema) -> None:
+    cache = PolicyOutcomeCache(tmp_path / "policy-cache")
+    runtime = FakeTSFMRuntime({method_id: 1.0 for method_id in FLAGSHIP_METHOD_IDS})
+    policy = _portfolio().tsfm[0]
+    task = _tasks()[0]
+    cache.evaluate(policy, task, _registry(runtime))
+    entry = next((tmp_path / "policy-cache").glob("*.json"))
+    payload = json.loads(entry.read_text(encoding="utf-8"))
+    payload["cache_schema"] = schema
+    entry.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(PolicyError, match="schema mismatch"):
+        cache.evaluate(policy, task, _registry(runtime))
+
+
 def test_combined_forecast_is_computed_from_both_parent_forecasts(tmp_path: Path) -> None:
     module = _module()
     portfolio = _portfolio()
@@ -794,6 +826,49 @@ def test_route_uses_a_history_only_signal_to_select_explicit_parent() -> None:
     assert combined.forecast == (20.0, 20.0)
 
 
+@pytest.mark.parametrize(
+    ("signal", "threshold"),
+    (
+        ("noise_relative_scale", 2.0),
+        ("intermittency_adi", 2.5),
+        ("history_length", 7.0),
+        ("horizon", 1.0),
+        ("horizon_ratio", 0.2),
+    ),
+)
+def test_route_supports_extended_reviewed_python_signals(
+    signal: str, threshold: float
+) -> None:
+    """Missing host-side signal computation would reject or misroute valid policies."""
+    policy = CombinedPolicy(
+        "combined_morphology_route",
+        ("toto_2_0", "seasonal_naive"),
+        "route",
+        signal=signal,
+        threshold=threshold,
+        above_parent="seasonal_naive",
+        below_parent="toto_2_0",
+        fallback_parent="toto_2_0",
+    )
+
+    combined = combine_materialized_outcome(
+        policy,
+        {
+            "toto_2_0": Outcome("toto_2_0", "operator", SUCCESS, forecast=(10.0, 10.0)),
+            "seasonal_naive": Outcome(
+                "seasonal_naive", "operator", SUCCESS, forecast=(20.0, 20.0)
+            ),
+        },
+        task_id="operator",
+        history=(0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0),
+        horizon=2,
+        frequency="1 day",
+    )
+
+    assert combined.status == SUCCESS
+    assert combined.forecast == (20.0, 20.0)
+
+
 def test_failed_nonfallback_parent_returns_successful_explicit_fallback() -> None:
     task = _operator_task()
     policy = CombinedPolicy(
@@ -1124,6 +1199,36 @@ def test_tsfm_runtime_executes_once_when_multiple_combined_policies_consume_it(
 
     assert all(outcome.status == SUCCESS for outcome in outcomes)
     assert len(runtime.calls) == len(portfolio.tsfm)
+
+
+def test_successful_tsfm_and_combined_outcomes_record_scaled_metrics(
+    tmp_path: Path,
+) -> None:
+    policy_cache = PolicyOutcomeCache(tmp_path / "policy-cache")
+    outcomes = evaluate_portfolio(
+        _module(),
+        _portfolio(),
+        _tasks()[:1],
+        outcome_cache=OutcomeCache(tmp_path / "cache"),
+        runtimes=_registry(FakeTSFMRuntime({method_id: 1.0 for method_id in FLAGSHIP_METHOD_IDS})),
+        isolated_methods=False,
+        policy_cache=policy_cache,
+    )
+    cached = evaluate_portfolio(
+        _module(),
+        _portfolio(),
+        _tasks()[:1],
+        outcome_cache=OutcomeCache(tmp_path / "cache"),
+        runtimes=_registry(FakeTSFMRuntime({method_id: 1.0 for method_id in FLAGSHIP_METHOD_IDS})),
+        isolated_methods=False,
+        policy_cache=policy_cache,
+    )
+
+    for outcome in outcomes + cached:
+        if outcome.status == SUCCESS:
+            assert outcome.smae is not None and outcome.srmse is not None
+            assert outcome.smae_raw is not None and outcome.srmse_raw is not None
+            assert outcome.smae_clipped is not None and outcome.srmse_clipped is not None
 
 
 def test_forecast_tsfm_is_label_free_and_rejects_invalid_runtime_output() -> None:

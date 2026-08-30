@@ -6,7 +6,9 @@ import unittest
 from common.metrics import (
     aggregate_drcik_point_metrics,
     drcik_point_metrics,
+    joint_scaled_error,
     mae,
+    pareto_scaled_improvement,
     rmse,
     score_forecast,
     smape,
@@ -42,6 +44,15 @@ class MaeTests(unittest.TestCase):
 
 
 class DrCikPointMetricTests(unittest.TestCase):
+    def test_joint_scaled_error_and_pareto_gate_keep_metrics_separate(self):
+        self.assertEqual(joint_scaled_error(1.0, 3.0), 2.0)
+        self.assertTrue(
+            pareto_scaled_improvement(1.0, 1.0, 0.9, 1.0, tolerance=1e-12)
+        )
+        self.assertFalse(
+            pareto_scaled_improvement(1.0, 1.0, 0.5, 1.01, tolerance=1e-12)
+        )
+
     def test_reduces_multiple_trajectories_to_their_stepwise_mean(self):
         result = drcik_point_metrics(
             [2.0, 4.0],

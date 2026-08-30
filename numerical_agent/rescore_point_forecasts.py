@@ -8,7 +8,11 @@ import math
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from common.payload import write_json
+from common.evolution_core.contracts import (
+    load_active_release,
+    metric_report_metadata,
+)
+from common.payload import standards_json_value, strict_json_loads, write_json
 
 from .evaluate_frozen_two_stage import (
     ForecastResult,
@@ -36,7 +40,7 @@ def rescore_cached_point_forecasts(
     baseline_row: str,
 ) -> dict[str, object]:
     """Read frozen trajectories and recompute point metrics without model inference."""
-    forecasts = _load_forecast_rows(artifact_path)
+    forecasts = _load_forecast_rows(artifact_path, allow_legacy=True)
     expected_task_ids = {task.task_id for task in tasks}
     if set(forecasts) != expected_task_ids:
         missing = sorted(expected_task_ids - set(forecasts))
@@ -58,15 +62,18 @@ def rescore_cached_point_forecasts(
         for name, results in by_row.items()
     }
     baseline_by_task = {
-        str(row["task_id"]): float(row["smae"])
+        str(row["task_id"]): (float(row["smae"]), float(row["srmse"]))
         for row in scores[baseline_row]["per_task"]
     }
     paired = {
-        name: _paired_counts(score["per_task"], baseline_by_task)
+        name: _paired_counts(
+            score["per_task"], baseline_by_task, tuple(task.task_id for task in tasks)
+        )
         for name, score in scores.items()
     }
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        **metric_report_metadata(),
         "task_count": len(tasks),
         "source_artifact": str(Path(artifact_path)),
         "source_artifact_sha256": hashlib.sha256(Path(artifact_path).read_bytes()).hexdigest(),
@@ -77,6 +84,7 @@ def rescore_cached_point_forecasts(
             "scale": "mean absolute true future value per task",
             "winsorization_cap": 5.0,
             "aggregation": "task mean plus standard error",
+            "ordering": "paired joint mean of capped sMAE and sRMSE",
             "official_hidden_score": False,
         },
         "rows": scores,
@@ -95,12 +103,15 @@ def render_point_report(payload: Mapping[str, object]) -> str:
         "",
         f"- Tasks: {payload['task_count']}",
         f"- Baseline: `{payload['baseline_row']}`",
+        f"- Metric policy SHA-256: `{payload['metric_policy_fingerprint']}`",
+        "- Primary metrics: sMAE, sRMSE",
+        "- Diagnostic only: MASE, MAE, sMAPE, RMSSE",
         "- sCRPS: **not computed** (no probabilistic trajectories in this phase)",
         "- Model calls: **0**; all forecasts were read from the frozen artifact",
         "- Status: public-label development/regression metrics, not an official hidden-test score",
         "",
-        "| Row | Mean sMAE | sMAE SE | Mean sRMSE | sRMSE SE | P90/P95 sMAE | Clipped sMAE/sRMSE | Coverage | W/T/L vs baseline |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Row | Mean sMAE | Median sMAE | sMAE SE | Mean sRMSE | Median sRMSE | sRMSE SE | Raw P90/P95 sMAE/sRMSE | Clipped sMAE/sRMSE | Coverage | W/T/L/M/U vs baseline (joint) |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name, raw in rows.items():
         if not isinstance(raw, Mapping):
@@ -109,64 +120,147 @@ def render_point_report(payload: Mapping[str, object]) -> str:
         if not isinstance(comparison, Mapping):
             raise ValueError(f"comparison for {name} must be a mapping")
         lines.append(
-            f"| {name} | {_number(raw['mean_smae'])} | {_number(raw['se_smae'])} | "
-            f"{_number(raw['mean_srmse'])} | {_number(raw['se_srmse'])} | "
-            f"{_number(raw['p90_smae'])}/{_number(raw['p95_smae'])} | "
+            f"| {name} | {_number(raw['mean_smae'])} | {_number(raw['median_smae'])} | "
+            f"{_number(raw['se_smae'])} | {_number(raw['mean_srmse'])} | "
+            f"{_number(raw['median_srmse'])} | {_number(raw['se_srmse'])} | "
+            f"{_number(raw['p90_smae_raw'])}/{_number(raw['p95_smae_raw'])} / "
+            f"{_number(raw['p90_srmse_raw'])}/{_number(raw['p95_srmse_raw'])} | "
             f"{raw['smae_clipped_count']}/{raw['srmse_clipped_count']} | "
             f"{_number(raw['coverage'], digits=4)} | "
-            f"{comparison['wins']}/{comparison['ties']}/{comparison['losses']} |"
+            f"{comparison['wins']}/{comparison['ties']}/{comparison['losses']}/"
+            f"{comparison['missing']}/{comparison['unscored']} |"
         )
     return "\n".join(lines) + "\n"
 
 
-def _load_forecast_rows(path: str | Path) -> dict[str, dict[str, ForecastResult]]:
+def _load_forecast_rows(
+    path: str | Path, *, allow_legacy: bool = False
+) -> dict[str, dict[str, ForecastResult]]:
+    """Read a frozen historical forecast artifact for report-only rescoring."""
     result: dict[str, dict[str, ForecastResult]] = {}
     for line_number, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
-        raw = json.loads(line)
+        raw = strict_json_loads(
+            line, context=f"historical forecast row {line_number}"
+        )
         if not isinstance(raw, Mapping):
             raise ValueError(f"line {line_number} must contain an object")
-        task_id = str(raw.get("task_id", ""))
+        active = "schema_version" in raw
+        if active:
+            load_active_release(raw)
+            _require_exact_row_fields(raw, {
+                "schema_version", "metric_policy", "metric_policy_fingerprint",
+                "task_id", "rows",
+            }, f"active line {line_number}")
+        else:
+            if not allow_legacy:
+                raise ValueError(
+                    "legacy forecast rows require allow_legacy=True report-only parsing"
+                )
+            _require_exact_row_fields(
+                raw, {"task_id", "rows"}, f"legacy line {line_number}"
+            )
+        task_id = raw["task_id"]
+        if type(task_id) is not str or not task_id:
+            raise ValueError(f"line {line_number} task_id must be a non-empty string")
         if not task_id or task_id in result:
             raise ValueError(f"duplicate or empty task_id on line {line_number}")
-        raw_rows = raw.get("rows")
-        if not isinstance(raw_rows, Mapping) or not raw_rows:
+        raw_rows = raw["rows"]
+        if type(raw_rows) is not dict or not raw_rows:
             raise ValueError(f"line {line_number} needs non-empty rows")
         parsed: dict[str, ForecastResult] = {}
         for name, value in raw_rows.items():
+            if type(name) is not str or not name:
+                raise ValueError(f"line {line_number} row names must be non-empty strings")
             if not isinstance(value, Mapping):
                 raise ValueError(f"row {name!r} on line {line_number} must be an object")
-            row_task_id = str(value.get("task_id", ""))
+            expected_fields = {
+                "task_id", "forecast", "selected", "families", "mode", "oracle_mase",
+            }
+            if active:
+                expected_fields.add("assumption_ids")
+            _require_exact_row_fields(
+                value, expected_fields, f"row {name!r} on line {line_number}"
+            )
+            row_task_id = value["task_id"]
+            if type(row_task_id) is not str:
+                raise ValueError(
+                    f"row {name!r} task_id on line {line_number} must be a string"
+                )
             if row_task_id != task_id:
                 raise ValueError(
                     f"row {name!r} task_id {row_task_id!r} does not match {task_id!r}"
                 )
-            forecast = tuple(float(item) for item in _sequence(value.get("forecast"), "forecast"))
-            if not all(math.isfinite(item) for item in forecast):
-                raise ValueError(f"row {name!r} contains a non-finite forecast")
-            oracle = value.get("oracle_mase")
-            parsed[str(name)] = ForecastResult(
+            forecast = _finite_number_list(value["forecast"], "forecast")
+            selected = _string_list(value["selected"], "selected")
+            families = _string_list(value["families"], "families")
+            mode = value["mode"]
+            if type(mode) is not str or not mode:
+                raise ValueError(f"row {name!r} mode must be a non-empty string")
+            oracle = value["oracle_mase"]
+            if oracle is not None:
+                oracle = _finite_number(oracle, f"row {name!r} oracle_mase")
+            assumption_ids = (
+                _string_list(value["assumption_ids"], "assumption_ids")
+                if active else ()
+            )
+            parsed[name] = ForecastResult(
                 task_id,
                 forecast,
-                tuple(str(item) for item in _sequence(value.get("selected"), "selected")),
-                tuple(str(item) for item in _sequence(value.get("families"), "families")),
-                str(value.get("mode", "")),
-                None if oracle is None else float(oracle),
+                selected,
+                families,
+                mode,
+                oracle,
+                assumption_ids,
             )
         result[task_id] = parsed
     return result
 
 
-def _sequence(value: object, name: str) -> Sequence[object]:
-    if not isinstance(value, (list, tuple)):
-        raise ValueError(f"{name} must be a sequence")
-    return value
+def _require_exact_row_fields(
+    payload: Mapping[str, object], expected: set[str], context: str
+) -> None:
+    missing = expected - set(payload)
+    unknown = set(payload) - expected
+    if missing or unknown:
+        raise ValueError(
+            f"{context} fields mismatch: missing={sorted(missing)}, "
+            f"unknown={sorted(unknown)}"
+        )
+
+
+def _finite_number(value: object, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be numeric")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{field_name} must be finite")
+    return number
+
+
+def _finite_number_list(value: object, field_name: str) -> tuple[float, ...]:
+    if type(value) is not list:
+        raise ValueError(f"{field_name} must be a list")
+    return tuple(
+        _finite_number(item, f"{field_name}[{index}]")
+        for index, item in enumerate(value)
+    )
+
+
+def _string_list(value: object, field_name: str) -> tuple[str, ...]:
+    if type(value) is not list or any(type(item) is not str or not item for item in value):
+        raise ValueError(f"{field_name} must be a list of non-empty strings")
+    return tuple(value)
 
 
 def _number(value: object, *, digits: int = 6) -> str:
     number = float(value)
-    return f"{number:.{digits}f}" if math.isfinite(number) else "n/a"
+    if math.isnan(number):
+        raise ValueError("rescore report cannot render NaN")
+    if math.isinf(number):
+        return "positive_infinity" if number > 0 else "negative_infinity"
+    return f"{number:.{digits}f}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -183,18 +277,18 @@ def main(argv: list[str] | None = None) -> int:
     (output / "POINT_RESCORE_REPORT.md").write_text(
         render_point_report(payload), encoding="utf-8"
     )
-    print(json.dumps(_finite_json(payload), ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(
+        _finite_json(payload),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    ))
     return 0
 
 
 def _finite_json(value: object) -> object:
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    if isinstance(value, Mapping):
-        return {str(key): _finite_json(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_finite_json(item) for item in value]
-    return value
+    return standards_json_value(value)
 
 
 if __name__ == "__main__":

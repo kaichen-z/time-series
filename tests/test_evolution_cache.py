@@ -6,7 +6,7 @@ import shutil
 
 import pytest
 
-from numerical_agent.evolution.cache import CacheMissError, OutcomeCache
+from numerical_agent.evolution.cache import CacheError, CacheMissError, OutcomeCache
 from numerical_agent.evolution.execution import SUCCESS, Task
 from numerical_agent.evolution.module import parse_method
 
@@ -23,6 +23,33 @@ def tasks() -> tuple[Task, ...]:
         Task("t1", (1.0, 2.0, 3.0), 2, "1 day", (3.0, 3.0)),
         Task("t2", (4.0, 5.0, 6.0), 2, "1 day", (6.0, 6.0)),
     )
+
+
+def valid_cached_success_payload() -> dict[str, object]:
+    return {
+        "method": "cached_method",
+        "task_id": "t1",
+        "status": SUCCESS,
+        "smae": 0.0,
+        "srmse": 0.0,
+        "smae_raw": 0.0,
+        "srmse_raw": 0.0,
+        "smae_clipped": False,
+        "srmse_clipped": False,
+        "smape": 0.0,
+        "mae": 0.0,
+        "mase": 0.0,
+        "detail": "",
+        "forecast": [3.0, 3.0],
+    }
+
+
+def test_cache_rejects_success_without_both_scaled_metrics() -> None:
+    payload = valid_cached_success_payload()
+    del payload["srmse"]
+
+    with pytest.raises(CacheError, match="scaled metrics"):
+        OutcomeCache.from_payload(payload)
 
 
 def test_unchanged_method_and_tasks_hit_the_outcome_cache(tmp_path: Path) -> None:
@@ -51,22 +78,20 @@ def test_source_task_and_isolation_changes_use_distinct_cache_keys(tmp_path: Pat
     assert (cache.stats.hits, cache.stats.misses) == (0, 4)
 
 
-def test_corrupt_cache_entry_is_a_miss_and_is_replaced(tmp_path: Path) -> None:
+def test_corrupt_existing_cache_entry_fails_closed(tmp_path: Path) -> None:
     root = tmp_path / "cache"
     cache = OutcomeCache(root)
     method = parse_method(method_source())
-    expected = cache.evaluate_method(method, (tasks()[0],), isolated=False)
+    cache.evaluate_method(method, (tasks()[0],), isolated=False)
     entry = next(root.glob("*.json"))
     entry.write_text("not-json", encoding="utf-8")
 
-    actual = cache.evaluate_method(method, (tasks()[0],), isolated=False)
-
-    assert actual == expected
-    assert (cache.stats.hits, cache.stats.misses) == (0, 2)
-    assert entry.read_text(encoding="utf-8").startswith("{")
+    with pytest.raises(CacheError, match="malformed active outcome cache row"):
+        cache.evaluate_method(method, (tasks()[0],), isolated=False)
+    assert entry.read_text(encoding="utf-8") == "not-json"
 
 
-def test_cache_record_copied_under_another_key_is_a_miss(tmp_path: Path) -> None:
+def test_cache_record_copied_under_another_key_fails_closed(tmp_path: Path) -> None:
     root = tmp_path / "cache"
     cache = OutcomeCache(root)
     method = parse_method(method_source())
@@ -76,13 +101,27 @@ def test_cache_record_copied_under_another_key_is_a_miss(tmp_path: Path) -> None
     second_key = cache.cache_key(method, second, isolated=False)
     shutil.copyfile(first_entry, root / f"{second_key}.json")
 
-    outcome = cache.evaluate_method(method, (second,), isolated=False)
-
-    assert outcome[0].task_id == second.task_id
-    assert (cache.stats.hits, cache.stats.misses) == (0, 2)
+    with pytest.raises(CacheError, match="key mismatch"):
+        cache.evaluate_method(method, (second,), isolated=False)
 
 
-def test_success_cache_record_without_complete_metrics_is_a_miss(tmp_path: Path) -> None:
+@pytest.mark.parametrize("schema", (True, 3.0))
+def test_outcome_cache_rejects_noninteger_schema_aliases(tmp_path: Path, schema) -> None:
+    root = tmp_path / "cache"
+    cache = OutcomeCache(root)
+    method = parse_method(method_source())
+    task = tasks()[0]
+    cache.evaluate_method(method, (task,), isolated=False)
+    entry = next(root.glob("*.json"))
+    payload = json.loads(entry.read_text(encoding="utf-8"))
+    payload["cache_schema"] = schema
+    entry.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(CacheError, match="schema mismatch"):
+        cache.evaluate_method(method, (task,), isolated=False)
+
+
+def test_success_cache_record_without_complete_metrics_fails_closed(tmp_path: Path) -> None:
     root = tmp_path / "cache"
     cache = OutcomeCache(root)
     method = parse_method(method_source())
@@ -93,13 +132,11 @@ def test_success_cache_record_without_complete_metrics_is_a_miss(tmp_path: Path)
     payload["outcome"]["mase"] = None
     entry.write_text(json.dumps(payload), encoding="utf-8")
 
-    actual = cache.evaluate_method(method, (task,), isolated=False)
-
-    assert actual[0].mase == 0.0
-    assert (cache.stats.hits, cache.stats.misses) == (0, 2)
+    with pytest.raises(CacheError, match="complete diagnostic metrics"):
+        cache.evaluate_method(method, (task,), isolated=False)
 
 
-def test_forecast_required_for_diagnosis_refreshes_a_legacy_cache_record(
+def test_forecast_required_for_diagnosis_rejects_a_legacy_cache_record(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "cache"
@@ -112,12 +149,21 @@ def test_forecast_required_for_diagnosis_refreshes_a_legacy_cache_record(
     payload["outcome"].pop("forecast", None)
     entry.write_text(json.dumps(payload), encoding="utf-8")
 
-    actual = cache.evaluate_method(
-        method, (task,), isolated=False, require_forecasts=True
-    )
+    with pytest.raises(CacheError, match="forecast horizon mismatch"):
+        cache.evaluate_method(method, (task,), isolated=False, require_forecasts=True)
 
-    assert actual[0].forecast == (3.0, 3.0)
-    assert (cache.stats.hits, cache.stats.misses) == (0, 2)
+
+def test_cache_round_trips_raw_infinite_scaled_tail_risk(tmp_path: Path) -> None:
+    cache = OutcomeCache(tmp_path / "cache")
+    method = parse_method(method_source())
+    task = Task("zero-scale", (1.0, 2.0, 3.0), 2, "1 day", (0.0, 0.0))
+
+    first = cache.evaluate_method(method, (task,), isolated=False)[0]
+    second = cache.evaluate_method(method, (task,), isolated=False)[0]
+
+    assert first.smae_clipped and first.srmse_clipped
+    assert first.smae_raw == float("inf") and first.srmse_raw == float("inf")
+    assert second == first
 
 
 def test_cache_only_lookup_never_executes_a_missing_method(tmp_path: Path) -> None:

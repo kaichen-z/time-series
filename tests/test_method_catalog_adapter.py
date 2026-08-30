@@ -31,7 +31,7 @@ def test_release_catalog_imports_as_an_executable_statistical_dictionary() -> No
     assert all(record.candidate is None for record in dictionary.methods)
 
 
-def test_existing_tool_dictionary_payload_remains_supported() -> None:
+def test_unbound_tool_dictionary_payload_is_not_an_active_catalog_seed() -> None:
     payload = {
         "dictionary_id": "existing",
         "parent_dictionary_id": None,
@@ -45,12 +45,8 @@ def test_existing_tool_dictionary_payload_remains_supported() -> None:
         ],
     }
 
-    dictionary = tool_dictionary_from_payload(
-        payload, allowed_families=("statistical",)
-    )
-
-    assert dictionary.dictionary_id == "existing"
-    assert dictionary.methods[0].definition.method_id == "m1"
+    with pytest.raises(ValueError, match="metric policy"):
+        tool_dictionary_from_payload(payload, allowed_families=("statistical",))
 
 
 def test_release_import_rejects_combined_methods_without_their_parent_families() -> (

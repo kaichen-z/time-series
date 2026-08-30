@@ -4,10 +4,19 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+import statistics
+from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
+from common.metrics import (
+    joint_scaled_error,
+    linear_quantile,
+    pareto_scaled_improvement,
+    standard_error,
+)
+
 from .analysis_skills_template import analyze_series
+from .cache import SCALED_METRIC_CAP, SCALED_METRIC_SCHEMA
 from .execution import (
     CRASHED,
     INVALID,
@@ -43,6 +52,13 @@ _FEATURE_FIELDS = frozenset(
         "intermittency_cv2",
     }
 )
+_SCALED_METRIC_POLICY = {
+    "scaled_metric_schema": SCALED_METRIC_SCHEMA,
+    "scaled_metric_cap": SCALED_METRIC_CAP,
+    "objective": "pareto_minimize_smae_srmse",
+    "aggregation": "mean_capped_task_metrics",
+    "ordering": "joint_scaled_error_smae_srmse_name",
+}
 _FEATURE_OPERATORS = frozenset({"<", "<=", "==", ">=", ">", "in"})
 _SELECTABLE_STATUSES = frozenset({"keep", "specialized"})
 _STATUSES = frozenset({"keep", "specialized", "repair", "quarantine", "discard"})
@@ -333,11 +349,24 @@ class ScreeningScore:
     not_applicable_exposure: float
     mean_active_failures: float
     mean_active_not_applicable: float
+    active_failures: int
+    active_crashed: int
+    active_invalid: int
+    active_missing: int
+    active_malformed_success: int
+    crash_exposure: float
+    invalid_exposure: float
+    missing_exposure: float
+    malformed_success_exposure: float
     compression: float
     mean_active_candidates: float
     median_active_candidates: float
+    mean_active_smae: float
+    mean_active_srmse: float
     global_oracle_retention: float
     mean_active_oracle_regret: float
+    mean_active_oracle_smae_regret: float
+    mean_active_oracle_srmse_regret: float
     mean_active_families: float
     fallback_rate: float
     active_counts: Mapping[str, int]
@@ -346,6 +375,26 @@ class ScreeningScore:
     unique_active_dictionaries: int
     mean_pairwise_jaccard: float
     conditioned_entries_by_family: Mapping[str, int]
+    oracle_names: Mapping[str, tuple[str, ...]]
+    mean_smae: float = math.inf
+    median_smae: float = math.inf
+    se_smae: float = math.inf
+    mean_srmse: float = math.inf
+    median_srmse: float = math.inf
+    se_srmse: float = math.inf
+    p90_smae: float = math.inf
+    p95_smae: float = math.inf
+    p90_srmse: float = math.inf
+    p95_srmse: float = math.inf
+    p90_smae_raw: float = math.inf
+    p95_smae_raw: float = math.inf
+    p90_srmse_raw: float = math.inf
+    p95_srmse_raw: float = math.inf
+    smae_clipped_count: int = 0
+    smae_clipped_rate: float = 1.0
+    srmse_clipped_count: int = 0
+    srmse_clipped_rate: float = 1.0
+    task_scaled_pairs: Mapping[str, tuple[float, float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -542,16 +591,30 @@ def evaluate_screening(
     active_attempts = 0
     active_successes = 0
     active_failures = 0
+    active_crashed = 0
+    active_invalid = 0
+    active_missing = 0
+    active_malformed_success = 0
     active_not_applicable = 0
     covered = 0
     oracle_tasks = 0
     oracle_retained = 0
     regrets: list[float] = []
+    smae_regrets: list[float] = []
+    srmse_regrets: list[float] = []
+    active_smae_scores: list[float] = []
+    active_srmse_scores: list[float] = []
+    active_smae_raw_scores: list[float] = []
+    active_srmse_raw_scores: list[float] = []
+    smae_clipped_count = 0
+    srmse_clipped_count = 0
+    task_scaled_pairs: dict[str, tuple[float, float]] = {}
     family_counts: list[int] = []
     fallback_count = 0
     policy_names = {entry.name for entry in policy.entries}
     active_signatures: list[frozenset[str]] = []
     profiles = {task.task_id: profile_task(task) for task in tasks}
+    oracle_names: dict[str, tuple[str, ...]] = {}
 
     for task in tasks:
         active_dictionary = materialize_active_dictionary(policy, profiles[task.task_id])
@@ -564,14 +627,54 @@ def evaluate_screening(
         active_rows = []
         for name in active_names:
             row = by_key.get((name, task.task_id))
-            if row is not None and row.status == SUCCESS and _finite_mase(row):
+            if row is not None and row.status == SUCCESS and _finite_scaled(row):
                 active_successes += 1
                 active_rows.append(row)
+                active_smae_scores.append(float(row.smae))
+                active_srmse_scores.append(float(row.srmse))
+                active_smae_raw_scores.append(
+                    float(row.smae_raw) if row.smae_raw is not None else math.inf
+                )
+                active_srmse_raw_scores.append(
+                    float(row.srmse_raw) if row.srmse_raw is not None else math.inf
+                )
+                smae_clipped_count += int(bool(row.smae_clipped))
+                srmse_clipped_count += int(bool(row.srmse_clipped))
             elif row is not None and row.status == NOT_APPLICABLE:
                 active_not_applicable += 1
+                active_smae_scores.append(5.0)
+                active_srmse_scores.append(5.0)
+                active_smae_raw_scores.append(math.inf)
+                active_srmse_raw_scores.append(math.inf)
+                smae_clipped_count += 1
+                srmse_clipped_count += 1
             else:
                 active_failures += 1
+                if row is None:
+                    active_missing += 1
+                elif row.status == CRASHED:
+                    active_crashed += 1
+                elif row.status == INVALID:
+                    active_invalid += 1
+                elif row.status == SUCCESS:
+                    active_malformed_success += 1
+                else:
+                    active_invalid += 1
+                active_smae_scores.append(5.0)
+                active_srmse_scores.append(5.0)
+                active_smae_raw_scores.append(math.inf)
+                active_srmse_raw_scores.append(math.inf)
+                smae_clipped_count += 1
+                srmse_clipped_count += 1
         covered += int(bool(active_rows))
+        if active_rows:
+            task_best = min(active_rows, key=_scaled_order)
+            task_scaled_pairs[task.task_id] = (
+                float(task_best.smae),
+                float(task_best.srmse),
+            )
+        else:
+            task_scaled_pairs[task.task_id] = (5.0, 5.0)
 
         global_rows = [
             row
@@ -579,24 +682,47 @@ def evaluate_screening(
             if row.task_id == task.task_id
             and row.method in policy_names
             and row.status == SUCCESS
-            and _finite_mase(row)
+            and _finite_scaled(row)
         ]
         if not global_rows:
+            oracle_names[task.task_id] = ()
             regrets.append(10.0)
+            smae_regrets.append(10.0)
+            srmse_regrets.append(10.0)
             continue
         oracle_tasks += 1
-        best_global = min(float(row.mase) for row in global_rows)  # type: ignore[arg-type]
-        global_oracles = {
+        best_global_row = min(global_rows, key=_scaled_order)
+        best_global_smae = float(best_global_row.smae)
+        best_global_srmse = float(best_global_row.srmse)
+        global_oracles = tuple(sorted(
             row.method
             for row in global_rows
-            if abs(float(row.mase) - best_global) <= 1e-12  # type: ignore[arg-type]
-        }
-        oracle_retained += int(bool(global_oracles.intersection(active_names)))
+            if abs(float(row.smae) - best_global_smae) <= 1e-12
+            and abs(float(row.srmse) - best_global_srmse) <= 1e-12
+        ))
+        oracle_names[task.task_id] = global_oracles
+        oracle_retained += int(bool(set(global_oracles).intersection(active_names)))
         if active_rows:
-            best_active = min(float(row.mase) for row in active_rows)  # type: ignore[arg-type]
+            best_active_row = min(active_rows, key=_scaled_order)
+            best_active = joint_scaled_error(
+                float(best_active_row.smae), float(best_active_row.srmse)
+            )
+            best_global = joint_scaled_error(best_global_smae, best_global_srmse)
             regrets.append(max(0.0, (best_active - best_global) / (1.0 + best_global)))
+            smae_regrets.append(max(
+                0.0,
+                (float(best_active_row.smae) - best_global_smae)
+                / (1.0 + best_global_smae),
+            ))
+            srmse_regrets.append(max(
+                0.0,
+                (float(best_active_row.srmse) - best_global_srmse)
+                / (1.0 + best_global_srmse),
+            ))
         else:
             regrets.append(10.0)
+            smae_regrets.append(10.0)
+            srmse_regrets.append(10.0)
 
     denominator = max(1, active_attempts)
     task_denominator = max(1, len(tasks))
@@ -618,11 +744,30 @@ def evaluate_screening(
         not_applicable_exposure=active_not_applicable / denominator,
         mean_active_failures=active_failures / task_denominator,
         mean_active_not_applicable=active_not_applicable / task_denominator,
+        active_failures=active_failures,
+        active_crashed=active_crashed,
+        active_invalid=active_invalid,
+        active_missing=active_missing,
+        active_malformed_success=active_malformed_success,
+        crash_exposure=active_crashed / denominator,
+        invalid_exposure=active_invalid / denominator,
+        missing_exposure=active_missing / denominator,
+        malformed_success_exposure=active_malformed_success / denominator,
         compression=active_attempts / max(1, len(policy.entries) * len(tasks)),
         mean_active_candidates=sum(counts) / task_denominator,
         median_active_candidates=_median(counts),
+        mean_active_smae=(
+            sum(active_smae_scores) / len(active_smae_scores)
+            if active_smae_scores else 5.0
+        ),
+        mean_active_srmse=(
+            sum(active_srmse_scores) / len(active_srmse_scores)
+            if active_srmse_scores else 5.0
+        ),
         global_oracle_retention=oracle_retained / max(1, oracle_tasks),
         mean_active_oracle_regret=sum(regrets) / task_denominator,
+        mean_active_oracle_smae_regret=sum(smae_regrets) / task_denominator,
+        mean_active_oracle_srmse_regret=sum(srmse_regrets) / task_denominator,
         mean_active_families=sum(family_counts) / task_denominator,
         fallback_rate=fallback_count / task_denominator,
         active_counts=active_counts,
@@ -631,6 +776,34 @@ def evaluate_screening(
         unique_active_dictionaries=len(set(active_signatures)),
         mean_pairwise_jaccard=_mean_pairwise_jaccard(active_signatures),
         conditioned_entries_by_family=conditioned,
+        oracle_names=oracle_names,
+        mean_smae=(statistics.fmean(active_smae_scores) if active_smae_scores else 5.0),
+        median_smae=(statistics.median(active_smae_scores) if active_smae_scores else 5.0),
+        se_smae=standard_error(active_smae_scores) if active_smae_scores else math.inf,
+        mean_srmse=(statistics.fmean(active_srmse_scores) if active_srmse_scores else 5.0),
+        median_srmse=(statistics.median(active_srmse_scores) if active_srmse_scores else 5.0),
+        se_srmse=standard_error(active_srmse_scores) if active_srmse_scores else math.inf,
+        p90_smae=linear_quantile(active_smae_scores, 0.90) if active_smae_scores else 5.0,
+        p95_smae=linear_quantile(active_smae_scores, 0.95) if active_smae_scores else 5.0,
+        p90_srmse=linear_quantile(active_srmse_scores, 0.90) if active_srmse_scores else 5.0,
+        p95_srmse=linear_quantile(active_srmse_scores, 0.95) if active_srmse_scores else 5.0,
+        p90_smae_raw=linear_quantile(active_smae_raw_scores, 0.90) if active_smae_raw_scores else math.inf,
+        p95_smae_raw=linear_quantile(active_smae_raw_scores, 0.95) if active_smae_raw_scores else math.inf,
+        p90_srmse_raw=linear_quantile(active_srmse_raw_scores, 0.90) if active_srmse_raw_scores else math.inf,
+        p95_srmse_raw=linear_quantile(active_srmse_raw_scores, 0.95) if active_srmse_raw_scores else math.inf,
+        smae_clipped_count=smae_clipped_count,
+        smae_clipped_rate=(
+            smae_clipped_count / len(active_smae_scores)
+            if active_smae_scores
+            else 1.0
+        ),
+        srmse_clipped_count=srmse_clipped_count,
+        srmse_clipped_rate=(
+            srmse_clipped_count / len(active_srmse_scores)
+            if active_srmse_scores
+            else 1.0
+        ),
+        task_scaled_pairs=task_scaled_pairs,
     )
 
 
@@ -645,12 +818,66 @@ def compare_screening(
 ) -> ScreeningGateResult:
     """Apply the frozen Train-improvement and read-only Dev acceptance gate."""
     tolerance = 1e-12
-    if train_child.coverage < 1.0 - tolerance or dev_child.coverage < 1.0 - tolerance:
-        return ScreeningGateResult(False, "rejected: screening coverage is below 100%")
+    train_scaled_improved = pareto_scaled_improvement(
+        train_parent.mean_active_smae,
+        train_parent.mean_active_srmse,
+        train_child.mean_active_smae,
+        train_child.mean_active_srmse,
+        tolerance=tolerance,
+    )
+    if train_child.coverage < 1.0 - tolerance:
+        return ScreeningGateResult(False, "rejected: Train screening coverage is below 100%")
     if train_child.global_oracle_retention < 1.0 - tolerance:
         return ScreeningGateResult(
             False, "rejected: Train oracle retention must remain 100%"
         )
+    if train_child.failure_exposure > train_parent.failure_exposure + tolerance:
+        return ScreeningGateResult(False, "rejected: Train failure exposure increased")
+    if train_child.mean_active_failures > train_parent.mean_active_failures + tolerance:
+        return ScreeningGateResult(
+            False, "rejected: Train failure exposure count increased"
+        )
+    if not train_scaled_improved:
+        return ScreeningGateResult(
+            False,
+            "rejected: Train sMAE/sRMSE did not improve under the Pareto gate",
+        )
+    train_safety_regression = _screening_scaled_safety_regression(
+        train_parent, train_child, tolerance=tolerance
+    )
+    if train_safety_regression is not None:
+        return ScreeningGateResult(
+            False, f"rejected: Train {train_safety_regression} regressed"
+        )
+    if constraints is not None:
+        if train_child.min_active_candidates < constraints.min_active_candidates:
+            return ScreeningGateResult(
+                False, "rejected: Train active candidate pool is too small"
+            )
+        if (
+            enforce_final_constraints
+            and train_child.max_active_candidates > constraints.max_active_candidates
+        ):
+            return ScreeningGateResult(
+                False, "rejected: Train active candidate pool is too large"
+            )
+        if enforce_final_constraints and (
+            train_child.unique_active_dictionaries
+            < min(constraints.min_unique_active_dictionaries, train_child.task_count)
+        ):
+            return ScreeningGateResult(
+                False, "rejected: insufficient Train task-conditioned diversity"
+            )
+
+    dev_scaled_improved = pareto_scaled_improvement(
+        dev_parent.mean_active_smae,
+        dev_parent.mean_active_srmse,
+        dev_child.mean_active_smae,
+        dev_child.mean_active_srmse,
+        tolerance=tolerance,
+    )
+    if dev_child.coverage < 1.0 - tolerance:
+        return ScreeningGateResult(False, "rejected: Dev screening coverage is below 100%")
     required_dev_oracle = (
         constraints.min_dev_oracle_retention if constraints is not None else 1.0
     )
@@ -659,31 +886,48 @@ def compare_screening(
             False,
             "rejected: Dev oracle retention is below the bounded safety floor",
         )
-    if dev_child.mean_active_oracle_regret > dev_parent.mean_active_oracle_regret + 0.01 + tolerance:
-        return ScreeningGateResult(False, "rejected: Dev active-oracle regret regressed")
+    if (
+        dev_child.mean_active_oracle_smae_regret
+        > dev_parent.mean_active_oracle_smae_regret + 0.01 + tolerance
+    ):
+        return ScreeningGateResult(False, "rejected: Dev sMAE oracle regret regressed")
+    if (
+        dev_child.mean_active_oracle_srmse_regret
+        > dev_parent.mean_active_oracle_srmse_regret + 0.01 + tolerance
+    ):
+        return ScreeningGateResult(False, "rejected: Dev sRMSE oracle regret regressed")
+    if dev_child.failure_exposure > dev_parent.failure_exposure + tolerance:
+        return ScreeningGateResult(False, "rejected: Dev failure exposure increased")
     if dev_child.mean_active_failures > dev_parent.mean_active_failures + tolerance:
         return ScreeningGateResult(
             False, "rejected: Dev failure exposure count increased"
         )
-    if train_child.mean_active_failures > train_parent.mean_active_failures + tolerance:
+    if not dev_scaled_improved:
         return ScreeningGateResult(
-            False, "rejected: Train failure exposure count increased"
+            False,
+            "rejected: Dev sMAE/sRMSE did not improve under the Pareto gate",
+        )
+    dev_safety_regression = _screening_scaled_safety_regression(
+        dev_parent, dev_child, tolerance=tolerance
+    )
+    if dev_safety_regression is not None:
+        return ScreeningGateResult(
+            False, f"rejected: Dev {dev_safety_regression} regressed"
         )
     if constraints is not None:
+        if dev_child.min_active_candidates < constraints.min_active_candidates:
+            return ScreeningGateResult(
+                False, "rejected: Dev active candidate pool is too small"
+            )
         if (
-            train_child.min_active_candidates < constraints.min_active_candidates
-            or dev_child.min_active_candidates < constraints.min_active_candidates
+            enforce_final_constraints
+            and dev_child.max_active_candidates > constraints.max_active_candidates
         ):
-            return ScreeningGateResult(False, "rejected: active candidate pool is too small")
+            return ScreeningGateResult(
+                False, "rejected: Dev active candidate pool is too large"
+            )
         if enforce_final_constraints and (
-            train_child.max_active_candidates > constraints.max_active_candidates
-            or dev_child.max_active_candidates > constraints.max_active_candidates
-        ):
-            return ScreeningGateResult(False, "rejected: active candidate pool is too large")
-        if enforce_final_constraints and (
-            train_child.unique_active_dictionaries
-            < min(constraints.min_unique_active_dictionaries, train_child.task_count)
-            or dev_child.unique_active_dictionaries
+            dev_child.unique_active_dictionaries
             < min(constraints.min_unique_active_dictionaries, dev_child.task_count)
             or (
                 dev_child.task_count > 1
@@ -703,6 +947,7 @@ def compare_screening(
             )
 
     dimensions = {
+        "scaled_error": (train_scaled_improved, dev_scaled_improved),
         "active_success_rate": (
             train_child.active_success_rate > train_parent.active_success_rate + tolerance,
             dev_child.active_success_rate + 0.005 >= dev_parent.active_success_rate,
@@ -732,9 +977,36 @@ def compare_screening(
         )
     return ScreeningGateResult(
         True,
-        "accepted: screening improved on Train without a Dev regression",
+        "accepted: screening improved under separate Train and Dev Pareto gates",
         improved,
     )
+
+
+def _screening_scaled_safety_regression(
+    parent: ScreeningScore,
+    child: ScreeningScore,
+    *,
+    tolerance: float,
+) -> str | None:
+    tail_fields = (
+        "p90_smae",
+        "p95_smae",
+        "p90_srmse",
+        "p95_srmse",
+        "p90_smae_raw",
+        "p95_smae_raw",
+        "p90_srmse_raw",
+        "p95_srmse_raw",
+    )
+    for field_name in tail_fields:
+        parent_value = float(getattr(parent, field_name))
+        child_value = float(getattr(child, field_name))
+        if not child_value <= parent_value + tolerance:
+            return field_name
+    for field_name in ("smae_clipped_count", "srmse_clipped_count"):
+        if int(getattr(child, field_name)) > int(getattr(parent, field_name)):
+            return field_name
+    return None
 
 
 def _needs_fallback(
@@ -748,8 +1020,20 @@ def _needs_fallback(
     return "tsfm" in available_families and "tsfm" not in families
 
 
-def _finite_mase(row: Outcome) -> bool:
-    return row.mase is not None and math.isfinite(float(row.mase))
+def _finite_scaled(row: Outcome) -> bool:
+    return (
+        row.smae is not None
+        and row.srmse is not None
+        and math.isfinite(float(row.smae))
+        and math.isfinite(float(row.srmse))
+    )
+
+
+def _scaled_order(row: Outcome) -> tuple[float, float, float, str]:
+    assert row.smae is not None and row.srmse is not None
+    smae = float(row.smae)
+    srmse = float(row.srmse)
+    return joint_scaled_error(smae, srmse), smae, srmse, row.method
 
 
 def _median(values: Sequence[int]) -> float:
@@ -779,6 +1063,7 @@ def _bucket(value: int, edges: Sequence[int]) -> str:
 
 def _policy_payload(policy: ScreeningPolicy) -> dict[str, object]:
     return {
+        "metric_policy": _SCALED_METRIC_POLICY,
         "entries": [
             {
                 "name": entry.name,

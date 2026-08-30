@@ -15,8 +15,21 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from common.data import load_tasks
+from common.evolution_core.contracts import (
+    METRIC_POLICY_FINGERPRINT,
+    metric_policy_metadata,
+    metric_report_metadata,
+    require_active_metric_policy,
+    load_active_release,
+)
 from common.llm import CodexCLIClient, CodexCLIConfig
-from common.payload import read_json_object, write_json
+from common.metrics import joint_scaled_error
+from common.payload import (
+    read_json_object,
+    standards_json_value,
+    strict_json_loads,
+    write_json,
+)
 
 from .evolution.execution import CRASHED, INVALID, NOT_APPLICABLE, SUCCESS, Outcome, Task, load_methods
 from .evolution.module import MethodModule, read_module
@@ -77,6 +90,10 @@ def _add_tsf_runtime_options_compat(parser: argparse.ArgumentParser) -> None:
     _add_tsfm_runtime_options(parser)
 
 
+class CacheIntegrityError(ValueError):
+    """An existing active cache row is corrupt and must abort the lifecycle."""
+
+
 class ForecastStore:
     """Content-addressed history-only forecast cache shared across selector generations."""
 
@@ -91,6 +108,7 @@ class ForecastStore:
         screening_hash: str,
         statistical_time_budget_s: float = 20.0,
         statistical_failure_limit: int = 2,
+        runtime_identity: Mapping[str, object] | None = None,
     ) -> None:
         if statistical_time_budget_s <= 0:
             raise ValueError("statistical_time_budget_s must be positive")
@@ -112,8 +130,21 @@ class ForecastStore:
         self.screening_hash = screening_hash
         self.tsfm = {policy.name: policy for policy in portfolio.tsfm}
         self.combined = {policy.name: policy for policy in portfolio.combined}
+        identity = {
+            "module_source": module_path.read_text(encoding="utf-8"),
+            "skills_source": (
+                skills_path.read_text(encoding="utf-8") if skills_path is not None else None
+            ),
+            "portfolio": asdict(portfolio),
+            "reviewed_manifests_sha256": _sha256(
+                Path(__file__).parent / "tsfm" / "runtime_manifests.json"
+            ),
+            "runtime": dict(runtime_identity or {}),
+        }
         self.identity_hash = hashlib.sha256(
-            (module_path.read_text(encoding="utf-8") + repr(portfolio)).encode("utf-8")
+            json.dumps(identity, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
+                "utf-8"
+            )
         ).hexdigest()
         self.hits = 0
         self.misses = 0
@@ -124,25 +155,77 @@ class ForecastStore:
     ) -> tuple[float, ...]:
         key = self._key(name, history, horizon, frequency)
         path = self.root / f"{key}.json"
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            if payload.get("key") == key and payload.get("status") == SUCCESS:
-                values = tuple(float(value) for value in payload["forecast"])
-                if len(values) == horizon and all(map(math.isfinite, values)):
+        if not path.exists():
+            payload = None
+        else:
+            try:
+                payload = strict_json_loads(
+                    path.read_text(encoding="utf-8"),
+                    context="active hindcast cache row",
+                )
+            except (OSError, TypeError, ValueError) as error:
+                raise CacheIntegrityError(
+                    "active hindcast cache row is malformed"
+                ) from error
+        if payload is not None:
+            try:
+                if not isinstance(payload, Mapping):
+                    raise CacheIntegrityError(
+                        "active hindcast cache row must be an object"
+                    )
+                require_active_metric_policy(payload, context="active hindcast cache row")
+                if (
+                    type(payload.get("cache_schema")) is not int
+                    or payload["cache_schema"] != 3
+                ):
+                    raise CacheIntegrityError(
+                        "active hindcast cache row schema mismatch"
+                    )
+                if payload.get("key") != key:
+                    raise CacheIntegrityError("active hindcast cache row key mismatch")
+                if payload.get("status") == SUCCESS:
+                    values = tuple(float(value) for value in payload["forecast"])
+                    if len(values) != horizon or not all(map(math.isfinite, values)):
+                        raise CacheIntegrityError(
+                            "active hindcast cache row forecast is noncanonical"
+                        )
                     self.hits += 1
                     return values
-            if payload.get("key") == key and payload.get("status") == NOT_APPLICABLE:
-                self.hits += 1
-                raise self.not_applicable(str(payload.get("detail", "not applicable")))
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
-            pass
+                if payload.get("status") == NOT_APPLICABLE:
+                    self.hits += 1
+                    raise self.not_applicable(
+                        str(payload.get("detail", "not applicable"))
+                    )
+                raise CacheIntegrityError(
+                    "active hindcast cache row status is noncanonical"
+                )
+            except CacheIntegrityError:
+                raise
+            except self.not_applicable:
+                raise
+            except (KeyError, TypeError, ValueError) as error:
+                raise CacheIntegrityError(
+                    str(error) or "active hindcast cache row is noncanonical"
+                ) from error
         self.misses += 1
         try:
             values = self._execute(name, history, horizon, frequency)
         except self.not_applicable as error:
-            self._write(path, {"key": key, "status": NOT_APPLICABLE, "detail": str(error)[:200]})
+            self._write(path, {
+                "cache_schema": 3,
+                **metric_policy_metadata(),
+                "key": key,
+                "status": NOT_APPLICABLE,
+                "detail": str(error)[:200],
+            })
             raise
-        self._write(path, {"key": key, "status": SUCCESS, "forecast": list(values)})
+        self._write(path, {
+            "cache_schema": 3,
+            **metric_policy_metadata(),
+            "key": key,
+            "status": SUCCESS,
+            "forecast": list(values),
+        })
         return values
 
     def _execute(
@@ -215,6 +298,8 @@ class ForecastStore:
                 SUCCESS,
                 forecast=self.forecast(name, history, horizon, frequency),
             )
+        except CacheIntegrityError:
+            raise
         except self.not_applicable as error:
             outcome = Outcome(
                 name, "history-only", NOT_APPLICABLE, detail=str(error)[:200]
@@ -245,7 +330,8 @@ class ForecastStore:
 
     def _key(self, name, history, horizon, frequency) -> str:
         payload = json.dumps({
-            "schema": 2,
+            "schema": 3,
+            "metric_policy_fingerprint": METRIC_POLICY_FINGERPRINT,
             "identity": self.identity_hash,
             "name": name,
             "history": history,
@@ -425,6 +511,7 @@ def main(argv: list[str] | None = None) -> int:
     output.mkdir(parents=True, exist_ok=True)
     screening_path = screening_dir / "frozen_screening_policy.py"
     screening_manifest = read_json_object(screening_dir / "screening_manifest.json")
+    load_active_release(screening_manifest)
     actual_screening_hash = _sha256(screening_path)
     if screening_manifest.get("frozen_screening_policy_sha256") != actual_screening_hash:
         raise ValueError("frozen screening policy hash does not match its manifest")
@@ -453,6 +540,7 @@ def main(argv: list[str] | None = None) -> int:
             portfolio,
             runtimes,
             actual_screening_hash,
+            runtime_identity=_forecast_runtime_identity(args),
         )
         try:
             config = HindcastConfig(folds=args.folds)
@@ -509,11 +597,16 @@ def main(argv: list[str] | None = None) -> int:
             proposal_source, encoding="utf-8"
         )
         payload = {
+            "schema_version": 2,
+            **metric_report_metadata(),
             "generation": generation,
             "accepted": result.accepted,
             "gate": asdict(result.gate),
             "train_parent": asdict(result.train_parent),
             "train_child": asdict(result.train_child),
+            "paired_joint_wtl": _score_pair_wtl(
+                result.train_parent, result.train_child
+            ),
             "candidate_count": result.candidate_count,
             "parent_hash": decision_policy_hash(
                 result.parent, screening_policy_hash=actual_screening_hash
@@ -534,7 +627,8 @@ def main(argv: list[str] | None = None) -> int:
     final_train = evaluate_decision(evolution.frozen, train_cases)
     final_dev = evaluate_decision(evolution.frozen, dev_cases)
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
+        **metric_report_metadata(),
         "phase": "task_conditioned_numerical_selector",
         "train_tasks": len(train),
         "dev_tasks": len(dev),
@@ -548,6 +642,10 @@ def main(argv: list[str] | None = None) -> int:
         "dev_parent": asdict(evolution.dev_parent),
         "dev_train_winner": asdict(evolution.dev_winner),
         "final_dev_gate": asdict(evolution.final_gate),
+        "paired_joint_wtl": {
+            "train": _score_pair_wtl(evolution.train_parent, evolution.train_winner_score),
+            "dev": _score_pair_wtl(evolution.dev_parent, evolution.dev_winner),
+        },
         "dev_accepted": evolution.final_gate.accepted,
         "train_winner_sha256": decision_policy_hash(
             evolution.train_winner, screening_policy_hash=actual_screening_hash
@@ -574,7 +672,13 @@ def main(argv: list[str] | None = None) -> int:
     }
     write_json(output / "selector_manifest.json", manifest)
     (output / "SELECTOR_REPORT.md").write_text(_report(manifest), encoding="utf-8")
-    print(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(
+        standards_json_value(manifest),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    ))
     return 0
 
 
@@ -634,6 +738,8 @@ def _write_cases(path: Path, cases: Sequence[DecisionCase]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for case in cases:
             payload = {
+                "schema_version": 2,
+                **metric_policy_metadata(),
                 "task_id": case.task.task_id,
                 "active_names": list(case.active_names),
                 "diagnostics": {name: asdict(value) for name, value in case.diagnostics.items()},
@@ -646,9 +752,9 @@ def _write_cases(path: Path, cases: Sequence[DecisionCase]) -> None:
 
 
 def _global_ranking(
-    outcomes: Sequence[Outcome], task_ids: Sequence[str], *, failure_penalty: float = 20.0
+    outcomes: Sequence[Outcome], task_ids: Sequence[str], *, failure_penalty: float = 5.0
 ) -> tuple[str, ...]:
-    """Freeze the legacy cross-task ranker from Train labels only."""
+    """Freeze the canonical joint scaled-error ranker from Train labels only."""
     requested = tuple(task_ids)
     by_method: dict[str, dict[str, Outcome]] = {}
     for outcome in outcomes:
@@ -656,21 +762,56 @@ def _global_ranking(
             by_method.setdefault(outcome.method, {})[outcome.task_id] = outcome
     scores = []
     for name, rows in by_method.items():
-        values = []
+        smaes = []
+        srmses = []
         for task_id in requested:
             outcome = rows.get(task_id)
-            values.append(
-                float(outcome.mase)
-                if outcome is not None and outcome.status == SUCCESS and outcome.mase is not None
-                else failure_penalty
-            )
-        scores.append((sum(values) / len(values), name))
+            if outcome is not None and outcome.status == SUCCESS:
+                if outcome.smae is None or outcome.srmse is None:
+                    raise ValueError(
+                        "active global ranking cannot consume legacy metric policy outcomes"
+                    )
+                smaes.append(float(outcome.smae))
+                srmses.append(float(outcome.srmse))
+            else:
+                smaes.append(failure_penalty)
+                srmses.append(failure_penalty)
+        mean_smae = sum(smaes) / len(smaes)
+        mean_srmse = sum(srmses) / len(srmses)
+        scores.append((joint_scaled_error(mean_smae, mean_srmse), name))
     return tuple(name for _, name in sorted(scores))
+
+
+def _score_pair_wtl(parent, child) -> dict[str, int]:
+    result = {"wins": 0, "ties": 0, "losses": 0, "missing": 0, "unscored": 0}
+    parent_pairs = parent.task_scaled_pairs
+    child_pairs = child.task_scaled_pairs
+    observed = set(parent_pairs) | set(child_pairs)
+    for task_id in sorted(observed):
+        if task_id not in parent_pairs or task_id not in child_pairs:
+            result["missing"] += 1
+            continue
+        parent_joint = joint_scaled_error(*parent_pairs[task_id])
+        child_joint = joint_scaled_error(*child_pairs[task_id])
+        if child_joint < parent_joint - 1e-12:
+            result["wins"] += 1
+        elif child_joint > parent_joint + 1e-12:
+            result["losses"] += 1
+        else:
+            result["ties"] += 1
+    expected = max(parent.task_count, child.task_count, len(observed))
+    result["unscored"] = expected - len(observed)
+    return result
 
 
 def _finite_json(value):
     if isinstance(value, float) and not math.isfinite(value):
-        return None
+        if math.isnan(value):
+            raise ValueError("active hindcast payload cannot contain NaN")
+        return {
+            "status": "positive_infinity" if value > 0 else "negative_infinity",
+            "value": None,
+        }
     if isinstance(value, Mapping):
         return {str(key): _finite_json(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -680,6 +821,24 @@ def _finite_json(value):
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _forecast_runtime_identity(args: argparse.Namespace) -> dict[str, object]:
+    """Canonical provider/deployment/checkpoint identity for hindcast cache keys."""
+    deployment = getattr(args, "tsfm_workers_config", None)
+    deployment_hash = None
+    if deployment:
+        deployment_path = Path(deployment).expanduser().resolve()
+        deployment_hash = _sha256(deployment_path)
+    return {
+        "tsfm_runtimes": getattr(args, "tsfm_runtimes", "") or "",
+        "chronos_device_map": getattr(args, "chronos_device_map", "cpu"),
+        "model_cache_dir": str(getattr(args, "model_cache_dir", None) or ""),
+        "deployment_sha256": deployment_hash,
+        "acknowledged_model_licenses": getattr(
+            args, "acknowledged_model_licenses", ""
+        ) or "",
+    }
 
 
 def _report(manifest: Mapping[str, object]) -> str:
@@ -693,14 +852,29 @@ def _report(manifest: Mapping[str, object]) -> str:
         f"- Accepted generations: {manifest['accepted_generations']}",
         f"- Screening SHA-256: `{manifest['screening_policy_sha256']}`",
         f"- Decision SHA-256: `{manifest['frozen_decision_policy_sha256']}`",
+        f"- Metric policy SHA-256: `{manifest['metric_policy_fingerprint']}`",
+        "- Primary metrics: sMAE, sRMSE",
+        "- Diagnostic only: MASE, MAE, sMAPE, RMSSE",
         f"- Dev accepted: `{manifest.get('dev_accepted', False)}`",
         f"- Final Dev gate: {manifest.get('final_dev_gate', {}).get('reason', 'not recorded')}",
         f"- Public Test accessed: `{manifest['public_test_accessed']}`",
         "",
-        "| Split | Coverage | Mean sMAE | sMAE SE | Mean sRMSE | sRMSE SE | P90/P95 sMAE | Clipped sMAE/sRMSE | Mean MASE | Mean MAE | Mean sMAPE | Oracle regret | Methods | Families | Ensemble | Assumptions | Verifier pool | Pool families | Assumption kinds |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Split | Coverage | Mean sMAE | Median sMAE | sMAE SE | Mean sRMSE | Median sRMSE | sRMSE SE | P90/P95 sMAE | P90/P95 sRMSE | Raw P90/P95 sMAE | Raw P90/P95 sRMSE | Clipped sMAE/sRMSE | Oracle sMAE/sRMSE regret | Methods | Families | Ensemble | Assumptions | Verifier pool | Pool families | Assumption kinds |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         _score_row("Train", train),
         _score_row("Dev", dev),
+        "",
+        "| Split | Wins / Ties / Losses / Missing / Unscored |",
+        "|---|---:|",
+        _paired_report_row("Train", manifest["paired_joint_wtl"]["train"]),
+        _paired_report_row("Dev", manifest["paired_joint_wtl"]["dev"]),
+        "",
+        "## Diagnostic-only metrics",
+        "",
+        "| Split | Mean MASE | Mean MAE | Mean sMAPE |",
+        "|---|---:|---:|---:|",
+        f"| Train | {train['mean_mase']:.6f} | {train['mean_mae']:.6f} | {train['mean_smape']:.6f} |",
+        f"| Dev | {dev['mean_mase']:.6f} | {dev['mean_mae']:.6f} | {dev['mean_smape']:.6f} |",
         "",
     ))
 
@@ -708,14 +882,25 @@ def _report(manifest: Mapping[str, object]) -> str:
 def _score_row(label: str, score: Mapping[str, object]) -> str:
     return (
         f"| {label} | {score['coverage']:.4f} | {score['mean_smae']:.6f} | "
-        f"{score['se_smae']:.6f} | {score['mean_srmse']:.6f} | {score['se_srmse']:.6f} | "
+        f"{score['median_smae']:.6f} | {score['se_smae']:.6f} | "
+        f"{score['mean_srmse']:.6f} | {score['median_srmse']:.6f} | {score['se_srmse']:.6f} | "
         f"{score['p90_smae']:.6f}/{score['p95_smae']:.6f} | "
+        f"{score['p90_srmse']:.6f}/{score['p95_srmse']:.6f} | "
+        f"{score['p90_smae_raw']:.6f}/{score['p95_smae_raw']:.6f} | "
+        f"{score['p90_srmse_raw']:.6f}/{score['p95_srmse_raw']:.6f} | "
         f"{score['smae_clipped_count']}/{score['srmse_clipped_count']} | "
-        f"{score['mean_mase']:.6f} | {score['mean_mae']:.6f} | {score['mean_smape']:.6f} | "
-        f"{score['mean_active_oracle_regret']:.6f} | "
+        f"{score['mean_active_oracle_smae_regret']:.6f}/"
+        f"{score['mean_active_oracle_srmse_regret']:.6f} | "
         f"{score['method_diversity']} | {score['family_diversity']} | {score['ensemble_rate']:.4f} | "
         f"{score['mean_assumption_count']:.2f} | {score['mean_considered_candidates']:.2f} | "
         f"{score['mean_considered_families']:.2f} | {score['assumption_kind_diversity']} |"
+    )
+
+
+def _paired_report_row(label: str, counts: Mapping[str, object]) -> str:
+    return (
+        f"| {label} | {counts['wins']} / {counts['ties']} / {counts['losses']} / "
+        f"{counts['missing']} / {counts['unscored']} |"
     )
 
 

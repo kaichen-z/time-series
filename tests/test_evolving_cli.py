@@ -10,6 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 import evolving_loop.cli as cli_module
+import common.evolution_core.contracts as evolution_contracts
+import numerical_agent.run_evolution as numerical_evolution_runner
 
 from evolving_loop.cli import (
     BASELINE_CHOICES,
@@ -44,6 +46,45 @@ from evolving_loop.retrieval_agent.evolution import (
 )
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 from common.llm import FakeLLMClient
+
+
+def test_active_evolution_defaults_bind_the_joint_scaled_metric_policy() -> None:
+    config = evolution_contracts.EvolutionConfig()
+
+    assert config.metric.name == "smae"
+    assert config.metric_policy == evolution_contracts.METRIC_POLICY
+    assert config.metric_policy_fingerprint == evolution_contracts.METRIC_POLICY_FINGERPRINT
+
+
+def test_numerical_evolution_run_manifest_rejects_legacy_metric_policy(tmp_path) -> None:
+    manifest = numerical_evolution_runner._load_or_create_run_manifest(tmp_path)
+    assert manifest["schema_version"] == 2
+    assert manifest["metric_policy_fingerprint"] == evolution_contracts.METRIC_POLICY_FINGERPRINT
+
+    (tmp_path / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "metric_policy": {
+                    "schema_version": 1,
+                    "primary": ["mase"],
+                    "ordering": "median_mase",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="legacy metric policy"):
+        numerical_evolution_runner._load_or_create_run_manifest(tmp_path)
+
+
+def test_numerical_evolution_refuses_to_label_an_existing_legacy_run_as_active(
+    tmp_path,
+) -> None:
+    (tmp_path / "generation_001_result.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="missing metric policy"):
+        numerical_evolution_runner._load_or_create_run_manifest(tmp_path)
 
 
 def test_evolve_cli_exposes_three_evolution_modes() -> None:

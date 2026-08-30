@@ -4,6 +4,25 @@ This document gives a concise map of the repository's self-evolution architectur
 two related layers: a reusable domain-independent Self-Harness and a time-series-specific
 three-agent Meta-Harness.
 
+## 0. Numerical Metric Authority (active since 2026-08-30)
+
+All performance-based Numerical stages share one schema-v2 contract. A successful Statistical,
+TSFM, or Combined candidate is scored with capped Dr-CiK `sMAE` and `sRMSE`; the joint mean orders
+ties deterministically, but it cannot hide a regression. Filtering, Screening, history-only
+hindcasting, Safe-Anchor overrides, Combined/Morphology evolution, Train promotion, read-only Dev
+acceptance, and release freezing require both metrics to be non-regressing and at least one to
+improve, in addition to their existing coverage and tail-safety gates.
+
+At runtime these scores come only from validation windows cut from observed history. Train labels
+remain inside the trusted evaluator. Dev compares frozen Parent and Child artifacts without writing
+Skills or policies. Public and hidden evaluation cannot propose or accept a Child. `MASE`, `MAE`,
+`sMAPE`, and `RMSSE` are retained only as explicitly marked diagnostics.
+
+Every active cache, policy, checkpoint, release, and smoke artifact binds the canonical metric-policy
+fingerprint. A missing or mismatched fingerprint fails closed. Legacy policies and prior 99-task
+tables remain report-only historical evidence produced under their recorded objectives; they are
+not silently converted or retrospectively relabelled as schema-v2 results.
+
 ## 1. Generic Self-Harness
 
 The reusable controller is implemented in

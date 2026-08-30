@@ -112,6 +112,20 @@ def test_a_correct_method_is_scored_on_every_task(tmp_path: Path) -> None:
     ]
 
 
+def test_successful_outcome_records_capped_and_raw_scaled_metrics(tmp_path: Path) -> None:
+    outcomes, reports = run_module(write_fixture(tmp_path), tasks(), isolated=True)
+    row = next(outcome for outcome in outcomes if outcome.method == "perfect_method")
+    report = next(item for item in reports if item.method == "perfect_method")
+
+    assert row.smae is not None and row.srmse is not None
+    assert row.smae_raw is not None and row.srmse_raw is not None
+    assert next(item for item in reports if item.method == "picky_method").mean_smae is None
+    assert report.mean_smae == row.smae
+    assert report.mean_srmse == row.srmse
+    assert report.by_characteristic_smae["frequency:1 day"] == row.smae
+    assert report.by_characteristic_srmse["frequency:1 day"] == row.srmse
+
+
 def test_outcome_statuses_cover_every_method_and_task(tmp_path: Path) -> None:
     outcomes, _ = run_module(write_fixture(tmp_path), tasks())
 

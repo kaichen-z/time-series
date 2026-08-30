@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import math
-import statistics
 import subprocess
 import time
 from dataclasses import dataclass, field, replace
@@ -11,6 +10,8 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from common.llm import LLMClient, parse_json_object
+from common.evolution_core.contracts import metric_report_metadata
+from common.metrics import joint_scaled_error, pareto_scaled_improvement
 from common.payload import write_json
 
 from .cache import OutcomeCache
@@ -20,7 +21,13 @@ from .diagnostics import (
     parse_failure_diagnosis,
     render_failure_judge_user,
 )
-from .execution import Outcome, SUCCESS, Task, report_payload, reports_from_outcomes
+from .execution import (
+    Outcome,
+    Task,
+    oracle_scaled_summary,
+    report_payload,
+    reports_from_outcomes,
+)
 from .identity import identity_contract
 from .module import MethodModule, ModuleError, apply_operations, read_module, write_module
 from .prompts import (
@@ -359,8 +366,14 @@ def evolve_targets_once(
     if eligible:
         eligible.sort(
             key=lambda item: (
-                candidates[item].validation_metrics["child_mean_mase"],
-                candidates[item].validation_metrics["child_median_mase"],
+                joint_scaled_error(
+                    candidates[item].validation_metrics["child_mean_smae"],
+                    candidates[item].validation_metrics["child_mean_srmse"],
+                ),
+                joint_scaled_error(
+                    candidates[item].validation_metrics["child_median_smae"],
+                    candidates[item].validation_metrics["child_median_srmse"],
+                ),
             ),
         )
         current = parent
@@ -444,6 +457,8 @@ def evolve_targets_once(
     hits = outcome_cache.stats.hits - initial_hits
     misses = outcome_cache.stats.misses - initial_misses
     summary = {
+        "schema_version": 2,
+        **metric_report_metadata(),
         "generation": generation,
         "cache_hits": hits,
         "cache_misses": misses,
@@ -501,7 +516,13 @@ def _diagnose_target(
     diagnostic_dir.mkdir(parents=True, exist_ok=True)
     write_json(
         diagnostic_dir / f"generation_{generation:03d}_target_{index:02d}_{method.name}.json",
-        diagnostics,
+        {
+            "schema_version": 2,
+            **metric_report_metadata(),
+            "generation": generation,
+            "target": method.name,
+            "diagnostics": diagnostics,
+        },
     )
     user = render_failure_judge_user(diagnostics)
     try:
@@ -603,13 +624,11 @@ def _subset(outcomes: Sequence[Outcome], task_ids: set[str]) -> tuple[Outcome, .
 def _comparison(
     parent: Sequence[Outcome], child: Sequence[Outcome], tasks: Sequence[Task]
 ) -> dict[str, float]:
-    parent_mean, parent_median = _oracle_mase(parent, tasks)
-    child_mean, child_median = _oracle_mase(child, tasks)
+    parent_metrics = oracle_scaled_summary(parent, tasks)
+    child_metrics = oracle_scaled_summary(child, tasks)
     return {
-        "parent_mean_mase": parent_mean,
-        "parent_median_mase": parent_median,
-        "child_mean_mase": child_mean,
-        "child_median_mase": child_median,
+        **{f"parent_{name}": value for name, value in parent_metrics.items()},
+        **{f"child_{name}": value for name, value in child_metrics.items()},
     }
 
 
@@ -632,56 +651,43 @@ def _comparison_with_changed_method(
     child_report = reports_from_outcomes((changed_name,), child_outcomes, tasks)[0]
     for prefix, report in (("parent_method", parent_report), ("child_method", child_report)):
         metrics[f"{prefix}_coverage"] = float(report.coverage)
-        if report.mean_mase is not None and math.isfinite(report.mean_mase):
-            metrics[f"{prefix}_mean_mase"] = float(report.mean_mase)
-        if report.mean_mae is not None and math.isfinite(report.mean_mae):
-            metrics[f"{prefix}_mean_mae"] = float(report.mean_mae)
+        if report.mean_smae is not None and report.mean_srmse is not None:
+            metrics[f"{prefix}_mean_smae"] = float(report.mean_smae)
+            metrics[f"{prefix}_mean_srmse"] = float(report.mean_srmse)
     return metrics
 
 
 def _screen_rank(metrics: Mapping[str, float]) -> tuple[float, float, float]:
     """Rank screen survivors by portfolio gain, then by target-method gain."""
-    mean_delta = metrics["child_mean_mase"] - metrics["parent_mean_mase"]
-    median_delta = metrics["child_median_mase"] - metrics["parent_median_mase"]
-    parent_method = metrics.get("parent_method_mean_mase")
-    child_method = metrics.get("child_method_mean_mase")
-    if parent_method is None or child_method is None:
-        method_ratio = math.inf
-    elif parent_method <= 1e-12:
-        method_ratio = 0.0 if child_method <= 1e-12 else math.inf
-    else:
-        method_ratio = child_method / parent_method
-    return mean_delta, median_delta, method_ratio
-
-
-def _oracle_mase(
-    outcomes: Sequence[Outcome], tasks: Sequence[Task]
-) -> tuple[float, float]:
-    values = []
-    for task in tasks:
-        scores = [
-            float(outcome.mase)
-            for outcome in outcomes
-            if outcome.task_id == task.task_id
-            and outcome.status == SUCCESS
-            and outcome.mase is not None
-            and math.isfinite(outcome.mase)
-        ]
-        values.append(min(scores) if scores else math.inf)
-    return statistics.fmean(values), statistics.median(values)
+    mean_delta = joint_scaled_error(
+        metrics["child_mean_smae"], metrics["child_mean_srmse"]
+    ) - joint_scaled_error(
+        metrics["parent_mean_smae"], metrics["parent_mean_srmse"]
+    )
+    median_delta = joint_scaled_error(
+        metrics["child_median_smae"], metrics["child_median_srmse"]
+    ) - joint_scaled_error(
+        metrics["parent_median_smae"], metrics["parent_median_srmse"]
+    )
+    parent_smae = metrics.get("parent_method_mean_smae")
+    parent_srmse = metrics.get("parent_method_mean_srmse")
+    child_smae = metrics.get("child_method_mean_smae")
+    child_srmse = metrics.get("child_method_mean_srmse")
+    method_delta = (
+        math.inf
+        if None in (parent_smae, parent_srmse, child_smae, child_srmse)
+        else joint_scaled_error(float(child_smae), float(child_srmse))
+        - joint_scaled_error(float(parent_smae), float(parent_srmse))
+    )
+    return mean_delta, median_delta, method_delta
 
 
 def _strict_non_regression(metrics: Mapping[str, float]) -> bool:
-    tolerance = 1e-12
-    parent_mean = metrics["parent_mean_mase"]
-    parent_median = metrics["parent_median_mase"]
-    child_mean = metrics["child_mean_mase"]
-    child_median = metrics["child_median_mase"]
-    return (
-        math.isfinite(child_mean)
-        and child_mean <= parent_mean + tolerance
-        and child_median <= parent_median + tolerance
-        and (child_mean < parent_mean - tolerance or child_median < parent_median - tolerance)
+    return pareto_scaled_improvement(
+        metrics["parent_mean_smae"],
+        metrics["parent_mean_srmse"],
+        metrics["child_mean_smae"],
+        metrics["child_mean_srmse"],
     )
 
 
@@ -698,7 +704,6 @@ def _accept_stage(
     op = str(operation.get("op", ""))
     tolerance = 1e-12
     changed_name = _changed_method_name(parent, child, operation)
-    own_improved = False
     if changed_name is not None:
         changed_report = reports_from_outcomes((changed_name,), child_outcomes, tasks)[0]
         if changed_report.crashed or changed_report.invalid:
@@ -710,31 +715,15 @@ def _accept_stage(
             parent_report = reports_from_outcomes((original,), parent_outcomes, tasks)[0]
             if changed_report.coverage + tolerance < parent_report.coverage:
                 return False, "repair reduced applicable-task coverage"
-            if (
-                changed_report.mean_mase is not None
-                and parent_report.mean_mase is not None
-                and changed_report.mean_mase < parent_report.mean_mase - tolerance
-            ):
-                own_improved = True
-
-    parent_mean = metrics["parent_mean_mase"]
-    parent_median = metrics["parent_median_mase"]
-    child_mean = metrics["child_mean_mase"]
-    child_median = metrics["child_median_mase"]
-    non_regressing = (
-        math.isfinite(child_mean)
-        and child_mean <= parent_mean + tolerance
-        and child_median <= parent_median + tolerance
+    portfolio_improved = pareto_scaled_improvement(
+        metrics["parent_mean_smae"],
+        metrics["parent_mean_srmse"],
+        metrics["child_mean_smae"],
+        metrics["child_mean_srmse"],
     )
-    if not non_regressing:
-        return False, "portfolio MASE regressed"
-    portfolio_improved = (
-        child_mean < parent_mean - tolerance
-        or child_median < parent_median - tolerance
-    )
-    if portfolio_improved or own_improved:
+    if portfolio_improved:
         return True, "improved"
-    return False, "MASE did not improve"
+    return False, "portfolio mean scaled metric pair did not improve under Pareto gate"
 
 
 def _changed_method_name(

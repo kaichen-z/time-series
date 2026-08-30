@@ -5,6 +5,44 @@ adapter. It ships an auditable forecasting-method dataset and reviewed runtime a
 subset of foundation models. Catalog definitions and executable providers remain deliberately
 separate: a method is counted as executable only when its implementation/runtime is enabled.
 
+## Active metric contract (2026-08-30)
+
+Every **active performance decision** in the Numerical pipeline now uses the same Dr-CiK
+point-forecast pair: capped `sMAE` and capped `sRMSE`. Both divide error by the mean absolute
+value of the scored truth horizon and are capped independently at `5.0` per task. Their arithmetic
+mean is only a deterministic ordering key. Train or read-only Dev accepts a Child only when both
+metrics are non-regressing and at least one improves, while coverage, clipping, execution-health,
+and tail-risk gates also remain satisfied.
+
+This contract covers method filtering, task-conditioned Screening, history-only hindcast ranking,
+Safe-Anchor overrides, Statistical/TSFM/Combined selection, Morphology assumption credit, Child
+promotion, and release freezing. Runtime selection computes these metrics only on windows cut from
+the observed history. Train labels may be used by the trusted Train evaluator; Dev is read-only;
+Public and hidden outcomes cannot mutate policies or Skills. `MASE`, `MAE`, `sMAPE`, and `RMSSE`
+may still appear under fields explicitly labelled `diagnostic_only`, but they cannot affect an
+active choice.
+
+Active artifacts use schema version 2 and must carry the exact canonical metric-policy fingerprint.
+Legacy MASE/sMAPE policies and the already published 99-task tables remain readable historical
+evidence under their original objective; they are not silently promoted into the new active path
+and their recorded numbers are not rewritten.
+
+The deterministic one-task wiring smoke is:
+
+```bash
+python -m numerical_agent.run_morphology_smoke \
+  --task-file external/Dr-CiK/sample/tasks/task_42.json \
+  --results-path /tmp/numerical-task42-fake-smoke.json \
+  --llm-backend fake \
+  --hindcast-folds 2
+```
+
+Its artifact reports Statistical, TSFM, and Combined execution separately, binds the metric-policy
+fingerprint, and records that Dev is read-only. A real-checkpoint smoke additionally requires an
+operator-supplied reviewed `methods.py`, `skills.py`, `policies.py`, Screening and Decision sources,
+plus a local TSFM deployment whose exact checkpoint load has already produced an attestation. The
+runner never downloads a model or treats an unavailable family as a successful candidate.
+
 ## Forecast Method Dataset v001
 
 The publishable release is
@@ -203,8 +241,9 @@ for the exact policy contract and the cached 80/20 exploratory result.
 
 Selector evolution now uses the Dr-CiK point-forecast definition for its trusted Train/Dev gate:
 per-task MAE and RMSE are divided by the mean absolute true future value, independently capped at
-`5.0`, and then averaged across tasks. A Child must improve clipped mean sMAE while preserving
-100% coverage, mean sRMSE, clipped-task counts, active-oracle regret, and the P90/P95 sMAE tail.
+`5.0`, and then averaged across tasks. A Child must Pareto-improve this pair: neither clipped mean
+sMAE nor mean sRMSE may regress, at least one must improve, and coverage, clipped-task counts,
+active-oracle regret, and the configured sMAE/sRMSE tails must remain safe.
 MASE, RMSSE, MAE, and sMAPE remain diagnostic metrics. This phase intentionally does **not**
 compute sCRPS or generate probabilistic trajectories.
 

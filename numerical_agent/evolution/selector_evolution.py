@@ -7,16 +7,18 @@ import json
 import math
 import pprint
 import statistics
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
 from common.llm import LLMClient, parse_json_object
 from common.metrics import (
     drcik_point_metrics,
+    joint_scaled_error,
     linear_quantile,
     mae,
     mase,
+    pareto_scaled_improvement,
     smape,
     standard_error,
 )
@@ -27,6 +29,7 @@ from .numerical_selector import (
     DecisionPolicy,
     SelectionDecision,
     _long_horizon_route_matches,
+    _normalize_legacy_decision_ranking,
     select_assumption_guided_forecast,
 )
 from .screening import profile_task
@@ -35,8 +38,8 @@ from .screening import profile_task
 SELECTOR_SYSTEM = """You are a bounded Meta-Harness Engineer for one history-only Numerical
 Selector. You receive only aggregate Train diagnostics. Propose one conservative DecisionPolicy.
 You may change only the supplied baseline strategy, ranking order, recent-regime preference,
-minimum completed folds,
-catastrophic MASE threshold, and guarded TSFM-plus-statistical combination thresholds, weight grids,
+minimum completed folds, independent raw sMAE/sRMSE catastrophe and fold-regret thresholds,
+and guarded TSFM-plus-statistical combination thresholds, weight grids,
 clipped residual strengths, and one typed task-conditioned long-horizon audit route. You cannot change identities,
 screening, task partition, measurements, evaluator, runtime, cache, code, or labels. Return exactly
 one JSON object with keys summary and policy. The policy must contain every allowed field exactly
@@ -61,8 +64,11 @@ both sMAE and sRMSE on every ordinary fold and the long-horizon audit.
 assumption_guidance_enabled controls whether a history-only assumption layer restricts the Verifier.
 When enabled, assumption_top_k must be between 1 and 7, candidates per hypothesis between 1 and 3,
 and minimum confidence within [0, 1]. Preserve reviewed TSFM anchors regardless of Top-k.
-Optimize clipped Dr-CiK-aligned sMAE. Treat sRMSE, clipped-task counts,
-P90/P95 sMAE, and full coverage as safety constraints. MASE, MAE, and sMAPE are diagnostics only."""
+Use joint scaled error only to order proposals. Accept only Pareto improvements in
+clipped Dr-CiK-aligned sMAE and sRMSE, with clipped-task counts, P90/P95 sMAE,
+and full coverage as safety constraints. ranking_order must put all three joint
+fields first, then median_smae and median_srmse as an inseparable paired tie-break;
+only normalized_bias or slope_error may follow."""
 
 
 class SelectorEvolutionError(ValueError):
@@ -95,6 +101,8 @@ class DecisionScore:
     family_diversity: int
     ensemble_rate: float
     fallback_rate: float
+    mean_active_oracle_smae_regret: float = math.inf
+    mean_active_oracle_srmse_regret: float = math.inf
     mean_smae: float = math.inf
     median_smae: float = math.inf
     se_smae: float = math.inf
@@ -103,6 +111,12 @@ class DecisionScore:
     se_srmse: float = math.inf
     p90_smae: float = math.inf
     p95_smae: float = math.inf
+    p90_srmse: float = math.inf
+    p95_srmse: float = math.inf
+    p90_smae_raw: float = math.inf
+    p95_smae_raw: float = math.inf
+    p90_srmse_raw: float = math.inf
+    p95_srmse_raw: float = math.inf
     smae_clipped_count: int = 0
     smae_clipped_rate: float = 1.0
     srmse_clipped_count: int = 0
@@ -111,6 +125,7 @@ class DecisionScore:
     mean_considered_candidates: float = 0.0
     mean_considered_families: float = 0.0
     assumption_kind_diversity: int = 0
+    task_scaled_pairs: Mapping[str, tuple[float, float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -170,7 +185,10 @@ _FIELDS = (
     "ranking_order",
     "recent_regime_first",
     "min_successful_folds",
-    "catastrophic_mase",
+    "catastrophic_smae_raw",
+    "catastrophic_srmse_raw",
+    "max_smae_fold_regret",
+    "max_srmse_fold_regret",
     "baseline_strategy",
     "tsfm_router_min_improvement",
     "tsfm_router_blend_weight",
@@ -197,6 +215,16 @@ _FIELDS = (
     "long_horizon_max_regret",
     "fallback_to_best_available",
 )
+
+_SCALED_SAFETY_FIELDS = frozenset(
+    {
+        "catastrophic_smae_raw",
+        "catastrophic_srmse_raw",
+        "max_smae_fold_regret",
+        "max_srmse_fold_regret",
+    }
+)
+_MUTATION_FIELDS = _FIELDS
 
 _ASSUMPTION_FIELDS = frozenset(
     {
@@ -255,7 +283,9 @@ def render_decision_source(policy: DecisionPolicy, *, screening_policy_hash: str
     )
 
 
-def parse_decision_source(source: str) -> DecisionPolicy:
+def parse_decision_source(
+    source: str, *, allow_legacy: bool = False
+) -> DecisionPolicy:
     try:
         tree = ast.parse(source)
     except SyntaxError as error:
@@ -276,7 +306,7 @@ def parse_decision_source(source: str) -> DecisionPolicy:
                 raise SelectorEvolutionError("decision source must contain literals") from error
     if not isinstance(payload, Mapping):
         raise SelectorEvolutionError("decision source needs a DECISION_POLICY mapping")
-    return _parse_policy(payload)
+    return _parse_policy(payload, allow_legacy=allow_legacy)
 
 
 def decision_policy_hash(policy: DecisionPolicy, *, screening_policy_hash: str = "") -> str:
@@ -286,20 +316,20 @@ def decision_policy_hash(policy: DecisionPolicy, *, screening_policy_hash: str =
 
 
 def apply_decision_response(parent: DecisionPolicy, response: str) -> DecisionPolicy:
-    del parent  # The response is an exact replacement inside a fixed typed schema.
     payload = parse_json_object(response)
     if set(payload) != {"summary", "policy"} or not isinstance(payload["summary"], str):
         raise SelectorEvolutionError("response must contain exactly summary and policy")
     raw = payload["policy"]
+    mutation_fields = set(_MUTATION_FIELDS)
     accepted_fields = (
-        set(_FIELDS),
-        set(_FIELDS) - {"baseline_strategy"},
-        set(_FIELDS) - _ASSUMPTION_FIELDS,
-        set(_FIELDS) - _ASSUMPTION_FIELDS - {"baseline_strategy"},
-        set(_FIELDS) - _LONG_HORIZON_ROUTE_FIELDS,
-        set(_FIELDS) - _LONG_HORIZON_ROUTE_FIELDS - {"baseline_strategy"},
-        set(_FIELDS) - _LONG_HORIZON_ROUTE_FIELDS - _ASSUMPTION_FIELDS,
-        set(_FIELDS) - _LONG_HORIZON_ROUTE_FIELDS - _ASSUMPTION_FIELDS - {"baseline_strategy"},
+        mutation_fields,
+        mutation_fields - {"baseline_strategy"},
+        mutation_fields - _ASSUMPTION_FIELDS,
+        mutation_fields - _ASSUMPTION_FIELDS - {"baseline_strategy"},
+        mutation_fields - _LONG_HORIZON_ROUTE_FIELDS,
+        mutation_fields - _LONG_HORIZON_ROUTE_FIELDS - {"baseline_strategy"},
+        mutation_fields - _LONG_HORIZON_ROUTE_FIELDS - _ASSUMPTION_FIELDS,
+        mutation_fields - _LONG_HORIZON_ROUTE_FIELDS - _ASSUMPTION_FIELDS - {"baseline_strategy"},
     )
     accepted_fields = (
         *accepted_fields,
@@ -309,9 +339,16 @@ def apply_decision_response(parent: DecisionPolicy, response: str) -> DecisionPo
         *accepted_fields,
         *(fields - _TSFM_ROUTER_FIELDS for fields in accepted_fields),
     )
+    accepted_fields = (
+        *accepted_fields,
+        *(fields - _SCALED_SAFETY_FIELDS for fields in accepted_fields),
+    )
     if not isinstance(raw, Mapping) or set(raw) not in accepted_fields:
         raise SelectorEvolutionError("policy must contain exactly the approved fields")
-    return _parse_policy(raw)
+    # A response is a bounded mutation, not an artifact reader: materialize the
+    # complete active payload from the exact parent before applying approved edits.
+    normalized = {**_policy_payload(parent), **dict(raw)}
+    return _parse_policy(normalized)
 
 
 def evaluate_decision(
@@ -326,7 +363,7 @@ def evaluate_decision(
             float,
             float,
             float,
-            float,
+            tuple[float, float],
             Mapping[str, float | bool],
         ]
     ] = []
@@ -352,21 +389,47 @@ def evaluate_decision(
         task_mae = mae(truth, prediction)
         task_smape = smape(truth, prediction)
         point = drcik_point_metrics(truth, prediction)
-        active_scores = [
-            float(drcik_point_metrics(truth, list(case.forecasts[name]))["smae"])
+        active_pairs = [
+            (
+                name,
+                float(active_point["smae"]),
+                float(active_point["srmse"]),
+            )
             for name in case.active_names
             if name in case.forecasts and len(case.forecasts[name]) == len(truth)
+            for active_point in (
+                drcik_point_metrics(truth, list(case.forecasts[name])),
+            )
         ]
         task_smae = float(point["smae"])
-        oracle = min(active_scores, default=task_smae)
-        regret = (task_smae - oracle) / (1.0 + oracle)
-        records.append((case, decision, task_mase, task_mae, task_smape, regret, point))
+        task_srmse = float(point["srmse"])
+        if active_pairs:
+            _, oracle_smae, oracle_srmse = min(
+                active_pairs,
+                key=lambda item: (
+                    joint_scaled_error(item[1], item[2]),
+                    item[1],
+                    item[2],
+                    item[0],
+                ),
+            )
+        else:
+            oracle_smae, oracle_srmse = task_smae, task_srmse
+        regret_pair = (
+            (task_smae - oracle_smae) / (1.0 + oracle_smae),
+            (task_srmse - oracle_srmse) / (1.0 + oracle_srmse),
+        )
+        records.append(
+            (case, decision, task_mase, task_mae, task_smape, regret_pair, point)
+        )
 
     mases = [record[2] for record in records]
     maes = [record[3] for record in records]
     smapes = [record[4] for record in records]
     smaes = [float(record[6]["smae"]) for record in records]
     srmses = [float(record[6]["srmse"]) for record in records]
+    smaes_raw = [float(record[6]["smae_raw"]) for record in records]
+    srmses_raw = [float(record[6]["srmse_raw"]) for record in records]
     smae_clipped_count = sum(bool(record[6]["smae_clipped"]) for record in records)
     srmse_clipped_count = sum(bool(record[6]["srmse_clipped"]) for record in records)
     selected = {name for _, decision, *_ in records for name in decision.selected}
@@ -396,7 +459,8 @@ def evaluate_decision(
         mean_smape=statistics.fmean(smapes) if smapes else math.inf,
         catastrophic_rate=(sum(value > 10.0 for value in mases) / completed if completed else 1.0),
         mean_active_oracle_regret=(
-            statistics.fmean(record[5] for record in records) if records else math.inf
+            statistics.fmean((record[5][0] + record[5][1]) / 2.0 for record in records)
+            if records else math.inf
         ),
         method_diversity=len(selected),
         family_diversity=len(families),
@@ -411,6 +475,14 @@ def evaluate_decision(
             ) / completed
             if completed else 0.0
         ),
+        mean_active_oracle_smae_regret=(
+            statistics.fmean(record[5][0] for record in records)
+            if records else math.inf
+        ),
+        mean_active_oracle_srmse_regret=(
+            statistics.fmean(record[5][1] for record in records)
+            if records else math.inf
+        ),
         mean_smae=statistics.fmean(smaes) if smaes else math.inf,
         median_smae=statistics.median(smaes) if smaes else math.inf,
         se_smae=standard_error(smaes) if smaes else math.inf,
@@ -419,6 +491,12 @@ def evaluate_decision(
         se_srmse=standard_error(srmses) if srmses else math.inf,
         p90_smae=linear_quantile(smaes, 0.90) if smaes else math.inf,
         p95_smae=linear_quantile(smaes, 0.95) if smaes else math.inf,
+        p90_srmse=linear_quantile(srmses, 0.90) if srmses else math.inf,
+        p95_srmse=linear_quantile(srmses, 0.95) if srmses else math.inf,
+        p90_smae_raw=linear_quantile(smaes_raw, 0.90) if smaes_raw else math.inf,
+        p95_smae_raw=linear_quantile(smaes_raw, 0.95) if smaes_raw else math.inf,
+        p90_srmse_raw=linear_quantile(srmses_raw, 0.90) if srmses_raw else math.inf,
+        p95_srmse_raw=linear_quantile(srmses_raw, 0.95) if srmses_raw else math.inf,
         smae_clipped_count=smae_clipped_count,
         smae_clipped_rate=smae_clipped_count / completed if completed else 1.0,
         srmse_clipped_count=srmse_clipped_count,
@@ -427,6 +505,13 @@ def evaluate_decision(
         mean_considered_candidates=(statistics.fmean(considered_counts) if records else 0.0),
         mean_considered_families=(statistics.fmean(considered_family_counts) if records else 0.0),
         assumption_kind_diversity=len(assumption_kinds),
+        task_scaled_pairs={
+            record[0].task.task_id: (
+                float(record[6]["smae"]),
+                float(record[6]["srmse"]),
+            )
+            for record in records
+        },
     )
 
 
@@ -436,30 +521,70 @@ def compare_decisions(
     dev_parent: DecisionScore,
     dev_child: DecisionScore,
 ) -> DecisionGateResult:
-    if train_child.coverage < 1.0 - 1e-12 or dev_child.coverage < 1.0 - 1e-12:
-        return DecisionGateResult(False, "Train and Dev coverage must remain 100%")
-    if dev_child.mean_srmse > dev_parent.mean_srmse + 1e-12:
-        return DecisionGateResult(False, "Dev sRMSE increased")
-    if dev_child.smae_clipped_count > dev_parent.smae_clipped_count:
-        return DecisionGateResult(False, "Dev clipped-sMAE task count increased")
-    if dev_child.srmse_clipped_count > dev_parent.srmse_clipped_count:
-        return DecisionGateResult(False, "Dev clipped-sRMSE task count increased")
-    if not _tail_is_safe(dev_child.p90_smae, dev_parent.p90_smae):
-        return DecisionGateResult(False, "Dev P90 sMAE materially increased")
-    if not _tail_is_safe(dev_child.p95_smae, dev_parent.p95_smae):
-        return DecisionGateResult(False, "Dev P95 sMAE materially increased")
-    if dev_child.mean_active_oracle_regret > dev_parent.mean_active_oracle_regret + 1e-12:
-        return DecisionGateResult(False, "Dev active-oracle regret increased")
-    if dev_child.mean_smae >= dev_parent.mean_smae - 1e-12:
-        return DecisionGateResult(False, "Dev clipped sMAE did not improve")
-    if train_child.mean_smae >= train_parent.mean_smae - 1e-12:
-        return DecisionGateResult(False, "Child has no Train clipped-sMAE improvement")
+    train_gate = _compare_train_decisions(train_parent, train_child)
+    if not train_gate.accepted:
+        return train_gate
+    if dev_child.coverage < 1.0 - 1e-12:
+        return DecisionGateResult(False, "Dev coverage must remain 100%")
+    if not pareto_scaled_improvement(
+        dev_parent.mean_smae,
+        dev_parent.mean_srmse,
+        dev_child.mean_smae,
+        dev_child.mean_srmse,
+    ):
+        return DecisionGateResult(False, "Dev scaled metric pair did not Pareto-improve")
+    safety = _scaled_tail_and_oracle_gate(dev_parent, dev_child, label="Dev")
+    if safety is not None:
+        return safety
     return DecisionGateResult(True, "Train proposal passed all read-only Dev gates")
 
 
 def _tail_is_safe(child: float, parent: float, *, relative_tolerance: float = 0.01) -> bool:
     """Permit at most a one-percent increase in a high-quantile tail statistic."""
+    if math.isnan(child) or math.isnan(parent) or child < 0.0 or parent < 0.0:
+        return False
+    if math.isinf(child):
+        return math.isinf(parent)
+    if math.isinf(parent):
+        return True
     return child <= parent * (1.0 + relative_tolerance) + 1e-12
+
+
+def _scaled_tail_and_oracle_gate(
+    parent: DecisionScore,
+    child: DecisionScore,
+    *,
+    label: str,
+    relative_tolerance: float = 0.01,
+) -> DecisionGateResult | None:
+    for metric in ("smae", "srmse"):
+        if getattr(child, f"{metric}_clipped_count") > getattr(
+            parent, f"{metric}_clipped_count"
+        ):
+            return DecisionGateResult(
+                False, f"{label} clipped-{metric} task count increased"
+            )
+        for quantile in ("p90", "p95"):
+            for suffix in ("", "_raw"):
+                field = f"{quantile}_{metric}{suffix}"
+                if not _tail_is_safe(
+                    float(getattr(child, field)),
+                    float(getattr(parent, field)),
+                    relative_tolerance=relative_tolerance,
+                ):
+                    raw = " raw" if suffix else ""
+                    return DecisionGateResult(
+                        False,
+                        f"{label} {quantile.upper()}{raw} {metric} materially increased",
+                    )
+        oracle_field = f"mean_active_oracle_{metric}_regret"
+        if float(getattr(child, oracle_field)) > float(
+            getattr(parent, oracle_field)
+        ) + 1e-12:
+            return DecisionGateResult(
+                False, f"{label} active-oracle {metric} regret increased"
+            )
+    return None
 
 
 def bounded_combined_candidates(
@@ -481,11 +606,12 @@ def bounded_combined_candidates(
         proposal.ranking_order,
         parent.ranking_order,
         (
-            "worst_mase",
-            "recent_mase",
-            "median_mase",
-            "median_rmsse",
-            "mase_mad",
+            "worst_joint_scaled_error",
+            "recent_joint_scaled_error",
+            "median_joint_scaled_error",
+            "median_smae",
+            "median_srmse",
+            "normalized_bias",
         ),
     )
     fold_requirements = (
@@ -733,20 +859,18 @@ def _compare_train_decisions(
 ) -> DecisionGateResult:
     if child.coverage < 1.0 - 1e-12:
         return DecisionGateResult(False, "Train coverage must remain 100%")
-    if child.smae_clipped_count > parent.smae_clipped_count:
-        return DecisionGateResult(False, "Train clipped-sMAE task count increased")
-    if child.srmse_clipped_count > parent.srmse_clipped_count:
-        return DecisionGateResult(False, "Train clipped-sRMSE task count increased")
-    if child.mean_srmse > parent.mean_srmse * 1.01 + 1e-12:
-        return DecisionGateResult(False, "Train sRMSE materially increased")
-    if not _tail_is_safe(child.p90_smae, parent.p90_smae, relative_tolerance=0.05):
-        return DecisionGateResult(False, "Train P90 sMAE materially increased")
-    if not _tail_is_safe(child.p95_smae, parent.p95_smae, relative_tolerance=0.05):
-        return DecisionGateResult(False, "Train P95 sMAE materially increased")
-    if child.mean_active_oracle_regret > parent.mean_active_oracle_regret + 1e-12:
-        return DecisionGateResult(False, "Train active-oracle regret increased")
-    if child.mean_smae >= parent.mean_smae - 1e-12:
-        return DecisionGateResult(False, "Train clipped sMAE did not improve")
+    if not pareto_scaled_improvement(
+        parent.mean_smae,
+        parent.mean_srmse,
+        child.mean_smae,
+        child.mean_srmse,
+    ):
+        return DecisionGateResult(False, "Train scaled metric pair did not Pareto-improve")
+    safety = _scaled_tail_and_oracle_gate(
+        parent, child, label="Train", relative_tolerance=0.05
+    )
+    if safety is not None:
+        return safety
     return DecisionGateResult(True, "Candidate passed all Train search gates")
 
 
@@ -770,26 +894,32 @@ def compare_train_crossfolds(
         child = evaluate_decision(child_policy, partition)
         if child.coverage < 1.0 - 1e-12:
             return DecisionGateResult(False, f"Train fold {index} coverage decreased")
-        if child.smae_clipped_count > parent.smae_clipped_count:
-            return DecisionGateResult(False, f"Train fold {index} clipped-sMAE count increased")
-        if child.srmse_clipped_count > parent.srmse_clipped_count:
-            return DecisionGateResult(False, f"Train fold {index} clipped-sRMSE count increased")
-        if child.mean_smae > parent.mean_smae * 1.01 + 1e-12:
-            return DecisionGateResult(False, f"Train fold {index} sMAE materially increased")
-        if child.mean_srmse > parent.mean_srmse * 1.01 + 1e-12:
-            return DecisionGateResult(False, f"Train fold {index} sRMSE materially increased")
-        if child.mean_smae < parent.mean_smae - 1e-12:
+        if child.mean_smae > parent.mean_smae + 1e-12:
+            return DecisionGateResult(False, f"Train fold {index} sMAE regressed")
+        if child.mean_srmse > parent.mean_srmse + 1e-12:
+            return DecisionGateResult(False, f"Train fold {index} sRMSE regressed")
+        safety = _scaled_tail_and_oracle_gate(
+            parent, child, label=f"Train fold {index}", relative_tolerance=0.05
+        )
+        if safety is not None:
+            return safety
+        if pareto_scaled_improvement(
+            parent.mean_smae,
+            parent.mean_srmse,
+            child.mean_smae,
+            child.mean_srmse,
+        ):
             improvements += 1
 
     required = math.ceil(0.75 * len(partitions))
     if improvements < required:
         return DecisionGateResult(
             False,
-            f"Train cross-fold sMAE improved in only {improvements}/{len(partitions)} folds",
+            f"Train cross-fold scaled pair improved in only {improvements}/{len(partitions)} folds",
         )
     return DecisionGateResult(
         True,
-        f"Train cross-fold sMAE improved in {improvements}/{len(partitions)} folds",
+        f"Train cross-fold scaled pair improved in {improvements}/{len(partitions)} folds",
     )
 
 
@@ -914,30 +1044,30 @@ def compare_activation_aware_fold_scores(
     for index, (parent, child) in enumerate(score_pairs):
         if child.coverage < parent.coverage - 1e-12:
             return DecisionGateResult(False, f"Train fold {index} coverage decreased")
-        if child.smae_clipped_count > parent.smae_clipped_count:
-            return DecisionGateResult(False, f"Train fold {index} clipped-sMAE count increased")
-        if child.srmse_clipped_count > parent.srmse_clipped_count:
-            return DecisionGateResult(False, f"Train fold {index} clipped-sRMSE count increased")
-        if child.mean_smae > parent.mean_smae * 1.01 + 1e-12:
-            return DecisionGateResult(False, f"Train fold {index} sMAE materially increased")
-        if child.mean_srmse > parent.mean_srmse * 1.01 + 1e-12:
-            return DecisionGateResult(False, f"Train fold {index} sRMSE materially increased")
-        if not _tail_is_safe(child.p90_smae, parent.p90_smae):
-            return DecisionGateResult(False, f"Train fold {index} P90 sMAE materially increased")
-        if not _tail_is_safe(child.p95_smae, parent.p95_smae):
-            return DecisionGateResult(False, f"Train fold {index} P95 sMAE materially increased")
-        if child.mean_active_oracle_regret > parent.mean_active_oracle_regret + 1e-12:
-            return DecisionGateResult(False, f"Train fold {index} oracle regret increased")
-        if child.mean_smae < parent.mean_smae - 1e-12:
+        if child.mean_smae > parent.mean_smae + 1e-12:
+            return DecisionGateResult(False, f"Train fold {index} sMAE regressed")
+        if child.mean_srmse > parent.mean_srmse + 1e-12:
+            return DecisionGateResult(False, f"Train fold {index} sRMSE regressed")
+        safety = _scaled_tail_and_oracle_gate(
+            parent, child, label=f"Train fold {index}"
+        )
+        if safety is not None:
+            return safety
+        if pareto_scaled_improvement(
+            parent.mean_smae,
+            parent.mean_srmse,
+            child.mean_smae,
+            child.mean_srmse,
+        ):
             improvements += 1
     if improvements < 2:
         return DecisionGateResult(
             False,
-            f"Activation-aware sMAE improved in only {improvements}/{len(score_pairs)} folds",
+            f"Activation-aware scaled pair improved in only {improvements}/{len(score_pairs)} folds",
         )
     return DecisionGateResult(
         True,
-        f"Activation-aware sMAE improved in {improvements}/{len(score_pairs)} folds "
+        f"Activation-aware scaled pair improved in {improvements}/{len(score_pairs)} folds "
         "with no material fold regression",
     )
 
@@ -966,11 +1096,19 @@ def _group_balanced_folds(
 
 def _train_rank(score: DecisionScore) -> tuple[float, ...]:
     return (
+        joint_scaled_error(score.mean_smae, score.mean_srmse),
         score.mean_smae,
         score.mean_srmse,
         score.p95_smae,
+        score.p95_srmse,
         score.p90_smae,
-        score.mean_active_oracle_regret,
+        score.p90_srmse,
+        score.p95_smae_raw,
+        score.p95_srmse_raw,
+        score.p90_smae_raw,
+        score.p90_srmse_raw,
+        score.mean_active_oracle_smae_regret,
+        score.mean_active_oracle_srmse_regret,
     )
 
 
@@ -991,10 +1129,10 @@ def _evolve_selector_on_train_once(
         {
             "generation": generation,
             "screening_policy_hash": screening_policy_hash,
-            "current_policy": _policy_payload(parent),
+            "current_policy": _mutation_policy_payload(parent),
             "available_hindcast_folds": available_hindcast_folds,
             "prior_rejections": list(prior_rejections[-5:]),
-            "train_summary": asdict(train_parent),
+            "train_summary": _scaled_train_summary(train_parent),
             "train_failure_summary": _failure_summary(parent, train_cases),
             "instruction": (
                 "Propose one conservative typed policy. Python will expand it into a bounded "
@@ -1174,10 +1312,10 @@ def evolve_selector_once(
         {
             "generation": generation,
             "screening_policy_hash": screening_policy_hash,
-            "current_policy": _policy_payload(parent),
+            "current_policy": _mutation_policy_payload(parent),
             "available_hindcast_folds": available_hindcast_folds,
             "prior_rejections": list(prior_rejections[-5:]),
-            "train_summary": asdict(train_parent),
+            "train_summary": _scaled_train_summary(train_parent),
             "train_failure_summary": _failure_summary(parent, train_cases),
             "instruction": "Make one conservative typed policy proposal.",
         },
@@ -1270,34 +1408,22 @@ def evolve_selector_generations(
     return current, tuple(results)
 
 
-def _parse_policy(raw: Mapping[str, object]) -> DecisionPolicy:
-    legacy_fields = (
-        set(_FIELDS) - _TSFM_BLEND_FIELDS,
-        set(_PRE_COMBINED_FIELDS),
-        set(_PRE_COMBINED_FIELDS) | _LONG_HORIZON_ROUTE_FIELDS,
-        set(_PRE_COMBINED_FIELDS) | _LONG_HORIZON_ROUTE_FIELDS | _LONG_HORIZON_GUARD_FIELDS,
-        set(_FIELDS) - _LONG_HORIZON_GUARD_FIELDS,
-        set(_FIELDS) - {"baseline_strategy"},
-        set(_FIELDS) - _ASSUMPTION_FIELDS,
-        set(_FIELDS) - _ASSUMPTION_FIELDS - {"baseline_strategy"},
-        set(_FIELDS) - _LONG_HORIZON_ROUTE_FIELDS,
-        set(_FIELDS) - _LONG_HORIZON_ROUTE_FIELDS - {"baseline_strategy"},
-        set(_FIELDS) - _LONG_HORIZON_ROUTE_FIELDS - _ASSUMPTION_FIELDS,
-        set(_FIELDS) - _LONG_HORIZON_ROUTE_FIELDS - _ASSUMPTION_FIELDS - {"baseline_strategy"},
-    )
-    legacy_fields = (
-        *legacy_fields,
-        *(fields - _LONG_HORIZON_GUARD_FIELDS for fields in legacy_fields),
-    )
-    legacy_fields = (
-        *legacy_fields,
-        *(fields - _TSFM_BLEND_FIELDS for fields in legacy_fields),
-    )
-    legacy_fields = (
-        *legacy_fields,
-        *(fields - _TSFM_ROUTER_FIELDS for fields in legacy_fields),
-    )
-    if set(raw) in legacy_fields:
+def _parse_policy(
+    raw: Mapping[str, object], *, allow_legacy: bool = False
+) -> DecisionPolicy:
+    raw = dict(raw)
+    legacy_keys = {
+        "catastrophic_mase", "median_mase", "recent_mase", "worst_mase",
+        "mase_mad", "median_rmsse", "median_smape",
+    }
+    present_legacy = legacy_keys & set(raw)
+    if present_legacy and not allow_legacy:
+        raise SelectorEvolutionError(
+            "legacy DecisionPolicy fields require allow_legacy=True report-only parsing"
+        )
+    if allow_legacy:
+        for field in legacy_keys:
+            raw.pop(field, None)
         defaults = _policy_payload(DecisionPolicy())
         raw = {**defaults, **raw}
     if set(raw) != set(_FIELDS):
@@ -1305,12 +1431,21 @@ def _parse_policy(raw: Mapping[str, object]) -> DecisionPolicy:
     ranking = raw["ranking_order"]
     if not isinstance(ranking, (list, tuple)):
         raise SelectorEvolutionError("ranking_order must be a sequence")
+    if allow_legacy:
+        if "median_smape" in {str(value) for value in ranking}:
+            raise SelectorEvolutionError(
+                "legacy median_smape cannot be migrated into the scaled metric policy"
+            )
+        ranking = _normalize_legacy_decision_ranking(ranking)
     try:
         return DecisionPolicy(
             ranking_order=tuple(str(value) for value in ranking),
             recent_regime_first=_strict_bool(raw["recent_regime_first"]),
             min_successful_folds=_strict_int(raw["min_successful_folds"]),
-            catastrophic_mase=_finite_float(raw["catastrophic_mase"]),
+            catastrophic_smae_raw=_finite_float(raw["catastrophic_smae_raw"]),
+            catastrophic_srmse_raw=_finite_float(raw["catastrophic_srmse_raw"]),
+            max_smae_fold_regret=_finite_float(raw["max_smae_fold_regret"]),
+            max_srmse_fold_regret=_finite_float(raw["max_srmse_fold_regret"]),
             baseline_strategy=str(raw["baseline_strategy"]),
             tsfm_router_min_improvement=_finite_float(
                 raw["tsfm_router_min_improvement"]
@@ -1356,7 +1491,10 @@ def _policy_payload(policy: DecisionPolicy) -> dict[str, object]:
         "ranking_order": list(policy.ranking_order),
         "recent_regime_first": policy.recent_regime_first,
         "min_successful_folds": policy.min_successful_folds,
-        "catastrophic_mase": policy.catastrophic_mase,
+        "catastrophic_smae_raw": policy.catastrophic_smae_raw,
+        "catastrophic_srmse_raw": policy.catastrophic_srmse_raw,
+        "max_smae_fold_regret": policy.max_smae_fold_regret,
+        "max_srmse_fold_regret": policy.max_srmse_fold_regret,
         "baseline_strategy": policy.baseline_strategy,
         "tsfm_router_min_improvement": policy.tsfm_router_min_improvement,
         "tsfm_router_blend_weight": policy.tsfm_router_blend_weight,
@@ -1383,6 +1521,27 @@ def _policy_payload(policy: DecisionPolicy) -> dict[str, object]:
         "long_horizon_max_regret": policy.long_horizon_max_regret,
         "fallback_to_best_available": policy.fallback_to_best_available,
     }
+
+
+def _mutation_policy_payload(policy: DecisionPolicy) -> dict[str, object]:
+    """Project only live scaled mutation fields; legacy metrics stay read-only."""
+    return _policy_payload(policy)
+
+
+def _scaled_train_summary(score: DecisionScore) -> dict[str, object]:
+    """Expose only formal scaled objectives and non-performance safety summaries."""
+    payload = asdict(score)
+    for field in (
+        "mean_mase",
+        "median_mase",
+        "mean_mae",
+        "median_mae",
+        "mean_smape",
+        "catastrophic_rate",
+        "task_scaled_pairs",
+    ):
+        payload.pop(field)
+    return payload
 
 
 def _failure_summary(
@@ -1417,7 +1576,15 @@ def _failure_summary(
                 for diagnostic in case.diagnostics.values()
                 if diagnostic.eligible
             )
-            for field in ("median_mase", "recent_mase", "worst_mase", "mase_mad")
+            for field in (
+                "median_joint_scaled_error",
+                "recent_joint_scaled_error",
+                "worst_joint_scaled_error",
+                "median_smae",
+                "median_srmse",
+                "worst_smae_raw",
+                "worst_srmse_raw",
+            )
         },
     }
 

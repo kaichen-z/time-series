@@ -11,12 +11,18 @@ from pathlib import Path
 from typing import Sequence
 
 from common.data import load_tasks_by_id
+from common.evolution_core.contracts import METRIC_POLICY, metric_report_metadata
 from common.llm import CodexCLIClient, CodexCLIConfig
-from common.payload import read_json_object, write_json
+from common.payload import (
+    canonical_json_bytes,
+    read_json_object,
+    standards_json_value,
+    write_json,
+)
 
 from .evolution.cache import OutcomeCache
 from .evolution.execution import Outcome, Task, require_unique_outcome_keys, require_unique_task_ids
-from .evolution.filtering import build_filter_dictionary, parse_filter_source
+from .evolution.filtering import build_filter_dictionary
 from .evolution.module import read_module
 from .evolution.portfolio import (
     PolicyOutcomeCache,
@@ -40,6 +46,10 @@ from .evolution.screening_evolution import (
     select_refinement_targets,
 )
 from .main import _add_tsfm_runtime_options, _runtime_registry
+from .run_filter_evolution import _validate_seed_manifest
+
+
+SCALED_METRIC_POLICY = METRIC_POLICY
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,10 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--train-limit", type=int, default=80)
     parser.add_argument("--dev-limit", type=int, default=20)
-    parser.add_argument(
-        "--seed-policy", choices=("all", "legacy"), default="all",
-        help="start from the complete selectable Master Dictionary or the legacy global filter",
-    )
+    parser.add_argument("--seed-manifest", default=None)
     parser.add_argument("--codex-model", default="gpt-5.6-luna")
     parser.add_argument(
         "--codex-reasoning-effort", choices=("none", "low", "medium", "high"), default="low"
@@ -110,15 +117,15 @@ def main(argv: list[str] | None = None) -> int:
     portfolio = read_policy_file(repo / "policies.py")
     portfolio.validate_namespace(module.names())
     candidate_names = tuple(module.names()) + portfolio.names
-    legacy_path = repo / "frozen_dictionary.py"
-    if not legacy_path.is_file():
-        legacy_path = repo / "dictionary.py"
-    legacy_dictionary = parse_filter_source(legacy_path.read_text(encoding="utf-8"))
-    seed_dictionary = (
-        build_filter_dictionary(module, portfolio)
-        if args.seed_policy == "all"
-        else legacy_dictionary
+    seed_manifest_path = (
+        Path(args.seed_manifest) if args.seed_manifest else repo / "seed_manifest.json"
     )
+    _validate_seed_manifest(
+        seed_manifest_path,
+        repo,
+        seed_kind="complete_master_dictionary",
+    )
+    seed_dictionary = build_filter_dictionary(module, portfolio)
     parent = migrate_filter_dictionary(
         seed_dictionary,
         fallback_names=_fallback_names(module.names(), tuple(policy.name for policy in portfolio.tsfm)),
@@ -183,6 +190,8 @@ def main(argv: list[str] | None = None) -> int:
             child_source, encoding="utf-8"
         )
         generation_payload = {
+            "schema_version": 2,
+            **metric_report_metadata(),
             "generation": number,
             "phase": "review",
             "evaluation_scope": "train_only",
@@ -193,6 +202,9 @@ def main(argv: list[str] | None = None) -> int:
             "child_hash": result.child.fingerprint(),
             "train_parent": asdict(result.train_parent),
             "train_child": asdict(result.train_child),
+            "paired_joint_wtl": _paired_screening_counts(
+                result.train_parent, result.train_child
+            ),
             "oracle_shields": [asdict(shield) for shield in result.oracle_shields],
             "action_decisions": [
                 asdict(decision) for decision in result.action_decisions
@@ -249,6 +261,8 @@ def main(argv: list[str] | None = None) -> int:
             child_source, encoding="utf-8"
         )
         generation_payload = {
+            "schema_version": 2,
+            **metric_report_metadata(),
             "generation": number,
             "phase": "refinement",
             "evaluation_scope": "train_only",
@@ -261,6 +275,9 @@ def main(argv: list[str] | None = None) -> int:
             "child_hash": result.child.fingerprint(),
             "train_parent": asdict(result.train_parent),
             "train_child": asdict(result.train_child),
+            "paired_joint_wtl": _paired_screening_counts(
+                result.train_parent, result.train_child
+            ),
             "oracle_shields": [asdict(shield) for shield in result.oracle_shields],
             "action_decisions": [
                 asdict(decision) for decision in result.action_decisions
@@ -303,7 +320,8 @@ def main(argv: list[str] | None = None) -> int:
     _write_active(output / "train_active_dictionaries.jsonl", parent, train)
     _write_active(output / "dev_active_dictionaries.jsonl", parent, dev)
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
+        **metric_report_metadata(),
         "phase": "task_conditioned_screening",
         "train_tasks": len(train),
         "dev_tasks": len(dev),
@@ -314,17 +332,20 @@ def main(argv: list[str] | None = None) -> int:
         "refinement_batch_size": args.screen_refinement_batch_size,
         "constraints": asdict(constraints),
         "final_constraints_met": final_constraints_met,
-        "seed_policy": args.seed_policy,
+        "seed_policy": "complete_master_dictionary",
         **policy_artifacts,
         "source_hashes": {
             "methods.py": _sha256(repo / "methods.py"),
             "policies.py": _sha256(repo / "policies.py"),
-            "legacy_dictionary.py": _sha256(legacy_path),
         },
         "cache": _merge_cache_summaries(train_cache_summary, dev_cache_summary),
         "train": asdict(train_score),
         "dev": asdict(dev_score),
         "final_dev_gate": asdict(final_gate),
+        "paired_joint_wtl": {
+            "train": _paired_screening_counts(original_train_score, train_score),
+            "dev": _paired_screening_counts(original_dev_score, dev_score),
+        },
         "dev_evaluations": 1,
         "generations": generations,
         "accepted_train_generations": [
@@ -338,9 +359,16 @@ def main(argv: list[str] | None = None) -> int:
         "elapsed_seconds": time.monotonic() - started,
         "public_test_accessed": False,
     }
+    manifest["manifest_sha256"] = _manifest_fingerprint(manifest)
     write_json(output / "screening_manifest.json", manifest)
     (output / "SCREENING_REPORT.md").write_text(_report(manifest), encoding="utf-8")
-    print(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(
+        standards_json_value(manifest),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    ))
     return 0 if final_constraints_met else 2
 
 
@@ -451,11 +479,40 @@ def _write_active(path: Path, policy: ScreeningPolicy, tasks: Sequence[Task]) ->
     with path.open("w", encoding="utf-8") as handle:
         for task in tasks:
             active = materialize_active_dictionary(policy, profile_task(task))
-            handle.write(json.dumps(asdict(active), sort_keys=True, allow_nan=False) + "\n")
+            payload = {
+                "schema_version": 2,
+                **metric_report_metadata(),
+                **asdict(active),
+            }
+            handle.write(json.dumps(payload, sort_keys=True, allow_nan=False) + "\n")
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _paired_screening_counts(parent, child) -> dict[str, int]:
+    result = {"wins": 0, "ties": 0, "losses": 0, "missing": 0, "unscored": 0}
+    observed = set(parent.task_scaled_pairs) | set(child.task_scaled_pairs)
+    for task_id in sorted(observed):
+        if task_id not in parent.task_scaled_pairs or task_id not in child.task_scaled_pairs:
+            result["missing"] += 1
+            continue
+        left = sum(parent.task_scaled_pairs[task_id]) / 2.0
+        right = sum(child.task_scaled_pairs[task_id]) / 2.0
+        if right < left - 1e-12:
+            result["wins"] += 1
+        elif right > left + 1e-12:
+            result["losses"] += 1
+        else:
+            result["ties"] += 1
+    expected = max(parent.task_count, child.task_count, len(observed))
+    result["unscored"] = expected - len(observed)
+    return result
+
+
+def _manifest_fingerprint(payload: dict[str, object]) -> str:
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 
 def _write_policy_artifacts(
@@ -558,10 +615,25 @@ def _report(manifest: dict) -> str:
         f"- Dev evaluations: {manifest.get('dev_evaluations', 'not recorded')}",
         f"- Final Dev gate: {manifest.get('final_dev_gate', {}).get('reason', 'not recorded')}",
         "",
-        "| Split | Coverage | Active success | Failure exposure | N/A exposure | Oracle retention | Mean regret | Compression |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
-        f"| Train | {train['coverage']:.4f} | {train['active_success_rate']:.4f} | {train['failure_exposure']:.4f} | {train['not_applicable_exposure']:.4f} | {train['global_oracle_retention']:.4f} | {train['mean_active_oracle_regret']:.4f} | {train['compression']:.4f} |",
-        f"| Dev | {dev['coverage']:.4f} | {dev['active_success_rate']:.4f} | {dev['failure_exposure']:.4f} | {dev['not_applicable_exposure']:.4f} | {dev['global_oracle_retention']:.4f} | {dev['mean_active_oracle_regret']:.4f} | {dev['compression']:.4f} |",
+        "| Split | Mean active sMAE | Mean active sRMSE | Coverage | Active success | Failure exposure | N/A exposure | Oracle retention | sMAE regret | sRMSE regret | Compression |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        f"| Train | {train['mean_active_smae']:.4f} | {train['mean_active_srmse']:.4f} | {train['coverage']:.4f} | {train['active_success_rate']:.4f} | {train['failure_exposure']:.4f} | {train['not_applicable_exposure']:.4f} | {train['global_oracle_retention']:.4f} | {train['mean_active_oracle_smae_regret']:.4f} | {train['mean_active_oracle_srmse_regret']:.4f} | {train['compression']:.4f} |",
+        f"| Dev | {dev['mean_active_smae']:.4f} | {dev['mean_active_srmse']:.4f} | {dev['coverage']:.4f} | {dev['active_success_rate']:.4f} | {dev['failure_exposure']:.4f} | {dev['not_applicable_exposure']:.4f} | {dev['global_oracle_retention']:.4f} | {dev['mean_active_oracle_smae_regret']:.4f} | {dev['mean_active_oracle_srmse_regret']:.4f} | {dev['compression']:.4f} |",
+        "",
+        "| Split | Mean sMAE | Median sMAE | sMAE SE | Mean sRMSE | Median sRMSE | sRMSE SE | Raw P90/P95 sMAE | Raw P90/P95 sRMSE | Clipped sMAE/sRMSE |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        _screening_metric_row("Train", train),
+        _screening_metric_row("Dev", dev),
+        "",
+        "| Split | Wins / Ties / Losses / Missing / Unscored |",
+        "|---|---:|",
+        _paired_report_row("Train", manifest["paired_joint_wtl"]["train"]),
+        _paired_report_row("Dev", manifest["paired_joint_wtl"]["dev"]),
+        "",
+        "| Split | Crash / invalid / missing / malformed |",
+        "|---|---:|",
+        f"| Train | {train['active_crashed']} / {train['active_invalid']} / {train['active_missing']} / {train['active_malformed_success']} |",
+        f"| Dev | {dev['active_crashed']} / {dev['active_invalid']} / {dev['active_missing']} / {dev['active_malformed_success']} |",
         "",
         "| Split | Mean active | Min / Max | Unique dictionaries | Pairwise Jaccard | Conditioned Statistical / TSFM / Combined |",
         "|---|---:|---:|---:|---:|---:|",
@@ -569,6 +641,25 @@ def _report(manifest: dict) -> str:
         f"| Dev | {dev['mean_active_candidates']:.2f} | {dev['min_active_candidates']} / {dev['max_active_candidates']} | {dev['unique_active_dictionaries']} | {dev['mean_pairwise_jaccard']:.4f} | {dev_families['statistical']} / {dev_families['tsfm']} / {dev_families['combined']} |",
         "",
     ))
+
+
+def _screening_metric_row(label: str, score: Mapping[str, object]) -> str:
+    return (
+        f"| {label} | {score['mean_smae']:.6f} | {score['median_smae']:.6f} | "
+        f"{score['se_smae']:.6f} | {score['mean_srmse']:.6f} | "
+        f"{score['median_srmse']:.6f} | {score['se_srmse']:.6f} | "
+        f"{score['p90_smae_raw']:.6f}/{score['p95_smae_raw']:.6f} | "
+        f"{score['p90_srmse_raw']:.6f}/{score['p95_srmse_raw']:.6f} | "
+        f"{score['smae_clipped_count']} ({score['smae_clipped_rate']:.4f}) / "
+        f"{score['srmse_clipped_count']} ({score['srmse_clipped_rate']:.4f}) |"
+    )
+
+
+def _paired_report_row(label: str, counts: Mapping[str, object]) -> str:
+    return (
+        f"| {label} | {counts['wins']} / {counts['ties']} / {counts['losses']} / "
+        f"{counts['missing']} / {counts['unscored']} |"
+    )
 
 
 if __name__ == "__main__":

@@ -7,6 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from common.evolution_core.contracts import (
+    METRIC_POLICY,
+    METRIC_POLICY_FINGERPRINT,
+)
 from numerical_agent.main import _curation_config, _evolution_config, _labels, _task_items
 
 
@@ -120,6 +124,13 @@ def test_builder_persists_selector_coverage_and_retry_parameters(tmp_path: Path)
     assert curation["selection_folds"] == 4
     assert curation["selection_horizon"] == 6
     assert curation["allowed_families"] == ["statistical"]
+    assert curation["method_metric"] == "smae"
+    assert curation["dictionary_metric"] == "smae"
+    assert curation["metric_policy"] == {
+        **METRIC_POLICY,
+        "primary": list(METRIC_POLICY["primary"]),
+    }
+    assert curation["metric_policy_fingerprint"] == METRIC_POLICY_FINGERPRINT
 
 
 def test_builder_keeps_train_and_dev_disjoint(tmp_path: Path) -> None:

@@ -16,7 +16,7 @@ DICTIONARY_PATH = (
 
 def _load() -> ToolDictionary:
     payload = json.loads(DICTIONARY_PATH.read_text(encoding="utf-8"))
-    return ToolDictionary.from_payload(payload)
+    return ToolDictionary.from_legacy_report_payload(payload)
 
 
 def test_statistical_base_methods_dictionary_parses_and_round_trips() -> None:

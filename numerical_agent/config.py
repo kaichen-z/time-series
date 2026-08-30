@@ -2,6 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field
+from typing import Mapping
+
+from common.evolution_core.contracts import (
+    METRIC_POLICY,
+    METRIC_POLICY_FINGERPRINT,
+    require_active_metric_policy,
+)
 
 
 ALLOWED_ACTIONS = ("keep", "revise", "quarantine", "discard")
@@ -27,12 +35,18 @@ class DictionaryCurationConfig:
     max_revisions_per_method: int = 1
     max_implementation_attempts: int = 3
     method_statuses: tuple[str, ...] = METHOD_STATUSES
-    method_metric: str = "smape"
-    dictionary_metric: str = "smape"
+    method_metric: str = "smae"
+    dictionary_metric: str = "smae"
+    metric_policy: Mapping[str, object] = field(
+        default_factory=lambda: dict(METRIC_POLICY)
+    )
+    metric_policy_fingerprint: str = METRIC_POLICY_FINGERPRINT
     discard_requires_dominance_evidence: bool = True
     allow_dev_learning: bool = False
-    accepted_max_error: float = 50.0
-    specialized_max_error: float = 100.0
+    accepted_max_smae: float = 1.0
+    accepted_max_srmse: float = 1.0
+    specialized_max_smae: float = 2.5
+    specialized_max_srmse: float = 2.5
     min_success_rate: float = 0.8
     selection_folds: int = 3
     selection_horizon: int = 8
@@ -50,10 +64,34 @@ class DictionaryCurationConfig:
             raise ValueError("method_statuses contains an unsupported status")
         if not self.method_metric or not self.dictionary_metric:
             raise ValueError("metric names must not be empty")
-        if self.accepted_max_error < 0 or self.specialized_max_error < 0:
-            raise ValueError("status thresholds must be non-negative")
-        if self.specialized_max_error < self.accepted_max_error:
-            raise ValueError("specialized_max_error must not be below accepted_max_error")
+        require_active_metric_policy(
+            {
+                "metric_policy": self.metric_policy,
+                "metric_policy_fingerprint": self.metric_policy_fingerprint,
+                "method_metric": self.method_metric,
+                "dictionary_metric": self.dictionary_metric,
+            },
+            context="active curation config",
+        )
+        object.__setattr__(self, "metric_policy", dict(METRIC_POLICY))
+        thresholds = {
+            "accepted_max_smae": self.accepted_max_smae,
+            "accepted_max_srmse": self.accepted_max_srmse,
+            "specialized_max_smae": self.specialized_max_smae,
+            "specialized_max_srmse": self.specialized_max_srmse,
+        }
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not 0.0 <= float(value) <= 5.0
+            for value in thresholds.values()
+        ):
+            raise ValueError("scaled status thresholds must be between zero and five")
+        if (
+            self.specialized_max_smae < self.accepted_max_smae
+            or self.specialized_max_srmse < self.accepted_max_srmse
+        ):
+            raise ValueError("specialized pair thresholds must not be below accepted thresholds")
         if not 0.0 <= self.min_success_rate <= 1.0:
             raise ValueError("min_success_rate must be between 0 and 1")
         if self.selection_folds <= 0 or self.selection_horizon <= 0:

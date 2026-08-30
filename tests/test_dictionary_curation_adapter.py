@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import math
+from dataclasses import asdict
 from pathlib import Path
 from typing import Sequence
+
+import pytest
 
 from common.evolution_core.contracts import EvaluationReport, MutationContext
 from common.evolution_core.persistence import JsonArtifactStore
@@ -82,6 +86,85 @@ def absolute_error(prediction: Sequence[float], truth: Sequence[float]) -> float
     return sum(abs(left - right) for left, right in zip(prediction, truth)) / len(truth)
 
 
+def test_curation_config_replaces_unbounded_scalar_error_thresholds() -> None:
+    payload = asdict(DictionaryCurationConfig())
+
+    assert "accepted_max_error" not in payload
+    assert "specialized_max_error" not in payload
+    for name in (
+        "accepted_max_smae",
+        "accepted_max_srmse",
+        "specialized_max_smae",
+        "specialized_max_srmse",
+    ):
+        assert 0.0 <= payload[name] <= 5.0
+
+
+def test_curation_pair_gate_rejects_srmse_regression() -> None:
+    task = DictionaryCurationTask(
+        base_dictionary=ToolDictionary(
+            "d0", None, 0, (MethodDefinition("m", "statistical", "m"),)
+        ),
+        config=DictionaryCurationConfig(),
+        implementer=OneShotImplementer(),
+        runtimes=RuntimeRegistry(),
+        labels={"train": {}, "dev": {}},
+        metric=absolute_error,
+        store=JsonArtifactStore(Path(".")),
+    )
+    gate = task.components().acceptance_gate
+    parent = EvaluationReport("p", "dev", {"smae": 1.0, "srmse": 1.0}, 1)
+    child = EvaluationReport("c", "dev", {"smae": 0.8, "srmse": 1.1}, 1)
+
+    assert not gate.accept(parent, child)
+
+
+def test_curation_evaluator_produces_both_scaled_aggregates() -> None:
+    evaluator = DictionaryEvaluator(
+        DictionaryCurationConfig(), {"dev": {"t": (10.0, 10.0)}}, absolute_error
+    )
+    report = evaluator.evaluate(
+        "d",
+        (
+            MethodExecutionResult(
+                "d", "m", "t", "success", (10.0, 7.0), selected=True
+            ),
+        ),
+        "dev",
+    )
+
+    assert report.metrics["smae"] == pytest.approx(0.15)
+    assert report.metrics["srmse"] == pytest.approx(math.sqrt(4.5) / 10.0)
+
+
+def test_scaled_pair_classification_preserves_all_status_distinctions() -> None:
+    adapter = DictionaryArtifactAdapter(DictionaryCurationConfig())
+    base = {
+        "total_count": 4,
+        "success_count": 4,
+        "success_rate": 1.0,
+        "unsafe_count": 0,
+        "unavailable_count": 0,
+        "subset_win_rate": 0.0,
+        "dominated": False,
+    }
+
+    assert adapter._classify({**base, "mean_smae": 0.8, "mean_srmse": 0.9}) == "accepted"
+    assert adapter._classify({
+        **base,
+        "mean_smae": 1.5,
+        "mean_srmse": 1.5,
+        "subset_win_rate": 0.5,
+    }) == "specialized"
+    assert adapter._classify({**base, "mean_smae": 3.0, "mean_srmse": 1.0}) == "quarantined"
+    assert adapter._classify({
+        **base,
+        "mean_smae": 3.0,
+        "mean_srmse": 3.0,
+        "dominated": True,
+    }) == "discarded"
+
+
 def make_task(tmp_path: Path) -> tuple[DictionaryCurationTask, FakeImplementer]:
     methods = tuple(
         MethodDefinition(method_id, "statistical", f"external {method_id}")
@@ -91,8 +174,10 @@ def make_task(tmp_path: Path) -> tuple[DictionaryCurationTask, FakeImplementer]:
     task = DictionaryCurationTask(
         base_dictionary=ToolDictionary("d0", None, 0, methods),
         config=DictionaryCurationConfig(
-            accepted_max_error=20.0,
-            specialized_max_error=60.0,
+            accepted_max_smae=2.0,
+            accepted_max_srmse=2.0,
+            specialized_max_smae=4.0,
+            specialized_max_srmse=4.0,
         ),
         implementer=implementer,
         runtimes=RuntimeRegistry({"fake": FakeRuntime()}),
@@ -193,8 +278,10 @@ def test_adapter_marks_subset_winner_specialized_instead_of_discarded(tmp_path: 
     task = DictionaryCurationTask(
         base_dictionary=ToolDictionary("d0", None, 0, (method,)),
         config=DictionaryCurationConfig(
-            accepted_max_error=20.0,
-            specialized_max_error=60.0,
+            accepted_max_smae=0.2,
+            accepted_max_srmse=0.2,
+            specialized_max_smae=2.5,
+            specialized_max_srmse=2.5,
         ),
         implementer=implementer,
         runtimes=RuntimeRegistry({"fake": FakeRuntime()}),
@@ -346,7 +433,7 @@ def test_dictionary_score_uses_the_history_selected_method_not_oracle_minimum() 
 
     report = evaluator.evaluate("d", results, "dev")
 
-    assert report.metrics["smape"] == 50.0
+    assert report.metrics == {"smae": 2.5, "srmse": 2.5}
     assert report.diagnostics["oracle_score"] == 0.0
 
 

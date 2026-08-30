@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 import numerical_agent.evaluate_frozen_two_stage as frozen_evaluation
+import common.evolution_core.contracts as evolution_contracts
+from common.payload import canonical_json_bytes
 from numerical_agent.evaluate_frozen_two_stage import (
     ForecastResult,
     _hindcast_config_for_policy,
@@ -140,11 +142,16 @@ def test_freeze_verifier_rejects_hash_mismatch_and_existing_completion(tmp_path)
     screen.mkdir(); selector.mkdir(); output.mkdir()
     screen_hash = _write(screen / "frozen_screening_policy.py", "screen")
     decision_hash = _write(selector / "frozen_decision_policy.py", "decision")
+    binding = evolution_contracts.metric_policy_metadata()
     (screen / "screening_manifest.json").write_text(json.dumps({
+        "schema_version": 2,
+        **binding,
         "frozen_screening_policy_sha256": screen_hash,
         "public_test_accessed": False,
     }))
     (selector / "selector_manifest.json").write_text(json.dumps({
+        "schema_version": 2,
+        **binding,
         "screening_policy_sha256": screen_hash,
         "frozen_decision_policy_sha256": decision_hash,
         "public_test_accessed": False,
@@ -157,6 +164,119 @@ def test_freeze_verifier_rejects_hash_mismatch_and_existing_completion(tmp_path)
     (output / "evaluation_complete.json").write_text("{}")
     with pytest.raises(ValueError, match="already"):
         verify_frozen_policies(screen, selector, output)
+
+
+@pytest.mark.parametrize(
+    "legacy_policy",
+    (
+        None,
+        {"schema_version": 1, "primary": ["mase"], "ordering": "median_mase"},
+    ),
+)
+def test_active_release_rejects_missing_or_legacy_metric_policy(
+    tmp_path, legacy_policy
+):
+    screen = tmp_path / "screen"
+    selector = tmp_path / "selector"
+    output = tmp_path / "out"
+    screen.mkdir(); selector.mkdir(); output.mkdir()
+    screen_hash = _write(screen / "frozen_screening_policy.py", "screen")
+    decision_hash = _write(selector / "frozen_decision_policy.py", "decision")
+    screen_manifest = {
+        "schema_version": 1,
+        "frozen_screening_policy_sha256": screen_hash,
+        "public_test_accessed": False,
+    }
+    selector_manifest = {
+        "schema_version": 1,
+        "screening_policy_sha256": screen_hash,
+        "frozen_decision_policy_sha256": decision_hash,
+        "public_test_accessed": False,
+        "frozen_global_ranking": ["median_mase"],
+    }
+    if legacy_policy is not None:
+        screen_manifest["metric_policy"] = legacy_policy
+        selector_manifest["metric_policy"] = legacy_policy
+    (screen / "screening_manifest.json").write_text(json.dumps(screen_manifest))
+    (selector / "selector_manifest.json").write_text(json.dumps(selector_manifest))
+
+    with pytest.raises(ValueError, match="metric policy|legacy metric policy"):
+        verify_frozen_policies(screen, selector, output)
+
+
+def test_active_release_rejects_noncanonical_metric_policy_field_types():
+    payload = {
+        "schema_version": 2,
+        **evolution_contracts.metric_policy_metadata(),
+    }
+    payload["metric_policy"] = {
+        **payload["metric_policy"],
+        "schema_version": 2.0,
+    }
+
+    with pytest.raises(ValueError, match="metric policy"):
+        evolution_contracts.load_active_release(payload)
+
+
+@pytest.mark.parametrize("schema_version", (True, 2.0))
+def test_active_release_rejects_noninteger_envelope_schema_aliases(schema_version):
+    payload = {
+        "schema_version": schema_version,
+        **evolution_contracts.metric_policy_metadata(),
+    }
+
+    with pytest.raises(ValueError, match="schema_version"):
+        evolution_contracts.load_active_release(payload)
+
+
+def test_active_release_rejects_legacy_ranking_even_with_forged_current_binding():
+    payload = {
+        "schema_version": 2,
+        **evolution_contracts.metric_policy_metadata(),
+        "ranking_order": ["median_mase"],
+    }
+
+    with pytest.raises(ValueError, match="legacy metric policy"):
+        evolution_contracts.load_active_release(payload)
+
+
+def test_exported_metric_policy_cannot_mutate_canonical_authority():
+    try:
+        with pytest.raises(TypeError):
+            evolution_contracts.METRIC_POLICY["cap"] = 4.0
+    finally:
+        # Keep this RED probe isolated if an old mutable implementation is under test.
+        if evolution_contracts.METRIC_POLICY["cap"] != 5.0:
+            evolution_contracts.METRIC_POLICY["cap"] = 5.0
+
+    first = evolution_contracts.metric_policy_metadata()
+    first["metric_policy"]["cap"] = 4.0
+    second = evolution_contracts.metric_policy_metadata()
+
+    assert second["metric_policy"]["cap"] == 5.0
+    evolution_contracts.require_active_metric_policy(second)
+
+
+def test_active_release_recomputes_and_rejects_a_forged_fingerprint():
+    payload = {
+        "schema_version": 2,
+        **evolution_contracts.metric_policy_metadata(),
+    }
+    payload["metric_policy_fingerprint"] = "0" * 64
+
+    with pytest.raises(ValueError, match="fingerprint mismatch"):
+        evolution_contracts.load_active_release(payload)
+
+
+def test_raw_infinite_tail_uses_an_explicit_standards_json_sentinel():
+    encoded = canonical_json_bytes({"p95_smae_raw": float("inf")})
+
+    assert b"Infinity" not in encoded
+    decoded = json.loads(encoded)
+    assert decoded["p95_smae_raw"] == {
+        "status": "positive_infinity",
+        "value": None,
+    }
 
 
 def test_evaluation_cli_has_no_llm_or_mutation_options():
@@ -248,6 +368,12 @@ def test_score_reports_drcik_aligned_point_metrics_standard_errors_and_tails():
     assert score["se_srmse"] == pytest.approx(2.25)
     assert score["p90_smae"] == pytest.approx(4.55)
     assert score["p95_smae"] == pytest.approx(4.775)
+    assert score["p90_srmse"] == pytest.approx(4.55)
+    assert score["p95_srmse"] == pytest.approx(4.775)
+    assert score["p90_smae_raw"] == pytest.approx(9.05)
+    assert score["p95_smae_raw"] == pytest.approx(9.525)
+    assert score["p90_srmse_raw"] == pytest.approx(9.05)
+    assert score["p95_srmse_raw"] == pytest.approx(9.525)
     assert score["smae_clipped_count"] == 1
     assert score["smae_clipped_rate"] == pytest.approx(0.5)
     assert score["srmse_clipped_count"] == 1
@@ -262,30 +388,86 @@ def test_frozen_report_leads_with_drcik_point_metrics():
     task = Task("t", (1.0, 2.0, 3.0), 1, "D", (2.0,))
     result = ForecastResult("t", (3.0,), ("a",), ("statistical",), "single")
     score = score_forecast_results((task,), (result,))
-    report = _report({
+    payload = {
         "task_count": 1,
         "screening_policy_sha256": "screen",
         "decision_policy_sha256": "decision",
         "llm_calls": 0,
         "mutation_calls": 0,
         "rows": {"candidate": score},
-        "paired_vs_A": {"candidate": {"wins": 0, "ties": 1, "losses": 0}},
-    })
+        "paired_vs_A": {"candidate": {
+            "wins": 0, "ties": 1, "losses": 0, "missing": 0, "unscored": 0,
+        }},
+        **evolution_contracts.metric_report_metadata(),
+    }
+    report = _report(payload)
 
+    assert payload["primary_metrics"] == ["smae", "srmse"]
+    assert set(payload["diagnostic_only"]) >= {"mase", "mae", "smape", "rmsse"}
     assert "Mean sMAE" in report
+    assert "Median sMAE" in report
     assert "sMAE SE" in report
     assert "Mean sRMSE" in report
-    assert "P90/P95 sMAE" in report
+    assert "Median sRMSE" in report
+    assert "Raw P90/P95 sMAE/sRMSE" in report
     assert "Clipped sMAE/sRMSE" in report
+    assert "W/T/L/M/U vs A" in report
 
 
-def test_paired_counts_compare_the_reported_smae_metric():
+def test_paired_counts_compare_the_joint_scaled_metric_pair():
     comparison = _paired_counts(
-        ({"task_id": "t", "mase": 0.1, "smae": 2.0},),
-        {"t": 1.0},
+        ({"task_id": "t", "smae": 0.5, "srmse": 2.5},),
+        {"t": (1.0, 1.0)},
+        ("t",),
     )
 
-    assert comparison == {"wins": 0, "ties": 0, "losses": 1, "missing": 0}
+    assert comparison == {
+        "wins": 0, "ties": 0, "losses": 1, "missing": 0, "unscored": 0,
+    }
+
+
+def test_paired_counts_conserve_the_exact_expected_task_universe():
+    expected = ("win", "tie", "loss", "candidate_only", "baseline_only", "both_missing")
+    candidate = (
+        {"task_id": "win", "smae": 0.5, "srmse": 0.5},
+        {"task_id": "tie", "smae": 1.0, "srmse": 1.0},
+        {"task_id": "loss", "smae": 2.0, "srmse": 2.0},
+        {"task_id": "candidate_only", "smae": 1.0, "srmse": 1.0},
+    )
+    baseline = {
+        "win": (1.0, 1.0),
+        "tie": (1.0, 1.0),
+        "loss": (1.0, 1.0),
+        "baseline_only": (1.0, 1.0),
+    }
+
+    counts = _paired_counts(candidate, baseline, expected)
+
+    assert counts == {
+        "wins": 1, "ties": 1, "losses": 1, "missing": 2, "unscored": 1,
+    }
+    assert sum(counts.values()) == len(expected)
+
+
+@pytest.mark.parametrize("source", ("candidate", "baseline"))
+def test_paired_counts_reject_unexpected_task_identity(source):
+    candidate = ({"task_id": "expected", "smae": 1.0, "srmse": 1.0},)
+    baseline = {"expected": (1.0, 1.0)}
+    if source == "candidate":
+        candidate += ({"task_id": "unexpected", "smae": 1.0, "srmse": 1.0},)
+    else:
+        baseline["unexpected"] = (1.0, 1.0)
+
+    with pytest.raises(ValueError, match="unexpected"):
+        _paired_counts(candidate, baseline, ("expected",))
+
+
+def test_paired_counts_reject_duplicate_expected_or_observed_ids():
+    row = {"task_id": "task", "smae": 1.0, "srmse": 1.0}
+    with pytest.raises(ValueError, match="duplicate expected"):
+        _paired_counts((row,), {"task": (1.0, 1.0)}, ("task", "task"))
+    with pytest.raises(ValueError, match="duplicate observed"):
+        _paired_counts((row, row), {"task": (1.0, 1.0)}, ("task",))
 
 
 def test_frozen_selector_records_history_only_top_k_assumptions():

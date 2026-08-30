@@ -16,7 +16,13 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Literal, Mapping, Sequence, cast
 
-from common.metrics import mae, mase, smape
+from common.evolution_core.contracts import (
+    metric_policy_metadata,
+    require_active_metric_policy,
+)
+
+from common.metrics import drcik_point_metrics, mae, mase, smape
+from common.payload import strict_json_loads
 
 from numerical_agent.dictionary import MethodCandidate
 from numerical_agent.foundation import TSFM_IMPLEMENTATION_KIND
@@ -24,7 +30,12 @@ from numerical_agent.providers import RuntimeRegistry, RuntimeUnavailableError
 from numerical_agent.tsfm.manifests import ManifestRegistry
 
 from .analysis_skills_template import analyze_series
-from .cache import CacheMissError, OutcomeCache
+from .cache import (
+    CacheMissError,
+    OutcomeCache,
+    SCALED_METRIC_CAP,
+    SCALED_METRIC_SCHEMA,
+)
 from .execution import (
     CRASHED,
     INVALID,
@@ -79,6 +90,11 @@ _SIGNALS = frozenset(
         "outlier_fraction",
         "trend_strength",
         "recent_regime_confidence",
+        "noise_relative_scale",
+        "intermittency_adi",
+        "history_length",
+        "horizon",
+        "horizon_ratio",
     }
 )
 _ROUTE_DIRECTIONS = frozenset({"above", "below"})
@@ -143,7 +159,10 @@ class PolicyOutcomeCache:
     @staticmethod
     def _key(policy: "TSFMPolicy", task: Task) -> str:
         payload = {
-            "schema": 1,
+            "cache_schema": 3,
+            **metric_policy_metadata(),
+            "scaled_metric_schema": SCALED_METRIC_SCHEMA,
+            "scaled_metric_cap": SCALED_METRIC_CAP,
             "policy": policy.to_payload(),
             "reviewed_candidate": _candidate(policy.method_id).to_payload(),
             "task": asdict(task),
@@ -152,37 +171,58 @@ class PolicyOutcomeCache:
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     def _read(self, key: str, method: str, task: Task) -> Outcome | None:
-        try:
-            payload = json.loads((self.root / f"{key}.json").read_text(encoding="utf-8"))
-            if payload.get("schema") != 1 or payload.get("key") != key:
-                return None
-            raw = payload["outcome"]
-            outcome = Outcome(
-                method=str(raw["method"]),
-                task_id=str(raw["task_id"]),
-                status=str(raw["status"]),
-                smape=_optional_metric(raw.get("smape")),
-                mae=_optional_metric(raw.get("mae")),
-                mase=_optional_metric(raw.get("mase")),
-                detail=str(raw.get("detail", "")),
-                forecast=tuple(float(value) for value in raw.get("forecast", ())),
-            )
-            if outcome.method != method or outcome.task_id != task.task_id:
-                return None
-            if outcome.status not in {SUCCESS, NOT_APPLICABLE, CRASHED, INVALID}:
-                return None
-            if outcome.status == SUCCESS and (
-                len(outcome.forecast) != task.horizon
-                or any(value is None for value in (outcome.smape, outcome.mae, outcome.mase))
-            ):
-                return None
-            return outcome
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        path = self.root / f"{key}.json"
+        if not path.exists():
             return None
+        try:
+            payload = strict_json_loads(
+                path.read_text(encoding="utf-8"),
+                context="active policy outcome cache row",
+            )
+        except (OSError, ValueError) as error:
+            raise PolicyError("malformed active policy outcome cache row") from error
+        try:
+            if not isinstance(payload, Mapping):
+                raise PolicyError("active policy outcome cache row must be an object")
+            require_active_metric_policy(payload, context="active policy outcome cache row")
+            if type(payload.get("cache_schema")) is not int or payload["cache_schema"] != 3:
+                raise PolicyError("active policy outcome cache row schema mismatch")
+            if payload.get("key") != key:
+                raise PolicyError("active policy outcome cache row key mismatch")
+            if (
+                type(payload.get("scaled_metric_schema")) is not int
+                or payload["scaled_metric_schema"] != SCALED_METRIC_SCHEMA
+                or payload.get("scaled_metric_cap") != SCALED_METRIC_CAP
+            ):
+                raise PolicyError("active policy outcome cache scaled schema mismatch")
+            raw = payload["outcome"]
+            if not isinstance(raw, Mapping):
+                raise PolicyError("active policy outcome must be an object")
+            outcome = OutcomeCache.from_payload(raw)
+            if outcome.method != method or outcome.task_id != task.task_id:
+                raise PolicyError("active policy outcome cache identity mismatch")
+            if outcome.status not in {SUCCESS, NOT_APPLICABLE, CRASHED, INVALID}:
+                raise PolicyError("active policy outcome cache status mismatch")
+            if outcome.status == SUCCESS and len(outcome.forecast) != task.horizon:
+                raise PolicyError("active policy outcome cache forecast horizon mismatch")
+            return outcome
+        except PolicyError:
+            raise
+        except ValueError:
+            raise
+        except (TypeError, KeyError) as error:
+            raise PolicyError("malformed active policy outcome cache row") from error
 
     def _write(self, key: str, outcome: Outcome) -> None:
         payload = json.dumps(
-            {"schema": 1, "key": key, "outcome": asdict(outcome)},
+            {
+                "cache_schema": 3,
+                **metric_policy_metadata(),
+                "scaled_metric_schema": SCALED_METRIC_SCHEMA,
+                "scaled_metric_cap": SCALED_METRIC_CAP,
+                "key": key,
+                "outcome": OutcomeCache.to_payload(outcome),
+            },
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
@@ -849,7 +889,7 @@ def combine_materialized_forecast(
             for index in range(horizon)
         )
     elif policy.operator == "route":
-        signal = _history_signal(policy.signal, history, frequency)
+        signal = _history_signal(policy.signal, history, horizon, frequency)
         selected = policy.above_parent if signal >= policy.threshold else policy.below_parent
         forecast = parent_outcomes[selected].forecast
     elif policy.operator == "median":
@@ -967,10 +1007,17 @@ def _scored(name: str, task: Task, forecast: Sequence[float]) -> Outcome:
     values = tuple(float(value) for value in forecast)
     if len(values) != task.horizon or not all(math.isfinite(value) for value in values):
         return Outcome(name, task.task_id, INVALID, detail="combined forecast is invalid")
+    point = drcik_point_metrics(task.future, values)
     return Outcome(
         name,
         task.task_id,
         SUCCESS,
+        smae=float(point["smae"]),
+        srmse=float(point["srmse"]),
+        smae_raw=float(point["smae_raw"]),
+        srmse_raw=float(point["srmse_raw"]),
+        smae_clipped=bool(point["smae_clipped"]),
+        srmse_clipped=bool(point["srmse_clipped"]),
         smape=smape(task.future, values),
         mae=mae(task.future, values),
         mase=mase(task.future, values, task.history),
@@ -996,10 +1043,18 @@ def _applicable(applicability: str, profile: Mapping[str, object]) -> bool:
 
 
 def _signal(name: str, task: Task) -> float:
-    return _history_signal(name, task.history, task.frequency)
+    return _history_signal(name, task.history, task.horizon, task.frequency)
 
 
-def _history_signal(name: str, history: Sequence[float], frequency: str) -> float:
+def _history_signal(
+    name: str, history: Sequence[float], horizon: int, frequency: str
+) -> float:
+    if name == "history_length":
+        return float(len(history))
+    if name == "horizon":
+        return float(horizon)
+    if name == "horizon_ratio":
+        return float(horizon / len(history))
     profile = analyze_series(history, frequency)
     if name == "periodicity_strength":
         return float(cast(Mapping[str, object], profile["periodicity"])["strength"])
@@ -1012,6 +1067,12 @@ def _history_signal(name: str, history: Sequence[float], frequency: str) -> floa
         return float(cast(Mapping[str, object], profile["trend"])["strength"])
     if name == "recent_regime_confidence":
         return float(cast(Mapping[str, object], profile["recent_regime"])["confidence"])
+    if name == "noise_relative_scale":
+        return float(cast(Mapping[str, object], profile["noise"])["relative_scale"])
+    if name == "intermittency_adi":
+        return float(
+            cast(Mapping[str, object], profile["intermittency"])["average_nonzero_gap"]
+        )
     raise PolicyError(f"unsupported signal {name!r}")
 
 
@@ -1142,12 +1203,3 @@ def _bounded(
         or not lower <= float(value) <= upper
     ):
         raise PolicyError(f"{field} must be between {lower:g} and {upper:g}")
-
-
-def _optional_metric(value: object) -> float | None:
-    if value is None:
-        return None
-    number = float(value)
-    if not math.isfinite(number):
-        raise ValueError("cached policy metric must be finite")
-    return number

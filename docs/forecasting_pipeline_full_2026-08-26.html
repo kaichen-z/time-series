@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Time-Series Self-Evolution Pipeline · 更新至 2026-08-28</title>
+  <title>Time-Series Self-Evolution Pipeline · 更新至 2026-08-30</title>
   <style>
     :root {
       --bg: #f4f0e8;
@@ -283,9 +283,10 @@
   <div class="shell">
     <aside>
       <div class="brand">Forecasting Pipeline</div>
-      <div class="brand-sub">完整项目地图 · 更新至 2026-08-28</div>
+      <div class="brand-sub">完整项目地图 · 更新至 2026-08-30</div>
       <nav aria-label="页面目录">
         <div class="nav-label">先看结论</div>
+        <a href="#metric-migration">最新：全流程 sMAE + sRMSE</a>
         <a href="#latest">最新：三代系统与 99 题结果</a>
         <a href="#now">0. 现在到底在做什么</a>
         <a href="#question">1. 研究问题与 Dr-CiK</a>
@@ -319,13 +320,14 @@
         <p class="lede">这不是“让一个 LLM 猜未来”，而是构建一套可审计的系统：先理解历史序列、筛掉不适用的方法，再用历史回测选择或组合 Statistical 与 TSFM，并让规则、策略和代码在 Train/Dev 门控下逐步演化。</p>
         <div class="meta-row">
           <span class="pill">仓库 <code>time-series</code></span>
-          <span class="pill">分支 <code>feature/two-stage-retrieval-self-evolution</code></span>
-          <span class="pill">实现基线 <code>3f5e1e5</code></span>
-          <span class="pill">页面更新 2026-08-28</span>
+          <span class="pill">Active schema <code>v2</code></span>
+          <span class="pill">Metric policy <code>sMAE + sRMSE</code></span>
+          <span class="pill">页面更新 2026-08-30</span>
           <a class="pill" href="forecasting_pipeline_full_2026-08-27_en.html" lang="en">English version</a>
         </div>
         <div class="pill-row">
           <span class="pill good"><span class="dot"></span>103-candidate 框架已实现</span>
+          <span class="pill good"><span class="dot"></span>Numerical performance gate 已统一</span>
           <span class="pill good"><span class="dot"></span>80/20/99 防泄漏划分已冻结</span>
           <span class="pill good"><span class="dot"></span>两阶段 Retrieval 代码与 fake E2E 已实现</span>
           <span class="pill warn"><span class="dot"></span>尚无真实 Retrieval 80/20 或 Retrieval 分数</span>
@@ -334,9 +336,28 @@
         </div>
       </header>
 
+      <section id="metric-migration" data-section>
+        <h2>2026-08-30 · Numerical 全流程指标统一</h2>
+        <p class="section-intro">这次不是改表头，而是改 active decision contract。所有会根据效果做筛选、排序、进化、接受或冻结的 Numerical 阶段，现在都以 Dr-CiK point-forecast 的 capped sMAE 与 capped sRMSE 为唯一性能依据。</p>
+        <div class="flow">
+          <div class="node">Method execution<small>Statistical / TSFM / Combined 使用同一 scorer</small></div><div class="arrow">→</div>
+          <div class="node">Screening<small>group-wise ΔsMAE + ΔsRMSE</small></div><div class="arrow">→</div>
+          <div class="node">History hindcast<small>joint 只排序；两项分别留档</small></div><div class="arrow">→</div>
+          <div class="node">Safe selection<small>两项 regret 与 tail gate</small></div><div class="arrow">→</div>
+          <div class="node">Train / read-only Dev<small>Pareto non-regression 后才继承</small></div>
+        </div>
+        <div class="grid g3">
+          <article class="card"><h3>同一个定义</h3><p>每题 MAE、RMSE 都除以真实评分 horizon 的平均绝对量级，再分别 capped at 5.0。<code>(sMAE+sRMSE)/2</code> 只用于确定性排序。</p></article>
+          <article class="card"><h3>同一个接受门</h3><p>Child 的 sMAE 与 sRMSE 都不得退化，并且至少一项严格改善；coverage、clipping、crash/invalid 与尾部约束也不能退化。</p></article>
+          <article class="card"><h3>旧指标不再掌权</h3><p>MASE、MAE、sMAPE、RMSSE 只出现在明确标记的 <code>diagnostic_only</code> 区域，不参与 active ranking 或 acceptance。</p></article>
+        </div>
+        <div class="callout"><strong>防泄漏边界：</strong>runtime 只在 observed history 内切 hindcast window；Train label 只进入 trusted Train evaluator；Dev 只读；Public/hidden 不产生 mutation、Skill 或 Child。</div>
+        <div class="callout warnbox"><strong>历史结果边界：</strong>下方 99 题表格是以前冻结策略在当时 objective 下得到的 legacy experimental evidence。原数字保留不改，也不会被静默当成 schema-v2 active release。当前阶段只完成迁移审计和单题 smoke，不声称新的 benchmark 提升。</div>
+      </section>
+
       <section id="latest" data-section>
-        <h2>最新 · 三代系统到底分别在做什么</h2>
-        <p class="section-intro">这三个名字不是三个互相独立的项目，而是同一条 Numerical Selector 演进路线。核心变化是：从“保守地替换一个方法”，逐步走向“保留强 TSFM 锚点，再允许多个 TSFM 与 Statistical residual 在严格历史回测门控下共同参与”。</p>
+        <h2>历史记录 · 三代系统到底分别在做什么</h2>
+        <p class="section-intro">以下数字保留其原始实验 objective，属于迁移前的 legacy evidence。这三个名字不是三个互相独立的项目，而是同一条 Numerical Selector 演进路线。</p>
 
         <div class="grid g3">
           <article class="card">
@@ -784,7 +805,7 @@ JSON artifact: score、status、revision、hash</code></pre>
         <p class="section-intro">B 阶段回答的是：Active Dictionary 已经给定，最终该选谁、是否组合、何时必须退回强 baseline。</p>
         <h3>每个候选的历史诊断</h3>
         <div class="grid g3">
-          <div class="card"><h4>中心表现</h4><p>median sMAE、recent sMAE、mean MAE、mean sRMSE。</p></div>
+          <div class="card"><h4>中心表现</h4><p>median/recent joint scaled error，以及分开的 median/recent sMAE 与 sRMSE。</p></div>
           <div class="card"><h4>稳定性</h4><p>worst fold、MAD、bias、slope error、phase error、explosion。</p></div>
           <div class="card"><h4>可执行性</h4><p>成功 folds、coverage、Crash/Invalid、NotApplicable、fallback。</p></div>
         </div>
@@ -801,8 +822,7 @@ Route:
         <h3>Safe Anchor / baseline protection</h3>
         <p>默认先保留 Toto 或 TimesFM。challenger 只有在历史 folds 上同时满足以下条件才可覆盖：</p>
         <ul>
-          <li>sMAE 改善达到最低阈值；</li>
-          <li>sRMSE 不退化；</li>
+          <li>sMAE 与 sRMSE 都不退化，并且至少一项达到严格改善；</li>
           <li>至少赢规定数量的 folds；</li>
           <li>recent fold 和 worst fold 的 regret 都受限；</li>
           <li>没有 explosion、coverage 缺失或 catastrophic pattern；</li>
@@ -1092,7 +1112,7 @@ python -m evolving_loop --evolution &lt;prompt|genome|source|retrieval&gt; [opti
       </section>
 
       <footer>
-        <p>本页于 2026-08-28 从本地 <code>time-series</code> worktree 更新。页面展示的 Protected Top-k 是 Numerical 的冻结 99 题 Public Regression Test，零 LLM/mutation 调用；它既不是新的 unseen-test claim，也不是 Retrieval 结果。Retrieval 实现目前只有 fake-LLM 验证，真实实验尚未运行。</p>
+        <p>本页于 2026-08-30 从本地 <code>time-series</code> worktree 更新。页面展示的 Protected Top-k 是迁移前 Numerical 冻结策略的 99 题 Public Regression Test，零 LLM/mutation 调用；其数字按原 objective 保留，不是 schema-v2 的新 unseen-test claim，也不是 Retrieval 结果。Retrieval 实现目前只有 fake-LLM 验证，真实实验尚未运行。</p>
       </footer>
     </main>
   </div>

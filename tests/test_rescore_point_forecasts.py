@@ -4,11 +4,29 @@ import json
 
 import pytest
 
+from common.evolution_core.contracts import METRIC_POLICY_FINGERPRINT
+from common.payload import decode_infinity_sentinel, strict_json_loads
 from numerical_agent.evolution.execution import Task
 from numerical_agent.rescore_point_forecasts import (
+    _finite_json,
+    _load_forecast_rows,
+    _number,
+    main,
     render_point_report,
     rescore_cached_point_forecasts,
 )
+
+
+def test_rescore_raw_infinity_round_trips_as_strict_explicit_sentinel() -> None:
+    encoded = json.dumps(_finite_json({"p95_smae_raw": float("inf")}), allow_nan=False)
+    decoded = strict_json_loads(encoded)
+
+    assert decoded == {
+        "p95_smae_raw": {"status": "positive_infinity", "value": None}
+    }
+    assert decode_infinity_sentinel(decoded["p95_smae_raw"], "p95_smae_raw") == float("inf")
+    assert _number(float("inf")) == "positive_infinity"
+    assert _number(float("-inf")) == "negative_infinity"
 
 
 def _write_rows(path) -> None:
@@ -43,6 +61,16 @@ def _write_rows(path) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
+def test_legacy_forecast_reader_requires_explicit_report_only_opt_in(tmp_path):
+    artifact = tmp_path / "legacy.jsonl"
+    _write_rows(artifact)
+
+    with pytest.raises(ValueError, match="allow_legacy"):
+        _load_forecast_rows(artifact)
+
+    assert set(_load_forecast_rows(artifact, allow_legacy=True)) == {"t1", "t2"}
+
+
 def test_rescore_uses_cached_forecasts_without_probabilistic_metrics(tmp_path):
     artifact = tmp_path / "per_task_results.jsonl"
     _write_rows(artifact)
@@ -55,15 +83,111 @@ def test_rescore_uses_cached_forecasts_without_probabilistic_metrics(tmp_path):
 
     assert payload["metric_contract"]["point_forecast_only"] is True
     assert payload["metric_contract"]["scrps_computed"] is False
+    assert payload["schema_version"] == 2
+    assert payload["metric_policy_fingerprint"] == METRIC_POLICY_FINGERPRINT
+    assert payload["primary_metrics"] == ["smae", "srmse"]
+    assert set(payload["diagnostic_only"]) >= {"mase", "mae", "smape", "rmsse"}
     assert payload["rows"]["candidate"]["mean_smae"] == pytest.approx(0.25)
     assert payload["rows"]["baseline"]["mean_smae"] == pytest.approx(1.0)
     assert payload["paired_vs_baseline"]["candidate"] == {
         "wins": 2, "ties": 0, "losses": 0, "missing": 0,
+        "unscored": 0,
     }
     report = render_point_report(payload)
     assert "sCRPS: **not computed**" in report
     assert "Mean sMAE" in report
-    assert "P90/P95 sMAE" in report
+    assert "Median sMAE" in report
+    assert "Mean sRMSE" in report
+    assert "Raw P90/P95 sMAE/sRMSE" in report
+    assert "W/T/L/M/U vs baseline" in report
+
+
+def test_rescore_main_writes_canonical_outputs_and_strict_stdout(tmp_path, capsys):
+    artifact = tmp_path / "per_task_results.jsonl"
+    _write_rows(artifact)
+    tasks_file = tmp_path / "tasks.jsonl"
+    tasks_file.write_text(
+        "".join(
+            json.dumps({
+                "benchmark_id": task_id,
+                "series": {
+                    "history_values": [1.0, 2.0, 3.0],
+                    "future_values": future,
+                },
+                "task_metadata": {"prediction_length": 2, "frequency": "D"},
+            }) + "\n"
+            for task_id, future in (("t1", [2.0, 2.0]), ("t2", [1.0, 1.0]))
+        ),
+        encoding="utf-8",
+    )
+    split_file = tmp_path / "split.json"
+    split_file.write_text(
+        json.dumps({"partitions": {"public_test": {"task_ids": ["t1", "t2"]}}}),
+        encoding="utf-8",
+    )
+    output = tmp_path / "output"
+
+    exit_code = main([
+        "--split-file", str(split_file),
+        "--tasks-file", str(tasks_file),
+        "--per-task-results", str(artifact),
+        "--output-dir", str(output),
+        "--baseline-row", "baseline",
+    ])
+
+    stdout_payload = strict_json_loads(capsys.readouterr().out, context="rescore stdout")
+    file_payload = strict_json_loads(
+        (output / "point_rescore_results.json").read_text(encoding="utf-8"),
+        context="rescore result",
+    )
+    assert exit_code == 0
+    assert stdout_payload == file_payload
+    assert file_payload["schema_version"] == 2
+    assert file_payload["metric_policy_fingerprint"] == METRIC_POLICY_FINGERPRINT
+    assert (output / "POINT_RESCORE_REPORT.md").is_file()
+
+
+def test_rescore_paired_counts_conserve_every_expected_task(tmp_path):
+    artifact = tmp_path / "paired.jsonl"
+    membership = {
+        "win": {"candidate": 1.0, "baseline": 2.0},
+        "tie": {"candidate": 2.0, "baseline": 2.0},
+        "loss": {"candidate": 3.0, "baseline": 2.0},
+        "candidate_only": {"candidate": 2.0},
+        "baseline_only": {"baseline": 2.0},
+        "both_missing": {"other": 1.0},
+    }
+    rows = []
+    tasks = []
+    for task_id, forecasts in membership.items():
+        tasks.append(Task(task_id, (1.0,), 1, "D", (1.0,)))
+        rows.append({
+            "task_id": task_id,
+            "rows": {
+                name: {
+                    "task_id": task_id,
+                    "forecast": [forecast],
+                    "selected": [name],
+                    "families": ["statistical"],
+                    "mode": "single",
+                    "oracle_mase": None,
+                }
+                for name, forecast in forecasts.items()
+            },
+        })
+    artifact.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+    payload = rescore_cached_point_forecasts(
+        tuple(tasks), artifact, baseline_row="baseline"
+    )
+
+    counts = payload["paired_vs_baseline"]["candidate"]
+    assert counts == {
+        "wins": 1, "ties": 1, "losses": 1, "missing": 2, "unscored": 1,
+    }
+    assert sum(counts.values()) == len(tasks)
 
 
 def test_rescore_rejects_duplicate_or_mismatched_task_rows(tmp_path):
@@ -81,4 +205,52 @@ def test_rescore_rejects_duplicate_or_mismatched_task_rows(tmp_path):
     task = Task("t1", (1.0,), 1, "D", (1.0,))
 
     with pytest.raises(ValueError, match="task_id"):
+        rescore_cached_point_forecasts((task,), artifact, baseline_row="candidate")
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        '{"task_id":"t1","task_id":"t1","rows":{"candidate":{"task_id":"t1","forecast":[1.0],"selected":[],"families":[],"mode":"single","oracle_mase":null}}}',
+        '{"task_id":"t1","rows":{"candidate":{"task_id":"t1","forecast":[1.0],"forecast":[1.0],"selected":[],"families":[],"mode":"single","oracle_mase":null}}}',
+        '{"task_id":"t1","rows":{"candidate":{"task_id":"t1","forecast":[NaN],"selected":[],"families":[],"mode":"single","oracle_mase":null}}}',
+        '{"task_id":"t1","rows":{"candidate":{"task_id":"t1","forecast":[Infinity],"selected":[],"families":[],"mode":"single","oracle_mase":null}}}',
+        '{"task_id":"t1","rows":{"candidate":{"task_id":"t1","forecast":[1.0],"selected":[],"families":[],"mode":"single","oracle_mase":Infinity}}}',
+    ),
+)
+def test_rescore_rejects_duplicate_keys_and_nonstandard_constants_before_scoring(
+    tmp_path, source
+):
+    artifact = tmp_path / "invalid.jsonl"
+    artifact.write_text(source + "\n", encoding="utf-8")
+    task = Task("t1", (1.0,), 1, "D", (1.0,))
+
+    with pytest.raises(ValueError, match="duplicate|non-finite"):
+        rescore_cached_point_forecasts((task,), artifact, baseline_row="candidate")
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda row: {**row, "unexpected": True},
+        lambda row: {**row, "rows": {"candidate": {**row["rows"]["candidate"], "unexpected": True}}},
+        lambda row: {**row, "rows": {"candidate": {**row["rows"]["candidate"], "forecast": [True]}}},
+        lambda row: {**row, "rows": {"candidate": {**row["rows"]["candidate"], "oracle_mase": "1.0"}}},
+    ),
+)
+def test_rescore_legacy_reader_requires_exact_finite_row_schema(tmp_path, mutation):
+    artifact = tmp_path / "invalid-legacy.jsonl"
+    row = {
+        "task_id": "t1",
+        "rows": {
+            "candidate": {
+                "task_id": "t1", "forecast": [1.0], "selected": [],
+                "families": [], "mode": "single", "oracle_mase": None,
+            }
+        },
+    }
+    artifact.write_text(json.dumps(mutation(row)) + "\n", encoding="utf-8")
+    task = Task("t1", (1.0,), 1, "D", (1.0,))
+
+    with pytest.raises(ValueError):
         rescore_cached_point_forecasts((task,), artifact, baseline_row="candidate")

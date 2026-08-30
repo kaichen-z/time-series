@@ -114,6 +114,33 @@ def aggregate_drcik_point_metrics(
     }
 
 
+def joint_scaled_error(smae: float, srmse: float) -> float:
+    """Return the equal-weight scalar diagnostic for two capped scaled errors."""
+    values = (float(smae), float(srmse))
+    if not all(math.isfinite(value) and value >= 0.0 for value in values):
+        raise ValueError("scaled errors must be finite and nonnegative")
+    return math.fsum(values) / 2.0
+
+
+def pareto_scaled_improvement(
+    parent_smae: float,
+    parent_srmse: float,
+    child_smae: float,
+    child_srmse: float,
+    *,
+    tolerance: float = 1e-12,
+) -> bool:
+    """Whether a child improves one scaled metric without worsening the other."""
+    return (
+        child_smae <= parent_smae + tolerance
+        and child_srmse <= parent_srmse + tolerance
+        and (
+            child_smae < parent_smae - tolerance
+            or child_srmse < parent_srmse - tolerance
+        )
+    )
+
+
 def standard_error(values: list[float]) -> float:
     """Standard error of a task-level sample; zero for fewer than two tasks."""
     if len(values) < 2:

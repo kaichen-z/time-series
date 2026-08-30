@@ -117,10 +117,16 @@ def test_decision_policy_round_trip_and_strict_mutation_schema():
     child = apply_decision_response(parent, json.dumps({
         "summary": "prefer recent evidence",
         "policy": {
-            "ranking_order": ["recent_mase", "median_mase", "worst_mase", "mase_mad"],
+            "ranking_order": [
+                "recent_joint_scaled_error",
+                "median_joint_scaled_error",
+                "worst_joint_scaled_error",
+                "median_smae",
+                "median_srmse",
+                "normalized_bias",
+            ],
             "recent_regime_first": True,
             "min_successful_folds": 2,
-            "catastrophic_mase": 8.0,
             "ensemble_enabled": False,
             "ensemble_max_members": 2,
             "ensemble_min_diversity": 0.1,
@@ -134,11 +140,46 @@ def test_decision_policy_round_trip_and_strict_mutation_schema():
         },
     }))
     assert child.recent_regime_first
-    assert child.catastrophic_mase == 8.0
+    assert child.catastrophic_smae_raw == parent.catastrophic_smae_raw
 
     for forbidden in ("future", "split", "candidates", "scorer", "screening_policy"):
         with pytest.raises(SelectorEvolutionError):
             apply_decision_response(parent, json.dumps({"summary": "bad", "policy": {forbidden: 1}}))
+
+
+def test_mutation_rejects_a_single_metric_ranking_policy() -> None:
+    parent = DecisionPolicy()
+    payload = {
+        "summary": "rank only by one metric",
+        "policy": {
+            **selector_evolution._mutation_policy_payload(parent),
+            "ranking_order": ["median_smae"],
+        },
+    }
+
+    with pytest.raises(SelectorEvolutionError, match="complete.*sMAE.*sRMSE"):
+        apply_decision_response(parent, json.dumps(payload))
+
+
+def test_mutation_rejects_complete_looking_policy_with_single_metric_authority() -> None:
+    parent = DecisionPolicy()
+    payload = {
+        "summary": "put recent sMAE ahead of the joint pair",
+        "policy": {
+            **selector_evolution._mutation_policy_payload(parent),
+            "ranking_order": [
+                "recent_smae",
+                "median_joint_scaled_error",
+                "recent_joint_scaled_error",
+                "worst_joint_scaled_error",
+                "median_smae",
+                "median_srmse",
+            ],
+        },
+    }
+
+    with pytest.raises(SelectorEvolutionError, match="canonical joint fields"):
+        apply_decision_response(parent, json.dumps(payload))
 
 
 def test_guarded_combination_parameters_round_trip_through_evolution_schema():
@@ -155,7 +196,6 @@ def test_guarded_combination_parameters_round_trip_through_evolution_schema():
         "ranking_order": list(policy.ranking_order),
         "recent_regime_first": policy.recent_regime_first,
         "min_successful_folds": policy.min_successful_folds,
-        "catastrophic_mase": policy.catastrophic_mase,
         "ensemble_enabled": policy.ensemble_enabled,
         "ensemble_max_members": policy.ensemble_max_members,
         "ensemble_min_diversity": policy.ensemble_min_diversity,
@@ -174,6 +214,40 @@ def test_guarded_combination_parameters_round_trip_through_evolution_schema():
     assert child.ensemble_weight_grid == (0.7, 0.9)
     assert child.ensemble_residual_strengths == (0.1, 0.25)
     assert child.ensemble_max_worst_fold_regret == pytest.approx(0.04)
+
+
+def test_active_decision_payload_omits_catastrophic_mase_and_legacy_is_opt_in():
+    source = render_decision_source(DecisionPolicy())
+    assert "catastrophic_mase" not in source
+
+    legacy = source.replace(
+        "'catastrophic_smae_raw': 10.0,",
+        "'catastrophic_smae_raw': 10.0,\n 'catastrophic_mase': 999.0,",
+    )
+    with pytest.raises(SelectorEvolutionError, match="legacy"):
+        parse_decision_source(legacy)
+    assert parse_decision_source(legacy, allow_legacy=True) == DecisionPolicy()
+
+
+def test_explicit_legacy_source_reader_rejects_median_smape_ranking() -> None:
+    source = render_decision_source(DecisionPolicy()).replace(
+        "'median_joint_scaled_error'", "'median_smape'"
+    )
+
+    with pytest.raises(SelectorEvolutionError, match="median_smape cannot be migrated"):
+        parse_decision_source(source, allow_legacy=True)
+
+
+def test_explicit_legacy_source_reader_normalizes_unpaired_ranking() -> None:
+    source = render_decision_source(DecisionPolicy())
+    source = source.replace("'median_joint_scaled_error'", "'median_mase'")
+    source = source.replace("'recent_joint_scaled_error'", "'recent_mase'")
+    source = source.replace("'worst_joint_scaled_error'", "'worst_mase'")
+    source = source.replace("'median_smae'", "'mase_mad'")
+    source = source.replace("'median_srmse'", "'median_rmsse'")
+    source = source.replace("                   'normalized_bias'],\n", "                   ],\n")
+
+    assert parse_decision_source(source, allow_legacy=True) == DecisionPolicy()
 
 
 def test_task_conditioned_long_horizon_route_round_trips_and_legacy_defaults_are_safe():
@@ -200,7 +274,9 @@ def test_task_conditioned_long_horizon_route_round_trips_and_legacy_defaults_are
             if not line.lstrip().startswith(repr(field))
         )
 
-    parsed = parse_decision_source(legacy_source)
+    with pytest.raises(SelectorEvolutionError, match="fields"):
+        parse_decision_source(legacy_source)
+    parsed = parse_decision_source(legacy_source, allow_legacy=True)
     assert parsed.long_horizon_audit_enabled is False
     assert parsed.long_horizon_penalty_weight == 0.0
 
@@ -383,7 +459,9 @@ def test_policy_parser_accepts_legacy_source_without_soft_overlay_weight():
         "",
     )
 
-    assert parse_decision_source(source) == DecisionPolicy()
+    with pytest.raises(SelectorEvolutionError, match="fields"):
+        parse_decision_source(source)
+    assert parse_decision_source(source, allow_legacy=True) == DecisionPolicy()
 
 
 def test_minimax_baseline_strategy_round_trips_and_is_in_bounded_search():
@@ -434,7 +512,9 @@ def test_legacy_policy_source_defaults_to_flat_selection_without_assumptions():
     ):
         source = "\n".join(line for line in source.splitlines() if not line.lstrip().startswith(repr(field)))
 
-    parsed = parse_decision_source(source)
+    with pytest.raises(SelectorEvolutionError, match="fields"):
+        parse_decision_source(source)
+    parsed = parse_decision_source(source, allow_legacy=True)
 
     assert parsed.assumption_guidance_enabled is False
     assert parsed.assumption_top_k == 5
@@ -460,7 +540,9 @@ def test_pre_combined_policy_source_remains_backward_compatible():
         if not any(line.lstrip().startswith(repr(field)) for field in omitted)
     )
 
-    parsed = parse_decision_source(source)
+    with pytest.raises(SelectorEvolutionError, match="fields"):
+        parse_decision_source(source)
+    parsed = parse_decision_source(source, allow_legacy=True)
 
     assert parsed == DecisionPolicy()
 
@@ -523,21 +605,90 @@ def test_gate_uses_clipped_smae_as_primary_and_guards_srmse_and_tail():
     assert not compare_decisions(parent, improved, parent, missing).accepted
 
 
-def test_active_oracle_regret_uses_the_same_scaled_smae_contract():
-    task = Task("t", tuple(float(i) for i in range(1, 21)), 2, "D", (1.0, 2.0))
+def test_combined_child_is_rejected_when_train_srmse_regresses() -> None:
+    """A Train sMAE gain must not hide regression in the paired scaled metric."""
+    observed = evaluate_decision(DecisionPolicy(ensemble_enabled=False), (_case("t1"),))
+    parent = replace(
+        observed,
+        mean_smae=1.0,
+        mean_srmse=1.0,
+        p90_smae=1.0,
+        p95_smae=1.0,
+    )
+    train_child = replace(parent, mean_smae=0.8, mean_srmse=1.001)
+    dev_child = replace(parent, mean_smae=0.9, mean_srmse=0.9)
+
+    assert not compare_decisions(parent, train_child, parent, dev_child).accepted
+
+
+def test_combined_child_accepts_pareto_gain_in_srmse_with_smae_unchanged() -> None:
+    """Requiring an sMAE win would incorrectly reject a valid two-metric Pareto gain."""
+    observed = evaluate_decision(DecisionPolicy(ensemble_enabled=False), (_case("t1"),))
+    parent = replace(
+        observed,
+        mean_smae=1.0,
+        mean_srmse=1.0,
+        p90_smae=1.0,
+        p95_smae=1.0,
+    )
+    child = replace(parent, mean_srmse=0.9)
+
+    assert compare_decisions(parent, child, parent, child).accepted
+
+
+def test_active_oracle_regret_uses_the_joint_pair_not_the_smae_only_winner():
+    task = Task("t", tuple(float(i) for i in range(1, 21)), 2, "D", (1.0, 1.0))
     case = DecisionCase(
         task,
-        ("selected", "oracle"),
-        {"selected": _diag("selected", 0.1), "oracle": _diag("oracle", 0.2)},
-        {"selected": (4.0, 5.0), "oracle": (1.0, 2.0)},
-        {"selected": "statistical", "oracle": "statistical"},
+        ("selected", "joint_oracle"),
+        {
+            "selected": _diag("selected", 0.1),
+            "joint_oracle": _diag("joint_oracle", 0.2),
+        },
+        {
+            # sMAE=1.0 and sRMSE=sqrt(2): the old sMAE-only oracle.
+            "selected": (1.0, 3.0),
+            # sMAE=sRMSE=1.1: the lower joint-pair oracle.
+            "joint_oracle": (2.1, 2.1),
+        },
+        {"selected": "statistical", "joint_oracle": "statistical"},
     )
 
     score = evaluate_decision(DecisionPolicy(ensemble_enabled=False), (case,))
 
-    # Selected MAE is 3 and the mean absolute target scale is 1.5, so sMAE=2.
-    # The active oracle is perfect, giving regret (2 - 0) / (1 + 0) = 2.
-    assert score.mean_active_oracle_regret == pytest.approx(2.0)
+    assert score.mean_active_oracle_smae_regret == pytest.approx((1.0 - 1.1) / 2.1)
+    assert score.mean_active_oracle_srmse_regret == pytest.approx(
+        (2.0**0.5 - 1.1) / 2.1
+    )
+
+
+def test_train_and_dev_gates_reject_srmse_tail_regression_despite_mean_gain():
+    observed = evaluate_decision(DecisionPolicy(ensemble_enabled=False), (_case("t1"),))
+    parent = replace(
+        observed,
+        mean_smae=1.0,
+        mean_srmse=1.0,
+        p90_smae=1.0,
+        p95_smae=1.0,
+        p90_srmse=1.0,
+        p95_srmse=1.0,
+        p90_smae_raw=1.0,
+        p95_smae_raw=1.0,
+        p90_srmse_raw=1.0,
+        p95_srmse_raw=1.0,
+        mean_active_oracle_smae_regret=0.1,
+        mean_active_oracle_srmse_regret=0.1,
+    )
+    mean_better = replace(parent, mean_smae=0.9, mean_srmse=0.9)
+    capped_tail_failure = replace(mean_better, p95_srmse=1.5)
+    raw_tail_failure = replace(mean_better, p95_srmse_raw=20.0)
+
+    assert not compare_decisions(parent, mean_better, parent, capped_tail_failure).accepted
+    assert not compare_decisions(parent, mean_better, parent, raw_tail_failure).accepted
+    assert not selector_evolution._compare_train_decisions(
+        parent, capped_tail_failure
+    ).accepted
+    assert not selector_evolution._compare_train_decisions(parent, raw_tail_failure).accepted
 
 
 def test_decision_score_observes_assumption_breadth_before_final_selection():
@@ -600,7 +751,6 @@ def test_evolution_prompt_contains_train_aggregates_not_ids_or_futures(tmp_path)
             "ranking_order": list(parent.ranking_order),
             "recent_regime_first": parent.recent_regime_first,
             "min_successful_folds": parent.min_successful_folds,
-            "catastrophic_mase": parent.catastrophic_mase,
             "ensemble_enabled": parent.ensemble_enabled,
             "ensemble_max_members": parent.ensemble_max_members,
             "ensemble_min_diversity": parent.ensemble_min_diversity,
@@ -626,6 +776,8 @@ def test_evolution_prompt_contains_train_aggregates_not_ids_or_futures(tmp_path)
     assert "train-secret" not in prompt
     assert "dev-secret" not in prompt
     assert "future" not in prompt.lower()
+    assert "mase" not in prompt.lower()
+    assert "smape" not in prompt.lower()
     assert "screen-sha" in prompt
     assert not result.accepted
 
@@ -636,7 +788,6 @@ def test_evolution_rejects_child_requiring_more_folds_than_exist(tmp_path):
         "ranking_order": list(parent.ranking_order),
         "recent_regime_first": parent.recent_regime_first,
         "min_successful_folds": 4,
-        "catastrophic_mase": parent.catastrophic_mase,
         "ensemble_enabled": parent.ensemble_enabled,
         "ensemble_max_members": parent.ensemble_max_members,
         "ensemble_min_diversity": parent.ensemble_min_diversity,
@@ -674,7 +825,6 @@ def test_evolution_passes_prior_rejections_without_task_labels(tmp_path):
         "ranking_order": list(parent.ranking_order),
         "recent_regime_first": parent.recent_regime_first,
         "min_successful_folds": parent.min_successful_folds,
-        "catastrophic_mase": parent.catastrophic_mase,
         "ensemble_enabled": parent.ensemble_enabled,
         "ensemble_max_members": parent.ensemble_max_members,
         "ensemble_min_diversity": parent.ensemble_min_diversity,
@@ -716,7 +866,6 @@ def test_generation_sequence_feeds_rejection_reason_to_next_child(tmp_path):
                 "ranking_order": list(parent.ranking_order),
                 "recent_regime_first": parent.recent_regime_first,
                 "min_successful_folds": minimum_folds,
-                "catastrophic_mase": parent.catastrophic_mase,
                 "ensemble_enabled": parent.ensemble_enabled,
                 "ensemble_max_members": parent.ensemble_max_members,
                 "ensemble_min_diversity": parent.ensemble_min_diversity,
@@ -755,7 +904,10 @@ def test_bounded_combined_candidates_cover_operators_without_exceeding_fold_budg
     parent = DecisionPolicy(min_successful_folds=3)
     proposal = replace(
         parent,
-        ranking_order=("recent_mase", "median_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "recent_joint_scaled_error", "median_joint_scaled_error",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
+        ),
     )
 
     candidates = bounded_combined_candidates(
@@ -780,13 +932,19 @@ def test_bounded_combined_candidates_cover_operators_without_exceeding_fold_budg
 
 def test_train_evolution_uses_dev_only_for_one_final_read_only_gate(tmp_path):
     parent = DecisionPolicy(
-        ranking_order=("median_mase", "recent_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "median_joint_scaled_error", "recent_joint_scaled_error",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
+        ),
         recent_regime_first=False,
         ensemble_enabled=False,
     )
     child = replace(
         parent,
-        ranking_order=("recent_mase", "median_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "recent_joint_scaled_error", "median_joint_scaled_error",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
+        ),
     )
 
     def response(policy):
@@ -796,7 +954,6 @@ def test_train_evolution_uses_dev_only_for_one_final_read_only_gate(tmp_path):
                 "ranking_order": list(policy.ranking_order),
                 "recent_regime_first": policy.recent_regime_first,
                 "min_successful_folds": policy.min_successful_folds,
-                "catastrophic_mase": policy.catastrophic_mase,
                 "ensemble_enabled": policy.ensemble_enabled,
                 "ensemble_max_members": policy.ensemble_max_members,
                 "ensemble_min_diversity": policy.ensemble_min_diversity,
@@ -824,9 +981,9 @@ def test_train_evolution_uses_dev_only_for_one_final_read_only_gate(tmp_path):
 
     assert result.generations[0].accepted
     second_request = json.loads(agent.requests[1]["messages"][0]["content"])
-    assert second_request["current_policy"]["ranking_order"][0] == "recent_mase"
+    assert second_request["current_policy"]["ranking_order"][0] == "recent_joint_scaled_error"
     assert "dev-secret" not in json.dumps(agent.requests)
-    assert result.train_winner.ranking_order[0] == "recent_mase"
+    assert result.train_winner.ranking_order[0] == "recent_joint_scaled_error"
     assert not result.final_gate.accepted
     assert result.frozen == parent
 
@@ -834,13 +991,19 @@ def test_train_evolution_uses_dev_only_for_one_final_read_only_gate(tmp_path):
 def test_train_crossfold_gate_rejects_average_gain_with_one_unstable_entity_group():
     """Removing the cross-fold gate would accept a policy with one severe group regression."""
     parent = DecisionPolicy(
-        ranking_order=("median_mase", "recent_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "median_joint_scaled_error", "recent_joint_scaled_error",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
+        ),
         recent_regime_first=False,
         ensemble_enabled=False,
     )
     child = replace(
         parent,
-        ranking_order=("recent_mase", "median_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "recent_joint_scaled_error", "median_joint_scaled_error",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
+        ),
     )
     cases = tuple(
         replace(
@@ -862,13 +1025,19 @@ def test_train_crossfold_gate_rejects_average_gain_with_one_unstable_entity_grou
 
 def test_train_crossfold_gate_accepts_policy_improving_every_entity_group():
     parent = DecisionPolicy(
-        ranking_order=("median_mase", "recent_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "median_joint_scaled_error", "recent_joint_scaled_error",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
+        ),
         recent_regime_first=False,
         ensemble_enabled=False,
     )
     child = replace(
         parent,
-        ranking_order=("recent_mase", "median_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "recent_joint_scaled_error", "median_joint_scaled_error",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
+        ),
     )
     cases = tuple(
         replace(
@@ -937,13 +1106,19 @@ def test_activation_aware_gate_rejects_any_material_fold_regression():
 
 def test_change_aware_crossfold_gate_counts_only_changed_final_forecasts():
     parent = DecisionPolicy(
-        ranking_order=("median_mase", "recent_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "median_joint_scaled_error", "recent_joint_scaled_error",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
+        ),
         recent_regime_first=False,
         ensemble_enabled=False,
     )
     child = replace(
         parent,
-        ranking_order=("recent_mase", "median_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "recent_joint_scaled_error", "median_joint_scaled_error",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
+        ),
     )
     cases = (
         replace(_ranking_sensitive_case("changed-1", child_is_better=True), group_id="e1"),
@@ -1015,13 +1190,19 @@ def test_activation_aware_gate_allows_two_fold_abstaining_overlay_support():
 
 def test_train_only_evolution_rejects_child_that_fails_crossfold_stability(tmp_path):
     parent = DecisionPolicy(
-        ranking_order=("median_mase", "recent_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "median_joint_scaled_error", "recent_joint_scaled_error",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
+        ),
         recent_regime_first=False,
         ensemble_enabled=False,
     )
     child = replace(
         parent,
-        ranking_order=("recent_mase", "median_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "recent_joint_scaled_error", "median_joint_scaled_error",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
+        ),
     )
     payload = {
         "summary": "prefer recent evidence",
@@ -1029,7 +1210,6 @@ def test_train_only_evolution_rejects_child_that_fails_crossfold_stability(tmp_p
             "ranking_order": list(child.ranking_order),
             "recent_regime_first": child.recent_regime_first,
             "min_successful_folds": child.min_successful_folds,
-            "catastrophic_mase": child.catastrophic_mase,
             "ensemble_enabled": child.ensemble_enabled,
             "ensemble_max_members": child.ensemble_max_members,
             "ensemble_min_diversity": child.ensemble_min_diversity,

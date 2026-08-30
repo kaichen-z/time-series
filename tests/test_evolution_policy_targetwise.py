@@ -6,12 +6,13 @@ import subprocess
 from pathlib import Path
 
 from common.llm import FakeLLMClient
+from common.evolution_core.contracts import require_active_metric_policy
 from numerical_agent.dictionary import MethodCandidate
 from numerical_agent.evolution import commit_module, init_repo
 from numerical_agent.evolution.cache import OutcomeCache
-from numerical_agent.evolution.execution import Task
+from numerical_agent.evolution.execution import Outcome, Task
 from numerical_agent.evolution.module import MODULE_HEADER, parse_module, write_module
-from numerical_agent.evolution.policy_targetwise import evolve_policies_once
+from numerical_agent.evolution.policy_targetwise import _accept, evolve_policies_once
 from numerical_agent.evolution.portfolio import (
     FLAGSHIP_METHOD_IDS,
     PolicyOutcomeCache,
@@ -67,6 +68,40 @@ def _tasks(prefix: str) -> tuple[Task, ...]:
     )
 
 
+def test_policy_gate_rejects_srmse_regression_despite_legacy_mase_gain() -> None:
+    tasks = (Task("t", (1.0, 2.0), 1, "1 day", (2.0,)),)
+    parent = (
+        Outcome(
+            "p", "t", "success", smape=100.0, mae=1.0, mase=100.0,
+            smae=1.0, srmse=1.0,
+        ),
+    )
+    child = (
+        Outcome(
+            "p", "t", "success", smape=0.0, mae=0.8, mase=0.0,
+            smae=0.8, srmse=1.1,
+        ),
+    )
+    metrics = {
+        "parent_mean_smae": 1.0,
+        "parent_mean_srmse": 1.0,
+        "parent_median_smae": 1.0,
+        "parent_median_srmse": 1.0,
+        "child_mean_smae": 0.8,
+        "child_mean_srmse": 1.1,
+        "child_median_smae": 0.8,
+        "child_median_srmse": 1.1,
+        "parent_mean_mase": 100.0,
+        "parent_median_mase": 100.0,
+        "child_mean_mase": 0.0,
+        "child_median_mase": 0.0,
+    }
+
+    accepted, _ = _accept(parent, child, tasks, "p", metrics)
+
+    assert not accepted
+
+
 def test_combined_policy_child_is_screened_validated_and_committed(tmp_path: Path) -> None:
     repo = _repo(tmp_path / "repo")
     selector = FakeLLMClient([json.dumps({"targets": [{
@@ -100,6 +135,11 @@ def test_combined_policy_child_is_screened_validated_and_committed(tmp_path: Pat
     assert result.candidates[0].accepted and result.candidates[0].promoted
     assert read_policy_file(repo / "policies.py").combined[0].weights == (0.90, 0.10)
     assert result.candidate_count == 15  # five test Python parents + ten policies
+    generation_payload = json.loads(
+        (repo / "generation_001_policies.json").read_text(encoding="utf-8")
+    )
+    assert generation_payload["schema_version"] == 2
+    require_active_metric_policy(generation_payload)
 
 
 def test_policy_mutator_can_change_combined_parents(tmp_path: Path) -> None:

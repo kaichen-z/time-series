@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import hashlib
+import json
 import subprocess
 import time
 from pathlib import Path
@@ -37,9 +38,11 @@ from numerical_agent.run_selector_evolution import (
     _build_case,
     _global_ranking,
     _report,
+    _score_pair_wtl,
     _write_cases,
     build_parser,
 )
+import common.evolution_core.contracts as evolution_contracts
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +117,15 @@ def stable_method(history, horizon, frequency):
         assert first.misses == 1
     finally:
         first.close()
+    cached = json.loads(next(cache.glob("*.json")).read_text(encoding="utf-8"))
+    assert cached["metric_policy"] == {
+        **evolution_contracts.METRIC_POLICY,
+        "primary": list(evolution_contracts.METRIC_POLICY["primary"]),
+    }
+    assert (
+        cached["metric_policy_fingerprint"]
+        == evolution_contracts.METRIC_POLICY_FINGERPRINT
+    )
 
     second = ForecastStore(
         cache,
@@ -130,6 +142,189 @@ def stable_method(history, horizon, frequency):
         assert second.misses == 0
     finally:
         second.close()
+
+
+def test_forecast_store_rejects_a_legacy_cache_row_instead_of_seeding_runtime(
+    tmp_path,
+):
+    methods = tmp_path / "methods.py"
+    methods.write_text(
+        MODULE_HEADER
+        + '''
+
+def stable_method(history, horizon, frequency):
+    """Use when a last-value forecast is sufficient."""
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+    module = read_module(methods)
+    store = ForecastStore(
+        tmp_path / "cache",
+        methods,
+        None,
+        module,
+        PolicyPortfolio.flagship5(),
+        RuntimeRegistry(),
+        "screen",
+    )
+    try:
+        key = store._key("stable_method", (1.0, 2.0), 2, "D")
+        (store.root / f"{key}.json").write_text(
+            json.dumps({"key": key, "status": "success", "forecast": [2.0, 2.0]}),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match="missing metric policy"):
+            store.forecast("stable_method", (1.0, 2.0), 2, "D")
+    finally:
+        store.close()
+
+
+def test_forecast_store_identity_binds_skills_runtime_and_checkpoint(tmp_path):
+    methods = tmp_path / "methods.py"
+    methods.write_text(
+        MODULE_HEADER
+        + '''
+
+def stable_method(history, horizon, frequency):
+    """Use when a last-value forecast is sufficient."""
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+    skills = tmp_path / "skills.py"
+    skills.write_text("SKILL_VERSION = 1\n", encoding="utf-8")
+    module = read_module(methods)
+    args = (module, PolicyPortfolio.flagship5(), RuntimeRegistry(), "screen")
+    first = ForecastStore(
+        tmp_path / "a", methods, skills, *args,
+        runtime_identity={"provider": "p", "checkpoint": "v1"},
+    )
+    second = ForecastStore(
+        tmp_path / "b", methods, skills, *args,
+        runtime_identity={"provider": "p", "checkpoint": "v2"},
+    )
+    key1 = first._key("stable_method", (1.0, 2.0), 1, "D")
+    key2 = second._key("stable_method", (1.0, 2.0), 1, "D")
+    first.close()
+    second.close()
+    skills.write_text("SKILL_VERSION = 2\n", encoding="utf-8")
+    third = ForecastStore(
+        tmp_path / "c", methods, skills, *args,
+        runtime_identity={"provider": "p", "checkpoint": "v1"},
+    )
+    key3 = third._key("stable_method", (1.0, 2.0), 1, "D")
+    third.close()
+
+    assert len({key1, key2, key3}) == 3
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "not-json",
+        json.dumps({**evolution_contracts.metric_policy_metadata(), "key": "wrong", "status": SUCCESS, "forecast": [2.0]}),
+        json.dumps({**evolution_contracts.metric_policy_metadata(), "key": "PLACEHOLDER", "status": "unknown"}),
+    ],
+)
+def test_forecast_store_existing_malformed_or_noncanonical_row_fails_closed(tmp_path, row):
+    methods = tmp_path / "methods.py"
+    methods.write_text(
+        MODULE_HEADER
+        + '''
+
+def stable_method(history, horizon, frequency):
+    """Use when a last-value forecast is sufficient."""
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+    store = ForecastStore(
+        tmp_path / "cache", methods, None, read_module(methods),
+        PolicyPortfolio.flagship5(), RuntimeRegistry(), "screen",
+    )
+    try:
+        key = store._key("stable_method", (1.0, 2.0), 1, "D")
+        (store.root / f"{key}.json").write_text(row.replace("PLACEHOLDER", key), encoding="utf-8")
+        with pytest.raises(ValueError, match="active hindcast cache row") as raised:
+            store.forecast("stable_method", (1.0, 2.0), 1, "D")
+        assert type(raised.value).__name__ == "CacheIntegrityError"
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("schema", (True, 3.0))
+def test_forecast_store_rejects_noninteger_schema_aliases(tmp_path, schema):
+    methods = tmp_path / "methods.py"
+    methods.write_text(
+        MODULE_HEADER
+        + '''
+
+def stable_method(history, horizon, frequency):
+    """Use when a last-value forecast is sufficient."""
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+    store = ForecastStore(
+        tmp_path / "cache", methods, None, read_module(methods),
+        PolicyPortfolio.flagship5(), RuntimeRegistry(), "screen",
+    )
+    try:
+        store.forecast("stable_method", (1.0, 2.0), 1, "D")
+        entry = next(store.root.glob("*.json"))
+        payload = json.loads(entry.read_text(encoding="utf-8"))
+        payload["cache_schema"] = schema
+        entry.write_text(json.dumps(payload), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="schema mismatch"):
+            store.forecast("stable_method", (1.0, 2.0), 1, "D")
+    finally:
+        store.close()
+
+
+def test_corrupted_combined_leaf_cache_aborts_instead_of_falling_back(tmp_path):
+    methods = tmp_path / "methods.py"
+    methods.write_text(
+        MODULE_HEADER
+        + '''
+
+def primary_leaf(history, horizon, frequency):
+    """Use as a primary leaf in cache-integrity tests."""
+    return [1.0] * horizon
+
+def fallback_leaf(history, horizon, frequency):
+    """Use as a fallback leaf in cache-integrity tests."""
+    return [2.0] * horizon
+''',
+        encoding="utf-8",
+    )
+    combined = CombinedPolicy(
+        "combined_cache_integrity",
+        ("primary_leaf", "toto_2_0"),
+        "weighted_mean",
+        (0.5, 0.5),
+        fallback_parent="toto_2_0",
+    )
+    store = ForecastStore(
+        tmp_path / "cache",
+        methods,
+        None,
+        read_module(methods),
+        PolicyPortfolio(PolicyPortfolio.flagship5().tsfm, (combined,)),
+        RuntimeRegistry(),
+        "screen",
+    )
+    try:
+        key = store._key("primary_leaf", (1.0, 2.0), 1, "D")
+        (store.root / f"{key}.json").write_text("not-json", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="malformed") as raised:
+            store.forecast("combined_cache_integrity", (1.0, 2.0), 1, "D")
+        assert type(raised.value).__name__ == "CacheIntegrityError"
+    finally:
+        store.close()
 
 
 def test_forecast_store_materializes_canonical_combined_leaf_forecasts_once(tmp_path):
@@ -733,15 +928,23 @@ def test_task_conditioned_audit_writes_a_manifest_accepted_by_frozen_evaluator(t
         screen_source, encoding="utf-8"
     )
     screen_hash = hashlib.sha256(screen_source.encode()).hexdigest()
+    binding = evolution_contracts.metric_policy_metadata()
     write_json(
         screen_dir / "screening_manifest.json",
-        {"frozen_screening_policy_sha256": screen_hash, "public_test_accessed": False},
+        {
+            "schema_version": 2,
+            **binding,
+            "frozen_screening_policy_sha256": screen_hash,
+            "public_test_accessed": False,
+        },
     )
     decision_source = "DECISION_POLICY = {}\n"
     (selector_dir / "frozen_decision_policy.py").write_text(
         decision_source, encoding="utf-8"
     )
     parent_manifest = {
+        "schema_version": 2,
+        **binding,
         "frozen_global_ranking": [f"method_{index}" for index in range(103)],
         "public_test_accessed": False,
     }
@@ -760,6 +963,8 @@ def test_task_conditioned_audit_writes_a_manifest_accepted_by_frozen_evaluator(t
         screen_hash,
         hashlib.sha256(decision_source.encode()).hexdigest(),
     )
+    manifest = json.loads((selector_dir / "selector_manifest.json").read_text())
+    assert manifest["metric_policy_fingerprint"] == evolution_contracts.METRIC_POLICY_FINGERPRINT
 
 
 def test_train_only_manifest_drops_inherited_dev_results(tmp_path):
@@ -775,7 +980,8 @@ def test_train_only_manifest_drops_inherited_dev_results(tmp_path):
     experiment._write_selector_manifest(
         output,
         {
-            "schema_version": 1,
+            "schema_version": 2,
+            **evolution_contracts.metric_policy_metadata(),
             "phase": "task_conditioned_numerical_selector",
             "frozen_global_ranking": ["toto_2_0"],
             "dev": {"mean_smae": 9.0},
@@ -798,6 +1004,7 @@ def test_train_only_manifest_drops_inherited_dev_results(tmp_path):
     assert manifest["dev_tasks"] == 0
     assert manifest["dev_accepted"] is False
     assert manifest["frozen_global_ranking"] == ["toto_2_0"]
+    assert manifest["metric_policy_fingerprint"] == evolution_contracts.METRIC_POLICY_FINGERPRINT
     for stale in ("dev", "dev_parent", "dev_train_winner", "generations"):
         assert stale not in manifest
 
@@ -930,7 +1137,7 @@ def test_selector_shell_forwards_runtime_and_freeze_inputs():
         assert option in source
 
 
-def test_case_artifact_serializes_ineligible_infinite_diagnostics_as_null(tmp_path):
+def test_case_artifact_serializes_ineligible_infinite_diagnostics_as_sentinel(tmp_path):
     diagnostic = CandidateDiagnostics.synthetic(
         name="failed", family="statistical", median_mase=float("inf"), eligible=False
     )
@@ -943,7 +1150,13 @@ def test_case_artifact_serializes_ineligible_infinite_diagnostics_as_null(tmp_pa
     )
     target = tmp_path / "cases.jsonl"
     _write_cases(target, (case,))
-    assert '"median_mase": null' in target.read_text(encoding="utf-8")
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 2
+    evolution_contracts.require_active_metric_policy(payload)
+    assert payload["diagnostics"]["failed"]["median_mase"] == {
+        "status": "positive_infinity",
+        "value": None,
+    }
 
 
 def test_case_artifact_preserves_entity_group_for_train_cross_validation(tmp_path):
@@ -1056,14 +1269,14 @@ def test_build_case_always_preserves_reviewed_tsfm_anchors():
     assert case.conditioned_names == ()
 
 
-def test_global_ranking_penalizes_failures_and_is_deterministic():
+def test_global_ranking_uses_the_joint_scaled_metric_pair_and_penalizes_failures():
     rows = (
-        Outcome("a", "t1", "success", mase=1.0),
-        Outcome("a", "t2", "success", mase=1.0),
-        Outcome("b", "t1", "success", mase=0.1),
+        Outcome("a", "t1", "success", smae=1.0, srmse=1.0),
+        Outcome("a", "t2", "success", smae=1.0, srmse=1.0),
+        Outcome("b", "t1", "success", smae=0.1, srmse=0.1),
         Outcome("b", "t2", "crashed"),
-        Outcome("c", "t1", "success", mase=1.0),
-        Outcome("c", "t2", "success", mase=1.0),
+        Outcome("c", "t1", "success", smae=0.5, srmse=1.5),
+        Outcome("c", "t2", "success", smae=0.5, srmse=1.5),
     )
     assert _global_ranking(rows, ("t1", "t2")) == ("a", "c", "b")
 
@@ -1081,7 +1294,7 @@ def test_selector_report_leads_with_drcik_point_metrics():
     from numerical_agent.evolution.selector_evolution import evaluate_decision
 
     score = asdict(evaluate_decision(DecisionPolicy(ensemble_enabled=False), (case,)))
-    report = _report({
+    payload = {
         "train_tasks": 1,
         "dev_tasks": 1,
         "accepted_generations": [],
@@ -1090,15 +1303,41 @@ def test_selector_report_leads_with_drcik_point_metrics():
         "public_test_accessed": False,
         "dev_accepted": False,
         "final_dev_gate": {"accepted": False, "reason": "Dev sRMSE increased"},
+        "paired_joint_wtl": {
+            "train": {"wins": 1, "ties": 0, "losses": 0, "missing": 0, "unscored": 0},
+            "dev": {"wins": 0, "ties": 0, "losses": 1, "missing": 0, "unscored": 0},
+        },
         "train": score,
         "dev": score,
-    })
+        **evolution_contracts.metric_report_metadata(),
+    }
+    report = _report(payload)
 
+    assert payload["primary_metrics"] == ["smae", "srmse"]
+    assert set(payload["diagnostic_only"]) >= {"mase", "mae", "smape", "rmsse"}
     assert "Mean sMAE" in report
     assert "Mean sRMSE" in report
+    assert "Median sMAE" in report
+    assert "Median sRMSE" in report
     assert "P90/P95 sMAE" in report
     assert "Clipped sMAE/sRMSE" in report
+    assert "Oracle sMAE/sRMSE regret" in report
+    assert (
+        f"{score['mean_active_oracle_smae_regret']:.6f}/"
+        f"{score['mean_active_oracle_srmse_regret']:.6f}"
+    ) in report
+    assert "Wins / Ties / Losses / Missing / Unscored" in report
     assert "Assumptions" in report
     assert "Verifier pool" in report
     assert "Dev accepted: `False`" in report
     assert "Dev sRMSE increased" in report
+
+
+def test_selector_paired_counts_conserve_both_missing_tasks():
+    parent = SimpleNamespace(task_count=4, task_scaled_pairs={"same": (1.0, 1.0), "left": (1.0, 1.0)})
+    child = SimpleNamespace(task_count=4, task_scaled_pairs={"same": (1.0, 1.0), "right": (1.0, 1.0)})
+
+    counts = _score_pair_wtl(parent, child)
+
+    assert counts == {"wins": 0, "ties": 1, "losses": 0, "missing": 2, "unscored": 1}
+    assert sum(counts.values()) == 4

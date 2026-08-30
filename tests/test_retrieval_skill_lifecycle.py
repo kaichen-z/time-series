@@ -300,6 +300,111 @@ def _operator_active_checkpoint(
     return path, _migrate_legacy_for_operator(path)
 
 
+def test_frozen_execution_snapshot_deep_rehydrates_skill_rows(tmp_path) -> None:
+    skill = seed_skill(skill_id="captured_row")
+    library = RetrievalSkillLibrary(
+        tmp_path / "skills.json",
+        (skill,),
+        persist=False,
+    )
+
+    snapshot = library.frozen_execution_snapshot()
+    object.__setattr__(skill, "description", "mutated after preflight")
+
+    frozen = snapshot.get_by_id("captured_row")
+    assert frozen is not None
+    assert frozen is not skill
+    assert frozen.description != skill.description
+    assert snapshot.persist is False
+    with pytest.raises(RetrievalSkillError, match="read-only"):
+        snapshot.add(seed_skill(skill_id="late_addition"))
+
+
+def test_frozen_execution_snapshot_has_detached_active_authority(tmp_path) -> None:
+    path, source = _operator_active_checkpoint(tmp_path)
+    snapshot = source.frozen_execution_snapshot()
+
+    replacement = skill_library_module._load_verified_checkpoint_for_operator(path)
+
+    with pytest.raises(RetrievalSkillError, match="current checkpoint epoch"):
+        source.active_skills()
+    assert replacement.active_skills()
+    assert snapshot.active_skills()
+    assert snapshot.persist is False
+
+
+def test_frozen_execution_snapshot_preserves_trusted_train_shadow(tmp_path) -> None:
+    skill = seed_skill(
+        skill_id="train_shadow",
+        applicability=RetrievalApplicability(),
+    )
+    library = RetrievalSkillLibrary(
+        tmp_path / "skills.json",
+        (skill,),
+        persist=False,
+    )
+    authorized = skill_library_module._authorize_train_shadow_projection(
+        library,
+        ("train_shadow",),
+    )
+
+    snapshot = authorized.frozen_execution_snapshot()
+
+    projected = skill_library_module._trusted_train_shadow_skills(
+        snapshot,
+        "round1",
+    )
+    assert tuple(item.skill_id for item in projected) == ("train_shadow",)
+    assert projected[0] is not skill
+
+
+def test_frozen_execution_snapshot_preserves_effective_mixed_train_shadow(
+    tmp_path,
+) -> None:
+    candidate = seed_skill(
+        skill_id="candidate_shadow",
+        applicability=RetrievalApplicability(),
+    )
+    genome = replace(
+        RetrievalGenome.seed(),
+        version="v001",
+        parent="v000",
+        active_skill_ids=("accepted_context",),
+    )
+    release = _write_accepted_retrieval_release(
+        tmp_path / "releases",
+        genome,
+        skills=(
+            _active_payload(
+                skill_id="accepted_context",
+                applicability={
+                    "assumption_kinds": [],
+                    "gap_types": [],
+                    "temporal_relations": [],
+                },
+            ),
+            candidate.to_payload(),
+        ),
+        audit=_accepted_audit(),
+    )
+    library = RetrievalSkillLibrary.from_release(release.path)
+    authorized = skill_library_module._authorize_train_shadow_projection(
+        library,
+        ("accepted_context", "candidate_shadow"),
+    )
+
+    snapshot = authorized.frozen_execution_snapshot()
+
+    assert tuple(item.skill_id for item in snapshot.active_skills()) == (
+        "accepted_context",
+    )
+    projected = skill_library_module._trusted_train_shadow_skills(
+        snapshot,
+        "round1",
+    )
+    assert tuple(item.skill_id for item in projected) == ("candidate_shadow",)
+
+
 def test_public_payload_and_record_constructors_reject_active_status() -> None:
     payload = _active_payload()
 
