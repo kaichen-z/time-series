@@ -8,7 +8,7 @@ from pathlib import Path
 from common.data import load_tasks
 from common.evolution_core.contracts import (
     metric_policy_metadata,
-    require_active_metric_policy,
+    load_active_release,
 )
 from common.llm import ClaudeCLIClient, ClaudeCLIConfig, CodexCLIClient, CodexCLIConfig, QwenClient
 from common.payload import read_json_object, write_json
@@ -213,10 +213,7 @@ def _load_or_create_run_manifest(repo: str | Path) -> dict[str, object]:
     path = Path(repo) / "run_manifest.json"
     if path.exists():
         payload = read_json_object(path)
-        require_active_metric_policy(payload, context="active evolution run manifest")
-        if payload.get("schema_version") != 2:
-            raise ValueError("active evolution run manifest schema_version must be 2")
-        return payload
+        return load_active_release(payload)
     lifecycle_markers = (
         Path(repo) / "run_evolution_trace.jsonl",
         Path(repo) / "outcome-cache",

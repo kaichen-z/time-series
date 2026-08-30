@@ -99,7 +99,11 @@ class FakeEvaluator:
         return EvaluationReport(
             artifact_id=artifact_id,
             split=split,
-            metrics={"loss": 10.0 - quality},
+            metrics={
+                "loss": 10.0 - quality,
+                "smae": 5.0 - quality,
+                "srmse": 5.0 - quality,
+            },
             item_count=len(results),
             diagnostics={},
         )
@@ -151,6 +155,31 @@ def test_engine_retains_parent_when_dev_does_not_improve(tmp_path: Path) -> None
 
     assert outcome.accepted_artifact.artifact_id == "v000"
     assert not outcome.steps[0].accepted
+
+
+def test_engine_ranks_train_children_by_joint_scaled_pair_then_name(
+    tmp_path: Path,
+) -> None:
+    engine, _, _, _ = make_engine(tmp_path, qualities=(1.0,))
+    reports = (
+        (
+            FakeArtifact("low-smae", 1.0),
+            EvaluationReport("low-smae", "train", {"smae": 0.4, "srmse": 1.6}, 1, {}),
+        ),
+        (
+            FakeArtifact("joint-best", 1.0),
+            EvaluationReport("joint-best", "train", {"smae": 0.9, "srmse": 0.9}, 1, {}),
+        ),
+        (
+            FakeArtifact("z-tie", 1.0),
+            EvaluationReport("z-tie", "train", {"smae": 0.9, "srmse": 0.9}, 1, {}),
+        ),
+    )
+
+    selected = engine._best_train_pair(reports)
+
+    assert selected is not None
+    assert selected[0].artifact_id == "joint-best"
 
 
 def test_engine_requires_nonempty_train_and_dev(tmp_path: Path) -> None:

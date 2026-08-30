@@ -20,10 +20,16 @@ from common.evolution_core.contracts import (
     metric_policy_metadata,
     metric_report_metadata,
     require_active_metric_policy,
+    load_active_release,
 )
 from common.llm import CodexCLIClient, CodexCLIConfig
 from common.metrics import joint_scaled_error
-from common.payload import read_json_object, standards_json_value, write_json
+from common.payload import (
+    read_json_object,
+    standards_json_value,
+    strict_json_loads,
+    write_json,
+)
 
 from .evolution.execution import CRASHED, INVALID, NOT_APPLICABLE, SUCCESS, Outcome, Task, load_methods
 from .evolution.module import MethodModule, read_module
@@ -82,6 +88,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _add_tsf_runtime_options_compat(parser: argparse.ArgumentParser) -> None:
     _add_tsfm_runtime_options(parser)
+
+
+class CacheIntegrityError(ValueError):
+    """An existing active cache row is corrupt and must abort the lifecycle."""
 
 
 class ForecastStore:
@@ -149,27 +159,54 @@ class ForecastStore:
             payload = None
         else:
             try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, TypeError, json.JSONDecodeError) as error:
-                raise ValueError("active hindcast cache row is malformed") from error
+                payload = strict_json_loads(
+                    path.read_text(encoding="utf-8"),
+                    context="active hindcast cache row",
+                )
+            except (OSError, TypeError, ValueError) as error:
+                raise CacheIntegrityError(
+                    "active hindcast cache row is malformed"
+                ) from error
         if payload is not None:
-            if not isinstance(payload, Mapping):
-                raise ValueError("active hindcast cache row must be an object")
-            require_active_metric_policy(payload, context="active hindcast cache row")
-            if payload.get("cache_schema") != 3:
-                raise ValueError("active hindcast cache row schema mismatch")
-            if payload.get("key") != key:
-                raise ValueError("active hindcast cache row key mismatch")
-            if payload.get("status") == SUCCESS:
-                values = tuple(float(value) for value in payload["forecast"])
-                if len(values) == horizon and all(map(math.isfinite, values)):
+            try:
+                if not isinstance(payload, Mapping):
+                    raise CacheIntegrityError(
+                        "active hindcast cache row must be an object"
+                    )
+                require_active_metric_policy(payload, context="active hindcast cache row")
+                if (
+                    type(payload.get("cache_schema")) is not int
+                    or payload["cache_schema"] != 3
+                ):
+                    raise CacheIntegrityError(
+                        "active hindcast cache row schema mismatch"
+                    )
+                if payload.get("key") != key:
+                    raise CacheIntegrityError("active hindcast cache row key mismatch")
+                if payload.get("status") == SUCCESS:
+                    values = tuple(float(value) for value in payload["forecast"])
+                    if len(values) != horizon or not all(map(math.isfinite, values)):
+                        raise CacheIntegrityError(
+                            "active hindcast cache row forecast is noncanonical"
+                        )
                     self.hits += 1
                     return values
-                raise ValueError("active hindcast cache row forecast is noncanonical")
-            if payload.get("status") == NOT_APPLICABLE:
-                self.hits += 1
-                raise self.not_applicable(str(payload.get("detail", "not applicable")))
-            raise ValueError("active hindcast cache row status is noncanonical")
+                if payload.get("status") == NOT_APPLICABLE:
+                    self.hits += 1
+                    raise self.not_applicable(
+                        str(payload.get("detail", "not applicable"))
+                    )
+                raise CacheIntegrityError(
+                    "active hindcast cache row status is noncanonical"
+                )
+            except CacheIntegrityError:
+                raise
+            except self.not_applicable:
+                raise
+            except (KeyError, TypeError, ValueError) as error:
+                raise CacheIntegrityError(
+                    str(error) or "active hindcast cache row is noncanonical"
+                ) from error
         self.misses += 1
         try:
             values = self._execute(name, history, horizon, frequency)
@@ -261,6 +298,8 @@ class ForecastStore:
                 SUCCESS,
                 forecast=self.forecast(name, history, horizon, frequency),
             )
+        except CacheIntegrityError:
+            raise
         except self.not_applicable as error:
             outcome = Outcome(
                 name, "history-only", NOT_APPLICABLE, detail=str(error)[:200]
@@ -472,11 +511,7 @@ def main(argv: list[str] | None = None) -> int:
     output.mkdir(parents=True, exist_ok=True)
     screening_path = screening_dir / "frozen_screening_policy.py"
     screening_manifest = read_json_object(screening_dir / "screening_manifest.json")
-    require_active_metric_policy(
-        screening_manifest, context="active screening release"
-    )
-    if screening_manifest.get("schema_version") != 2:
-        raise ValueError("active screening release schema_version must be 2")
+    load_active_release(screening_manifest)
     actual_screening_hash = _sha256(screening_path)
     if screening_manifest.get("frozen_screening_policy_sha256") != actual_screening_hash:
         raise ValueError("frozen screening policy hash does not match its manifest")
@@ -703,6 +738,7 @@ def _write_cases(path: Path, cases: Sequence[DecisionCase]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for case in cases:
             payload = {
+                "schema_version": 2,
                 **metric_policy_metadata(),
                 "task_id": case.task.task_id,
                 "active_names": list(case.active_names),
@@ -747,10 +783,11 @@ def _global_ranking(
 
 
 def _score_pair_wtl(parent, child) -> dict[str, int]:
-    result = {"wins": 0, "ties": 0, "losses": 0, "missing": 0}
+    result = {"wins": 0, "ties": 0, "losses": 0, "missing": 0, "unscored": 0}
     parent_pairs = parent.task_scaled_pairs
     child_pairs = child.task_scaled_pairs
-    for task_id in sorted(set(parent_pairs) | set(child_pairs)):
+    observed = set(parent_pairs) | set(child_pairs)
+    for task_id in sorted(observed):
         if task_id not in parent_pairs or task_id not in child_pairs:
             result["missing"] += 1
             continue
@@ -762,6 +799,8 @@ def _score_pair_wtl(parent, child) -> dict[str, int]:
             result["losses"] += 1
         else:
             result["ties"] += 1
+    expected = max(parent.task_count, child.task_count, len(observed))
+    result["unscored"] = expected - len(observed)
     return result
 
 
@@ -820,10 +859,22 @@ def _report(manifest: Mapping[str, object]) -> str:
         f"- Final Dev gate: {manifest.get('final_dev_gate', {}).get('reason', 'not recorded')}",
         f"- Public Test accessed: `{manifest['public_test_accessed']}`",
         "",
-        "| Split | Coverage | Mean sMAE | sMAE SE | Mean sRMSE | sRMSE SE | P90/P95 sMAE | P90/P95 sRMSE | Raw P90/P95 sMAE | Raw P90/P95 sRMSE | Clipped sMAE/sRMSE | Mean MASE | Mean MAE | Mean sMAPE | Oracle regret | Methods | Families | Ensemble | Assumptions | Verifier pool | Pool families | Assumption kinds |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Split | Coverage | Mean sMAE | Median sMAE | sMAE SE | Mean sRMSE | Median sRMSE | sRMSE SE | P90/P95 sMAE | P90/P95 sRMSE | Raw P90/P95 sMAE | Raw P90/P95 sRMSE | Clipped sMAE/sRMSE | Oracle regret | Methods | Families | Ensemble | Assumptions | Verifier pool | Pool families | Assumption kinds |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         _score_row("Train", train),
         _score_row("Dev", dev),
+        "",
+        "| Split | Wins / Ties / Losses / Missing / Unscored |",
+        "|---|---:|",
+        _paired_report_row("Train", manifest["paired_joint_wtl"]["train"]),
+        _paired_report_row("Dev", manifest["paired_joint_wtl"]["dev"]),
+        "",
+        "## Diagnostic-only metrics",
+        "",
+        "| Split | Mean MASE | Mean MAE | Mean sMAPE |",
+        "|---|---:|---:|---:|",
+        f"| Train | {train['mean_mase']:.6f} | {train['mean_mae']:.6f} | {train['mean_smape']:.6f} |",
+        f"| Dev | {dev['mean_mase']:.6f} | {dev['mean_mae']:.6f} | {dev['mean_smape']:.6f} |",
         "",
     ))
 
@@ -831,17 +882,24 @@ def _report(manifest: Mapping[str, object]) -> str:
 def _score_row(label: str, score: Mapping[str, object]) -> str:
     return (
         f"| {label} | {score['coverage']:.4f} | {score['mean_smae']:.6f} | "
-        f"{score['se_smae']:.6f} | {score['mean_srmse']:.6f} | {score['se_srmse']:.6f} | "
+        f"{score['median_smae']:.6f} | {score['se_smae']:.6f} | "
+        f"{score['mean_srmse']:.6f} | {score['median_srmse']:.6f} | {score['se_srmse']:.6f} | "
         f"{score['p90_smae']:.6f}/{score['p95_smae']:.6f} | "
         f"{score['p90_srmse']:.6f}/{score['p95_srmse']:.6f} | "
         f"{score['p90_smae_raw']:.6f}/{score['p95_smae_raw']:.6f} | "
         f"{score['p90_srmse_raw']:.6f}/{score['p95_srmse_raw']:.6f} | "
         f"{score['smae_clipped_count']}/{score['srmse_clipped_count']} | "
-        f"{score['mean_mase']:.6f} | {score['mean_mae']:.6f} | {score['mean_smape']:.6f} | "
         f"{score['mean_active_oracle_regret']:.6f} | "
         f"{score['method_diversity']} | {score['family_diversity']} | {score['ensemble_rate']:.4f} | "
         f"{score['mean_assumption_count']:.2f} | {score['mean_considered_candidates']:.2f} | "
         f"{score['mean_considered_families']:.2f} | {score['assumption_kind_diversity']} |"
+    )
+
+
+def _paired_report_row(label: str, counts: Mapping[str, object]) -> str:
+    return (
+        f"| {label} | {counts['wins']} / {counts['ties']} / {counts['losses']} / "
+        f"{counts['missing']} / {counts['unscored']} |"
     )
 
 

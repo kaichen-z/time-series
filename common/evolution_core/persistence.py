@@ -1,14 +1,18 @@
 """Filesystem persistence for generic self-evolution runs."""
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 from pathlib import Path
 from typing import Mapping
 
-from .contracts import load_active_release, metric_policy_metadata
-from common.payload import canonical_json_bytes, is_simple_filename
+from .contracts import active_envelope, load_active_release
+from common.payload import (
+    canonical_json_bytes,
+    canonical_json_line_bytes,
+    is_simple_filename,
+    read_json_object,
+)
 
 
 class JsonArtifactStore:
@@ -22,37 +26,31 @@ class JsonArtifactStore:
         if not is_simple_filename(name):
             raise ValueError("artifact name must be a simple non-empty filename stem")
         destination = self.root / f"{name}.json"
-        self._write_json(destination, payload)
+        self._write_json(
+            destination,
+            active_envelope(payload, context=f"active artifact {name!r}"),
+        )
         return destination
 
     def save_checkpoint(self, payload: Mapping[str, object]) -> Path:
         destination = self.root / "checkpoint.json"
-        self._write_json(
-            destination,
-            {
-                **dict(payload),
-                "schema_version": 2,
-                **metric_policy_metadata(),
-            },
-        )
+        self._write_json(destination, active_envelope(payload, context="active checkpoint"))
         return destination
 
     def load_checkpoint(self) -> dict[str, object] | None:
         source = self.root / "checkpoint.json"
         if not source.exists():
             return None
-        payload = json.loads(source.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            raise ValueError("checkpoint must contain a JSON object")
+        payload = read_json_object(source)
         return load_active_release(payload)
 
     def append_trace(self, payload: Mapping[str, object]) -> None:
         if not isinstance(payload, Mapping):
             raise TypeError("trace payload must be a mapping")
         trace_path = self.root / "evolution_trace.jsonl"
-        with trace_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(dict(payload), ensure_ascii=False, sort_keys=True))
-            handle.write("\n")
+        bound = active_envelope(payload, context="active evolution trace")
+        with trace_path.open("ab") as handle:
+            handle.write(canonical_json_line_bytes(bound))
 
     @staticmethod
     def _write_json(destination: Path, payload: Mapping[str, object]) -> None:

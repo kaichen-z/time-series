@@ -11,16 +11,22 @@ from numerical_agent.run_task_conditioned_screening import (
     SCALED_METRIC_POLICY,
     _manifest_fingerprint,
     _merge_cache_summaries,
+    _paired_screening_counts,
     _report,
     _training_outcomes,
     _train_constraints_met,
     _write_policy_artifacts,
+    _write_active,
     build_parser,
     load_frozen_partitions,
     main,
 )
-from common.evolution_core.contracts import METRIC_POLICY, metric_policy_metadata
-from common.payload import write_json
+from common.evolution_core.contracts import (
+    METRIC_POLICY,
+    metric_policy_metadata,
+    require_active_metric_policy,
+)
+from common.payload import strict_json_loads, write_json
 from numerical_agent.evolution.execution import Task
 from numerical_agent.evolution.filtering import build_filter_dictionary, render_filter_source
 from numerical_agent.evolution.module import MODULE_HEADER, parse_module, write_module
@@ -413,6 +419,20 @@ def test_report_exposes_task_conditioning_and_family_coverage():
         "not_applicable_exposure": 0.1,
         "mean_active_smae": 0.8,
         "mean_active_srmse": 0.9,
+        "mean_smae": 0.8,
+        "median_smae": 0.7,
+        "se_smae": 0.01,
+        "mean_srmse": 0.9,
+        "median_srmse": 0.8,
+        "se_srmse": 0.02,
+        "p90_smae_raw": 6.0,
+        "p95_smae_raw": 7.0,
+        "p90_srmse_raw": 8.0,
+        "p95_srmse_raw": 9.0,
+        "smae_clipped_count": 1,
+        "smae_clipped_rate": 0.1,
+        "srmse_clipped_count": 2,
+        "srmse_clipped_rate": 0.2,
         "global_oracle_retention": 1.0,
         "mean_active_oracle_regret": 0.0,
         "mean_active_oracle_smae_regret": 0.0,
@@ -446,6 +466,10 @@ def test_report_exposes_task_conditioning_and_family_coverage():
         "final_dev_gate": {"accepted": True, "reason": "safe on held-out Dev"},
         "train": score,
         "dev": score,
+        "paired_joint_wtl": {
+            "train": {"wins": 1, "ties": 2, "losses": 3, "missing": 4, "unscored": 5},
+            "dev": {"wins": 5, "ties": 4, "losses": 3, "missing": 2, "unscored": 1},
+        },
     })
 
     assert "Unique dictionaries" in report
@@ -458,6 +482,42 @@ def test_report_exposes_task_conditioning_and_family_coverage():
     assert "safe on held-out Dev" in report
     assert "Mean active sMAE" in report
     assert "Mean active sRMSE" in report
+    assert "Median sMAE" in report
+    assert "sMAE SE" in report
+    assert "Raw P90/P95 sMAE" in report
+    assert "Clipped sMAE/sRMSE" in report
+    assert "Wins / Ties / Losses / Missing / Unscored" in report
+
+
+def test_screening_paired_counts_conserve_both_missing_tasks() -> None:
+    parent = SimpleNamespace(task_count=4, task_scaled_pairs={"same": (1.0, 1.0), "left": (1.0, 1.0)})
+    child = SimpleNamespace(task_count=4, task_scaled_pairs={"same": (1.0, 1.0), "right": (1.0, 1.0)})
+
+    counts = _paired_screening_counts(parent, child)
+
+    assert counts == {"wins": 0, "ties": 1, "losses": 0, "missing": 2, "unscored": 1}
+    assert sum(counts.values()) == 4
+
+
+def test_materialized_active_dictionary_rows_are_schema_v2_policy_bound(tmp_path) -> None:
+    policy = ScreeningPolicy(
+        entries=(ScreeningEntry(
+            "fallback", "statistical", "keep", ApplicabilityPolicy(), "safe fallback"
+        ),),
+        fallback_names=("fallback",),
+    )
+    target = tmp_path / "active.jsonl"
+
+    _write_active(
+        target,
+        policy,
+        (Task("task", (1.0, 2.0), 1, "D", (3.0,)),),
+    )
+
+    payload = strict_json_loads(target.read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+    assert payload["schema_version"] == 2
+    require_active_metric_policy(payload)
 
 
 def test_screening_manifest_hash_binds_scaled_metric_objective():

@@ -104,3 +104,72 @@ Complete in the fix-round changeset. Closed every Critical/Important review seam
 ### Concerns
 
 Active filter/screening launches now require a schema-v2 `seed_manifest.json` (or explicit `--seed-manifest`) with exact canonical policy/fingerprint and source hashes. This is intentional fail-closed behavior; old unversioned or `--seed-policy legacy` launches must be migrated explicitly, never normalized at runtime.
+
+---
+
+## Fix round 2
+
+### Status and changes
+
+Complete in the fix-round-2 changeset. Batch and targetwise acceptance now use only the canonical mean sMAE/sRMSE Pareto gate; median aggregates remain reporting evidence. Curation child ranking uses deterministic joint-pair ordering and final pair acceptance. Active ToolDictionary/config/checkpoint/cache/generic artifact/method-evaluation/generation artifacts require exact integer schemas and exact metric-policy binding; standalone materialized dictionaries and decision cases are schema-v2 envelopes. Hindcast cache corruption raises a distinct integrity exception through direct and Combined paths. Active Decision parsing requires every canonical field and rejects all legacy members; only explicit `allow_legacy=True` report readers normalize old payloads. Active `HindcastConfig` no longer contains `catastrophic_mase`. Strict JSON rejects duplicate keys at every nesting level and nonfinite constants. Filter, screening, selector, frozen, and rescore reports expose the complete scaled pair, raw tails, clipping, coverage, and conservation-safe W/T/L/Missing/Unscored counts; infinities use explicit typed status sentinels in JSON and reports.
+
+### TDD RED evidence
+
+1. Mean-pair gates and joint child ranking:
+
+   `pytest -q tests/test_evolution_loop.py::test_batch_validation_rejects_median_only_improvement tests/test_targetwise_evolution.py::test_targetwise_gate_rejects_median_only_improvement tests/test_evolution_core_controller.py::test_engine_ranks_train_children_by_joint_scaled_pair_then_name`
+
+   Output: `3 failed in 0.18s`.
+
+2. Dictionary, persistence, strict schema, and strict JSON boundary:
+
+   `pytest -q tests/test_numerical_dictionary_contracts.py::test_active_dictionary_rejects_legacy_unbound_or_defaulted_fields tests/test_numerical_dictionary_contracts.py::test_legacy_dictionary_reader_is_explicit_and_report_only tests/test_evolution_core_persistence.py::test_json_store_round_trips_checkpoint_and_artifact tests/test_evolution_core_persistence.py::test_json_store_appends_one_trace_object_per_line tests/test_evolution_core_persistence.py::test_active_checkpoint_rejects_noninteger_schema_aliases tests/test_evolution_core_persistence.py::test_generic_artifact_rejects_incomplete_active_envelope tests/test_frozen_two_stage_evaluation.py::test_active_release_rejects_noninteger_envelope_schema_aliases tests/test_common_payload.py`
+
+   Output: `14 failed, 4 passed in 0.18s`.
+
+3. Active CLI dictionary/config fail-closed boundary:
+
+   `pytest -q tests/test_numerical_agent_cli.py::test_active_config_sections_require_exact_integer_schema tests/test_numerical_agent_cli.py::test_curate_rejects_unbound_dictionary_before_creating_output tests/test_numerical_agent_cli.py::test_frozen_rejects_unbound_dictionary_before_reading_public_data`
+
+   Output: `5 failed in 0.13s`.
+
+4. Generation/method-evaluation binding: focused curation CLI/transcript assertions failed before envelope binding (`2 failed in 0.45s`). Cache schema alias probes failed before exact-type validation (`3 failed, 3 passed`). Corrupt direct/Combined cache probes showed swallowed integrity faults (`4 failed, 1 passed`).
+
+5. Strict Decision/Hindcast legacy split:
+
+   `pytest -q tests/test_evolution_numerical_selector.py::test_active_policy_rejects_legacy_error_ranking_fields tests/test_evolution_numerical_selector.py::test_active_policy_parser_requires_explicit_legacy_migration_flag tests/test_evolution_numerical_selector.py::test_active_policy_payload_requires_every_canonical_field tests/test_evolution_numerical_selector.py::test_hindcast_config_has_no_active_catastrophic_mase_and_legacy_is_explicit tests/test_evolution_selector_evolution.py::test_task_conditioned_long_horizon_route_round_trips_and_legacy_defaults_are_safe tests/test_evolution_selector_evolution.py::test_policy_parser_accepts_legacy_source_without_soft_overlay_weight tests/test_evolution_selector_evolution.py::test_legacy_policy_source_defaults_to_flat_selection_without_assumptions tests/test_evolution_selector_evolution.py::test_pre_combined_policy_source_remains_backward_compatible`
+
+   Output after correcting a test import: `7 failed, 1 passed in 0.25s`.
+
+6. Exact report fields and paired-count conservation:
+
+   `pytest -q tests/test_run_filter_evolution.py::test_filter_report_and_manifest_lead_with_bound_scaled_objective tests/test_run_filter_evolution.py::test_filter_paired_counts_conserve_tasks_with_both_missing_unscored tests/test_task_conditioned_screening_script.py::test_report_exposes_task_conditioning_and_family_coverage tests/test_task_conditioned_screening_script.py::test_screening_paired_counts_conserve_both_missing_tasks tests/test_numerical_selector_script.py::test_selector_report_leads_with_drcik_point_metrics tests/test_numerical_selector_script.py::test_selector_paired_counts_conserve_both_missing_tasks`
+
+   Output: `6 failed in 0.21s`.
+
+7. Remaining artifact/frozen/rescore probes: targetwise and policy generations plus materialized dictionaries/cases were initially unbound (`4 failed in 1.25s`); frozen W/T/L/M/U surfaces were incomplete (`3 failed in 0.27s`); rescore rendered infinity as `n/a` (`1 failed in 0.12s`).
+
+### GREEN and compatibility evidence
+
+- Mean-pair/ranking focused rerun: `3 passed in 0.11s`; batch/targetwise/controller compatibility: `53 passed in 6.53s`.
+- Dictionary/persistence/strict-JSON rerun: `18 passed in 0.12s`; dictionary/config compatibility: `48 passed in 0.54s`; active CLI config/dictionary boundary: `6 passed in 0.07s`.
+- Generation/method-evaluation binding: `2 passed in 0.44s`; exact cache schemas: `6 passed in 0.50s`; cache-integrity propagation including ordinary provider behavior: `7 passed in 0.47s`.
+- Decision/Hindcast focused rerun: `8 passed in 0.11s`; full selector policy compatibility files: `121 passed in 0.47s`.
+- Report/paired-count focused rerun: `6 passed in 0.11s`; complete filter/screening/selector script files: `66 passed in 1.43s`.
+- Targetwise/policy/case/materialized-dictionary binding: `4 passed in 1.13s`; frozen W/T/L/M/U: `3 passed in 0.41s`; rescore sentinel/text surface: `3 passed in 0.10s`.
+- Expanded focused suite first exposed one stale rescore W/T/L expectation (`1 failed, 614 passed in 14.56s`); after updating the schema expectation, final expanded verification passed: `615 passed in 15.36s`.
+- Final post-self-review revalidation, including compile and diff checks: `615 passed in 14.30s`.
+- `python -m compileall -q common numerical_agent`: passed. `git diff --check`: passed.
+
+### Files and self-review
+
+- Mean-pair lifecycle: `common/evolution_core/controller.py`, batch/targetwise/policy evolution and their tests.
+- Schema/legacy boundary: `common/{payload,evolution_core/contracts,evolution_core/persistence}.py`, ToolDictionary, config/main/experiment, both caches, Decision/Hindcast parsers, frozen/rescore readers and tests.
+- Release/report surfaces: filter, screening, selector, audit, frozen evaluation, rescore, targetwise generation artifacts, fixtures, and focused lifecycle tests.
+- Confirmed active parsers never default missing schema/policy fields; bool/float schema aliases reject; legacy conversion is explicit and report-only; cache corruption cannot fall through Combined fallback; ordinary provider failures retain outcome classification.
+- Confirmed mean-only Pareto acceptance, joint pair ordering, raw safety tails, complete W/T/L/M/U conservation, exact-Parent Dev rejection, no Public/Hidden mutation, and no active `catastrophic_mase` field.
+- Confirmed no historical file under `runs/` was opened or rewritten, no Retrieval/Decision or Task 6 documentation/final-smoke implementation changed, and untracked `runs/numerical_morphology/` remains unstaged.
+
+### Concerns
+
+None.

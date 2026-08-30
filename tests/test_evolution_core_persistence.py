@@ -48,7 +48,12 @@ def test_json_store_round_trips_checkpoint_and_artifact(tmp_path) -> None:
         {"generation": 2, "accepted_artifact": {"id": "v002"}}
     )
 
-    assert json.loads(artifact_path.read_text())["id"] == "v000"
+    assert json.loads(artifact_path.read_text()) == {
+        "schema_version": 2,
+        **metric_policy_metadata(),
+        "id": "v000",
+        "quality": 1,
+    }
     assert checkpoint_path.name == "checkpoint.json"
     assert store.load_checkpoint() == {
         "schema_version": 2,
@@ -95,6 +100,38 @@ def test_json_store_appends_one_trace_object_per_line(tmp_path) -> None:
 
     trace_path = tmp_path / "evolution_trace.jsonl"
     assert [json.loads(line) for line in trace_path.read_text().splitlines()] == [
-        {"generation": 0, "accepted": False},
-        {"generation": 1, "accepted": True},
+        {
+            "schema_version": 2,
+            **metric_policy_metadata(),
+            "generation": 0,
+            "accepted": False,
+        },
+        {
+            "schema_version": 2,
+            **metric_policy_metadata(),
+            "generation": 1,
+            "accepted": True,
+        },
     ]
+
+
+@pytest.mark.parametrize("schema_version", (True, 2.0))
+def test_active_checkpoint_rejects_noninteger_schema_aliases(
+    tmp_path, schema_version
+) -> None:
+    (tmp_path / "checkpoint.json").write_text(json.dumps({
+        "schema_version": schema_version,
+        **metric_policy_metadata(),
+        "generation": 1,
+        "accepted_artifact": {"id": "v001"},
+    }), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="schema_version"):
+        JsonArtifactStore(tmp_path).load_checkpoint()
+
+
+def test_generic_artifact_rejects_incomplete_active_envelope(tmp_path) -> None:
+    with pytest.raises(ValueError, match="metric policy"):
+        JsonArtifactStore(tmp_path).save_artifact(
+            "legacy", {"schema_version": 2, "id": "legacy"}
+        )

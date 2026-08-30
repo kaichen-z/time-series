@@ -1,5 +1,6 @@
 {
   "evolution": {
+    "schema_version": 2,
     "metric_policy": {
       "schema_version": 2,
       "primary": ["smae", "srmse"],
@@ -14,6 +15,7 @@
     "resume": true
   },
   "curation": {
+    "schema_version": 2,
     "max_revisions_per_method": 1,
     "dictionary_metric": "smae",
     "method_metric": "smae",

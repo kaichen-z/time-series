@@ -111,6 +111,23 @@ def load_active_release(payload: Mapping[str, object]) -> dict[str, object]:
     return dict(payload)
 
 
+def active_envelope(
+    payload: Mapping[str, object], *, context: str = "active artifact"
+) -> dict[str, object]:
+    """Bind raw active data, but never repair a partial or legacy envelope."""
+    binding_fields = {"schema_version", "metric_policy", "metric_policy_fingerprint"}
+    if binding_fields & set(payload):
+        try:
+            return load_active_release(payload)
+        except ValueError as error:
+            raise ValueError(f"{context}: {error}") from error
+    return {
+        "schema_version": 2,
+        **metric_policy_metadata(),
+        **dict(payload),
+    }
+
+
 def _normalized_metric_policy(policy: Mapping[str, object]) -> dict[str, object]:
     primary = policy.get("primary")
     if isinstance(primary, Sequence) and not isinstance(primary, (str, bytes)):

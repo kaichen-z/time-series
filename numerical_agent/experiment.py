@@ -35,6 +35,7 @@ def build_experiment(
     dev = _select(tasks, partitions["dev"], dev_limit, "dev")
     return {
         "evolution": {
+            "schema_version": 2,
             **metric_policy_metadata(),
             "generations": generations,
             "children_per_generation": children_per_generation,
@@ -42,6 +43,7 @@ def build_experiment(
             "resume": True,
         },
         "curation": {
+            "schema_version": 2,
             **metric_policy_metadata(),
             "allowed_families": ["statistical"],
             "max_revisions_per_method": max_revisions_per_method,

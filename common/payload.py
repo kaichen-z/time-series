@@ -7,6 +7,27 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 
+def strict_json_loads(source: str, *, context: str = "JSON payload") -> object:
+    """Parse standards JSON while rejecting duplicate keys at every depth."""
+
+    def object_from_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"{context} contains duplicate key {key!r}")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> object:
+        raise ValueError(f"{context} contains non-finite constant {value}")
+
+    return json.loads(
+        source,
+        object_pairs_hook=object_from_pairs,
+        parse_constant=reject_constant,
+    )
+
+
 def canonical_json_bytes(payload: Mapping[str, object]) -> bytes:
     """Serialize a payload deterministically so content hashes stay reproducible."""
     return (
@@ -15,6 +36,20 @@ def canonical_json_bytes(payload: Mapping[str, object]) -> bytes:
             ensure_ascii=False,
             indent=2,
             sort_keys=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def canonical_json_line_bytes(payload: Mapping[str, object]) -> bytes:
+    """Serialize one strict canonical JSONL object."""
+    return (
+        json.dumps(
+            standards_json_value(payload),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
             allow_nan=False,
         )
         + "\n"
@@ -65,7 +100,9 @@ def write_json(path: str | Path, payload: Mapping[str, object]) -> Path:
 def read_json_object(path: str | Path) -> dict[str, object]:
     """Read a JSON file that must contain an object at the top level."""
     source = Path(path)
-    payload = json.loads(source.read_text(encoding="utf-8"))
+    payload = strict_json_loads(
+        source.read_text(encoding="utf-8"), context=str(source)
+    )
     if not isinstance(payload, dict):
         raise ValueError(f"{source} must contain a JSON object")
     return payload

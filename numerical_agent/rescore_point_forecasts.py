@@ -12,7 +12,7 @@ from common.evolution_core.contracts import (
     METRIC_POLICY_FINGERPRINT,
     metric_report_metadata,
 )
-from common.payload import write_json
+from common.payload import standards_json_value, write_json
 
 from .evaluate_frozen_two_stage import (
     ForecastResult,
@@ -108,7 +108,7 @@ def render_point_report(payload: Mapping[str, object]) -> str:
         "- Model calls: **0**; all forecasts were read from the frozen artifact",
         "- Status: public-label development/regression metrics, not an official hidden-test score",
         "",
-        "| Row | Mean sMAE | Median sMAE | sMAE SE | Mean sRMSE | Median sRMSE | sRMSE SE | Raw P90/P95 sMAE/sRMSE | Clipped sMAE/sRMSE | Coverage | W/T/L vs baseline (joint) |",
+        "| Row | Mean sMAE | Median sMAE | sMAE SE | Mean sRMSE | Median sRMSE | sRMSE SE | Raw P90/P95 sMAE/sRMSE | Clipped sMAE/sRMSE | Coverage | W/T/L/M/U vs baseline (joint) |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name, raw in rows.items():
@@ -125,7 +125,8 @@ def render_point_report(payload: Mapping[str, object]) -> str:
             f"{_number(raw['p90_srmse_raw'])}/{_number(raw['p95_srmse_raw'])} | "
             f"{raw['smae_clipped_count']}/{raw['srmse_clipped_count']} | "
             f"{_number(raw['coverage'], digits=4)} | "
-            f"{comparison['wins']}/{comparison['ties']}/{comparison['losses']} |"
+            f"{comparison['wins']}/{comparison['ties']}/{comparison['losses']}/"
+            f"{comparison['missing']}/{comparison['unscored']} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -178,7 +179,11 @@ def _sequence(value: object, name: str) -> Sequence[object]:
 
 def _number(value: object, *, digits: int = 6) -> str:
     number = float(value)
-    return f"{number:.{digits}f}" if math.isfinite(number) else "n/a"
+    if math.isnan(number):
+        raise ValueError("rescore report cannot render NaN")
+    if math.isinf(number):
+        return "positive_infinity" if number > 0 else "negative_infinity"
+    return f"{number:.{digits}f}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -195,18 +200,18 @@ def main(argv: list[str] | None = None) -> int:
     (output / "POINT_RESCORE_REPORT.md").write_text(
         render_point_report(payload), encoding="utf-8"
     )
-    print(json.dumps(_finite_json(payload), ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(
+        _finite_json(payload),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    ))
     return 0
 
 
 def _finite_json(value: object) -> object:
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    if isinstance(value, Mapping):
-        return {str(key): _finite_json(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_finite_json(item) for item in value]
-    return value
+    return standards_json_value(value)
 
 
 if __name__ == "__main__":

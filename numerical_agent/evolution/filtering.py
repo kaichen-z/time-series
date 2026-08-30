@@ -169,6 +169,7 @@ class FilterScore:
     srmse_clipped_count: int = 0
     srmse_clipped_rate: float = 1.0
     task_scaled_pairs: Mapping[str, tuple[float, float]] = field(default_factory=dict)
+    task_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -500,6 +501,7 @@ def evaluate_filter(
         srmse_clipped_count=srmse_clipped_count,
         srmse_clipped_rate=srmse_clipped_count / len(tasks) if tasks else 1.0,
         task_scaled_pairs=task_scaled_pairs,
+        task_count=len(tasks),
     )
 
 

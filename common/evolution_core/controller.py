@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Generic, Mapping, Sequence, TypeVar
 
+from common.metrics import joint_scaled_error
+
 from .contracts import (
     EvaluationReport,
     EvolutionComponents,
@@ -171,12 +173,17 @@ class SelfEvolutionEngine(Generic[ArtifactT, ItemT, ResultT]):
     ) -> tuple[ArtifactT, EvaluationReport] | None:
         if not pairs:
             return None
-        metric_name = self.config.metric.name
-        reverse = self.config.metric.objective == "maximize"
         return sorted(
             pairs,
-            key=lambda pair: pair[1].metrics[metric_name],
-            reverse=reverse,
+            key=lambda pair: (
+                joint_scaled_error(
+                    float(pair[1].metrics["smae"]),
+                    float(pair[1].metrics["srmse"]),
+                ),
+                float(pair[1].metrics["smae"]),
+                float(pair[1].metrics["srmse"]),
+                self.components.artifact_adapter.artifact_id(pair[0]),
+            ),
         )[0]
 
     def _restore_checkpoint(

@@ -27,9 +27,38 @@ class HindcastConfig:
     min_successful_folds: int = 2
     catastrophic_smae_raw: float = 10.0
     catastrophic_srmse_raw: float = 10.0
-    # Compatibility-only: retained for frozen callers; never read by selector gates.
-    catastrophic_mase: float = 10.0
     long_horizon_audit: bool = False
+
+    @classmethod
+    def from_payload(
+        cls, payload: Mapping[str, object], *, allow_legacy: bool = False
+    ) -> "HindcastConfig":
+        """Parse an active config, or explicitly consume a report-only legacy row."""
+        raw = dict(payload)
+        if "catastrophic_mase" in raw:
+            if not allow_legacy:
+                raise ValueError(
+                    "legacy catastrophic_mase requires allow_legacy=True report-only parsing"
+                )
+            raw.pop("catastrophic_mase")
+        defaults = asdict(cls())
+        if allow_legacy:
+            raw = {**defaults, **raw}
+        missing = set(defaults) - set(raw)
+        unknown = set(raw) - set(defaults)
+        if missing or unknown:
+            raise ValueError(
+                "invalid HindcastConfig fields: "
+                f"missing={sorted(missing)}, unknown={sorted(unknown)}"
+            )
+        if type(raw["folds"]) is not int or type(raw["min_successful_folds"]) is not int:
+            raise ValueError("HindcastConfig fold counts must be exact integers")
+        if type(raw["long_horizon_audit"]) is not bool:
+            raise ValueError("long_horizon_audit must be a boolean")
+        for field in ("catastrophic_smae_raw", "catastrophic_srmse_raw"):
+            if isinstance(raw[field], bool) or not isinstance(raw[field], (int, float)):
+                raise ValueError(f"{field} must be numeric")
+        return cls(**raw)  # type: ignore[arg-type]
 
     def __post_init__(self) -> None:
         if self.folds < 1:
@@ -43,8 +72,6 @@ class HindcastConfig:
             or self.catastrophic_srmse_raw <= 0
         ):
             raise ValueError("raw scaled catastrophe thresholds must be positive")
-        if not math.isfinite(self.catastrophic_mase) or self.catastrophic_mase <= 0:
-            raise ValueError("legacy catastrophic_mase must be positive")
 
 
 @dataclass(frozen=True)
@@ -254,44 +281,48 @@ class DecisionPolicy:
     ) -> "DecisionPolicy":
         """Parse active scaled policies; legacy MASE migration is opt-in only."""
         raw = dict(payload)
-        legacy_keys = {"catastrophic_mase", "median_mase", "recent_mase", "worst_mase", "mase_mad"}
-        if legacy_keys & set(raw) and not allow_legacy:
+        legacy_keys = {
+            "catastrophic_mase", "median_mase", "recent_mase", "worst_mase",
+            "mase_mad", "median_rmsse", "median_smape",
+        }
+        present_legacy = legacy_keys & set(raw)
+        if present_legacy and not allow_legacy:
             raise ValueError("legacy MASE policy fields require allow_legacy=True")
-        raw.pop("catastrophic_mase", None)
+        if allow_legacy:
+            for field in legacy_keys:
+                raw.pop(field, None)
         if "ranking_order" in raw:
             ranking = raw["ranking_order"]
             if isinstance(ranking, (str, bytes)):
                 raise ValueError("ranking_order must be a sequence")
             ranking = tuple(ranking)  # type: ignore[arg-type]
-            if any(
-                str(field) in {
-                    "median_mase", "recent_mase", "worst_mase", "mase_mad",
-                    "median_rmsse", "median_smape",
-                }
-                for field in ranking
-            ) and not allow_legacy:
+            legacy_ranking = {
+                "median_mase": "median_joint_scaled_error",
+                "recent_mase": "recent_joint_scaled_error",
+                "worst_mase": "worst_joint_scaled_error",
+                "mase_mad": "smae_mad",
+                "median_rmsse": "median_srmse",
+            }
+            if any(str(field) in legacy_ranking or str(field) == "median_smape" for field in ranking) and not allow_legacy:
                 raise ValueError("legacy MASE policy fields require allow_legacy=True")
+            if allow_legacy:
+                ranking = tuple(legacy_ranking.get(str(field), str(field)) for field in ranking)
             raw["ranking_order"] = ranking
-        allowed = set(asdict(cls()))
+        defaults = asdict(cls())
+        if allow_legacy:
+            raw = {**defaults, **raw}
+        allowed = set(defaults)
+        missing = allowed - set(raw)
         unknown = set(raw) - allowed
-        if unknown:
-            raise ValueError(f"unsupported DecisionPolicy fields: {sorted(unknown)}")
+        if missing or unknown:
+            raise ValueError(
+                "invalid DecisionPolicy fields: "
+                f"missing={sorted(missing)}, unsupported={sorted(unknown)}"
+            )
         return cls(**raw)  # type: ignore[arg-type]
 
     def __post_init__(self) -> None:
-        legacy_ranking = {
-            "median_mase": "median_joint_scaled_error",
-            "recent_mase": "recent_joint_scaled_error",
-            "worst_mase": "worst_joint_scaled_error",
-            "mase_mad": "smae_mad",
-            "median_rmsse": "median_srmse",
-        }
-        normalized_order = tuple(
-            legacy_ranking.get(field, field) for field in self.ranking_order
-        )
-        # Old frozen payloads are read-only inputs; the live object never carries
-        # an MASE ranking field into selection or override logic.
-        object.__setattr__(self, "ranking_order", normalized_order)
+        normalized_order = tuple(self.ranking_order)
         allowed = {
             "median_joint_scaled_error", "recent_joint_scaled_error",
             "worst_joint_scaled_error", "median_smae", "recent_smae",

@@ -16,7 +16,7 @@ from common.evolution_core.contracts import (
     METRIC_POLICY_FINGERPRINT,
     metric_policy_metadata,
     metric_report_metadata,
-    require_active_metric_policy,
+    load_active_release,
 )
 from common.metrics import (
     drcik_point_metrics,
@@ -83,12 +83,8 @@ def verify_frozen_policies(
         raise ValueError("Public Test evaluation has already completed")
     screen_manifest = read_json_object(screen_dir / "screening_manifest.json")
     selector_manifest = read_json_object(decision_dir / "selector_manifest.json")
-    require_active_metric_policy(screen_manifest, context="active screening release")
-    require_active_metric_policy(selector_manifest, context="active selector release")
-    if screen_manifest.get("schema_version") != 2:
-        raise ValueError("active screening release schema_version must be 2")
-    if selector_manifest.get("schema_version") != 2:
-        raise ValueError("active selector release schema_version must be 2")
+    load_active_release(screen_manifest)
+    load_active_release(selector_manifest)
     screen_hash = _sha256(screen_dir / "frozen_screening_policy.py")
     decision_hash = _sha256(decision_dir / "frozen_decision_policy.py")
     if screen_manifest.get("frozen_screening_policy_sha256") != screen_hash:
@@ -275,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     with (output / "per_task_results.jsonl").open("w", encoding="utf-8") as handle:
         for task in tasks:
             payload = {
+                "schema_version": 2,
                 **metric_policy_metadata(),
                 "task_id": task.task_id,
                 "rows": {
@@ -440,7 +437,7 @@ def _result(case, selected, weights, forecast, mode, *, assumption_ids=()) -> Fo
 def _paired_counts(
     per_task, baseline: Mapping[str, tuple[float, float]]
 ) -> dict[str, int]:
-    result = {"wins": 0, "ties": 0, "losses": 0, "missing": 0}
+    result = {"wins": 0, "ties": 0, "losses": 0, "missing": 0, "unscored": 0}
     seen = set()
     for row in per_task:
         task_id = str(row["task_id"])
@@ -491,7 +488,7 @@ def _report(payload: Mapping[str, object]) -> str:
         "- Diagnostic only: MASE, MAE, sMAPE, RMSSE",
         f"- LLM / mutation calls: {payload['llm_calls']} / {payload['mutation_calls']}",
         "",
-        "| Row | Mean sMAE | Median sMAE | sMAE SE | Mean sRMSE | Median sRMSE | sRMSE SE | Raw P90/P95 sMAE/sRMSE | Clipped sMAE/sRMSE | Coverage | W/T/L vs A (joint) | Mean MASE [diagnostic] | Mean RMSSE [diagnostic] | Mean MAE [diagnostic] | Methods | Families | Ensemble |",
+        "| Row | Mean sMAE | Median sMAE | sMAE SE | Mean sRMSE | Median sRMSE | sRMSE SE | Raw P90/P95 sMAE/sRMSE | Clipped sMAE/sRMSE | Coverage | W/T/L/M/U vs A (joint) | Mean MASE [diagnostic] | Mean RMSSE [diagnostic] | Mean MAE [diagnostic] | Methods | Families | Ensemble |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name, raw in scores.items():
@@ -505,7 +502,8 @@ def _report(payload: Mapping[str, object]) -> str:
             f"{score['p90_srmse_raw']:.6f}/{score['p95_srmse_raw']:.6f} | "
             f"{score['smae_clipped_count']}/{score['srmse_clipped_count']} | "
             f"{score['coverage']:.4f} | "
-            f"{comparison['wins']}/{comparison['ties']}/{comparison['losses']} | "
+            f"{comparison['wins']}/{comparison['ties']}/{comparison['losses']}/"
+            f"{comparison['missing']}/{comparison['unscored']} | "
             f"{score['mean_mase']:.6f} | {score['mean_rmsse']:.6f} | "
             f"{score['mean_mae']:.6f} | "
             f"{score['method_diversity']} | "

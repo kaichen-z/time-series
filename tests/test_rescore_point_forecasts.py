@@ -5,11 +5,26 @@ import json
 import pytest
 
 from common.evolution_core.contracts import METRIC_POLICY_FINGERPRINT
+from common.payload import decode_infinity_sentinel, strict_json_loads
 from numerical_agent.evolution.execution import Task
 from numerical_agent.rescore_point_forecasts import (
+    _finite_json,
+    _number,
     render_point_report,
     rescore_cached_point_forecasts,
 )
+
+
+def test_rescore_raw_infinity_round_trips_as_strict_explicit_sentinel() -> None:
+    encoded = json.dumps(_finite_json({"p95_smae_raw": float("inf")}), allow_nan=False)
+    decoded = strict_json_loads(encoded)
+
+    assert decoded == {
+        "p95_smae_raw": {"status": "positive_infinity", "value": None}
+    }
+    assert decode_infinity_sentinel(decoded["p95_smae_raw"], "p95_smae_raw") == float("inf")
+    assert _number(float("inf")) == "positive_infinity"
+    assert _number(float("-inf")) == "negative_infinity"
 
 
 def _write_rows(path) -> None:
@@ -64,6 +79,7 @@ def test_rescore_uses_cached_forecasts_without_probabilistic_metrics(tmp_path):
     assert payload["rows"]["baseline"]["mean_smae"] == pytest.approx(1.0)
     assert payload["paired_vs_baseline"]["candidate"] == {
         "wins": 2, "ties": 0, "losses": 0, "missing": 0,
+        "unscored": 0,
     }
     report = render_point_report(payload)
     assert "sCRPS: **not computed**" in report
@@ -71,6 +87,7 @@ def test_rescore_uses_cached_forecasts_without_probabilistic_metrics(tmp_path):
     assert "Median sMAE" in report
     assert "Mean sRMSE" in report
     assert "Raw P90/P95 sMAE/sRMSE" in report
+    assert "W/T/L/M/U vs baseline" in report
 
 
 def test_rescore_rejects_duplicate_or_mismatched_task_rows(tmp_path):

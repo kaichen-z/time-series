@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from common.evolution_core.contracts import require_active_metric_policy
 from common.llm import FakeLLMClient, LLMResponse
 from numerical_agent.evolution import commit_module, init_repo
 from numerical_agent.evolution.cache import OutcomeCache
@@ -118,6 +119,21 @@ def test_targetwise_gate_rejects_srmse_regression_and_ignores_legacy_gain() -> N
     assert not _strict_non_regression(metrics)
 
 
+def test_targetwise_gate_rejects_median_only_improvement() -> None:
+    metrics = {
+        "parent_mean_smae": 1.0,
+        "parent_mean_srmse": 1.0,
+        "parent_median_smae": 1.0,
+        "parent_median_srmse": 1.0,
+        "child_mean_smae": 1.0,
+        "child_mean_srmse": 1.0,
+        "child_median_smae": 0.7,
+        "child_median_srmse": 0.8,
+    }
+
+    assert not _strict_non_regression(metrics)
+
+
 def test_invalid_target_does_not_block_a_later_improving_child(tmp_path: Path) -> None:
     repo = init_repo(tmp_path / "repo")
     parent = parse_module(
@@ -165,6 +181,11 @@ def test_invalid_target_does_not_block_a_later_improving_child(tmp_path: Path) -
     assert outcome.applied == (
         "fork beta -> beta_last: replace the biased zero forecast with a distinct challenger",
     )
+    generation_payload = json.loads(
+        (repo / "generation_001_targetwise.json").read_text(encoding="utf-8")
+    )
+    assert generation_payload["schema_version"] == 2
+    require_active_metric_policy(generation_payload)
     assert read_module(repo / "methods.py").names() == ("alpha", "beta", "beta_last")
     assert outcome.cache_misses > 0
 

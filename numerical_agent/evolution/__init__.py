@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from common.llm import LLMClient, parse_json_object
+from common.evolution_core.contracts import metric_report_metadata
+from common.metrics import pareto_scaled_improvement
 from common.payload import write_json
 from common.tracing import TraceEvent, emit
 
@@ -146,7 +148,15 @@ def evolve_once(
 
     _, reports = run_module(module_path, tasks, isolated=isolate_methods)
     payload = report_payload(reports)
-    write_json(root / f"generation_{generation:03d}_metrics.json", {"reports": payload})
+    write_json(
+        root / f"generation_{generation:03d}_metrics.json",
+        {
+            "schema_version": 2,
+            **metric_report_metadata(),
+            "generation": generation,
+            "reports": payload,
+        },
+    )
 
     if selector_llm is None:
         system = EVOLVE_SYSTEM
@@ -468,23 +478,25 @@ def _validate_candidate(
         **{f"parent_{name}": value for name, value in parent_metrics.items()},
         **{f"child_{name}": value for name, value in child_metrics.items()},
     }
-    write_json(root / f"generation_{generation:03d}_validation.json", payload)
+    write_json(
+        root / f"generation_{generation:03d}_validation.json",
+        {
+            "schema_version": 2,
+            **metric_report_metadata(),
+            "generation": generation,
+            **payload,
+        },
+    )
     accepted = _scaled_validation_accepts(payload)
     return accepted, payload
 
 
 def _scaled_validation_accepts(metrics: Mapping[str, float]) -> bool:
-    tolerance = 1e-12
-    fields = ("mean_smae", "mean_srmse", "median_smae", "median_srmse")
-    return all(
-        math.isfinite(float(metrics[f"child_{field}"]))
-        and float(metrics[f"child_{field}"])
-        <= float(metrics[f"parent_{field}"]) + tolerance
-        for field in fields
-    ) and any(
-        float(metrics[f"child_{field}"])
-        < float(metrics[f"parent_{field}"]) - tolerance
-        for field in fields
+    return pareto_scaled_improvement(
+        float(metrics["parent_mean_smae"]),
+        float(metrics["parent_mean_srmse"]),
+        float(metrics["child_mean_smae"]),
+        float(metrics["child_mean_srmse"]),
     )
 
 

@@ -213,8 +213,9 @@ def _status_counts(dictionary) -> dict[str, int]:
 
 
 def _paired_filter_counts(parent, child) -> dict[str, int]:
-    result = {"wins": 0, "ties": 0, "losses": 0, "missing": 0}
-    for task_id in sorted(set(parent.task_scaled_pairs) | set(child.task_scaled_pairs)):
+    result = {"wins": 0, "ties": 0, "losses": 0, "missing": 0, "unscored": 0}
+    observed = set(parent.task_scaled_pairs) | set(child.task_scaled_pairs)
+    for task_id in sorted(observed):
         if task_id not in parent.task_scaled_pairs or task_id not in child.task_scaled_pairs:
             result["missing"] += 1
             continue
@@ -226,6 +227,12 @@ def _paired_filter_counts(parent, child) -> dict[str, int]:
             result["losses"] += 1
         else:
             result["ties"] += 1
+    expected = max(
+        int(getattr(parent, "task_count", len(observed))),
+        int(getattr(child, "task_count", len(observed))),
+        len(observed),
+    )
+    result["unscored"] = expected - len(observed)
     return result
 
 
@@ -242,7 +249,11 @@ def _validate_seed_manifest(
 ) -> dict[str, object]:
     payload = read_json_object(path)
     require_active_metric_policy(payload, context="active evolution seed")
-    if payload.get("schema_version") != 2 or payload.get("seed_kind") != seed_kind:
+    if (
+        type(payload.get("schema_version")) is not int
+        or payload["schema_version"] != 2
+        or payload.get("seed_kind") != seed_kind
+    ):
         raise ValueError("active evolution seed manifest schema or kind mismatch")
     expected = {
         "methods.py": _sha256(repo / "methods.py"),
@@ -271,17 +282,47 @@ def _markdown(payload: dict[str, object]) -> str:
         f"- Elapsed: {float(payload['elapsed_seconds']):.2f} seconds",
         f"- Changes: {len(payload['changes'])}",
         "",
-        "| Split | Parent mean sMAE | Child mean sMAE | Parent mean sRMSE | Child mean sRMSE | Parent coverage | Child coverage |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| Split | Parent mean sMAE | Parent median sMAE | Parent sMAE SE | Child mean sMAE | Child median sMAE | Child sMAE SE | Parent mean sRMSE | Parent median sRMSE | Parent sRMSE SE | Child mean sRMSE | Child median sRMSE | Child sRMSE SE | Parent coverage | Child coverage |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for split in ("train", "dev"):
         left = parent[split]
         right = child[split]
         assert isinstance(left, dict) and isinstance(right, dict)
         lines.append(
-            f"| {split} | {left['mean_smae']:.6f} | {right['mean_smae']:.6f} | "
-            f"{left['mean_srmse']:.6f} | {right['mean_srmse']:.6f} | "
+            f"| {split} | {left['mean_smae']:.6f} | {left['median_smae']:.6f} | {left['se_smae']:.6f} | "
+            f"{right['mean_smae']:.6f} | {right['median_smae']:.6f} | {right['se_smae']:.6f} | "
+            f"{left['mean_srmse']:.6f} | {left['median_srmse']:.6f} | {left['se_srmse']:.6f} | "
+            f"{right['mean_srmse']:.6f} | {right['median_srmse']:.6f} | {right['se_srmse']:.6f} | "
             f"{left['coverage']:.4f} | {right['coverage']:.4f} |"
+        )
+    lines.extend((
+        "",
+        "| Split | Side | Raw P90/P95 sMAE | Raw P90/P95 sRMSE | Clipped sMAE/sRMSE |",
+        "|---|---|---:|---:|---:|",
+    ))
+    for split in ("train", "dev"):
+        for side, scores in (("Parent", parent[split]), ("Child", child[split])):
+            assert isinstance(scores, dict)
+            lines.append(
+                f"| {split} | {side} | {scores['p90_smae_raw']:.6f}/{scores['p95_smae_raw']:.6f} | "
+                f"{scores['p90_srmse_raw']:.6f}/{scores['p95_srmse_raw']:.6f} | "
+                f"{scores['smae_clipped_count']} ({scores['smae_clipped_rate']:.4f}) / "
+                f"{scores['srmse_clipped_count']} ({scores['srmse_clipped_rate']:.4f}) |"
+            )
+    lines.extend((
+        "",
+        "| Split | Wins / Ties / Losses / Missing / Unscored |",
+        "|---|---:|",
+    ))
+    paired = payload["paired_joint_wtl"]
+    assert isinstance(paired, dict)
+    for split in ("train", "dev"):
+        counts = paired[split]
+        assert isinstance(counts, dict)
+        lines.append(
+            f"| {split} | {counts['wins']} / {counts['ties']} / {counts['losses']} / "
+            f"{counts['missing']} / {counts['unscored']} |"
         )
     lines.extend((
         "",

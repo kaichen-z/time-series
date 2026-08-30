@@ -429,6 +429,22 @@ def test_policy_cache_existing_wrong_policy_binding_fails_closed(tmp_path: Path)
         cache.evaluate(policy, task, _registry(runtime))
 
 
+@pytest.mark.parametrize("schema", (True, 3.0))
+def test_policy_cache_rejects_noninteger_schema_aliases(tmp_path: Path, schema) -> None:
+    cache = PolicyOutcomeCache(tmp_path / "policy-cache")
+    runtime = FakeTSFMRuntime({method_id: 1.0 for method_id in FLAGSHIP_METHOD_IDS})
+    policy = _portfolio().tsfm[0]
+    task = _tasks()[0]
+    cache.evaluate(policy, task, _registry(runtime))
+    entry = next((tmp_path / "policy-cache").glob("*.json"))
+    payload = json.loads(entry.read_text(encoding="utf-8"))
+    payload["cache_schema"] = schema
+    entry.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(PolicyError, match="schema mismatch"):
+        cache.evaluate(policy, task, _registry(runtime))
+
+
 def test_combined_forecast_is_computed_from_both_parent_forecasts(tmp_path: Path) -> None:
     module = _module()
     portfolio = _portfolio()

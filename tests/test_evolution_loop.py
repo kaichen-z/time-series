@@ -5,8 +5,10 @@ from pathlib import Path
 
 import pytest
 
+from common.evolution_core.contracts import METRIC_POLICY_FINGERPRINT
 from common.llm import FakeLLMClient
 from numerical_agent.evolution import (
+    _scaled_validation_accepts,
     _validate_candidate,
     bootstrap,
     commit_module,
@@ -137,6 +139,21 @@ def test_batch_validation_rejects_srmse_regression_despite_smae_improvement(
     assert not accepted
 
 
+def test_batch_validation_rejects_median_only_improvement() -> None:
+    metrics = {
+        "parent_mean_smae": 1.0,
+        "parent_mean_srmse": 1.0,
+        "parent_median_smae": 1.0,
+        "parent_median_srmse": 1.0,
+        "child_mean_smae": 1.0,
+        "child_mean_srmse": 1.0,
+        "child_median_smae": 0.8,
+        "child_median_srmse": 0.9,
+    }
+
+    assert not _scaled_validation_accepts(metrics)
+
+
 def test_bootstrap_writes_and_commits_a_module(tmp_path: Path) -> None:
     llm = FakeLLMClient([
         json.dumps({"code": method("naive_last")}),
@@ -224,6 +241,8 @@ def test_metrics_and_transcript_are_written_each_generation(tmp_path: Path) -> N
     evolve_once(repo, tasks(), llm, 4)
 
     metrics = json.loads((repo / "generation_004_metrics.json").read_text(encoding="utf-8"))
+    assert metrics["schema_version"] == 2
+    assert metrics["metric_policy_fingerprint"] == METRIC_POLICY_FINGERPRINT
     assert {entry["method"] for entry in metrics["reports"]} == {"alpha", "beta"}
     assert (repo / "transcripts" / "generation_004.md").exists()
 

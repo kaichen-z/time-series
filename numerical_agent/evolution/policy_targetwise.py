@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from common.llm import LLMClient, parse_json_object
+from common.evolution_core.contracts import metric_report_metadata
 from common.metrics import joint_scaled_error, pareto_scaled_improvement
 from common.payload import write_json
 
@@ -356,6 +357,8 @@ def evolve_policies_once(
     hits = outcome_cache.stats.hits + policy_cache.stats.hits - initial_hits
     misses = outcome_cache.stats.misses + policy_cache.stats.misses - initial_misses
     payload = {
+        "schema_version": 2,
+        **metric_report_metadata(),
         "generation": generation,
         "candidate_count": len(module.names()) + len(current.names),
         "cache_hits": hits,
@@ -554,7 +557,16 @@ def _diagnose(
     diagnostics = diagnose_forecasts(target, selected, tasks)
     directory = root / "diagnostics"
     directory.mkdir(parents=True, exist_ok=True)
-    write_json(directory / f"generation_{generation:03d}_policy_{index:02d}_{target}.json", diagnostics)
+    write_json(
+        directory / f"generation_{generation:03d}_policy_{index:02d}_{target}.json",
+        {
+            "schema_version": 2,
+            **metric_report_metadata(),
+            "generation": generation,
+            "target": target,
+            "diagnostics": diagnostics,
+        },
+    )
     user = render_failure_judge_user(diagnostics)
     try:
         response = judge.complete(

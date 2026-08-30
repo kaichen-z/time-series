@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from common.llm import FakeLLMClient
+from common.evolution_core.contracts import require_active_metric_policy
 from numerical_agent.dictionary import MethodCandidate
 from numerical_agent.evolution import commit_module, init_repo
 from numerical_agent.evolution.cache import OutcomeCache
@@ -134,6 +135,11 @@ def test_combined_policy_child_is_screened_validated_and_committed(tmp_path: Pat
     assert result.candidates[0].accepted and result.candidates[0].promoted
     assert read_policy_file(repo / "policies.py").combined[0].weights == (0.90, 0.10)
     assert result.candidate_count == 15  # five test Python parents + ten policies
+    generation_payload = json.loads(
+        (repo / "generation_001_policies.json").read_text(encoding="utf-8")
+    )
+    assert generation_payload["schema_version"] == 2
+    require_active_metric_policy(generation_payload)
 
 
 def test_policy_mutator_can_change_combined_parents(tmp_path: Path) -> None:

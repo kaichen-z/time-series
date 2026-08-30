@@ -14,6 +14,7 @@ from common.evolution_core.contracts import (
     metric_policy_metadata,
     require_active_metric_policy,
 )
+from common.payload import strict_json_loads
 
 from .execution import (
     CRASHED,
@@ -197,19 +198,25 @@ class OutcomeCache:
         if not path.exists():
             return None
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+            payload = strict_json_loads(
+                path.read_text(encoding="utf-8"), context="active outcome cache row"
+            )
+        except (OSError, ValueError) as error:
             raise CacheError("malformed active outcome cache row") from error
         try:
             if not isinstance(payload, Mapping):
                 raise CacheError("active outcome cache row must be an object")
             require_active_metric_policy(payload, context="active outcome cache row")
-            if payload.get("cache_schema") != CACHE_SCHEMA:
+            if (
+                type(payload.get("cache_schema")) is not int
+                or payload["cache_schema"] != CACHE_SCHEMA
+            ):
                 raise CacheError("active outcome cache row schema mismatch")
             if payload.get("key") != key:
                 raise CacheError("active outcome cache row key mismatch")
             if (
-                payload.get("scaled_metric_schema") != SCALED_METRIC_SCHEMA
+                type(payload.get("scaled_metric_schema")) is not int
+                or payload["scaled_metric_schema"] != SCALED_METRIC_SCHEMA
                 or payload.get("scaled_metric_cap") != SCALED_METRIC_CAP
             ):
                 raise CacheError("active outcome cache scaled schema mismatch")

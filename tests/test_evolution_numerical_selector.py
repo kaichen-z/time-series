@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 import math
 import random
 
@@ -227,10 +227,9 @@ def test_safe_anchor_blocks_one_metric_tail_regression():
     assert result.selected == ("toto_2_0",)
 
 
-def test_active_policy_normalizes_legacy_error_ranking_fields():
-    policy = DecisionPolicy(ranking_order=("median_mase",))
-
-    assert policy.ranking_order == ("median_joint_scaled_error",)
+def test_active_policy_rejects_legacy_error_ranking_fields():
+    with pytest.raises(ValueError, match="unsupported"):
+        DecisionPolicy(ranking_order=("median_mase",))
 
 
 def test_active_policy_parser_requires_explicit_legacy_migration_flag():
@@ -244,6 +243,30 @@ def test_active_policy_parser_requires_explicit_legacy_migration_flag():
     assert not hasattr(migrated, "catastrophic_mase")
     assert migrated.catastrophic_smae_raw == pytest.approx(10.0)
     assert migrated.catastrophic_srmse_raw == pytest.approx(10.0)
+
+
+def test_active_policy_payload_requires_every_canonical_field():
+    payload = asdict(DecisionPolicy())
+    payload.pop("median_mase", None)
+    payload.pop("long_horizon_max_regret")
+
+    with pytest.raises(ValueError, match="missing"):
+        DecisionPolicy.from_payload(payload)
+
+    assert DecisionPolicy.from_payload(payload, allow_legacy=True) == DecisionPolicy()
+
+
+def test_hindcast_config_has_no_active_catastrophic_mase_and_legacy_is_explicit():
+    active = asdict(HindcastConfig())
+    assert "catastrophic_mase" not in active
+    with pytest.raises(ValueError, match="legacy"):
+        HindcastConfig.from_payload({**active, "catastrophic_mase": 2.0})
+
+    migrated = HindcastConfig.from_payload(
+        {"folds": 3, "catastrophic_mase": 2.0}, allow_legacy=True
+    )
+    assert migrated == HindcastConfig()
+    assert not hasattr(migrated, "catastrophic_mase")
 
 
 def test_unreliable_toto_cannot_displace_a_reliable_scaled_challenger():

@@ -4,6 +4,8 @@ from typing import Sequence
 
 import pytest
 
+from common.evolution_core.contracts import metric_policy_metadata
+
 from numerical_agent.config import DictionaryCurationConfig
 from numerical_agent.dictionary import (
     MethodCandidate,
@@ -67,6 +69,72 @@ def test_dictionary_json_round_trip_preserves_external_payload() -> None:
     restored = ToolDictionary.from_payload(original.to_payload())
 
     assert restored == original
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda payload: {**payload, "schema_version": 1},
+        lambda payload: {
+            key: value for key, value in payload.items()
+            if key not in {"metric_policy", "metric_policy_fingerprint"}
+        },
+        lambda payload: {**payload, "schema_version": 2.0},
+        lambda payload: {
+            **payload,
+            "generation": True,
+        },
+        lambda payload: {
+            **payload,
+            "methods": [
+                {
+                    key: value for key, value in payload["methods"][0].items()
+                    if key != "status"
+                }
+            ],
+        },
+    ),
+)
+def test_active_dictionary_rejects_legacy_unbound_or_defaulted_fields(mutate) -> None:
+    dictionary = ToolDictionary(
+        "active",
+        None,
+        0,
+        (MethodDefinition("m1", "statistical", "active method"),),
+    )
+
+    with pytest.raises(ValueError, match="schema|metric policy|generation|status"):
+        ToolDictionary.from_payload(mutate(dictionary.to_payload()))
+
+
+def test_legacy_dictionary_reader_is_explicit_and_report_only() -> None:
+    payload = {
+        "schema_version": 1,
+        "dictionary_id": "legacy",
+        "parent_dictionary_id": None,
+        "methods": [
+            {
+                "method_id": "m1",
+                "family": "statistical",
+                "description": "historical report method",
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError):
+        ToolDictionary.from_payload(payload)
+    restored = ToolDictionary.from_legacy_report_payload(payload)
+
+    assert restored.generation == 0
+    assert restored.methods[0].status == "unimplemented"
+    assert restored.to_payload() == {
+        "schema_version": 2,
+        **metric_policy_metadata(),
+        "dictionary_id": "legacy",
+        "parent_dictionary_id": None,
+        "generation": 0,
+        "methods": [restored.methods[0].to_payload()],
+    }
 
 
 class FakeRuntime:

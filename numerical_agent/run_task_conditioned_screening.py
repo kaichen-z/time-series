@@ -479,7 +479,12 @@ def _write_active(path: Path, policy: ScreeningPolicy, tasks: Sequence[Task]) ->
     with path.open("w", encoding="utf-8") as handle:
         for task in tasks:
             active = materialize_active_dictionary(policy, profile_task(task))
-            handle.write(json.dumps(asdict(active), sort_keys=True, allow_nan=False) + "\n")
+            payload = {
+                "schema_version": 2,
+                **metric_report_metadata(),
+                **asdict(active),
+            }
+            handle.write(json.dumps(payload, sort_keys=True, allow_nan=False) + "\n")
 
 
 def _sha256(path: Path) -> str:
@@ -487,8 +492,9 @@ def _sha256(path: Path) -> str:
 
 
 def _paired_screening_counts(parent, child) -> dict[str, int]:
-    result = {"wins": 0, "ties": 0, "losses": 0, "missing": 0}
-    for task_id in sorted(set(parent.task_scaled_pairs) | set(child.task_scaled_pairs)):
+    result = {"wins": 0, "ties": 0, "losses": 0, "missing": 0, "unscored": 0}
+    observed = set(parent.task_scaled_pairs) | set(child.task_scaled_pairs)
+    for task_id in sorted(observed):
         if task_id not in parent.task_scaled_pairs or task_id not in child.task_scaled_pairs:
             result["missing"] += 1
             continue
@@ -500,6 +506,8 @@ def _paired_screening_counts(parent, child) -> dict[str, int]:
             result["losses"] += 1
         else:
             result["ties"] += 1
+    expected = max(parent.task_count, child.task_count, len(observed))
+    result["unscored"] = expected - len(observed)
     return result
 
 
@@ -612,6 +620,16 @@ def _report(manifest: dict) -> str:
         f"| Train | {train['mean_active_smae']:.4f} | {train['mean_active_srmse']:.4f} | {train['coverage']:.4f} | {train['active_success_rate']:.4f} | {train['failure_exposure']:.4f} | {train['not_applicable_exposure']:.4f} | {train['global_oracle_retention']:.4f} | {train['mean_active_oracle_smae_regret']:.4f} | {train['mean_active_oracle_srmse_regret']:.4f} | {train['compression']:.4f} |",
         f"| Dev | {dev['mean_active_smae']:.4f} | {dev['mean_active_srmse']:.4f} | {dev['coverage']:.4f} | {dev['active_success_rate']:.4f} | {dev['failure_exposure']:.4f} | {dev['not_applicable_exposure']:.4f} | {dev['global_oracle_retention']:.4f} | {dev['mean_active_oracle_smae_regret']:.4f} | {dev['mean_active_oracle_srmse_regret']:.4f} | {dev['compression']:.4f} |",
         "",
+        "| Split | Mean sMAE | Median sMAE | sMAE SE | Mean sRMSE | Median sRMSE | sRMSE SE | Raw P90/P95 sMAE | Raw P90/P95 sRMSE | Clipped sMAE/sRMSE |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        _screening_metric_row("Train", train),
+        _screening_metric_row("Dev", dev),
+        "",
+        "| Split | Wins / Ties / Losses / Missing / Unscored |",
+        "|---|---:|",
+        _paired_report_row("Train", manifest["paired_joint_wtl"]["train"]),
+        _paired_report_row("Dev", manifest["paired_joint_wtl"]["dev"]),
+        "",
         "| Split | Crash / invalid / missing / malformed |",
         "|---|---:|",
         f"| Train | {train['active_crashed']} / {train['active_invalid']} / {train['active_missing']} / {train['active_malformed_success']} |",
@@ -623,6 +641,25 @@ def _report(manifest: dict) -> str:
         f"| Dev | {dev['mean_active_candidates']:.2f} | {dev['min_active_candidates']} / {dev['max_active_candidates']} | {dev['unique_active_dictionaries']} | {dev['mean_pairwise_jaccard']:.4f} | {dev_families['statistical']} / {dev_families['tsfm']} / {dev_families['combined']} |",
         "",
     ))
+
+
+def _screening_metric_row(label: str, score: Mapping[str, object]) -> str:
+    return (
+        f"| {label} | {score['mean_smae']:.6f} | {score['median_smae']:.6f} | "
+        f"{score['se_smae']:.6f} | {score['mean_srmse']:.6f} | "
+        f"{score['median_srmse']:.6f} | {score['se_srmse']:.6f} | "
+        f"{score['p90_smae_raw']:.6f}/{score['p95_smae_raw']:.6f} | "
+        f"{score['p90_srmse_raw']:.6f}/{score['p95_srmse_raw']:.6f} | "
+        f"{score['smae_clipped_count']} ({score['smae_clipped_rate']:.4f}) / "
+        f"{score['srmse_clipped_count']} ({score['srmse_clipped_rate']:.4f}) |"
+    )
+
+
+def _paired_report_row(label: str, counts: Mapping[str, object]) -> str:
+    return (
+        f"| {label} | {counts['wins']} / {counts['ties']} / {counts['losses']} / "
+        f"{counts['missing']} / {counts['unscored']} |"
+    )
 
 
 if __name__ == "__main__":

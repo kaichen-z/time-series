@@ -216,7 +216,9 @@ def test_task_conditioned_long_horizon_route_round_trips_and_legacy_defaults_are
             if not line.lstrip().startswith(repr(field))
         )
 
-    parsed = parse_decision_source(legacy_source)
+    with pytest.raises(SelectorEvolutionError, match="fields"):
+        parse_decision_source(legacy_source)
+    parsed = parse_decision_source(legacy_source, allow_legacy=True)
     assert parsed.long_horizon_audit_enabled is False
     assert parsed.long_horizon_penalty_weight == 0.0
 
@@ -399,7 +401,9 @@ def test_policy_parser_accepts_legacy_source_without_soft_overlay_weight():
         "",
     )
 
-    assert parse_decision_source(source) == DecisionPolicy()
+    with pytest.raises(SelectorEvolutionError, match="fields"):
+        parse_decision_source(source)
+    assert parse_decision_source(source, allow_legacy=True) == DecisionPolicy()
 
 
 def test_minimax_baseline_strategy_round_trips_and_is_in_bounded_search():
@@ -450,7 +454,9 @@ def test_legacy_policy_source_defaults_to_flat_selection_without_assumptions():
     ):
         source = "\n".join(line for line in source.splitlines() if not line.lstrip().startswith(repr(field)))
 
-    parsed = parse_decision_source(source)
+    with pytest.raises(SelectorEvolutionError, match="fields"):
+        parse_decision_source(source)
+    parsed = parse_decision_source(source, allow_legacy=True)
 
     assert parsed.assumption_guidance_enabled is False
     assert parsed.assumption_top_k == 5
@@ -476,7 +482,9 @@ def test_pre_combined_policy_source_remains_backward_compatible():
         if not any(line.lstrip().startswith(repr(field)) for field in omitted)
     )
 
-    parsed = parse_decision_source(source)
+    with pytest.raises(SelectorEvolutionError, match="fields"):
+        parse_decision_source(source)
+    parsed = parse_decision_source(source, allow_legacy=True)
 
     assert parsed == DecisionPolicy()
 
@@ -800,7 +808,10 @@ def test_bounded_combined_candidates_cover_operators_without_exceeding_fold_budg
     parent = DecisionPolicy(min_successful_folds=3)
     proposal = replace(
         parent,
-        ranking_order=("recent_mase", "median_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "recent_joint_scaled_error", "median_joint_scaled_error",
+            "worst_joint_scaled_error", "smae_mad",
+        ),
     )
 
     candidates = bounded_combined_candidates(
@@ -825,13 +836,19 @@ def test_bounded_combined_candidates_cover_operators_without_exceeding_fold_budg
 
 def test_train_evolution_uses_dev_only_for_one_final_read_only_gate(tmp_path):
     parent = DecisionPolicy(
-        ranking_order=("median_mase", "recent_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "median_joint_scaled_error", "recent_joint_scaled_error",
+            "worst_joint_scaled_error", "smae_mad",
+        ),
         recent_regime_first=False,
         ensemble_enabled=False,
     )
     child = replace(
         parent,
-        ranking_order=("recent_mase", "median_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "recent_joint_scaled_error", "median_joint_scaled_error",
+            "worst_joint_scaled_error", "smae_mad",
+        ),
     )
 
     def response(policy):
@@ -878,13 +895,19 @@ def test_train_evolution_uses_dev_only_for_one_final_read_only_gate(tmp_path):
 def test_train_crossfold_gate_rejects_average_gain_with_one_unstable_entity_group():
     """Removing the cross-fold gate would accept a policy with one severe group regression."""
     parent = DecisionPolicy(
-        ranking_order=("median_mase", "recent_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "median_joint_scaled_error", "recent_joint_scaled_error",
+            "worst_joint_scaled_error", "smae_mad",
+        ),
         recent_regime_first=False,
         ensemble_enabled=False,
     )
     child = replace(
         parent,
-        ranking_order=("recent_mase", "median_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "recent_joint_scaled_error", "median_joint_scaled_error",
+            "worst_joint_scaled_error", "smae_mad",
+        ),
     )
     cases = tuple(
         replace(
@@ -906,13 +929,19 @@ def test_train_crossfold_gate_rejects_average_gain_with_one_unstable_entity_grou
 
 def test_train_crossfold_gate_accepts_policy_improving_every_entity_group():
     parent = DecisionPolicy(
-        ranking_order=("median_mase", "recent_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "median_joint_scaled_error", "recent_joint_scaled_error",
+            "worst_joint_scaled_error", "smae_mad",
+        ),
         recent_regime_first=False,
         ensemble_enabled=False,
     )
     child = replace(
         parent,
-        ranking_order=("recent_mase", "median_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "recent_joint_scaled_error", "median_joint_scaled_error",
+            "worst_joint_scaled_error", "smae_mad",
+        ),
     )
     cases = tuple(
         replace(
@@ -981,13 +1010,19 @@ def test_activation_aware_gate_rejects_any_material_fold_regression():
 
 def test_change_aware_crossfold_gate_counts_only_changed_final_forecasts():
     parent = DecisionPolicy(
-        ranking_order=("median_mase", "recent_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "median_joint_scaled_error", "recent_joint_scaled_error",
+            "worst_joint_scaled_error", "smae_mad",
+        ),
         recent_regime_first=False,
         ensemble_enabled=False,
     )
     child = replace(
         parent,
-        ranking_order=("recent_mase", "median_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "recent_joint_scaled_error", "median_joint_scaled_error",
+            "worst_joint_scaled_error", "smae_mad",
+        ),
     )
     cases = (
         replace(_ranking_sensitive_case("changed-1", child_is_better=True), group_id="e1"),
@@ -1059,13 +1094,19 @@ def test_activation_aware_gate_allows_two_fold_abstaining_overlay_support():
 
 def test_train_only_evolution_rejects_child_that_fails_crossfold_stability(tmp_path):
     parent = DecisionPolicy(
-        ranking_order=("median_mase", "recent_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "median_joint_scaled_error", "recent_joint_scaled_error",
+            "worst_joint_scaled_error", "smae_mad",
+        ),
         recent_regime_first=False,
         ensemble_enabled=False,
     )
     child = replace(
         parent,
-        ranking_order=("recent_mase", "median_mase", "worst_mase", "mase_mad"),
+        ranking_order=(
+            "recent_joint_scaled_error", "median_joint_scaled_error",
+            "worst_joint_scaled_error", "smae_mad",
+        ),
     )
     payload = {
         "summary": "prefer recent evidence",

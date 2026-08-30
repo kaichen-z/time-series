@@ -12,7 +12,7 @@ from pathlib import Path
 from common.data import load_tasks_by_id
 from common.evolution_core.contracts import (
     metric_report_metadata,
-    require_active_metric_policy,
+    load_active_release,
 )
 from common.payload import read_json_object, standards_json_value, write_json
 
@@ -101,15 +101,11 @@ def main(argv: list[str] | None = None) -> int:
     screen_path = screen_dir / "frozen_screening_policy.py"
     screen_hash = _sha256(screen_path)
     screen_manifest = read_json_object(screen_dir / "screening_manifest.json")
-    require_active_metric_policy(screen_manifest, context="active screening release")
-    if screen_manifest.get("schema_version") != 2:
-        raise ValueError("active screening release schema_version must be 2")
+    load_active_release(screen_manifest)
     if screen_manifest.get("frozen_screening_policy_sha256") != screen_hash:
         raise ValueError("frozen screening policy hash does not match its manifest")
     parent_manifest = read_json_object(selector_dir / "selector_manifest.json")
-    require_active_metric_policy(parent_manifest, context="active selector release")
-    if parent_manifest.get("schema_version") != 2:
-        raise ValueError("active selector release schema_version must be 2")
+    load_active_release(parent_manifest)
     if parent_manifest.get("screening_policy_sha256") != screen_hash:
         raise ValueError("parent Decision policy is bound to a different screening policy")
 
@@ -291,7 +287,10 @@ def main(argv: list[str] | None = None) -> int:
             "dev": (
                 _score_pair_wtl(dev_parent, dev_winner)
                 if dev_parent is not None and dev_winner is not None
-                else {"wins": 0, "ties": 0, "losses": 0, "missing": 0}
+                else {
+                    "wins": 0, "ties": 0, "losses": 0,
+                    "missing": 0, "unscored": 0,
+                }
             ),
         },
         "dev_evaluated": not args.train_only,

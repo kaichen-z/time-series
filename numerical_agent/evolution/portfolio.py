@@ -22,6 +22,7 @@ from common.evolution_core.contracts import (
 )
 
 from common.metrics import drcik_point_metrics, mae, mase, smape
+from common.payload import strict_json_loads
 
 from numerical_agent.dictionary import MethodCandidate
 from numerical_agent.foundation import TSFM_IMPLEMENTATION_KIND
@@ -174,19 +175,23 @@ class PolicyOutcomeCache:
         if not path.exists():
             return None
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+            payload = strict_json_loads(
+                path.read_text(encoding="utf-8"),
+                context="active policy outcome cache row",
+            )
+        except (OSError, ValueError) as error:
             raise PolicyError("malformed active policy outcome cache row") from error
         try:
             if not isinstance(payload, Mapping):
                 raise PolicyError("active policy outcome cache row must be an object")
             require_active_metric_policy(payload, context="active policy outcome cache row")
-            if payload.get("cache_schema") != 3:
+            if type(payload.get("cache_schema")) is not int or payload["cache_schema"] != 3:
                 raise PolicyError("active policy outcome cache row schema mismatch")
             if payload.get("key") != key:
                 raise PolicyError("active policy outcome cache row key mismatch")
             if (
-                payload.get("scaled_metric_schema") != SCALED_METRIC_SCHEMA
+                type(payload.get("scaled_metric_schema")) is not int
+                or payload["scaled_metric_schema"] != SCALED_METRIC_SCHEMA
                 or payload.get("scaled_metric_cap") != SCALED_METRIC_CAP
             ):
                 raise PolicyError("active policy outcome cache scaled schema mismatch")

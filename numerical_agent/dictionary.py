@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, Mapping, Sequence, cast
 
+from common.evolution_core.contracts import load_active_release, metric_policy_metadata
 from common.payload import require_strings as _tuple_of_strings
 
 from .config import ALLOWED_FAMILIES, METHOD_STATUSES
@@ -203,7 +204,8 @@ class ToolDictionary:
 
     def to_payload(self) -> dict[str, object]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
+            **metric_policy_metadata(),
             "dictionary_id": self.dictionary_id,
             "parent_dictionary_id": self.parent_dictionary_id,
             "generation": self.generation,
@@ -212,6 +214,25 @@ class ToolDictionary:
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> "ToolDictionary":
+        load_active_release(payload)
+        if "generation" not in payload or type(payload["generation"]) is not int:
+            raise ValueError("active dictionary generation must be an explicit integer")
+        return cls._from_payload(payload, require_explicit_status=True)
+
+    @classmethod
+    def from_legacy_report_payload(
+        cls, payload: Mapping[str, object]
+    ) -> "ToolDictionary":
+        """Parse a historical dictionary for reporting, never active evolution."""
+        return cls._from_payload(payload, require_explicit_status=False)
+
+    @classmethod
+    def _from_payload(
+        cls,
+        payload: Mapping[str, object],
+        *,
+        require_explicit_status: bool,
+    ) -> "ToolDictionary":
         methods = payload.get("methods")
         if not isinstance(methods, Sequence) or isinstance(methods, (str, bytes)):
             raise ValueError("dictionary methods must be a list")
@@ -219,6 +240,8 @@ class ToolDictionary:
         for method in methods:
             if not isinstance(method, Mapping):
                 raise ValueError("dictionary method must be an object")
+            if require_explicit_status and "status" not in method:
+                raise ValueError("active dictionary method status must be explicit")
             if "definition" in method:
                 records.append(MethodRecord.from_payload(method))
             else:

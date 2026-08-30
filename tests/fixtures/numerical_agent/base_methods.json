@@ -1,18 +1,33 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "metric_policy": {
+    "schema_version": 2,
+    "primary": ["smae", "srmse"],
+    "cap": 5.0,
+    "ordering": "mean_pair",
+    "acceptance": "pareto_non_regression"
+  },
+  "metric_policy_fingerprint": "fe5cf0fd10839f93a3dea81cb90a63641ad520a589bdce875bd11095a2a8bf8d",
   "dictionary_id": "fixture_raw_v000",
   "parent_dictionary_id": null,
   "generation": 0,
   "methods": [
     {
-      "method_id": "external_fixture_method",
-      "family": "statistical",
-      "description": "A deterministic external method used only for framework smoke testing.",
-      "assumptions": [],
-      "failure_conditions": [],
-      "implementation_spec": {"prediction": 10.0},
-      "dependencies": [],
-      "status": "unimplemented"
+      "definition": {
+        "method_id": "external_fixture_method",
+        "family": "statistical",
+        "description": "A deterministic external method used only for framework smoke testing.",
+        "assumptions": [],
+        "failure_conditions": [],
+        "implementation_spec": {"prediction": 10.0},
+        "dependencies": [],
+        "status": "unimplemented"
+      },
+      "candidate": null,
+      "status": "unimplemented",
+      "revision_count": 0,
+      "train_summary": {},
+      "implementation_attempts": 0
     }
   ]
 }

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from common.llm import LLMClient, parse_json_object
+from common.evolution_core.contracts import metric_report_metadata
 from common.metrics import joint_scaled_error, pareto_scaled_improvement
 from common.payload import write_json
 
@@ -456,6 +457,8 @@ def evolve_targets_once(
     hits = outcome_cache.stats.hits - initial_hits
     misses = outcome_cache.stats.misses - initial_misses
     summary = {
+        "schema_version": 2,
+        **metric_report_metadata(),
         "generation": generation,
         "cache_hits": hits,
         "cache_misses": misses,
@@ -513,7 +516,13 @@ def _diagnose_target(
     diagnostic_dir.mkdir(parents=True, exist_ok=True)
     write_json(
         diagnostic_dir / f"generation_{generation:03d}_target_{index:02d}_{method.name}.json",
-        diagnostics,
+        {
+            "schema_version": 2,
+            **metric_report_metadata(),
+            "generation": generation,
+            "target": method.name,
+            "diagnostics": diagnostics,
+        },
     )
     user = render_failure_judge_user(diagnostics)
     try:
@@ -674,15 +683,11 @@ def _screen_rank(metrics: Mapping[str, float]) -> tuple[float, float, float]:
 
 
 def _strict_non_regression(metrics: Mapping[str, float]) -> bool:
-    tolerance = 1e-12
-    fields = ("mean_smae", "mean_srmse", "median_smae", "median_srmse")
-    return all(
-        math.isfinite(metrics[f"child_{field}"])
-        and metrics[f"child_{field}"] <= metrics[f"parent_{field}"] + tolerance
-        for field in fields
-    ) and any(
-        metrics[f"child_{field}"] < metrics[f"parent_{field}"] - tolerance
-        for field in fields
+    return pareto_scaled_improvement(
+        metrics["parent_mean_smae"],
+        metrics["parent_mean_srmse"],
+        metrics["child_mean_smae"],
+        metrics["child_mean_srmse"],
     )
 
 
@@ -699,7 +704,6 @@ def _accept_stage(
     op = str(operation.get("op", ""))
     tolerance = 1e-12
     changed_name = _changed_method_name(parent, child, operation)
-    own_improved = False
     if changed_name is not None:
         changed_report = reports_from_outcomes((changed_name,), child_outcomes, tasks)[0]
         if changed_report.crashed or changed_report.invalid:
@@ -711,35 +715,15 @@ def _accept_stage(
             parent_report = reports_from_outcomes((original,), parent_outcomes, tasks)[0]
             if changed_report.coverage + tolerance < parent_report.coverage:
                 return False, "repair reduced applicable-task coverage"
-            if (
-                changed_report.mean_smae is not None
-                and changed_report.mean_srmse is not None
-                and parent_report.mean_smae is not None
-                and parent_report.mean_srmse is not None
-                and pareto_scaled_improvement(
-                    parent_report.mean_smae,
-                    parent_report.mean_srmse,
-                    changed_report.mean_smae,
-                    changed_report.mean_srmse,
-                )
-            ):
-                own_improved = True
-
-    fields = ("mean_smae", "mean_srmse", "median_smae", "median_srmse")
-    non_regressing = all(
-        math.isfinite(metrics[f"child_{field}"])
-        and metrics[f"child_{field}"] <= metrics[f"parent_{field}"] + tolerance
-        for field in fields
+    portfolio_improved = pareto_scaled_improvement(
+        metrics["parent_mean_smae"],
+        metrics["parent_mean_srmse"],
+        metrics["child_mean_smae"],
+        metrics["child_mean_srmse"],
     )
-    if not non_regressing:
-        return False, "portfolio scaled metric pair regressed"
-    portfolio_improved = any(
-        metrics[f"child_{field}"] < metrics[f"parent_{field}"] - tolerance
-        for field in fields
-    )
-    if portfolio_improved or own_improved:
+    if portfolio_improved:
         return True, "improved"
-    return False, "scaled metric pair did not improve"
+    return False, "portfolio mean scaled metric pair did not improve under Pareto gate"
 
 
 def _changed_method_name(

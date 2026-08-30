@@ -218,6 +218,17 @@ def test_active_release_rejects_noncanonical_metric_policy_field_types():
         evolution_contracts.load_active_release(payload)
 
 
+@pytest.mark.parametrize("schema_version", (True, 2.0))
+def test_active_release_rejects_noninteger_envelope_schema_aliases(schema_version):
+    payload = {
+        "schema_version": schema_version,
+        **evolution_contracts.metric_policy_metadata(),
+    }
+
+    with pytest.raises(ValueError, match="schema_version"):
+        evolution_contracts.load_active_release(payload)
+
+
 def test_active_release_rejects_legacy_ranking_even_with_forged_current_binding():
     payload = {
         "schema_version": 2,
@@ -384,7 +395,9 @@ def test_frozen_report_leads_with_drcik_point_metrics():
         "llm_calls": 0,
         "mutation_calls": 0,
         "rows": {"candidate": score},
-        "paired_vs_A": {"candidate": {"wins": 0, "ties": 1, "losses": 0}},
+        "paired_vs_A": {"candidate": {
+            "wins": 0, "ties": 1, "losses": 0, "missing": 0, "unscored": 0,
+        }},
         **evolution_contracts.metric_report_metadata(),
     }
     report = _report(payload)
@@ -398,6 +411,7 @@ def test_frozen_report_leads_with_drcik_point_metrics():
     assert "Median sRMSE" in report
     assert "Raw P90/P95 sMAE/sRMSE" in report
     assert "Clipped sMAE/sRMSE" in report
+    assert "W/T/L/M/U vs A" in report
 
 
 def test_paired_counts_compare_the_joint_scaled_metric_pair():
@@ -406,7 +420,9 @@ def test_paired_counts_compare_the_joint_scaled_metric_pair():
         {"t": (1.0, 1.0)},
     )
 
-    assert comparison == {"wins": 0, "ties": 0, "losses": 1, "missing": 0}
+    assert comparison == {
+        "wins": 0, "ties": 0, "losses": 1, "missing": 0, "unscored": 0,
+    }
 
 
 def test_frozen_selector_records_history_only_top_k_assumptions():

@@ -38,6 +38,7 @@ from numerical_agent.run_selector_evolution import (
     _build_case,
     _global_ranking,
     _report,
+    _score_pair_wtl,
     _write_cases,
     build_parser,
 )
@@ -246,8 +247,82 @@ def stable_method(history, horizon, frequency):
     try:
         key = store._key("stable_method", (1.0, 2.0), 1, "D")
         (store.root / f"{key}.json").write_text(row.replace("PLACEHOLDER", key), encoding="utf-8")
-        with pytest.raises(ValueError, match="active hindcast cache row"):
+        with pytest.raises(ValueError, match="active hindcast cache row") as raised:
             store.forecast("stable_method", (1.0, 2.0), 1, "D")
+        assert type(raised.value).__name__ == "CacheIntegrityError"
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("schema", (True, 3.0))
+def test_forecast_store_rejects_noninteger_schema_aliases(tmp_path, schema):
+    methods = tmp_path / "methods.py"
+    methods.write_text(
+        MODULE_HEADER
+        + '''
+
+def stable_method(history, horizon, frequency):
+    """Use when a last-value forecast is sufficient."""
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+    store = ForecastStore(
+        tmp_path / "cache", methods, None, read_module(methods),
+        PolicyPortfolio.flagship5(), RuntimeRegistry(), "screen",
+    )
+    try:
+        store.forecast("stable_method", (1.0, 2.0), 1, "D")
+        entry = next(store.root.glob("*.json"))
+        payload = json.loads(entry.read_text(encoding="utf-8"))
+        payload["cache_schema"] = schema
+        entry.write_text(json.dumps(payload), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="schema mismatch"):
+            store.forecast("stable_method", (1.0, 2.0), 1, "D")
+    finally:
+        store.close()
+
+
+def test_corrupted_combined_leaf_cache_aborts_instead_of_falling_back(tmp_path):
+    methods = tmp_path / "methods.py"
+    methods.write_text(
+        MODULE_HEADER
+        + '''
+
+def primary_leaf(history, horizon, frequency):
+    """Use as a primary leaf in cache-integrity tests."""
+    return [1.0] * horizon
+
+def fallback_leaf(history, horizon, frequency):
+    """Use as a fallback leaf in cache-integrity tests."""
+    return [2.0] * horizon
+''',
+        encoding="utf-8",
+    )
+    combined = CombinedPolicy(
+        "combined_cache_integrity",
+        ("primary_leaf", "toto_2_0"),
+        "weighted_mean",
+        (0.5, 0.5),
+        fallback_parent="toto_2_0",
+    )
+    store = ForecastStore(
+        tmp_path / "cache",
+        methods,
+        None,
+        read_module(methods),
+        PolicyPortfolio(PolicyPortfolio.flagship5().tsfm, (combined,)),
+        RuntimeRegistry(),
+        "screen",
+    )
+    try:
+        key = store._key("primary_leaf", (1.0, 2.0), 1, "D")
+        (store.root / f"{key}.json").write_text("not-json", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="malformed") as raised:
+            store.forecast("combined_cache_integrity", (1.0, 2.0), 1, "D")
+        assert type(raised.value).__name__ == "CacheIntegrityError"
     finally:
         store.close()
 
@@ -1076,6 +1151,8 @@ def test_case_artifact_serializes_ineligible_infinite_diagnostics_as_sentinel(tm
     target = tmp_path / "cases.jsonl"
     _write_cases(target, (case,))
     payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 2
+    evolution_contracts.require_active_metric_policy(payload)
     assert payload["diagnostics"]["failed"]["median_mase"] == {
         "status": "positive_infinity",
         "value": None,
@@ -1226,6 +1303,10 @@ def test_selector_report_leads_with_drcik_point_metrics():
         "public_test_accessed": False,
         "dev_accepted": False,
         "final_dev_gate": {"accepted": False, "reason": "Dev sRMSE increased"},
+        "paired_joint_wtl": {
+            "train": {"wins": 1, "ties": 0, "losses": 0, "missing": 0, "unscored": 0},
+            "dev": {"wins": 0, "ties": 0, "losses": 1, "missing": 0, "unscored": 0},
+        },
         "train": score,
         "dev": score,
         **evolution_contracts.metric_report_metadata(),
@@ -1236,9 +1317,22 @@ def test_selector_report_leads_with_drcik_point_metrics():
     assert set(payload["diagnostic_only"]) >= {"mase", "mae", "smape", "rmsse"}
     assert "Mean sMAE" in report
     assert "Mean sRMSE" in report
+    assert "Median sMAE" in report
+    assert "Median sRMSE" in report
     assert "P90/P95 sMAE" in report
     assert "Clipped sMAE/sRMSE" in report
+    assert "Wins / Ties / Losses / Missing / Unscored" in report
     assert "Assumptions" in report
     assert "Verifier pool" in report
     assert "Dev accepted: `False`" in report
     assert "Dev sRMSE increased" in report
+
+
+def test_selector_paired_counts_conserve_both_missing_tasks():
+    parent = SimpleNamespace(task_count=4, task_scaled_pairs={"same": (1.0, 1.0), "left": (1.0, 1.0)})
+    child = SimpleNamespace(task_count=4, task_scaled_pairs={"same": (1.0, 1.0), "right": (1.0, 1.0)})
+
+    counts = _score_pair_wtl(parent, child)
+
+    assert counts == {"wins": 0, "ties": 1, "losses": 0, "missing": 2, "unscored": 1}
+    assert sum(counts.values()) == 4

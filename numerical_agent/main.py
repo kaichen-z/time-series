@@ -14,8 +14,9 @@ from typing import Callable, Mapping, Sequence, cast
 from common.evolution_core.contracts import (
     EvolutionConfig,
     MetricSpec,
+    active_envelope,
+    load_active_release,
     metric_report_metadata,
-    require_active_metric_policy,
 )
 from common.evolution_core.controller import SelfEvolutionEngine
 from common.llm import (
@@ -33,6 +34,7 @@ from common.metrics import (
     standard_error,
 )
 from common.payload import (
+    canonical_json_line_bytes,
     read_json_object,
     require_object,
     standards_json_value,
@@ -349,6 +351,7 @@ def _evaluate_frozen(args: argparse.Namespace) -> int:
     ) as handle:
         for result in results:
             payload: dict[str, object] = {
+                "schema_version": 2,
                 **metric_report_metadata(),
                 "item_id": result.item_id,
                 "method_id": result.method_id,
@@ -441,6 +444,7 @@ def _frozen_curation_surface(results, labels) -> dict[str, object]:
             "ties": len(selected),
             "losses": 0,
             "missing": count - len(selected),
+            "unscored": 0,
         },
     }
 
@@ -653,8 +657,8 @@ def _build_dataset(args: argparse.Namespace) -> int:
 
 def _curation_config(experiment: Mapping[str, object]) -> DictionaryCurationConfig:
     payload = require_object(experiment.get("curation", {}), "curation config")
-    require_active_metric_policy(payload, context="active curation config")
-    normalized = dict(payload)
+    normalized = load_active_release(payload)
+    normalized.pop("schema_version")
     for field_name in ("allowed_actions", "allowed_families", "method_statuses"):
         if field_name in normalized:
             value = normalized[field_name]
@@ -668,7 +672,7 @@ def _evolution_config(
     experiment: Mapping[str, object], curation: DictionaryCurationConfig
 ) -> EvolutionConfig:
     payload = require_object(experiment.get("evolution", {}), "evolution config")
-    require_active_metric_policy(payload, context="active evolution config")
+    payload = load_active_release(payload)
     allowed = {
         "generations",
         "children_per_generation",
@@ -677,12 +681,13 @@ def _evolution_config(
         "resume",
         "metric_policy",
         "metric_policy_fingerprint",
+        "schema_version",
     }
     unknown = set(payload) - allowed
     if unknown:
         raise ValueError(f"unknown evolution config fields: {sorted(unknown)!r}")
     return EvolutionConfig(
-        **dict(payload),
+        **{key: value for key, value in payload.items() if key != "schema_version"},
         metric=MetricSpec(curation.dictionary_metric, "minimize"),
     )
 
@@ -882,20 +887,13 @@ def _metric(name: str):
 
 def _write_method_evaluations(output_dir: Path, steps: Sequence[object]) -> None:
     destination = output_dir / "method_evaluations.jsonl"
-    with destination.open("w", encoding="utf-8") as handle:
+    with destination.open("wb") as handle:
         for step in steps:
             reports = getattr(step, "child_train_reports", ())
             for report in reports:
-                handle.write(
-                    json.dumps(
-                        {
-                            "artifact_id": report.artifact_id,
-                            "split": report.split,
-                            "metrics": dict(report.metrics),
-                            "diagnostics": dict(report.diagnostics),
-                        },
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    )
-                )
-                handle.write("\n")
+                handle.write(canonical_json_line_bytes(active_envelope({
+                    "artifact_id": report.artifact_id,
+                    "split": report.split,
+                    "metrics": dict(report.metrics),
+                    "diagnostics": dict(report.diagnostics),
+                }, context="active method evaluation")))

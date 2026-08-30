@@ -340,9 +340,9 @@ def apply_decision_response(parent: DecisionPolicy, response: str) -> DecisionPo
     )
     if not isinstance(raw, Mapping) or set(raw) not in accepted_fields:
         raise SelectorEvolutionError("policy must contain exactly the approved fields")
-    normalized = dict(raw)
-    for field in _SCALED_SAFETY_FIELDS:
-        normalized.setdefault(field, getattr(parent, field))
+    # A response is a bounded mutation, not an artifact reader: materialize the
+    # complete active payload from the exact parent before applying approved edits.
+    normalized = {**_policy_payload(parent), **dict(raw)}
     return _parse_policy(normalized)
 
 
@@ -1343,43 +1343,18 @@ def _parse_policy(
     raw: Mapping[str, object], *, allow_legacy: bool = False
 ) -> DecisionPolicy:
     raw = dict(raw)
-    if "catastrophic_mase" in raw:
-        if not allow_legacy:
-            raise SelectorEvolutionError(
-                "legacy catastrophic_mase requires allow_legacy=True report-only parsing"
-            )
-        raw.pop("catastrophic_mase")
-    legacy_fields = (
-        set(_FIELDS) - _TSFM_BLEND_FIELDS,
-        set(_PRE_COMBINED_FIELDS),
-        set(_PRE_COMBINED_FIELDS) | _LONG_HORIZON_ROUTE_FIELDS,
-        set(_PRE_COMBINED_FIELDS) | _LONG_HORIZON_ROUTE_FIELDS | _LONG_HORIZON_GUARD_FIELDS,
-        set(_FIELDS) - _LONG_HORIZON_GUARD_FIELDS,
-        set(_FIELDS) - {"baseline_strategy"},
-        set(_FIELDS) - _ASSUMPTION_FIELDS,
-        set(_FIELDS) - _ASSUMPTION_FIELDS - {"baseline_strategy"},
-        set(_FIELDS) - _LONG_HORIZON_ROUTE_FIELDS,
-        set(_FIELDS) - _LONG_HORIZON_ROUTE_FIELDS - {"baseline_strategy"},
-        set(_FIELDS) - _LONG_HORIZON_ROUTE_FIELDS - _ASSUMPTION_FIELDS,
-        set(_FIELDS) - _LONG_HORIZON_ROUTE_FIELDS - _ASSUMPTION_FIELDS - {"baseline_strategy"},
-    )
-    legacy_fields = (
-        *legacy_fields,
-        *(fields - _LONG_HORIZON_GUARD_FIELDS for fields in legacy_fields),
-    )
-    legacy_fields = (
-        *legacy_fields,
-        *(fields - _TSFM_BLEND_FIELDS for fields in legacy_fields),
-    )
-    legacy_fields = (
-        *legacy_fields,
-        *(fields - _TSFM_ROUTER_FIELDS for fields in legacy_fields),
-    )
-    legacy_fields = (
-        *legacy_fields,
-        *(fields - _SCALED_SAFETY_FIELDS for fields in legacy_fields),
-    )
-    if set(raw) in legacy_fields:
+    legacy_keys = {
+        "catastrophic_mase", "median_mase", "recent_mase", "worst_mase",
+        "mase_mad", "median_rmsse", "median_smape",
+    }
+    present_legacy = legacy_keys & set(raw)
+    if present_legacy and not allow_legacy:
+        raise SelectorEvolutionError(
+            "legacy DecisionPolicy fields require allow_legacy=True report-only parsing"
+        )
+    if allow_legacy:
+        for field in legacy_keys:
+            raw.pop(field, None)
         defaults = _policy_payload(DecisionPolicy())
         raw = {**defaults, **raw}
     if set(raw) != set(_FIELDS):
@@ -1387,6 +1362,15 @@ def _parse_policy(
     ranking = raw["ranking_order"]
     if not isinstance(ranking, (list, tuple)):
         raise SelectorEvolutionError("ranking_order must be a sequence")
+    legacy_ranking = {
+        "median_mase": "median_joint_scaled_error",
+        "recent_mase": "recent_joint_scaled_error",
+        "worst_mase": "worst_joint_scaled_error",
+        "mase_mad": "smae_mad",
+        "median_rmsse": "median_srmse",
+    }
+    if allow_legacy:
+        ranking = tuple(legacy_ranking.get(str(value), str(value)) for value in ranking)
     try:
         return DecisionPolicy(
             ranking_order=tuple(str(value) for value in ranking),

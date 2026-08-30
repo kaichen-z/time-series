@@ -105,6 +105,22 @@ def test_cache_record_copied_under_another_key_fails_closed(tmp_path: Path) -> N
         cache.evaluate_method(method, (second,), isolated=False)
 
 
+@pytest.mark.parametrize("schema", (True, 3.0))
+def test_outcome_cache_rejects_noninteger_schema_aliases(tmp_path: Path, schema) -> None:
+    root = tmp_path / "cache"
+    cache = OutcomeCache(root)
+    method = parse_method(method_source())
+    task = tasks()[0]
+    cache.evaluate_method(method, (task,), isolated=False)
+    entry = next(root.glob("*.json"))
+    payload = json.loads(entry.read_text(encoding="utf-8"))
+    payload["cache_schema"] = schema
+    entry.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(CacheError, match="schema mismatch"):
+        cache.evaluate_method(method, (task,), isolated=False)
+
+
 def test_success_cache_record_without_complete_metrics_fails_closed(tmp_path: Path) -> None:
     root = tmp_path / "cache"
     cache = OutcomeCache(root)
