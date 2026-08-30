@@ -10,7 +10,7 @@ import math
 import re
 import statistics
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 from common.llm import LLMClient
@@ -215,9 +215,9 @@ def _score_scaled_forecast_pair(
     return _TaskScaledEvidence(**values)
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True)
 class MorphologyGroupEvidence:
-    """One sanitized fixed-predicate summary derived from Train tasks only."""
+    """Sanitized reporting value; proposal execution never trusts this object."""
 
     group_id: str
     feature: str
@@ -244,16 +244,28 @@ class MorphologyGroupEvidence:
     candidate_srmse_clipped_rate: float = 0.0
     baseline_smae_clipped_rate: float = 0.0
     baseline_srmse_clipped_rate: float = 0.0
-    _canonical_values: tuple[object, ...] = field(default=(), repr=False, compare=False)
 
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        raise CombinedEvolutionError(
-            "morphology group evidence must come from the trusted group builder"
-        )
+    def __post_init__(self) -> None:
+        _validate_morphology_group_evidence(self)
 
     def to_payload(self) -> dict[str, object]:
         _validate_morphology_group_evidence(self)
         return _morphology_group_payload(self)
+
+
+@dataclass(frozen=True)
+class MorphologyGroupTrainInputs:
+    """Aligned Train-only arrays scored locally by the proposal boundary."""
+
+    profiles: tuple[TaskProfile, ...]
+    entity_ids: tuple[str, ...]
+    group_id: str
+    eligible_leaves: tuple[str, ...]
+    baseline: str
+    truths: tuple[tuple[float, ...] | None, ...]
+    candidate_forecasts: tuple[tuple[float, ...] | None, ...]
+    baseline_forecasts: tuple[tuple[float, ...] | None, ...]
+    forecast_disagreements: tuple[float | None, ...]
 
 
 @dataclass(frozen=True)
@@ -264,7 +276,6 @@ class CombinedProposalDiagnostics:
     forecast_disagreement: float
     successful_leaf_count: int
     unavailable_leaf_count: int
-    morphology_groups: tuple[MorphologyGroupEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_combined_diagnostics(
@@ -272,12 +283,6 @@ class CombinedProposalDiagnostics:
             self.forecast_disagreement,
             self.successful_leaf_count,
             self.unavailable_leaf_count,
-            self.morphology_groups,
-        )
-        object.__setattr__(
-            self,
-            "morphology_groups",
-            tuple(sorted(self.morphology_groups, key=lambda evidence: evidence.group_id)),
         )
 
     def to_payload(self) -> dict[str, object]:
@@ -286,22 +291,13 @@ class CombinedProposalDiagnostics:
             self.forecast_disagreement,
             self.successful_leaf_count,
             self.unavailable_leaf_count,
-            self.morphology_groups,
         )
-        payload: dict[str, object] = {
+        return {
             "forecast_disagreement": self.forecast_disagreement,
             "history_length": self.history_length,
             "successful_leaf_count": self.successful_leaf_count,
             "unavailable_leaf_count": self.unavailable_leaf_count,
         }
-        if self.morphology_groups:
-            payload["morphology_groups"] = [
-                _morphology_group_payload(evidence)
-                for evidence in sorted(
-                    self.morphology_groups, key=lambda evidence: evidence.group_id
-                )
-            ]
-        return payload
 
 
 def summarize_morphology_group_evidence(
@@ -427,16 +423,7 @@ def summarize_morphology_group_evidence(
         baseline_smae_clipped_rate=float(baseline_smae_clipped_count / successful_count),
         baseline_srmse_clipped_rate=float(baseline_srmse_clipped_count / successful_count),
     )
-    evidence = object.__new__(MorphologyGroupEvidence)
-    for name, value in values.items():
-        object.__setattr__(evidence, name, value)
-    object.__setattr__(
-        evidence,
-        "_canonical_values",
-        _morphology_group_evidence_values(evidence),
-    )
-    _validate_morphology_group_evidence(evidence)
-    return evidence
+    return MorphologyGroupEvidence(**values)
 
 
 @dataclass(frozen=True)
@@ -572,15 +559,37 @@ def propose_combined_child(
     statistical_names: Sequence[str],
     diagnostics: CombinedProposalDiagnostics,
     agent: LLMClient,
+    morphology_train_inputs: tuple[MorphologyGroupTrainInputs, ...] = (),
 ) -> CombinedProposalResult:
     """Request one bounded proposal and return Parent exactly on every failure."""
     try:
         _validate_proposal_parent(parent)
+        if type(diagnostics) is not CombinedProposalDiagnostics:
+            raise CombinedEvolutionError(
+                "diagnostics must use CombinedProposalDiagnostics"
+            )
+        _validate_combined_diagnostics(
+            diagnostics.history_length,
+            diagnostics.forecast_disagreement,
+            diagnostics.successful_leaf_count,
+            diagnostics.unavailable_leaf_count,
+        )
         reviewed_names = _reviewed_statistical_names(statistical_names)
         tsfm_names = tuple(policy.name for policy in parent.tsfm)
+        known_leaves = tuple(dict.fromkeys((*reviewed_names, *tsfm_names)))
+        legacy_groups = getattr(diagnostics, "morphology_groups", ())
+        if legacy_groups and not morphology_train_inputs:
+            raise CombinedEvolutionError(
+                "precomputed morphology groups cannot authorize a proposal"
+            )
+        morphology_groups = _score_proposal_morphology_groups(
+            morphology_train_inputs,
+            reviewed_leaf_names=known_leaves,
+        )
         diagnostic_payload = _proposal_diagnostics_payload(
             diagnostics,
-            known_leaves=(*reviewed_names, *tsfm_names),
+            known_leaves=known_leaves,
+            morphology_groups=morphology_groups,
         )
         prompt = {
             "current_policies": [_canonical_combined_payload(policy) for policy in parent.combined],
@@ -588,7 +597,7 @@ def propose_combined_child(
             "tsfm_names": list(tsfm_names),
             "diagnostics": diagnostic_payload,
             "allowed_operations": _allowed_operations_payload(
-                include_morphology_signals=bool(diagnostics.morphology_groups)
+                include_morphology_signals=bool(morphology_groups)
             ),
         }
         response = agent.complete(
@@ -686,7 +695,6 @@ def _validate_combined_diagnostics(
     forecast_disagreement: object,
     successful_leaf_count: object,
     unavailable_leaf_count: object,
-    morphology_groups: object = (),
 ) -> None:
     """Reject every non-canonical diagnostic before it can enter a prompt."""
     if type(history_length) is not int or not 1 <= history_length <= 1_000_000:
@@ -705,19 +713,6 @@ def _validate_combined_diagnostics(
     ):
         if type(value) is not int or not 0 <= value <= 1_000_000:
             raise CombinedEvolutionError(f"{name} must be a bounded exact integer")
-    if type(morphology_groups) is not tuple or len(morphology_groups) > 32:
-        raise CombinedEvolutionError("morphology_groups must be a bounded exact tuple")
-    if not all(type(value) is MorphologyGroupEvidence for value in morphology_groups):
-        raise CombinedEvolutionError(
-            "morphology_groups must contain exact MorphologyGroupEvidence records"
-        )
-    group_ids = tuple(value.group_id for value in morphology_groups)
-    if len(group_ids) != len(set(group_ids)):
-        raise CombinedEvolutionError("morphology group identifiers must be unique")
-    for value in morphology_groups:
-        _validate_morphology_group_evidence(value)
-
-
 def _validate_proposal_parent(parent: object) -> None:
     """Reject polymorphic portfolio records before reading or serializing them."""
     if type(parent) is not PolicyPortfolio:
@@ -891,6 +886,7 @@ def _proposal_diagnostics_payload(
     value: object,
     *,
     known_leaves: tuple[str, ...],
+    morphology_groups: tuple[MorphologyGroupEvidence, ...],
 ) -> dict[str, object]:
     if type(value) is not CombinedProposalDiagnostics:
         raise CombinedEvolutionError("diagnostics must use CombinedProposalDiagnostics")
@@ -899,10 +895,9 @@ def _proposal_diagnostics_payload(
         value.forecast_disagreement,
         value.successful_leaf_count,
         value.unavailable_leaf_count,
-        value.morphology_groups,
     )
     reviewed = frozenset(known_leaves)
-    for evidence in value.morphology_groups:
+    for evidence in morphology_groups:
         leaves = frozenset(evidence.eligible_leaves)
         if evidence.baseline not in reviewed or not leaves <= reviewed:
             raise CombinedEvolutionError("morphology evidence contains an unknown leaf")
@@ -912,14 +907,53 @@ def _proposal_diagnostics_payload(
         "successful_leaf_count": value.successful_leaf_count,
         "unavailable_leaf_count": value.unavailable_leaf_count,
     }
-    if value.morphology_groups:
+    if morphology_groups:
         payload["morphology_groups"] = [
             _morphology_group_payload(evidence)
             for evidence in sorted(
-                value.morphology_groups, key=lambda evidence: evidence.group_id
+                morphology_groups, key=lambda evidence: evidence.group_id
             )
         ]
     return payload
+
+
+def _score_proposal_morphology_groups(
+    value: object,
+    *,
+    reviewed_leaf_names: tuple[str, ...],
+) -> tuple[MorphologyGroupEvidence, ...]:
+    if type(value) is not tuple or len(value) > 32:
+        raise CombinedEvolutionError(
+            "morphology_train_inputs must be a bounded exact tuple"
+        )
+    if not all(type(item) is MorphologyGroupTrainInputs for item in value):
+        raise CombinedEvolutionError(
+            "morphology_train_inputs must contain exact trusted input records"
+        )
+    group_ids = tuple(item.group_id for item in value)
+    if len(group_ids) != len(set(group_ids)):
+        raise CombinedEvolutionError("morphology group identifiers must be unique")
+    return tuple(
+        sorted(
+            (
+                summarize_morphology_group_evidence(
+                    item.profiles,
+                    entity_ids=item.entity_ids,
+                    split="train",
+                    group_id=item.group_id,
+                    eligible_leaves=item.eligible_leaves,
+                    baseline=item.baseline,
+                    reviewed_leaf_names=reviewed_leaf_names,
+                    truths=item.truths,
+                    candidate_forecasts=item.candidate_forecasts,
+                    baseline_forecasts=item.baseline_forecasts,
+                    forecast_disagreements=item.forecast_disagreements,
+                )
+                for item in value
+            ),
+            key=lambda evidence: evidence.group_id,
+        )
+    )
 
 
 def _fixed_group_predicate(group_id: object) -> tuple[str, str, float]:
@@ -931,10 +965,6 @@ def _fixed_group_predicate(group_id: object) -> tuple[str, str, float]:
 def _validate_morphology_group_evidence(value: object) -> None:
     if not isinstance(value, MorphologyGroupEvidence):
         raise CombinedEvolutionError("invalid morphology group evidence")
-    if value._canonical_values != _morphology_group_evidence_values(value):
-        raise CombinedEvolutionError(
-            "morphology group evidence must come from the trusted group builder"
-        )
     expected = _fixed_group_predicate(value.group_id)
     if (
         type(value.feature) is not str
@@ -1060,41 +1090,6 @@ def _morphology_group_payload(value: MorphologyGroupEvidence) -> dict[str, objec
 
 def _json_safe_raw_tail(value: float) -> float | str:
     return "positive_infinity" if value == math.inf else value
-
-
-def _morphology_group_evidence_values(
-    value: MorphologyGroupEvidence,
-) -> tuple[object, ...]:
-    return tuple(
-        getattr(value, name)
-        for name in (
-            "group_id",
-            "feature",
-            "operator",
-            "threshold",
-            "task_count",
-            "entity_count",
-            "eligible_leaves",
-            "baseline",
-            "winsorized_smae_delta",
-            "winsorized_srmse_delta",
-            "coverage",
-            "failure_rate",
-            "forecast_disagreement",
-            "candidate_worst_smae_raw",
-            "candidate_worst_srmse_raw",
-            "baseline_worst_smae_raw",
-            "baseline_worst_srmse_raw",
-            "candidate_smae_clipped_count",
-            "candidate_srmse_clipped_count",
-            "baseline_smae_clipped_count",
-            "baseline_srmse_clipped_count",
-            "candidate_smae_clipped_rate",
-            "candidate_srmse_clipped_rate",
-            "baseline_smae_clipped_rate",
-            "baseline_srmse_clipped_rate",
-        )
-    )
 
 
 def _validate_leaf_tuple(value: object, label: str) -> tuple[str, ...]:

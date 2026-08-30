@@ -166,6 +166,109 @@ def _evidence(**overrides: object):
     return evidence
 
 
+def _forged_evidence_with_impossible_deltas():
+    """Reproduce every currently importable snapshot field used as authority."""
+    import numerical_agent.evolution.combined_evolution as combined_evolution
+
+    valid = _evidence()
+    forged = object.__new__(type(valid))
+    for name, value in vars(valid).items():
+        object.__setattr__(forged, name, value)
+    object.__setattr__(forged, "winsorized_smae_delta", -5.0)
+    object.__setattr__(forged, "winsorized_srmse_delta", -5.0)
+    snapshot = getattr(combined_evolution, "_morphology_group_evidence_values", None)
+    if snapshot is not None:
+        object.__setattr__(forged, "_canonical_values", snapshot(forged))
+    return forged
+
+
+def _proposal_train_group_inputs(**overrides: object):
+    from numerical_agent.evolution.combined_evolution import (
+        MorphologyGroupTrainInputs,
+    )
+
+    group_id = str(overrides.pop("group_id", "periodic_high_confidence"))
+    profiles = _periodic_profiles()
+    if group_id == "intermittent":
+        profiles = tuple(replace(profile, intermittency_adi=2.0) for profile in profiles)
+    values: dict[str, object] = dict(
+        profiles=profiles,
+        entity_ids=("a", "b", "c"),
+        group_id=group_id,
+        eligible_leaves=("timesfm_2_5", "seasonal_naive"),
+        baseline="toto_2_0",
+        truths=((1.0, 1.0),) * 3,
+        candidate_forecasts=((1.5, 1.5),) * 3,
+        baseline_forecasts=((2.0, 2.0),) * 3,
+        forecast_disagreements=(0.25,) * 3,
+    )
+    values.update(overrides)
+    return MorphologyGroupTrainInputs(**values)
+
+
+def test_proposal_rejects_precomputed_morphology_groups_without_raw_train_inputs() -> None:
+    """A forged reporting object alone must never authorize an LLM proposal prompt."""
+    from numerical_agent.evolution.combined_evolution import (
+        CombinedProposalDiagnostics,
+        propose_combined_child,
+    )
+
+    parent = PolicyPortfolio.flagship5()
+    diagnostics = CombinedProposalDiagnostics(128, 0.25, 4, 1)
+    object.__setattr__(
+        diagnostics,
+        "morphology_groups",
+        (_forged_evidence_with_impossible_deltas(),),
+    )
+    agent = FakeLLMClient(['{"operations": []}'])
+
+    result = propose_combined_child(
+        parent,
+        statistical_names=("seasonal_naive",),
+        diagnostics=diagnostics,
+        agent=agent,
+    )
+
+    assert result.child is parent
+    assert agent.calls == []
+
+
+def test_proposal_recomputes_morphology_payload_from_aligned_train_inputs() -> None:
+    """Forged deltas must be ignored when the proposal boundary scores raw Train inputs."""
+    from numerical_agent.evolution.combined_evolution import (
+        CombinedProposalDiagnostics,
+        propose_combined_child,
+    )
+
+    parent = PolicyPortfolio.flagship5()
+    diagnostics = CombinedProposalDiagnostics(128, 0.25, 4, 1)
+    object.__setattr__(
+        diagnostics,
+        "morphology_groups",
+        (_forged_evidence_with_impossible_deltas(),),
+    )
+    agent = FakeLLMClient(['{"operations": []}'])
+
+    result = propose_combined_child(
+        parent,
+        statistical_names=("seasonal_naive",),
+        diagnostics=diagnostics,
+        morphology_train_inputs=(_proposal_train_group_inputs(),),
+        agent=agent,
+    )
+
+    assert result.child is parent
+    prompt = json.loads(agent.calls[0]["messages"][0]["content"])
+    group = prompt["diagnostics"]["morphology_groups"][0]
+    assert group["winsorized_smae_delta"] == -0.5
+    assert group["winsorized_srmse_delta"] == -0.5
+    serialized = json.dumps(prompt, sort_keys=True, allow_nan=False)
+    assert "truths" not in serialized
+    assert "candidate_forecasts" not in serialized
+    assert "baseline_forecasts" not in serialized
+    assert "secret-task" not in serialized
+
+
 def test_morphology_group_evidence_is_immutable_and_projects_only_canonical_aggregates() -> None:
     """Adding raw identities or mutable payloads would leak Train examples to the model."""
     evidence = _evidence()
@@ -314,29 +417,11 @@ def test_trusted_group_builder_uses_canonical_cap_and_rejects_incomplete_pairs()
         )
 
 
-def test_precomputed_delta_floats_cannot_enter_morphology_group_evidence() -> None:
-    """A caller-supplied metric pair must not acquire canonical evidence authority."""
+def test_trusted_group_builder_does_not_accept_precomputed_delta_floats() -> None:
+    """The scorer boundary must expose no parameter for caller-authored metrics."""
     from numerical_agent.evolution.combined_evolution import (
-        CombinedEvolutionError,
-        MorphologyGroupEvidence,
         summarize_morphology_group_evidence,
     )
-
-    with pytest.raises(CombinedEvolutionError, match="trusted group builder"):
-        MorphologyGroupEvidence(
-            group_id="periodic_high_confidence",
-            feature="periodicity_strength",
-            operator="at_least",
-            threshold=0.6,
-            task_count=3,
-            entity_count=3,
-            eligible_leaves=("timesfm_2_5", "seasonal_naive"),
-            baseline="toto_2_0",
-            winsorized_smae_delta=-0.5,
-            winsorized_srmse_delta=-0.5,
-            coverage=1.0,
-            failure_rate=0.0,
-        )
 
     profiles = tuple(
         profile_task(Task(str(index), (1.0, 2.0, 1.0, 2.0), 1, "D", (0.0,)))
@@ -354,16 +439,6 @@ def test_precomputed_delta_floats_cannot_enter_morphology_group_evidence() -> No
             scaled_deltas=((-0.5, -0.5),) * 3,
             forecast_disagreements=(0.0, 0.0, 0.0),
         )
-
-
-def test_canonical_group_snapshot_rejects_post_construction_metric_forgery() -> None:
-    from numerical_agent.evolution.combined_evolution import CombinedEvolutionError
-
-    evidence = _evidence()
-    object.__setattr__(evidence, "winsorized_smae_delta", 0.0)
-
-    with pytest.raises(CombinedEvolutionError, match="trusted group builder"):
-        evidence.to_payload()
 
 
 def test_group_builder_projects_sanitized_raw_tail_and_clipping_aggregates() -> None:
@@ -518,13 +593,14 @@ def test_proposal_prompt_receives_only_reviewed_morphology_group_evidence() -> N
     )
 
     parent = PolicyPortfolio.flagship5()
-    diagnostics = CombinedProposalDiagnostics(128, 0.25, 4, 1, (_evidence(),))
+    diagnostics = CombinedProposalDiagnostics(128, 0.25, 4, 1)
     agent = FakeLLMClient(['{"operations": []}'])
 
     result = propose_combined_child(
         parent,
         statistical_names=("seasonal_naive",),
         diagnostics=diagnostics,
+        morphology_train_inputs=(_proposal_train_group_inputs(),),
         agent=agent,
     )
 
@@ -553,23 +629,18 @@ def test_statistical_only_evidence_reaches_one_llm_call() -> None:
     )
 
     parent = PolicyPortfolio.flagship5()
-    diagnostics = CombinedProposalDiagnostics(
-        128,
-        0.25,
-        4,
-        1,
-        (
-            _evidence(
-                eligible_leaves=("seasonal_naive", "holt_damped_trend")
-            ),
-        ),
-    )
+    diagnostics = CombinedProposalDiagnostics(128, 0.25, 4, 1)
     agent = FakeLLMClient(['{"operations": []}'])
 
     result = propose_combined_child(
         parent,
         statistical_names=("seasonal_naive", "holt_damped_trend"),
         diagnostics=diagnostics,
+        morphology_train_inputs=(
+            _proposal_train_group_inputs(
+                eligible_leaves=("seasonal_naive", "holt_damped_trend")
+            ),
+        ),
         agent=agent,
     )
 
@@ -591,34 +662,36 @@ def test_evidence_and_group_permutations_have_one_canonical_prompt_and_fingerpri
     periodic_right = _evidence(
         eligible_leaves=("seasonal_naive", "timesfm_2_5")
     )
-    intermittent_left = _evidence(
-        group_id="intermittent",
-        feature="intermittency_adi",
-        threshold=1.32,
-        eligible_leaves=("seasonal_naive", "timesfm_2_5"),
-    )
-    intermittent_right = _evidence(
-        group_id="intermittent",
-        feature="intermittency_adi",
-        threshold=1.32,
-        eligible_leaves=("timesfm_2_5", "seasonal_naive"),
-    )
     left_agent = FakeLLMClient(['{"operations": []}'])
     right_agent = FakeLLMClient(['{"operations": []}'])
 
     propose_combined_child(
         parent,
         statistical_names=("seasonal_naive",),
-        diagnostics=CombinedProposalDiagnostics(
-            128, 0.25, 4, 1, (periodic_left, intermittent_left)
+        diagnostics=CombinedProposalDiagnostics(128, 0.25, 4, 1),
+        morphology_train_inputs=(
+            _proposal_train_group_inputs(
+                eligible_leaves=("timesfm_2_5", "seasonal_naive")
+            ),
+            _proposal_train_group_inputs(
+                group_id="intermittent",
+                eligible_leaves=("seasonal_naive", "timesfm_2_5"),
+            ),
         ),
         agent=left_agent,
     )
     propose_combined_child(
         parent,
         statistical_names=("seasonal_naive",),
-        diagnostics=CombinedProposalDiagnostics(
-            128, 0.25, 4, 1, (intermittent_right, periodic_right)
+        diagnostics=CombinedProposalDiagnostics(128, 0.25, 4, 1),
+        morphology_train_inputs=(
+            _proposal_train_group_inputs(
+                group_id="intermittent",
+                eligible_leaves=("timesfm_2_5", "seasonal_naive"),
+            ),
+            _proposal_train_group_inputs(
+                eligible_leaves=("seasonal_naive", "timesfm_2_5")
+            ),
         ),
         agent=right_agent,
     )
@@ -640,19 +713,18 @@ def test_proposal_rejects_unknown_evidence_leaf_before_calling_llm() -> None:
     from numerical_agent.evolution.combined_evolution import CombinedProposalDiagnostics, propose_combined_child
 
     parent = PolicyPortfolio.flagship5()
-    diagnostics = CombinedProposalDiagnostics(
-        128,
-        0.25,
-        4,
-        1,
-        (_evidence(eligible_leaves=("timesfm_2_5", "unknown_leaf")),),
-    )
+    diagnostics = CombinedProposalDiagnostics(128, 0.25, 4, 1)
     agent = FakeLLMClient(['{"operations": []}'])
 
     result = propose_combined_child(
         parent,
         statistical_names=("seasonal_naive",),
         diagnostics=diagnostics,
+        morphology_train_inputs=(
+            _proposal_train_group_inputs(
+                eligible_leaves=("timesfm_2_5", "unknown_leaf")
+            ),
+        ),
         agent=agent,
     )
 
