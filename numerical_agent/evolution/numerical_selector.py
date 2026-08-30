@@ -2508,7 +2508,6 @@ def _scaled_candidate_summary(
 
     smaes = values("smae")
     srmses = values("srmse")
-    joints = [joint_scaled_error(smae, srmse) for smae, srmse in zip(smaes, srmses)]
     def median_mad(items: list[float]) -> tuple[float, float]:
         if not items:
             return math.inf, math.inf
@@ -2517,17 +2516,21 @@ def _scaled_candidate_summary(
 
     median_smae, smae_mad = median_mad(smaes)
     median_srmse, srmse_mad = median_mad(srmses)
+    recent_smae = smaes[-1] if smaes else math.inf
+    recent_srmse = srmses[-1] if srmses else math.inf
+    worst_smae = max(smaes, default=math.inf)
+    worst_srmse = max(srmses, default=math.inf)
     return {
-        "median_joint_scaled_error": _median_or_inf(joints),
-        "recent_joint_scaled_error": joints[-1] if joints else math.inf,
-        "worst_joint_scaled_error": max(joints, default=math.inf),
+        "median_joint_scaled_error": _joint_scaled_or_inf(median_smae, median_srmse),
+        "recent_joint_scaled_error": _joint_scaled_or_inf(recent_smae, recent_srmse),
+        "worst_joint_scaled_error": _joint_scaled_or_inf(worst_smae, worst_srmse),
         "median_smae": median_smae,
-        "recent_smae": smaes[-1] if smaes else math.inf,
-        "worst_smae": max(smaes, default=math.inf),
+        "recent_smae": recent_smae,
+        "worst_smae": worst_smae,
         "smae_mad": smae_mad,
         "median_srmse": median_srmse,
-        "recent_srmse": srmses[-1] if srmses else math.inf,
-        "worst_srmse": max(srmses, default=math.inf),
+        "recent_srmse": recent_srmse,
+        "worst_srmse": worst_srmse,
         "srmse_mad": srmse_mad,
         "worst_smae_raw": max(values("smae_raw"), default=math.inf),
         "worst_srmse_raw": max(values("srmse_raw"), default=math.inf),
@@ -2597,21 +2600,17 @@ def _summarize(
         ),
         long_horizon_fold=long_horizon_fold,
         long_horizon_coverage=long_horizon_coverage,
-        median_joint_scaled_error=_median_or_inf([
-            joint_scaled_error(float(fold.smae), float(fold.srmse))
-            for fold in successful
-            if fold.smae is not None and fold.srmse is not None
-        ]),
+        median_joint_scaled_error=_joint_scaled_or_inf(
+            _median_or_inf(smaes), _median_or_inf(srmses)
+        ),
         recent_joint_scaled_error=(
             joint_scaled_error(float(successful[-1].smae), float(successful[-1].srmse))
             if successful and successful[-1].smae is not None and successful[-1].srmse is not None
             else math.inf
         ),
-        worst_joint_scaled_error=max((
-            joint_scaled_error(float(fold.smae), float(fold.srmse))
-            for fold in successful
-            if fold.smae is not None and fold.srmse is not None
-        ), default=math.inf),
+        worst_joint_scaled_error=_joint_scaled_or_inf(
+            max(smaes, default=math.inf), max(srmses, default=math.inf)
+        ),
         median_smae=_median_or_inf(smaes),
         recent_smae=float(successful[-1].smae) if successful and successful[-1].smae is not None else math.inf,
         worst_smae=max(smaes, default=math.inf),
@@ -2629,6 +2628,12 @@ def _summarize(
         worst_smae_raw=max(smaes_raw, default=math.inf),
         worst_srmse_raw=max(srmses_raw, default=math.inf),
     )
+
+
+def _joint_scaled_or_inf(smae: float, srmse: float) -> float:
+    if not math.isfinite(smae) or not math.isfinite(srmse):
+        return math.inf
+    return joint_scaled_error(smae, srmse)
 
 
 def _empty_diagnostics(
@@ -2873,7 +2878,7 @@ def _passes_long_horizon_override_guard(
     reference = baseline.long_horizon_fold
     if audit is None or reference is None:
         return False
-    return _passes_independent_scaled_regret(
+    return passes_independent_scaled_regret(
         (audit.forecast,),
         (reference.forecast,),
         (reference.truth,),
@@ -2882,7 +2887,7 @@ def _passes_long_horizon_override_guard(
     )
 
 
-def _passes_independent_scaled_regret(
+def passes_independent_scaled_regret(
     candidate_forecasts: Sequence[Sequence[float]],
     reference_forecasts: Sequence[Sequence[float]],
     truths: Sequence[Sequence[float]],
@@ -3195,7 +3200,7 @@ def _passes_scaled_fold_acceptance(
     minimum_improvement: float = 0.0,
 ) -> bool:
     """Accept only independently safe capped sMAE and sRMSE fold evidence."""
-    if not _passes_independent_scaled_regret(
+    if not passes_independent_scaled_regret(
         candidate_forecasts, reference_forecasts, truths,
         max_smae_regret=(
             policy.max_smae_fold_regret if maximum_regret is None else maximum_regret

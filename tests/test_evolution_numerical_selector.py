@@ -16,11 +16,22 @@ from numerical_agent.evolution.numerical_selector import (
     diagnose_candidate,
     hindcast_cache_key,
     pairwise_diversity,
+    passes_independent_scaled_regret,
     select_assumption_guided_forecast,
     select_numerical_forecast,
     select_protected_safe_anchor,
 )
 from numerical_agent.evolution.screening import TaskProfile, profile_task
+
+
+def test_exported_scaled_regret_guard_uses_raw_error_when_capped_metrics_tie() -> None:
+    assert not passes_independent_scaled_regret(
+        candidate_forecasts=((8.0, 8.0),),
+        reference_forecasts=((7.0, 7.0),),
+        truths=((1.0, 1.0),),
+        max_smae_regret=0.02,
+        max_srmse_regret=0.02,
+    )
 
 
 def _task(history=tuple(float(i) for i in range(1, 41)), horizon=5):

@@ -88,6 +88,31 @@ def _diagnostic(
     )
 
 
+def _scaled_diagnostic(
+    name: str,
+    family: str,
+    *,
+    forecast: tuple[float, ...],
+    truth: tuple[float, ...],
+) -> CandidateDiagnostics:
+    metrics = drcik_point_metrics(truth, forecast)
+    return CandidateDiagnostics.synthetic(
+        name=name,
+        family=family,
+        median_mase=float(metrics["smae"]),
+        fold_forecasts=(forecast,) * 3,
+        fold_truths=(truth,) * 3,
+        median_smae=float(metrics["smae"]),
+        recent_smae=float(metrics["smae"]),
+        worst_smae=float(metrics["smae"]),
+        median_srmse=float(metrics["srmse"]),
+        recent_srmse=float(metrics["srmse"]),
+        worst_srmse=float(metrics["srmse"]),
+        worst_smae_raw=float(metrics["smae_raw"]),
+        worst_srmse_raw=float(metrics["srmse_raw"]),
+    )
+
+
 def _audited_diagnostic(
     diagnostic: CandidateDiagnostics,
     *,
@@ -973,7 +998,15 @@ def test_safe_handoff_host_ids_are_stable_for_identical_accepted_order() -> None
     ("candidate", "diagnostic_changes", "expected_reason"),
     [
         ("too_few", {"successful_folds": 2}, "insufficient_successful_folds"),
-        ("bad_tail", {"worst_smae_raw": 10.1}, "catastrophic_hindcast_tail"),
+        (
+            "bad_tail",
+            {
+                "worst_smae": 5.0,
+                "worst_smae_raw": 10.1,
+                "worst_joint_scaled_error": 2.6,
+            },
+            "catastrophic_hindcast_tail",
+        ),
         ("exploded", {"explosion": True}, "catastrophic_hindcast_tail"),
         (
             "low_coverage",
@@ -1047,21 +1080,17 @@ def test_assumption_guidance_cannot_bypass_srmse_safe_anchor_guard() -> None:
     entries = (_entry("safe_anchor", "tsfm"), _entry("challenger", "statistical"))
     truth = (1.0, 2.0, 3.0)
     diagnostics = {
-        "safe_anchor": _diagnostic(
+        "safe_anchor": _scaled_diagnostic(
             "safe_anchor",
             "tsfm",
-            forecast=truth,
+            forecast=(2.0, 3.0, 4.0),
             truth=truth,
-            median_smae=1.0,
-            median_srmse=1.0,
         ),
-        "challenger": _diagnostic(
+        "challenger": _scaled_diagnostic(
             "challenger",
             "statistical",
-            forecast=truth,
+            forecast=(1.0, 2.0, 5.5),
             truth=truth,
-            median_smae=0.7,
-            median_srmse=1.4,
         ),
     }
 

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from common.metrics import drcik_point_metrics, joint_scaled_error
 from numerical_agent.evolution.morphology import (
     AssumptionGrounding,
     MorphologyCard,
@@ -90,6 +91,31 @@ def _diagnostic(name: str, **changes: object) -> CandidateDiagnostics:
             fold_truths=((1.0, 2.0, 3.0),) * 3,
         ),
         **changes,
+    )
+
+
+def _scaled_diagnostic(
+    name: str,
+    *,
+    forecast: tuple[float, ...],
+    truth: tuple[float, ...],
+    family: str = "statistical",
+) -> CandidateDiagnostics:
+    metrics = drcik_point_metrics(truth, forecast)
+    return CandidateDiagnostics.synthetic(
+        name=name,
+        family=family,
+        median_mase=float(metrics["smae"]),
+        fold_forecasts=(forecast,) * 3,
+        fold_truths=(truth,) * 3,
+        median_smae=float(metrics["smae"]),
+        recent_smae=float(metrics["smae"]),
+        worst_smae=float(metrics["smae"]),
+        median_srmse=float(metrics["srmse"]),
+        recent_srmse=float(metrics["srmse"]),
+        worst_srmse=float(metrics["srmse"]),
+        worst_smae_raw=float(metrics["smae_raw"]),
+        worst_srmse_raw=float(metrics["srmse_raw"]),
     )
 
 
@@ -188,7 +214,12 @@ def test_consistency_enforces_fold_worst_fold_catastrophe_and_forecast_gates() -
     )
     diagnostics = {
         "few": _diagnostic("few", successful_folds=2),
-        "worst": _diagnostic("worst", worst_smae_raw=10.1),
+        "worst": _diagnostic(
+            "worst",
+            worst_smae=5.0,
+            worst_smae_raw=10.1,
+            worst_joint_scaled_error=joint_scaled_error(5.0, 0.4),
+        ),
         "exploded": _diagnostic("exploded", explosion=True),
         "malformed": _diagnostic("malformed"),
     }
@@ -229,12 +260,13 @@ def test_consistency_rejects_nonfinite_scaled_tail_diagnostics() -> None:
 def test_assumption_cannot_bypass_srmse_safe_anchor_guard() -> None:
     """Assumption guidance must not admit a challenger that regresses anchor sRMSE."""
     assumption = _assumption("guided", "seasonality", "challenger")
+    truth = (1.0, 2.0, 3.0)
     diagnostics = {
-        "safe_anchor": _diagnostic(
-            "safe_anchor", median_smae=1.0, median_srmse=1.0
+        "safe_anchor": _scaled_diagnostic(
+            "safe_anchor", forecast=(2.0, 3.0, 4.0), truth=truth
         ),
-        "challenger": _diagnostic(
-            "challenger", median_smae=0.7, median_srmse=1.4
+        "challenger": _scaled_diagnostic(
+            "challenger", forecast=(1.0, 2.0, 5.5), truth=truth
         ),
     }
 
@@ -242,12 +274,157 @@ def test_assumption_cannot_bypass_srmse_safe_anchor_guard() -> None:
         _card(assumption),
         _profile(),
         diagnostics,
-        {name: (1.0, 2.0, 3.0) for name in diagnostics},
+        {"safe_anchor": (2.0, 3.0, 4.0), "challenger": (1.0, 2.0, 5.5)},
         protected_anchor_name="safe_anchor",
     )
 
     assert result.accepted == ()
     assert result.rejected == {"guided": "safe_anchor_scaled_regret"}
+
+
+def test_consistency_matches_runtime_raw_guard_for_capped_tie() -> None:
+    from numerical_agent.evolution.numerical_selector import (
+        passes_independent_scaled_regret,
+    )
+
+    truths = ((1.0, 1.0),) * 3
+    anchor_forecasts = ((7.0, 7.0),) * 3
+    challenger_forecasts = ((8.0, 8.0),) * 3
+    anchor = CandidateDiagnostics.synthetic(
+        name="safe_anchor",
+        family="tsfm",
+        median_mase=6.0,
+        fold_forecasts=anchor_forecasts,
+        fold_truths=truths,
+        median_smae=5.0,
+        recent_smae=5.0,
+        worst_smae=5.0,
+        median_srmse=5.0,
+        recent_srmse=5.0,
+        worst_srmse=5.0,
+        worst_smae_raw=6.0,
+        worst_srmse_raw=6.0,
+    )
+    challenger = CandidateDiagnostics.synthetic(
+        name="challenger",
+        family="statistical",
+        median_mase=7.0,
+        fold_forecasts=challenger_forecasts,
+        fold_truths=truths,
+        median_smae=5.0,
+        recent_smae=5.0,
+        worst_smae=5.0,
+        median_srmse=5.0,
+        recent_srmse=5.0,
+        worst_srmse=5.0,
+        worst_smae_raw=7.0,
+        worst_srmse_raw=7.0,
+    )
+    runtime_accepted = passes_independent_scaled_regret(
+        challenger_forecasts,
+        anchor_forecasts,
+        truths,
+        max_smae_regret=0.02,
+        max_srmse_regret=0.02,
+    )
+
+    result = _check(
+        _card(_assumption("guided", "seasonality", "challenger")),
+        _profile(horizon=2),
+        {"safe_anchor": anchor, "challenger": challenger},
+        {"safe_anchor": (7.0, 7.0), "challenger": (8.0, 8.0)},
+        protected_anchor_name="safe_anchor",
+    )
+
+    assert bool(result.accepted) is runtime_accepted
+    assert result.rejected == {"guided": "safe_anchor_scaled_regret"}
+
+
+@pytest.mark.parametrize("broken", ("absent", "misaligned"))
+def test_consistency_rejects_absent_or_misaligned_anchor_folds(broken: str) -> None:
+    truths = ((1.0, 1.0),) * 3
+    anchor = CandidateDiagnostics.synthetic(
+        name="safe_anchor",
+        family="tsfm",
+        median_mase=1.0,
+        fold_forecasts=() if broken == "absent" else ((1.0, 1.0),) * 3,
+        fold_truths=() if broken == "absent" else truths,
+    )
+    challenger = CandidateDiagnostics.synthetic(
+        name="challenger",
+        family="statistical",
+        median_mase=0.5,
+        fold_forecasts=((1.0, 1.0),) * 3,
+        fold_truths=(
+            ((2.0, 2.0),) * 3 if broken == "misaligned" else truths
+        ),
+    )
+
+    result = _check(
+        _card(_assumption("guided", "seasonality", "challenger")),
+        _profile(horizon=2),
+        {"safe_anchor": anchor, "challenger": challenger},
+        {"safe_anchor": (1.0, 1.0), "challenger": (1.0, 1.0)},
+        protected_anchor_name="safe_anchor",
+    )
+
+    assert result.accepted == ()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"median_smae": 5.1},
+        {"median_joint_scaled_error": 0.0},
+        {"median_smae": float("nan")},
+    ),
+)
+def test_consistency_rejects_forged_scaled_summaries(changes: dict[str, object]) -> None:
+    result = _check(
+        _card(_assumption("forged", "seasonality", "candidate")),
+        _profile(),
+        {"candidate": _diagnostic("candidate", **changes)},
+        {"candidate": (1.0, 2.0, 3.0)},
+    )
+
+    assert result.rejected == {"forged": "invalid_diagnostics"}
+
+
+@pytest.mark.parametrize(
+    "fold_changes",
+    (
+        {"smae": 4.0, "smae_raw": 6.0, "smae_clipped": True},
+        {"smae": 5.0, "smae_raw": 6.0, "smae_clipped": False},
+        {"srmse_raw": float("nan")},
+    ),
+)
+def test_consistency_rejects_inconsistent_fold_cap_raw_or_flag(
+    fold_changes: dict[str, object],
+) -> None:
+    base_fold = HindcastFold(
+        train_end=80,
+        validation_end=84,
+        status="success",
+        forecast=(1.0, 2.0, 3.0),
+        truth=(1.0, 2.0, 3.0),
+        smae=0.0,
+        srmse=0.0,
+        smae_raw=0.0,
+        srmse_raw=0.0,
+        smae_clipped=False,
+        srmse_clipped=False,
+    )
+    forged_fold = replace(base_fold, **fold_changes)
+    diagnostic = _diagnostic("candidate", folds=(forged_fold,) * 3)
+
+    result = _check(
+        _card(_assumption("forged", "seasonality", "candidate")),
+        _profile(),
+        {"candidate": diagnostic},
+        {"candidate": (1.0, 2.0, 3.0)},
+    )
+
+    assert result.rejected == {"forged": "invalid_fold_evidence"}
 
 
 def test_train_credit_reports_explicit_joint_scaled_improvement() -> None:

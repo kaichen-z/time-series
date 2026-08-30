@@ -6,11 +6,16 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 
-from common.metrics import drcik_point_metrics
+from common.metrics import joint_scaled_error
 
 from .assumptions import ForecastAssumption, rank_diverse_assumptions
 from .morphology import AssumptionGrounding, MorphologyCard
-from .numerical_selector import CandidateDiagnostics, DecisionPolicy, HindcastFold
+from .numerical_selector import (
+    CandidateDiagnostics,
+    DecisionPolicy,
+    HindcastFold,
+    passes_independent_scaled_regret,
+)
 from .screening import TaskProfile
 
 
@@ -326,45 +331,25 @@ def _passes_safe_anchor_regret(
     anchor: CandidateDiagnostics,
     policy: DecisionPolicy,
 ) -> bool:
-    """Protect both capped scaled metrics independently against the exact anchor."""
-    tolerance = 1e-12
+    """Use the runtime raw/clipping guard on complete truth-aligned folds."""
     if (
-        candidate.median_smae
-        > anchor.median_smae * (1.0 + policy.max_smae_fold_regret) + tolerance
-        or candidate.median_srmse
-        > anchor.median_srmse * (1.0 + policy.max_srmse_fold_regret) + tolerance
+        not candidate.fold_forecasts
+        or not candidate.fold_truths
+        or not anchor.fold_forecasts
+        or not anchor.fold_truths
+        or candidate.fold_truths != anchor.fold_truths
+        or len(candidate.fold_forecasts) != candidate.successful_folds
+        or len(anchor.fold_forecasts) != anchor.successful_folds
+        or candidate.successful_folds != anchor.successful_folds
     ):
         return False
-    if not candidate.fold_forecasts or not anchor.fold_forecasts:
-        return True
-    if (
-        len(candidate.fold_forecasts) != len(anchor.fold_forecasts)
-        or len(candidate.fold_forecasts) != len(anchor.fold_truths)
-    ):
-        return False
-    for candidate_forecast, anchor_forecast, truth in zip(
+    return passes_independent_scaled_regret(
         candidate.fold_forecasts,
         anchor.fold_forecasts,
         anchor.fold_truths,
-        strict=True,
-    ):
-        if (
-            len(candidate_forecast) != len(anchor_forecast)
-            or len(candidate_forecast) != len(truth)
-            or not truth
-        ):
-            return False
-        candidate_metrics = drcik_point_metrics(list(truth), list(candidate_forecast))
-        anchor_metrics = drcik_point_metrics(list(truth), list(anchor_forecast))
-        for metric, maximum_regret in (
-            ("smae", policy.max_smae_fold_regret),
-            ("srmse", policy.max_srmse_fold_regret),
-        ):
-            if float(candidate_metrics[metric]) > float(anchor_metrics[metric]) * (
-                1.0 + maximum_regret
-            ) + tolerance:
-                return False
-    return True
+        max_smae_regret=policy.max_smae_fold_regret,
+        max_srmse_regret=policy.max_srmse_fold_regret,
+    )
 
 
 def _valid_diagnostic(value: object, expected_name: str) -> bool:
@@ -374,10 +359,12 @@ def _valid_diagnostic(value: object, expected_name: str) -> bool:
         return False
     if isinstance(value.successful_folds, bool) or not isinstance(value.successful_folds, int):
         return False
-    scaled_numbers = (
-        value.median_joint_scaled_error,
-        value.recent_joint_scaled_error,
-        value.worst_joint_scaled_error,
+    capped_pairs = (
+        (value.median_joint_scaled_error, value.median_smae, value.median_srmse),
+        (value.recent_joint_scaled_error, value.recent_smae, value.recent_srmse),
+        (value.worst_joint_scaled_error, value.worst_smae, value.worst_srmse),
+    )
+    capped_numbers = (
         value.median_smae,
         value.recent_smae,
         value.worst_smae,
@@ -386,11 +373,11 @@ def _valid_diagnostic(value: object, expected_name: str) -> bool:
         value.recent_srmse,
         value.worst_srmse,
         value.srmse_mad,
-        value.worst_smae_raw,
-        value.worst_srmse_raw,
     )
     numbers = (
-        *scaled_numbers,
+        *(number for pair in capped_pairs for number in pair),
+        value.smae_mad,
+        value.srmse_mad,
         value.normalized_bias,
         value.slope_error,
         value.long_horizon_coverage,
@@ -403,7 +390,26 @@ def _valid_diagnostic(value: object, expected_name: str) -> bool:
         for number in numbers
     ):
         return False
-    if any(number < 0.0 for number in scaled_numbers):
+    if any(number < 0.0 or number > 5.0 for number in capped_numbers):
+        return False
+    if any(
+        joint != joint_scaled_error(smae, srmse)
+        for joint, smae, srmse in capped_pairs
+    ):
+        return False
+    raw_tails = (value.worst_smae_raw, value.worst_srmse_raw)
+    if any(
+        not isinstance(number, (int, float))
+        or isinstance(number, bool)
+        or math.isnan(float(number))
+        or float(number) < 0.0
+        or float(number) == -math.inf
+        for number in raw_tails
+    ):
+        return False
+    if value.worst_smae != min(5.0, value.worst_smae_raw):
+        return False
+    if value.worst_srmse != min(5.0, value.worst_srmse_raw):
         return False
     if any(
         number is not None
@@ -463,20 +469,35 @@ def _valid_long_horizon_audit(diagnostic: CandidateDiagnostics) -> bool:
 
 
 def _valid_scaled_fold_metrics(fold: HindcastFold) -> bool:
-    values = (fold.smae, fold.srmse, fold.smae_raw, fold.srmse_raw)
-    if not all(
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-        and value >= 0.0
-        for value in values
+    return _valid_scaled_metric_triplet(
+        fold.smae, fold.smae_raw, fold.smae_clipped
+    ) and _valid_scaled_metric_triplet(
+        fold.srmse, fold.srmse_raw, fold.srmse_clipped
+    )
+
+
+def _valid_scaled_metric_triplet(
+    capped: object,
+    raw: object,
+    clipped: object,
+) -> bool:
+    if (
+        not isinstance(capped, (int, float))
+        or isinstance(capped, bool)
+        or not math.isfinite(float(capped))
+        or not 0.0 <= float(capped) <= 5.0
+        or not isinstance(raw, (int, float))
+        or isinstance(raw, bool)
+        or math.isnan(float(raw))
+        or float(raw) < 0.0
+        or float(raw) == -math.inf
+        or type(clipped) is not bool
     ):
         return False
-    if type(fold.smae_clipped) is not bool or type(fold.srmse_clipped) is not bool:
-        return False
-    assert fold.smae is not None and fold.srmse is not None
-    assert fold.smae_raw is not None and fold.srmse_raw is not None
-    return fold.smae <= fold.smae_raw and fold.srmse <= fold.srmse_raw
+    return (
+        float(capped) == min(5.0, float(raw))
+        and clipped == (float(raw) > 5.0)
+    )
 
 
 def _valid_forecast(value: object) -> bool:
