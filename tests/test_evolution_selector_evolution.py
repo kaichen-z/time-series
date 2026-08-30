@@ -121,7 +121,9 @@ def test_decision_policy_round_trip_and_strict_mutation_schema():
                 "recent_joint_scaled_error",
                 "median_joint_scaled_error",
                 "worst_joint_scaled_error",
-                "smae_mad",
+                "median_smae",
+                "median_srmse",
+                "normalized_bias",
             ],
             "recent_regime_first": True,
             "min_successful_folds": 2,
@@ -143,6 +145,41 @@ def test_decision_policy_round_trip_and_strict_mutation_schema():
     for forbidden in ("future", "split", "candidates", "scorer", "screening_policy"):
         with pytest.raises(SelectorEvolutionError):
             apply_decision_response(parent, json.dumps({"summary": "bad", "policy": {forbidden: 1}}))
+
+
+def test_mutation_rejects_a_single_metric_ranking_policy() -> None:
+    parent = DecisionPolicy()
+    payload = {
+        "summary": "rank only by one metric",
+        "policy": {
+            **selector_evolution._mutation_policy_payload(parent),
+            "ranking_order": ["median_smae"],
+        },
+    }
+
+    with pytest.raises(SelectorEvolutionError, match="complete.*sMAE.*sRMSE"):
+        apply_decision_response(parent, json.dumps(payload))
+
+
+def test_mutation_rejects_complete_looking_policy_with_single_metric_authority() -> None:
+    parent = DecisionPolicy()
+    payload = {
+        "summary": "put recent sMAE ahead of the joint pair",
+        "policy": {
+            **selector_evolution._mutation_policy_payload(parent),
+            "ranking_order": [
+                "recent_smae",
+                "median_joint_scaled_error",
+                "recent_joint_scaled_error",
+                "worst_joint_scaled_error",
+                "median_smae",
+                "median_srmse",
+            ],
+        },
+    }
+
+    with pytest.raises(SelectorEvolutionError, match="canonical joint fields"):
+        apply_decision_response(parent, json.dumps(payload))
 
 
 def test_guarded_combination_parameters_round_trip_through_evolution_schema():
@@ -199,6 +236,18 @@ def test_explicit_legacy_source_reader_rejects_median_smape_ranking() -> None:
 
     with pytest.raises(SelectorEvolutionError, match="median_smape cannot be migrated"):
         parse_decision_source(source, allow_legacy=True)
+
+
+def test_explicit_legacy_source_reader_normalizes_unpaired_ranking() -> None:
+    source = render_decision_source(DecisionPolicy())
+    source = source.replace("'median_joint_scaled_error'", "'median_mase'")
+    source = source.replace("'recent_joint_scaled_error'", "'recent_mase'")
+    source = source.replace("'worst_joint_scaled_error'", "'worst_mase'")
+    source = source.replace("'median_smae'", "'mase_mad'")
+    source = source.replace("'median_srmse'", "'median_rmsse'")
+    source = source.replace("                   'normalized_bias'],\n", "                   ],\n")
+
+    assert parse_decision_source(source, allow_legacy=True) == DecisionPolicy()
 
 
 def test_task_conditioned_long_horizon_route_round_trips_and_legacy_defaults_are_safe():
@@ -587,21 +636,59 @@ def test_combined_child_accepts_pareto_gain_in_srmse_with_smae_unchanged() -> No
     assert compare_decisions(parent, child, parent, child).accepted
 
 
-def test_active_oracle_regret_uses_the_same_scaled_smae_contract():
-    task = Task("t", tuple(float(i) for i in range(1, 21)), 2, "D", (1.0, 2.0))
+def test_active_oracle_regret_uses_the_joint_pair_not_the_smae_only_winner():
+    task = Task("t", tuple(float(i) for i in range(1, 21)), 2, "D", (1.0, 1.0))
     case = DecisionCase(
         task,
-        ("selected", "oracle"),
-        {"selected": _diag("selected", 0.1), "oracle": _diag("oracle", 0.2)},
-        {"selected": (4.0, 5.0), "oracle": (1.0, 2.0)},
-        {"selected": "statistical", "oracle": "statistical"},
+        ("selected", "joint_oracle"),
+        {
+            "selected": _diag("selected", 0.1),
+            "joint_oracle": _diag("joint_oracle", 0.2),
+        },
+        {
+            # sMAE=1.0 and sRMSE=sqrt(2): the old sMAE-only oracle.
+            "selected": (1.0, 3.0),
+            # sMAE=sRMSE=1.1: the lower joint-pair oracle.
+            "joint_oracle": (2.1, 2.1),
+        },
+        {"selected": "statistical", "joint_oracle": "statistical"},
     )
 
     score = evaluate_decision(DecisionPolicy(ensemble_enabled=False), (case,))
 
-    # Selected MAE is 3 and the mean absolute target scale is 1.5, so sMAE=2.
-    # The active oracle is perfect, giving regret (2 - 0) / (1 + 0) = 2.
-    assert score.mean_active_oracle_regret == pytest.approx(2.0)
+    assert score.mean_active_oracle_smae_regret == pytest.approx((1.0 - 1.1) / 2.1)
+    assert score.mean_active_oracle_srmse_regret == pytest.approx(
+        (2.0**0.5 - 1.1) / 2.1
+    )
+
+
+def test_train_and_dev_gates_reject_srmse_tail_regression_despite_mean_gain():
+    observed = evaluate_decision(DecisionPolicy(ensemble_enabled=False), (_case("t1"),))
+    parent = replace(
+        observed,
+        mean_smae=1.0,
+        mean_srmse=1.0,
+        p90_smae=1.0,
+        p95_smae=1.0,
+        p90_srmse=1.0,
+        p95_srmse=1.0,
+        p90_smae_raw=1.0,
+        p95_smae_raw=1.0,
+        p90_srmse_raw=1.0,
+        p95_srmse_raw=1.0,
+        mean_active_oracle_smae_regret=0.1,
+        mean_active_oracle_srmse_regret=0.1,
+    )
+    mean_better = replace(parent, mean_smae=0.9, mean_srmse=0.9)
+    capped_tail_failure = replace(mean_better, p95_srmse=1.5)
+    raw_tail_failure = replace(mean_better, p95_srmse_raw=20.0)
+
+    assert not compare_decisions(parent, mean_better, parent, capped_tail_failure).accepted
+    assert not compare_decisions(parent, mean_better, parent, raw_tail_failure).accepted
+    assert not selector_evolution._compare_train_decisions(
+        parent, capped_tail_failure
+    ).accepted
+    assert not selector_evolution._compare_train_decisions(parent, raw_tail_failure).accepted
 
 
 def test_decision_score_observes_assumption_breadth_before_final_selection():
@@ -819,7 +906,7 @@ def test_bounded_combined_candidates_cover_operators_without_exceeding_fold_budg
         parent,
         ranking_order=(
             "recent_joint_scaled_error", "median_joint_scaled_error",
-            "worst_joint_scaled_error", "smae_mad",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
         ),
     )
 
@@ -847,7 +934,7 @@ def test_train_evolution_uses_dev_only_for_one_final_read_only_gate(tmp_path):
     parent = DecisionPolicy(
         ranking_order=(
             "median_joint_scaled_error", "recent_joint_scaled_error",
-            "worst_joint_scaled_error", "smae_mad",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
         ),
         recent_regime_first=False,
         ensemble_enabled=False,
@@ -856,7 +943,7 @@ def test_train_evolution_uses_dev_only_for_one_final_read_only_gate(tmp_path):
         parent,
         ranking_order=(
             "recent_joint_scaled_error", "median_joint_scaled_error",
-            "worst_joint_scaled_error", "smae_mad",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
         ),
     )
 
@@ -906,7 +993,7 @@ def test_train_crossfold_gate_rejects_average_gain_with_one_unstable_entity_grou
     parent = DecisionPolicy(
         ranking_order=(
             "median_joint_scaled_error", "recent_joint_scaled_error",
-            "worst_joint_scaled_error", "smae_mad",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
         ),
         recent_regime_first=False,
         ensemble_enabled=False,
@@ -915,7 +1002,7 @@ def test_train_crossfold_gate_rejects_average_gain_with_one_unstable_entity_grou
         parent,
         ranking_order=(
             "recent_joint_scaled_error", "median_joint_scaled_error",
-            "worst_joint_scaled_error", "smae_mad",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
         ),
     )
     cases = tuple(
@@ -940,7 +1027,7 @@ def test_train_crossfold_gate_accepts_policy_improving_every_entity_group():
     parent = DecisionPolicy(
         ranking_order=(
             "median_joint_scaled_error", "recent_joint_scaled_error",
-            "worst_joint_scaled_error", "smae_mad",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
         ),
         recent_regime_first=False,
         ensemble_enabled=False,
@@ -949,7 +1036,7 @@ def test_train_crossfold_gate_accepts_policy_improving_every_entity_group():
         parent,
         ranking_order=(
             "recent_joint_scaled_error", "median_joint_scaled_error",
-            "worst_joint_scaled_error", "smae_mad",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
         ),
     )
     cases = tuple(
@@ -1021,7 +1108,7 @@ def test_change_aware_crossfold_gate_counts_only_changed_final_forecasts():
     parent = DecisionPolicy(
         ranking_order=(
             "median_joint_scaled_error", "recent_joint_scaled_error",
-            "worst_joint_scaled_error", "smae_mad",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
         ),
         recent_regime_first=False,
         ensemble_enabled=False,
@@ -1030,7 +1117,7 @@ def test_change_aware_crossfold_gate_counts_only_changed_final_forecasts():
         parent,
         ranking_order=(
             "recent_joint_scaled_error", "median_joint_scaled_error",
-            "worst_joint_scaled_error", "smae_mad",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
         ),
     )
     cases = (
@@ -1105,7 +1192,7 @@ def test_train_only_evolution_rejects_child_that_fails_crossfold_stability(tmp_p
     parent = DecisionPolicy(
         ranking_order=(
             "median_joint_scaled_error", "recent_joint_scaled_error",
-            "worst_joint_scaled_error", "smae_mad",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
         ),
         recent_regime_first=False,
         ensemble_enabled=False,
@@ -1114,7 +1201,7 @@ def test_train_only_evolution_rejects_child_that_fails_crossfold_stability(tmp_p
         parent,
         ranking_order=(
             "recent_joint_scaled_error", "median_joint_scaled_error",
-            "worst_joint_scaled_error", "smae_mad",
+            "worst_joint_scaled_error", "median_smae", "median_srmse", "normalized_bias",
         ),
     )
     payload = {

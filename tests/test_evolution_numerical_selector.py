@@ -233,6 +233,33 @@ def test_active_policy_rejects_legacy_error_ranking_fields():
         DecisionPolicy(ranking_order=("median_mase",))
 
 
+@pytest.mark.parametrize(
+    "ranking_order",
+    (
+        ("median_smae",),
+        (
+            "median_joint_scaled_error",
+            "recent_joint_scaled_error",
+            "worst_joint_scaled_error",
+            "median_smae",
+        ),
+        (
+            "recent_smae",
+            "median_joint_scaled_error",
+            "recent_joint_scaled_error",
+            "worst_joint_scaled_error",
+            "median_smae",
+            "median_srmse",
+        ),
+    ),
+)
+def test_active_policy_requires_the_complete_dual_metric_ranking_contract(
+    ranking_order,
+):
+    with pytest.raises(ValueError, match="complete.*sMAE.*sRMSE"):
+        DecisionPolicy(ranking_order=ranking_order)
+
+
 def test_active_policy_parser_requires_explicit_legacy_migration_flag():
     with pytest.raises(ValueError, match="allow_legacy"):
         DecisionPolicy.from_payload({"catastrophic_mase": 2.0})
@@ -315,6 +342,19 @@ def test_explicit_legacy_reader_rejects_median_smape_ranking_without_a_surrogate
 
     with pytest.raises(ValueError, match="median_smape cannot be migrated"):
         DecisionPolicy.from_payload(payload, allow_legacy=True)
+
+
+def test_explicit_legacy_reader_normalizes_unpaired_ranking_to_canonical_pair() -> None:
+    payload = asdict(DecisionPolicy())
+    payload["ranking_order"] = [
+        "median_mase",
+        "recent_mase",
+        "worst_mase",
+        "mase_mad",
+        "median_rmsse",
+    ]
+
+    assert DecisionPolicy.from_payload(payload, allow_legacy=True) == DecisionPolicy()
 
 
 def _with_long_horizon_audit(diagnostic, *, forecast, truth, coverage, scale=1.0):

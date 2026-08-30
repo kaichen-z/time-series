@@ -859,7 +859,7 @@ def _report(manifest: Mapping[str, object]) -> str:
         f"- Final Dev gate: {manifest.get('final_dev_gate', {}).get('reason', 'not recorded')}",
         f"- Public Test accessed: `{manifest['public_test_accessed']}`",
         "",
-        "| Split | Coverage | Mean sMAE | Median sMAE | sMAE SE | Mean sRMSE | Median sRMSE | sRMSE SE | P90/P95 sMAE | P90/P95 sRMSE | Raw P90/P95 sMAE | Raw P90/P95 sRMSE | Clipped sMAE/sRMSE | Oracle regret | Methods | Families | Ensemble | Assumptions | Verifier pool | Pool families | Assumption kinds |",
+        "| Split | Coverage | Mean sMAE | Median sMAE | sMAE SE | Mean sRMSE | Median sRMSE | sRMSE SE | P90/P95 sMAE | P90/P95 sRMSE | Raw P90/P95 sMAE | Raw P90/P95 sRMSE | Clipped sMAE/sRMSE | Oracle sMAE/sRMSE regret | Methods | Families | Ensemble | Assumptions | Verifier pool | Pool families | Assumption kinds |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         _score_row("Train", train),
         _score_row("Dev", dev),
@@ -889,7 +889,8 @@ def _score_row(label: str, score: Mapping[str, object]) -> str:
         f"{score['p90_smae_raw']:.6f}/{score['p95_smae_raw']:.6f} | "
         f"{score['p90_srmse_raw']:.6f}/{score['p95_srmse_raw']:.6f} | "
         f"{score['smae_clipped_count']}/{score['srmse_clipped_count']} | "
-        f"{score['mean_active_oracle_regret']:.6f} | "
+        f"{score['mean_active_oracle_smae_regret']:.6f}/"
+        f"{score['mean_active_oracle_srmse_regret']:.6f} | "
         f"{score['method_diversity']} | {score['family_diversity']} | {score['ensemble_rate']:.4f} | "
         f"{score['mean_assumption_count']:.2f} | {score['mean_considered_candidates']:.2f} | "
         f"{score['mean_considered_families']:.2f} | {score['assumption_kind_diversity']} |"

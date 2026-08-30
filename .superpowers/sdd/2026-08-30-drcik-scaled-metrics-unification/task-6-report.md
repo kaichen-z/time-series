@@ -8,8 +8,8 @@ The scoped commit is created after this report is finalized. Nothing was pushed 
 ## Changes
 
 - Added a semantic AST audit over the active Numerical evolution modules. Legacy
-  MASE/MAE/sMAPE/RMSSE operations are permitted only in an explicit function-level
-  allowlist for diagnostics, serialization, or opt-in legacy readers.
+  MASE/MAE/sMAPE/RMSSE operations are permitted only as exact, counted AST-operation
+  nodes for diagnostics, serialization, or opt-in legacy readers.
 - Migrated Morphology assumption ranking and package ranking from legacy MASE summaries
   to capped Dr-CiK sMAE/sRMSE joint summaries and per-metric stability fields.
 - Removed the final active MASE seam from residual correction and long-horizon handling:
@@ -121,3 +121,44 @@ the immutable checkpoint or model digest) showing a successful real-checkpoint l
 The repository is not currently eligible for the requested real-checkpoint smoke because it lacks
 the required immutable load attestation. This is an honest prerequisite gap, not a failed
 forecasting result.
+
+## Fix round 1: dual-metric contract and exact-node audit
+
+Independent review of the initial Task-6 commit found three active-contract gaps. They were fixed
+with new failing tests before production changes:
+
+1. A `DecisionPolicy` could previously accept a nonempty scaled subset such as
+   `("median_smae",)`. Active and mutated policies now require the complete canonical ranking
+   core: all three median/recent/worst joint scaled fields must precede the paired median sMAE and
+   median sRMSE tie-breakers; only non-error safety fields may follow. Thus a complete-looking
+   policy cannot restore single-metric authority by putting `recent_smae` first. Explicit legacy
+   readers normalize unpaired old rankings to the complete pair. The smoke's `decision_metrics`
+   and `decision_ranking_order` are derived from that validated policy and checked against the
+   bound metric-policy metadata.
+2. Selector active-oracle regret previously chose its oracle by sMAE alone, and Train/Dev tail
+   gates checked only capped sMAE tails. Oracle identity is now ordered by the joint scaled pair;
+   sMAE and sRMSE regrets are retained separately. Train, read-only Dev, cross-fold, and
+   activation-aware gates now check both capped and raw P90/P95 tails, both clipped counts, and
+   both oracle regrets. The Markdown selector report also renders the regret pair rather than the
+   old scalar summary.
+3. The semantic audit previously missed direct metric calls and dynamic access patterns and
+   allowlisted entire functions. It now detects `ast.Name` calls, mapping `.get`, subscripts,
+   `getattr`, and metric strings, then binds every allowed operation to the SHA-256 prefix of its
+   normalized enclosing AST statement. A same-function diagnostic-to-authority repurpose therefore
+   changes the node identity and fails the audit.
+
+### Fix-round TDD evidence
+
+- RED: incomplete direct and mutated ranking policies were accepted; the smoke omitted the
+  validated ranking order; a sMAE-only oracle controlled regret; capped/raw sRMSE-tail
+  adversaries passed; and the audit returned no operations for dynamic legacy access.
+- GREEN: the final selector and smoke focused regression completed with `353 passed in 3.56s`.
+- Deterministic task_42 fake smoke revalidated the same metric-policy fingerprint
+  `fe5cf0fd10839f93a3dea81cb90a63641ad520a589bdce875bd11095a2a8bf8d`, the complete
+  canonical ranking order, sMAE `0.2248109293847605`, and sRMSE `0.2750891381127843`.
+- `python -m compileall -q common numerical_agent` and `git diff --check` passed.
+- Final independent re-review reported no remaining Critical or Important findings after the
+  canonical-order and statement-hash fixes.
+- Per the review-fix instruction, the already-passing full suite was not run a second time.
+- `runs/numerical_morphology/` remains untouched with the same aggregate SHA-256:
+  `703fbe89573c7e86a6e96a50f79629c08d8a7bddc90113663ddd340a52501b25`.

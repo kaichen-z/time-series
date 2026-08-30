@@ -195,7 +195,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     future = _future_values_after_freeze(task.raw_record, task.task.prediction_length)
     metrics = _post_freeze_metrics(task.task.history_values, future, package.final_forecast)
-    payload = _result_payload(task, package, runner, metrics)
+    payload = _result_payload(task, package, runner, decision, metrics)
     _write_result(result_path, payload, overwrite=args.overwrite)
     return 0
 
@@ -766,7 +766,11 @@ def _morphology_reasoner(args: argparse.Namespace) -> MorphologyReasoner:
 
 
 def _result_payload(
-    task: _LoadedTask, package, runner: _CandidateRunner, metrics: dict[str, float] | None
+    task: _LoadedTask,
+    package,
+    runner: _CandidateRunner,
+    decision_policy: DecisionPolicy,
+    metrics: dict[str, float] | None,
 ) -> dict[str, object]:
     alternatives = {item.name: item for item in package.ranked_alternatives}
     active = []
@@ -785,20 +789,29 @@ def _result_payload(
         else:
             unavailable.append({**summary, "reason": runner.unavailable_reason(name)})
     selected = package.selection_decision
+    report_metadata = metric_report_metadata()
+    decision_metrics = list(decision_policy.decision_metrics)
+    if decision_metrics != report_metadata["primary_metrics"]:
+        raise SmokeError("Decision policy metrics do not match the active metric contract")
     selection = {
         "recipe": asdict(selected.arithmetic) if selected.arithmetic is not None else None,
         "methods": list(selected.selected),
         "weights": list(selected.weights),
         "reason_codes": list(selected.reason_codes),
-        "decision_metrics": ["smae", "srmse"],
+        "decision_metrics": decision_metrics,
+        "decision_ranking_order": list(decision_policy.ranking_order),
     }
     rejected_counts = dict(sorted(Counter(package.rejected_assumptions.values()).items()))
     return {
         "schema_version": 2,
-        **metric_report_metadata(),
+        **report_metadata,
         "task_id": task.task.task_id,
         "selection": selection,
-        "selected": {key: value for key, value in selection.items() if key != "decision_metrics"},
+        "selected": {
+            key: value
+            for key, value in selection.items()
+            if key not in {"decision_metrics", "decision_ranking_order"}
+        },
         "evolution": {
             "dev_read_only": True,
             "public_hidden_mutation_enabled": False,

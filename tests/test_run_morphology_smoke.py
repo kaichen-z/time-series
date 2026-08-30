@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+from collections import Counter
 import json
 import hashlib
 import inspect
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import types
 from argparse import Namespace
 from pathlib import Path
 
@@ -72,15 +74,36 @@ _LEGACY_PERFORMANCE_FIELDS = {
     "median_mae",
     "median_smape",
     "median_rmsse",
+    "mean_mase",
+    "mean_mae",
+    "mean_smape",
+    "mean_rmsse",
+    "oracle_mase",
+    "catastrophic_mase",
     "mase_scale",
 }
 
 
 def _legacy_metric_operations(module) -> list[str]:
-    """Return executable legacy-metric reads/writes outside named report-only functions."""
+    """Return semantic legacy-metric operations for exact-node allowlisting."""
     tree = ast.parse(Path(inspect.getsourcefile(module)).read_text(encoding="utf-8"))
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
     operations: list[str] = []
     functions: list[str] = []
+
+    def record(kind: str, field: str, node: ast.AST) -> None:
+        statement = node
+        while not isinstance(statement, ast.stmt):
+            statement = parents[statement]
+        normalized = ast.dump(statement, annotate_fields=True, include_attributes=False)
+        statement_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+        operations.append(
+            f"{functions[-1] if functions else '<module>'}:{kind}:{field}@{statement_hash}"
+        )
 
     class Visitor(ast.NodeVisitor):
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -92,20 +115,46 @@ def _legacy_metric_operations(module) -> list[str]:
 
         def visit_Attribute(self, node: ast.Attribute) -> None:
             if node.attr in _LEGACY_PERFORMANCE_FIELDS:
-                operations.append(f"{functions[-1] if functions else '<module>'}:{node.attr}")
+                record("attribute", node.attr, node)
             self.generic_visit(node)
 
         def visit_Subscript(self, node: ast.Subscript) -> None:
             if isinstance(node.slice, ast.Constant) and node.slice.value in _LEGACY_PERFORMANCE_FIELDS:
-                operations.append(
-                    f"{functions[-1] if functions else '<module>'}:{node.slice.value}"
-                )
+                record("subscript", str(node.slice.value), node)
             self.generic_visit(node)
 
         def visit_keyword(self, node: ast.keyword) -> None:
             if node.arg in _LEGACY_PERFORMANCE_FIELDS:
-                operations.append(f"{functions[-1] if functions else '<module>'}:{node.arg}")
+                record("keyword", str(node.arg), node)
             self.generic_visit(node)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id in _LEGACY_PERFORMANCE_FIELDS
+            ):
+                record("name_call", node.func.id, node)
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value in _LEGACY_PERFORMANCE_FIELDS
+            ):
+                record("mapping_get", str(node.args[0].value), node)
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value in _LEGACY_PERFORMANCE_FIELDS
+            ):
+                record("getattr", str(node.args[1].value), node)
+            self.generic_visit(node)
+
+        def visit_Constant(self, node: ast.Constant) -> None:
+            if node.value in _LEGACY_PERFORMANCE_FIELDS:
+                record("string_config", str(node.value), node)
 
     Visitor().visit(tree)
     return operations
@@ -124,21 +173,255 @@ def _uses_default_metric_fingerprint(function) -> bool:
     )
 
 
+def test_semantic_metric_audit_detects_dynamic_legacy_access_patterns(tmp_path) -> None:
+    source = tmp_path / "dynamic_legacy.py"
+    source.write_text(
+        """
+def active(mapping, diagnostic, truth, forecast):
+    direct = mase(truth, forecast)
+    mapped = mapping.get("smape")
+    reflected = getattr(diagnostic, "rmsse")
+    ranking_order = ("median_mae",)
+    return direct, mapped, reflected, ranking_order
+""",
+        encoding="utf-8",
+    )
+    module = types.ModuleType("dynamic_legacy")
+    module.__file__ = str(source)
+
+    operations = {
+        operation.rsplit("@", 1)[0]
+        for operation in _legacy_metric_operations(module)
+    }
+
+    assert {
+        "active:name_call:mase",
+        "active:mapping_get:smape",
+        "active:getattr:rmsse",
+        "active:string_config:median_mae",
+    } <= operations
+
+
+def test_semantic_metric_audit_binds_allowance_to_the_exact_statement(tmp_path) -> None:
+    diagnostic_source = tmp_path / "diagnostic_use.py"
+    diagnostic_source.write_text(
+        """
+def active(score):
+    observed = score.mean_mase
+    return {"diagnostic": observed}
+""",
+        encoding="utf-8",
+    )
+    authority_source = tmp_path / "authority_use.py"
+    authority_source.write_text(
+        """
+def active(score):
+    if score.mean_mase < 1.0:
+        return "accept"
+    return "reject"
+""",
+        encoding="utf-8",
+    )
+    diagnostic_module = types.ModuleType("diagnostic_use")
+    diagnostic_module.__file__ = str(diagnostic_source)
+    authority_module = types.ModuleType("authority_use")
+    authority_module.__file__ = str(authority_source)
+
+    assert _legacy_metric_operations(diagnostic_module) != _legacy_metric_operations(
+        authority_module
+    )
+
+
+def _allowed_statement(statement_hash: str, *operations: str) -> Counter[str]:
+    return Counter(f"{operation}@{statement_hash}" for operation in operations)
+
+
 def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_paths() -> None:
-    # Explicit allowlist: these functions only serialize, reconstruct, or calculate
-    # diagnostics. Every other executable operation in the active pipeline is audited.
-    allowed_diagnostic_or_legacy_reader_functions = {
-        cache: {"_outcome_from_payload"},
-        diagnostics: {"diagnose_forecasts"},
-        execution: {"_run_one", "_report", "report_payload"},
-        numerical_selector: {
-            "synthetic",
-            "_selection_diagnostic",
-            "_score_fold",
-            "_summarize",
-        },
-        portfolio: {"_scored"},
-        selector_evolution: {"evaluate_decision"},
+    # Exact semantic-node allowlist. Every operation is bound to the normalized AST
+    # hash of its enclosing statement, so repurposing an allowed diagnostic fails.
+    allowed_diagnostic_or_legacy_reader_nodes = {
+        cache: sum((
+            _allowed_statement(
+                "520fb57f169dbcc9",
+                "_outcome_from_payload:attribute:mae",
+                "_outcome_from_payload:attribute:mase",
+                "_outcome_from_payload:attribute:smape",
+            ),
+            _allowed_statement(
+                "05d8aea1701e7552",
+                *(
+                    f"_outcome_from_payload:{kind}:{field}"
+                    for kind in ("keyword", "mapping_get", "string_config")
+                    for field in ("mae", "mase", "smape")
+                ),
+            ),
+        ), Counter()),
+        diagnostics: sum((
+            _allowed_statement(
+                "0dbcb434449879c6",
+                "_aggregate:string_config:mae",
+                "_aggregate:string_config:mase",
+                "_aggregate:string_config:smape",
+            ),
+            _allowed_statement(
+                "d4444a06598cce63",
+                *(
+                    f"diagnose_forecasts:{kind}:{field}"
+                    for kind in ("attribute", "string_config")
+                    for field in ("mae", "mase", "smape")
+                ),
+            ),
+        ), Counter()),
+        execution: sum((
+            _allowed_statement("bf3998705f24429e", "_report:attribute:mae"),
+            _allowed_statement(
+                "c1a439729c061faa",
+                *(
+                    f"_report:attribute:{field}"
+                    for field in ("mae", "mase", "smape")
+                ),
+                *(
+                    f"_report:keyword:{field}"
+                    for field in ("mean_mae", "mean_mase", "mean_smape")
+                ),
+            ),
+            _allowed_statement("4646b75ce3c7f3f1", "_report:attribute:mase"),
+            _allowed_statement("656d7b1ec514f595", "_report:attribute:smape"),
+            _allowed_statement(
+                "006890beae4ad0e2",
+                *(
+                    f"_run_one:{kind}:{field}"
+                    for kind in ("keyword", "name_call")
+                    for field in ("mae", "mase", "smape")
+                ),
+            ),
+            _allowed_statement(
+                "56079bd6efbd80b8",
+                *(
+                    f"report_payload:{kind}:{field}"
+                    for kind in ("attribute", "string_config")
+                    for field in ("mean_mae", "mean_mase", "mean_smape")
+                ),
+            ),
+        ), Counter()),
+        numerical_selector: sum((
+            _allowed_statement(
+                "7d777ed564775a67",
+                *(
+                    f"_normalize_legacy_decision_ranking:string_config:{field}"
+                    for field in ("median_mase", "recent_mase", "worst_mase")
+                ),
+            ),
+            _allowed_statement(
+                "e112c82a57aeda5e",
+                *(
+                    f"_score_fold:keyword:{field}"
+                    for field in ("mae", "mase", "mase_scale", "rmsse", "smape")
+                ),
+                *(
+                    f"_score_fold:name_call:{field}"
+                    for field in ("mae", "mase", "smape")
+                ),
+            ),
+            _allowed_statement(
+                "bfd3922b9088ec02",
+                *(
+                    f"_selection_diagnostic:keyword:{field}"
+                    for field in ("mase_mad", "median_mase", "recent_mase", "worst_mase")
+                ),
+            ),
+            _allowed_statement(
+                "a8c3ef77cce5cd2b",
+                "_summarize:attribute:mase",
+                *(
+                    f"_summarize:keyword:{field}"
+                    for field in (
+                        "mase_mad", "median_mae", "median_mase", "median_rmsse",
+                        "median_smape", "recent_mase", "worst_mase",
+                    )
+                ),
+                *(
+                    f"_summarize:string_config:{field}"
+                    for field in ("mae", "rmsse", "smape")
+                ),
+            ),
+            _allowed_statement("27a857442157da00", "_summarize:string_config:mase"),
+            _allowed_statement("07d2bf27d46bbfb4", "from_payload:string_config:catastrophic_mase"),
+            _allowed_statement("6c7a47156995f494", "from_payload:string_config:catastrophic_mase"),
+            _allowed_statement(
+                "e669f93211913e53",
+                *(
+                    f"from_payload:string_config:{field}"
+                    for field in (
+                        "catastrophic_mase", "mase_mad", "median_mase", "median_rmsse",
+                        "median_smape", "recent_mase", "worst_mase",
+                    )
+                ),
+            ),
+            _allowed_statement(
+                "fb9855c476512bc7",
+                *(
+                    f"from_payload:string_config:{field}"
+                    for field in (
+                        "mase_mad", "median_mase", "median_rmsse", "median_smape",
+                        "recent_mase", "worst_mase",
+                    )
+                ),
+            ),
+            _allowed_statement("90b8dc8c04d5ff3f", "from_payload:string_config:median_smape"),
+            _allowed_statement(
+                "02016f55256c8018",
+                *(
+                    f"synthetic:keyword:{field}"
+                    for field in (
+                        "mase_mad", "median_mae", "median_mase", "median_rmsse",
+                        "median_smape", "recent_mase", "worst_mase",
+                    )
+                ),
+            ),
+        ), Counter()),
+        portfolio: _allowed_statement(
+            "b473b2e31ed49e42",
+            *(
+                f"_scored:{kind}:{field}"
+                for kind in ("keyword", "name_call")
+                for field in ("mae", "mase", "smape")
+            ),
+        ),
+        selector_evolution: sum((
+            _allowed_statement(
+                "e669f93211913e53",
+                *(
+                    f"_parse_policy:string_config:{field}"
+                    for field in (
+                        "catastrophic_mase", "mase_mad", "median_mase", "median_rmsse",
+                        "median_smape", "recent_mase", "worst_mase",
+                    )
+                ),
+            ),
+            _allowed_statement("485cdc11a41e4a57", "_parse_policy:string_config:median_smape"),
+            _allowed_statement(
+                "7ce93841d63789ff",
+                *(
+                    f"_scaled_train_summary:string_config:{field}"
+                    for field in (
+                        "mean_mae", "mean_mase", "mean_smape", "median_mae", "median_mase",
+                    )
+                ),
+            ),
+            _allowed_statement(
+                "f8410ad12e58d206",
+                *(
+                    f"evaluate_decision:keyword:{field}"
+                    for field in (
+                        "mean_mae", "mean_mase", "mean_smape", "median_mae", "median_mase",
+                    )
+                ),
+            ),
+            _allowed_statement("68f739f795a66307", "evaluate_decision:name_call:mae"),
+            _allowed_statement("b904f68bebae9a01", "evaluate_decision:name_call:mase"),
+            _allowed_statement("047c8a7f7c85d51d", "evaluate_decision:name_call:smape"),
+        ), Counter()),
     }
     audited = (
         assumptions,
@@ -157,18 +440,17 @@ def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_pat
         screening_evolution,
         selector_evolution,
     )
-    unexpected = {}
+    mismatches = {}
     for module in audited:
-        allowed = allowed_diagnostic_or_legacy_reader_functions.get(module, set())
-        operations = [
-            operation
-            for operation in _legacy_metric_operations(module)
-            if operation.split(":", 1)[0] not in allowed
-        ]
-        if operations:
-            unexpected[module.__name__] = operations
+        observed = Counter(_legacy_metric_operations(module))
+        allowed = allowed_diagnostic_or_legacy_reader_nodes.get(module, Counter())
+        if observed != allowed:
+            mismatches[module.__name__] = {
+                "unexpected": dict(observed - allowed),
+                "missing_allowlisted": dict(allowed - observed),
+            }
 
-    assert unexpected == {}
+    assert mismatches == {}
 
 
 def test_scaled_metric_contract_renderers_require_a_bound_fingerprint() -> None:
@@ -271,6 +553,35 @@ def test_fake_smoke_selects_one_task_freezes_then_writes_complete_result(tmp_pat
     )
     assert payload["candidates"]["unavailable"]
     assert "toto_2_0" in {item["name"] for item in payload["candidates"]["unavailable"]}
+
+
+def test_smoke_derives_decision_metrics_from_the_validated_policy(tmp_path, monkeypatch):
+    tasks = tmp_path / "tasks.jsonl"
+    result = tmp_path / "smoke.json"
+    _write_tasks(tasks, _record("one"))
+    decision = numerical_selector.DecisionPolicy(
+        ranking_order=(
+            "recent_joint_scaled_error",
+            "median_joint_scaled_error",
+            "worst_joint_scaled_error",
+            "median_smae",
+            "median_srmse",
+            "normalized_bias",
+        )
+    )
+    monkeypatch.setattr(smoke, "_decision_policy", lambda artifacts: decision)
+
+    assert main([
+        "--task-file", str(tasks),
+        "--results-path", str(result),
+        "--llm-backend", "fake",
+    ]) == 0
+
+    payload = json.loads(result.read_text(encoding="utf-8"))
+    assert payload["selection"]["decision_ranking_order"] == list(
+        decision.ranking_order
+    )
+    assert payload["selection"]["decision_metrics"] == ["smae", "srmse"]
 
 
 def test_ambiguous_input_fails_before_result_or_model_work(tmp_path) -> None:

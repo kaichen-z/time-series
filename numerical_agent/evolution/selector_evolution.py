@@ -29,6 +29,7 @@ from .numerical_selector import (
     DecisionPolicy,
     SelectionDecision,
     _long_horizon_route_matches,
+    _normalize_legacy_decision_ranking,
     select_assumption_guided_forecast,
 )
 from .screening import profile_task
@@ -65,7 +66,9 @@ When enabled, assumption_top_k must be between 1 and 7, candidates per hypothesi
 and minimum confidence within [0, 1]. Preserve reviewed TSFM anchors regardless of Top-k.
 Use joint scaled error only to order proposals. Accept only Pareto improvements in
 clipped Dr-CiK-aligned sMAE and sRMSE, with clipped-task counts, P90/P95 sMAE,
-and full coverage as safety constraints."""
+and full coverage as safety constraints. ranking_order must put all three joint
+fields first, then median_smae and median_srmse as an inseparable paired tie-break;
+only normalized_bias or slope_error may follow."""
 
 
 class SelectorEvolutionError(ValueError):
@@ -98,6 +101,8 @@ class DecisionScore:
     family_diversity: int
     ensemble_rate: float
     fallback_rate: float
+    mean_active_oracle_smae_regret: float = math.inf
+    mean_active_oracle_srmse_regret: float = math.inf
     mean_smae: float = math.inf
     median_smae: float = math.inf
     se_smae: float = math.inf
@@ -358,7 +363,7 @@ def evaluate_decision(
             float,
             float,
             float,
-            float,
+            tuple[float, float],
             Mapping[str, float | bool],
         ]
     ] = []
@@ -384,15 +389,39 @@ def evaluate_decision(
         task_mae = mae(truth, prediction)
         task_smape = smape(truth, prediction)
         point = drcik_point_metrics(truth, prediction)
-        active_scores = [
-            float(drcik_point_metrics(truth, list(case.forecasts[name]))["smae"])
+        active_pairs = [
+            (
+                name,
+                float(active_point["smae"]),
+                float(active_point["srmse"]),
+            )
             for name in case.active_names
             if name in case.forecasts and len(case.forecasts[name]) == len(truth)
+            for active_point in (
+                drcik_point_metrics(truth, list(case.forecasts[name])),
+            )
         ]
         task_smae = float(point["smae"])
-        oracle = min(active_scores, default=task_smae)
-        regret = (task_smae - oracle) / (1.0 + oracle)
-        records.append((case, decision, task_mase, task_mae, task_smape, regret, point))
+        task_srmse = float(point["srmse"])
+        if active_pairs:
+            _, oracle_smae, oracle_srmse = min(
+                active_pairs,
+                key=lambda item: (
+                    joint_scaled_error(item[1], item[2]),
+                    item[1],
+                    item[2],
+                    item[0],
+                ),
+            )
+        else:
+            oracle_smae, oracle_srmse = task_smae, task_srmse
+        regret_pair = (
+            (task_smae - oracle_smae) / (1.0 + oracle_smae),
+            (task_srmse - oracle_srmse) / (1.0 + oracle_srmse),
+        )
+        records.append(
+            (case, decision, task_mase, task_mae, task_smape, regret_pair, point)
+        )
 
     mases = [record[2] for record in records]
     maes = [record[3] for record in records]
@@ -430,7 +459,8 @@ def evaluate_decision(
         mean_smape=statistics.fmean(smapes) if smapes else math.inf,
         catastrophic_rate=(sum(value > 10.0 for value in mases) / completed if completed else 1.0),
         mean_active_oracle_regret=(
-            statistics.fmean(record[5] for record in records) if records else math.inf
+            statistics.fmean((record[5][0] + record[5][1]) / 2.0 for record in records)
+            if records else math.inf
         ),
         method_diversity=len(selected),
         family_diversity=len(families),
@@ -444,6 +474,14 @@ def evaluate_decision(
                 for record in records
             ) / completed
             if completed else 0.0
+        ),
+        mean_active_oracle_smae_regret=(
+            statistics.fmean(record[5][0] for record in records)
+            if records else math.inf
+        ),
+        mean_active_oracle_srmse_regret=(
+            statistics.fmean(record[5][1] for record in records)
+            if records else math.inf
         ),
         mean_smae=statistics.fmean(smaes) if smaes else math.inf,
         median_smae=statistics.median(smaes) if smaes else math.inf,
@@ -483,8 +521,11 @@ def compare_decisions(
     dev_parent: DecisionScore,
     dev_child: DecisionScore,
 ) -> DecisionGateResult:
-    if train_child.coverage < 1.0 - 1e-12 or dev_child.coverage < 1.0 - 1e-12:
-        return DecisionGateResult(False, "Train and Dev coverage must remain 100%")
+    train_gate = _compare_train_decisions(train_parent, train_child)
+    if not train_gate.accepted:
+        return train_gate
+    if dev_child.coverage < 1.0 - 1e-12:
+        return DecisionGateResult(False, "Dev coverage must remain 100%")
     if not pareto_scaled_improvement(
         dev_parent.mean_smae,
         dev_parent.mean_srmse,
@@ -492,29 +533,58 @@ def compare_decisions(
         dev_child.mean_srmse,
     ):
         return DecisionGateResult(False, "Dev scaled metric pair did not Pareto-improve")
-    if dev_child.smae_clipped_count > dev_parent.smae_clipped_count:
-        return DecisionGateResult(False, "Dev clipped-sMAE task count increased")
-    if dev_child.srmse_clipped_count > dev_parent.srmse_clipped_count:
-        return DecisionGateResult(False, "Dev clipped-sRMSE task count increased")
-    if not _tail_is_safe(dev_child.p90_smae, dev_parent.p90_smae):
-        return DecisionGateResult(False, "Dev P90 sMAE materially increased")
-    if not _tail_is_safe(dev_child.p95_smae, dev_parent.p95_smae):
-        return DecisionGateResult(False, "Dev P95 sMAE materially increased")
-    if dev_child.mean_active_oracle_regret > dev_parent.mean_active_oracle_regret + 1e-12:
-        return DecisionGateResult(False, "Dev active-oracle regret increased")
-    if not pareto_scaled_improvement(
-        train_parent.mean_smae,
-        train_parent.mean_srmse,
-        train_child.mean_smae,
-        train_child.mean_srmse,
-    ):
-        return DecisionGateResult(False, "Train scaled metric pair did not Pareto-improve")
+    safety = _scaled_tail_and_oracle_gate(dev_parent, dev_child, label="Dev")
+    if safety is not None:
+        return safety
     return DecisionGateResult(True, "Train proposal passed all read-only Dev gates")
 
 
 def _tail_is_safe(child: float, parent: float, *, relative_tolerance: float = 0.01) -> bool:
     """Permit at most a one-percent increase in a high-quantile tail statistic."""
+    if math.isnan(child) or math.isnan(parent) or child < 0.0 or parent < 0.0:
+        return False
+    if math.isinf(child):
+        return math.isinf(parent)
+    if math.isinf(parent):
+        return True
     return child <= parent * (1.0 + relative_tolerance) + 1e-12
+
+
+def _scaled_tail_and_oracle_gate(
+    parent: DecisionScore,
+    child: DecisionScore,
+    *,
+    label: str,
+    relative_tolerance: float = 0.01,
+) -> DecisionGateResult | None:
+    for metric in ("smae", "srmse"):
+        if getattr(child, f"{metric}_clipped_count") > getattr(
+            parent, f"{metric}_clipped_count"
+        ):
+            return DecisionGateResult(
+                False, f"{label} clipped-{metric} task count increased"
+            )
+        for quantile in ("p90", "p95"):
+            for suffix in ("", "_raw"):
+                field = f"{quantile}_{metric}{suffix}"
+                if not _tail_is_safe(
+                    float(getattr(child, field)),
+                    float(getattr(parent, field)),
+                    relative_tolerance=relative_tolerance,
+                ):
+                    raw = " raw" if suffix else ""
+                    return DecisionGateResult(
+                        False,
+                        f"{label} {quantile.upper()}{raw} {metric} materially increased",
+                    )
+        oracle_field = f"mean_active_oracle_{metric}_regret"
+        if float(getattr(child, oracle_field)) > float(
+            getattr(parent, oracle_field)
+        ) + 1e-12:
+            return DecisionGateResult(
+                False, f"{label} active-oracle {metric} regret increased"
+            )
+    return None
 
 
 def bounded_combined_candidates(
@@ -539,8 +609,9 @@ def bounded_combined_candidates(
             "worst_joint_scaled_error",
             "recent_joint_scaled_error",
             "median_joint_scaled_error",
+            "median_smae",
             "median_srmse",
-            "smae_mad",
+            "normalized_bias",
         ),
     )
     fold_requirements = (
@@ -788,10 +859,6 @@ def _compare_train_decisions(
 ) -> DecisionGateResult:
     if child.coverage < 1.0 - 1e-12:
         return DecisionGateResult(False, "Train coverage must remain 100%")
-    if child.smae_clipped_count > parent.smae_clipped_count:
-        return DecisionGateResult(False, "Train clipped-sMAE task count increased")
-    if child.srmse_clipped_count > parent.srmse_clipped_count:
-        return DecisionGateResult(False, "Train clipped-sRMSE task count increased")
     if not pareto_scaled_improvement(
         parent.mean_smae,
         parent.mean_srmse,
@@ -799,12 +866,11 @@ def _compare_train_decisions(
         child.mean_srmse,
     ):
         return DecisionGateResult(False, "Train scaled metric pair did not Pareto-improve")
-    if not _tail_is_safe(child.p90_smae, parent.p90_smae, relative_tolerance=0.05):
-        return DecisionGateResult(False, "Train P90 sMAE materially increased")
-    if not _tail_is_safe(child.p95_smae, parent.p95_smae, relative_tolerance=0.05):
-        return DecisionGateResult(False, "Train P95 sMAE materially increased")
-    if child.mean_active_oracle_regret > parent.mean_active_oracle_regret + 1e-12:
-        return DecisionGateResult(False, "Train active-oracle regret increased")
+    safety = _scaled_tail_and_oracle_gate(
+        parent, child, label="Train", relative_tolerance=0.05
+    )
+    if safety is not None:
+        return safety
     return DecisionGateResult(True, "Candidate passed all Train search gates")
 
 
@@ -828,14 +894,15 @@ def compare_train_crossfolds(
         child = evaluate_decision(child_policy, partition)
         if child.coverage < 1.0 - 1e-12:
             return DecisionGateResult(False, f"Train fold {index} coverage decreased")
-        if child.smae_clipped_count > parent.smae_clipped_count:
-            return DecisionGateResult(False, f"Train fold {index} clipped-sMAE count increased")
-        if child.srmse_clipped_count > parent.srmse_clipped_count:
-            return DecisionGateResult(False, f"Train fold {index} clipped-sRMSE count increased")
         if child.mean_smae > parent.mean_smae + 1e-12:
             return DecisionGateResult(False, f"Train fold {index} sMAE regressed")
         if child.mean_srmse > parent.mean_srmse + 1e-12:
             return DecisionGateResult(False, f"Train fold {index} sRMSE regressed")
+        safety = _scaled_tail_and_oracle_gate(
+            parent, child, label=f"Train fold {index}", relative_tolerance=0.05
+        )
+        if safety is not None:
+            return safety
         if pareto_scaled_improvement(
             parent.mean_smae,
             parent.mean_srmse,
@@ -977,20 +1044,15 @@ def compare_activation_aware_fold_scores(
     for index, (parent, child) in enumerate(score_pairs):
         if child.coverage < parent.coverage - 1e-12:
             return DecisionGateResult(False, f"Train fold {index} coverage decreased")
-        if child.smae_clipped_count > parent.smae_clipped_count:
-            return DecisionGateResult(False, f"Train fold {index} clipped-sMAE count increased")
-        if child.srmse_clipped_count > parent.srmse_clipped_count:
-            return DecisionGateResult(False, f"Train fold {index} clipped-sRMSE count increased")
         if child.mean_smae > parent.mean_smae + 1e-12:
             return DecisionGateResult(False, f"Train fold {index} sMAE regressed")
         if child.mean_srmse > parent.mean_srmse + 1e-12:
             return DecisionGateResult(False, f"Train fold {index} sRMSE regressed")
-        if not _tail_is_safe(child.p90_smae, parent.p90_smae):
-            return DecisionGateResult(False, f"Train fold {index} P90 sMAE materially increased")
-        if not _tail_is_safe(child.p95_smae, parent.p95_smae):
-            return DecisionGateResult(False, f"Train fold {index} P95 sMAE materially increased")
-        if child.mean_active_oracle_regret > parent.mean_active_oracle_regret + 1e-12:
-            return DecisionGateResult(False, f"Train fold {index} oracle regret increased")
+        safety = _scaled_tail_and_oracle_gate(
+            parent, child, label=f"Train fold {index}"
+        )
+        if safety is not None:
+            return safety
         if pareto_scaled_improvement(
             parent.mean_smae,
             parent.mean_srmse,
@@ -1038,8 +1100,15 @@ def _train_rank(score: DecisionScore) -> tuple[float, ...]:
         score.mean_smae,
         score.mean_srmse,
         score.p95_smae,
+        score.p95_srmse,
         score.p90_smae,
-        score.mean_active_oracle_regret,
+        score.p90_srmse,
+        score.p95_smae_raw,
+        score.p95_srmse_raw,
+        score.p90_smae_raw,
+        score.p90_srmse_raw,
+        score.mean_active_oracle_smae_regret,
+        score.mean_active_oracle_srmse_regret,
     )
 
 
@@ -1362,19 +1431,12 @@ def _parse_policy(
     ranking = raw["ranking_order"]
     if not isinstance(ranking, (list, tuple)):
         raise SelectorEvolutionError("ranking_order must be a sequence")
-    legacy_ranking = {
-        "median_mase": "median_joint_scaled_error",
-        "recent_mase": "recent_joint_scaled_error",
-        "worst_mase": "worst_joint_scaled_error",
-        "mase_mad": "smae_mad",
-        "median_rmsse": "median_srmse",
-    }
     if allow_legacy:
         if "median_smape" in {str(value) for value in ranking}:
             raise SelectorEvolutionError(
                 "legacy median_smape cannot be migrated into the scaled metric policy"
             )
-        ranking = tuple(legacy_ranking.get(str(value), str(value)) for value in ranking)
+        ranking = _normalize_legacy_decision_ranking(ranking)
     try:
         return DecisionPolicy(
             ranking_order=tuple(str(value) for value in ranking),

@@ -21,6 +21,51 @@ CandidateRunner = Callable[
 ]
 
 
+_CANONICAL_JOINT_RANKING_FIELDS = frozenset(
+    {
+        "median_joint_scaled_error",
+        "recent_joint_scaled_error",
+        "worst_joint_scaled_error",
+    }
+)
+_CANONICAL_PAIRED_TIE_BREAKERS = ("median_smae", "median_srmse")
+_CANONICAL_RANKING_SAFETY_FIELDS = frozenset({"normalized_bias", "slope_error"})
+_REQUIRED_DUAL_METRIC_RANKING_FIELDS = (
+    _CANONICAL_JOINT_RANKING_FIELDS
+    | frozenset(_CANONICAL_PAIRED_TIE_BREAKERS)
+)
+
+
+def _normalize_legacy_decision_ranking(ranking: Sequence[object]) -> tuple[str, ...]:
+    """Project an explicit legacy reader onto the complete paired contract."""
+    joint_aliases = {
+        "median_mase": "median_joint_scaled_error",
+        "recent_mase": "recent_joint_scaled_error",
+        "worst_mase": "worst_joint_scaled_error",
+    }
+    values = tuple(joint_aliases.get(str(value), str(value)) for value in ranking)
+    joint = tuple(
+        dict.fromkeys(
+            value for value in values if value in _CANONICAL_JOINT_RANKING_FIELDS
+        )
+    )
+    joint = joint + tuple(
+        value
+        for value in (
+            "median_joint_scaled_error",
+            "recent_joint_scaled_error",
+            "worst_joint_scaled_error",
+        )
+        if value not in joint
+    )
+    safety = tuple(
+        dict.fromkeys(
+            value for value in values if value in _CANONICAL_RANKING_SAFETY_FIELDS
+        )
+    ) or ("normalized_bias",)
+    return (*joint, *_CANONICAL_PAIRED_TIE_BREAKERS, *safety)
+
+
 @dataclass(frozen=True)
 class HindcastConfig:
     folds: int = 3
@@ -301,16 +346,13 @@ class DecisionPolicy:
                     "legacy median_smape cannot be migrated into the scaled metric policy"
                 )
             legacy_ranking = {
-                "median_mase": "median_joint_scaled_error",
-                "recent_mase": "recent_joint_scaled_error",
-                "worst_mase": "worst_joint_scaled_error",
-                "mase_mad": "smae_mad",
-                "median_rmsse": "median_srmse",
+                "median_mase", "recent_mase", "worst_mase", "mase_mad",
+                "median_rmsse", "median_smape",
             }
-            if any(str(field) in legacy_ranking or str(field) == "median_smape" for field in ranking) and not allow_legacy:
+            if any(str(field) in legacy_ranking for field in ranking) and not allow_legacy:
                 raise ValueError("legacy MASE policy fields require allow_legacy=True")
             if allow_legacy:
-                ranking = tuple(legacy_ranking.get(str(field), str(field)) for field in ranking)
+                ranking = _normalize_legacy_decision_ranking(ranking)
             raw["ranking_order"] = ranking
         defaults = asdict(cls())
         if allow_legacy:
@@ -327,14 +369,27 @@ class DecisionPolicy:
 
     def __post_init__(self) -> None:
         normalized_order = tuple(self.ranking_order)
-        allowed = {
-            "median_joint_scaled_error", "recent_joint_scaled_error",
-            "worst_joint_scaled_error", "median_smae", "recent_smae",
-            "worst_smae", "smae_mad", "median_srmse", "recent_srmse",
-            "worst_srmse", "srmse_mad", "normalized_bias", "slope_error",
-        }
-        if not normalized_order or not set(normalized_order) <= allowed:
-            raise ValueError("ranking_order contains unsupported fields")
+        allowed = (
+            _REQUIRED_DUAL_METRIC_RANKING_FIELDS
+            | _CANONICAL_RANKING_SAFETY_FIELDS
+        )
+        if (
+            len(normalized_order) != len(set(normalized_order))
+            or not set(normalized_order) <= allowed
+        ):
+            raise ValueError(
+                "ranking_order contains unsupported fields or lacks the complete canonical "
+                "joint fields followed by paired sMAE and sRMSE tie-breakers"
+            )
+        canonical_prefix = normalized_order[:5]
+        if (
+            set(canonical_prefix[:3]) != _CANONICAL_JOINT_RANKING_FIELDS
+            or canonical_prefix[3:] != _CANONICAL_PAIRED_TIE_BREAKERS
+        ):
+            raise ValueError(
+                "ranking_order must contain the complete canonical joint fields followed "
+                "by paired sMAE and sRMSE tie-breakers"
+            )
         if self.min_successful_folds < 1:
             raise ValueError("min_successful_folds must be positive")
         safety_values = (
@@ -351,6 +406,7 @@ class DecisionPolicy:
             or self.max_srmse_fold_regret < 0
         ):
             raise ValueError("scaled safety thresholds must be nonnegative")
+
         if self.baseline_strategy not in {
             "toto_first",
             "minimax_tsfm",
@@ -435,6 +491,23 @@ class DecisionPolicy:
             raise ValueError("long-horizon minimum coverage must be within [0, 1]")
         if not 0.0 <= self.long_horizon_max_regret <= 1.0:
             raise ValueError("long-horizon maximum regret must be within [0, 1]")
+
+    @property
+    def decision_metrics(self) -> tuple[str, str]:
+        """Derive the active metric pair from a validated complete ranking policy."""
+        normalized_order = tuple(self.ranking_order)
+        if not _REQUIRED_DUAL_METRIC_RANKING_FIELDS <= set(normalized_order):
+            raise ValueError(
+                "ranking_order must contain the complete joint, sMAE, and sRMSE contract"
+            )
+        metrics = tuple(
+            metric
+            for metric in ("smae", "srmse")
+            if f"median_{metric}" in normalized_order
+        )
+        if metrics != ("smae", "srmse"):
+            raise ValueError("DecisionPolicy does not bind the canonical metric pair")
+        return metrics
 
 
 @dataclass(frozen=True)

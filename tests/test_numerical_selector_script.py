@@ -1321,6 +1321,11 @@ def test_selector_report_leads_with_drcik_point_metrics():
     assert "Median sRMSE" in report
     assert "P90/P95 sMAE" in report
     assert "Clipped sMAE/sRMSE" in report
+    assert "Oracle sMAE/sRMSE regret" in report
+    assert (
+        f"{score['mean_active_oracle_smae_regret']:.6f}/"
+        f"{score['mean_active_oracle_srmse_regret']:.6f}"
+    ) in report
     assert "Wins / Ties / Losses / Missing / Unscored" in report
     assert "Assumptions" in report
     assert "Verifier pool" in report
