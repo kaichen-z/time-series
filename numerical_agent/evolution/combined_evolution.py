@@ -118,12 +118,9 @@ class _StrictJsonError(ValueError):
     """A JSON response violates strict object or numeric parsing rules."""
 
 
-_CANONICAL_EVIDENCE_TOKEN = object()
-
-
 @dataclass(frozen=True)
-class CanonicalScaledDelta:
-    """Opaque per-task evidence produced only from one aligned forecast pair."""
+class _TaskScaledEvidence:
+    """Internal scorer output; never accepted by the public group boundary."""
 
     winsorized_smae_delta: float
     winsorized_srmse_delta: float
@@ -139,26 +136,35 @@ class CanonicalScaledDelta:
     baseline_srmse_raw: float
     baseline_smae_clipped: bool
     baseline_srmse_clipped: bool
-    _canonical_token: object = field(default=None, repr=False, compare=False)
-    _canonical_values: tuple[object, ...] = field(default=(), repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if (
-            self._canonical_token is not _CANONICAL_EVIDENCE_TOKEN
-            or self._canonical_values != _canonical_scaled_delta_values(self)
-        ):
-            raise CombinedEvolutionError(
-                "scaled delta records must come from the canonical scorer"
-            )
-        _validate_canonical_scaled_delta(self)
+        for prefix in ("candidate", "baseline"):
+            for metric in ("smae", "srmse"):
+                capped = getattr(self, f"{prefix}_{metric}")
+                raw = getattr(self, f"{prefix}_{metric}_raw")
+                clipped = getattr(self, f"{prefix}_{metric}_clipped")
+                if (
+                    type(capped) is not float
+                    or not 0.0 <= capped <= SCALED_METRIC_CAP
+                    or type(raw) is not float
+                    or math.isnan(raw)
+                    or raw < 0.0
+                    or raw == -math.inf
+                    or type(clipped) is not bool
+                    or capped != min(SCALED_METRIC_CAP, raw)
+                    or clipped != (raw > SCALED_METRIC_CAP)
+                ):
+                    raise CombinedEvolutionError(
+                        "canonical scorer returned inconsistent capped/raw evidence"
+                    )
 
 
-def winsorized_scaled_metric_delta(
+def _score_scaled_forecast_pair(
     *,
     truth: Sequence[float] | object,
     candidate_forecast: Sequence[float] | object,
     baseline_forecast: Sequence[float] | object,
-) -> CanonicalScaledDelta:
+) -> _TaskScaledEvidence:
     """Score one complete candidate/baseline pair under the canonical capped contract."""
     if any(
         isinstance(value, (str, bytes)) or not isinstance(value, Sequence)
@@ -206,15 +212,10 @@ def winsorized_scaled_metric_delta(
         "baseline_smae_clipped": bool(baseline["smae_clipped"]),
         "baseline_srmse_clipped": bool(baseline["srmse_clipped"]),
     }
-    provisional = CanonicalScaledDelta(
-        **values,
-        _canonical_token=_CANONICAL_EVIDENCE_TOKEN,
-        _canonical_values=tuple(values.values()),
-    )
-    return provisional
+    return _TaskScaledEvidence(**values)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class MorphologyGroupEvidence:
     """One sanitized fixed-predicate summary derived from Train tasks only."""
 
@@ -243,19 +244,12 @@ class MorphologyGroupEvidence:
     candidate_srmse_clipped_rate: float = 0.0
     baseline_smae_clipped_rate: float = 0.0
     baseline_srmse_clipped_rate: float = 0.0
-    _canonical_token: object = field(default=None, repr=False, compare=False)
     _canonical_values: tuple[object, ...] = field(default=(), repr=False, compare=False)
 
-    def __post_init__(self) -> None:
-        if (
-            self._canonical_token is not _CANONICAL_EVIDENCE_TOKEN
-            or self._canonical_values != _morphology_group_evidence_values(self)
-        ):
-            raise CombinedEvolutionError(
-                "morphology group evidence must come from the canonical scorer"
-            )
-        _validate_morphology_group_evidence(self)
-        object.__setattr__(self, "eligible_leaves", tuple(sorted(self.eligible_leaves)))
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise CombinedEvolutionError(
+            "morphology group evidence must come from the trusted group builder"
+        )
 
     def to_payload(self) -> dict[str, object]:
         _validate_morphology_group_evidence(self)
@@ -319,16 +313,20 @@ def summarize_morphology_group_evidence(
     eligible_leaves: tuple[str, ...],
     baseline: str,
     reviewed_leaf_names: tuple[str, ...],
-    scaled_deltas: tuple[CanonicalScaledDelta | None, ...],
+    truths: tuple[tuple[float, ...] | None, ...],
+    candidate_forecasts: tuple[tuple[float, ...] | None, ...],
+    baseline_forecasts: tuple[tuple[float, ...] | None, ...],
     forecast_disagreements: tuple[float | None, ...],
 ) -> MorphologyGroupEvidence:
-    """Aggregate aligned Train-only task metrics under one fixed profile predicate."""
+    """Score and aggregate aligned Train labels without retaining raw arrays."""
     if type(split) is not str or split != "train":
         raise CombinedEvolutionError("morphology evidence is restricted to Train")
     aligned = (
         profiles,
         entity_ids,
-        scaled_deltas,
+        truths,
+        candidate_forecasts,
+        baseline_forecasts,
         forecast_disagreements,
     )
     if any(type(values) is not tuple for values in aligned):
@@ -356,28 +354,35 @@ def summarize_morphology_group_evidence(
     reviewed = _reviewed_leaf_names(reviewed_leaf_names)
     _validate_reviewed_evidence_names(eligible_leaves, baseline, reviewed)
     feature, operator, threshold = _fixed_group_predicate(group_id)
-    complete: list[tuple[CanonicalScaledDelta, float]] = []
+    complete: list[tuple[_TaskScaledEvidence, float]] = []
     matched_indices: list[int] = []
     for index, profile in enumerate(profiles):
-        delta = scaled_deltas[index]
+        truth = truths[index]
+        candidate_forecast = candidate_forecasts[index]
+        baseline_forecast = baseline_forecasts[index]
         disagreement = forecast_disagreements[index]
-        if delta is None and disagreement is None:
+        raw_inputs = (truth, candidate_forecast, baseline_forecast)
+        if all(value is None for value in raw_inputs) and disagreement is None:
+            scored = None
             pass
-        elif delta is None or disagreement is None:
+        elif any(value is None for value in raw_inputs) or disagreement is None:
             raise CombinedEvolutionError("successful morphology metrics must be complete")
         else:
-            if type(delta) is not CanonicalScaledDelta:
-                raise CombinedEvolutionError(
-                    "scaled deltas must be exact canonical records"
-                )
-            CanonicalScaledDelta.__post_init__(delta)
+            assert truth is not None
+            assert candidate_forecast is not None
+            assert baseline_forecast is not None
+            scored = _score_scaled_forecast_pair(
+                truth=truth,
+                candidate_forecast=candidate_forecast,
+                baseline_forecast=baseline_forecast,
+            )
             if not _bounded_exact_float(disagreement, lower=0.0, upper=1_000_000.0):
                 raise CombinedEvolutionError("forecast disagreement must be finite")
         if _profile_matches(profile, feature, operator, threshold):
             matched_indices.append(index)
-            if delta is not None:
+            if scored is not None:
                 assert disagreement is not None
-                complete.append((delta, disagreement))
+                complete.append((scored, disagreement))
     if not matched_indices:
         raise CombinedEvolutionError("fixed morphology group has no task support")
     entity_count = len({entity_ids[index] for index in matched_indices})
@@ -422,11 +427,16 @@ def summarize_morphology_group_evidence(
         baseline_smae_clipped_rate=float(baseline_smae_clipped_count / successful_count),
         baseline_srmse_clipped_rate=float(baseline_srmse_clipped_count / successful_count),
     )
-    return MorphologyGroupEvidence(
-        **values,
-        _canonical_token=_CANONICAL_EVIDENCE_TOKEN,
-        _canonical_values=tuple(values.values()),
+    evidence = object.__new__(MorphologyGroupEvidence)
+    for name, value in values.items():
+        object.__setattr__(evidence, name, value)
+    object.__setattr__(
+        evidence,
+        "_canonical_values",
+        _morphology_group_evidence_values(evidence),
     )
+    _validate_morphology_group_evidence(evidence)
+    return evidence
 
 
 @dataclass(frozen=True)
@@ -921,12 +931,9 @@ def _fixed_group_predicate(group_id: object) -> tuple[str, str, float]:
 def _validate_morphology_group_evidence(value: object) -> None:
     if not isinstance(value, MorphologyGroupEvidence):
         raise CombinedEvolutionError("invalid morphology group evidence")
-    if (
-        value._canonical_token is not _CANONICAL_EVIDENCE_TOKEN
-        or value._canonical_values != _morphology_group_evidence_values(value)
-    ):
+    if value._canonical_values != _morphology_group_evidence_values(value):
         raise CombinedEvolutionError(
-            "morphology group evidence must come from the canonical scorer"
+            "morphology group evidence must come from the trusted group builder"
         )
     expected = _fixed_group_predicate(value.group_id)
     if (
@@ -964,16 +971,23 @@ def _validate_morphology_group_evidence(value: object) -> None:
         value.forecast_disagreement, lower=0.0, upper=1_000_000.0
     ):
         raise CombinedEvolutionError("forecast_disagreement must be finite")
-    for name in (
-        "candidate_worst_smae_raw",
-        "candidate_worst_srmse_raw",
-        "baseline_worst_smae_raw",
-        "baseline_worst_srmse_raw",
-    ):
-        if not _bounded_exact_float(
-            getattr(value, name), lower=0.0, upper=1_000_000_000_000.0
+    raw_tail_fields = (
+        ("candidate_worst_smae_raw", "candidate_smae_clipped_count"),
+        ("candidate_worst_srmse_raw", "candidate_srmse_clipped_count"),
+        ("baseline_worst_smae_raw", "baseline_smae_clipped_count"),
+        ("baseline_worst_srmse_raw", "baseline_srmse_clipped_count"),
+    )
+    for name, _ in raw_tail_fields:
+        raw_tail = getattr(value, name)
+        if (
+            type(raw_tail) is not float
+            or math.isnan(raw_tail)
+            or raw_tail < 0.0
+            or raw_tail == -math.inf
         ):
-            raise CombinedEvolutionError(f"{name} must be a bounded finite raw tail")
+            raise CombinedEvolutionError(
+                f"{name} must be nonnegative finite or positive infinity"
+            )
     for name in (
         "candidate_smae_clipped_count",
         "candidate_srmse_clipped_count",
@@ -983,6 +997,11 @@ def _validate_morphology_group_evidence(value: object) -> None:
         count = getattr(value, name)
         if type(count) is not int or not 0 <= count <= value.task_count:
             raise CombinedEvolutionError(f"{name} must be a bounded exact count")
+    for raw_name, clipped_count_name in raw_tail_fields:
+        if getattr(value, raw_name) == math.inf and getattr(value, clipped_count_name) < 1:
+            raise CombinedEvolutionError(
+                f"{raw_name} positive infinity must be marked clipped"
+            )
     successful_count = value.task_count - round(value.failure_rate * value.task_count)
     for prefix in ("candidate_smae", "candidate_srmse", "baseline_smae", "baseline_srmse"):
         count = getattr(value, f"{prefix}_clipped_count")
@@ -1016,10 +1035,18 @@ def _morphology_group_payload(value: MorphologyGroupEvidence) -> dict[str, objec
         "threshold": value.threshold,
         "winsorized_smae_delta": value.winsorized_smae_delta,
         "winsorized_srmse_delta": value.winsorized_srmse_delta,
-        "candidate_worst_smae_raw": value.candidate_worst_smae_raw,
-        "candidate_worst_srmse_raw": value.candidate_worst_srmse_raw,
-        "baseline_worst_smae_raw": value.baseline_worst_smae_raw,
-        "baseline_worst_srmse_raw": value.baseline_worst_srmse_raw,
+        "candidate_worst_smae_raw": _json_safe_raw_tail(
+            value.candidate_worst_smae_raw
+        ),
+        "candidate_worst_srmse_raw": _json_safe_raw_tail(
+            value.candidate_worst_srmse_raw
+        ),
+        "baseline_worst_smae_raw": _json_safe_raw_tail(
+            value.baseline_worst_smae_raw
+        ),
+        "baseline_worst_srmse_raw": _json_safe_raw_tail(
+            value.baseline_worst_srmse_raw
+        ),
         "candidate_smae_clipped_count": value.candidate_smae_clipped_count,
         "candidate_srmse_clipped_count": value.candidate_srmse_clipped_count,
         "baseline_smae_clipped_count": value.baseline_smae_clipped_count,
@@ -1031,56 +1058,8 @@ def _morphology_group_payload(value: MorphologyGroupEvidence) -> dict[str, objec
     }
 
 
-def _canonical_scaled_delta_values(value: CanonicalScaledDelta) -> tuple[object, ...]:
-    return tuple(
-        getattr(value, name)
-        for name in (
-            "winsorized_smae_delta",
-            "winsorized_srmse_delta",
-            "candidate_smae",
-            "candidate_srmse",
-            "candidate_smae_raw",
-            "candidate_srmse_raw",
-            "candidate_smae_clipped",
-            "candidate_srmse_clipped",
-            "baseline_smae",
-            "baseline_srmse",
-            "baseline_smae_raw",
-            "baseline_srmse_raw",
-            "baseline_smae_clipped",
-            "baseline_srmse_clipped",
-        )
-    )
-
-
-def _validate_canonical_scaled_delta(value: CanonicalScaledDelta) -> None:
-    for prefix in ("candidate", "baseline"):
-        for metric in ("smae", "srmse"):
-            capped = getattr(value, f"{prefix}_{metric}")
-            raw = getattr(value, f"{prefix}_{metric}_raw")
-            clipped = getattr(value, f"{prefix}_{metric}_clipped")
-            if (
-                type(capped) is not float
-                or not 0.0 <= capped <= SCALED_METRIC_CAP
-                or type(raw) is not float
-                or math.isnan(raw)
-                or raw < 0.0
-                or type(clipped) is not bool
-                or capped != min(SCALED_METRIC_CAP, raw)
-                or clipped != (raw > SCALED_METRIC_CAP)
-            ):
-                raise CombinedEvolutionError(
-                    "canonical scaled delta contains inconsistent capped/raw evidence"
-                )
-    for metric in ("smae", "srmse"):
-        delta = getattr(value, f"winsorized_{metric}_delta")
-        expected = getattr(value, f"candidate_{metric}") - getattr(
-            value, f"baseline_{metric}"
-        )
-        if type(delta) is not float or not math.isfinite(delta) or delta != expected:
-            raise CombinedEvolutionError(
-                "canonical scaled delta contains an inconsistent metric delta"
-            )
+def _json_safe_raw_tail(value: float) -> float | str:
+    return "positive_infinity" if value == math.inf else value
 
 
 def _morphology_group_evidence_values(

@@ -390,6 +390,84 @@ def test_consistency_rejects_forged_scaled_summaries(changes: dict[str, object])
     assert result.rejected == {"forged": "invalid_diagnostics"}
 
 
+def test_consistency_validates_joint_distribution_summary_against_aligned_folds() -> None:
+    """A forged joint aggregate must not pass, nor may marginal pairing reject valid folds."""
+    truth = (1.0, 1.0, 1.0, 1.0)
+    forecasts = (
+        (5.0, 5.0, 5.0, 5.0),
+        (1.0, 1.0, 1.0, 9.0),
+        (1.0, 1.0, 1.0, 11.0),
+    )
+    folds = tuple(
+        HindcastFold(
+            train_end=20 + index * 4,
+            validation_end=24 + index * 4,
+            status="success",
+            forecast=forecast,
+            truth=truth,
+            smae=float(metrics["smae"]),
+            srmse=float(metrics["srmse"]),
+            smae_raw=float(metrics["smae_raw"]),
+            srmse_raw=float(metrics["srmse_raw"]),
+            smae_clipped=bool(metrics["smae_clipped"]),
+            srmse_clipped=bool(metrics["srmse_clipped"]),
+        )
+        for index, forecast in enumerate(forecasts)
+        for metrics in (drcik_point_metrics(truth, forecast),)
+    )
+    valid = replace(
+        CandidateDiagnostics.synthetic(
+            name="candidate",
+            family="statistical",
+            median_mase=2.5,
+            fold_forecasts=forecasts,
+            fold_truths=(truth,) * 3,
+        ),
+        folds=folds,
+        median_joint_scaled_error=3.75,
+        recent_joint_scaled_error=3.75,
+        worst_joint_scaled_error=4.0,
+        median_smae=2.5,
+        recent_smae=2.5,
+        worst_smae=4.0,
+        smae_mad=0.5,
+        median_srmse=4.0,
+        recent_srmse=5.0,
+        worst_srmse=5.0,
+        srmse_mad=0.0,
+        worst_smae_raw=4.0,
+        worst_srmse_raw=5.0,
+    )
+
+    accepted = _check(
+        _card(_assumption("valid", "seasonality", "candidate")),
+        _profile(horizon=4),
+        {"candidate": valid},
+        {"candidate": forecasts[-1]},
+    )
+    forged = _check(
+        _card(_assumption("forged", "seasonality", "candidate")),
+        _profile(horizon=4),
+        {"candidate": replace(valid, median_joint_scaled_error=3.25)},
+        {"candidate": forecasts[-1]},
+    )
+    misaligned = _check(
+        _card(_assumption("misaligned", "seasonality", "candidate")),
+        _profile(horizon=4),
+        {
+            "candidate": replace(
+                valid,
+                fold_forecasts=((1.0, 1.0, 1.0, 1.0),) * 3,
+            )
+        },
+        {"candidate": forecasts[-1]},
+    )
+
+    assert tuple(item.assumption_id for item in accepted.accepted) == ("valid",)
+    assert forged.rejected == {"forged": "invalid_diagnostics"}
+    assert misaligned.rejected == {"misaligned": "invalid_fold_evidence"}
+
+
 @pytest.mark.parametrize(
     "fold_changes",
     (

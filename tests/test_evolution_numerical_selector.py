@@ -75,6 +75,33 @@ def test_hindcast_folds_record_capped_and_raw_scaled_metrics():
     assert fold.smae_clipped and fold.srmse_clipped
 
 
+def test_joint_summaries_follow_per_fold_distribution_on_cross_trading_folds() -> None:
+    """Pairing marginal summaries invents a joint score no observed fold produced."""
+    forecasts = iter(
+        (
+            (5.0, 5.0, 5.0, 5.0),  # sMAE=4, sRMSE=4, joint=4
+            (1.0, 1.0, 1.0, 9.0),  # sMAE=2, sRMSE=4, joint=3
+            (1.0, 1.0, 1.0, 11.0),  # sMAE=2.5, sRMSE=5, joint=3.75
+        )
+    )
+    diagnostic = diagnose_candidate(
+        _task((1.0,) * 40, horizon=4),
+        "cross_trading",
+        "statistical",
+        lambda *_: next(forecasts),
+        HindcastConfig(folds=3),
+    )
+
+    assert diagnostic.median_joint_scaled_error == pytest.approx(3.75)
+    assert diagnostic.worst_joint_scaled_error == pytest.approx(4.0)
+    assert diagnostic.median_joint_scaled_error != pytest.approx(
+        (diagnostic.median_smae + diagnostic.median_srmse) / 2.0
+    )
+    assert diagnostic.worst_joint_scaled_error != pytest.approx(
+        (diagnostic.worst_smae + diagnostic.worst_srmse) / 2.0
+    )
+
+
 def test_hindcast_identity_is_independent_of_the_screening_policy():
     """Changing only the active-dictionary policy must not invalidate a forecast."""
     task = _task()

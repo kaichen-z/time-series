@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from dataclasses import FrozenInstanceError, replace
 
@@ -13,22 +14,104 @@ from numerical_agent.evolution.portfolio import PolicyPortfolio
 from numerical_agent.evolution.screening import profile_task
 
 
-def _canonical_delta():
-    from numerical_agent.evolution.combined_evolution import (
-        winsorized_scaled_metric_delta,
+def _periodic_profiles(count: int = 3):
+    return tuple(
+        profile_task(
+            Task(
+                f"secret-task-{index}",
+                tuple(float((step % 3) + 1) for step in range(36)),
+                3,
+                "1 day",
+                (99.0, 98.0, 97.0),
+            )
+        )
+        for index in range(count)
     )
 
-    return winsorized_scaled_metric_delta(
-        truth=(1.0, 1.0),
-        candidate_forecast=(1.5, 1.5),
-        baseline_forecast=(2.0, 2.0),
+
+def _trusted_group_inputs(count: int = 3) -> dict[str, object]:
+    return {
+        "entity_ids": tuple(chr(ord("a") + index) for index in range(count)),
+        "split": "train",
+        "group_id": "periodic_high_confidence",
+        "eligible_leaves": ("timesfm_2_5", "seasonal_naive"),
+        "baseline": "toto_2_0",
+        "reviewed_leaf_names": ("timesfm_2_5", "seasonal_naive", "toto_2_0"),
+        "truths": ((1.0, 1.0),) * count,
+        "candidate_forecasts": ((1.5, 1.5),) * count,
+        "baseline_forecasts": ((2.0, 2.0),) * count,
+        "forecast_disagreements": (0.25,) * count,
+    }
+
+
+def test_trusted_group_builder_exposes_no_precomputed_metric_authority() -> None:
+    """A module caller must have no record or token that grants scorer-free authority."""
+    import numerical_agent.evolution.combined_evolution as combined_evolution
+
+    signature = inspect.signature(
+        combined_evolution.summarize_morphology_group_evidence
     )
+
+    assert "scaled_deltas" not in signature.parameters
+    assert not hasattr(combined_evolution, "CanonicalScaledDelta")
+    assert not hasattr(combined_evolution, "winsorized_scaled_metric_delta")
+    assert not hasattr(combined_evolution, "_CANONICAL_EVIDENCE_TOKEN")
+
+
+def test_only_aligned_truth_and_forecast_arrays_build_sanitized_group_evidence() -> None:
+    """Removing internal scoring or retaining its arrays would break the trust boundary."""
+    from numerical_agent.evolution.combined_evolution import (
+        CombinedEvolutionError,
+        summarize_morphology_group_evidence,
+    )
+
+    evidence = summarize_morphology_group_evidence(
+        _periodic_profiles(), **_trusted_group_inputs()
+    )
+
+    assert evidence.winsorized_smae_delta == pytest.approx(-0.5)
+    assert evidence.winsorized_srmse_delta == pytest.approx(-0.5)
+    forbidden = {"truth", "truths", "forecast", "forecasts"}
+    assert forbidden.isdisjoint(vars(evidence))
+    assert forbidden.isdisjoint(evidence.to_payload())
+    with pytest.raises(CombinedEvolutionError, match="align|complete"):
+        summarize_morphology_group_evidence(
+            _periodic_profiles(),
+            **{
+                **_trusted_group_inputs(),
+                "candidate_forecasts": ((1.5, 1.5), (1.5, 1.5)),
+            },
+        )
+
+
+def test_zero_scale_group_evidence_serializes_infinite_raw_tail_canonically() -> None:
+    """Rejecting or emitting JSON Infinity would erase catastrophic zero-scale evidence."""
+    from numerical_agent.evolution.combined_evolution import (
+        summarize_morphology_group_evidence,
+    )
+
+    inputs = _trusted_group_inputs()
+    inputs.update(
+        truths=((0.0, 0.0),) * 3,
+        candidate_forecasts=((1.0, 1.0),) * 3,
+        baseline_forecasts=((0.0, 0.0),) * 3,
+    )
+    evidence = summarize_morphology_group_evidence(_periodic_profiles(), **inputs)
+    payload = evidence.to_payload()
+
+    assert evidence.candidate_worst_smae_raw == float("inf")
+    assert evidence.candidate_worst_srmse_raw == float("inf")
+    assert evidence.candidate_smae_clipped_count == 3
+    assert evidence.candidate_srmse_clipped_count == 3
+    assert payload["candidate_worst_smae_raw"] == "positive_infinity"
+    assert payload["candidate_worst_srmse_raw"] == "positive_infinity"
+    serialized = json.dumps(payload, sort_keys=True, allow_nan=False)
+    assert "Infinity" not in serialized
 
 
 def _evidence(**overrides: object):
     from numerical_agent.evolution.combined_evolution import (
         summarize_morphology_group_evidence,
-        winsorized_scaled_metric_delta,
     )
 
     group_id = str(overrides.pop("group_id", "periodic_high_confidence"))
@@ -50,7 +133,6 @@ def _evidence(**overrides: object):
     )
     if group_id == "intermittent":
         profiles = tuple(replace(profile, intermittency_adi=2.0) for profile in profiles)
-    delta = _canonical_delta()
     evidence = summarize_morphology_group_evidence(
         profiles,
         entity_ids=("a", "b", "c"),
@@ -65,7 +147,9 @@ def _evidence(**overrides: object):
             "toto_2_0",
             "unknown_leaf",
         ),
-        scaled_deltas=(delta, delta, delta),
+        truths=((1.0, 1.0),) * 3,
+        candidate_forecasts=((1.5, 1.5),) * 3,
+        baseline_forecasts=((2.0, 2.0),) * 3,
         forecast_disagreements=(0.25, 0.25, 0.25),
     )
     expected_predicates = {
@@ -76,7 +160,10 @@ def _evidence(**overrides: object):
     for name, index in (("feature", 0), ("operator", 1), ("threshold", 2)):
         if expected is not None and overrides.get(name) == expected[index]:
             overrides.pop(name)
-    return replace(evidence, **overrides) if overrides else evidence
+    if overrides:
+        for name, value in overrides.items():
+            object.__setattr__(evidence, name, value)
+    return evidence
 
 
 def test_morphology_group_evidence_is_immutable_and_projects_only_canonical_aggregates() -> None:
@@ -143,7 +230,7 @@ def test_morphology_group_evidence_rejects_unsupported_or_hostile_values(
     from numerical_agent.evolution.combined_evolution import CombinedEvolutionError
 
     with pytest.raises(CombinedEvolutionError):
-        _evidence(**overrides)
+        _evidence(**overrides).to_payload()
 
 
 def test_train_profiles_are_summarized_by_the_fixed_predicate_without_exposing_ids() -> None:
@@ -164,13 +251,6 @@ def test_train_profiles_are_summarized_by_the_fixed_predicate_without_exposing_i
         )
         for index in range(4)
     )
-    from numerical_agent.evolution.combined_evolution import winsorized_scaled_metric_delta
-
-    delta = winsorized_scaled_metric_delta(
-        truth=(1.0, 1.0),
-        candidate_forecast=(1.5, 1.5),
-        baseline_forecast=(2.0, 2.0),
-    )
     evidence = summarize_morphology_group_evidence(
         profiles,
         entity_ids=("entity-a", "entity-b", "entity-c", "entity-a"),
@@ -179,7 +259,9 @@ def test_train_profiles_are_summarized_by_the_fixed_predicate_without_exposing_i
         eligible_leaves=("timesfm_2_5", "seasonal_naive"),
         baseline="toto_2_0",
         reviewed_leaf_names=("timesfm_2_5", "seasonal_naive", "toto_2_0"),
-        scaled_deltas=(delta, delta, None, delta),
+        truths=((1.0, 1.0), (1.0, 1.0), None, (1.0, 1.0)),
+        candidate_forecasts=((1.5, 1.5), (1.5, 1.5), None, (1.5, 1.5)),
+        baseline_forecasts=((2.0, 2.0), (2.0, 2.0), None, (2.0, 2.0)),
         forecast_disagreements=(0.2, 0.4, None, 0.6),
     )
 
@@ -194,62 +276,66 @@ def test_train_profiles_are_summarized_by_the_fixed_predicate_without_exposing_i
     assert "99.0" not in json.dumps(evidence.to_payload(), sort_keys=True)
 
 
-def test_combined_delta_producer_uses_canonical_cap_and_rejects_incomplete_pairs() -> None:
+def test_trusted_group_builder_uses_canonical_cap_and_rejects_incomplete_pairs() -> None:
     """A hand-rolled or single-metric producer could leak uncapped proposal evidence."""
     from numerical_agent.evolution.combined_evolution import (
         CombinedEvolutionError,
-        winsorized_scaled_metric_delta,
+        summarize_morphology_group_evidence,
     )
 
-    delta = winsorized_scaled_metric_delta(
-        truth=(1.0, 1.0, 1.0, 1.0),
-        candidate_forecast=(1.0, 1.0, 1.0, 25.0),
-        baseline_forecast=(1.0, 1.0, 1.0, 1.0),
+    evidence = summarize_morphology_group_evidence(
+        _periodic_profiles(),
+        **{
+            **_trusted_group_inputs(),
+            "truths": ((1.0, 1.0, 1.0, 1.0),) * 3,
+            "candidate_forecasts": ((1.0, 1.0, 1.0, 25.0),) * 3,
+            "baseline_forecasts": ((1.0, 1.0, 1.0, 1.0),) * 3,
+        },
     )
 
-    assert delta.winsorized_smae_delta == 5.0
-    assert delta.winsorized_srmse_delta == 5.0
-    assert delta.candidate_smae_raw == 6.0
-    assert delta.candidate_srmse_raw == 12.0
-    assert delta.baseline_smae_raw == 0.0
-    assert delta.baseline_srmse_raw == 0.0
-    assert delta.candidate_smae_clipped is True
-    assert delta.candidate_srmse_clipped is True
-    assert delta.baseline_smae_clipped is False
-    assert delta.baseline_srmse_clipped is False
+    assert evidence.winsorized_smae_delta == 5.0
+    assert evidence.winsorized_srmse_delta == 5.0
+    assert evidence.candidate_worst_smae_raw == 6.0
+    assert evidence.candidate_worst_srmse_raw == 12.0
+    assert evidence.baseline_worst_smae_raw == 0.0
+    assert evidence.baseline_worst_srmse_raw == 0.0
+    assert evidence.candidate_smae_clipped_count == 3
+    assert evidence.candidate_srmse_clipped_count == 3
+    assert evidence.baseline_smae_clipped_count == 0
+    assert evidence.baseline_srmse_clipped_count == 0
 
     with pytest.raises(CombinedEvolutionError, match="complete"):
-        winsorized_scaled_metric_delta(
-            truth=(1.0, 1.0),
-            candidate_forecast=(1.0,),
-            baseline_forecast=(1.0, 1.0),
+        summarize_morphology_group_evidence(
+            _periodic_profiles(),
+            **{
+                **_trusted_group_inputs(),
+                "candidate_forecasts": ((1.0,),) * 3,
+            },
         )
 
 
 def test_precomputed_delta_floats_cannot_enter_morphology_group_evidence() -> None:
     """A caller-supplied metric pair must not acquire canonical evidence authority."""
     from numerical_agent.evolution.combined_evolution import (
-        CanonicalScaledDelta,
         CombinedEvolutionError,
+        MorphologyGroupEvidence,
         summarize_morphology_group_evidence,
     )
 
-    with pytest.raises(CombinedEvolutionError, match="canonical scorer"):
-        CanonicalScaledDelta(
+    with pytest.raises(CombinedEvolutionError, match="trusted group builder"):
+        MorphologyGroupEvidence(
+            group_id="periodic_high_confidence",
+            feature="periodicity_strength",
+            operator="at_least",
+            threshold=0.6,
+            task_count=3,
+            entity_count=3,
+            eligible_leaves=("timesfm_2_5", "seasonal_naive"),
+            baseline="toto_2_0",
             winsorized_smae_delta=-0.5,
             winsorized_srmse_delta=-0.5,
-            candidate_smae=0.5,
-            candidate_srmse=0.5,
-            candidate_smae_raw=0.5,
-            candidate_srmse_raw=0.5,
-            candidate_smae_clipped=False,
-            candidate_srmse_clipped=False,
-            baseline_smae=1.0,
-            baseline_srmse=1.0,
-            baseline_smae_raw=1.0,
-            baseline_srmse_raw=1.0,
-            baseline_smae_clipped=False,
-            baseline_srmse_clipped=False,
+            coverage=1.0,
+            failure_rate=0.0,
         )
 
     profiles = tuple(
@@ -265,8 +351,7 @@ def test_precomputed_delta_floats_cannot_enter_morphology_group_evidence() -> No
             eligible_leaves=("timesfm_2_5", "seasonal_naive"),
             baseline="toto_2_0",
             reviewed_leaf_names=("timesfm_2_5", "seasonal_naive", "toto_2_0"),
-            winsorized_smae_deltas=(-0.5, -0.5, -0.5),
-            winsorized_srmse_deltas=(-0.5, -0.5, -0.5),
+            scaled_deltas=((-0.5, -0.5),) * 3,
             forecast_disagreements=(0.0, 0.0, 0.0),
         )
 
@@ -277,14 +362,13 @@ def test_canonical_group_snapshot_rejects_post_construction_metric_forgery() -> 
     evidence = _evidence()
     object.__setattr__(evidence, "winsorized_smae_delta", 0.0)
 
-    with pytest.raises(CombinedEvolutionError, match="canonical scorer"):
+    with pytest.raises(CombinedEvolutionError, match="trusted group builder"):
         evidence.to_payload()
 
 
 def test_group_builder_projects_sanitized_raw_tail_and_clipping_aggregates() -> None:
     from numerical_agent.evolution.combined_evolution import (
         summarize_morphology_group_evidence,
-        winsorized_scaled_metric_delta,
     )
 
     profiles = tuple(
@@ -299,17 +383,6 @@ def test_group_builder_projects_sanitized_raw_tail_and_clipping_aggregates() -> 
         )
         for index in range(3)
     )
-    clipped = winsorized_scaled_metric_delta(
-        truth=(1.0, 1.0, 1.0, 1.0),
-        candidate_forecast=(1.0, 1.0, 1.0, 25.0),
-        baseline_forecast=(1.0, 1.0, 1.0, 1.0),
-    )
-    clean = winsorized_scaled_metric_delta(
-        truth=(1.0, 1.0),
-        candidate_forecast=(1.5, 1.5),
-        baseline_forecast=(2.0, 2.0),
-    )
-
     evidence = summarize_morphology_group_evidence(
         profiles,
         entity_ids=("a", "b", "c"),
@@ -318,7 +391,21 @@ def test_group_builder_projects_sanitized_raw_tail_and_clipping_aggregates() -> 
         eligible_leaves=("timesfm_2_5", "seasonal_naive"),
         baseline="toto_2_0",
         reviewed_leaf_names=("timesfm_2_5", "seasonal_naive", "toto_2_0"),
-        scaled_deltas=(clipped, clean, clean),
+        truths=(
+            (1.0, 1.0, 1.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 1.0),
+        ),
+        candidate_forecasts=(
+            (1.0, 1.0, 1.0, 25.0),
+            (1.5, 1.5),
+            (1.5, 1.5),
+        ),
+        baseline_forecasts=(
+            (1.0, 1.0, 1.0, 1.0),
+            (2.0, 2.0),
+            (2.0, 2.0),
+        ),
         forecast_disagreements=(0.2, 0.3, 0.4),
     )
     payload = evidence.to_payload()
@@ -374,7 +461,9 @@ def test_morphology_summarizer_rejects_nonexact_profile_measurements(
             eligible_leaves=("timesfm_2_5", "seasonal_naive"),
             baseline="toto_2_0",
             reviewed_leaf_names=("timesfm_2_5", "seasonal_naive", "toto_2_0"),
-            scaled_deltas=(_canonical_delta(),) * 3,
+            truths=((1.0, 1.0),) * 3,
+            candidate_forecasts=((1.5, 1.5),) * 3,
+            baseline_forecasts=((2.0, 2.0),) * 3,
             forecast_disagreements=(0.0, 0.0, 0.0),
         )
 
@@ -395,7 +484,9 @@ def test_morphology_summarizer_rejects_non_train_and_hostile_containers() -> Non
             eligible_leaves=("timesfm_2_5", "seasonal_naive"),
             baseline="toto_2_0",
             reviewed_leaf_names=("timesfm_2_5", "seasonal_naive", "toto_2_0"),
-            scaled_deltas=object(),  # type: ignore[arg-type]
+            truths=object(),  # type: ignore[arg-type]
+            candidate_forecasts=object(),  # type: ignore[arg-type]
+            baseline_forecasts=object(),  # type: ignore[arg-type]
             forecast_disagreements=object(),  # type: ignore[arg-type]
         )
 
@@ -412,7 +503,9 @@ def test_morphology_summarizer_rejects_non_train_and_hostile_containers() -> Non
             eligible_leaves=("timesfm_2_5", "seasonal_naive"),
             baseline="toto_2_0",
             reviewed_leaf_names=("timesfm_2_5", "seasonal_naive", "toto_2_0"),
-            scaled_deltas=(_canonical_delta(),) * 3,
+            truths=((1.0, 1.0),) * 3,
+            candidate_forecasts=((1.5, 1.5),) * 3,
+            baseline_forecasts=((2.0, 2.0),) * 3,
             forecast_disagreements=(0.0, 0.0, 0.0),
         )
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
@@ -392,10 +393,20 @@ def _valid_diagnostic(value: object, expected_name: str) -> bool:
         return False
     if any(number < 0.0 or number > 5.0 for number in capped_numbers):
         return False
-    if any(
+    valid_successful_folds = tuple(
+        fold
+        for fold in value.folds
+        if fold.status == "success" and _valid_scaled_fold_metrics(fold)
+    )
+    if value.folds and len(valid_successful_folds) == len(value.folds):
+        if not _scaled_summaries_match_folds(value, valid_successful_folds):
+            return False
+    elif not value.folds and any(
         joint != joint_scaled_error(smae, srmse)
         for joint, smae, srmse in capped_pairs
     ):
+        # Read-only compatibility diagnostics lack serialized folds.  Their
+        # joint values can only be checked against the paired summaries.
         return False
     raw_tails = (value.worst_smae_raw, value.worst_srmse_raw)
     if any(
@@ -424,6 +435,45 @@ def _valid_diagnostic(value: object, expected_name: str) -> bool:
     return True
 
 
+def _scaled_summaries_match_folds(
+    diagnostic: CandidateDiagnostics,
+    folds: tuple[HindcastFold, ...],
+) -> bool:
+    smaes = tuple(float(fold.smae) for fold in folds if fold.smae is not None)
+    srmses = tuple(float(fold.srmse) for fold in folds if fold.srmse is not None)
+    smaes_raw = tuple(
+        float(fold.smae_raw) for fold in folds if fold.smae_raw is not None
+    )
+    srmses_raw = tuple(
+        float(fold.srmse_raw) for fold in folds if fold.srmse_raw is not None
+    )
+    if not smaes or not (len(smaes) == len(srmses) == len(smaes_raw) == len(srmses_raw)):
+        return False
+    joints = tuple(
+        joint_scaled_error(smae, srmse)
+        for smae, srmse in zip(smaes, srmses, strict=True)
+    )
+    median_smae = statistics.median(smaes)
+    median_srmse = statistics.median(srmses)
+    return (
+        diagnostic.median_joint_scaled_error == statistics.median(joints)
+        and diagnostic.recent_joint_scaled_error == joints[-1]
+        and diagnostic.worst_joint_scaled_error == max(joints)
+        and diagnostic.median_smae == median_smae
+        and diagnostic.recent_smae == smaes[-1]
+        and diagnostic.worst_smae == max(smaes)
+        and diagnostic.smae_mad
+        == statistics.median(abs(value - median_smae) for value in smaes)
+        and diagnostic.median_srmse == median_srmse
+        and diagnostic.recent_srmse == srmses[-1]
+        and diagnostic.worst_srmse == max(srmses)
+        and diagnostic.srmse_mad
+        == statistics.median(abs(value - median_srmse) for value in srmses)
+        and diagnostic.worst_smae_raw == max(smaes_raw)
+        and diagnostic.worst_srmse_raw == max(srmses_raw)
+    )
+
+
 def _valid_fold_evidence(diagnostic: CandidateDiagnostics) -> bool:
     forecasts = diagnostic.fold_forecasts
     truths = diagnostic.fold_truths
@@ -447,6 +497,8 @@ def _valid_fold_evidence(diagnostic: CandidateDiagnostics) -> bool:
     # evidence is mandatory and must fail closed.
     return not diagnostic.folds or (
         len(diagnostic.folds) == diagnostic.successful_folds
+        and tuple(fold.forecast for fold in diagnostic.folds) == forecasts
+        and tuple(fold.truth for fold in diagnostic.folds) == truths
         and all(
             isinstance(fold, HindcastFold)
             and fold.status == "success"
