@@ -11,6 +11,7 @@ from numerical_agent.rescore_point_forecasts import (
     _finite_json,
     _load_forecast_rows,
     _number,
+    main,
     render_point_report,
     rescore_cached_point_forecasts,
 )
@@ -99,6 +100,51 @@ def test_rescore_uses_cached_forecasts_without_probabilistic_metrics(tmp_path):
     assert "Mean sRMSE" in report
     assert "Raw P90/P95 sMAE/sRMSE" in report
     assert "W/T/L/M/U vs baseline" in report
+
+
+def test_rescore_main_writes_canonical_outputs_and_strict_stdout(tmp_path, capsys):
+    artifact = tmp_path / "per_task_results.jsonl"
+    _write_rows(artifact)
+    tasks_file = tmp_path / "tasks.jsonl"
+    tasks_file.write_text(
+        "".join(
+            json.dumps({
+                "benchmark_id": task_id,
+                "series": {
+                    "history_values": [1.0, 2.0, 3.0],
+                    "future_values": future,
+                },
+                "task_metadata": {"prediction_length": 2, "frequency": "D"},
+            }) + "\n"
+            for task_id, future in (("t1", [2.0, 2.0]), ("t2", [1.0, 1.0]))
+        ),
+        encoding="utf-8",
+    )
+    split_file = tmp_path / "split.json"
+    split_file.write_text(
+        json.dumps({"partitions": {"public_test": {"task_ids": ["t1", "t2"]}}}),
+        encoding="utf-8",
+    )
+    output = tmp_path / "output"
+
+    exit_code = main([
+        "--split-file", str(split_file),
+        "--tasks-file", str(tasks_file),
+        "--per-task-results", str(artifact),
+        "--output-dir", str(output),
+        "--baseline-row", "baseline",
+    ])
+
+    stdout_payload = strict_json_loads(capsys.readouterr().out, context="rescore stdout")
+    file_payload = strict_json_loads(
+        (output / "point_rescore_results.json").read_text(encoding="utf-8"),
+        context="rescore result",
+    )
+    assert exit_code == 0
+    assert stdout_payload == file_payload
+    assert file_payload["schema_version"] == 2
+    assert file_payload["metric_policy_fingerprint"] == METRIC_POLICY_FINGERPRINT
+    assert (output / "POINT_RESCORE_REPORT.md").is_file()
 
 
 def test_rescore_paired_counts_conserve_every_expected_task(tmp_path):

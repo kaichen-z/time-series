@@ -217,3 +217,30 @@ Complete in the fix-round-3 changeset. Active schema-v2 ToolDictionary reads now
 ### Concerns
 
 None.
+
+---
+
+## Fix round 4
+
+### Status and change
+
+Complete in the fix-round-4 changeset. Restored the standard-library JSON serializer import used by the successful rescore CLI stdout path. Strict historical input parsing remains on `strict_json_loads`; file and stdout output continue to use the canonical finite-sentinel transform with `allow_nan=False`.
+
+### TDD RED evidence
+
+`pytest -q tests/test_rescore_point_forecasts.py::test_rescore_main_writes_canonical_outputs_and_strict_stdout`
+
+Output: `1 failed in 0.13s` with `NameError: name 'json' is not defined` at `main()` stdout serialization, after the output files were written.
+
+### GREEN and verification evidence
+
+- Exact regression rerun: `1 passed in 0.12s`.
+- Focused rescore/frozen/lifecycle command: `pytest -q tests/test_rescore_point_forecasts.py tests/test_frozen_two_stage_evaluation.py tests/test_run_morphology_smoke.py tests/test_evolving_cli.py` -> `186 passed in 3.10s`; final fresh rerun: `186 passed in 3.01s`.
+- `python -m compileall -q numerical_agent`: passed. `git diff --check`: passed.
+- Regression exercises real split/task/artifact reads, `main()` output-file writes, report creation, strict stdout parsing, and equality of the canonical stdout/file payloads.
+- Self-review confirmed the production diff is only `import json`; strict input decoding and canonical `allow_nan=False` output behavior are unchanged.
+- `runs/numerical_morphology/` remains untouched and unstaged.
+
+### Concerns
+
+None.
