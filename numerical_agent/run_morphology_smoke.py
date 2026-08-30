@@ -21,7 +21,11 @@ from common.evolution_core.contracts import metric_report_metadata
 from common.llm import CodexCLIClient, CodexCLIConfig
 from common.metrics import drcik_point_metrics, mase
 from numerical_agent.evolution import MorphologyReasoner, run_numerical_loop
-from numerical_agent.evolution.execution import Task
+from numerical_agent.evolution.execution import (
+    IsolatedForecastRuntime,
+    MethodForecastError,
+    Task,
+)
 from numerical_agent.evolution.numerical_selector import DecisionPolicy, HindcastConfig
 from numerical_agent.evolution.portfolio import (
     CombinedPolicy,
@@ -528,10 +532,19 @@ class _CandidateRunner:
     ) -> None:
         self._unavailable: dict[str, str] = {}
         self._runtimes = _smoke_runtime_registry(args)
-        self._statistics = _statistical_functions(
-            artifacts.path("reviewed_methods"), artifacts.path("reviewed_skills")
-        )
-        self.statistical_names = tuple(self._statistics)
+        reviewed_methods = artifacts.path("reviewed_methods")
+        self._statistical_runtime: IsolatedForecastRuntime | None = None
+        if reviewed_methods is None:
+            self._statistics = _statistical_functions(None, None)
+            self.statistical_names = tuple(self._statistics)
+        else:
+            self._statistics = {}
+            self._statistical_runtime = IsolatedForecastRuntime(
+                reviewed_methods,
+                skills_path=artifacts.path("reviewed_skills"),
+            )
+            self.statistical_names = self._statistical_runtime.names
+        self._statistical_name_set = frozenset(self.statistical_names)
         self._tsfm = {policy.name: policy for policy in portfolio.tsfm}
         self.fingerprints = {
             "smoke_statistical_source": artifacts.fingerprints.get(
@@ -540,6 +553,14 @@ class _CandidateRunner:
         }
 
     def __call__(self, name: str, history: tuple[float, ...], horizon: int, frequency: str) -> tuple[float, ...]:
+        if name in self._statistical_name_set and self._statistical_runtime is not None:
+            try:
+                return self._statistical_runtime.forecast(
+                    name, history, horizon, frequency
+                )
+            except MethodForecastError as error:
+                self._unavailable.setdefault(name, str(error))
+                raise
         function = self._statistics.get(name)
         if function is not None:
             return tuple(float(value) for value in function(history, horizon, frequency))
@@ -556,6 +577,8 @@ class _CandidateRunner:
         return self._unavailable.get(name, "candidate did not materialize")
 
     def close(self) -> None:
+        if self._statistical_runtime is not None:
+            self._statistical_runtime.close()
         self._runtimes.close()
 
 

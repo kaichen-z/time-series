@@ -40,6 +40,7 @@ from numerical_agent.evolution import (
     selector_evolution,
 )
 from numerical_agent.evolution.portfolio import PolicyPortfolio, render_policy_source
+from numerical_agent.evolution.module import MODULE_HEADER
 from numerical_agent.evolution.numerical_selector import CandidateDiagnostics
 from numerical_agent.run_morphology_smoke import main
 
@@ -616,6 +617,60 @@ def test_fake_smoke_selects_one_task_freezes_then_writes_complete_result(tmp_pat
     )
     assert payload["candidates"]["unavailable"]
     assert "toto_2_0" in {item["name"] for item in payload["candidates"]["unavailable"]}
+
+
+def test_reviewed_statistical_native_exit_is_contained_by_the_smoke_cli(
+    tmp_path: Path,
+) -> None:
+    tasks = tmp_path / "tasks.jsonl"
+    result = tmp_path / "smoke.json"
+    methods = tmp_path / "methods.py"
+    _write_tasks(tasks, _record("one"))
+    methods.write_text(
+        MODULE_HEADER
+        + '''
+
+def exiting_method(history, horizon, frequency):
+    """Use when native failure containment is under test."""
+    import os
+    os._exit(29)
+
+
+def perfect_method(history, horizon, frequency):
+    """Use when the next values repeat the last observation."""
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "numerical_agent.run_morphology_smoke",
+            "--task-file",
+            str(tasks),
+            "--results-path",
+            str(result),
+            "--methods-path",
+            str(methods),
+            "--llm-backend",
+            "fake",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(result.read_text(encoding="utf-8"))
+    statistical = payload["execution_by_family"]["statistical"]
+    assert statistical["successful_candidates"] == ["perfect_method"]
+    unavailable = {
+        item["name"]: item["reason"]
+        for item in statistical["unavailable_candidates"]
+    }
+    assert "worker exited" in unavailable["exiting_method"]
 
 
 def test_smoke_derives_decision_metrics_from_the_validated_policy(tmp_path, monkeypatch):
