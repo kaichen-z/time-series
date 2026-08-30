@@ -852,7 +852,7 @@ def _report(manifest: Mapping[str, object]) -> str:
         f"- Accepted generations: {manifest['accepted_generations']}",
         f"- Screening SHA-256: `{manifest['screening_policy_sha256']}`",
         f"- Decision SHA-256: `{manifest['frozen_decision_policy_sha256']}`",
-        f"- Metric policy SHA-256: `{manifest.get('metric_policy_fingerprint', METRIC_POLICY_FINGERPRINT)}`",
+        f"- Metric policy SHA-256: `{manifest['metric_policy_fingerprint']}`",
         "- Primary metrics: sMAE, sRMSE",
         "- Diagnostic only: MASE, MAE, sMAPE, RMSSE",
         f"- Dev accepted: `{manifest.get('dev_accepted', False)}`",

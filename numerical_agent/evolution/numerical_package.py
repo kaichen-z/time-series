@@ -243,10 +243,11 @@ def ranked_forecasts(
         key=lambda item: (
             not item.eligible,
             -item.successful_folds,
-            _rank_number(item.median_mase),
-            _rank_number(item.recent_mase),
-            _rank_number(item.worst_mase),
-            _rank_number(item.mase_mad),
+            _rank_number(item.median_joint_scaled_error),
+            _rank_number(item.recent_joint_scaled_error),
+            _rank_number(item.worst_joint_scaled_error),
+            _rank_number(item.median_smae),
+            _rank_number(item.median_srmse),
             item.name,
         )
     )

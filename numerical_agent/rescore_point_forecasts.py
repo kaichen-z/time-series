@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from common.evolution_core.contracts import (
-    METRIC_POLICY_FINGERPRINT,
     load_active_release,
     metric_report_metadata,
 )
@@ -104,7 +103,7 @@ def render_point_report(payload: Mapping[str, object]) -> str:
         "",
         f"- Tasks: {payload['task_count']}",
         f"- Baseline: `{payload['baseline_row']}`",
-        f"- Metric policy SHA-256: `{payload.get('metric_policy_fingerprint', METRIC_POLICY_FINGERPRINT)}`",
+        f"- Metric policy SHA-256: `{payload['metric_policy_fingerprint']}`",
         "- Primary metrics: sMAE, sRMSE",
         "- Diagnostic only: MASE, MAE, sMAPE, RMSSE",
         "- sCRPS: **not computed** (no probabilistic trajectories in this phase)",

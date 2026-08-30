@@ -1,11 +1,14 @@
 """Executable contract for the one-task morphology smoke command."""
 from __future__ import annotations
 
+import ast
 import json
 import hashlib
+import inspect
 import os
 import subprocess
 import sys
+import textwrap
 import threading
 from argparse import Namespace
 from pathlib import Path
@@ -15,7 +18,27 @@ import pytest
 import numerical_agent.run_morphology_smoke as smoke
 from common.data import Task as DrCiKTask
 from common.evolution_core import contracts
+from numerical_agent import evaluate_frozen_two_stage, rescore_point_forecasts
+from numerical_agent import run_selector_evolution
+from numerical_agent.evolution import (
+    assumptions,
+    cache,
+    combined_evolution,
+    diagnostics,
+    execution,
+    filtering,
+    morphology_consistency,
+    morphology_credit,
+    numerical_loop,
+    numerical_package,
+    numerical_selector,
+    portfolio,
+    screening,
+    screening_evolution,
+    selector_evolution,
+)
 from numerical_agent.evolution.portfolio import PolicyPortfolio, render_policy_source
+from numerical_agent.evolution.numerical_selector import CandidateDiagnostics
 from numerical_agent.run_morphology_smoke import main
 
 
@@ -35,6 +58,155 @@ def _write_tasks(path, *records: dict[str, object]) -> None:
     path.write_text(
         "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
     )
+
+
+_LEGACY_PERFORMANCE_FIELDS = {
+    "mase",
+    "mae",
+    "smape",
+    "rmsse",
+    "median_mase",
+    "recent_mase",
+    "worst_mase",
+    "mase_mad",
+    "median_mae",
+    "median_smape",
+    "median_rmsse",
+    "mase_scale",
+}
+
+
+def _legacy_metric_operations(module) -> list[str]:
+    """Return executable legacy-metric reads/writes outside named report-only functions."""
+    tree = ast.parse(Path(inspect.getsourcefile(module)).read_text(encoding="utf-8"))
+    operations: list[str] = []
+    functions: list[str] = []
+
+    class Visitor(ast.NodeVisitor):
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            functions.append(node.name)
+            self.generic_visit(node)
+            functions.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Attribute(self, node: ast.Attribute) -> None:
+            if node.attr in _LEGACY_PERFORMANCE_FIELDS:
+                operations.append(f"{functions[-1] if functions else '<module>'}:{node.attr}")
+            self.generic_visit(node)
+
+        def visit_Subscript(self, node: ast.Subscript) -> None:
+            if isinstance(node.slice, ast.Constant) and node.slice.value in _LEGACY_PERFORMANCE_FIELDS:
+                operations.append(
+                    f"{functions[-1] if functions else '<module>'}:{node.slice.value}"
+                )
+            self.generic_visit(node)
+
+        def visit_keyword(self, node: ast.keyword) -> None:
+            if node.arg in _LEGACY_PERFORMANCE_FIELDS:
+                operations.append(f"{functions[-1] if functions else '<module>'}:{node.arg}")
+            self.generic_visit(node)
+
+    Visitor().visit(tree)
+    return operations
+
+
+def _uses_default_metric_fingerprint(function) -> bool:
+    tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and len(node.args) > 1
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "metric_policy_fingerprint"
+        for node in ast.walk(tree)
+    )
+
+
+def test_scaled_metric_contract_has_no_legacy_authority_in_active_morphology_paths() -> None:
+    # Explicit allowlist: these functions only serialize, reconstruct, or calculate
+    # diagnostics. Every other executable operation in the active pipeline is audited.
+    allowed_diagnostic_or_legacy_reader_functions = {
+        cache: {"_outcome_from_payload"},
+        diagnostics: {"diagnose_forecasts"},
+        execution: {"_run_one", "_report", "report_payload"},
+        numerical_selector: {
+            "synthetic",
+            "_selection_diagnostic",
+            "_score_fold",
+            "_summarize",
+        },
+        portfolio: {"_scored"},
+        selector_evolution: {"evaluate_decision"},
+    }
+    audited = (
+        assumptions,
+        cache,
+        combined_evolution,
+        diagnostics,
+        execution,
+        filtering,
+        morphology_consistency,
+        morphology_credit,
+        numerical_loop,
+        numerical_package,
+        numerical_selector,
+        portfolio,
+        screening,
+        screening_evolution,
+        selector_evolution,
+    )
+    unexpected = {}
+    for module in audited:
+        allowed = allowed_diagnostic_or_legacy_reader_functions.get(module, set())
+        operations = [
+            operation
+            for operation in _legacy_metric_operations(module)
+            if operation.split(":", 1)[0] not in allowed
+        ]
+        if operations:
+            unexpected[module.__name__] = operations
+
+    assert unexpected == {}
+
+
+def test_scaled_metric_contract_renderers_require_a_bound_fingerprint() -> None:
+    renderers = (
+        evaluate_frozen_two_stage._report,
+        rescore_point_forecasts.render_point_report,
+        run_selector_evolution._report,
+    )
+
+    assert not any(_uses_default_metric_fingerprint(function) for function in renderers)
+
+
+def test_ranked_alternatives_use_the_canonical_scaled_pair_tie_break_order() -> None:
+    diagnostics = {
+        "z_lower_smae": CandidateDiagnostics.synthetic(
+            name="z_lower_smae",
+            family="tsfm",
+            median_mase=1.0,
+            median_smae=0.9,
+            median_srmse=1.1,
+        ),
+        "a_name_only": CandidateDiagnostics.synthetic(
+            name="a_name_only",
+            family="tsfm",
+            median_mase=1.0,
+            median_smae=1.0,
+            median_srmse=1.0,
+        ),
+    }
+
+    ranked = numerical_package.ranked_forecasts(
+        active_names=("z_lower_smae", "a_name_only"),
+        families={name: "tsfm" for name in diagnostics},
+        diagnostics=diagnostics,
+        forecasts={name: (1.0, 1.0) for name in diagnostics},
+    )
+
+    assert tuple(item.name for item in ranked) == ("z_lower_smae", "a_name_only")
 
 
 def test_fake_smoke_selects_one_task_freezes_then_writes_complete_result(tmp_path) -> None:
@@ -63,6 +235,24 @@ def test_fake_smoke_selects_one_task_freezes_then_writes_complete_result(tmp_pat
     assert payload["metric_policy_fingerprint"] == contracts.METRIC_POLICY_FINGERPRINT
     assert payload["primary_metrics"] == ["smae", "srmse"]
     assert set(payload["diagnostic_only"]) >= {"mase", "mae", "smape", "rmsse"}
+    assert payload["selection"]["decision_metrics"] == ["smae", "srmse"]
+    assert payload["evolution"] == {
+        "dev_read_only": True,
+        "public_hidden_mutation_enabled": False,
+    }
+    assert set(payload["execution_by_family"]) == {"statistical", "tsfm", "combined"}
+    for summary in payload["execution_by_family"].values():
+        assert summary["attempted"] == summary["successful"] + summary["unavailable"]
+        assert set(summary) == {
+            "attempted",
+            "successful",
+            "unavailable",
+            "successful_candidates",
+            "unavailable_candidates",
+        }
+    assert payload["execution_by_family"]["statistical"]["successful"] > 0
+    assert payload["execution_by_family"]["tsfm"]["unavailable"] > 0
+    assert payload["execution_by_family"]["combined"]["unavailable"] > 0
     assert len(payload["final_forecast"]) == 3
     assert set(payload) >= {
         "task_id", "selected", "final_forecast", "protected_baseline",

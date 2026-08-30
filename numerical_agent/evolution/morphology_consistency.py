@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from types import MappingProxyType
 
 from common.metrics import joint_scaled_error
@@ -131,7 +131,7 @@ def check_morphology_assumptions(
 
     ranked = rank_diverse_assumptions(
         tuple(_as_rankable(assumption) for assumption in survivors),
-        _scaled_ranking_diagnostics(stable_diagnostics),
+        stable_diagnostics,
         top_k=policy.assumption_top_k,
         candidates_per_assumption=policy.assumption_candidates_per_hypothesis,
         min_confidence=policy.assumption_min_confidence,
@@ -142,22 +142,6 @@ def check_morphology_assumptions(
             rejected[assumption.assumption_id] = "diversity_rejected"
     accepted = tuple(assumption for assumption in survivors if assumption.assumption_id in accepted_ids)
     return AssumptionConsistencyResult(accepted=accepted, rejected=rejected)
-
-
-def _scaled_ranking_diagnostics(
-    diagnostics: Mapping[str, CandidateDiagnostics],
-) -> dict[str, CandidateDiagnostics]:
-    """Adapt the shared ranker without granting legacy metrics active authority."""
-    return {
-        name: replace(
-            diagnostic,
-            worst_mase=diagnostic.worst_joint_scaled_error,
-            median_mase=diagnostic.median_joint_scaled_error,
-            recent_mase=diagnostic.recent_joint_scaled_error,
-            mase_mad=max(diagnostic.smae_mad, diagnostic.srmse_mad),
-        )
-        for name, diagnostic in diagnostics.items()
-    }
 
 
 def _reject_all(

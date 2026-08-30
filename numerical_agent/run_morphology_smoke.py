@@ -785,16 +785,23 @@ def _result_payload(
         else:
             unavailable.append({**summary, "reason": runner.unavailable_reason(name)})
     selected = package.selection_decision
+    selection = {
+        "recipe": asdict(selected.arithmetic) if selected.arithmetic is not None else None,
+        "methods": list(selected.selected),
+        "weights": list(selected.weights),
+        "reason_codes": list(selected.reason_codes),
+        "decision_metrics": ["smae", "srmse"],
+    }
     rejected_counts = dict(sorted(Counter(package.rejected_assumptions.values()).items()))
     return {
         "schema_version": 2,
         **metric_report_metadata(),
         "task_id": task.task.task_id,
-        "selected": {
-            "recipe": asdict(selected.arithmetic) if selected.arithmetic is not None else None,
-            "methods": list(selected.selected),
-            "weights": list(selected.weights),
-            "reason_codes": list(selected.reason_codes),
+        "selection": selection,
+        "selected": {key: value for key, value in selection.items() if key != "decision_metrics"},
+        "evolution": {
+            "dev_read_only": True,
+            "public_hidden_mutation_enabled": False,
         },
         "final_forecast": list(package.final_forecast),
         "protected_baseline": _ranked_payload(package.protected_baseline),
@@ -803,6 +810,7 @@ def _result_payload(
         "selected_history_only_diagnostics": _diagnostic_payload(package.candidate_diagnostics.get(selected.selected[0])),
         "baseline_history_only_diagnostics": _diagnostic_payload(package.protected_baseline.diagnostics),
         "candidates": {"active": active, "available": available, "unavailable": unavailable},
+        "execution_by_family": _execution_by_family(available, unavailable),
         "morphology": {
             "call_status": "completed" if package.morphology_card is not None else "fallback",
             "fallback_reason": package.fallback_reason,
@@ -823,11 +831,63 @@ def _diagnostic_payload(value) -> dict[str, object] | None:
         "eligible": value.eligible,
         "reason_code": value.reason_code,
         "successful_folds": value.successful_folds,
-        "median_mase": _finite_or_none(value.median_mase),
-        "recent_mase": _finite_or_none(value.recent_mase),
-        "worst_mase": _finite_or_none(value.worst_mase),
+        "joint_scaled_error": {
+            "median": _finite_or_none(value.median_joint_scaled_error),
+            "recent": _finite_or_none(value.recent_joint_scaled_error),
+            "worst": _finite_or_none(value.worst_joint_scaled_error),
+        },
+        "smae": {
+            "median": _finite_or_none(value.median_smae),
+            "recent": _finite_or_none(value.recent_smae),
+            "worst": _finite_or_none(value.worst_smae),
+            "mad": _finite_or_none(value.smae_mad),
+            "worst_raw": _finite_or_none(value.worst_smae_raw),
+        },
+        "srmse": {
+            "median": _finite_or_none(value.median_srmse),
+            "recent": _finite_or_none(value.recent_srmse),
+            "worst": _finite_or_none(value.worst_srmse),
+            "mad": _finite_or_none(value.srmse_mad),
+            "worst_raw": _finite_or_none(value.worst_srmse_raw),
+        },
+        "diagnostic_only": {
+            "median_mase": _finite_or_none(value.median_mase),
+            "recent_mase": _finite_or_none(value.recent_mase),
+            "worst_mase": _finite_or_none(value.worst_mase),
+        },
         "fold_statuses": [item.status for item in value.folds],
     }
+
+
+def _execution_by_family(
+    available: Sequence[Mapping[str, object]],
+    unavailable: Sequence[Mapping[str, object]],
+) -> dict[str, dict[str, object]]:
+    """Expose family failures without converting them into successful candidates."""
+    result: dict[str, dict[str, object]] = {}
+    for family in ("statistical", "tsfm", "combined"):
+        successful_names = sorted(
+            str(item["name"]) for item in available if item.get("family") == family
+        )
+        unavailable_rows = sorted(
+            (
+                {
+                    "name": str(item["name"]),
+                    "reason": str(item.get("reason", "candidate did not materialize")),
+                }
+                for item in unavailable
+                if item.get("family") == family
+            ),
+            key=lambda item: item["name"],
+        )
+        result[family] = {
+            "attempted": len(successful_names) + len(unavailable_rows),
+            "successful": len(successful_names),
+            "unavailable": len(unavailable_rows),
+            "successful_candidates": successful_names,
+            "unavailable_candidates": unavailable_rows,
+        }
+    return result
 
 
 def _ranked_payload(value) -> dict[str, object]:

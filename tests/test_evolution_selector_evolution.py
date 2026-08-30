@@ -192,6 +192,15 @@ def test_active_decision_payload_omits_catastrophic_mase_and_legacy_is_opt_in():
     assert parse_decision_source(legacy, allow_legacy=True) == DecisionPolicy()
 
 
+def test_explicit_legacy_source_reader_rejects_median_smape_ranking() -> None:
+    source = render_decision_source(DecisionPolicy()).replace(
+        "'median_joint_scaled_error'", "'median_smape'"
+    )
+
+    with pytest.raises(SelectorEvolutionError, match="median_smape cannot be migrated"):
+        parse_decision_source(source, allow_legacy=True)
+
+
 def test_task_conditioned_long_horizon_route_round_trips_and_legacy_defaults_are_safe():
     policy = DecisionPolicy(
         long_horizon_audit_enabled=True,

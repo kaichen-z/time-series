@@ -167,6 +167,44 @@ def test_top_k_is_diverse_by_kind_and_leading_candidate():
     )
 
 
+def test_assumption_leader_uses_the_canonical_scaled_pair_tie_break_order():
+    assumption = ForecastAssumption(
+        "scaled-order",
+        "foundation_shape",
+        "The supported shape persists.",
+        ("history_only",),
+        "The shape changes.",
+        ("z_lower_smae", "a_name_only"),
+        0.8,
+    )
+    diagnostics = {
+        "z_lower_smae": CandidateDiagnostics.synthetic(
+            name="z_lower_smae",
+            family="tsfm",
+            median_mase=1.0,
+            median_smae=0.9,
+            median_srmse=1.1,
+        ),
+        "a_name_only": CandidateDiagnostics.synthetic(
+            name="a_name_only",
+            family="tsfm",
+            median_mase=1.0,
+            median_smae=1.0,
+            median_srmse=1.0,
+        ),
+    }
+
+    ranked = rank_diverse_assumptions(
+        (assumption,),
+        diagnostics,
+        top_k=1,
+        candidates_per_assumption=2,
+        min_confidence=0.0,
+    )
+
+    assert ranked[0].leading_candidate == "z_lower_smae"
+
+
 def test_candidate_pool_keeps_reviewed_anchors_beside_top_k_methods():
     assumptions = generate_forecast_assumptions(
         _profile(trend_direction="up", trend_strength=0.8),

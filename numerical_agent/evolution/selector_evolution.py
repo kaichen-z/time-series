@@ -1370,6 +1370,10 @@ def _parse_policy(
         "median_rmsse": "median_srmse",
     }
     if allow_legacy:
+        if "median_smape" in {str(value) for value in ranking}:
+            raise SelectorEvolutionError(
+                "legacy median_smape cannot be migrated into the scaled metric policy"
+            )
         ranking = tuple(legacy_ranking.get(str(value), str(value)) for value in ranking)
     try:
         return DecisionPolicy(

@@ -21,6 +21,7 @@ from numerical_agent.evolution.numerical_selector import (
     select_numerical_forecast,
     select_protected_safe_anchor,
 )
+from numerical_agent.evolution import numerical_selector as selector_module
 from numerical_agent.evolution.screening import TaskProfile, profile_task
 
 
@@ -308,6 +309,14 @@ def test_policy_parser_rejects_legacy_ranking_without_legacy_flag():
         DecisionPolicy.from_payload({"ranking_order": ["median_mase"]})
 
 
+def test_explicit_legacy_reader_rejects_median_smape_ranking_without_a_surrogate():
+    payload = asdict(DecisionPolicy())
+    payload["ranking_order"] = ["median_smape"]
+
+    with pytest.raises(ValueError, match="median_smape cannot be migrated"):
+        DecisionPolicy.from_payload(payload, allow_legacy=True)
+
+
 def _with_long_horizon_audit(diagnostic, *, forecast, truth, coverage, scale=1.0):
     def scaled_fields(fold_truth, fold_forecast):
         metrics = drcik_point_metrics(fold_truth, fold_forecast)
@@ -344,6 +353,34 @@ def _with_long_horizon_audit(diagnostic, *, forecast, truth, coverage, scale=1.0
         ),
         long_horizon_coverage=float(coverage),
     )
+
+
+def test_residual_correction_scale_is_independent_of_legacy_mase_diagnostics():
+    base = _diagnostic(
+        "anchor",
+        median=1.0,
+        forecasts=((2.0, 3.0),) * 3,
+        truths=((1.0, 5.0),) * 3,
+    )
+    small_legacy_scale = _with_long_horizon_audit(
+        base,
+        forecast=(2.0, 3.0),
+        truth=(1.0, 5.0),
+        coverage=1.0,
+        scale=0.01,
+    )
+    large_legacy_scale = _with_long_horizon_audit(
+        base,
+        forecast=(2.0, 3.0),
+        truth=(1.0, 5.0),
+        coverage=1.0,
+        scale=10_000.0,
+    )
+
+    assert selector_module._fold_correction_scales(
+        small_legacy_scale
+    ) == selector_module._fold_correction_scales(large_legacy_scale)
+    assert selector_module._fold_correction_scales(small_legacy_scale) == (4.0,) * 3
 
 
 def test_context_preserving_long_horizon_audit_keeps_original_rank_folds():

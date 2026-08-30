@@ -296,6 +296,10 @@ class DecisionPolicy:
             if isinstance(ranking, (str, bytes)):
                 raise ValueError("ranking_order must be a sequence")
             ranking = tuple(ranking)  # type: ignore[arg-type]
+            if allow_legacy and "median_smape" in {str(field) for field in ranking}:
+                raise ValueError(
+                    "legacy median_smape cannot be migrated into the scaled metric policy"
+                )
             legacy_ranking = {
                 "median_mase": "median_joint_scaled_error",
                 "recent_mase": "recent_joint_scaled_error",
@@ -1897,9 +1901,7 @@ def _tsfm_portfolio_proposal(
     weights: tuple[float, ...],
     final: tuple[float, ...],
 ):
-    scores = _fold_scores(
-        candidate_folds, anchor.fold_truths, _fold_mase_scales(anchor)
-    )
+    scores = _fold_scores(candidate_folds, anchor.fold_truths)
     srmses = tuple(
         float(drcik_point_metrics(list(truth), list(forecast))["srmse"])
         for forecast, truth in zip(candidate_folds, anchor.fold_truths, strict=True)
@@ -2447,8 +2449,7 @@ def _selection_diagnostic(
         )
         for index, fold in enumerate(reference.folds)
     )
-    scales = _fold_mase_scales(reference)
-    scores = _fold_scores(fold_forecasts, reference.fold_truths, scales)
+    scores = _fold_scores(fold_forecasts, reference.fold_truths)
     if not scores:
         return None
     return replace(
@@ -2873,13 +2874,8 @@ def _long_horizon_penalty(
         or not audit.truth
     ):
         return 0.0
-    scale = reference.mase_scale
-    if scale is None or not math.isfinite(scale) or scale <= 0:
-        return 0.0
-    candidate_scores = _fold_scores((audit.forecast,), (audit.truth,), (float(scale),))
-    reference_scores = _fold_scores(
-        (reference.forecast,), (reference.truth,), (float(scale),)
-    )
+    candidate_scores = _fold_scores((audit.forecast,), (audit.truth,))
+    reference_scores = _fold_scores((reference.forecast,), (reference.truth,))
     if not candidate_scores or not reference_scores:
         return 0.0
     regret = (candidate_scores[0] - reference_scores[0]) / (1.0 + reference_scores[0])
@@ -3109,14 +3105,10 @@ def _best_guarded_combination(
                 forecasts[specialist.name],
                 anchor_weight,
             )
-            score = _fold_score(
-                fold_forecasts, anchor.fold_truths, _fold_mase_scales(anchor)
-            )
+            score = _fold_score(fold_forecasts, anchor.fold_truths)
             proposals.append((
                 score,
-                _worst_fold_score(
-                    fold_forecasts, anchor.fold_truths, _fold_mase_scales(anchor)
-                ),
+                _worst_fold_score(fold_forecasts, anchor.fold_truths),
                 "weighted_blend",
                 anchor.name,
                 specialist.name,
@@ -3169,14 +3161,10 @@ def _best_guarded_combination(
                 policy.ensemble_correction_clip,
                 final_scale,
             )
-            score = _fold_score(
-                fold_forecasts, anchor.fold_truths, _fold_mase_scales(anchor)
-            )
+            score = _fold_score(fold_forecasts, anchor.fold_truths)
             proposals.append((
                 score,
-                _worst_fold_score(
-                    fold_forecasts, anchor.fold_truths, _fold_mase_scales(anchor)
-                ),
+                _worst_fold_score(fold_forecasts, anchor.fold_truths),
                 "residual_correction",
                 anchor.name,
                 specialist.name,
@@ -3306,9 +3294,7 @@ def _combined_long_horizon_fold(
     if kind == "weighted_blend":
         forecast = _blend_values(left.forecast, right.forecast, parameter)
     elif kind == "residual_correction":
-        scale = left.mase_scale
-        if scale is None or not math.isfinite(scale) or scale <= 0:
-            scale = _forecast_scale(left.truth)
+        scale = _forecast_scale(left.truth)
         forecast = _residual_values(
             left.forecast,
             right.forecast,
@@ -3491,21 +3477,10 @@ def _blend_values(
 def _fold_correction_scales(candidate: CandidateDiagnostics) -> tuple[float, ...]:
     successful = tuple(fold for fold in candidate.folds if fold.status == "success")
     if len(successful) == len(candidate.fold_forecasts):
-        scales = tuple(
-            float(fold.mase_scale)
-            if fold.mase_scale is not None and fold.mase_scale > 0
-            else max(1e-8, float(fold.mae) / float(fold.mase))
-            if fold.mae is not None and fold.mase is not None and fold.mase > 0
-            else _forecast_scale(fold.truth)
-            for fold in successful
-        )
+        scales = tuple(_forecast_scale(fold.truth) for fold in successful)
         if scales:
             return scales
     return tuple(_forecast_scale(truth) for truth in candidate.fold_truths)
-
-
-def _fold_mase_scales(candidate: CandidateDiagnostics) -> tuple[float, ...]:
-    return _fold_correction_scales(candidate)
 
 
 def _forecast_scale(values: Sequence[float]) -> float:

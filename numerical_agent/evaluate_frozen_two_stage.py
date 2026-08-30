@@ -13,7 +13,6 @@ from typing import Mapping, Sequence
 
 from common.data import load_tasks
 from common.evolution_core.contracts import (
-    METRIC_POLICY_FINGERPRINT,
     metric_policy_metadata,
     metric_report_metadata,
     load_active_release,
@@ -537,7 +536,7 @@ def _report(payload: Mapping[str, object]) -> str:
         f"- Tasks: {payload['task_count']}",
         f"- Screening SHA-256: `{payload['screening_policy_sha256']}`",
         f"- Decision SHA-256: `{payload['decision_policy_sha256']}`",
-        f"- Metric policy SHA-256: `{payload.get('metric_policy_fingerprint', METRIC_POLICY_FINGERPRINT)}`",
+        f"- Metric policy SHA-256: `{payload['metric_policy_fingerprint']}`",
         "- Primary metrics: sMAE, sRMSE",
         "- Diagnostic only: MASE, MAE, sMAPE, RMSSE",
         f"- LLM / mutation calls: {payload['llm_calls']} / {payload['mutation_calls']}",

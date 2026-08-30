@@ -7,6 +7,7 @@ import sys
 
 from common.evolution_core.contracts import metric_policy_metadata
 from numerical_agent import main as numerical_main
+from numerical_agent.dictionary import ToolDictionary
 from numerical_agent.main import main
 from numerical_agent.tsfm.deployment import TSFMDeployment
 from numerical_agent.tsfm.protocol import WorkerResponse
@@ -126,13 +127,13 @@ def test_mixed_fake_worker_curation_and_frozen_evaluation_cover_runtime_contract
     base_methods = tmp_path / "base-methods.json"
     _write_json(
         base_methods,
-        {
+        ToolDictionary.from_legacy_report_payload({
             "schema_version": 1,
             "dictionary_id": "mixed-integration.v000",
             "parent_dictionary_id": None,
             "generation": 0,
             "methods": methods,
-        },
+        }).to_payload(),
     )
 
     task = {
@@ -146,12 +147,14 @@ def test_mixed_fake_worker_curation_and_frozen_evaluation_cover_runtime_contract
         experiment_path,
         {
             "evolution": {
+                "schema_version": 2,
                 **metric_policy_metadata(),
                 "generations": 1,
                 "children_per_generation": 1,
                 "resume": False,
             },
             "curation": {
+                "schema_version": 2,
                 **metric_policy_metadata(),
                 "allowed_families": ["statistical", "foundation"],
                 "accepted_max_smae": 5.0,
