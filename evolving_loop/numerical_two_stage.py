@@ -26,12 +26,14 @@ from evolving_loop.retrieval_agent.agent import RetrievalResult
 from evolving_loop.retrieval_agent.schemas import (
     FinalRetrievalCard,
     RetrievalAssumption,
+    RetrievalContractError,
     RetrievalGap,
     RetrievalRoundResult,
 )
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 from evolving_loop.retrieval_agent.verifier import merge_verified_rounds
 from numerical_agent.evolution.execution import Task
+from numerical_agent.evolution.morphology import AssumptionGrounding
 from numerical_agent.evolution.numerical_handoff import (
     safe_retrieval_projection,
     task_input_fingerprint,
@@ -153,11 +155,17 @@ def run_numerical_two_stage(
 ) -> NumericalTwoStageResult:
     """Run fixed two-stage Retrieval and Decision over one frozen Numerical package."""
     _validate_inputs(task, numerical, retrieval, decision)
-    execution_fingerprints = _execution_fingerprints(numerical, retrieval, decision)
     candidates = _decision_candidates(numerical)
     host_default = _safe_default(numerical, candidates)
 
     assumptions, handoff_failure = _validated_handoff(numerical)
+    execution_fingerprints = _execution_fingerprints(
+        task,
+        numerical,
+        retrieval,
+        decision,
+        candidates,
+    )
     fallback_reason = handoff_failure
 
     round1 = _run_round1(retrieval, task)
@@ -200,9 +208,17 @@ def run_numerical_two_stage(
             assumptions,
         )
         if _fatal_round_failure(round2, "round2"):
+            round2 = replace(round2, chains=(), counterevidence=())
             fallback_reason = "invalid_round2_response"
-        elif not round2.chains and not round2.counterevidence:
-            fallback_reason = "round2_no_verified_evidence"
+        else:
+            had_verified_evidence = bool(round2.chains or round2.counterevidence)
+            round2 = _bind_round2_to_sent_gaps(round2, sent_gaps)
+            if not round2.chains and not round2.counterevidence:
+                fallback_reason = (
+                    "round2_no_gap_bound_evidence"
+                    if had_verified_evidence
+                    else "round2_no_verified_evidence"
+                )
 
     card = merge_verified_rounds(round1, round2, gaps=sent_gaps)
     if fallback_reason is not None:
@@ -296,6 +312,31 @@ def _validate_inputs(
     expected_profile_fingerprint = _fingerprint(expected_profile.to_public_payload())
     if fingerprints["task_profile"] != expected_profile_fingerprint:
         raise ValueError("Numerical package task profile fingerprint mismatch")
+    expected_morphology_fingerprint = (
+        numerical.morphology_card.fingerprint
+        if numerical.morphology_card is not None
+        else _fingerprint({"enabled": False})
+    )
+    if fingerprints["morphology_card"] != expected_morphology_fingerprint:
+        raise ValueError("Numerical package Morphology card fingerprint mismatch")
+    accepted = tuple(numerical.accepted_assumptions)
+    if accepted and numerical.morphology_card is None:
+        raise ValueError("accepted assumptions require a frozen Morphology card")
+    card_assumptions = {
+        item.assumption_id: item
+        for item in (
+            numerical.morphology_card.assumptions
+            if numerical.morphology_card is not None
+            else ()
+        )
+    }
+    if any(
+        type(item) is not AssumptionGrounding
+        or type(card_assumptions.get(item.assumption_id)) is not AssumptionGrounding
+        or card_assumptions[item.assumption_id] != item
+        for item in accepted
+    ):
+        raise ValueError("accepted assumption is not bound to the frozen Morphology card")
 
 
 def _decision_candidates(
@@ -452,22 +493,122 @@ def _run_decision(
     prior: tuple[DecisionResult, ...] = (),
 ) -> tuple[DecisionResult, str | None]:
     try:
-        return (
-            decision.run(
-                candidates,
-                retrieval,
-                host_default_id=host_default.candidate_id,
-                prior_decisions=prior,
-                round_index=round_index,
-                assumptions=assumptions,
-            ),
-            None,
+        result = decision.run(
+            candidates,
+            retrieval,
+            host_default_id=host_default.candidate_id,
+            prior_decisions=prior,
+            round_index=round_index,
+            assumptions=assumptions,
+        )
+        return _validate_decision_result(
+            result,
+            decision=decision,
+            candidates=candidates,
+            retrieval=retrieval,
+            host_default=host_default,
+            assumptions=assumptions,
         )
     except TransientLLMError:
         raise
     except Exception as error:
         reason = f"decision_failure:{type(error).__name__}"
         return _fallback_decision(host_default, reason), reason
+
+
+def _validate_decision_result(
+    result: object,
+    *,
+    decision: DecisionAgent,
+    candidates: tuple[DecisionCandidate, ...],
+    retrieval: RetrievalResult,
+    host_default: DecisionCandidate,
+    assumptions: tuple[RetrievalAssumption, ...],
+) -> tuple[DecisionResult, str | None]:
+    """Revalidate an untrusted Decision artifact against host-owned objects."""
+    if type(result) is not DecisionResult:
+        reason = "invalid_decision_result"
+        return _fallback_decision(host_default, reason), reason
+    if result.rejection_reason is not None:
+        reason = "decision_contract_rejected"
+        return _fallback_decision(host_default, reason), reason
+
+    by_id = {item.candidate_id: item for item in candidates}
+    canonical = by_id.get(getattr(result.selected, "candidate_id", None))
+    if (
+        type(result.selected) is not DecisionCandidate
+        or canonical is None
+        or result.selected != canonical
+        or result.host_default_id != host_default.candidate_id
+        or type(result.requested_more_retrieval) is not bool
+        or type(result.llm_override_accepted) is not bool
+        or not isinstance(result.rationale, str)
+    ):
+        reason = "invalid_decision_result"
+        return _fallback_decision(host_default, reason), reason
+
+    citations = result.supporting_document_ids
+    if (
+        type(citations) is not tuple
+        or any(not isinstance(item, str) or not item for item in citations)
+        or len(citations) != len(set(citations))
+    ):
+        reason = "invalid_decision_result"
+        return _fallback_decision(host_default, reason), reason
+    verified_ids = {item.document_id for item in retrieval.evidence}
+    if not set(citations).issubset(verified_ids) or not set(
+        canonical.source_document_ids
+    ).issubset(citations):
+        reason = "invalid_decision_result"
+        return _fallback_decision(host_default, reason), reason
+
+    override = canonical.candidate_id != host_default.candidate_id
+    if (
+        result.llm_override_accepted is not override
+        or (override and not citations)
+    ):
+        reason = "invalid_decision_result"
+        return _fallback_decision(host_default, reason), reason
+
+    used_skills = result.used_skill_names
+    if (
+        type(used_skills) is not tuple
+        or any(not isinstance(item, str) or not item for item in used_skills)
+        or len(used_skills) != len(set(used_skills))
+        or (
+            decision.library is None
+            and bool(used_skills)
+        )
+        or (
+            decision.library is not None
+            and any(decision.library.get(item) is None for item in used_skills)
+        )
+    ):
+        reason = "invalid_decision_result"
+        return _fallback_decision(host_default, reason), reason
+
+    gaps = result.gaps
+    allowed_assumptions = {item.assumption_id for item in assumptions}
+    try:
+        canonical_gaps = tuple(
+            RetrievalGap.from_payload(item.to_payload())
+            for item in gaps
+            if type(item) is RetrievalGap
+        )
+    except (RetrievalContractError, TypeError, ValueError):
+        canonical_gaps = ()
+    if (
+        type(gaps) is not tuple
+        or any(type(item) is not RetrievalGap for item in gaps)
+        or canonical_gaps != gaps
+        or len(gaps) != len({item.assumption_id for item in gaps})
+        or any(item.assumption_id not in allowed_assumptions for item in gaps)
+        or result.requested_more_retrieval is not bool(gaps)
+    ):
+        reason = "invalid_decision_result"
+        return _fallback_decision(host_default, reason), reason
+
+    return replace(result, selected=canonical), None
 
 
 def _fallback_decision(default: DecisionCandidate, reason: str) -> DecisionResult:
@@ -511,6 +652,34 @@ def _fatal_round_failure(result: RetrievalRoundResult, stage: str) -> bool:
     )
 
 
+def _bind_round2_to_sent_gaps(
+    result: RetrievalRoundResult,
+    gaps: tuple[RetrievalGap, ...],
+) -> RetrievalRoundResult:
+    """Keep only verified Round 2 chains explicitly scoped to a sent gap."""
+    allowed = {item.assumption_id for item in gaps}
+
+    def bound(chain: object) -> bool:
+        addressed = set(getattr(chain, "addressed_assumption_ids", ()))
+        return bool(addressed) and addressed.issubset(allowed)
+
+    chains = tuple(item for item in result.chains if bound(item))
+    counterevidence = tuple(
+        item for item in result.counterevidence if bound(item)
+    )
+    removed = tuple(
+        f"round2_chain_not_gap_bound:{item.chain_id}"
+        for item in (*result.chains, *result.counterevidence)
+        if not bound(item)
+    )
+    return replace(
+        result,
+        chains=chains,
+        counterevidence=counterevidence,
+        rejected=tuple(dict.fromkeys((*result.rejected, *removed))),
+    )
+
+
 def _record_rejection(
     card: FinalRetrievalCard,
     reason: str,
@@ -519,14 +688,35 @@ def _record_rejection(
 
 
 def _execution_fingerprints(
+    task: ContextTask,
     numerical: NumericalForecastPackage,
     retrieval: TwoStageRetrievalAgent,
     decision: DecisionAgent,
+    candidates: tuple[DecisionCandidate, ...],
 ) -> Mapping[str, str]:
     result = {
         "bridge_contract": _fingerprint(_BRIDGE_CONTRACT),
+        "context_projection": _fingerprint(task.retrieval_view()),
+        "decision_candidates": _fingerprint(
+            [_decision_candidate_payload(item) for item in candidates]
+        ),
         "decision_host_contract": _fingerprint(_DECISION_HOST_CONTRACT),
         "metric_policy": METRIC_POLICY_FINGERPRINT,
+        "morphology_projection": _fingerprint(
+            {
+                "morphology_card_fingerprint": (
+                    numerical.morphology_card.fingerprint
+                    if numerical.morphology_card is not None
+                    else None
+                ),
+                "accepted_assumptions": [
+                    item.to_payload() for item in numerical.accepted_assumptions
+                ],
+                "retrieval_handoff": [
+                    dict(item) for item in numerical.retrieval_handoff
+                ],
+            }
+        ),
         "numerical_package": _numerical_package_fingerprint(numerical),
         "retrieval_verifier_contract": _fingerprint(_RETRIEVAL_VERIFIER_CONTRACT),
         "retrieval_genome": retrieval.genome.fingerprint(),
@@ -559,7 +749,7 @@ def _execution_fingerprints(
             if _SHA256.fullmatch(value)
             else _fingerprint({"component": name, "identity": value})
         )
-    return MappingProxyType(dict(sorted(result.items())))
+    return _freeze_fingerprints(result)
 
 
 def _completed_fingerprints(
@@ -579,12 +769,12 @@ def _completed_fingerprints(
             "final_decision_artifact": _fingerprint(_decision_result_payload(final)),
         }
     )
-    return MappingProxyType(dict(sorted(result.items())))
+    return _freeze_fingerprints(result)
 
 
 def _decision_result_payload(result: DecisionResult) -> Mapping[str, object]:
     return {
-        "selected": asdict(result.selected),
+        "selected": _decision_candidate_payload(result.selected),
         "host_default_id": result.host_default_id,
         "requested_more_retrieval": result.requested_more_retrieval,
         "rationale": result.rationale,
@@ -596,6 +786,22 @@ def _decision_result_payload(result: DecisionResult) -> Mapping[str, object]:
     }
 
 
+def _decision_candidate_payload(
+    candidate: DecisionCandidate,
+) -> Mapping[str, object]:
+    return {
+        "candidate_id": candidate.candidate_id,
+        "forecast": list(candidate.forecast),
+        "assumption": candidate.assumption,
+        "failure_condition": candidate.failure_condition,
+        "hindcast_smae": candidate.hindcast_smae,
+        "hindcast_srmse": candidate.hindcast_srmse,
+        "source_document_ids": list(candidate.source_document_ids),
+        "tags": list(candidate.tags),
+        "hindcast_smape": candidate.hindcast_smape,
+    }
+
+
 def _numerical_package_fingerprint(numerical: NumericalForecastPackage) -> str:
     """Bind the exact safe runtime projection without serializing internal folds."""
     selection = numerical.selection_decision
@@ -604,6 +810,14 @@ def _numerical_package_fingerprint(numerical: NumericalForecastPackage) -> str:
             "task_id": numerical.task_profile.task_id,
             "task_input_fingerprint": numerical.component_fingerprints["task_input"],
             "task_profile": numerical.task_profile.to_public_payload(),
+            "morphology_card_fingerprint": (
+                numerical.morphology_card.fingerprint
+                if numerical.morphology_card is not None
+                else None
+            ),
+            "accepted_assumptions": [
+                item.to_payload() for item in numerical.accepted_assumptions
+            ],
             "active_candidate_names": list(numerical.active_candidate_names),
             "selection": {
                 "mode": selection.mode,
@@ -651,6 +865,19 @@ def _fingerprint(payload: object) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _freeze_fingerprints(values: Mapping[str, str]) -> Mapping[str, str]:
+    result = dict(values)
+    if any(
+        not isinstance(key, str)
+        or not key
+        or not isinstance(value, str)
+        or not _SHA256.fullmatch(value)
+        for key, value in result.items()
+    ):
+        raise ValueError("execution fingerprint map contains a noncanonical fingerprint")
+    return MappingProxyType(dict(sorted(result.items())))
 
 
 __all__ = ["NumericalTwoStageResult", "run_numerical_two_stage"]

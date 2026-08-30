@@ -9,12 +9,17 @@ import pytest
 from common.data import Task as ContextNumericTask
 from common.llm import FakeLLMClient, LLMResponse, TransientLLMError
 from evolving_loop.data import ContextTask, Document
-from evolving_loop.decision_agent.agent import DecisionAgent
+from evolving_loop.decision_agent.agent import (
+    DecisionAgent,
+    DecisionCandidate,
+    DecisionResult,
+)
 from evolving_loop.numerical_two_stage import (
     NumericalTwoStageResult,
     run_numerical_two_stage,
 )
 from evolving_loop.retrieval_agent.policy import RetrievalGenome
+from evolving_loop.retrieval_agent.schemas import RetrievalGap
 from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 from numerical_agent.evolution.execution import Task
@@ -115,7 +120,11 @@ def _diagnostic(
     )
 
 
-def _morphology_card(candidate_name: str) -> MorphologyCard:
+def _morphology_card(
+    candidate_name: str,
+    *,
+    claim: str = "The observed three-step cycle persists through the horizon.",
+) -> MorphologyCard:
     broad = MorphologyToolCall("broad", "detect_periodicity", 0, len(_history()))
     recent = MorphologyToolCall(
         "recent", "detect_periodicity", len(_history()) // 2, len(_history())
@@ -123,7 +132,7 @@ def _morphology_card(candidate_name: str) -> MorphologyCard:
     assumption = AssumptionGrounding(
         assumption_id="cycle",
         kind="seasonality",
-        claim="The observed three-step cycle persists through the horizon.",
+        claim=claim,
         failure_condition="The cycle changes phase or disappears.",
         supporting_call_ids=("broad", "recent"),
         candidate_names=(candidate_name,),
@@ -149,7 +158,11 @@ class _FixedReasoner:
         return self.card
 
 
-def _package(*, with_assumption: bool = True):
+def _package(
+    *,
+    with_assumption: bool = True,
+    assumption_claim: str = "The observed three-step cycle persists through the horizon.",
+):
     forecasts = {
         "safe_anchor": (3.0, 3.0),
         "seasonal_specialist": (8.0, 9.0),
@@ -183,7 +196,9 @@ def _package(*, with_assumption: bool = True):
         diagnostics=diagnostics,
         decision_policy=DecisionPolicy(ensemble_enabled=False),
         morphology_reasoner=(
-            _FixedReasoner(_morphology_card("safe_anchor"))
+            _FixedReasoner(
+                _morphology_card("safe_anchor", claim=assumption_claim)
+            )
             if with_assumption
             else None
         ),
@@ -726,8 +741,370 @@ def test_decision_rejection_preserves_materialized_host_default(tmp_path) -> Non
     result = run_numerical_two_stage(task, package, retrieval, decision)
 
     assert result.final_decision.selected.candidate_id == "safe_anchor"
-    assert result.final_decision.rejection_reason == "override_requires_task_evidence"
+    assert result.final_decision.rejection_reason == "decision_contract_rejected"
     assert result.forecast == package.protected_baseline.forecast
+
+
+def test_malformed_decision_with_verified_citation_cannot_override_default(
+    tmp_path,
+) -> None:
+    task = _context_task()
+    package = _package()
+    retrieval = _retrieval(
+        [
+            _round(
+                _chain(
+                    task,
+                    chain_id="round1_support",
+                    document_id="doc_round1",
+                    direction="up",
+                    magnitude=5.0,
+                )
+            )
+        ],
+        tmp_path,
+    )
+    malformed = json.loads(
+        _decision("seasonal_specialist", cited=("doc_round1",))
+    )
+    malformed["forbidden_extra"] = "a valid citation must not salvage this schema"
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                json.dumps(malformed),
+                _decision("seasonal_specialist", cited=("doc_round1",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(task, package, retrieval, decision)
+
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert result.forecast == package.protected_baseline.forecast
+    assert result.fallback_reason == "decision_contract_rejected"
+
+
+def test_forged_decision_candidate_metadata_cannot_cross_host_boundary(tmp_path) -> None:
+    task = _context_task()
+    package = _package()
+    retrieval = _retrieval(
+        [
+            _round(
+                _chain(
+                    task,
+                    chain_id="round1_support",
+                    document_id="doc_round1",
+                    direction="up",
+                    magnitude=5.0,
+                )
+            )
+        ],
+        tmp_path,
+    )
+
+    class ForgingDecisionAgent(DecisionAgent):
+        def run(self, candidates, _retrieval, **kwargs):
+            canonical = next(
+                item
+                for item in candidates
+                if item.candidate_id == "seasonal_specialist"
+            )
+            forged = DecisionCandidate(
+                candidate_id=canonical.candidate_id,
+                forecast=canonical.forecast,
+                assumption="Forged assumption that was never in the Numerical package.",
+                failure_condition=canonical.failure_condition,
+                hindcast_smae=canonical.hindcast_smae,
+                hindcast_srmse=canonical.hindcast_srmse,
+                source_document_ids=("doc_round1",),
+                tags=canonical.tags,
+            )
+            return DecisionResult(
+                selected=forged,
+                host_default_id=kwargs["host_default_id"],
+                requested_more_retrieval=False,
+                rationale="Forged DecisionResult with a canonical ID and forecast.",
+                supporting_document_ids=("doc_round1",),
+                llm_override_accepted=True,
+            )
+
+    decision = ForgingDecisionAgent(FakeLLMClient([]))
+
+    result = run_numerical_two_stage(task, package, retrieval, decision)
+
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert type(result.final_decision.selected) is DecisionCandidate
+    assert result.final_decision.selected.assumption == (
+        "The observed three-step cycle persists through the horizon."
+    )
+    assert result.final_decision.selected.failure_condition == (
+        "The cycle changes phase or disappears."
+    )
+    assert result.final_decision.selected.source_document_ids == ()
+    assert result.final_decision.selected.tags == ("numerical_package", "tsfm")
+    assert result.fallback_reason == "invalid_decision_result"
+
+
+def test_forged_decision_result_subclass_is_rejected(tmp_path) -> None:
+    task = _context_task()
+    package = _package()
+    retrieval = _retrieval([_round()], tmp_path)
+
+    class ForgedDecisionResult(DecisionResult):
+        pass
+
+    class ForgingDecisionAgent(DecisionAgent):
+        def run(self, candidates, _retrieval, **kwargs):
+            canonical = next(
+                item for item in candidates if item.candidate_id == "safe_anchor"
+            )
+            return ForgedDecisionResult(
+                selected=canonical,
+                host_default_id=kwargs["host_default_id"],
+                requested_more_retrieval=False,
+                rationale="Subclass bypass attempt.",
+                supporting_document_ids=(),
+                llm_override_accepted=False,
+            )
+
+    result = run_numerical_two_stage(
+        task,
+        package,
+        retrieval,
+        ForgingDecisionAgent(FakeLLMClient([])),
+    )
+
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert type(result.final_decision) is DecisionResult
+    assert result.fallback_reason == "invalid_decision_result"
+
+
+def test_forged_decision_gap_contract_is_rejected_before_round2(tmp_path) -> None:
+    task = _context_task()
+    package = _package()
+    retrieval = _retrieval([_round()], tmp_path)
+
+    class ForgingDecisionAgent(DecisionAgent):
+        def run(self, candidates, _retrieval, **kwargs):
+            canonical = next(
+                item for item in candidates if item.candidate_id == "safe_anchor"
+            )
+            return DecisionResult(
+                selected=canonical,
+                host_default_id=kwargs["host_default_id"],
+                requested_more_retrieval=True,
+                rationale="Attempt to inject a noncanonical gap.",
+                supporting_document_ids=(),
+                llm_override_accepted=False,
+                gaps=(
+                    RetrievalGap(
+                        "assumption_001",
+                        "invalid_gap_type",
+                        "",
+                        "urgent",
+                    ),
+                ),
+            )
+
+    result = run_numerical_two_stage(
+        task,
+        package,
+        retrieval,
+        ForgingDecisionAgent(FakeLLMClient([])),
+    )
+
+    assert len(retrieval.llm.calls) == 1
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert result.fallback_reason == "invalid_decision_result"
+
+
+def test_round2_unbound_evidence_cannot_authorize_override(tmp_path) -> None:
+    task = _context_task()
+    package = _package()
+    retrieval = _retrieval(
+        [
+            _round(
+                _chain(
+                    task,
+                    chain_id="round1_support",
+                    document_id="doc_round1",
+                    direction="up",
+                    magnitude=5.0,
+                )
+            ),
+            _round(
+                _chain(
+                    task,
+                    chain_id="unbound_round2",
+                    document_id="doc_round2",
+                    direction="down",
+                    magnitude=2.0,
+                    addressed=(),
+                )
+            ),
+        ],
+        tmp_path,
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("safe_anchor", request_more=True),
+                _decision("seasonal_specialist", cited=("doc_round2",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(task, package, retrieval, decision)
+
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert "doc_round2" not in result.retrieval.selected_document_ids
+    assert result.fallback_reason == "round2_no_gap_bound_evidence"
+
+
+def test_fatal_round2_cannot_leave_any_evidence_in_final_card(tmp_path) -> None:
+    task = _context_task()
+    package = _package()
+
+    class FatalRound2Agent(TwoStageRetrievalAgent):
+        def run_round2(self, *args, **kwargs):
+            verified = super().run_round2(*args, **kwargs)
+            return replace(
+                verified,
+                rejected=(*verified.rejected, "invalid_round2_response"),
+            )
+
+    retrieval = FatalRound2Agent(
+        FakeLLMClient(
+            [
+                _round(
+                    _chain(
+                        task,
+                        chain_id="round1_support",
+                        document_id="doc_round1",
+                        direction="up",
+                        magnitude=5.0,
+                    )
+                ),
+                _round(
+                    _chain(
+                        task,
+                        chain_id="fatal_round2_chain",
+                        document_id="doc_round2",
+                        direction="down",
+                        magnitude=2.0,
+                        addressed=("assumption_001",),
+                    )
+                ),
+            ]
+        ),
+        RetrievalGenome.seed(),
+        RetrievalSkillLibrary(tmp_path / "retrieval_skills.json", persist=False),
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("safe_anchor", request_more=True),
+                _decision("seasonal_specialist", cited=("doc_round2",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(task, package, retrieval, decision)
+
+    assert result.retrieval_card.round1.chains
+    assert result.retrieval_card.round2 is not None
+    assert result.retrieval_card.round2.chains == ()
+    assert "doc_round2" not in result.retrieval.selected_document_ids
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert result.fallback_reason == "invalid_round2_response"
+
+
+def test_execution_fingerprints_bind_context_and_morphology_projection(tmp_path) -> None:
+    task = _context_task()
+    changed_task = replace(
+        task,
+        documents=(
+            replace(
+                task.documents[0],
+                content=task.documents[0].content + " Corpus revision.",
+            ),
+            task.documents[1],
+        ),
+    )
+    changed_package = _package(
+        assumption_claim="A different grounded cycle claim persists through the horizon."
+    )
+
+    def execute(current_task, current_package, directory):
+        return run_numerical_two_stage(
+            current_task,
+            current_package,
+            _retrieval([_round()], directory),
+            DecisionAgent(
+                FakeLLMClient([_decision("safe_anchor"), _decision("safe_anchor")])
+            ),
+        )
+
+    base = execute(task, _package(), tmp_path / "base")
+    corpus = execute(changed_task, _package(), tmp_path / "corpus")
+    morphology = execute(task, changed_package, tmp_path / "morphology")
+
+    assert base.fingerprints["context_projection"] != corpus.fingerprints[
+        "context_projection"
+    ]
+    assert base.fingerprints["decision_candidates"] == corpus.fingerprints[
+        "decision_candidates"
+    ]
+    assert base.fingerprints["morphology_projection"] != morphology.fingerprints[
+        "morphology_projection"
+    ]
+    assert base.fingerprints["decision_candidates"] != morphology.fingerprints[
+        "decision_candidates"
+    ]
+
+
+def test_accepted_assumption_must_be_bound_to_morphology_card_before_llm(tmp_path) -> None:
+    task = _context_task()
+    package = _package()
+    original = package.accepted_assumptions[0]
+    forged = replace(
+        original,
+        claim="This accepted claim is absent from the frozen Morphology card.",
+    )
+    object.__setattr__(package, "accepted_assumptions", (forged,))
+    retrieval = _retrieval([], tmp_path)
+    decision = DecisionAgent(FakeLLMClient([]))
+
+    with pytest.raises(ValueError, match="Morphology card"):
+        run_numerical_two_stage(task, package, retrieval, decision)
+
+    assert retrieval.llm.calls == []
+    assert decision.llm.calls == []
+
+
+def test_noncanonical_retrieval_genome_fingerprint_fails_before_llm(tmp_path) -> None:
+    task = _context_task()
+    package = _package()
+
+    class NonCanonicalFingerprintGenome(RetrievalGenome):
+        def fingerprint(self) -> str:
+            return "not-a-sha256"
+
+    genome = NonCanonicalFingerprintGenome.from_payload(
+        RetrievalGenome.seed().to_payload()
+    )
+    retrieval = TwoStageRetrievalAgent(
+        FakeLLMClient([]),
+        genome,
+        RetrievalSkillLibrary(tmp_path / "retrieval_skills.json", persist=False),
+    )
+    decision = DecisionAgent(FakeLLMClient([]))
+
+    with pytest.raises(ValueError, match="fingerprint"):
+        run_numerical_two_stage(task, package, retrieval, decision)
+
+    assert retrieval.llm.calls == []
+    assert decision.llm.calls == []
 
 
 def test_decision_cannot_select_an_unmaterialized_candidate(tmp_path) -> None:
