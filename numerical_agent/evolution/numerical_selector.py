@@ -2159,16 +2159,14 @@ def _conservative_statistical_soft_overlay(
                 )
             ):
                 continue
-                blended_srmse = tuple(
+            blended_srmse = tuple(
                 float(drcik_point_metrics(list(truth), list(forecast))["srmse"])
-                    for forecast, truth in zip(
-                        blended_folds, anchor.fold_truths, strict=True
-                    )
+                for forecast, truth in zip(
+                    blended_folds, anchor.fold_truths, strict=True
                 )
-                blended_scores = _fold_scores(
-                    blended_folds, anchor.fold_truths
-                )
-                proposals.append((
+            )
+            blended_scores = _fold_scores(blended_folds, anchor.fold_truths)
+            proposals.append((
                 statistics.median(blended_scores),
                 statistics.median(blended_srmse),
                 max(blended_scores),

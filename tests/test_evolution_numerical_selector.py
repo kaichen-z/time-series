@@ -1233,12 +1233,12 @@ def test_conservative_combined_adds_a_strictly_safe_statistical_specialist():
     )
 
     assert parent.selected == ("toto_2_0",)
-    assert child.mode == "single"
-    assert child.selected == ("toto_2_0",)
-    assert child.weights == pytest.approx((1.0,))
-    assert child.forecast == pytest.approx((11.0, 11.0))
-    assert child.combination_type is None
-    assert "conservative_statistical_soft_overlay" not in child.reason_codes
+    assert child.mode == "combined"
+    assert child.selected == ("toto_2_0", "seasonal_specialist")
+    assert child.weights == pytest.approx((0.75, 0.25))
+    assert child.forecast == pytest.approx((10.0, 10.0))
+    assert child.combination_type == "statistical_shrinkage_overlay"
+    assert "conservative_statistical_soft_overlay" in child.reason_codes
 
 
 def test_conservative_combined_abstains_when_any_fold_regresses():
@@ -1269,6 +1269,50 @@ def test_conservative_combined_abstains_when_any_fold_regresses():
         "conditioned_names": ("unstable_specialist",),
     }
 
+    parent = select_numerical_forecast(
+        DecisionPolicy(ensemble_enabled=False, recent_regime_first=False), **common
+    )
+    child = select_numerical_forecast(
+        DecisionPolicy(
+            baseline_strategy="conservative_combined",
+            tsfm_router_blend_weight=0.25,
+            ensemble_enabled=False,
+            recent_regime_first=False,
+        ),
+        **common,
+    )
+
+    assert child == parent
+
+
+def test_conservative_combined_abstains_when_srmse_regresses_alone():
+    """Lower sMAE cannot admit an overlay whose sRMSE becomes worse."""
+    truths = ((10.0, 10.0),) * 3
+    diagnostics = {
+        "toto_2_0": _with_long_horizon_audit(
+            _diagnostic(
+                "toto_2_0", family="tsfm", median=0.5,
+                forecasts=((12.0, 12.0),) * 3, truths=truths,
+            ),
+            forecast=(12.0, 12.0), truth=(10.0, 10.0), coverage=1.0,
+        ),
+        "srmse_regressing_specialist": _with_long_horizon_audit(
+            _diagnostic(
+                "srmse_regressing_specialist", family="statistical", median=5.0,
+                forecasts=((-28.0, 30.0),) * 3, truths=truths,
+            ),
+            forecast=(-28.0, 30.0), truth=(10.0, 10.0), coverage=1.0,
+        ),
+    }
+    common = {
+        "active_names": tuple(diagnostics),
+        "diagnostics": diagnostics,
+        "forecasts": {
+            "toto_2_0": (12.0, 12.0),
+            "srmse_regressing_specialist": (-28.0, 30.0),
+        },
+        "conditioned_names": ("srmse_regressing_specialist",),
+    }
     parent = select_numerical_forecast(
         DecisionPolicy(ensemble_enabled=False, recent_regime_first=False), **common
     )
@@ -1469,8 +1513,8 @@ def test_conservative_combined_search_includes_a_task_conditioned_specialist():
         conditioned_names=("matched_specialist",),
     )
 
-    assert child.selected == ("toto_2_0",)
-    assert "task_conditioned_statistical_specialist" not in child.reason_codes
+    assert child.selected == ("toto_2_0", "matched_specialist")
+    assert "task_conditioned_statistical_specialist" in child.reason_codes
 
 
 def test_joint_portfolio_combines_two_complementary_tsfms_before_statistics():
@@ -1634,11 +1678,11 @@ def test_joint_portfolio_adds_one_conditioned_statistical_specialist():
     )
 
     assert decision.mode == "combined"
-    assert decision.selected == ("timesfm_2_5", "toto_2_0")
-    assert decision.weights == pytest.approx((0.5, 0.5))
-    assert decision.forecast == pytest.approx((11.0, 11.0))
-    assert decision.combination_type == "tsfm_weighted_portfolio"
-    assert "task_conditioned_statistical_specialist" not in decision.reason_codes
+    assert decision.selected == ("timesfm_2_5", "toto_2_0", "seasonal_specialist")
+    assert decision.weights == pytest.approx((0.375, 0.375, 0.25))
+    assert decision.forecast == pytest.approx((10.0, 10.0))
+    assert decision.combination_type == "joint_tsfm_statistical_portfolio"
+    assert "task_conditioned_statistical_specialist" in decision.reason_codes
 
 
 def test_joint_portfolio_abstains_when_the_long_audit_regresses():

@@ -1463,6 +1463,8 @@ def test_package_rejects_active_card_ensemble_even_without_accepted_assumptions(
         "residual_correction",
         "protected_statistical_residual",
         "tsfm_median_portfolio",
+        "statistical_shrinkage_overlay",
+        "joint_tsfm_statistical_portfolio",
     ),
 )
 def test_no_reasoner_package_preserves_real_legacy_non_linear_decision(
@@ -1527,6 +1529,8 @@ def test_no_reasoner_package_replays_shrinkage_with_exact_blend_primitive(
         "residual_correction",
         "protected_statistical_residual",
         "tsfm_median_portfolio",
+        "statistical_shrinkage_overlay",
+        "joint_tsfm_statistical_portfolio",
         "equal_fmean",
     ),
 )
