@@ -32,7 +32,10 @@ from evolving_loop.retrieval_agent.schemas import (
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 from evolving_loop.retrieval_agent.verifier import merge_verified_rounds
 from numerical_agent.evolution.execution import Task
-from numerical_agent.evolution.numerical_handoff import safe_retrieval_projection
+from numerical_agent.evolution.numerical_handoff import (
+    safe_retrieval_projection,
+    task_input_fingerprint,
+)
 from numerical_agent.evolution.numerical_package import (
     NumericalForecastPackage,
     valid_forecast,
@@ -44,6 +47,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _REQUIRED_NUMERICAL_FINGERPRINTS = frozenset(
     {
         "metric_policy_fingerprint",
+        "task_input",
         "task_profile",
         "screening_policy",
         "active_dictionary",
@@ -53,6 +57,33 @@ _REQUIRED_NUMERICAL_FINGERPRINTS = frozenset(
         "morphology_card",
     }
 )
+_BRIDGE_CONTRACT = {
+    "schema_version": 1,
+    "topology": "round1_decide_optional_round2_decide",
+    "round1_assumption_blind": True,
+    "round2_assumption_fields": [
+        "assumption_id",
+        "kind",
+        "claim",
+        "failure_condition",
+    ],
+    "selection_boundary": "materialized_ranked_alternatives_only",
+    "safe_default": "single_package_selection_else_protected_baseline",
+}
+_RETRIEVAL_VERIFIER_CONTRACT = {
+    "schema_version": 1,
+    "implementation": "host_verified_evidence_chain_merge",
+    "round1_identity_precedence": True,
+    "exact_quote_required": True,
+    "verified_citations_only": True,
+}
+_DECISION_HOST_CONTRACT = {
+    "schema_version": 1,
+    "implementation": "executed_candidate_verified_citation_gate",
+    "unmaterialized_candidate_rejected": True,
+    "override_requires_verified_evidence": True,
+    "forecast_values_immutable": True,
+}
 _MAX_ASSUMPTIONS = 7
 _MAX_TEXT_LENGTHS = {
     "assumption_id": 128,
@@ -122,6 +153,7 @@ def run_numerical_two_stage(
 ) -> NumericalTwoStageResult:
     """Run fixed two-stage Retrieval and Decision over one frozen Numerical package."""
     _validate_inputs(task, numerical, retrieval, decision)
+    execution_fingerprints = _execution_fingerprints(numerical, retrieval, decision)
     candidates = _decision_candidates(numerical)
     host_default = _safe_default(numerical, candidates)
 
@@ -203,7 +235,12 @@ def run_numerical_two_stage(
         provisional_decision=provisional,
         final_decision=final,
         forecast=final.selected.forecast,
-        fingerprints=_result_fingerprints(numerical, retrieval, decision),
+        fingerprints=_completed_fingerprints(
+            execution_fingerprints,
+            card,
+            provisional,
+            final,
+        ),
         fallback_reason=fallback_reason,
     )
 
@@ -248,6 +285,14 @@ def _validate_inputs(
     for name in _REQUIRED_NUMERICAL_FINGERPRINTS - {"metric_policy_fingerprint"}:
         if not _SHA256.fullmatch(fingerprints[name]):
             raise ValueError(f"Numerical package {name} fingerprint is not canonical")
+    expected_input_fingerprint = task_input_fingerprint(
+        task_id=task.numeric.task_id,
+        history=task.numeric.history_values,
+        frequency=task.numeric.frequency,
+        horizon=task.numeric.prediction_length,
+    )
+    if fingerprints["task_input"] != expected_input_fingerprint:
+        raise ValueError("Numerical package task input fingerprint mismatch")
     expected_profile_fingerprint = _fingerprint(expected_profile.to_public_payload())
     if fingerprints["task_profile"] != expected_profile_fingerprint:
         raise ValueError("Numerical package task profile fingerprint mismatch")
@@ -473,14 +518,17 @@ def _record_rejection(
     return replace(card, rejected=tuple(dict.fromkeys((*card.rejected, reason))))
 
 
-def _result_fingerprints(
+def _execution_fingerprints(
     numerical: NumericalForecastPackage,
     retrieval: TwoStageRetrievalAgent,
     decision: DecisionAgent,
 ) -> Mapping[str, str]:
     result = {
+        "bridge_contract": _fingerprint(_BRIDGE_CONTRACT),
+        "decision_host_contract": _fingerprint(_DECISION_HOST_CONTRACT),
         "metric_policy": METRIC_POLICY_FINGERPRINT,
         "numerical_package": _numerical_package_fingerprint(numerical),
+        "retrieval_verifier_contract": _fingerprint(_RETRIEVAL_VERIFIER_CONTRACT),
         "retrieval_genome": retrieval.genome.fingerprint(),
         "retrieval_skills": _fingerprint(
             [
@@ -502,13 +550,50 @@ def _result_fingerprints(
             ]
         ),
     }
+    for name, value in numerical.component_fingerprints.items():
+        key = f"numerical_{name.removesuffix('_fingerprint')}"
+        if key in result:
+            raise ValueError(f"Numerical component fingerprint key conflicts with {key}")
+        result[key] = (
+            value
+            if _SHA256.fullmatch(value)
+            else _fingerprint({"component": name, "identity": value})
+        )
+    return MappingProxyType(dict(sorted(result.items())))
+
+
+def _completed_fingerprints(
+    execution: Mapping[str, str],
+    retrieval_card: FinalRetrievalCard,
+    provisional: DecisionResult,
+    final: DecisionResult,
+) -> Mapping[str, str]:
+    """Bind the exact verified Retrieval and host-validated Decision artifacts."""
+    result = dict(execution)
     result.update(
         {
-            f"numerical_{name.removesuffix('_fingerprint')}": value
-            for name, value in numerical.component_fingerprints.items()
+            "final_retrieval_artifact": _fingerprint(retrieval_card.to_payload()),
+            "provisional_decision_artifact": _fingerprint(
+                _decision_result_payload(provisional)
+            ),
+            "final_decision_artifact": _fingerprint(_decision_result_payload(final)),
         }
     )
     return MappingProxyType(dict(sorted(result.items())))
+
+
+def _decision_result_payload(result: DecisionResult) -> Mapping[str, object]:
+    return {
+        "selected": asdict(result.selected),
+        "host_default_id": result.host_default_id,
+        "requested_more_retrieval": result.requested_more_retrieval,
+        "rationale": result.rationale,
+        "supporting_document_ids": list(result.supporting_document_ids),
+        "llm_override_accepted": result.llm_override_accepted,
+        "rejection_reason": result.rejection_reason,
+        "used_skill_names": list(result.used_skill_names),
+        "gaps": [item.to_payload() for item in result.gaps],
+    }
 
 
 def _numerical_package_fingerprint(numerical: NumericalForecastPackage) -> str:
@@ -516,6 +601,8 @@ def _numerical_package_fingerprint(numerical: NumericalForecastPackage) -> str:
     selection = numerical.selection_decision
     return _fingerprint(
         {
+            "task_id": numerical.task_profile.task_id,
+            "task_input_fingerprint": numerical.component_fingerprints["task_input"],
             "task_profile": numerical.task_profile.to_public_payload(),
             "active_candidate_names": list(numerical.active_candidate_names),
             "selection": {
@@ -535,8 +622,8 @@ def _numerical_package_fingerprint(numerical: NumericalForecastPackage) -> str:
                     "name": item.name,
                     "family": item.family,
                     "forecast": list(item.forecast),
-                    "median_smae": item.diagnostics.median_smae,
-                    "median_srmse": item.diagnostics.median_srmse,
+                    "median_smae": _canonical_metric(item.diagnostics.median_smae),
+                    "median_srmse": _canonical_metric(item.diagnostics.median_srmse),
                 }
                 for item in numerical.ranked_alternatives
             ],
@@ -544,6 +631,15 @@ def _numerical_package_fingerprint(numerical: NumericalForecastPackage) -> str:
             "component_fingerprints": dict(numerical.component_fingerprints),
         }
     )
+
+
+def _canonical_metric(value: float) -> float | str:
+    number = float(value)
+    if math.isfinite(number):
+        return number
+    if math.isnan(number):
+        return "nan"
+    return "+inf" if number > 0.0 else "-inf"
 
 
 def _fingerprint(payload: object) -> str:

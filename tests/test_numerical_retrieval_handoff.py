@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import date, timedelta
 
 import pytest
@@ -28,11 +28,13 @@ from numerical_agent.evolution.numerical_loop import run_numerical_loop
 from numerical_agent.evolution.numerical_selector import (
     CandidateDiagnostics,
     DecisionPolicy,
+    SelectionDecision,
 )
 from numerical_agent.evolution.screening import (
     ApplicabilityPolicy,
     ScreeningEntry,
     ScreeningPolicy,
+    profile_task,
 )
 
 
@@ -316,9 +318,16 @@ def test_package_native_two_stage_e2e_is_blind_bounded_and_materialized(tmp_path
     assert result.retrieval_card.round2 is not None
     assert result.retrieval.evidence
     assert set(result.fingerprints) >= {
+        "bridge_contract",
+        "decision_host_contract",
+        "final_decision_artifact",
+        "final_retrieval_artifact",
         "metric_policy",
         "numerical_package",
+        "numerical_task_input",
         "numerical_task_profile",
+        "provisional_decision_artifact",
+        "retrieval_verifier_contract",
         "retrieval_genome",
         "retrieval_skills",
         "decision_prompt",
@@ -584,6 +593,141 @@ def test_package_task_and_metric_fingerprint_mismatches_fail_before_llm(tmp_path
 
     assert retrieval.llm.calls == []
     assert decision.llm.calls == []
+
+
+def test_same_profile_different_history_is_rejected_before_llm(tmp_path) -> None:
+    task = _context_task()
+    package = _package()
+    scaled_history = tuple(2.0 * value for value in _history())
+    mismatched = replace(
+        task,
+        numeric=replace(task.numeric, history_values=scaled_history),
+    )
+    # The morphology profile is deliberately lossy: exact task binding must not rely on it.
+    assert profile_task(Task("bridge_task", scaled_history, 2, "D", ())) == (
+        package.task_profile
+    )
+    retrieval = _retrieval([], tmp_path)
+    decision = DecisionAgent(FakeLLMClient([]))
+
+    with pytest.raises(ValueError, match="task input fingerprint"):
+        run_numerical_two_stage(mismatched, package, retrieval, decision)
+
+    assert retrieval.llm.calls == []
+    assert decision.llm.calls == []
+
+
+def test_non_sha_component_identity_is_hashed_before_external_calls(tmp_path) -> None:
+    task = _context_task()
+    package = _package()
+    object.__setattr__(
+        package,
+        "component_fingerprints",
+        {
+            **dict(package.component_fingerprints),
+            "portfolio": "reviewed-portfolio-v1",
+        },
+    )
+    retrieval = _retrieval([_round()], tmp_path)
+    decision = DecisionAgent(
+        FakeLLMClient([_decision("safe_anchor"), _decision("safe_anchor")])
+    )
+
+    result = run_numerical_two_stage(task, package, retrieval, decision)
+
+    assert len(retrieval.llm.calls) == 1
+    assert len(decision.llm.calls) == 2
+    assert len(result.fingerprints["numerical_portfolio"]) == 64
+    assert result.fingerprints["numerical_portfolio"] != "reviewed-portfolio-v1"
+
+
+def test_ensemble_numerical_selection_uses_protected_baseline_as_host_default(
+    tmp_path,
+) -> None:
+    task = _context_task()
+    package = _package(with_assumption=False)
+    ensemble = SelectionDecision(
+        mode="ensemble",
+        selected=("safe_anchor", "seasonal_specialist"),
+        weights=(0.5, 0.5),
+        forecast=(5.5, 6.0),
+        confidence=0.5,
+        reason_codes=("test_ensemble",),
+        rejected={},
+        baseline_name="safe_anchor",
+        considered_candidates=("safe_anchor", "seasonal_specialist"),
+    )
+    package = replace(
+        package,
+        selection_decision=ensemble,
+        final_forecast=ensemble.forecast,
+    )
+    retrieval = _retrieval([_round()], tmp_path)
+    decision = DecisionAgent(
+        FakeLLMClient([_decision("safe_anchor"), _decision("safe_anchor")])
+    )
+
+    result = run_numerical_two_stage(task, package, retrieval, decision)
+
+    first_decision = json.loads(decision.llm.calls[0]["messages"][0]["content"])
+    assert first_decision["host_default_id"] == "safe_anchor"
+    assert result.forecast == package.protected_baseline.forecast
+
+
+def test_empty_verified_round2_evidence_preserves_round1_and_safe_default(tmp_path) -> None:
+    task = _context_task()
+    package = _package()
+    retrieval = _retrieval(
+        [
+            _round(
+                _chain(
+                    task,
+                    chain_id="round1_support",
+                    document_id="doc_round1",
+                    direction="up",
+                    magnitude=5.0,
+                )
+            ),
+            _round(),
+        ],
+        tmp_path,
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("safe_anchor", request_more=True),
+                _decision("seasonal_specialist", cited=("doc_round1",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(task, package, retrieval, decision)
+
+    assert result.retrieval_card.round1.chains
+    assert result.retrieval_card.round2 is not None
+    assert not result.retrieval_card.round2.chains
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert result.fallback_reason == "round2_no_verified_evidence"
+
+
+def test_decision_rejection_preserves_materialized_host_default(tmp_path) -> None:
+    task = _context_task()
+    package = _package()
+    retrieval = _retrieval([_round()], tmp_path)
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("seasonal_specialist"),
+                _decision("seasonal_specialist"),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(task, package, retrieval, decision)
+
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert result.final_decision.rejection_reason == "override_requires_task_evidence"
+    assert result.forecast == package.protected_baseline.forecast
 
 
 def test_decision_cannot_select_an_unmaterialized_candidate(tmp_path) -> None:

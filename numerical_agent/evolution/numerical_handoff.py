@@ -85,6 +85,7 @@ def safe_retrieval_projection(
 
 def component_fingerprints(
     *,
+    input_fingerprint: str,
     profile: TaskProfile,
     active_dictionary: ActiveDictionary,
     screening_policy: ScreeningPolicy,
@@ -95,8 +96,11 @@ def component_fingerprints(
     provided: Mapping[str, str] | None,
 ) -> Mapping[str, str]:
     """Hash reviewed component payloads with caller-order-independent policies."""
+    if not isinstance(input_fingerprint, str) or len(input_fingerprint) != 64:
+        raise ValueError("task input fingerprint must be a canonical SHA-256 string")
     result = {
         "metric_policy_fingerprint": METRIC_POLICY_FINGERPRINT,
+        "task_input": input_fingerprint,
         "task_profile": active_dictionary.task_profile_hash,
         "screening_policy": screening_policy.fingerprint(),
         "active_dictionary": _fingerprint(
@@ -133,6 +137,25 @@ def component_fingerprints(
             )
         result.update(external)
     return MappingProxyType(dict(sorted(result.items())))
+
+
+def task_input_fingerprint(
+    *,
+    task_id: str,
+    history: Sequence[float],
+    frequency: str,
+    horizon: int,
+) -> str:
+    """Bind a Numerical package to one exact history-only forecasting input."""
+    return _fingerprint(
+        {
+            "schema_version": 1,
+            "task_id": task_id,
+            "history": [float(value) for value in history],
+            "frequency": frequency,
+            "horizon": horizon,
+        }
+    )
 
 
 def _fingerprint(payload: object) -> str:

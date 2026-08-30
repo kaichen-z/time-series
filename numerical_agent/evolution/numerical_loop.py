@@ -11,6 +11,7 @@ from .morphology_consistency import check_morphology_assumptions
 from .numerical_handoff import (
     component_fingerprints as build_component_fingerprints,
     safe_retrieval_projection,
+    task_input_fingerprint,
 )
 from .numerical_package import (
     NumericalForecastPackage,
@@ -301,6 +302,12 @@ def run_numerical_loop(
     if protected_baseline is None:
         raise ValueError("protected Safe-Anchor was not materialized")
     fingerprints = build_component_fingerprints(
+        input_fingerprint=task_input_fingerprint(
+            task_id=safe_task.task_id,
+            history=safe_task.history,
+            frequency=safe_task.frequency,
+            horizon=safe_task.horizon,
+        ),
         profile=profile,
         active_dictionary=active_dictionary,
         screening_policy=screening_policy,
