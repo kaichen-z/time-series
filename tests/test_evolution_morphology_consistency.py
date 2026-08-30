@@ -12,7 +12,11 @@ from numerical_agent.evolution.morphology import (
     MorphologyToolCall,
 )
 from numerical_agent.evolution.morphology_consistency import check_morphology_assumptions
-from numerical_agent.evolution.numerical_selector import CandidateDiagnostics, DecisionPolicy
+from numerical_agent.evolution.numerical_selector import (
+    CandidateDiagnostics,
+    DecisionPolicy,
+    HindcastFold,
+)
 from numerical_agent.evolution.screening import TaskProfile
 
 
@@ -207,6 +211,52 @@ def test_consistency_enforces_fold_worst_fold_catastrophe_and_forecast_gates() -
         "exploded": "catastrophic_hindcast_tail",
         "bad_forecast": "invalid_forecast",
     }
+
+
+def test_consistency_rejects_nonfinite_scaled_tail_diagnostics() -> None:
+    result = _check(
+        _card(_assumption("bad-tail", "seasonality", "candidate")),
+        _profile(),
+        {"candidate": _diagnostic("candidate", worst_srmse_raw=float("nan"))},
+        {"candidate": (1.0, 2.0, 3.0)},
+        policy=DecisionPolicy(),
+    )
+
+    assert result.rejected == {"bad-tail": "invalid_diagnostics"}
+
+
+@pytest.mark.parametrize("field", ("median_smae", "worst_srmse_raw"))
+@pytest.mark.parametrize("value", (float("nan"), float("inf"), float("-inf")))
+def test_consistency_fails_closed_on_nonfinite_scaled_diagnostics(field: str, value: float) -> None:
+    result = _check(
+        _card(_assumption("bad-scaled", "seasonality", "candidate")),
+        _profile(),
+        {"candidate": _diagnostic("candidate", **{field: value})},
+        {"candidate": (1.0, 2.0, 3.0)},
+    )
+
+    assert result.rejected == {"bad-scaled": "invalid_diagnostics"}
+
+
+def test_consistency_rejects_missing_scaled_long_horizon_metrics() -> None:
+    audit = HindcastFold(
+        train_end=80,
+        validation_end=84,
+        status="success",
+        forecast=(1.0, 2.0, 3.0),
+        truth=(1.0, 2.0, 3.0),
+    )
+    result = _check(
+        _card(_assumption("bad-audit", "seasonality", "candidate")),
+        _profile(),
+        {"candidate": _diagnostic(
+            "candidate", long_horizon_coverage=1.0, long_horizon_fold=audit,
+        )},
+        {"candidate": (1.0, 2.0, 3.0)},
+        policy=DecisionPolicy(long_horizon_guard_enabled=True),
+    )
+
+    assert result.rejected == {"bad-audit": "invalid_long_horizon_audit"}
 
 
 @pytest.mark.parametrize(

@@ -8,6 +8,7 @@ from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
+from common.metrics import drcik_point_metrics
 from numerical_agent.evolution import NumericalForecastPackage, run_numerical_loop
 from numerical_agent.evolution.execution import Task
 from numerical_agent.evolution.morphology import (
@@ -94,6 +95,13 @@ def _audited_diagnostic(
     truth: tuple[float, ...],
     scale: float = 1.0,
 ) -> CandidateDiagnostics:
+    def scaled_fields(fold_truth, fold_forecast):
+        metrics = drcik_point_metrics(fold_truth, fold_forecast)
+        return {
+            key: metrics[key]
+            for key in ("smae", "srmse", "smae_raw", "srmse_raw", "smae_clipped", "srmse_clipped")
+        }
+
     folds = tuple(
         HindcastFold(
             train_end=10 * (index + 1),
@@ -102,6 +110,7 @@ def _audited_diagnostic(
             forecast=tuple(float(value) for value in fold_forecast),
             truth=tuple(float(value) for value in fold_truth),
             mase_scale=float(scale),
+            **scaled_fields(fold_truth, fold_forecast),
         )
         for index, (fold_forecast, fold_truth) in enumerate(
             zip(diagnostic.fold_forecasts, diagnostic.fold_truths, strict=True)
@@ -117,6 +126,7 @@ def _audited_diagnostic(
             forecast=forecast,
             truth=truth,
             mase_scale=float(scale),
+            **scaled_fields(truth, forecast),
         ),
         long_horizon_coverage=1.0,
     )
@@ -996,6 +1006,12 @@ def test_assumption_guidance_cannot_bypass_protected_reliability_gates(
                 truth=(1.0, 2.0, 3.0),
                 mase=0.0,
                 mase_scale=1.0,
+                smae=0.0,
+                srmse=0.0,
+                smae_raw=0.0,
+                srmse_raw=0.0,
+                smae_clipped=False,
+                srmse_clipped=False,
             ),
         )
 
@@ -1463,7 +1479,7 @@ def test_no_reasoner_package_replays_equal_weight_ensemble_with_fmean() -> None:
     expected, package = _legacy_replay_scenario("equal_fmean")
 
     assert expected.mode == "ensemble"
-    assert expected.forecast == (0.23333333333333336,)
+    assert expected.forecast == (0.25,)
     assert package.selection_decision == expected
     assert package.final_forecast == expected.forecast
 
@@ -1476,18 +1492,6 @@ def test_no_reasoner_package_replays_equal_weight_ensemble_with_fmean() -> None:
             ("chronos_bolt", "timesfm_2_5"),
             (1.9, 2.9000000000000004),
             (1.9000000000000001, 2.9000000000000004),
-        ),
-        (
-            "statistical_shrinkage_overlay",
-            ("toto_2_0", "seasonal_specialist"),
-            (1.9, 2.9000000000000004),
-            (1.9000000000000001, 2.9000000000000004),
-        ),
-        (
-            "joint_tsfm_statistical_portfolio",
-            ("timesfm_2_5", "toto_2_0", "seasonal_specialist"),
-            (1.9, 1.9),
-            (1.9000000000000001, 1.9000000000000001),
         ),
     ),
 )

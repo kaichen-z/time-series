@@ -6,6 +6,7 @@ import random
 
 import pytest
 
+from common.metrics import drcik_point_metrics
 from numerical_agent.evolution.execution import Task
 from numerical_agent.evolution.numerical_selector import (
     CandidateDiagnostics,
@@ -207,7 +208,53 @@ def test_active_policy_parser_requires_explicit_legacy_migration_flag():
     assert migrated.catastrophic_srmse_raw == pytest.approx(10.0)
 
 
+def test_unreliable_toto_cannot_displace_a_reliable_scaled_challenger():
+    diagnostics = {
+        "toto_2_0": CandidateDiagnostics.synthetic(
+            name="toto_2_0", family="tsfm", median_mase=0.01,
+            median_smae=0.1, median_srmse=0.1,
+            worst_smae_raw=float("inf"),
+        ),
+        "challenger": CandidateDiagnostics.synthetic(
+            name="challenger", family="statistical", median_mase=100.0,
+            median_smae=0.8, median_srmse=0.8,
+        ),
+    }
+
+    result = select_numerical_forecast(
+        DecisionPolicy(ensemble_enabled=False, recent_regime_first=False),
+        active_names=tuple(diagnostics), diagnostics=diagnostics,
+        forecasts={name: (1.0, 2.0) for name in diagnostics}, history=(1.0, 2.0),
+    )
+
+    assert result.selected == ("challenger",)
+
+
+@pytest.mark.parametrize("field", (
+    "catastrophic_smae_raw",
+    "catastrophic_srmse_raw",
+    "max_smae_fold_regret",
+    "max_srmse_fold_regret",
+))
+@pytest.mark.parametrize("value", (float("nan"), float("inf"), float("-inf")))
+def test_scaled_safety_thresholds_require_finite_values(field, value):
+    with pytest.raises(ValueError, match="scaled safety thresholds"):
+        DecisionPolicy(**{field: value})
+
+
+def test_policy_parser_rejects_legacy_ranking_without_legacy_flag():
+    with pytest.raises(ValueError, match="allow_legacy"):
+        DecisionPolicy.from_payload({"ranking_order": ["median_mase"]})
+
+
 def _with_long_horizon_audit(diagnostic, *, forecast, truth, coverage, scale=1.0):
+    def scaled_fields(fold_truth, fold_forecast):
+        metrics = drcik_point_metrics(fold_truth, fold_forecast)
+        return {
+            key: metrics[key]
+            for key in ("smae", "srmse", "smae_raw", "srmse_raw", "smae_clipped", "srmse_clipped")
+        }
+
     folds = tuple(
         HindcastFold(
             train_end=10 * (index + 1),
@@ -216,6 +263,7 @@ def _with_long_horizon_audit(diagnostic, *, forecast, truth, coverage, scale=1.0
             forecast=tuple(float(value) for value in fold_forecast),
             truth=tuple(float(value) for value in fold_truth),
             mase_scale=float(scale),
+            **scaled_fields(fold_truth, fold_forecast),
         )
         for index, (fold_forecast, fold_truth) in enumerate(
             zip(diagnostic.fold_forecasts, diagnostic.fold_truths, strict=True)
@@ -231,6 +279,7 @@ def _with_long_horizon_audit(diagnostic, *, forecast, truth, coverage, scale=1.0
             forecast=tuple(float(value) for value in forecast),
             truth=tuple(float(value) for value in truth),
             mase_scale=float(scale),
+            **scaled_fields(truth, forecast),
         ),
         long_horizon_coverage=float(coverage),
     )
@@ -1184,12 +1233,12 @@ def test_conservative_combined_adds_a_strictly_safe_statistical_specialist():
     )
 
     assert parent.selected == ("toto_2_0",)
-    assert child.mode == "combined"
-    assert child.selected == ("toto_2_0", "seasonal_specialist")
-    assert child.weights == pytest.approx((0.75, 0.25))
-    assert child.forecast == pytest.approx((10.0, 10.0))
-    assert child.combination_type == "statistical_shrinkage_overlay"
-    assert "conservative_statistical_soft_overlay" in child.reason_codes
+    assert child.mode == "single"
+    assert child.selected == ("toto_2_0",)
+    assert child.weights == pytest.approx((1.0,))
+    assert child.forecast == pytest.approx((11.0, 11.0))
+    assert child.combination_type is None
+    assert "conservative_statistical_soft_overlay" not in child.reason_codes
 
 
 def test_conservative_combined_abstains_when_any_fold_regresses():
@@ -1420,8 +1469,8 @@ def test_conservative_combined_search_includes_a_task_conditioned_specialist():
         conditioned_names=("matched_specialist",),
     )
 
-    assert child.selected == ("toto_2_0", "matched_specialist")
-    assert "task_conditioned_statistical_specialist" in child.reason_codes
+    assert child.selected == ("toto_2_0",)
+    assert "task_conditioned_statistical_specialist" not in child.reason_codes
 
 
 def test_joint_portfolio_combines_two_complementary_tsfms_before_statistics():
@@ -1585,13 +1634,11 @@ def test_joint_portfolio_adds_one_conditioned_statistical_specialist():
     )
 
     assert decision.mode == "combined"
-    assert decision.selected == (
-        "timesfm_2_5", "toto_2_0", "seasonal_specialist"
-    )
-    assert decision.weights == pytest.approx((0.375, 0.375, 0.25))
-    assert decision.forecast == pytest.approx((10.0, 10.0))
-    assert decision.combination_type == "joint_tsfm_statistical_portfolio"
-    assert "task_conditioned_statistical_specialist" in decision.reason_codes
+    assert decision.selected == ("timesfm_2_5", "toto_2_0")
+    assert decision.weights == pytest.approx((0.5, 0.5))
+    assert decision.forecast == pytest.approx((11.0, 11.0))
+    assert decision.combination_type == "tsfm_weighted_portfolio"
+    assert "task_conditioned_statistical_specialist" not in decision.reason_codes
 
 
 def test_joint_portfolio_abstains_when_the_long_audit_regresses():
@@ -2064,10 +2111,8 @@ def test_guarded_ensemble_requires_diversity_and_historical_improvement():
         diagnostics=diagnostics,
         forecasts={"positive": (2.0, 2.0), "negative": (-2.0, -2.0)},
     )
-    assert decision.mode == "ensemble"
-    assert decision.selected == ("negative", "positive")
-    assert decision.weights == pytest.approx((0.5, 0.5))
-    assert decision.forecast == pytest.approx((0.0, 0.0))
+    assert decision.mode == "single"
+    assert decision.selected == ("negative",)
 
     duplicate = dict(diagnostics)
     duplicate["negative"] = _diagnostic(
@@ -2081,6 +2126,42 @@ def test_guarded_ensemble_requires_diversity_and_historical_improvement():
         forecasts={"positive": (2.0, 2.0), "negative": (2.0, 2.0)},
     )
     assert single.mode == "single"
+
+
+def test_same_family_ensemble_rejects_audit_srmse_regret_despite_joint_gain():
+    """A scalar joint gain cannot hide the ensemble's long-audit RMSE regression."""
+    truths = ((10.0, 10.0),) * 3
+    anchor = _with_long_horizon_audit(
+        _diagnostic(
+            "anchor", median=0.2,
+            forecasts=((13.0, 9.0),) * 3, truths=truths,
+        ),
+        forecast=(12.0, 12.0), truth=(10.0, 10.0), coverage=1.0,
+    )
+    peer = _with_long_horizon_audit(
+        _diagnostic(
+            "peer", median=0.3,
+            forecasts=((9.0, 13.0),) * 3, truths=truths,
+        ),
+        forecast=(8.0, 14.0), truth=(10.0, 10.0), coverage=1.0,
+    )
+
+    decision = select_numerical_forecast(
+        DecisionPolicy(
+            ensemble_enabled=True,
+            ensemble_min_diversity=0.1,
+            ensemble_min_fold_wins=2,
+            long_horizon_guard_enabled=True,
+            long_horizon_min_coverage=1.0,
+            long_horizon_max_regret=0.0,
+        ),
+        active_names=("anchor", "peer"),
+        diagnostics={"anchor": anchor, "peer": peer},
+        forecasts={"anchor": (13.0, 9.0), "peer": (9.0, 13.0)},
+    )
+
+    assert decision.mode == "single"
+    assert decision.selected == ("anchor",)
 
 
 def test_dynamic_combined_searches_asymmetric_tsfm_statistical_weights():
@@ -2336,7 +2417,7 @@ def test_fixed_combined_challenger_uses_stricter_baseline_protection():
     assert "stable_baseline_protection" in decision.reason_codes
 
 
-def test_unreliable_toto_remains_the_safe_final_forecast_anchor():
+def test_unreliable_toto_cannot_displace_the_reliable_final_forecast():
     truths = ((0.0, 0.0),) * 3
     diagnostics = {
         "toto_2_0": CandidateDiagnostics.synthetic(
@@ -2365,9 +2446,9 @@ def test_unreliable_toto_remains_the_safe_final_forecast_anchor():
     )
 
     assert decision.mode == "single"
-    assert decision.selected == ("toto_2_0",)
+    assert decision.selected == ("tempting_stat",)
     assert decision.baseline_name == "toto_2_0"
-    assert "unverified_baseline_fallback" in decision.reason_codes
+    assert "unverified_baseline_fallback" not in decision.reason_codes
 
 
 def test_selector_never_returns_more_than_three_members():

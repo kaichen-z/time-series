@@ -36,7 +36,12 @@ class HindcastConfig:
             raise ValueError("folds must be positive")
         if not 1 <= self.min_successful_folds <= self.folds:
             raise ValueError("min_successful_folds must be within folds")
-        if self.catastrophic_smae_raw <= 0 or self.catastrophic_srmse_raw <= 0:
+        if (
+            not math.isfinite(self.catastrophic_smae_raw)
+            or not math.isfinite(self.catastrophic_srmse_raw)
+            or self.catastrophic_smae_raw <= 0
+            or self.catastrophic_srmse_raw <= 0
+        ):
             raise ValueError("raw scaled catastrophe thresholds must be positive")
         if not math.isfinite(self.catastrophic_mase) or self.catastrophic_mase <= 0:
             raise ValueError("legacy catastrophic_mase must be positive")
@@ -258,7 +263,16 @@ class DecisionPolicy:
             ranking = raw["ranking_order"]
             if isinstance(ranking, (str, bytes)):
                 raise ValueError("ranking_order must be a sequence")
-            raw["ranking_order"] = tuple(ranking)  # type: ignore[arg-type]
+            ranking = tuple(ranking)  # type: ignore[arg-type]
+            if any(
+                str(field) in {
+                    "median_mase", "recent_mase", "worst_mase", "mase_mad",
+                    "median_rmsse", "median_smape",
+                }
+                for field in ranking
+            ) and not allow_legacy:
+                raise ValueError("legacy MASE policy fields require allow_legacy=True")
+            raw["ranking_order"] = ranking
         allowed = set(asdict(cls()))
         unknown = set(raw) - allowed
         if unknown:
@@ -289,8 +303,16 @@ class DecisionPolicy:
             raise ValueError("ranking_order contains unsupported fields")
         if self.min_successful_folds < 1:
             raise ValueError("min_successful_folds must be positive")
+        safety_values = (
+            self.catastrophic_smae_raw,
+            self.catastrophic_srmse_raw,
+            self.catastrophic_mase,
+            self.max_smae_fold_regret,
+            self.max_srmse_fold_regret,
+        )
         if (
-            self.catastrophic_smae_raw <= 0
+            not all(math.isfinite(value) for value in safety_values)
+            or self.catastrophic_smae_raw <= 0
             or self.catastrophic_srmse_raw <= 0
             or self.catastrophic_mase <= 0
             or self.max_smae_fold_regret < 0
@@ -1321,8 +1343,8 @@ def select_numerical_forecast(
     baseline_is_eligible = baseline is not None and any(
         candidate.name == baseline.name for candidate in eligible
     )
-    if baseline is not None and best.name != baseline.name:
-        if not baseline_is_eligible or not _passes_single_override(
+    if baseline is not None and baseline_is_eligible and best.name != baseline.name:
+        if not _passes_single_override(
             policy, best, baseline, profile=profile
         ):
             best = baseline
@@ -1441,11 +1463,6 @@ def _conservative_tsfm_soft_overlay(
     ):
         return parent
 
-    scales = _fold_mase_scales(anchor)
-    parent_scores = _fold_scores(anchor.fold_forecasts, anchor.fold_truths, scales)
-    if not parent_scores:
-        return parent
-
     selected = None
     for challenger_weight in _adaptive_overlay_weights(
         policy.tsfm_router_blend_weight
@@ -1455,16 +1472,13 @@ def _conservative_tsfm_soft_overlay(
             (anchor.fold_forecasts, timesfm.fold_forecasts),
             (anchor_weight, challenger_weight),
         )
-        blended_scores = _fold_scores(blended_folds, anchor.fold_truths, scales)
-        if len(blended_scores) != len(parent_scores) or any(
-            not blended + 1e-12 < reference
-            for blended, reference in zip(blended_scores, parent_scores, strict=True)
-        ):
-            continue
-        if not _passes_srmse_strict_improvement(
+        if not _passes_scaled_fold_acceptance(
+            policy,
             blended_folds,
             anchor.fold_forecasts,
             anchor.fold_truths,
+            required_wins=len(anchor.fold_forecasts),
+            maximum_regret=0.0,
         ):
             continue
 
@@ -1475,23 +1489,17 @@ def _conservative_tsfm_soft_overlay(
             parameter=anchor_weight,
             clip_multiplier=policy.ensemble_correction_clip,
         )
-        audit_scores = _long_horizon_comparison(
-            policy,
-            anchor,
-            anchor,
-            challenger_fold=audit_fold,
-            coverage=audit_coverage,
-        )
         anchor_audit = anchor.long_horizon_fold
         if (
             audit_fold is None
             or anchor_audit is None
-            or audit_scores is None
-            or not audit_scores[0] + 1e-12 < audit_scores[1]
-            or not _passes_srmse_strict_improvement(
+            or not _passes_scaled_fold_acceptance(
+                policy,
                 (audit_fold.forecast,),
                 (anchor_audit.forecast,),
                 (anchor_audit.truth,),
+                required_wins=1,
+                maximum_regret=0.0,
             )
         ):
             continue
@@ -1903,6 +1911,14 @@ def _passes_tsfm_portfolio_gate(
         return False
     minimum = policy.tsfm_router_min_improvement
     maximum_regret = policy.long_horizon_max_regret
+    if not _passes_scaled_fold_acceptance(
+        policy,
+        candidate_folds,
+        anchor.fold_forecasts,
+        anchor.fold_truths,
+        minimum_improvement=minimum,
+    ):
+        return False
     pairs = tuple(zip(
         candidate_folds,
         anchor.fold_forecasts,
@@ -1951,7 +1967,16 @@ def _passes_tsfm_portfolio_gate(
         list(reference_audit.truth), list(reference_audit.forecast)
     )
     return bool(
-        float(audit_candidate["smae"])
+        _passes_scaled_fold_acceptance(
+            policy,
+            (audit.forecast,),
+            (reference_audit.forecast,),
+            (reference_audit.truth,),
+            required_wins=1,
+            maximum_regret=maximum_regret,
+            minimum_improvement=minimum,
+        )
+        and float(audit_candidate["smae"])
         < float(audit_reference["smae"]) * (1.0 - minimum)
         and float(audit_candidate["srmse"])
         < float(audit_reference["srmse"]) * (1.0 - minimum)
@@ -2087,11 +2112,6 @@ def _conservative_statistical_soft_overlay(
     ):
         return parent
 
-    scales = _fold_mase_scales(anchor)
-    parent_scores = _fold_scores(anchor.fold_forecasts, anchor.fold_truths, scales)
-    if not parent_scores:
-        return parent
-
     proposals = []
     for specialist in specialists:
         if not _strictly_aligned_successful_folds(
@@ -2106,20 +2126,13 @@ def _conservative_statistical_soft_overlay(
                 (anchor.fold_forecasts, specialist.fold_forecasts),
                 (anchor_weight, challenger_weight),
             )
-            blended_scores = _fold_scores(blended_folds, anchor.fold_truths, scales)
-            if len(blended_scores) != len(parent_scores) or any(
-                not blended + 1e-12 < reference * (
-                    1.0 - policy.tsfm_router_min_improvement
-                )
-                for blended, reference in zip(
-                    blended_scores, parent_scores, strict=True
-                )
-            ):
-                continue
-            if not _passes_srmse_relative_improvement(
+            if not _passes_scaled_fold_acceptance(
+                policy,
                 blended_folds,
                 anchor.fold_forecasts,
                 anchor.fold_truths,
+                required_wins=len(anchor.fold_forecasts),
+                maximum_regret=0.0,
                 minimum_improvement=policy.tsfm_router_min_improvement,
             ):
                 continue
@@ -2131,36 +2144,31 @@ def _conservative_statistical_soft_overlay(
                 parameter=anchor_weight,
                 clip_multiplier=policy.ensemble_correction_clip,
             )
-            audit_scores = _long_horizon_comparison(
-                policy,
-                anchor,
-                anchor,
-                challenger_fold=audit_fold,
-                coverage=audit_coverage,
-            )
             anchor_audit = anchor.long_horizon_fold
             if (
                 audit_fold is None
                 or anchor_audit is None
-                or audit_scores is None
-                or not audit_scores[0] + 1e-12 < audit_scores[1] * (
-                    1.0 - policy.tsfm_router_min_improvement
-                )
-                or not _passes_srmse_relative_improvement(
+                or not _passes_scaled_fold_acceptance(
+                    policy,
                     (audit_fold.forecast,),
                     (anchor_audit.forecast,),
                     (anchor_audit.truth,),
+                    required_wins=1,
+                    maximum_regret=0.0,
                     minimum_improvement=policy.tsfm_router_min_improvement,
                 )
             ):
                 continue
-            blended_srmse = tuple(
+                blended_srmse = tuple(
                 float(drcik_point_metrics(list(truth), list(forecast))["srmse"])
-                for forecast, truth in zip(
-                    blended_folds, anchor.fold_truths, strict=True
+                    for forecast, truth in zip(
+                        blended_folds, anchor.fold_truths, strict=True
+                    )
                 )
-            )
-            proposals.append((
+                blended_scores = _fold_scores(
+                    blended_folds, anchor.fold_truths
+                )
+                proposals.append((
                 statistics.median(blended_scores),
                 statistics.median(blended_srmse),
                 max(blended_scores),
@@ -2743,56 +2751,16 @@ def _passes_single_override(
         return _passes_conservative_override(policy, challenger, baseline)
     if not _aligned_folds((challenger, baseline)):
         return False
-    scales = _fold_mase_scales(baseline)
-    challenger_scores = _fold_scores(
-        challenger.fold_forecasts, challenger.fold_truths, scales
-    )
-    baseline_scores = _fold_scores(
-        baseline.fold_forecasts, baseline.fold_truths, scales
-    )
-    if not challenger_scores or len(challenger_scores) != len(baseline_scores):
-        return False
-    if not _passes_independent_scaled_regret(
-        challenger.fold_forecasts,
-        baseline.fold_forecasts,
-        baseline.fold_truths,
-        max_smae_regret=policy.max_smae_fold_regret,
-        max_srmse_regret=policy.max_srmse_fold_regret,
-    ):
-        return False
     minimum_improvement = policy.ensemble_min_improvement
     if challenger.family == "combined":
         minimum_improvement = max(0.05, minimum_improvement)
-    baseline_smae, baseline_srmse = _median_scaled_metrics(
-        baseline.fold_forecasts, baseline.fold_truths
-    )
-    challenger_smae, challenger_srmse = _median_scaled_metrics(
-        challenger.fold_forecasts, challenger.fold_truths
-    )
-    if not pareto_scaled_improvement(
-        baseline_smae, baseline_srmse, challenger_smae, challenger_srmse
+    if not _passes_scaled_fold_acceptance(
+        policy,
+        challenger.fold_forecasts,
+        baseline.fold_forecasts,
+        baseline.fold_truths,
+        minimum_improvement=minimum_improvement,
     ):
-        return False
-    if not (
-        challenger_smae < baseline_smae * (1.0 - minimum_improvement)
-        or challenger_srmse < baseline_srmse * (1.0 - minimum_improvement)
-    ):
-        return False
-    wins = sum(
-        candidate_smae <= baseline_smae_fold + 1e-12
-        and candidate_srmse <= baseline_srmse_fold + 1e-12
-        and (
-            candidate_smae < baseline_smae_fold - 1e-12
-            or candidate_srmse < baseline_srmse_fold - 1e-12
-        )
-        for (candidate_smae, candidate_srmse), (baseline_smae_fold, baseline_srmse_fold)
-        in zip(
-            _scaled_fold_pairs(challenger.fold_forecasts, baseline.fold_truths),
-            _scaled_fold_pairs(baseline.fold_forecasts, baseline.fold_truths),
-            strict=True,
-        )
-    )
-    if wins < min(policy.ensemble_min_fold_wins, len(baseline_scores)):
         return False
     if policy.long_horizon_guard_enabled and not _passes_long_horizon_override_guard(
         policy, challenger, baseline
@@ -2809,52 +2777,27 @@ def _passes_conservative_override(
     """Require stable absolute and squared-error evidence across 3+1 folds."""
     if not _aligned_folds((challenger, baseline)):
         return False
-    scales = _fold_mase_scales(baseline)
-    challenger_scores = _fold_scores(
-        challenger.fold_forecasts, challenger.fold_truths, scales
-    )
-    baseline_scores = _fold_scores(
-        baseline.fold_forecasts, baseline.fold_truths, scales
-    )
-    if not challenger_scores or len(challenger_scores) != len(baseline_scores):
-        return False
-    if not _passes_independent_scaled_regret(
+    required_ordinary_wins = math.ceil(
+        0.75 * (len(challenger.fold_forecasts) + 1)
+    ) - 1
+    if not _passes_scaled_fold_acceptance(
+        policy,
         challenger.fold_forecasts,
         baseline.fold_forecasts,
         baseline.fold_truths,
-        max_smae_regret=0.0,
-        max_srmse_regret=0.0,
+        required_wins=required_ordinary_wins,
+        maximum_regret=0.0,
     ):
         return False
-    baseline_median = statistics.median(baseline_scores)
-    challenger_median = statistics.median(challenger_scores)
-    if not challenger_median < baseline_median * (
-        1.0 - policy.tsfm_router_min_improvement
-    ):
-        return False
-    ordinary_regrets = tuple(
-        (candidate - reference) / (1.0 + reference)
-        for candidate, reference in zip(challenger_scores, baseline_scores)
+    baseline_smae, baseline_srmse = _median_scaled_metrics(
+        baseline.fold_forecasts, baseline.fold_truths
     )
-    if max(ordinary_regrets) > 1e-12:
-        return False
-    audit = _long_horizon_comparison(policy, challenger, baseline)
-    if audit is None:
-        return False
-    audit_candidate, audit_baseline = audit
-    audit_regret = (audit_candidate - audit_baseline) / (1.0 + audit_baseline)
-    if audit_regret > policy.long_horizon_max_regret + 1e-12:
-        return False
-    wins = sum(
-        candidate < reference
-        for candidate, reference in zip(challenger_scores, baseline_scores)
-    ) + int(audit_candidate < audit_baseline)
-    if wins < math.ceil(0.75 * (len(challenger_scores) + 1)):
-        return False
-    if not _passes_srmse_noninferiority(
-        challenger.fold_forecasts,
-        baseline.fold_forecasts,
-        baseline.fold_truths,
+    challenger_smae, challenger_srmse = _median_scaled_metrics(
+        challenger.fold_forecasts, challenger.fold_truths
+    )
+    if not (
+        challenger_smae < baseline_smae * (1.0 - policy.tsfm_router_min_improvement)
+        and challenger_srmse < baseline_srmse * (1.0 - policy.tsfm_router_min_improvement)
     ):
         return False
     audit_fold = challenger.long_horizon_fold
@@ -2862,10 +2805,13 @@ def _passes_conservative_override(
     return bool(
         audit_fold is not None
         and baseline_audit is not None
-        and _passes_srmse_noninferiority(
+        and _passes_scaled_fold_acceptance(
+            policy,
             (audit_fold.forecast,),
             (baseline_audit.forecast,),
             (baseline_audit.truth,),
+            required_wins=1,
+            maximum_regret=policy.long_horizon_max_regret,
         )
     )
 
@@ -3025,13 +2971,8 @@ def _long_horizon_comparison(
         or not audit.truth
     ):
         return None
-    scale = reference.mase_scale
-    if scale is None or not math.isfinite(scale) or scale <= 0:
-        return None
-    candidate_scores = _fold_scores((audit.forecast,), (audit.truth,), (float(scale),))
-    baseline_scores = _fold_scores(
-        (reference.forecast,), (reference.truth,), (float(scale),)
-    )
+    candidate_scores = _fold_scores((audit.forecast,), (audit.truth,))
+    baseline_scores = _fold_scores((reference.forecast,), (reference.truth,))
     if not candidate_scores or not baseline_scores:
         return None
     return candidate_scores[0], baseline_scores[0]
@@ -3235,44 +3176,75 @@ def _passes_combination_gates(
     references: Sequence[CandidateDiagnostics],
 ) -> bool:
     for reference in references:
-        scales = _fold_mase_scales(reference)
-        reference_scores = _fold_scores(
-            reference.fold_forecasts, reference.fold_truths, scales
-        )
-        candidate_scores = _fold_scores(candidate_folds, reference.fold_truths, scales)
-        if len(candidate_scores) != len(reference_scores) or not candidate_scores:
-            return False
-        if not _passes_independent_scaled_regret(
+        if not _passes_scaled_fold_acceptance(
+            policy,
             candidate_folds,
             reference.fold_forecasts,
             reference.fold_truths,
-            max_smae_regret=policy.max_smae_fold_regret,
-            max_srmse_regret=policy.max_srmse_fold_regret,
         ):
             return False
-        baseline_smae, baseline_srmse = _median_scaled_metrics(
-            reference.fold_forecasts, reference.fold_truths
-        )
-        candidate_smae, candidate_srmse = _median_scaled_metrics(
-            candidate_folds, reference.fold_truths
-        )
-        if not pareto_scaled_improvement(
-            baseline_smae, baseline_srmse, candidate_smae, candidate_srmse
-        ):
-            return False
+    return True
+
+
+def _passes_scaled_fold_acceptance(
+    policy: DecisionPolicy,
+    candidate_forecasts: Sequence[Sequence[float]],
+    reference_forecasts: Sequence[Sequence[float]],
+    truths: Sequence[Sequence[float]],
+    *,
+    required_wins: int | None = None,
+    maximum_regret: float | None = None,
+    minimum_improvement: float = 0.0,
+) -> bool:
+    """Accept only independently safe capped sMAE and sRMSE fold evidence."""
+    if not _passes_independent_scaled_regret(
+        candidate_forecasts, reference_forecasts, truths,
+        max_smae_regret=(
+            policy.max_smae_fold_regret if maximum_regret is None else maximum_regret
+        ),
+        max_srmse_regret=(
+            policy.max_srmse_fold_regret if maximum_regret is None else maximum_regret
+        ),
+    ):
+        return False
+    candidate = _scaled_fold_pairs(candidate_forecasts, truths)
+    reference = _scaled_fold_pairs(reference_forecasts, truths)
+    if not candidate or len(candidate) != len(reference):
+        return False
+    candidate_smae, candidate_srmse = _median_scaled_metrics(candidate_forecasts, truths)
+    reference_smae, reference_srmse = _median_scaled_metrics(reference_forecasts, truths)
+    if not pareto_scaled_improvement(
+        reference_smae, reference_srmse, candidate_smae, candidate_srmse
+    ):
+        return False
+    if not (
+        candidate_smae < reference_smae * (1.0 - minimum_improvement)
+        and candidate_srmse < reference_srmse * (1.0 - minimum_improvement)
+    ):
+        return False
+    wins_required = min(
+        policy.ensemble_min_fold_wins if required_wins is None else required_wins,
+        len(candidate),
+    )
+    for metric_index in (0, 1):
         wins = sum(
-            candidate < reference_score
-            for candidate, reference_score in zip(candidate_scores, reference_scores)
+            candidate_fold[metric_index] < reference_fold[metric_index] - 1e-12
+            for candidate_fold, reference_fold in zip(candidate, reference, strict=True)
         )
-        if wins < min(policy.ensemble_min_fold_wins, len(reference_scores)):
+        if wins < wins_required:
             return False
-        regrets = tuple(
-            (candidate - reference_score) / (1.0 + reference_score)
-            for candidate, reference_score in zip(candidate_scores, reference_scores)
+        regret_limit = (
+            policy.ensemble_max_worst_fold_regret
+            if maximum_regret is None else maximum_regret
         )
-        if max(regrets) > policy.ensemble_max_worst_fold_regret:
+        capped_regrets = tuple(
+            (candidate_fold[metric_index] - reference_fold[metric_index])
+            / (1.0 + reference_fold[metric_index])
+            for candidate_fold, reference_fold in zip(candidate, reference, strict=True)
+        )
+        if max(capped_regrets) > regret_limit + 1e-12:
             return False
-        if regrets[-1] > policy.ensemble_max_worst_fold_regret:
+        if capped_regrets[-1] > regret_limit + 1e-12:
             return False
     return True
 
@@ -3327,72 +3299,31 @@ def _passes_combination_long_horizon_gate(
 ) -> bool:
     if baseline is None:
         return True
-    scales = _fold_mase_scales(baseline)
-    baseline_scores = _fold_scores(baseline.fold_forecasts, baseline.fold_truths, scales)
-    candidate_scores = _fold_scores(candidate_folds, baseline.fold_truths, scales)
-    if not baseline_scores or len(candidate_scores) != len(baseline_scores):
-        return False
-    baseline_median = statistics.median(baseline_scores)
-    candidate_median = statistics.median(candidate_scores)
-    advantage = (baseline_median - candidate_median) / (1.0 + baseline_median)
-    required = baseline_median * policy.ensemble_min_improvement / (1.0 + baseline_median)
-    penalty = _long_horizon_penalty(
+    if not _passes_scaled_fold_acceptance(
         policy,
-        baseline,
-        baseline,
-        profile=profile,
-        challenger_fold=audit_fold,
-        coverage=audit_coverage,
-    )
-    if not advantage - penalty > required:
+        candidate_folds,
+        baseline.fold_forecasts,
+        baseline.fold_truths,
+    ):
         return False
+    del profile
     if (
         policy.baseline_strategy == "conservative_tsfm"
         and baseline.name == "timesfm_2_5"
     ):
-        audit = _long_horizon_comparison(
-            policy,
-            baseline,
-            baseline,
-            challenger_fold=audit_fold,
-            coverage=audit_coverage,
-        )
-        if audit is None:
-            return False
-        if not _passes_srmse_noninferiority(
-            candidate_folds,
-            baseline.fold_forecasts,
-            baseline.fold_truths,
-        ):
-            return False
         baseline_audit = baseline.long_horizon_fold
-        if (
-            audit_fold is None
-            or baseline_audit is None
-            or not _passes_srmse_noninferiority(
-                (audit_fold.forecast,),
-                (baseline_audit.forecast,),
-                (baseline_audit.truth,),
-            )
-        ):
+        if audit_fold is None or baseline_audit is None:
             return False
-        audit_candidate, audit_baseline = audit
-        ordinary_wins = sum(
-            candidate < reference
-            for candidate, reference in zip(candidate_scores, baseline_scores)
-        )
-        required_wins = math.ceil(0.75 * (len(candidate_scores) + 1))
-        audit_regret = (audit_candidate - audit_baseline) / (1.0 + audit_baseline)
-        return (
-            ordinary_wins + int(audit_candidate < audit_baseline) >= required_wins
-            and audit_regret <= policy.long_horizon_max_regret + 1e-12
+        return _passes_scaled_fold_acceptance(
+            policy,
+            (audit_fold.forecast,),
+            (baseline_audit.forecast,),
+            (baseline_audit.truth,),
+            required_wins=1,
+            maximum_regret=policy.long_horizon_max_regret,
         )
     return not policy.long_horizon_guard_enabled or _passes_long_horizon_override_guard(
-        policy,
-        baseline,
-        baseline,
-        challenger_fold=audit_fold,
-        coverage=audit_coverage,
+        policy, baseline, baseline, challenger_fold=audit_fold, coverage=audit_coverage
     )
 
 
@@ -3590,7 +3521,6 @@ def _best_validated_ensemble(
     best: CandidateDiagnostics,
 ) -> tuple[tuple[str, ...], tuple[float, ...], tuple[float, ...]] | None:
     pool = sorted(eligible, key=lambda item: _rank_key(item, policy.ranking_order))[:5]
-    best_score = _fold_score(best.fold_forecasts, best.fold_truths)
     best_proposal = None
     for size in range(2, min(policy.ensemble_max_members, len(pool)) + 1):
         for members in itertools.combinations(pool, size):
@@ -3603,9 +3533,14 @@ def _best_validated_ensemble(
                 continue
             weights = tuple(1.0 / size for _ in members)
             fold_forecasts = _blend_folds(tuple(member.fold_forecasts for member in members), weights)
-            score = _fold_score(fold_forecasts, members[0].fold_truths)
-            required = best_score * (1.0 - policy.ensemble_min_improvement)
-            if not score < required:
+            if not _passes_combination_gates(policy, fold_forecasts, members):
+                continue
+            audit, coverage = _multi_member_long_horizon_fold(
+                members, weights=weights, kind="weighted"
+            )
+            if not _passes_combination_long_horizon_gate(
+                policy, fold_forecasts, best, audit, coverage, profile=None
+            ):
                 continue
             names_and_forecasts = sorted(
                 ((member.name, tuple(map(float, forecasts[member.name]))) for member in members),
@@ -3613,12 +3548,12 @@ def _best_validated_ensemble(
             )
             names = tuple(item[0] for item in names_and_forecasts)
             final = _fmean_values(tuple(item[1] for item in names_and_forecasts))
-            proposal = (score, names, weights, final)
-            if best_proposal is None or proposal[:2] < best_proposal[:2]:
+            proposal = (names, weights, final)
+            if best_proposal is None or proposal[0] < best_proposal[0]:
                 best_proposal = proposal
     if best_proposal is None:
         return None
-    _, names, weights, final = best_proposal
+    names, weights, final = best_proposal
     return names, weights, final
 
 

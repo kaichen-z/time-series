@@ -278,14 +278,23 @@ def _valid_diagnostic(value: object, expected_name: str) -> bool:
         return False
     if isinstance(value.successful_folds, bool) or not isinstance(value.successful_folds, int):
         return False
+    scaled_numbers = (
+        value.median_joint_scaled_error,
+        value.recent_joint_scaled_error,
+        value.worst_joint_scaled_error,
+        value.median_smae,
+        value.recent_smae,
+        value.worst_smae,
+        value.smae_mad,
+        value.median_srmse,
+        value.recent_srmse,
+        value.worst_srmse,
+        value.srmse_mad,
+        value.worst_smae_raw,
+        value.worst_srmse_raw,
+    )
     numbers = (
-        value.median_mase,
-        value.recent_mase,
-        value.worst_mase,
-        value.mase_mad,
-        value.median_mae,
-        value.median_smape,
-        value.median_rmsse,
+        *scaled_numbers,
         value.normalized_bias,
         value.slope_error,
         value.long_horizon_coverage,
@@ -297,6 +306,8 @@ def _valid_diagnostic(value: object, expected_name: str) -> bool:
         and math.isfinite(number)
         for number in numbers
     ):
+        return False
+    if any(number < 0.0 for number in scaled_numbers):
         return False
     if any(
         number is not None
@@ -322,11 +333,24 @@ def _valid_fold_evidence(diagnostic: CandidateDiagnostics) -> bool:
         or len(truths) != diagnostic.successful_folds
     ):
         return False
-    return all(
+    if not all(
         _valid_forecast(forecast)
         and _valid_forecast(truth)
         and len(forecast) == len(truth)
         for forecast, truth in zip(forecasts, truths)
+    ):
+        return False
+    # Synthetic diagnostics used by read-only compatibility callers do not carry
+    # serialized fold records.  When records are present, however, their scaled
+    # evidence is mandatory and must fail closed.
+    return not diagnostic.folds or (
+        len(diagnostic.folds) == diagnostic.successful_folds
+        and all(
+            isinstance(fold, HindcastFold)
+            and fold.status == "success"
+            and _valid_scaled_fold_metrics(fold)
+            for fold in diagnostic.folds
+        )
     )
 
 
@@ -338,12 +362,25 @@ def _valid_long_horizon_audit(diagnostic: CandidateDiagnostics) -> bool:
         and _valid_forecast(audit.forecast)
         and _valid_forecast(audit.truth)
         and len(audit.forecast) == len(audit.truth)
-        and audit.mase_scale is not None
-        and isinstance(audit.mase_scale, (int, float))
-        and not isinstance(audit.mase_scale, bool)
-        and math.isfinite(audit.mase_scale)
-        and audit.mase_scale > 0.0
+        and _valid_scaled_fold_metrics(audit)
     )
+
+
+def _valid_scaled_fold_metrics(fold: HindcastFold) -> bool:
+    values = (fold.smae, fold.srmse, fold.smae_raw, fold.srmse_raw)
+    if not all(
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0.0
+        for value in values
+    ):
+        return False
+    if type(fold.smae_clipped) is not bool or type(fold.srmse_clipped) is not bool:
+        return False
+    assert fold.smae is not None and fold.srmse is not None
+    assert fold.smae_raw is not None and fold.srmse_raw is not None
+    return fold.smae <= fold.smae_raw and fold.srmse <= fold.srmse_raw
 
 
 def _valid_forecast(value: object) -> bool:
