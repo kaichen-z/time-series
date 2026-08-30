@@ -179,12 +179,18 @@ class FilterGeneration:
     child: FilterDictionary
     train_parent: FilterScore
     train_child: FilterScore
-    dev_parent: FilterScore
-    dev_child: FilterScore
+    dev_parent: FilterScore | None
+    dev_child: FilterScore | None
     accepted: bool
     reason: str
     agent_calls: int
     required_targets: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FilterGateResult:
+    accepted: bool
+    reason: str
 
 
 def build_filter_dictionary(
@@ -589,33 +595,62 @@ def evolve_filter_once(
     train_child = evaluate_filter(
         child, train_outcomes, train_tasks, reference_outcomes=train_outcomes
     )
+    train_gate = _compare_filter_split(
+        train_parent, train_child, split="Train"
+    )
+    if not train_gate.accepted:
+        return FilterGeneration(
+            generation, parent, child, train_parent, train_child,
+            None, None, False, train_gate.reason, 1, target_batch,
+        )
     dev_parent = evaluate_filter(
         parent, dev_outcomes, dev_tasks, reference_outcomes=train_outcomes
     )
     dev_child = evaluate_filter(
         child, dev_outcomes, dev_tasks, reference_outcomes=train_outcomes
     )
-    train_forecast_ok = _forecast_non_regression(train_parent, train_child)
-    dev_forecast_ok = _forecast_non_regression(dev_parent, dev_child)
-    train_reliability_ok = _reliability_non_regression(train_parent, train_child)
-    dev_reliability_ok = _reliability_non_regression(dev_parent, dev_child)
-    strict_forecast = _forecast_improved(train_parent, train_child)
-    train_ok = (
-        train_forecast_ok
-        and train_reliability_ok
-        and strict_forecast
-    )
-    dev_ok = dev_forecast_ok and dev_reliability_ok
-    accepted = train_ok and dev_ok
-    if accepted:
-        reason = "accepted: Train scaled forecast pair improved with Train and Dev safety"
-    elif not train_ok:
-        reason = "rejected: Train forecast/reliability regressed or did not improve"
-    else:
-        reason = "rejected: Dev forecast or reliability regressed"
+    gate = _compare_filter_split(dev_parent, dev_child, split="Dev")
     return FilterGeneration(
         generation, parent, child, train_parent, train_child,
-        dev_parent, dev_child, accepted, reason, 1, target_batch,
+        dev_parent, dev_child, gate.accepted, gate.reason, 1, target_batch,
+    )
+
+
+def compare_filter_scores(
+    train_parent: FilterScore,
+    train_child: FilterScore,
+    dev_parent: FilterScore,
+    dev_child: FilterScore,
+) -> FilterGateResult:
+    """Require independent Train and Dev Pareto gains plus scaled safety."""
+    train_gate = _compare_filter_split(train_parent, train_child, split="Train")
+    if not train_gate.accepted:
+        return train_gate
+    return _compare_filter_split(dev_parent, dev_child, split="Dev")
+
+
+def _compare_filter_split(
+    parent: FilterScore, child: FilterScore, *, split: str
+) -> FilterGateResult:
+    if not _forecast_improved(parent, child):
+        return FilterGateResult(
+            False,
+            f"rejected: {split} sMAE/sRMSE did not improve under the Pareto gate",
+        )
+    safety_regression = _scaled_safety_regression(parent, child)
+    if safety_regression is not None:
+        return FilterGateResult(
+            False, f"rejected: {split} {safety_regression} regressed"
+        )
+    if not _forecast_non_regression(parent, child):
+        return FilterGateResult(
+            False, f"rejected: {split} coverage or median scaled error regressed"
+        )
+    if not _reliability_non_regression(parent, child):
+        return FilterGateResult(False, f"rejected: {split} reliability regressed")
+    return FilterGateResult(
+        True,
+        f"accepted: {split} scaled forecast pair improved with safety",
     )
 
 
@@ -639,6 +674,31 @@ def _forecast_improved(parent: FilterScore, child: FilterScore) -> bool:
         child.mean_srmse,
         tolerance=tolerance,
     )
+
+
+def _scaled_safety_regression(
+    parent: FilterScore, child: FilterScore
+) -> str | None:
+    tolerance = 1e-12
+    tail_fields = (
+        "p90_smae",
+        "p95_smae",
+        "p90_srmse",
+        "p95_srmse",
+        "p90_smae_raw",
+        "p95_smae_raw",
+        "p90_srmse_raw",
+        "p95_srmse_raw",
+    )
+    for field_name in tail_fields:
+        parent_value = float(getattr(parent, field_name))
+        child_value = float(getattr(child, field_name))
+        if not child_value <= parent_value + tolerance:
+            return field_name
+    for field_name in ("smae_clipped_count", "srmse_clipped_count"):
+        if int(getattr(child, field_name)) > int(getattr(parent, field_name)):
+            return field_name
+    return None
 
 
 def _reliability_non_regression(parent: FilterScore, child: FilterScore) -> bool:

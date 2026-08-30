@@ -825,16 +825,59 @@ def compare_screening(
         train_child.mean_active_srmse,
         tolerance=tolerance,
     )
-    dev_scaled_safe = (
-        dev_child.mean_active_smae <= dev_parent.mean_active_smae + tolerance
-        and dev_child.mean_active_srmse <= dev_parent.mean_active_srmse + tolerance
-    )
-    if train_child.coverage < 1.0 - tolerance or dev_child.coverage < 1.0 - tolerance:
-        return ScreeningGateResult(False, "rejected: screening coverage is below 100%")
+    if train_child.coverage < 1.0 - tolerance:
+        return ScreeningGateResult(False, "rejected: Train screening coverage is below 100%")
     if train_child.global_oracle_retention < 1.0 - tolerance:
         return ScreeningGateResult(
             False, "rejected: Train oracle retention must remain 100%"
         )
+    if train_child.failure_exposure > train_parent.failure_exposure + tolerance:
+        return ScreeningGateResult(False, "rejected: Train failure exposure increased")
+    if train_child.mean_active_failures > train_parent.mean_active_failures + tolerance:
+        return ScreeningGateResult(
+            False, "rejected: Train failure exposure count increased"
+        )
+    if not train_scaled_improved:
+        return ScreeningGateResult(
+            False,
+            "rejected: Train sMAE/sRMSE did not improve under the Pareto gate",
+        )
+    train_safety_regression = _screening_scaled_safety_regression(
+        train_parent, train_child, tolerance=tolerance
+    )
+    if train_safety_regression is not None:
+        return ScreeningGateResult(
+            False, f"rejected: Train {train_safety_regression} regressed"
+        )
+    if constraints is not None:
+        if train_child.min_active_candidates < constraints.min_active_candidates:
+            return ScreeningGateResult(
+                False, "rejected: Train active candidate pool is too small"
+            )
+        if (
+            enforce_final_constraints
+            and train_child.max_active_candidates > constraints.max_active_candidates
+        ):
+            return ScreeningGateResult(
+                False, "rejected: Train active candidate pool is too large"
+            )
+        if enforce_final_constraints and (
+            train_child.unique_active_dictionaries
+            < min(constraints.min_unique_active_dictionaries, train_child.task_count)
+        ):
+            return ScreeningGateResult(
+                False, "rejected: insufficient Train task-conditioned diversity"
+            )
+
+    dev_scaled_improved = pareto_scaled_improvement(
+        dev_parent.mean_active_smae,
+        dev_parent.mean_active_srmse,
+        dev_child.mean_active_smae,
+        dev_child.mean_active_srmse,
+        tolerance=tolerance,
+    )
+    if dev_child.coverage < 1.0 - tolerance:
+        return ScreeningGateResult(False, "rejected: Dev screening coverage is below 100%")
     required_dev_oracle = (
         constraints.min_dev_oracle_retention if constraints is not None else 1.0
     )
@@ -855,38 +898,36 @@ def compare_screening(
         return ScreeningGateResult(False, "rejected: Dev sRMSE oracle regret regressed")
     if dev_child.failure_exposure > dev_parent.failure_exposure + tolerance:
         return ScreeningGateResult(False, "rejected: Dev failure exposure increased")
-    if train_child.failure_exposure > train_parent.failure_exposure + tolerance:
-        return ScreeningGateResult(False, "rejected: Train failure exposure increased")
     if dev_child.mean_active_failures > dev_parent.mean_active_failures + tolerance:
         return ScreeningGateResult(
             False, "rejected: Dev failure exposure count increased"
         )
-    if train_child.mean_active_failures > train_parent.mean_active_failures + tolerance:
-        return ScreeningGateResult(
-            False, "rejected: Train failure exposure count increased"
-        )
-    if not train_scaled_improved:
+    if not dev_scaled_improved:
         return ScreeningGateResult(
             False,
-            "rejected: Train sMAE/sRMSE did not improve under the Pareto gate",
+            "rejected: Dev sMAE/sRMSE did not improve under the Pareto gate",
         )
-    if not dev_scaled_safe:
-        return ScreeningGateResult(False, "rejected: Dev sMAE or sRMSE regressed")
+    dev_safety_regression = _screening_scaled_safety_regression(
+        dev_parent, dev_child, tolerance=tolerance
+    )
+    if dev_safety_regression is not None:
+        return ScreeningGateResult(
+            False, f"rejected: Dev {dev_safety_regression} regressed"
+        )
     if constraints is not None:
+        if dev_child.min_active_candidates < constraints.min_active_candidates:
+            return ScreeningGateResult(
+                False, "rejected: Dev active candidate pool is too small"
+            )
         if (
-            train_child.min_active_candidates < constraints.min_active_candidates
-            or dev_child.min_active_candidates < constraints.min_active_candidates
+            enforce_final_constraints
+            and dev_child.max_active_candidates > constraints.max_active_candidates
         ):
-            return ScreeningGateResult(False, "rejected: active candidate pool is too small")
+            return ScreeningGateResult(
+                False, "rejected: Dev active candidate pool is too large"
+            )
         if enforce_final_constraints and (
-            train_child.max_active_candidates > constraints.max_active_candidates
-            or dev_child.max_active_candidates > constraints.max_active_candidates
-        ):
-            return ScreeningGateResult(False, "rejected: active candidate pool is too large")
-        if enforce_final_constraints and (
-            train_child.unique_active_dictionaries
-            < min(constraints.min_unique_active_dictionaries, train_child.task_count)
-            or dev_child.unique_active_dictionaries
+            dev_child.unique_active_dictionaries
             < min(constraints.min_unique_active_dictionaries, dev_child.task_count)
             or (
                 dev_child.task_count > 1
@@ -906,7 +947,7 @@ def compare_screening(
             )
 
     dimensions = {
-        "scaled_error": (train_scaled_improved, dev_scaled_safe),
+        "scaled_error": (train_scaled_improved, dev_scaled_improved),
         "active_success_rate": (
             train_child.active_success_rate > train_parent.active_success_rate + tolerance,
             dev_child.active_success_rate + 0.005 >= dev_parent.active_success_rate,
@@ -936,9 +977,36 @@ def compare_screening(
         )
     return ScreeningGateResult(
         True,
-        "accepted: screening improved on Train without a Dev regression",
+        "accepted: screening improved under separate Train and Dev Pareto gates",
         improved,
     )
+
+
+def _screening_scaled_safety_regression(
+    parent: ScreeningScore,
+    child: ScreeningScore,
+    *,
+    tolerance: float,
+) -> str | None:
+    tail_fields = (
+        "p90_smae",
+        "p95_smae",
+        "p90_srmse",
+        "p95_srmse",
+        "p90_smae_raw",
+        "p95_smae_raw",
+        "p90_srmse_raw",
+        "p95_srmse_raw",
+    )
+    for field_name in tail_fields:
+        parent_value = float(getattr(parent, field_name))
+        child_value = float(getattr(child, field_name))
+        if not child_value <= parent_value + tolerance:
+            return field_name
+    for field_name in ("smae_clipped_count", "srmse_clipped_count"):
+        if int(getattr(child, field_name)) > int(getattr(parent, field_name)):
+            return field_name
+    return None
 
 
 def _needs_fallback(

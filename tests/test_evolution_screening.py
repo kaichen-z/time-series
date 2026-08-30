@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 
 import pytest
@@ -577,3 +578,127 @@ def test_screening_gate_rejects_single_metric_oracle_regret_hidden_by_joint_scor
 
     assert not result.accepted
     assert "sRMSE oracle regret" in result.reason
+
+
+def _safe_gate_score(**changes: object) -> ScreeningScore:
+    tasks = _screen_tasks()
+    score = evaluate_screening(
+        _screen_policy(broken_status="repair"), tasks, _screen_outcomes(tasks)
+    )
+    defaults = {
+        "mean_active_smae": 1.0,
+        "mean_active_srmse": 1.0,
+        "p90_smae": 1.0,
+        "p95_smae": 1.0,
+        "p90_srmse": 1.0,
+        "p95_srmse": 1.0,
+        "p90_smae_raw": 1.0,
+        "p95_smae_raw": 1.0,
+        "p90_srmse_raw": 1.0,
+        "p95_srmse_raw": 1.0,
+        "smae_clipped_count": 0,
+        "srmse_clipped_count": 0,
+    }
+    defaults.update(changes)
+    return replace(score, **defaults)
+
+
+def test_screening_gate_requires_strict_pareto_improvement_on_each_split() -> None:
+    parent = _safe_gate_score()
+    train_regression = _safe_gate_score(
+        mean_active_smae=0.8, mean_active_srmse=1.1
+    )
+    dev_improvement = _safe_gate_score(
+        mean_active_smae=0.8, mean_active_srmse=1.0
+    )
+
+    train_result = compare_screening(
+        parent, train_regression, parent, dev_improvement
+    )
+    equal_dev_result = compare_screening(
+        parent, dev_improvement, parent, parent
+    )
+
+    assert not train_result.accepted
+    assert "Train" in train_result.reason
+    assert not equal_dev_result.accepted
+    assert "Dev" in equal_dev_result.reason
+
+
+def test_screening_rejects_train_before_inspecting_bad_dev_constraints() -> None:
+    parent = _safe_gate_score()
+    train_regression = _safe_gate_score(
+        mean_active_smae=0.8, mean_active_srmse=1.1
+    )
+    unsafe_dev = _safe_gate_score(coverage=0.0, global_oracle_retention=0.0)
+
+    result = compare_screening(parent, train_regression, parent, unsafe_dev)
+
+    assert not result.accepted
+    assert "Train sMAE/sRMSE" in result.reason
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "p90_smae",
+        "p95_smae",
+        "p90_srmse",
+        "p95_srmse",
+        "p90_smae_raw",
+        "p95_smae_raw",
+        "p90_srmse_raw",
+        "p95_srmse_raw",
+    ),
+)
+@pytest.mark.parametrize("split", ("train", "dev"))
+def test_screening_gate_rejects_each_capped_and_raw_tail_regression(
+    field: str, split: str
+) -> None:
+    parent = _safe_gate_score()
+    improved = _safe_gate_score(mean_active_smae=0.8, mean_active_srmse=1.0)
+    unsafe = replace(
+        improved, **{field: math.inf if field.endswith("_raw") else 1.01}
+    )
+
+    result = compare_screening(
+        parent,
+        unsafe if split == "train" else improved,
+        parent,
+        unsafe if split == "dev" else improved,
+    )
+
+    assert not result.accepted
+    assert split.title() in result.reason
+    assert field in result.reason
+
+
+@pytest.mark.parametrize("field", ("smae_clipped_count", "srmse_clipped_count"))
+@pytest.mark.parametrize("split", ("train", "dev"))
+def test_screening_gate_rejects_each_clipped_count_increase(
+    field: str, split: str
+) -> None:
+    parent = _safe_gate_score()
+    improved = _safe_gate_score(mean_active_smae=0.8, mean_active_srmse=1.0)
+    unsafe = replace(improved, **{field: 1})
+
+    result = compare_screening(
+        parent,
+        unsafe if split == "train" else improved,
+        parent,
+        unsafe if split == "dev" else improved,
+    )
+
+    assert not result.accepted
+    assert split.title() in result.reason
+    assert field in result.reason
+
+
+def test_screening_gate_accepts_safe_pareto_child_on_both_splits() -> None:
+    parent = _safe_gate_score()
+    train_child = _safe_gate_score(mean_active_smae=0.8, mean_active_srmse=1.0)
+    dev_child = _safe_gate_score(mean_active_smae=1.0, mean_active_srmse=0.8)
+
+    result = compare_screening(parent, train_child, parent, dev_child)
+
+    assert result.accepted

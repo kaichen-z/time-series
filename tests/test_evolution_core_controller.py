@@ -6,7 +6,7 @@ from typing import Mapping, Sequence
 
 import pytest
 
-from common.evolution_core.acceptance import MetricAcceptanceGate
+from common.evolution_core.acceptance import ScaledPairAcceptanceGate
 from common.evolution_core.contracts import (
     EvaluationReport,
     EvolutionComponents,
@@ -109,9 +109,27 @@ class FakeEvaluator:
         )
 
 
+class ScriptedPairEvaluator:
+    def __init__(self, pairs: Mapping[tuple[str, str], tuple[float, float]]) -> None:
+        self.pairs = dict(pairs)
+
+    def evaluate(
+        self, artifact_id: str, results: Sequence[FakeResult], split: str
+    ) -> EvaluationReport:
+        smae, srmse = self.pairs[(artifact_id, split)]
+        return EvaluationReport(
+            artifact_id=artifact_id,
+            split=split,
+            metrics={"smae": smae, "srmse": srmse},
+            item_count=len(results),
+            diagnostics={},
+        )
+
+
 def make_engine(
     tmp_path: Path,
     qualities: Sequence[float],
+    evaluator: object | None = None,
     **config_overrides: object,
 ) -> tuple[SelfEvolutionEngine[FakeArtifact, int, FakeResult], FakeAdapter, FakeMutator, FakeExecutor]:
     adapter = FakeAdapter()
@@ -127,8 +145,8 @@ def make_engine(
         artifact_adapter=adapter,
         mutator=mutator,
         executor=executor,
-        evaluator=FakeEvaluator(),
-        acceptance_gate=MetricAcceptanceGate(config.metric),
+        evaluator=evaluator or FakeEvaluator(),
+        acceptance_gate=ScaledPairAcceptanceGate(),
         store=JsonArtifactStore(tmp_path),
     )
     return SelfEvolutionEngine(config, components), adapter, mutator, executor
@@ -155,6 +173,71 @@ def test_engine_retains_parent_when_dev_does_not_improve(tmp_path: Path) -> None
 
     assert outcome.accepted_artifact.artifact_id == "v000"
     assert not outcome.steps[0].accepted
+
+
+def test_engine_rejects_train_regression_before_reading_improved_dev(
+    tmp_path: Path,
+) -> None:
+    evaluator = ScriptedPairEvaluator(
+        {
+            ("v000", "train"): (1.0, 1.0),
+            ("v001_1", "train"): (0.8, 1.1),
+            ("v000", "dev"): (1.0, 1.0),
+            ("v001_1", "dev"): (0.8, 0.8),
+        }
+    )
+    engine, _, _, executor = make_engine(
+        tmp_path, qualities=(1.0,), evaluator=evaluator
+    )
+    parent = FakeArtifact("v000", 0.0)
+
+    outcome = engine.evolve(parent, (1, 2), (3, 4))
+
+    assert outcome.accepted_artifact is parent
+    assert not outcome.steps[0].accepted
+    assert outcome.steps[0].parent_dev_report is None
+    assert outcome.steps[0].child_dev_report is None
+    assert ("v000", "dev", 2) not in executor.calls
+    assert ("v001_1", "dev", 2) not in executor.calls
+
+
+def test_engine_requires_strict_pareto_improvement_again_on_dev(
+    tmp_path: Path,
+) -> None:
+    evaluator = ScriptedPairEvaluator(
+        {
+            ("v000", "train"): (1.0, 1.0),
+            ("v001_1", "train"): (0.8, 1.0),
+            ("v000", "dev"): (1.0, 1.0),
+            ("v001_1", "dev"): (1.0, 1.0),
+        }
+    )
+    engine, _, _, _ = make_engine(tmp_path, qualities=(1.0,), evaluator=evaluator)
+    parent = FakeArtifact("v000", 0.0)
+
+    outcome = engine.evolve(parent, (1, 2), (3, 4))
+
+    assert outcome.accepted_artifact is parent
+    assert not outcome.steps[0].accepted
+
+
+def test_engine_accepts_child_with_separate_train_and_dev_pareto_improvements(
+    tmp_path: Path,
+) -> None:
+    evaluator = ScriptedPairEvaluator(
+        {
+            ("v000", "train"): (1.0, 1.0),
+            ("v001_1", "train"): (0.8, 1.0),
+            ("v000", "dev"): (1.0, 1.0),
+            ("v001_1", "dev"): (1.0, 0.8),
+        }
+    )
+    engine, _, _, _ = make_engine(tmp_path, qualities=(1.0,), evaluator=evaluator)
+
+    outcome = engine.evolve(FakeArtifact("v000", 0.0), (1, 2), (3, 4))
+
+    assert outcome.accepted_artifact.artifact_id == "v001_1"
+    assert outcome.steps[0].accepted
 
 
 def test_engine_ranks_train_children_by_joint_scaled_pair_then_name(

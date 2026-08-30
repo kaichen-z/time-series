@@ -75,13 +75,13 @@ class SelfEvolutionEngine(Generic[ArtifactT, ItemT, ResultT]):
 
         steps: list[EvolutionStep] = []
         for generation in range(start_generation + 1, self.config.generations + 1):
-            
             parent_train = self._evaluate(current, train_items, "train")
-            current = adapter.apply_train_report(current, parent_train)
-            adapter.validate(current)
+            mutation_parent = adapter.apply_train_report(current, parent_train)
+            adapter.validate(mutation_parent)
             parent_id = adapter.artifact_id(current)
             self.components.store.save_artifact(
-                f"generation_{generation:03d}_parent", adapter.to_payload(current)
+                f"generation_{generation:03d}_parent",
+                adapter.to_payload(mutation_parent),
             )
 
             context = MutationContext(
@@ -91,7 +91,7 @@ class SelfEvolutionEngine(Generic[ArtifactT, ItemT, ResultT]):
             )
             proposed = tuple(
                 self.components.mutator.propose(
-                    current, context, self.config.children_per_generation
+                    mutation_parent, context, self.config.children_per_generation
                 )
             )
             for child in proposed:
@@ -109,7 +109,12 @@ class SelfEvolutionEngine(Generic[ArtifactT, ItemT, ResultT]):
                     adapter.to_payload(annotated),
                 )
 
-            selected_pair = self._best_train_pair(train_pairs)
+            train_eligible_pairs = tuple(
+                pair
+                for pair in train_pairs
+                if self.components.acceptance_gate.accept(parent_train, pair[1])
+            )
+            selected_pair = self._best_train_pair(train_eligible_pairs)
             parent_dev: EvaluationReport | None = None
             child_dev: EvaluationReport | None = None
             accepted = False

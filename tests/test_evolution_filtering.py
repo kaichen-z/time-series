@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from common.llm import FakeLLMClient
+import numerical_agent.evolution.filtering as filtering
 from numerical_agent.evolution.execution import (
     CRASHED,
     INVALID,
@@ -88,6 +90,131 @@ def _dictionary() -> FilterDictionary:
             FilterEntry("intermittent", "statistical", "keep", (), "specialist"),
         )
     )
+
+
+def _gate_score(**changes: object):
+    task = _tasks("gate", 1)[0]
+    rows = (
+        Outcome(
+            "stable",
+            task.task_id,
+            SUCCESS,
+            smae=1.0,
+            srmse=1.0,
+            smae_raw=1.0,
+            srmse_raw=1.0,
+            smae_clipped=False,
+            srmse_clipped=False,
+        ),
+    )
+    base = evaluate_filter(
+        FilterDictionary((FilterEntry("stable", "statistical", "keep", (), "stable"),)),
+        rows,
+        (task,),
+        reference_outcomes=rows,
+    )
+    defaults = {
+        "mean_smae": 1.0,
+        "mean_srmse": 1.0,
+        "median_smae": 1.0,
+        "median_srmse": 1.0,
+        "p90_smae": 1.0,
+        "p95_smae": 1.0,
+        "p90_srmse": 1.0,
+        "p95_srmse": 1.0,
+        "p90_smae_raw": 1.0,
+        "p95_smae_raw": 1.0,
+        "p90_srmse_raw": 1.0,
+        "p95_srmse_raw": 1.0,
+        "smae_clipped_count": 0,
+        "srmse_clipped_count": 0,
+    }
+    defaults.update(changes)
+    return replace(base, **defaults)
+
+
+def test_filter_gate_requires_strict_pareto_improvement_on_train_and_dev() -> None:
+    parent = _gate_score()
+    train_regression = _gate_score(mean_smae=0.8, mean_srmse=1.1)
+    dev_improvement = _gate_score(mean_smae=0.8, mean_srmse=1.0)
+
+    train_result = filtering.compare_filter_scores(
+        parent, train_regression, parent, dev_improvement
+    )
+    equal_dev_result = filtering.compare_filter_scores(
+        parent, dev_improvement, parent, parent
+    )
+
+    assert not train_result.accepted
+    assert "Train" in train_result.reason
+    assert not equal_dev_result.accepted
+    assert "Dev" in equal_dev_result.reason
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "p90_smae",
+        "p95_smae",
+        "p90_srmse",
+        "p95_srmse",
+        "p90_smae_raw",
+        "p95_smae_raw",
+        "p90_srmse_raw",
+        "p95_srmse_raw",
+    ),
+)
+@pytest.mark.parametrize("split", ("train", "dev"))
+def test_filter_gate_rejects_each_capped_and_raw_tail_regression(
+    field: str, split: str
+) -> None:
+    parent = _gate_score()
+    improved = _gate_score(mean_smae=0.8, mean_srmse=1.0)
+    unsafe = replace(
+        improved, **{field: math.inf if field.endswith("_raw") else 1.01}
+    )
+
+    result = filtering.compare_filter_scores(
+        parent,
+        unsafe if split == "train" else improved,
+        parent,
+        unsafe if split == "dev" else improved,
+    )
+
+    assert not result.accepted
+    assert split.title() in result.reason
+    assert field in result.reason
+
+
+@pytest.mark.parametrize("field", ("smae_clipped_count", "srmse_clipped_count"))
+@pytest.mark.parametrize("split", ("train", "dev"))
+def test_filter_gate_rejects_each_clipped_count_increase(
+    field: str, split: str
+) -> None:
+    parent = _gate_score()
+    improved = _gate_score(mean_smae=0.8, mean_srmse=1.0)
+    unsafe = replace(improved, **{field: 1})
+
+    result = filtering.compare_filter_scores(
+        parent,
+        unsafe if split == "train" else improved,
+        parent,
+        unsafe if split == "dev" else improved,
+    )
+
+    assert not result.accepted
+    assert split.title() in result.reason
+    assert field in result.reason
+
+
+def test_filter_gate_accepts_safe_pareto_child_on_both_splits() -> None:
+    parent = _gate_score()
+    train_child = _gate_score(mean_smae=0.8, mean_srmse=1.0)
+    dev_child = _gate_score(mean_smae=1.0, mean_srmse=0.8)
+
+    result = filtering.compare_filter_scores(parent, train_child, parent, dev_child)
+
+    assert result.accepted
 
 
 def test_filter_uses_joint_scaled_error_not_mase() -> None:
@@ -396,8 +523,8 @@ def test_reliability_improvement_cannot_replace_scaled_forecast_improvement(
 
     assert result.train_child.mean_smae == result.train_parent.mean_smae
     assert result.train_child.mean_srmse == result.train_parent.mean_srmse
-    assert result.dev_child.mean_smae == result.dev_parent.mean_smae
-    assert result.dev_child.mean_srmse == result.dev_parent.mean_srmse
+    assert result.dev_parent is None
+    assert result.dev_child is None
     assert result.train_child.eligible_success_rate > result.train_parent.eligible_success_rate
     assert result.train_child.eligible_failure_rate < result.train_parent.eligible_failure_rate
     assert (
@@ -406,6 +533,55 @@ def test_reliability_improvement_cannot_replace_scaled_forecast_improvement(
     )
     assert not result.accepted
     assert "did not improve" in result.reason.lower()
+
+
+def test_train_rejected_filter_child_does_not_evaluate_malformed_dev(
+    tmp_path: Path,
+) -> None:
+    train = _tasks("train", 2)
+    dev = _tasks("dev", 1)
+    dictionary = FilterDictionary(
+        (
+            FilterEntry("stable", "statistical", "keep", (), "baseline"),
+            FilterEntry("broken", "statistical", "keep", (), "crashes"),
+        )
+    )
+    train_rows = tuple(
+        row
+        for task in train
+        for row in (
+            Outcome("stable", task.task_id, SUCCESS, smae=1.0, srmse=1.0),
+            Outcome("broken", task.task_id, CRASHED),
+        )
+    )
+    duplicate_dev_row = Outcome(
+        "stable", dev[0].task_id, SUCCESS, smae=1.0, srmse=1.0
+    )
+    agent = FakeLLMClient(
+        ['''{
+          "summary": "quarantine the crashing candidate",
+          "actions": [{
+            "name": "broken", "status": "quarantine", "applicability": [],
+            "reason": "It crashes on every Train task."
+          }]
+        }''']
+    )
+
+    result = evolve_filter_once(
+        dictionary,
+        train,
+        dev,
+        train_rows + (duplicate_dev_row, duplicate_dev_row),
+        agent,
+        generation=1,
+        transcript_dir=tmp_path,
+        required_targets=("broken",),
+    )
+
+    assert not result.accepted
+    assert result.dev_parent is None
+    assert result.dev_child is None
+    assert "Train" in result.reason
 
 
 def test_filter_score_separates_execution_failure_categories() -> None:

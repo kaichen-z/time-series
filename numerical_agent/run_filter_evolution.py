@@ -174,17 +174,21 @@ def main(argv: list[str] | None = None) -> int:
         },
         "parent": {
             "train": asdict(result.train_parent),
-            "dev": asdict(result.dev_parent),
+            "dev": asdict(result.dev_parent) if result.dev_parent is not None else None,
             "status_counts": _status_counts(result.parent),
         },
         "child": {
             "train": asdict(result.train_child),
-            "dev": asdict(result.dev_child),
+            "dev": asdict(result.dev_child) if result.dev_child is not None else None,
             "status_counts": _status_counts(result.child),
         },
         "paired_joint_wtl": {
             "train": _paired_filter_counts(result.train_parent, result.train_child),
-            "dev": _paired_filter_counts(result.dev_parent, result.dev_child),
+            "dev": (
+                _paired_filter_counts(result.dev_parent, result.dev_child)
+                if result.dev_parent is not None and result.dev_child is not None
+                else None
+            ),
         },
         "changes": changes,
         "source_hashes": source_hashes,
@@ -288,6 +292,9 @@ def _markdown(payload: dict[str, object]) -> str:
     for split in ("train", "dev"):
         left = parent[split]
         right = child[split]
+        if left is None or right is None:
+            lines.append(f"| {split} | not evaluated (Train gate rejected Child) |")
+            continue
         assert isinstance(left, dict) and isinstance(right, dict)
         lines.append(
             f"| {split} | {left['mean_smae']:.6f} | {left['median_smae']:.6f} | {left['se_smae']:.6f} | "
@@ -303,6 +310,8 @@ def _markdown(payload: dict[str, object]) -> str:
     ))
     for split in ("train", "dev"):
         for side, scores in (("Parent", parent[split]), ("Child", child[split])):
+            if scores is None:
+                continue
             assert isinstance(scores, dict)
             lines.append(
                 f"| {split} | {side} | {scores['p90_smae_raw']:.6f}/{scores['p95_smae_raw']:.6f} | "
@@ -319,6 +328,9 @@ def _markdown(payload: dict[str, object]) -> str:
     assert isinstance(paired, dict)
     for split in ("train", "dev"):
         counts = paired[split]
+        if counts is None:
+            lines.append(f"| {split} | not evaluated (Train gate rejected Child) |")
+            continue
         assert isinstance(counts, dict)
         lines.append(
             f"| {split} | {counts['wins']} / {counts['ties']} / {counts['losses']} / "
@@ -331,6 +343,8 @@ def _markdown(payload: dict[str, object]) -> str:
     ))
     for split in ("train", "dev"):
         for side, scores in (("Parent", parent[split]), ("Child", child[split])):
+            if scores is None:
+                continue
             assert isinstance(scores, dict)
             lines.append(
                 f"| {split} | {side} | {scores['eligible_crashed']} / "

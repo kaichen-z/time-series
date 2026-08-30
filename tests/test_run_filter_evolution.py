@@ -81,6 +81,46 @@ def test_filter_report_and_manifest_lead_with_bound_scaled_objective() -> None:
     )
 
 
+def test_filter_report_marks_dev_not_evaluated_after_train_rejection() -> None:
+    score = {
+        "mean_smae": 1.0,
+        "mean_srmse": 1.0,
+        "median_smae": 1.0,
+        "median_srmse": 1.0,
+        "se_smae": 0.0,
+        "se_srmse": 0.0,
+        "p90_smae_raw": 1.0,
+        "p95_smae_raw": 1.0,
+        "p90_srmse_raw": 1.0,
+        "p95_srmse_raw": 1.0,
+        "smae_clipped_count": 0,
+        "smae_clipped_rate": 0.0,
+        "srmse_clipped_count": 0,
+        "srmse_clipped_rate": 0.0,
+        "coverage": 1.0,
+        "eligible_crashed": 0,
+        "eligible_invalid": 0,
+        "eligible_missing": 0,
+        "eligible_malformed_success": 0,
+    }
+    payload = {
+        "accepted": False,
+        "reason": "rejected: Train sMAE/sRMSE did not improve",
+        "elapsed_seconds": 1.0,
+        "changes": [],
+        "parent": {"train": score, "dev": None},
+        "child": {"train": score, "dev": None},
+        "paired_joint_wtl": {
+            "train": {"wins": 0, "ties": 1, "losses": 0, "missing": 0, "unscored": 0},
+            "dev": None,
+        },
+    }
+
+    report = _markdown(payload)
+
+    assert "dev | not evaluated (Train gate rejected Child)" in report
+
+
 def test_filter_paired_counts_conserve_tasks_with_both_missing_unscored() -> None:
     parent = SimpleNamespace(task_count=4, task_scaled_pairs={"same": (1.0, 1.0), "left": (1.0, 1.0)})
     child = SimpleNamespace(task_count=4, task_scaled_pairs={"same": (1.0, 1.0), "right": (1.0, 1.0)})
