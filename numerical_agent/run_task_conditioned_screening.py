@@ -11,10 +11,11 @@ from pathlib import Path
 from typing import Sequence
 
 from common.data import load_tasks_by_id
+from common.evolution_core.contracts import METRIC_POLICY, metric_report_metadata
 from common.llm import CodexCLIClient, CodexCLIConfig
 from common.payload import read_json_object, write_json
 
-from .evolution.cache import OutcomeCache, SCALED_METRIC_CAP, SCALED_METRIC_SCHEMA
+from .evolution.cache import OutcomeCache
 from .evolution.execution import Outcome, Task, require_unique_outcome_keys, require_unique_task_ids
 from .evolution.filtering import build_filter_dictionary, parse_filter_source
 from .evolution.module import read_module
@@ -42,13 +43,7 @@ from .evolution.screening_evolution import (
 from .main import _add_tsfm_runtime_options, _runtime_registry
 
 
-SCALED_METRIC_POLICY = {
-    "scaled_metric_schema": SCALED_METRIC_SCHEMA,
-    "scaled_metric_cap": SCALED_METRIC_CAP,
-    "objective": "pareto_minimize_smae_srmse",
-    "aggregation": "mean_capped_task_metrics",
-    "ordering": "joint_scaled_error_smae_srmse_name",
-}
+SCALED_METRIC_POLICY = METRIC_POLICY
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -313,10 +308,7 @@ def main(argv: list[str] | None = None) -> int:
     _write_active(output / "dev_active_dictionaries.jsonl", parent, dev)
     manifest = {
         "schema_version": 2,
-        "metric_policy": SCALED_METRIC_POLICY,
-        "diagnostic_only_metrics": [
-            "mase", "mae", "smape", "mean_active_oracle_regret",
-        ],
+        **metric_report_metadata(),
         "phase": "task_conditioned_screening",
         "train_tasks": len(train),
         "dev_tasks": len(dev),

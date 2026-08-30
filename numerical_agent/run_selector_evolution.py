@@ -15,7 +15,14 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from common.data import load_tasks
+from common.evolution_core.contracts import (
+    METRIC_POLICY_FINGERPRINT,
+    metric_policy_metadata,
+    metric_report_metadata,
+    require_active_metric_policy,
+)
 from common.llm import CodexCLIClient, CodexCLIConfig
+from common.metrics import joint_scaled_error
 from common.payload import read_json_object, write_json
 
 from .evolution.execution import CRASHED, INVALID, NOT_APPLICABLE, SUCCESS, Outcome, Task, load_methods
@@ -126,6 +133,12 @@ class ForecastStore:
         path = self.root / f"{key}.json"
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, json.JSONDecodeError):
+            payload = None
+        if payload is not None:
+            if not isinstance(payload, Mapping):
+                raise ValueError("active hindcast cache row must be an object")
+            require_active_metric_policy(payload, context="active hindcast cache row")
             if payload.get("key") == key and payload.get("status") == SUCCESS:
                 values = tuple(float(value) for value in payload["forecast"])
                 if len(values) == horizon and all(map(math.isfinite, values)):
@@ -134,15 +147,23 @@ class ForecastStore:
             if payload.get("key") == key and payload.get("status") == NOT_APPLICABLE:
                 self.hits += 1
                 raise self.not_applicable(str(payload.get("detail", "not applicable")))
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
-            pass
         self.misses += 1
         try:
             values = self._execute(name, history, horizon, frequency)
         except self.not_applicable as error:
-            self._write(path, {"key": key, "status": NOT_APPLICABLE, "detail": str(error)[:200]})
+            self._write(path, {
+                **metric_policy_metadata(),
+                "key": key,
+                "status": NOT_APPLICABLE,
+                "detail": str(error)[:200],
+            })
             raise
-        self._write(path, {"key": key, "status": SUCCESS, "forecast": list(values)})
+        self._write(path, {
+            **metric_policy_metadata(),
+            "key": key,
+            "status": SUCCESS,
+            "forecast": list(values),
+        })
         return values
 
     def _execute(
@@ -245,7 +266,8 @@ class ForecastStore:
 
     def _key(self, name, history, horizon, frequency) -> str:
         payload = json.dumps({
-            "schema": 2,
+            "schema": 3,
+            "metric_policy_fingerprint": METRIC_POLICY_FINGERPRINT,
             "identity": self.identity_hash,
             "name": name,
             "history": history,
@@ -425,6 +447,11 @@ def main(argv: list[str] | None = None) -> int:
     output.mkdir(parents=True, exist_ok=True)
     screening_path = screening_dir / "frozen_screening_policy.py"
     screening_manifest = read_json_object(screening_dir / "screening_manifest.json")
+    require_active_metric_policy(
+        screening_manifest, context="active screening release"
+    )
+    if screening_manifest.get("schema_version") != 2:
+        raise ValueError("active screening release schema_version must be 2")
     actual_screening_hash = _sha256(screening_path)
     if screening_manifest.get("frozen_screening_policy_sha256") != actual_screening_hash:
         raise ValueError("frozen screening policy hash does not match its manifest")
@@ -509,6 +536,8 @@ def main(argv: list[str] | None = None) -> int:
             proposal_source, encoding="utf-8"
         )
         payload = {
+            "schema_version": 2,
+            **metric_report_metadata(),
             "generation": generation,
             "accepted": result.accepted,
             "gate": asdict(result.gate),
@@ -534,7 +563,8 @@ def main(argv: list[str] | None = None) -> int:
     final_train = evaluate_decision(evolution.frozen, train_cases)
     final_dev = evaluate_decision(evolution.frozen, dev_cases)
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
+        **metric_report_metadata(),
         "phase": "task_conditioned_numerical_selector",
         "train_tasks": len(train),
         "dev_tasks": len(dev),
@@ -634,6 +664,7 @@ def _write_cases(path: Path, cases: Sequence[DecisionCase]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for case in cases:
             payload = {
+                **metric_policy_metadata(),
                 "task_id": case.task.task_id,
                 "active_names": list(case.active_names),
                 "diagnostics": {name: asdict(value) for name, value in case.diagnostics.items()},
@@ -646,9 +677,9 @@ def _write_cases(path: Path, cases: Sequence[DecisionCase]) -> None:
 
 
 def _global_ranking(
-    outcomes: Sequence[Outcome], task_ids: Sequence[str], *, failure_penalty: float = 20.0
+    outcomes: Sequence[Outcome], task_ids: Sequence[str], *, failure_penalty: float = 5.0
 ) -> tuple[str, ...]:
-    """Freeze the legacy cross-task ranker from Train labels only."""
+    """Freeze the canonical joint scaled-error ranker from Train labels only."""
     requested = tuple(task_ids)
     by_method: dict[str, dict[str, Outcome]] = {}
     for outcome in outcomes:
@@ -656,15 +687,23 @@ def _global_ranking(
             by_method.setdefault(outcome.method, {})[outcome.task_id] = outcome
     scores = []
     for name, rows in by_method.items():
-        values = []
+        smaes = []
+        srmses = []
         for task_id in requested:
             outcome = rows.get(task_id)
-            values.append(
-                float(outcome.mase)
-                if outcome is not None and outcome.status == SUCCESS and outcome.mase is not None
-                else failure_penalty
-            )
-        scores.append((sum(values) / len(values), name))
+            if outcome is not None and outcome.status == SUCCESS:
+                if outcome.smae is None or outcome.srmse is None:
+                    raise ValueError(
+                        "active global ranking cannot consume legacy metric policy outcomes"
+                    )
+                smaes.append(float(outcome.smae))
+                srmses.append(float(outcome.srmse))
+            else:
+                smaes.append(failure_penalty)
+                srmses.append(failure_penalty)
+        mean_smae = sum(smaes) / len(smaes)
+        mean_srmse = sum(srmses) / len(srmses)
+        scores.append((joint_scaled_error(mean_smae, mean_srmse), name))
     return tuple(name for _, name in sorted(scores))
 
 
@@ -693,6 +732,9 @@ def _report(manifest: Mapping[str, object]) -> str:
         f"- Accepted generations: {manifest['accepted_generations']}",
         f"- Screening SHA-256: `{manifest['screening_policy_sha256']}`",
         f"- Decision SHA-256: `{manifest['frozen_decision_policy_sha256']}`",
+        f"- Metric policy SHA-256: `{manifest.get('metric_policy_fingerprint', METRIC_POLICY_FINGERPRINT)}`",
+        "- Primary metrics: sMAE, sRMSE",
+        "- Diagnostic only: MASE, MAE, sMAPE, RMSSE",
         f"- Dev accepted: `{manifest.get('dev_accepted', False)}`",
         f"- Final Dev gate: {manifest.get('final_dev_gate', {}).get('reason', 'not recorded')}",
         f"- Public Test accessed: `{manifest['public_test_accessed']}`",

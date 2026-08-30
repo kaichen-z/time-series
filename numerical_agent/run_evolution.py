@@ -6,8 +6,12 @@ import json
 from pathlib import Path
 
 from common.data import load_tasks
+from common.evolution_core.contracts import (
+    metric_policy_metadata,
+    require_active_metric_policy,
+)
 from common.llm import ClaudeCLIClient, ClaudeCLIConfig, CodexCLIClient, CodexCLIConfig, QwenClient
-from common.payload import read_json_object
+from common.payload import read_json_object, write_json
 from common.tracing import configure
 
 from .evolution import run_evolution
@@ -102,6 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     repo = Path(args.repo)
+    _load_or_create_run_manifest(repo)
     configure(repo / "run_evolution_trace.jsonl")
 
     tasks, validation_tasks = _evolution_tasks(
@@ -201,6 +206,36 @@ def main(argv: list[str] | None = None) -> int:
             status = f"rejected: {outcome.rejected}" if outcome.rejected else f"{len(outcome.applied)} operations"
             print(f"generation {outcome.number}: {outcome.method_count} methods, commit {outcome.commit}  ({status})")
     return 0
+
+
+def _load_or_create_run_manifest(repo: str | Path) -> dict[str, object]:
+    """Create a new active run binding or fail closed when resuming one."""
+    path = Path(repo) / "run_manifest.json"
+    if path.exists():
+        payload = read_json_object(path)
+        require_active_metric_policy(payload, context="active evolution run manifest")
+        if payload.get("schema_version") != 2:
+            raise ValueError("active evolution run manifest schema_version must be 2")
+        return payload
+    lifecycle_markers = (
+        Path(repo) / "run_evolution_trace.jsonl",
+        Path(repo) / "outcome-cache",
+        Path(repo) / "policy-outcome-cache",
+    )
+    if any(item.exists() for item in lifecycle_markers) or any(
+        Path(repo).glob("generation_*_result.json")
+    ):
+        raise ValueError(
+            "existing evolution run is missing metric policy manifest; "
+            "legacy runs cannot seed active evolution"
+        )
+    payload = {
+        "schema_version": 2,
+        **metric_policy_metadata(),
+        "phase": "numerical_method_evolution",
+    }
+    write_json(path, payload)
+    return payload
 
 
 def _train_tasks(

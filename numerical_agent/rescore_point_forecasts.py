@@ -8,6 +8,10 @@ import math
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from common.evolution_core.contracts import (
+    METRIC_POLICY_FINGERPRINT,
+    metric_report_metadata,
+)
 from common.payload import write_json
 
 from .evaluate_frozen_two_stage import (
@@ -58,7 +62,7 @@ def rescore_cached_point_forecasts(
         for name, results in by_row.items()
     }
     baseline_by_task = {
-        str(row["task_id"]): float(row["smae"])
+        str(row["task_id"]): (float(row["smae"]), float(row["srmse"]))
         for row in scores[baseline_row]["per_task"]
     }
     paired = {
@@ -66,7 +70,8 @@ def rescore_cached_point_forecasts(
         for name, score in scores.items()
     }
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        **metric_report_metadata(),
         "task_count": len(tasks),
         "source_artifact": str(Path(artifact_path)),
         "source_artifact_sha256": hashlib.sha256(Path(artifact_path).read_bytes()).hexdigest(),
@@ -77,6 +82,7 @@ def rescore_cached_point_forecasts(
             "scale": "mean absolute true future value per task",
             "winsorization_cap": 5.0,
             "aggregation": "task mean plus standard error",
+            "ordering": "paired joint mean of capped sMAE and sRMSE",
             "official_hidden_score": False,
         },
         "rows": scores,
@@ -95,12 +101,15 @@ def render_point_report(payload: Mapping[str, object]) -> str:
         "",
         f"- Tasks: {payload['task_count']}",
         f"- Baseline: `{payload['baseline_row']}`",
+        f"- Metric policy SHA-256: `{payload.get('metric_policy_fingerprint', METRIC_POLICY_FINGERPRINT)}`",
+        "- Primary metrics: sMAE, sRMSE",
+        "- Diagnostic only: MASE, MAE, sMAPE, RMSSE",
         "- sCRPS: **not computed** (no probabilistic trajectories in this phase)",
         "- Model calls: **0**; all forecasts were read from the frozen artifact",
         "- Status: public-label development/regression metrics, not an official hidden-test score",
         "",
-        "| Row | Mean sMAE | sMAE SE | Mean sRMSE | sRMSE SE | P90/P95 sMAE | Clipped sMAE/sRMSE | Coverage | W/T/L vs baseline |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Row | Mean sMAE | Median sMAE | sMAE SE | Mean sRMSE | Median sRMSE | sRMSE SE | Raw P90/P95 sMAE/sRMSE | Clipped sMAE/sRMSE | Coverage | W/T/L vs baseline (joint) |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name, raw in rows.items():
         if not isinstance(raw, Mapping):
@@ -109,9 +118,11 @@ def render_point_report(payload: Mapping[str, object]) -> str:
         if not isinstance(comparison, Mapping):
             raise ValueError(f"comparison for {name} must be a mapping")
         lines.append(
-            f"| {name} | {_number(raw['mean_smae'])} | {_number(raw['se_smae'])} | "
-            f"{_number(raw['mean_srmse'])} | {_number(raw['se_srmse'])} | "
-            f"{_number(raw['p90_smae'])}/{_number(raw['p95_smae'])} | "
+            f"| {name} | {_number(raw['mean_smae'])} | {_number(raw['median_smae'])} | "
+            f"{_number(raw['se_smae'])} | {_number(raw['mean_srmse'])} | "
+            f"{_number(raw['median_srmse'])} | {_number(raw['se_srmse'])} | "
+            f"{_number(raw['p90_smae_raw'])}/{_number(raw['p95_smae_raw'])} / "
+            f"{_number(raw['p90_srmse_raw'])}/{_number(raw['p95_srmse_raw'])} | "
             f"{raw['smae_clipped_count']}/{raw['srmse_clipped_count']} | "
             f"{_number(raw['coverage'], digits=4)} | "
             f"{comparison['wins']}/{comparison['ties']}/{comparison['losses']} |"
@@ -120,6 +131,7 @@ def render_point_report(payload: Mapping[str, object]) -> str:
 
 
 def _load_forecast_rows(path: str | Path) -> dict[str, dict[str, ForecastResult]]:
+    """Read a frozen historical forecast artifact for report-only rescoring."""
     result: dict[str, dict[str, ForecastResult]] = {}
     for line_number, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 
+from common.evolution_core.contracts import metric_policy_metadata
 from numerical_agent import main as numerical_main
 from numerical_agent.main import main
 from numerical_agent.tsfm.deployment import TSFMDeployment
@@ -150,6 +151,7 @@ def test_mixed_fake_worker_curation_and_frozen_evaluation_cover_runtime_contract
                 "resume": False,
             },
             "curation": {
+                **metric_policy_metadata(),
                 "allowed_families": ["statistical", "foundation"],
                 "accepted_max_error": 1000.0,
                 "specialized_max_error": 1000.0,

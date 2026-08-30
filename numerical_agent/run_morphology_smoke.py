@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from common.data import Task as DrCiKTask
+from common.evolution_core.contracts import metric_report_metadata
 from common.llm import CodexCLIClient, CodexCLIConfig
 from common.metrics import drcik_point_metrics, mase
 from numerical_agent.evolution import MorphologyReasoner, run_numerical_loop
@@ -786,6 +787,8 @@ def _result_payload(
     selected = package.selection_decision
     rejected_counts = dict(sorted(Counter(package.rejected_assumptions.values()).items()))
     return {
+        "schema_version": 2,
+        **metric_report_metadata(),
         "task_id": task.task.task_id,
         "selected": {
             "recipe": asdict(selected.arithmetic) if selected.arithmetic is not None else None,

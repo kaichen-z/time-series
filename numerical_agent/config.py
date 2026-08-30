@@ -2,6 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field
+from typing import Mapping
+
+from common.evolution_core.contracts import (
+    METRIC_POLICY,
+    METRIC_POLICY_FINGERPRINT,
+    require_active_metric_policy,
+)
 
 
 ALLOWED_ACTIONS = ("keep", "revise", "quarantine", "discard")
@@ -27,8 +35,12 @@ class DictionaryCurationConfig:
     max_revisions_per_method: int = 1
     max_implementation_attempts: int = 3
     method_statuses: tuple[str, ...] = METHOD_STATUSES
-    method_metric: str = "smape"
-    dictionary_metric: str = "smape"
+    method_metric: str = "smae"
+    dictionary_metric: str = "smae"
+    metric_policy: Mapping[str, object] = field(
+        default_factory=lambda: dict(METRIC_POLICY)
+    )
+    metric_policy_fingerprint: str = METRIC_POLICY_FINGERPRINT
     discard_requires_dominance_evidence: bool = True
     allow_dev_learning: bool = False
     accepted_max_error: float = 50.0
@@ -50,6 +62,15 @@ class DictionaryCurationConfig:
             raise ValueError("method_statuses contains an unsupported status")
         if not self.method_metric or not self.dictionary_metric:
             raise ValueError("metric names must not be empty")
+        require_active_metric_policy(
+            {
+                "metric_policy": self.metric_policy,
+                "metric_policy_fingerprint": self.metric_policy_fingerprint,
+                "method_metric": self.method_metric,
+                "dictionary_metric": self.dictionary_metric,
+            },
+            context="active curation config",
+        )
         if self.accepted_max_error < 0 or self.specialized_max_error < 0:
             raise ValueError("status thresholds must be non-negative")
         if self.specialized_max_error < self.accepted_max_error:

@@ -14,6 +14,7 @@ import pytest
 
 import numerical_agent.run_morphology_smoke as smoke
 from common.data import Task as DrCiKTask
+from common.evolution_core import contracts
 from numerical_agent.evolution.portfolio import PolicyPortfolio, render_policy_source
 from numerical_agent.run_morphology_smoke import main
 
@@ -54,6 +55,14 @@ def test_fake_smoke_selects_one_task_freezes_then_writes_complete_result(tmp_pat
 
     payload = json.loads(result.read_text(encoding="utf-8"))
     assert payload["task_id"] == "one"
+    assert payload["schema_version"] == 2
+    assert payload["metric_policy"] == {
+        **contracts.METRIC_POLICY,
+        "primary": list(contracts.METRIC_POLICY["primary"]),
+    }
+    assert payload["metric_policy_fingerprint"] == contracts.METRIC_POLICY_FINGERPRINT
+    assert payload["primary_metrics"] == ["smae", "srmse"]
+    assert set(payload["diagnostic_only"]) >= {"mase", "mae", "smape", "rmsse"}
     assert len(payload["final_forecast"]) == 3
     assert set(payload) >= {
         "task_id", "selected", "final_forecast", "protected_baseline",

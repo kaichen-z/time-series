@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from common.evolution_core.contracts import METRIC_POLICY_FINGERPRINT
 from numerical_agent.evolution.execution import Task
 from numerical_agent.rescore_point_forecasts import (
     render_point_report,
@@ -55,6 +56,10 @@ def test_rescore_uses_cached_forecasts_without_probabilistic_metrics(tmp_path):
 
     assert payload["metric_contract"]["point_forecast_only"] is True
     assert payload["metric_contract"]["scrps_computed"] is False
+    assert payload["schema_version"] == 2
+    assert payload["metric_policy_fingerprint"] == METRIC_POLICY_FINGERPRINT
+    assert payload["primary_metrics"] == ["smae", "srmse"]
+    assert set(payload["diagnostic_only"]) >= {"mase", "mae", "smape", "rmsse"}
     assert payload["rows"]["candidate"]["mean_smae"] == pytest.approx(0.25)
     assert payload["rows"]["baseline"]["mean_smae"] == pytest.approx(1.0)
     assert payload["paired_vs_baseline"]["candidate"] == {
@@ -63,7 +68,9 @@ def test_rescore_uses_cached_forecasts_without_probabilistic_metrics(tmp_path):
     report = render_point_report(payload)
     assert "sCRPS: **not computed**" in report
     assert "Mean sMAE" in report
-    assert "P90/P95 sMAE" in report
+    assert "Median sMAE" in report
+    assert "Mean sRMSE" in report
+    assert "Raw P90/P95 sMAE/sRMSE" in report
 
 
 def test_rescore_rejects_duplicate_or_mismatched_task_rows(tmp_path):

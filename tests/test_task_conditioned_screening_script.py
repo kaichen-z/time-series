@@ -19,6 +19,7 @@ from numerical_agent.run_task_conditioned_screening import (
     load_frozen_partitions,
     main,
 )
+from common.evolution_core.contracts import METRIC_POLICY
 from numerical_agent.evolution.execution import Task
 from numerical_agent.evolution.filtering import build_filter_dictionary, render_filter_source
 from numerical_agent.evolution.module import MODULE_HEADER, parse_module, write_module
@@ -444,6 +445,8 @@ def test_report_exposes_task_conditioning_and_family_coverage():
 
 def test_screening_manifest_hash_binds_scaled_metric_objective():
     manifest = {"schema_version": 2, "metric_policy": SCALED_METRIC_POLICY}
+
+    assert SCALED_METRIC_POLICY == METRIC_POLICY
 
     assert _manifest_fingerprint(manifest) != _manifest_fingerprint(
         {

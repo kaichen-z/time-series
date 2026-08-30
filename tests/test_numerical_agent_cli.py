@@ -6,8 +6,50 @@ import subprocess
 import sys
 from pathlib import Path
 
+import common.evolution_core.contracts as evolution_contracts
+import pytest
+from numerical_agent.config import DictionaryCurationConfig
+from numerical_agent.main import _curation_config
+
 
 FIXTURES = Path(__file__).parent / "fixtures" / "numerical_agent"
+
+
+def test_active_curation_defaults_use_the_joint_scaled_metric_policy() -> None:
+    config = DictionaryCurationConfig()
+
+    assert config.method_metric == "smae"
+    assert config.dictionary_metric == "smae"
+    assert config.metric_policy == evolution_contracts.METRIC_POLICY
+    assert config.metric_policy_fingerprint == evolution_contracts.METRIC_POLICY_FINGERPRINT
+
+
+def test_active_curation_config_load_fails_closed_without_metric_policy() -> None:
+    with pytest.raises(ValueError, match="missing metric policy"):
+        _curation_config(
+            {
+                "curation": {
+                    "method_metric": "smae",
+                    "dictionary_metric": "smae",
+                }
+            }
+        )
+
+
+@pytest.mark.parametrize("legacy_metric", ["smape", "mae"])
+def test_active_curation_config_load_rejects_legacy_metric_defaults(
+    legacy_metric: str,
+) -> None:
+    with pytest.raises(ValueError, match="legacy metric policy"):
+        _curation_config(
+            {
+                "curation": {
+                    "method_metric": legacy_metric,
+                    "dictionary_metric": legacy_metric,
+                    **evolution_contracts.metric_policy_metadata(),
+                }
+            }
+        )
 
 
 def test_curate_cli_runs_with_injected_fake_provider(tmp_path: Path) -> None:
@@ -112,8 +154,9 @@ def test_evaluate_frozen_scores_public_test_without_mutating_dictionary(
             {
                 "curation": {
                     "allowed_families": ["statistical"],
-                    "dictionary_metric": "smape",
-                    "method_metric": "smape",
+                    "dictionary_metric": "smae",
+                    "method_metric": "smae",
+                    **evolution_contracts.metric_policy_metadata(),
                     "selection_folds": 2,
                     "selection_horizon": 1,
                 }
@@ -193,14 +236,14 @@ def test_evaluate_frozen_scores_public_test_without_mutating_dictionary(
     summary = json.loads(completed.stdout)
     assert summary == {
         "artifact_id": "fixture.g001",
-        "metric": "smape",
+        "metric": "smae",
         "public_test_tasks": 1,
         "score": 0.0,
     }
     report = json.loads((output_dir / "frozen_test_report.json").read_text())
     assert report["split"] == "public_test"
     assert report["item_count"] == 1
-    assert report["metrics"] == {"smape": 0.0}
+    assert report["metrics"] == {"smae": 0.0}
     assert report["manifest_sha256"] == "fixture-manifest"
     assert report["dictionary_sha256"] == before
     forecasts = [
@@ -213,7 +256,7 @@ def test_evaluate_frozen_scores_public_test_without_mutating_dictionary(
             "item_id": "test_1",
             "method_id": "last_value",
             "selected": True,
-            "selection_score": 40.0,
+            "selection_score": 1.0 / 3.0,
             "status": "success",
         }
     ]

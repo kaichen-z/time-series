@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Iterable
 
 from common.data import Task, load_tasks
+from common.evolution_core.contracts import metric_policy_metadata
 
 
 def build_experiment(
@@ -38,11 +39,12 @@ def build_experiment(
             "resume": True,
         },
         "curation": {
+            **metric_policy_metadata(),
             "allowed_families": ["statistical"],
             "max_revisions_per_method": max_revisions_per_method,
             "max_implementation_attempts": max_implementation_attempts,
-            "dictionary_metric": "smape",
-            "method_metric": "smape",
+            "dictionary_metric": "smae",
+            "method_metric": "smae",
             "accepted_max_error": accepted_max_error,
             "specialized_max_error": specialized_max_error,
             "min_success_rate": min_success_rate,

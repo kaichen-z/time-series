@@ -10,6 +10,10 @@ from dataclasses import asdict
 from pathlib import Path
 
 from common.data import load_tasks_by_id
+from common.evolution_core.contracts import (
+    metric_report_metadata,
+    require_active_metric_policy,
+)
 from common.payload import read_json_object, write_json
 
 from .evolution.module import read_module
@@ -92,9 +96,15 @@ def main(argv: list[str] | None = None) -> int:
     screen_path = screen_dir / "frozen_screening_policy.py"
     screen_hash = _sha256(screen_path)
     screen_manifest = read_json_object(screen_dir / "screening_manifest.json")
+    require_active_metric_policy(screen_manifest, context="active screening release")
+    if screen_manifest.get("schema_version") != 2:
+        raise ValueError("active screening release schema_version must be 2")
     if screen_manifest.get("frozen_screening_policy_sha256") != screen_hash:
         raise ValueError("frozen screening policy hash does not match its manifest")
     parent_manifest = read_json_object(selector_dir / "selector_manifest.json")
+    require_active_metric_policy(parent_manifest, context="active selector release")
+    if parent_manifest.get("schema_version") != 2:
+        raise ValueError("active selector release schema_version must be 2")
     if parent_manifest.get("screening_policy_sha256") != screen_hash:
         raise ValueError("parent Decision policy is bound to a different screening policy")
 
@@ -232,7 +242,8 @@ def main(argv: list[str] | None = None) -> int:
         train_only=args.train_only,
     )
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
+        **metric_report_metadata(),
         "experiment": args.candidate_family,
         "selection": (
             "Train-only search with entity-disjoint cross-validation; Dev not accessed"
@@ -491,6 +502,8 @@ def _write_selector_manifest(
         }
     manifest = {
         **inherited,
+        "schema_version": 2,
+        **metric_report_metadata(),
         "experiment": experiment,
         "screening_policy_sha256": screening_hash,
         "frozen_decision_policy_sha256": _sha256(policy_path),

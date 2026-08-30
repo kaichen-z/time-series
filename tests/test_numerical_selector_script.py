@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import hashlib
+import json
 import subprocess
 import time
 from pathlib import Path
@@ -40,6 +41,7 @@ from numerical_agent.run_selector_evolution import (
     _write_cases,
     build_parser,
 )
+import common.evolution_core.contracts as evolution_contracts
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +116,15 @@ def stable_method(history, horizon, frequency):
         assert first.misses == 1
     finally:
         first.close()
+    cached = json.loads(next(cache.glob("*.json")).read_text(encoding="utf-8"))
+    assert cached["metric_policy"] == {
+        **evolution_contracts.METRIC_POLICY,
+        "primary": list(evolution_contracts.METRIC_POLICY["primary"]),
+    }
+    assert (
+        cached["metric_policy_fingerprint"]
+        == evolution_contracts.METRIC_POLICY_FINGERPRINT
+    )
 
     second = ForecastStore(
         cache,
@@ -130,6 +141,43 @@ def stable_method(history, horizon, frequency):
         assert second.misses == 0
     finally:
         second.close()
+
+
+def test_forecast_store_rejects_a_legacy_cache_row_instead_of_seeding_runtime(
+    tmp_path,
+):
+    methods = tmp_path / "methods.py"
+    methods.write_text(
+        MODULE_HEADER
+        + '''
+
+def stable_method(history, horizon, frequency):
+    """Use when a last-value forecast is sufficient."""
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+    module = read_module(methods)
+    store = ForecastStore(
+        tmp_path / "cache",
+        methods,
+        None,
+        module,
+        PolicyPortfolio.flagship5(),
+        RuntimeRegistry(),
+        "screen",
+    )
+    try:
+        key = store._key("stable_method", (1.0, 2.0), 2, "D")
+        (store.root / f"{key}.json").write_text(
+            json.dumps({"key": key, "status": "success", "forecast": [2.0, 2.0]}),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match="missing metric policy"):
+            store.forecast("stable_method", (1.0, 2.0), 2, "D")
+    finally:
+        store.close()
 
 
 def test_forecast_store_materializes_canonical_combined_leaf_forecasts_once(tmp_path):
@@ -733,15 +781,23 @@ def test_task_conditioned_audit_writes_a_manifest_accepted_by_frozen_evaluator(t
         screen_source, encoding="utf-8"
     )
     screen_hash = hashlib.sha256(screen_source.encode()).hexdigest()
+    binding = evolution_contracts.metric_policy_metadata()
     write_json(
         screen_dir / "screening_manifest.json",
-        {"frozen_screening_policy_sha256": screen_hash, "public_test_accessed": False},
+        {
+            "schema_version": 2,
+            **binding,
+            "frozen_screening_policy_sha256": screen_hash,
+            "public_test_accessed": False,
+        },
     )
     decision_source = "DECISION_POLICY = {}\n"
     (selector_dir / "frozen_decision_policy.py").write_text(
         decision_source, encoding="utf-8"
     )
     parent_manifest = {
+        "schema_version": 2,
+        **binding,
         "frozen_global_ranking": [f"method_{index}" for index in range(103)],
         "public_test_accessed": False,
     }
@@ -760,6 +816,8 @@ def test_task_conditioned_audit_writes_a_manifest_accepted_by_frozen_evaluator(t
         screen_hash,
         hashlib.sha256(decision_source.encode()).hexdigest(),
     )
+    manifest = json.loads((selector_dir / "selector_manifest.json").read_text())
+    assert manifest["metric_policy_fingerprint"] == evolution_contracts.METRIC_POLICY_FINGERPRINT
 
 
 def test_train_only_manifest_drops_inherited_dev_results(tmp_path):
@@ -775,7 +833,8 @@ def test_train_only_manifest_drops_inherited_dev_results(tmp_path):
     experiment._write_selector_manifest(
         output,
         {
-            "schema_version": 1,
+            "schema_version": 2,
+            **evolution_contracts.metric_policy_metadata(),
             "phase": "task_conditioned_numerical_selector",
             "frozen_global_ranking": ["toto_2_0"],
             "dev": {"mean_smae": 9.0},
@@ -798,6 +857,7 @@ def test_train_only_manifest_drops_inherited_dev_results(tmp_path):
     assert manifest["dev_tasks"] == 0
     assert manifest["dev_accepted"] is False
     assert manifest["frozen_global_ranking"] == ["toto_2_0"]
+    assert manifest["metric_policy_fingerprint"] == evolution_contracts.METRIC_POLICY_FINGERPRINT
     for stale in ("dev", "dev_parent", "dev_train_winner", "generations"):
         assert stale not in manifest
 
@@ -1056,14 +1116,14 @@ def test_build_case_always_preserves_reviewed_tsfm_anchors():
     assert case.conditioned_names == ()
 
 
-def test_global_ranking_penalizes_failures_and_is_deterministic():
+def test_global_ranking_uses_the_joint_scaled_metric_pair_and_penalizes_failures():
     rows = (
-        Outcome("a", "t1", "success", mase=1.0),
-        Outcome("a", "t2", "success", mase=1.0),
-        Outcome("b", "t1", "success", mase=0.1),
+        Outcome("a", "t1", "success", smae=1.0, srmse=1.0),
+        Outcome("a", "t2", "success", smae=1.0, srmse=1.0),
+        Outcome("b", "t1", "success", smae=0.1, srmse=0.1),
         Outcome("b", "t2", "crashed"),
-        Outcome("c", "t1", "success", mase=1.0),
-        Outcome("c", "t2", "success", mase=1.0),
+        Outcome("c", "t1", "success", smae=0.5, srmse=1.5),
+        Outcome("c", "t2", "success", smae=0.5, srmse=1.5),
     )
     assert _global_ranking(rows, ("t1", "t2")) == ("a", "c", "b")
 
@@ -1081,7 +1141,7 @@ def test_selector_report_leads_with_drcik_point_metrics():
     from numerical_agent.evolution.selector_evolution import evaluate_decision
 
     score = asdict(evaluate_decision(DecisionPolicy(ensemble_enabled=False), (case,)))
-    report = _report({
+    payload = {
         "train_tasks": 1,
         "dev_tasks": 1,
         "accepted_generations": [],
@@ -1092,8 +1152,12 @@ def test_selector_report_leads_with_drcik_point_metrics():
         "final_dev_gate": {"accepted": False, "reason": "Dev sRMSE increased"},
         "train": score,
         "dev": score,
-    })
+        **evolution_contracts.metric_report_metadata(),
+    }
+    report = _report(payload)
 
+    assert payload["primary_metrics"] == ["smae", "srmse"]
+    assert set(payload["diagnostic_only"]) >= {"mase", "mae", "smape", "rmsse"}
     assert "Mean sMAE" in report
     assert "Mean sRMSE" in report
     assert "P90/P95 sMAE" in report

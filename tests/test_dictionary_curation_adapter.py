@@ -346,7 +346,7 @@ def test_dictionary_score_uses_the_history_selected_method_not_oracle_minimum() 
 
     report = evaluator.evaluate("d", results, "dev")
 
-    assert report.metrics["smape"] == 50.0
+    assert report.metrics["smae"] == 50.0
     assert report.diagnostics["oracle_score"] == 0.0
 
 

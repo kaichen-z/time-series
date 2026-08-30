@@ -9,7 +9,11 @@ import sys
 from pathlib import Path
 from typing import Callable, Mapping, Sequence, cast
 
-from common.evolution_core.contracts import EvolutionConfig, MetricSpec
+from common.evolution_core.contracts import (
+    EvolutionConfig,
+    MetricSpec,
+    require_active_metric_policy,
+)
 from common.evolution_core.controller import SelfEvolutionEngine
 from common.llm import (
     ClaudeCLIClient,
@@ -18,7 +22,7 @@ from common.llm import (
     CodexCLIConfig,
     QwenClient,
 )
-from common.metrics import mae, smape
+from common.metrics import drcik_point_metrics, mae, smape
 from common.payload import read_json_object, require_object, write_json
 from common.tracing import configure
 
@@ -557,6 +561,7 @@ def _build_dataset(args: argparse.Namespace) -> int:
 
 def _curation_config(experiment: Mapping[str, object]) -> DictionaryCurationConfig:
     payload = require_object(experiment.get("curation", {}), "curation config")
+    require_active_metric_policy(payload, context="active curation config")
     normalized = dict(payload)
     for field_name in ("allowed_actions", "allowed_families", "method_statuses"):
         if field_name in normalized:
@@ -769,6 +774,10 @@ def _present(**values: object) -> dict[str, object]:
 
 
 def _metric(name: str):
+    if name == "smae":
+        return lambda prediction, truth: float(
+            drcik_point_metrics(list(truth), list(prediction))["smae"]
+        )
     if name == "smape":
         return lambda prediction, truth: smape(list(truth), list(prediction))
     if name == "mae":

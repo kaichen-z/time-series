@@ -9,10 +9,11 @@ from dataclasses import asdict
 from pathlib import Path
 
 from common.llm import CodexCLIClient, CodexCLIConfig
+from common.evolution_core.contracts import METRIC_POLICY, metric_report_metadata
 from common.payload import write_json
 
 from .evolution import git
-from .evolution.cache import OutcomeCache, SCALED_METRIC_CAP, SCALED_METRIC_SCHEMA
+from .evolution.cache import OutcomeCache
 from .evolution.filtering import (
     build_filter_dictionary,
     evolve_filter_once,
@@ -25,13 +26,7 @@ from .evolution.portfolio import PolicyOutcomeCache, read_policy_file
 from .run_evolution import _evolution_tasks
 
 
-SCALED_METRIC_POLICY = {
-    "scaled_metric_schema": SCALED_METRIC_SCHEMA,
-    "scaled_metric_cap": SCALED_METRIC_CAP,
-    "objective": "pareto_minimize_smae_srmse",
-    "aggregation": "mean_capped_task_metrics",
-    "ordering": "joint_scaled_error_smae_srmse_name",
-}
+SCALED_METRIC_POLICY = METRIC_POLICY
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -146,8 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     payload = {
         "schema_version": 2,
-        "metric_policy": SCALED_METRIC_POLICY,
-        "diagnostic_only_metrics": ["mase", "mae", "smape"],
+        **metric_report_metadata(),
         "generation": args.generation,
         "accepted": result.accepted,
         "reason": result.reason,

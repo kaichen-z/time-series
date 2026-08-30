@@ -7,8 +7,16 @@
   },
   "curation": {
     "max_revisions_per_method": 1,
-    "dictionary_metric": "smape",
-    "method_metric": "smape",
+    "dictionary_metric": "smae",
+    "method_metric": "smae",
+    "metric_policy": {
+      "schema_version": 2,
+      "primary": ["smae", "srmse"],
+      "cap": 5.0,
+      "ordering": "mean_pair",
+      "acceptance": "pareto_non_regression"
+    },
+    "metric_policy_fingerprint": "fe5cf0fd10839f93a3dea81cb90a63641ad520a589bdce875bd11095a2a8bf8d",
     "accepted_max_error": 20.0,
     "specialized_max_error": 60.0
   },

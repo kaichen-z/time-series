@@ -4,6 +4,7 @@ from numerical_agent.run_filter_evolution import (
     _markdown,
     build_parser,
 )
+from common.evolution_core.contracts import METRIC_POLICY
 
 
 def test_filter_smoke_defaults_to_eight_train_two_dev_and_luna() -> None:
@@ -23,6 +24,7 @@ def test_filter_smoke_defaults_to_eight_train_two_dev_and_luna() -> None:
 
 
 def test_filter_report_and_manifest_lead_with_bound_scaled_objective() -> None:
+    assert SCALED_METRIC_POLICY == METRIC_POLICY
     score = {
         "mean_smae": 0.8,
         "mean_srmse": 0.9,

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import numerical_agent.evaluate_frozen_two_stage as frozen_evaluation
+import common.evolution_core.contracts as evolution_contracts
 from numerical_agent.evaluate_frozen_two_stage import (
     ForecastResult,
     _hindcast_config_for_policy,
@@ -140,11 +141,16 @@ def test_freeze_verifier_rejects_hash_mismatch_and_existing_completion(tmp_path)
     screen.mkdir(); selector.mkdir(); output.mkdir()
     screen_hash = _write(screen / "frozen_screening_policy.py", "screen")
     decision_hash = _write(selector / "frozen_decision_policy.py", "decision")
+    binding = evolution_contracts.metric_policy_metadata()
     (screen / "screening_manifest.json").write_text(json.dumps({
+        "schema_version": 2,
+        **binding,
         "frozen_screening_policy_sha256": screen_hash,
         "public_test_accessed": False,
     }))
     (selector / "selector_manifest.json").write_text(json.dumps({
+        "schema_version": 2,
+        **binding,
         "screening_policy_sha256": screen_hash,
         "frozen_decision_policy_sha256": decision_hash,
         "public_test_accessed": False,
@@ -157,6 +163,69 @@ def test_freeze_verifier_rejects_hash_mismatch_and_existing_completion(tmp_path)
     (output / "evaluation_complete.json").write_text("{}")
     with pytest.raises(ValueError, match="already"):
         verify_frozen_policies(screen, selector, output)
+
+
+@pytest.mark.parametrize(
+    "legacy_policy",
+    (
+        None,
+        {"schema_version": 1, "primary": ["mase"], "ordering": "median_mase"},
+    ),
+)
+def test_active_release_rejects_missing_or_legacy_metric_policy(
+    tmp_path, legacy_policy
+):
+    screen = tmp_path / "screen"
+    selector = tmp_path / "selector"
+    output = tmp_path / "out"
+    screen.mkdir(); selector.mkdir(); output.mkdir()
+    screen_hash = _write(screen / "frozen_screening_policy.py", "screen")
+    decision_hash = _write(selector / "frozen_decision_policy.py", "decision")
+    screen_manifest = {
+        "schema_version": 1,
+        "frozen_screening_policy_sha256": screen_hash,
+        "public_test_accessed": False,
+    }
+    selector_manifest = {
+        "schema_version": 1,
+        "screening_policy_sha256": screen_hash,
+        "frozen_decision_policy_sha256": decision_hash,
+        "public_test_accessed": False,
+        "frozen_global_ranking": ["median_mase"],
+    }
+    if legacy_policy is not None:
+        screen_manifest["metric_policy"] = legacy_policy
+        selector_manifest["metric_policy"] = legacy_policy
+    (screen / "screening_manifest.json").write_text(json.dumps(screen_manifest))
+    (selector / "selector_manifest.json").write_text(json.dumps(selector_manifest))
+
+    with pytest.raises(ValueError, match="metric policy|legacy metric policy"):
+        verify_frozen_policies(screen, selector, output)
+
+
+def test_active_release_rejects_noncanonical_metric_policy_field_types():
+    payload = {
+        "schema_version": 2,
+        **evolution_contracts.metric_policy_metadata(),
+    }
+    payload["metric_policy"] = {
+        **payload["metric_policy"],
+        "schema_version": 2.0,
+    }
+
+    with pytest.raises(ValueError, match="metric policy"):
+        evolution_contracts.load_active_release(payload)
+
+
+def test_active_release_rejects_legacy_ranking_even_with_forged_current_binding():
+    payload = {
+        "schema_version": 2,
+        **evolution_contracts.metric_policy_metadata(),
+        "ranking_order": ["median_mase"],
+    }
+
+    with pytest.raises(ValueError, match="legacy metric policy"):
+        evolution_contracts.load_active_release(payload)
 
 
 def test_evaluation_cli_has_no_llm_or_mutation_options():
@@ -248,6 +317,12 @@ def test_score_reports_drcik_aligned_point_metrics_standard_errors_and_tails():
     assert score["se_srmse"] == pytest.approx(2.25)
     assert score["p90_smae"] == pytest.approx(4.55)
     assert score["p95_smae"] == pytest.approx(4.775)
+    assert score["p90_srmse"] == pytest.approx(4.55)
+    assert score["p95_srmse"] == pytest.approx(4.775)
+    assert score["p90_smae_raw"] == pytest.approx(9.05)
+    assert score["p95_smae_raw"] == pytest.approx(9.525)
+    assert score["p90_srmse_raw"] == pytest.approx(9.05)
+    assert score["p95_srmse_raw"] == pytest.approx(9.525)
     assert score["smae_clipped_count"] == 1
     assert score["smae_clipped_rate"] == pytest.approx(0.5)
     assert score["srmse_clipped_count"] == 1
@@ -262,7 +337,7 @@ def test_frozen_report_leads_with_drcik_point_metrics():
     task = Task("t", (1.0, 2.0, 3.0), 1, "D", (2.0,))
     result = ForecastResult("t", (3.0,), ("a",), ("statistical",), "single")
     score = score_forecast_results((task,), (result,))
-    report = _report({
+    payload = {
         "task_count": 1,
         "screening_policy_sha256": "screen",
         "decision_policy_sha256": "decision",
@@ -270,19 +345,25 @@ def test_frozen_report_leads_with_drcik_point_metrics():
         "mutation_calls": 0,
         "rows": {"candidate": score},
         "paired_vs_A": {"candidate": {"wins": 0, "ties": 1, "losses": 0}},
-    })
+        **evolution_contracts.metric_report_metadata(),
+    }
+    report = _report(payload)
 
+    assert payload["primary_metrics"] == ["smae", "srmse"]
+    assert set(payload["diagnostic_only"]) >= {"mase", "mae", "smape", "rmsse"}
     assert "Mean sMAE" in report
+    assert "Median sMAE" in report
     assert "sMAE SE" in report
     assert "Mean sRMSE" in report
-    assert "P90/P95 sMAE" in report
+    assert "Median sRMSE" in report
+    assert "Raw P90/P95 sMAE/sRMSE" in report
     assert "Clipped sMAE/sRMSE" in report
 
 
-def test_paired_counts_compare_the_reported_smae_metric():
+def test_paired_counts_compare_the_joint_scaled_metric_pair():
     comparison = _paired_counts(
-        ({"task_id": "t", "mase": 0.1, "smae": 2.0},),
-        {"t": 1.0},
+        ({"task_id": "t", "smae": 0.5, "srmse": 2.5},),
+        {"t": (1.0, 1.0)},
     )
 
     assert comparison == {"wins": 0, "ties": 0, "losses": 1, "missing": 0}
