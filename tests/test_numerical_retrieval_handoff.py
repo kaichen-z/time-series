@@ -44,6 +44,7 @@ from numerical_agent.evolution.morphology import (
     MorphologyToolCall,
 )
 from numerical_agent.evolution.numerical_loop import run_numerical_loop
+from numerical_agent.evolution.numerical_handoff import safe_retrieval_projection
 from numerical_agent.evolution.numerical_selector import (
     CandidateDiagnostics,
     DecisionPolicy,
@@ -61,7 +62,11 @@ def _history() -> tuple[float, ...]:
     return tuple(float(value) for value in [1, 2, 3] * 28)
 
 
-def _context_task(*, horizon: int = 2) -> ContextTask:
+def _context_task(
+    *,
+    horizon: int = 2,
+    round2_relation: str = "challenge",
+) -> ContextTask:
     origin = date(2026, 1, 1)
     history_timestamps = tuple(
         (origin + timedelta(days=index)).isoformat() for index in range(len(_history()))
@@ -71,6 +76,25 @@ def _context_task(*, horizon: int = 2) -> ContextTask:
         for index in range(horizon)
     )
     start, end = future_timestamps[0], future_timestamps[-1]
+    if round2_relation == "challenge":
+        round2_content = (
+            f"Entity A sales three-step seasonal cycle will break and sales will "
+            f"decrease by 2 units from {start} through {end} because a scheduled "
+            "supply restriction begins."
+        )
+    elif round2_relation == "support":
+        round2_content = (
+            f"Entity A sales three-step seasonal cycle will persist and sales will "
+            f"decrease by 2 units from {start} through {end} because a scheduled "
+            "seasonal program begins."
+        )
+    elif round2_relation == "unrelated":
+        round2_content = (
+            f"Entity A sales will decrease by 2 units from {start} through {end} "
+            "because a scheduled supply restriction begins."
+        )
+    else:
+        raise ValueError("unknown round2 relation fixture")
     return ContextTask(
         numeric=ContextNumericTask(
             task_id="bridge_task",
@@ -97,8 +121,7 @@ def _context_task(*, horizon: int = 2) -> ContextTask:
             ),
             Document(
                 "doc_round2",
-                f"Entity A sales will decrease by 2 units from {start} through {end} "
-                "because a supply restriction begins.",
+                round2_content,
                 role="supporting",
                 subtype="counterevidence",
             ),
@@ -262,6 +285,30 @@ def _package_with_grounded_candidate(candidate_name: str):
         morphology_card=card,
         accepted_assumptions=card.assumptions,
         rejected_assumptions={},
+        component_fingerprints={
+            **dict(package.component_fingerprints),
+            "morphology_card": card.fingerprint,
+        },
+    )
+
+
+def _package_with_ambiguous_groundings():
+    """Map separate accepted assumptions to the default and challenger."""
+    package = _package()
+    base = _morphology_card("safe_anchor")
+    challenger = replace(
+        base.assumptions[0],
+        assumption_id="challenger_cycle",
+        candidate_names=("seasonal_specialist",),
+    )
+    card = replace(base, assumptions=(*base.assumptions, challenger))
+    accepted, rejected, handoff = safe_retrieval_projection(card.assumptions, {})
+    return replace(
+        package,
+        morphology_card=card,
+        accepted_assumptions=accepted,
+        rejected_assumptions=rejected,
+        retrieval_handoff=handoff,
         component_fingerprints={
             **dict(package.component_fingerprints),
             "morphology_card": card.fingerprint,
@@ -1966,7 +2013,9 @@ def test_targeted_support_or_safe_default_challenge_authorizes_override(
     stance: str,
 ) -> None:
     """The two explicitly allowed typed assumption relations remain usable."""
-    task = _context_task()
+    task = _context_task(
+        round2_relation="support" if stance == "supports" else "challenge"
+    )
     retrieval = TwoStageRetrievalAgent(
         FakeLLMClient(
             [
@@ -2005,6 +2054,379 @@ def test_targeted_support_or_safe_default_challenge_authorizes_override(
 
     assert result.final_decision.selected.candidate_id == "seasonal_specialist"
     assert result.fallback_reason is None
+
+
+def test_forged_typed_stance_with_semantically_unrelated_quote_cannot_override(
+    tmp_path,
+) -> None:
+    """A model-authored stance is not host proof of the quoted assumption relation."""
+    task = _context_task(round2_relation="unrelated")
+    forged = _chain(
+        task,
+        chain_id="forged_challenge",
+        document_id="doc_round2",
+        direction="down",
+        magnitude=2.0,
+        addressed=("assumption_001",),
+        stance="challenges",
+    )
+    forged["claim"] = "The three-step seasonal cycle will break."
+    retrieval = TwoStageRetrievalAgent(
+        FakeLLMClient(
+            [
+                _round(),
+                _round(forged),
+            ]
+        ),
+        replace(RetrievalGenome.seed(), second_round_trigger="always"),
+        RetrievalSkillLibrary(tmp_path / "retrieval_skills.json", persist=False),
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("safe_anchor"),
+                _decision("seasonal_specialist", cited=("doc_round2",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(task, _package(), retrieval, decision)
+
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert result.fallback_reason == "decision_override_not_assumption_authorized"
+
+
+@pytest.mark.parametrize(
+    "content_template",
+    [
+        (
+            "Entity A sales are not seasonal; sales will decrease by 2 units from "
+            "{start} through {end} because the scheduled promotion will continue."
+        ),
+        (
+            "Entity A sales seasonal cycle might persist while sales decrease by 2 "
+            "units from {start} through {end} because a scheduled program begins."
+        ),
+        (
+            "Entity A sales seasonal cycle will persist, but this claim is uncertain; "
+            "sales will decrease by 2 units from {start} through {end}."
+        ),
+        (
+            "Entity A sales seasonal cycle will persist. Entity A sales seasonal cycle "
+            "will break and sales will decrease by 2 units from {start} through {end}."
+        ),
+        (
+            "Entity A sales seasonal cycle won't persist and sales will decrease by 2 "
+            "units from {start} through {end}."
+        ),
+        (
+            "Entity A sales seasonal cycle shouldn't persist and sales will decrease by "
+            "2 units from {start} through {end}."
+        ),
+        (
+            "Entity A sales seasonal cycle couldn't persist and sales will decrease by "
+            "2 units from {start} through {end}."
+        ),
+    ],
+)
+def test_negated_uncertain_or_contrasted_quote_cannot_certify_support(
+    tmp_path,
+    content_template: str,
+) -> None:
+    """Closed host semantics reject bag-of-words support false positives."""
+    task = _context_task()
+    content = content_template.format(
+        start=task.future_timestamps[0],
+        end=task.future_timestamps[-1],
+    )
+    task = replace(
+        task,
+        documents=(task.documents[0], replace(task.documents[1], content=content)),
+    )
+    retrieval = TwoStageRetrievalAgent(
+        FakeLLMClient(
+            [
+                _round(),
+                _round(
+                    _chain(
+                        task,
+                        chain_id="false_positive_support",
+                        document_id="doc_round2",
+                        direction="down",
+                        magnitude=2.0,
+                        addressed=("assumption_001",),
+                        stance="supports",
+                    )
+                ),
+            ]
+        ),
+        replace(RetrievalGenome.seed(), second_round_trigger="always"),
+        RetrievalSkillLibrary(tmp_path / "retrieval_skills.json", persist=False),
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("safe_anchor"),
+                _decision("seasonal_specialist", cited=("doc_round2",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(
+        task,
+        _package_with_grounded_candidate("seasonal_specialist"),
+        retrieval,
+        decision,
+    )
+
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert result.fallback_reason == "decision_override_not_assumption_authorized"
+
+
+def test_subject_and_support_predicate_cannot_be_composed_across_quotes(tmp_path) -> None:
+    """Each exact citation must independently express the typed relation."""
+    task = _context_task()
+    start, end = task.future_timestamps
+    task = replace(
+        task,
+        documents=(
+            replace(task.documents[0], content="Entity A sales are seasonal."),
+            replace(
+                task.documents[1],
+                content=(
+                    f"Entity A sales will decrease by 2 units from {start} through {end} "
+                    "because the scheduled promotion will continue."
+                ),
+            ),
+        ),
+    )
+    chain = _chain(
+        task,
+        chain_id="cross_quote_support",
+        document_id="doc_round1",
+        direction="down",
+        magnitude=2.0,
+        addressed=("assumption_001",),
+        stance="supports",
+    )
+    chain["citations"].append(
+        {"document_id": "doc_round2", "exact_quote": task.documents[1].content}
+    )
+    retrieval = TwoStageRetrievalAgent(
+        FakeLLMClient([_round(), _round(chain)]),
+        replace(RetrievalGenome.seed(), second_round_trigger="always"),
+        RetrievalSkillLibrary(tmp_path / "retrieval_skills.json", persist=False),
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("safe_anchor"),
+                _decision(
+                    "seasonal_specialist",
+                    cited=("doc_round1", "doc_round2"),
+                ),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(
+        task,
+        _package_with_grounded_candidate("seasonal_specialist"),
+        retrieval,
+        decision,
+    )
+
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert result.fallback_reason == "decision_override_not_assumption_authorized"
+
+
+def test_relation_quote_cannot_borrow_entity_and_target_from_another_quote(
+    tmp_path,
+) -> None:
+    """The exact quote certifying polarity must carry its own host identity anchors."""
+    task = _context_task()
+    start, end = task.future_timestamps
+    task = replace(
+        task,
+        documents=(
+            replace(task.documents[0], content="A seasonal cycle will persist."),
+            replace(
+                task.documents[1],
+                content=(
+                    f"Entity A sales will decrease by 2 units from {start} through {end} "
+                    "because a scheduled program begins."
+                ),
+            ),
+        ),
+    )
+    chain = _chain(
+        task,
+        chain_id="split_identity_support",
+        document_id="doc_round1",
+        direction="down",
+        magnitude=2.0,
+        addressed=("assumption_001",),
+        stance="supports",
+    )
+    chain["citations"].append(
+        {"document_id": "doc_round2", "exact_quote": task.documents[1].content}
+    )
+    retrieval = TwoStageRetrievalAgent(
+        FakeLLMClient([_round(), _round(chain)]),
+        replace(RetrievalGenome.seed(), second_round_trigger="always"),
+        RetrievalSkillLibrary(tmp_path / "retrieval_skills.json", persist=False),
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("safe_anchor"),
+                _decision(
+                    "seasonal_specialist",
+                    cited=("doc_round1", "doc_round2"),
+                ),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(
+        task,
+        _package_with_grounded_candidate("seasonal_specialist"),
+        retrieval,
+        decision,
+    )
+
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert result.fallback_reason == "decision_override_not_assumption_authorized"
+
+
+def test_one_document_id_cannot_select_between_opposite_exact_quote_chains(
+    tmp_path,
+) -> None:
+    """Document IDs cannot authorize one of two chain identities sharing that source."""
+    task = _context_task()
+    challenge = _chain(
+        task,
+        chain_id="challenge_chain",
+        document_id="doc_round2",
+        direction="down",
+        magnitude=2.0,
+        addressed=("assumption_001",),
+        stance="challenges",
+    )
+    unresolved = {
+        **challenge,
+        "chain_id": "opposite_chain",
+        "claim": "A distinct opposite interpretation of the cited document.",
+        "stance": "supports",
+        "citations": [
+            {
+                "document_id": "doc_round2",
+                "exact_quote": "three-step seasonal cycle will break",
+            }
+        ],
+    }
+    retrieval = TwoStageRetrievalAgent(
+        FakeLLMClient([_round(), _round(challenge, unresolved)]),
+        replace(RetrievalGenome.seed(), second_round_trigger="always"),
+        RetrievalSkillLibrary(tmp_path / "retrieval_skills.json", persist=False),
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("safe_anchor"),
+                _decision("seasonal_specialist", cited=("doc_round2",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(task, _package(), retrieval, decision)
+
+    assert len(result.retrieval_card.chains) == 2
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert result.fallback_reason == "decision_override_not_assumption_authorized"
+
+
+def test_document_id_cannot_stand_in_for_two_required_exact_quotes(tmp_path) -> None:
+    """A document-only Decision citation cannot identify multiple same-source quotes."""
+    task = _context_task()
+    chain = _chain(
+        task,
+        chain_id="two_quote_chain",
+        document_id="doc_round2",
+        direction="down",
+        magnitude=2.0,
+        addressed=("assumption_001",),
+        stance="challenges",
+    )
+    chain["citations"].append(
+        {
+            "document_id": "doc_round2",
+            "exact_quote": "three-step seasonal cycle will break",
+        }
+    )
+    retrieval = TwoStageRetrievalAgent(
+        FakeLLMClient([_round(), _round(chain)]),
+        replace(RetrievalGenome.seed(), second_round_trigger="always"),
+        RetrievalSkillLibrary(tmp_path / "retrieval_skills.json", persist=False),
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("safe_anchor"),
+                _decision("seasonal_specialist", cited=("doc_round2",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(task, _package(), retrieval, decision)
+
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert result.fallback_reason == "decision_override_not_assumption_authorized"
+
+
+def test_chain_addressing_default_and_challenger_is_too_ambiguous_to_authorize(
+    tmp_path,
+) -> None:
+    """A relation spanning both sides cannot establish which candidate it favors."""
+    task = _context_task()
+    retrieval = TwoStageRetrievalAgent(
+        FakeLLMClient(
+            [
+                _round(),
+                _round(
+                    _chain(
+                        task,
+                        chain_id="ambiguous_targets",
+                        document_id="doc_round2",
+                        direction="down",
+                        magnitude=2.0,
+                        addressed=("assumption_001", "assumption_002"),
+                        stance="challenges",
+                    )
+                ),
+            ]
+        ),
+        replace(RetrievalGenome.seed(), second_round_trigger="always"),
+        RetrievalSkillLibrary(tmp_path / "retrieval_skills.json", persist=False),
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("safe_anchor"),
+                _decision("seasonal_specialist", cited=("doc_round2",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(
+        task,
+        _package_with_ambiguous_groundings(),
+        retrieval,
+        decision,
+    )
+
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert result.fallback_reason == "decision_override_not_assumption_authorized"
 
 
 def test_provisional_unauthorized_choice_can_still_request_targeted_round2(
@@ -2171,6 +2593,140 @@ def test_decision_execution_scope_is_frozen_before_round1_and_deeply_detached(
         initial_prompt.encode("utf-8")
     ).hexdigest()
     assert not initial_library_path.exists()
+    assert not late_library.path.exists()
+
+
+def test_frozen_decision_skill_snapshot_rejects_all_in_memory_mutators(tmp_path) -> None:
+    """persist=False is insufficient: the execution snapshot itself must be immutable."""
+    skill = DecisionSkill(
+        skill_id="frozen_skill",
+        name="frozen_skill",
+        description="A reviewed row.",
+        applicability="all tasks",
+        decision_rule="Keep the protected default.",
+        failure_condition="Not applicable.",
+        created_from_task="train_001",
+        validation_smae=0.2,
+        validation_srmse=0.3,
+    )
+    source = DecisionSkillLibrary(tmp_path / "skills.json", [skill], persist=True)
+
+    snapshot = DecisionSkillLibrary.frozen_execution_snapshot(source)
+
+    with pytest.raises(RuntimeError, match="read-only"):
+        snapshot.add(replace(skill, name="late_skill", skill_id="late_skill"))
+    with pytest.raises(RuntimeError, match="read-only"):
+        snapshot.record_use("frozen_skill", 0.1, 0.1)
+    with pytest.raises(RuntimeError, match="read-only"):
+        snapshot.save()
+    with pytest.raises(TypeError):
+        snapshot._skills["late_skill"] = skill  # type: ignore[index]
+    assert snapshot.all() == (skill,)
+    assert not source.path.exists()
+
+
+def test_frozen_decision_snapshot_rejects_hostile_nonprimitive_row_alias(tmp_path) -> None:
+    """A forged frozen dataclass field cannot retain a caller-controlled object alias."""
+
+    class SelfAliasingText:
+        def __deepcopy__(self, _memo):
+            return self
+
+        def __str__(self) -> str:
+            return "Caller-controlled pseudo-text."
+
+    skill = DecisionSkill(
+        skill_id="hostile_skill",
+        name="hostile_skill",
+        description="Initially canonical.",
+        applicability="all tasks",
+        decision_rule="Keep the protected default.",
+        failure_condition="Not applicable.",
+        created_from_task="train_001",
+        validation_smae=0.2,
+        validation_srmse=0.3,
+    )
+    object.__setattr__(skill, "description", SelfAliasingText())
+    source = DecisionSkillLibrary(tmp_path / "hostile.json", [skill], persist=True)
+
+    with pytest.raises(TypeError, match="description"):
+        DecisionSkillLibrary.frozen_execution_snapshot(source)
+
+    assert not source.path.exists()
+
+
+def test_round1_callback_cannot_drift_frozen_decision_scope(tmp_path) -> None:
+    """Decision authority is detached before even the assumption-blind Retrieval call."""
+    initial_prompt = "Decision authority frozen before Round 1."
+    initial_skill = DecisionSkill(
+        skill_id="initial_skill",
+        name="initial_skill",
+        description="Original Decision skill.",
+        applicability="all tasks",
+        decision_rule="Preserve the safe candidate.",
+        failure_condition="Not applicable.",
+        created_from_task="train_001",
+        validation_smae=0.2,
+        validation_srmse=0.3,
+    )
+    original_decision_llm = FakeLLMClient(
+        [_decision("safe_anchor"), _decision("safe_anchor")]
+    )
+    late_decision_llm = FakeLLMClient(
+        [_decision("seasonal_specialist", cited=("doc_round2",))]
+    )
+    decision = DecisionAgent(
+        original_decision_llm,
+        DecisionSkillLibrary(
+            tmp_path / "initial.json",
+            [initial_skill],
+            persist=True,
+        ),
+        prompt=initial_prompt,
+    )
+    late_library = DecisionSkillLibrary(
+        tmp_path / "late.json",
+        [replace(initial_skill, skill_id="late_skill", name="late_skill")],
+        persist=True,
+    )
+    retrieval_llm = _MutatingFakeLLM([_round()])
+    retrieval = TwoStageRetrievalAgent(
+        retrieval_llm,
+        RetrievalGenome.seed(),
+        RetrievalSkillLibrary(tmp_path / "retrieval.json", persist=False),
+    )
+
+    def mutate_during_round1() -> None:
+        decision.prompt = "Caller-controlled prompt after Round 1."
+        decision.library = late_library
+        decision.llm = late_decision_llm
+        object.__setattr__(initial_skill, "description", "Mutated captured row.")
+
+    retrieval_llm.mutation = mutate_during_round1
+
+    result = run_numerical_two_stage(
+        _context_task(),
+        _package(),
+        retrieval,
+        decision,
+    )
+
+    assert decision.prompt == "Caller-controlled prompt after Round 1."
+    assert decision.library is late_library
+    assert decision.llm is late_decision_llm
+    assert [call["system"] for call in original_decision_llm.calls] == [
+        initial_prompt,
+        initial_prompt,
+    ]
+    assert late_decision_llm.calls == []
+    for call in original_decision_llm.calls:
+        payload = json.loads(call["messages"][0]["content"])
+        assert "Original Decision skill." in payload["validated_decision_skills"]
+        assert "late_skill" not in payload["validated_decision_skills"]
+        assert "Mutated captured row" not in payload["validated_decision_skills"]
+    assert result.fingerprints["decision_prompt"] == hashlib.sha256(
+        initial_prompt.encode("utf-8")
+    ).hexdigest()
     assert not late_library.path.exists()
 
 

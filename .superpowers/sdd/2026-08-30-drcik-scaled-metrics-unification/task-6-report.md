@@ -212,3 +212,46 @@ first failed 8 of 10 cases; the separate provisional-gap contract also failed be
 boundary was added. After implementation, all 44 bridge tests and 148 affected
 bridge/Retrieval/Decision tests passed. The final full-suite and independent-review evidence are
 recorded with the scoped fix commit.
+
+### Final-review bridge hardening
+
+Independent review of the first bridge fix found that it still trusted model-authored `stance`
+and flattened document IDs too far. A second strict RED/GREEN wave closed those gaps:
+
+- typed support/challenge is now certified by a closed host grammar from one verified exact quote
+  and the host-owned assumption kind. The same quote must contain the verifier-certified entity
+  and target plus a nearby subject-before-predicate relation. Negation, uncertainty, contrast,
+  questions, cross-quote composition, opposite predicates anywhere in the quote, and the
+  verifier's complete normalized contraction set fail closed; model-authored chain prose or
+  stance cannot manufacture the semantic relation;
+- a Decision document citation must identify one complete, unambiguous exact chain. Reused
+  document IDs across chains, multiple same-document quotes, duplicate chain identities,
+  unresolved contradictions, and partial chain citations fail closed;
+- an addressed-assumption set that targets both the challenger and protected default cannot
+  authorize either polarity;
+- Decision Skill rows require primitive immutable text, finite primitive metrics, and a
+  non-negative integer use count. Execution rehydrates them from a revalidated primitive payload
+  into a deep detached, non-persistent read-only snapshot whose `add`, `record_use`, and `save`
+  mutators raise and whose internal mapping cannot be changed;
+- the drift probe now mutates the caller prompt, library, and captured row during Round 1, before
+  the first Decision call, while both Decision calls and their fingerprints remain bound to the
+  pre-Round-1 executor.
+
+Successive exact RED repros covered forged semantic stance; shared-document/opposite chains;
+multiple exact quotes hidden behind one document ID; ambiguous assumption targets; mutable frozen
+Skill storage; hostile self-aliasing Skill fields; negated, uncertain, contrasted, contradictory,
+and contracted relation language; cross-quote subject/predicate composition; and an identity-blind
+relation quote borrowing entity/target anchors from another citation. Both allowed positive paths
+remain covered: support for an assumption naming the selected candidate and challenge to an
+assumption naming the protected default.
+
+Final verification after all hardening changes:
+
+- bridge tests: `60 passed`;
+- affected bridge/Retrieval/Decision/library tests: `206 passed`;
+- complete repository suite: `2405 passed, 1 skipped in 64.08s`;
+- `python -m compileall -q evolving_loop tests/test_numerical_retrieval_handoff.py` passed;
+- `git diff --check` passed;
+- final independent re-review: no Critical, Important, or Minor findings; `Ready: Yes`.
+
+No run artifact was created, changed, or staged.

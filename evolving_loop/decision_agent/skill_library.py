@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import math
 import os
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,65 @@ class DecisionSkill:
     avg_srmse: float | None = None
     avg_score: float | None = None
 
+    def __post_init__(self) -> None:
+        for field_name in (
+            "skill_id",
+            "name",
+            "description",
+            "applicability",
+            "decision_rule",
+            "failure_condition",
+            "created_from_task",
+        ):
+            value = getattr(self, field_name)
+            if type(value) is not str:
+                raise TypeError(f"Decision Skill {field_name} must be primitive text")
+            if not value.strip():
+                raise ValueError(f"Decision Skill {field_name} must be non-empty")
+        if type(self.uses) is not int:
+            raise TypeError("Decision Skill uses must be an integer")
+        if self.uses < 0:
+            raise ValueError("Decision Skill uses must be non-negative")
+        for field_name in (
+            "validation_smae",
+            "validation_srmse",
+            "validation_score",
+            "avg_smae",
+            "avg_srmse",
+            "avg_score",
+        ):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            if type(value) not in {int, float}:
+                raise TypeError(
+                    f"Decision Skill {field_name} must be a primitive finite number"
+                )
+            numeric = float(value)
+            if not math.isfinite(numeric):
+                raise ValueError(f"Decision Skill {field_name} must be finite")
+            object.__setattr__(self, field_name, numeric)
+
+    def to_payload(self) -> dict[str, object]:
+        """Return a primitive-only payload after revalidating the current frozen row."""
+        self.__post_init__()
+        return {
+            "skill_id": self.skill_id,
+            "name": self.name,
+            "description": self.description,
+            "applicability": self.applicability,
+            "decision_rule": self.decision_rule,
+            "failure_condition": self.failure_condition,
+            "created_from_task": self.created_from_task,
+            "validation_smae": self.validation_smae,
+            "validation_srmse": self.validation_srmse,
+            "validation_score": self.validation_score,
+            "uses": self.uses,
+            "avg_smae": self.avg_smae,
+            "avg_srmse": self.avg_srmse,
+            "avg_score": self.avg_score,
+        }
+
 
 class DecisionSkillLibrary:
     def __init__(
@@ -38,6 +99,7 @@ class DecisionSkillLibrary:
         self.path = Path(path)
         self.persist = persist
         self._skills = {skill.name: skill for skill in (skills or [])}
+        self._read_only = False
 
     @classmethod
     def load(cls, path: str | Path) -> "DecisionSkillLibrary":
@@ -47,16 +109,18 @@ class DecisionSkillLibrary:
         return cls(source, [DecisionSkill(**record) for record in json.loads(source.read_text())])
 
     def save(self) -> None:
+        self._require_writable()
         if not self.persist:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
         temporary.write_text(
-            json.dumps([asdict(skill) for skill in self._skills.values()], indent=2)
+            json.dumps([skill.to_payload() for skill in self._skills.values()], indent=2)
         )
         os.replace(temporary, self.path)
 
     def add(self, skill: DecisionSkill) -> None:
+        self._require_writable()
         existing = self._skills.get(skill.name)
         if (
             existing is not None
@@ -117,6 +181,7 @@ class DecisionSkillLibrary:
         )
 
     def record_use(self, name: str, smae: float, srmse: float) -> None:
+        self._require_writable()
         skill = self._skills.get(name)
         if skill is None:
             return
@@ -130,6 +195,31 @@ class DecisionSkillLibrary:
 
     def clone(self, *, persist: bool = False) -> "DecisionSkillLibrary":
         return DecisionSkillLibrary(self.path, list(self._skills.values()), persist=persist)
+
+    @classmethod
+    def frozen_execution_snapshot(
+        cls,
+        source: "DecisionSkillLibrary",
+    ) -> "DecisionSkillLibrary":
+        """Return a deep, non-persistent snapshot whose mutators fail closed."""
+        if type(source) is not cls:
+            raise TypeError("Decision Skill library must be canonical")
+        source_rows = source.all()
+        if any(type(item) is not DecisionSkill for item in source_rows):
+            raise TypeError("Decision Skill rows must be canonical")
+        rows = tuple(DecisionSkill(**item.to_payload()) for item in source_rows)
+        snapshot = cls(source.path, list(rows), persist=False)
+        snapshot._skills = MappingProxyType(dict(snapshot._skills))
+        snapshot._read_only = True
+        return snapshot
+
+    def _require_writable(self) -> None:
+        if self._read_only:
+            raise RuntimeError("frozen Decision Skill snapshot is read-only")
+
+    @property
+    def read_only(self) -> bool:
+        return self._read_only
 
     def __len__(self) -> int:
         return len(self._skills)

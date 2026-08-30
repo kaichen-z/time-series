@@ -30,6 +30,7 @@ from evolving_loop.decision_agent.skill_library import (
 from evolving_loop.retrieval_agent.agent import RetrievalResult
 from evolving_loop.retrieval_agent.policy import RetrievalGenome
 from evolving_loop.retrieval_agent.schemas import (
+    EvidenceChain,
     FinalRetrievalCard,
     RetrievalAssumption,
     RetrievalContractError,
@@ -47,6 +48,7 @@ from evolving_loop.retrieval_agent.two_stage_agent import (
     _select_documents,
 )
 from evolving_loop.retrieval_agent.verifier import (
+    _normalize_semantics,
     merge_verified_rounds,
     verify_round_result,
 )
@@ -378,16 +380,15 @@ def _frozen_decision_executor(decision: DecisionAgent) -> DecisionAgent:
         source_rows = DecisionSkillLibrary.all(library)
         if any(type(item) is not DecisionSkill for item in source_rows):
             raise TypeError("Decision Skill rows must be canonical")
-        frozen_rows = tuple(DecisionSkill(**asdict(item)) for item in source_rows)
-        frozen_library = DecisionSkillLibrary(
-            library.path,
-            list(frozen_rows),
-            persist=False,
+        frozen_rows = tuple(DecisionSkill(**item.to_payload()) for item in source_rows)
+        frozen_library = DecisionSkillLibrary.frozen_execution_snapshot(
+            library,
         )
         if (
             type(frozen_library) is not DecisionSkillLibrary
             or frozen_library.persist is not False
             or DecisionSkillLibrary.all(frozen_library) != frozen_rows
+            or not frozen_library.read_only
         ):
             raise ValueError("Decision Skill snapshot drifted during preflight")
     return DecisionAgent(llm, frozen_library, prompt=prompt)
@@ -851,6 +852,7 @@ def _validate_decision_result(
         host_default_id=host_default.candidate_id,
         cited_document_ids=citations,
         retrieval_card=retrieval_card,
+        assumptions=assumptions,
         assumption_targets=assumption_targets,
     ):
         reason = "decision_override_not_assumption_authorized"
@@ -903,35 +905,306 @@ def _typed_override_authorized(
     host_default_id: str,
     cited_document_ids: tuple[str, ...],
     retrieval_card: FinalRetrievalCard,
+    assumptions: tuple[RetrievalAssumption, ...],
     assumption_targets: Mapping[str, frozenset[str]],
 ) -> bool:
-    """Authorize an override only through one complete, polarity-correct chain."""
+    """Authorize an override only through one exact host-certified typed chain."""
     cited = frozenset(cited_document_ids)
     support_stances = frozenset({"support", "supports"})
     challenge_stances = frozenset({"challenge", "challenges"})
+    assumptions_by_id = {item.assumption_id: item for item in assumptions}
     for chain in retrieval_card.chains:
-        chain_documents = frozenset(
-            citation.document_id for citation in chain.citations
-        )
         if (
             not chain.entity_match
             or not chain.target_match
             or chain.missing_links
-            or not chain_documents
-            or not chain_documents.issubset(cited)
             or not chain.addressed_assumption_ids
+            or not _decision_cites_one_exact_chain(
+                chain=chain,
+                retrieval_card=retrieval_card,
+                cited_document_ids=cited,
+            )
         ):
             continue
-        targets = frozenset(
-            candidate_name
+        addressed = tuple(
+            assumptions_by_id.get(assumption_id)
             for assumption_id in chain.addressed_assumption_ids
-            for candidate_name in assumption_targets.get(assumption_id, frozenset())
         )
-        if chain.stance in support_stances and selected_candidate_id in targets:
+        if any(item is None for item in addressed):
+            continue
+        target_sets = tuple(
+            assumption_targets.get(assumption_id, frozenset())
+            for assumption_id in chain.addressed_assumption_ids
+        )
+        targets_selected = any(
+            selected_candidate_id in names for names in target_sets
+        )
+        targets_default = any(host_default_id in names for names in target_sets)
+        if targets_selected and targets_default:
+            continue
+        if chain.stance in support_stances and (
+            targets_selected
+            and not targets_default
+            and all(
+                _exact_quotes_certify_relation(chain, item, "support")
+                for item in addressed
+                if item is not None
+            )
+        ):
             return True
-        if chain.stance in challenge_stances and host_default_id in targets:
+        if chain.stance in challenge_stances and (
+            targets_default
+            and not targets_selected
+            and all(
+                _exact_quotes_certify_relation(chain, item, "challenge")
+                for item in addressed
+                if item is not None
+            )
+        ):
             return True
     return False
+
+
+def _decision_cites_one_exact_chain(
+    *,
+    chain: EvidenceChain,
+    retrieval_card: FinalRetrievalCard,
+    cited_document_ids: frozenset[str],
+) -> bool:
+    """Fail closed when document-only citations cannot identify one exact chain."""
+    if (
+        "duplicate_chain_identity" in retrieval_card.rejected
+        or retrieval_card.unresolved_contradictions
+    ):
+        return False
+    citations = chain.citations
+    chain_documents = tuple(item.document_id for item in citations)
+    if (
+        not chain_documents
+        or len(chain_documents) != len(set(chain_documents))
+        or frozenset(chain_documents) != cited_document_ids
+    ):
+        return False
+    for other in retrieval_card.chains:
+        if other.chain_id == chain.chain_id:
+            continue
+        if any(
+            citation.document_id in cited_document_ids
+            for citation in other.citations
+        ):
+            return False
+    return True
+
+
+_RELATION_LEXICON: Mapping[
+    str,
+    tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]],
+] = MappingProxyType(
+    {
+        "seasonality": (
+            ("seasonal", "seasonality", "cycle", "periodic", "periodicity"),
+            ("persist", "continue", "repeat", "remain", "recur"),
+            ("break", "weaken", "phase shift", "change phase", "disappear", "end"),
+        ),
+        "periodicity": (
+            ("seasonal", "seasonality", "cycle", "periodic", "periodicity"),
+            ("persist", "continue", "repeat", "remain", "recur"),
+            ("break", "weaken", "phase shift", "change phase", "disappear", "end"),
+        ),
+        "trend_persistence": (
+            ("trend", "direction", "slope", "growth", "decline"),
+            ("persist", "continue", "remain", "sustain"),
+            ("flatten", "reverse", "reversal", "end", "break", "weaken"),
+        ),
+        "trend_reversal": (
+            ("trend", "direction", "slope", "growth", "decline"),
+            ("reverse", "reversal", "turn", "change direction"),
+            ("persist", "continue", "remain", "sustain"),
+        ),
+        "level_persistence": (
+            ("level", "baseline", "plateau"),
+            ("persist", "remain", "stable", "unchanged", "hold"),
+            ("shift", "change", "jump", "drop", "rise", "break"),
+        ),
+        "regime_persistence": (
+            ("regime", "state", "phase"),
+            ("persist", "remain", "continue", "hold"),
+            ("end", "change", "shift", "revert", "break"),
+        ),
+        "regime_change": (
+            ("regime", "state", "phase"),
+            ("change", "shift", "new regime", "break"),
+            ("persist", "remain", "continue", "hold"),
+        ),
+        "anomaly_reversion": (
+            ("anomaly", "deviation", "outlier", "irregular"),
+            ("revert", "normalize", "return", "temporary"),
+            ("persist", "continue", "new regime", "remain"),
+        ),
+        "history_defect": (
+            ("error", "defect", "measurement", "sensor", "software"),
+            ("confirmed", "verified", "corrupt", "incorrect"),
+            ("accurate", "valid", "correct", "real movement"),
+        ),
+        "future_event": (
+            ("event", "promotion", "restriction", "outage", "launch"),
+            ("scheduled", "will begin", "will occur", "confirmed"),
+            ("cancel", "withdraw", "will not occur", "ended"),
+        ),
+        "other": (
+            ("intermittent", "arrival", "sparse", "dense"),
+            ("persist", "remain", "continue"),
+            ("denser", "sparser", "change", "end"),
+        ),
+    }
+)
+
+
+def _exact_quotes_certify_relation(
+    chain: EvidenceChain,
+    assumption: RetrievalAssumption,
+    relation: str,
+) -> bool:
+    """Certify typed polarity from verified exact quotes, never model-authored prose."""
+    lexicon = _RELATION_LEXICON.get(assumption.kind)
+    if lexicon is None or relation not in {"support", "challenge"}:
+        return False
+    subject_terms, support_terms, challenge_terms = lexicon
+    relation_terms, opposite_terms = (
+        (support_terms, challenge_terms)
+        if relation == "support"
+        else (challenge_terms, support_terms)
+    )
+    canonical_entity = chain.canonical_entity.strip()
+    canonical_target = chain.canonical_target.strip()
+    if not canonical_entity or not canonical_target:
+        return False
+    return any(
+        _quote_contains_host_identity(
+            citation.exact_quote,
+            canonical_entity=canonical_entity,
+            canonical_target=canonical_target,
+        )
+        and _one_exact_quote_certifies_relation(
+            citation.exact_quote,
+            subject_terms=subject_terms,
+            relation_terms=relation_terms,
+            opposite_terms=opposite_terms,
+        )
+        for citation in chain.citations
+    )
+
+
+_RELATION_UNCERTAINTY = frozenset(
+    {
+        "allegedly",
+        "could",
+        "inconclusive",
+        "if",
+        "may",
+        "might",
+        "perhaps",
+        "possible",
+        "possibly",
+        "uncertain",
+        "unlikely",
+        "whether",
+        "would",
+    }
+)
+_RELATION_NEGATION = frozenset(
+    {
+        "cannot",
+        "can't",
+        "denied",
+        "denies",
+        "didn't",
+        "disputed",
+        "disputes",
+        "doesn't",
+        "isn't",
+        "never",
+        "no",
+        "not",
+        "refuted",
+        "refutes",
+        "without",
+        "won't",
+    }
+)
+_RELATION_CONTRAST = re.compile(
+    r"(?<![\w])(?:although|but|despite|however|whereas|while|yet)(?![\w])"
+)
+_RELATION_CLAUSE_BREAK = re.compile(r"[.;:!?\n]+")
+_RELATION_WORD = re.compile(r"[a-z0-9]+(?:'[a-z]+)?")
+_MAX_RELATION_GAP_WORDS = 10
+
+
+def _one_exact_quote_certifies_relation(
+    quote: str,
+    *,
+    subject_terms: tuple[str, ...],
+    relation_terms: tuple[str, ...],
+    opposite_terms: tuple[str, ...],
+) -> bool:
+    """Apply a conservative subject-before-predicate grammar to one exact quote."""
+    normalized = _normalize_semantics(quote)
+    if "?" in normalized or _RELATION_CONTRAST.search(normalized):
+        return False
+    all_tokens = tuple(_RELATION_WORD.findall(normalized))
+    if (
+        set(all_tokens) & (_RELATION_UNCERTAINTY | _RELATION_NEGATION)
+        or _phrase_positions(all_tokens, opposite_terms)
+    ):
+        return False
+    for raw_clause in _RELATION_CLAUSE_BREAK.split(normalized):
+        tokens = tuple(_RELATION_WORD.findall(raw_clause))
+        if not tokens or (
+            set(tokens) & (_RELATION_UNCERTAINTY | _RELATION_NEGATION)
+        ):
+            continue
+        subject_positions = _phrase_positions(tokens, subject_terms)
+        relation_positions = _phrase_positions(tokens, relation_terms)
+        if not subject_positions or not relation_positions:
+            continue
+        if _phrase_positions(tokens, opposite_terms):
+            continue
+        if any(
+            0 <= relation_start - subject_end <= _MAX_RELATION_GAP_WORDS
+            for _subject_start, subject_end in subject_positions
+            for relation_start, _relation_end in relation_positions
+        ):
+            return True
+    return False
+
+
+def _quote_contains_host_identity(
+    quote: str,
+    *,
+    canonical_entity: str,
+    canonical_target: str,
+) -> bool:
+    tokens = tuple(_RELATION_WORD.findall(quote.casefold()))
+    return bool(
+        _phrase_positions(tokens, (canonical_entity,))
+        and _phrase_positions(tokens, (canonical_target,))
+    )
+
+
+def _phrase_positions(
+    tokens: tuple[str, ...],
+    phrases: tuple[str, ...],
+) -> tuple[tuple[int, int], ...]:
+    positions: list[tuple[int, int]] = []
+    for phrase in phrases:
+        phrase_tokens = tuple(_RELATION_WORD.findall(phrase.casefold()))
+        if not phrase_tokens:
+            continue
+        width = len(phrase_tokens)
+        for start in range(0, len(tokens) - width + 1):
+            if tokens[start : start + width] == phrase_tokens:
+                positions.append((start, start + width))
+    return tuple(positions)
 
 
 def _fallback_decision(default: DecisionCandidate, reason: str) -> DecisionResult:
