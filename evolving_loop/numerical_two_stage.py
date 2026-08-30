@@ -24,6 +24,7 @@ from evolving_loop.decision_agent.agent import (
     DecisionResult,
 )
 from evolving_loop.retrieval_agent.agent import RetrievalResult
+from evolving_loop.retrieval_agent.policy import RetrievalGenome
 from evolving_loop.retrieval_agent.schemas import (
     FinalRetrievalCard,
     RetrievalAssumption,
@@ -33,6 +34,7 @@ from evolving_loop.retrieval_agent.schemas import (
     build_round1_payload,
     build_round2_payload,
 )
+from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
 from evolving_loop.retrieval_agent.two_stage_agent import (
     TwoStageRetrievalAgent,
     _select_documents,
@@ -165,6 +167,7 @@ def run_numerical_two_stage(
     """Run fixed two-stage Retrieval and Decision over one frozen Numerical package."""
     _validate_inputs(task, numerical, retrieval, decision)
     retrieval_task = _sanitized_context_task(task)
+    execution_retrieval = _frozen_retrieval_executor(retrieval)
     candidates = _decision_candidates(numerical)
     host_default = _safe_default(numerical, candidates)
 
@@ -172,13 +175,13 @@ def run_numerical_two_stage(
     execution_fingerprints = _execution_fingerprints(
         retrieval_task,
         numerical,
-        retrieval,
+        execution_retrieval,
         decision,
         candidates,
     )
     fallback_reason = handoff_failure
 
-    round1 = _run_round1(retrieval, retrieval_task)
+    round1 = _run_round1(execution_retrieval, retrieval_task)
     if _fatal_round_failure(round1, "round1"):
         round1 = replace(round1, chains=(), counterevidence=())
         fallback_reason = fallback_reason or "invalid_round1_response"
@@ -203,7 +206,7 @@ def run_numerical_two_stage(
         fallback_reason is None
         and assumptions
         and _should_run_round2(
-            retrieval.genome.second_round_trigger,
+            execution_retrieval.genome.second_round_trigger,
             round1,
             provisional,
         )
@@ -212,7 +215,7 @@ def run_numerical_two_stage(
         # TwoStageRetrievalAgent propagates TransientLLMError and converts all other
         # completion/contract failures into a typed, auditable stage result.
         round2 = _run_round2(
-            retrieval,
+            execution_retrieval,
             retrieval_task,
             round1,
             sent_gaps,
@@ -226,7 +229,7 @@ def run_numerical_two_stage(
             binding_kind = (
                 "gap"
                 if sent_gaps
-                or retrieval.genome.second_round_trigger == "on_named_gap"
+                or execution_retrieval.genome.second_round_trigger == "on_named_gap"
                 else "assumption"
             )
             round2 = _bind_round2_to_scope(
@@ -316,6 +319,33 @@ def _sanitized_context_task(task: ContextTask) -> ContextTask:
         gt_evidence=(),
         labels_public=False,
     )
+
+
+def _frozen_retrieval_executor(
+    retrieval: TwoStageRetrievalAgent,
+) -> TwoStageRetrievalAgent:
+    """Freeze the complete Retrieval execution scope before replaceable calls."""
+    caller_genome_fingerprint = retrieval.genome.fingerprint()
+    if not isinstance(caller_genome_fingerprint, str) or not _SHA256.fullmatch(
+        caller_genome_fingerprint
+    ):
+        raise ValueError("Retrieval Genome fingerprint is not canonical")
+    genome = RetrievalGenome.from_payload(
+        RetrievalGenome.to_payload(retrieval.genome)
+    )
+    if genome.fingerprint() != caller_genome_fingerprint:
+        raise ValueError("Retrieval Genome fingerprint does not match its payload")
+    if type(retrieval.skills) is not RetrievalSkillLibrary:
+        raise TypeError("Retrieval Skill library must be canonical")
+    skill_snapshot = RetrievalSkillLibrary.all(retrieval.skills)
+    skills = RetrievalSkillLibrary.frozen_execution_snapshot(
+        retrieval.skills,
+    )
+    if type(skills) is not RetrievalSkillLibrary or (
+        RetrievalSkillLibrary.all(skills) != skill_snapshot
+    ):
+        raise ValueError("Retrieval Skill snapshot drifted during preflight")
+    return TwoStageRetrievalAgent(retrieval.llm, genome, skills)
 
 
 def _validate_inputs(

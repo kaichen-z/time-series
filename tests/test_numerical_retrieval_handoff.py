@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import FrozenInstanceError, replace
 from datetime import date, timedelta
@@ -25,7 +26,10 @@ from evolving_loop.retrieval_agent.schemas import (
     RetrievalGap,
     RetrievalRoundResult,
 )
-from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
+from evolving_loop.retrieval_agent.skill_library import (
+    RetrievalSkill,
+    RetrievalSkillLibrary,
+)
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 from numerical_agent.evolution.execution import Task
 from numerical_agent.evolution.morphology import (
@@ -292,6 +296,21 @@ def _retrieval(responses: list[str], tmp_path) -> TwoStageRetrievalAgent:
     )
 
 
+class _MutatingFakeLLM(FakeLLMClient):
+    def __init__(self, responses: list[str]) -> None:
+        super().__init__(responses)
+        self.mutation = lambda: None
+
+    def complete(self, *, system, messages, temperature=0.0):
+        response = super().complete(
+            system=system,
+            messages=messages,
+            temperature=temperature,
+        )
+        self.mutation()
+        return response
+
+
 def test_package_native_two_stage_e2e_is_blind_bounded_and_materialized(tmp_path) -> None:
     task = _context_task()
     package = _package()
@@ -399,9 +418,26 @@ def test_package_native_two_stage_e2e_is_blind_bounded_and_materialized(tmp_path
         result.forecast = (0.0, 0.0)  # type: ignore[misc]
 
 
-def test_both_retrieval_rounds_receive_only_host_sanitized_context(tmp_path) -> None:
+def test_both_retrieval_rounds_receive_only_host_sanitized_context(
+    tmp_path,
+    monkeypatch,
+) -> None:
     task = _context_task()
     package = _package()
+    host_received_tasks: list[ContextTask] = []
+    original_round1 = TwoStageRetrievalAgent.run_round1
+    original_round2 = TwoStageRetrievalAgent.run_round2
+
+    def record_host_round1(self, current_task):
+        host_received_tasks.append(current_task)
+        return original_round1(self, current_task)
+
+    def record_host_round2(self, current_task, *args, **kwargs):
+        host_received_tasks.append(current_task)
+        return original_round2(self, current_task, *args, **kwargs)
+
+    monkeypatch.setattr(TwoStageRetrievalAgent, "run_round1", record_host_round1)
+    monkeypatch.setattr(TwoStageRetrievalAgent, "run_round2", record_host_round2)
 
     class RecordingRetrievalAgent(TwoStageRetrievalAgent):
         def __init__(self, *args, **kwargs):
@@ -454,8 +490,9 @@ def test_both_retrieval_rounds_receive_only_host_sanitized_context(tmp_path) -> 
 
     result = run_numerical_two_stage(task, package, retrieval, decision)
 
-    assert len(retrieval.received_tasks) == 2
-    for received in retrieval.received_tasks:
+    assert retrieval.received_tasks == []
+    assert len(host_received_tasks) == 2
+    for received in host_received_tasks:
         assert received.numeric.history_values == task.numeric.history_values
         assert received.numeric.frequency == task.numeric.frequency
         assert received.numeric.prediction_length == task.numeric.prediction_length
@@ -494,6 +531,260 @@ def test_both_retrieval_rounds_receive_only_host_sanitized_context(tmp_path) -> 
     assert result.fingerprints["context_projection"] == variant.fingerprints[
         "context_projection"
     ]
+
+
+def test_retrieval_genome_is_frozen_before_replaceable_round_calls(tmp_path) -> None:
+    task = replace(
+        _context_task(),
+        target_description="Scheduled promotion increase in daily sales",
+    )
+    package = _package()
+    initial_genome = replace(
+        RetrievalGenome.seed(),
+        second_round_trigger="never",
+        max_selected_documents=1,
+        max_evidence_chains=1,
+        max_citations_per_chain=1,
+    )
+    raw_chain = _chain(
+        task,
+        chain_id="outside_original_budget",
+        document_id="doc_round2",
+        direction="down",
+        magnitude=2.0,
+    )
+    forged = EvidenceChain.from_payload(raw_chain)
+    llm = _MutatingFakeLLM([_round(raw_chain)])
+
+    class MutatingRetrievalAgent(TwoStageRetrievalAgent):
+        def run_round1(self, _task):
+            self.llm.complete(system="mutation", messages=[])
+            return RetrievalRoundResult((forged,), (), (), True)
+
+    retrieval = MutatingRetrievalAgent(
+        llm,
+        initial_genome,
+        RetrievalSkillLibrary(tmp_path / "skills.json", persist=False),
+    )
+    widened_genome = replace(
+        initial_genome,
+        max_selected_documents=2,
+        max_evidence_chains=4,
+        max_citations_per_chain=4,
+    )
+    llm.mutation = lambda: setattr(retrieval, "genome", widened_genome)
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("seasonal_specialist", cited=("doc_round2",)),
+                _decision("seasonal_specialist", cited=("doc_round2",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(task, package, retrieval, decision)
+
+    assert retrieval.genome == widened_genome
+    assert result.fingerprints["retrieval_genome"] == initial_genome.fingerprint()
+    assert "doc_round2" not in result.retrieval.selected_document_ids
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+
+
+def test_retrieval_skills_are_frozen_before_replaceable_round_calls(tmp_path) -> None:
+    task = _context_task()
+    package = _package()
+    raw_chain = _chain(
+        task,
+        chain_id="late_skill_chain",
+        document_id="doc_round1",
+        direction="up",
+        magnitude=5.0,
+    )
+    raw_chain["used_skill_ids"] = ["late_skill"]
+    forged = EvidenceChain.from_payload(raw_chain)
+    late_skill = RetrievalSkill._from_storage_payload(
+        {
+            "skill_id": "late_skill",
+            "version": 1,
+            "parent_version": None,
+            "stage": "round1",
+            "status": "accepted",
+            "name": "Late skill",
+            "description": "A skill introduced after execution scope was frozen.",
+            "applicability": {
+                "assumption_kinds": [],
+                "gap_types": [],
+                "temporal_relations": [],
+            },
+            "query_steps": ["Search for exact forecast-window evidence."],
+            "required_chain_fields": ["entity", "target"],
+            "counterevidence_rule": "Search for cancellation.",
+            "failure_conditions": ["No exact evidence exists."],
+            "validated_task_ids": ["train_1"],
+            "validated_entities": ["Entity A"],
+            "validation_smae_gain": 0.1,
+            "validation_srmse_gain": 0.1,
+            "merged_from_skill_ids": [],
+            "quarantine_reason": None,
+        }
+    )
+
+    class LateSkillLibrary(RetrievalSkillLibrary):
+        def all(self):
+            return (late_skill,)
+
+        def for_stage(self, *_args, **_kwargs):
+            return (late_skill,)
+
+    llm = _MutatingFakeLLM([_round(raw_chain)])
+
+    class MutatingRetrievalAgent(TwoStageRetrievalAgent):
+        def run_round1(self, _task):
+            self.llm.complete(system="mutation", messages=[])
+            return RetrievalRoundResult((forged,), (), (), True)
+
+    initial_library = RetrievalSkillLibrary(
+        tmp_path / "initial_skills.json",
+        persist=False,
+    )
+    retrieval = MutatingRetrievalAgent(
+        llm,
+        replace(
+            RetrievalGenome.seed(),
+            second_round_trigger="never",
+            active_skill_ids=("late_skill",),
+        ),
+        initial_library,
+    )
+    late_library = LateSkillLibrary(tmp_path / "late.json", persist=False)
+    llm.mutation = lambda: setattr(retrieval, "skills", late_library)
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("seasonal_specialist", cited=("doc_round1",)),
+                _decision("seasonal_specialist", cited=("doc_round1",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(task, package, retrieval, decision)
+
+    assert retrieval.skills is late_library
+    assert result.fingerprints["retrieval_skills"] == hashlib.sha256(b"[]").hexdigest()
+    assert all(
+        "late_skill" not in item.used_skill_ids
+        for item in result.retrieval_card.chains
+    )
+    control = run_numerical_two_stage(
+        task,
+        package,
+        TwoStageRetrievalAgent(
+            FakeLLMClient([_round(raw_chain)]),
+            replace(
+                RetrievalGenome.seed(),
+                second_round_trigger="never",
+                active_skill_ids=("late_skill",),
+            ),
+            RetrievalSkillLibrary(tmp_path / "control.json", persist=False),
+        ),
+        DecisionAgent(
+            FakeLLMClient(
+                [
+                    _decision("seasonal_specialist", cited=("doc_round1",)),
+                    _decision("seasonal_specialist", cited=("doc_round1",)),
+                ]
+            )
+        ),
+    )
+    assert result.retrieval_card == control.retrieval_card
+    assert result.final_decision == control.final_decision
+
+
+def test_retrieval_execution_snapshot_does_not_share_captured_skill_rows(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    task = _context_task()
+    package = _package()
+    skill = RetrievalSkill.from_payload(
+        {
+            "skill_id": "captured_candidate",
+            "version": 1,
+            "parent_version": None,
+            "stage": "round1",
+            "status": "candidate",
+            "name": "Captured candidate",
+            "description": "Original preflight description.",
+            "applicability": {
+                "assumption_kinds": [],
+                "gap_types": [],
+                "temporal_relations": [],
+            },
+            "query_steps": ["Search for exact evidence."],
+            "required_chain_fields": ["entity", "target"],
+            "counterevidence_rule": "Search for cancellation.",
+            "failure_conditions": ["No exact evidence exists."],
+            "validated_task_ids": [],
+            "validated_entities": [],
+            "validation_smae_gain": None,
+            "validation_srmse_gain": None,
+            "merged_from_skill_ids": [],
+            "quarantine_reason": None,
+        }
+    )
+    initial_payload = [skill.to_payload()]
+    expected_fingerprint = hashlib.sha256(
+        json.dumps(
+            initial_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    llm = _MutatingFakeLLM([_round()])
+    llm.mutation = lambda: object.__setattr__(
+        skill,
+        "description",
+        "Mutated after the execution snapshot was captured.",
+    )
+    observed_descriptions: list[str] = []
+    original_round1 = TwoStageRetrievalAgent.run_round1
+
+    def inspect_after_round1(self, current_task):
+        result = original_round1(self, current_task)
+        observed_descriptions.extend(
+            item.description for item in self.skills.all()
+        )
+        return result
+
+    monkeypatch.setattr(
+        TwoStageRetrievalAgent,
+        "run_round1",
+        inspect_after_round1,
+    )
+    retrieval = TwoStageRetrievalAgent(
+        llm,
+        replace(RetrievalGenome.seed(), second_round_trigger="never"),
+        RetrievalSkillLibrary(
+            tmp_path / "captured.json",
+            (skill,),
+            persist=False,
+        ),
+    )
+
+    result = run_numerical_two_stage(
+        task,
+        package,
+        retrieval,
+        DecisionAgent(
+            FakeLLMClient([_decision("safe_anchor"), _decision("safe_anchor")])
+        ),
+    )
+
+    assert skill.description.startswith("Mutated")
+    assert observed_descriptions == ["Original preflight description."]
+    assert result.fingerprints["retrieval_skills"] == expected_fingerprint
 
 
 def test_empty_handoff_keeps_round1_audit_and_safe_numerical_default(tmp_path) -> None:
@@ -1063,19 +1354,23 @@ def test_round2_unbound_evidence_cannot_authorize_override(tmp_path) -> None:
     assert result.fallback_reason == "round2_no_gap_bound_evidence"
 
 
-def test_fatal_round2_cannot_leave_any_evidence_in_final_card(tmp_path) -> None:
+def test_fatal_round2_cannot_leave_any_evidence_in_final_card(
+    tmp_path,
+    monkeypatch,
+) -> None:
     task = _context_task()
     package = _package()
+    original_round2 = TwoStageRetrievalAgent.run_round2
 
-    class FatalRound2Agent(TwoStageRetrievalAgent):
-        def run_round2(self, *args, **kwargs):
-            verified = super().run_round2(*args, **kwargs)
-            return replace(
-                verified,
-                rejected=(*verified.rejected, "invalid_round2_response"),
-            )
+    def fatal_round2(self, *args, **kwargs):
+        verified = original_round2(self, *args, **kwargs)
+        return replace(
+            verified,
+            rejected=(*verified.rejected, "invalid_round2_response"),
+        )
 
-    retrieval = FatalRound2Agent(
+    monkeypatch.setattr(TwoStageRetrievalAgent, "run_round2", fatal_round2)
+    retrieval = TwoStageRetrievalAgent(
         FakeLLMClient(
             [
                 _round(
@@ -1262,19 +1557,23 @@ def test_host_reverification_preserves_valid_chain_and_quote_denominator(
     )
 
 
-def test_fatal_round1_cannot_leave_any_evidence_in_final_card(tmp_path) -> None:
+def test_fatal_round1_cannot_leave_any_evidence_in_final_card(
+    tmp_path,
+    monkeypatch,
+) -> None:
     task = _context_task()
     package = _package()
+    original_round1 = TwoStageRetrievalAgent.run_round1
 
-    class FatalRound1Agent(TwoStageRetrievalAgent):
-        def run_round1(self, current_task):
-            verified = super().run_round1(current_task)
-            return replace(
-                verified,
-                rejected=(*verified.rejected, "invalid_round1_response"),
-            )
+    def fatal_round1(self, current_task):
+        verified = original_round1(self, current_task)
+        return replace(
+            verified,
+            rejected=(*verified.rejected, "invalid_round1_response"),
+        )
 
-    retrieval = FatalRound1Agent(
+    monkeypatch.setattr(TwoStageRetrievalAgent, "run_round1", fatal_round1)
+    retrieval = TwoStageRetrievalAgent(
         FakeLLMClient(
             [
                 _round(
