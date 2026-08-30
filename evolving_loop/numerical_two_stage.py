@@ -23,6 +23,10 @@ from evolving_loop.decision_agent.agent import (
     DecisionCandidate,
     DecisionResult,
 )
+from evolving_loop.decision_agent.skill_library import (
+    DecisionSkill,
+    DecisionSkillLibrary,
+)
 from evolving_loop.retrieval_agent.agent import RetrievalResult
 from evolving_loop.retrieval_agent.policy import RetrievalGenome
 from evolving_loop.retrieval_agent.schemas import (
@@ -94,10 +98,11 @@ _RETRIEVAL_VERIFIER_CONTRACT = {
     "verified_citations_only": True,
 }
 _DECISION_HOST_CONTRACT = {
-    "schema_version": 1,
-    "implementation": "executed_candidate_verified_citation_gate",
+    "schema_version": 2,
+    "implementation": "executed_candidate_typed_assumption_chain_gate",
     "unmaterialized_candidate_rejected": True,
-    "override_requires_verified_evidence": True,
+    "override_requires_verified_targeted_assumption_evidence": True,
+    "decision_execution_scope_frozen_before_round1": True,
     "forecast_values_immutable": True,
 }
 _MAX_ASSUMPTIONS = 7
@@ -171,15 +176,17 @@ def run_numerical_two_stage(
     _validate_inputs(task, numerical, retrieval, decision)
     retrieval_task = _sanitized_context_task(task)
     execution_retrieval = _frozen_retrieval_executor(retrieval)
+    execution_decision = _frozen_decision_executor(decision)
     candidates = _decision_candidates(numerical)
     host_default = _safe_default(numerical, candidates)
 
     assumptions, handoff_failure = _validated_handoff(numerical)
+    assumption_targets = _assumption_candidate_targets(numerical, assumptions)
     execution_fingerprints = _execution_fingerprints(
         retrieval_task,
         numerical,
         execution_retrieval,
-        decision,
+        execution_decision,
         candidates,
     )
     fallback_reason = handoff_failure
@@ -191,13 +198,13 @@ def run_numerical_two_stage(
     round1_card = merge_verified_rounds(round1, None)
     if handoff_failure is not None:
         round1_card = _record_rejection(round1_card, handoff_failure)
-    provisional_retrieval = round1_card.to_legacy_result()
     provisional, provisional_failure = _run_decision(
-        decision,
+        execution_decision,
         candidates,
-        provisional_retrieval,
+        round1_card,
         host_default=host_default,
         assumptions=assumptions,
+        assumption_targets=assumption_targets,
         round_index=0,
     )
     if provisional_failure is not None:
@@ -253,11 +260,12 @@ def run_numerical_two_stage(
         card = _record_rejection(card, fallback_reason)
     final_retrieval = card.to_legacy_result()
     final, final_failure = _run_decision(
-        decision,
+        execution_decision,
         candidates,
-        final_retrieval,
+        card,
         host_default=host_default,
         assumptions=assumptions,
+        assumption_targets=assumption_targets,
         round_index=1,
         prior=(provisional,),
     )
@@ -349,6 +357,40 @@ def _frozen_retrieval_executor(
     ):
         raise ValueError("Retrieval Skill snapshot drifted during preflight")
     return TwoStageRetrievalAgent(retrieval.llm, genome, skills)
+
+
+def _frozen_decision_executor(decision: DecisionAgent) -> DecisionAgent:
+    """Detach all mutable Decision authority before any replaceable round runs."""
+    fields = vars(decision)
+    prompt = fields.get("prompt")
+    llm = fields.get("llm")
+    library = fields.get("library")
+    if not isinstance(prompt, str) or not prompt:
+        raise ValueError("Decision prompt must be a non-empty string")
+    if llm is None:
+        raise ValueError("Decision executor requires its original LLM")
+
+    if library is None:
+        frozen_library = None
+    else:
+        if type(library) is not DecisionSkillLibrary:
+            raise TypeError("Decision Skill library must be canonical")
+        source_rows = DecisionSkillLibrary.all(library)
+        if any(type(item) is not DecisionSkill for item in source_rows):
+            raise TypeError("Decision Skill rows must be canonical")
+        frozen_rows = tuple(DecisionSkill(**asdict(item)) for item in source_rows)
+        frozen_library = DecisionSkillLibrary(
+            library.path,
+            list(frozen_rows),
+            persist=False,
+        )
+        if (
+            type(frozen_library) is not DecisionSkillLibrary
+            or frozen_library.persist is not False
+            or DecisionSkillLibrary.all(frozen_library) != frozen_rows
+        ):
+            raise ValueError("Decision Skill snapshot drifted during preflight")
+    return DecisionAgent(llm, frozen_library, prompt=prompt)
 
 
 def _validate_inputs(
@@ -527,6 +569,29 @@ def _validated_handoff(
     return assumptions, None
 
 
+def _assumption_candidate_targets(
+    numerical: NumericalForecastPackage,
+    assumptions: tuple[RetrievalAssumption, ...],
+) -> Mapping[str, frozenset[str]]:
+    """Recover the host-private candidate targets behind opaque Retrieval IDs."""
+    accepted = tuple(numerical.accepted_assumptions)
+    if not assumptions:
+        return MappingProxyType({})
+    if len(assumptions) != len(accepted):
+        raise ValueError("Retrieval assumptions do not match accepted Numerical assumptions")
+    targets = {
+        retrieval_assumption.assumption_id: frozenset(grounding.candidate_names)
+        for retrieval_assumption, grounding in zip(
+            assumptions,
+            accepted,
+            strict=True,
+        )
+    }
+    if len(targets) != len(assumptions) or any(not names for names in targets.values()):
+        raise ValueError("Retrieval assumption candidate mapping is not canonical")
+    return MappingProxyType(dict(sorted(targets.items())))
+
+
 def _run_round1(
     retrieval: TwoStageRetrievalAgent,
     task: ContextTask,
@@ -690,14 +755,16 @@ def _host_verify_retrieval_round(
 def _run_decision(
     decision: DecisionAgent,
     candidates: tuple[DecisionCandidate, ...],
-    retrieval: RetrievalResult,
+    retrieval_card: FinalRetrievalCard,
     *,
     host_default: DecisionCandidate,
     assumptions: tuple[RetrievalAssumption, ...],
+    assumption_targets: Mapping[str, frozenset[str]],
     round_index: int,
     prior: tuple[DecisionResult, ...] = (),
 ) -> tuple[DecisionResult, str | None]:
     try:
+        retrieval = retrieval_card.to_legacy_result()
         result = decision.run(
             candidates,
             retrieval,
@@ -710,9 +777,11 @@ def _run_decision(
             result,
             decision=decision,
             candidates=candidates,
-            retrieval=retrieval,
+            retrieval_card=retrieval_card,
             host_default=host_default,
             assumptions=assumptions,
+            assumption_targets=assumption_targets,
+            require_typed_override_authority=round_index > 0,
         )
     except TransientLLMError:
         raise
@@ -726,9 +795,11 @@ def _validate_decision_result(
     *,
     decision: DecisionAgent,
     candidates: tuple[DecisionCandidate, ...],
-    retrieval: RetrievalResult,
+    retrieval_card: FinalRetrievalCard,
     host_default: DecisionCandidate,
     assumptions: tuple[RetrievalAssumption, ...],
+    assumption_targets: Mapping[str, frozenset[str]],
+    require_typed_override_authority: bool,
 ) -> tuple[DecisionResult, str | None]:
     """Revalidate an untrusted Decision artifact against host-owned objects."""
     if type(result) is not DecisionResult:
@@ -760,6 +831,7 @@ def _validate_decision_result(
     ):
         reason = "invalid_decision_result"
         return _fallback_decision(host_default, reason), reason
+    retrieval = retrieval_card.to_legacy_result()
     verified_ids = {item.document_id for item in retrieval.evidence}
     if not set(citations).issubset(verified_ids) or not set(
         canonical.source_document_ids
@@ -773,6 +845,15 @@ def _validate_decision_result(
         or (override and not citations)
     ):
         reason = "invalid_decision_result"
+        return _fallback_decision(host_default, reason), reason
+    if require_typed_override_authority and override and not _typed_override_authorized(
+        selected_candidate_id=canonical.candidate_id,
+        host_default_id=host_default.candidate_id,
+        cited_document_ids=citations,
+        retrieval_card=retrieval_card,
+        assumption_targets=assumption_targets,
+    ):
+        reason = "decision_override_not_assumption_authorized"
         return _fallback_decision(host_default, reason), reason
 
     used_skills = result.used_skill_names
@@ -814,6 +895,43 @@ def _validate_decision_result(
         return _fallback_decision(host_default, reason), reason
 
     return replace(result, selected=canonical), None
+
+
+def _typed_override_authorized(
+    *,
+    selected_candidate_id: str,
+    host_default_id: str,
+    cited_document_ids: tuple[str, ...],
+    retrieval_card: FinalRetrievalCard,
+    assumption_targets: Mapping[str, frozenset[str]],
+) -> bool:
+    """Authorize an override only through one complete, polarity-correct chain."""
+    cited = frozenset(cited_document_ids)
+    support_stances = frozenset({"support", "supports"})
+    challenge_stances = frozenset({"challenge", "challenges"})
+    for chain in retrieval_card.chains:
+        chain_documents = frozenset(
+            citation.document_id for citation in chain.citations
+        )
+        if (
+            not chain.entity_match
+            or not chain.target_match
+            or chain.missing_links
+            or not chain_documents
+            or not chain_documents.issubset(cited)
+            or not chain.addressed_assumption_ids
+        ):
+            continue
+        targets = frozenset(
+            candidate_name
+            for assumption_id in chain.addressed_assumption_ids
+            for candidate_name in assumption_targets.get(assumption_id, frozenset())
+        )
+        if chain.stance in support_stances and selected_candidate_id in targets:
+            return True
+        if chain.stance in challenge_stances and host_default_id in targets:
+            return True
+    return False
 
 
 def _fallback_decision(default: DecisionCandidate, reason: str) -> DecisionResult:

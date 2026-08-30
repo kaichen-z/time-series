@@ -187,3 +187,28 @@ Verification for this bounded fix:
 - Semantic audit slice: `4 passed in 0.40s`.
 - Audit plus smoke/report focused tests: `89 passed in 2.99s`.
 - No full suite was run, as explicitly required for this bounded round.
+
+## Final-review bridge fix: typed Decision authority and frozen execution scope
+
+The final whole-branch review identified two bridge-specific authority gaps after the
+Numerical migration itself was complete.
+
+1. Final Decision overrides previously needed only a document ID present in the flattened
+   legacy Retrieval projection. The host now keeps the verified `FinalRetrievalCard` through
+   Decision validation, maps each opaque Retrieval assumption ID back to the exact accepted
+   Numerical `AssumptionGrounding.candidate_names`, and accepts an override only when one fully
+   cited verified chain either supports an assumption naming the selected candidate or challenges
+   an assumption naming the protected host default. Round-1-only, neutral, unresolved,
+   wrong-polarity, unrelated, or partially cited chains cannot authorize a final override.
+2. The caller's `DecisionAgent` was previously reused across both Decision calls. The bridge now
+   freezes the prompt and a deeply detached `persist=False` Decision Skill snapshot before Round 1,
+   constructs a base `DecisionAgent` with the original LLM, and uses only that executor for both
+   calls, host validation, and fingerprints. Caller prompt/library/row drift and subclassed
+   `run()` implementations therefore have no execution authority, and no Decision Skill write is
+   possible on this inference path.
+
+Strict TDD reproduced both defects before production changes. The new adversarial/positive slice
+first failed 8 of 10 cases; the separate provisional-gap contract also failed before its phase
+boundary was added. After implementation, all 44 bridge tests and 148 affected
+bridge/Retrieval/Decision tests passed. The final full-suite and independent-review evidence are
+recorded with the scoped fix commit.

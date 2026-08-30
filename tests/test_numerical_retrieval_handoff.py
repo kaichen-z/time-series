@@ -16,6 +16,10 @@ from evolving_loop.decision_agent.agent import (
     DecisionCandidate,
     DecisionResult,
 )
+from evolving_loop.decision_agent.skill_library import (
+    DecisionSkill,
+    DecisionSkillLibrary,
+)
 from evolving_loop.numerical_two_stage import (
     NumericalTwoStageResult,
     run_numerical_two_stage,
@@ -223,6 +227,7 @@ def _chain(
     direction: str,
     magnitude: float,
     addressed: tuple[str, ...] = (),
+    stance: str | None = None,
 ) -> dict[str, object]:
     document = next(item for item in task.documents if item.document_id == document_id)
     return {
@@ -243,9 +248,25 @@ def _chain(
         "missing_links": [],
         "used_skill_ids": [],
         "addressed_assumption_ids": list(addressed),
-        "stance": "challenges" if addressed else "supports",
+        "stance": stance or ("challenges" if addressed else "supports"),
         "numeric_eligible": True,
     }
+
+
+def _package_with_grounded_candidate(candidate_name: str):
+    """Build a bridge-valid frozen package with one explicitly mapped assumption."""
+    package = _package()
+    card = _morphology_card(candidate_name)
+    return replace(
+        package,
+        morphology_card=card,
+        accepted_assumptions=card.assumptions,
+        rejected_assumptions={},
+        component_fingerprints={
+            **dict(package.component_fingerprints),
+            "morphology_card": card.fingerprint,
+        },
+    )
 
 
 def _round(*chains: dict[str, object]) -> str:
@@ -1315,7 +1336,7 @@ def test_forged_decision_candidate_metadata_cannot_cross_host_boundary(tmp_path)
     )
     assert result.final_decision.selected.source_document_ids == ()
     assert result.final_decision.selected.tags == ("numerical_package", "tsfm")
-    assert result.fallback_reason == "invalid_decision_result"
+    assert result.fallback_reason == "decision_failure:RuntimeError"
 
 
 def test_forged_decision_result_subclass_is_rejected(tmp_path) -> None:
@@ -1349,7 +1370,7 @@ def test_forged_decision_result_subclass_is_rejected(tmp_path) -> None:
 
     assert result.final_decision.selected.candidate_id == "safe_anchor"
     assert type(result.final_decision) is DecisionResult
-    assert result.fallback_reason == "invalid_decision_result"
+    assert result.fallback_reason == "decision_failure:RuntimeError"
 
 
 def test_forged_decision_gap_contract_is_rejected_before_round2(tmp_path) -> None:
@@ -1388,7 +1409,7 @@ def test_forged_decision_gap_contract_is_rejected_before_round2(tmp_path) -> Non
 
     assert len(retrieval.llm.calls) == 1
     assert result.final_decision.selected.candidate_id == "safe_anchor"
-    assert result.fallback_reason == "invalid_decision_result"
+    assert result.fallback_reason == "decision_failure:RuntimeError"
 
 
 def test_round2_unbound_evidence_cannot_authorize_override(tmp_path) -> None:
@@ -1834,3 +1855,357 @@ def test_decision_cannot_select_an_unmaterialized_candidate(tmp_path) -> None:
 
     assert result.final_decision.selected.candidate_id == "safe_anchor"
     assert result.forecast == package.protected_baseline.forecast
+
+
+def test_round1_assumption_blind_evidence_cannot_authorize_package_override(
+    tmp_path,
+) -> None:
+    """Removing typed assumption authorization must never leave citation-only authority."""
+    task = _context_task()
+    retrieval = _retrieval(
+        [
+            _round(
+                _chain(
+                    task,
+                    chain_id="round1_only_quote",
+                    document_id="doc_round1",
+                    direction="up",
+                    magnitude=5.0,
+                )
+            )
+        ],
+        tmp_path,
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("seasonal_specialist", cited=("doc_round1",)),
+                _decision("seasonal_specialist", cited=("doc_round1",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(
+        task,
+        _package(),
+        retrieval,
+        decision,
+    )
+
+    assert result.retrieval_card.round1.chains
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert result.fallback_reason == "decision_override_not_assumption_authorized"
+
+
+@pytest.mark.parametrize(
+    ("grounded_candidate", "stance"),
+    [
+        ("safe_anchor", "supports"),
+        ("safe_anchor", "neutral"),
+        ("safe_anchor", "unresolved"),
+        ("seasonal_specialist", "challenges"),
+    ],
+)
+def test_non_authorizing_round2_stance_cannot_override_package_default(
+    tmp_path,
+    grounded_candidate: str,
+    stance: str,
+) -> None:
+    """Wrong-polarity, neutral, and unresolved links cannot authorize an override."""
+    task = _context_task()
+    retrieval = TwoStageRetrievalAgent(
+        FakeLLMClient(
+            [
+                _round(),
+                _round(
+                    _chain(
+                        task,
+                        chain_id=f"non_authorizing_{stance}",
+                        document_id="doc_round2",
+                        direction="down",
+                        magnitude=2.0,
+                        addressed=("assumption_001",),
+                        stance=stance,
+                    )
+                ),
+            ]
+        ),
+        replace(RetrievalGenome.seed(), second_round_trigger="always"),
+        RetrievalSkillLibrary(tmp_path / "retrieval_skills.json", persist=False),
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("safe_anchor"),
+                _decision("seasonal_specialist", cited=("doc_round2",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(
+        task,
+        _package_with_grounded_candidate(grounded_candidate),
+        retrieval,
+        decision,
+    )
+
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert result.fallback_reason == "decision_override_not_assumption_authorized"
+
+
+@pytest.mark.parametrize(
+    ("grounded_candidate", "stance"),
+    [
+        ("seasonal_specialist", "supports"),
+        ("safe_anchor", "challenges"),
+    ],
+)
+def test_targeted_support_or_safe_default_challenge_authorizes_override(
+    tmp_path,
+    grounded_candidate: str,
+    stance: str,
+) -> None:
+    """The two explicitly allowed typed assumption relations remain usable."""
+    task = _context_task()
+    retrieval = TwoStageRetrievalAgent(
+        FakeLLMClient(
+            [
+                _round(),
+                _round(
+                    _chain(
+                        task,
+                        chain_id=f"authorizing_{stance}",
+                        document_id="doc_round2",
+                        direction="down",
+                        magnitude=2.0,
+                        addressed=("assumption_001",),
+                        stance=stance,
+                    )
+                ),
+            ]
+        ),
+        replace(RetrievalGenome.seed(), second_round_trigger="always"),
+        RetrievalSkillLibrary(tmp_path / "retrieval_skills.json", persist=False),
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("safe_anchor"),
+                _decision("seasonal_specialist", cited=("doc_round2",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(
+        task,
+        _package_with_grounded_candidate(grounded_candidate),
+        retrieval,
+        decision,
+    )
+
+    assert result.final_decision.selected.candidate_id == "seasonal_specialist"
+    assert result.fallback_reason is None
+
+
+def test_provisional_unauthorized_choice_can_still_request_targeted_round2(
+    tmp_path,
+) -> None:
+    """Final authority must not erase a valid provisional named-gap request."""
+    task = _context_task()
+    retrieval = _retrieval(
+        [
+            _round(
+                _chain(
+                    task,
+                    chain_id="blind_round1_context",
+                    document_id="doc_round1",
+                    direction="up",
+                    magnitude=5.0,
+                )
+            ),
+            _round(
+                _chain(
+                    task,
+                    chain_id="targeted_round2_challenge",
+                    document_id="doc_round2",
+                    direction="down",
+                    magnitude=2.0,
+                    addressed=("assumption_001",),
+                    stance="challenges",
+                )
+            ),
+        ],
+        tmp_path,
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision(
+                    "seasonal_specialist",
+                    cited=("doc_round1",),
+                    request_more=True,
+                ),
+                _decision("seasonal_specialist", cited=("doc_round2",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(task, _package(), retrieval, decision)
+
+    assert result.retrieval_card.round2 is not None
+    assert result.final_decision.selected.candidate_id == "seasonal_specialist"
+    assert result.fallback_reason is None
+
+
+def test_partial_citation_of_authorizing_chain_cannot_override_default(tmp_path) -> None:
+    """Citing one flattened quote must not stand in for the complete verified chain."""
+    task = _context_task()
+    chain = _chain(
+        task,
+        chain_id="two_document_chain",
+        document_id="doc_round1",
+        direction="up",
+        magnitude=5.0,
+        addressed=("assumption_001",),
+        stance="challenges",
+    )
+    chain["citations"].append(
+        {
+            "document_id": "doc_round2",
+            "exact_quote": task.documents[1].content,
+        }
+    )
+    retrieval = TwoStageRetrievalAgent(
+        FakeLLMClient([_round(), _round(chain)]),
+        replace(RetrievalGenome.seed(), second_round_trigger="always"),
+        RetrievalSkillLibrary(tmp_path / "retrieval_skills.json", persist=False),
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("safe_anchor"),
+                _decision("seasonal_specialist", cited=("doc_round1",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(task, _package(), retrieval, decision)
+
+    assert {item.document_id for item in result.retrieval.evidence} == {
+        "doc_round1",
+        "doc_round2",
+    }
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert result.fallback_reason == "decision_override_not_assumption_authorized"
+
+
+def test_decision_execution_scope_is_frozen_before_round1_and_deeply_detached(
+    tmp_path,
+) -> None:
+    """Caller prompt, library, and captured row drift must not change either Decision call."""
+    initial_prompt = "Frozen Decision prompt."
+    initial_skill = DecisionSkill(
+        skill_id="initial_skill",
+        name="initial_skill",
+        description="Original frozen skill row.",
+        applicability="all bridge tasks",
+        decision_rule="Preserve the protected default.",
+        failure_condition="The rule is not applicable.",
+        created_from_task="train_001",
+        validation_smae=0.2,
+        validation_srmse=0.3,
+    )
+    initial_library_path = tmp_path / "decision_skills.json"
+    initial_library = DecisionSkillLibrary(
+        initial_library_path,
+        [initial_skill],
+        persist=True,
+    )
+    late_skill = replace(
+        initial_skill,
+        skill_id="late_skill",
+        name="late_skill",
+        description="Late caller-controlled skill row.",
+    )
+    late_library = DecisionSkillLibrary(
+        tmp_path / "late_decision_skills.json",
+        [late_skill],
+        persist=True,
+    )
+    llm = _MutatingFakeLLM(
+        [_decision("safe_anchor"), _decision("safe_anchor")]
+    )
+    decision = DecisionAgent(
+        llm,
+        initial_library,
+        prompt=initial_prompt,
+    )
+
+    def mutate_caller_scope() -> None:
+        decision.prompt = "Mutated caller Decision prompt."
+        decision.library = late_library
+        object.__setattr__(
+            initial_skill,
+            "description",
+            "Mutated captured row after the frozen snapshot.",
+        )
+
+    llm.mutation = mutate_caller_scope
+
+    result = run_numerical_two_stage(
+        _context_task(),
+        _package(),
+        _retrieval([_round()], tmp_path / "retrieval"),
+        decision,
+    )
+
+    assert decision.prompt == "Mutated caller Decision prompt."
+    assert decision.library is late_library
+    assert [call["system"] for call in llm.calls] == [initial_prompt, initial_prompt]
+    for call in llm.calls:
+        payload = json.loads(call["messages"][0]["content"])
+        assert "Original frozen skill row." in payload["validated_decision_skills"]
+        assert "Late caller-controlled" not in payload["validated_decision_skills"]
+        assert "Mutated captured row" not in payload["validated_decision_skills"]
+    assert result.fingerprints["decision_prompt"] == hashlib.sha256(
+        initial_prompt.encode("utf-8")
+    ).hexdigest()
+    assert not initial_library_path.exists()
+    assert not late_library.path.exists()
+
+
+def test_decision_subclass_cannot_replace_frozen_base_executor(tmp_path) -> None:
+    """The execution path must call a fresh base DecisionAgent, never caller override code."""
+
+    class ForgingDecisionAgent(DecisionAgent):
+        def __init__(self, llm) -> None:
+            super().__init__(llm)
+            self.run_calls = 0
+
+        def run(self, candidates, _retrieval, **kwargs):
+            self.run_calls += 1
+            chosen = next(
+                item for item in candidates if item.candidate_id == "seasonal_specialist"
+            )
+            return DecisionResult(
+                selected=chosen,
+                host_default_id=kwargs["host_default_id"],
+                requested_more_retrieval=False,
+                rationale="Caller subclass attempted to replace Decision execution.",
+                supporting_document_ids=("doc_round1",),
+                llm_override_accepted=True,
+            )
+
+    decision = ForgingDecisionAgent(
+        FakeLLMClient([_decision("safe_anchor"), _decision("safe_anchor")])
+    )
+
+    result = run_numerical_two_stage(
+        _context_task(),
+        _package(),
+        _retrieval([_round()], tmp_path),
+        decision,
+    )
+
+    assert decision.run_calls == 0
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
