@@ -19,7 +19,12 @@ from evolving_loop.numerical_two_stage import (
     run_numerical_two_stage,
 )
 from evolving_loop.retrieval_agent.policy import RetrievalGenome
-from evolving_loop.retrieval_agent.schemas import RetrievalGap
+from evolving_loop.retrieval_agent.schemas import (
+    EvidenceChain,
+    EvidenceCitation,
+    RetrievalGap,
+    RetrievalRoundResult,
+)
 from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 from numerical_agent.evolution.execution import Task
@@ -1017,6 +1022,238 @@ def test_fatal_round2_cannot_leave_any_evidence_in_final_card(tmp_path) -> None:
     assert "doc_round2" not in result.retrieval.selected_document_ids
     assert result.final_decision.selected.candidate_id == "safe_anchor"
     assert result.fallback_reason == "invalid_round2_response"
+
+
+def test_host_reverifies_forged_typed_round1_before_decision(tmp_path) -> None:
+    task = _context_task()
+    package = _package()
+    valid = EvidenceChain.from_payload(
+        _chain(
+            task,
+            chain_id="forged_round1",
+            document_id="doc_round1",
+            direction="up",
+            magnitude=5.0,
+        )
+    )
+    forged = replace(
+        valid,
+        citations=(
+            EvidenceCitation("nonexistent_doc", task.documents[0].content),
+        ),
+    )
+
+    class ForgedRound1Agent(TwoStageRetrievalAgent):
+        def run_round1(self, _task):
+            return RetrievalRoundResult((forged,), (), (), True)
+
+    retrieval = ForgedRound1Agent(
+        FakeLLMClient([]),
+        RetrievalGenome.seed(),
+        RetrievalSkillLibrary(tmp_path / "retrieval_skills.json", persist=False),
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("seasonal_specialist", cited=("nonexistent_doc",)),
+                _decision("seasonal_specialist", cited=("nonexistent_doc",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(task, package, retrieval, decision)
+
+    assert "nonexistent_doc" not in result.retrieval.selected_document_ids
+    assert all(
+        item.document_id != "nonexistent_doc" for item in result.retrieval.evidence
+    )
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+
+
+def test_host_reverifies_forged_typed_round2_before_decision(tmp_path) -> None:
+    task = _context_task()
+    package = _package()
+    valid = EvidenceChain.from_payload(
+        _chain(
+            task,
+            chain_id="forged_round2",
+            document_id="doc_round2",
+            direction="down",
+            magnitude=2.0,
+            addressed=("assumption_001",),
+        )
+    )
+    forged = replace(
+        valid,
+        citations=(
+            EvidenceCitation("nonexistent_doc", task.documents[1].content),
+        ),
+    )
+
+    class ForgedRound2Agent(TwoStageRetrievalAgent):
+        def run_round2(self, *_args, **_kwargs):
+            return RetrievalRoundResult((forged,), (), (), True)
+
+    retrieval = ForgedRound2Agent(
+        FakeLLMClient(
+            [
+                _round(
+                    _chain(
+                        task,
+                        chain_id="round1_support",
+                        document_id="doc_round1",
+                        direction="up",
+                        magnitude=5.0,
+                    )
+                )
+            ]
+        ),
+        RetrievalGenome.seed(),
+        RetrievalSkillLibrary(tmp_path / "retrieval_skills.json", persist=False),
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("safe_anchor", request_more=True),
+                _decision("seasonal_specialist", cited=("nonexistent_doc",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(task, package, retrieval, decision)
+
+    assert "nonexistent_doc" not in result.retrieval.selected_document_ids
+    assert all(
+        item.document_id != "nonexistent_doc" for item in result.retrieval.evidence
+    )
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+
+
+def test_host_reverification_preserves_valid_chain_and_quote_denominator(
+    tmp_path,
+) -> None:
+    task = _context_task()
+    package = _package()
+    valid = _chain(
+        task,
+        chain_id="valid_round1",
+        document_id="doc_round1",
+        direction="up",
+        magnitude=5.0,
+    )
+    invalid = _chain(
+        task,
+        chain_id="invalid_round1",
+        document_id="doc_round2",
+        direction="down",
+        magnitude=2.0,
+    )
+    invalid["citations"][0]["document_id"] = "nonexistent_doc"
+    retrieval = _retrieval([_round(valid, invalid)], tmp_path)
+    decision = DecisionAgent(
+        FakeLLMClient([_decision("safe_anchor"), _decision("safe_anchor")])
+    )
+
+    result = run_numerical_two_stage(task, package, retrieval, decision)
+
+    assert len(result.retrieval_card.round1.chains) == 1
+    assert result.retrieval.selected_document_ids == ("doc_round1",)
+    assert result.retrieval_card.round1.quote_attempt_count == 2
+    assert result.retrieval_card.round1.valid_quote_count == 1
+    assert "unselected_document:nonexistent_doc" in (
+        result.retrieval_card.round1.rejected
+    )
+
+
+def test_fatal_round1_cannot_leave_any_evidence_in_final_card(tmp_path) -> None:
+    task = _context_task()
+    package = _package()
+
+    class FatalRound1Agent(TwoStageRetrievalAgent):
+        def run_round1(self, current_task):
+            verified = super().run_round1(current_task)
+            return replace(
+                verified,
+                rejected=(*verified.rejected, "invalid_round1_response"),
+            )
+
+    retrieval = FatalRound1Agent(
+        FakeLLMClient(
+            [
+                _round(
+                    _chain(
+                        task,
+                        chain_id="fatal_round1_chain",
+                        document_id="doc_round1",
+                        direction="up",
+                        magnitude=5.0,
+                    )
+                )
+            ]
+        ),
+        RetrievalGenome.seed(),
+        RetrievalSkillLibrary(tmp_path / "retrieval_skills.json", persist=False),
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("seasonal_specialist", cited=("doc_round1",)),
+                _decision("seasonal_specialist", cited=("doc_round1",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(task, package, retrieval, decision)
+
+    assert result.retrieval_card.round1.chains == ()
+    assert "doc_round1" not in result.retrieval.selected_document_ids
+    assert result.final_decision.selected.candidate_id == "safe_anchor"
+    assert result.fallback_reason == "invalid_round1_response"
+
+
+@pytest.mark.parametrize("trigger", ["always", "on_incomplete_chain"])
+def test_round2_without_named_gap_can_bind_to_supplied_assumption(
+    tmp_path,
+    trigger: str,
+) -> None:
+    task = _context_task()
+    package = _package()
+    genome = replace(RetrievalGenome.seed(), second_round_trigger=trigger)
+    retrieval = TwoStageRetrievalAgent(
+        FakeLLMClient(
+            [
+                _round(),
+                _round(
+                    _chain(
+                        task,
+                        chain_id=f"{trigger}_round2",
+                        document_id="doc_round2",
+                        direction="down",
+                        magnitude=2.0,
+                        addressed=("assumption_001",),
+                    )
+                ),
+            ]
+        ),
+        genome,
+        RetrievalSkillLibrary(tmp_path / "retrieval_skills.json", persist=False),
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("safe_anchor"),
+                _decision("seasonal_specialist", cited=("doc_round2",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(task, package, retrieval, decision)
+
+    assert result.retrieval_card.round2 is not None
+    assert result.retrieval_card.round2.chains
+    assert result.retrieval.selected_document_ids == ("doc_round2",)
+    assert result.final_decision.selected.candidate_id == "seasonal_specialist"
+    assert result.fallback_reason is None
 
 
 def test_execution_fingerprints_bind_context_and_morphology_projection(tmp_path) -> None:

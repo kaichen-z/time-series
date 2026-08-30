@@ -29,9 +29,17 @@ from evolving_loop.retrieval_agent.schemas import (
     RetrievalContractError,
     RetrievalGap,
     RetrievalRoundResult,
+    build_round1_payload,
+    build_round2_payload,
 )
-from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
-from evolving_loop.retrieval_agent.verifier import merge_verified_rounds
+from evolving_loop.retrieval_agent.two_stage_agent import (
+    TwoStageRetrievalAgent,
+    _select_documents,
+)
+from evolving_loop.retrieval_agent.verifier import (
+    merge_verified_rounds,
+    verify_round_result,
+)
 from numerical_agent.evolution.execution import Task
 from numerical_agent.evolution.morphology import AssumptionGrounding
 from numerical_agent.evolution.numerical_handoff import (
@@ -170,6 +178,7 @@ def run_numerical_two_stage(
 
     round1 = _run_round1(retrieval, task)
     if _fatal_round_failure(round1, "round1"):
+        round1 = replace(round1, chains=(), counterevidence=())
         fallback_reason = fallback_reason or "invalid_round1_response"
     round1_card = merge_verified_rounds(round1, None)
     if handoff_failure is not None:
@@ -212,10 +221,21 @@ def run_numerical_two_stage(
             fallback_reason = "invalid_round2_response"
         else:
             had_verified_evidence = bool(round2.chains or round2.counterevidence)
-            round2 = _bind_round2_to_sent_gaps(round2, sent_gaps)
+            binding_kind = (
+                "gap"
+                if sent_gaps
+                or retrieval.genome.second_round_trigger == "on_named_gap"
+                else "assumption"
+            )
+            round2 = _bind_round2_to_scope(
+                round2,
+                gaps=sent_gaps,
+                assumptions=assumptions,
+                binding_kind=binding_kind,
+            )
             if not round2.chains and not round2.counterevidence:
                 fallback_reason = (
-                    "round2_no_gap_bound_evidence"
+                    f"round2_no_{binding_kind}_bound_evidence"
                     if had_verified_evidence
                     else "round2_no_verified_evidence"
                 )
@@ -442,7 +462,13 @@ def _run_round1(
     task: ContextTask,
 ) -> RetrievalRoundResult:
     try:
-        return retrieval.run_round1(task)
+        raw = retrieval.run_round1(task)
+        return _host_verify_retrieval_round(
+            retrieval,
+            task,
+            raw,
+            stage="round1",
+        )
     except TransientLLMError:
         raise
     except Exception as error:
@@ -466,7 +492,16 @@ def _run_round2(
     assumptions: tuple[RetrievalAssumption, ...],
 ) -> RetrievalRoundResult:
     try:
-        return retrieval.run_round2(task, round1, gaps, assumptions)
+        raw = retrieval.run_round2(task, round1, gaps, assumptions)
+        return _host_verify_retrieval_round(
+            retrieval,
+            task,
+            raw,
+            stage="round2",
+            round1=round1,
+            gaps=gaps,
+            assumptions=assumptions,
+        )
     except TransientLLMError:
         raise
     except Exception as error:
@@ -480,6 +515,106 @@ def _run_round2(
                 f"round2_failure:{type(error).__name__}",
             ),
         )
+
+
+def _host_verify_retrieval_round(
+    retrieval: TwoStageRetrievalAgent,
+    task: ContextTask,
+    raw: RetrievalRoundResult,
+    *,
+    stage: str,
+    round1: RetrievalRoundResult | None = None,
+    gaps: tuple[RetrievalGap, ...] = (),
+    assumptions: tuple[RetrievalAssumption, ...] = (),
+) -> RetrievalRoundResult:
+    """Replay typed agent output through the canonical host-owned verifier."""
+    if type(raw) is not RetrievalRoundResult:
+        raise RetrievalContractError("noncanonical retrieval round result")
+    skills = TwoStageRetrievalAgent._skills(
+        retrieval,
+        stage,
+        assumptions=assumptions,
+        gaps=gaps,
+    )
+    skill_payloads = TwoStageRetrievalAgent._skill_payloads(skills)
+    if stage == "round1":
+        scope_payload = build_round1_payload(task, skills=skill_payloads)
+    elif stage == "round2" and round1 is not None:
+        scope_payload = build_round2_payload(
+            task,
+            round1,
+            gaps,
+            assumptions,
+            skill_payloads,
+        )
+    else:
+        raise ValueError("Round 2 host verification requires verified Round 1")
+    selected_documents = _select_documents(
+        scope_payload,
+        retrieval.genome.max_selected_documents,
+    )
+    raw_payload = RetrievalRoundResult.to_payload(raw)
+    dropped: list[str] = []
+    for field in ("evidence_chains", "counterevidence"):
+        collection = raw_payload.get(field, ())
+        if not isinstance(collection, (list, tuple)):
+            continue
+        retained: list[object] = []
+        for item in collection:
+            citations = item.get("citations") if isinstance(item, Mapping) else None
+            if isinstance(citations, (list, tuple)) and citations:
+                retained.append(item)
+                continue
+            chain_id = (
+                item.get("chain_id", "unknown")
+                if isinstance(item, Mapping)
+                else "unknown"
+            )
+            dropped.append(f"host_dropped_citationless_chain:{chain_id}")
+        raw_payload[field] = retained
+    if dropped:
+        prior_rejected = raw_payload.get("rejected", ())
+        if not isinstance(prior_rejected, (list, tuple)):
+            prior_rejected = ()
+        raw_payload["rejected"] = list(
+            dict.fromkeys((*prior_rejected, *dropped))
+        )
+    bounded = TwoStageRetrievalAgent._bounded_response(retrieval, raw_payload)
+    verified = verify_round_result(
+        task,
+        bounded,
+        stage=stage,
+        allowed_skill_ids=tuple(item.skill_id for item in skills),
+        allowed_assumption_ids=(
+            ()
+            if stage == "round1"
+            else tuple(item.assumption_id for item in assumptions)
+        ),
+        allowed_document_ids=tuple(
+            item["document_id"] for item in selected_documents
+        ),
+        prior_round1=round1 if stage == "round2" else None,
+    )
+    max_quote_attempts = (
+        retrieval.genome.max_evidence_chains
+        * retrieval.genome.max_citations_per_chain
+    )
+    verified = replace(
+        verified,
+        quote_attempt_count=min(
+            max_quote_attempts,
+            max(raw.quote_attempt_count, verified.quote_attempt_count),
+        ),
+    )
+    if stage == "round1" and verified.gaps:
+        verified = replace(
+            verified,
+            gaps=(),
+            rejected=tuple(
+                dict.fromkeys((*verified.rejected, "round1_gaps_forbidden"))
+            ),
+        )
+    return verified
 
 
 def _run_decision(
@@ -652,12 +787,20 @@ def _fatal_round_failure(result: RetrievalRoundResult, stage: str) -> bool:
     )
 
 
-def _bind_round2_to_sent_gaps(
+def _bind_round2_to_scope(
     result: RetrievalRoundResult,
+    *,
     gaps: tuple[RetrievalGap, ...],
+    assumptions: tuple[RetrievalAssumption, ...],
+    binding_kind: str,
 ) -> RetrievalRoundResult:
-    """Keep only verified Round 2 chains explicitly scoped to a sent gap."""
-    allowed = {item.assumption_id for item in gaps}
+    """Keep only Round 2 chains bound to the host-supplied retrieval scope."""
+    if binding_kind == "gap":
+        allowed = {item.assumption_id for item in gaps}
+    elif binding_kind == "assumption":
+        allowed = {item.assumption_id for item in assumptions}
+    else:
+        raise ValueError("unknown Round 2 binding kind")
 
     def bound(chain: object) -> bool:
         addressed = set(getattr(chain, "addressed_assumption_ids", ()))
@@ -668,7 +811,7 @@ def _bind_round2_to_sent_gaps(
         item for item in result.counterevidence if bound(item)
     )
     removed = tuple(
-        f"round2_chain_not_gap_bound:{item.chain_id}"
+        f"round2_chain_not_{binding_kind}_bound:{item.chain_id}"
         for item in (*result.chains, *result.counterevidence)
         if not bound(item)
     )
