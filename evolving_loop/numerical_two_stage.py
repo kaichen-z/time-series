@@ -14,9 +14,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from types import MappingProxyType
 
+from common.data import Task as ContextNumericTask
 from common.evolution_core.contracts import METRIC_POLICY_FINGERPRINT
 from common.llm import TransientLLMError
-from evolving_loop.data import ContextTask
+from evolving_loop.data import ContextTask, Document
 from evolving_loop.decision_agent.agent import (
     DecisionAgent,
     DecisionCandidate,
@@ -163,12 +164,13 @@ def run_numerical_two_stage(
 ) -> NumericalTwoStageResult:
     """Run fixed two-stage Retrieval and Decision over one frozen Numerical package."""
     _validate_inputs(task, numerical, retrieval, decision)
+    retrieval_task = _sanitized_context_task(task)
     candidates = _decision_candidates(numerical)
     host_default = _safe_default(numerical, candidates)
 
     assumptions, handoff_failure = _validated_handoff(numerical)
     execution_fingerprints = _execution_fingerprints(
-        task,
+        retrieval_task,
         numerical,
         retrieval,
         decision,
@@ -176,7 +178,7 @@ def run_numerical_two_stage(
     )
     fallback_reason = handoff_failure
 
-    round1 = _run_round1(retrieval, task)
+    round1 = _run_round1(retrieval, retrieval_task)
     if _fatal_round_failure(round1, "round1"):
         round1 = replace(round1, chains=(), counterevidence=())
         fallback_reason = fallback_reason or "invalid_round1_response"
@@ -211,7 +213,7 @@ def run_numerical_two_stage(
         # completion/contract failures into a typed, auditable stage result.
         round2 = _run_round2(
             retrieval,
-            task,
+            retrieval_task,
             round1,
             sent_gaps,
             assumptions,
@@ -278,6 +280,41 @@ def run_numerical_two_stage(
             final,
         ),
         fallback_reason=fallback_reason,
+    )
+
+
+def _sanitized_context_task(task: ContextTask) -> ContextTask:
+    """Create the only ContextTask object that a replaceable Retrieval agent sees."""
+    numeric = task.numeric
+    return ContextTask(
+        numeric=ContextNumericTask(
+            task_id=str(numeric.task_id),
+            history_values=tuple(float(value) for value in numeric.history_values),
+            future_values=(),
+            prediction_length=int(numeric.prediction_length),
+            frequency=str(numeric.frequency),
+            seasonal_period=(
+                None
+                if numeric.seasonal_period is None
+                else str(numeric.seasonal_period)
+            ),
+            entity_name=str(numeric.entity_name),
+        ),
+        target_name=str(task.target_name),
+        target_description=str(task.target_description),
+        history_timestamps=tuple(str(value) for value in task.history_timestamps),
+        future_timestamps=tuple(str(value) for value in task.future_timestamps),
+        documents=tuple(
+            Document(
+                document_id=str(item.document_id),
+                content=str(item.content),
+                role=None,
+                subtype=None,
+            )
+            for item in task.documents
+        ),
+        gt_evidence=(),
+        labels_public=False,
     )
 
 

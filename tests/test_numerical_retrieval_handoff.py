@@ -399,6 +399,103 @@ def test_package_native_two_stage_e2e_is_blind_bounded_and_materialized(tmp_path
         result.forecast = (0.0, 0.0)  # type: ignore[misc]
 
 
+def test_both_retrieval_rounds_receive_only_host_sanitized_context(tmp_path) -> None:
+    task = _context_task()
+    package = _package()
+
+    class RecordingRetrievalAgent(TwoStageRetrievalAgent):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.received_tasks: list[ContextTask] = []
+
+        def run_round1(self, current_task):
+            self.received_tasks.append(current_task)
+            return super().run_round1(current_task)
+
+        def run_round2(self, current_task, *args, **kwargs):
+            self.received_tasks.append(current_task)
+            return super().run_round2(current_task, *args, **kwargs)
+
+    retrieval = RecordingRetrievalAgent(
+        FakeLLMClient(
+            [
+                _round(
+                    _chain(
+                        task,
+                        chain_id="sanitized_round1",
+                        document_id="doc_round1",
+                        direction="up",
+                        magnitude=5.0,
+                    )
+                ),
+                _round(
+                    _chain(
+                        task,
+                        chain_id="sanitized_round2",
+                        document_id="doc_round2",
+                        direction="down",
+                        magnitude=2.0,
+                        addressed=("assumption_001",),
+                    )
+                ),
+            ]
+        ),
+        RetrievalGenome.seed(),
+        RetrievalSkillLibrary(tmp_path / "retrieval_skills.json", persist=False),
+    )
+    decision = DecisionAgent(
+        FakeLLMClient(
+            [
+                _decision("safe_anchor", request_more=True),
+                _decision("seasonal_specialist", cited=("doc_round2",)),
+            ]
+        )
+    )
+
+    result = run_numerical_two_stage(task, package, retrieval, decision)
+
+    assert len(retrieval.received_tasks) == 2
+    for received in retrieval.received_tasks:
+        assert received.numeric.history_values == task.numeric.history_values
+        assert received.numeric.frequency == task.numeric.frequency
+        assert received.numeric.prediction_length == task.numeric.prediction_length
+        assert received.numeric.future_values == ()
+        assert received.gt_evidence == ()
+        assert received.labels_public is False
+        assert tuple(
+            (item.document_id, item.content) for item in received.documents
+        ) == tuple((item.document_id, item.content) for item in task.documents)
+        assert all(
+            item.role is None and item.subtype is None
+            for item in received.documents
+        )
+
+    private_variant = replace(
+        task,
+        numeric=replace(task.numeric, future_values=(-1.0, -2.0)),
+        gt_evidence=("different private label bytes",),
+        documents=tuple(
+            replace(
+                item,
+                role="different-private-role",
+                subtype="different-private-subtype",
+            )
+            for item in task.documents
+        ),
+    )
+    variant = run_numerical_two_stage(
+        private_variant,
+        package,
+        _retrieval([_round()], tmp_path / "variant"),
+        DecisionAgent(
+            FakeLLMClient([_decision("safe_anchor"), _decision("safe_anchor")])
+        ),
+    )
+    assert result.fingerprints["context_projection"] == variant.fingerprints[
+        "context_projection"
+    ]
+
+
 def test_empty_handoff_keeps_round1_audit_and_safe_numerical_default(tmp_path) -> None:
     task = _context_task()
     package = _package(with_assumption=False)
