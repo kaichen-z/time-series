@@ -7,6 +7,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from types import MappingProxyType
 
+from common.evolution_core.contracts import METRIC_POLICY_FINGERPRINT
+
 from .morphology import AssumptionGrounding, MorphologyCard
 from .numerical_package import freeze_string_mapping, host_assumption_ids
 from .numerical_selector import DecisionPolicy, HindcastConfig
@@ -94,6 +96,7 @@ def component_fingerprints(
 ) -> Mapping[str, str]:
     """Hash reviewed component payloads with caller-order-independent policies."""
     result = {
+        "metric_policy_fingerprint": METRIC_POLICY_FINGERPRINT,
         "task_profile": active_dictionary.task_profile_hash,
         "screening_policy": screening_policy.fingerprint(),
         "active_dictionary": _fingerprint(

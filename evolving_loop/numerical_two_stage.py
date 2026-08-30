@@ -1,0 +1,560 @@
+"""Package-native Numerical -> two-stage Retrieval -> Decision orchestration.
+
+This boundary deliberately consumes a completed :class:`NumericalForecastPackage`.
+It never re-runs the Numerical or Morphology agents, never creates a new forecast, and
+never gives Retrieval access to candidate identities, scores, or Numerical internals.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass, replace
+from types import MappingProxyType
+
+from common.evolution_core.contracts import METRIC_POLICY_FINGERPRINT
+from common.llm import TransientLLMError
+from evolving_loop.data import ContextTask
+from evolving_loop.decision_agent.agent import (
+    DecisionAgent,
+    DecisionCandidate,
+    DecisionResult,
+)
+from evolving_loop.retrieval_agent.agent import RetrievalResult
+from evolving_loop.retrieval_agent.schemas import (
+    FinalRetrievalCard,
+    RetrievalAssumption,
+    RetrievalGap,
+    RetrievalRoundResult,
+)
+from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
+from evolving_loop.retrieval_agent.verifier import merge_verified_rounds
+from numerical_agent.evolution.execution import Task
+from numerical_agent.evolution.numerical_handoff import safe_retrieval_projection
+from numerical_agent.evolution.numerical_package import (
+    NumericalForecastPackage,
+    valid_forecast,
+)
+from numerical_agent.evolution.screening import profile_task
+
+
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_REQUIRED_NUMERICAL_FINGERPRINTS = frozenset(
+    {
+        "metric_policy_fingerprint",
+        "task_profile",
+        "screening_policy",
+        "active_dictionary",
+        "combined_policies",
+        "decision_policy",
+        "hindcast_config",
+        "morphology_card",
+    }
+)
+_MAX_ASSUMPTIONS = 7
+_MAX_TEXT_LENGTHS = {
+    "assumption_id": 128,
+    "kind": 64,
+    "claim": 512,
+    "failure_condition": 512,
+}
+
+
+@dataclass(frozen=True)
+class NumericalTwoStageResult:
+    """Immutable output of the package-native two-stage inference path."""
+
+    numerical: NumericalForecastPackage
+    retrieval_card: FinalRetrievalCard
+    retrieval: RetrievalResult
+    provisional_decision: DecisionResult
+    final_decision: DecisionResult
+    forecast: tuple[float, ...]
+    fingerprints: Mapping[str, str]
+    fallback_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.numerical, NumericalForecastPackage):
+            raise ValueError("result requires a NumericalForecastPackage")
+        if not isinstance(self.retrieval_card, FinalRetrievalCard):
+            raise ValueError("result requires a final Retrieval card")
+        if not isinstance(self.retrieval, RetrievalResult):
+            raise ValueError("result requires a verified Retrieval result")
+        if not isinstance(self.provisional_decision, DecisionResult) or not isinstance(
+            self.final_decision, DecisionResult
+        ):
+            raise ValueError("result requires provisional and final Decision artifacts")
+        forecast = tuple(float(value) for value in self.forecast)
+        if not valid_forecast(forecast, self.numerical.task_profile.horizon):
+            raise ValueError("result forecast must be finite and match the Numerical horizon")
+        if forecast != self.final_decision.selected.forecast:
+            raise ValueError("result forecast must equal the final materialized Decision")
+        if self.retrieval != self.retrieval_card.to_legacy_result():
+            raise ValueError("result Retrieval projection must match the final card")
+        fingerprints = dict(self.fingerprints)
+        if any(
+            not isinstance(key, str)
+            or not key
+            or not isinstance(value, str)
+            or not _SHA256.fullmatch(value)
+            for key, value in fingerprints.items()
+        ):
+            raise ValueError("result fingerprints must be canonical SHA-256 strings")
+        if self.fallback_reason is not None and (
+            not isinstance(self.fallback_reason, str) or not self.fallback_reason
+        ):
+            raise ValueError("fallback_reason must be a non-empty string or None")
+        object.__setattr__(self, "forecast", forecast)
+        object.__setattr__(
+            self,
+            "fingerprints",
+            MappingProxyType(dict(sorted(fingerprints.items()))),
+        )
+
+
+def run_numerical_two_stage(
+    task: ContextTask,
+    numerical: NumericalForecastPackage,
+    retrieval: TwoStageRetrievalAgent,
+    decision: DecisionAgent,
+) -> NumericalTwoStageResult:
+    """Run fixed two-stage Retrieval and Decision over one frozen Numerical package."""
+    _validate_inputs(task, numerical, retrieval, decision)
+    candidates = _decision_candidates(numerical)
+    host_default = _safe_default(numerical, candidates)
+
+    assumptions, handoff_failure = _validated_handoff(numerical)
+    fallback_reason = handoff_failure
+
+    round1 = _run_round1(retrieval, task)
+    if _fatal_round_failure(round1, "round1"):
+        fallback_reason = fallback_reason or "invalid_round1_response"
+    round1_card = merge_verified_rounds(round1, None)
+    if handoff_failure is not None:
+        round1_card = _record_rejection(round1_card, handoff_failure)
+    provisional_retrieval = round1_card.to_legacy_result()
+    provisional, provisional_failure = _run_decision(
+        decision,
+        candidates,
+        provisional_retrieval,
+        host_default=host_default,
+        assumptions=assumptions,
+        round_index=0,
+    )
+    if provisional_failure is not None:
+        fallback_reason = fallback_reason or provisional_failure
+
+    round2: RetrievalRoundResult | None = None
+    sent_gaps = ()
+    if (
+        fallback_reason is None
+        and assumptions
+        and _should_run_round2(
+            retrieval.genome.second_round_trigger,
+            round1,
+            provisional,
+        )
+    ):
+        sent_gaps = provisional.gaps
+        # TwoStageRetrievalAgent propagates TransientLLMError and converts all other
+        # completion/contract failures into a typed, auditable stage result.
+        round2 = _run_round2(
+            retrieval,
+            task,
+            round1,
+            sent_gaps,
+            assumptions,
+        )
+        if _fatal_round_failure(round2, "round2"):
+            fallback_reason = "invalid_round2_response"
+        elif not round2.chains and not round2.counterevidence:
+            fallback_reason = "round2_no_verified_evidence"
+
+    card = merge_verified_rounds(round1, round2, gaps=sent_gaps)
+    if fallback_reason is not None:
+        card = _record_rejection(card, fallback_reason)
+    final_retrieval = card.to_legacy_result()
+    final, final_failure = _run_decision(
+        decision,
+        candidates,
+        final_retrieval,
+        host_default=host_default,
+        assumptions=assumptions,
+        round_index=1,
+        prior=(provisional,),
+    )
+    if final_failure is not None:
+        fallback_reason = fallback_reason or final_failure
+    if fallback_reason is not None:
+        final = _fallback_decision(host_default, fallback_reason)
+
+    materialized = {item.candidate_id: item for item in candidates}
+    selected = materialized.get(final.selected.candidate_id)
+    if selected is None or selected.forecast != final.selected.forecast:
+        fallback_reason = fallback_reason or "unmaterialized_final_decision"
+        final = _fallback_decision(host_default, fallback_reason)
+
+    return NumericalTwoStageResult(
+        numerical=numerical,
+        retrieval_card=card,
+        retrieval=final_retrieval,
+        provisional_decision=provisional,
+        final_decision=final,
+        forecast=final.selected.forecast,
+        fingerprints=_result_fingerprints(numerical, retrieval, decision),
+        fallback_reason=fallback_reason,
+    )
+
+
+def _validate_inputs(
+    task: ContextTask,
+    numerical: NumericalForecastPackage,
+    retrieval: TwoStageRetrievalAgent,
+    decision: DecisionAgent,
+) -> None:
+    if not isinstance(task, ContextTask):
+        raise TypeError("task must be a ContextTask")
+    if not isinstance(numerical, NumericalForecastPackage):
+        raise TypeError("numerical must be a NumericalForecastPackage")
+    if not isinstance(retrieval, TwoStageRetrievalAgent):
+        raise TypeError("retrieval must be a TwoStageRetrievalAgent")
+    if not isinstance(decision, DecisionAgent):
+        raise TypeError("decision must be a DecisionAgent")
+    if task.numeric.prediction_length != numerical.task_profile.horizon:
+        raise ValueError("Numerical package horizon does not match the ContextTask horizon")
+    expected_profile = profile_task(
+        Task(
+            task.numeric.task_id,
+            tuple(task.numeric.history_values),
+            task.numeric.prediction_length,
+            task.numeric.frequency,
+            (),
+        )
+    )
+    if expected_profile != numerical.task_profile:
+        raise ValueError("Numerical package TaskProfile does not match the ContextTask history")
+
+    fingerprints = dict(numerical.component_fingerprints)
+    missing = _REQUIRED_NUMERICAL_FINGERPRINTS - set(fingerprints)
+    if missing:
+        raise ValueError(
+            "Numerical package is missing canonical component fingerprints: "
+            + ", ".join(sorted(missing))
+        )
+    if fingerprints["metric_policy_fingerprint"] != METRIC_POLICY_FINGERPRINT:
+        raise ValueError("Numerical package metric policy fingerprint mismatch")
+    for name in _REQUIRED_NUMERICAL_FINGERPRINTS - {"metric_policy_fingerprint"}:
+        if not _SHA256.fullmatch(fingerprints[name]):
+            raise ValueError(f"Numerical package {name} fingerprint is not canonical")
+    expected_profile_fingerprint = _fingerprint(expected_profile.to_public_payload())
+    if fingerprints["task_profile"] != expected_profile_fingerprint:
+        raise ValueError("Numerical package task profile fingerprint mismatch")
+
+
+def _decision_candidates(
+    numerical: NumericalForecastPackage,
+) -> tuple[DecisionCandidate, ...]:
+    accepted = tuple(numerical.accepted_assumptions)
+    candidates: list[DecisionCandidate] = []
+    for alternative in numerical.ranked_alternatives:
+        diagnostic = alternative.diagnostics
+        if not valid_forecast(alternative.forecast, numerical.task_profile.horizon):
+            continue
+        if not math.isfinite(diagnostic.median_smae) or not math.isfinite(
+            diagnostic.median_srmse
+        ):
+            continue
+        grounding = next(
+            (
+                item
+                for item in accepted
+                if alternative.name in item.candidate_names
+            ),
+            None,
+        )
+        if grounding is None:
+            assumption = (
+                f"This materialized {alternative.family} candidate remains valid under "
+                "its history-only validation."
+            )
+            failure_condition = (
+                "The future regime differs from the history-only validation regime."
+            )
+        else:
+            assumption = grounding.claim
+            failure_condition = grounding.failure_condition
+        candidates.append(
+            DecisionCandidate(
+                candidate_id=alternative.name,
+                forecast=alternative.forecast,
+                assumption=assumption,
+                failure_condition=failure_condition,
+                hindcast_smae=diagnostic.median_smae,
+                hindcast_srmse=diagnostic.median_srmse,
+                tags=("numerical_package", alternative.family),
+            )
+        )
+    if not candidates:
+        raise ValueError("Numerical package has no materialized alternatives with valid metrics")
+    return tuple(candidates)
+
+
+def _safe_default(
+    numerical: NumericalForecastPackage,
+    candidates: Sequence[DecisionCandidate],
+) -> DecisionCandidate:
+    by_id = {item.candidate_id: item for item in candidates}
+    selected = tuple(numerical.selection_decision.selected)
+    if len(selected) == 1 and selected[0] in by_id:
+        return by_id[selected[0]]
+    protected = by_id.get(numerical.protected_baseline.name)
+    if protected is None:
+        raise ValueError("Numerical protected baseline is not a valid materialized alternative")
+    return protected
+
+
+def _validated_handoff(
+    numerical: NumericalForecastPackage,
+) -> tuple[tuple[RetrievalAssumption, ...], str | None]:
+    raw_handoff = tuple(numerical.retrieval_handoff)
+    if not raw_handoff:
+        return (), "empty_retrieval_handoff"
+    if len(raw_handoff) > _MAX_ASSUMPTIONS:
+        return (), "invalid_retrieval_handoff"
+    try:
+        safe, _trace, expected = safe_retrieval_projection(
+            numerical.accepted_assumptions,
+            numerical.rejected_assumptions,
+        )
+        if safe != numerical.accepted_assumptions:
+            raise ValueError("accepted assumption has no safe Retrieval projection")
+        if tuple(dict(item) for item in raw_handoff) != tuple(
+            dict(item) for item in expected
+        ):
+            raise ValueError("Retrieval handoff does not match accepted assumptions")
+        assumptions = tuple(
+            RetrievalAssumption.from_payload(item) for item in raw_handoff
+        )
+        if len({item.assumption_id for item in assumptions}) != len(assumptions):
+            raise ValueError("duplicate Retrieval assumption IDs")
+        for item in assumptions:
+            payload = item.to_payload()
+            if any(
+                len(payload[field]) > limit
+                for field, limit in _MAX_TEXT_LENGTHS.items()
+            ):
+                raise ValueError("Retrieval assumption text exceeds its host budget")
+    except (TypeError, ValueError):
+        return (), "invalid_retrieval_handoff"
+    return assumptions, None
+
+
+def _run_round1(
+    retrieval: TwoStageRetrievalAgent,
+    task: ContextTask,
+) -> RetrievalRoundResult:
+    try:
+        return retrieval.run_round1(task)
+    except TransientLLMError:
+        raise
+    except Exception as error:
+        return RetrievalRoundResult(
+            (),
+            (),
+            ("invalid_retrieval_payload",),
+            False,
+            rejected=(
+                "invalid_round1_response",
+                f"round1_failure:{type(error).__name__}",
+            ),
+        )
+
+
+def _run_round2(
+    retrieval: TwoStageRetrievalAgent,
+    task: ContextTask,
+    round1: RetrievalRoundResult,
+    gaps: tuple[RetrievalGap, ...],
+    assumptions: tuple[RetrievalAssumption, ...],
+) -> RetrievalRoundResult:
+    try:
+        return retrieval.run_round2(task, round1, gaps, assumptions)
+    except TransientLLMError:
+        raise
+    except Exception as error:
+        return RetrievalRoundResult(
+            (),
+            (),
+            ("invalid_retrieval_payload",),
+            False,
+            rejected=(
+                "invalid_round2_response",
+                f"round2_failure:{type(error).__name__}",
+            ),
+        )
+
+
+def _run_decision(
+    decision: DecisionAgent,
+    candidates: tuple[DecisionCandidate, ...],
+    retrieval: RetrievalResult,
+    *,
+    host_default: DecisionCandidate,
+    assumptions: tuple[RetrievalAssumption, ...],
+    round_index: int,
+    prior: tuple[DecisionResult, ...] = (),
+) -> tuple[DecisionResult, str | None]:
+    try:
+        return (
+            decision.run(
+                candidates,
+                retrieval,
+                host_default_id=host_default.candidate_id,
+                prior_decisions=prior,
+                round_index=round_index,
+                assumptions=assumptions,
+            ),
+            None,
+        )
+    except TransientLLMError:
+        raise
+    except Exception as error:
+        reason = f"decision_failure:{type(error).__name__}"
+        return _fallback_decision(host_default, reason), reason
+
+
+def _fallback_decision(default: DecisionCandidate, reason: str) -> DecisionResult:
+    return DecisionResult(
+        selected=default,
+        host_default_id=default.candidate_id,
+        requested_more_retrieval=False,
+        rationale="Preserve the frozen Numerical safe default.",
+        supporting_document_ids=(),
+        llm_override_accepted=False,
+        rejection_reason=reason,
+        used_skill_names=(),
+        gaps=(),
+    )
+
+
+def _should_run_round2(
+    trigger: str,
+    round1: RetrievalRoundResult,
+    provisional: DecisionResult,
+) -> bool:
+    if trigger == "never":
+        return False
+    if trigger == "always":
+        return True
+    if trigger == "on_named_gap":
+        return provisional.requested_more_retrieval and bool(provisional.gaps)
+    if trigger == "on_incomplete_chain":
+        return (
+            not round1.sufficient
+            or not round1.chains
+            or any(item.missing_links or not item.numeric_eligible for item in round1.chains)
+        )
+    raise ValueError(f"unknown second-round trigger: {trigger}")
+
+
+def _fatal_round_failure(result: RetrievalRoundResult, stage: str) -> bool:
+    return (
+        f"invalid_{stage}_response" in result.rejected
+        or "invalid_retrieval_payload" in result.missing_information
+    )
+
+
+def _record_rejection(
+    card: FinalRetrievalCard,
+    reason: str,
+) -> FinalRetrievalCard:
+    return replace(card, rejected=tuple(dict.fromkeys((*card.rejected, reason))))
+
+
+def _result_fingerprints(
+    numerical: NumericalForecastPackage,
+    retrieval: TwoStageRetrievalAgent,
+    decision: DecisionAgent,
+) -> Mapping[str, str]:
+    result = {
+        "metric_policy": METRIC_POLICY_FINGERPRINT,
+        "numerical_package": _numerical_package_fingerprint(numerical),
+        "retrieval_genome": retrieval.genome.fingerprint(),
+        "retrieval_skills": _fingerprint(
+            [
+                item.to_payload()
+                for item in sorted(
+                    retrieval.skills.all(),
+                    key=lambda value: (value.skill_id, value.version),
+                )
+            ]
+        ),
+        "decision_prompt": hashlib.sha256(decision.prompt.encode("utf-8")).hexdigest(),
+        "decision_skills": _fingerprint(
+            [
+                asdict(item)
+                for item in sorted(
+                    decision.library.all() if decision.library is not None else (),
+                    key=lambda value: (value.skill_id, value.name),
+                )
+            ]
+        ),
+    }
+    result.update(
+        {
+            f"numerical_{name.removesuffix('_fingerprint')}": value
+            for name, value in numerical.component_fingerprints.items()
+        }
+    )
+    return MappingProxyType(dict(sorted(result.items())))
+
+
+def _numerical_package_fingerprint(numerical: NumericalForecastPackage) -> str:
+    """Bind the exact safe runtime projection without serializing internal folds."""
+    selection = numerical.selection_decision
+    return _fingerprint(
+        {
+            "task_profile": numerical.task_profile.to_public_payload(),
+            "active_candidate_names": list(numerical.active_candidate_names),
+            "selection": {
+                "mode": selection.mode,
+                "selected": list(selection.selected),
+                "weights": list(selection.weights),
+                "forecast": list(selection.forecast),
+                "baseline_name": selection.baseline_name,
+            },
+            "protected_baseline": {
+                "name": numerical.protected_baseline.name,
+                "forecast": list(numerical.protected_baseline.forecast),
+            },
+            "ranked_alternatives": [
+                {
+                    "rank": item.rank,
+                    "name": item.name,
+                    "family": item.family,
+                    "forecast": list(item.forecast),
+                    "median_smae": item.diagnostics.median_smae,
+                    "median_srmse": item.diagnostics.median_srmse,
+                }
+                for item in numerical.ranked_alternatives
+            ],
+            "retrieval_handoff": [dict(item) for item in numerical.retrieval_handoff],
+            "component_fingerprints": dict(numerical.component_fingerprints),
+        }
+    )
+
+
+def _fingerprint(payload: object) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+__all__ = ["NumericalTwoStageResult", "run_numerical_two_stage"]
