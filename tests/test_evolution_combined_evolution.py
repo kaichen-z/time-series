@@ -257,6 +257,51 @@ def test_parse_combined_operations_accepts_wrapper_contract() -> None:
     assert parse_combined_operations("```json\n{\"operations\": []}\n```") == ()
 
 
+def test_proposal_boundary_accepts_lead_time_route_child() -> None:
+    from numerical_agent.evolution.combined_evolution import propose_combined_child
+
+    policy = _policy(
+        "combined_lead_time_route",
+        parents=["chronos_bolt", "timesfm_2_5", "seasonal_naive"],
+    )
+    policy.update(
+        {
+            "operator": "lead_time_route",
+            "weights": [0.25, 0.50, 0.25],
+            "fallback_parent": "timesfm_2_5",
+        }
+    )
+
+    result = propose_combined_child(
+        PolicyPortfolio.flagship5(),
+        statistical_names=(
+            "seasonal_naive",
+            "holt_damped_trend",
+            "croston_sba",
+            "robust_loess_trend",
+            "median_seasonal_profile_forecast",
+        ),
+        diagnostics=_diagnostics(),
+        agent=FakeLLMClient(
+            [
+                _response(
+                    {
+                        "op": "add",
+                        "reason": "route by forecast lead time",
+                        "policy": policy,
+                    }
+                )
+            ]
+        ),
+    )
+
+    child = result.child.get("combined_lead_time_route")
+    assert result.changed
+    assert child is not None
+    assert child.operator == "lead_time_route"
+    assert child.weights == (0.25, 0.50, 0.25)
+
+
 @pytest.mark.parametrize(
     "response",
     (
@@ -763,6 +808,10 @@ def test_propose_combined_child_sends_only_typed_label_free_diagnostics_and_comp
                 "unique": True,
             },
             "operators": {
+                "lead_time_route": (
+                    "two to five ordered parents; weights are strictly positive "
+                    "contiguous forecast-horizon duration shares summing to one"
+                ),
                 "median": "two to five parents; weights must be empty",
                 "route": "exactly two parents; weights must be empty; above_parent and below_parent are distinct parents",
                 "trimmed_mean": "three to five parents; weights must be empty",

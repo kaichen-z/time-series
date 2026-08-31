@@ -206,6 +206,8 @@ For Combined policies, preserve the name and use two to five unique reviewed lea
 canonical `parents` tuple, including at least one TSFM parent. A repair may change the ordered
 parent set, `operator`, `weights`, history-only `signal`, finite `threshold`, and explicit
 `above_parent`, `below_parent`, and `fallback_parent` fields.
+The `lead_time_route` operator assigns ordered parents to contiguous forecast-horizon
+segments using strictly positive duration-share `weights` that sum to one.
 Low coverage caused by honest NotApplicable behavior is not a failure. Crashes and invalid
 forecasts are defects.
 
@@ -226,9 +228,11 @@ For a Combined policy, return all canonical fields: `name`, `parents`, `operator
 `signal`, `threshold`, `above_parent`, `below_parent`, and `fallback_parent`. The `parents` tuple
 has two to five unique reviewed leaf names and includes at
 least one TSFM parent; a repair may change its ordered parent set. `operator` is one of
-weighted_mean, median, trimmed_mean, or route. Weighted-mean `weights` are one nonnegative value
-per parent and sum to one; other operators use an empty tuple. Route has two parents and explicit
-above/below branches. Use only the reviewed history-only signal vocabulary.
+weighted_mean, median, trimmed_mean, route, or lead_time_route. Weighted-mean `weights` are one
+nonnegative value per parent and sum to one. Lead-time-route `weights` are one strictly positive
+duration share per ordered parent, sum to one, and define contiguous forecast-horizon segments.
+Median, trimmed-mean, and route use an empty tuple. Route has two parents and explicit above/below
+branches. Use only the reviewed history-only signal vocabulary.
 
 Return exactly one JSON object:
 {"replacement": {"name": "...", "...": "all remaining policy fields"},
