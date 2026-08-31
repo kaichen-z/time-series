@@ -165,6 +165,173 @@ def load_methods(
     return module, functions
 
 
+class MethodForecastError(RuntimeError):
+    """One isolated reviewed method could not produce a usable forecast."""
+
+
+class IsolatedForecastRuntime:
+    """Execute reviewed methods behind one restartable native-crash boundary.
+
+    The Numerical runtime asks for individual forecasts, while ``run_module`` scores a
+    complete method/task matrix.  This adapter keeps the same process-isolation guarantee
+    for history-only inference: Python failures are returned as typed errors, and a native
+    exit or hard timeout destroys the worker without terminating the host Numerical run.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        skills_path: str | Path | None = None,
+        time_budget_s: float = 20.0,
+        worker_startup_timeout_s: float = 10.0,
+    ) -> None:
+        if time_budget_s <= 0:
+            raise ValueError("time_budget_s must be positive")
+        if worker_startup_timeout_s <= 0:
+            raise ValueError("worker_startup_timeout_s must be positive")
+        source = Path(path).resolve()
+        from .module import read_module
+
+        self._path = source
+        self._skills_path = _skills_path(source, skills_path)
+        self._ordered_names = tuple(read_module(source).names())
+        self._names = frozenset(self._ordered_names)
+        if not self._names:
+            raise ImportError(f"{source} defines no forecasting functions")
+        self._time_budget_s = float(time_budget_s)
+        self._startup_timeout_s = float(worker_startup_timeout_s)
+        self._context = multiprocessing.get_context("spawn")
+        self._parent: object | None = None
+        self._worker: multiprocessing.Process | None = None
+        self._native_failures: dict[str, str] = {}
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return self._ordered_names
+
+    def forecast(
+        self,
+        name: str,
+        history: Sequence[float],
+        horizon: int,
+        frequency: str,
+    ) -> tuple[float, ...]:
+        if name not in self._names:
+            raise MethodForecastError(f"unknown reviewed method {name!r}")
+        if name in self._native_failures:
+            raise MethodForecastError(
+                f"{name} previously failed its isolated worker: "
+                f"{self._native_failures[name]}"
+            )
+        if isinstance(horizon, bool) or not isinstance(horizon, int) or horizon < 1:
+            raise ValueError("horizon must be a positive integer")
+        if not isinstance(frequency, str) or not frequency:
+            raise ValueError("frequency must be a non-empty string")
+        try:
+            stable_history = tuple(float(value) for value in history)
+        except (TypeError, ValueError) as error:
+            raise ValueError("history must contain numeric values") from error
+        if not stable_history or not all(math.isfinite(value) for value in stable_history):
+            raise ValueError("history must contain finite values")
+
+        self._ensure_worker()
+        assert self._parent is not None
+        assert self._worker is not None
+        try:
+            self._parent.send((name, stable_history, horizon, frequency))  # type: ignore[attr-defined]
+        except (BrokenPipeError, EOFError, OSError):
+            detail = _worker_exit(self._worker)
+            self._record_native_failure(name, detail)
+            raise MethodForecastError(detail) from None
+
+        if not self._parent.poll(self._time_budget_s):  # type: ignore[attr-defined]
+            if self._worker.exitcode is None:
+                detail = f"hard timeout after {self._time_budget_s:g}s"
+            else:
+                detail = _worker_exit(self._worker)
+            self._record_native_failure(name, detail)
+            raise MethodForecastError(detail) from None
+        try:
+            reply = self._parent.recv()  # type: ignore[attr-defined]
+        except (EOFError, OSError):
+            detail = _worker_exit(self._worker)
+            self._record_native_failure(name, detail)
+            raise MethodForecastError(detail) from None
+        if (
+            not isinstance(reply, tuple)
+            or len(reply) != 3
+            or reply[0] not in {SUCCESS, NOT_APPLICABLE, CRASHED, INVALID}
+            or not isinstance(reply[1], str)
+        ):
+            self._record_native_failure(name, "worker returned an invalid forecast response")
+            raise MethodForecastError("worker returned an invalid forecast response")
+        status, detail, raw = reply
+        if status != SUCCESS:
+            raise MethodForecastError(f"{status}: {detail}"[:240])
+        try:
+            forecast = tuple(float(value) for value in raw)
+        except (TypeError, ValueError) as error:
+            raise MethodForecastError(f"invalid: unreadable forecast: {error}"[:240]) from None
+        if len(forecast) != horizon or not all(math.isfinite(value) for value in forecast):
+            raise MethodForecastError("invalid: forecast must contain exactly horizon finite values")
+        return forecast
+
+    def close(self) -> None:
+        parent, worker = self._parent, self._worker
+        self._parent = None
+        self._worker = None
+        if parent is not None:
+            try:
+                parent.send(None)  # type: ignore[attr-defined]
+            except (BrokenPipeError, EOFError, OSError):
+                pass
+            try:
+                parent.close()  # type: ignore[attr-defined]
+            except OSError:
+                pass
+        if worker is not None:
+            _stop_worker(worker)
+
+    def _record_native_failure(self, name: str, detail: str) -> None:
+        self._native_failures[name] = detail
+        self.close()
+
+    def _ensure_worker(self) -> None:
+        if self._parent is not None and self._worker is not None:
+            return
+        parent, child = self._context.Pipe()  # type: ignore[attr-defined]
+        worker = self._context.Process(  # type: ignore[attr-defined]
+            target=_isolated_forecast_worker,
+            args=(str(self._path), str(self._skills_path), child),
+            daemon=True,
+        )
+        worker.start()
+        child.close()
+        if not parent.poll(self._startup_timeout_s):
+            detail = (
+                f"worker startup timeout after {self._startup_timeout_s:g}s"
+                if worker.exitcode is None
+                else _worker_exit(worker)
+            )
+            parent.close()
+            _stop_worker(worker)
+            raise MethodForecastError(detail)
+        try:
+            ready = parent.recv()
+        except (EOFError, OSError):
+            detail = _worker_exit(worker)
+            parent.close()
+            _stop_worker(worker)
+            raise MethodForecastError(detail) from None
+        if ready != ("worker_ready", tuple(sorted(self._names))):
+            parent.close()
+            _stop_worker(worker)
+            raise MethodForecastError("worker returned an invalid startup handshake")
+        self._parent = parent
+        self._worker = worker
+
+
 def run_module(
     path: str | Path,
     tasks: Sequence[Task],
@@ -501,6 +668,44 @@ def _isolated_method_worker(
         connection.send(  # type: ignore[attr-defined]
             _run_one(name, function, task, not_applicable, float("inf"))
         )
+
+
+def _isolated_forecast_worker(path: str, skills_path: str, connection: object) -> None:
+    """Serve arbitrary reviewed methods from one disposable inference worker."""
+    module, functions = load_methods(path, skills_path=skills_path)
+    not_applicable = getattr(module, "NotApplicable")
+    connection.send(("worker_ready", tuple(sorted(functions))))  # type: ignore[attr-defined]
+    while True:
+        request = connection.recv()  # type: ignore[attr-defined]
+        if request is None:
+            return
+        name, history, horizon, frequency = request
+        function = functions[name]
+        try:
+            raw = function(list(history), horizon, frequency)
+        except not_applicable as error:
+            connection.send(  # type: ignore[attr-defined]
+                (NOT_APPLICABLE, str(error)[:200], ())
+            )
+            continue
+        except BaseException as error:
+            connection.send(  # type: ignore[attr-defined]
+                (CRASHED, f"{type(error).__name__}: {error}"[:200], ())
+            )
+            continue
+        try:
+            forecast = tuple(float(value) for value in raw)
+        except (TypeError, ValueError) as error:
+            connection.send(  # type: ignore[attr-defined]
+                (INVALID, f"unreadable forecast: {error}"[:200], ())
+            )
+            continue
+        if len(forecast) != horizon or not all(math.isfinite(value) for value in forecast):
+            connection.send(  # type: ignore[attr-defined]
+                (INVALID, "forecast must contain exactly horizon finite values", ())
+            )
+            continue
+        connection.send((SUCCESS, "", forecast))  # type: ignore[attr-defined]
 
 
 def _worker_exit(worker: multiprocessing.Process) -> str:

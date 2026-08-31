@@ -75,14 +75,18 @@ Applicability = Literal[
     "all", "periodic", "intermittent", "recent_regime", "trending", "stable"
 ]
 Preprocess = Literal["none", "standardize", "robust_scale", "log1p_shift"]
-CombinedOperator = Literal["weighted_mean", "median", "trimmed_mean", "route"]
+CombinedOperator = Literal[
+    "weighted_mean", "median", "trimmed_mean", "route", "lead_time_route"
+]
 RouteDirection = Literal["above", "below"]
 
 _APPLICABILITY = frozenset(
     {"all", "periodic", "intermittent", "recent_regime", "trending", "stable"}
 )
 _PREPROCESS = frozenset({"none", "standardize", "robust_scale", "log1p_shift"})
-_COMBINED_OPERATORS = frozenset({"weighted_mean", "median", "trimmed_mean", "route"})
+_COMBINED_OPERATORS = frozenset(
+    {"weighted_mean", "median", "trimmed_mean", "route", "lead_time_route"}
+)
 _SIGNALS = frozenset(
     {
         "periodicity_strength",
@@ -310,9 +314,9 @@ class CombinedPolicy:
             raise PolicyError(f"unsupported Combined operator {self.operator!r}")
         if not isinstance(self.weights, tuple):
             raise PolicyError("weights must be a tuple")
-        if self.operator == "weighted_mean":
+        if self.operator in {"weighted_mean", "lead_time_route"}:
             if len(self.weights) != len(self.parents):
-                raise PolicyError("weighted_mean weights must match parents")
+                raise PolicyError(f"{self.operator} weights must match parents")
             for weight in self.weights:
                 if (
                     isinstance(weight, bool)
@@ -321,6 +325,8 @@ class CombinedPolicy:
                     or float(weight) < 0.0
                 ):
                     raise PolicyError("weights must be finite and non-negative")
+                if self.operator == "lead_time_route" and float(weight) <= 0.0:
+                    raise PolicyError("lead_time_route weights must be strictly positive")
             if not math.isclose(
                 math.fsum(float(weight) for weight in self.weights),
                 1.0,
@@ -888,6 +894,15 @@ def combine_materialized_forecast(
             )
             for index in range(horizon)
         )
+    elif policy.operator == "lead_time_route":
+        counts = _lead_time_segment_counts(policy.weights, horizon)
+        values: list[float] = []
+        offset = 0
+        for outcome, count in zip(parents, counts, strict=True):
+            end = offset + count
+            values.extend(outcome.forecast[offset:end])
+            offset = end
+        forecast = tuple(values)
     elif policy.operator == "route":
         signal = _history_signal(policy.signal, history, horizon, frequency)
         selected = policy.above_parent if signal >= policy.threshold else policy.below_parent
@@ -909,6 +924,32 @@ def combine_materialized_forecast(
     else:  # pragma: no cover - CombinedPolicy validates operators
         raise PolicyError(f"unsupported Combined operator {policy.operator!r}")
     return tuple(float(value) for value in forecast)
+
+
+def _lead_time_segment_counts(weights: Sequence[float], horizon: int) -> tuple[int, ...]:
+    """Allocate non-empty contiguous lead-time segments deterministically."""
+    if type(horizon) is not int or horizon < len(weights):
+        raise PolicyError("horizon is too short for every lead_time_route parent")
+    exact_weights = tuple(Fraction.from_float(float(weight)) for weight in weights)
+    weight_sum = sum(exact_weights, start=Fraction())
+    quotas = tuple(Fraction(horizon) * weight / weight_sum for weight in exact_weights)
+    floors = tuple(quota.numerator // quota.denominator for quota in quotas)
+    counts = list(floors)
+    unallocated = horizon - sum(floors)
+    order = sorted(
+        range(len(weights)),
+        key=lambda index: (-(quotas[index] - floors[index]), index),
+    )
+    for index in order[:unallocated]:
+        counts[index] += 1
+    for empty in (index for index, count in enumerate(counts) if count == 0):
+        donor = max(
+            (index for index, count in enumerate(counts) if count > 1),
+            key=lambda index: (counts[index] - quotas[index], counts[index], -index),
+        )
+        counts[empty] = 1
+        counts[donor] -= 1
+    return tuple(counts)
 
 
 def _stable_weighted_mean(values: Sequence[tuple[float, float]]) -> float:

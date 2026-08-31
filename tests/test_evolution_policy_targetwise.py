@@ -196,6 +196,8 @@ def test_targetwise_combined_prompts_use_canonical_policy_schema() -> None:
     ):
         assert field in prompt
     assert "parent identities are immutable" not in prompt
+    assert "lead_time_route" in prompt
+    assert "contiguous forecast-horizon segments" in prompt
 
 
 def test_targetwise_combined_prompt_declares_exact_canonical_field_sequence() -> None:

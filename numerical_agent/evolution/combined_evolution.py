@@ -40,11 +40,13 @@ above_parent, below_parent, and fallback_parent. Name and every parent are
 public Python identifiers. Parents are two to five unique materialized leaf
 names, include at least one supplied fixed TSFM identity, and have no Combined parent.
 Never change the fixed TSFM identities or order. weighted_mean has one
-finite non-negative weight per parent summing to one; median has empty weights;
-trimmed_mean has three to five parents and empty weights; route has exactly two
-parents, empty weights, and distinct above_parent and below_parent values from
-parents. Non-route policies have empty branches. fallback_parent occurs in
-parents. signal is one supplied history-only signal and threshold is finite.
+finite non-negative weight per parent summing to one. lead_time_route uses the
+ordered parents for contiguous forecast-horizon segments and has one strictly
+positive segment-duration weight per parent summing to one. median has empty
+weights; trimmed_mean has three to five parents and empty weights; route has
+exactly two parents, empty weights, and distinct above_parent and below_parent
+values from parents. Non-route policies have empty branches. fallback_parent
+occurs in parents. signal is one supplied history-only signal and threshold is finite.
 
 Do not score, select, or accept a child. Use only history and materialized leaf
 information. Use no future values, documents, ground truth, task-role labels, Public, hidden data, secrets,
@@ -864,6 +866,10 @@ def _allowed_operations_payload(
                 "combined_parents_allowed": False,
             },
             "operators": {
+                "lead_time_route": (
+                    "two to five ordered parents; weights are strictly positive "
+                    "contiguous forecast-horizon duration shares summing to one"
+                ),
                 "median": "two to five parents; weights must be empty",
                 "route": "exactly two parents; weights must be empty; above_parent and below_parent are distinct parents",
                 "trimmed_mean": "three to five parents; weights must be empty",

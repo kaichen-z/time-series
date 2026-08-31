@@ -69,6 +69,20 @@ def test_canonical_combined_policy_round_trips() -> None:
     assert CombinedPolicy(**policy.to_payload()) == policy
 
 
+def test_lead_time_route_round_trips_through_literal_python_policy_source() -> None:
+    base = PolicyPortfolio.flagship5()
+    policy = CombinedPolicy(
+        "combined_lead_time_route",
+        ("chronos_bolt", "timesfm_2_5", "seasonal_naive"),
+        "lead_time_route",
+        (0.25, 0.50, 0.25),
+        fallback_parent="timesfm_2_5",
+    )
+    portfolio = PolicyPortfolio(base.tsfm, (policy,))
+
+    assert parse_policy_source(render_policy_source(portfolio)) == portfolio
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
@@ -695,6 +709,115 @@ def test_weighted_mean_combines_two_tsfm_parent_forecasts_pointwise() -> None:
 
     assert combined.status == SUCCESS
     assert combined.forecast == (17.5, 17.5)
+
+
+def test_lead_time_route_uses_ordered_parents_for_contiguous_horizon_segments() -> None:
+    policy = CombinedPolicy(
+        "combined_lead_time_route",
+        ("chronos_bolt", "timesfm_2_5", "seasonal_naive"),
+        "lead_time_route",
+        (0.25, 0.50, 0.25),
+        fallback_parent="timesfm_2_5",
+    )
+    horizon = 24
+
+    combined = combine_materialized_outcome(
+        policy,
+        {
+            "chronos_bolt": _successful_parent(
+                "chronos_bolt", tuple(100.0 + step for step in range(horizon))
+            ),
+            "timesfm_2_5": _successful_parent(
+                "timesfm_2_5", tuple(200.0 + step for step in range(horizon))
+            ),
+            "seasonal_naive": _successful_parent(
+                "seasonal_naive", tuple(300.0 + step for step in range(horizon))
+            ),
+        },
+        task_id="operator",
+        history=(1.0, 2.0),
+        horizon=horizon,
+        frequency="D",
+    )
+
+    assert combined.status == SUCCESS
+    assert combined.forecast == (
+        tuple(100.0 + step for step in range(6))
+        + tuple(200.0 + step for step in range(6, 18))
+        + tuple(300.0 + step for step in range(18, 24))
+    )
+
+
+def test_lead_time_route_duration_shares_apply_to_the_complete_horizon() -> None:
+    policy = CombinedPolicy(
+        "combined_short_tail_route",
+        ("timesfm_2_5", "seasonal_naive"),
+        "lead_time_route",
+        (0.90, 0.10),
+        fallback_parent="timesfm_2_5",
+    )
+
+    combined = combine_materialized_outcome(
+        policy,
+        {
+            "timesfm_2_5": _successful_parent("timesfm_2_5", (10.0,) * 10),
+            "seasonal_naive": _successful_parent("seasonal_naive", (20.0,) * 10),
+        },
+        task_id="operator",
+        history=(1.0, 2.0),
+        horizon=10,
+        frequency="D",
+    )
+
+    assert combined.forecast == (10.0,) * 9 + (20.0,)
+
+
+@pytest.mark.parametrize(
+    ("weights", "message"),
+    (
+        ((0.5, 0.5), "match parents"),
+        ((0.25, 0.75, 0.0), "strictly positive"),
+        ((0.25, 0.50, 0.30), "sum to one"),
+    ),
+)
+def test_lead_time_route_rejects_invalid_segment_proportions(
+    weights: tuple[float, ...], message: str
+) -> None:
+    with pytest.raises(PolicyError, match=message):
+        CombinedPolicy(
+            "combined_lead_time_route",
+            ("chronos_bolt", "timesfm_2_5", "seasonal_naive"),
+            "lead_time_route",
+            weights,
+            fallback_parent="timesfm_2_5",
+        )
+
+
+def test_lead_time_route_falls_back_when_horizon_cannot_give_each_parent_a_segment() -> None:
+    policy = CombinedPolicy(
+        "combined_lead_time_route",
+        ("chronos_bolt", "timesfm_2_5", "seasonal_naive"),
+        "lead_time_route",
+        (0.25, 0.50, 0.25),
+        fallback_parent="timesfm_2_5",
+    )
+
+    combined = combine_materialized_outcome(
+        policy,
+        {
+            "chronos_bolt": _successful_parent("chronos_bolt", (10.0, 11.0)),
+            "timesfm_2_5": _successful_parent("timesfm_2_5", (20.0, 21.0)),
+            "seasonal_naive": _successful_parent("seasonal_naive", (30.0, 31.0)),
+        },
+        task_id="operator",
+        history=(1.0, 2.0),
+        horizon=2,
+        frequency="D",
+    )
+
+    assert combined.status == SUCCESS
+    assert combined.forecast == (20.0, 21.0)
+    assert combined.detail.startswith("fallback=timesfm_2_5")
 
 
 def test_median_combines_three_tsfm_and_statistical_parent_forecasts_pointwise() -> None:

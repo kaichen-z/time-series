@@ -13,6 +13,8 @@ from numerical_agent.evolution.execution import (
     NOT_APPLICABLE,
     SUCCESS,
     Task,
+    IsolatedForecastRuntime,
+    MethodForecastError,
     derive_characteristics,
     load_methods,
     report_payload,
@@ -318,6 +320,67 @@ def perfect_method(history, horizon, frequency):
         if outcome.method == "exiting_method"
     )
     assert perfect.success == 2
+
+
+def test_isolated_forecast_runtime_contains_exit_and_continues(tmp_path: Path) -> None:
+    module = tmp_path / "methods.py"
+    module.write_text(
+        MODULE_HEADER
+        + '''
+
+def exiting_method(history, horizon, frequency):
+    """Use when a native-style worker failure is under test."""
+    import os
+    os._exit(23)
+
+
+def perfect_method(history, horizon, frequency):
+    """Use when the forecast repeats the final observation."""
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+
+    runtime = IsolatedForecastRuntime(module, time_budget_s=1.0)
+    try:
+        with pytest.raises(MethodForecastError, match="worker exited"):
+            runtime.forecast("exiting_method", (1.0, 2.0), 2, "D")
+        assert runtime.forecast("perfect_method", (1.0, 2.0), 2, "D") == (2.0, 2.0)
+        with pytest.raises(MethodForecastError, match="previously failed"):
+            runtime.forecast("exiting_method", (1.0, 2.0), 2, "D")
+    finally:
+        runtime.close()
+
+
+def test_isolated_forecast_runtime_hard_timeout_does_not_block_next_method(
+    tmp_path: Path,
+) -> None:
+    module = tmp_path / "methods.py"
+    module.write_text(
+        MODULE_HEADER
+        + '''
+
+def hanging_method(history, horizon, frequency):
+    """Use when hard-timeout containment is under test."""
+    import time
+    time.sleep(30)
+    return [float(history[-1])] * horizon
+
+
+def perfect_method(history, horizon, frequency):
+    """Use when the forecast repeats the final observation."""
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+
+    runtime = IsolatedForecastRuntime(module, time_budget_s=0.1)
+    try:
+        with pytest.raises(MethodForecastError, match="hard timeout"):
+            runtime.forecast("hanging_method", (1.0, 2.0), 2, "D")
+        assert runtime.forecast("perfect_method", (1.0, 2.0), 2, "D") == (2.0, 2.0)
+    finally:
+        runtime.close()
 
 
 def test_isolated_execution_restarts_a_worker_after_one_task_exits(tmp_path: Path) -> None:

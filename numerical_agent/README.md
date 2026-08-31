@@ -120,8 +120,10 @@ checkpoint, adapter, license, and model identity are immutable. Evolution may ch
 history-only applicability, context window, reversible preprocessing, and bounded output
 shrinkage. Combined policies use an ordered tuple of 2–5 unique leaf parents and must include a
 TSFM, supporting TSFM–TSFM, TSFM–Statistical, and mixed three-to-five-parent combinations. The
-reviewed operators are `weighted_mean`, `median`, `trimmed_mean`, and two-parent `route`.
-Weighted means require finite non-negative weights summing to one; route stores explicit
+reviewed operators are `weighted_mean`, `median`, `trimmed_mean`, two-parent `route`, and
+`lead_time_route`, which assigns ordered parents to contiguous forecast-horizon segments.
+Weighted means require finite non-negative weights summing to one; lead-time routes require
+strictly positive duration shares summing to one; route stores explicit
 above/below parents and a reviewed history-only signal. Every policy names an in-tuple fallback;
 it is used only when a non-fallback parent is unavailable, crashes, is invalid, or is not
 applicable, and fallback use is recorded rather than fabricating a forecast. Combined policies
