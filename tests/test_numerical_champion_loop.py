@@ -216,6 +216,68 @@ def test_legacy_package_keeps_legacy_named_component_fingerprints() -> None:
     )
 
 
+def test_champion_hashes_and_semantic_marker_are_bidirectionally_bound() -> None:
+    legacy = _run()
+    champion = _run(release=_release())
+
+    assert not hasattr(legacy, "champion_enabled")
+    with pytest.raises(ValueError, match="Champion component fingerprints"):
+        replace(
+            legacy,
+            selection_decision=replace(
+                legacy.selection_decision,
+                reason_codes=("frozen_champion", "champion_materialized_selection"),
+            ),
+        )
+    with pytest.raises(ValueError, match="Champion component fingerprints"):
+        replace(
+            legacy,
+            component_fingerprints={
+                **dict(legacy.component_fingerprints),
+                **{
+                    key: champion.component_fingerprints[key]
+                    for key in (
+                        "champion_release",
+                        "champion_recipe",
+                        "champion_assumptions",
+                    )
+                },
+            },
+        )
+
+
+class _FloatSubclass(float):
+    pass
+
+
+class _StringSubclass(str):
+    pass
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    (
+        pytest.param(
+            ChampionExecution((10**10000, 2.0), ("specialist",), (), None),
+            id="huge_int",
+        ),
+        ChampionExecution((_FloatSubclass(1.0), 2.0), ("specialist",), (), None),
+        ChampionExecution(("1.0", 2.0), ("specialist",), (), None),
+        ChampionExecution((object(), 2.0), ("specialist",), (), None),
+        ChampionExecution((1.0, 2.0), (_StringSubclass("specialist"),), (), None),
+    ),
+)
+def test_hostile_champion_execution_values_never_escape_fallback(
+    monkeypatch, malformed: ChampionExecution
+) -> None:
+    monkeypatch.setattr(loop_module, "execute_champion", lambda *_args: malformed)
+
+    package = _run(release=_release())
+
+    assert package.selection_decision.selected == ("specialist",)
+    assert package.fallback_reason == "champion_execution_failed:invalid_result"
+
+
 @pytest.mark.parametrize(
     "malformed",
     (

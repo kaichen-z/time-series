@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
@@ -354,7 +355,6 @@ def run_numerical_loop(
         retrieval_handoff=handoff,
         component_fingerprints=fingerprints,
         fallback_reason=fallback_reason,
-        champion_enabled=champion_release is not None,
     )
 
 
@@ -554,35 +554,41 @@ def _valid_champion_execution(
     horizon: int,
 ) -> bool:
     """Accept only the exact frozen executor result shape before consuming it."""
-    if type(execution) is not ChampionExecution:
-        return False
-    if type(execution.forecast) is not tuple or not valid_forecast(
-        execution.forecast, horizon
-    ):
-        return False
-    if (
-        type(execution.selected_names) is not tuple
-        or not execution.selected_names
-        or any(
-            type(name) is not str or not name or name not in forecasts
-            for name in execution.selected_names
+    try:
+        if type(execution) is not ChampionExecution:
+            return False
+        if type(execution.forecast) is not tuple or len(execution.forecast) != horizon:
+            return False
+        if any(
+            type(value) is not float or not math.isfinite(value)
+            for value in execution.forecast
+        ):
+            return False
+        if (
+            type(execution.selected_names) is not tuple
+            or not execution.selected_names
+            or any(
+                type(name) is not str or not name or name not in forecasts
+                for name in execution.selected_names
+            )
+        ):
+            return False
+        if type(execution.activated_assumptions) is not tuple or any(
+            type(assumption_id) is not str
+            or not assumption_id
+            or not assumption_id.isidentifier()
+            for assumption_id in execution.activated_assumptions
+        ):
+            return False
+        if len(execution.activated_assumptions) != len(
+            set(execution.activated_assumptions)
+        ):
+            return False
+        return execution.fallback_reason is None or (
+            type(execution.fallback_reason) is str and bool(execution.fallback_reason)
         )
-    ):
+    except (AttributeError, OverflowError, TypeError, ValueError):
         return False
-    if type(execution.activated_assumptions) is not tuple or any(
-        type(assumption_id) is not str
-        or not assumption_id
-        or not assumption_id.isidentifier()
-        for assumption_id in execution.activated_assumptions
-    ):
-        return False
-    if len(execution.activated_assumptions) != len(
-        set(execution.activated_assumptions)
-    ):
-        return False
-    return execution.fallback_reason is None or (
-        type(execution.fallback_reason) is str and bool(execution.fallback_reason)
-    )
 
 
 def _champion_fallback(
