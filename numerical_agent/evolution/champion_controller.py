@@ -948,15 +948,29 @@ class ChampionRunManifest:
             _lifecycle_fail("run manifest partition seed must be an exact integer")
         _validated_hash_inventory(self.source_hashes, "source hashes")
         _validated_hash_inventory(self.dictionary_hashes, "Dictionary hashes")
-        train = _validated_membership(self.train_tasks, "Train membership", expected_size=80)
-        dev = _validated_membership(self.dev_tasks, "Dev membership", expected_size=20)
+        shapes = {
+            (80, 20): (64, 16),
+            (10, 2): (8, 2),
+        }
+        shape = shapes.get((len(self.train_tasks), len(self.dev_tasks)))
+        if shape is None:
+            _lifecycle_fail(
+                "run manifest must use the formal 80/20 or deterministic 8/2 smoke shape"
+            )
+        build_size, calibration_size = shape
+        train = _validated_membership(
+            self.train_tasks, "Train membership", expected_size=build_size + calibration_size
+        )
+        dev = _validated_membership(self.dev_tasks, "Dev membership", expected_size=len(self.dev_tasks))
         _validated_task_hashes(self.train_task_hashes, "Train task hashes", train)
         _validated_task_hashes(self.dev_task_hashes, "Dev task hashes", dev)
-        build = _validated_membership(self.build_tasks, "Build membership", expected_size=64)
+        build = _validated_membership(
+            self.build_tasks, "Build membership", expected_size=build_size
+        )
         calibration = _validated_membership(
             self.calibration_tasks,
             "Calibration membership",
-            expected_size=16,
+            expected_size=calibration_size,
         )
         train_map = dict(train)
         if set(build) & set(calibration):
@@ -4539,12 +4553,22 @@ class ChampionEvolutionController:
         ChampionRunManifest.__post_init__(self.manifest)
         ChampionEvolutionConfig.__post_init__(self.config)
         self.attestations.verify(self.manifest)
+        shape = (
+            self.config.build_size,
+            self.config.calibration_size,
+            self.config.screen_sizes,
+        )
+        if shape not in {_FORMAL_SIZES, _SMOKE_SIZES}:
+            _lifecycle_fail("lifecycle requires a registered formal or smoke schedule")
         if (
-            self.config.build_size != 64
-            or self.config.calibration_size != 16
-            or self.config.screen_sizes != (8, 32, 64)
+            len(self.manifest.train_tasks)
+            != self.config.build_size + self.config.calibration_size
+            or len(self.manifest.dev_tasks)
+            != (20 if self.config.build_size == 64 else 2)
+            or len(self.manifest.build_tasks) != self.config.build_size
+            or len(self.manifest.calibration_tasks) != self.config.calibration_size
         ):
-            _lifecycle_fail("formal lifecycle requires the exact 64/16 schedule")
+            _lifecycle_fail("manifest membership does not match the registered schedule")
         if self.config.fingerprint != self.manifest.schedule_fingerprint:
             _lifecycle_fail("schedule fingerprint drifted from the run manifest")
         if (
@@ -4565,8 +4589,8 @@ class ChampionEvolutionController:
         )
         parts = partition_train_tasks(
             train,
-            build_size=64,
-            calibration_size=16,
+            build_size=self.config.build_size,
+            calibration_size=self.config.calibration_size,
             seed=self.manifest.partition_seed,
         )
         build_membership = tuple((task.task_id, task.entity_name) for task in parts.build)

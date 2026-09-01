@@ -19,12 +19,13 @@ from common.evolution_core.contracts import METRIC_POLICY_FINGERPRINT
 from common.payload import read_json_object
 
 from .dictionary import MethodDefinition, ToolDictionary
-from .evolution.champion import ChampionRelease, parse_champion_release
+from .evolution.champion import ChampionRelease, champion_fingerprint, parse_champion_release
 from .evolution.champion_controller import (
     ChampionArtifactStore,
     ChampionAuthorityStore,
     ChampionEvolutionConfig,
     ChampionEvolutionController,
+    ChampionEvolutionOutcome,
     ChampionProposerAdapter,
     ChampionRowProviderAdapter,
     ChampionRunAttestations,
@@ -34,6 +35,7 @@ from .evolution.champion_controller import (
     task_content_fingerprint,
 )
 from .evolution.champion_evidence import ChampionHistoryDiagnostic, ChampionTaskRow
+from .evolution.champion_evidence import ChampionGateConfig
 from .evolution.execution import Task as RuntimeTask
 from .evolution.forecast_store import ForecastStore
 from .evolution.module import read_module
@@ -286,6 +288,241 @@ def _manifest(
         runtime_implementation_fingerprint=attestations.runtime_implementation_fingerprint,
         forecast_runtime_identity_fingerprint=attestations.forecast_runtime_identity_fingerprint,
     )
+
+
+def _smoke_parent(source_hashes: tuple[tuple[str, str], ...]) -> ChampionRelease:
+    """Return the fixed non-Toto Parent used only by deterministic wiring smoke."""
+    from .evolution.champion import ChampionRecipe, EvolutionAssumption, FittedChampionPolicy
+
+    assumption = EvolutionAssumption(
+        assumption_id="timesfm_parent_history",
+        candidate_name="timesfm_2_5",
+        feature="history_length",
+        direction="above",
+        horizon_region="full",
+        operator="select",
+        rationale="The smoke Parent uses a host-materialized TimesFM forecast.",
+        failure_condition="The host-materialized TimesFM forecast is unavailable.",
+    )
+    return ChampionRelease(
+        policy=FittedChampionPolicy(
+            recipe=ChampionRecipe(
+                name="timesfm_smoke_parent",
+                kind="select",
+                parents=("timesfm_2_5",),
+                fallback_parent="timesfm_2_5",
+                assumptions=(assumption,),
+            ),
+            thresholds=((assumption.assumption_id, 0.0),),
+        ),
+        source_hashes=source_hashes,
+        metric_policy_fingerprint=METRIC_POLICY_FINGERPRINT,
+        lineage=("timesfm_smoke_parent",),
+    )
+
+
+def _smoke_rows(
+    tasks: Iterable[DataTask],
+    *,
+    split: str,
+    timesfm_error: float,
+    seasonal_error: float,
+) -> tuple[ChampionTaskRow, ...]:
+    """Materialize fixed fake leaves through the same typed row-provider contract."""
+    rows: list[ChampionTaskRow] = []
+    for index, source in enumerate(tasks):
+        task = RuntimeTask(
+            source.task_id,
+            tuple(source.history_values),
+            source.prediction_length,
+            source.frequency,
+            tuple(source.future_values),
+        )
+        profile = profile_task(task)
+        for name, family, error in (
+            ("timesfm_2_5", "tsfm", timesfm_error),
+            ("seasonal_naive", "statistical", seasonal_error),
+        ):
+            diagnostic = ChampionHistoryDiagnostic.from_candidate(
+                diagnose_candidate(
+                    task,
+                    name,
+                    family,
+                    lambda _name, _history, horizon, _frequency, offset=error: tuple(
+                        value + offset for value in task.future[:horizon]
+                    ),
+                    HindcastConfig(),
+                    runtime_settings={"smoke": "deterministic"},
+                )
+            )
+            rows.append(
+                ChampionTaskRow(
+                    task_id=task.task_id,
+                    candidate_name=name,
+                    profile=profile,
+                    truth=tuple(task.future),
+                    forecast=tuple(value + error for value in task.future),
+                    failure_reason=None,
+                    fold=index % 5,
+                    split=split,  # type: ignore[arg-type]
+                    history=tuple(task.history),
+                    diagnostic=diagnostic,
+                )
+            )
+    return tuple(rows)
+
+
+def run_fake_champion_evolution(
+    *,
+    build_tasks: tuple[DataTask, ...],
+    calibration_tasks: tuple[DataTask, ...],
+    dev_tasks: tuple[DataTask, ...],
+    proposal: object,
+    screen_sizes: tuple[int, ...],
+    output_dir: str | Path,
+    timesfm_error: float = 2.0,
+    seasonal_error: float = 0.2,
+    dev_seasonal_error: float | None = None,
+) -> ChampionEvolutionOutcome:
+    """Run the sealed 8/2 fake lifecycle without a model download or LLM call.
+
+    This is deliberately a wiring-only smoke entry point.  It accepts only the
+    registered 8/2 schedule and creates the same sealed adapters, manifest,
+    checkpoint, split authority, and release artifacts as the formal runner.
+    """
+    if type(build_tasks) is not tuple or type(calibration_tasks) is not tuple:
+        raise ValueError("fake smoke requires exact Build and Calibration task tuples")
+    if type(dev_tasks) is not tuple or len(build_tasks) != 8 or len(calibration_tasks) != 2:
+        raise ValueError("fake smoke requires exactly 8 Build and 2 Calibration tasks")
+    if len(dev_tasks) != 2 or screen_sizes != (4, 8):
+        raise ValueError("fake smoke requires exactly 2 Dev tasks and screens (4, 8)")
+    if (
+        type(timesfm_error) is not float
+        or type(seasonal_error) is not float
+        or (dev_seasonal_error is not None and type(dev_seasonal_error) is not float)
+    ):
+        raise ValueError("fake smoke forecast errors must be exact floats")
+    output = Path(output_dir).resolve()
+    inputs = output.parent / f"{output.name}.smoke-inputs"
+    inputs.mkdir(parents=True, exist_ok=True)
+    contents = {
+        "split.json": b'{"mode":"deterministic_8_2_smoke"}\n',
+        "seasonal_naive.py": b"# deterministic smoke seasonal leaf\n",
+        "timesfm_2_5.py": b"# deterministic smoke TimesFM leaf\n",
+        "forecast.store": b"deterministic fake forecast store\n",
+        "runtime.py": b"deterministic fake runtime\n",
+    }
+    for name, content in contents.items():
+        path = inputs / name
+        if not path.exists():
+            path.write_bytes(content)
+    train = build_tasks + calibration_tasks
+    parts = partition_train_tasks(train, build_size=8, calibration_size=2, seed=20260901)
+    config = ChampionEvolutionConfig(
+        build_size=8,
+        calibration_size=2,
+        screen_sizes=screen_sizes,
+        build_task_ids=tuple(task.task_id for task in parts.build),
+        screen_task_ids=(
+            tuple(task.task_id for task in parts.build[:4]),
+            tuple(task.task_id for task in parts.build),
+        ),
+        gate_config=ChampionGateConfig(minimum_improved_folds=0),
+    )
+    if type(proposal) is not tuple:
+        raise ValueError("fake smoke proposal must be an exact recipe tuple")
+    proposer = ChampionProposerAdapter.scripted(
+        identity="deterministic-fake-llm",
+        proposal_batches=(proposal,),
+        config={"mode": "deterministic_8_2_smoke"},
+    )
+    rows = (
+        _smoke_rows(parts.build, split="build", timesfm_error=timesfm_error, seasonal_error=seasonal_error)
+        + _smoke_rows(parts.calibration, split="calibration", timesfm_error=timesfm_error, seasonal_error=seasonal_error)
+        + _smoke_rows(
+            dev_tasks,
+            split="dev",
+            timesfm_error=timesfm_error,
+            seasonal_error=(
+                seasonal_error if dev_seasonal_error is None else dev_seasonal_error
+            ),
+        )
+    )
+    provider = ChampionRowProviderAdapter.materialized(
+        identity="deterministic-fake-forecast-store",
+        rows=rows,
+        config={"mode": "deterministic_8_2_smoke"},
+    )
+    runtime = ChampionRuntimeBindings.formal()
+    dictionary_files = (
+        ("seasonal_naive", inputs / "seasonal_naive.py"),
+        ("timesfm_2_5", inputs / "timesfm_2_5.py"),
+    )
+    attestations = ChampionRunAttestations(
+        source_files=dictionary_files,
+        split_manifest_file=inputs / "split.json",
+        dictionary_files=dictionary_files,
+        forecast_store=inputs / "forecast.store",
+        proposal_model=proposer.identity,
+        proposal_config=proposer.config,
+        proposer_binding=proposer,
+        row_provider_binding=provider,
+        runtime_bindings=runtime,
+        numeric_grid={"mode": "deterministic_8_2_smoke"},
+        runtime_files=(("deterministic_runtime", inputs / "runtime.py"),),
+        forecast_runtime_identity={"mode": "deterministic_8_2_smoke"},
+    )
+    manifest = ChampionRunManifest(
+        schema_version=1,
+        partition_seed=20260901,
+        source_hashes=attestations.source_hashes,
+        train_tasks=tuple((task.task_id, task.entity_name) for task in train),
+        train_task_hashes=tuple((task.task_id, task_content_fingerprint(task)) for task in train),
+        dev_tasks=tuple((task.task_id, task.entity_name) for task in dev_tasks),
+        dev_task_hashes=tuple((task.task_id, task_content_fingerprint(task)) for task in dev_tasks),
+        split_manifest_fingerprint=attestations.split_manifest_fingerprint,
+        build_tasks=tuple((task.task_id, task.entity_name) for task in parts.build),
+        calibration_tasks=tuple((task.task_id, task.entity_name) for task in parts.calibration),
+        dictionary_hashes=attestations.dictionary_hashes,
+        forecast_store_fingerprint=attestations.forecast_store_fingerprint,
+        metric_policy_fingerprint=METRIC_POLICY_FINGERPRINT,
+        proposal_model=proposer.identity,
+        proposal_config_fingerprint=attestations.proposal_config_fingerprint,
+        proposal_implementation_fingerprint=attestations.proposal_implementation_fingerprint,
+        row_provider_fingerprint=attestations.row_provider_fingerprint,
+        schedule_fingerprint=config.fingerprint,
+        numeric_grid_fingerprint=attestations.numeric_grid_fingerprint,
+        candidate_minimum_gain=config.candidate_minimum_gain,
+        research_target_gain=config.research_target_gain,
+        runtime_fingerprint=attestations.runtime_fingerprint,
+        runtime_implementation_fingerprint=attestations.runtime_implementation_fingerprint,
+        forecast_runtime_identity_fingerprint=attestations.forecast_runtime_identity_fingerprint,
+    )
+    authority_root = output.parent / f"{output.name}.smoke-authority"
+    authority_identity = champion_fingerprint({"smoke_authority": str(authority_root)})
+    if authority_root.exists():
+        authority = ChampionAuthorityStore(
+            authority_root, expected_authority_identity=authority_identity
+        )
+    else:
+        authority = ChampionAuthorityStore.provision(
+            authority_root, authority_identity=authority_identity
+        )
+    artifacts = ChampionArtifactStore(output)
+    try:
+        return ChampionEvolutionController(
+            manifest=manifest,
+            config=config,
+            attestations=attestations,
+            proposer=proposer,
+            row_provider=provider,
+            runtime_bindings=runtime,
+            artifact_store=artifacts,
+            authority_store=authority,
+        ).evolve(_smoke_parent(attestations.dictionary_hashes), train, dev_tasks)
+    finally:
+        authority.close()
+        artifacts.close()
 
 
 def main(argv: list[str] | None = None) -> int:
