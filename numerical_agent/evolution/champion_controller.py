@@ -16,11 +16,13 @@ from .champion import (
     EvolutionAssumption,
     FittedChampionPolicy,
     champion_fingerprint,
+    parse_champion_recipe,
 )
 from .champion_evidence import (
     ChampionComparison,
     ChampionEvidenceError,
     ChampionGateConfig,
+    ChampionHistoryDiagnostic,
     ChampionTaskRow,
     ProposerEvidence,
     compare_champion,
@@ -28,6 +30,8 @@ from .champion_evidence import (
     score_policy,
 )
 from .champion_proposal import ChampionProposalError, expand_recipe
+from .champion_runtime import execute_champion
+from .numerical_selector import CandidateDiagnostics
 
 
 _FORMAL_SIZES = (64, 16, (8, 32, 64))
@@ -160,8 +164,11 @@ class BuildAttempt:
     fitted_id: str
     policy: FittedChampionPolicy
     stage_task_counts: tuple[int, ...]
-    comparison: ChampionComparison
-    status: Literal["pruned", "finalist", "below_candidate_threshold"]
+    comparison: ChampionComparison | None
+    status: Literal[
+        "invalid", "pruned", "finalist", "below_candidate_threshold"
+    ]
+    invalid_reason: Literal["unscorable_child"] | None = None
     score_label: Literal["adaptive_train_build_diagnostic"] = (
         "adaptive_train_build_diagnostic"
     )
@@ -205,6 +212,7 @@ class _AttemptState:
     stage_task_counts: tuple[int, ...] = ()
     comparison: ChampionComparison | None = None
     evidence_rows: tuple[ChampionTaskRow, ...] = ()
+    invalid_reason: Literal["unscorable_child"] | None = None
 
 
 def _capture_object_graph(
@@ -297,14 +305,15 @@ def _validated_rows(
     rows: object,
     *,
     build_size: int,
-) -> tuple[tuple[ChampionTaskRow, ...], tuple[str, ...]]:
+) -> tuple[tuple[ChampionTaskRow, ...], tuple[str, ...], tuple[str, ...]]:
     if type(rows) not in {tuple, list} or not rows:
         _fail("Build rows must be a nonempty exact tuple or list")
     snapshot = tuple(cast(tuple[object, ...] | list[object], rows))
     seen_keys: set[tuple[str, str]] = set()
     task_ids: list[str] = []
-    identities: dict[str, tuple[object, object, int, str]] = {}
+    identities: dict[str, tuple[object, object, int, str, object]] = {}
     candidate_tasks: dict[str, set[str]] = {}
+    normalized_candidates: dict[str, str] = {}
     for raw_row in snapshot:
         if type(raw_row) is not ChampionTaskRow:
             _fail("Build rows must contain exact ChampionTaskRow values")
@@ -315,23 +324,36 @@ def _validated_rows(
             raise ChampionControllerError("Build row violates its trusted contract") from error
         if row.split != "build":
             _fail("Build evolution accepts Build rows only")
+        normalized_name = _canonical_identity(row.candidate_name)
+        prior_name = normalized_candidates.setdefault(
+            normalized_name, row.candidate_name
+        )
+        if prior_name != row.candidate_name:
+            _fail("normalized row inventory contains a candidate collision")
         key = (row.candidate_name, row.task_id)
         if key in seen_keys:
             _fail("Build rows contain a duplicate candidate/task key")
         seen_keys.add(key)
         if row.task_id not in identities:
             task_ids.append(row.task_id)
-        identity = (row.profile, row.truth, row.fold, row.split)
+        identity = (row.profile, row.truth, row.fold, row.split, row.history)
         previous = identities.setdefault(row.task_id, identity)
         if identity != previous:
-            _fail("Build row universe drifted across profile, truth, fold, or split")
+            _fail(
+                "Build row universe drifted across profile, truth, fold, split, "
+                "or history"
+            )
         candidate_tasks.setdefault(row.candidate_name, set()).add(row.task_id)
     if len(task_ids) != build_size:
         _fail("Build rows do not contain the configured task universe")
     universe = set(task_ids)
     if any(task_set != universe for task_set in candidate_tasks.values()):
         _fail("every materialized candidate must cover the fixed Build universe")
-    return cast(tuple[ChampionTaskRow, ...], snapshot), tuple(task_ids)
+    return (
+        cast(tuple[ChampionTaskRow, ...], snapshot),
+        tuple(task_ids),
+        tuple(candidate_tasks),
+    )
 
 
 def _bound_config(
@@ -343,12 +365,62 @@ def _bound_config(
     screens = config.screen_task_ids or tuple(
         task_ids[:size] for size in config.screen_sizes
     )
-    bound = replace(config, build_task_ids=task_ids, screen_task_ids=screens)
+    bound = _clone_config(
+        config,
+        build_task_ids=task_ids,
+        screen_task_ids=screens,
+    )
     if set(bound.screen_task_ids[-1]) != set(task_ids):
         _fail("the final screen must equal the complete fixed Build universe")
     if any(not set(stage).issubset(task_ids) for stage in bound.screen_task_ids):
         _fail("screen membership contains a task outside fixed Build")
     return bound
+
+
+def _clone_gate(config: ChampionGateConfig) -> ChampionGateConfig:
+    return ChampionGateConfig(
+        **{entry.name: getattr(config, entry.name) for entry in fields(config)}
+    )
+
+
+def _clone_config(
+    config: ChampionEvolutionConfig,
+    *,
+    build_task_ids: tuple[str, ...] | None = None,
+    screen_task_ids: tuple[tuple[str, ...], ...] | None = None,
+) -> ChampionEvolutionConfig:
+    """Detach every nested registered value from caller-owned aliases."""
+    return ChampionEvolutionConfig(
+        build_size=config.build_size,
+        calibration_size=config.calibration_size,
+        screen_sizes=tuple(config.screen_sizes),
+        generations=config.generations,
+        minimum_recipes=config.minimum_recipes,
+        maximum_recipes=config.maximum_recipes,
+        maximum_full_build_children=config.maximum_full_build_children,
+        maximum_finalists=config.maximum_finalists,
+        candidate_minimum_gain=config.candidate_minimum_gain,
+        research_target_gain=config.research_target_gain,
+        gate_config=_clone_gate(config.gate_config),
+        build_task_ids=(
+            tuple(config.build_task_ids)
+            if build_task_ids is None
+            else tuple(build_task_ids)
+        ),
+        screen_task_ids=(
+            tuple(tuple(stage) for stage in config.screen_task_ids)
+            if screen_task_ids is None
+            else tuple(tuple(stage) for stage in screen_task_ids)
+        ),
+    )
+
+
+def _require_config_fingerprint(
+    config: ChampionEvolutionConfig,
+    expected: str,
+) -> None:
+    if _fingerprint_changed(config, expected):
+        _fail("registered Champion evolution config mutated")
 
 
 def _feature_value(policy: FittedChampionPolicy, task_row: ChampionTaskRow, index: int) -> float:
@@ -379,6 +451,37 @@ def _policy_forecast(
     fallback = task_rows.get(policy.recipe.fallback_parent)
     if fallback is None or fallback.forecast is None:
         return None, "fallback_unavailable"
+    parent_rows = tuple(task_rows.get(name) for name in policy.recipe.parents)
+    enriched = fallback.history is not None or fallback.diagnostic is not None
+    if enriched or any(
+        row is not None and (row.history is not None or row.diagnostic is not None)
+        for row in parent_rows
+    ):
+        if fallback.history is None:
+            return None, "history_unavailable"
+        forecasts: dict[str, tuple[float, ...]] = {}
+        diagnostics: dict[str, CandidateDiagnostics] = {}
+        for name, row in zip(policy.recipe.parents, parent_rows, strict=True):
+            if row is None or row.forecast is None:
+                return None, "parent_forecast_unavailable"
+            if row.history != fallback.history:
+                return None, "history_mismatch"
+            if row.diagnostic is None or not _valid_history_diagnostic(row.diagnostic):
+                return None, "history_diagnostic_unavailable"
+            forecasts[name] = row.forecast
+            diagnostics[name] = _runtime_diagnostic(row.diagnostic)
+        execution = execute_champion(
+            policy,
+            forecasts,
+            diagnostics,
+            fallback.profile,
+            fallback.history,
+            fallback.profile.horizon,
+        )
+        if execution.fallback_reason not in {None, "assumption_not_satisfied"}:
+            return None, f"runtime_{execution.fallback_reason}"
+        return execution.forecast, None
+
     parents: dict[str, tuple[float, ...]] = {}
     for name in policy.recipe.parents:
         row = task_rows.get(name)
@@ -418,6 +521,60 @@ def _policy_forecast(
     if kind == "bounded_overlay":
         return None, "history_scale_unavailable"
     return None, "unsupported_operator"
+
+
+def _valid_history_diagnostic(diagnostic: object) -> bool:
+    if type(diagnostic) is not ChampionHistoryDiagnostic:
+        return False
+    try:
+        ChampionHistoryDiagnostic.__post_init__(diagnostic)
+    except (ChampionEvidenceError, TypeError, ValueError):
+        return False
+    return True
+
+
+def _runtime_diagnostic(
+    diagnostic: ChampionHistoryDiagnostic,
+) -> CandidateDiagnostics:
+    """Construct Task 3 input with no fold objects, forecasts, truths, or cache."""
+    return CandidateDiagnostics(
+        name=diagnostic.name,
+        family=diagnostic.family,
+        folds=(),
+        successful_folds=diagnostic.successful_folds,
+        eligible=diagnostic.eligible,
+        reason_code=diagnostic.reason_code,
+        median_mase=diagnostic.median_mase,
+        recent_mase=diagnostic.recent_mase,
+        worst_mase=diagnostic.worst_mase,
+        mase_mad=diagnostic.mase_mad,
+        median_mae=diagnostic.median_mae,
+        median_smape=diagnostic.median_smape,
+        median_rmsse=diagnostic.median_rmsse,
+        normalized_bias=diagnostic.normalized_bias,
+        slope_error=diagnostic.slope_error,
+        phase_error=diagnostic.phase_error,
+        amplitude_ratio=diagnostic.amplitude_ratio,
+        explosion=diagnostic.explosion,
+        fold_forecasts=(),
+        fold_truths=(),
+        cache_key="",
+        long_horizon_fold=None,
+        long_horizon_coverage=diagnostic.long_horizon_coverage,
+        median_joint_scaled_error=diagnostic.median_joint_scaled_error,
+        recent_joint_scaled_error=diagnostic.recent_joint_scaled_error,
+        worst_joint_scaled_error=diagnostic.worst_joint_scaled_error,
+        median_smae=diagnostic.median_smae,
+        recent_smae=diagnostic.recent_smae,
+        worst_smae=diagnostic.worst_smae,
+        smae_mad=diagnostic.smae_mad,
+        median_srmse=diagnostic.median_srmse,
+        recent_srmse=diagnostic.recent_srmse,
+        worst_srmse=diagnostic.worst_srmse,
+        srmse_mad=diagnostic.srmse_mad,
+        worst_smae_raw=diagnostic.worst_smae_raw,
+        worst_srmse_raw=diagnostic.worst_srmse_raw,
+    )
 
 
 def _materialize_policy(
@@ -481,9 +638,8 @@ def _parent_rows(
 
 
 def _stage_gate(config: ChampionEvolutionConfig, *, final: bool) -> ChampionGateConfig:
-    if final:
-        return config.gate_config
-    return replace(config.gate_config, minimum_improved_folds=0)
+    del final
+    return config.gate_config
 
 
 def _evaluate_stage(
@@ -502,15 +658,25 @@ def _evaluate_stage(
     evidence_rows = parent_rows + child_rows
     try:
         parent_score = score_policy(evidence_rows, parent_name)
+    except (ChampionEvidenceError, TypeError, ValueError) as error:
+        raise ChampionControllerError("trusted Build scoring rejected the Parent") from error
+    try:
         child_score = score_policy(evidence_rows, state.score_name)
         comparison = compare_champion(parent_score, child_score, gate)
-    except (ChampionEvidenceError, TypeError, ValueError) as error:
-        raise ChampionControllerError("trusted Build scoring rejected a Child") from error
+    except (ChampionEvidenceError, TypeError, ValueError):
+        return replace(
+            state,
+            stage_task_counts=state.stage_task_counts + (len(task_ids),),
+            comparison=None,
+            evidence_rows=evidence_rows,
+            invalid_reason="unscorable_child",
+        )
     return replace(
         state,
         stage_task_counts=state.stage_task_counts + (len(task_ids),),
         comparison=comparison,
         evidence_rows=evidence_rows,
+        invalid_reason=None,
     )
 
 
@@ -556,7 +722,12 @@ def _diverse(
 
 
 def _feedback(states: tuple[_AttemptState, ...]) -> ProposerEvidence:
-    if not states:
+    scored_states = tuple(
+        state
+        for state in states
+        if state.comparison is not None and state.evidence_rows
+    )
+    if not scored_states:
         return ProposerEvidence(
             label="adaptive_train_build_diagnostic",
             independent_generalization_claim=False,
@@ -564,9 +735,7 @@ def _feedback(states: tuple[_AttemptState, ...]) -> ProposerEvidence:
             comparisons=(),
         )
     grouped: dict[tuple[str, ...], list[_AttemptState]] = {}
-    for state in states:
-        if state.comparison is None or not state.evidence_rows:
-            _fail("attempt feedback lacks trusted evidence")
+    for state in scored_states:
         comparison = cast(ChampionComparison, state.comparison)
         task_ids = tuple(
             row.task_id
@@ -637,11 +806,12 @@ def _call_proposer(
         recipe = cast(ChampionRecipe, raw_recipe)
         try:
             ChampionRecipe.__post_init__(recipe)
+            detached = parse_champion_recipe(recipe.to_payload())
         except Exception as error:
             raise ChampionControllerError(
                 "proposer returned an invalid Champion recipe"
             ) from error
-        validated.append(recipe)
+        validated.append(detached)
     recipe_ids = tuple(champion_fingerprint(recipe) for recipe in validated)
     recipe_names = tuple(recipe.name for recipe in validated)
     canonical_names = tuple(_canonical_identity(name) for name in recipe_names)
@@ -663,6 +833,52 @@ def _call_proposer(
     return tuple(validated)
 
 
+def _stored_policies(
+    generations: list[BuildGeneration],
+    archive: list[_AttemptState],
+) -> tuple[FittedChampionPolicy, ...]:
+    values = [
+        attempt.policy
+        for generation in generations
+        for attempt in generation.attempts
+    ]
+    values.extend(state.policy for state in archive)
+    unique: list[FittedChampionPolicy] = []
+    seen: set[int] = set()
+    for policy in values:
+        if id(policy) in seen:
+            continue
+        seen.add(id(policy))
+        unique.append(policy)
+    return tuple(unique)
+
+
+def _stored_policy_fingerprints(
+    generations: list[BuildGeneration],
+    archive: list[_AttemptState],
+) -> tuple[tuple[FittedChampionPolicy, str], ...]:
+    return tuple(
+        (policy, champion_fingerprint(policy))
+        for policy in _stored_policies(generations, archive)
+    )
+
+
+def _stored_policy_changed(
+    fingerprints: tuple[tuple[FittedChampionPolicy, str], ...],
+) -> bool:
+    return any(
+        _fingerprint_changed(policy, expected)
+        for policy, expected in fingerprints
+    )
+
+
+def _validate_stored_policy_ids(generations: list[BuildGeneration]) -> None:
+    for generation in generations:
+        for attempt in generation.attempts:
+            if champion_fingerprint(attempt.policy) != attempt.fitted_id:
+                _fail("stored fitted policy fingerprint drifted")
+
+
 def run_build_evolution(
     parent: object,
     rows: tuple[ChampionTaskRow, ...] | list[ChampionTaskRow],
@@ -673,9 +889,13 @@ def run_build_evolution(
     if type(config) is not ChampionEvolutionConfig:
         _fail("config must be an exact ChampionEvolutionConfig")
     ChampionEvolutionConfig.__post_init__(config)
+    input_config_sha256 = config.fingerprint
     parent_recipe, parent_policy = _validated_parent(parent)
-    snapshot, task_ids = _validated_rows(rows, build_size=config.build_size)
+    snapshot, task_ids, row_candidate_names = _validated_rows(
+        rows, build_size=config.build_size
+    )
     bound_config = _bound_config(config, task_ids)
+    bound_config_sha256 = bound_config.fingerprint
     parent_sha256 = champion_fingerprint(parent)
     rows_sha256 = champion_fingerprint(snapshot)
     feedback = ProposerEvidence(
@@ -686,42 +906,84 @@ def run_build_evolution(
     )
     seen_recipe_ids: set[str] = {champion_fingerprint(parent_recipe)}
     seen_policy_names: set[str] = {_canonical_identity(parent_recipe.name)}
+    reserved_row_names = {
+        _canonical_identity(candidate_name)
+        for candidate_name in row_candidate_names
+    }
     seen_fitted_ids: set[str] = set()
     generations: list[BuildGeneration] = []
     archive: list[_AttemptState] = []
 
     for generation_number in range(1, bound_config.generations + 1):
+        _require_config_fingerprint(config, input_config_sha256)
+        _require_config_fingerprint(bound_config, bound_config_sha256)
+        _validate_stored_policy_ids(generations)
         parent_state = _capture_object_graph(parent)
         row_state = _capture_object_graph(snapshot)
         feedback_state = _capture_object_graph(feedback)
+        config_state = _capture_object_graph(config)
+        bound_config_state = _capture_object_graph(bound_config)
+        stored_fingerprints = _stored_policy_fingerprints(generations, archive)
+        stored_state = _capture_object_graph(
+            tuple(policy for policy, _ in stored_fingerprints)
+        )
         feedback_sha256 = champion_fingerprint(feedback)
         parent_changed = row_changed = feedback_changed = False
+        config_changed = bound_config_changed = stored_changed = False
+        callback_error: Exception | None = None
+        recipes: tuple[ChampionRecipe, ...] | None = None
         try:
-            recipes = _call_proposer(
-                proposer,
-                parent,
-                feedback,
-                minimum=bound_config.minimum_recipes,
-                maximum=bound_config.maximum_recipes,
-            )
-            parent_changed = _fingerprint_changed(parent, parent_sha256)
-            row_changed = _fingerprint_changed(snapshot, rows_sha256)
-            feedback_changed = _fingerprint_changed(feedback, feedback_sha256)
+            try:
+                recipes = _call_proposer(
+                    proposer,
+                    parent,
+                    feedback,
+                    minimum=bound_config.minimum_recipes,
+                    maximum=bound_config.maximum_recipes,
+                )
+            except Exception as error:
+                callback_error = error
+            finally:
+                parent_changed = _fingerprint_changed(parent, parent_sha256)
+                row_changed = _fingerprint_changed(snapshot, rows_sha256)
+                feedback_changed = _fingerprint_changed(feedback, feedback_sha256)
+                config_changed = _fingerprint_changed(config, input_config_sha256)
+                bound_config_changed = _fingerprint_changed(
+                    bound_config, bound_config_sha256
+                )
+                stored_changed = _stored_policy_changed(stored_fingerprints)
         finally:
             _restore_object_graph(parent_state)
             _restore_object_graph(row_state)
             _restore_object_graph(feedback_state)
+            _restore_object_graph(config_state)
+            _restore_object_graph(bound_config_state)
+            _restore_object_graph(stored_state)
         if parent_changed:
             _fail("proposer attempted to mutate the active Parent")
         if row_changed:
             _fail("proposer attempted to mutate the fixed Build rows")
         if feedback_changed:
             _fail("proposer attempted to mutate sanitized Build feedback")
+        if config_changed or bound_config_changed:
+            _fail("proposer attempted to mutate the registered config")
+        if stored_changed:
+            _fail("proposer attempted to mutate an archived fitted policy")
+        _require_config_fingerprint(config, input_config_sha256)
+        _require_config_fingerprint(bound_config, bound_config_sha256)
+        _validate_stored_policy_ids(generations)
+        if callback_error is not None:
+            raise callback_error
+        if recipes is None:
+            _fail("structural proposer returned no recipes")
+        validated_recipes = cast(tuple[ChampionRecipe, ...], recipes)
 
         states: list[_AttemptState] = []
-        for recipe in recipes:
+        for recipe in validated_recipes:
             recipe_id = champion_fingerprint(recipe)
             policy_name = _canonical_identity(recipe.name)
+            if policy_name in reserved_row_names:
+                _fail("proposal policy ID collides with materialized row inventory")
             if recipe_id in seen_recipe_ids or policy_name in seen_policy_names:
                 _fail("duplicate policy ID across Build generations")
             seen_recipe_ids.add(recipe_id)
@@ -751,6 +1013,9 @@ def run_build_evolution(
         for stage_index, stage_task_ids in enumerate(bound_config.screen_task_ids):
             if not active:
                 break
+            _require_config_fingerprint(config, input_config_sha256)
+            _require_config_fingerprint(bound_config, bound_config_sha256)
+            _validate_stored_policy_ids(generations)
             evaluated = tuple(
                 _evaluate_stage(
                     state,
@@ -765,12 +1030,14 @@ def run_build_evolution(
                 )
                 for state in active
             )
+            _require_config_fingerprint(config, input_config_sha256)
+            _require_config_fingerprint(bound_config, bound_config_sha256)
             updates = {state.fitted_id: state for state in evaluated}
             states = [updates.get(state.fitted_id, state) for state in states]
             safe = tuple(
                 state
                 for state in evaluated
-                if cast(ChampionComparison, state.comparison).accepted
+                if state.comparison is not None and state.comparison.accepted
             )
             if stage_index == len(bound_config.screen_task_ids) - 1:
                 active = safe
@@ -793,7 +1060,8 @@ def run_build_evolution(
         eligible = tuple(
             state
             for state in active
-            if cast(ChampionComparison, state.comparison).joint_improvement
+            if state.comparison is not None
+            and state.comparison.joint_improvement
             >= bound_config.candidate_minimum_gain
         )
         finalists = _diverse(eligible, limit=bound_config.maximum_finalists)
@@ -803,14 +1071,17 @@ def run_build_evolution(
                 fitted_id=state.fitted_id,
                 policy=state.policy,
                 stage_task_counts=state.stage_task_counts,
-                comparison=cast(ChampionComparison, state.comparison),
+                comparison=state.comparison,
                 status=(
-                    "finalist"
+                    "invalid"
+                    if state.invalid_reason is not None
+                    else "finalist"
                     if state.fitted_id in finalist_ids
                     else "below_candidate_threshold"
                     if state in active
                     else "pruned"
                 ),
+                invalid_reason=state.invalid_reason,
             )
             for state in states
         )
@@ -836,8 +1107,13 @@ def run_build_evolution(
         archive.extend(finalists)
 
     shortlist = _diverse(tuple(archive), limit=bound_config.maximum_finalists)
+    _require_config_fingerprint(config, input_config_sha256)
+    _require_config_fingerprint(bound_config, bound_config_sha256)
+    _validate_stored_policy_ids(generations)
     if champion_fingerprint(parent) != parent_sha256:
         _fail("Build evolution attempted to mutate the active Parent")
+    if champion_fingerprint(snapshot) != rows_sha256:
+        _fail("Build evolution attempted to mutate the fixed Build rows")
     return BuildEvolutionResult(
         active_parent=parent,
         generations=tuple(generations),

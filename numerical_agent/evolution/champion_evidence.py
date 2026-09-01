@@ -19,6 +19,7 @@ from common.metrics import drcik_point_metrics, joint_scaled_error, linear_quant
 
 from .cache import SCALED_METRIC_CAP
 from .champion import FittedChampionPolicy
+from .numerical_selector import CandidateDiagnostics
 from .screening import TaskProfile
 
 
@@ -159,6 +160,138 @@ def _universe_fingerprint(metrics: tuple[_TaskMetric, ...]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+_HISTORY_DIAGNOSTIC_FLOAT_FIELDS = (
+    "median_mase",
+    "recent_mase",
+    "worst_mase",
+    "mase_mad",
+    "median_mae",
+    "median_smape",
+    "median_rmsse",
+    "normalized_bias",
+    "slope_error",
+    "long_horizon_coverage",
+    "median_joint_scaled_error",
+    "recent_joint_scaled_error",
+    "worst_joint_scaled_error",
+    "median_smae",
+    "recent_smae",
+    "worst_smae",
+    "smae_mad",
+    "median_srmse",
+    "recent_srmse",
+    "worst_srmse",
+    "srmse_mad",
+    "worst_smae_raw",
+    "worst_srmse_raw",
+)
+_SIGNED_HISTORY_DIAGNOSTIC_FIELDS = frozenset({"normalized_bias", "slope_error"})
+
+
+@dataclass(frozen=True)
+class ChampionHistoryDiagnostic:
+    """Finite history-derived diagnostic summary with no fold arrays."""
+
+    name: str
+    family: str
+    successful_folds: int
+    eligible: bool
+    reason_code: str
+    median_mase: float
+    recent_mase: float
+    worst_mase: float
+    mase_mad: float
+    median_mae: float
+    median_smape: float
+    median_rmsse: float
+    normalized_bias: float
+    slope_error: float
+    phase_error: float | None
+    amplitude_ratio: float | None
+    explosion: bool
+    long_horizon_coverage: float
+    median_joint_scaled_error: float
+    recent_joint_scaled_error: float
+    worst_joint_scaled_error: float
+    median_smae: float
+    recent_smae: float
+    worst_smae: float
+    smae_mad: float
+    median_srmse: float
+    recent_srmse: float
+    worst_srmse: float
+    srmse_mad: float
+    worst_smae_raw: float
+    worst_srmse_raw: float
+
+    def __post_init__(self) -> None:
+        _public_identifier(self.name, "history diagnostic name")
+        if type(self.family) is not str or not self.family.strip():
+            _fail("history diagnostic family must be a non-empty exact string")
+        if type(self.successful_folds) is not int or self.successful_folds < 0:
+            _fail("history diagnostic successful_folds must be nonnegative")
+        if type(self.eligible) is not bool or type(self.explosion) is not bool:
+            _fail("history diagnostic flags must be exact bools")
+        if type(self.reason_code) is not str or not self.reason_code:
+            _fail("history diagnostic reason_code must be a non-empty exact string")
+        for name in _HISTORY_DIAGNOSTIC_FLOAT_FIELDS:
+            value = _finite_float(
+                getattr(self, name),
+                f"history diagnostic {name}",
+            )
+            if name not in _SIGNED_HISTORY_DIAGNOSTIC_FIELDS and value < 0.0:
+                _fail(f"history diagnostic {name} must be nonnegative")
+        if self.long_horizon_coverage > 1.0:
+            _fail("history diagnostic coverage must not exceed one")
+        for name in ("phase_error", "amplitude_ratio"):
+            value = getattr(self, name)
+            if value is not None:
+                _finite_float(value, f"history diagnostic {name}")
+        if self.amplitude_ratio is not None and self.amplitude_ratio < 0.0:
+            _fail("history diagnostic amplitude_ratio must be nonnegative")
+
+    @classmethod
+    def from_candidate(
+        cls, diagnostic: CandidateDiagnostics
+    ) -> "ChampionHistoryDiagnostic":
+        """Drop every fold object/forecast/truth before Champion execution."""
+        if type(diagnostic) is not CandidateDiagnostics:
+            _fail("history diagnostic source must be exact CandidateDiagnostics")
+        return cls(
+            name=diagnostic.name,
+            family=diagnostic.family,
+            successful_folds=diagnostic.successful_folds,
+            eligible=diagnostic.eligible,
+            reason_code=diagnostic.reason_code,
+            median_mase=diagnostic.median_mase,
+            recent_mase=diagnostic.recent_mase,
+            worst_mase=diagnostic.worst_mase,
+            mase_mad=diagnostic.mase_mad,
+            median_mae=diagnostic.median_mae,
+            median_smape=diagnostic.median_smape,
+            median_rmsse=diagnostic.median_rmsse,
+            normalized_bias=diagnostic.normalized_bias,
+            slope_error=diagnostic.slope_error,
+            phase_error=diagnostic.phase_error,
+            amplitude_ratio=diagnostic.amplitude_ratio,
+            explosion=diagnostic.explosion,
+            long_horizon_coverage=diagnostic.long_horizon_coverage,
+            median_joint_scaled_error=diagnostic.median_joint_scaled_error,
+            recent_joint_scaled_error=diagnostic.recent_joint_scaled_error,
+            worst_joint_scaled_error=diagnostic.worst_joint_scaled_error,
+            median_smae=diagnostic.median_smae,
+            recent_smae=diagnostic.recent_smae,
+            worst_smae=diagnostic.worst_smae,
+            smae_mad=diagnostic.smae_mad,
+            median_srmse=diagnostic.median_srmse,
+            recent_srmse=diagnostic.recent_srmse,
+            worst_srmse=diagnostic.worst_srmse,
+            srmse_mad=diagnostic.srmse_mad,
+            worst_smae_raw=diagnostic.worst_smae_raw,
+            worst_srmse_raw=diagnostic.worst_srmse_raw,
+        )
+
+
 @dataclass(frozen=True)
 class ChampionTaskRow:
     """One trusted materialized policy outcome for one labeled task."""
@@ -171,6 +304,8 @@ class ChampionTaskRow:
     failure_reason: str | None = None
     fold: int = 0
     split: Literal["build", "calibration", "dev", "public"] = "build"
+    history: tuple[float, ...] | None = None
+    diagnostic: ChampionHistoryDiagnostic | None = None
 
     def __post_init__(self) -> None:
         _validate_task_row(self)
@@ -189,6 +324,17 @@ def _validate_task_row(row: object) -> ChampionTaskRow:
         _fail("fold must be a bounded exact nonnegative integer")
     if type(row.split) is not str or row.split not in _SPLITS:
         _fail("split label is unsupported")
+    if row.history is not None:
+        if type(row.history) is not tuple or len(row.history) != profile.history_length:
+            _fail("history must be an exact tuple matching profile history_length")
+        for value in row.history:
+            _finite_number(value, "history value")
+    if row.diagnostic is not None:
+        if type(row.diagnostic) is not ChampionHistoryDiagnostic:
+            _fail("diagnostic must be an exact ChampionHistoryDiagnostic")
+        ChampionHistoryDiagnostic.__post_init__(row.diagnostic)
+        if row.diagnostic.name != row.candidate_name:
+            _fail("diagnostic name must match candidate_name")
 
     if row.truth is None:
         _fail("every task row requires a complete finite truth array")
@@ -1331,6 +1477,7 @@ __all__ = [
     "ChampionComparison",
     "ChampionEvidenceError",
     "ChampionGateConfig",
+    "ChampionHistoryDiagnostic",
     "ChampionScore",
     "ChampionTaskRow",
     "MorphologyAggregate",

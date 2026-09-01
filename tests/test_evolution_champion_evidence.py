@@ -10,12 +10,14 @@ import numerical_agent.evolution.champion_evidence as champion_evidence
 from numerical_agent.evolution.champion_evidence import (
     ChampionEvidenceError,
     ChampionGateConfig,
+    ChampionHistoryDiagnostic,
     ChampionTaskRow,
     WinTieLoss,
     compare_champion,
     sanitize_build_evidence,
     score_policy,
 )
+from numerical_agent.evolution.numerical_selector import CandidateDiagnostics
 from numerical_agent.evolution.screening import TaskProfile
 
 
@@ -117,6 +119,40 @@ def _gate(**changes: object) -> ChampionGateConfig:
     }
     values.update(changes)
     return ChampionGateConfig(**values)  # type: ignore[arg-type]
+
+
+def test_build_row_binds_exact_history_only_diagnostics_without_fold_arrays() -> None:
+    source = CandidateDiagnostics.synthetic(
+        name="candidate",
+        family="statistical",
+        median_mase=0.5,
+        fold_forecasts=((1.0,),),
+        fold_truths=((9.0,),),
+    )
+    diagnostic = ChampionHistoryDiagnostic.from_candidate(source)
+    history = (1.0,) * 200
+
+    row = ChampionTaskRow(
+        task_id="history_bound",
+        candidate_name="candidate",
+        profile=_profile("history_bound"),
+        truth=(1.0, 1.0, 1.0, 1.0),
+        forecast=(1.0, 1.0, 1.0, 1.0),
+        history=history,
+        diagnostic=diagnostic,
+    )
+
+    assert row.history is history
+    assert row.diagnostic is diagnostic
+    assert not hasattr(diagnostic, "fold_truths")
+    assert not hasattr(diagnostic, "fold_forecasts")
+
+    with pytest.raises(ChampionEvidenceError):
+        replace(row, history=list(history))  # type: ignore[arg-type]
+    with pytest.raises(ChampionEvidenceError):
+        replace(row, history=history[:-1])
+    with pytest.raises(ChampionEvidenceError):
+        replace(row, diagnostic=replace(diagnostic, name="other"))
 
 
 def test_score_policy_uses_canonical_capped_and_raw_metric_authority() -> None:
