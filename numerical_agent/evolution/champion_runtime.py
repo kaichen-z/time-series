@@ -387,7 +387,7 @@ def execute_champion(
                 delta = candidate - baseline
                 correction = max(-limit, min(limit, policy.overlay_alpha * delta))
                 value = baseline + correction
-                if not math.isfinite(value) or abs(value - baseline) > limit:
+                if not math.isfinite(value):
                     return _fallback(fallback_forecast, fallback_name, "invalid_arithmetic")
                 overlaid.append(value)
             result = tuple(overlaid)

@@ -645,7 +645,7 @@ def test_arithmetic_overflow_returns_exact_fallback() -> None:
     assert result.fallback_reason == "invalid_policy"
 
 
-def test_overlay_rounding_cannot_realize_correction_above_cap() -> None:
+def test_overlay_returns_finite_frozen_formula_result_despite_rounding() -> None:
     baseline = math.nextafter(1e16, math.inf)
     fallback = (baseline, baseline)
     policy = _policy(
@@ -666,5 +666,5 @@ def test_overlay_rounding_cannot_realize_correction_above_cap() -> None:
         horizon=2,
     )
 
-    assert result.forecast is fallback
-    assert result.fallback_reason == "invalid_arithmetic"
+    assert result.forecast == (1.0000000000000004e16, 1.0000000000000004e16)
+    assert result.fallback_reason is None
