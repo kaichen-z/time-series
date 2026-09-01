@@ -1,8 +1,17 @@
 # Champion Package Retrieval–Decision Coordinate Evolution Design
 
 Date: 2026-09-02
-Status: approved direction; proposed implementation contract
+Status: implemented and verified
 Base: `c80e1db` (`merge: integrate champion numerical evolution`)
+
+Implemented modules:
+
+- `evolving_loop.package_registry.FrozenNumericalPackageRegistry`
+- `evolving_loop.package_retrieval_evolution.PackageRetrievalEvaluator`
+- `evolving_loop.package_decision_evolution.PackageDecisionEvaluator`
+- `evolving_loop.package_decision_evolution.PackageDecisionEvolutionEngine`
+- `evolving_loop.package_coordinate_evolution.PackageCoordinateBundle`
+- `evolving_loop.package_coordinate_evolution.PackageCoordinateController`
 
 ## 1. Goal
 
