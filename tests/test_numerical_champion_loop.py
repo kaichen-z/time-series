@@ -20,6 +20,7 @@ from numerical_agent.evolution.champion_runtime import (
 )
 from numerical_agent.evolution.execution import Task
 from numerical_agent.evolution.numerical_loop import run_numerical_loop
+from numerical_agent.evolution.numerical_package import NumericalForecastPackage
 from numerical_agent.evolution.numerical_selector import (
     CandidateDiagnostics,
     DecisionPolicy,
@@ -216,32 +217,56 @@ def test_legacy_package_keeps_legacy_named_component_fingerprints() -> None:
     )
 
 
-def test_champion_hashes_and_semantic_marker_are_bidirectionally_bound() -> None:
+def test_legacy_package_never_infers_champion_provenance_from_contents() -> None:
     legacy = _run()
     champion = _run(release=_release())
 
-    assert not hasattr(legacy, "champion_enabled")
-    with pytest.raises(ValueError, match="Champion component fingerprints"):
+    collision = replace(
+        legacy,
+        selection_decision=replace(
+            legacy.selection_decision,
+            reason_codes=("frozen_champion", "legacy_reason"),
+        ),
+        component_fingerprints={
+            **dict(legacy.component_fingerprints),
+            **{
+                key: champion.component_fingerprints[key]
+                for key in (
+                    "champion_release",
+                    "champion_recipe",
+                    "champion_assumptions",
+                )
+            },
+        },
+    )
+
+    assert type(collision) is NumericalForecastPackage
+    assert collision.selection_decision.reason_codes == (
+        "frozen_champion",
+        "legacy_reason",
+    )
+
+
+def test_champion_package_subtype_preserves_its_provenance_invariant() -> None:
+    champion = _run(release=_release())
+
+    assert type(champion) is not NumericalForecastPackage
+    assert type(replace(champion)) is type(champion)
+    with pytest.raises(ValueError, match="fixed provenance marker"):
         replace(
-            legacy,
+            champion,
             selection_decision=replace(
-                legacy.selection_decision,
-                reason_codes=("frozen_champion", "champion_materialized_selection"),
+                champion.selection_decision,
+                reason_codes=("legacy_reason",),
             ),
         )
     with pytest.raises(ValueError, match="Champion component fingerprints"):
         replace(
-            legacy,
+            champion,
             component_fingerprints={
-                **dict(legacy.component_fingerprints),
-                **{
-                    key: champion.component_fingerprints[key]
-                    for key in (
-                        "champion_release",
-                        "champion_recipe",
-                        "champion_assumptions",
-                    )
-                },
+                key: value
+                for key, value in champion.component_fingerprints.items()
+                if key != "champion_assumptions"
             },
         )
 

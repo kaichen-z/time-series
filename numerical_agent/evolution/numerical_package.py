@@ -204,19 +204,6 @@ class NumericalForecastPackage:
         fingerprints = freeze_string_mapping(
             self.component_fingerprints, "component fingerprints"
         )
-        champion_marker = selection.reason_codes[:1] == ("frozen_champion",)
-        champion_hashes = {
-            key
-            for key in _CHAMPION_FINGERPRINT_KEYS
-            if key in fingerprints and _SHA256.fullmatch(fingerprints[key]) is not None
-        }
-        complete_champion_hashes = champion_hashes == _CHAMPION_FINGERPRINT_KEYS
-        if champion_marker != complete_champion_hashes or (
-            champion_hashes and not complete_champion_hashes
-        ):
-            raise ValueError(
-                "Champion component fingerprints must be complete SHA-256 values"
-            )
         fallback = self.fallback_reason
         if fallback is not None and (not isinstance(fallback, str) or not fallback):
             raise ValueError("fallback reason must be a nonempty string")
@@ -239,6 +226,27 @@ class NumericalForecastPackage:
         object.__setattr__(self, "ranked_alternatives", alternatives)
         object.__setattr__(self, "retrieval_handoff", handoff)
         object.__setattr__(self, "component_fingerprints", fingerprints)
+
+
+@dataclass(frozen=True)
+class _ChampionNumericalForecastPackage(NumericalForecastPackage):
+    """Runtime-only package type that binds frozen Champion provenance."""
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        raise TypeError("Champion package type is sealed")
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.selection_decision.reason_codes[:1] != ("frozen_champion",):
+            raise ValueError("Champion package requires the fixed provenance marker")
+        fingerprints = self.component_fingerprints
+        if _CHAMPION_FINGERPRINT_KEYS - set(fingerprints) or any(
+            _SHA256.fullmatch(fingerprints[key]) is None
+            for key in _CHAMPION_FINGERPRINT_KEYS
+        ):
+            raise ValueError(
+                "Champion component fingerprints must be complete SHA-256 values"
+            )
 
 
 def snapshot_diagnostics(

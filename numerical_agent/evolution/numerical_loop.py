@@ -18,6 +18,7 @@ from .numerical_handoff import (
     task_input_fingerprint,
 )
 from .numerical_package import (
+    _ChampionNumericalForecastPackage,
     NumericalForecastPackage,
     RankedNumericalForecast,
     forecast_tuple,
@@ -341,7 +342,12 @@ def run_numerical_loop(
     )
     if champion_release is not None:
         fingerprints = _with_champion_fingerprints(fingerprints, champion_release)
-    return NumericalForecastPackage(
+    package_type = (
+        _ChampionNumericalForecastPackage
+        if champion_release is not None
+        else NumericalForecastPackage
+    )
+    return package_type(
         task_profile=profile,
         active_candidate_names=active_names,
         candidate_diagnostics=stable_diagnostics,
