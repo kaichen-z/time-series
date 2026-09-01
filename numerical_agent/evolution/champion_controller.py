@@ -2,19 +2,14 @@
 from __future__ import annotations
 
 import hashlib
-import dis
-import inspect
 import math
 import os
 import re
 import secrets
 import stat
-import sys
 import unicodedata
-from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
-from types import BuiltinFunctionType, CodeType, FunctionType, ModuleType
 from typing import Callable, Literal, NoReturn, cast
 
 from common.data import Task
@@ -46,6 +41,7 @@ from .champion_evidence import (
     sanitize_build_evidence,
     score_policy,
 )
+from . import champion_proposal as _champion_proposal_module
 from .champion_proposal import ChampionProposalError, expand_recipe
 from .champion_runtime import ChampionExecution, execute_champion
 from .numerical_selector import CandidateDiagnostics
@@ -99,547 +95,492 @@ def _lifecycle_fail(message: str) -> NoReturn:
     raise ChampionLifecycleError(message)
 
 
-_CALLABLE_KINDS = frozenset(
-    {"proposer", "row_provider", "expander", "executor", "scorer", "comparator"}
-)
-_BEHAVIOR_SOURCE_CACHE: ContextVar[dict[str, dict[str, object]] | None] = (
-    ContextVar("champion_behavior_source_cache", default=None)
-)
-_BEHAVIOR_IDENTITY_CACHE: ContextVar[dict[int, dict[str, object]] | None] = (
-    ContextVar("champion_behavior_identity_cache", default=None)
-)
-_BEHAVIOR_STRICT_GRAPH: ContextVar[bool] = ContextVar(
-    "champion_behavior_strict_graph", default=False
-)
-_HOST_SOURCE_DIGEST_CACHE: dict[
-    tuple[str, int, int, int, int, int], str
-] = {}
-_HOST_CODE_FINGERPRINT_CACHE: dict[CodeType, str] = {}
+_RUNTIME_KINDS = frozenset({"expander", "executor", "scorer", "comparator"})
+_PROPOSER_KINDS = frozenset({"scripted", "codex_cli"})
+_ROW_PROVIDER_KINDS = frozenset({"materialized"})
+_PROPOSER_ADAPTER_CONTRACT = "champion_proposer_adapter_v1"
+_ROW_PROVIDER_ADAPTER_CONTRACT = "champion_row_provider_adapter_v1"
 
 
-def _host_constant_identity(value: object) -> object:
-    if isinstance(value, CodeType):
-        return {"nested_code": _host_code_fingerprint(value)}
-    if type(value) is float and not math.isfinite(cast(float, value)):
-        number = cast(float, value)
-        return {"nonfinite_float": "nan" if math.isnan(number) else repr(number)}
-    if type(value) in {str, int, float, bool, type(None)}:
-        return value
-    if type(value) is bytes:
-        return {"bytes_sha256": hashlib.sha256(cast(bytes, value)).hexdigest()}
-    if type(value) is tuple:
-        return [
-            _host_constant_identity(item) for item in cast(tuple[object, ...], value)
-        ]
-    if type(value) is frozenset:
-        members = [
-            _host_constant_identity(item)
-            for item in cast(frozenset[object], value)
-        ]
-        return {
-            "frozenset": sorted(members, key=lambda item: champion_fingerprint(item))
-        }
-    if type(value) is complex:
-        complex_number = cast(complex, value)
-        return {
-            "complex": {
-                "real": complex_number.real,
-                "imag": complex_number.imag,
-            }
-        }
-    if value is Ellipsis:
-        return {"constant": "Ellipsis"}
-    _lifecycle_fail("callable implementation contains an unsupported host constant")
-
-
-def _host_code_fingerprint(code: CodeType) -> str:
-    """Fingerprint immutable code fields without CPython quickening state."""
-    cached = _HOST_CODE_FINGERPRINT_CACHE.get(code)
-    if cached is not None:
-        return cached
-    constants = [_host_constant_identity(value) for value in code.co_consts]
-    fingerprint = champion_fingerprint(
-        {
-            "bytecode_sha256": hashlib.sha256(code.co_code).hexdigest(),
-            "constants": constants,
-            "names": code.co_names,
-            "varnames": code.co_varnames,
-            "freevars": code.co_freevars,
-            "cellvars": code.co_cellvars,
-            "argcount": code.co_argcount,
-            "posonlyargcount": code.co_posonlyargcount,
-            "kwonlyargcount": code.co_kwonlyargcount,
-            "flags": code.co_flags,
-        }
-    )
-    _HOST_CODE_FINGERPRINT_CACHE[code] = fingerprint
-    return fingerprint
-
-
-def _module_source_identity(module: ModuleType) -> dict[str, object]:
-    module_name = getattr(module, "__name__", None)
-    if type(module_name) is not str or not module_name:
-        _lifecycle_fail("behavior module has no exact host identity")
-    cache = _BEHAVIOR_SOURCE_CACHE.get()
-    if cache is not None and module_name in cache:
-        return cache[module_name]
+def _canonical_adapter_payload(value: object, label: str) -> str:
+    if type(value) is not dict or any(
+        type(key) is not str for key in cast(dict[object, object], value)
+    ):
+        _lifecycle_fail(f"{label} must be an exact canonical JSON object")
     try:
-        source = inspect.getsourcefile(module)
-    except TypeError:
-        source = None
-    if source is None:
-        raw_file = getattr(module, "__file__", None)
-        source = raw_file if type(raw_file) is str else None
-    if source is None:
-        identity: dict[str, object] = {
-            "module": module_name,
-            "origin": "builtin",
-            "python_runtime": sys.version,
-        }
-        if cache is not None:
-            cache[module_name] = identity
-        return identity
+        payload = canonical_json_bytes(cast(dict[str, object], value)).decode("utf-8")
+        parsed = strict_json_loads(payload, context=label)
+    except (TypeError, ValueError) as error:
+        raise ChampionLifecycleError(f"{label} must be canonical") from error
+    if type(parsed) is not dict:
+        _lifecycle_fail(f"{label} must be an exact canonical JSON object")
+    return payload
+
+
+def _adapter_object(payload: str, label: str) -> dict[str, object]:
+    if type(payload) is not str:
+        _lifecycle_fail(f"{label} canonical payload drifted")
     try:
-        path = Path(source).resolve(strict=True)
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        details = os.fstat(descriptor)
-        if not stat.S_ISREG(details.st_mode):
-            _lifecycle_fail("runtime module source must be an exact file")
-        digest_key = (
-            str(path),
-            details.st_dev,
-            details.st_ino,
-            details.st_size,
-            details.st_mtime_ns,
-            details.st_ctime_ns,
-        )
-        source_digest = _HOST_SOURCE_DIGEST_CACHE.get(digest_key)
-        if source_digest is None:
-            digest = hashlib.sha256()
-            while True:
-                chunk = os.read(descriptor, 1024 * 1024)
-                if not chunk:
-                    break
-                digest.update(chunk)
-            source_digest = digest.hexdigest()
-            _HOST_SOURCE_DIGEST_CACHE[digest_key] = source_digest
-    except OSError as error:
-        raise ChampionLifecycleError("runtime module source cannot be read") from error
-    finally:
-        if "descriptor" in locals():
-            os.close(descriptor)
-    identity = {
-        "module": module_name,
-        "source_path": str(path),
-        "source_sha256": source_digest,
-    }
-    if cache is not None:
-        cache[module_name] = identity
-    return identity
+        parsed = strict_json_loads(payload, context=label)
+    except (TypeError, ValueError) as error:
+        raise ChampionLifecycleError(f"{label} canonical payload drifted") from error
+    if type(parsed) is not dict:
+        _lifecycle_fail(f"{label} canonical payload drifted")
+    canonical = canonical_json_bytes(cast(dict[str, object], parsed)).decode("utf-8")
+    if canonical != payload:
+        _lifecycle_fail(f"{label} canonical payload drifted")
+    return cast(dict[str, object], parsed)
 
 
-def _code_global_names(code: CodeType) -> frozenset[str]:
-    names = {
-        cast(str, instruction.argval)
-        for instruction in dis.get_instructions(code)
-        if instruction.opname in {"LOAD_GLOBAL", "LOAD_NAME"}
-        and type(instruction.argval) is str
-    }
-    for constant in code.co_consts:
-        if isinstance(constant, CodeType):
-            names.update(_code_global_names(constant))
-    return frozenset(names)
+def _validate_adapter_identity(identity: object, label: str) -> str:
+    if type(identity) is not str or not cast(str, identity).strip():
+        _lifecycle_fail(f"{label} identity must be nonempty")
+    return cast(str, identity)
 
 
-def _module_attribute_names(code: CodeType, global_name: str) -> frozenset[str]:
-    attributes: set[str] = set()
-    instructions = tuple(dis.get_instructions(code))
-    for index, instruction in enumerate(instructions[:-1]):
-        if (
-            instruction.opname in {"LOAD_GLOBAL", "LOAD_NAME"}
-            and instruction.argval == global_name
-        ):
-            following = instructions[index + 1]
-            if following.opname in {"LOAD_ATTR", "LOAD_METHOD"} and type(
-                following.argval
-            ) is str:
-                attributes.add(cast(str, following.argval))
-    for constant in code.co_consts:
-        if isinstance(constant, CodeType):
-            attributes.update(_module_attribute_names(constant, global_name))
-    return frozenset(attributes)
-
-
-def _host_type_identity(value: type, seen: set[int]) -> dict[str, object]:
-    cache = _BEHAVIOR_IDENTITY_CACHE.get()
-    if cache is not None and id(value) in cache:
-        return cache[id(value)]
-    module = sys.modules.get(value.__module__)
-    identity: dict[str, object] = {
-        "module": value.__module__,
-        "qualname": value.__qualname__,
-    }
-    if isinstance(module, ModuleType):
-        identity["module_source"] = _module_source_identity(module)
-    if cache is not None:
-        cache[id(value)] = identity
-    return identity
-
-
-def _is_generated_dataclass_method(name: str, value: FunctionType) -> bool:
-    if value.__code__.co_filename == "<string>":
-        return True
-    return (
-        name == "__repr__"
-        and value.__code__.co_name == "wrapper"
-        and Path(value.__code__.co_filename).name == "dataclasses.py"
-    )
-
-
-def _host_callable_type_identity(
-    value: type, seen: set[int]
-) -> dict[str, object]:
-    methods = {
-        name: _host_function_identity(member, seen)
-        for name, member in sorted(vars(value).items())
-        if isinstance(member, FunctionType)
-        and not _is_generated_dataclass_method(name, member)
-    }
-    if "__call__" not in methods:
-        _lifecycle_fail("formal callable has no exact host implementation")
-    return {
-        "type": _host_type_identity(value, seen),
-        "methods": methods,
-    }
-
-
-def _resolve_loaded_name(
-    callback: FunctionType, name: str
-) -> tuple[str, object]:
-    if name in callback.__globals__:
-        return "global", callback.__globals__[name]
-    builtins = getattr(callback, "__builtins__", None)
-    if isinstance(builtins, ModuleType):
-        if hasattr(builtins, name):
-            return "builtin", getattr(builtins, name)
-    elif type(builtins) is dict and name in builtins:
-        return "builtin", cast(dict[str, object], builtins)[name]
-    _lifecycle_fail(f"formal callable has unresolved loaded name: {name}")
-
-
-def _shallow_function_identity(
-    value: FunctionType, seen: set[int], *, include_globals: bool
-) -> dict[str, object]:
-    reference = id(value)
-    stable_name = f"{value.__module__}.{value.__qualname__}"
-    if reference in seen:
-        return {"function_reference": stable_name}
-    module = sys.modules.get(value.__module__)
-    if not isinstance(module, ModuleType):
-        _lifecycle_fail("behavior dependency module is not loaded")
-    seen.add(reference)
-    try:
-        identity: dict[str, object] = {
-            "function": stable_name,
-            "module_source": _module_source_identity(module),
-            "code_fingerprint": _host_code_fingerprint(value.__code__),
-            "defaults": _host_behavior_value(value.__defaults__ or (), seen),
-            "kwdefaults": _host_behavior_value(
-                tuple(sorted((value.__kwdefaults__ or {}).items())), seen
-            ),
-            "closure": tuple(
-                _host_behavior_value(cell.cell_contents, seen)
-                for cell in (value.__closure__ or ())
-            ),
-        }
-        if include_globals:
-            globals_identity: dict[str, object] = {}
-            for name in sorted(_code_global_names(value.__code__)):
-                scope, global_value = _resolve_loaded_name(value, name)
-                dependency: object
-                if isinstance(global_value, FunctionType):
-                    dependency = _shallow_function_identity(
-                        global_value, seen, include_globals=False
-                    )
-                else:
-                    dependency = _shallow_dependency_identity(global_value, seen)
-                globals_identity[name] = {
-                    "scope": scope,
-                    "identity": dependency,
-                }
-            identity["globals"] = globals_identity
-        return identity
-    finally:
-        seen.remove(reference)
-
-
-def _shallow_dependency_identity(value: object, seen: set[int]) -> object:
-    if isinstance(value, FunctionType):
-        return _shallow_function_identity(
-            value,
-            seen,
-            include_globals=_BEHAVIOR_STRICT_GRAPH.get(),
-        )
-    if isinstance(value, BuiltinFunctionType):
-        return {
-            "builtin_module": value.__module__,
-            "builtin_name": value.__qualname__,
-        }
-    if isinstance(value, type):
-        return _host_type_identity(value, seen)
-    if isinstance(value, ModuleType):
-        return _module_source_identity(value)
-    return _host_behavior_value(value, seen, allow_mutable_globals=True)
-
-
-def _host_behavior_value(
-    value: object, seen: set[int], *, allow_mutable_globals: bool = False
-) -> object:
-    if type(value) is float and not math.isfinite(cast(float, value)):
-        number = cast(float, value)
-        return {"nonfinite_float": "nan" if math.isnan(number) else repr(number)}
-    if type(value) in {str, int, float, bool, type(None)}:
-        return value
-    if type(value) is bytes:
-        return {"bytes_sha256": hashlib.sha256(cast(bytes, value)).hexdigest()}
-    if isinstance(value, Path):
-        return {"path": str(value.absolute()), "type": type(value).__name__}
-    if isinstance(value, re.Pattern):
-        return {"regex_pattern": value.pattern, "regex_flags": value.flags}
-    if isinstance(value, range):
-        return {"range": (value.start, value.stop, value.step)}
-    if isinstance(value, slice):
-        return {"slice": (value.start, value.stop, value.step)}
-    if type(value).__module__ == "typing":
-        typing_module = sys.modules.get("typing")
-        if not isinstance(typing_module, ModuleType):
-            _lifecycle_fail("typing behavior dependency is not loaded")
-        return {
-            "typing_value": repr(value),
-            "module_source": _module_source_identity(typing_module),
-        }
-    if type(value) is tuple:
-        return [
-            _host_behavior_value(
-                item, seen, allow_mutable_globals=allow_mutable_globals
-            )
-            for item in cast(tuple[object, ...], value)
-        ]
-    if type(value) is frozenset:
-        members = [
-            _host_behavior_value(
-                item, seen, allow_mutable_globals=allow_mutable_globals
-            )
-            for item in cast(frozenset[object], value)
-        ]
-        return {
-            "frozenset": sorted(members, key=lambda item: champion_fingerprint(item))
-        }
-    if type(value) in {list, dict, set, bytearray}:
-        if not allow_mutable_globals:
-            _lifecycle_fail("formal callable behavior state must be immutable")
-        if type(value) is list:
-            return {
-                "mutable_global_list": [
-                    _host_behavior_value(item, seen, allow_mutable_globals=True)
-                    for item in cast(list[object], value)
-                ]
-            }
-        if type(value) is dict:
-            dict_items = [
-                (
-                    _host_behavior_value(key, seen, allow_mutable_globals=True),
-                    _host_behavior_value(item, seen, allow_mutable_globals=True),
-                )
-                for key, item in cast(dict[object, object], value).items()
-            ]
-            return {
-                "mutable_global_dict": sorted(
-                    dict_items, key=lambda item: champion_fingerprint(item[0])
-                )
-            }
-        if type(value) is set:
-            set_items = [
-                _host_behavior_value(item, seen, allow_mutable_globals=True)
-                for item in cast(set[object], value)
-            ]
-            return {
-                "mutable_global_set": sorted(
-                    set_items, key=lambda item: champion_fingerprint(item)
-                )
-            }
-        return {
-            "mutable_global_bytes": hashlib.sha256(
-                bytes(cast(bytearray, value))
-            ).hexdigest()
-        }
-    if isinstance(value, FunctionType):
-        return _host_function_identity(value, seen)
-    if isinstance(value, BuiltinFunctionType):
-        return {
-            "builtin_module": value.__module__,
-            "builtin_name": value.__qualname__,
-        }
-    if isinstance(value, ModuleType):
-        return _module_source_identity(value)
-    if isinstance(value, type):
-        return _host_type_identity(value, seen)
-    if is_dataclass(value):
-        parameters = getattr(type(value), "__dataclass_params__", None)
-        if parameters is None or parameters.frozen is not True:
-            _lifecycle_fail("formal callable behavior state must be frozen")
-        reference = id(value)
-        if reference in seen:
-            return {
-                "frozen_reference": f"{type(value).__module__}.{type(value).__qualname__}"
-            }
-        seen.add(reference)
+def _parse_scripted_batches(payload: str) -> tuple[tuple[ChampionRecipe, ...], ...]:
+    value = _adapter_object(payload, "scripted proposer payload")
+    if set(value) != {"batches"} or type(value["batches"]) is not list:
+        _lifecycle_fail("scripted proposer payload is malformed")
+    batches: list[tuple[ChampionRecipe, ...]] = []
+    for raw_batch in cast(list[object], value["batches"]):
+        if type(raw_batch) is not list:
+            _lifecycle_fail("scripted proposer batch is malformed")
         try:
-            identity = {
-                "frozen_type": _host_type_identity(type(value), seen),
-                "fields": {
-                    item.name: _host_behavior_value(getattr(value, item.name), seen)
-                    for item in fields(value)
-                },
-            }
-            if callable(value):
-                identity["callable_implementation"] = _host_callable_type_identity(
-                    type(value), seen
-                )
-            return identity
-        finally:
-            seen.remove(reference)
-    _lifecycle_fail(
-        "formal callable has unsupported mutable behavior state: "
-        f"{type(value).__module__}.{type(value).__qualname__}"
-    )
+            batch = tuple(
+                parse_champion_recipe(item)
+                for item in cast(list[object], raw_batch)
+            )
+        except Exception as error:
+            raise ChampionLifecycleError("scripted proposer batch is malformed") from error
+        if not 5 <= len(batch) <= 10:
+            _lifecycle_fail("scripted proposer batch must contain five through ten recipes")
+        batches.append(batch)
+    if not batches:
+        _lifecycle_fail("scripted proposer requires at least one batch")
+    return tuple(batches)
 
 
-def _host_function_identity(
-    callback: FunctionType, seen: set[int]
-) -> dict[str, object]:
-    reference = id(callback)
-    cache = _BEHAVIOR_IDENTITY_CACHE.get()
-    if cache is not None and reference in cache:
-        return cache[reference]
-    stable_name = f"{callback.__module__}.{callback.__qualname__}"
-    if reference in seen:
-        return {"function_reference": stable_name}
-    seen.add(reference)
-    try:
-        module = sys.modules.get(callback.__module__)
-        if not isinstance(module, ModuleType):
-            _lifecycle_fail("callable function module is not loaded")
-        globals_identity: dict[str, object] = {}
-        for name in sorted(_code_global_names(callback.__code__)):
-            scope, global_value = _resolve_loaded_name(callback, name)
-            if isinstance(global_value, ModuleType):
-                attributes: dict[str, object] = {}
-                for attribute in sorted(
-                    _module_attribute_names(callback.__code__, name)
-                ):
-                    if not hasattr(global_value, attribute):
-                        _lifecycle_fail(
-                            "formal callable has unresolved module attribute: "
-                            f"{name}.{attribute}"
-                        )
-                    attributes[attribute] = _shallow_dependency_identity(
-                        getattr(global_value, attribute), seen
-                    )
-                dependency: object = {
-                    "module": _module_source_identity(global_value),
-                    "attributes": attributes,
-                }
-            elif isinstance(global_value, FunctionType) and (
-                global_value.__module__ == callback.__module__
-                or global_value.__module__.startswith("numerical_agent.")
-                or global_value.__module__.startswith("common.")
+@dataclass(frozen=True, init=False)
+class ChampionProposerAdapter:
+    """Sealed formal proposer kind with canonical data-only behavior state."""
+
+    kind: str
+    identity: str
+    config_json: str = field(repr=False)
+    behavior_json: str = field(repr=False)
+
+    @classmethod
+    def bind(
+        cls, *, identity: str, callback: object, config: object
+    ) -> "ChampionProposerAdapter":
+        del cls, identity, callback, config
+        _lifecycle_fail("formal proposer requires a closed registered adapter kind")
+
+    @classmethod
+    def scripted(
+        cls,
+        *,
+        identity: str,
+        proposal_batches: object,
+        config: object,
+    ) -> "ChampionProposerAdapter":
+        del cls
+        if type(proposal_batches) is not tuple:
+            _lifecycle_fail("scripted proposer batches must be an exact tuple")
+        payload_batches: list[list[dict[str, object]]] = []
+        for raw_batch in cast(tuple[object, ...], proposal_batches):
+            if type(raw_batch) is not tuple or any(
+                type(recipe) is not ChampionRecipe
+                for recipe in cast(tuple[object, ...], raw_batch)
             ):
-                dependency = _host_function_identity(global_value, seen)
-            elif isinstance(global_value, (FunctionType, BuiltinFunctionType, type)):
-                dependency = _shallow_dependency_identity(global_value, seen)
-            else:
-                dependency = _host_behavior_value(
-                    global_value, seen, allow_mutable_globals=True
-                )
-            globals_identity[name] = {
-                "scope": scope,
-                "identity": dependency,
-            }
-        closure = callback.__closure__ or ()
-        identity = {
-            "owner_module": callback.__module__,
-            "owner_qualname": callback.__qualname__,
-            "module_source": _module_source_identity(module),
-            "code_fingerprint": _host_code_fingerprint(callback.__code__),
-            "defaults": _host_behavior_value(callback.__defaults__ or (), seen),
-            "kwdefaults": _host_behavior_value(
-                tuple(sorted((callback.__kwdefaults__ or {}).items())), seen
-            ),
-            "closure": tuple(
-                _host_behavior_value(cell.cell_contents, seen) for cell in closure
-            ),
-            "globals": globals_identity,
+                _lifecycle_fail("scripted proposer batches require exact recipes")
+            payload_batches.append(
+                [
+                    cast(ChampionRecipe, recipe).to_payload()
+                    for recipe in cast(tuple[object, ...], raw_batch)
+                ]
+            )
+        return ChampionProposerAdapter._create(
+            kind="scripted",
+            identity=identity,
+            config=config,
+            behavior={"batches": payload_batches},
+        )
+
+    @classmethod
+    def codex_cli(
+        cls,
+        *,
+        identity: str,
+        model: str,
+        reasoning_effort: str,
+        inventory: object,
+        timeout_seconds: int = 900,
+        cache_dir: str | None = None,
+    ) -> "ChampionProposerAdapter":
+        del cls
+        from numerical_agent.dictionary import ToolDictionary
+
+        if type(inventory) is not ToolDictionary:
+            _lifecycle_fail("Codex proposer inventory must be an exact ToolDictionary")
+        if type(model) is not str or not model.strip():
+            _lifecycle_fail("Codex proposer model must be nonempty")
+        if type(reasoning_effort) is not str or not reasoning_effort.strip():
+            _lifecycle_fail("Codex proposer reasoning effort must be nonempty")
+        if type(timeout_seconds) is not int or timeout_seconds <= 0:
+            _lifecycle_fail("Codex proposer timeout must be a positive integer")
+        if cache_dir is not None and type(cache_dir) is not str:
+            _lifecycle_fail("Codex proposer cache directory must be a string or null")
+        config = {
+            "adapter_kind": "codex_cli",
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+            "timeout_seconds": timeout_seconds,
+            "cache_dir": cache_dir,
         }
-        if cache is not None:
-            cache[reference] = identity
-        return identity
-    finally:
-        seen.remove(reference)
+        return ChampionProposerAdapter._create(
+            kind="codex_cli",
+            identity=identity,
+            config=config,
+            behavior={"inventory": inventory.to_payload()},
+        )
 
+    @classmethod
+    def _create(
+        cls,
+        *,
+        kind: str,
+        identity: str,
+        config: object,
+        behavior: object,
+    ) -> "ChampionProposerAdapter":
+        del cls
+        instance = object.__new__(ChampionProposerAdapter)
+        object.__setattr__(instance, "kind", kind)
+        object.__setattr__(
+            instance, "identity", _validate_adapter_identity(identity, "proposer")
+        )
+        object.__setattr__(
+            instance,
+            "config_json",
+            _canonical_adapter_payload(config, "proposer config"),
+        )
+        object.__setattr__(
+            instance,
+            "behavior_json",
+            _canonical_adapter_payload(behavior, "proposer behavior"),
+        )
+        instance.verify()
+        return instance
 
-def _host_callable_fingerprint(callback: object) -> str:
-    """Derive an explicit bounded manifest of actually loaded dependencies."""
-    source_token = _BEHAVIOR_SOURCE_CACHE.set({})
-    identity_token = _BEHAVIOR_IDENTITY_CACHE.set({})
-    strict_token = _BEHAVIOR_STRICT_GRAPH.set(
-        not isinstance(callback, FunctionType)
-    )
-    try:
-        if isinstance(callback, FunctionType):
-            module = sys.modules.get(callback.__module__)
-            if not isinstance(module, ModuleType):
-                _lifecycle_fail("formal callable module is not loaded")
-            identity = {
-                "callable": _host_function_identity(callback, set()),
+    @property
+    def config(self) -> dict[str, object]:
+        return _adapter_object(self.config_json, "proposer config")
+
+    @property
+    def config_fingerprint(self) -> str:
+        return champion_fingerprint(self.config)
+
+    @property
+    def implementation_fingerprint(self) -> str:
+        return champion_fingerprint(
+            {
+                "contract": _PROPOSER_ADAPTER_CONTRACT,
+                "kind": self.kind,
+                "behavior_sha256": hashlib.sha256(
+                    self.behavior_json.encode("utf-8")
+                ).hexdigest(),
             }
+        )
+
+    @property
+    def fingerprint(self) -> str:
+        self.verify()
+        return champion_fingerprint(
+            {
+                "kind": self.kind,
+                "identity": self.identity,
+                "implementation_fingerprint": self.implementation_fingerprint,
+                "config_fingerprint": self.config_fingerprint,
+            }
+        )
+
+    def verify(self) -> None:
+        if type(self) is not ChampionProposerAdapter:
+            _lifecycle_fail("formal proposer requires the exact sealed adapter type")
+        if type(self.kind) is not str or self.kind not in _PROPOSER_KINDS:
+            _lifecycle_fail("formal proposer kind is not registered")
+        _validate_adapter_identity(self.identity, "proposer")
+        _adapter_object(self.config_json, "proposer config")
+        if self.kind == "scripted":
+            _parse_scripted_batches(self.behavior_json)
         else:
-            if not callable(callback) or not is_dataclass(callback):
-                _lifecycle_fail("formal callable requires a closed frozen host adapter")
-            parameters = getattr(type(callback), "__dataclass_params__", None)
-            if parameters is None or parameters.frozen is not True:
-                _lifecycle_fail("formal callable requires immutable behavior state")
-            implementation = vars(type(callback)).get("__call__")
-            if not isinstance(implementation, FunctionType):
-                _lifecycle_fail("formal callable has no exact host implementation")
-            module = sys.modules.get(implementation.__module__)
-            if not isinstance(module, ModuleType):
-                _lifecycle_fail("formal callable module is not loaded")
-            identity = {
-                "callable_type": _host_callable_type_identity(
-                    type(callback), set()
-                ),
-                "state": {
-                    item.name: _host_behavior_value(
-                        getattr(callback, item.name), set()
-                    )
-                    for item in fields(callback)
+            behavior = _adapter_object(self.behavior_json, "Codex proposer behavior")
+            if set(behavior) != {"inventory"} or type(behavior["inventory"]) is not dict:
+                _lifecycle_fail("Codex proposer behavior is malformed")
+            config = self.config
+            if set(config) != {
+                "adapter_kind",
+                "model",
+                "reasoning_effort",
+                "timeout_seconds",
+                "cache_dir",
+            } or (
+                config["adapter_kind"] != "codex_cli"
+                or type(config["model"]) is not str
+                or not cast(str, config["model"]).strip()
+                or type(config["reasoning_effort"]) is not str
+                or not cast(str, config["reasoning_effort"]).strip()
+                or type(config["timeout_seconds"]) is not int
+                or cast(int, config["timeout_seconds"]) <= 0
+                or (
+                    config["cache_dir"] is not None
+                    and type(config["cache_dir"]) is not str
+                )
+            ):
+                _lifecycle_fail("Codex proposer config is malformed")
+
+    def propose(
+        self,
+        parent: object,
+        evidence: ProposerEvidence,
+        *,
+        generation: int,
+    ) -> tuple[ChampionRecipe, ...]:
+        self.verify()
+        if type(generation) is not int or generation <= 0:
+            _lifecycle_fail("formal proposer generation must be a positive integer")
+        if self.kind == "scripted":
+            batches = _parse_scripted_batches(self.behavior_json)
+            if generation > len(batches):
+                _lifecycle_fail("scripted proposer has no registered generation batch")
+            return batches[generation - 1]
+
+        from common.llm import CodexCLIClient, CodexCLIConfig
+        from numerical_agent.dictionary import ToolDictionary
+        from .champion_proposal import propose_champion_recipes
+
+        behavior = _adapter_object(self.behavior_json, "Codex proposer behavior")
+        try:
+            inventory = ToolDictionary.from_payload(
+                cast(dict[str, object], behavior["inventory"])
+            )
+        except Exception as error:
+            raise ChampionLifecycleError("Codex proposer inventory is malformed") from error
+        config = self.config
+        client = CodexCLIClient(
+            CodexCLIConfig(
+                model=cast(str, config["model"]),
+                reasoning_effort=cast(str, config["reasoning_effort"]),
+                timeout_seconds=cast(int, config["timeout_seconds"]),
+                cache_dir=cast(str | None, config["cache_dir"]),
+            )
+        )
+        if type(parent) is ChampionRelease:
+            parent_recipe = cast(ChampionRelease, parent).policy.recipe
+        elif type(parent) is ChampionRecipe:
+            parent_recipe = cast(ChampionRecipe, parent)
+        else:
+            _lifecycle_fail("Codex proposer Parent is malformed")
+        return propose_champion_recipes(client, parent_recipe, inventory, evidence)
+
+    def __call__(self, parent: object, evidence: ProposerEvidence) -> object:
+        _lifecycle_fail("formal proposer invocation requires a host generation")
+
+
+def _parse_materialized_rows(
+    payload: str,
+) -> tuple[tuple[ChampionTaskRow, ...], tuple[str, ...]]:
+    value = _adapter_object(payload, "materialized row-provider payload")
+    if set(value) != {"rows", "unavailable_splits"} or any(
+        type(value[name]) is not list for name in ("rows", "unavailable_splits")
+    ):
+        _lifecycle_fail("materialized row-provider payload is malformed")
+    rows = tuple(
+        _parse_authority_row(item) for item in cast(list[object], value["rows"])
+    )
+    keys = tuple((row.split, row.task_id, row.candidate_name) for row in rows)
+    if not rows or len(keys) != len(set(keys)):
+        _lifecycle_fail("materialized row-provider rows must be nonempty and unique")
+    unavailable = tuple(cast(list[object], value["unavailable_splits"]))
+    if any(
+        type(split) is not str or split not in {"build", "calibration", "dev"}
+        for split in unavailable
+    ) or len(unavailable) != len(set(unavailable)):
+        _lifecycle_fail("materialized row-provider unavailable splits are malformed")
+    return rows, cast(tuple[str, ...], unavailable)
+
+
+@dataclass(frozen=True, init=False)
+class ChampionRowProviderAdapter:
+    """Sealed immutable materialized-row provider for the formal lifecycle."""
+
+    kind: str
+    identity: str
+    config_json: str = field(repr=False)
+    rows_json: str = field(repr=False)
+
+    @classmethod
+    def bind(
+        cls, *, identity: str, callback: object, config: object
+    ) -> "ChampionRowProviderAdapter":
+        del cls, identity, callback, config
+        _lifecycle_fail("formal row provider requires a closed registered adapter kind")
+
+    @classmethod
+    def materialized(
+        cls,
+        *,
+        identity: str,
+        rows: object,
+        config: object,
+        unavailable_splits: tuple[str, ...] = (),
+    ) -> "ChampionRowProviderAdapter":
+        del cls
+        if type(rows) is not tuple or not rows or any(
+            type(row) is not ChampionTaskRow for row in cast(tuple[object, ...], rows)
+        ):
+            _lifecycle_fail("materialized provider requires exact immutable row data")
+        for row in cast(tuple[ChampionTaskRow, ...], rows):
+            ChampionTaskRow.__post_init__(row)
+        if type(unavailable_splits) is not tuple or any(
+            type(split) is not str or split not in {"build", "calibration", "dev"}
+            for split in unavailable_splits
+        ) or len(unavailable_splits) != len(set(unavailable_splits)):
+            _lifecycle_fail("materialized provider unavailable splits are malformed")
+        instance = object.__new__(ChampionRowProviderAdapter)
+        object.__setattr__(instance, "kind", "materialized")
+        object.__setattr__(
+            instance,
+            "identity",
+            _validate_adapter_identity(identity, "row-provider"),
+        )
+        object.__setattr__(
+            instance,
+            "config_json",
+            _canonical_adapter_payload(config, "row-provider config"),
+        )
+        object.__setattr__(
+            instance,
+            "rows_json",
+            _canonical_adapter_payload(
+                {
+                    "rows": [
+                        _row_payload(row)
+                        for row in cast(tuple[ChampionTaskRow, ...], rows)
+                    ],
+                    "unavailable_splits": list(unavailable_splits),
                 },
+                "materialized row-provider payload",
+            ),
+        )
+        instance.verify()
+        return instance
+
+    @property
+    def config_fingerprint(self) -> str:
+        return champion_fingerprint(
+            _adapter_object(self.config_json, "row-provider config")
+        )
+
+    @property
+    def implementation_fingerprint(self) -> str:
+        return champion_fingerprint(
+            {
+                "contract": _ROW_PROVIDER_ADAPTER_CONTRACT,
+                "kind": self.kind,
+                "rows_sha256": hashlib.sha256(
+                    self.rows_json.encode("utf-8")
+                ).hexdigest(),
             }
-        return champion_fingerprint(identity)
-    finally:
-        _BEHAVIOR_STRICT_GRAPH.reset(strict_token)
-        _BEHAVIOR_IDENTITY_CACHE.reset(identity_token)
-        _BEHAVIOR_SOURCE_CACHE.reset(source_token)
+        )
+
+    @property
+    def fingerprint(self) -> str:
+        self.verify()
+        return champion_fingerprint(
+            {
+                "kind": self.kind,
+                "identity": self.identity,
+                "implementation_fingerprint": self.implementation_fingerprint,
+                "config_fingerprint": self.config_fingerprint,
+            }
+        )
+
+    def verify(self) -> None:
+        if type(self) is not ChampionRowProviderAdapter:
+            _lifecycle_fail("formal row provider requires the exact sealed adapter type")
+        if type(self.kind) is not str or self.kind not in _ROW_PROVIDER_KINDS:
+            _lifecycle_fail("formal row-provider kind is not registered")
+        _validate_adapter_identity(self.identity, "row-provider")
+        _adapter_object(self.config_json, "row-provider config")
+        _parse_materialized_rows(self.rows_json)
+
+    def provide(self, tasks: object, split: object) -> tuple[ChampionTaskRow, ...]:
+        self.verify()
+        if type(split) is not str or split not in {"build", "calibration", "dev"}:
+            _lifecycle_fail("formal row-provider split is not registered")
+        if type(tasks) not in {tuple, list} or any(
+            type(task) is not Task for task in cast(tuple[object, ...] | list[object], tasks)
+        ):
+            _lifecycle_fail("formal row-provider tasks are malformed")
+        task_ids = tuple(
+            cast(Task, task).task_id
+            for task in cast(tuple[object, ...] | list[object], tasks)
+        )
+        if len(task_ids) != len(set(task_ids)):
+            _lifecycle_fail("formal row-provider tasks contain duplicate identities")
+        rows, unavailable = _parse_materialized_rows(self.rows_json)
+        if split in unavailable:
+            raise ChampionLifecycleError(
+                f"materialized row-provider data is unavailable for {split}"
+            )
+        selected = set(task_ids)
+        return tuple(
+            row
+            for row in rows
+            if row.split == split and row.task_id in selected
+        )
+
+    def __call__(self, tasks: object, split: object) -> tuple[ChampionTaskRow, ...]:
+        return self.provide(tasks, split)
+
+
+def _runtime_spec(kind: str) -> tuple[str, Callable[..., object], str]:
+    if kind == "expander":
+        return (
+            "champion_recipe_expander",
+            _FORMAL_EXPAND_RECIPE,
+            "champion_recipe_expander_v1",
+        )
+    if kind == "executor":
+        return (
+            "champion_runtime_executor",
+            _FORMAL_EXECUTE_CHAMPION,
+            "champion_runtime_executor_v1",
+        )
+    if kind == "scorer":
+        return (
+            "champion_evidence_scorer",
+            _FORMAL_SCORE_POLICY,
+            "champion_evidence_scorer_v1",
+        )
+    if kind == "comparator":
+        return (
+            "champion_gate_comparator",
+            _FORMAL_COMPARE_CHAMPION,
+            "champion_gate_comparator_v1",
+        )
+    _lifecycle_fail("formal runtime kind is not registered")
 
 
 @dataclass(frozen=True, init=False)
 class ChampionCallableBinding:
-    """Host-derived executable plus canonical behavior config for one boundary."""
+    """One exact registered host runtime operation and canonical config."""
 
     kind: str
     identity: str
-    callback: object = field(repr=False, compare=False)
     implementation_fingerprint: str
     config_fingerprint: str
 
@@ -652,59 +593,34 @@ class ChampionCallableBinding:
         callback: object,
         config: object,
     ) -> "ChampionCallableBinding":
-        if kind in {"proposer", "row_provider"}:
-            _lifecycle_fail("formal external boundaries require closed typed adapters")
-        expected = {
-            "expander": _FORMAL_EXPAND_RECIPE,
-            "executor": _FORMAL_EXECUTE_CHAMPION,
-            "scorer": _FORMAL_SCORE_POLICY,
-            "comparator": _FORMAL_COMPARE_CHAMPION,
-        }
-        if kind not in expected or callback is not expected[kind]:
-            _lifecycle_fail("formal runtime binding is not a closed host executable")
-        return cls._bind(
-            kind=kind,
-            identity=identity,
-            callback=callback,
-            config=config,
+        del cls
+        if type(kind) is not str or kind not in _RUNTIME_KINDS:
+            _lifecycle_fail("formal runtime kind is not registered")
+        expected_identity, expected_callback, contract = _runtime_spec(kind)
+        if identity != expected_identity or callback is not expected_callback:
+            _lifecycle_fail("formal runtime binding is not a closed host operation")
+        config_payload = _adapter_object(
+            _canonical_adapter_payload(config, "runtime config"), "runtime config"
         )
-
-    @classmethod
-    def _bind(
-        cls,
-        *,
-        kind: str,
-        identity: str,
-        callback: object,
-        config: object,
-    ) -> "ChampionCallableBinding":
-        if type(kind) is not str or kind not in _CALLABLE_KINDS:
-            _lifecycle_fail("callable binding kind is not registered")
-        if type(identity) is not str or not identity.strip():
-            _lifecycle_fail("callable binding identity must be nonempty")
-        if not callable(callback):
-            _lifecycle_fail("callable binding requires a live callable")
-        try:
-            config_fingerprint = champion_fingerprint(config)
-        except Exception as error:
-            raise ChampionLifecycleError(
-                "callable binding config must be canonical"
-            ) from error
-        instance = object.__new__(cls)
+        if config_payload != {"contract": contract}:
+            _lifecycle_fail("formal runtime config is not registered")
+        instance = object.__new__(ChampionCallableBinding)
         object.__setattr__(instance, "kind", kind)
-        object.__setattr__(instance, "identity", identity)
-        object.__setattr__(instance, "callback", callback)
+        object.__setattr__(instance, "identity", expected_identity)
         object.__setattr__(
             instance,
             "implementation_fingerprint",
-            _host_callable_fingerprint(callback),
+            champion_fingerprint({"kind": kind, "contract": contract}),
         )
-        object.__setattr__(instance, "config_fingerprint", config_fingerprint)
+        object.__setattr__(
+            instance, "config_fingerprint", champion_fingerprint(config_payload)
+        )
         instance.verify()
         return instance
 
     @property
     def fingerprint(self) -> str:
+        self.verify()
         return champion_fingerprint(
             {
                 "kind": self.kind,
@@ -715,125 +631,37 @@ class ChampionCallableBinding:
         )
 
     def verify(self) -> None:
-        if type(self.kind) is not str or self.kind not in _CALLABLE_KINDS:
-            _lifecycle_fail("callable binding kind drifted")
-        if type(self.identity) is not str or not self.identity.strip():
-            _lifecycle_fail("callable binding identity drifted")
-        if not callable(self.callback):
-            _lifecycle_fail("callable binding lost its executable")
-        if _host_callable_fingerprint(self.callback) != self.implementation_fingerprint:
-            _lifecycle_fail("callable executable implementation drifted")
+        if type(self) is not ChampionCallableBinding:
+            _lifecycle_fail("formal runtime binding requires the exact sealed type")
+        if type(self.kind) is not str or self.kind not in _RUNTIME_KINDS:
+            _lifecycle_fail("formal runtime binding kind drifted")
+        identity, _callback, contract = _runtime_spec(self.kind)
+        if self.identity != identity:
+            _lifecycle_fail("formal runtime binding identity drifted")
+        if self.implementation_fingerprint != champion_fingerprint(
+            {"kind": self.kind, "contract": contract}
+        ) or self.config_fingerprint != champion_fingerprint({"contract": contract}):
+            _lifecycle_fail("formal runtime binding config drifted")
 
     def __call__(self, *args: object, **kwargs: object) -> object:
         self.verify()
-        try:
-            return cast(Callable[..., object], self.callback)(*args, **kwargs)
-        finally:
-            self.verify()
+        _identity, callback, _contract = _runtime_spec(self.kind)
+        return cast(Callable[..., object], callback)(*args, **kwargs)
 
 
-@dataclass(frozen=True, init=False)
-class ChampionProposerAdapter:
-    """Exact host-owned formal proposer adapter with derived behavior identity."""
-
-    binding: ChampionCallableBinding
-
-    @classmethod
-    def bind(
-        cls, *, identity: str, callback: object, config: object
-    ) -> "ChampionProposerAdapter":
-        instance = object.__new__(cls)
-        object.__setattr__(
-            instance,
-            "binding",
-            ChampionCallableBinding._bind(
-                kind="proposer",
-                identity=identity,
-                callback=callback,
-                config=config,
-            ),
+def _formal_runtime_configuration_fingerprint() -> str:
+    try:
+        return champion_fingerprint(
+            {
+                "weight_grid": _champion_proposal_module.WEIGHT_GRID,
+                "overlay_alpha_grid": _champion_proposal_module.OVERLAY_ALPHA_GRID,
+                "correction_cap_grid": _champion_proposal_module.CORRECTION_CAP_GRID,
+                "horizon_split_grid": _champion_proposal_module.HORIZON_SPLIT_GRID,
+                "quantiles": _champion_proposal_module._QUANTILES,
+            }
         )
-        instance.verify()
-        return instance
-
-    @property
-    def identity(self) -> str:
-        return self.binding.identity
-
-    @property
-    def implementation_fingerprint(self) -> str:
-        return self.binding.implementation_fingerprint
-
-    @property
-    def config_fingerprint(self) -> str:
-        return self.binding.config_fingerprint
-
-    @property
-    def fingerprint(self) -> str:
-        return self.binding.fingerprint
-
-    def verify(self) -> None:
-        if (
-            type(self.binding) is not ChampionCallableBinding
-            or self.binding.kind != "proposer"
-        ):
-            _lifecycle_fail("formal proposer adapter is malformed")
-        self.binding.verify()
-
-    def __call__(self, *args: object, **kwargs: object) -> object:
-        return self.binding(*args, **kwargs)
-
-
-@dataclass(frozen=True, init=False)
-class ChampionRowProviderAdapter:
-    """Exact host-owned formal row-provider adapter with derived behavior identity."""
-
-    binding: ChampionCallableBinding
-
-    @classmethod
-    def bind(
-        cls, *, identity: str, callback: object, config: object
-    ) -> "ChampionRowProviderAdapter":
-        instance = object.__new__(cls)
-        object.__setattr__(
-            instance,
-            "binding",
-            ChampionCallableBinding._bind(
-                kind="row_provider",
-                identity=identity,
-                callback=callback,
-                config=config,
-            ),
-        )
-        instance.verify()
-        return instance
-
-    @property
-    def identity(self) -> str:
-        return self.binding.identity
-
-    @property
-    def implementation_fingerprint(self) -> str:
-        return self.binding.implementation_fingerprint
-
-    @property
-    def config_fingerprint(self) -> str:
-        return self.binding.config_fingerprint
-
-    @property
-    def fingerprint(self) -> str:
-        return self.binding.fingerprint
-
-    def verify(self) -> None:
-        if (
-            type(self.binding) is not ChampionCallableBinding
-            or self.binding.kind != "row_provider"
-        ):
-            _lifecycle_fail("formal row-provider adapter is malformed")
-        self.binding.verify()
-
-    def __call__(self, *args: object, **kwargs: object) -> object:
-        return self.binding(*args, **kwargs)
+    except Exception as error:
+        raise ChampionLifecycleError("formal runtime configuration is malformed") from error
 
 
 @dataclass(frozen=True, init=False)
@@ -844,72 +672,50 @@ class ChampionRuntimeBindings:
     executor: ChampionCallableBinding
     scorer: ChampionCallableBinding
     comparator: ChampionCallableBinding
+    configuration_fingerprint: str
 
     @classmethod
     def formal(cls) -> "ChampionRuntimeBindings":
-        instance = object.__new__(cls)
-        bindings = (
-            (
-                "expander",
+        del cls
+        instance = object.__new__(ChampionRuntimeBindings)
+        for kind in ("expander", "executor", "scorer", "comparator"):
+            identity, callback, contract = _runtime_spec(kind)
+            object.__setattr__(
+                instance,
+                kind,
                 ChampionCallableBinding.bind(
-                    kind="expander",
-                    identity="champion_recipe_expander",
-                    callback=_FORMAL_EXPAND_RECIPE,
-                    config={"contract": "champion_recipe_expander_v1"},
+                    kind=kind,
+                    identity=identity,
+                    callback=callback,
+                    config={"contract": contract},
                 ),
-            ),
-            (
-                "executor",
-                ChampionCallableBinding.bind(
-                    kind="executor",
-                    identity="champion_runtime_executor",
-                    callback=_FORMAL_EXECUTE_CHAMPION,
-                    config={"contract": "champion_runtime_executor_v1"},
-                ),
-            ),
-            (
-                "scorer",
-                ChampionCallableBinding.bind(
-                    kind="scorer",
-                    identity="champion_evidence_scorer",
-                    callback=_FORMAL_SCORE_POLICY,
-                    config={"contract": "champion_evidence_scorer_v1"},
-                ),
-            ),
-            (
-                "comparator",
-                ChampionCallableBinding.bind(
-                    kind="comparator",
-                    identity="champion_gate_comparator",
-                    callback=_FORMAL_COMPARE_CHAMPION,
-                    config={"contract": "champion_gate_comparator_v1"},
-                ),
-            ),
+            )
+        object.__setattr__(
+            instance,
+            "configuration_fingerprint",
+            _formal_runtime_configuration_fingerprint(),
         )
-        for name, binding in bindings:
-            object.__setattr__(instance, name, binding)
         instance.verify()
         return instance
 
     @property
     def fingerprint(self) -> str:
+        self.verify()
         return champion_fingerprint(
             {
                 "expander": self.expander.fingerprint,
                 "executor": self.executor.fingerprint,
                 "scorer": self.scorer.fingerprint,
                 "comparator": self.comparator.fingerprint,
+                "configuration_fingerprint": self.configuration_fingerprint,
             }
         )
 
     def verify(self) -> None:
-        expected_kinds = (
-            (self.expander, "expander"),
-            (self.executor, "executor"),
-            (self.scorer, "scorer"),
-            (self.comparator, "comparator"),
-        )
-        for binding, kind in expected_kinds:
+        if type(self) is not ChampionRuntimeBindings:
+            _lifecycle_fail("formal runtime requires the exact sealed binding set")
+        for kind in ("expander", "executor", "scorer", "comparator"):
+            binding = getattr(self, kind)
             if type(binding) is not ChampionCallableBinding or binding.kind != kind:
                 _lifecycle_fail("formal runtime binding set is malformed")
             binding.verify()
@@ -917,14 +723,19 @@ class ChampionRuntimeBindings:
     def verify_live_globals(self) -> None:
         self.verify()
         live = (
-            (expand_recipe, self.expander.callback, "expander"),
-            (execute_champion, self.executor.callback, "executor"),
-            (score_policy, self.scorer.callback, "scorer"),
-            (compare_champion, self.comparator.callback, "comparator"),
+            (expand_recipe, _FORMAL_EXPAND_RECIPE, "expander"),
+            (execute_champion, _FORMAL_EXECUTE_CHAMPION, "executor"),
+            (score_policy, _FORMAL_SCORE_POLICY, "scorer"),
+            (compare_champion, _FORMAL_COMPARE_CHAMPION, "comparator"),
         )
-        for current, bound, label in live:
-            if current is not bound:
+        for current, expected, label in live:
+            if current is not expected:
                 _lifecycle_fail(f"formal runtime {label} executable drifted")
+        if (
+            _formal_runtime_configuration_fingerprint()
+            != self.configuration_fingerprint
+        ):
+            _lifecycle_fail("formal runtime configuration drifted")
 
 
 @dataclass(frozen=True)
@@ -4068,17 +3879,28 @@ def _feedback(states: tuple[_AttemptState, ...]) -> ProposerEvidence:
 
 
 def _call_proposer(
-    proposer: Callable[[object, ProposerEvidence], object],
+    proposer: object,
     parent: object,
     feedback: ProposerEvidence,
     *,
     minimum: int,
     maximum: int,
+    generation: int | None = None,
 ) -> tuple[ChampionRecipe, ...]:
-    if not callable(proposer):
-        _fail("proposer must be callable")
+    proposed: object
     try:
-        proposed = proposer(parent, feedback)
+        if type(proposer) is ChampionProposerAdapter:
+            if generation is None:
+                _fail("formal proposer invocation requires a host generation")
+            proposed = cast(ChampionProposerAdapter, proposer).propose(
+                parent, feedback, generation=generation
+            )
+        else:
+            if not callable(proposer):
+                _fail("proposer must be callable")
+            proposed = cast(Callable[[object, ProposerEvidence], object], proposer)(
+                parent, feedback
+            )
     except Exception as error:
         raise ChampionControllerError("structural proposer callback failed") from error
     if type(proposed) not in {tuple, list}:
@@ -4169,7 +3991,7 @@ def _validate_stored_policy_ids(generations: list[BuildGeneration]) -> None:
 def run_build_evolution(
     parent: object,
     rows: tuple[ChampionTaskRow, ...] | list[ChampionTaskRow],
-    proposer: Callable[[object, ProposerEvidence], object],
+    proposer: object,
     config: ChampionEvolutionConfig,
     *,
     boundary_validator: Callable[[], None] | None = None,
@@ -4254,6 +4076,7 @@ def run_build_evolution(
                     feedback,
                     minimum=bound_config.minimum_recipes,
                     maximum=bound_config.maximum_recipes,
+                    generation=generation_number,
                 )
             except Exception as error:
                 callback_error = error
