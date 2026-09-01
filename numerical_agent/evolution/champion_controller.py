@@ -2,15 +2,19 @@
 from __future__ import annotations
 
 import hashlib
+import dis
+import inspect
 import math
 import os
 import re
 import secrets
 import stat
+import sys
 import unicodedata
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
-from types import CodeType, FunctionType
+from types import BuiltinFunctionType, CodeType, FunctionType, ModuleType
 from typing import Callable, Literal, NoReturn, cast
 
 from common.data import Task
@@ -98,11 +102,24 @@ def _lifecycle_fail(message: str) -> NoReturn:
 _CALLABLE_KINDS = frozenset(
     {"proposer", "row_provider", "expander", "executor", "scorer", "comparator"}
 )
+_BEHAVIOR_SOURCE_CACHE: ContextVar[dict[str, dict[str, object]] | None] = (
+    ContextVar("champion_behavior_source_cache", default=None)
+)
+_BEHAVIOR_IDENTITY_CACHE: ContextVar[dict[int, dict[str, object]] | None] = (
+    ContextVar("champion_behavior_identity_cache", default=None)
+)
+_HOST_SOURCE_DIGEST_CACHE: dict[
+    tuple[str, int, int, int, int, int], str
+] = {}
+_HOST_CODE_FINGERPRINT_CACHE: dict[CodeType, str] = {}
 
 
 def _host_constant_identity(value: object) -> object:
     if isinstance(value, CodeType):
         return {"nested_code": _host_code_fingerprint(value)}
+    if type(value) is float and not math.isfinite(cast(float, value)):
+        number = cast(float, value)
+        return {"nonfinite_float": "nan" if math.isnan(number) else repr(number)}
     if type(value) in {str, int, float, bool, type(None)}:
         return value
     if type(value) is bytes:
@@ -120,8 +137,13 @@ def _host_constant_identity(value: object) -> object:
             "frozenset": sorted(members, key=lambda item: champion_fingerprint(item))
         }
     if type(value) is complex:
-        number = cast(complex, value)
-        return {"complex": {"real": number.real, "imag": number.imag}}
+        complex_number = cast(complex, value)
+        return {
+            "complex": {
+                "real": complex_number.real,
+                "imag": complex_number.imag,
+            }
+        }
     if value is Ellipsis:
         return {"constant": "Ellipsis"}
     _lifecycle_fail("callable implementation contains an unsupported host constant")
@@ -129,8 +151,11 @@ def _host_constant_identity(value: object) -> object:
 
 def _host_code_fingerprint(code: CodeType) -> str:
     """Fingerprint immutable code fields without CPython quickening state."""
+    cached = _HOST_CODE_FINGERPRINT_CACHE.get(code)
+    if cached is not None:
+        return cached
     constants = [_host_constant_identity(value) for value in code.co_consts]
-    return champion_fingerprint(
+    fingerprint = champion_fingerprint(
         {
             "bytecode_sha256": hashlib.sha256(code.co_code).hexdigest(),
             "constants": constants,
@@ -144,58 +169,370 @@ def _host_code_fingerprint(code: CodeType) -> str:
             "flags": code.co_flags,
         }
     )
+    _HOST_CODE_FINGERPRINT_CACHE[code] = fingerprint
+    return fingerprint
+
+
+def _module_source_identity(module: ModuleType) -> dict[str, object]:
+    module_name = getattr(module, "__name__", None)
+    if type(module_name) is not str or not module_name:
+        _lifecycle_fail("behavior module has no exact host identity")
+    cache = _BEHAVIOR_SOURCE_CACHE.get()
+    if cache is not None and module_name in cache:
+        return cache[module_name]
+    try:
+        source = inspect.getsourcefile(module)
+    except TypeError:
+        source = None
+    if source is None:
+        raw_file = getattr(module, "__file__", None)
+        source = raw_file if type(raw_file) is str else None
+    if source is None:
+        identity: dict[str, object] = {
+            "module": module_name,
+            "origin": "builtin",
+            "python_runtime": sys.version,
+        }
+        if cache is not None:
+            cache[module_name] = identity
+        return identity
+    try:
+        path = Path(source).resolve(strict=True)
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        details = os.fstat(descriptor)
+        if not stat.S_ISREG(details.st_mode):
+            _lifecycle_fail("runtime module source must be an exact file")
+        digest_key = (
+            str(path),
+            details.st_dev,
+            details.st_ino,
+            details.st_size,
+            details.st_mtime_ns,
+            details.st_ctime_ns,
+        )
+        source_digest = _HOST_SOURCE_DIGEST_CACHE.get(digest_key)
+        if source_digest is None:
+            digest = hashlib.sha256()
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            source_digest = digest.hexdigest()
+            _HOST_SOURCE_DIGEST_CACHE[digest_key] = source_digest
+    except OSError as error:
+        raise ChampionLifecycleError("runtime module source cannot be read") from error
+    finally:
+        if "descriptor" in locals():
+            os.close(descriptor)
+    identity = {
+        "module": module_name,
+        "source_path": str(path),
+        "source_sha256": source_digest,
+    }
+    if cache is not None:
+        cache[module_name] = identity
+    return identity
+
+
+def _code_global_names(code: CodeType) -> frozenset[str]:
+    names = {
+        cast(str, instruction.argval)
+        for instruction in dis.get_instructions(code)
+        if instruction.opname in {"LOAD_GLOBAL", "LOAD_NAME"}
+        and type(instruction.argval) is str
+    }
+    for constant in code.co_consts:
+        if isinstance(constant, CodeType):
+            names.update(_code_global_names(constant))
+    return frozenset(names)
+
+
+def _module_attribute_names(code: CodeType, global_name: str) -> frozenset[str]:
+    attributes: set[str] = set()
+    instructions = tuple(dis.get_instructions(code))
+    for index, instruction in enumerate(instructions[:-1]):
+        if (
+            instruction.opname in {"LOAD_GLOBAL", "LOAD_NAME"}
+            and instruction.argval == global_name
+        ):
+            following = instructions[index + 1]
+            if following.opname in {"LOAD_ATTR", "LOAD_METHOD"} and type(
+                following.argval
+            ) is str:
+                attributes.add(cast(str, following.argval))
+    for constant in code.co_consts:
+        if isinstance(constant, CodeType):
+            attributes.update(_module_attribute_names(constant, global_name))
+    return frozenset(attributes)
+
+
+def _host_type_identity(value: type, seen: set[int]) -> dict[str, object]:
+    cache = _BEHAVIOR_IDENTITY_CACHE.get()
+    if cache is not None and id(value) in cache:
+        return cache[id(value)]
+    module = sys.modules.get(value.__module__)
+    identity: dict[str, object] = {
+        "module": value.__module__,
+        "qualname": value.__qualname__,
+    }
+    if isinstance(module, ModuleType):
+        identity["module_source"] = _module_source_identity(module)
+    if cache is not None:
+        cache[id(value)] = identity
+    return identity
+
+
+def _shallow_dependency_identity(value: object, seen: set[int]) -> object:
+    if isinstance(value, FunctionType):
+        module = sys.modules.get(value.__module__)
+        if not isinstance(module, ModuleType):
+            _lifecycle_fail("behavior dependency module is not loaded")
+        return {
+            "function": f"{value.__module__}.{value.__qualname__}",
+            "module_source": _module_source_identity(module),
+            "code_fingerprint": _host_code_fingerprint(value.__code__),
+        }
+    if isinstance(value, BuiltinFunctionType):
+        return {
+            "builtin_module": value.__module__,
+            "builtin_name": value.__qualname__,
+        }
+    if isinstance(value, type):
+        return _host_type_identity(value, seen)
+    if isinstance(value, ModuleType):
+        return _module_source_identity(value)
+    return _host_behavior_value(value, seen, allow_mutable_globals=True)
+
+
+def _host_behavior_value(
+    value: object, seen: set[int], *, allow_mutable_globals: bool = False
+) -> object:
+    if type(value) is float and not math.isfinite(cast(float, value)):
+        number = cast(float, value)
+        return {"nonfinite_float": "nan" if math.isnan(number) else repr(number)}
+    if type(value) in {str, int, float, bool, type(None)}:
+        return value
+    if type(value) is bytes:
+        return {"bytes_sha256": hashlib.sha256(cast(bytes, value)).hexdigest()}
+    if isinstance(value, Path):
+        return {"path": str(value.absolute()), "type": type(value).__name__}
+    if isinstance(value, re.Pattern):
+        return {"regex_pattern": value.pattern, "regex_flags": value.flags}
+    if isinstance(value, range):
+        return {"range": (value.start, value.stop, value.step)}
+    if isinstance(value, slice):
+        return {"slice": (value.start, value.stop, value.step)}
+    if type(value).__module__ == "typing":
+        typing_module = sys.modules.get("typing")
+        if not isinstance(typing_module, ModuleType):
+            _lifecycle_fail("typing behavior dependency is not loaded")
+        return {
+            "typing_value": repr(value),
+            "module_source": _module_source_identity(typing_module),
+        }
+    if type(value) is tuple:
+        return [
+            _host_behavior_value(
+                item, seen, allow_mutable_globals=allow_mutable_globals
+            )
+            for item in cast(tuple[object, ...], value)
+        ]
+    if type(value) is frozenset:
+        members = [
+            _host_behavior_value(
+                item, seen, allow_mutable_globals=allow_mutable_globals
+            )
+            for item in cast(frozenset[object], value)
+        ]
+        return {
+            "frozenset": sorted(members, key=lambda item: champion_fingerprint(item))
+        }
+    if type(value) in {list, dict, set, bytearray}:
+        if not allow_mutable_globals:
+            _lifecycle_fail("formal callable behavior state must be immutable")
+        if type(value) is list:
+            return {
+                "mutable_global_list": [
+                    _host_behavior_value(item, seen, allow_mutable_globals=True)
+                    for item in cast(list[object], value)
+                ]
+            }
+        if type(value) is dict:
+            dict_items = [
+                (
+                    _host_behavior_value(key, seen, allow_mutable_globals=True),
+                    _host_behavior_value(item, seen, allow_mutable_globals=True),
+                )
+                for key, item in cast(dict[object, object], value).items()
+            ]
+            return {
+                "mutable_global_dict": sorted(
+                    dict_items, key=lambda item: champion_fingerprint(item[0])
+                )
+            }
+        if type(value) is set:
+            set_items = [
+                _host_behavior_value(item, seen, allow_mutable_globals=True)
+                for item in cast(set[object], value)
+            ]
+            return {
+                "mutable_global_set": sorted(
+                    set_items, key=lambda item: champion_fingerprint(item)
+                )
+            }
+        return {
+            "mutable_global_bytes": hashlib.sha256(
+                bytes(cast(bytearray, value))
+            ).hexdigest()
+        }
+    if isinstance(value, FunctionType):
+        return _host_function_identity(value, seen)
+    if isinstance(value, BuiltinFunctionType):
+        return {
+            "builtin_module": value.__module__,
+            "builtin_name": value.__qualname__,
+        }
+    if isinstance(value, ModuleType):
+        return _module_source_identity(value)
+    if isinstance(value, type):
+        return _host_type_identity(value, seen)
+    if is_dataclass(value):
+        parameters = getattr(type(value), "__dataclass_params__", None)
+        if parameters is None or parameters.frozen is not True:
+            _lifecycle_fail("formal callable behavior state must be frozen")
+        reference = id(value)
+        if reference in seen:
+            return {
+                "frozen_reference": f"{type(value).__module__}.{type(value).__qualname__}"
+            }
+        seen.add(reference)
+        try:
+            return {
+                "frozen_type": _host_type_identity(type(value), seen),
+                "fields": {
+                    item.name: _host_behavior_value(getattr(value, item.name), seen)
+                    for item in fields(value)
+                },
+            }
+        finally:
+            seen.remove(reference)
+    _lifecycle_fail(
+        "formal callable has unsupported mutable behavior state: "
+        f"{type(value).__module__}.{type(value).__qualname__}"
+    )
+
+
+def _host_function_identity(
+    callback: FunctionType, seen: set[int]
+) -> dict[str, object]:
+    reference = id(callback)
+    cache = _BEHAVIOR_IDENTITY_CACHE.get()
+    if cache is not None and reference in cache:
+        return cache[reference]
+    stable_name = f"{callback.__module__}.{callback.__qualname__}"
+    if reference in seen:
+        return {"function_reference": stable_name}
+    seen.add(reference)
+    try:
+        module = sys.modules.get(callback.__module__)
+        if not isinstance(module, ModuleType):
+            _lifecycle_fail("callable function module is not loaded")
+        globals_identity: dict[str, object] = {}
+        for name in sorted(_code_global_names(callback.__code__)):
+            if name not in callback.__globals__:
+                continue
+            global_value = callback.__globals__[name]
+            if isinstance(global_value, ModuleType):
+                attributes = {
+                    attribute: _shallow_dependency_identity(
+                        getattr(global_value, attribute), seen
+                    )
+                    for attribute in sorted(
+                        _module_attribute_names(callback.__code__, name)
+                    )
+                    if hasattr(global_value, attribute)
+                }
+                globals_identity[name] = {
+                    "module": _module_source_identity(global_value),
+                    "attributes": attributes,
+                }
+            elif isinstance(global_value, FunctionType) and (
+                global_value.__module__ == callback.__module__
+                or global_value.__module__.startswith("numerical_agent.")
+                or global_value.__module__.startswith("common.")
+            ):
+                globals_identity[name] = _host_function_identity(global_value, seen)
+            elif isinstance(global_value, (FunctionType, BuiltinFunctionType, type)):
+                globals_identity[name] = _shallow_dependency_identity(
+                    global_value, seen
+                )
+            else:
+                globals_identity[name] = _host_behavior_value(
+                    global_value, seen, allow_mutable_globals=True
+                )
+        closure = callback.__closure__ or ()
+        identity = {
+            "owner_module": callback.__module__,
+            "owner_qualname": callback.__qualname__,
+            "module_source": _module_source_identity(module),
+            "code_fingerprint": _host_code_fingerprint(callback.__code__),
+            "defaults": _host_behavior_value(callback.__defaults__ or (), seen),
+            "kwdefaults": _host_behavior_value(
+                tuple(sorted((callback.__kwdefaults__ or {}).items())), seen
+            ),
+            "closure": tuple(
+                _host_behavior_value(cell.cell_contents, seen) for cell in closure
+            ),
+            "globals": globals_identity,
+        }
+        if cache is not None:
+            cache[reference] = identity
+        return identity
+    finally:
+        seen.remove(reference)
 
 
 def _host_callable_fingerprint(callback: object) -> str:
-    """Derive executable identity from live host code, never caller declaration."""
-    executable: object
-    if isinstance(callback, FunctionType):
-        executable = callback
-        owner_module = getattr(callback, "__module__", None)
-        owner_qualname = getattr(callback, "__qualname__", None)
-    else:
-        executable = getattr(type(callback), "__call__", None)
-        owner_module = getattr(type(callback), "__module__", None)
-        owner_qualname = getattr(type(callback), "__qualname__", None)
-    code = getattr(executable, "__code__", None)
-    if (
-        not isinstance(code, CodeType)
-        or type(owner_module) is not str
-        or type(owner_qualname) is not str
-    ):
-        _lifecycle_fail("callable implementation has no exact host executable identity")
-    closure = getattr(executable, "__closure__", None)
-    closure_fingerprint: str | None = None
-    if closure:
-        closure_values: list[object] = []
-        try:
-            for cell in closure:
-                value = cell.cell_contents
-                if isinstance(value, Path):
-                    closure_values.append(
-                        {"path": str(value.absolute()), "type": type(value).__name__}
+    """Derive an explicit bounded manifest of actually loaded dependencies."""
+    source_token = _BEHAVIOR_SOURCE_CACHE.set({})
+    identity_token = _BEHAVIOR_IDENTITY_CACHE.set({})
+    try:
+        if isinstance(callback, FunctionType):
+            module = sys.modules.get(callback.__module__)
+            if not isinstance(module, ModuleType):
+                _lifecycle_fail("formal callable module is not loaded")
+            identity = {
+                "callable": _host_function_identity(callback, set()),
+            }
+        else:
+            if not callable(callback) or not is_dataclass(callback):
+                _lifecycle_fail("formal callable requires a closed frozen host adapter")
+            parameters = getattr(type(callback), "__dataclass_params__", None)
+            if parameters is None or parameters.frozen is not True:
+                _lifecycle_fail("formal callable requires immutable behavior state")
+            implementation = vars(type(callback)).get("__call__")
+            if not isinstance(implementation, FunctionType):
+                _lifecycle_fail("formal callable has no exact host implementation")
+            module = sys.modules.get(implementation.__module__)
+            if not isinstance(module, ModuleType):
+                _lifecycle_fail("formal callable module is not loaded")
+            identity = {
+                "callable_type": _host_type_identity(type(callback), set()),
+                "implementation": _host_function_identity(
+                    implementation, set()
+                ),
+                "state": {
+                    item.name: _host_behavior_value(
+                        getattr(callback, item.name), set()
                     )
-                elif isinstance(value, type):
-                    closure_values.append(
-                        {"type_module": value.__module__, "type_name": value.__qualname__}
-                    )
-                else:
-                    closure_values.append(value)
-            closure_fingerprint = champion_fingerprint(tuple(closure_values))
-        except Exception as error:
-            raise ChampionLifecycleError(
-                "callable closure cannot be bound as canonical executable config"
-            ) from error
-    return champion_fingerprint(
-        {
-            "owner_module": owner_module,
-            "owner_qualname": owner_qualname,
-            "code_fingerprint": _host_code_fingerprint(code),
-            "defaults": getattr(executable, "__defaults__", None),
-            "kwdefaults": getattr(executable, "__kwdefaults__", None),
-            "closure_fingerprint": closure_fingerprint,
-        }
-    )
+                    for item in fields(callback)
+                },
+            }
+        return champion_fingerprint(identity)
+    finally:
+        _BEHAVIOR_IDENTITY_CACHE.reset(identity_token)
+        _BEHAVIOR_SOURCE_CACHE.reset(source_token)
 
 
 @dataclass(frozen=True, init=False)
@@ -205,12 +542,37 @@ class ChampionCallableBinding:
     kind: str
     identity: str
     callback: object = field(repr=False, compare=False)
-    config: object = field(repr=False)
     implementation_fingerprint: str
     config_fingerprint: str
 
     @classmethod
     def bind(
+        cls,
+        *,
+        kind: str,
+        identity: str,
+        callback: object,
+        config: object,
+    ) -> "ChampionCallableBinding":
+        if kind in {"proposer", "row_provider"}:
+            _lifecycle_fail("formal external boundaries require closed typed adapters")
+        expected = {
+            "expander": _FORMAL_EXPAND_RECIPE,
+            "executor": _FORMAL_EXECUTE_CHAMPION,
+            "scorer": _FORMAL_SCORE_POLICY,
+            "comparator": _FORMAL_COMPARE_CHAMPION,
+        }
+        if kind not in expected or callback is not expected[kind]:
+            _lifecycle_fail("formal runtime binding is not a closed host executable")
+        return cls._bind(
+            kind=kind,
+            identity=identity,
+            callback=callback,
+            config=config,
+        )
+
+    @classmethod
+    def _bind(
         cls,
         *,
         kind: str,
@@ -234,7 +596,6 @@ class ChampionCallableBinding:
         object.__setattr__(instance, "kind", kind)
         object.__setattr__(instance, "identity", identity)
         object.__setattr__(instance, "callback", callback)
-        object.__setattr__(instance, "config", config)
         object.__setattr__(
             instance,
             "implementation_fingerprint",
@@ -264,8 +625,6 @@ class ChampionCallableBinding:
             _lifecycle_fail("callable binding lost its executable")
         if _host_callable_fingerprint(self.callback) != self.implementation_fingerprint:
             _lifecycle_fail("callable executable implementation drifted")
-        if champion_fingerprint(self.config) != self.config_fingerprint:
-            _lifecycle_fail("callable executable config drifted")
 
     def __call__(self, *args: object, **kwargs: object) -> object:
         self.verify()
@@ -273,6 +632,110 @@ class ChampionCallableBinding:
             return cast(Callable[..., object], self.callback)(*args, **kwargs)
         finally:
             self.verify()
+
+
+@dataclass(frozen=True, init=False)
+class ChampionProposerAdapter:
+    """Exact host-owned formal proposer adapter with derived behavior identity."""
+
+    binding: ChampionCallableBinding
+
+    @classmethod
+    def bind(
+        cls, *, identity: str, callback: object, config: object
+    ) -> "ChampionProposerAdapter":
+        instance = object.__new__(cls)
+        object.__setattr__(
+            instance,
+            "binding",
+            ChampionCallableBinding._bind(
+                kind="proposer",
+                identity=identity,
+                callback=callback,
+                config=config,
+            ),
+        )
+        instance.verify()
+        return instance
+
+    @property
+    def identity(self) -> str:
+        return self.binding.identity
+
+    @property
+    def implementation_fingerprint(self) -> str:
+        return self.binding.implementation_fingerprint
+
+    @property
+    def config_fingerprint(self) -> str:
+        return self.binding.config_fingerprint
+
+    @property
+    def fingerprint(self) -> str:
+        return self.binding.fingerprint
+
+    def verify(self) -> None:
+        if (
+            type(self.binding) is not ChampionCallableBinding
+            or self.binding.kind != "proposer"
+        ):
+            _lifecycle_fail("formal proposer adapter is malformed")
+        self.binding.verify()
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        return self.binding(*args, **kwargs)
+
+
+@dataclass(frozen=True, init=False)
+class ChampionRowProviderAdapter:
+    """Exact host-owned formal row-provider adapter with derived behavior identity."""
+
+    binding: ChampionCallableBinding
+
+    @classmethod
+    def bind(
+        cls, *, identity: str, callback: object, config: object
+    ) -> "ChampionRowProviderAdapter":
+        instance = object.__new__(cls)
+        object.__setattr__(
+            instance,
+            "binding",
+            ChampionCallableBinding._bind(
+                kind="row_provider",
+                identity=identity,
+                callback=callback,
+                config=config,
+            ),
+        )
+        instance.verify()
+        return instance
+
+    @property
+    def identity(self) -> str:
+        return self.binding.identity
+
+    @property
+    def implementation_fingerprint(self) -> str:
+        return self.binding.implementation_fingerprint
+
+    @property
+    def config_fingerprint(self) -> str:
+        return self.binding.config_fingerprint
+
+    @property
+    def fingerprint(self) -> str:
+        return self.binding.fingerprint
+
+    def verify(self) -> None:
+        if (
+            type(self.binding) is not ChampionCallableBinding
+            or self.binding.kind != "row_provider"
+        ):
+            _lifecycle_fail("formal row-provider adapter is malformed")
+        self.binding.verify()
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        return self.binding(*args, **kwargs)
 
 
 @dataclass(frozen=True, init=False)
@@ -1033,8 +1496,8 @@ class ChampionRunAttestations:
     forecast_store: Path
     proposal_model: str
     proposal_config: object
-    proposer_binding: ChampionCallableBinding
-    row_provider_binding: ChampionCallableBinding
+    proposer_binding: ChampionProposerAdapter
+    row_provider_binding: ChampionRowProviderAdapter
     runtime_bindings: ChampionRuntimeBindings
     numeric_grid: object
     runtime_files: tuple[tuple[str, Path], ...]
@@ -1067,10 +1530,8 @@ class ChampionRunAttestations:
         if type(self.proposal_model) is not str or not self.proposal_model.strip():
             _lifecycle_fail("actual proposal model identity must be nonempty")
         if (
-            type(self.proposer_binding) is not ChampionCallableBinding
-            or self.proposer_binding.kind != "proposer"
-            or type(self.row_provider_binding) is not ChampionCallableBinding
-            or self.row_provider_binding.kind != "row_provider"
+            type(self.proposer_binding) is not ChampionProposerAdapter
+            or type(self.row_provider_binding) is not ChampionRowProviderAdapter
             or type(self.runtime_bindings) is not ChampionRuntimeBindings
         ):
             _lifecycle_fail("actual formal callable bindings are malformed")
@@ -1205,6 +1666,7 @@ def _open_pinned_directory(
     if any(component in {"", ".", ".."} for component in components):
         _lifecycle_fail(f"{label} cannot use a relative path component")
     chain: list[tuple[str, int, int, int]] = []
+    anchor_descriptor: int | None = None
     try:
         anchor_descriptor = os.open(
             absolute_root.anchor,
@@ -1212,6 +1674,8 @@ def _open_pinned_directory(
         )
         anchor_details = os.fstat(anchor_descriptor)
     except OSError as error:
+        if anchor_descriptor is not None:
+            os.close(anchor_descriptor)
         raise ChampionLifecycleError(f"{label} must be an exact directory") from error
     if not stat.S_ISDIR(anchor_details.st_mode):
         os.close(anchor_descriptor)
@@ -1224,48 +1688,64 @@ def _open_pinned_directory(
             anchor_details.st_ino,
         )
     )
-    for component in components:
-        parent_descriptor = chain[-1][1]
-        try:
-            descriptor = os.open(
-                component,
-                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
-                dir_fd=parent_descriptor,
-            )
-        except FileNotFoundError as error:
-            if not create:
-                raise ChampionLifecycleError(
-                    f"{label} is missing and must be explicitly provisioned"
-                ) from error
+    try:
+        for component in components:
+            parent_descriptor = chain[-1][1]
+            descriptor: int | None = None
             try:
-                os.mkdir(component, mode=0o700, dir_fd=parent_descriptor)
-                os.fsync(parent_descriptor)
                 descriptor = os.open(
                     component,
-                    os.O_RDONLY
-                    | os.O_DIRECTORY
-                    | getattr(os, "O_NOFOLLOW", 0),
+                    os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
                     dir_fd=parent_descriptor,
                 )
-            except OSError as creation_error:
+            except FileNotFoundError as error:
+                if not create:
+                    raise ChampionLifecycleError(
+                        f"{label} is missing and must be explicitly provisioned"
+                    ) from error
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=parent_descriptor)
+                    os.fsync(parent_descriptor)
+                    descriptor = os.open(
+                        component,
+                        os.O_RDONLY
+                        | os.O_DIRECTORY
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=parent_descriptor,
+                    )
+                except OSError as creation_error:
+                    raise ChampionLifecycleError(
+                        f"{label} cannot be safely provisioned"
+                    ) from creation_error
+            except OSError as error:
                 raise ChampionLifecycleError(
-                    f"{label} cannot be safely provisioned"
-                ) from creation_error
-        except OSError as error:
-            raise ChampionLifecycleError(
-                f"{label} cannot use a symlink or path alias"
-            ) from error
-        details = os.fstat(descriptor)
-        linked = os.stat(component, dir_fd=parent_descriptor, follow_symlinks=False)
-        if (
-            not stat.S_ISDIR(details.st_mode)
-            or stat.S_ISLNK(linked.st_mode)
-            or (details.st_dev, details.st_ino) != (linked.st_dev, linked.st_ino)
-        ):
-            os.close(descriptor)
-            _lifecycle_fail(f"{label} cannot use a symlink or path alias")
-        chain.append((component, descriptor, details.st_dev, details.st_ino))
-    return absolute_root, tuple(chain)
+                    f"{label} cannot use a symlink or path alias"
+                ) from error
+            try:
+                details = os.fstat(descriptor)
+                linked = os.stat(
+                    component, dir_fd=parent_descriptor, follow_symlinks=False
+                )
+                if (
+                    not stat.S_ISDIR(details.st_mode)
+                    or stat.S_ISLNK(linked.st_mode)
+                    or (details.st_dev, details.st_ino)
+                    != (linked.st_dev, linked.st_ino)
+                ):
+                    _lifecycle_fail(f"{label} cannot use a symlink or path alias")
+                chain.append((component, descriptor, details.st_dev, details.st_ino))
+                descriptor = None
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+        return absolute_root, tuple(chain)
+    except BaseException:
+        for _, descriptor, _, _ in reversed(chain):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
 
 
 class _PinnedJsonDirectory:
@@ -1274,13 +1754,40 @@ class _PinnedJsonDirectory:
     def __init__(
         self, root: str | Path, label: str, *, create: bool = True
     ) -> None:
+        self._closed = False
         self.root, self._root_chain = _open_pinned_directory(
             root, label, create=create
         )
         _, self._root_fd, self._root_dev, self._root_ino = self._root_chain[-1]
         self._root_label = label
 
+    def close(self) -> None:
+        """Idempotently release every pinned ancestry descriptor."""
+        if getattr(self, "_closed", True):
+            return
+        self._closed = True
+        for _, descriptor, _, _ in reversed(getattr(self, "_root_chain", ())):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    def __enter__(self) -> "_PinnedJsonDirectory":
+        self._verify_root()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def _verify_root(self) -> None:
+        if self._closed:
+            _lifecycle_fail(f"{self._root_label} is closed")
         for index, (component, descriptor, device, inode) in enumerate(
             self._root_chain
         ):
@@ -1401,10 +1908,14 @@ class _PinnedJsonDirectory:
                 ) from error
             self._sync_root()
         finally:
+            removed_temporary = False
             try:
                 os.unlink(temporary, dir_fd=self._root_fd)
+                removed_temporary = True
             except FileNotFoundError:
                 pass
+            if removed_temporary:
+                self._sync_root()
 
     def _atomic_replace_name(self, name: str, content: bytes) -> None:
         safe_name = self._simple_name(name)
@@ -1432,37 +1943,23 @@ class _PinnedJsonDirectory:
     def _force_replace_name_bytes(self, name: str, content: bytes) -> None:
         """Replace one exact leaf through the pinned dirfd without following it."""
         safe_name = self._simple_name(name)
-        self._verify_root()
-        try:
-            os.stat(safe_name, dir_fd=self._root_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        except OSError as error:
-            raise ChampionLifecycleError(
-                f"artifact cannot be inspected for restoration: {safe_name}"
-            ) from error
-        else:
-            try:
-                os.unlink(safe_name, dir_fd=self._root_fd)
-            except OSError as error:
-                raise ChampionLifecycleError(
-                    f"artifact leaf cannot be removed for restoration: {safe_name}"
-                ) from error
         temporary = self._write_temporary(safe_name, content)
         try:
+            self._verify_root()
             os.replace(
                 temporary,
                 safe_name,
                 src_dir_fd=self._root_fd,
                 dst_dir_fd=self._root_fd,
             )
+            temporary = ""
             self._sync_root()
-        except Exception:
-            try:
-                os.unlink(temporary, dir_fd=self._root_fd)
-            except OSError:
-                pass
-            raise
+        finally:
+            if temporary:
+                try:
+                    os.unlink(temporary, dir_fd=self._root_fd)
+                except OSError:
+                    pass
         if self._read_name_bytes(safe_name) != content:
             _lifecycle_fail(f"artifact restoration could not be verified: {safe_name}")
 
@@ -1628,17 +2125,21 @@ class ChampionAuthorityStore(_PinnedJsonDirectory):
             expected_authority_identity, "expected authority identity"
         )
         super().__init__(root, "authority root", create=False)
-        identity_name = "authority_identity.json"
-        if not self._name_exists(identity_name):
-            _lifecycle_fail("authority root is not explicitly provisioned")
-        payload = self._read_name_payload(identity_name)
-        if set(payload) != {"schema_version", "authority_identity"} or (
-            payload["schema_version"] != 1
-        ):
-            _lifecycle_fail("authority identity anchor is malformed")
-        if payload["authority_identity"] != expected:
-            _lifecycle_fail("authority identity does not match operator authority")
-        self.authority_identity = expected
+        try:
+            identity_name = "authority_identity.json"
+            if not self._name_exists(identity_name):
+                _lifecycle_fail("authority root is not explicitly provisioned")
+            payload = self._read_name_payload(identity_name)
+            if set(payload) != {"schema_version", "authority_identity"} or (
+                payload["schema_version"] != 1
+            ):
+                _lifecycle_fail("authority identity anchor is malformed")
+            if payload["authority_identity"] != expected:
+                _lifecycle_fail("authority identity does not match operator authority")
+            self.authority_identity = expected
+        except BaseException:
+            self.close()
+            raise
 
     @classmethod
     def provision(
@@ -1656,11 +2157,15 @@ class ChampionAuthorityStore(_PinnedJsonDirectory):
         _PinnedJsonDirectory.__init__(
             instance, path, "authority root", create=True
         )
-        instance._atomic_create_name(
-            "authority_identity.json",
-            {"schema_version": 1, "authority_identity": expected},
-        )
-        instance.authority_identity = expected
+        try:
+            instance._atomic_create_name(
+                "authority_identity.json",
+                {"schema_version": 1, "authority_identity": expected},
+            )
+            instance.authority_identity = expected
+        except BaseException:
+            instance.close()
+            raise
         return instance
 
     @staticmethod
@@ -1938,10 +2443,23 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
 
     def __init__(self, root: str | Path) -> None:
         super().__init__(root, "artifact root")
-        self._release_archive = _PinnedJsonDirectory(
-            self.root / "releases", "release archive root"
-        )
-        self._recover_publication()
+        try:
+            self._release_archive = _PinnedJsonDirectory(
+                self.root / "releases", "release archive root"
+            )
+            self._recover_publication()
+        except BaseException:
+            release_archive = getattr(self, "_release_archive", None)
+            if release_archive is not None:
+                release_archive.close()
+            super().close()
+            raise
+
+    def close(self) -> None:
+        release_archive = getattr(self, "_release_archive", None)
+        if release_archive is not None:
+            release_archive.close()
+        super().close()
 
     def _publication_hook(self, phase: str) -> None:
         """Deterministic failure-injection seam for transaction tests."""
@@ -4190,8 +4708,8 @@ class ChampionEvolutionController:
         manifest: ChampionRunManifest,
         config: ChampionEvolutionConfig,
         attestations: ChampionRunAttestations,
-        proposer: ChampionCallableBinding,
-        row_provider: ChampionCallableBinding,
+        proposer: ChampionProposerAdapter,
+        row_provider: ChampionRowProviderAdapter,
         runtime_bindings: ChampionRuntimeBindings,
         artifact_store: ChampionArtifactStore,
         authority_store: ChampionAuthorityStore,
@@ -4209,12 +4727,9 @@ class ChampionEvolutionController:
             _lifecycle_fail("artifact store must be an exact ChampionArtifactStore")
         if type(authority_store) is not ChampionAuthorityStore:
             _lifecycle_fail("authority store must be an exact ChampionAuthorityStore")
-        if type(proposer) is not ChampionCallableBinding or proposer.kind != "proposer":
+        if type(proposer) is not ChampionProposerAdapter:
             _lifecycle_fail("formal proposer requires an exact typed callable binding")
-        if (
-            type(row_provider) is not ChampionCallableBinding
-            or row_provider.kind != "row_provider"
-        ):
+        if type(row_provider) is not ChampionRowProviderAdapter:
             _lifecycle_fail("formal row provider requires an exact typed callable binding")
         if type(runtime_bindings) is not ChampionRuntimeBindings:
             _lifecycle_fail("formal runtime requires exact closed bindings")
@@ -4713,6 +5228,8 @@ __all__ = [
     "ChampionEvolutionConfig",
     "ChampionEvolutionOutcome",
     "ChampionLifecycleError",
+    "ChampionProposerAdapter",
+    "ChampionRowProviderAdapter",
     "ChampionRunManifest",
     "ChampionRunAttestations",
     "ChampionRuntimeBindings",

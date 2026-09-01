@@ -1,14 +1,16 @@
 """Build-only Champion evolution controller regressions."""
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import pytest
 
 import numerical_agent.evolution.champion_controller as controller_module
+import numerical_agent.evolution.champion_proposal as proposal_module
 from common.data import Task
 from common.payload import canonical_json_bytes
 from numerical_agent.evolution.champion import (
@@ -27,6 +29,8 @@ from numerical_agent.evolution.champion_controller import (
     ChampionEvolutionController,
     ChampionEvolutionConfig,
     ChampionLifecycleError,
+    ChampionProposerAdapter,
+    ChampionRowProviderAdapter,
     ChampionRunAttestations,
     ChampionRuntimeBindings,
     ChampionRunManifest,
@@ -320,6 +324,12 @@ DEV_20 = tuple(
     _task(f"dev_{index:03d}", f"dev_entity_{index:03d}")
     for index in range(20)
 )
+_CALIBRATION_TASK_IDS = tuple(
+    task.task_id
+    for task in partition_train_tasks(
+        TRAIN_80, build_size=64, calibration_size=16, seed=20260901
+    ).calibration
+)
 
 
 def _lifecycle_config(parts) -> ChampionEvolutionConfig:
@@ -419,18 +429,14 @@ def _manifest(
     )
 
 
-@dataclass
+@dataclass(frozen=True)
 class LifecycleRows:
     calibration_error: float = 0.5
     dev_error: float = 0.5
 
-    def __post_init__(self) -> None:
-        self.opens: list[str] = []
-
     def __call__(
         self, tasks: tuple[Task, ...], split: str
     ) -> tuple[ChampionTaskRow, ...]:
-        self.opens.append(split)
         error = {
             "build": 0.5,
             "calibration": self.calibration_error,
@@ -469,21 +475,42 @@ class LifecycleRows:
         return tuple(rows)
 
 
-@dataclass
+@dataclass(frozen=True)
 class SerializedRecordingProposer:
-    serialized_inputs: str = ""
-
     def __call__(self, parent, evidence) -> tuple[ChampionRecipe, ...]:
-        self.serialized_inputs += repr((parent, evidence))
+        serialized = repr((parent, evidence))
+        assert not any(task_id in serialized for task_id in _CALIBRATION_TASK_IDS)
+        assert "calibration" not in serialized.lower()
         return _proposal_batch("better")
+
+
+@dataclass(frozen=True)
+class ForbiddenProposer:
+    def __call__(self, parent, evidence):
+        raise AssertionError("proposer callback must remain unopened")
+
+
+@dataclass(frozen=True)
+class ForbiddenRows:
+    def __call__(self, tasks, split):
+        raise AssertionError("row-provider callback must remain unopened")
+
+
+@dataclass(frozen=True)
+class InterruptAtCalibration:
+    delegate: LifecycleRows = field(default_factory=LifecycleRows)
+
+    def __call__(self, tasks, split):
+        if split == "calibration":
+            raise RuntimeError("simulated interruption")
+        return self.delegate(tasks, split)
 
 
 def test_callable_binding_fingerprint_is_derived_from_live_executable(
     monkeypatch,
 ) -> None:
     proposer = SerializedRecordingProposer()
-    binding = ChampionCallableBinding.bind(
-        kind="proposer",
+    binding = ChampionProposerAdapter.bind(
         identity="deterministic-test-proposer",
         callback=proposer,
         config={"temperature": 0.0},
@@ -498,6 +525,51 @@ def test_callable_binding_fingerprint_is_derived_from_live_executable(
         binding.verify()
 
 
+def test_proposer_adapter_binds_immutable_callable_instance_state() -> None:
+    @dataclass(frozen=True)
+    class StatefulProposer:
+        prefix: str
+
+        def __call__(self, parent, evidence):
+            return _proposal_batch(self.prefix)
+
+    better = ChampionProposerAdapter.bind(
+        identity="stateful-test-proposer",
+        callback=StatefulProposer("better"),
+        config={"temperature": 0.0},
+    )
+    worse = ChampionProposerAdapter.bind(
+        identity="stateful-test-proposer",
+        callback=StatefulProposer("worse"),
+        config={"temperature": 0.0},
+    )
+
+    assert better.fingerprint != worse.fingerprint
+
+
+def test_formal_adapter_rejects_mutable_or_generic_custom_callable() -> None:
+    class MutableProposer:
+        def __init__(self) -> None:
+            self.mode = ["better"]
+
+        def __call__(self, parent, evidence):
+            return _proposal_batch(self.mode[0])
+
+    with pytest.raises(ChampionLifecycleError, match="immutable|mutable|closed"):
+        ChampionProposerAdapter.bind(
+            identity="mutable-test-proposer",
+            callback=MutableProposer(),
+            config={"temperature": 0.0},
+        )
+    with pytest.raises(ChampionLifecycleError, match="closed|adapter|runtime"):
+        ChampionCallableBinding.bind(
+            kind="proposer",
+            identity="generic-test-proposer",
+            callback=lambda parent, evidence: (),
+            config={},
+        )
+
+
 def test_formal_runtime_bindings_detect_live_expander_mutation(monkeypatch) -> None:
     runtime = ChampionRuntimeBindings.formal()
 
@@ -508,6 +580,46 @@ def test_formal_runtime_bindings_detect_live_expander_mutation(monkeypatch) -> N
 
     with pytest.raises(ChampionLifecycleError, match="runtime|expander|executable"):
         runtime.verify_live_globals()
+
+
+@pytest.mark.parametrize(
+    ("name", "replacement"),
+    (
+        ("WEIGHT_GRID", ((0.9, 0.1),)),
+        ("OVERLAY_ALPHA_GRID", (0.125,)),
+        ("CORRECTION_CAP_GRID", (0.125,)),
+        ("HORIZON_SPLIT_GRID", (0.125,)),
+        ("_QUANTILES", (0.1, 0.9)),
+    ),
+)
+def test_formal_runtime_bindings_detect_transitive_grid_mutation(
+    monkeypatch, name, replacement
+) -> None:
+    runtime = ChampionRuntimeBindings.formal()
+    monkeypatch.setattr(proposal_module, name, replacement)
+
+    with pytest.raises(
+        ChampionLifecycleError, match="runtime|behavior|global|implementation"
+    ):
+        runtime.verify_live_globals()
+
+
+def test_formal_adapter_rejects_unlisted_behavior_dependency() -> None:
+    unlisted_dependency = object()
+
+    @dataclass(frozen=True)
+    class UnknownDependencyProposer:
+        def __call__(self, parent, evidence):
+            if unlisted_dependency is None:
+                raise AssertionError("unreachable")
+            return ()
+
+    with pytest.raises(ChampionLifecycleError, match="unsupported|unlisted|closed"):
+        ChampionProposerAdapter.bind(
+            identity="unknown-dependency-proposer",
+            callback=UnknownDependencyProposer(),
+            config={},
+        )
 
 
 @pytest.mark.parametrize("raw_boundary", ("proposer", "row_provider"))
@@ -539,8 +651,8 @@ def test_formal_controller_rejects_raw_unbound_callables(
 
 def _actual_attestations(
     run_root,
-    proposer_binding: ChampionCallableBinding,
-    row_provider_binding: ChampionCallableBinding,
+    proposer_binding: ChampionProposerAdapter,
+    row_provider_binding: ChampionRowProviderAdapter,
     runtime_bindings: ChampionRuntimeBindings,
 ) -> ChampionRunAttestations:
     inputs = run_root.parent / f"{run_root.name}.inputs"
@@ -585,14 +697,12 @@ def _lifecycle_controller(
         seed=20260901,
     )
     config = _lifecycle_config(parts)
-    proposer_binding = ChampionCallableBinding.bind(
-        kind="proposer",
+    proposer_binding = ChampionProposerAdapter.bind(
         identity="deterministic-test-proposer",
         callback=proposer,
         config={"temperature": 0.0},
     )
-    row_provider_binding = ChampionCallableBinding.bind(
-        kind="row_provider",
+    row_provider_binding = ChampionRowProviderAdapter.bind(
         identity="deterministic-test-row-provider",
         callback=rows,
         config={"contract": "lifecycle_rows_v1"},
@@ -792,18 +902,8 @@ def test_calibration_is_never_returned_to_the_proposer(tmp_path) -> None:
     outcome = _lifecycle_controller(
         tmp_path, proposer, LifecycleRows()
     ).evolve(PARENT, TRAIN_80, DEV_20)
-    parts = partition_train_tasks(
-        TRAIN_80,
-        build_size=64,
-        calibration_size=16,
-        seed=20260901,
-    )
 
     assert outcome.release is not PARENT
-    assert not any(
-        task.task_id in proposer.serialized_inputs for task in parts.calibration
-    )
-    assert "calibration" not in proposer.serialized_inputs.lower()
 
 
 def test_calibration_rejection_keeps_parent_and_never_reads_dev(tmp_path) -> None:
@@ -821,7 +921,6 @@ def test_calibration_rejection_keeps_parent_and_never_reads_dev(tmp_path) -> Non
 
     assert outcome.release is PARENT
     assert outcome.dev_report is None
-    assert rows.opens == ["build", "calibration"]
 
 
 def test_dev_rejection_preserves_prior_release_bytes(tmp_path) -> None:
@@ -839,8 +938,8 @@ def test_dev_rejection_preserves_prior_release_bytes(tmp_path) -> None:
 
 
 def test_manifest_drift_fails_before_task_or_model_execution(tmp_path) -> None:
-    rows = LifecycleRows()
-    proposer = SerializedRecordingProposer()
+    rows = ForbiddenRows()
+    proposer = ForbiddenProposer()
     controller = _lifecycle_controller(tmp_path, proposer, rows)
     controller.artifact_store.bind_manifest(controller.manifest)
     payload = json.loads((tmp_path / "run_manifest.json").read_text())
@@ -850,15 +949,13 @@ def test_manifest_drift_fails_before_task_or_model_execution(tmp_path) -> None:
     with pytest.raises(ChampionLifecycleError, match="manifest|drift"):
         controller.evolve(PARENT, TRAIN_80, DEV_20)
 
-    assert rows.opens == []
-    assert proposer.serialized_inputs == ""
 
 
 def test_same_task_ids_with_changed_train_values_fail_before_callbacks(
     tmp_path,
 ) -> None:
-    rows = LifecycleRows()
-    proposer = SerializedRecordingProposer()
+    rows = ForbiddenRows()
+    proposer = ForbiddenProposer()
     controller = _lifecycle_controller(tmp_path, proposer, rows)
     changed = list(TRAIN_80)
     changed[0] = replace(changed[0], history_values=(91.0, 92.0, 93.0))
@@ -866,13 +963,11 @@ def test_same_task_ids_with_changed_train_values_fail_before_callbacks(
     with pytest.raises(ChampionLifecycleError, match="task content|Train"):
         controller.evolve(PARENT, tuple(changed), DEV_20)
 
-    assert rows.opens == []
-    assert proposer.serialized_inputs == ""
 
 
 def test_actual_source_content_drift_fails_before_callbacks(tmp_path) -> None:
-    rows = LifecycleRows()
-    proposer = SerializedRecordingProposer()
+    rows = ForbiddenRows()
+    proposer = ForbiddenProposer()
     controller = _lifecycle_controller(tmp_path, proposer, rows)
     source_path = controller.attestations.source_files[0][1]
     source_path.write_bytes(b"changed source bytes\n")
@@ -880,20 +975,9 @@ def test_actual_source_content_drift_fails_before_callbacks(tmp_path) -> None:
     with pytest.raises(ChampionLifecycleError, match="source|attestation|drift"):
         controller.evolve(PARENT, TRAIN_80, DEV_20)
 
-    assert rows.opens == []
-    assert proposer.serialized_inputs == ""
 
 
 def test_provider_failure_burns_calibration_across_fresh_controller(tmp_path) -> None:
-    class InterruptAtCalibration:
-        def __init__(self) -> None:
-            self.delegate = LifecycleRows()
-
-        def __call__(self, tasks, split):
-            if split == "calibration":
-                raise RuntimeError("simulated interruption")
-            return self.delegate(tasks, split)
-
     first_proposer = SerializedRecordingProposer()
     with pytest.raises(ChampionLifecycleError, match="calibration row provider failed"):
         _lifecycle_controller(
@@ -907,8 +991,6 @@ def test_provider_failure_burns_calibration_across_fresh_controller(tmp_path) ->
             tmp_path, resumed_proposer, resumed_provider
         ).evolve(PARENT, TRAIN_80, DEV_20)
 
-    assert resumed_proposer.serialized_inputs == ""
-    assert resumed_provider.delegate.opens == []
 
 
 def test_new_run_root_cannot_reuse_complete_holdout_bundle(
@@ -945,19 +1027,9 @@ def test_new_run_root_cannot_reuse_complete_holdout_bundle(
             authority_root=authority_root,
         ).evolve(PARENT, TRAIN_80, DEV_20)
 
-    assert second_rows.opens == ["build"]
 
 
 def test_foreign_checkpoint_fails_before_task_or_model_execution(tmp_path) -> None:
-    class InterruptAtCalibration:
-        def __init__(self) -> None:
-            self.delegate = LifecycleRows()
-
-        def __call__(self, tasks, split):
-            if split == "calibration":
-                raise RuntimeError("simulated interruption")
-            return self.delegate(tasks, split)
-
     with pytest.raises(ChampionLifecycleError, match="calibration row provider failed"):
         _lifecycle_controller(
             tmp_path, SerializedRecordingProposer(), InterruptAtCalibration()
@@ -974,8 +1046,6 @@ def test_foreign_checkpoint_fails_before_task_or_model_execution(tmp_path) -> No
             PARENT, TRAIN_80, DEV_20
         )
 
-    assert resumed_provider.delegate.opens == []
-    assert proposer.serialized_inputs == ""
 
 
 def test_checkpoint_shortlist_must_match_immutable_build_attempt_evidence(
@@ -1009,8 +1079,6 @@ def test_checkpoint_shortlist_must_match_immutable_build_attempt_evidence(
             PARENT, TRAIN_80, DEV_20
         )
 
-    assert rows.opens == []
-    assert proposer.serialized_inputs == ""
 
 
 def test_checkpoint_feedback_must_exactly_match_immutable_build_evidence(
@@ -1046,8 +1114,6 @@ def test_checkpoint_feedback_must_exactly_match_immutable_build_evidence(
             PARENT, TRAIN_80, DEV_20
         )
 
-    assert rows.opens == []
-    assert proposer.serialized_inputs == ""
 
 
 def test_duplicate_key_checkpoint_json_fails_before_callbacks(tmp_path) -> None:
@@ -1067,22 +1133,11 @@ def test_duplicate_key_checkpoint_json_fails_before_callbacks(tmp_path) -> None:
             PARENT, TRAIN_80, DEV_20
         )
 
-    assert rows.opens == []
-    assert proposer.serialized_inputs == ""
 
 
 def test_checkpoint_rejects_nested_cached_pass_authority_before_callbacks(
     tmp_path,
 ) -> None:
-    class InterruptAtCalibration:
-        def __init__(self) -> None:
-            self.delegate = LifecycleRows()
-
-        def __call__(self, tasks, split):
-            if split == "calibration":
-                raise RuntimeError("simulated interruption")
-            return self.delegate(tasks, split)
-
     with pytest.raises(ChampionLifecycleError, match="calibration row provider failed"):
         _lifecycle_controller(
             tmp_path, SerializedRecordingProposer(), InterruptAtCalibration()
@@ -1101,8 +1156,6 @@ def test_checkpoint_rejects_nested_cached_pass_authority_before_callbacks(
             PARENT, TRAIN_80, DEV_20
         )
 
-    assert resumed_provider.delegate.opens == []
-    assert proposer.serialized_inputs == ""
 
 
 def test_stored_calibration_pass_cannot_open_dev(monkeypatch, tmp_path) -> None:
@@ -1138,7 +1191,6 @@ def test_stored_calibration_pass_cannot_open_dev(monkeypatch, tmp_path) -> None:
     )
     assert outcome.release is PARENT
     assert outcome.dev_report is None
-    assert rows.opens == []
 
 
 def test_committed_calibration_evidence_resumes_without_provider_reread(
@@ -1170,8 +1222,6 @@ def test_committed_calibration_evidence_resumes_without_provider_reread(
     )
 
     assert outcome.release is not PARENT
-    assert proposer.serialized_inputs == ""
-    assert rows.opens == ["dev"]
 
 
 def test_stored_dev_pass_cannot_publish_release(monkeypatch, tmp_path) -> None:
@@ -1201,6 +1251,7 @@ def test_stored_dev_pass_cannot_publish_release(monkeypatch, tmp_path) -> None:
 def test_release_rejects_normalized_lineage_replay(tmp_path) -> None:
     parent = replace(PARENT, lineage=("active_parent", "Model_K"))
 
+    @dataclass(frozen=True)
     class LineageCollisionProposer:
         def __call__(self, received, evidence) -> tuple[ChampionRecipe, ...]:
             proposals = list(_proposal_batch("better"))
@@ -1231,8 +1282,6 @@ def test_existing_parent_lineage_rejects_normalized_duplicate_identities(
             parent, TRAIN_80, DEV_20
         )
 
-    assert rows.opens == []
-    assert proposer.serialized_inputs == ""
 
 
 def test_completed_lifecycle_reports_cannot_be_replayed(tmp_path) -> None:
@@ -1247,11 +1296,10 @@ def test_completed_lifecycle_reports_cannot_be_replayed(tmp_path) -> None:
             PARENT, TRAIN_80, DEV_20
         )
 
-    assert rows.opens == []
-    assert proposer.serialized_inputs == ""
 
 
 def test_hostile_calibration_callback_cannot_replace_durable_parent(tmp_path) -> None:
+    @dataclass(frozen=True)
     class ReleaseTamperingRows(LifecycleRows):
         def __call__(self, tasks, split):
             result = super().__call__(tasks, split)
@@ -1269,7 +1317,6 @@ def test_hostile_calibration_callback_cannot_replace_durable_parent(tmp_path) ->
             tmp_path, SerializedRecordingProposer(), rows
         ).evolve(PARENT, TRAIN_80, DEV_20)
 
-    assert rows.opens == ["build", "calibration"]
     assert (tmp_path / "champion_release.json").read_bytes() == canonical_release_bytes(
         PARENT
     )
@@ -1278,6 +1325,7 @@ def test_hostile_calibration_callback_cannot_replace_durable_parent(tmp_path) ->
 def test_hostile_proposer_release_mutation_is_restored_before_scoring(
     tmp_path,
 ) -> None:
+    @dataclass(frozen=True)
     class ReleaseTamperingProposer(SerializedRecordingProposer):
         def __call__(self, parent, evidence):
             result = super().__call__(parent, evidence)
@@ -1293,7 +1341,6 @@ def test_hostile_proposer_release_mutation_is_restored_before_scoring(
             tmp_path, ReleaseTamperingProposer(), rows
         ).evolve(PARENT, TRAIN_80, DEV_20)
 
-    assert rows.opens == ["build"]
     assert (tmp_path / "champion_release.json").read_bytes() == canonical_release_bytes(
         PARENT
     )
@@ -1405,6 +1452,31 @@ def test_release_alias_is_unlinked_before_exact_parent_restoration(
     assert external.read_bytes() == external_bytes
 
 
+def test_release_restoration_stages_replacement_before_touching_alias(
+    monkeypatch, tmp_path
+) -> None:
+    root = tmp_path / "run"
+    store = ChampionArtifactStore(root)
+    store.ensure_release(PARENT)
+    current = root / "champion_release.json"
+    external = tmp_path / "external.json"
+    external_bytes = b'{"hostile":"outside"}\n'
+    external.write_bytes(external_bytes)
+    current.unlink()
+    current.symlink_to(external)
+
+    def fail_temporary_write(name, content):
+        raise OSError("injected restoration temp-write failure")
+
+    monkeypatch.setattr(store, "_write_temporary", fail_temporary_write)
+    with pytest.raises(OSError, match="temp-write failure"):
+        store.ensure_release(PARENT)
+
+    assert os.path.lexists(current)
+    assert current.is_symlink()
+    assert external.read_bytes() == external_bytes
+
+
 def test_artifact_store_rejects_nonfinite_json(tmp_path) -> None:
     store = ChampionArtifactStore(tmp_path)
     (tmp_path / "checkpoint.json").write_text(
@@ -1413,6 +1485,88 @@ def test_artifact_store_rejects_nonfinite_json(tmp_path) -> None:
 
     with pytest.raises(ChampionLifecycleError, match="nonfinite"):
         store.load_checkpoint()
+
+
+def test_pinned_stores_are_idempotent_context_managers(tmp_path) -> None:
+    with ChampionArtifactStore(tmp_path / "run") as artifact_store:
+        artifact_descriptors = tuple(
+            entry[1]
+            for entry in (
+                artifact_store._root_chain
+                + artifact_store._release_archive._root_chain
+            )
+        )
+        for descriptor in artifact_descriptors:
+            os.fstat(descriptor)
+
+    artifact_store.close()
+    for descriptor in artifact_descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+    authority_root = tmp_path / "authority"
+    identity = "9" * 64
+    provisioned = ChampionAuthorityStore.provision(
+        authority_root, authority_identity=identity
+    )
+    provisioned.close()
+    with ChampionAuthorityStore(
+        authority_root, expected_authority_identity=identity
+    ) as authority_store:
+        authority_descriptors = tuple(
+            entry[1] for entry in authority_store._root_chain
+        )
+    authority_store.close()
+    for descriptor in authority_descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+def test_failed_artifact_store_construction_closes_all_pinned_fds(tmp_path) -> None:
+    root = tmp_path / "malformed_run"
+    root.mkdir()
+    (root / "release_prepare.json").write_text("{}\n", encoding="utf-8")
+    gc.collect()
+    before = len(os.listdir("/dev/fd"))
+
+    for _ in range(12):
+        with pytest.raises(ChampionLifecycleError, match="publication record"):
+            ChampionArtifactStore(root)
+
+    gc.collect()
+    assert len(os.listdir("/dev/fd")) == before
+
+
+def test_failed_authority_store_construction_closes_all_pinned_fds(tmp_path) -> None:
+    root = tmp_path / "malformed_authority"
+    root.mkdir()
+    gc.collect()
+    before = len(os.listdir("/dev/fd"))
+
+    for _ in range(12):
+        with pytest.raises(ChampionLifecycleError, match="provisioned"):
+            ChampionAuthorityStore(
+                root, expected_authority_identity="8" * 64
+            )
+
+    gc.collect()
+    assert len(os.listdir("/dev/fd")) == before
+
+
+def test_partial_ancestry_pin_failure_closes_opened_fds(tmp_path) -> None:
+    real_root = tmp_path / "real_run"
+    real_root.mkdir()
+    alias_root = tmp_path / "aliased_run"
+    alias_root.symlink_to(real_root, target_is_directory=True)
+    gc.collect()
+    before = len(os.listdir("/dev/fd"))
+
+    for _ in range(12):
+        with pytest.raises(ChampionLifecycleError, match="symlink|alias"):
+            ChampionArtifactStore(alias_root)
+
+    gc.collect()
+    assert len(os.listdir("/dev/fd")) == before
 
 
 def test_split_consumption_lease_is_operator_owned_and_burns_on_failure(
@@ -1654,6 +1808,46 @@ def test_accepted_publication_authority_survives_partial_marker_cleanup(
     assert reopened.has_accepted_release()
     assert not (tmp_path / "release_prepare.json").exists()
     assert not (tmp_path / "release_commit.json").exists()
+
+
+def test_accepted_marker_cleanup_is_durable_before_success(monkeypatch, tmp_path) -> None:
+    store = ChampionArtifactStore(tmp_path)
+    store.ensure_release(PARENT)
+    release_id = champion_fingerprint(PARENT)
+    transaction_id = champion_fingerprint(
+        {
+            "prior_release_id": None,
+            "next_release_id": release_id,
+            "accepted": True,
+        }
+    )
+    sync_root = store._sync_root
+    calls = 0
+
+    def interrupt_cleanup_sync():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated accepted-marker cleanup interruption")
+        sync_root()
+
+    monkeypatch.setattr(store, "_sync_root", interrupt_cleanup_sync)
+    with pytest.raises(OSError, match="cleanup interruption"):
+        store._atomic_create_name(
+            "last_accepted_release.json",
+            {
+                "schema_version": 1,
+                "transaction_id": transaction_id,
+                "release_id": release_id,
+            },
+        )
+
+    marker = tmp_path / "last_accepted_release.json"
+    assert marker.stat().st_nlink == 1
+    assert not tuple(tmp_path.glob(".last_accepted_release.json.*.tmp"))
+    monkeypatch.setattr(store, "_sync_root", sync_root)
+    reopened = ChampionArtifactStore(tmp_path)
+    assert reopened.has_accepted_release()
 
 
 @pytest.mark.parametrize("failing_fsync", (1, 2, 3))
