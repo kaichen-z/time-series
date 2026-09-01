@@ -1,15 +1,65 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import numerical_agent.evolution.forecast_store as forecast_store
 from numerical_agent.evolution.forecast_store import ForecastStore
-from numerical_agent.evolution.module import MODULE_HEADER, read_module
+from numerical_agent.evolution.module import MODULE_HEADER
 from numerical_agent.evolution.portfolio import PolicyPortfolio
 from numerical_agent.providers import RuntimeRegistry
 
 
 HISTORY = (1.0, 2.0, 3.0, 4.0)
+
+
+def test_shared_store_uses_the_planned_keyword_only_constructor(tmp_path, monkeypatch):
+    methods = tmp_path / "methods.py"
+    methods.write_text(
+        MODULE_HEADER
+        + '''
+
+def naive_last(history, horizon, frequency):
+    """Return the final observed value."""
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+
+    class NoopStatisticalRuntime:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        forecast_store, "_IsolatedStatisticalRuntime", NoopStatisticalRuntime
+    )
+    store = ForecastStore(
+        tmp_path / "cache",
+        methods,
+        None,
+        PolicyPortfolio.flagship5(),
+        RuntimeRegistry(),
+        screening_hash="screen-hash",
+        runtime_identity={},
+    )
+    store.close()
+    signature = inspect.signature(ForecastStore)
+    assert tuple(signature.parameters) == (
+        "root",
+        "module_path",
+        "skills_path",
+        "portfolio",
+        "runtimes",
+        "screening_hash",
+        "runtime_identity",
+        "statistical_time_budget_s",
+        "statistical_failure_limit",
+    )
+    assert signature.parameters["screening_hash"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert signature.parameters["runtime_identity"].kind is inspect.Parameter.KEYWORD_ONLY
 
 
 def make_fixture_store(tmp_path: Path, monkeypatch, calls: list[str]) -> ForecastStore:
@@ -64,10 +114,10 @@ def seasonal_naive(history, horizon, frequency):
         tmp_path / "cache",
         methods,
         None,
-        read_module(methods),
         PolicyPortfolio.flagship5(),
         RuntimeRegistry({"timesfm": runtime, "tsfm_worker": runtime}),
-        "screen-hash",
+        screening_hash="screen-hash",
+        runtime_identity={},
     )
 
 

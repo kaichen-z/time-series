@@ -20,7 +20,7 @@ from common.evolution_core.contracts import (
 from common.payload import strict_json_loads
 
 from .execution import CRASHED, INVALID, NOT_APPLICABLE, SUCCESS, Outcome, load_methods
-from .module import MethodModule
+from .module import read_module
 from .portfolio import (
     CombinedPolicy,
     InvalidTSFMForecastError,
@@ -43,13 +43,13 @@ class ForecastStore:
         root: str | Path,
         module_path: Path,
         skills_path: Path | None,
-        module: MethodModule,
         portfolio: PolicyPortfolio,
         runtimes,
+        *,
         screening_hash: str,
+        runtime_identity: Mapping[str, object] | None,
         statistical_time_budget_s: float = 20.0,
         statistical_failure_limit: int = 2,
-        runtime_identity: Mapping[str, object] | None = None,
     ) -> None:
         if statistical_time_budget_s <= 0:
             raise ValueError("statistical_time_budget_s must be positive")
@@ -58,6 +58,7 @@ class ForecastStore:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.not_applicable = _HistoryOnlyNotApplicable
+        module = read_module(module_path)
         self.statistical_names = frozenset(module.names())
         self._statistical = _IsolatedStatisticalRuntime(
             module_path,

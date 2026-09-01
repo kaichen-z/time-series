@@ -109,10 +109,9 @@ def main(argv: list[str] | None = None) -> int:
             args.hindcast_cache_dir,
             repo / "methods.py",
             repo / "skills.py" if (repo / "skills.py").is_file() else None,
-            module,
             portfolio,
             runtimes,
-            actual_screening_hash,
+            screening_hash=actual_screening_hash,
             runtime_identity=_forecast_runtime_identity(args),
         )
         try:
