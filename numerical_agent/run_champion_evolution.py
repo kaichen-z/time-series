@@ -261,6 +261,46 @@ def _balanced_task_folds(tasks: Iterable[object], *, seed: int) -> dict[str, int
     return {task_id: index % 5 for index, (task_id, _entity) in enumerate(ranked)}
 
 
+def _fold_stratified_screen_task_ids(
+    tasks: Iterable[object],
+    folds: dict[str, int],
+    *,
+    sizes: tuple[int, ...],
+) -> tuple[tuple[str, ...], ...]:
+    task_ids = tuple(getattr(task, "task_id", None) for task in tasks)
+    if any(type(task_id) is not str or not task_id for task_id in task_ids):
+        raise ValueError("screen assignment requires nonempty task IDs")
+    if len(task_ids) != len(set(task_ids)) or set(task_ids) != set(folds):
+        raise ValueError("screen assignment must cover the exact unique task universe")
+    if (
+        type(sizes) is not tuple
+        or not sizes
+        or any(type(size) is not int or size <= 0 for size in sizes)
+        or tuple(sorted(sizes)) != sizes
+        or sizes[-1] != len(task_ids)
+    ):
+        raise ValueError("screen sizes must be increasing and end at the task universe")
+    buckets: dict[int, list[str]] = {fold: [] for fold in range(5)}
+    for task_id in task_ids:
+        fold = folds[task_id]
+        if fold not in buckets:
+            raise ValueError("formal screen assignment requires folds zero through four")
+        buckets[fold].append(task_id)
+    if any(not bucket for bucket in buckets.values()):
+        raise ValueError("formal screen assignment requires all five folds")
+    for bucket in buckets.values():
+        bucket.sort()
+    ordered: list[str] = []
+    offset = 0
+    while len(ordered) < len(task_ids):
+        for fold in range(5):
+            bucket = buckets[fold]
+            if offset < len(bucket):
+                ordered.append(bucket[offset])
+        offset += 1
+    return tuple(tuple(ordered[:size]) for size in sizes)
+
+
 def _load_parent(path: Path) -> ChampionRelease:
     if not path.is_file():
         raise ValueError("normal evolution requires an immutable --parent-release")
@@ -279,6 +319,12 @@ def _materialize_rows(
     split: str,
 ) -> tuple[ChampionTaskRow, ...]:
     rows: list[ChampionTaskRow] = []
+    entries = {entry.name: entry for entry in screening.entries}
+    reviewed_candidates = tuple(
+        (name, family)
+        for name, family in candidates
+        if entries[name].status in {"keep", "specialized"}
+    )
     for source in tasks:
         task = RuntimeTask(
             source.task_id,
@@ -288,7 +334,28 @@ def _materialize_rows(
             tuple(source.future_values),
         )
         profile = profile_task(task)
-        for name, family in _screened_candidates(screening, profile, candidates):
+        active_names = {
+            name for name, _family in _screened_candidates(
+                screening, profile, reviewed_candidates
+            )
+        }
+        for name, family in reviewed_candidates:
+            if name not in active_names:
+                rows.append(
+                    ChampionTaskRow(
+                        task.task_id,
+                        name,
+                        profile,
+                        tuple(task.future),
+                        None,
+                        "NotApplicable: screening_policy",
+                        folds[task.task_id],
+                        split,
+                        tuple(task.history),
+                        None,
+                    )
+                )
+                continue
             try:
                 forecast = store.forecast(
                     name, task.history, task.horizon, task.frequency
@@ -636,15 +703,20 @@ def main(argv: list[str] | None = None) -> int:
     parts = partition_train_tasks(
         train, build_size=64, calibration_size=16, seed=args.partition_seed
     )
+    build_folds = _balanced_task_folds(parts.build, seed=args.partition_seed)
+    calibration_folds = _balanced_task_folds(
+        parts.calibration, seed=args.partition_seed
+    )
+    dev_folds = _balanced_task_folds(dev, seed=args.partition_seed)
     config = ChampionEvolutionConfig(
         generations=args.generations,
         candidate_minimum_gain=float(args.candidate_minimum_gain),
         research_target_gain=float(args.research_target_gain),
         build_task_ids=tuple(task.task_id for task in parts.build),
-        screen_task_ids=(
-            tuple(task.task_id for task in parts.build[:8]),
-            tuple(task.task_id for task in parts.build[:32]),
-            tuple(task.task_id for task in parts.build),
+        screen_task_ids=_fold_stratified_screen_task_ids(
+            parts.build,
+            build_folds,
+            sizes=(8, 32, 64),
         ),
     )
     module, portfolio = read_module(repo / "methods.py"), read_policy_file(
@@ -687,7 +759,7 @@ def main(argv: list[str] | None = None) -> int:
             parts.build,
             candidates,
             screening,
-            _balanced_task_folds(parts.build, seed=args.partition_seed),
+            build_folds,
             "build",
         )
         rows += _materialize_rows(
@@ -695,7 +767,7 @@ def main(argv: list[str] | None = None) -> int:
             parts.calibration,
             candidates,
             screening,
-            _balanced_task_folds(parts.calibration, seed=args.partition_seed),
+            calibration_folds,
             "calibration",
         )
         rows += _materialize_rows(
@@ -703,7 +775,7 @@ def main(argv: list[str] | None = None) -> int:
             dev,
             candidates,
             screening,
-            _balanced_task_folds(dev, seed=args.partition_seed),
+            dev_folds,
             "dev",
         )
         provider = ChampionRowProviderAdapter.materialized(

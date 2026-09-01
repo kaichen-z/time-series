@@ -13,8 +13,10 @@ from numerical_agent.run_champion_evolution import build_parser, main
 from numerical_agent.run_champion_evolution import (
     _balanced_task_folds,
     _clean_git_source,
+    _fold_stratified_screen_task_ids,
     _inventory,
     _load_screening_policy,
+    _materialize_rows,
     _screened_candidates,
     load_evolution_partitions,
 )
@@ -306,3 +308,74 @@ def test_formal_five_fold_assignment_is_stable_balanced_and_order_independent() 
     assert max(counts(fold) for fold in range(5)) - min(
         counts(fold) for fold in range(5)
     ) <= 1
+
+
+def test_formal_screen_membership_is_nested_and_fold_stratified() -> None:
+    tasks = tuple(
+        SimpleNamespace(task_id=f"task_{index:02d}", entity_name=f"entity_{index:02d}")
+        for index in range(64)
+    )
+    folds = _balanced_task_folds(tasks, seed=20260901)
+
+    screens = _fold_stratified_screen_task_ids(tasks, folds, sizes=(8, 32, 64))
+
+    assert tuple(map(len, screens)) == (8, 32, 64)
+    assert set(screens[0]).issubset(screens[1])
+    assert set(screens[1]).issubset(screens[2])
+    assert set(folds[task_id] for task_id in screens[0]) == {0, 1, 2, 3, 4}
+    assert set(screens[-1]) == {task.task_id for task in tasks}
+
+
+def test_formal_specialist_inapplicability_is_a_complete_failed_row() -> None:
+    screening = _reviewed_screening()
+    tasks = (
+        SimpleNamespace(
+            task_id="short",
+            entity_name="short_entity",
+            history_values=tuple(float(index) for index in range(20)),
+            future_values=(20.0, 21.0),
+            prediction_length=2,
+            frequency="D",
+        ),
+        SimpleNamespace(
+            task_id="long",
+            entity_name="long_entity",
+            history_values=tuple(float(index) for index in range(120)),
+            future_values=(120.0, 121.0),
+            prediction_length=2,
+            frequency="D",
+        ),
+    )
+
+    class Store:
+        identity_hash = "fixture-store"
+
+        @staticmethod
+        def forecast(
+            _name: str,
+            history: tuple[float, ...],
+            horizon: int,
+            _frequency: str,
+        ) -> tuple[float, ...]:
+            return (history[-1],) * horizon
+
+    rows = _materialize_rows(
+        Store(),  # type: ignore[arg-type]
+        tasks,  # type: ignore[arg-type]
+        (("broad_stat", "statistical"), ("long_history_stat", "statistical")),
+        screening,
+        {"short": 0, "long": 1},
+        "build",
+    )
+
+    by_key = {(row.candidate_name, row.task_id): row for row in rows}
+    assert set(by_key) == {
+        ("broad_stat", "short"),
+        ("broad_stat", "long"),
+        ("long_history_stat", "short"),
+        ("long_history_stat", "long"),
+    }
+    inactive = by_key[("long_history_stat", "short")]
+    assert inactive.forecast is None
+    assert inactive.failure_reason == "NotApplicable: screening_policy"
+    assert by_key[("long_history_stat", "long")].forecast is not None
