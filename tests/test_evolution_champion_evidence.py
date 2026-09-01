@@ -619,10 +619,30 @@ def test_sanitizer_rejects_embedded_normalized_task_identity_sequences() -> None
 
 
 @pytest.mark.parametrize(
+    ("task_id", "child_name"),
+    (
+        ("租户", "model_租户"),
+        ("Ｔｅｎａｎｔ", "model_tenant"),
+    ),
+)
+def test_sanitizer_rejects_unicode_normalized_embedded_task_identities(
+    task_id: str,
+    child_name: str,
+) -> None:
+    rows, comparison = _named_child_evidence(child_name, task_id=task_id)
+
+    with pytest.raises(ChampionEvidenceError, match="identity"):
+        sanitize_build_evidence(rows, (comparison,))
+
+
+@pytest.mark.parametrize(
     "child_name",
     (
         "DEVops_model",
         "devops_model",
+        "myDEVops_model",
+        "myＤＥＶops_model",
+        "modelPUBLICdaily",
         "DevModel",
         "DEVModel",
         "dev_model",
@@ -669,11 +689,58 @@ def test_sanitizer_blocks_reserved_markers_across_separator_forms(
 @pytest.mark.parametrize(
     "child_name",
     (
+        "entity_secret",
+        "truth_model",
+        "exception_payload",
+        "hidden_task",
+        "EntitySecret",
+        "TruthModel",
+        "ＴｒｕｔｈModel",
+        "EXCEPTIONPayload",
+        "myHIDDENtask",
+    ),
+)
+def test_sanitizer_blocks_sensitive_markers_across_identifier_forms(
+    child_name: str,
+) -> None:
+    rows, comparison = _named_child_evidence(child_name)
+
+    with pytest.raises(ChampionEvidenceError, match="forbidden|sensitive"):
+        sanitize_build_evidence(rows, (comparison,))
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "hidden-task",
+        "model.entity",
+        "truth/payload",
+        "EXCEPTION-payload",
+    ),
+)
+def test_recursive_payload_validator_blocks_sensitive_separator_forms(
+    value: str,
+) -> None:
+    with pytest.raises(ChampionEvidenceError, match="forbidden|sensitive"):
+        champion_evidence._assert_sanitized({"label": value})
+
+
+@pytest.mark.parametrize(
+    "child_name",
+    (
         "device_model",
         "developer_model",
         "devonian_model",
         "publicity_model",
         "republic_model",
+        "myDeviceModel",
+        "modelPublicityDaily",
+        "myRepublicModel",
+        "identity_model",
+        "truthful_model",
+        "ｔｒｕｔｈｆｕｌ_model",
+        "exceptional_model",
+        "unhidden_model",
         "model_secret_task_01",
         "model_secret_tasks_0",
     ),

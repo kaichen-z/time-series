@@ -11,6 +11,7 @@ import json
 import math
 import re
 import statistics
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -998,28 +999,95 @@ def _assert_sanitized(
         _fail("proposer evidence contains a non-JSON numeric value")
 
 
+def _canonical(value: str) -> str:
+    return unicodedata.normalize("NFKC", value).casefold()
+
+
+def _alnum_segments(value: str) -> tuple[str, ...]:
+    normalized = unicodedata.normalize("NFKC", value)
+    segments: list[str] = []
+    current: list[str] = []
+    for character in normalized:
+        if character.isalnum():
+            current.append(character)
+        elif current:
+            segments.append("".join(current))
+            current = []
+    if current:
+        segments.append("".join(current))
+    return tuple(segments)
+
+
+def _token_starts(segment: str) -> tuple[int, ...]:
+    starts = [0]
+    for index in range(1, len(segment)):
+        previous = segment[index - 1]
+        current = segment[index]
+        following = segment[index + 1] if index + 1 < len(segment) else ""
+        digit_boundary = previous.isdigit() != current.isdigit()
+        case_boundary = previous.islower() and current.isupper()
+        acronym_boundary = (
+            previous.isupper() and current.isupper() and following.islower()
+        )
+        previous_uncased = previous.isalpha() and not (
+            previous.islower() or previous.isupper()
+        )
+        current_uncased = current.isalpha() and not (
+            current.islower() or current.isupper()
+        )
+        script_boundary = previous_uncased != current_uncased
+        if digit_boundary or case_boundary or acronym_boundary or script_boundary:
+            starts.append(index)
+    return tuple(starts)
+
+
 def _tokens(value: str) -> tuple[str, ...]:
-    camel_split = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", value)
-    camel_split = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", camel_split)
-    return tuple(
-        token.casefold()
-        for token in re.split(r"[^A-Za-z0-9]+", camel_split)
-        if token
-    )
+    tokens: list[str] = []
+    for segment in _alnum_segments(value):
+        starts = _token_starts(segment)
+        tokens.extend(
+            _canonical(segment[start:end])
+            for start, end in zip(starts, (*starts[1:], len(segment)))
+        )
+    return tuple(tokens)
+
+
+def _contains_marker(
+    value: str,
+    markers: frozenset[str],
+    *,
+    compounds: frozenset[str] = frozenset(),
+) -> bool:
+    if (markers | compounds) & set(_tokens(value)):
+        return True
+    for segment in _alnum_segments(value):
+        for start in _token_starts(segment):
+            for marker in markers:
+                end = start + len(marker)
+                matched = segment[start:end]
+                if (
+                    _canonical(matched) == marker
+                    and matched.isupper()
+                    and end < len(segment)
+                    and segment[end].islower()
+                ):
+                    return True
+    return False
 
 
 def _contains_split_marker(value: str) -> bool:
-    if {"dev", "devops", "public"} & set(_tokens(value)):
-        return True
-    for segment in re.split(r"[^A-Za-z0-9]+", value):
-        if any(
-            segment.startswith(marker)
-            and len(segment) > len(marker)
-            and segment[len(marker)].islower()
-            for marker in ("DEV", "PUBLIC")
-        ):
-            return True
-    return False
+    return _contains_marker(
+        value,
+        frozenset({"dev", "public"}),
+        compounds=frozenset({"devops"}),
+    )
+
+
+def _contains_sensitive_marker(value: str) -> bool:
+    return _contains_marker(
+        value,
+        frozenset({"hidden", "entity", "truth", "exception"}),
+    )
 
 
 @dataclass(frozen=True)
@@ -1029,7 +1097,7 @@ class _IdentityIndex:
 
 
 def _build_identity_index(task_ids: tuple[str, ...]) -> _IdentityIndex:
-    exact = frozenset(task_id.casefold() for task_id in task_ids)
+    exact = frozenset(_canonical(task_id) for task_id in task_ids)
     token_sequences = tuple(
         sorted(
             {tokens for task_id in task_ids if (tokens := _tokens(task_id))},
@@ -1040,7 +1108,7 @@ def _build_identity_index(task_ids: tuple[str, ...]) -> _IdentityIndex:
 
 
 def _matches_identity(value: str, index: _IdentityIndex) -> bool:
-    if value.casefold() in index.exact:
+    if _canonical(value) in index.exact:
         return True
     emitted = _tokens(value)
     for identity in index.token_sequences:
@@ -1062,6 +1130,8 @@ def _validate_emitted_string(
         return
     if _contains_split_marker(value):
         _fail("proposer evidence contains a forbidden Dev/Public marker")
+    if _contains_sensitive_marker(value):
+        _fail("proposer evidence contains a forbidden sensitive marker")
     if identity_index is not None and _matches_identity(value, identity_index):
         _fail("proposer evidence string embeds a known task identity")
     if validated_strings is not None:
