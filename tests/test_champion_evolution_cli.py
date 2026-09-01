@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from numerical_agent.run_champion_evolution import build_parser, main
+from numerical_agent.run_champion_evolution import (
+    _clean_git_source,
+    load_evolution_partitions,
+)
 
 
 def _options(parser):
@@ -99,3 +104,44 @@ def test_evolution_partition_loader_never_decodes_public_rows(
             ]
         )
     assert seen == [("train", "dev")]
+
+
+def test_evolution_loader_rejects_duplicate_requested_jsonl_rows(
+    tmp_path: Path,
+) -> None:
+    split = tmp_path / "split.json"
+    split.write_text(
+        json.dumps(
+            {"partitions": {"train": {"task_ids": ["train"]}, "dev": {"task_ids": []}}}
+        ),
+        encoding="utf-8",
+    )
+    row = {
+        "benchmark_id": "train",
+        "series": {"history_values": [1.0, 2.0], "future_values": [3.0]},
+        "task_metadata": {"prediction_length": 1, "frequency": "D"},
+    }
+    tasks = tmp_path / "tasks.jsonl"
+    tasks.write_text(
+        json.dumps(row) + "\n" + json.dumps(row) + "\n{invalid Public body}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicate requested task"):
+        load_evolution_partitions(split, tasks)
+
+
+def test_clean_git_source_accepts_gitfile_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    responses = iter(
+        (
+            subprocess.CompletedProcess([], 0, "true\n", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+        )
+    )
+    monkeypatch.setattr(
+        "numerical_agent.run_champion_evolution.subprocess.run",
+        lambda *args, **kwargs: next(responses),
+    )
+    _clean_git_source(tmp_path)

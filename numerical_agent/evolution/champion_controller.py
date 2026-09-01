@@ -1,4 +1,5 @@
 """Build evolution plus the durable 64/16/20 Champion lifecycle."""
+
 from __future__ import annotations
 
 import hashlib
@@ -58,21 +59,23 @@ _FORMAL_SIZES = (64, 16, (8, 32, 64))
 _SMOKE_SIZES = (8, 2, (4, 8))
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _CHECKPOINT_STAGE = re.compile(r"build_generation_([1-9][0-9]*)\Z")
-_PROFILE_FEATURES = frozenset({
-    "history_length",
-    "horizon",
-    "horizon_ratio",
-    "zero_fraction",
-    "trend_strength",
-    "periodicity_strength",
-    "periodicity_confidence",
-    "outlier_fraction",
-    "noise_relative_scale",
-    "stationarity_score",
-    "recent_regime_confidence",
-    "intermittency_adi",
-    "intermittency_cv2",
-})
+_PROFILE_FEATURES = frozenset(
+    {
+        "history_length",
+        "horizon",
+        "horizon_ratio",
+        "zero_fraction",
+        "trend_strength",
+        "periodicity_strength",
+        "periodicity_confidence",
+        "outlier_fraction",
+        "noise_relative_scale",
+        "stationarity_score",
+        "recent_regime_confidence",
+        "intermittency_adi",
+        "intermittency_cv2",
+    }
+)
 
 
 class ChampionControllerError(ValueError):
@@ -147,10 +150,7 @@ def _parse_scripted_batches(payload: str) -> tuple[tuple[ChampionRecipe, ...], .
         if type(raw_batch) is not list:
             _lifecycle_fail("scripted proposer batch is malformed")
         try:
-            batch = tuple(
-                parse_champion_recipe(item)
-                for item in cast(list[object], raw_batch)
-            )
+            batch = tuple(parse_champion_recipe(item) for item in cast(list[object], raw_batch))
         except Exception as error:
             raise ChampionLifecycleError("scripted proposer batch is malformed") from error
         if not 5 <= len(batch) <= 10:
@@ -171,9 +171,7 @@ class ChampionProposerAdapter:
     behavior_json: str = field(repr=False)
 
     @classmethod
-    def bind(
-        cls, *, identity: str, callback: object, config: object
-    ) -> "ChampionProposerAdapter":
+    def bind(cls, *, identity: str, callback: object, config: object) -> "ChampionProposerAdapter":
         del cls, identity, callback, config
         _lifecycle_fail("formal proposer requires a closed registered adapter kind")
 
@@ -258,9 +256,7 @@ class ChampionProposerAdapter:
         del cls
         instance = object.__new__(ChampionProposerAdapter)
         object.__setattr__(instance, "kind", kind)
-        object.__setattr__(
-            instance, "identity", _validate_adapter_identity(identity, "proposer")
-        )
+        object.__setattr__(instance, "identity", _validate_adapter_identity(identity, "proposer"))
         object.__setattr__(
             instance,
             "config_json",
@@ -288,9 +284,7 @@ class ChampionProposerAdapter:
             {
                 "contract": _PROPOSER_ADAPTER_CONTRACT,
                 "kind": self.kind,
-                "behavior_sha256": hashlib.sha256(
-                    self.behavior_json.encode("utf-8")
-                ).hexdigest(),
+                "behavior_sha256": hashlib.sha256(self.behavior_json.encode("utf-8")).hexdigest(),
             }
         )
 
@@ -334,10 +328,7 @@ class ChampionProposerAdapter:
                 or not cast(str, config["reasoning_effort"]).strip()
                 or type(config["timeout_seconds"]) is not int
                 or cast(int, config["timeout_seconds"]) <= 0
-                or (
-                    config["cache_dir"] is not None
-                    and type(config["cache_dir"]) is not str
-                )
+                or (config["cache_dir"] is not None and type(config["cache_dir"]) is not str)
             ):
                 _lifecycle_fail("Codex proposer config is malformed")
 
@@ -363,9 +354,7 @@ class ChampionProposerAdapter:
 
         behavior = _adapter_object(self.behavior_json, "Codex proposer behavior")
         try:
-            inventory = ToolDictionary.from_payload(
-                cast(dict[str, object], behavior["inventory"])
-            )
+            inventory = ToolDictionary.from_payload(cast(dict[str, object], behavior["inventory"]))
         except Exception as error:
             raise ChampionLifecycleError("Codex proposer inventory is malformed") from error
         config = self.config
@@ -397,9 +386,7 @@ def _parse_materialized_rows(
         type(value[name]) is not list for name in ("rows", "unavailable_splits")
     ):
         _lifecycle_fail("materialized row-provider payload is malformed")
-    rows = tuple(
-        _parse_authority_row(item) for item in cast(list[object], value["rows"])
-    )
+    rows = tuple(_parse_authority_row(item) for item in cast(list[object], value["rows"]))
     keys = tuple((row.split, row.task_id, row.candidate_name) for row in rows)
     if not rows or len(keys) != len(set(keys)):
         _lifecycle_fail("materialized row-provider rows must be nonempty and unique")
@@ -438,16 +425,22 @@ class ChampionRowProviderAdapter:
         unavailable_splits: tuple[str, ...] = (),
     ) -> "ChampionRowProviderAdapter":
         del cls
-        if type(rows) is not tuple or not rows or any(
-            type(row) is not ChampionTaskRow for row in cast(tuple[object, ...], rows)
+        if (
+            type(rows) is not tuple
+            or not rows
+            or any(type(row) is not ChampionTaskRow for row in cast(tuple[object, ...], rows))
         ):
             _lifecycle_fail("materialized provider requires exact immutable row data")
         for row in cast(tuple[ChampionTaskRow, ...], rows):
             ChampionTaskRow.__post_init__(row)
-        if type(unavailable_splits) is not tuple or any(
-            type(split) is not str or split not in {"build", "calibration", "dev"}
-            for split in unavailable_splits
-        ) or len(unavailable_splits) != len(set(unavailable_splits)):
+        if (
+            type(unavailable_splits) is not tuple
+            or any(
+                type(split) is not str or split not in {"build", "calibration", "dev"}
+                for split in unavailable_splits
+            )
+            or len(unavailable_splits) != len(set(unavailable_splits))
+        ):
             _lifecycle_fail("materialized provider unavailable splits are malformed")
         instance = object.__new__(ChampionRowProviderAdapter)
         object.__setattr__(instance, "kind", "materialized")
@@ -466,10 +459,7 @@ class ChampionRowProviderAdapter:
             "rows_json",
             _canonical_adapter_payload(
                 {
-                    "rows": [
-                        _row_payload(row)
-                        for row in cast(tuple[ChampionTaskRow, ...], rows)
-                    ],
+                    "rows": [_row_payload(row) for row in cast(tuple[ChampionTaskRow, ...], rows)],
                     "unavailable_splits": list(unavailable_splits),
                 },
                 "materialized row-provider payload",
@@ -480,9 +470,7 @@ class ChampionRowProviderAdapter:
 
     @property
     def config_fingerprint(self) -> str:
-        return champion_fingerprint(
-            _adapter_object(self.config_json, "row-provider config")
-        )
+        return champion_fingerprint(_adapter_object(self.config_json, "row-provider config"))
 
     @property
     def implementation_fingerprint(self) -> str:
@@ -490,9 +478,7 @@ class ChampionRowProviderAdapter:
             {
                 "contract": _ROW_PROVIDER_ADAPTER_CONTRACT,
                 "kind": self.kind,
-                "rows_sha256": hashlib.sha256(
-                    self.rows_json.encode("utf-8")
-                ).hexdigest(),
+                "rows_sha256": hashlib.sha256(self.rows_json.encode("utf-8")).hexdigest(),
             }
         )
 
@@ -526,8 +512,7 @@ class ChampionRowProviderAdapter:
         ):
             _lifecycle_fail("formal row-provider tasks are malformed")
         task_ids = tuple(
-            cast(Task, task).task_id
-            for task in cast(tuple[object, ...] | list[object], tasks)
+            cast(Task, task).task_id for task in cast(tuple[object, ...] | list[object], tasks)
         )
         if len(task_ids) != len(set(task_ids)):
             _lifecycle_fail("formal row-provider tasks contain duplicate identities")
@@ -537,11 +522,7 @@ class ChampionRowProviderAdapter:
                 f"materialized row-provider data is unavailable for {split}"
             )
         selected = set(task_ids)
-        return tuple(
-            row
-            for row in rows
-            if row.split == split and row.task_id in selected
-        )
+        return tuple(row for row in rows if row.split == split and row.task_id in selected)
 
     def __call__(self, tasks: object, split: object) -> tuple[ChampionTaskRow, ...]:
         return self.provide(tasks, split)
@@ -612,9 +593,7 @@ class ChampionCallableBinding:
             "implementation_fingerprint",
             champion_fingerprint({"kind": kind, "contract": contract}),
         )
-        object.__setattr__(
-            instance, "config_fingerprint", champion_fingerprint(config_payload)
-        )
+        object.__setattr__(instance, "config_fingerprint", champion_fingerprint(config_payload))
         instance.verify()
         return instance
 
@@ -731,10 +710,7 @@ class ChampionRuntimeBindings:
         for current, expected, label in live:
             if current is not expected:
                 _lifecycle_fail(f"formal runtime {label} executable drifted")
-        if (
-            _formal_runtime_configuration_fingerprint()
-            != self.configuration_fingerprint
-        ):
+        if _formal_runtime_configuration_fingerprint() != self.configuration_fingerprint:
             _lifecycle_fail("formal runtime configuration drifted")
 
 
@@ -795,9 +771,7 @@ def partition_train_tasks(
         sorted(
             (
                 (
-                    hashlib.sha256(
-                        f"{seed}{entity_name}".encode("utf-8")
-                    ).hexdigest(),
+                    hashlib.sha256(f"{seed}{entity_name}".encode("utf-8")).hexdigest(),
                     entity_name,
                     tuple(sorted(group, key=lambda item: item.task_id)),
                 )
@@ -816,9 +790,7 @@ def partition_train_tasks(
         subsets = next_subsets
     selected_groups = subsets.get(calibration_size)
     if selected_groups is None:
-        _lifecycle_fail(
-            "Train entity groups cannot form the exact entity-disjoint partition"
-        )
+        _lifecycle_fail("Train entity groups cannot form the exact entity-disjoint partition")
     calibration_indexes = set(selected_groups)
     build = tuple(
         task
@@ -834,9 +806,7 @@ def partition_train_tasks(
     )
     if len(build) != build_size or len(calibration) != calibration_size:
         _lifecycle_fail("entity-disjoint partition produced the wrong exact sizes")
-    if {task.entity_name for task in build} & {
-        task.entity_name for task in calibration
-    }:
+    if {task.entity_name for task in build} & {task.entity_name for task in calibration}:
         _lifecycle_fail("entity-disjoint partition contains entity overlap")
     return TrainPartitions(build=build, calibration=calibration)
 
@@ -847,9 +817,7 @@ def _require_sha256(value: object, label: str) -> str:
     return cast(str, value)
 
 
-def _validated_hash_inventory(
-    values: object, label: str
-) -> tuple[tuple[str, str], ...]:
+def _validated_hash_inventory(values: object, label: str) -> tuple[tuple[str, str], ...]:
     if type(values) is not tuple or not values:
         _lifecycle_fail(f"{label} must be a nonempty exact tuple")
     inventory = cast(tuple[object, ...], values)
@@ -940,9 +908,7 @@ def _validated_task_hashes(
         task_id, digest = cast(tuple[object, object], raw_pair)
         if task_id != expected_ids[index]:
             _lifecycle_fail(f"{label} task order drifted from membership")
-        parsed.append(
-            (cast(str, task_id), _require_sha256(digest, f"{label} hash"))
-        )
+        parsed.append((cast(str, task_id), _require_sha256(digest, f"{label} hash")))
     return tuple(parsed)
 
 
@@ -973,6 +939,7 @@ class ChampionRunManifest:
     research_target_gain: float
     runtime_fingerprint: str
     runtime_implementation_fingerprint: str
+    forecast_runtime_identity_fingerprint: str
 
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int or self.schema_version != 1:
@@ -981,17 +948,11 @@ class ChampionRunManifest:
             _lifecycle_fail("run manifest partition seed must be an exact integer")
         _validated_hash_inventory(self.source_hashes, "source hashes")
         _validated_hash_inventory(self.dictionary_hashes, "Dictionary hashes")
-        train = _validated_membership(
-            self.train_tasks, "Train membership", expected_size=80
-        )
+        train = _validated_membership(self.train_tasks, "Train membership", expected_size=80)
         dev = _validated_membership(self.dev_tasks, "Dev membership", expected_size=20)
-        _validated_task_hashes(
-            self.train_task_hashes, "Train task hashes", train
-        )
+        _validated_task_hashes(self.train_task_hashes, "Train task hashes", train)
         _validated_task_hashes(self.dev_task_hashes, "Dev task hashes", dev)
-        build = _validated_membership(
-            self.build_tasks, "Build membership", expected_size=64
-        )
+        build = _validated_membership(self.build_tasks, "Build membership", expected_size=64)
         calibration = _validated_membership(
             self.calibration_tasks,
             "Calibration membership",
@@ -1002,9 +963,7 @@ class ChampionRunManifest:
             _lifecycle_fail("Build and Calibration membership overlap")
         if dict(build) | dict(calibration) != train_map:
             _lifecycle_fail("Build and Calibration must exactly partition Train")
-        if {entity for _, entity in build} & {
-            entity for _, entity in calibration
-        }:
+        if {entity for _, entity in build} & {entity for _, entity in calibration}:
             _lifecycle_fail("Build and Calibration must be entity-disjoint")
         if {_canonical_identity(task_id) for task_id, _ in train} & {
             _canonical_identity(task_id) for task_id, _ in dev
@@ -1025,6 +984,7 @@ class ChampionRunManifest:
             "numeric_grid_fingerprint",
             "runtime_fingerprint",
             "runtime_implementation_fingerprint",
+            "forecast_runtime_identity_fingerprint",
         ):
             _require_sha256(getattr(self, name), name)
         if type(self.proposal_model) is not str or not self.proposal_model.strip():
@@ -1037,10 +997,7 @@ class ChampionRunManifest:
             _lifecycle_fail("research target cannot be below candidate threshold")
 
     def _identity_payload(self) -> dict[str, object]:
-        return {
-            entry.name: getattr(self, entry.name)
-            for entry in fields(self)
-        }
+        return {entry.name: getattr(self, entry.name) for entry in fields(self)}
 
     @property
     def input_fingerprint(self) -> str:
@@ -1098,8 +1055,7 @@ def _parse_sanitized_feedback(payload: dict[str, object]) -> ProposerEvidence:
     )
     try:
         morphology = tuple(
-            MorphologyAggregate(**item)  # type: ignore[arg-type]
-            for item in morphology_payloads
+            MorphologyAggregate(**item) for item in morphology_payloads  # type: ignore[arg-type]
         )
         comparisons: list[_ProposerComparison] = []
         count_fields = {
@@ -1133,12 +1089,9 @@ def _parse_sanitized_feedback(payload: dict[str, object]) -> ProposerEvidence:
                     continue
                 elif type(value) is not float or not math.isfinite(value):
                     _lifecycle_fail("checkpoint comparison metric is malformed")
-            comparisons.append(
-                _ProposerComparison(**item)  # type: ignore[arg-type]
-            )
+            comparisons.append(_ProposerComparison(**item))  # type: ignore[arg-type]
         invalid_attempts = tuple(
-            _InvalidAttemptAggregate(**item)  # type: ignore[arg-type]
-            for item in invalid_payloads
+            _InvalidAttemptAggregate(**item) for item in invalid_payloads  # type: ignore[arg-type]
         )
         evidence = ProposerEvidence(
             label="adaptive_train_build_diagnostic",
@@ -1173,17 +1126,15 @@ class ChampionCheckpoint:
         if type(self.schema_version) is not int or self.schema_version != 1:
             _lifecycle_fail("checkpoint schema_version must be exactly one")
         _require_sha256(self.input_fingerprint, "checkpoint input fingerprint")
-        if type(self.completed_stage) is not str or _CHECKPOINT_STAGE.fullmatch(
-            self.completed_stage
-        ) is None:
+        if (
+            type(self.completed_stage) is not str
+            or _CHECKPOINT_STAGE.fullmatch(self.completed_stage) is None
+        ):
             _lifecycle_fail("checkpoint completed stage is invalid")
         if type(self.active_parent) is not ChampionRelease:
             _lifecycle_fail("checkpoint active Parent must be an exact release")
         _validated_parent(self.active_parent)
-        if (
-            type(self.proposal_archive) is not tuple
-            or len(self.proposal_archive) > 3
-        ):
+        if type(self.proposal_archive) is not tuple or len(self.proposal_archive) > 3:
             _lifecycle_fail("checkpoint proposal archive cannot exceed three policies")
         policy_ids: list[str] = []
         for policy in self.proposal_archive:
@@ -1211,9 +1162,7 @@ class ChampionCheckpoint:
             "input_fingerprint": self.input_fingerprint,
             "completed_stage": self.completed_stage,
             "active_parent": self.active_parent.to_payload(),
-            "proposal_archive": [
-                policy.to_payload() for policy in self.proposal_archive
-            ],
+            "proposal_archive": [policy.to_payload() for policy in self.proposal_archive],
             "sanitized_feedback": self.sanitized_feedback.to_payload(),
             "build_evidence_fingerprint": self.build_evidence_fingerprint,
         }
@@ -1243,9 +1192,7 @@ class ChampionStageCandidateReport:
         return {
             "policy_sha256": self.policy_sha256,
             "evidence_fingerprint": self.evidence_fingerprint,
-            "comparison": (
-                asdict(self.comparison) if self.comparison is not None else None
-            ),
+            "comparison": (asdict(self.comparison) if self.comparison is not None else None),
             "invalid_reason": self.invalid_reason,
         }
 
@@ -1324,9 +1271,7 @@ def _attested_file_digest(path: Path, label: str) -> str:
         if cursor.is_symlink():
             _lifecycle_fail(f"{label} cannot use a symlink or path alias")
     try:
-        descriptor = os.open(
-            absolute, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        )
+        descriptor = os.open(absolute, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError as error:
         raise ChampionLifecycleError(f"{label} is missing or unreadable") from error
     try:
@@ -1359,15 +1304,11 @@ def _attested_path_digest(path: Path, label: str) -> str:
             continue
         if not child.is_file():
             _lifecycle_fail(f"{label} contains a non-file entry")
-        inventory.append(
-            (child.relative_to(path).as_posix(), _attested_file_digest(child, label))
-        )
+        inventory.append((child.relative_to(path).as_posix(), _attested_file_digest(child, label)))
     return champion_fingerprint({"files": tuple(inventory)})
 
 
-def _validated_attestation_files(
-    values: object, label: str
-) -> tuple[tuple[str, Path], ...]:
+def _validated_attestation_files(values: object, label: str) -> tuple[tuple[str, Path], ...]:
     if type(values) is not tuple or not values:
         _lifecycle_fail(f"{label} must be a nonempty exact tuple")
     parsed: list[tuple[str, Path]] = []
@@ -1388,9 +1329,7 @@ def _validated_attestation_files(
         _attested_file_digest(path, label)
         parsed.append((name, path))
     result = tuple(parsed)
-    if tuple(name for name, _ in result) != tuple(
-        sorted(name for name, _ in result)
-    ):
+    if tuple(name for name, _ in result) != tuple(sorted(name for name, _ in result)):
         _lifecycle_fail(f"{label} must use canonical sorted order")
     return result
 
@@ -1410,6 +1349,7 @@ class ChampionRunAttestations:
     runtime_bindings: ChampionRuntimeBindings
     numeric_grid: object
     runtime_files: tuple[tuple[str, Path], ...]
+    forecast_runtime_identity: object
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1420,9 +1360,7 @@ class ChampionRunAttestations:
         object.__setattr__(
             self,
             "dictionary_files",
-            _validated_attestation_files(
-                self.dictionary_files, "Dictionary attestations"
-            ),
+            _validated_attestation_files(self.dictionary_files, "Dictionary attestations"),
         )
         object.__setattr__(
             self,
@@ -1449,13 +1387,12 @@ class ChampionRunAttestations:
         self.runtime_bindings.verify_live_globals()
         if self.proposer_binding.identity != self.proposal_model:
             _lifecycle_fail("actual proposer identity drifted from proposal model")
-        if self.proposer_binding.config_fingerprint != champion_fingerprint(
-            self.proposal_config
-        ):
+        if self.proposer_binding.config_fingerprint != champion_fingerprint(self.proposal_config):
             _lifecycle_fail("actual proposer config drifted")
         try:
             champion_fingerprint(self.proposal_config)
             champion_fingerprint(self.numeric_grid)
+            champion_fingerprint(self.forecast_runtime_identity)
         except Exception as error:
             raise ChampionLifecycleError(
                 "proposal config and numeric grid must be canonical inputs"
@@ -1464,8 +1401,7 @@ class ChampionRunAttestations:
     @staticmethod
     def _inventory(values: tuple[tuple[str, Path], ...]) -> tuple[tuple[str, str], ...]:
         return tuple(
-            (name, _attested_file_digest(path, f"{name} attestation"))
-            for name, path in values
+            (name, _attested_file_digest(path, f"{name} attestation")) for name, path in values
         )
 
     @property
@@ -1478,15 +1414,11 @@ class ChampionRunAttestations:
 
     @property
     def split_manifest_fingerprint(self) -> str:
-        return _attested_file_digest(
-            self.split_manifest_file, "split manifest attestation"
-        )
+        return _attested_file_digest(self.split_manifest_file, "split manifest attestation")
 
     @property
     def forecast_store_fingerprint(self) -> str:
-        return _attested_path_digest(
-            self.forecast_store, "forecast store attestation"
-        )
+        return _attested_path_digest(self.forecast_store, "forecast store attestation")
 
     @property
     def proposal_config_fingerprint(self) -> str:
@@ -1511,6 +1443,10 @@ class ChampionRunAttestations:
     @property
     def runtime_fingerprint(self) -> str:
         return champion_fingerprint({"files": self._inventory(self.runtime_files)})
+
+    @property
+    def forecast_runtime_identity_fingerprint(self) -> str:
+        return champion_fingerprint(self.forecast_runtime_identity)
 
     def verify(self, manifest: ChampionRunManifest) -> None:
         """Recompute every actual identity; no manifest digest authenticates itself."""
@@ -1552,6 +1488,10 @@ class ChampionRunAttestations:
             "runtime implementation attestation": (
                 self.runtime_implementation_fingerprint,
                 manifest.runtime_implementation_fingerprint,
+            ),
+            "forecast runtime identity attestation": (
+                self.forecast_runtime_identity_fingerprint,
+                manifest.forecast_runtime_identity_fingerprint,
             ),
             "proposal model attestation": (
                 self.proposal_model,
@@ -1617,9 +1557,7 @@ def _open_pinned_directory(
                     os.fsync(parent_descriptor)
                     descriptor = os.open(
                         component,
-                        os.O_RDONLY
-                        | os.O_DIRECTORY
-                        | getattr(os, "O_NOFOLLOW", 0),
+                        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
                         dir_fd=parent_descriptor,
                     )
                 except OSError as creation_error:
@@ -1632,14 +1570,11 @@ def _open_pinned_directory(
                 ) from error
             try:
                 details = os.fstat(descriptor)
-                linked = os.stat(
-                    component, dir_fd=parent_descriptor, follow_symlinks=False
-                )
+                linked = os.stat(component, dir_fd=parent_descriptor, follow_symlinks=False)
                 if (
                     not stat.S_ISDIR(details.st_mode)
                     or stat.S_ISLNK(linked.st_mode)
-                    or (details.st_dev, details.st_ino)
-                    != (linked.st_dev, linked.st_ino)
+                    or (details.st_dev, details.st_ino) != (linked.st_dev, linked.st_ino)
                 ):
                     _lifecycle_fail(f"{label} cannot use a symlink or path alias")
                 chain.append((component, descriptor, details.st_dev, details.st_ino))
@@ -1660,13 +1595,9 @@ def _open_pinned_directory(
 class _PinnedJsonDirectory:
     """Canonical JSON primitives relative to a verified no-follow directory FD."""
 
-    def __init__(
-        self, root: str | Path, label: str, *, create: bool = True
-    ) -> None:
+    def __init__(self, root: str | Path, label: str, *, create: bool = True) -> None:
         self._closed = False
-        self.root, self._root_chain = _open_pinned_directory(
-            root, label, create=create
-        )
+        self.root, self._root_chain = _open_pinned_directory(root, label, create=create)
         _, self._root_fd, self._root_dev, self._root_ino = self._root_chain[-1]
         self._root_label = label
 
@@ -1697,9 +1628,7 @@ class _PinnedJsonDirectory:
     def _verify_root(self) -> None:
         if self._closed:
             _lifecycle_fail(f"{self._root_label} is closed")
-        for index, (component, descriptor, device, inode) in enumerate(
-            self._root_chain
-        ):
+        for index, (component, descriptor, device, inode) in enumerate(self._root_chain):
             try:
                 pinned = os.fstat(descriptor)
                 if index == 0:
@@ -1720,9 +1649,7 @@ class _PinnedJsonDirectory:
                 or (linked.st_dev, linked.st_ino) != (device, inode)
                 or (pinned.st_dev, pinned.st_ino) != (device, inode)
             ):
-                _lifecycle_fail(
-                    f"{self._root_label} path drifted from its pinned authority"
-                )
+                _lifecycle_fail(f"{self._root_label} path drifted from its pinned authority")
 
     def _simple_name(self, name: str) -> str:
         if (
@@ -1742,9 +1669,7 @@ class _PinnedJsonDirectory:
         except FileNotFoundError:
             return False
         except OSError as error:
-            raise ChampionLifecycleError(
-                f"artifact cannot be inspected: {safe_name}"
-            ) from error
+            raise ChampionLifecycleError(f"artifact cannot be inspected: {safe_name}") from error
         if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode):
             _lifecycle_fail(f"artifact is missing or aliased: {safe_name}")
         if details.st_nlink != 1:
@@ -1762,10 +1687,7 @@ class _PinnedJsonDirectory:
             try:
                 descriptor = os.open(
                     temporary,
-                    os.O_WRONLY
-                    | os.O_CREAT
-                    | os.O_EXCL
-                    | getattr(os, "O_NOFOLLOW", 0),
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
                     0o600,
                     dir_fd=self._root_fd,
                 )
@@ -1882,9 +1804,7 @@ class _PinnedJsonDirectory:
                 dir_fd=self._root_fd,
             )
         except OSError as error:
-            raise ChampionLifecycleError(
-                f"artifact is missing or aliased: {safe_name}"
-            ) from error
+            raise ChampionLifecycleError(f"artifact is missing or aliased: {safe_name}") from error
         try:
             details = os.fstat(descriptor)
             if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
@@ -1916,9 +1836,7 @@ class _PinnedJsonDirectory:
         try:
             canonical = canonical_json_bytes(result)
         except (TypeError, ValueError) as error:
-            raise ChampionLifecycleError(
-                f"artifact is not canonical JSON: {safe_name}"
-            ) from error
+            raise ChampionLifecycleError(f"artifact is not canonical JSON: {safe_name}") from error
         if raw != canonical:
             _lifecycle_fail(f"artifact is not canonical JSON: {safe_name}")
         return result
@@ -1936,9 +1854,7 @@ class ChampionSplitLease:
         if type(self.role) is not str or self.role not in {"calibration", "dev"}:
             _lifecycle_fail("split lease has an invalid role")
         _require_sha256(self.split_key, "split lease key")
-        _require_sha256(
-            self.run_input_fingerprint, "split lease run input fingerprint"
-        )
+        _require_sha256(self.run_input_fingerprint, "split lease run input fingerprint")
 
 
 @dataclass(frozen=True)
@@ -1974,9 +1890,9 @@ def _parse_authority_row(value: object) -> ChampionTaskRow:
         _lifecycle_fail("authority provider row has a malformed schema")
     payload = cast(dict[str, object], value)
     profile_payload = payload["profile"]
-    if type(profile_payload) is not dict or set(
-        cast(dict[object, object], profile_payload)
-    ) != {entry.name for entry in fields(TaskProfile)}:
+    if type(profile_payload) is not dict or set(cast(dict[object, object], profile_payload)) != {
+        entry.name for entry in fields(TaskProfile)
+    }:
         _lifecycle_fail("authority provider profile has a malformed schema")
     profile_values = dict(cast(dict[str, object], profile_payload))
     periods = profile_values["periodicity_periods"]
@@ -1997,9 +1913,7 @@ def _parse_authority_row(value: object) -> ChampionTaskRow:
                 **cast(dict[str, object], diagnostic_payload)  # type: ignore[arg-type]
             )
         except Exception as error:
-            raise ChampionLifecycleError(
-                "authority provider diagnostic is malformed"
-            ) from error
+            raise ChampionLifecycleError("authority provider diagnostic is malformed") from error
     try:
         row = ChampionTaskRow(
             task_id=payload["task_id"],  # type: ignore[arg-type]
@@ -2030,9 +1944,7 @@ class ChampionAuthorityStore(_PinnedJsonDirectory):
         *,
         expected_authority_identity: str,
     ) -> None:
-        expected = _require_sha256(
-            expected_authority_identity, "expected authority identity"
-        )
+        expected = _require_sha256(expected_authority_identity, "expected authority identity")
         super().__init__(root, "authority root", create=False)
         try:
             identity_name = "authority_identity.json"
@@ -2063,9 +1975,7 @@ class ChampionAuthorityStore(_PinnedJsonDirectory):
         if path.exists() or path.is_symlink():
             _lifecycle_fail("authority root is already provisioned")
         instance = object.__new__(cls)
-        _PinnedJsonDirectory.__init__(
-            instance, path, "authority root", create=True
-        )
+        _PinnedJsonDirectory.__init__(instance, path, "authority root", create=True)
         try:
             instance._atomic_create_name(
                 "authority_identity.json",
@@ -2085,12 +1995,8 @@ class ChampionAuthorityStore(_PinnedJsonDirectory):
     ) -> str:
         if type(role) is not str or role not in {"calibration", "dev"}:
             _lifecycle_fail("split authority has an invalid role")
-        _require_sha256(
-            split_manifest_fingerprint, "split authority manifest fingerprint"
-        )
-        _require_sha256(
-            task_content_fingerprint, "split authority task-content fingerprint"
-        )
+        _require_sha256(split_manifest_fingerprint, "split authority manifest fingerprint")
+        _require_sha256(task_content_fingerprint, "split authority task-content fingerprint")
         return champion_fingerprint(
             {
                 "role": role,
@@ -2107,9 +2013,7 @@ class ChampionAuthorityStore(_PinnedJsonDirectory):
         run_input_fingerprint: str,
     ) -> ChampionSplitLease:
         """Irreversibly acquire a split before any provider sees its tasks."""
-        split_key = self._split_key(
-            role, split_manifest_fingerprint, task_content_fingerprint
-        )
+        split_key = self._split_key(role, split_manifest_fingerprint, task_content_fingerprint)
         _require_sha256(run_input_fingerprint, "split authority run fingerprint")
         lease = ChampionSplitLease(role, split_key, run_input_fingerprint)
         name = f"{split_key}.lease.json"
@@ -2150,9 +2054,7 @@ class ChampionAuthorityStore(_PinnedJsonDirectory):
         name = f"{run_authority_fingerprint}.build.json"
         if not self._name_exists(name):
             self._atomic_create_name(name, payload)
-        elif canonical_json_bytes(self._read_name_payload(name)) != canonical_json_bytes(
-            payload
-        ):
+        elif canonical_json_bytes(self._read_name_payload(name)) != canonical_json_bytes(payload):
             _lifecycle_fail("operator-owned Build evidence authority drifted")
 
     def require_build_evidence(
@@ -2177,19 +2079,21 @@ class ChampionAuthorityStore(_PinnedJsonDirectory):
             "input_fingerprint": input_fingerprint,
             "build_evidence_fingerprint": build_evidence_fingerprint,
         }
-        if canonical_json_bytes(self._read_name_payload(name)) != canonical_json_bytes(
-            expected
-        ):
+        if canonical_json_bytes(self._read_name_payload(name)) != canonical_json_bytes(expected):
             _lifecycle_fail("operator-owned Build evidence authority drifted")
 
     def _load_lease(self, split_key: str) -> ChampionSplitLease:
         payload = self._read_name_payload(f"{split_key}.lease.json")
-        if set(payload) != {
-            "schema_version",
-            "role",
-            "split_key",
-            "run_input_fingerprint",
-        } or payload["schema_version"] != 1:
+        if (
+            set(payload)
+            != {
+                "schema_version",
+                "role",
+                "split_key",
+                "run_input_fingerprint",
+            }
+            or payload["schema_version"] != 1
+        ):
             _lifecycle_fail("split lease has a malformed schema")
         try:
             lease = ChampionSplitLease(
@@ -2214,9 +2118,7 @@ class ChampionAuthorityStore(_PinnedJsonDirectory):
         runtime_fingerprint: str,
     ) -> tuple[ChampionSplitLease, _AuthorityProviderBundle | None]:
         """Acquire once, or resume only from a complete committed result bundle."""
-        split_key = self._split_key(
-            role, split_manifest_fingerprint, task_content_fingerprint
-        )
+        split_key = self._split_key(role, split_manifest_fingerprint, task_content_fingerprint)
         for value, label in (
             (run_input_fingerprint, "split authority run fingerprint"),
             (candidate_fingerprint, "split authority candidate fingerprint"),
@@ -2243,16 +2145,20 @@ class ChampionAuthorityStore(_PinnedJsonDirectory):
         ):
             _lifecycle_fail(f"{role} split has already been consumed")
         payload = self._read_name_payload(bundle_name)
-        if set(payload) != {
-            "schema_version",
-            "role",
-            "split_key",
-            "run_input_fingerprint",
-            "candidate_fingerprint",
-            "runtime_fingerprint",
-            "rows_fingerprint",
-            "rows",
-        } or payload["schema_version"] != 1:
+        if (
+            set(payload)
+            != {
+                "schema_version",
+                "role",
+                "split_key",
+                "run_input_fingerprint",
+                "candidate_fingerprint",
+                "runtime_fingerprint",
+                "rows_fingerprint",
+                "rows",
+            }
+            or payload["schema_version"] != 1
+        ):
             _lifecycle_fail("split provider bundle has a malformed schema")
         if (
             payload["role"] != role
@@ -2394,23 +2300,23 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
     def _parse_publication_record(
         self, payload: dict[str, object], label: str
     ) -> tuple[str, str | None, str, bool]:
-        if set(payload) != {
-            "schema_version",
-            "transaction_id",
-            "prior_release_id",
-            "next_release_id",
-            "accepted",
-        } or payload["schema_version"] != 1:
+        if (
+            set(payload)
+            != {
+                "schema_version",
+                "transaction_id",
+                "prior_release_id",
+                "next_release_id",
+                "accepted",
+            }
+            or payload["schema_version"] != 1
+        ):
             _lifecycle_fail(f"{label} publication record is malformed")
-        transaction_id = _require_sha256(
-            payload["transaction_id"], f"{label} transaction ID"
-        )
+        transaction_id = _require_sha256(payload["transaction_id"], f"{label} transaction ID")
         prior = payload["prior_release_id"]
         if prior is not None:
             prior = _require_sha256(prior, f"{label} prior release ID")
-        next_release = _require_sha256(
-            payload["next_release_id"], f"{label} next release ID"
-        )
+        next_release = _require_sha256(payload["next_release_id"], f"{label} next release ID")
         accepted = payload["accepted"]
         if type(accepted) is not bool:
             _lifecycle_fail(f"{label} publication accepted flag is malformed")
@@ -2434,9 +2340,7 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
         name = "last_accepted_release.json"
         if not self._name_exists(name):
             self._atomic_create_name(name, payload)
-        elif canonical_json_bytes(self._read_name_payload(name)) != canonical_json_bytes(
-            payload
-        ):
+        elif canonical_json_bytes(self._read_name_payload(name)) != canonical_json_bytes(payload):
             _lifecycle_fail("last accepted release authority cannot be overwritten")
 
     def _read_accepted_release_authority(self) -> tuple[str, str, bytes] | None:
@@ -2448,12 +2352,8 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
             payload["schema_version"] != 1
         ):
             _lifecycle_fail("last accepted release authority is malformed")
-        transaction_id = _require_sha256(
-            payload["transaction_id"], "accepted transaction ID"
-        )
-        release_id = _require_sha256(
-            payload["release_id"], "last accepted release fingerprint"
-        )
+        transaction_id = _require_sha256(payload["transaction_id"], "accepted transaction ID")
+        release_id = _require_sha256(payload["release_id"], "last accepted release fingerprint")
         return transaction_id, release_id, self._archive_release_bytes(release_id)
 
     def has_accepted_release(self) -> bool:
@@ -2507,15 +2407,14 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
                         "publication marker drifted from accepted transaction authority"
                     )
             try:
-                pointer_matches = self._name_exists(
-                    "champion_release.json"
-                ) and self._read_name_bytes("champion_release.json") == accepted_bytes
+                pointer_matches = (
+                    self._name_exists("champion_release.json")
+                    and self._read_name_bytes("champion_release.json") == accepted_bytes
+                )
             except ChampionLifecycleError:
                 pointer_matches = False
             if not pointer_matches:
-                self._force_replace_name_bytes(
-                    "champion_release.json", accepted_bytes
-                )
+                self._force_replace_name_bytes("champion_release.json", accepted_bytes)
             if has_commit:
                 self._unlink_root_name(commit_name)
                 self._sync_root()
@@ -2555,9 +2454,7 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
         else:
             self._restore_transaction_prior(prior_release_id)
             if self._name_exists("last_accepted_release.json"):
-                accepted_payload = self._read_name_payload(
-                    "last_accepted_release.json"
-                )
+                accepted_payload = self._read_name_payload("last_accepted_release.json")
                 if accepted_payload.get("transaction_id") == transaction_id:
                     self._unlink_root_name("last_accepted_release.json")
         self._unlink_root_name(commit_name)
@@ -2639,17 +2536,19 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
             )
             return instance_fingerprint
         payload = self._read_name_payload(name)
-        if set(payload) != {
-            "schema_version",
-            "input_fingerprint",
-            "instance_fingerprint",
-        } or payload["schema_version"] != 1:
+        if (
+            set(payload)
+            != {
+                "schema_version",
+                "input_fingerprint",
+                "instance_fingerprint",
+            }
+            or payload["schema_version"] != 1
+        ):
             _lifecycle_fail("run instance authority is malformed")
         if payload["input_fingerprint"] != manifest.input_fingerprint:
             _lifecycle_fail("run instance belongs to a stale or foreign manifest")
-        return _require_sha256(
-            payload["instance_fingerprint"], "run instance fingerprint"
-        )
+        return _require_sha256(payload["instance_fingerprint"], "run instance fingerprint")
 
     def require_open_lifecycle(self, run_authority_fingerprint: str) -> None:
         _require_sha256(run_authority_fingerprint, "run authority fingerprint")
@@ -2657,12 +2556,16 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
         if not self._name_exists(name):
             return
         payload = self._read_name_payload(name)
-        if set(payload) != {
-            "schema_version",
-            "run_authority_fingerprint",
-            "status",
-            "release_fingerprint",
-        } or payload["schema_version"] != 1:
+        if (
+            set(payload)
+            != {
+                "schema_version",
+                "run_authority_fingerprint",
+                "status",
+                "release_fingerprint",
+            }
+            or payload["schema_version"] != 1
+        ):
             _lifecycle_fail("lifecycle completion authority is malformed")
         if payload["run_authority_fingerprint"] != run_authority_fingerprint:
             _lifecycle_fail("lifecycle completion belongs to a stale or foreign run")
@@ -2673,9 +2576,7 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
         self,
         *,
         run_authority_fingerprint: str,
-        status: Literal[
-            "no_finalist", "calibration_rejected", "dev_rejected", "accepted"
-        ],
+        status: Literal["no_finalist", "calibration_rejected", "dev_rejected", "accepted"],
         release: ChampionRelease,
     ) -> None:
         _require_sha256(run_authority_fingerprint, "run authority fingerprint")
@@ -2744,28 +2645,21 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
                         for attempt in generation.attempts
                     ],
                     "finalist_fingerprints": tuple(
-                        champion_fingerprint(policy)
-                        for policy in generation.finalists
+                        champion_fingerprint(policy) for policy in generation.finalists
                     ),
-                    "feedback_fingerprint": champion_fingerprint(
-                        generation.feedback.to_payload()
-                    ),
+                    "feedback_fingerprint": champion_fingerprint(generation.feedback.to_payload()),
                 }
                 for generation in result.generations
             ],
             "shortlist": [policy.to_payload() for policy in result.shortlist],
             "combined_feedback": combined_feedback_payload,
-            "combined_feedback_fingerprint": champion_fingerprint(
-                combined_feedback_payload
-            ),
+            "combined_feedback_fingerprint": champion_fingerprint(combined_feedback_payload),
         }
         fingerprint = champion_fingerprint(payload)
         path = self._path("build_evidence.json")
         if not path.exists():
             self._atomic_create(path, payload)
-        elif canonical_json_bytes(self._read_payload(path)) != canonical_json_bytes(
-            payload
-        ):
+        elif canonical_json_bytes(self._read_payload(path)) != canonical_json_bytes(payload):
             _lifecycle_fail("immutable Build evidence drifted")
         return fingerprint
 
@@ -2778,17 +2672,21 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
         config: ChampionEvolutionConfig,
     ) -> None:
         payload = self._read_payload(self._path("build_evidence.json"))
-        if set(payload) != {
-            "schema_version",
-            "input_fingerprint",
-            "parent_fingerprint",
-            "config_fingerprint",
-            "build_rows_fingerprint",
-            "generations",
-            "shortlist",
-            "combined_feedback",
-            "combined_feedback_fingerprint",
-        } or payload["schema_version"] != 1:
+        if (
+            set(payload)
+            != {
+                "schema_version",
+                "input_fingerprint",
+                "parent_fingerprint",
+                "config_fingerprint",
+                "build_rows_fingerprint",
+                "generations",
+                "shortlist",
+                "combined_feedback",
+                "combined_feedback_fingerprint",
+            }
+            or payload["schema_version"] != 1
+        ):
             _lifecycle_fail("immutable Build evidence has a malformed schema")
         if champion_fingerprint(payload) != checkpoint.build_evidence_fingerprint:
             _lifecycle_fail("checkpoint drifted from immutable Build evidence")
@@ -2822,8 +2720,7 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
             generation = cast(dict[str, object], raw_generation)
             if (
                 generation["number"] != expected_number
-                or generation["mutation_parent_sha256"]
-                != champion_fingerprint(parent)
+                or generation["mutation_parent_sha256"] != champion_fingerprint(parent)
                 or generation["config_fingerprint"] != config.fingerprint
                 or generation["stage_counts"] != list(config.screen_sizes)
             ):
@@ -2858,9 +2755,7 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
                     comparison = attempt["comparison"]
                     if type(comparison) is not dict:
                         _lifecycle_fail("Build finalist lacks exact score evidence")
-                    joint = cast(dict[str, object], comparison).get(
-                        "joint_improvement"
-                    )
+                    joint = cast(dict[str, object], comparison).get("joint_improvement")
                     if (
                         type(joint) is not float
                         or not math.isfinite(joint)
@@ -2871,16 +2766,13 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
                     finalist_ids.add(fitted_id)
             if generation["finalist_fingerprints"] != generation_finalists:
                 _lifecycle_fail("Build finalist evidence drifted from its attempts")
-            _require_sha256(
-                generation["feedback_fingerprint"], "Build feedback fingerprint"
-            )
+            _require_sha256(generation["feedback_fingerprint"], "Build feedback fingerprint")
         raw_shortlist = payload["shortlist"]
         if type(raw_shortlist) is not list:
             _lifecycle_fail("Build evidence shortlist is malformed")
         try:
             evidence_shortlist = tuple(
-                _parse_fitted_policy(item)
-                for item in cast(list[object], raw_shortlist)
+                _parse_fitted_policy(item) for item in cast(list[object], raw_shortlist)
             )
         except Exception as error:
             raise ChampionLifecycleError("Build evidence shortlist is malformed") from error
@@ -2888,24 +2780,18 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
         if any(item not in finalist_ids for item in evidence_ids):
             _lifecycle_fail("Build evidence shortlist was not derived from finalists")
         if canonical_json_bytes([item.to_payload() for item in evidence_shortlist]) != (
-            canonical_json_bytes(
-                [item.to_payload() for item in checkpoint.proposal_archive]
-            )
+            canonical_json_bytes([item.to_payload() for item in checkpoint.proposal_archive])
         ):
             _lifecycle_fail("checkpoint shortlist drifted from immutable Build evidence")
         raw_feedback = payload["combined_feedback"]
         if type(raw_feedback) is not dict:
             _lifecycle_fail("immutable Build combined feedback is malformed")
-        evidence_feedback = _parse_sanitized_feedback(
-            cast(dict[str, object], raw_feedback)
-        )
+        evidence_feedback = _parse_sanitized_feedback(cast(dict[str, object], raw_feedback))
         feedback_fingerprint = _require_sha256(
             payload["combined_feedback_fingerprint"],
             "Build combined feedback fingerprint",
         )
-        if feedback_fingerprint != champion_fingerprint(
-            evidence_feedback.to_payload()
-        ):
+        if feedback_fingerprint != champion_fingerprint(evidence_feedback.to_payload()):
             _lifecycle_fail("immutable Build combined feedback drifted")
         if canonical_json_bytes(evidence_feedback.to_payload()) != canonical_json_bytes(
             checkpoint.sanitized_feedback.to_payload()
@@ -2940,12 +2826,9 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
                 completed_stage=payload["completed_stage"],  # type: ignore[arg-type]
                 active_parent=parse_champion_release(payload["active_parent"]),
                 proposal_archive=tuple(
-                    _parse_fitted_policy(item)
-                    for item in cast(list[object], archive_payload)
+                    _parse_fitted_policy(item) for item in cast(list[object], archive_payload)
                 ),
-                sanitized_feedback=_parse_sanitized_feedback(
-                    cast(dict[str, object], feedback)
-                ),
+                sanitized_feedback=_parse_sanitized_feedback(cast(dict[str, object], feedback)),
                 build_evidence_fingerprint=payload[
                     "build_evidence_fingerprint"
                 ],  # type: ignore[arg-type]
@@ -3024,9 +2907,7 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
             _lifecycle_fail("immutable Parent archive drifted before restoration")
         self._force_replace_name_bytes("champion_release.json", expected)
 
-    def publish_release(
-        self, release: ChampionRelease, *, _accepted: bool = True
-    ) -> Path:
+    def publish_release(self, release: ChampionRelease, *, _accepted: bool = True) -> Path:
         self._verify_root()
         self._recover_publication()
         content = canonical_release_bytes(release)
@@ -3050,9 +2931,7 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
                 ) from error
             prior_id = champion_fingerprint(prior)
             prior_release_id = prior_id
-            if self._archive_release_bytes(prior_id) != canonical_release_bytes(
-                prior
-            ):
+            if self._archive_release_bytes(prior_id) != canonical_release_bytes(prior):
                 _lifecycle_fail("prior release archive drifted before publication")
         transaction_id = champion_fingerprint(
             {
@@ -3084,9 +2963,7 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
             if not committed:
                 self._unlink_root_name("release_commit.json")
                 if self._name_exists("last_accepted_release.json"):
-                    accepted_payload = self._read_name_payload(
-                        "last_accepted_release.json"
-                    )
+                    accepted_payload = self._read_name_payload("last_accepted_release.json")
                     if accepted_payload.get("transaction_id") == transaction_id:
                         self._unlink_root_name("last_accepted_release.json")
                 self._restore_transaction_prior(prior_release_id)
@@ -3199,13 +3076,9 @@ class BuildAttempt:
     policy: FittedChampionPolicy
     stage_task_counts: tuple[int, ...]
     comparison: ChampionComparison | None
-    status: Literal[
-        "invalid", "pruned", "finalist", "below_candidate_threshold"
-    ]
+    status: Literal["invalid", "pruned", "finalist", "below_candidate_threshold"]
     invalid_reason: Literal["unscorable_child"] | None = None
-    score_label: Literal["adaptive_train_build_diagnostic"] = (
-        "adaptive_train_build_diagnostic"
-    )
+    score_label: Literal["adaptive_train_build_diagnostic"] = "adaptive_train_build_diagnostic"
     independent_generalization_claim: Literal[False] = False
 
 
@@ -3232,9 +3105,7 @@ class BuildEvolutionResult:
     shortlist: tuple[FittedChampionPolicy, ...]
     config: ChampionEvolutionConfig
     config_fingerprint: str
-    score_label: Literal["adaptive_train_build_diagnostic"] = (
-        "adaptive_train_build_diagnostic"
-    )
+    score_label: Literal["adaptive_train_build_diagnostic"] = "adaptive_train_build_diagnostic"
     independent_generalization_claim: Literal[False] = False
 
 
@@ -3320,13 +3191,9 @@ def _validated_parent(
     try:
         if type(parent) is ChampionRelease:
             ChampionRelease.__post_init__(parent)
-            normalized_lineage = tuple(
-                _canonical_identity(item) for item in parent.lineage
-            )
+            normalized_lineage = tuple(_canonical_identity(item) for item in parent.lineage)
             if len(normalized_lineage) != len(set(normalized_lineage)):
-                _lifecycle_fail(
-                    "active Parent lineage contains duplicate normalized identities"
-                )
+                _lifecycle_fail("active Parent lineage contains duplicate normalized identities")
             FittedChampionPolicy.__post_init__(parent.policy)
             return validate_recipe(parent.policy.recipe), parent.policy
         if type(parent) is FittedChampionPolicy:
@@ -3366,9 +3233,7 @@ def _validated_rows(
         if row.split != "build":
             _fail("Build evolution accepts Build rows only")
         normalized_name = _canonical_identity(row.candidate_name)
-        prior_name = normalized_candidates.setdefault(
-            normalized_name, row.candidate_name
-        )
+        prior_name = normalized_candidates.setdefault(normalized_name, row.candidate_name)
         if prior_name != row.candidate_name:
             _fail("normalized row inventory contains a candidate collision")
         key = (row.candidate_name, row.task_id)
@@ -3380,10 +3245,7 @@ def _validated_rows(
         identity = (row.profile, row.truth, row.fold, row.split, row.history)
         previous = identities.setdefault(row.task_id, identity)
         if identity != previous:
-            _fail(
-                "Build row universe drifted across profile, truth, fold, split, "
-                "or history"
-            )
+            _fail("Build row universe drifted across profile, truth, fold, split, " "or history")
         candidate_tasks.setdefault(row.candidate_name, set()).add(row.task_id)
     if len(task_ids) != build_size:
         _fail("Build rows do not contain the configured task universe")
@@ -3403,9 +3265,7 @@ def _bound_config(
 ) -> ChampionEvolutionConfig:
     if config.build_task_ids and config.build_task_ids != task_ids:
         _fail("Build task membership drifted from the pre-registered universe")
-    screens = config.screen_task_ids or tuple(
-        task_ids[:size] for size in config.screen_sizes
-    )
+    screens = config.screen_task_ids or tuple(task_ids[:size] for size in config.screen_sizes)
     bound = _clone_config(
         config,
         build_task_ids=task_ids,
@@ -3444,9 +3304,7 @@ def _clone_config(
         research_target_gain=config.research_target_gain,
         gate_config=_clone_gate(config.gate_config),
         build_task_ids=(
-            tuple(config.build_task_ids)
-            if build_task_ids is None
-            else tuple(build_task_ids)
+            tuple(config.build_task_ids) if build_task_ids is None else tuple(build_task_ids)
         ),
         screen_task_ids=(
             tuple(tuple(stage) for stage in config.screen_task_ids)
@@ -3557,14 +3415,18 @@ def _policy_forecast(
         split = int(len(left) * policy.horizon_split)
         return left[:split] + right[split:], None
     if kind == "weighted":
-        return tuple(
-            left[index] * policy.weights[0] + right[index] * policy.weights[1]
-            for index in range(len(left))
-        ), None
+        return (
+            tuple(
+                left[index] * policy.weights[0] + right[index] * policy.weights[1]
+                for index in range(len(left))
+            ),
+            None,
+        )
     if kind == "median":
-        return tuple(
-            left[index] / 2.0 + right[index] / 2.0 for index in range(len(left))
-        ), None
+        return (
+            tuple(left[index] / 2.0 + right[index] / 2.0 for index in range(len(left))),
+            None,
+        )
     if kind == "bounded_overlay":
         return None, "history_scale_unavailable"
     return None, "unsupported_operator"
@@ -3645,9 +3507,7 @@ def _materialize_policy(
     for task_id in task_ids:
         base = identity[task_id]
         try:
-            forecast, failure = _policy_forecast(
-                policy, by_task[task_id], executor=executor
-            )
+            forecast, failure = _policy_forecast(policy, by_task[task_id], executor=executor)
         except (ArithmeticError, ChampionControllerError, OverflowError, ValueError):
             forecast, failure = None, "invalid_policy_materialization"
         if forecast is not None and any(not math.isfinite(value) for value in forecast):
@@ -3734,12 +3594,8 @@ def _evaluate_stage(
     except (ChampionEvidenceError, TypeError, ValueError) as error:
         raise ChampionControllerError("trusted Build scoring rejected the Parent") from error
     try:
-        child_score = cast(
-            ChampionScore, active_scorer(evidence_rows, state.score_name)
-        )
-        comparison = cast(
-            ChampionComparison, active_comparator(parent_score, child_score, gate)
-        )
+        child_score = cast(ChampionScore, active_scorer(evidence_rows, state.score_name))
+        comparison = cast(ChampionComparison, active_comparator(parent_score, child_score, gate))
     except (ChampionEvidenceError, TypeError, ValueError):
         return replace(
             state,
@@ -3800,23 +3656,16 @@ def _diverse(
 
 def _feedback(states: tuple[_AttemptState, ...]) -> ProposerEvidence:
     scored_states = tuple(
-        state
-        for state in states
-        if state.comparison is not None and state.evidence_rows
+        state for state in states if state.comparison is not None and state.evidence_rows
     )
     invalid_states = tuple(
-        state
-        for state in states
-        if state.comparison is None and state.invalid_reason is not None
+        state for state in states if state.comparison is None and state.invalid_reason is not None
     )
     if len(scored_states) + len(invalid_states) != len(states):
         _fail("every Build attempt requires genuine or typed invalid feedback")
     invalid_attempts: list[_InvalidAttemptAggregate] = []
     for state in invalid_states:
-        if (
-            champion_fingerprint(state.policy) != state.fitted_id
-            or not state.stage_task_counts
-        ):
+        if champion_fingerprint(state.policy) != state.fitted_id or not state.stage_task_counts:
             _fail("invalid Build attempt feedback lost its host binding")
         invalid_attempts.append(
             _InvalidAttemptAggregate(
@@ -3849,9 +3698,7 @@ def _feedback(states: tuple[_AttemptState, ...]) -> ProposerEvidence:
         )
         comparisons = tuple(cast(ChampionComparison, state.comparison) for state in group)
         try:
-            evidence_parts.append(
-                sanitize_build_evidence(parent_rows + child_rows, comparisons)
-            )
+            evidence_parts.append(sanitize_build_evidence(parent_rows + child_rows, comparisons))
         except (ChampionEvidenceError, TypeError, ValueError) as error:
             raise ChampionControllerError("Build feedback could not be sanitized") from error
     return ProposerEvidence(
@@ -3929,9 +3776,7 @@ def _call_proposer(
     ):
         _fail("proposer returned duplicate policy identities")
     for recipe in validated:
-        canonical_parents = tuple(
-            _canonical_identity(name) for name in recipe.parents
-        )
+        canonical_parents = tuple(_canonical_identity(name) for name in recipe.parents)
         canonical_assumptions = tuple(
             _canonical_identity(item.assumption_id) for item in recipe.assumptions
         )
@@ -3946,11 +3791,7 @@ def _stored_policies(
     generations: list[BuildGeneration],
     archive: list[_AttemptState],
 ) -> tuple[FittedChampionPolicy, ...]:
-    values = [
-        attempt.policy
-        for generation in generations
-        for attempt in generation.attempts
-    ]
+    values = [attempt.policy for generation in generations for attempt in generation.attempts]
     values.extend(state.policy for state in archive)
     unique: list[FittedChampionPolicy] = []
     seen: set[int] = set()
@@ -3967,18 +3808,14 @@ def _stored_policy_fingerprints(
     archive: list[_AttemptState],
 ) -> tuple[tuple[FittedChampionPolicy, str], ...]:
     return tuple(
-        (policy, champion_fingerprint(policy))
-        for policy in _stored_policies(generations, archive)
+        (policy, champion_fingerprint(policy)) for policy in _stored_policies(generations, archive)
     )
 
 
 def _stored_policy_changed(
     fingerprints: tuple[tuple[FittedChampionPolicy, str], ...],
 ) -> bool:
-    return any(
-        _fingerprint_changed(policy, expected)
-        for policy, expected in fingerprints
-    )
+    return any(_fingerprint_changed(policy, expected) for policy, expected in fingerprints)
 
 
 def _validate_stored_policy_ids(generations: list[BuildGeneration]) -> None:
@@ -4026,9 +3863,7 @@ def run_build_evolution(
     require_boundary()
     input_config_sha256 = config.fingerprint
     parent_recipe, parent_policy = _validated_parent(parent)
-    snapshot, task_ids, row_candidate_names = _validated_rows(
-        rows, build_size=config.build_size
-    )
+    snapshot, task_ids, row_candidate_names = _validated_rows(rows, build_size=config.build_size)
     bound_config = _bound_config(config, task_ids)
     bound_config_sha256 = bound_config.fingerprint
     parent_sha256 = champion_fingerprint(parent)
@@ -4042,8 +3877,7 @@ def run_build_evolution(
     seen_recipe_ids: set[str] = {champion_fingerprint(parent_recipe)}
     seen_policy_names: set[str] = {_canonical_identity(parent_recipe.name)}
     reserved_row_names = {
-        _canonical_identity(candidate_name)
-        for candidate_name in row_candidate_names
+        _canonical_identity(candidate_name) for candidate_name in row_candidate_names
     }
     seen_fitted_ids: set[str] = set()
     generations: list[BuildGeneration] = []
@@ -4059,9 +3893,7 @@ def run_build_evolution(
         config_state = _capture_object_graph(config)
         bound_config_state = _capture_object_graph(bound_config)
         stored_fingerprints = _stored_policy_fingerprints(generations, archive)
-        stored_state = _capture_object_graph(
-            tuple(policy for policy, _ in stored_fingerprints)
-        )
+        stored_state = _capture_object_graph(tuple(policy for policy, _ in stored_fingerprints))
         feedback_sha256 = champion_fingerprint(feedback)
         parent_changed = row_changed = feedback_changed = False
         config_changed = bound_config_changed = stored_changed = False
@@ -4085,9 +3917,7 @@ def run_build_evolution(
                 row_changed = _fingerprint_changed(snapshot, rows_sha256)
                 feedback_changed = _fingerprint_changed(feedback, feedback_sha256)
                 config_changed = _fingerprint_changed(config, input_config_sha256)
-                bound_config_changed = _fingerprint_changed(
-                    bound_config, bound_config_sha256
-                )
+                bound_config_changed = _fingerprint_changed(bound_config, bound_config_sha256)
                 stored_changed = _stored_policy_changed(stored_fingerprints)
         finally:
             _restore_object_graph(parent_state)
@@ -4185,9 +4015,7 @@ def run_build_evolution(
             if stage_index == len(bound_config.screen_task_ids) - 1:
                 active = safe
             elif stage_index == len(bound_config.screen_task_ids) - 2:
-                active = _diverse(
-                    safe, limit=bound_config.maximum_full_build_children
-                )
+                active = _diverse(safe, limit=bound_config.maximum_full_build_children)
             else:
                 survivor_count = max(
                     bound_config.maximum_full_build_children,
@@ -4204,8 +4032,7 @@ def run_build_evolution(
             state
             for state in active
             if state.comparison is not None
-            and state.comparison.joint_improvement
-            >= bound_config.candidate_minimum_gain
+            and state.comparison.joint_improvement >= bound_config.candidate_minimum_gain
         )
         finalists = _diverse(eligible, limit=bound_config.maximum_finalists)
         finalist_ids = {state.fitted_id for state in finalists}
@@ -4218,11 +4045,11 @@ def run_build_evolution(
                 status=(
                     "invalid"
                     if state.invalid_reason is not None
-                    else "finalist"
-                    if state.fitted_id in finalist_ids
-                    else "below_candidate_threshold"
-                    if state in active
-                    else "pruned"
+                    else (
+                        "finalist"
+                        if state.fitted_id in finalist_ids
+                        else ("below_candidate_threshold" if state in active else "pruned")
+                    )
                 ),
                 invalid_reason=state.invalid_reason,
             )
@@ -4307,8 +4134,7 @@ def _validated_lifecycle_tasks(
             ("truth", task.future_values),
         ):
             if any(
-                type(value) not in {int, float}
-                or not math.isfinite(float(value))
+                type(value) not in {int, float} or not math.isfinite(float(value))
                 for value in values
             ):
                 _lifecycle_fail(f"{label} task {series_name} must be exactly finite")
@@ -4328,9 +4154,7 @@ def _validated_lifecycle_tasks(
     if membership != expected_membership:
         _lifecycle_fail(f"{label} task identity or entity drifted from the manifest")
     _validated_membership(membership, f"{label} membership", expected_size=len(result))
-    actual_hashes = tuple(
-        (task.task_id, task_content_fingerprint(task)) for task in result
-    )
+    actual_hashes = tuple((task.task_id, task_content_fingerprint(task)) for task in result)
     if actual_hashes != expected_content_hashes:
         _lifecycle_fail(f"{label} task content drifted from the run manifest")
     return result
@@ -4407,8 +4231,7 @@ def _call_row_provider(
                 return cast(ProposerEvidence, value).to_payload()
             if type(value) in {tuple, list}:
                 return tuple(
-                    safe_value(item)
-                    for item in cast(tuple[object, ...] | list[object], value)
+                    safe_value(item) for item in cast(tuple[object, ...] | list[object], value)
                 )
             if type(value) is dict:
                 return {
@@ -4505,9 +4328,7 @@ def _evaluate_lifecycle_stage(
             }
         )
         try:
-            child_score = cast(
-                ChampionScore, runtime_bindings.scorer(child_rows, child_name)
-            )
+            child_score = cast(ChampionScore, runtime_bindings.scorer(child_rows, child_name))
             comparison = cast(
                 ChampionComparison,
                 runtime_bindings.comparator(parent_score, child_score, gate),
@@ -4543,9 +4364,7 @@ def _stage_report(
                 policy_sha256=champion_fingerprint(state.policy),
                 evidence_fingerprint=state.evidence_fingerprint,
                 comparison=state.comparison,
-                invalid_reason=(
-                    "unscorable_child" if state.comparison is None else None
-                ),
+                invalid_reason=("unscorable_child" if state.comparison is None else None),
             )
             for state in states
         ),
@@ -4597,14 +4416,10 @@ def _combined_feedback(result: BuildEvolutionResult) -> ProposerEvidence:
         label="adaptive_train_build_diagnostic",
         independent_generalization_claim=False,
         morphology=tuple(
-            item
-            for generation in result.generations
-            for item in generation.feedback.morphology
+            item for generation in result.generations for item in generation.feedback.morphology
         ),
         comparisons=tuple(
-            item
-            for generation in result.generations
-            for item in generation.feedback.comparisons
+            item for generation in result.generations for item in generation.feedback.comparisons
         ),
         invalid_attempts=tuple(
             sorted(
@@ -4659,8 +4474,7 @@ class ChampionEvolutionController:
         runtime_bindings.verify_live_globals()
         if (
             proposer.fingerprint != attestations.proposer_binding.fingerprint
-            or row_provider.fingerprint
-            != attestations.row_provider_binding.fingerprint
+            or row_provider.fingerprint != attestations.row_provider_binding.fingerprint
             or runtime_bindings.fingerprint != attestations.runtime_bindings.fingerprint
         ):
             _lifecycle_fail("executing callable bindings drifted from actual attestations")
@@ -4704,17 +4518,12 @@ class ChampionEvolutionController:
                 or authority in absolute.parents
                 or absolute in authority.parents
             ):
-                _lifecycle_fail(
-                    "authority root must be outside and non-aliasing with run inputs"
-                )
+                _lifecycle_fail("authority root must be outside and non-aliasing with run inputs")
 
     def _require_pre_callback_state(self, parent: ChampionRelease) -> None:
         self.attestations.verify(self.manifest)
         self.artifact_store.bind_manifest(self.manifest)
-        if (
-            self.artifact_store.bind_run_instance(self.manifest)
-            != self._run_instance_fingerprint
-        ):
+        if self.artifact_store.bind_run_instance(self.manifest) != self._run_instance_fingerprint:
             _lifecycle_fail("run instance authority drifted")
         self.artifact_store.ensure_release(parent)
         self.authority_store._verify_root()
@@ -4739,16 +4548,11 @@ class ChampionEvolutionController:
         if self.config.fingerprint != self.manifest.schedule_fingerprint:
             _lifecycle_fail("schedule fingerprint drifted from the run manifest")
         if (
-            self.config.candidate_minimum_gain
-            != self.manifest.candidate_minimum_gain
-            or self.config.research_target_gain
-            != self.manifest.research_target_gain
+            self.config.candidate_minimum_gain != self.manifest.candidate_minimum_gain
+            or self.config.research_target_gain != self.manifest.research_target_gain
         ):
             _lifecycle_fail("threshold inputs drifted from the run manifest")
-        if (
-            parent.metric_policy_fingerprint
-            != self.manifest.metric_policy_fingerprint
-        ):
+        if parent.metric_policy_fingerprint != self.manifest.metric_policy_fingerprint:
             _lifecycle_fail("metric policy drifted from the exact Parent")
         dictionary = dict(self.manifest.dictionary_hashes)
         if any(dictionary.get(name) != digest for name, digest in parent.source_hashes):
@@ -4765,9 +4569,7 @@ class ChampionEvolutionController:
             calibration_size=16,
             seed=self.manifest.partition_seed,
         )
-        build_membership = tuple(
-            (task.task_id, task.entity_name) for task in parts.build
-        )
+        build_membership = tuple((task.task_id, task.entity_name) for task in parts.build)
         calibration_membership = tuple(
             (task.task_id, task.entity_name) for task in parts.calibration
         )
@@ -4779,10 +4581,7 @@ class ChampionEvolutionController:
         build_ids = tuple(task.task_id for task in parts.build)
         if self.config.build_task_ids != build_ids:
             _lifecycle_fail("Build task membership drifted from the schedule")
-        if (
-            not self.config.screen_task_ids
-            or self.config.screen_task_ids[-1] != build_ids
-        ):
+        if not self.config.screen_task_ids or self.config.screen_task_ids[-1] != build_ids:
             _lifecycle_fail("screen membership drifted from the Build partition")
         return train, parts
 
@@ -4819,10 +4618,7 @@ class ChampionEvolutionController:
         self.artifact_store.ensure_release(parent)
         self.attestations.verify(self.manifest)
         self.authority_store._verify_root()
-        if (
-            self.artifact_store.bind_run_instance(self.manifest)
-            != self._run_instance_fingerprint
-        ):
+        if self.artifact_store.bind_run_instance(self.manifest) != self._run_instance_fingerprint:
             _lifecycle_fail("run instance authority drifted")
         stored = self.artifact_store.load_checkpoint()
         if stored is None:
@@ -4845,14 +4641,10 @@ class ChampionEvolutionController:
         manifest_sha256 = self.manifest.input_fingerprint
         _, parts = self._validate_bindings(parent, train_tasks)
         self.artifact_store.bind_manifest(self.manifest)
-        self._run_instance_fingerprint = self.artifact_store.bind_run_instance(
-            self.manifest
-        )
+        self._run_instance_fingerprint = self.artifact_store.bind_run_instance(self.manifest)
         if self.artifact_store.has_accepted_release():
             _lifecycle_fail("one-shot lifecycle report cannot be overwritten or replayed")
-        self.artifact_store.require_open_lifecycle(
-            self._authority_run_fingerprint()
-        )
+        self.artifact_store.require_open_lifecycle(self._authority_run_fingerprint())
         self.artifact_store.ensure_release(parent)
         checkpoint = self.artifact_store.load_checkpoint()
         build_result: BuildEvolutionResult | None = None
@@ -4872,9 +4664,7 @@ class ChampionEvolutionController:
                     build_rows,
                     self.proposer,
                     self.config,
-                    boundary_validator=lambda: self._require_pre_callback_state(
-                        parent
-                    ),
+                    boundary_validator=lambda: self._require_pre_callback_state(parent),
                     runtime_bindings=self.runtime_bindings,
                 )
             except ChampionControllerError:
@@ -4929,24 +4719,17 @@ class ChampionEvolutionController:
         ):
             _lifecycle_fail("bound lifecycle state drifted before Calibration")
         calibration_task_hashes = tuple(
-            (task.task_id, task_content_fingerprint(task))
-            for task in parts.calibration
+            (task.task_id, task_content_fingerprint(task)) for task in parts.calibration
         )
-        calibration_candidate_fingerprint = champion_fingerprint(
-            checkpoint.proposal_archive
-        )
+        calibration_candidate_fingerprint = champion_fingerprint(checkpoint.proposal_archive)
         self._require_durable_state(checkpoint, parent)
-        calibration_lease, calibration_bundle = (
-            self.authority_store.claim_or_resume_split(
-                role="calibration",
-                split_manifest_fingerprint=self.manifest.split_manifest_fingerprint,
-                task_content_fingerprint=champion_fingerprint(
-                    {"tasks": calibration_task_hashes}
-                ),
-                run_input_fingerprint=self._authority_run_fingerprint(),
-                candidate_fingerprint=calibration_candidate_fingerprint,
-                runtime_fingerprint=self.manifest.runtime_fingerprint,
-            )
+        calibration_lease, calibration_bundle = self.authority_store.claim_or_resume_split(
+            role="calibration",
+            split_manifest_fingerprint=self.manifest.split_manifest_fingerprint,
+            task_content_fingerprint=champion_fingerprint({"tasks": calibration_task_hashes}),
+            run_input_fingerprint=self._authority_run_fingerprint(),
+            candidate_fingerprint=calibration_candidate_fingerprint,
+            runtime_fingerprint=self.manifest.runtime_fingerprint,
         )
         self._require_durable_state(checkpoint, parent)
         if calibration_bundle is None:
@@ -4985,12 +4768,8 @@ class ChampionEvolutionController:
             "calibration",
             calibration_states,
         )
-        if not self.authority_store.verify_evaluation(
-            calibration_lease, calibration_report
-        ):
-            self.authority_store.commit_evaluation(
-                calibration_lease, calibration_report
-            )
+        if not self.authority_store.verify_evaluation(calibration_lease, calibration_report):
+            self.authority_store.commit_evaluation(calibration_lease, calibration_report)
         self.artifact_store.bind_report(calibration_report)
         self._require_durable_state(checkpoint, parent)
         if (
@@ -5027,17 +4806,13 @@ class ChampionEvolutionController:
             expected_membership=self.manifest.dev_tasks,
             expected_content_hashes=self.manifest.dev_task_hashes,
         )
-        dev_task_hashes = tuple(
-            (task.task_id, task_content_fingerprint(task)) for task in dev
-        )
+        dev_task_hashes = tuple((task.task_id, task_content_fingerprint(task)) for task in dev)
         dev_candidate_fingerprint = champion_fingerprint((train_winner,))
         self._require_durable_state(checkpoint, parent)
         dev_lease, dev_bundle = self.authority_store.claim_or_resume_split(
             role="dev",
             split_manifest_fingerprint=self.manifest.split_manifest_fingerprint,
-            task_content_fingerprint=champion_fingerprint(
-                {"tasks": dev_task_hashes}
-            ),
+            task_content_fingerprint=champion_fingerprint({"tasks": dev_task_hashes}),
             run_input_fingerprint=self._authority_run_fingerprint(),
             candidate_fingerprint=dev_candidate_fingerprint,
             runtime_fingerprint=self.manifest.runtime_fingerprint,
@@ -5064,9 +4839,7 @@ class ChampionEvolutionController:
                 rows=dev_rows,
             )
         else:
-            dev_rows = _validated_stage_rows(
-                dev_bundle.rows, tasks=dev, split="dev"
-            )
+            dev_rows = _validated_stage_rows(dev_bundle.rows, tasks=dev, split="dev")
         self._require_durable_state(checkpoint, parent)
         dev_states = _evaluate_lifecycle_stage(
             parent,
@@ -5084,8 +4857,7 @@ class ChampionEvolutionController:
         self._require_durable_state(checkpoint, parent)
         if (
             champion_fingerprint(parent) != parent_sha256
-            or champion_fingerprint(train_winner)
-            != dev_report.candidates[0].policy_sha256
+            or champion_fingerprint(train_winner) != dev_report.candidates[0].policy_sha256
             or self.config.fingerprint != config_sha256
             or self.manifest.input_fingerprint != manifest_sha256
         ):

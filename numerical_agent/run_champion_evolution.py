@@ -88,7 +88,14 @@ def _sha256(path: Path) -> str:
 
 
 def _clean_git_source(repo: Path) -> None:
-    if not (repo / ".git").is_dir():
+    inside = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=repo,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if inside.returncode or inside.stdout.strip() != "true":
         raise ValueError("Champion source repository must be a Git worktree")
     result = subprocess.run(
         ["git", "status", "--porcelain"],
@@ -277,6 +284,7 @@ def _manifest(
         research_target_gain=config.research_target_gain,
         runtime_fingerprint=attestations.runtime_fingerprint,
         runtime_implementation_fingerprint=attestations.runtime_implementation_fingerprint,
+        forecast_runtime_identity_fingerprint=attestations.forecast_runtime_identity_fingerprint,
     )
 
 
@@ -389,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
                     Path(__file__).parent / "evolution" / "champion_controller.py",
                 ),
             ),
+            forecast_runtime_identity=_forecast_runtime_identity(args),
         )
         manifest = _manifest(train, dev, config, attestations, args.partition_seed)
         artifacts = ChampionArtifactStore(output)

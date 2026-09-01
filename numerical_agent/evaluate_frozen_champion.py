@@ -5,14 +5,18 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 
 from common.data import load_tasks_by_id
-from common.payload import read_json_object
+from common.payload import canonical_json_bytes, read_json_object
 
-from .evolution.champion import parse_champion_release
-from .evolution.champion_controller import canonical_release_bytes
+from .evolution.champion import champion_fingerprint, parse_champion_release
+from .evolution.champion_controller import (
+    ChampionArtifactStore,
+    ChampionRunManifest,
+    canonical_release_bytes,
+)
 from .evolution.champion_evidence import (
     ChampionHistoryDiagnostic,
     ChampionTaskRow,
@@ -97,19 +101,91 @@ def _release(release_dir: Path):
     return release
 
 
-def _verify_release_sources(repo: Path, release) -> None:
+def _load_manifest(release_dir: Path) -> ChampionRunManifest:
+    path = release_dir / "run_manifest.json"
+    if not path.is_file():
+        raise ValueError("frozen evaluation requires canonical run_manifest.json")
+    payload = read_json_object(path)
+    expected = {item.name for item in fields(ChampionRunManifest)} | {
+        "input_fingerprint"
+    }
+    if set(payload) != expected:
+        raise ValueError("run manifest schema is malformed")
+    values = dict(payload)
+    input_fingerprint = values.pop("input_fingerprint")
+    for name in (
+        "source_hashes",
+        "train_tasks",
+        "train_task_hashes",
+        "dev_tasks",
+        "dev_task_hashes",
+        "build_tasks",
+        "calibration_tasks",
+        "dictionary_hashes",
+    ):
+        raw = values.get(name)
+        if type(raw) is list:
+            values[name] = tuple(tuple(item) for item in raw)
+    try:
+        manifest = ChampionRunManifest(**values)
+    except Exception as error:
+        raise ValueError("run manifest schema is malformed") from error
+    if (
+        input_fingerprint != manifest.input_fingerprint
+        or path.read_bytes() != canonical_json_bytes(manifest.to_payload())
+    ):
+        raise ValueError("run manifest is not canonical immutable JSON")
+    return manifest
+
+
+def _verify_source_closure(repo: Path, manifest: ChampionRunManifest, release) -> None:
     source_map = {
         "dictionary": repo / "dictionary.py",
         "methods": repo / "methods.py",
         "policies": repo / "policies.py",
-        "skills": repo / "skills.py",
     }
-    for name, digest in release.source_hashes:
-        path = source_map.get(name)
-        if path is None or not path.is_file() or _sha256(path) != digest:
-            raise ValueError(
-                "champion release source fingerprint does not match repository"
-            )
+    skills = repo / "skills.py"
+    if skills.is_file():
+        source_map["skills"] = skills
+    actual = tuple(
+        sorted(
+            (name, _sha256(path)) for name, path in source_map.items() if path.is_file()
+        )
+    )
+    if (
+        actual != manifest.dictionary_hashes
+        or release.source_hashes != manifest.dictionary_hashes
+    ):
+        raise ValueError("frozen source closure does not match release authority")
+
+
+def _validate_frozen_authority(
+    repo: Path,
+    release_dir: Path,
+    split_file: str | Path,
+    runtime_identity: object,
+):
+    """Validate every immutable evolution authority before opening Public data."""
+    release = _release(release_dir)
+    manifest = _load_manifest(release_dir)
+    if _sha256(Path(split_file)) != manifest.split_manifest_fingerprint:
+        raise ValueError("split fingerprint does not match frozen evolution authority")
+    if (
+        champion_fingerprint(runtime_identity)
+        != manifest.forecast_runtime_identity_fingerprint
+    ):
+        raise ValueError(
+            "forecast runtime identity does not match frozen evolution authority"
+        )
+    _verify_source_closure(repo, manifest, release)
+    artifacts = ChampionArtifactStore(release_dir)
+    try:
+        if not artifacts.has_accepted_release():
+            raise ValueError("frozen evaluation requires an accepted release authority")
+        artifacts.ensure_release(release)
+    finally:
+        artifacts.close()
+    return release
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -121,8 +197,10 @@ def main(argv: list[str] | None = None) -> int:
             "Public regression has already completed and cannot be overwritten"
         )
     release_dir, repo = Path(args.release_dir).resolve(), Path(args.repo).resolve()
-    release = _release(release_dir)
-    _verify_release_sources(repo, release)
+    runtime_identity = _forecast_runtime_identity(args)
+    release = _validate_frozen_authority(
+        repo, release_dir, args.split_file, runtime_identity
+    )
     public = load_public_partition(args.split_file, args.tasks_file)
     module, portfolio = read_module(repo / "methods.py"), read_policy_file(
         repo / "policies.py"
@@ -144,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
             portfolio,
             runtimes,
             screening_hash="formal_champion_all_candidates",
-            runtime_identity=_forecast_runtime_identity(args),
+            runtime_identity=runtime_identity,
         )
         rows: list[ChampionTaskRow] = []
         output.mkdir(parents=True, exist_ok=True)

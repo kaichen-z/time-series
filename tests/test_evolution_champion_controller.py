@@ -1,4 +1,5 @@
 """Build-only Champion evolution controller regressions."""
+
 from __future__ import annotations
 
 import gc
@@ -101,18 +102,18 @@ def _parent() -> ChampionRelease:
             recipe=recipe,
             thresholds=(("parent_history", 0.0),),
         ),
-        source_hashes=((
-            "baseline_leaf",
-            hashlib.sha256(b"baseline dictionary\n").hexdigest(),
-        ),),
+        source_hashes=(
+            (
+                "baseline_leaf",
+                hashlib.sha256(b"baseline dictionary\n").hexdigest(),
+            ),
+        ),
         metric_policy_fingerprint="1" * 64,
         lineage=("active_parent",),
     )
 
 
-def _history_diagnostic(
-    name: str, *, eligible: bool = True
-) -> ChampionHistoryDiagnostic:
+def _history_diagnostic(name: str, *, eligible: bool = True) -> ChampionHistoryDiagnostic:
     return ChampionHistoryDiagnostic.from_candidate(
         CandidateDiagnostics.synthetic(
             name=name,
@@ -123,9 +124,7 @@ def _history_diagnostic(
     )
 
 
-def _rows(
-    count: int = 64, *, enriched: bool = False
-) -> tuple[ChampionTaskRow, ...]:
+def _rows(count: int = 64, *, enriched: bool = False) -> tuple[ChampionTaskRow, ...]:
     errors = {
         "baseline_leaf": 2.0,
         "better_a": 0.8,
@@ -156,9 +155,7 @@ def _rows(
                     fold=index % 5,
                     split="build",
                     history=history,
-                    diagnostic=(
-                        _history_diagnostic(candidate_name) if enriched else None
-                    ),
+                    diagnostic=(_history_diagnostic(candidate_name) if enriched else None),
                 )
             )
     return tuple(rows)
@@ -277,9 +274,13 @@ class AllOperatorProposer:
         )
         recipes: list[ChampionRecipe] = []
         for index, kind in enumerate(kinds):
-            parents = ("better_a",) if kind == "select" else (
-                "baseline_leaf",
-                "better_a",
+            parents = (
+                ("better_a",)
+                if kind == "select"
+                else (
+                    "baseline_leaf",
+                    "better_a",
+                )
             )
             recipes.append(
                 ChampionRecipe(
@@ -320,14 +321,8 @@ def _task(task_id: str, entity_name: str) -> Task:
     )
 
 
-TRAIN_80 = tuple(
-    _task(f"train_{index:03d}", f"entity_{index // 4:03d}")
-    for index in range(80)
-)
-DEV_20 = tuple(
-    _task(f"dev_{index:03d}", f"dev_entity_{index:03d}")
-    for index in range(20)
-)
+TRAIN_80 = tuple(_task(f"train_{index:03d}", f"entity_{index // 4:03d}") for index in range(80))
+DEV_20 = tuple(_task(f"dev_{index:03d}", f"dev_entity_{index:03d}") for index in range(20))
 _CALIBRATION_TASK_IDS = tuple(
     task.task_id
     for task in partition_train_tasks(
@@ -358,38 +353,24 @@ def _manifest(
             if attestations is not None
             else (("dev_tasks", "b" * 64), ("train_tasks", "a" * 64))
         ),
-        train_tasks=tuple(
-            (task.task_id, task.entity_name) for task in TRAIN_80
-        ),
+        train_tasks=tuple((task.task_id, task.entity_name) for task in TRAIN_80),
         train_task_hashes=tuple(
-            (task.task_id, controller_module.task_content_fingerprint(task))
-            for task in TRAIN_80
+            (task.task_id, controller_module.task_content_fingerprint(task)) for task in TRAIN_80
         ),
         dev_tasks=tuple((task.task_id, task.entity_name) for task in DEV_20),
         dev_task_hashes=tuple(
-            (task.task_id, controller_module.task_content_fingerprint(task))
-            for task in DEV_20
+            (task.task_id, controller_module.task_content_fingerprint(task)) for task in DEV_20
         ),
         split_manifest_fingerprint=(
-            attestations.split_manifest_fingerprint
-            if attestations is not None
-            else "c" * 64
+            attestations.split_manifest_fingerprint if attestations is not None else "c" * 64
         ),
-        build_tasks=tuple(
-            (task.task_id, task.entity_name) for task in parts.build
-        ),
-        calibration_tasks=tuple(
-            (task.task_id, task.entity_name) for task in parts.calibration
-        ),
+        build_tasks=tuple((task.task_id, task.entity_name) for task in parts.build),
+        calibration_tasks=tuple((task.task_id, task.entity_name) for task in parts.calibration),
         dictionary_hashes=(
-            attestations.dictionary_hashes
-            if attestations is not None
-            else PARENT.source_hashes
+            attestations.dictionary_hashes if attestations is not None else PARENT.source_hashes
         ),
         forecast_store_fingerprint=(
-            attestations.forecast_store_fingerprint
-            if attestations is not None
-            else "d" * 64
+            attestations.forecast_store_fingerprint if attestations is not None else "d" * 64
         ),
         metric_policy_fingerprint=PARENT.metric_policy_fingerprint,
         proposal_model=(
@@ -398,9 +379,7 @@ def _manifest(
             else "deterministic-test-proposer"
         ),
         proposal_config_fingerprint=(
-            attestations.proposal_config_fingerprint
-            if attestations is not None
-            else "e" * 64
+            attestations.proposal_config_fingerprint if attestations is not None else "e" * 64
         ),
         proposal_implementation_fingerprint=(
             attestations.proposal_implementation_fingerprint
@@ -408,27 +387,26 @@ def _manifest(
             else "7" * 64
         ),
         row_provider_fingerprint=(
-            attestations.row_provider_fingerprint
-            if attestations is not None
-            else "8" * 64
+            attestations.row_provider_fingerprint if attestations is not None else "8" * 64
         ),
         schedule_fingerprint=config.fingerprint,
         numeric_grid_fingerprint=(
-            attestations.numeric_grid_fingerprint
-            if attestations is not None
-            else "f" * 64
+            attestations.numeric_grid_fingerprint if attestations is not None else "f" * 64
         ),
         candidate_minimum_gain=config.candidate_minimum_gain,
         research_target_gain=config.research_target_gain,
         runtime_fingerprint=(
-            attestations.runtime_fingerprint
-            if attestations is not None
-            else "9" * 64
+            attestations.runtime_fingerprint if attestations is not None else "9" * 64
         ),
         runtime_implementation_fingerprint=(
             attestations.runtime_implementation_fingerprint
             if attestations is not None
             else "6" * 64
+        ),
+        forecast_runtime_identity_fingerprint=(
+            attestations.forecast_runtime_identity_fingerprint
+            if attestations is not None
+            else "5" * 64
         ),
     )
 
@@ -438,9 +416,7 @@ class LifecycleRows:
     calibration_error: float = 0.5
     dev_error: float = 0.5
 
-    def __call__(
-        self, tasks: tuple[Task, ...], split: str
-    ) -> tuple[ChampionTaskRow, ...]:
+    def __call__(self, tasks: tuple[Task, ...], split: str) -> tuple[ChampionTaskRow, ...]:
         error = {
             "build": 0.5,
             "calibration": self.calibration_error,
@@ -485,9 +461,7 @@ class LifecycleRows:
                         candidate_name=candidate_name,
                         profile=profile,
                         truth=task.future_values,
-                        forecast=tuple(
-                            value + candidate_error for value in task.future_values
-                        ),
+                        forecast=tuple(value + candidate_error for value in task.future_values),
                         fold=index % 5,
                         split=split,  # type: ignore[arg-type]
                         history=task.history_values,
@@ -671,9 +645,7 @@ def test_formal_runtime_bindings_detect_transitive_grid_mutation(
     runtime = ChampionRuntimeBindings.formal()
     monkeypatch.setattr(proposal_module, name, replacement)
 
-    with pytest.raises(
-        ChampionLifecycleError, match="runtime|behavior|global|implementation"
-    ):
+    with pytest.raises(ChampionLifecycleError, match="runtime|behavior|global|implementation"):
         runtime.verify_live_globals()
 
 
@@ -754,20 +726,19 @@ def test_sealed_codex_proposer_config_is_lazy_and_manifest_distinct(
     assert adapter.kind == "codex_cli"
     assert adapter.config["model"] == "gpt-5.6-sol"
     assert adapter.config["reasoning_effort"] == "high"
-    assert adapter.fingerprint != ChampionProposerAdapter.scripted(
-        identity="gpt-5.6-sol",
-        proposal_batches=(_proposal_batch("better"),),
-        config=adapter.config,
-    ).fingerprint
+    assert (
+        adapter.fingerprint
+        != ChampionProposerAdapter.scripted(
+            identity="gpt-5.6-sol",
+            proposal_batches=(_proposal_batch("better"),),
+            config=adapter.config,
+        ).fingerprint
+    )
 
 
 @pytest.mark.parametrize("raw_boundary", ("proposer", "row_provider"))
-def test_formal_controller_rejects_raw_unbound_callables(
-    tmp_path, raw_boundary
-) -> None:
-    bound = _lifecycle_controller(
-        tmp_path, SerializedRecordingProposer(), LifecycleRows()
-    )
+def test_formal_controller_rejects_raw_unbound_callables(tmp_path, raw_boundary) -> None:
+    bound = _lifecycle_controller(tmp_path, SerializedRecordingProposer(), LifecycleRows())
     arguments = {
         "manifest": bound.manifest,
         "config": bound.config,
@@ -779,9 +750,7 @@ def test_formal_controller_rejects_raw_unbound_callables(
         "authority_store": bound.authority_store,
     }
     arguments[raw_boundary] = (
-        SerializedRecordingProposer()
-        if raw_boundary == "proposer"
-        else LifecycleRows()
+        SerializedRecordingProposer() if raw_boundary == "proposer" else LifecycleRows()
     )
 
     with pytest.raises(ChampionLifecycleError, match="typed|binding"):
@@ -823,6 +792,7 @@ def _actual_attestations(
         runtime_bindings=runtime_bindings,
         numeric_grid={"thresholds": (0.0, 1.0)},
         runtime_files=(("python_runtime", inputs / "runtime.py"),),
+        forecast_runtime_identity={"provider": "deterministic-test-runtime"},
     )
 
 
@@ -1024,10 +994,7 @@ def test_manifest_fingerprint_binds_every_registered_input(tmp_path) -> None:
         replace(manifest, partition_seed=20260902),
     )
 
-    assert all(
-        variant.input_fingerprint != manifest.input_fingerprint
-        for variant in variants
-    )
+    assert all(variant.input_fingerprint != manifest.input_fingerprint for variant in variants)
     for index, variant in enumerate(variants):
         store = ChampionArtifactStore(tmp_path / f"variant_{index:02d}")
         store.bind_manifest(manifest)
@@ -1058,9 +1025,9 @@ def test_checkpoint_keeps_exact_frozen_sanitized_feedback() -> None:
 def test_calibration_is_never_returned_to_the_proposer(tmp_path) -> None:
     proposer = SerializedRecordingProposer()
 
-    outcome = _lifecycle_controller(
-        tmp_path, proposer, LifecycleRows()
-    ).evolve(PARENT, TRAIN_80, DEV_20)
+    outcome = _lifecycle_controller(tmp_path, proposer, LifecycleRows()).evolve(
+        PARENT, TRAIN_80, DEV_20
+    )
 
     assert outcome.release is not PARENT
 
@@ -1074,9 +1041,9 @@ def test_calibration_rejection_keeps_parent_and_never_reads_dev(tmp_path) -> Non
             raise AssertionError("Dev must remain unopened")
 
     rows = LifecycleRows(calibration_error=3.0)
-    outcome = _lifecycle_controller(
-        tmp_path, SerializedRecordingProposer(), rows
-    ).evolve(PARENT, TRAIN_80, ExplodingSequence())
+    outcome = _lifecycle_controller(tmp_path, SerializedRecordingProposer(), rows).evolve(
+        PARENT, TRAIN_80, ExplodingSequence()
+    )
 
     assert outcome.release is PARENT
     assert outcome.dev_report is None
@@ -1084,15 +1051,13 @@ def test_calibration_rejection_keeps_parent_and_never_reads_dev(tmp_path) -> Non
 
 def test_dev_rejection_preserves_prior_release_bytes(tmp_path) -> None:
     rows = LifecycleRows(dev_error=3.0)
-    outcome = _lifecycle_controller(
-        tmp_path, SerializedRecordingProposer(), rows
-    ).evolve(PARENT, TRAIN_80, DEV_20)
+    outcome = _lifecycle_controller(tmp_path, SerializedRecordingProposer(), rows).evolve(
+        PARENT, TRAIN_80, DEV_20
+    )
 
     assert outcome.release is PARENT
     assert canonical_release_bytes(outcome.release) == canonical_release_bytes(PARENT)
-    assert (tmp_path / "champion_release.json").read_bytes() == canonical_release_bytes(
-        PARENT
-    )
+    assert (tmp_path / "champion_release.json").read_bytes() == canonical_release_bytes(PARENT)
     assert outcome.dev_report is not None
 
 
@@ -1109,6 +1074,14 @@ def test_manifest_drift_fails_before_task_or_model_execution(tmp_path) -> None:
         controller.evolve(PARENT, TRAIN_80, DEV_20)
 
 
+def test_manifest_binds_attested_forecast_runtime_identity(tmp_path) -> None:
+    controller = _lifecycle_controller(tmp_path, SerializedRecordingProposer(), LifecycleRows())
+
+    assert (
+        controller.manifest.forecast_runtime_identity_fingerprint
+        == controller.attestations.forecast_runtime_identity_fingerprint
+    )
+
 
 def test_same_task_ids_with_changed_train_values_fail_before_callbacks(
     tmp_path,
@@ -1123,7 +1096,6 @@ def test_same_task_ids_with_changed_train_values_fail_before_callbacks(
         controller.evolve(PARENT, tuple(changed), DEV_20)
 
 
-
 def test_actual_source_content_drift_fails_before_callbacks(tmp_path) -> None:
     rows = ForbiddenRows()
     proposer = ForbiddenProposer()
@@ -1135,26 +1107,22 @@ def test_actual_source_content_drift_fails_before_callbacks(tmp_path) -> None:
         controller.evolve(PARENT, TRAIN_80, DEV_20)
 
 
-
 def test_provider_failure_burns_calibration_across_fresh_controller(tmp_path) -> None:
     first_proposer = SerializedRecordingProposer()
     with pytest.raises(ChampionLifecycleError, match="calibration row provider failed"):
-        _lifecycle_controller(
-            tmp_path, first_proposer, InterruptAtCalibration()
-        ).evolve(PARENT, TRAIN_80, DEV_20)
+        _lifecycle_controller(tmp_path, first_proposer, InterruptAtCalibration()).evolve(
+            PARENT, TRAIN_80, DEV_20
+        )
 
     resumed_proposer = SerializedRecordingProposer()
     resumed_provider = InterruptAtCalibration()
     with pytest.raises(ChampionLifecycleError, match="consumed"):
-        _lifecycle_controller(
-            tmp_path, resumed_proposer, resumed_provider
-        ).evolve(PARENT, TRAIN_80, DEV_20)
+        _lifecycle_controller(tmp_path, resumed_proposer, resumed_provider).evolve(
+            PARENT, TRAIN_80, DEV_20
+        )
 
 
-
-def test_new_run_root_cannot_reuse_complete_holdout_bundle(
-    monkeypatch, tmp_path
-) -> None:
+def test_new_run_root_cannot_reuse_complete_holdout_bundle(monkeypatch, tmp_path) -> None:
     first_root = tmp_path / "first_run"
     second_root = tmp_path / "second_run"
     authority_root = tmp_path / "operator_authority"
@@ -1165,9 +1133,7 @@ def test_new_run_root_cannot_reuse_complete_holdout_bundle(
             raise RuntimeError("crash after committed provider bundle")
         return evaluate(*args, **kwargs)
 
-    monkeypatch.setattr(
-        controller_module, "_evaluate_lifecycle_stage", interrupt_after_provider
-    )
+    monkeypatch.setattr(controller_module, "_evaluate_lifecycle_stage", interrupt_after_provider)
     with pytest.raises(RuntimeError, match="committed provider bundle"):
         _lifecycle_controller(
             first_root,
@@ -1185,7 +1151,6 @@ def test_new_run_root_cannot_reuse_complete_holdout_bundle(
             second_rows,
             authority_root=authority_root,
         ).evolve(PARENT, TRAIN_80, DEV_20)
-
 
 
 def test_foreign_checkpoint_fails_before_task_or_model_execution(tmp_path) -> None:
@@ -1206,7 +1171,6 @@ def test_foreign_checkpoint_fails_before_task_or_model_execution(tmp_path) -> No
         )
 
 
-
 def test_checkpoint_shortlist_must_match_immutable_build_attempt_evidence(
     monkeypatch, tmp_path
 ) -> None:
@@ -1219,12 +1183,10 @@ def test_checkpoint_shortlist_must_match_immutable_build_attempt_evidence(
         ChampionAuthorityStore, "claim_or_resume_split", interrupt_before_calibration
     )
     with pytest.raises(RuntimeError, match="stop after Build"):
-        _lifecycle_controller(
-            tmp_path, SerializedRecordingProposer(), LifecycleRows()
-        ).evolve(PARENT, TRAIN_80, DEV_20)
-    monkeypatch.setattr(
-        ChampionAuthorityStore, "claim_or_resume_split", original_claim
-    )
+        _lifecycle_controller(tmp_path, SerializedRecordingProposer(), LifecycleRows()).evolve(
+            PARENT, TRAIN_80, DEV_20
+        )
+    monkeypatch.setattr(ChampionAuthorityStore, "claim_or_resume_split", original_claim)
 
     checkpoint_path = tmp_path / "checkpoint.json"
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
@@ -1234,10 +1196,7 @@ def test_checkpoint_shortlist_must_match_immutable_build_attempt_evidence(
     proposer = SerializedRecordingProposer()
 
     with pytest.raises(ChampionLifecycleError, match="Build evidence|shortlist"):
-        _lifecycle_controller(tmp_path, proposer, rows).evolve(
-            PARENT, TRAIN_80, DEV_20
-        )
-
+        _lifecycle_controller(tmp_path, proposer, rows).evolve(PARENT, TRAIN_80, DEV_20)
 
 
 def test_checkpoint_feedback_must_exactly_match_immutable_build_evidence(
@@ -1252,12 +1211,10 @@ def test_checkpoint_feedback_must_exactly_match_immutable_build_evidence(
         ChampionAuthorityStore, "claim_or_resume_split", interrupt_before_calibration
     )
     with pytest.raises(RuntimeError, match="stop after Build"):
-        _lifecycle_controller(
-            tmp_path, SerializedRecordingProposer(), LifecycleRows()
-        ).evolve(PARENT, TRAIN_80, DEV_20)
-    monkeypatch.setattr(
-        ChampionAuthorityStore, "claim_or_resume_split", original_claim
-    )
+        _lifecycle_controller(tmp_path, SerializedRecordingProposer(), LifecycleRows()).evolve(
+            PARENT, TRAIN_80, DEV_20
+        )
+    monkeypatch.setattr(ChampionAuthorityStore, "claim_or_resume_split", original_claim)
 
     checkpoint_path = tmp_path / "checkpoint.json"
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
@@ -1269,16 +1226,11 @@ def test_checkpoint_feedback_must_exactly_match_immutable_build_evidence(
     proposer = SerializedRecordingProposer()
 
     with pytest.raises(ChampionLifecycleError, match="Build.*feedback|feedback.*Build"):
-        _lifecycle_controller(tmp_path, proposer, rows).evolve(
-            PARENT, TRAIN_80, DEV_20
-        )
-
+        _lifecycle_controller(tmp_path, proposer, rows).evolve(PARENT, TRAIN_80, DEV_20)
 
 
 def test_duplicate_key_checkpoint_json_fails_before_callbacks(tmp_path) -> None:
-    controller = _lifecycle_controller(
-        tmp_path, SerializedRecordingProposer(), LifecycleRows()
-    )
+    controller = _lifecycle_controller(tmp_path, SerializedRecordingProposer(), LifecycleRows())
     controller.artifact_store.bind_manifest(controller.manifest)
     controller.artifact_store.ensure_release(PARENT)
     (tmp_path / "checkpoint.json").write_text(
@@ -1288,10 +1240,7 @@ def test_duplicate_key_checkpoint_json_fails_before_callbacks(tmp_path) -> None:
     proposer = SerializedRecordingProposer()
 
     with pytest.raises(ChampionLifecycleError, match="malformed JSON"):
-        _lifecycle_controller(tmp_path, proposer, rows).evolve(
-            PARENT, TRAIN_80, DEV_20
-        )
-
+        _lifecycle_controller(tmp_path, proposer, rows).evolve(PARENT, TRAIN_80, DEV_20)
 
 
 def test_checkpoint_rejects_nested_cached_pass_authority_before_callbacks(
@@ -1316,7 +1265,6 @@ def test_checkpoint_rejects_nested_cached_pass_authority_before_callbacks(
         )
 
 
-
 def test_stored_calibration_pass_cannot_open_dev(monkeypatch, tmp_path) -> None:
     evaluate = controller_module._evaluate_lifecycle_stage
 
@@ -1325,13 +1273,11 @@ def test_stored_calibration_pass_cannot_open_dev(monkeypatch, tmp_path) -> None:
             raise RuntimeError("simulated post-provider interruption")
         return evaluate(*args, **kwargs)
 
-    monkeypatch.setattr(
-        controller_module, "_evaluate_lifecycle_stage", interrupt_after_provider
-    )
+    monkeypatch.setattr(controller_module, "_evaluate_lifecycle_stage", interrupt_after_provider)
     with pytest.raises(RuntimeError, match="post-provider interruption"):
-        _lifecycle_controller(
-            tmp_path, SerializedRecordingProposer(), LifecycleRows()
-        ).evolve(PARENT, TRAIN_80, DEV_20)
+        _lifecycle_controller(tmp_path, SerializedRecordingProposer(), LifecycleRows()).evolve(
+            PARENT, TRAIN_80, DEV_20
+        )
     monkeypatch.setattr(controller_module, "_evaluate_lifecycle_stage", evaluate)
     monkeypatch.setattr(
         controller_module,
@@ -1339,9 +1285,9 @@ def test_stored_calibration_pass_cannot_open_dev(monkeypatch, tmp_path) -> None:
         lambda states, gate, comparator=None: (),
     )
     rows = LifecycleRows()
-    outcome = _lifecycle_controller(
-        tmp_path, SerializedRecordingProposer(), rows
-    ).evolve(PARENT, TRAIN_80, DEV_20)
+    outcome = _lifecycle_controller(tmp_path, SerializedRecordingProposer(), rows).evolve(
+        PARENT, TRAIN_80, DEV_20
+    )
 
     assert outcome.calibration_report is not None
     assert all(
@@ -1365,20 +1311,16 @@ def test_committed_calibration_evidence_resumes_without_provider_reread(
             raise RuntimeError("crash after committed evaluation")
         return fresh(*args, **kwargs)
 
-    monkeypatch.setattr(
-        controller_module, "_fresh_comparisons", interrupt_before_boundary
-    )
+    monkeypatch.setattr(controller_module, "_fresh_comparisons", interrupt_before_boundary)
     with pytest.raises(RuntimeError, match="committed evaluation"):
-        _lifecycle_controller(
-            tmp_path, SerializedRecordingProposer(), LifecycleRows()
-        ).evolve(PARENT, TRAIN_80, DEV_20)
+        _lifecycle_controller(tmp_path, SerializedRecordingProposer(), LifecycleRows()).evolve(
+            PARENT, TRAIN_80, DEV_20
+        )
     monkeypatch.setattr(controller_module, "_fresh_comparisons", fresh)
 
     rows = LifecycleRows()
     proposer = SerializedRecordingProposer()
-    outcome = _lifecycle_controller(tmp_path, proposer, rows).evolve(
-        PARENT, TRAIN_80, DEV_20
-    )
+    outcome = _lifecycle_controller(tmp_path, proposer, rows).evolve(PARENT, TRAIN_80, DEV_20)
 
     assert outcome.release is not PARENT
 
@@ -1402,9 +1344,7 @@ def test_stored_dev_pass_cannot_publish_release(monkeypatch, tmp_path) -> None:
     comparison = outcome.dev_report.candidates[0].comparison
     assert comparison is not None and comparison.accepted
     assert outcome.release is PARENT
-    assert (tmp_path / "champion_release.json").read_bytes() == canonical_release_bytes(
-        PARENT
-    )
+    assert (tmp_path / "champion_release.json").read_bytes() == canonical_release_bytes(PARENT)
 
 
 def test_release_rejects_normalized_lineage_replay(tmp_path) -> None:
@@ -1428,9 +1368,7 @@ def test_release_rejects_normalized_lineage_replay(tmp_path) -> None:
     with pytest.raises(ChampionLifecycleError, match="lineage|replayed"):
         controller.evolve(parent, TRAIN_80, DEV_20)
 
-    assert (tmp_path / "champion_release.json").read_bytes() == canonical_release_bytes(
-        parent
-    )
+    assert (tmp_path / "champion_release.json").read_bytes() == canonical_release_bytes(parent)
 
 
 def test_existing_parent_lineage_rejects_normalized_duplicate_identities(
@@ -1441,24 +1379,18 @@ def test_existing_parent_lineage_rejects_normalized_duplicate_identities(
     proposer = SerializedRecordingProposer()
 
     with pytest.raises(ChampionLifecycleError, match="lineage|duplicate"):
-        _lifecycle_controller(tmp_path, proposer, rows).evolve(
-            parent, TRAIN_80, DEV_20
-        )
-
+        _lifecycle_controller(tmp_path, proposer, rows).evolve(parent, TRAIN_80, DEV_20)
 
 
 def test_completed_lifecycle_reports_cannot_be_replayed(tmp_path) -> None:
-    _lifecycle_controller(
-        tmp_path, SerializedRecordingProposer(), LifecycleRows()
-    ).evolve(PARENT, TRAIN_80, DEV_20)
+    _lifecycle_controller(tmp_path, SerializedRecordingProposer(), LifecycleRows()).evolve(
+        PARENT, TRAIN_80, DEV_20
+    )
     rows = LifecycleRows()
     proposer = SerializedRecordingProposer()
 
     with pytest.raises(ChampionLifecycleError, match="overwritten|replayed"):
-        _lifecycle_controller(tmp_path, proposer, rows).evolve(
-            PARENT, TRAIN_80, DEV_20
-        )
-
+        _lifecycle_controller(tmp_path, proposer, rows).evolve(PARENT, TRAIN_80, DEV_20)
 
 
 def test_hostile_calibration_callback_is_rejected_before_release_mutation(
@@ -1493,9 +1425,7 @@ def test_hostile_calibration_callback_is_rejected_before_release_mutation(
             config={},
         )
 
-    assert (tmp_path / "champion_release.json").read_bytes() == canonical_release_bytes(
-        PARENT
-    )
+    assert (tmp_path / "champion_release.json").read_bytes() == canonical_release_bytes(PARENT)
 
 
 def test_hostile_proposer_callback_is_rejected_before_release_mutation(
@@ -1528,9 +1458,7 @@ def test_hostile_proposer_callback_is_rejected_before_release_mutation(
             config={},
         )
 
-    assert (tmp_path / "champion_release.json").read_bytes() == canonical_release_bytes(
-        PARENT
-    )
+    assert (tmp_path / "champion_release.json").read_bytes() == canonical_release_bytes(PARENT)
 
 
 def test_artifact_store_rejects_symlinked_ancestor(tmp_path) -> None:
@@ -1585,16 +1513,12 @@ def test_artifact_store_rejects_ancestor_swap_even_when_final_inode_is_same(
     with pytest.raises(ChampionLifecycleError, match="pinned|drift|alias"):
         store.publish_release(next_release)
 
-    assert (held_ancestor / "run" / "champion_release.json").read_bytes() == (
-        prior_bytes
-    )
+    assert (held_ancestor / "run" / "champion_release.json").read_bytes() == (prior_bytes)
 
 
 def test_artifact_store_rejects_hardlinked_manifest(tmp_path) -> None:
     root = tmp_path / "run"
-    controller = _lifecycle_controller(
-        root, SerializedRecordingProposer(), LifecycleRows()
-    )
+    controller = _lifecycle_controller(root, SerializedRecordingProposer(), LifecycleRows())
     path = controller.artifact_store.bind_manifest(controller.manifest)
     os.link(path, tmp_path / "foreign_manifest.json")
 
@@ -1605,9 +1529,7 @@ def test_artifact_store_rejects_hardlinked_manifest(tmp_path) -> None:
 def test_artifact_store_rejects_hardlinked_release_archive(tmp_path) -> None:
     store = ChampionArtifactStore(tmp_path / "run")
     store.ensure_release(PARENT)
-    archive = (
-        store.root / "releases" / f"{champion_fingerprint(PARENT)}.json"
-    )
+    archive = store.root / "releases" / f"{champion_fingerprint(PARENT)}.json"
     os.link(archive, tmp_path / "foreign_release.json")
 
     with pytest.raises(ChampionLifecycleError, match="alias|immutable"):
@@ -1615,9 +1537,7 @@ def test_artifact_store_rejects_hardlinked_release_archive(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("alias_kind", ("symlink", "hardlink"))
-def test_release_alias_is_unlinked_before_exact_parent_restoration(
-    tmp_path, alias_kind
-) -> None:
+def test_release_alias_is_unlinked_before_exact_parent_restoration(tmp_path, alias_kind) -> None:
     root = tmp_path / "run"
     store = ChampionArtifactStore(root)
     store.ensure_release(PARENT)
@@ -1678,10 +1598,7 @@ def test_pinned_stores_are_idempotent_context_managers(tmp_path) -> None:
     with ChampionArtifactStore(tmp_path / "run") as artifact_store:
         artifact_descriptors = tuple(
             entry[1]
-            for entry in (
-                artifact_store._root_chain
-                + artifact_store._release_archive._root_chain
-            )
+            for entry in (artifact_store._root_chain + artifact_store._release_archive._root_chain)
         )
         for descriptor in artifact_descriptors:
             os.fstat(descriptor)
@@ -1693,16 +1610,12 @@ def test_pinned_stores_are_idempotent_context_managers(tmp_path) -> None:
 
     authority_root = tmp_path / "authority"
     identity = "9" * 64
-    provisioned = ChampionAuthorityStore.provision(
-        authority_root, authority_identity=identity
-    )
+    provisioned = ChampionAuthorityStore.provision(authority_root, authority_identity=identity)
     provisioned.close()
     with ChampionAuthorityStore(
         authority_root, expected_authority_identity=identity
     ) as authority_store:
-        authority_descriptors = tuple(
-            entry[1] for entry in authority_store._root_chain
-        )
+        authority_descriptors = tuple(entry[1] for entry in authority_store._root_chain)
     authority_store.close()
     for descriptor in authority_descriptors:
         with pytest.raises(OSError):
@@ -1732,9 +1645,7 @@ def test_failed_authority_store_construction_closes_all_pinned_fds(tmp_path) -> 
 
     for _ in range(12):
         with pytest.raises(ChampionLifecycleError, match="provisioned"):
-            ChampionAuthorityStore(
-                root, expected_authority_identity="8" * 64
-            )
+            ChampionAuthorityStore(root, expected_authority_identity="8" * 64)
 
     gc.collect()
     assert len(os.listdir("/dev/fd")) == before
@@ -1761,9 +1672,7 @@ def test_split_consumption_lease_is_operator_owned_and_burns_on_failure(
 ) -> None:
     authority_root = tmp_path / "operator_authority"
     expected_identity = "6" * 64
-    first = ChampionAuthorityStore.provision(
-        authority_root, authority_identity=expected_identity
-    )
+    first = ChampionAuthorityStore.provision(authority_root, authority_identity=expected_identity)
     lease = first.acquire_split(
         role="calibration",
         split_manifest_fingerprint="a" * 64,
@@ -1804,15 +1713,11 @@ def test_split_consumption_lease_is_operator_owned_and_burns_on_failure(
 def test_deleted_authority_root_cannot_be_silently_reprovisioned(tmp_path) -> None:
     root = tmp_path / "operator_authority"
     expected_identity = "7" * 64
-    ChampionAuthorityStore.provision(
-        root, authority_identity=expected_identity
-    )
+    ChampionAuthorityStore.provision(root, authority_identity=expected_identity)
     root.rename(tmp_path / "deleted_authority_snapshot")
 
     with pytest.raises(ChampionLifecycleError, match="missing|provision|authority"):
-        ChampionAuthorityStore(
-            root, expected_authority_identity=expected_identity
-        )
+        ChampionAuthorityStore(root, expected_authority_identity=expected_identity)
 
     assert not root.exists()
 
@@ -1822,18 +1727,14 @@ def test_split_manifest_declaration_cannot_namespace_identical_holdout(
 ) -> None:
     root = tmp_path / "operator_authority"
     identity = "4" * 64
-    authority = ChampionAuthorityStore.provision(
-        root, authority_identity=identity
-    )
+    authority = ChampionAuthorityStore.provision(root, authority_identity=identity)
     authority.acquire_split(
         role="calibration",
         split_manifest_fingerprint="a" * 64,
         task_content_fingerprint="b" * 64,
         run_input_fingerprint="c" * 64,
     )
-    reopened = ChampionAuthorityStore(
-        root, expected_authority_identity=identity
-    )
+    reopened = ChampionAuthorityStore(root, expected_authority_identity=identity)
 
     with pytest.raises(ChampionLifecycleError, match="consumed"):
         reopened.acquire_split(
@@ -1846,9 +1747,7 @@ def test_split_manifest_declaration_cannot_namespace_identical_holdout(
 
 def test_authority_root_swap_fails_without_writing_to_replacement(tmp_path) -> None:
     root = tmp_path / "authority"
-    authority = ChampionAuthorityStore.provision(
-        root, authority_identity="5" * 64
-    )
+    authority = ChampionAuthorityStore.provision(root, authority_identity="5" * 64)
     held = tmp_path / "held_authority"
     root.rename(held)
     outside = tmp_path / "outside_authority"
@@ -1877,9 +1776,9 @@ def test_authority_root_must_be_outside_run_and_attested_inputs(tmp_path) -> Non
 
 
 def test_lifecycle_artifacts_are_exact_canonical_json(tmp_path) -> None:
-    _lifecycle_controller(
-        tmp_path, SerializedRecordingProposer(), LifecycleRows()
-    ).evolve(PARENT, TRAIN_80, DEV_20)
+    _lifecycle_controller(tmp_path, SerializedRecordingProposer(), LifecycleRows()).evolve(
+        PARENT, TRAIN_80, DEV_20
+    )
 
     artifacts = tuple(sorted(tmp_path.rglob("*.json")))
     assert artifacts
@@ -1902,6 +1801,7 @@ def test_interrupted_publication_preserves_last_release(
         PARENT,
         lineage=("active_parent", "next_release"),
     )
+
     def interrupted(phase):
         if phase == failure_phase:
             raise OSError("simulated publication interruption")
@@ -1983,9 +1883,7 @@ def test_accepted_publication_authority_survives_partial_marker_cleanup(
         store._atomic_create_name("release_prepare.json", record)
     if surviving_markers in {"commit", "both"}:
         store._atomic_create_name("release_commit.json", record)
-    store._atomic_replace(
-        store.root / "champion_release.json", canonical_release_bytes(PARENT)
-    )
+    store._atomic_replace(store.root / "champion_release.json", canonical_release_bytes(PARENT))
 
     reopened = ChampionArtifactStore(tmp_path)
 
@@ -2100,9 +1998,7 @@ def test_build_feedback_is_labeled_non_independent() -> None:
         and attempt.independent_generalization_claim is False
         for attempt in result.generations[0].attempts
     )
-    assert len(result.generations[0].feedback.comparisons) == len(
-        result.generations[0].attempts
-    )
+    assert len(result.generations[0].feedback.comparisons) == len(result.generations[0].attempts)
 
 
 def test_threshold_defaults_and_membership_are_fingerprinted() -> None:
@@ -2119,13 +2015,9 @@ def test_threshold_defaults_and_membership_are_fingerprinted() -> None:
 
 def test_candidate_threshold_gates_but_research_target_does_not() -> None:
     high_target = replace(_config(), research_target_gain=0.99)
-    high_candidate = replace(
-        _config(), candidate_minimum_gain=0.99, research_target_gain=1.0
-    )
+    high_candidate = replace(_config(), candidate_minimum_gain=0.99, research_target_gain=1.0)
 
-    target_result = run_build_evolution(
-        PARENT, ROWS_64, RecordingProposer("better"), high_target
-    )
+    target_result = run_build_evolution(PARENT, ROWS_64, RecordingProposer("better"), high_target)
     candidate_result = run_build_evolution(
         PARENT, ROWS_64, RecordingProposer("better"), high_candidate
     )
@@ -2250,8 +2142,7 @@ def test_win_tie_loss_is_diagnostic_and_never_a_standalone_gate() -> None:
     full = next(
         attempt
         for attempt in result.generations[0].attempts
-        if attempt.policy.recipe.parents == ("mixed_leaf",)
-        and attempt.stage_task_counts[-1] == 64
+        if attempt.policy.recipe.parents == ("mixed_leaf",) and attempt.stage_task_counts[-1] == 64
     )
     assert full.comparison is not None
     assert full.comparison.wtl.losses > full.comparison.wtl.wins
@@ -2324,14 +2215,10 @@ def test_unscorable_child_is_typed_pruned_without_aborting_valid_siblings() -> N
             return valid + invalid
 
     proposer = MixedValidityProposer()
-    result = run_build_evolution(
-        PARENT, ROWS_64, proposer, _config(generations=2)
-    )
+    result = run_build_evolution(PARENT, ROWS_64, proposer, _config(generations=2))
 
     invalid = tuple(
-        attempt
-        for attempt in result.generations[0].attempts
-        if attempt.status == "invalid"
+        attempt for attempt in result.generations[0].attempts if attempt.status == "invalid"
     )
     assert invalid
     assert all(attempt.comparison is None for attempt in invalid)
@@ -2340,14 +2227,10 @@ def test_unscorable_child_is_typed_pruned_without_aborting_valid_siblings() -> N
     valid_count = len(result.generations[0].attempts) - len(invalid)
     assert len(generation_feedback.comparisons) == valid_count
     assert len(generation_feedback.invalid_attempts) == len(invalid)
-    assert (
-        len(generation_feedback.comparisons)
-        + len(generation_feedback.invalid_attempts)
-        == len(result.generations[0].attempts)
+    assert len(generation_feedback.comparisons) + len(generation_feedback.invalid_attempts) == len(
+        result.generations[0].attempts
     )
-    invalid_fingerprints = {
-        champion_fingerprint(attempt.policy) for attempt in invalid
-    }
+    invalid_fingerprints = {champion_fingerprint(attempt.policy) for attempt in invalid}
     assert {
         item.structure_sha256 for item in generation_feedback.invalid_attempts
     } == invalid_fingerprints
@@ -2380,9 +2263,7 @@ def test_unscorable_child_is_typed_pruned_without_aborting_valid_siblings() -> N
         )
     )
     assert proposer.feedback[1].invalid_attempts == generation_feedback.invalid_attempts
-    assert not invalid_fingerprints & {
-        champion_fingerprint(policy) for policy in result.shortlist
-    }
+    assert not invalid_fingerprints & {champion_fingerprint(policy) for policy in result.shortlist}
     assert result.shortlist
     assert result.active_parent is PARENT
 
@@ -2428,10 +2309,15 @@ def test_history_only_materializer_scores_all_six_task3_operators() -> None:
 
 
 def test_overlay_forecast_materialization_never_reads_future_truth(monkeypatch) -> None:
-    rows = [row for row in _rows(1, enriched=True) if row.candidate_name in {
-        "baseline_leaf",
-        "better_a",
-    }]
+    rows = [
+        row
+        for row in _rows(1, enriched=True)
+        if row.candidate_name
+        in {
+            "baseline_leaf",
+            "better_a",
+        }
+    ]
 
     class PoisonTruth:
         def __getattribute__(self, name: str) -> object:
@@ -2560,18 +2446,14 @@ def test_callback_recipe_alias_cannot_corrupt_prior_generation_fitted_ids() -> N
 
         def __call__(self, parent, evidence) -> tuple[ChampionRecipe, ...]:
             if self.first_batch is not None:
-                object.__setattr__(
-                    self.first_batch[0], "name", "mutated_external_alias"
-                )
+                object.__setattr__(self.first_batch[0], "name", "mutated_external_alias")
             batch = _proposal_batch("better", self.calls)
             if self.first_batch is None:
                 self.first_batch = batch
             self.calls += 1
             return batch
 
-    result = run_build_evolution(
-        PARENT, ROWS_64, AliasingProposer(), _config(generations=2)
-    )
+    result = run_build_evolution(PARENT, ROWS_64, AliasingProposer(), _config(generations=2))
 
     assert all(
         attempt.fitted_id == champion_fingerprint(attempt.policy)
@@ -2605,18 +2487,16 @@ def test_callback_cannot_loosen_or_leave_the_registered_gate_mutated() -> None:
 def test_registered_fold_gate_remains_authoritative_on_the_first_screen() -> None:
     all_ids = tuple(f"build_case_{index:03d}" for index in range(64))
     first_stage = tuple(f"build_case_{index:03d}" for index in range(0, 40, 5))
-    second_stage = first_stage + tuple(
-        task_id for task_id in all_ids if task_id not in first_stage
-    )[:24]
+    second_stage = (
+        first_stage + tuple(task_id for task_id in all_ids if task_id not in first_stage)[:24]
+    )
     config = replace(
         _config(),
         screen_task_ids=(first_stage, second_stage, all_ids),
         gate_config=ChampionGateConfig(minimum_improved_folds=2),
     )
 
-    result = run_build_evolution(
-        PARENT, ROWS_64, RecordingProposer("better"), config
-    )
+    result = run_build_evolution(PARENT, ROWS_64, RecordingProposer("better"), config)
 
     assert all(attempt.stage_task_counts == (8,) for attempt in result.generations[0].attempts)
     assert result.generations[0].full_build_children == 0
