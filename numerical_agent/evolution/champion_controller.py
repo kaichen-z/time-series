@@ -108,6 +108,9 @@ _BEHAVIOR_SOURCE_CACHE: ContextVar[dict[str, dict[str, object]] | None] = (
 _BEHAVIOR_IDENTITY_CACHE: ContextVar[dict[int, dict[str, object]] | None] = (
     ContextVar("champion_behavior_identity_cache", default=None)
 )
+_BEHAVIOR_STRICT_GRAPH: ContextVar[bool] = ContextVar(
+    "champion_behavior_strict_graph", default=False
+)
 _HOST_SOURCE_DIGEST_CACHE: dict[
     tuple[str, int, int, int, int, int], str
 ] = {}
@@ -283,16 +286,100 @@ def _host_type_identity(value: type, seen: set[int]) -> dict[str, object]:
     return identity
 
 
-def _shallow_dependency_identity(value: object, seen: set[int]) -> object:
-    if isinstance(value, FunctionType):
-        module = sys.modules.get(value.__module__)
-        if not isinstance(module, ModuleType):
-            _lifecycle_fail("behavior dependency module is not loaded")
-        return {
-            "function": f"{value.__module__}.{value.__qualname__}",
+def _is_generated_dataclass_method(name: str, value: FunctionType) -> bool:
+    if value.__code__.co_filename == "<string>":
+        return True
+    return (
+        name == "__repr__"
+        and value.__code__.co_name == "wrapper"
+        and Path(value.__code__.co_filename).name == "dataclasses.py"
+    )
+
+
+def _host_callable_type_identity(
+    value: type, seen: set[int]
+) -> dict[str, object]:
+    methods = {
+        name: _host_function_identity(member, seen)
+        for name, member in sorted(vars(value).items())
+        if isinstance(member, FunctionType)
+        and not _is_generated_dataclass_method(name, member)
+    }
+    if "__call__" not in methods:
+        _lifecycle_fail("formal callable has no exact host implementation")
+    return {
+        "type": _host_type_identity(value, seen),
+        "methods": methods,
+    }
+
+
+def _resolve_loaded_name(
+    callback: FunctionType, name: str
+) -> tuple[str, object]:
+    if name in callback.__globals__:
+        return "global", callback.__globals__[name]
+    builtins = getattr(callback, "__builtins__", None)
+    if isinstance(builtins, ModuleType):
+        if hasattr(builtins, name):
+            return "builtin", getattr(builtins, name)
+    elif type(builtins) is dict and name in builtins:
+        return "builtin", cast(dict[str, object], builtins)[name]
+    _lifecycle_fail(f"formal callable has unresolved loaded name: {name}")
+
+
+def _shallow_function_identity(
+    value: FunctionType, seen: set[int], *, include_globals: bool
+) -> dict[str, object]:
+    reference = id(value)
+    stable_name = f"{value.__module__}.{value.__qualname__}"
+    if reference in seen:
+        return {"function_reference": stable_name}
+    module = sys.modules.get(value.__module__)
+    if not isinstance(module, ModuleType):
+        _lifecycle_fail("behavior dependency module is not loaded")
+    seen.add(reference)
+    try:
+        identity: dict[str, object] = {
+            "function": stable_name,
             "module_source": _module_source_identity(module),
             "code_fingerprint": _host_code_fingerprint(value.__code__),
+            "defaults": _host_behavior_value(value.__defaults__ or (), seen),
+            "kwdefaults": _host_behavior_value(
+                tuple(sorted((value.__kwdefaults__ or {}).items())), seen
+            ),
+            "closure": tuple(
+                _host_behavior_value(cell.cell_contents, seen)
+                for cell in (value.__closure__ or ())
+            ),
         }
+        if include_globals:
+            globals_identity: dict[str, object] = {}
+            for name in sorted(_code_global_names(value.__code__)):
+                scope, global_value = _resolve_loaded_name(value, name)
+                dependency: object
+                if isinstance(global_value, FunctionType):
+                    dependency = _shallow_function_identity(
+                        global_value, seen, include_globals=False
+                    )
+                else:
+                    dependency = _shallow_dependency_identity(global_value, seen)
+                globals_identity[name] = {
+                    "scope": scope,
+                    "identity": dependency,
+                }
+            identity["globals"] = globals_identity
+        return identity
+    finally:
+        seen.remove(reference)
+
+
+def _shallow_dependency_identity(value: object, seen: set[int]) -> object:
+    if isinstance(value, FunctionType):
+        return _shallow_function_identity(
+            value,
+            seen,
+            include_globals=_BEHAVIOR_STRICT_GRAPH.get(),
+        )
     if isinstance(value, BuiltinFunctionType):
         return {
             "builtin_module": value.__module__,
@@ -408,13 +495,18 @@ def _host_behavior_value(
             }
         seen.add(reference)
         try:
-            return {
+            identity = {
                 "frozen_type": _host_type_identity(type(value), seen),
                 "fields": {
                     item.name: _host_behavior_value(getattr(value, item.name), seen)
                     for item in fields(value)
                 },
             }
+            if callable(value):
+                identity["callable_implementation"] = _host_callable_type_identity(
+                    type(value), seen
+                )
+            return identity
         finally:
             seen.remove(reference)
     _lifecycle_fail(
@@ -440,20 +532,21 @@ def _host_function_identity(
             _lifecycle_fail("callable function module is not loaded")
         globals_identity: dict[str, object] = {}
         for name in sorted(_code_global_names(callback.__code__)):
-            if name not in callback.__globals__:
-                continue
-            global_value = callback.__globals__[name]
+            scope, global_value = _resolve_loaded_name(callback, name)
             if isinstance(global_value, ModuleType):
-                attributes = {
-                    attribute: _shallow_dependency_identity(
+                attributes: dict[str, object] = {}
+                for attribute in sorted(
+                    _module_attribute_names(callback.__code__, name)
+                ):
+                    if not hasattr(global_value, attribute):
+                        _lifecycle_fail(
+                            "formal callable has unresolved module attribute: "
+                            f"{name}.{attribute}"
+                        )
+                    attributes[attribute] = _shallow_dependency_identity(
                         getattr(global_value, attribute), seen
                     )
-                    for attribute in sorted(
-                        _module_attribute_names(callback.__code__, name)
-                    )
-                    if hasattr(global_value, attribute)
-                }
-                globals_identity[name] = {
+                dependency: object = {
                     "module": _module_source_identity(global_value),
                     "attributes": attributes,
                 }
@@ -462,15 +555,17 @@ def _host_function_identity(
                 or global_value.__module__.startswith("numerical_agent.")
                 or global_value.__module__.startswith("common.")
             ):
-                globals_identity[name] = _host_function_identity(global_value, seen)
+                dependency = _host_function_identity(global_value, seen)
             elif isinstance(global_value, (FunctionType, BuiltinFunctionType, type)):
-                globals_identity[name] = _shallow_dependency_identity(
-                    global_value, seen
-                )
+                dependency = _shallow_dependency_identity(global_value, seen)
             else:
-                globals_identity[name] = _host_behavior_value(
+                dependency = _host_behavior_value(
                     global_value, seen, allow_mutable_globals=True
                 )
+            globals_identity[name] = {
+                "scope": scope,
+                "identity": dependency,
+            }
         closure = callback.__closure__ or ()
         identity = {
             "owner_module": callback.__module__,
@@ -497,6 +592,9 @@ def _host_callable_fingerprint(callback: object) -> str:
     """Derive an explicit bounded manifest of actually loaded dependencies."""
     source_token = _BEHAVIOR_SOURCE_CACHE.set({})
     identity_token = _BEHAVIOR_IDENTITY_CACHE.set({})
+    strict_token = _BEHAVIOR_STRICT_GRAPH.set(
+        not isinstance(callback, FunctionType)
+    )
     try:
         if isinstance(callback, FunctionType):
             module = sys.modules.get(callback.__module__)
@@ -518,9 +616,8 @@ def _host_callable_fingerprint(callback: object) -> str:
             if not isinstance(module, ModuleType):
                 _lifecycle_fail("formal callable module is not loaded")
             identity = {
-                "callable_type": _host_type_identity(type(callback), set()),
-                "implementation": _host_function_identity(
-                    implementation, set()
+                "callable_type": _host_callable_type_identity(
+                    type(callback), set()
                 ),
                 "state": {
                     item.name: _host_behavior_value(
@@ -531,6 +628,7 @@ def _host_callable_fingerprint(callback: object) -> str:
             }
         return champion_fingerprint(identity)
     finally:
+        _BEHAVIOR_STRICT_GRAPH.reset(strict_token)
         _BEHAVIOR_IDENTITY_CACHE.reset(identity_token)
         _BEHAVIOR_SOURCE_CACHE.reset(source_token)
 

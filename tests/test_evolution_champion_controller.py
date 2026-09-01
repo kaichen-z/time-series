@@ -1,11 +1,14 @@
 """Build-only Champion evolution controller regressions."""
 from __future__ import annotations
 
+import builtins
 import gc
 import hashlib
 import json
 import os
 from dataclasses import dataclass, field, replace
+from pathlib import Path
+from types import FunctionType
 
 import pytest
 
@@ -444,10 +447,28 @@ class LifecycleRows:
         }[split]
         rows: list[ChampionTaskRow] = []
         for index, task in enumerate(tasks):
-            profile = replace(
-                _profile(task.task_id, index),
+            base_profile = _profile(task.task_id, index)
+            profile = TaskProfile(
+                task_id=base_profile.task_id,
+                frequency=base_profile.frequency,
                 history_length=len(task.history_values),
                 horizon=task.prediction_length,
+                zero_fraction=base_profile.zero_fraction,
+                signed=base_profile.signed,
+                integer_valued=base_profile.integer_valued,
+                trend_direction=base_profile.trend_direction,
+                trend_strength=base_profile.trend_strength,
+                periodicity_periods=base_profile.periodicity_periods,
+                periodicity_strength=base_profile.periodicity_strength,
+                periodicity_confidence=base_profile.periodicity_confidence,
+                outlier_fraction=base_profile.outlier_fraction,
+                noise_relative_scale=base_profile.noise_relative_scale,
+                likely_stationary=base_profile.likely_stationary,
+                stationarity_score=base_profile.stationarity_score,
+                recent_regime_start=base_profile.recent_regime_start,
+                recent_regime_confidence=base_profile.recent_regime_confidence,
+                intermittency_adi=base_profile.intermittency_adi,
+                intermittency_cv2=base_profile.intermittency_cv2,
             )
             for candidate_name, candidate_error in {
                 "baseline_leaf": 2.0,
@@ -523,6 +544,176 @@ def test_callable_binding_fingerprint_is_derived_from_live_executable(
 
     with pytest.raises(ChampionLifecycleError, match="executable|implementation"):
         binding.verify()
+
+
+def test_row_provider_adapter_binds_nested_callable_method(monkeypatch) -> None:
+    provider = InterruptAtCalibration()
+    binding = ChampionRowProviderAdapter.bind(
+        identity="nested-row-provider",
+        callback=provider,
+        config={},
+    )
+
+    def replaced(self, tasks, split):
+        return ("behavior-drift",)
+
+    monkeypatch.setattr(LifecycleRows, "__call__", replaced)
+
+    with pytest.raises(ChampionLifecycleError, match="executable|implementation"):
+        binding.verify()
+
+
+def test_row_provider_adapter_binds_nested_custom_method(monkeypatch) -> None:
+    @dataclass(frozen=True)
+    class MethodRows:
+        def __call__(self, tasks, split):
+            return ()
+
+        def materialize(self, tasks, split):
+            return ("original",)
+
+    @dataclass(frozen=True)
+    class DelegatingRows:
+        delegate: MethodRows = field(default_factory=MethodRows)
+
+        def __call__(self, tasks, split):
+            return self.delegate.materialize(tasks, split)
+
+    binding = ChampionRowProviderAdapter.bind(
+        identity="nested-method-row-provider",
+        callback=DelegatingRows(),
+        config={},
+    )
+
+    def replaced(self, tasks, split):
+        return ("behavior-drift",)
+
+    monkeypatch.setattr(MethodRows, "materialize", replaced)
+
+    with pytest.raises(ChampionLifecycleError, match="executable|implementation"):
+        binding.verify()
+
+
+@pytest.mark.parametrize(
+    ("attribute", "replacement"),
+    (
+        ("__defaults__", ("behavior-drift",)),
+        ("__kwdefaults__", {"marker": "behavior-drift"}),
+    ),
+)
+def test_row_provider_adapter_binds_nested_callable_defaults(
+    monkeypatch, attribute, replacement
+) -> None:
+    @dataclass(frozen=True)
+    class DefaultedRows:
+        def __call__(
+            self,
+            tasks,
+            split,
+            behavior="original",
+            *,
+            marker="stable",
+        ):
+            return behavior, marker
+
+    @dataclass(frozen=True)
+    class DelegatingRows:
+        delegate: DefaultedRows = field(default_factory=DefaultedRows)
+
+        def __call__(self, tasks, split):
+            return self.delegate(tasks, split)
+
+    binding = ChampionRowProviderAdapter.bind(
+        identity="nested-defaulted-row-provider",
+        callback=DelegatingRows(),
+        config={},
+    )
+    monkeypatch.setattr(DefaultedRows.__call__, attribute, replacement)
+
+    with pytest.raises(ChampionLifecycleError, match="executable|implementation"):
+        binding.verify()
+
+
+def test_row_provider_adapter_binds_nested_callable_closure(monkeypatch) -> None:
+    behavior = "original"
+
+    @dataclass(frozen=True)
+    class ClosedRows:
+        def __call__(self, tasks, split):
+            return (behavior,)
+
+    @dataclass(frozen=True)
+    class DelegatingRows:
+        delegate: ClosedRows = field(default_factory=ClosedRows)
+
+        def __call__(self, tasks, split):
+            return self.delegate(tasks, split)
+
+    binding = ChampionRowProviderAdapter.bind(
+        identity="nested-closed-row-provider",
+        callback=DelegatingRows(),
+        config={},
+    )
+    closure = ClosedRows.__call__.__closure__
+    assert closure is not None and len(closure) == 1
+    monkeypatch.setattr(closure[0], "cell_contents", "behavior-drift")
+
+    with pytest.raises(ChampionLifecycleError, match="executable|implementation"):
+        binding.verify()
+
+
+def test_formal_adapter_binds_builtin_from_callable_mapping() -> None:
+    @dataclass(frozen=True)
+    class BuiltinRows:
+        def __call__(self, tasks, split):
+            return len(tasks)
+
+    builtin_mapping = dict(vars(builtins))
+    implementation = FunctionType(
+        BuiltinRows.__call__.__code__,
+        {"__builtins__": builtin_mapping},
+        BuiltinRows.__call__.__name__,
+        BuiltinRows.__call__.__defaults__,
+        BuiltinRows.__call__.__closure__,
+    )
+    implementation.__module__ = BuiltinRows.__call__.__module__
+    implementation.__qualname__ = BuiltinRows.__call__.__qualname__
+    BuiltinRows.__call__ = implementation  # type: ignore[method-assign]
+    binding = ChampionRowProviderAdapter.bind(
+        identity="builtin-row-provider",
+        callback=BuiltinRows(),
+        config={},
+    )
+
+    builtin_mapping["len"] = lambda value: 0
+
+    with pytest.raises(ChampionLifecycleError, match="executable|implementation"):
+        binding.verify()
+
+
+def test_formal_adapter_rejects_unresolved_loaded_builtin() -> None:
+    @dataclass(frozen=True)
+    class BuiltinRows:
+        def __call__(self, tasks, split):
+            return len(tasks)
+
+    implementation = FunctionType(
+        BuiltinRows.__call__.__code__,
+        {"__builtins__": {}},
+        BuiltinRows.__call__.__name__,
+        BuiltinRows.__call__.__defaults__,
+        BuiltinRows.__call__.__closure__,
+    )
+    implementation.__module__ = BuiltinRows.__call__.__module__
+    implementation.__qualname__ = BuiltinRows.__call__.__qualname__
+    BuiltinRows.__call__ = implementation  # type: ignore[method-assign]
+
+    with pytest.raises(ChampionLifecycleError, match="unresolved|builtin|global"):
+        ChampionRowProviderAdapter.bind(
+            identity="missing-builtin-row-provider",
+            callback=BuiltinRows(),
+            config={},
+        )
 
 
 def test_proposer_adapter_binds_immutable_callable_instance_state() -> None:
@@ -1250,16 +1441,20 @@ def test_stored_dev_pass_cannot_publish_release(monkeypatch, tmp_path) -> None:
 
 def test_release_rejects_normalized_lineage_replay(tmp_path) -> None:
     parent = replace(PARENT, lineage=("active_parent", "Model_K"))
+    collision_proposals = list(_proposal_batch("better"))
+    collision_proposals[0] = replace(collision_proposals[0], name="Model_K")
 
     @dataclass(frozen=True)
     class LineageCollisionProposer:
+        proposals: tuple[ChampionRecipe, ...]
+
         def __call__(self, received, evidence) -> tuple[ChampionRecipe, ...]:
-            proposals = list(_proposal_batch("better"))
-            proposals[0] = replace(proposals[0], name="Model_K")
-            return tuple(proposals)
+            return self.proposals
 
     controller = _lifecycle_controller(
-        tmp_path, LineageCollisionProposer(), LifecycleRows()
+        tmp_path,
+        LineageCollisionProposer(tuple(collision_proposals)),
+        LifecycleRows(),
     )
 
     with pytest.raises(ChampionLifecycleError, match="lineage|replayed"):
@@ -1299,18 +1494,26 @@ def test_completed_lifecycle_reports_cannot_be_replayed(tmp_path) -> None:
 
 
 def test_hostile_calibration_callback_cannot_replace_durable_parent(tmp_path) -> None:
+    tampered = replace(PARENT, lineage=("active_parent", "tampered"))
+    tampered_bytes = canonical_release_bytes(tampered)
+
     @dataclass(frozen=True)
-    class ReleaseTamperingRows(LifecycleRows):
+    class ReleaseTamperingRows:
+        delegate: LifecycleRows
+        release_path: Path
+        replacement_bytes: bytes
+
         def __call__(self, tasks, split):
-            result = super().__call__(tasks, split)
+            result = self.delegate(tasks, split)
             if split == "calibration":
-                tampered = replace(PARENT, lineage=("active_parent", "tampered"))
-                (tmp_path / "champion_release.json").write_bytes(
-                    canonical_release_bytes(tampered)
-                )
+                self.release_path.write_bytes(self.replacement_bytes)
             return result
 
-    rows = ReleaseTamperingRows()
+    rows = ReleaseTamperingRows(
+        LifecycleRows(),
+        tmp_path / "champion_release.json",
+        tampered_bytes,
+    )
 
     with pytest.raises(ChampionLifecycleError, match="release|Parent|drift"):
         _lifecycle_controller(
@@ -1325,21 +1528,30 @@ def test_hostile_calibration_callback_cannot_replace_durable_parent(tmp_path) ->
 def test_hostile_proposer_release_mutation_is_restored_before_scoring(
     tmp_path,
 ) -> None:
+    tampered = replace(PARENT, lineage=("active_parent", "tampered"))
+    tampered_bytes = canonical_release_bytes(tampered)
+
     @dataclass(frozen=True)
-    class ReleaseTamperingProposer(SerializedRecordingProposer):
+    class ReleaseTamperingProposer:
+        delegate: SerializedRecordingProposer
+        release_path: Path
+        replacement_bytes: bytes
+
         def __call__(self, parent, evidence):
-            result = super().__call__(parent, evidence)
-            tampered = replace(PARENT, lineage=("active_parent", "tampered"))
-            (tmp_path / "champion_release.json").write_bytes(
-                canonical_release_bytes(tampered)
-            )
+            result = self.delegate(parent, evidence)
+            self.release_path.write_bytes(self.replacement_bytes)
             return result
 
     rows = LifecycleRows()
+    proposer = ReleaseTamperingProposer(
+        SerializedRecordingProposer(),
+        tmp_path / "champion_release.json",
+        tampered_bytes,
+    )
     with pytest.raises(ChampionLifecycleError, match="release|Parent|drift"):
-        _lifecycle_controller(
-            tmp_path, ReleaseTamperingProposer(), rows
-        ).evolve(PARENT, TRAIN_80, DEV_20)
+        _lifecycle_controller(tmp_path, proposer, rows).evolve(
+            PARENT, TRAIN_80, DEV_20
+        )
 
     assert (tmp_path / "champion_release.json").read_bytes() == canonical_release_bytes(
         PARENT
