@@ -18,7 +18,8 @@ from evolving_loop.retrieval_agent.skill_library import (
     _commit_evaluator_records,
     _record_digest,
 )
-from evolving_loop.retrieval_agent.schemas import EvidenceChain
+from evolving_loop.retrieval_agent.quality import score_retrieval_card_quality
+from evolving_loop.retrieval_agent.schemas import EvidenceChain, FinalRetrievalCard
 from evolving_loop.retrieval_agent.verifier import (
     _verified_quote_spans,
     verify_round_result,
@@ -527,6 +528,17 @@ def _retrieval_quality(
     result: "HarnessResult",
     chains: tuple[object, ...],
 ) -> tuple[float, float, float, float, float, int]:
+    typed_card = getattr(result, "retrieval_card", None)
+    if isinstance(typed_card, FinalRetrievalCard):
+        quality = score_retrieval_card_quality(task, typed_card)
+        return (
+            quality.supporting_recall,
+            quality.gt_evidence_recall,
+            quality.distractor_avoidance,
+            quality.exact_quote_validity,
+            quality.complete_chain_rate,
+            quality.rejection_count,
+        )
     retrieved = set(_retrieved_document_ids(result))
     supporting = {document.document_id for document in task.documents if document.role == "supporting"}
     distractors = {document.document_id for document in task.documents if document.role == "distractor"}

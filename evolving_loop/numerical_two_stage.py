@@ -1465,6 +1465,13 @@ def _numerical_package_fingerprint(numerical: NumericalForecastPackage) -> str:
     )
 
 
+def numerical_package_fingerprint(numerical: NumericalForecastPackage) -> str:
+    """Return the canonical safe-runtime identity of a frozen Numerical package."""
+    if not isinstance(numerical, NumericalForecastPackage):
+        raise TypeError("numerical must be a NumericalForecastPackage")
+    return _numerical_package_fingerprint(numerical)
+
+
 def _canonical_metric(value: float) -> float | str:
     number = float(value)
     if math.isfinite(number):
