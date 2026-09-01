@@ -8,7 +8,11 @@ import pytest
 
 from common.llm import FakeLLMClient
 from numerical_agent.dictionary import MethodDefinition, ToolDictionary
-from numerical_agent.evolution.champion import ChampionRecipe, EvolutionAssumption
+from numerical_agent.evolution.champion import (
+    ChampionRecipe,
+    EvolutionAssumption,
+    champion_fingerprint,
+)
 from numerical_agent.evolution.champion_evidence import ChampionTaskRow, ProposerEvidence
 from numerical_agent.evolution.champion_proposal import (
     CORRECTION_CAP_GRID,
@@ -116,12 +120,162 @@ def _recipe(
     }
 
 
-def valid_response() -> dict[str, object]:
+def legacy_response() -> dict[str, object]:
     return {"recipes": [_recipe(index) for index in range(5)]}
+
+
+def _closed_assumption(
+    *,
+    kind: str = "weighted",
+    feature: str = "periodicity_strength",
+    candidate_name: str = "timesfm_2_5",
+    direction: str = "above",
+    horizon_region: str = "full",
+) -> dict[str, object]:
+    return {
+        "candidate_name": candidate_name,
+        "feature": feature,
+        "direction": direction,
+        "horizon_region": horizon_region,
+        "operator": kind,
+    }
+
+
+def _closed_recipe(
+    *,
+    kind: str = "weighted",
+    feature: str = "periodicity_strength",
+    direction: str = "above",
+    horizon_region: str = "full",
+) -> dict[str, object]:
+    parents = ["timesfm_2_5"] if kind == "select" else [
+        "timesfm_2_5",
+        "seasonal_naive",
+    ]
+    return {
+        "kind": kind,
+        "parents": parents,
+        "fallback_parent": parents[0],
+        "assumptions": [
+            _closed_assumption(
+                kind=kind,
+                feature=feature,
+                candidate_name=parents[0],
+                direction=direction,
+                horizon_region=horizon_region,
+            )
+        ],
+    }
+
+
+def closed_response(**recipe_fields: str) -> dict[str, object]:
+    return {
+        "recipes": [_closed_recipe(**recipe_fields) for _ in range(5)],
+    }
+
+
+def valid_response() -> dict[str, object]:
+    return closed_response()
 
 
 def timesfm_seasonal_response() -> dict[str, object]:
     return valid_response()
+
+
+def test_parser_reconstructs_task2_text_and_ids_from_closed_structure() -> None:
+    response = closed_response()
+    recipes = parse_champion_response(response, INVENTORY)
+
+    assert tuple(recipe.name for recipe in recipes) == tuple(
+        f"proposed_recipe_{index}" for index in range(5)
+    )
+    assert tuple(
+        recipe.assumptions[0].assumption_id for recipe in recipes
+    ) == tuple(f"proposed_assumption_{index}_0" for index in range(5))
+    assert recipes[0].assumptions[0].rationale == (
+        "The periodicity_strength feature supports timesfm_2_5 for above full "
+        "weighted structure."
+    )
+    assert recipes[0].assumptions[0].failure_condition == (
+        "The periodicity_strength feature may not support timesfm_2_5 for above "
+        "full weighted structure."
+    )
+    repeated = parse_champion_response(response, INVENTORY)
+    assert repeated == recipes
+    assert tuple(map(champion_fingerprint, repeated)) == tuple(
+        map(champion_fingerprint, recipes)
+    )
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ("select", "route", "horizon_route", "weighted", "median", "bounded_overlay"),
+)
+@pytest.mark.parametrize(
+    "feature",
+    (
+        "history_length",
+        "horizon",
+        "horizon_ratio",
+        "zero_fraction",
+        "trend_strength",
+        "periodicity_strength",
+        "periodicity_confidence",
+        "outlier_fraction",
+        "noise_relative_scale",
+        "stationarity_score",
+        "recent_regime_confidence",
+        "intermittency_adi",
+        "intermittency_cv2",
+    ),
+)
+@pytest.mark.parametrize("direction", ("above", "below"))
+@pytest.mark.parametrize("horizon_region", ("early", "late", "full"))
+def test_parser_accepts_every_closed_structural_combination(
+    kind: str,
+    feature: str,
+    direction: str,
+    horizon_region: str,
+) -> None:
+    recipes = parse_champion_response(
+        closed_response(
+            kind=kind,
+            feature=feature,
+            direction=direction,
+            horizon_region=horizon_region,
+        ),
+        INVENTORY,
+    )
+
+    assumption = recipes[0].assumptions[0]
+    assert (
+        assumption.operator,
+        assumption.feature,
+        assumption.direction,
+        assumption.horizon_region,
+    ) == (kind, feature, direction, horizon_region)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    (
+        "Choose as winner when hidden outcome quality improves.",
+        "Promote this recipe when holdout outcomes improve.",
+        "yield specialist",
+        "Elect this contender after unseen results improve.",
+        "Crown this option when concealed results improve.",
+        "await specialist",
+        "raise specialist",
+    ),
+)
+def test_parser_rejects_legacy_llm_owned_text_even_when_schema_is_otherwise_valid(
+    prose: str,
+) -> None:
+    response = legacy_response()
+    response["recipes"][0]["assumptions"][0]["rationale"] = prose  # type: ignore[index]
+
+    with pytest.raises(ChampionProposalError):
+        parse_champion_response(response, INVENTORY)
 
 
 def test_prompt_has_no_labels_tasks_or_numeric_authority() -> None:
@@ -139,13 +293,58 @@ def test_prompt_has_no_labels_tasks_or_numeric_authority() -> None:
     assert "accepted" not in serialized
     assert "weights" not in payload["output_schema"]["assumption_fields"]
     assert "threshold" not in payload["output_schema"]["assumption_fields"]
-    assert payload["parent"] == PARENT.to_payload()
+    assert payload["output_schema"]["recipe_fields"] == [
+        "kind",
+        "parents",
+        "fallback_parent",
+        "assumptions",
+    ]
+    assert payload["output_schema"]["assumption_fields"] == [
+        "candidate_name",
+        "feature",
+        "direction",
+        "horizon_region",
+        "operator",
+    ]
+    assert payload["parent"] == {
+        "kind": "select",
+        "parents": ["timesfm_2_5"],
+        "fallback_parent": "timesfm_2_5",
+        "assumptions": [
+            {
+                "candidate_name": "timesfm_2_5",
+                "feature": "history_length",
+                "direction": "above",
+                "horizon_region": "full",
+                "operator": "select",
+            }
+        ],
+    }
     assert payload["evidence"] == EVIDENCE.to_payload()
     assert payload["inventory"] == [
         {"family": "statistical", "name": "seasonal_naive"},
         {"family": "foundation", "name": "timesfm_2_5"},
         {"family": "foundation", "name": "toto_2_0"},
     ]
+
+
+def test_prompt_projects_parent_without_open_names_ids_or_text() -> None:
+    assumption = replace(
+        PARENT.assumptions[0],
+        assumption_id="holdout_outcome",
+        rationale="Choose as winner when hidden outcome quality improves.",
+        failure_condition="yield specialist",
+    )
+    parent = replace(PARENT, name="task_42", assumptions=(assumption,))
+    llm = FakeLLMClient([json.dumps(valid_response())])
+
+    propose_champion_recipes(llm, parent, INVENTORY, EVIDENCE)
+
+    prompt = llm.calls[0]["messages"][0]["content"]
+    assert "task_42" not in prompt
+    assert "holdout_outcome" not in prompt
+    assert "Choose as winner" not in prompt
+    assert "yield specialist" not in prompt
 
 
 def test_parser_rejects_llm_numeric_thresholds_before_expansion() -> None:
@@ -194,33 +393,37 @@ def test_parser_rejects_private_and_keyword_recipe_namespaces(
     field: str,
     identifier: str,
 ) -> None:
-    response = valid_response()
+    recipe = _typed_recipe("route")
     if field == "recipe":
-        response["recipes"][0]["name"] = identifier  # type: ignore[index]
+        recipe = replace(recipe, name=identifier)
     else:
-        response["recipes"][0]["assumptions"][0][  # type: ignore[index]
-            "assumption_id"
-        ] = identifier
+        assumption = replace(recipe.assumptions[0], assumption_id=identifier)
+        recipe = replace(recipe, assumptions=(assumption,))
 
     with pytest.raises(ChampionProposalError, match="public non-keyword"):
-        parse_champion_response(response, INVENTORY)
+        expand_recipe(recipe, _rows())
 
 
 def test_parser_rejects_unicode_normalized_recipe_and_assumption_duplicates() -> None:
-    duplicate_recipes = valid_response()
-    duplicate_recipes["recipes"][0]["name"] = "challenger_K"  # type: ignore[index]
-    duplicate_recipes["recipes"][1]["name"] = "challenger_K"  # type: ignore[index]
+    source = _typed_recipe("weighted")
+    duplicate_parents = replace(
+        source,
+        parents=("Model_K", "Model_K"),
+        fallback_parent="Model_K",
+        assumptions=(replace(source.assumptions[0], candidate_name="Model_K"),),
+    )
     with pytest.raises(ChampionProposalError, match="normalized"):
-        parse_champion_response(duplicate_recipes, INVENTORY)
+        expand_recipe(duplicate_parents, _rows())
 
-    duplicate_assumptions = valid_response()
-    first = duplicate_assumptions["recipes"][0]  # type: ignore[index]
-    first["assumptions"] = [
-        {**first["assumptions"][0], "assumption_id": "Signal"},
-        {**first["assumptions"][0], "assumption_id": "Ｓｉｇｎａｌ"},
-    ]
+    duplicate_assumptions = replace(
+        source,
+        assumptions=(
+            replace(source.assumptions[0], assumption_id="Signal"),
+            replace(source.assumptions[0], assumption_id="Ｓｉｇｎａｌ"),
+        ),
+    )
     with pytest.raises(ChampionProposalError, match="normalized"):
-        parse_champion_response(duplicate_assumptions, INVENTORY)
+        expand_recipe(duplicate_assumptions, _rows())
 
 
 def test_inventory_candidate_names_are_public_nonkeyword_and_normalized_unique() -> None:
@@ -333,12 +536,12 @@ def test_inventory_rejects_hostile_status_before_hash_or_equality(
         lambda response: {
             "recipes": [
                 *response["recipes"],
-                _recipe(6),
-                _recipe(7),
-                _recipe(8),
-                _recipe(9),
-                _recipe(10),
-                _recipe(11),
+                _closed_recipe(),
+                _closed_recipe(),
+                _closed_recipe(),
+                _closed_recipe(),
+                _closed_recipe(),
+                _closed_recipe(),
             ]
         },
         lambda response: {
@@ -355,7 +558,7 @@ def test_inventory_rejects_hostile_status_before_hash_or_equality(
                 {
                     **response["recipes"][0],
                     "assumptions": [
-                        _assumption(0, feature="unknown_feature")
+                        _closed_assumption(feature="unknown_feature")
                     ],
                 },
                 *response["recipes"][1:],
@@ -369,8 +572,16 @@ def test_inventory_rejects_hostile_status_before_hash_or_equality(
         },
         lambda response: {
             "recipes": [
-                response["recipes"][0],
-                {**response["recipes"][1], "name": "challenger_0"},
+                {
+                    **response["recipes"][0],
+                    "assumptions": [
+                        {
+                            **response["recipes"][0]["assumptions"][0],
+                            "assumption_id": "model_owned_id",
+                        }
+                    ],
+                },
+                response["recipes"][1],
                 *response["recipes"][2:],
             ]
         },
@@ -415,15 +626,15 @@ def test_raw_parser_rejects_duplicate_keys_code_blocks_and_noncanonical_json(
 def test_parser_rejects_authority_numeric_and_code_like_structural_prose(
     prose: str,
 ) -> None:
-    response = valid_response()
+    response = legacy_response()
     response["recipes"][0]["assumptions"][0]["rationale"] = prose  # type: ignore[index]
 
-    with pytest.raises(ChampionProposalError, match="prose"):
+    with pytest.raises(ChampionProposalError):
         parse_champion_response(response, INVENTORY)
 
 
-def test_parser_allows_bounded_ordinary_prose_with_benign_marker_near_misses() -> None:
-    response = valid_response()
+def test_parser_rejects_even_benign_llm_owned_prose() -> None:
+    response = legacy_response()
     assumption = response["recipes"][0]["assumptions"][0]  # type: ignore[index]
     assumption["rationale"] = (
         "Historical capacity may indicate stable seasonal behavior."
@@ -432,13 +643,12 @@ def test_parser_allows_bounded_ordinary_prose_with_benign_marker_near_misses() -
         "The captioned seasonal pattern may weaken gradually."
     )
 
-    recipes = parse_champion_response(response, INVENTORY)
-
-    assert recipes[0].assumptions[0].rationale.startswith("Historical capacity")
+    with pytest.raises(ChampionProposalError):
+        parse_champion_response(response, INVENTORY)
 
 
 def test_proposer_retries_unsafe_prose_once_and_retains_no_partial_batch() -> None:
-    response = valid_response()
+    response = legacy_response()
     response["recipes"][0]["assumptions"][0]["rationale"] = (  # type: ignore[index]
         "Use task_42 labels at threshold 0.8."
     )
@@ -449,6 +659,21 @@ def test_proposer_retries_unsafe_prose_once_and_retains_no_partial_batch() -> No
 
     assert len(llm.calls) == 2
     assert "task_42" not in str(caught.value)
+
+
+def test_proposer_retries_reviewer_text_and_returns_only_closed_second_batch() -> None:
+    first = legacy_response()
+    first["recipes"][0]["assumptions"][0]["rationale"] = "yield specialist"  # type: ignore[index]
+    second = closed_response(kind="route")
+    llm = FakeLLMClient([json.dumps(first), json.dumps(second)])
+
+    recipes = propose_champion_recipes(llm, PARENT, INVENTORY, EVIDENCE)
+
+    assert len(llm.calls) == 2
+    assert all(recipe.kind == "route" for recipe in recipes)
+    assert "yield specialist" not in json.dumps(
+        [recipe.to_payload() for recipe in recipes]
+    )
 
 
 def test_proposer_retries_schema_once_without_returning_partial_output() -> None:

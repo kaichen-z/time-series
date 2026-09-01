@@ -66,100 +66,24 @@ _PROFILE_FLOAT_FEATURES = frozenset(_FEATURES) - {
     "horizon_ratio",
 }
 _RECIPE_FIELDS = (
-    "name",
     "kind",
     "parents",
     "fallback_parent",
     "assumptions",
 )
 _ASSUMPTION_FIELDS = (
-    "assumption_id",
     "candidate_name",
     "feature",
     "direction",
     "horizon_region",
     "operator",
-    "rationale",
-    "failure_condition",
 )
+_DIRECTIONS = ("above", "below")
+_HORIZON_REGIONS = ("early", "late", "full")
 _MAX_ASSUMPTIONS_PER_RECIPE = 3
 _MAX_BUILD_ROWS = 1_000_000
 _MAX_PROFILE_LENGTH = 1_000_000
 _ACTIVE_INVENTORY_STATUSES = frozenset({"accepted", "specialized"})
-_MAX_STRUCTURAL_PROSE = 500
-_SAFE_PROSE_PUNCTUATION = frozenset(".,!?'-–—，。！？‘’")
-_CODE_PROSE_TOKENS = frozenset({
-    "call",
-    "class",
-    "def",
-    "eval",
-    "exec",
-    "function",
-    "import",
-    "lambda",
-    "return",
-})
-_AUTHORITY_PROSE_TOKENS = frozenset({
-    "accept",
-    "acceptance",
-    "accepted",
-    "accepting",
-    "accepts",
-    "alpha",
-    "approval",
-    "approve",
-    "approved",
-    "approves",
-    "approving",
-    "build",
-    "calibration",
-    "cap",
-    "capped",
-    "capping",
-    "caps",
-    "dev",
-    "devops",
-    "entities",
-    "entity",
-    "future",
-    "futures",
-    "gate",
-    "gates",
-    "label",
-    "labeled",
-    "labeling",
-    "labelled",
-    "labelling",
-    "labels",
-    "metric",
-    "metrics",
-    "parameter",
-    "parameters",
-    "position",
-    "positions",
-    "public",
-    "reject",
-    "rejected",
-    "rejecting",
-    "rejection",
-    "rejects",
-    "score",
-    "scored",
-    "scores",
-    "scoring",
-    "split",
-    "splits",
-    "task",
-    "tasks",
-    "threshold",
-    "thresholds",
-    "truth",
-    "truths",
-    "weight",
-    "weighted",
-    "weighting",
-    "weights",
-})
 
 CHAMPION_PROPOSAL_SYSTEM = """You propose structural Numerical Champion recipes only.
 Return exactly one standards-JSON object matching the exact schema supplied by
@@ -167,9 +91,12 @@ the user. Use exact canonical JSON types, no wrappers, no duplicate keys, and
 no unknown fields. Every recipe must use only supplied candidate names,
 features, operators, directions, and horizon regions. Return no thresholds,
 weights, strengths, correction caps, split positions, source code, data labels,
-task identities, scores, gates, or acceptance decisions. Numeric expansion and
-all evaluation belong exclusively to trusted host code. A malformed response
-causes at most one identical schema retry and no partial recipe is retained."""
+task identities, scores, gates, acceptance decisions, recipe names, assumption
+IDs, rationales, or failure text. Trusted host code assigns all identifiers and
+assembles canonical text after validating the closed structural fields. Numeric
+expansion and all evaluation belong exclusively to trusted host code. A
+malformed response causes at most one identical schema retry and no partial
+recipe is retained."""
 
 
 class ChampionProposalError(ValueError):
@@ -206,83 +133,6 @@ def _require_normalized_unique(values: tuple[str, ...], field_name: str) -> None
     normalized = tuple(_canonical_text(value) for value in values)
     if len(normalized) != len(set(normalized)):
         _fail(f"{field_name} must be normalized-unique")
-
-
-def _alnum_segments(value: str) -> tuple[str, ...]:
-    segments: list[str] = []
-    current: list[str] = []
-    for character in unicodedata.normalize("NFKC", value):
-        if character.isalnum():
-            current.append(character)
-        elif current:
-            segments.append("".join(current))
-            current = []
-    if current:
-        segments.append("".join(current))
-    return tuple(segments)
-
-
-def _token_starts(segment: str) -> tuple[int, ...]:
-    starts = [0]
-    for index in range(1, len(segment)):
-        previous = segment[index - 1]
-        current = segment[index]
-        following = segment[index + 1] if index + 1 < len(segment) else ""
-        if (
-            previous.isdigit() != current.isdigit()
-            or (previous.islower() and current.isupper())
-            or (previous.isupper() and current.isupper() and following.islower())
-        ):
-            starts.append(index)
-    return tuple(starts)
-
-
-def _prose_tokens(value: str) -> tuple[str, ...]:
-    tokens: list[str] = []
-    for segment in _alnum_segments(value):
-        starts = _token_starts(segment)
-        tokens.extend(
-            _canonical_text(segment[start:end])
-            for start, end in zip(starts, (*starts[1:], len(segment)))
-        )
-    return tuple(tokens)
-
-
-def _validate_structural_prose(value: object, field_name: str) -> str:
-    if type(value) is not str:
-        _fail(f"{field_name} prose must be an exact string")
-    prose = cast(str, value)
-    normalized = unicodedata.normalize("NFKC", prose)
-    if (
-        not prose
-        or prose != prose.strip()
-        or not 1 <= len(normalized) <= _MAX_STRUCTURAL_PROSE
-    ):
-        _fail(f"{field_name} prose must be nonempty, trimmed, and bounded")
-    if any(character.isnumeric() for character in normalized):
-        _fail(f"{field_name} prose cannot contain numeric authority")
-    if any(
-        not (
-            character == " "
-            or unicodedata.category(character).startswith(("L", "M"))
-            or character in _SAFE_PROSE_PUNCTUATION
-        )
-        for character in normalized
-    ):
-        _fail(f"{field_name} prose contains code-like syntax")
-    if any(
-        normalized[index - 1].isalnum()
-        and character == "."
-        and normalized[index + 1].isalnum()
-        for index, character in enumerate(normalized[1:-1], start=1)
-    ):
-        _fail(f"{field_name} prose contains code-like syntax")
-    tokens = frozenset(_prose_tokens(normalized))
-    if tokens & _CODE_PROSE_TOKENS:
-        _fail(f"{field_name} prose contains code-like fragments")
-    if tokens & _AUTHORITY_PROSE_TOKENS:
-        _fail(f"{field_name} prose contains forbidden authority")
-    return prose
 
 
 def _validate_limits(minimum: object, maximum: object) -> tuple[int, int]:
@@ -453,10 +303,6 @@ def _validate_recipe(recipe: object, *, inventory_names: tuple[str, ...]) -> Cha
                 or type(assumption.operator) is not str
             ):
                 _fail("assumption enums must use exact strings")
-            _validate_structural_prose(assumption.rationale, "rationale")
-            _validate_structural_prose(
-                assumption.failure_condition, "failure_condition"
-            )
             EvolutionAssumption.__post_init__(assumption)
             assumption_ids.append(assumption.assumption_id)
         _require_normalized_unique(tuple(assumption_ids), "assumption IDs")
@@ -504,6 +350,112 @@ def _response_payload(response: object) -> dict[str, object]:
     return parsed
 
 
+def _closed_assumption_payload(
+    assumption: object,
+    *,
+    recipe_index: int,
+    assumption_index: int,
+    recipe_kind: str,
+    parents: tuple[str, ...],
+) -> dict[str, object]:
+    if type(assumption) is not dict:
+        _fail("each proposal assumption must be an exact JSON object")
+    raw = cast(dict[object, object], assumption)
+    if any(type(key) is not str for key in raw) or set(raw) != set(_ASSUMPTION_FIELDS):
+        _fail("proposal assumption fields must match the closed structural schema")
+    if any(type(raw[field]) is not str for field in _ASSUMPTION_FIELDS):
+        _fail("proposal assumption values must be exact structural strings")
+
+    candidate_name = _public_identifier(raw["candidate_name"], "candidate name")
+    feature = _public_identifier(raw["feature"], "assumption feature")
+    direction = cast(str, raw["direction"])
+    horizon_region = cast(str, raw["horizon_region"])
+    operator = cast(str, raw["operator"])
+    if candidate_name not in parents:
+        _fail("proposal assumption candidate must be one of the recipe parents")
+    if feature not in _FEATURES:
+        _fail("proposal assumption feature must be from the closed feature set")
+    if direction not in _DIRECTIONS:
+        _fail("proposal assumption direction must be from the closed direction set")
+    if horizon_region not in _HORIZON_REGIONS:
+        _fail("proposal horizon region must be from the closed region set")
+    if operator not in _OPERATORS or operator != recipe_kind:
+        _fail("proposal assumption operator must match the closed recipe kind")
+
+    return {
+        "assumption_id": f"proposed_assumption_{recipe_index}_{assumption_index}",
+        "candidate_name": candidate_name,
+        "feature": feature,
+        "direction": direction,
+        "horizon_region": horizon_region,
+        "operator": operator,
+        "rationale": (
+            f"The {feature} feature supports {candidate_name} for {direction} "
+            f"{horizon_region} {operator} structure."
+        ),
+        "failure_condition": (
+            f"The {feature} feature may not support {candidate_name} for "
+            f"{direction} {horizon_region} {operator} structure."
+        ),
+    }
+
+
+def _closed_recipe_payload(
+    recipe: object,
+    *,
+    recipe_index: int,
+    inventory_names: tuple[str, ...],
+) -> dict[str, object]:
+    if type(recipe) is not dict:
+        _fail("each Champion recipe must be an exact JSON object")
+    raw = cast(dict[object, object], recipe)
+    if any(type(key) is not str for key in raw) or set(raw) != set(_RECIPE_FIELDS):
+        _fail("proposal recipe fields must match the closed structural schema")
+    if type(raw["kind"]) is not str or raw["kind"] not in _OPERATORS:
+        _fail("proposal recipe kind must be from the closed operator set")
+    if type(raw["parents"]) is not list or not raw["parents"]:
+        _fail("proposal recipe parents must be an exact nonempty array")
+    parent_values = cast(list[object], raw["parents"])
+    if any(type(parent) is not str for parent in parent_values):
+        _fail("proposal recipe parents must be exact candidate strings")
+    parents = tuple(
+        _public_identifier(parent, "recipe parent") for parent in parent_values
+    )
+    _require_normalized_unique(parents, "recipe parents")
+    if any(parent not in inventory_names for parent in parents):
+        _fail("recipe contains an unknown parent")
+    fallback_parent = _public_identifier(
+        raw["fallback_parent"], "recipe fallback parent"
+    )
+    if fallback_parent not in parents:
+        _fail("proposal fallback parent must be one of the recipe parents")
+    assumptions = raw["assumptions"]
+    if (
+        type(assumptions) is not list
+        or not 1 <= len(assumptions) <= _MAX_ASSUMPTIONS_PER_RECIPE
+    ):
+        _fail("each Champion recipe requires one through three assumptions")
+    recipe_kind = cast(str, raw["kind"])
+    return {
+        "name": f"proposed_recipe_{recipe_index}",
+        "kind": recipe_kind,
+        "parents": list(parents),
+        "fallback_parent": fallback_parent,
+        "assumptions": [
+            _closed_assumption_payload(
+                assumption,
+                recipe_index=recipe_index,
+                assumption_index=assumption_index,
+                recipe_kind=recipe_kind,
+                parents=parents,
+            )
+            for assumption_index, assumption in enumerate(
+                cast(list[object], assumptions)
+            )
+        ],
+    }
+
+
 def parse_champion_response(
     response: object,
     inventory: ToolDictionary,
@@ -522,16 +474,12 @@ def parse_champion_response(
         _fail("Champion response recipe count is outside the configured bounds")
 
     parsed: list[ChampionRecipe] = []
-    for raw_recipe in raw_recipes:
-        if type(raw_recipe) is not dict:
-            _fail("each Champion recipe must be an exact JSON object")
-        recipe_payload = cast(dict[str, object], raw_recipe)
-        assumptions = recipe_payload.get("assumptions")
-        if (
-            type(assumptions) is not list
-            or not 1 <= len(assumptions) <= _MAX_ASSUMPTIONS_PER_RECIPE
-        ):
-            _fail("each Champion recipe requires one through three assumptions")
+    for recipe_index, raw_recipe in enumerate(raw_recipes):
+        recipe_payload = _closed_recipe_payload(
+            raw_recipe,
+            recipe_index=recipe_index,
+            inventory_names=inventory_names,
+        )
         try:
             recipe = parse_champion_recipe(recipe_payload)
         except (ChampionContractError, KeyError, TypeError, ValueError) as error:
@@ -549,6 +497,24 @@ def parse_champion_response(
 
 def _validated_parent(parent: object, inventory_names: tuple[str, ...]) -> ChampionRecipe:
     return _validate_recipe(parent, inventory_names=inventory_names)
+
+
+def _structural_recipe_payload(recipe: ChampionRecipe) -> dict[str, object]:
+    return {
+        "kind": recipe.kind,
+        "parents": list(recipe.parents),
+        "fallback_parent": recipe.fallback_parent,
+        "assumptions": [
+            {
+                "candidate_name": assumption.candidate_name,
+                "feature": assumption.feature,
+                "direction": assumption.direction,
+                "horizon_region": assumption.horizon_region,
+                "operator": assumption.operator,
+            }
+            for assumption in recipe.assumptions
+        ],
+    }
 
 
 def _validated_evidence(evidence: object) -> dict[str, object]:
@@ -574,7 +540,7 @@ def _proposal_payload(
     inventory_names = _inventory_names(inventory)
     validated_parent = _validated_parent(parent, inventory_names)
     return {
-        "parent": validated_parent.to_payload(),
+        "parent": _structural_recipe_payload(validated_parent),
         "inventory": _inventory_payload(inventory),
         "evidence": _validated_evidence(evidence),
         "output_schema": {
@@ -588,8 +554,8 @@ def _proposal_payload(
             },
             "allowed_operators": list(_OPERATORS),
             "allowed_features": list(_FEATURES),
-            "allowed_directions": ["above", "below"],
-            "allowed_horizon_regions": ["early", "late", "full"],
+            "allowed_directions": list(_DIRECTIONS),
+            "allowed_horizon_regions": list(_HORIZON_REGIONS),
         },
     }
 
