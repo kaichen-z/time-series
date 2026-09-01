@@ -22,9 +22,6 @@ from .screening import TaskProfile
 
 
 _SPLITS = frozenset({"build", "calibration", "dev", "public"})
-_FORBIDDEN_PROPOSER_NAME = re.compile(
-    r"(?:^|_)(?:dev|public|hidden|entity|truth|exception)(?:_|$)", re.IGNORECASE
-)
 _MAX_ROWS = 1_000_000
 _TIE_EPSILON = 1e-12
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -928,30 +925,36 @@ class ProposerEvidence:
 
     def to_payload(self) -> dict[str, object]:
         """Return a JSON-safe payload with no scorer-internal identities or arrays."""
-        payload: dict[str, object] = {
-            "label": self.label,
-            "independent_generalization_claim": False,
-            "morphology": [
-                {
-                    "group_id": item.group_id,
-                    "support": item.support,
-                    "candidate_name": item.candidate_name,
-                    "mean_delta_smae": item.mean_delta_smae,
-                    "mean_delta_srmse": item.mean_delta_srmse,
-                    "coverage": item.coverage,
-                    "p95_regret_smae": item.p95_regret_smae,
-                    "p95_regret_srmse": item.p95_regret_srmse,
-                }
-                for item in self.morphology
-            ],
-            "comparisons": [
-                {field_name: _json_safe(getattr(item, field_name))
-                 for field_name in item.__dataclass_fields__}
-                for item in self.comparisons
-            ],
-        }
+        payload = _proposer_payload(self)
         _assert_sanitized(payload)
         return payload
+
+
+def _proposer_payload(evidence: ProposerEvidence) -> dict[str, object]:
+    return {
+        "label": evidence.label,
+        "independent_generalization_claim": False,
+        "morphology": [
+            {
+                "group_id": item.group_id,
+                "support": item.support,
+                "candidate_name": item.candidate_name,
+                "mean_delta_smae": item.mean_delta_smae,
+                "mean_delta_srmse": item.mean_delta_srmse,
+                "coverage": item.coverage,
+                "p95_regret_smae": item.p95_regret_smae,
+                "p95_regret_srmse": item.p95_regret_srmse,
+            }
+            for item in evidence.morphology
+        ],
+        "comparisons": [
+            {
+                field_name: _json_safe(getattr(item, field_name))
+                for field_name in item.__dataclass_fields__
+            }
+            for item in evidence.comparisons
+        ],
+    }
 
 
 def _json_safe(value: object) -> object:
@@ -962,13 +965,12 @@ def _json_safe(value: object) -> object:
     return value
 
 
-def _assert_safe_candidate_name(name: str) -> None:
-    _public_identifier(name, "candidate_name")
-    if _FORBIDDEN_PROPOSER_NAME.search(name) or _contains_split_marker(name):
-        _fail("candidate_name contains a forbidden proposer marker")
-
-
-def _assert_sanitized(value: object) -> None:
+def _assert_sanitized(
+    value: object,
+    *,
+    identity_index: _IdentityIndex | None = None,
+    validated_strings: set[str] | None = None,
+) -> None:
     forbidden_keys = frozenset({
         "accepted", "rejected", "passed", "failures", "gate", "gates",
         "task_id", "task_ids", "truth", "truths", "forecast", "forecasts",
@@ -978,12 +980,20 @@ def _assert_sanitized(value: object) -> None:
         for key, item in value.items():
             if type(key) is not str or key.lower() in forbidden_keys:
                 _fail("proposer evidence contains a forbidden field")
-            _assert_sanitized(item)
+            _assert_sanitized(
+                item,
+                identity_index=identity_index,
+                validated_strings=validated_strings,
+            )
     elif type(value) is list:
         for item in value:
-            _assert_sanitized(item)
-    elif type(value) is str and _contains_split_marker(value):
-        _fail("proposer evidence contains a Dev/Public marker")
+            _assert_sanitized(
+                item,
+                identity_index=identity_index,
+                validated_strings=validated_strings,
+            )
+    elif type(value) is str:
+        _validate_emitted_string(value, identity_index, validated_strings)
     elif type(value) is float and not math.isfinite(value):
         _fail("proposer evidence contains a non-JSON numeric value")
 
@@ -999,7 +1009,63 @@ def _tokens(value: str) -> tuple[str, ...]:
 
 
 def _contains_split_marker(value: str) -> bool:
-    return bool({"dev", "public"} & set(_tokens(value)))
+    if {"dev", "devops", "public"} & set(_tokens(value)):
+        return True
+    for segment in re.split(r"[^A-Za-z0-9]+", value):
+        if any(
+            segment.startswith(marker)
+            and len(segment) > len(marker)
+            and segment[len(marker)].islower()
+            for marker in ("DEV", "PUBLIC")
+        ):
+            return True
+    return False
+
+
+@dataclass(frozen=True)
+class _IdentityIndex:
+    exact: frozenset[str]
+    token_sequences: tuple[tuple[str, ...], ...]
+
+
+def _build_identity_index(task_ids: tuple[str, ...]) -> _IdentityIndex:
+    exact = frozenset(task_id.casefold() for task_id in task_ids)
+    token_sequences = tuple(
+        sorted(
+            {tokens for task_id in task_ids if (tokens := _tokens(task_id))},
+            key=lambda tokens: (-len(tokens), tokens),
+        )
+    )
+    return _IdentityIndex(exact=exact, token_sequences=token_sequences)
+
+
+def _matches_identity(value: str, index: _IdentityIndex) -> bool:
+    if value.casefold() in index.exact:
+        return True
+    emitted = _tokens(value)
+    for identity in index.token_sequences:
+        width = len(identity)
+        if any(
+            emitted[start : start + width] == identity
+            for start in range(len(emitted) - width + 1)
+        ):
+            return True
+    return False
+
+
+def _validate_emitted_string(
+    value: str,
+    identity_index: _IdentityIndex | None,
+    validated_strings: set[str] | None,
+) -> None:
+    if validated_strings is not None and value in validated_strings:
+        return
+    if _contains_split_marker(value):
+        _fail("proposer evidence contains a forbidden Dev/Public marker")
+    if identity_index is not None and _matches_identity(value, identity_index):
+        _fail("proposer evidence string embeds a known task identity")
+    if validated_strings is not None:
+        validated_strings.add(value)
 
 
 def _frequency_bucket(frequency: str) -> str:
@@ -1079,14 +1145,6 @@ def _comparison_projection(
     )
 
 
-def _reject_identity_projection(value: str, task_ids: tuple[str, ...]) -> None:
-    emitted = value.casefold()
-    suffix = emitted.split(":", 1)[-1]
-    identities = {task_id.casefold() for task_id in task_ids}
-    if emitted in identities or suffix in identities:
-        _fail("proposer evidence string matches a known task identity")
-
-
 def sanitize_build_evidence(
     rows: tuple[ChampionTaskRow, ...] | list[ChampionTaskRow],
     comparisons: tuple[ChampionComparison, ...] | list[ChampionComparison],
@@ -1108,21 +1166,25 @@ def sanitize_build_evidence(
     child_names = tuple(item.child_name for item in comparison_snapshot)
     if len(child_names) != len(set(child_names)):
         _fail("Build comparisons contain duplicate Child names")
+    task_ids = tuple(dict.fromkeys(row.task_id for row in snapshot))
+    identity_index = _build_identity_index(task_ids)
+    validated_strings: set[str] = set()
     for comparison in comparison_snapshot:
         _public_identifier(comparison.parent_name, "parent_name")
         _public_identifier(comparison.child_name, "child_name")
         if comparison.parent_name == comparison.child_name:
             _fail("Build comparisons require distinct Parent and Child names")
-        _assert_safe_candidate_name(comparison.parent_name)
-        _assert_safe_candidate_name(comparison.child_name)
+        _validate_emitted_string(
+            comparison.parent_name, identity_index, validated_strings
+        )
+        _validate_emitted_string(
+            comparison.child_name, identity_index, validated_strings
+        )
 
     row_map = {(row.candidate_name, row.task_id): row for row in snapshot}
-    task_ids = tuple(dict.fromkeys(row.task_id for row in snapshot))
     projections: list[_ProposerComparison] = []
     morphology: list[MorphologyAggregate] = []
     for comparison in comparison_snapshot:
-        _reject_identity_projection(comparison.parent_name, task_ids)
-        _reject_identity_projection(comparison.child_name, task_ids)
         parent_score = score_policy(snapshot, comparison.parent_name)
         child_score = score_policy(snapshot, comparison.child_name)
         diagnostics = _paired_diagnostics(
@@ -1140,7 +1202,9 @@ def sanitize_build_evidence(
             if parent.profile != child.profile:
                 _fail("mislabeled Build Parent/Child profiles disagree")
             for group_id in _profile_groups(parent.profile):
-                _reject_identity_projection(group_id, task_ids)
+                _validate_emitted_string(
+                    group_id, identity_index, validated_strings
+                )
                 grouped.setdefault(group_id, []).append((parent, child))
         for group_id, pairs in grouped.items():
             paired_values: list[tuple[float, float]] = []
@@ -1185,7 +1249,11 @@ def sanitize_build_evidence(
             sorted(projections, key=lambda item: item.candidate_name)
         ),
     )
-    evidence.to_payload()
+    _assert_sanitized(
+        _proposer_payload(evidence),
+        identity_index=identity_index,
+        validated_strings=validated_strings,
+    )
     return evidence
 
 

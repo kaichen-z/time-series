@@ -6,6 +6,7 @@ from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
+import numerical_agent.evolution.champion_evidence as champion_evidence
 from numerical_agent.evolution.champion_evidence import (
     ChampionEvidenceError,
     ChampionGateConfig,
@@ -595,6 +596,114 @@ def test_frequency_groups_are_preregistered_buckets_and_never_task_identities() 
     )
     with pytest.raises(ChampionEvidenceError, match="identity"):
         sanitize_build_evidence(identity_rows, (identity_comparison,))
+
+
+def _named_child_evidence(child_name: str, *, task_id: str = "secret_task_0"):
+    rows = (
+        _row(task_id, "parent", (2.0,) * 4),
+        _row(task_id, child_name, (1.5,) * 4),
+    )
+    comparison = compare_champion(
+        score_policy(rows, "parent"),
+        score_policy(rows, child_name),
+        _gate(),
+    )
+    return rows, comparison
+
+
+def test_sanitizer_rejects_embedded_normalized_task_identity_sequences() -> None:
+    rows, comparison = _named_child_evidence("model_secret_task_0")
+
+    with pytest.raises(ChampionEvidenceError, match="identity"):
+        sanitize_build_evidence(rows, (comparison,))
+
+
+@pytest.mark.parametrize(
+    "child_name",
+    (
+        "DEVops_model",
+        "devops_model",
+        "DevModel",
+        "DEVModel",
+        "dev_model",
+        "PublicModel",
+    ),
+)
+def test_sanitizer_blocks_reserved_markers_across_identifier_forms(
+    child_name: str,
+) -> None:
+    rows, comparison = _named_child_evidence(child_name)
+
+    with pytest.raises(ChampionEvidenceError, match="forbidden|Dev/Public"):
+        sanitize_build_evidence(rows, (comparison,))
+
+
+@pytest.mark.parametrize(
+    "frequency",
+    (
+        "dev-daily",
+        "devops-daily",
+        "public.daily",
+        "DEVops-daily",
+        "Public-Daily",
+    ),
+)
+def test_sanitizer_blocks_reserved_markers_across_separator_forms(
+    frequency: str,
+) -> None:
+    rows, comparison = _named_child_evidence("child")
+    marked_rows = tuple(
+        replace(row, profile=replace(row.profile, frequency=frequency))
+        for row in rows
+    )
+    marked_comparison = compare_champion(
+        score_policy(marked_rows, "parent"),
+        score_policy(marked_rows, "child"),
+        _gate(),
+    )
+
+    with pytest.raises(ChampionEvidenceError, match="Dev/Public"):
+        sanitize_build_evidence(marked_rows, (marked_comparison,))
+
+
+@pytest.mark.parametrize(
+    "child_name",
+    (
+        "device_model",
+        "developer_model",
+        "devonian_model",
+        "publicity_model",
+        "republic_model",
+        "model_secret_task_01",
+        "model_secret_tasks_0",
+    ),
+)
+def test_reserved_and_identity_checks_allow_benign_near_misses(
+    child_name: str,
+) -> None:
+    rows, comparison = _named_child_evidence(child_name)
+
+    payload = sanitize_build_evidence(rows, (comparison,)).to_payload()
+
+    assert payload["comparisons"][0]["candidate_name"] == child_name
+
+
+def test_sanitizer_builds_the_full_identity_index_once(monkeypatch) -> None:
+    builder = getattr(champion_evidence, "_build_identity_index", None)
+    assert callable(builder), "sanitizer requires one explicit identity-index boundary"
+    calls: list[tuple[str, ...]] = []
+
+    def counted(task_ids: tuple[str, ...]):
+        calls.append(task_ids)
+        return builder(task_ids)
+
+    monkeypatch.setattr(champion_evidence, "_build_identity_index", counted)
+    rows, parent, child = _scores((1.0,) * 25, (0.5,) * 25)
+    comparison = compare_champion(parent, child, _gate())
+
+    sanitize_build_evidence(rows, (comparison,))
+
+    assert calls == [tuple(f"secret_task_{index}" for index in range(25))]
 
 
 def test_evidence_contracts_are_frozen() -> None:
