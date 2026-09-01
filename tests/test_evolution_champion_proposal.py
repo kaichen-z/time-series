@@ -421,6 +421,11 @@ def test_prompt_has_no_labels_tasks_or_numeric_authority() -> None:
         "horizon_region",
         "operator",
     ]
+    assert payload["output_schema"]["relational_constraints"] == [
+        "fallback_parent must be one of the same recipe's parents",
+        "each assumption candidate_name must be one of the same recipe's parents",
+        "each assumption operator must equal the same recipe's kind",
+    ]
     assert payload["parent"] == {
         "kind": "select",
         "parents": ["timesfm_2_5"],

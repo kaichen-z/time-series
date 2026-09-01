@@ -97,7 +97,9 @@ IDs, rationales, or failure text. Trusted host code assigns all identifiers and
 assembles canonical text after validating the closed structural fields. Numeric
 expansion and all evaluation belong exclusively to trusted host code. A
 malformed response causes at most one identical schema retry and no partial
-recipe is retained."""
+recipe is retained. In every recipe, fallback_parent must be one of that same
+recipe's parents; every assumption candidate_name must be one of those same
+parents; and every assumption operator must exactly equal that recipe's kind."""
 
 
 class ChampionProposalError(ValueError):
@@ -631,6 +633,11 @@ def _proposal_payload(
             "allowed_features": list(_FEATURES),
             "allowed_directions": list(_DIRECTIONS),
             "allowed_horizon_regions": list(_HORIZON_REGIONS),
+            "relational_constraints": [
+                "fallback_parent must be one of the same recipe's parents",
+                "each assumption candidate_name must be one of the same recipe's parents",
+                "each assumption operator must equal the same recipe's kind",
+            ],
         },
     }
 

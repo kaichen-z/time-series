@@ -2778,7 +2778,18 @@ class ChampionArtifactStore(_PinnedJsonDirectory):
                         _lifecycle_fail("Build finalist violates the bound threshold")
                     generation_finalists.append(fitted_id)
                     finalist_ids.add(fitted_id)
-            if generation["finalist_fingerprints"] != generation_finalists:
+            recorded_finalists = generation["finalist_fingerprints"]
+            if (
+                type(recorded_finalists) is not list
+                or any(
+                    type(item) is not str or _SHA256.fullmatch(item) is None
+                    for item in cast(list[object], recorded_finalists)
+                )
+                or len(cast(list[object], recorded_finalists))
+                != len(set(cast(list[object], recorded_finalists)))
+                or set(cast(list[object], recorded_finalists))
+                != set(generation_finalists)
+            ):
                 _lifecycle_fail("Build finalist evidence drifted from its attempts")
             _require_sha256(generation["feedback_fingerprint"], "Build feedback fingerprint")
         raw_shortlist = payload["shortlist"]

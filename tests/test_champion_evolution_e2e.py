@@ -49,6 +49,70 @@ def timesfm_seasonal_recipe_without_toto() -> tuple[ChampionRecipe, ...]:
     )
 
 
+def diverse_timesfm_seasonal_recipes() -> tuple[ChampionRecipe, ...]:
+    specifications = (
+        ("select", ("timesfm_2_5",), "timesfm_2_5", "history_length", "full"),
+        (
+            "route",
+            ("seasonal_naive", "timesfm_2_5"),
+            "seasonal_naive",
+            "periodicity_confidence",
+            "full",
+        ),
+        (
+            "horizon_route",
+            ("seasonal_naive", "timesfm_2_5"),
+            "seasonal_naive",
+            "periodicity_strength",
+            "late",
+        ),
+        (
+            "weighted",
+            ("seasonal_naive", "timesfm_2_5"),
+            "seasonal_naive",
+            "periodicity_confidence",
+            "full",
+        ),
+        (
+            "median",
+            ("seasonal_naive", "timesfm_2_5"),
+            "seasonal_naive",
+            "outlier_fraction",
+            "full",
+        ),
+        (
+            "bounded_overlay",
+            ("seasonal_naive", "timesfm_2_5"),
+            "seasonal_naive",
+            "periodicity_strength",
+            "full",
+        ),
+    )
+    return tuple(
+        ChampionRecipe(
+            name=f"diverse_child_{index}",
+            kind=kind,
+            parents=parents,
+            fallback_parent="timesfm_2_5",
+            assumptions=(
+                EvolutionAssumption(
+                    assumption_id=f"diverse_assumption_{index}",
+                    candidate_name=candidate,
+                    feature=feature,
+                    direction="above",
+                    horizon_region=region,
+                    operator=kind,
+                    rationale="The reviewed morphology feature supports this structure.",
+                    failure_condition="The reviewed morphology feature no longer supports it.",
+                ),
+            ),
+        )
+        for index, (kind, parents, candidate, feature, region) in enumerate(
+            specifications
+        )
+    )
+
+
 def test_fake_e2e_evolves_non_toto_champion_and_freezes_it(tmp_path):
     outcome = run_fake_champion_evolution(
         build_tasks=fixture_tasks(8, prefix="build"),
@@ -67,6 +131,19 @@ def test_fake_e2e_evolves_non_toto_champion_and_freezes_it(tmp_path):
     assert outcome.dev_report is not None
     assert outcome.dev_report.candidates[0].comparison is not None
     assert outcome.dev_report.candidates[0].comparison.accepted is True
+
+
+def test_fake_e2e_persists_diverse_ranked_finalists(tmp_path):
+    outcome = run_fake_champion_evolution(
+        build_tasks=fixture_tasks(8, prefix="build"),
+        calibration_tasks=fixture_tasks(2, prefix="calibration"),
+        dev_tasks=fixture_tasks(2, prefix="dev"),
+        proposal=diverse_timesfm_seasonal_recipes(),
+        screen_sizes=(4, 8),
+        output_dir=tmp_path,
+    )
+
+    assert outcome.release.policy.recipe.name != "timesfm_smoke_parent"
 
 
 def test_fake_e2e_rejects_malformed_proposal_before_any_release(tmp_path):
