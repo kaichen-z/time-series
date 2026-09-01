@@ -71,6 +71,7 @@ class NumericalForecastPackage:
     retrieval_handoff: tuple[Mapping[str, str], ...]
     component_fingerprints: Mapping[str, str]
     fallback_reason: str | None = None
+    champion_enabled: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_profile, TaskProfile):
@@ -204,9 +205,10 @@ class NumericalForecastPackage:
         fingerprints = freeze_string_mapping(
             self.component_fingerprints, "component fingerprints"
         )
-        champion_fingerprints = _CHAMPION_FINGERPRINT_KEYS & set(fingerprints)
-        if champion_fingerprints and (
-            champion_fingerprints != _CHAMPION_FINGERPRINT_KEYS
+        if type(self.champion_enabled) is not bool:
+            raise ValueError("champion_enabled must be a boolean")
+        if self.champion_enabled and (
+            (_CHAMPION_FINGERPRINT_KEYS - set(fingerprints))
             or any(
                 _SHA256.fullmatch(fingerprints[key]) is None
                 for key in _CHAMPION_FINGERPRINT_KEYS

@@ -14,7 +14,10 @@ from numerical_agent.evolution.champion import (
     EvolutionAssumption,
     FittedChampionPolicy,
 )
-from numerical_agent.evolution.champion_runtime import execute_champion as real_execute
+from numerical_agent.evolution.champion_runtime import (
+    ChampionExecution,
+    execute_champion as real_execute,
+)
 from numerical_agent.evolution.execution import Task
 from numerical_agent.evolution.numerical_loop import run_numerical_loop
 from numerical_agent.evolution.numerical_selector import (
@@ -190,6 +193,78 @@ def test_package_rejects_partial_or_non_hash_champion_fingerprints() -> None:
                 if key != "champion_assumptions"
             },
         )
+
+
+def test_legacy_package_keeps_legacy_named_component_fingerprints() -> None:
+    package = _run()
+
+    legacy = replace(
+        package,
+        component_fingerprints={
+            **dict(package.component_fingerprints),
+            "champion_release": "legacy-tag",
+        },
+    )
+
+    assert legacy.component_fingerprints["champion_release"] == "legacy-tag"
+    assert legacy == replace(
+        package,
+        component_fingerprints={
+            **dict(package.component_fingerprints),
+            "champion_release": "legacy-tag",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    (
+        ChampionExecution((1, 2), None, (), None),  # type: ignore[arg-type]
+        ChampionExecution((1.0,), ("specialist",), (), None),
+        ChampionExecution((1.0, 2.0), ("unknown",), (), None),
+        ChampionExecution((1.0, 2.0), ("specialist",), ("",), None),
+        ChampionExecution((1.0, 2.0), ("specialist",), ("not an id",), None),
+        ChampionExecution((1.0, 2.0), ("specialist",), (), ""),
+    ),
+)
+def test_malformed_champion_execution_fields_use_fixed_materialized_fallback(
+    monkeypatch, malformed: ChampionExecution
+) -> None:
+    monkeypatch.setattr(loop_module, "execute_champion", lambda *_args: malformed)
+
+    package = _run(release=_release())
+
+    assert package.selection_decision.selected == ("specialist",)
+    assert package.final_forecast == (1.0, 2.0)
+    assert package.fallback_reason == "champion_execution_failed:invalid_result"
+
+
+def test_public_champion_package_hides_recipe_operator_and_threshold_text() -> None:
+    release = _release()
+
+    package = _run(release=release)
+
+    assert package.selection_decision.reason_codes == (
+        "frozen_champion",
+        "champion_materialized_selection",
+    )
+    assert package.selection_decision.assumption_ids == ("history_ready",)
+    assert all(
+        value != release.policy.recipe.kind
+        for value in package.selection_decision.reason_codes
+    )
+    assert all(
+        "threshold" not in value for value in package.selection_decision.reason_codes
+    )
+    assert all(
+        len(package.component_fingerprints[key]) == 64
+        for key in (
+            "champion_release",
+            "champion_recipe",
+            "champion_assumptions",
+        )
+    )
+    assert not hasattr(package, "champion_thresholds")
 
 
 def test_champion_non_materialized_arithmetic_falls_back_to_declared_parent() -> None:

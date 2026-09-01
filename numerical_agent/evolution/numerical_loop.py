@@ -354,6 +354,7 @@ def run_numerical_loop(
         retrieval_handoff=handoff,
         component_fingerprints=fingerprints,
         fallback_reason=fallback_reason,
+        champion_enabled=champion_release is not None,
     )
 
 
@@ -496,7 +497,9 @@ def _select_frozen_champion(
             protected,
             f"champion_execution_failed:{type(error).__name__}",
         )
-    if not isinstance(execution, ChampionExecution):
+    if not _valid_champion_execution(
+        execution, forecasts=materialized_forecasts, horizon=horizon
+    ):
         return _champion_fallback(
             fallback_name,
             materialized_forecasts,
@@ -508,7 +511,7 @@ def _select_frozen_champion(
             fallback_name,
             materialized_forecasts,
             protected,
-            f"champion_execution_fallback:{execution.fallback_reason}",
+            "champion_execution_fallback",
         )
     if len(execution.selected_names) != 1:
         return _champion_fallback(
@@ -533,7 +536,7 @@ def _select_frozen_champion(
             weights=(1.0,),
             forecast=forecast,
             confidence=0.0,
-            reason_codes=("frozen_champion", release.policy.recipe.kind),
+            reason_codes=("frozen_champion", "champion_materialized_selection"),
             rejected={},
             baseline_name=protected.selected[0],
             assumption_ids=execution.activated_assumptions,
@@ -541,6 +544,44 @@ def _select_frozen_champion(
             considered_candidates=(selected_name,),
         ),
         None,
+    )
+
+
+def _valid_champion_execution(
+    execution: object,
+    *,
+    forecasts: Mapping[str, tuple[float, ...]],
+    horizon: int,
+) -> bool:
+    """Accept only the exact frozen executor result shape before consuming it."""
+    if type(execution) is not ChampionExecution:
+        return False
+    if type(execution.forecast) is not tuple or not valid_forecast(
+        execution.forecast, horizon
+    ):
+        return False
+    if (
+        type(execution.selected_names) is not tuple
+        or not execution.selected_names
+        or any(
+            type(name) is not str or not name or name not in forecasts
+            for name in execution.selected_names
+        )
+    ):
+        return False
+    if type(execution.activated_assumptions) is not tuple or any(
+        type(assumption_id) is not str
+        or not assumption_id
+        or not assumption_id.isidentifier()
+        for assumption_id in execution.activated_assumptions
+    ):
+        return False
+    if len(execution.activated_assumptions) != len(
+        set(execution.activated_assumptions)
+    ):
+        return False
+    return execution.fallback_reason is None or (
+        type(execution.fallback_reason) is str and bool(execution.fallback_reason)
     )
 
 
