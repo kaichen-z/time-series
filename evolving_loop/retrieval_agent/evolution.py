@@ -46,8 +46,9 @@ from .skill_library import (
 )
 
 
-RETRIEVAL_EVOLUTION_CHECKPOINT_SCHEMA_VERSION = 2
+RETRIEVAL_EVOLUTION_CHECKPOINT_SCHEMA_VERSION = 3
 RetrievalChildScope = Literal["A", "B", "C"]
+RetrievalStrictGainTarget = Literal["contextual", "final"]
 CHILD_SCOPES: tuple[RetrievalChildScope, ...] = ("A", "B", "C")
 
 _TRUSTED_TRAIN_EVALUATION_STAGE = re.compile(
@@ -2402,10 +2403,15 @@ class RetrievalEvaluation:
         tolerance: float,
         *,
         require_strict_contextual_gain: bool = True,
+        require_strict_final_gain: bool = False,
     ) -> tuple[str, ...]:
         tolerance = _finite(tolerance, "tolerance")
         if tolerance < 0:
             raise RetrievalEvolutionError("tolerance cannot be negative")
+        if require_strict_contextual_gain and require_strict_final_gain:
+            raise RetrievalEvolutionError(
+                "only one strict Retrieval gain target is allowed"
+            )
         failures: list[str] = []
         if self.task_count != parent.task_count:
             failures.append("task_count")
@@ -2430,6 +2436,11 @@ class RetrievalEvaluation:
             failures.append("mean_final_smae")
         if self.mean_final_srmse > parent.mean_final_srmse + tolerance:
             failures.append("mean_final_srmse")
+        if require_strict_final_gain and not (
+            self.mean_final_smae < parent.mean_final_smae - tolerance
+            or self.mean_final_srmse < parent.mean_final_srmse - tolerance
+        ):
+            failures.append("strict_final_gain")
         if self.p90_smae > parent.p90_smae + tolerance:
             failures.append("p90_smae")
         if self.p95_smae > parent.p95_smae + tolerance:
@@ -2840,6 +2851,7 @@ class RetrievalEvolutionConfig:
     mutation_model_hash: str | None = None
     harness_hash: str | None = None
     metric_cap: float = 5.0
+    strict_gain_target: RetrievalStrictGainTarget = "contextual"
 
     def __post_init__(self) -> None:
         for name, lower in (
@@ -2870,6 +2882,10 @@ class RetrievalEvolutionConfig:
             type(self.harness_hash) is not str or not self.harness_hash
         ):
             raise RetrievalEvolutionError("harness_hash must be a non-empty digest")
+        if self.strict_gain_target not in {"contextual", "final"}:
+            raise RetrievalEvolutionError(
+                "strict_gain_target must be contextual or final"
+            )
         object.__setattr__(self, "tolerance", tolerance)
         object.__setattr__(self, "metric_cap", cap)
         if self.checkpoint_path is not None:
@@ -3307,7 +3323,7 @@ class RetrievalEvolutionEngine:
             rejection_reasons = child_dev.gate_failures(
                 parent_dev,
                 self.config.tolerance,
-                require_strict_contextual_gain=True,
+                **self._strict_gate_kwargs(),
             )
         accepted = child_dev is not None and not rejection_reasons
         self._event(
@@ -3338,6 +3354,14 @@ class RetrievalEvolutionEngine:
         )
         self._save_checkpoint(status="complete", result=result)
         return result
+
+    def _strict_gate_kwargs(self) -> dict[str, bool]:
+        return {
+            "require_strict_contextual_gain": (
+                self.config.strict_gain_target == "contextual"
+            ),
+            "require_strict_final_gain": self.config.strict_gain_target == "final",
+        }
 
     def _validate_inputs(
         self,
@@ -3403,6 +3427,7 @@ class RetrievalEvolutionEngine:
             "train_folds": self.config.train_folds,
             "transient_retries": self.config.transient_retries,
             "tolerance": self.config.tolerance,
+            "strict_gain_target": self.config.strict_gain_target,
             "original_parent_fingerprint": parent.fingerprint(),
             "skill_library_hash": _library_hash(self.skill_library),
             "skill_library_authority": (
@@ -3620,7 +3645,7 @@ class RetrievalEvolutionEngine:
             failures = evaluation.gate_failures(
                 parent_train,
                 self.config.tolerance,
-                require_strict_contextual_gain=True,
+                **self._strict_gate_kwargs(),
             )
             active_ids = (
                 frozenset()
@@ -5767,7 +5792,7 @@ class RetrievalEvolutionEngine:
                 failures = evaluation.gate_failures(
                     parent_train,
                     self.config.tolerance,
-                    require_strict_contextual_gain=True,
+                    **self._strict_gate_kwargs(),
                 )
                 child_library = self._candidate_libraries.get(
                     child.fingerprint()
@@ -5895,7 +5920,7 @@ class RetrievalEvolutionEngine:
             rejection_reasons = child_dev.gate_failures(
                 parent_dev,
                 self.config.tolerance,
-                require_strict_contextual_gain=True,
+                **self._strict_gate_kwargs(),
             )
         else:
             raise RetrievalCheckpointError("completed Child Dev evaluation is missing")

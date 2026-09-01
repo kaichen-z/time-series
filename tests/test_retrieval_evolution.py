@@ -1726,6 +1726,72 @@ def test_dev_acceptance_enforces_every_pareto_tail_recall_and_safety_gate() -> N
         assert not replace(accepted, **changes).dev_accepts(parent, tolerance=1e-12)
 
 
+def test_package_gate_accepts_strict_final_gain_with_a_frozen_oracle() -> None:
+    tasks = _tasks("dev", 20, entity_offset=100)
+    parent = _evaluation("v000", tasks, error=1.0)
+    child = _evaluation(
+        "v001",
+        tasks,
+        error=1.0,
+        mean_final_smae=0.9,
+        mean_contextual_oracle_smae=parent.mean_contextual_oracle_smae,
+        mean_contextual_oracle_srmse=parent.mean_contextual_oracle_srmse,
+    )
+
+    assert child.gate_failures(
+        parent,
+        1e-12,
+        require_strict_contextual_gain=False,
+        require_strict_final_gain=True,
+    ) == ()
+    assert child.gate_failures(
+        parent,
+        1e-12,
+        require_strict_contextual_gain=True,
+    ) == ("strict_contextual_gain",)
+
+
+def test_package_gate_requires_one_strict_final_metric_gain() -> None:
+    tasks = _tasks("dev", 20, entity_offset=100)
+    parent = _evaluation("v000", tasks, error=1.0)
+    child = _evaluation("v001", tasks, error=1.0)
+
+    assert child.gate_failures(
+        parent,
+        1e-12,
+        require_strict_contextual_gain=False,
+        require_strict_final_gain=True,
+    ) == ("strict_final_gain",)
+
+
+def test_retrieval_config_rejects_unknown_strict_gain_target() -> None:
+    with pytest.raises(RetrievalEvolutionError, match="strict_gain_target"):
+        RetrievalEvolutionConfig(strict_gain_target="oracle")
+
+
+def test_retrieval_science_signature_binds_strict_gain_target() -> None:
+    parent = RetrievalGenome.seed()
+    train = _tasks("train", 80)
+    dev = _tasks("dev", 20, entity_offset=100)
+    contextual = RetrievalEvolutionEngine(
+        FakeLLMClient([]),
+        _FakeEvaluator(),
+        RetrievalEvolutionConfig(strict_gain_target="contextual"),
+    )
+    final = RetrievalEvolutionEngine(
+        FakeLLMClient([]),
+        _FakeEvaluator(),
+        RetrievalEvolutionConfig(strict_gain_target="final"),
+    )
+
+    contextual_science = contextual._science_signature(parent, train, dev)
+    final_science = final._science_signature(parent, train, dev)
+
+    assert contextual_science["strict_gain_target"] == "contextual"
+    assert final_science["strict_gain_target"] == "final"
+    assert contextual_science != final_science
+
+
 def test_combined_tail_metrics_require_complete_finite_task_traces_and_linear_quantiles() -> None:
     tasks = _tasks("train", 4)
     left = _evaluation(
@@ -2827,12 +2893,13 @@ def test_checkpoint_resume_binds_science_completion_and_child_fingerprints(tmp_p
     first = engine.evolve(RetrievalGenome.seed(), train, dev)
     payload = json.loads(checkpoint.read_text(encoding="utf-8"))
 
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["scientific_inputs"]["dataset_split_hash"] == "split-v1"
     assert payload["scientific_inputs"]["verifier_hash"] == "verifier-v1"
     assert payload["scientific_inputs"]["evaluator_hash"] == "evaluator-v1"
     assert payload["scientific_inputs"]["metric_cap"] == 5.0
     assert payload["scientific_inputs"]["random_seed"] == 17
+    assert payload["scientific_inputs"]["strict_gain_target"] == "contextual"
     assert payload["original_parent_fingerprint"] == RetrievalGenome.seed().fingerprint()
     assert len(payload["child_fingerprints"]) == 3
     assert payload["task_completion"]
