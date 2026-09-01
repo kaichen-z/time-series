@@ -41,7 +41,13 @@ from .evolution.forecast_store import ForecastStore
 from .evolution.module import read_module
 from .evolution.numerical_selector import HindcastConfig, diagnose_candidate
 from .evolution.portfolio import read_policy_file
-from .evolution.screening import profile_task
+from .evolution.screening import (
+    ScreeningPolicy,
+    TaskProfile,
+    materialize_active_dictionary,
+    profile_task,
+)
+from .evolution.screening_evolution import parse_screening_source
 from .main import _add_tsfm_runtime_options, _runtime_registry
 from .run_selector_evolution import _forecast_runtime_identity
 
@@ -168,24 +174,91 @@ def _source_files(repo: Path) -> tuple[tuple[str, Path], ...]:
     return tuple(sorted(required.items()))
 
 
-def _inventory(module, portfolio) -> ToolDictionary:
-    definitions = [
-        MethodDefinition(
-            method.name,
+def _load_screening_policy(path: str | Path) -> ScreeningPolicy:
+    try:
+        return parse_screening_source(Path(path).read_text(encoding="utf-8"))
+    except Exception as error:
+        raise ValueError("Champion dictionary.py is not a valid screening policy") from error
+
+
+def _inventory(module, portfolio, screening: ScreeningPolicy) -> ToolDictionary:
+    runtime = {
+        method.name: (
             "statistical",
             method.docstring or "Executable statistical candidate.",
         )
         for method in module.methods
-    ]
-    definitions.extend(
-        MethodDefinition(
-            policy.name,
-            "foundation" if policy in portfolio.tsfm else "combined",
-            "Executable reviewed candidate.",
-        )
-        for policy in portfolio.all_policies
+    }
+    runtime.update(
+        {
+            policy.name: (
+                "foundation" if policy in portfolio.tsfm else "combined",
+                "Executable reviewed candidate.",
+            )
+            for policy in portfolio.all_policies
+        }
     )
+    entries = {entry.name: entry for entry in screening.entries}
+    if set(entries) != set(runtime):
+        missing = sorted(set(runtime) - set(entries))
+        extra = sorted(set(entries) - set(runtime))
+        raise ValueError(
+            f"Champion dictionary namespace mismatch: missing={missing}, extra={extra}"
+        )
+    status_map = {
+        "keep": "accepted",
+        "specialized": "specialized",
+        "repair": "quarantined",
+        "quarantine": "quarantined",
+        "discard": "discarded",
+    }
+    definitions = []
+    for name, (family, description) in runtime.items():
+        entry = entries[name]
+        expected_family = "tsfm" if family == "foundation" else family
+        if entry.family != expected_family:
+            raise ValueError(
+                f"Champion dictionary family mismatch for {name!r}: "
+                f"{entry.family!r} != {expected_family!r}"
+            )
+        definitions.append(
+            MethodDefinition(
+                name,
+                family,
+                description,
+                status=status_map[entry.status],
+            )
+        )
     return ToolDictionary("champion_runtime_inventory", None, 0, tuple(definitions))
+
+
+def _screened_candidates(
+    screening: ScreeningPolicy,
+    profile: TaskProfile,
+    candidates: tuple[tuple[str, str], ...],
+) -> tuple[tuple[str, str], ...]:
+    active = materialize_active_dictionary(screening, profile)
+    active_names = {item.name for item in active.active}
+    return tuple(item for item in candidates if item[0] in active_names)
+
+
+def _balanced_task_folds(tasks: Iterable[object], *, seed: int) -> dict[str, int]:
+    identified: list[tuple[str, str]] = []
+    for task in tasks:
+        task_id = getattr(task, "task_id", None)
+        entity = getattr(task, "entity_name", None)
+        if type(task_id) is not str or not task_id or type(entity) is not str:
+            raise ValueError("fold assignment requires task_id and entity_name strings")
+        identified.append((task_id, entity))
+    if len({task_id for task_id, _entity in identified}) != len(identified):
+        raise ValueError("fold assignment requires unique task IDs")
+    ranked = sorted(
+        identified,
+        key=lambda item: hashlib.sha256(
+            f"{seed}\0{item[0]}\0{item[1]}".encode("utf-8")
+        ).hexdigest(),
+    )
+    return {task_id: index % 5 for index, (task_id, _entity) in enumerate(ranked)}
 
 
 def _load_parent(path: Path) -> ChampionRelease:
@@ -201,6 +274,8 @@ def _materialize_rows(
     store: ForecastStore,
     tasks: Iterable[DataTask],
     candidates: tuple[tuple[str, str], ...],
+    screening: ScreeningPolicy,
+    folds: dict[str, int],
     split: str,
 ) -> tuple[ChampionTaskRow, ...]:
     rows: list[ChampionTaskRow] = []
@@ -213,7 +288,7 @@ def _materialize_rows(
             tuple(source.future_values),
         )
         profile = profile_task(task)
-        for name, family in candidates:
+        for name, family in _screened_candidates(screening, profile, candidates):
             try:
                 forecast = store.forecast(
                     name, task.history, task.horizon, task.frequency
@@ -239,7 +314,7 @@ def _materialize_rows(
                     tuple(task.future),
                     forecast,
                     failure,
-                    0,
+                    folds[task.task_id],
                     split,
                     tuple(task.history),
                     diagnostic,
@@ -576,7 +651,8 @@ def main(argv: list[str] | None = None) -> int:
         repo / "policies.py"
     )
     portfolio.validate_namespace(module.names())
-    inventory = _inventory(module, portfolio)
+    screening = _load_screening_policy(repo / "dictionary.py")
+    inventory = _inventory(module, portfolio, screening)
     proposer = ChampionProposerAdapter.codex_cli(
         identity=args.proposer_model,
         model=args.proposer_model,
@@ -597,7 +673,7 @@ def main(argv: list[str] | None = None) -> int:
             repo / "skills.py" if (repo / "skills.py").is_file() else None,
             portfolio,
             runtimes,
-            screening_hash="formal_champion_all_candidates",
+            screening_hash=screening.fingerprint(),
             runtime_identity=_forecast_runtime_identity(args),
         )
         candidates = tuple(
@@ -607,10 +683,29 @@ def main(argv: list[str] | None = None) -> int:
             for policy in portfolio.all_policies
         )
         rows = _materialize_rows(
-            store, (*parts.build, *parts.calibration), candidates, "build"
+            store,
+            parts.build,
+            candidates,
+            screening,
+            _balanced_task_folds(parts.build, seed=args.partition_seed),
+            "build",
         )
-        rows += _materialize_rows(store, parts.calibration, candidates, "calibration")
-        rows += _materialize_rows(store, dev, candidates, "dev")
+        rows += _materialize_rows(
+            store,
+            parts.calibration,
+            candidates,
+            screening,
+            _balanced_task_folds(parts.calibration, seed=args.partition_seed),
+            "calibration",
+        )
+        rows += _materialize_rows(
+            store,
+            dev,
+            candidates,
+            screening,
+            _balanced_task_folds(dev, seed=args.partition_seed),
+            "dev",
+        )
         provider = ChampionRowProviderAdapter.materialized(
             identity="materialized_forecast_store",
             rows=rows,

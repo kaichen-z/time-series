@@ -26,7 +26,9 @@ from numerical_agent.evolution.numerical_selector import (
     DecisionPolicy,
 )
 from numerical_agent.evolution.screening import (
+    ApplicabilityClause,
     ApplicabilityPolicy,
+    FeatureTest,
     ScreeningEntry,
     ScreeningPolicy,
 )
@@ -99,7 +101,12 @@ def _release(*, lineage: tuple[str, ...] = ("champion_a",)) -> ChampionRelease:
     )
 
 
-def _run(*, release: ChampionRelease | None = None, calls: Counter[str] | None = None):
+def _run(
+    *,
+    release: ChampionRelease | None = None,
+    calls: Counter[str] | None = None,
+    screening: ScreeningPolicy | None = None,
+):
     runner_calls = calls if calls is not None else Counter()
 
     def runner(name: str, _history: tuple[float, ...], horizon: int, _frequency: str):
@@ -112,7 +119,7 @@ def _run(*, release: ChampionRelease | None = None, calls: Counter[str] | None =
 
     return run_numerical_loop(
         _task(),
-        screening_policy=_screening(),
+        screening_policy=_screening() if screening is None else screening,
         candidate_runner=runner,
         diagnostics=_diagnostics(),
         decision_policy=DecisionPolicy(ensemble_enabled=False),
@@ -354,7 +361,7 @@ def test_public_champion_package_hides_recipe_operator_and_threshold_text() -> N
     assert not hasattr(package, "champion_thresholds")
 
 
-def test_champion_non_materialized_arithmetic_falls_back_to_declared_parent() -> None:
+def test_champion_arithmetic_is_host_materialized_as_a_ranked_candidate() -> None:
     release = _release()
     weighted = replace(
         release,
@@ -379,6 +386,68 @@ def test_champion_non_materialized_arithmetic_falls_back_to_declared_parent() ->
 
     package = _run(release=weighted)
 
+    assert package.selection_decision.selected == ("weighted_runtime_vector",)
+    assert package.final_forecast == (4.0, 4.5)
+    assert package.fallback_reason is None
+    materialized = {
+        item.name: item.forecast for item in package.ranked_alternatives
+    }
+    assert materialized["weighted_runtime_vector"] == (4.0, 4.5)
+    assert package.candidate_diagnostics[
+        "weighted_runtime_vector"
+    ].reason_code == "frozen_champion_release"
+
+
+def test_champion_exact_fallback_is_materialized_even_when_screening_excludes_it() -> None:
+    screening = ScreeningPolicy(
+        (
+            ScreeningEntry(
+                "safe_anchor",
+                "tsfm",
+                "specialized",
+                ApplicabilityPolicy(
+                    (
+                        ApplicabilityClause(
+                            feature_tests=(FeatureTest("history_length", ">", 1000),)
+                        ),
+                    )
+                ),
+                "not active for this short history",
+            ),
+            ScreeningEntry(
+                "specialist",
+                "statistical",
+                "keep",
+                ApplicabilityPolicy(),
+                "fixture",
+            ),
+        ),
+        ("specialist",),
+    )
+    release = _release()
+    exact_fallback = replace(
+        release,
+        policy=FittedChampionPolicy(
+            recipe=ChampionRecipe(
+                name="safe_anchor_release",
+                kind="select",
+                parents=("safe_anchor",),
+                fallback_parent="safe_anchor",
+                assumptions=(
+                    replace(
+                        release.policy.recipe.assumptions[0],
+                        candidate_name="safe_anchor",
+                    ),
+                ),
+            ),
+            thresholds=(("history_ready", 1000.0),),
+        ),
+    )
+    calls: Counter[str] = Counter()
+
+    package = _run(release=exact_fallback, calls=calls, screening=screening)
+
     assert package.selection_decision.selected == ("safe_anchor",)
     assert package.final_forecast == (7.0, 7.0)
-    assert package.fallback_reason == "champion_non_materialized_selection"
+    assert package.fallback_reason == "champion_execution_fallback"
+    assert calls == Counter({"safe_anchor": 1, "specialist": 1})
