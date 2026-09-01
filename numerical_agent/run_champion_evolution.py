@@ -298,7 +298,9 @@ def _fold_stratified_screen_task_ids(
             if offset < len(bucket):
                 ordered.append(bucket[offset])
         offset += 1
-    return tuple(tuple(ordered[:size]) for size in sizes)
+    screens = [tuple(ordered[:size]) for size in sizes]
+    screens[-1] = task_ids
+    return tuple(screens)
 
 
 def _load_parent(path: Path) -> ChampionRelease:

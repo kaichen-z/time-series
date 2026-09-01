@@ -323,7 +323,7 @@ def test_formal_screen_membership_is_nested_and_fold_stratified() -> None:
     assert set(screens[0]).issubset(screens[1])
     assert set(screens[1]).issubset(screens[2])
     assert set(folds[task_id] for task_id in screens[0]) == {0, 1, 2, 3, 4}
-    assert set(screens[-1]) == {task.task_id for task in tasks}
+    assert screens[-1] == tuple(task.task_id for task in tasks)
 
 
 def test_formal_specialist_inapplicability_is_a_complete_failed_row() -> None:
