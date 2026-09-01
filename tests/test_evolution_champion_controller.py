@@ -21,12 +21,14 @@ from numerical_agent.evolution.champion import (
 from numerical_agent.evolution.champion_controller import (
     ChampionArtifactStore,
     ChampionAuthorityStore,
+    ChampionCallableBinding,
     ChampionCheckpoint,
     ChampionControllerError,
     ChampionEvolutionController,
     ChampionEvolutionConfig,
     ChampionLifecycleError,
     ChampionRunAttestations,
+    ChampionRuntimeBindings,
     ChampionRunManifest,
     canonical_release_bytes,
     partition_train_tasks,
@@ -386,6 +388,16 @@ def _manifest(
             if attestations is not None
             else "e" * 64
         ),
+        proposal_implementation_fingerprint=(
+            attestations.proposal_implementation_fingerprint
+            if attestations is not None
+            else "7" * 64
+        ),
+        row_provider_fingerprint=(
+            attestations.row_provider_fingerprint
+            if attestations is not None
+            else "8" * 64
+        ),
         schedule_fingerprint=config.fingerprint,
         numeric_grid_fingerprint=(
             attestations.numeric_grid_fingerprint
@@ -398,6 +410,11 @@ def _manifest(
             attestations.runtime_fingerprint
             if attestations is not None
             else "9" * 64
+        ),
+        runtime_implementation_fingerprint=(
+            attestations.runtime_implementation_fingerprint
+            if attestations is not None
+            else "6" * 64
         ),
     )
 
@@ -461,7 +478,71 @@ class SerializedRecordingProposer:
         return _proposal_batch("better")
 
 
-def _actual_attestations(run_root) -> ChampionRunAttestations:
+def test_callable_binding_fingerprint_is_derived_from_live_executable(
+    monkeypatch,
+) -> None:
+    proposer = SerializedRecordingProposer()
+    binding = ChampionCallableBinding.bind(
+        kind="proposer",
+        identity="deterministic-test-proposer",
+        callback=proposer,
+        config={"temperature": 0.0},
+    )
+
+    def replaced(self, parent, evidence):
+        return _proposal_batch("worse")
+
+    monkeypatch.setattr(SerializedRecordingProposer, "__call__", replaced)
+
+    with pytest.raises(ChampionLifecycleError, match="executable|implementation"):
+        binding.verify()
+
+
+def test_formal_runtime_bindings_detect_live_expander_mutation(monkeypatch) -> None:
+    runtime = ChampionRuntimeBindings.formal()
+
+    def replaced(recipe, rows):
+        return ()
+
+    monkeypatch.setattr(controller_module, "expand_recipe", replaced)
+
+    with pytest.raises(ChampionLifecycleError, match="runtime|expander|executable"):
+        runtime.verify_live_globals()
+
+
+@pytest.mark.parametrize("raw_boundary", ("proposer", "row_provider"))
+def test_formal_controller_rejects_raw_unbound_callables(
+    tmp_path, raw_boundary
+) -> None:
+    bound = _lifecycle_controller(
+        tmp_path, SerializedRecordingProposer(), LifecycleRows()
+    )
+    arguments = {
+        "manifest": bound.manifest,
+        "config": bound.config,
+        "attestations": bound.attestations,
+        "proposer": bound.proposer,
+        "row_provider": bound.row_provider,
+        "runtime_bindings": bound.runtime_bindings,
+        "artifact_store": bound.artifact_store,
+        "authority_store": bound.authority_store,
+    }
+    arguments[raw_boundary] = (
+        SerializedRecordingProposer()
+        if raw_boundary == "proposer"
+        else LifecycleRows()
+    )
+
+    with pytest.raises(ChampionLifecycleError, match="typed|binding"):
+        ChampionEvolutionController(**arguments)  # type: ignore[arg-type]
+
+
+def _actual_attestations(
+    run_root,
+    proposer_binding: ChampionCallableBinding,
+    row_provider_binding: ChampionCallableBinding,
+    runtime_bindings: ChampionRuntimeBindings,
+) -> ChampionRunAttestations:
     inputs = run_root.parent / f"{run_root.name}.inputs"
     inputs.mkdir(exist_ok=True)
     contents = {
@@ -486,6 +567,9 @@ def _actual_attestations(run_root) -> ChampionRunAttestations:
         forecast_store=inputs / "forecast.store",
         proposal_model="deterministic-test-proposer",
         proposal_config={"temperature": 0.0},
+        proposer_binding=proposer_binding,
+        row_provider_binding=row_provider_binding,
+        runtime_bindings=runtime_bindings,
         numeric_grid={"thresholds": (0.0, 1.0)},
         runtime_files=(("python_runtime", inputs / "runtime.py"),),
     )
@@ -501,19 +585,57 @@ def _lifecycle_controller(
         seed=20260901,
     )
     config = _lifecycle_config(parts)
-    attestations = _actual_attestations(tmp_path)
+    proposer_binding = ChampionCallableBinding.bind(
+        kind="proposer",
+        identity="deterministic-test-proposer",
+        callback=proposer,
+        config={"temperature": 0.0},
+    )
+    row_provider_binding = ChampionCallableBinding.bind(
+        kind="row_provider",
+        identity="deterministic-test-row-provider",
+        callback=rows,
+        config={"contract": "lifecycle_rows_v1"},
+    )
+    runtime_bindings = ChampionRuntimeBindings.formal()
+    attestations = _actual_attestations(
+        tmp_path,
+        proposer_binding,
+        row_provider_binding,
+        runtime_bindings,
+    )
+    resolved_authority_root = (
+        authority_root
+        if authority_root is not None
+        else tmp_path.parent / f"{tmp_path.name}.authority"
+    )
+    authority_anchor = resolved_authority_root.parent / (
+        f"{resolved_authority_root.name}.operator-identity"
+    )
+    if authority_anchor.exists():
+        expected_authority_identity = authority_anchor.read_text(encoding="ascii")
+        authority_store = ChampionAuthorityStore(
+            resolved_authority_root,
+            expected_authority_identity=expected_authority_identity,
+        )
+    else:
+        expected_authority_identity = champion_fingerprint(
+            {"operator_authority": str(resolved_authority_root.absolute())}
+        )
+        authority_anchor.write_text(expected_authority_identity, encoding="ascii")
+        authority_store = ChampionAuthorityStore.provision(
+            resolved_authority_root,
+            authority_identity=expected_authority_identity,
+        )
     return ChampionEvolutionController(
         manifest=_manifest(parts, config, attestations),
         config=config,
         attestations=attestations,
-        proposer=proposer,
-        row_provider=rows,
+        proposer=proposer_binding,
+        row_provider=row_provider_binding,
+        runtime_bindings=runtime_bindings,
         artifact_store=ChampionArtifactStore(tmp_path),
-        authority_store=ChampionAuthorityStore(
-            authority_root
-            if authority_root is not None
-            else tmp_path.parent / f"{tmp_path.name}.authority"
-        ),
+        authority_store=authority_store,
     )
 
 
@@ -779,14 +901,14 @@ def test_provider_failure_burns_calibration_across_fresh_controller(tmp_path) ->
         ).evolve(PARENT, TRAIN_80, DEV_20)
 
     resumed_proposer = SerializedRecordingProposer()
-    resumed_rows = LifecycleRows()
+    resumed_provider = InterruptAtCalibration()
     with pytest.raises(ChampionLifecycleError, match="consumed"):
         _lifecycle_controller(
-            tmp_path, resumed_proposer, resumed_rows
+            tmp_path, resumed_proposer, resumed_provider
         ).evolve(PARENT, TRAIN_80, DEV_20)
 
     assert resumed_proposer.serialized_inputs == ""
-    assert resumed_rows.opens == []
+    assert resumed_provider.delegate.opens == []
 
 
 def test_new_run_root_cannot_reuse_complete_holdout_bundle(
@@ -844,15 +966,15 @@ def test_foreign_checkpoint_fails_before_task_or_model_execution(tmp_path) -> No
     checkpoint = json.loads(checkpoint_path.read_text())
     checkpoint["input_fingerprint"] = "7" * 64
     checkpoint_path.write_bytes(canonical_json_bytes(checkpoint))
-    rows = LifecycleRows()
+    resumed_provider = InterruptAtCalibration()
     proposer = SerializedRecordingProposer()
 
     with pytest.raises(ChampionLifecycleError, match="stale|foreign"):
-        _lifecycle_controller(tmp_path, proposer, rows).evolve(
+        _lifecycle_controller(tmp_path, proposer, resumed_provider).evolve(
             PARENT, TRAIN_80, DEV_20
         )
 
-    assert rows.opens == []
+    assert resumed_provider.delegate.opens == []
     assert proposer.serialized_inputs == ""
 
 
@@ -883,6 +1005,43 @@ def test_checkpoint_shortlist_must_match_immutable_build_attempt_evidence(
     proposer = SerializedRecordingProposer()
 
     with pytest.raises(ChampionLifecycleError, match="Build evidence|shortlist"):
+        _lifecycle_controller(tmp_path, proposer, rows).evolve(
+            PARENT, TRAIN_80, DEV_20
+        )
+
+    assert rows.opens == []
+    assert proposer.serialized_inputs == ""
+
+
+def test_checkpoint_feedback_must_exactly_match_immutable_build_evidence(
+    monkeypatch, tmp_path
+) -> None:
+    original_claim = ChampionAuthorityStore.claim_or_resume_split
+
+    def interrupt_before_calibration(*args, **kwargs):
+        raise RuntimeError("stop after Build checkpoint")
+
+    monkeypatch.setattr(
+        ChampionAuthorityStore, "claim_or_resume_split", interrupt_before_calibration
+    )
+    with pytest.raises(RuntimeError, match="stop after Build"):
+        _lifecycle_controller(
+            tmp_path, SerializedRecordingProposer(), LifecycleRows()
+        ).evolve(PARENT, TRAIN_80, DEV_20)
+    monkeypatch.setattr(
+        ChampionAuthorityStore, "claim_or_resume_split", original_claim
+    )
+
+    checkpoint_path = tmp_path / "checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    comparisons = checkpoint["sanitized_feedback"]["comparisons"]
+    assert comparisons
+    comparisons[0]["joint_improvement"] += 0.125
+    checkpoint_path.write_bytes(canonical_json_bytes(checkpoint))
+    rows = LifecycleRows()
+    proposer = SerializedRecordingProposer()
+
+    with pytest.raises(ChampionLifecycleError, match="Build.*feedback|feedback.*Build"):
         _lifecycle_controller(tmp_path, proposer, rows).evolve(
             PARENT, TRAIN_80, DEV_20
         )
@@ -934,15 +1093,15 @@ def test_checkpoint_rejects_nested_cached_pass_authority_before_callbacks(
     assert comparisons
     comparisons[0]["passed"] = True
     checkpoint_path.write_bytes(canonical_json_bytes(checkpoint))
-    rows = LifecycleRows()
+    resumed_provider = InterruptAtCalibration()
     proposer = SerializedRecordingProposer()
 
     with pytest.raises(ChampionLifecycleError, match="feedback|malformed|forbidden"):
-        _lifecycle_controller(tmp_path, proposer, rows).evolve(
+        _lifecycle_controller(tmp_path, proposer, resumed_provider).evolve(
             PARENT, TRAIN_80, DEV_20
         )
 
-    assert rows.opens == []
+    assert resumed_provider.delegate.opens == []
     assert proposer.serialized_inputs == ""
 
 
@@ -962,23 +1121,11 @@ def test_stored_calibration_pass_cannot_open_dev(monkeypatch, tmp_path) -> None:
             tmp_path, SerializedRecordingProposer(), LifecycleRows()
         ).evolve(PARENT, TRAIN_80, DEV_20)
     monkeypatch.setattr(controller_module, "_evaluate_lifecycle_stage", evaluate)
-    compare = controller_module.compare_champion
-    calibration_calls = 0
-
-    def changing_comparison(parent, child, gate):
-        nonlocal calibration_calls
-        result = compare(parent, child, gate)
-        if child.policy_name.startswith("calibration_child_"):
-            calibration_calls += 1
-            if calibration_calls > 3:
-                return replace(
-                    result,
-                    accepted=False,
-                    failures=("primary_smae_regression",),
-                )
-        return result
-
-    monkeypatch.setattr(controller_module, "compare_champion", changing_comparison)
+    monkeypatch.setattr(
+        controller_module,
+        "_fresh_comparisons",
+        lambda states, gate, comparator=None: (),
+    )
     rows = LifecycleRows()
     outcome = _lifecycle_controller(
         tmp_path, SerializedRecordingProposer(), rows
@@ -1028,23 +1175,16 @@ def test_committed_calibration_evidence_resumes_without_provider_reread(
 
 
 def test_stored_dev_pass_cannot_publish_release(monkeypatch, tmp_path) -> None:
-    compare = controller_module.compare_champion
-    dev_calls = 0
+    fresh = controller_module._fresh_comparisons
+    boundary_calls = 0
 
-    def changing_comparison(parent, child, gate):
-        nonlocal dev_calls
-        result = compare(parent, child, gate)
-        if child.policy_name.startswith("dev_child_"):
-            dev_calls += 1
-            if dev_calls > 1:
-                return replace(
-                    result,
-                    accepted=False,
-                    failures=("primary_smae_regression",),
-                )
-        return result
+    def reject_only_dev(states, gate, comparator=None):
+        nonlocal boundary_calls
+        boundary_calls += 1
+        result = fresh(states, gate, comparator)
+        return () if boundary_calls == 2 else result
 
-    monkeypatch.setattr(controller_module, "compare_champion", changing_comparison)
+    monkeypatch.setattr(controller_module, "_fresh_comparisons", reject_only_dev)
     outcome = _lifecycle_controller(
         tmp_path, SerializedRecordingProposer(), LifecycleRows()
     ).evolve(PARENT, TRAIN_80, DEV_20)
@@ -1195,6 +1335,27 @@ def test_artifact_store_root_swap_fails_without_writing_outside_pinned_root(
     assert tuple(outside.iterdir()) == ()
 
 
+def test_artifact_store_rejects_ancestor_swap_even_when_final_inode_is_same(
+    tmp_path,
+) -> None:
+    ancestor = tmp_path / "operator"
+    root = ancestor / "run"
+    store = ChampionArtifactStore(root)
+    store.ensure_release(PARENT)
+    prior_bytes = canonical_release_bytes(PARENT)
+    held_ancestor = tmp_path / "held_operator"
+    ancestor.rename(held_ancestor)
+    ancestor.symlink_to(held_ancestor, target_is_directory=True)
+    next_release = replace(PARENT, lineage=("active_parent", "next_release"))
+
+    with pytest.raises(ChampionLifecycleError, match="pinned|drift|alias"):
+        store.publish_release(next_release)
+
+    assert (held_ancestor / "run" / "champion_release.json").read_bytes() == (
+        prior_bytes
+    )
+
+
 def test_artifact_store_rejects_hardlinked_manifest(tmp_path) -> None:
     root = tmp_path / "run"
     controller = _lifecycle_controller(
@@ -1219,6 +1380,31 @@ def test_artifact_store_rejects_hardlinked_release_archive(tmp_path) -> None:
         store.publish_release(PARENT)
 
 
+@pytest.mark.parametrize("alias_kind", ("symlink", "hardlink"))
+def test_release_alias_is_unlinked_before_exact_parent_restoration(
+    tmp_path, alias_kind
+) -> None:
+    root = tmp_path / "run"
+    store = ChampionArtifactStore(root)
+    store.ensure_release(PARENT)
+    current = root / "champion_release.json"
+    external = tmp_path / "external.json"
+    external_bytes = b'{"hostile":"outside"}\n'
+    external.write_bytes(external_bytes)
+    current.unlink()
+    if alias_kind == "symlink":
+        current.symlink_to(external)
+    else:
+        os.link(external, current)
+
+    with pytest.raises(ChampionLifecycleError, match="drift|alias|Parent"):
+        store.ensure_release(PARENT)
+
+    assert not current.is_symlink()
+    assert current.read_bytes() == canonical_release_bytes(PARENT)
+    assert external.read_bytes() == external_bytes
+
+
 def test_artifact_store_rejects_nonfinite_json(tmp_path) -> None:
     store = ChampionArtifactStore(tmp_path)
     (tmp_path / "checkpoint.json").write_text(
@@ -1233,7 +1419,10 @@ def test_split_consumption_lease_is_operator_owned_and_burns_on_failure(
     tmp_path,
 ) -> None:
     authority_root = tmp_path / "operator_authority"
-    first = ChampionAuthorityStore(authority_root)
+    expected_identity = "6" * 64
+    first = ChampionAuthorityStore.provision(
+        authority_root, authority_identity=expected_identity
+    )
     lease = first.acquire_split(
         role="calibration",
         split_manifest_fingerprint="a" * 64,
@@ -1245,7 +1434,6 @@ def test_split_consumption_lease_is_operator_owned_and_burns_on_failure(
     assert lease.split_key == champion_fingerprint(
         {
             "role": "calibration",
-            "split_manifest_fingerprint": "a" * 64,
             "task_content_fingerprint": "b" * 64,
         }
     )
@@ -1253,7 +1441,9 @@ def test_split_consumption_lease_is_operator_owned_and_burns_on_failure(
 
     # Deleting/replacing a run directory cannot reopen this operator-owned split.
     (tmp_path / "fresh_run").mkdir()
-    reopened = ChampionAuthorityStore(authority_root)
+    reopened = ChampionAuthorityStore(
+        authority_root, expected_authority_identity=expected_identity
+    )
     with pytest.raises(ChampionLifecycleError, match="consumed"):
         reopened.acquire_split(
             role="calibration",
@@ -1270,9 +1460,54 @@ def test_split_consumption_lease_is_operator_owned_and_burns_on_failure(
         )
 
 
+def test_deleted_authority_root_cannot_be_silently_reprovisioned(tmp_path) -> None:
+    root = tmp_path / "operator_authority"
+    expected_identity = "7" * 64
+    ChampionAuthorityStore.provision(
+        root, authority_identity=expected_identity
+    )
+    root.rename(tmp_path / "deleted_authority_snapshot")
+
+    with pytest.raises(ChampionLifecycleError, match="missing|provision|authority"):
+        ChampionAuthorityStore(
+            root, expected_authority_identity=expected_identity
+        )
+
+    assert not root.exists()
+
+
+def test_split_manifest_declaration_cannot_namespace_identical_holdout(
+    tmp_path,
+) -> None:
+    root = tmp_path / "operator_authority"
+    identity = "4" * 64
+    authority = ChampionAuthorityStore.provision(
+        root, authority_identity=identity
+    )
+    authority.acquire_split(
+        role="calibration",
+        split_manifest_fingerprint="a" * 64,
+        task_content_fingerprint="b" * 64,
+        run_input_fingerprint="c" * 64,
+    )
+    reopened = ChampionAuthorityStore(
+        root, expected_authority_identity=identity
+    )
+
+    with pytest.raises(ChampionLifecycleError, match="consumed"):
+        reopened.acquire_split(
+            role="calibration",
+            split_manifest_fingerprint="d" * 64,
+            task_content_fingerprint="b" * 64,
+            run_input_fingerprint="e" * 64,
+        )
+
+
 def test_authority_root_swap_fails_without_writing_to_replacement(tmp_path) -> None:
     root = tmp_path / "authority"
-    authority = ChampionAuthorityStore(root)
+    authority = ChampionAuthorityStore.provision(
+        root, authority_identity="5" * 64
+    )
     held = tmp_path / "held_authority"
     root.rename(held)
     outside = tmp_path / "outside_authority"
@@ -1377,6 +1612,48 @@ def test_fresh_process_recovery_rolls_back_uncommitted_release_pointer(
 
     assert (tmp_path / "champion_release.json").read_bytes() == prior_bytes
     reopened.ensure_release(PARENT)
+
+
+@pytest.mark.parametrize("surviving_markers", ("prepare", "commit", "both"))
+def test_accepted_publication_authority_survives_partial_marker_cleanup(
+    tmp_path, surviving_markers
+) -> None:
+    store = ChampionArtifactStore(tmp_path)
+    store.ensure_release(PARENT)
+    next_release = replace(PARENT, lineage=("active_parent", "next_release"))
+    store.publish_release(next_release)
+    prior_id = champion_fingerprint(PARENT)
+    next_id = champion_fingerprint(next_release)
+    transaction_id = champion_fingerprint(
+        {
+            "prior_release_id": prior_id,
+            "next_release_id": next_id,
+            "accepted": True,
+        }
+    )
+    record = {
+        "schema_version": 1,
+        "transaction_id": transaction_id,
+        "prior_release_id": prior_id,
+        "next_release_id": next_id,
+        "accepted": True,
+    }
+    if surviving_markers in {"prepare", "both"}:
+        store._atomic_create_name("release_prepare.json", record)
+    if surviving_markers in {"commit", "both"}:
+        store._atomic_create_name("release_commit.json", record)
+    store._atomic_replace(
+        store.root / "champion_release.json", canonical_release_bytes(PARENT)
+    )
+
+    reopened = ChampionArtifactStore(tmp_path)
+
+    assert (tmp_path / "champion_release.json").read_bytes() == (
+        canonical_release_bytes(next_release)
+    )
+    assert reopened.has_accepted_release()
+    assert not (tmp_path / "release_prepare.json").exists()
+    assert not (tmp_path / "release_commit.json").exists()
 
 
 @pytest.mark.parametrize("failing_fsync", (1, 2, 3))
