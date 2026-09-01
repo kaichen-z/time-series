@@ -83,6 +83,7 @@ _HORIZON_REGIONS = ("early", "late", "full")
 _MAX_ASSUMPTIONS_PER_RECIPE = 3
 _MAX_BUILD_ROWS = 1_000_000
 _MAX_PROFILE_LENGTH = 1_000_000
+_MAX_ID_ALLOCATION_ATTEMPTS = 10_000
 _ACTIVE_INVENTORY_STATUSES = frozenset({"accepted", "specialized"})
 
 CHAMPION_PROPOSAL_SYSTEM = """You propose structural Numerical Champion recipes only.
@@ -353,8 +354,6 @@ def _response_payload(response: object) -> dict[str, object]:
 def _closed_assumption_payload(
     assumption: object,
     *,
-    recipe_index: int,
-    assumption_index: int,
     recipe_kind: str,
     parents: tuple[str, ...],
 ) -> dict[str, object]:
@@ -383,27 +382,17 @@ def _closed_assumption_payload(
         _fail("proposal assumption operator must match the closed recipe kind")
 
     return {
-        "assumption_id": f"proposed_assumption_{recipe_index}_{assumption_index}",
         "candidate_name": candidate_name,
         "feature": feature,
         "direction": direction,
         "horizon_region": horizon_region,
         "operator": operator,
-        "rationale": (
-            f"The {feature} feature supports {candidate_name} for {direction} "
-            f"{horizon_region} {operator} structure."
-        ),
-        "failure_condition": (
-            f"The {feature} feature may not support {candidate_name} for "
-            f"{direction} {horizon_region} {operator} structure."
-        ),
     }
 
 
 def _closed_recipe_payload(
     recipe: object,
     *,
-    recipe_index: int,
     inventory_names: tuple[str, ...],
 ) -> dict[str, object]:
     if type(recipe) is not dict:
@@ -437,21 +426,94 @@ def _closed_recipe_payload(
         _fail("each Champion recipe requires one through three assumptions")
     recipe_kind = cast(str, raw["kind"])
     return {
-        "name": f"proposed_recipe_{recipe_index}",
         "kind": recipe_kind,
         "parents": list(parents),
         "fallback_parent": fallback_parent,
         "assumptions": [
             _closed_assumption_payload(
                 assumption,
-                recipe_index=recipe_index,
-                assumption_index=assumption_index,
                 recipe_kind=recipe_kind,
                 parents=parents,
             )
-            for assumption_index, assumption in enumerate(
-                cast(list[object], assumptions)
+            for assumption in cast(list[object], assumptions)
+        ],
+    }
+
+
+def _canonical_closed_recipe(recipe: dict[str, object]) -> str:
+    try:
+        return json.dumps(
+            recipe,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as error:
+        raise ChampionProposalError(
+            "closed Champion structure must be canonical standards JSON"
+        ) from error
+
+
+def _allocate_host_identifier(base: str, reserved: set[str]) -> str:
+    for suffix in range(_MAX_ID_ALLOCATION_ATTEMPTS):
+        candidate = base if suffix == 0 else f"{base}_{suffix}"
+        normalized = _canonical_text(candidate)
+        if normalized not in reserved:
+            reserved.add(normalized)
+            return candidate
+    _fail("unable to allocate a bounded collision-free Champion identifier")
+    raise AssertionError("unreachable")
+
+
+def _host_assumption_payload(
+    assumption: dict[str, object],
+    *,
+    assumption_id: str,
+) -> dict[str, object]:
+    candidate_name = cast(str, assumption["candidate_name"])
+    feature = cast(str, assumption["feature"])
+    direction = cast(str, assumption["direction"])
+    horizon_region = cast(str, assumption["horizon_region"])
+    operator = cast(str, assumption["operator"])
+    return {
+        "assumption_id": assumption_id,
+        **assumption,
+        "rationale": (
+            f"The {feature} feature supports {candidate_name} for {direction} "
+            f"{horizon_region} {operator} structure."
+        ),
+        "failure_condition": (
+            f"The {feature} feature may not support {candidate_name} for "
+            f"{direction} {horizon_region} {operator} structure."
+        ),
+    }
+
+
+def _host_recipe_payload(
+    recipe: dict[str, object],
+    *,
+    recipe_index: int,
+    reserved: set[str],
+) -> dict[str, object]:
+    recipe_name = _allocate_host_identifier(
+        f"proposed_recipe_{recipe_index}", reserved
+    )
+    assumptions = cast(list[dict[str, object]], recipe["assumptions"])
+    return {
+        "name": recipe_name,
+        "kind": recipe["kind"],
+        "parents": recipe["parents"],
+        "fallback_parent": recipe["fallback_parent"],
+        "assumptions": [
+            _host_assumption_payload(
+                assumption,
+                assumption_id=_allocate_host_identifier(
+                    f"proposed_assumption_{recipe_index}_{assumption_index}",
+                    reserved,
+                ),
             )
+            for assumption_index, assumption in enumerate(assumptions)
         ],
     }
 
@@ -470,15 +532,28 @@ def parse_champion_response(
     if set(payload) != {"recipes"} or type(payload["recipes"]) is not list:
         _fail("Champion response fields must be exactly one recipes array")
     raw_recipes = cast(list[object], payload["recipes"])
-    if not lower <= len(raw_recipes) <= upper:
+    if len(raw_recipes) > upper:
         _fail("Champion response recipe count is outside the configured bounds")
 
+    closed_recipes = tuple(
+        _closed_recipe_payload(raw_recipe, inventory_names=inventory_names)
+        for raw_recipe in raw_recipes
+    )
+    canonical_structures = tuple(
+        _canonical_closed_recipe(recipe) for recipe in closed_recipes
+    )
+    if len(canonical_structures) != len(set(canonical_structures)):
+        _fail("Champion response contains a duplicate closed recipe structure")
+    if len(closed_recipes) < lower:
+        _fail("Champion response recipe count is outside the configured bounds")
+
+    reserved = {_canonical_text(name) for name in inventory_names}
     parsed: list[ChampionRecipe] = []
-    for recipe_index, raw_recipe in enumerate(raw_recipes):
-        recipe_payload = _closed_recipe_payload(
-            raw_recipe,
+    for recipe_index, closed_recipe in enumerate(closed_recipes):
+        recipe_payload = _host_recipe_payload(
+            closed_recipe,
             recipe_index=recipe_index,
-            inventory_names=inventory_names,
+            reserved=reserved,
         )
         try:
             recipe = parse_champion_recipe(recipe_payload)

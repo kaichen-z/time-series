@@ -8,6 +8,7 @@ import pytest
 
 from common.llm import FakeLLMClient
 from numerical_agent.dictionary import MethodDefinition, ToolDictionary
+from numerical_agent.evolution import champion_proposal as proposal_module
 from numerical_agent.evolution.champion import (
     ChampionRecipe,
     EvolutionAssumption,
@@ -169,8 +170,49 @@ def _closed_recipe(
 
 
 def closed_response(**recipe_fields: str) -> dict[str, object]:
+    primary_feature = recipe_fields.get("feature", "periodicity_strength")
+    features = (
+        primary_feature,
+        *(
+            feature
+            for feature in (
+                "history_length",
+                "horizon",
+                "horizon_ratio",
+                "zero_fraction",
+                "trend_strength",
+                "periodicity_strength",
+                "periodicity_confidence",
+                "outlier_fraction",
+                "noise_relative_scale",
+                "stationarity_score",
+                "recent_regime_confidence",
+                "intermittency_adi",
+                "intermittency_cv2",
+            )
+            if feature != primary_feature
+        ),
+    )
     return {
-        "recipes": [_closed_recipe(**recipe_fields) for _ in range(5)],
+        "recipes": [
+            _closed_recipe(**{**recipe_fields, "feature": feature})
+            for feature in features[:5]
+        ],
+    }
+
+
+def distinct_closed_response() -> dict[str, object]:
+    return {
+        "recipes": [
+            _closed_recipe(feature=feature)
+            for feature in (
+                "history_length",
+                "horizon",
+                "horizon_ratio",
+                "zero_fraction",
+                "trend_strength",
+            )
+        ],
     }
 
 
@@ -205,6 +247,79 @@ def test_parser_reconstructs_task2_text_and_ids_from_closed_structure() -> None:
     assert tuple(map(champion_fingerprint, repeated)) == tuple(
         map(champion_fingerprint, recipes)
     )
+
+
+def test_parser_rejects_exact_duplicate_closed_structures_before_count() -> None:
+    response = closed_response()
+    response["recipes"][1] = response["recipes"][0]  # type: ignore[index]
+
+    with pytest.raises(ChampionProposalError, match="duplicate"):
+        parse_champion_response(response, INVENTORY)
+
+
+def test_parser_rejects_reordered_object_keys_for_the_same_structure() -> None:
+    response = distinct_closed_response()
+    first = response["recipes"][0]  # type: ignore[index]
+    response["recipes"][1] = dict(reversed(tuple(first.items())))  # type: ignore[index]
+
+    with pytest.raises(ChampionProposalError, match="duplicate"):
+        parse_champion_response(response, INVENTORY)
+
+
+def test_parser_accepts_five_genuinely_distinct_closed_structures() -> None:
+    recipes = parse_champion_response(distinct_closed_response(), INVENTORY)
+
+    assert len(recipes) == 5
+    assert len({champion_fingerprint(recipe) for recipe in recipes}) == 5
+
+
+def _identifier_collision_inventory() -> ToolDictionary:
+    return ToolDictionary(
+        "identifier_collision_inventory",
+        None,
+        0,
+        (
+            *INVENTORY.methods,
+            MethodDefinition(
+                "ｐｒｏｐｏｓｅｄ＿ｒｅｃｉｐｅ＿０",
+                "statistical",
+                "normalized recipe identifier collision",
+                status="accepted",
+            ),
+            MethodDefinition(
+                "proposed_assumption_0_0",
+                "statistical",
+                "assumption identifier collision",
+                status="accepted",
+            ),
+        ),
+    )
+
+
+def test_host_ids_skip_normalized_inventory_collisions_deterministically() -> None:
+    inventory = _identifier_collision_inventory()
+    response = distinct_closed_response()
+
+    first = parse_champion_response(response, inventory)
+    second = parse_champion_response(response, inventory)
+
+    assert first[0].name == "proposed_recipe_0_1"
+    assert first[0].assumptions[0].assumption_id == "proposed_assumption_0_0_1"
+    assert tuple(map(champion_fingerprint, first)) == tuple(
+        map(champion_fingerprint, second)
+    )
+
+
+def test_host_identifier_allocation_cap_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(proposal_module, "_MAX_ID_ALLOCATION_ATTEMPTS", 1)
+
+    with pytest.raises(ChampionProposalError, match="allocate"):
+        parse_champion_response(
+            distinct_closed_response(),
+            _identifier_collision_inventory(),
+        )
 
 
 @pytest.mark.parametrize(
