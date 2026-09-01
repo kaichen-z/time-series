@@ -1,4 +1,5 @@
 """End-to-end contract for the morphology-guided Numerical loop."""
+
 from __future__ import annotations
 
 import math
@@ -55,7 +56,9 @@ def _entry(
     *,
     applicability: ApplicabilityPolicy = ApplicabilityPolicy(),
 ) -> ScreeningEntry:
-    return ScreeningEntry(name, family, "keep", applicability, "reviewed test candidate")
+    return ScreeningEntry(
+        name, family, "keep", applicability, "reviewed test candidate"
+    )
 
 
 def _screening(*entries: ScreeningEntry) -> ScreeningPolicy:
@@ -124,7 +127,14 @@ def _audited_diagnostic(
         metrics = drcik_point_metrics(fold_truth, fold_forecast)
         return {
             key: metrics[key]
-            for key in ("smae", "srmse", "smae_raw", "srmse_raw", "smae_clipped", "srmse_clipped")
+            for key in (
+                "smae",
+                "srmse",
+                "smae_raw",
+                "srmse_raw",
+                "smae_clipped",
+                "srmse_clipped",
+            )
         }
 
     folds = tuple(
@@ -176,11 +186,7 @@ def _run_legacy_selection_package(
         conditioned_names=conditioned_names,
     )
     fallback = next(
-        (
-            name
-            for name in active_names
-            if diagnostics[name].family == "tsfm"
-        ),
+        (name for name in active_names if diagnostics[name].family == "tsfm"),
         active_names[0],
     )
     package = run_numerical_loop(
@@ -335,9 +341,7 @@ def _legacy_replay_scenario(
             long_horizon_min_coverage=0.75,
             long_horizon_max_regret=0.0,
         )
-        return _run_legacy_selection_package(
-            task, policy, diagnostics, final_forecasts
-        )
+        return _run_legacy_selection_package(task, policy, diagnostics, final_forecasts)
     if kind == "equal_fmean":
         task = Task("fmean", (0.0,) * 40, 1, "D", ())
         final_forecasts = {
@@ -363,9 +367,7 @@ def _legacy_replay_scenario(
             ensemble_min_improvement=0.01,
             recent_regime_first=False,
         )
-        return _run_legacy_selection_package(
-            task, policy, diagnostics, final_forecasts
-        )
+        return _run_legacy_selection_package(task, policy, diagnostics, final_forecasts)
     if kind == "tsfm_shrinkage_overlay":
         task = Task("tsfm-blend", (0.0, 1.0) * 20, 2, "D", ())
         truth = (0.0, 1.0)
@@ -504,9 +506,7 @@ def _combined() -> tuple[CombinedPolicy, ...]:
     )
 
 
-def _diagnostics_for_active(
-    *, horizon: int = 3
-) -> dict[str, CandidateDiagnostics]:
+def _diagnostics_for_active(*, horizon: int = 3) -> dict[str, CandidateDiagnostics]:
     truth = tuple(float(index + 1) for index in range(horizon))
     return {
         "toto_2_0": _diagnostic(
@@ -564,7 +564,9 @@ def _policy_entries(*, include_inactive: bool = False) -> tuple[ScreeningEntry, 
                 applicability=ApplicabilityPolicy(
                     (
                         ApplicabilityClause(
-                            feature_tests=(FeatureTest("trend_direction", "==", "flat"),)
+                            feature_tests=(
+                                FeatureTest("trend_direction", "==", "flat"),
+                            )
                         ),
                     )
                 ),
@@ -573,7 +575,9 @@ def _policy_entries(*, include_inactive: bool = False) -> tuple[ScreeningEntry, 
     return tuple(entries)
 
 
-def _card(*assumptions: AssumptionGrounding, history_length: int = 84) -> MorphologyCard:
+def _card(
+    *assumptions: AssumptionGrounding, history_length: int = 84
+) -> MorphologyCard:
     broad = MorphologyToolCall("broad", "detect_periodicity", 0, history_length)
     recent = MorphologyToolCall(
         "recent", "detect_periodicity", history_length // 2, history_length
@@ -618,7 +622,9 @@ class _FixedReasoner:
         return self.result
 
 
-def test_task_profile_screens_before_leaf_materialization_and_combined_reuses_leaves() -> None:
+def test_task_profile_screens_before_leaf_materialization_and_combined_reuses_leaves() -> (
+    None
+):
     task = Task("trend", tuple(float(value) for value in range(1, 85)), 3, "D", ())
     calls: Counter[tuple[str, tuple[float, ...], int, str]] = Counter()
     diagnostics = _diagnostics_for_active()
@@ -645,7 +651,9 @@ def test_task_profile_screens_before_leaf_materialization_and_combined_reuses_le
 
 
 def test_history_only_hindcasts_memoize_shared_leaf_invocations_by_prefix() -> None:
-    task = Task("history-only", tuple(float(value) for value in [1, 2, 3] * 10), 2, "D", ())
+    task = Task(
+        "history-only", tuple(float(value) for value in [1, 2, 3] * 10), 2, "D", ()
+    )
     calls: Counter[tuple[str, tuple[float, ...], int, str]] = Counter()
 
     package = run_numerical_loop(
@@ -663,7 +671,9 @@ def test_history_only_hindcasts_memoize_shared_leaf_invocations_by_prefix() -> N
     assert package.candidate_diagnostics["combined_route"].successful_folds == 2
 
 
-def test_valid_grounded_top_k_guides_only_executed_forecasts_and_projects_four_fields() -> None:
+def test_valid_grounded_top_k_guides_only_executed_forecasts_and_projects_four_fields() -> (
+    None
+):
     task = _task()
     calls: Counter[tuple[str, tuple[float, ...], int, str]] = Counter()
     card = _card(
@@ -684,7 +694,9 @@ def test_valid_grounded_top_k_guides_only_executed_forecasts_and_projects_four_f
     )
 
     assert package.selection_decision.selected == ("seasonal_specialist",)
-    assert package.final_forecast == tuple(float(index + 1) for index in range(task.horizon))
+    assert package.final_forecast == tuple(
+        float(index + 1) for index in range(task.horizon)
+    )
     assert tuple(item.assumption_id for item in package.accepted_assumptions) == (
         "cycle_primary",
     )
@@ -775,9 +787,7 @@ def test_grounded_guidance_compares_against_exact_all_statistical_safe_anchor() 
         candidate_runner=runner,
         diagnostics=diagnostics,
         decision_policy=DecisionPolicy(ensemble_enabled=False),
-        morphology_reasoner=_FixedReasoner(
-            _card(_assumption("guided", "guided_stat"))
-        ),
+        morphology_reasoner=_FixedReasoner(_card(_assumption("guided", "guided_stat"))),
     )
 
     assert package.protected_baseline.name == "safe_stat"
@@ -786,7 +796,9 @@ def test_grounded_guidance_compares_against_exact_all_statistical_safe_anchor() 
     assert package.final_forecast == (10.0, 10.0, 10.0)
 
 
-def test_safe_handoff_does_not_confuse_a_morphology_word_with_identity_leakage() -> None:
+def test_safe_handoff_does_not_confuse_a_morphology_word_with_identity_leakage() -> (
+    None
+):
     task = _task()
     entries = (_entry("toto_2_0", "tsfm"), _entry("cycle", "statistical"))
     truth = (1.0, 2.0, 3.0)
@@ -921,9 +933,10 @@ def test_safe_handoff_opaque_id_hides_candidate_metric_and_tool_identifiers(
         unsafe_id,
     )
     assert package.retrieval_handoff[0]["assumption_id"] == "assumption_001"
-    assert unsafe_id.casefold() not in " ".join(
-        package.retrieval_handoff[0].values()
-    ).casefold()
+    assert (
+        unsafe_id.casefold()
+        not in " ".join(package.retrieval_handoff[0].values()).casefold()
+    )
 
 
 @pytest.mark.parametrize(
@@ -960,18 +973,17 @@ def test_safe_handoff_replaces_every_model_id_with_an_opaque_host_id(
         ),
         diagnostics=diagnostics,
         decision_policy=DecisionPolicy(ensemble_enabled=False),
-        morphology_reasoner=_FixedReasoner(
-            _card(_assumption(model_id, "cycle"))
-        ),
+        morphology_reasoner=_FixedReasoner(_card(_assumption(model_id, "cycle"))),
     )
 
     assert tuple(item.assumption_id for item in package.accepted_assumptions) == (
         model_id,
     )
     assert package.retrieval_handoff[0]["assumption_id"] == "assumption_001"
-    assert model_id.casefold() not in " ".join(
-        package.retrieval_handoff[0].values()
-    ).casefold()
+    assert (
+        model_id.casefold()
+        not in " ".join(package.retrieval_handoff[0].values()).casefold()
+    )
 
 
 def test_safe_handoff_host_ids_are_stable_for_identical_accepted_order() -> None:
@@ -1104,20 +1116,18 @@ def test_assumption_guidance_cannot_bypass_srmse_safe_anchor_guard() -> None:
         ),
         diagnostics=diagnostics,
         decision_policy=DecisionPolicy(ensemble_enabled=False),
-        morphology_reasoner=_FixedReasoner(
-            _card(_assumption("guided", "challenger"))
-        ),
+        morphology_reasoner=_FixedReasoner(_card(_assumption("guided", "challenger"))),
     )
 
     assert package.accepted_assumptions == ()
-    assert package.rejected_assumptions == {
-        "guided": "safe_anchor_scaled_regret"
-    }
+    assert package.rejected_assumptions == {"guided": "safe_anchor_scaled_regret"}
     assert package.selection_decision.selected == ("safe_anchor",)
 
 
 @pytest.mark.parametrize("result", [{"not": "a card"}, RuntimeError("bad morphology")])
-def test_malformed_or_failed_morphology_returns_protected_safe_anchor(result: object) -> None:
+def test_malformed_or_failed_morphology_returns_protected_safe_anchor(
+    result: object,
+) -> None:
     class MalformedReasoner(_FixedReasoner):
         def reason(self, **kwargs: object) -> object:
             if isinstance(self.result, Exception):
@@ -1172,6 +1182,22 @@ def test_absent_morphology_reasoner_is_exactly_legacy_selector_behavior() -> Non
     assert package.selection_decision == expected
     assert package.fallback_reason is None
     assert package.morphology_card is None
+
+
+def test_explicit_none_champion_keeps_legacy_package_byte_identical() -> None:
+    calls: Counter[tuple[str, tuple[float, ...], int, str]] = Counter()
+    kwargs = {
+        "screening_policy": _screening(*_policy_entries()),
+        "candidate_runner": _runner(calls),
+        "combined_policies": _combined(),
+        "diagnostics": _diagnostics_for_active(),
+        "decision_policy": DecisionPolicy(ensemble_enabled=False),
+    }
+
+    legacy = run_numerical_loop(_task(), **kwargs)
+    explicit_none = run_numerical_loop(_task(), champion_release=None, **kwargs)
+
+    assert legacy == explicit_none
 
 
 def test_absent_reasoner_preserves_enabled_legacy_assumption_guidance() -> None:
@@ -1321,12 +1347,16 @@ def test_package_detaches_every_mutable_selection_container() -> None:
     assert decision.rejected == {"outside": "unchanged"}
     assert decision.assumption_ids == base.selection_decision.assumption_ids
     assert decision.assumption_kinds == base.selection_decision.assumption_kinds
-    assert decision.considered_candidates == base.selection_decision.considered_candidates
+    assert (
+        decision.considered_candidates == base.selection_decision.considered_candidates
+    )
     with pytest.raises(TypeError):
         decision.rejected["mutated"] = "yes"  # type: ignore[index]
 
 
-def test_package_rejects_selected_active_name_without_materialized_alternative() -> None:
+def test_package_rejects_selected_active_name_without_materialized_alternative() -> (
+    None
+):
     base = run_numerical_loop(
         _task(),
         screening_policy=_screening(*_policy_entries()),
@@ -1499,7 +1529,9 @@ def test_package_rejects_morphology_guided_multi_member_selection() -> None:
         replace(base, selection_decision=forged, final_forecast=weighted)
 
 
-def test_package_rejects_active_card_ensemble_even_without_accepted_assumptions() -> None:
+def test_package_rejects_active_card_ensemble_even_without_accepted_assumptions() -> (
+    None
+):
     base = run_numerical_loop(
         _task(),
         screening_policy=_screening(*_policy_entries()),
@@ -1659,8 +1691,6 @@ def test_leaf_memo_does_not_swallow_process_control_exceptions() -> None:
                 (_entry("stat_only", "statistical"),), ("stat_only",)
             ),
             candidate_runner=interrupted,
-            diagnostics={
-                "stat_only": _diagnostic("stat_only", "statistical")
-            },
+            diagnostics={"stat_only": _diagnostic("stat_only", "statistical")},
             decision_policy=DecisionPolicy(ensemble_enabled=False),
         )
