@@ -186,6 +186,77 @@ def test_parser_rejects_noncanonical_inventory_definition_records() -> None:
         parse_champion_response(valid_response(), inventory)
 
 
+@pytest.mark.parametrize(
+    "identifier", ("_hidden", "_gate", "class", "for", "match", "case")
+)
+@pytest.mark.parametrize("field", ("recipe", "assumption"))
+def test_parser_rejects_private_and_keyword_recipe_namespaces(
+    field: str,
+    identifier: str,
+) -> None:
+    response = valid_response()
+    if field == "recipe":
+        response["recipes"][0]["name"] = identifier  # type: ignore[index]
+    else:
+        response["recipes"][0]["assumptions"][0][  # type: ignore[index]
+            "assumption_id"
+        ] = identifier
+
+    with pytest.raises(ChampionProposalError, match="public non-keyword"):
+        parse_champion_response(response, INVENTORY)
+
+
+def test_parser_rejects_unicode_normalized_recipe_and_assumption_duplicates() -> None:
+    duplicate_recipes = valid_response()
+    duplicate_recipes["recipes"][0]["name"] = "challenger_K"  # type: ignore[index]
+    duplicate_recipes["recipes"][1]["name"] = "challenger_K"  # type: ignore[index]
+    with pytest.raises(ChampionProposalError, match="normalized"):
+        parse_champion_response(duplicate_recipes, INVENTORY)
+
+    duplicate_assumptions = valid_response()
+    first = duplicate_assumptions["recipes"][0]  # type: ignore[index]
+    first["assumptions"] = [
+        {**first["assumptions"][0], "assumption_id": "Signal"},
+        {**first["assumptions"][0], "assumption_id": "Ｓｉｇｎａｌ"},
+    ]
+    with pytest.raises(ChampionProposalError, match="normalized"):
+        parse_champion_response(duplicate_assumptions, INVENTORY)
+
+
+def test_inventory_candidate_names_are_public_nonkeyword_and_normalized_unique() -> None:
+    keyword_inventory = ToolDictionary(
+        "keyword_inventory",
+        None,
+        0,
+        (
+            *INVENTORY.methods,
+            MethodDefinition(
+                "class",
+                "statistical",
+                "syntactic keyword candidate",
+                status="accepted",
+            ),
+        ),
+    )
+    with pytest.raises(ChampionProposalError, match="public non-keyword"):
+        parse_champion_response(valid_response(), keyword_inventory)
+
+    normalized_duplicate = ToolDictionary(
+        "normalized_duplicate_inventory",
+        None,
+        0,
+        (
+            MethodDefinition(
+                "Model_K", "foundation", "first candidate", status="accepted"
+            ),
+            MethodDefinition(
+                "Model_K", "statistical", "second candidate", status="accepted"
+            ),
+        ),
+    )
+    with pytest.raises(ChampionProposalError, match="normalized"):
+        parse_champion_response(valid_response(), normalized_duplicate)
+
 def test_inactive_dictionary_records_neither_enter_prompt_nor_authorize_parents() -> None:
     inventory = ToolDictionary(
         "mixed_inventory",
@@ -216,6 +287,41 @@ def test_inactive_dictionary_records_neither_enter_prompt_nor_authorize_parents(
     ]
     with pytest.raises(ChampionProposalError, match="unknown parent"):
         parse_champion_response(response, inventory)
+
+
+@pytest.mark.parametrize("location", ("record", "definition"))
+def test_inventory_rejects_hostile_status_before_hash_or_equality(
+    location: str,
+) -> None:
+    class SpoofStatus:
+        calls = 0
+
+        def __hash__(self) -> int:
+            type(self).calls += 1
+            return hash("accepted")
+
+        def __eq__(self, other: object) -> bool:
+            type(self).calls += 1
+            return other == "accepted"
+
+    source = INVENTORY.methods[1]
+    definition = replace(source.definition)
+    record = replace(source, definition=definition)
+    if location == "record":
+        object.__setattr__(record, "status", SpoofStatus())
+    else:
+        object.__setattr__(definition, "status", SpoofStatus())
+    inventory = ToolDictionary(
+        "hostile_status_inventory",
+        None,
+        0,
+        (INVENTORY.methods[0], record, INVENTORY.methods[2]),
+    )
+
+    with pytest.raises(ChampionProposalError, match="exact canonical"):
+        parse_champion_response(valid_response(), inventory)
+
+    assert SpoofStatus.calls == 0
 
 
 @pytest.mark.parametrize(
@@ -289,6 +395,60 @@ def test_raw_parser_rejects_duplicate_keys_code_blocks_and_noncanonical_json(
 ) -> None:
     with pytest.raises(ChampionProposalError):
         parse_champion_response(response, INVENTORY)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    (
+        "Use task_42 future labels at threshold 0.8, then call accept().",
+        "Use ｔａｓｋ＿４２ and Ｐｕｂｌｉｃ labels for this route.",
+        "Blend alpha=0.25 before routing.",
+        "Run helper(value) when seasonality changes.",
+        "def choose: return specialist",
+        "if seasonality: choose route",
+        "class Router",
+        "call helper",
+        "Approve and gate this route.",
+        "Entity truth metrics score this split.",
+    ),
+)
+def test_parser_rejects_authority_numeric_and_code_like_structural_prose(
+    prose: str,
+) -> None:
+    response = valid_response()
+    response["recipes"][0]["assumptions"][0]["rationale"] = prose  # type: ignore[index]
+
+    with pytest.raises(ChampionProposalError, match="prose"):
+        parse_champion_response(response, INVENTORY)
+
+
+def test_parser_allows_bounded_ordinary_prose_with_benign_marker_near_misses() -> None:
+    response = valid_response()
+    assumption = response["recipes"][0]["assumptions"][0]  # type: ignore[index]
+    assumption["rationale"] = (
+        "Historical capacity may indicate stable seasonal behavior."
+    )
+    assumption["failure_condition"] = (
+        "The captioned seasonal pattern may weaken gradually."
+    )
+
+    recipes = parse_champion_response(response, INVENTORY)
+
+    assert recipes[0].assumptions[0].rationale.startswith("Historical capacity")
+
+
+def test_proposer_retries_unsafe_prose_once_and_retains_no_partial_batch() -> None:
+    response = valid_response()
+    response["recipes"][0]["assumptions"][0]["rationale"] = (  # type: ignore[index]
+        "Use task_42 labels at threshold 0.8."
+    )
+    llm = FakeLLMClient([json.dumps(response), json.dumps(response)])
+
+    with pytest.raises(ChampionProposalError, match="after one schema retry") as caught:
+        propose_champion_recipes(llm, PARENT, INVENTORY, EVIDENCE)
+
+    assert len(llm.calls) == 2
+    assert "task_42" not in str(caught.value)
 
 
 def test_proposer_retries_schema_once_without_returning_partial_output() -> None:
@@ -366,8 +526,8 @@ def _typed_recipe(kind: str, *, feature: str = "periodicity_strength") -> Champi
                 direction="above",
                 horizon_region="full",
                 operator=kind,  # type: ignore[arg-type]
-                rationale="The Build feature identifies a region.",
-                failure_condition="The Build feature stops identifying that region.",
+                rationale="The history feature identifies a region.",
+                failure_condition="The history feature stops identifying that region.",
             ),
         ),
     )
@@ -445,3 +605,13 @@ def test_expansion_accepts_exact_builtin_row_containers_but_not_subclasses() -> 
     assert expand_recipe(recipe, list(_rows())) == expand_recipe(recipe, _rows())
     with pytest.raises(ChampionProposalError):
         expand_recipe(recipe, RowList(_rows()))
+
+
+def test_expansion_rejects_unbounded_integer_features_without_raw_overflow() -> None:
+    row = _rows()[0]
+    object.__setattr__(row.profile, "history_length", 10**400)
+
+    with pytest.raises(ChampionProposalError, match="bounded") as caught:
+        expand_recipe(_typed_recipe("route", feature="history_length"), (row,))
+
+    assert "10" not in str(caught.value)

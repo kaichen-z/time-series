@@ -3,14 +3,22 @@ from __future__ import annotations
 
 import itertools
 import json
+import keyword
 import math
+import unicodedata
 from typing import cast
 
 from common.llm import LLMClient
 from common.metrics import linear_quantile
 from common.payload import strict_json_loads
 
-from numerical_agent.dictionary import MethodDefinition, MethodRecord, ToolDictionary
+from numerical_agent.config import ALLOWED_FAMILIES, METHOD_STATUSES
+from numerical_agent.dictionary import (
+    MethodCandidate,
+    MethodDefinition,
+    MethodRecord,
+    ToolDictionary,
+)
 
 from .champion import (
     ChampionContractError,
@@ -76,7 +84,82 @@ _ASSUMPTION_FIELDS = (
 )
 _MAX_ASSUMPTIONS_PER_RECIPE = 3
 _MAX_BUILD_ROWS = 1_000_000
+_MAX_PROFILE_LENGTH = 1_000_000
 _ACTIVE_INVENTORY_STATUSES = frozenset({"accepted", "specialized"})
+_MAX_STRUCTURAL_PROSE = 500
+_SAFE_PROSE_PUNCTUATION = frozenset(".,!?'-–—，。！？‘’")
+_CODE_PROSE_TOKENS = frozenset({
+    "call",
+    "class",
+    "def",
+    "eval",
+    "exec",
+    "function",
+    "import",
+    "lambda",
+    "return",
+})
+_AUTHORITY_PROSE_TOKENS = frozenset({
+    "accept",
+    "acceptance",
+    "accepted",
+    "accepting",
+    "accepts",
+    "alpha",
+    "approval",
+    "approve",
+    "approved",
+    "approves",
+    "approving",
+    "build",
+    "calibration",
+    "cap",
+    "capped",
+    "capping",
+    "caps",
+    "dev",
+    "devops",
+    "entities",
+    "entity",
+    "future",
+    "futures",
+    "gate",
+    "gates",
+    "label",
+    "labeled",
+    "labeling",
+    "labelled",
+    "labelling",
+    "labels",
+    "metric",
+    "metrics",
+    "parameter",
+    "parameters",
+    "position",
+    "positions",
+    "public",
+    "reject",
+    "rejected",
+    "rejecting",
+    "rejection",
+    "rejects",
+    "score",
+    "scored",
+    "scores",
+    "scoring",
+    "split",
+    "splits",
+    "task",
+    "tasks",
+    "threshold",
+    "thresholds",
+    "truth",
+    "truths",
+    "weight",
+    "weighted",
+    "weighting",
+    "weights",
+})
 
 CHAMPION_PROPOSAL_SYSTEM = """You propose structural Numerical Champion recipes only.
 Return exactly one standards-JSON object matching the exact schema supplied by
@@ -97,6 +180,111 @@ def _fail(message: str) -> None:
     raise ChampionProposalError(message)
 
 
+def _canonical_text(value: str) -> str:
+    return unicodedata.normalize("NFKC", value).casefold()
+
+
+def _public_identifier(value: object, field_name: str) -> str:
+    if type(value) is not str:
+        _fail(f"{field_name} must be an exact public non-keyword identifier")
+    identifier = cast(str, value)
+    normalized = unicodedata.normalize("NFKC", identifier)
+    if (
+        not identifier
+        or identifier.startswith("_")
+        or normalized.startswith("_")
+        or not identifier.isidentifier()
+        or not normalized.isidentifier()
+        or keyword.iskeyword(normalized)
+        or keyword.issoftkeyword(normalized)
+    ):
+        _fail(f"{field_name} must be an exact public non-keyword identifier")
+    return identifier
+
+
+def _require_normalized_unique(values: tuple[str, ...], field_name: str) -> None:
+    normalized = tuple(_canonical_text(value) for value in values)
+    if len(normalized) != len(set(normalized)):
+        _fail(f"{field_name} must be normalized-unique")
+
+
+def _alnum_segments(value: str) -> tuple[str, ...]:
+    segments: list[str] = []
+    current: list[str] = []
+    for character in unicodedata.normalize("NFKC", value):
+        if character.isalnum():
+            current.append(character)
+        elif current:
+            segments.append("".join(current))
+            current = []
+    if current:
+        segments.append("".join(current))
+    return tuple(segments)
+
+
+def _token_starts(segment: str) -> tuple[int, ...]:
+    starts = [0]
+    for index in range(1, len(segment)):
+        previous = segment[index - 1]
+        current = segment[index]
+        following = segment[index + 1] if index + 1 < len(segment) else ""
+        if (
+            previous.isdigit() != current.isdigit()
+            or (previous.islower() and current.isupper())
+            or (previous.isupper() and current.isupper() and following.islower())
+        ):
+            starts.append(index)
+    return tuple(starts)
+
+
+def _prose_tokens(value: str) -> tuple[str, ...]:
+    tokens: list[str] = []
+    for segment in _alnum_segments(value):
+        starts = _token_starts(segment)
+        tokens.extend(
+            _canonical_text(segment[start:end])
+            for start, end in zip(starts, (*starts[1:], len(segment)))
+        )
+    return tuple(tokens)
+
+
+def _validate_structural_prose(value: object, field_name: str) -> str:
+    if type(value) is not str:
+        _fail(f"{field_name} prose must be an exact string")
+    prose = cast(str, value)
+    normalized = unicodedata.normalize("NFKC", prose)
+    if (
+        not prose
+        or prose != prose.strip()
+        or not 1 <= len(normalized) <= _MAX_STRUCTURAL_PROSE
+    ):
+        _fail(f"{field_name} prose must be nonempty, trimmed, and bounded")
+    if any(character.isnumeric() for character in normalized):
+        _fail(f"{field_name} prose cannot contain numeric authority")
+    if any(
+        not (
+            character == " "
+            or unicodedata.category(character).startswith(("L", "M"))
+            or character in _SAFE_PROSE_PUNCTUATION
+        )
+        for character in normalized
+    ):
+        _fail(f"{field_name} prose contains code-like syntax")
+    if any(
+        normalized[index - 1].isalnum()
+        and character == "."
+        and normalized[index + 1].isalnum()
+        for index, character in enumerate(normalized[1:-1], start=1)
+    ):
+        _fail(f"{field_name} prose contains code-like syntax")
+    tokens = frozenset(_prose_tokens(normalized))
+    if tokens & _CODE_PROSE_TOKENS:
+        _fail(f"{field_name} prose contains code-like fragments")
+    if tokens & _AUTHORITY_PROSE_TOKENS:
+        _fail(f"{field_name} prose contains forbidden authority")
+    return prose
+
+
 def _validate_limits(minimum: object, maximum: object) -> tuple[int, int]:
     if (
         type(minimum) is not int
@@ -111,6 +299,17 @@ def _inventory_records(inventory: object) -> tuple[MethodRecord, ...]:
     if type(inventory) is not ToolDictionary:
         _fail("inventory must be an exact canonical ToolDictionary")
     canonical = cast(ToolDictionary, inventory)
+    if (
+        type(canonical.dictionary_id) is not str
+        or not canonical.dictionary_id
+        or (
+            canonical.parent_dictionary_id is not None
+            and type(canonical.parent_dictionary_id) is not str
+        )
+        or type(canonical.generation) is not int
+        or canonical.generation < 0
+    ):
+        _fail("inventory metadata must use exact canonical types")
     if type(canonical.methods) is not tuple:
         _fail("inventory must be an exact canonical ToolDictionary")
     records = cast(tuple[MethodRecord, ...], canonical.methods)
@@ -118,23 +317,82 @@ def _inventory_records(inventory: object) -> tuple[MethodRecord, ...]:
         _fail("inventory must contain exact canonical MethodRecord values")
     names: list[str] = []
     for record in records:
+        if (
+            type(record.status) is not str
+            or record.status not in METHOD_STATUSES
+            or type(record.revision_count) is not int
+            or record.revision_count < 0
+            or type(record.implementation_attempts) is not int
+            or record.implementation_attempts < 0
+            or type(record.train_summary) is not dict
+            or any(type(key) is not str for key in record.train_summary)
+            or any(
+                type(value) is not float or not math.isfinite(value)
+                for value in record.train_summary.values()
+            )
+        ):
+            _fail("inventory records must use exact canonical authorization fields")
+        raw_definition = record.definition
+        if type(raw_definition) is not MethodDefinition:
+            _fail("inventory definitions must use exact canonical records")
+        definition = cast(MethodDefinition, raw_definition)
+        if (
+            type(definition.method_id) is not str
+            or type(definition.family) is not str
+            or definition.family not in ALLOWED_FAMILIES
+            or type(definition.description) is not str
+            or not definition.description.strip()
+            or type(definition.status) is not str
+            or definition.status not in METHOD_STATUSES
+            or type(definition.assumptions) is not tuple
+            or any(type(item) is not str for item in definition.assumptions)
+            or type(definition.failure_conditions) is not tuple
+            or any(type(item) is not str for item in definition.failure_conditions)
+            or type(definition.dependencies) is not tuple
+            or any(type(item) is not str for item in definition.dependencies)
+            or type(definition.implementation_spec) is not dict
+            or any(type(key) is not str for key in definition.implementation_spec)
+        ):
+            _fail("inventory definitions must use exact canonical authorization fields")
+        candidate = record.candidate
+        if candidate is not None:
+            if type(candidate) is not MethodCandidate:
+                _fail("inventory candidates must use exact canonical records")
+            if (
+                type(candidate.method_id) is not str
+                or type(candidate.provider) is not str
+                or not candidate.provider
+                or type(candidate.implementation_kind) is not str
+                or not candidate.implementation_kind
+                or type(candidate.implementation) is not dict
+                or any(type(key) is not str for key in candidate.implementation)
+                or type(candidate.version) is not int
+                or candidate.version <= 0
+                or (
+                    candidate.parent_version is not None
+                    and (
+                        type(candidate.parent_version) is not int
+                        or candidate.parent_version <= 0
+                    )
+                )
+            ):
+                _fail("inventory candidates must use exact canonical authorization fields")
         try:
-            MethodRecord.__post_init__(record)
-            raw_definition = record.definition
-            if type(raw_definition) is not MethodDefinition:
-                _fail("inventory definitions must use exact canonical records")
-            definition = cast(MethodDefinition, raw_definition)
             definition.__post_init__()
+            if candidate is not None:
+                candidate.__post_init__()
+            MethodRecord.__post_init__(record)
         except ChampionProposalError:
             raise
         except Exception as error:
             raise ChampionProposalError("inventory contains an invalid method record") from error
-        name = definition.method_id
-        if type(name) is not str or not name or not name.isidentifier() or name.startswith("_"):
-            _fail("inventory method names must be public Python identifiers")
+        name = _public_identifier(definition.method_id, "inventory method name")
+        for dependency in definition.dependencies:
+            _public_identifier(dependency, "inventory dependency name")
+        if candidate is not None:
+            _public_identifier(candidate.method_id, "inventory candidate name")
         names.append(name)
-    if len(names) != len(set(names)):
-        _fail("inventory method names must be unique")
+    _require_normalized_unique(tuple(names), "inventory method names")
     return records
 
 
@@ -170,11 +428,38 @@ def _validate_recipe(recipe: object, *, inventory_names: tuple[str, ...]) -> Cha
     if type(recipe) is not ChampionRecipe:
         _fail("recipe must be an exact ChampionRecipe")
     canonical = cast(ChampionRecipe, recipe)
+    _public_identifier(canonical.name, "recipe name")
+    if type(canonical.kind) is not str or canonical.kind not in _OPERATORS:
+        _fail("recipe kind must be an exact supported operator")
+    if type(canonical.parents) is not tuple or not canonical.parents:
+        _fail("recipe parents must be an exact nonempty tuple")
+    for parent in canonical.parents:
+        _public_identifier(parent, "recipe parent")
+    _require_normalized_unique(canonical.parents, "recipe parents")
+    _public_identifier(canonical.fallback_parent, "recipe fallback parent")
+    if type(canonical.assumptions) is not tuple or not canonical.assumptions:
+        _fail("recipe assumptions must be an exact nonempty tuple")
+    assumption_ids: list[str] = []
     try:
         for assumption in canonical.assumptions:
             if type(assumption) is not EvolutionAssumption:
                 _fail("recipe assumptions must be exact EvolutionAssumption values")
+            _public_identifier(assumption.assumption_id, "assumption ID")
+            _public_identifier(assumption.candidate_name, "assumption candidate name")
+            _public_identifier(assumption.feature, "assumption feature")
+            if (
+                type(assumption.direction) is not str
+                or type(assumption.horizon_region) is not str
+                or type(assumption.operator) is not str
+            ):
+                _fail("assumption enums must use exact strings")
+            _validate_structural_prose(assumption.rationale, "rationale")
+            _validate_structural_prose(
+                assumption.failure_condition, "failure_condition"
+            )
             EvolutionAssumption.__post_init__(assumption)
+            assumption_ids.append(assumption.assumption_id)
+        _require_normalized_unique(tuple(assumption_ids), "assumption IDs")
         ChampionRecipe.__post_init__(canonical)
     except ChampionProposalError:
         raise
@@ -252,12 +537,13 @@ def parse_champion_response(
         except (ChampionContractError, KeyError, TypeError, ValueError) as error:
             raise ChampionProposalError("Champion recipe violates its exact schema") from error
         _validate_recipe(recipe, inventory_names=inventory_names)
-        if recipe.name in inventory_names:
+        if _canonical_text(recipe.name) in {
+            _canonical_text(name) for name in inventory_names
+        }:
             _fail("Champion recipe names cannot collide with the candidate inventory")
         parsed.append(recipe)
     names = tuple(recipe.name for recipe in parsed)
-    if len(names) != len(set(names)):
-        _fail("Champion recipe names must be unique")
+    _require_normalized_unique(names, "Champion recipe names")
     return tuple(parsed)
 
 
@@ -368,6 +654,12 @@ def _validated_build_profiles(
         if type(raw_row) is not ChampionTaskRow:
             _fail("Build rows must contain exact ChampionTaskRow values")
         row = cast(ChampionTaskRow, raw_row)
+        if type(row.profile) is not TaskProfile or any(
+            type(getattr(row.profile, field)) is not int
+            or not 1 <= getattr(row.profile, field) <= _MAX_PROFILE_LENGTH
+            for field in ("history_length", "horizon")
+        ):
+            _fail("Build profile integer features must be exact and bounded")
         try:
             ChampionTaskRow.__post_init__(row)
         except Exception as error:
@@ -386,17 +678,27 @@ def _validated_build_profiles(
 
 
 def _feature_value(profile: TaskProfile, feature: str) -> float | None:
-    if feature == "horizon_ratio":
-        value: object = profile.horizon / profile.history_length
-    elif feature in {"history_length", "horizon"}:
-        value = getattr(profile, feature)
-    elif feature in _PROFILE_FLOAT_FEATURES:
-        value = getattr(profile, feature)
-    else:
-        return None
+    try:
+        if feature == "horizon_ratio":
+            value: object = profile.horizon / profile.history_length
+        elif feature in {"history_length", "horizon"}:
+            value = getattr(profile, feature)
+        elif feature in _PROFILE_FLOAT_FEATURES:
+            value = getattr(profile, feature)
+        else:
+            return None
+    except (ArithmeticError, TypeError, ValueError) as error:
+        raise ChampionProposalError(
+            "Build feature arithmetic must be finite and bounded"
+        ) from error
     if type(value) not in {int, float}:
         return None
-    number = float(cast(int | float, value))
+    try:
+        number = float(cast(int | float, value))
+    except (OverflowError, TypeError, ValueError) as error:
+        raise ChampionProposalError(
+            "Build feature values must be finite and bounded"
+        ) from error
     return number if math.isfinite(number) else None
 
 
@@ -411,7 +713,16 @@ def _threshold_grid(
     )
     if not values:
         _fail("Build has no finite value for an assumption feature")
-    quantiles = tuple(float(linear_quantile(list(values), level)) for level in _QUANTILES)
+    try:
+        quantiles = tuple(
+            float(linear_quantile(list(values), level)) for level in _QUANTILES
+        )
+    except (ArithmeticError, TypeError, ValueError) as error:
+        raise ChampionProposalError(
+            "Build feature quantiles must be finite and bounded"
+        ) from error
+    if any(not math.isfinite(value) for value in quantiles):
+        _fail("Build feature quantiles must be finite and bounded")
     return tuple(dict.fromkeys(quantiles))
 
 
