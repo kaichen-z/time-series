@@ -102,7 +102,6 @@ def _scores(
 
 def _gate(**changes: object) -> ChampionGateConfig:
     values: dict[str, object] = {
-        "minimum_joint_improvement": 0.0,
         "primary_regression_tolerance": 0.0,
         "tail_regression_tolerance": 0.0,
         "minimum_coverage": 1.0,
@@ -146,7 +145,6 @@ def test_score_policy_counts_explicit_failures_without_inspecting_raw_exception(
             "b",
             "candidate",
             None,
-            truth=None,
             failure_reason="RuntimeError: entity-secret failed on Public row",
         ),
     )
@@ -205,6 +203,30 @@ def test_score_policy_rejects_missing_candidate_task_pair() -> None:
         score_policy(rows, "child")
 
 
+def test_scoring_rejects_conflicting_truths_before_building_policy_scores() -> None:
+    rows = (
+        _row("same", "parent", (1.0,) * 4, truth=(1.0,) * 4),
+        _row("same", "child", (2.0,) * 4, truth=(2.0,) * 4),
+    )
+
+    with pytest.raises(ChampionEvidenceError, match="truth|universe"):
+        score_policy(rows, "parent")
+
+
+def test_comparison_binds_the_exact_truth_universe_across_separate_scores() -> None:
+    parent = score_policy(
+        (_row("same", "parent", (1.0,) * 4, truth=(1.0,) * 4),),
+        "parent",
+    )
+    child = score_policy(
+        (_row("same", "child", (2.0,) * 4, truth=(2.0,) * 4),),
+        "child",
+    )
+
+    with pytest.raises(ChampionEvidenceError, match="truth|universe"):
+        compare_champion(parent, child, _gate())
+
+
 @pytest.mark.parametrize(
     "row",
     (
@@ -244,8 +266,7 @@ def test_pair_gate_rejects_srmse_regression_hidden_by_joint_mean() -> None:
     ("p90_smae_raw", "p95_smae_raw", "p90_srmse_raw", "p95_srmse_raw"),
 )
 def test_each_raw_tail_is_an_independent_gate(metric: str) -> None:
-    _, parent, child = _scores((1.0,) * 10, (0.5,) * 10)
-    object.__setattr__(child, metric, 99.0)
+    _, parent, child = _scores((4.0,) * 10, (0.0,) * 8 + (10.0,) * 2)
 
     result = compare_champion(parent, child, _gate())
 
@@ -271,19 +292,25 @@ def test_win_count_is_reported_but_not_a_standalone_gate() -> None:
 
 
 def test_coverage_clipping_regret_and_fold_stability_remain_independent_gates() -> None:
-    rows, parent, child = _scores((1.0,) * 10, (0.5,) * 10)
+    rows, parent, child = _scores((4.0,) * 10, (0.0,) * 9 + (10.0,))
 
-    clipped = replace(child, smae_clipped_count=1)
-    assert "smae_clipped_count" in compare_champion(parent, clipped, _gate()).failures
-
-    low_coverage = replace(
+    clipped_result = compare_champion(
+        parent,
         child,
-        successful_tasks=9,
-        coverage=0.9,
-        failure_rate=0.1,
-        failure_count=1,
+        _gate(maximum_task_regret_smae=5.0, maximum_task_regret_srmse=5.0),
     )
-    coverage_result = compare_champion(parent, low_coverage, _gate())
+    assert "smae_clipped_count" in clipped_result.failures
+    assert "srmse_clipped_count" in clipped_result.failures
+
+    failed_rows = (
+        _row("a", "parent", (2.0,) * 4),
+        _row("b", "parent", (2.0,) * 4),
+        _row("a", "child", (1.5,) * 4),
+        _row("b", "child", None, failure_reason="runtime failed"),
+    )
+    failed_parent = score_policy(failed_rows, "parent")
+    failed_child = score_policy(failed_rows, "child")
+    coverage_result = compare_champion(failed_parent, failed_child, _gate())
     assert {"coverage", "failure_rate"} <= set(coverage_result.failures)
 
     _, regret_parent, regret_child = _scores((1.0, 1.0), (0.0, 1.2))
@@ -300,6 +327,123 @@ def test_coverage_clipping_regret_and_fold_stability_remain_independent_gates() 
     assert unstable.total_folds == 5
     assert unstable.improved_folds == 5
     assert len(rows) == 20
+
+
+def test_common_successful_pairs_own_primary_and_tail_authority() -> None:
+    rows = (
+        _row("easy", "parent", (1.1,) * 4),
+        _row("hard", "parent", (6.0,) * 4),
+        _row("easy", "child", (1.2,) * 4),
+        _row("hard", "child", None, failure_reason="bounded failure"),
+    )
+    parent = score_policy(rows, "parent")
+    child = score_policy(rows, "child")
+
+    result = compare_champion(
+        parent,
+        child,
+        _gate(
+            minimum_coverage=0.5,
+            maximum_failure_rate=0.5,
+            maximum_coverage_regression=0.5,
+            maximum_failure_rate_increase=0.5,
+        ),
+    )
+
+    assert child.mean_smae < parent.mean_smae  # Unpaired aggregates are misleading.
+    assert result.mean_delta_smae == pytest.approx(0.1)
+    assert result.mean_delta_srmse == pytest.approx(0.1)
+    assert {"mean_smae", "mean_srmse"} <= set(result.failures)
+    assert {
+        "p90_smae", "p95_smae", "p90_srmse", "p95_srmse",
+        "p90_smae_raw", "p95_smae_raw", "p90_srmse_raw", "p95_srmse_raw",
+    } <= set(result.failures)
+    assert result.wtl == WinTieLoss(wins=0, ties=0, losses=1)
+
+
+def test_public_comparison_rejects_forged_or_incoherent_scores() -> None:
+    _, parent, child = _scores((1.0, 1.0), (0.5, 0.5))
+
+    with pytest.raises(ChampionEvidenceError, match="coherent|coverage"):
+        replace(child, coverage=0.5)
+
+    object.__setattr__(child, "mean_smae", 0.0)
+    with pytest.raises(ChampionEvidenceError, match="coherent|mean_smae"):
+        compare_champion(parent, child, _gate())
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "total_tasks",
+        "successful_tasks",
+        "failure_count",
+        "coverage",
+        "failure_rate",
+        "smae_clipped_count",
+        "srmse_clipped_count",
+        "smae_clipped_rate",
+        "srmse_clipped_rate",
+        "fold_count",
+        "mean_smae",
+        "mean_srmse",
+        "median_smae",
+        "median_srmse",
+        "p90_smae",
+        "p95_smae",
+        "max_smae",
+        "mean_smae_raw",
+        "median_srmse_raw",
+        "p90_smae_raw",
+        "p95_srmse_raw",
+        "max_srmse_raw",
+    ),
+)
+def test_every_derived_score_field_is_exactly_bound_to_task_metrics(field: str) -> None:
+    rows = (
+        _row("a", "candidate", (1.0, 1.0, 1.0, 25.0), fold=0),
+        _row("b", "candidate", (1.5,) * 4, fold=1),
+        _row("c", "candidate", None, failure_reason="bounded failure", fold=2),
+    )
+    score = score_policy(rows, "candidate")
+    current = getattr(score, field)
+    mutation = current + (1 if type(current) is int else 1e-6)
+
+    with pytest.raises(ChampionEvidenceError, match=field):
+        replace(score, **{field: mutation})
+
+
+def test_score_coherence_rejects_even_sub_tolerance_metric_forgery() -> None:
+    _, _, child = _scores((1.0,), (0.5,))
+
+    with pytest.raises(ChampionEvidenceError, match="mean_smae"):
+        replace(child, mean_smae=child.mean_smae + 5e-13)
+
+
+def test_joint_gain_is_diagnostic_only_and_not_an_acceptance_threshold() -> None:
+    _, parent, child = _scores((1.0,) * 5, (0.999,) * 5)
+
+    result = compare_champion(parent, child, _gate())
+
+    assert result.accepted is True
+    assert 0.0 < result.joint_improvement < 0.005
+    assert "joint_improvement" not in result.failures
+
+
+def test_fold_stability_requires_independent_smae_srmse_pareto_behavior() -> None:
+    rows = (
+        _row("a", "parent", (2.0, 2.0, 2.0, 2.0), fold=0),
+        _row("a", "child", (1.0, 1.0, 1.0, 3.1), fold=0),
+    )
+
+    result = compare_champion(
+        score_policy(rows, "parent"),
+        score_policy(rows, "child"),
+        _gate(minimum_improved_folds=1),
+    )
+
+    assert result.improved_folds == 0
+    assert "fold_stability" in result.failures
 
 
 def _walk(value: object):
@@ -357,6 +501,23 @@ def test_sanitized_build_evidence_contains_only_anonymous_reviewed_aggregates() 
     assert all(not isinstance(value, TaskProfile) for value in _walk(evidence))
     assert payload["label"] == "adaptive_train_build_diagnostic"
     assert payload["independent_generalization_claim"] is False
+    assert not {
+        "accepted", "rejected", "passed", "failures", "gate", "gates"
+    } & set(payload["comparisons"][0])
+
+
+def test_sanitizer_recomputes_diagnostics_instead_of_copying_decision_authority() -> None:
+    rows, parent, child = _scores((1.0,), (0.5,))
+    comparison = compare_champion(parent, child, _gate())
+    object.__setattr__(comparison, "mean_delta_smae", -999.0)
+    object.__setattr__(comparison, "accepted", False)
+    object.__setattr__(comparison, "failures", ("forged_gate",))
+
+    payload = sanitize_build_evidence(rows, (comparison,)).to_payload()
+
+    assert payload["comparisons"][0]["mean_delta_smae"] == pytest.approx(-0.5)
+    assert "accepted" not in payload["comparisons"][0]
+    assert "failures" not in payload["comparisons"][0]
 
 
 def test_sanitizer_rejects_mislabeled_rows_and_forbidden_candidate_markers() -> None:
@@ -377,12 +538,12 @@ def test_sanitizer_rejects_mislabeled_rows_and_forbidden_candidate_markers() -> 
         sanitize_build_evidence(hostile_rows, (hostile_comparison,))
 
 
-def test_sanitizer_revalidates_comparison_fields_and_frequency_markers() -> None:
+def test_sanitizer_ignores_forged_comparison_fields_and_blocks_frequency_markers() -> None:
     rows, parent, child = _scores((1.0,), (0.5,))
     comparison = compare_champion(parent, child, _gate())
     object.__setattr__(comparison, "child_p90_smae_raw", "not-a-number")
-    with pytest.raises(ChampionEvidenceError, match="child_p90_smae_raw"):
-        sanitize_build_evidence(rows, (comparison,))
+    payload = sanitize_build_evidence(rows, (comparison,)).to_payload()
+    assert payload["comparisons"][0]["p90_smae_raw"] == pytest.approx(0.5)
 
     marked_rows = tuple(
         replace(row, profile=replace(row.profile, frequency="Public daily"))
@@ -393,6 +554,47 @@ def test_sanitizer_revalidates_comparison_fields_and_frequency_markers() -> None
     marked_comparison = compare_champion(marked_parent, marked_child, _gate())
     with pytest.raises(ChampionEvidenceError, match="Dev/Public"):
         sanitize_build_evidence(marked_rows, (marked_comparison,))
+
+    camel_rows = tuple(
+        replace(row, profile=replace(row.profile, frequency="PublicDaily"))
+        for row in rows
+    )
+    camel_comparison = compare_champion(
+        score_policy(camel_rows, "parent"),
+        score_policy(camel_rows, "child"),
+        _gate(),
+    )
+    with pytest.raises(ChampionEvidenceError, match="Dev/Public"):
+        sanitize_build_evidence(camel_rows, (camel_comparison,))
+
+
+def test_frequency_groups_are_preregistered_buckets_and_never_task_identities() -> None:
+    rows, parent, child = _scores((1.0,), (0.5,))
+    custom_rows = tuple(
+        replace(row, profile=replace(row.profile, frequency="tenant-secret-frequency"))
+        for row in rows
+    )
+    custom_comparison = compare_champion(
+        score_policy(custom_rows, "parent"),
+        score_policy(custom_rows, "child"),
+        _gate(),
+    )
+    evidence = sanitize_build_evidence(custom_rows, (custom_comparison,))
+    group_ids = {item.group_id for item in evidence.morphology}
+    assert "frequency:other" in group_ids
+    assert not any("tenant" in group_id for group_id in group_ids)
+
+    identity_rows = (
+        _row("daily", "parent", (2.0,) * 4),
+        _row("daily", "child", (1.5,) * 4),
+    )
+    identity_comparison = compare_champion(
+        score_policy(identity_rows, "parent"),
+        score_policy(identity_rows, "child"),
+        _gate(),
+    )
+    with pytest.raises(ChampionEvidenceError, match="identity"):
+        sanitize_build_evidence(identity_rows, (identity_comparison,))
 
 
 def test_evidence_contracts_are_frozen() -> None:
