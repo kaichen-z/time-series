@@ -507,17 +507,23 @@ def test_hostile_callback_cannot_mutate_sanitized_feedback() -> None:
 
 def test_unscorable_child_is_typed_pruned_without_aborting_valid_siblings() -> None:
     class MixedValidityProposer:
+        calls = 0
+        feedback: list[ProposerEvidence] = []
+
         def __call__(self, parent, evidence) -> tuple[ChampionRecipe, ...]:
-            valid = _proposal_batch("better")[:1]
+            self.feedback.append(evidence)
+            generation = self.calls
+            self.calls += 1
+            valid = _proposal_batch("better", generation)[:1]
             invalid = tuple(
                 ChampionRecipe(
-                    name=f"overlay_{index}",
+                    name=f"overlay_{generation}_{index}",
                     kind="bounded_overlay",
                     parents=("better_a", "better_b"),
                     fallback_parent="better_a",
                     assumptions=(
                         EvolutionAssumption(
-                            assumption_id=f"overlay_history_{index}",
+                            assumption_id=f"overlay_history_{generation}_{index}",
                             candidate_name="better_b",
                             feature="periodicity_confidence",
                             direction="above",
@@ -534,8 +540,9 @@ def test_unscorable_child_is_typed_pruned_without_aborting_valid_siblings() -> N
             )
             return valid + invalid
 
+    proposer = MixedValidityProposer()
     result = run_build_evolution(
-        PARENT, ROWS_64, MixedValidityProposer(), _config()
+        PARENT, ROWS_64, proposer, _config(generations=2)
     )
 
     invalid = tuple(
@@ -546,6 +553,53 @@ def test_unscorable_child_is_typed_pruned_without_aborting_valid_siblings() -> N
     assert invalid
     assert all(attempt.comparison is None for attempt in invalid)
     assert all(attempt.invalid_reason == "unscorable_child" for attempt in invalid)
+    generation_feedback = result.generations[0].feedback
+    valid_count = len(result.generations[0].attempts) - len(invalid)
+    assert len(generation_feedback.comparisons) == valid_count
+    assert len(generation_feedback.invalid_attempts) == len(invalid)
+    assert (
+        len(generation_feedback.comparisons)
+        + len(generation_feedback.invalid_attempts)
+        == len(result.generations[0].attempts)
+    )
+    invalid_fingerprints = {
+        champion_fingerprint(attempt.policy) for attempt in invalid
+    }
+    assert {
+        item.structure_sha256 for item in generation_feedback.invalid_attempts
+    } == invalid_fingerprints
+    assert all(
+        item.kind == "bounded_overlay"
+        and item.stage_support == 8
+        and item.reason_code == "unscorable_child"
+        for item in generation_feedback.invalid_attempts
+    )
+    invalid_payloads = generation_feedback.to_payload()["invalid_attempts"]
+    assert all(
+        set(item) == {"structure_sha256", "kind", "stage_support", "reason_code"}
+        for item in invalid_payloads
+    )
+    assert not any(
+        forbidden in repr(invalid_payloads).casefold()
+        for forbidden in (
+            "overlay_0_",
+            "better_a",
+            "accepted",
+            "rejected",
+            "passed",
+            "smae",
+            "srmse",
+            "truth",
+            "forecast",
+            "task_id",
+            "split",
+            "gate",
+        )
+    )
+    assert proposer.feedback[1].invalid_attempts == generation_feedback.invalid_attempts
+    assert not invalid_fingerprints & {
+        champion_fingerprint(policy) for policy in result.shortlist
+    }
     assert result.shortlist
     assert result.active_parent is PARENT
 

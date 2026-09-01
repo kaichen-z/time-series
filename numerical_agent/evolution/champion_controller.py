@@ -19,6 +19,7 @@ from .champion import (
     parse_champion_recipe,
 )
 from .champion_evidence import (
+    _InvalidAttemptAggregate,
     ChampionComparison,
     ChampionEvidenceError,
     ChampionGateConfig,
@@ -727,12 +728,27 @@ def _feedback(states: tuple[_AttemptState, ...]) -> ProposerEvidence:
         for state in states
         if state.comparison is not None and state.evidence_rows
     )
-    if not scored_states:
-        return ProposerEvidence(
-            label="adaptive_train_build_diagnostic",
-            independent_generalization_claim=False,
-            morphology=(),
-            comparisons=(),
+    invalid_states = tuple(
+        state
+        for state in states
+        if state.comparison is None and state.invalid_reason is not None
+    )
+    if len(scored_states) + len(invalid_states) != len(states):
+        _fail("every Build attempt requires genuine or typed invalid feedback")
+    invalid_attempts: list[_InvalidAttemptAggregate] = []
+    for state in invalid_states:
+        if (
+            champion_fingerprint(state.policy) != state.fitted_id
+            or not state.stage_task_counts
+        ):
+            _fail("invalid Build attempt feedback lost its host binding")
+        invalid_attempts.append(
+            _InvalidAttemptAggregate(
+                structure_sha256=state.fitted_id,
+                kind=state.policy.recipe.kind,
+                stage_support=state.stage_task_counts[-1],
+                reason_code=state.invalid_reason,
+            )
         )
     grouped: dict[tuple[str, ...], list[_AttemptState]] = {}
     for state in scored_states:
@@ -775,6 +791,12 @@ def _feedback(states: tuple[_AttemptState, ...]) -> ProposerEvidence:
             sorted(
                 (item for part in evidence_parts for item in part.comparisons),
                 key=lambda item: item.candidate_name,
+            )
+        ),
+        invalid_attempts=tuple(
+            sorted(
+                invalid_attempts,
+                key=lambda item: (item.structure_sha256, item.reason_code),
             )
         ),
     )
@@ -1091,6 +1113,12 @@ def run_build_evolution(
             independent_generalization_claim=False,
             morphology=feedback.morphology + generation_feedback.morphology,
             comparisons=feedback.comparisons + generation_feedback.comparisons,
+            invalid_attempts=tuple(
+                sorted(
+                    feedback.invalid_attempts + generation_feedback.invalid_attempts,
+                    key=lambda item: (item.structure_sha256, item.reason_code),
+                )
+            ),
         )
         generations.append(
             BuildGeneration(

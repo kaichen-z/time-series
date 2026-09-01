@@ -1048,6 +1048,36 @@ class _ProposerComparison:
 
 
 @dataclass(frozen=True)
+class _InvalidAttemptAggregate:
+    """Host-owned sanitized structure diagnostic with no score authority."""
+
+    structure_sha256: str
+    kind: Literal[
+        "select", "route", "horizon_route", "weighted", "median",
+        "bounded_overlay",
+    ]
+    stage_support: int
+    reason_code: Literal["unscorable_child", "invalid_structure"]
+
+    def __post_init__(self) -> None:
+        if type(self.structure_sha256) is not str or _SHA256.fullmatch(
+            self.structure_sha256
+        ) is None:
+            _fail("invalid attempt structure must be a canonical SHA-256")
+        if type(self.kind) is not str or self.kind not in {
+            "select", "route", "horizon_route", "weighted", "median",
+            "bounded_overlay",
+        }:
+            _fail("invalid attempt kind must be a closed Champion operator")
+        if type(self.stage_support) is not int or not 1 <= self.stage_support <= _MAX_ROWS:
+            _fail("invalid attempt stage support must be a positive bounded integer")
+        if type(self.reason_code) is not str or self.reason_code not in {
+            "unscorable_child", "invalid_structure",
+        }:
+            _fail("invalid attempt reason must be a closed host reason code")
+
+
+@dataclass(frozen=True)
 class ProposerEvidence:
     """The complete recursively sanitized projection allowed into a proposer."""
 
@@ -1055,6 +1085,7 @@ class ProposerEvidence:
     independent_generalization_claim: Literal[False]
     morphology: tuple[MorphologyAggregate, ...]
     comparisons: tuple[_ProposerComparison, ...]
+    invalid_attempts: tuple[_InvalidAttemptAggregate, ...] = ()
 
     def __post_init__(self) -> None:
         if self.label != "adaptive_train_build_diagnostic":
@@ -1069,6 +1100,21 @@ class ProposerEvidence:
             type(item) is not _ProposerComparison for item in self.comparisons
         ):
             _fail("comparison evidence must be an exact aggregate tuple")
+        if type(self.invalid_attempts) is not tuple or any(
+            type(item) is not _InvalidAttemptAggregate
+            for item in self.invalid_attempts
+        ):
+            _fail("invalid attempt evidence must be an exact aggregate tuple")
+        for item in self.invalid_attempts:
+            _InvalidAttemptAggregate.__post_init__(item)
+        invalid_keys = tuple(
+            (item.structure_sha256, item.reason_code)
+            for item in self.invalid_attempts
+        )
+        if len(invalid_keys) != len(set(invalid_keys)):
+            _fail("invalid attempt evidence contains a duplicate structure/reason")
+        if invalid_keys != tuple(sorted(invalid_keys)):
+            _fail("invalid attempt evidence must use canonical deterministic order")
 
     def to_payload(self) -> dict[str, object]:
         """Return a JSON-safe payload with no scorer-internal identities or arrays."""
@@ -1100,6 +1146,13 @@ def _proposer_payload(evidence: ProposerEvidence) -> dict[str, object]:
                 for field_name in item.__dataclass_fields__
             }
             for item in evidence.comparisons
+        ],
+        "invalid_attempts": [
+            {
+                field_name: getattr(item, field_name)
+                for field_name in item.__dataclass_fields__
+            }
+            for item in evidence.invalid_attempts
         ],
     }
 

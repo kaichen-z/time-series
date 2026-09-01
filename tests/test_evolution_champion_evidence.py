@@ -8,10 +8,12 @@ import pytest
 
 import numerical_agent.evolution.champion_evidence as champion_evidence
 from numerical_agent.evolution.champion_evidence import (
+    _InvalidAttemptAggregate,
     ChampionEvidenceError,
     ChampionGateConfig,
     ChampionHistoryDiagnostic,
     ChampionTaskRow,
+    ProposerEvidence,
     WinTieLoss,
     compare_champion,
     sanitize_build_evidence,
@@ -153,6 +155,43 @@ def test_build_row_binds_exact_history_only_diagnostics_without_fold_arrays() ->
         replace(row, history=history[:-1])
     with pytest.raises(ChampionEvidenceError):
         replace(row, diagnostic=replace(diagnostic, name="other"))
+
+
+def test_invalid_attempt_aggregate_rejects_hostile_reason_authority() -> None:
+    with pytest.raises(ChampionEvidenceError, match="closed|reason"):
+        _InvalidAttemptAggregate(
+            structure_sha256="a" * 64,
+            kind="bounded_overlay",
+            stage_support=8,
+            reason_code="accepted_child",  # type: ignore[arg-type]
+        )
+
+
+def test_invalid_attempt_feedback_rejects_duplicates_and_noncanonical_order() -> None:
+    first = _InvalidAttemptAggregate(
+        structure_sha256="a" * 64,
+        kind="bounded_overlay",
+        stage_support=8,
+        reason_code="unscorable_child",
+    )
+    second = replace(first, structure_sha256="b" * 64)
+
+    with pytest.raises(ChampionEvidenceError, match="duplicate"):
+        ProposerEvidence(
+            label="adaptive_train_build_diagnostic",
+            independent_generalization_claim=False,
+            morphology=(),
+            comparisons=(),
+            invalid_attempts=(first, first),
+        )
+    with pytest.raises(ChampionEvidenceError, match="canonical|order"):
+        ProposerEvidence(
+            label="adaptive_train_build_diagnostic",
+            independent_generalization_claim=False,
+            morphology=(),
+            comparisons=(),
+            invalid_attempts=(second, first),
+        )
 
 
 def test_score_policy_uses_canonical_capped_and_raw_metric_authority() -> None:
