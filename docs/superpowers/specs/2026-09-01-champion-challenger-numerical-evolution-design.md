@@ -106,7 +106,8 @@ class EvolutionAssumption:
     direction: Literal["above", "below"]
     horizon_region: Literal["early", "late", "full"]
     operator: Literal[
-        "select", "route", "weighted", "median", "bounded_overlay"
+        "select", "route", "horizon_route", "weighted", "median",
+        "bounded_overlay"
     ]
     rationale: str
     failure_condition: str
