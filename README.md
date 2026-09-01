@@ -50,6 +50,21 @@ Task-conditioned screening derives its candidate namespace and default safety ce
 portfolio. The initial `93 + 5 + 5 = 103` composition is an example; accepted Combined additions
 increase the runtime count without changing the formal 80/20 proposal-acceptance boundary.
 
+### Champion--Challenger numerical lifecycle
+
+The Dictionary evolution loop remains upstream. The separate Champion--Challenger lifecycle can
+propose a non-Toto TimesFM 2.5 + `seasonal_naive` Child; Toto is not a dependency. Host code fits
+only structural, history-based assumptions. In a formal run, the 64/16 entity-disjoint Build and
+Calibration split is internal to the 80-task Train partition; the 20-task Dev and 99-task Public
+partitions are read-only. Public is evaluated only by the frozen-release command, never during
+evolution.
+
+Run the exact registered wrapper with `scripts/run_champion_evolution.sh`; inspect its required
+`CHAMPION_*` variables with `scripts/run_champion_evolution.sh --dry-run`. The deterministic
+fake smoke is `pytest -q tests/test_champion_evolution_e2e.py`. It proves wiring only, not a real
+80/20 result or a Public-99 result. No new Champion experimental result is claimed here until those
+separate provisioned runs are performed.
+
 The current proposal adapter is not yet wired into the formal 80/20 command. It does not train or
 modify LLM/TSFM weights, and no performance result is claimed. Python owns schema, namespace,
 parent, finite-forecast, horizon, fallback, and immutable TSFM-manifest checks; proposals cannot

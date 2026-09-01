@@ -43,6 +43,37 @@ operator-supplied reviewed `methods.py`, `skills.py`, `policies.py`, Screening a
 plus a local TSFM deployment whose exact checkpoint load has already produced an attestation. The
 runner never downloads a model or treats an unavailable family as a successful candidate.
 
+## Champion--Challenger evolution status
+
+Dictionary evolution remains the upstream method-curation path. Champion--Challenger evolution is
+a separate frozen-policy lifecycle and does not require Toto: a reviewed TimesFM 2.5 plus
+`seasonal_naive` Child is a valid non-Toto recipe. Its assumptions are structural and host-fitted
+from history-only diagnostics; proposal code does not fit weights or learn from labels.
+
+The formal command opens exactly 80 Train tasks, creates an entity-disjoint 64 Build / 16
+Calibration split inside that Train partition, then opens the read-only 20-task Dev partition only
+after Calibration acceptance. It has no Public argument. The separate frozen evaluator opens the
+99-task Public partition only after a release is immutable:
+
+```bash
+scripts/run_champion_evolution.sh
+python -m numerical_agent.evaluate_frozen_champion --help
+```
+
+The command wrapper requires its documented `CHAMPION_*` environment variables and forwards the
+registered parser arguments; use its dry-run mode to inspect the exact invocation before a real
+run. The deterministic 8/2 smoke is exercised with:
+
+```bash
+pytest -q tests/test_champion_evolution_e2e.py
+```
+
+It uses sealed scripted proposals and materialized fake forecasts to prove lifecycle wiring only:
+non-Toto proposal, Parent-preserving rejection, Calibration/Dev gates, authority, checkpoint, and
+release publication. It is not a real 80/20 experiment and it does not produce a Public-99 result.
+No new real 80/20 Champion result or frozen Public-99 Champion result exists until an operator runs
+those experiments separately with provisioned authority and reviewed runtimes.
+
 ## Forecast Method Dataset v001
 
 The publishable release is

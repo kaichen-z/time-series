@@ -1,10 +1,14 @@
 """History-only orchestration for the morphology-guided Numerical loop."""
+
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 
+from .champion import ChampionRelease, champion_fingerprint
+from .champion_runtime import ChampionExecution, execute_champion
 from .execution import CRASHED, INVALID, SUCCESS, Outcome, Task
 from .morphology import AssumptionGrounding, MorphologyCard
 from .morphology_consistency import check_morphology_assumptions
@@ -14,6 +18,7 @@ from .numerical_handoff import (
     task_input_fingerprint,
 )
 from .numerical_package import (
+    _ChampionNumericalForecastPackage,
     NumericalForecastPackage,
     RankedNumericalForecast,
     forecast_tuple,
@@ -89,6 +94,7 @@ def run_numerical_loop(
     morphology_reasoner: object | None = None,
     diagnostics: Mapping[str, CandidateDiagnostics] | None = None,
     component_fingerprints: Mapping[str, str] | None = None,
+    champion_release: ChampionRelease | None = None,
 ) -> NumericalForecastPackage:
     """Run screening, materialization, hindcasting, Morphology, and protected selection.
 
@@ -102,6 +108,8 @@ def run_numerical_loop(
         raise TypeError("decision_policy must be a DecisionPolicy")
     if not isinstance(hindcast_config, HindcastConfig):
         raise TypeError("hindcast_config must be a HindcastConfig")
+    if champion_release is not None and type(champion_release) is not ChampionRelease:
+        raise TypeError("champion_release must be a ChampionRelease or None")
     policies = _combined_policy_map(combined_policies)
 
     # Deterministic morphology and screening always precede candidate execution.
@@ -109,6 +117,14 @@ def run_numerical_loop(
     active_dictionary = materialize_active_dictionary(screening_policy, profile)
     active_names = tuple(item.name for item in active_dictionary.active)
     families = {item.name: item.family for item in active_dictionary.active}
+    if champion_release is not None:
+        active_names, families = _with_champion_fallback_namespace(
+            active_names,
+            families,
+            screening_policy=screening_policy,
+            combined_policies=policies,
+            release=champion_release,
+        )
     _validate_active_namespace(active_names, families, policies)
     active_leaf_names = tuple(
         name for name in active_names if families[name] in {"statistical", "tsfm"}
@@ -256,9 +272,7 @@ def run_numerical_loop(
             )
         except Exception as error:
             fallback_reason = f"morphology_reasoner_failed:{type(error).__name__}"
-            decision = _fallback_decision(
-                protected, fallback_reason=fallback_reason
-            )
+            decision = _fallback_decision(protected, fallback_reason=fallback_reason)
         else:
             if not accepted:
                 fallback_reason = "morphology_consistency_rejected"
@@ -290,7 +304,9 @@ def run_numerical_loop(
                     )
 
     if not valid_forecast(decision.forecast, safe_task.horizon):
-        raise ValueError("protected selector returned a non-finite or wrong-horizon forecast")
+        raise ValueError(
+            "protected selector returned a non-finite or wrong-horizon forecast"
+        )
 
     alternatives = ranked_forecasts(
         active_names, families, stable_diagnostics, forecasts
@@ -301,6 +317,31 @@ def run_numerical_loop(
     )
     if protected_baseline is None:
         raise ValueError("protected Safe-Anchor was not materialized")
+
+    if champion_release is not None:
+        decision, fallback_reason, champion_alternative = _select_frozen_champion(
+            champion_release,
+            alternatives=alternatives,
+            profile=profile,
+            history=safe_task.history,
+            horizon=safe_task.horizon,
+            protected=protected,
+        )
+        if champion_alternative is not None:
+            active_names = (*active_names, champion_alternative.name)
+            families = {**families, champion_alternative.name: champion_alternative.family}
+            stable_diagnostics = MappingProxyType(
+                {
+                    **dict(stable_diagnostics),
+                    champion_alternative.name: champion_alternative.diagnostics,
+                }
+            )
+            alternatives = (*alternatives, champion_alternative)
+        if not valid_forecast(decision.forecast, safe_task.horizon):
+            raise ValueError(
+                "Champion selector returned a non-finite or wrong-horizon forecast"
+            )
+
     fingerprints = build_component_fingerprints(
         input_fingerprint=task_input_fingerprint(
             task_id=safe_task.task_id,
@@ -317,7 +358,14 @@ def run_numerical_loop(
         morphology_card=card,
         provided=component_fingerprints,
     )
-    return NumericalForecastPackage(
+    if champion_release is not None:
+        fingerprints = _with_champion_fingerprints(fingerprints, champion_release)
+    package_type = (
+        _ChampionNumericalForecastPackage
+        if champion_release is not None
+        else NumericalForecastPackage
+    )
+    return package_type(
         task_profile=profile,
         active_candidate_names=active_names,
         candidate_diagnostics=stable_diagnostics,
@@ -339,7 +387,11 @@ def _history_only_task(task: Task) -> Task:
         raise TypeError("task must be a Task")
     if not isinstance(task.task_id, str) or not task.task_id:
         raise ValueError("task_id must be a nonempty string")
-    if isinstance(task.horizon, bool) or not isinstance(task.horizon, int) or task.horizon < 1:
+    if (
+        isinstance(task.horizon, bool)
+        or not isinstance(task.horizon, int)
+        or task.horizon < 1
+    ):
         raise ValueError("task horizon must be positive")
     if not isinstance(task.frequency, str) or not task.frequency:
         raise ValueError("task frequency must be a nonempty string")
@@ -360,7 +412,11 @@ def _combined_policy_map(
             raise ValueError(f"duplicate Combined policy {policy.name!r}")
         result[policy.name] = policy
     combined_names = set(result)
-    if any(parent in combined_names for policy in result.values() for parent in policy.parents):
+    if any(
+        parent in combined_names
+        for policy in result.values()
+        for parent in policy.parents
+    ):
         raise ValueError("Combined policies cannot consume Combined parents")
     return result
 
@@ -372,17 +428,67 @@ def _validate_active_namespace(
 ) -> None:
     if not active_names:
         raise ValueError("screening produced no active candidates")
-    active_combined = {name for name in active_names if families.get(name) == "combined"}
+    active_combined = {
+        name for name in active_names if families.get(name) == "combined"
+    }
     if missing := active_combined - set(policies):
-        raise ValueError(f"active Combined candidates have no policy: {sorted(missing)!r}")
+        raise ValueError(
+            f"active Combined candidates have no policy: {sorted(missing)!r}"
+        )
     if collisions := {
-        name for name in active_names if families.get(name) != "combined" and name in policies
+        name
+        for name in active_names
+        if families.get(name) != "combined" and name in policies
     }:
         raise ValueError(f"Combined/leaf namespace collision: {sorted(collisions)!r}")
     if unsupported := {
-        family for family in families.values() if family not in {"statistical", "tsfm", "combined"}
+        family
+        for family in families.values()
+        if family not in {"statistical", "tsfm", "combined"}
     }:
-        raise ValueError(f"unsupported active candidate families: {sorted(unsupported)!r}")
+        raise ValueError(
+            f"unsupported active candidate families: {sorted(unsupported)!r}"
+        )
+
+
+def _with_champion_fallback_namespace(
+    active_names: tuple[str, ...],
+    families: Mapping[str, str],
+    *,
+    screening_policy: ScreeningPolicy,
+    combined_policies: Mapping[str, CombinedPolicy],
+    release: ChampionRelease,
+) -> tuple[tuple[str, ...], dict[str, str]]:
+    """Ensure the frozen release's exact fallback can be materialized.
+
+    Task-conditioned applicability may narrow a specialist, but an accepted
+    release owns its fallback.  The host therefore retains that exact fallback
+    (and, for a reviewed Combined fallback, its leaf parents) without activating
+    any other screened-out Challenger.
+    """
+    names = list(active_names)
+    resolved = dict(families)
+
+    def include(name: str) -> None:
+        if name in resolved:
+            return
+        entry = screening_policy.get(name)
+        if entry is None or entry.status not in {"keep", "specialized"}:
+            raise ValueError(
+                f"Champion configured fallback {name!r} is not a reviewed candidate"
+            )
+        names.append(name)
+        resolved[name] = entry.family
+
+    fallback = release.policy.recipe.fallback_parent
+    include(fallback)
+    if resolved[fallback] == "combined":
+        policy = combined_policies.get(fallback)
+        if policy is None:
+            raise ValueError("Champion configured Combined fallback has no policy")
+        for parent in policy.parents:
+            include(parent)
+    return tuple(names), resolved
 
 
 def _materialize_leaf(
@@ -411,3 +517,231 @@ def _fallback_decision(
         reason_codes=("protected_safe_anchor", fallback_reason),
         rejected={},
     )
+
+
+def _select_frozen_champion(
+    release: ChampionRelease,
+    *,
+    alternatives: Sequence[RankedNumericalForecast],
+    profile: object,
+    history: tuple[float, ...],
+    horizon: int,
+    protected: SelectionDecision,
+) -> tuple[SelectionDecision, str | None, RankedNumericalForecast | None]:
+    """Select exactly one already materialized candidate through a frozen release."""
+    materialized_forecasts = MappingProxyType(
+        {item.name: item.forecast for item in alternatives}
+    )
+    safe_diagnostics = MappingProxyType(
+        {
+            item.name: replace(
+                item.diagnostics,
+                folds=(),
+                fold_forecasts=(),
+                fold_truths=(),
+                long_horizon_fold=None,
+            )
+            for item in alternatives
+        }
+    )
+    fallback_name = release.policy.recipe.fallback_parent
+    try:
+        execution = execute_champion(
+            release.policy,
+            materialized_forecasts,
+            safe_diagnostics,
+            profile,
+            history,
+            horizon,
+        )
+    except Exception as error:
+        decision, reason = _champion_fallback(
+            fallback_name,
+            materialized_forecasts,
+            protected,
+            f"champion_execution_failed:{type(error).__name__}",
+        )
+        return decision, reason, None
+    if not _valid_champion_execution(
+        execution, forecasts=materialized_forecasts, horizon=horizon
+    ):
+        decision, reason = _champion_fallback(
+            fallback_name,
+            materialized_forecasts,
+            protected,
+            "champion_execution_failed:invalid_result",
+        )
+        return decision, reason, None
+    if execution.fallback_reason is not None:
+        decision, reason = _champion_fallback(
+            fallback_name,
+            materialized_forecasts,
+            protected,
+            "champion_execution_fallback",
+        )
+        return decision, reason, None
+    if len(execution.selected_names) == 1:
+        selected_name = execution.selected_names[0]
+        forecast = materialized_forecasts.get(selected_name)
+        if forecast is not None and tuple(execution.forecast) == forecast:
+            return (
+                SelectionDecision(
+                    mode="single",
+                    selected=(selected_name,),
+                    weights=(1.0,),
+                    forecast=forecast,
+                    confidence=0.0,
+                    reason_codes=(
+                        "frozen_champion",
+                        "champion_materialized_selection",
+                    ),
+                    rejected={},
+                    baseline_name=protected.selected[0],
+                    assumption_ids=execution.activated_assumptions,
+                    assumption_kinds=("champion",)
+                    * len(execution.activated_assumptions),
+                    considered_candidates=(selected_name,),
+                ),
+                None,
+                None,
+            )
+
+    champion_name = release.policy.recipe.name
+    if champion_name in materialized_forecasts:
+        decision, reason = _champion_fallback(
+            fallback_name,
+            materialized_forecasts,
+            protected,
+            "champion_execution_failed:name_collision",
+        )
+        return decision, reason, None
+    proxy = safe_diagnostics.get(fallback_name)
+    if proxy is None:
+        raise ValueError("Champion configured fallback has no diagnostics")
+    champion_diagnostic = replace(
+        proxy,
+        name=champion_name,
+        family="combined",
+        folds=(),
+        successful_folds=0,
+        eligible=False,
+        reason_code="frozen_champion_release",
+        fold_forecasts=(),
+        fold_truths=(),
+        cache_key="",
+        long_horizon_fold=None,
+    )
+    materialized = RankedNumericalForecast(
+        rank=len(alternatives) + 1,
+        name=champion_name,
+        family="combined",
+        forecast=execution.forecast,
+        diagnostics=champion_diagnostic,
+    )
+    return (
+        SelectionDecision(
+            mode="single",
+            selected=(champion_name,),
+            weights=(1.0,),
+            forecast=execution.forecast,
+            confidence=0.0,
+            reason_codes=("frozen_champion", "champion_materialized_release"),
+            rejected={},
+            baseline_name=protected.selected[0],
+            assumption_ids=execution.activated_assumptions,
+            assumption_kinds=("champion",) * len(execution.activated_assumptions),
+            considered_candidates=(champion_name,),
+        ),
+        None,
+        materialized,
+    )
+
+
+def _valid_champion_execution(
+    execution: object,
+    *,
+    forecasts: Mapping[str, tuple[float, ...]],
+    horizon: int,
+) -> bool:
+    """Accept only the exact frozen executor result shape before consuming it."""
+    try:
+        if type(execution) is not ChampionExecution:
+            return False
+        if type(execution.forecast) is not tuple or len(execution.forecast) != horizon:
+            return False
+        if any(
+            type(value) is not float or not math.isfinite(value)
+            for value in execution.forecast
+        ):
+            return False
+        if (
+            type(execution.selected_names) is not tuple
+            or not execution.selected_names
+            or any(
+                type(name) is not str or not name or name not in forecasts
+                for name in execution.selected_names
+            )
+        ):
+            return False
+        if type(execution.activated_assumptions) is not tuple or any(
+            type(assumption_id) is not str
+            or not assumption_id
+            or not assumption_id.isidentifier()
+            for assumption_id in execution.activated_assumptions
+        ):
+            return False
+        if len(execution.activated_assumptions) != len(
+            set(execution.activated_assumptions)
+        ):
+            return False
+        return execution.fallback_reason is None or (
+            type(execution.fallback_reason) is str and bool(execution.fallback_reason)
+        )
+    except (AttributeError, OverflowError, TypeError, ValueError):
+        return False
+
+
+def _champion_fallback(
+    fallback_name: str,
+    forecasts: Mapping[str, tuple[float, ...]],
+    protected: SelectionDecision,
+    reason: str,
+) -> tuple[SelectionDecision, str]:
+    forecast = forecasts.get(fallback_name)
+    if forecast is None:
+        raise ValueError("Champion configured fallback was not materialized")
+    return (
+        SelectionDecision(
+            mode="single",
+            selected=(fallback_name,),
+            weights=(1.0,),
+            forecast=forecast,
+            confidence=0.0,
+            reason_codes=("frozen_champion", reason),
+            rejected={},
+            baseline_name=protected.selected[0],
+            considered_candidates=(fallback_name,),
+        ),
+        reason,
+    )
+
+
+def _with_champion_fingerprints(
+    fingerprints: Mapping[str, str], release: ChampionRelease
+) -> Mapping[str, str]:
+    champion = {
+        "champion_release": champion_fingerprint(release),
+        "champion_recipe": champion_fingerprint(release.policy.recipe),
+        "champion_assumptions": champion_fingerprint(release.policy.recipe.assumptions),
+    }
+    result = dict(fingerprints)
+    conflicts = {
+        key for key, value in champion.items() if key in result and result[key] != value
+    }
+    if conflicts:
+        raise ValueError(
+            "provided component fingerprints conflict with frozen Champion values: "
+            f"{sorted(conflicts)!r}"
+        )
+    result.update(champion)
+    return MappingProxyType(dict(sorted(result.items())))

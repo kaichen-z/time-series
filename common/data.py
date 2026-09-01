@@ -1,4 +1,5 @@
 """Numbers-only Dr-CiK task loading, shared by every package that forecasts."""
+
 from __future__ import annotations
 
 import json
@@ -131,6 +132,8 @@ def load_tasks_by_id(
                     continue
                 record = json.loads(line)
                 if str(record.get("benchmark_id")) == task_id:
+                    if task_id in records:
+                        raise ValueError(f"duplicate requested task record: {task_id}")
                     records[task_id] = record
     return [
         _to_task(records[task_id])

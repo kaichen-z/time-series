@@ -14,7 +14,7 @@ import pytest
 from common.payload import write_json
 
 from numerical_agent.evolution.execution import CRASHED, INVALID, SUCCESS, Outcome, Task
-from numerical_agent.evolution.module import MODULE_HEADER, read_module
+from numerical_agent.evolution.module import MODULE_HEADER
 from numerical_agent.evolution.numerical_selector import (
     CandidateDiagnostics,
     DecisionPolicy,
@@ -66,15 +66,14 @@ def fast_method(history, horizon, frequency):
 ''',
         encoding="utf-8",
     )
-    module = read_module(methods)
     store = ForecastStore(
         tmp_path / "cache",
         methods,
         None,
-        module,
         PolicyPortfolio.flagship5(),
         RuntimeRegistry(),
-        "screen-hash",
+        screening_hash="screen-hash",
+        runtime_identity={},
         statistical_time_budget_s=0.1,
     )
     started = time.monotonic()
@@ -100,17 +99,16 @@ def stable_method(history, horizon, frequency):
 ''',
         encoding="utf-8",
     )
-    module = read_module(methods)
     cache = tmp_path / "cache"
 
     first = ForecastStore(
         cache,
         methods,
         None,
-        module,
         PolicyPortfolio.flagship5(),
         RuntimeRegistry(),
-        "part-1",
+        screening_hash="part-1",
+        runtime_identity={},
     )
     try:
         assert first.forecast("stable_method", (1.0, 2.0), 2, "D") == (2.0, 2.0)
@@ -131,10 +129,10 @@ def stable_method(history, horizon, frequency):
         cache,
         methods,
         None,
-        module,
         PolicyPortfolio.flagship5(),
         RuntimeRegistry(),
-        "part-2",
+        screening_hash="part-2",
+        runtime_identity={},
     )
     try:
         assert second.forecast("stable_method", (1.0, 2.0), 2, "D") == (2.0, 2.0)
@@ -158,15 +156,14 @@ def stable_method(history, horizon, frequency):
 ''',
         encoding="utf-8",
     )
-    module = read_module(methods)
     store = ForecastStore(
         tmp_path / "cache",
         methods,
         None,
-        module,
         PolicyPortfolio.flagship5(),
         RuntimeRegistry(),
-        "screen",
+        screening_hash="screen",
+        runtime_identity={},
     )
     try:
         key = store._key("stable_method", (1.0, 2.0), 2, "D")
@@ -195,14 +192,14 @@ def stable_method(history, horizon, frequency):
     )
     skills = tmp_path / "skills.py"
     skills.write_text("SKILL_VERSION = 1\n", encoding="utf-8")
-    module = read_module(methods)
-    args = (module, PolicyPortfolio.flagship5(), RuntimeRegistry(), "screen")
     first = ForecastStore(
-        tmp_path / "a", methods, skills, *args,
+        tmp_path / "a", methods, skills, PolicyPortfolio.flagship5(), RuntimeRegistry(),
+        screening_hash="screen",
         runtime_identity={"provider": "p", "checkpoint": "v1"},
     )
     second = ForecastStore(
-        tmp_path / "b", methods, skills, *args,
+        tmp_path / "b", methods, skills, PolicyPortfolio.flagship5(), RuntimeRegistry(),
+        screening_hash="screen",
         runtime_identity={"provider": "p", "checkpoint": "v2"},
     )
     key1 = first._key("stable_method", (1.0, 2.0), 1, "D")
@@ -211,7 +208,8 @@ def stable_method(history, horizon, frequency):
     second.close()
     skills.write_text("SKILL_VERSION = 2\n", encoding="utf-8")
     third = ForecastStore(
-        tmp_path / "c", methods, skills, *args,
+        tmp_path / "c", methods, skills, PolicyPortfolio.flagship5(), RuntimeRegistry(),
+        screening_hash="screen",
         runtime_identity={"provider": "p", "checkpoint": "v1"},
     )
     key3 = third._key("stable_method", (1.0, 2.0), 1, "D")
@@ -241,8 +239,8 @@ def stable_method(history, horizon, frequency):
         encoding="utf-8",
     )
     store = ForecastStore(
-        tmp_path / "cache", methods, None, read_module(methods),
-        PolicyPortfolio.flagship5(), RuntimeRegistry(), "screen",
+        tmp_path / "cache", methods, None,
+        PolicyPortfolio.flagship5(), RuntimeRegistry(), screening_hash="screen", runtime_identity={},
     )
     try:
         key = store._key("stable_method", (1.0, 2.0), 1, "D")
@@ -268,8 +266,8 @@ def stable_method(history, horizon, frequency):
         encoding="utf-8",
     )
     store = ForecastStore(
-        tmp_path / "cache", methods, None, read_module(methods),
-        PolicyPortfolio.flagship5(), RuntimeRegistry(), "screen",
+        tmp_path / "cache", methods, None,
+        PolicyPortfolio.flagship5(), RuntimeRegistry(), screening_hash="screen", runtime_identity={},
     )
     try:
         store.forecast("stable_method", (1.0, 2.0), 1, "D")
@@ -311,10 +309,10 @@ def fallback_leaf(history, horizon, frequency):
         tmp_path / "cache",
         methods,
         None,
-        read_module(methods),
         PolicyPortfolio(PolicyPortfolio.flagship5().tsfm, (combined,)),
         RuntimeRegistry(),
-        "screen",
+        screening_hash="screen",
+        runtime_identity={},
     )
     try:
         key = store._key("primary_leaf", (1.0, 2.0), 1, "D")
@@ -339,7 +337,6 @@ def seasonal_naive(history, horizon, frequency):
 ''',
         encoding="utf-8",
     )
-    module = read_module(methods)
     base = PolicyPortfolio.flagship5()
     portfolio = PolicyPortfolio(
         base.tsfm,
@@ -385,10 +382,10 @@ def seasonal_naive(history, horizon, frequency):
         tmp_path / "cache",
         methods,
         None,
-        module,
         portfolio,
         RuntimeRegistry({"timesfm": runtime, "tsfm_worker": runtime}),
-        "screen-hash",
+        screening_hash="screen-hash",
+        runtime_identity={},
     )
     try:
         assert store.forecast("combined_two_tsfm_median", (1.0, 2.0), 2, "D") == (15.0, 15.0)
@@ -420,7 +417,6 @@ def unused_statistical_leaf(history, horizon, frequency):
 ''',
         encoding="utf-8",
     )
-    module = read_module(methods)
     base = PolicyPortfolio.flagship5()
     combined = tuple(
         CombinedPolicy(
@@ -453,7 +449,7 @@ def unused_statistical_leaf(history, horizon, frequency):
     registry = RuntimeRegistry({"timesfm": runtime, "tsfm_worker": runtime})
     cache = tmp_path / "cache"
     first = ForecastStore(
-        cache, methods, None, module, portfolio, registry, "screen-hash"
+        cache, methods, None, portfolio, registry, screening_hash="screen-hash", runtime_identity={}
     )
     try:
         assert first.forecast(
@@ -468,7 +464,7 @@ def unused_statistical_leaf(history, horizon, frequency):
     assert runtime.calls.count("method_tsfm_0031") == 1
 
     second = ForecastStore(
-        cache, methods, None, module, portfolio, registry, "screen-hash"
+        cache, methods, None, portfolio, registry, screening_hash="screen-hash", runtime_identity={}
     )
     try:
         assert second.forecast(
@@ -492,7 +488,6 @@ def unused_statistical_leaf(history, horizon, frequency):
 ''',
         encoding="utf-8",
     )
-    module = read_module(methods)
     base = PolicyPortfolio.flagship5()
     policy = CombinedPolicy(
         "combined_tsfm_failure_parity",
@@ -531,10 +526,10 @@ def unused_statistical_leaf(history, horizon, frequency):
         tmp_path / "invalid-cache",
         methods,
         None,
-        module,
         portfolio,
         RuntimeRegistry({"timesfm": FailureRuntime(), "tsfm_worker": FailureRuntime()}),
-        "screen-hash",
+        screening_hash="screen-hash",
+        runtime_identity={},
     )
     try:
         invalid_parent = invalid_store._materialized_leaf_outcome(
@@ -562,7 +557,6 @@ def unused_statistical_leaf(history, horizon, frequency):
         tmp_path / "provider-cache",
         methods,
         None,
-        module,
         portfolio,
         RuntimeRegistry(
             {
@@ -570,7 +564,8 @@ def unused_statistical_leaf(history, horizon, frequency):
                 "tsfm_worker": FailureRuntime(timesfm_failure=ValueError("provider rejected request")),
             }
         ),
-        "screen-hash",
+        screening_hash="screen-hash",
+        runtime_identity={},
     )
     try:
         crashed_parent = provider_store._materialized_leaf_outcome(
@@ -598,7 +593,6 @@ def unused_statistical_leaf(history, horizon, frequency):
         tmp_path / "crashed-cache",
         methods,
         None,
-        module,
         portfolio,
         RuntimeRegistry(
             {
@@ -606,7 +600,8 @@ def unused_statistical_leaf(history, horizon, frequency):
                 "tsfm_worker": FailureRuntime(ValueError("provider rejected request")),
             }
         ),
-        "screen-hash",
+        screening_hash="screen-hash",
+        runtime_identity={},
     )
     try:
         crashed_fallback = crashed_store._materialized_leaf_outcome(

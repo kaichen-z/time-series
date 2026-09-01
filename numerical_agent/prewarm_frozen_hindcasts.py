@@ -67,11 +67,10 @@ def main(argv: list[str] | None = None) -> int:
         args.hindcast_cache_dir,
         module_path,
         skills_path,
-        module,
         portfolio,
         RuntimeRegistry(),
-        screening_hash,
-        runtime_identity={"provider": "isolated_statistical", "checkpoint": None},
+        screening_hash=screening_hash,
+        runtime_identity={},
     )
     try:
         config = HindcastConfig(folds=args.folds)

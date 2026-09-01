@@ -1,7 +1,9 @@
 """Immutable canonical artifacts for the morphology-guided Numerical loop."""
+
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
@@ -17,9 +19,13 @@ from .numerical_selector import (
 from .screening import TaskProfile
 
 
-_RETRIEVAL_FIELDS = frozenset(
-    {"assumption_id", "kind", "claim", "failure_condition"}
+_RETRIEVAL_FIELDS = frozenset({"assumption_id", "kind", "claim", "failure_condition"})
+_CHAMPION_FINGERPRINT_KEYS = frozenset(
+    {"champion_release", "champion_recipe", "champion_assumptions"}
 )
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+
+
 @dataclass(frozen=True)
 class RankedNumericalForecast:
     """One materialized candidate retained in deterministic diagnostic order."""
@@ -31,7 +37,11 @@ class RankedNumericalForecast:
     diagnostics: CandidateDiagnostics
 
     def __post_init__(self) -> None:
-        if isinstance(self.rank, bool) or not isinstance(self.rank, int) or self.rank < 1:
+        if (
+            isinstance(self.rank, bool)
+            or not isinstance(self.rank, int)
+            or self.rank < 1
+        ):
             raise ValueError("forecast rank must be positive")
         if not isinstance(self.name, str) or not self.name:
             raise ValueError("ranked forecast requires a candidate name")
@@ -78,7 +88,9 @@ class NumericalForecastPackage:
         ):
             raise ValueError("candidate diagnostics contain an invalid identity")
         if not set(diagnostics) <= set(active):
-            raise ValueError("candidate diagnostics must belong to the active dictionary")
+            raise ValueError(
+                "candidate diagnostics must belong to the active dictionary"
+            )
         diagnostics = {
             name: _freeze_diagnostic(value) for name, value in diagnostics.items()
         }
@@ -140,14 +152,20 @@ class NumericalForecastPackage:
         if not alternative_names <= set(active):
             raise ValueError("ranked alternatives must belong to the active dictionary")
         if not set(selection.selected) <= alternative_names:
-            raise ValueError("selected names must have materialized ranked alternatives")
+            raise ValueError(
+                "selected names must have materialized ranked alternatives"
+            )
         if not set(selection.considered_candidates) <= set(active):
-            raise ValueError("considered candidates must belong to the active dictionary")
+            raise ValueError(
+                "considered candidates must belong to the active dictionary"
+            )
         if (
             selection.baseline_name is not None
             and selection.baseline_name not in alternative_names
         ):
-            raise ValueError("selection baseline must be a materialized ranked forecast")
+            raise ValueError(
+                "selection baseline must be a materialized ranked forecast"
+            )
         selected_artifacts = tuple(
             next(item for item in alternatives if item.name == name)
             for name in selection.selected
@@ -169,7 +187,9 @@ class NumericalForecastPackage:
         if not isinstance(self.protected_baseline, RankedNumericalForecast):
             raise ValueError("Numerical package requires a protected baseline")
         if self.protected_baseline.name not in alternative_names:
-            raise ValueError("protected baseline must be a materialized ranked forecast")
+            raise ValueError(
+                "protected baseline must be a materialized ranked forecast"
+            )
         protected = next(
             item for item in alternatives if item.name == self.protected_baseline.name
         )
@@ -178,7 +198,9 @@ class NumericalForecastPackage:
         if tuple(item["assumption_id"] for item in handoff) != host_assumption_ids(
             len(accepted)
         ):
-            raise ValueError("Retrieval handoff must correspond exactly to accepted assumptions")
+            raise ValueError(
+                "Retrieval handoff must correspond exactly to accepted assumptions"
+            )
         fingerprints = freeze_string_mapping(
             self.component_fingerprints, "component fingerprints"
         )
@@ -188,11 +210,15 @@ class NumericalForecastPackage:
 
         object.__setattr__(self, "active_candidate_names", active)
         object.__setattr__(
-            self, "candidate_diagnostics", MappingProxyType(dict(sorted(diagnostics.items())))
+            self,
+            "candidate_diagnostics",
+            MappingProxyType(dict(sorted(diagnostics.items()))),
         )
         object.__setattr__(self, "accepted_assumptions", accepted)
         object.__setattr__(
-            self, "rejected_assumptions", MappingProxyType(dict(sorted(rejected.items())))
+            self,
+            "rejected_assumptions",
+            MappingProxyType(dict(sorted(rejected.items()))),
         )
         object.__setattr__(self, "selection_decision", selection)
         object.__setattr__(self, "final_forecast", final)
@@ -200,6 +226,27 @@ class NumericalForecastPackage:
         object.__setattr__(self, "ranked_alternatives", alternatives)
         object.__setattr__(self, "retrieval_handoff", handoff)
         object.__setattr__(self, "component_fingerprints", fingerprints)
+
+
+@dataclass(frozen=True)
+class _ChampionNumericalForecastPackage(NumericalForecastPackage):
+    """Runtime-only package type that binds frozen Champion provenance."""
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        raise TypeError("Champion package type is sealed")
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.selection_decision.reason_codes[:1] != ("frozen_champion",):
+            raise ValueError("Champion package requires the fixed provenance marker")
+        fingerprints = self.component_fingerprints
+        if _CHAMPION_FINGERPRINT_KEYS - set(fingerprints) or any(
+            _SHA256.fullmatch(fingerprints[key]) is None
+            for key in _CHAMPION_FINGERPRINT_KEYS
+        ):
+            raise ValueError(
+                "Champion component fingerprints must be complete SHA-256 values"
+            )
 
 
 def snapshot_diagnostics(
@@ -263,17 +310,12 @@ def ranked_forecasts(
     )
 
 
-def freeze_string_mapping(
-    value: Mapping[str, str], context: str
-) -> Mapping[str, str]:
+def freeze_string_mapping(value: Mapping[str, str], context: str) -> Mapping[str, str]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{context} must be a mapping")
     result = dict(value)
     if any(
-        not isinstance(key, str)
-        or not key
-        or not isinstance(item, str)
-        or not item
+        not isinstance(key, str) or not key or not isinstance(item, str) or not item
         for key, item in result.items()
     ):
         raise ValueError(f"{context} must contain nonempty strings")
@@ -326,8 +368,12 @@ def _freeze_selection(
     ):
         raise ValueError("selection weights must be numerical")
     weights = tuple(float(value) for value in raw_weights)
-    if len(weights) != len(selected) or any(not math.isfinite(value) for value in weights):
-        raise ValueError("selection weights must be finite and align with selected names")
+    if len(weights) != len(selected) or any(
+        not math.isfinite(value) for value in weights
+    ):
+        raise ValueError(
+            "selection weights must be finite and align with selected names"
+        )
     if any(value < 0.0 for value in weights) or math.fsum(weights) != 1.0:
         raise ValueError("selection weights must be nonnegative and normalized")
     confidence = decision.confidence
@@ -339,8 +385,7 @@ def _freeze_selection(
     ):
         raise ValueError("selection confidence must be finite and within [0, 1]")
     if decision.combination_type is not None and (
-        not isinstance(decision.combination_type, str)
-        or not decision.combination_type
+        not isinstance(decision.combination_type, str) or not decision.combination_type
     ):
         raise ValueError("selection combination type must be a nonempty string or None")
     if decision.baseline_name is not None and (
@@ -366,9 +411,7 @@ def _freeze_selection(
         forecast=forecast_tuple(decision.forecast, horizon=horizon),
         confidence=float(confidence),
         reason_codes=_string_tuple(decision.reason_codes, "selection reason codes"),
-        rejected=freeze_string_mapping(
-            decision.rejected, "selection rejection trace"
-        ),
+        rejected=freeze_string_mapping(decision.rejected, "selection rejection trace"),
         assumption_ids=assumption_ids,
         assumption_kinds=assumption_kinds,
         considered_candidates=_string_tuple(
@@ -436,9 +479,7 @@ def _string_tuple(
     return result
 
 
-def _finite_tuple(
-    values: Sequence[float], *, allow_empty: bool
-) -> tuple[float, ...]:
+def _finite_tuple(values: Sequence[float], *, allow_empty: bool) -> tuple[float, ...]:
     if isinstance(values, (str, bytes)):
         raise ValueError("forecast must be a numerical sequence")
     try:
