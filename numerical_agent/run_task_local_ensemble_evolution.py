@@ -28,6 +28,7 @@ from .evolution.task_local_ensemble import (
     canonical_task_local_release_bytes,
     task_local_fingerprint,
 )
+from .evolution.task_local_confidence import ConfidencePolicy
 from .evolution.task_local_evolution import (
     ConditionalUpliftReport,
     TaskLocalTaskRow,
@@ -44,6 +45,9 @@ from .run_champion_evolution import (
     _source_files,
 )
 from .run_selector_evolution import _forecast_runtime_identity
+
+
+_CONFIDENCE_HINDCAST_CONFIG = HindcastConfig(folds=5, min_successful_folds=3)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -118,12 +122,12 @@ def _smoke_rows(
         truth = (10.0, 10.0)
         history = (7.0, 8.0, 9.0, 10.0)
         for name, family, full, folds in (
-            ("toto_2_0", "tsfm", (8.0, 8.0), ((8.0, 8.0),) * 3),
+            ("toto_2_0", "tsfm", (8.0, 8.0), ((8.0, 8.0),) * 5),
             (
                 "seasonal_naive",
                 "statistical",
                 (0.0, 0.0) if specialist_regression else (10.0, 10.0),
-                ((10.0, 10.0),) * 3,
+                ((10.0, 10.0),) * 5,
             ),
         ):
             diagnostic = CandidateDiagnostics.synthetic(
@@ -131,7 +135,7 @@ def _smoke_rows(
                 family=family,
                 median_mase=1.0,
                 fold_forecasts=folds,
-                fold_truths=(truth,) * 3,
+                fold_truths=(truth,) * 5,
                 median_smae=1.0,
                 median_srmse=1.0,
             )
@@ -178,6 +182,11 @@ def _run_smoke(output: Path, *, dev_regression: bool) -> int:
         anchor_name="toto_2_0",
         source_hashes=(("dictionary", "b" * 64),),
         policy=policy,
+        confidence_policy=ConfidencePolicy(
+            exact_minimum_support=2,
+            coarse_minimum_support=2,
+            global_minimum_support=2,
+        ),
     )
     _write_once(output / "group_folds.json", manifest.to_payload())
     _write_once(output / "oof_report.json", _report_payload(oof))
@@ -250,6 +259,7 @@ def _materialize_rows(
     screening: ScreeningPolicy,
     *,
     split: str,
+    hindcast_config: HindcastConfig,
 ) -> tuple[TaskLocalTaskRow, ...]:
     rows: list[TaskLocalTaskRow] = []
     for source in tasks:
@@ -281,7 +291,7 @@ def _materialize_rows(
                         name,
                         family,
                         store.forecast,
-                        HindcastConfig(),
+                        hindcast_config,
                         runtime_settings={"forecast_store": store.identity_hash},
                     )
                 except Exception as error:
@@ -347,7 +357,12 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
             runtime_identity=_forecast_runtime_identity(args),
         )
         train_rows = _materialize_rows(
-            store, train, candidates, screening, split="train"
+            store,
+            train,
+            candidates,
+            screening,
+            split="train",
+            hindcast_config=_CONFIDENCE_HINDCAST_CONFIG,
         )
         manifest = build_group_fold_manifest(
             train, seed=int(args.partition_seed)
@@ -361,15 +376,24 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
             policy=TaskLocalTournamentPolicy(
                 anchor_name=anchor.policy.recipe.fallback_parent
             ),
+            confidence_policy=ConfidencePolicy(),
         )
         run_manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "split_sha256": _sha256(Path(args.split_file)),
             "source_hashes": dict(source_hashes),
             "anchor_release_sha256": champion_fingerprint(anchor),
             "forecast_store_fingerprint": store.identity_hash,
             "grouping_fingerprint": manifest.grouping_fingerprint,
             "tournament_policy_fingerprint": task_local_fingerprint(release.policy),
+            "confidence_policy_fingerprint": task_local_fingerprint(
+                release.confidence_evidence.policy
+                if release.confidence_evidence is not None
+                else {}
+            ),
+            "hindcast_config_fingerprint": task_local_fingerprint(
+                _CONFIDENCE_HINDCAST_CONFIG
+            ),
             "train_task_ids_sha256": hashlib.sha256("\n".join(train_ids).encode()).hexdigest(),
             "dev_task_ids_sha256": hashlib.sha256("\n".join(dev_ids).encode()).hexdigest(),
         }
@@ -393,7 +417,14 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
         if set(dev_by_id) != set(dev_ids):
             raise ValueError("formal task-local evolution is missing Dev tasks")
         dev = tuple(dev_by_id[task_id] for task_id in dev_ids)
-        dev_rows = _materialize_rows(store, dev, candidates, screening, split="dev")
+        dev_rows = _materialize_rows(
+            store,
+            dev,
+            candidates,
+            screening,
+            split="dev",
+            hindcast_config=_CONFIDENCE_HINDCAST_CONFIG,
+        )
         dev_report = evaluate_task_local_release(
             release, dev_rows, task_ids=dev_ids, split="dev"
         )

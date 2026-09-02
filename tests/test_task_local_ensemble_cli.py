@@ -10,6 +10,7 @@ import pytest
 
 from common.payload import read_json_object
 from numerical_agent.evaluate_frozen_task_local_ensemble import main as public_main
+from numerical_agent.evolution.task_local_ensemble import parse_task_local_release
 from numerical_agent.run_task_local_ensemble_evolution import main
 
 
@@ -27,6 +28,11 @@ def test_smoke_runs_eight_train_two_dev_and_freezes_after_acceptance(
     assert (output / "task_local_release.json").is_file()
     assert (output / "oof_report.json").is_file()
     assert (output / "dev_report.json").is_file()
+    release = parse_task_local_release(
+        read_json_object(output / "task_local_release.json")
+    )
+    assert release.schema_version == 2
+    assert release.confidence_evidence is not None
 
 
 def test_failed_dev_publishes_no_task_local_release(tmp_path: Path) -> None:

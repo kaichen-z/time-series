@@ -230,6 +230,35 @@ def test_oof_supply_for_each_task_is_fitted_without_its_group() -> None:
     assert all(len(item.candidate_names) <= 8 for item in release.group_supplies)
 
 
+def test_oof_confidence_release_uses_fold_banks_then_all_train_bank() -> None:
+    tasks = _ten_tasks()
+    manifest = build_group_fold_manifest(tasks, seed=17)
+    confidence_policy = ConfidencePolicy(
+        exact_minimum_support=2,
+        coarse_minimum_support=2,
+        global_minimum_support=2,
+    )
+
+    release, report = fit_oof_release(
+        _local_rows(tasks),
+        manifest,
+        anchor_release_sha256="a" * 64,
+        anchor_name="toto_2_0",
+        source_hashes=(("dictionary", "b" * 64),),
+        policy=TaskLocalTournamentPolicy(),
+        confidence_policy=confidence_policy,
+    )
+
+    assert report.accepted is True
+    assert report.activation_count == 10
+    assert release.schema_version == 2
+    assert release.confidence_evidence is not None
+    assert release.confidence_evidence.policy == confidence_policy
+    assert release.confidence_evidence.fit_group_ids == tuple(
+        sorted(group_sha for group_sha, _task_ids, _fold in manifest.groups)
+    )
+
+
 def test_conditional_uplift_excludes_exact_anchor_fallback_ties() -> None:
     tasks = _ten_tasks()
     manifest = build_group_fold_manifest(tasks, seed=17)

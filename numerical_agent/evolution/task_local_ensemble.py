@@ -729,6 +729,7 @@ class TaskLocalRegionResult:
     posterior_win_probability: float
     robust_margin_smae: float
     robust_margin_srmse: float
+    maximum_fold_regret: float
 
     def __post_init__(self) -> None:
         if self.region not in {"full", "early", "late"}:
@@ -777,6 +778,12 @@ class TaskLocalRegionResult:
         for margin in (self.robust_margin_smae, self.robust_margin_srmse):
             if type(margin) is not float or not math.isfinite(margin):
                 raise ValueError("task-local confidence margin is invalid")
+        if (
+            type(self.maximum_fold_regret) is not float
+            or not math.isfinite(self.maximum_fold_regret)
+            or self.maximum_fold_regret < 0.0
+        ):
+            raise ValueError("task-local confidence fold regret is invalid")
 
 
 @dataclass(frozen=True)
@@ -834,6 +841,7 @@ class _QualifiedRecipe:
     local_margin_smae: float
     local_margin_srmse: float
     posterior_win_probability: float
+    maximum_fold_regret: float
 
 
 def _region_bounds(region: str, horizon: int) -> tuple[int, int]:
@@ -868,7 +876,7 @@ def _local_recipe_summary(
     horizon: int,
     policy: TaskLocalTournamentPolicy,
     confidence_policy: ConfidencePolicy,
-) -> tuple[_FoldSummary, float, float] | None:
+) -> tuple[_FoldSummary, float, float, float] | None:
     selected = {name: fold_maps.get(name) for name in recipe.names}
     if any(value is None or len(value) != len(anchor_folds) for value in selected.values()):
         return None
@@ -917,6 +925,13 @@ def _local_recipe_summary(
         improvements_srmse,
         multiplier=confidence_policy.robust_mad_multiplier,
     )
+    maximum_fold_regret = max(
+        0.0,
+        max(
+            child - parent
+            for child, parent in zip(child_joints, anchor_joints, strict=True)
+        ),
+    )
     if (
         not pareto_scaled_improvement(
             anchor_summary.median_smae,
@@ -930,14 +945,10 @@ def _local_recipe_summary(
         or margin_srmse <= 0.0
         or summary.worst_smae_raw > policy.maximum_raw_smae
         or summary.worst_srmse_raw > policy.maximum_raw_srmse
-        or max(
-            child - parent
-            for child, parent in zip(child_joints, anchor_joints, strict=True)
-        )
-        > policy.maximum_worst_joint_regret
+        or maximum_fold_regret > policy.maximum_worst_joint_regret
     ):
         return None
-    return summary, margin_smae, margin_srmse
+    return summary, margin_smae, margin_srmse, maximum_fold_regret
 
 
 def _qualified_region(
@@ -993,7 +1004,7 @@ def _qualified_region(
         )
         if local is None:
             continue
-        summary, margin_smae, margin_srmse = local
+        summary, margin_smae, margin_srmse, maximum_fold_regret = local
         qualified.append(
             _QualifiedRecipe(
                 recipe,
@@ -1001,6 +1012,7 @@ def _qualified_region(
                 margin_smae,
                 margin_srmse,
                 prior.posterior_win_probability,
+                maximum_fold_regret,
             )
         )
     if not qualified:
@@ -1014,6 +1026,7 @@ def _qualified_region(
             posterior_win_probability=0.0,
             robust_margin_smae=0.0,
             robust_margin_srmse=0.0,
+            maximum_fold_regret=0.0,
         )
         reason = (
             "local_hindcast_not_confident"
@@ -1050,6 +1063,7 @@ def _qualified_region(
             posterior_win_probability=selected.posterior_win_probability,
             robust_margin_smae=selected.local_margin_smae,
             robust_margin_srmse=selected.local_margin_srmse,
+            maximum_fold_regret=selected.maximum_fold_regret,
         ),
         forecast,
         "",
@@ -1117,7 +1131,16 @@ def execute_confidence_task_local_ensemble(
         raise ValueError("task-local confidence anchor is missing or invalid")
     if policy.anchor_name not in fold_maps:
         fallback_region = TaskLocalRegionResult(
-            "full", 0, horizon, (policy.anchor_name,), (1.0,), False, 0.0, 0.0, 0.0
+            "full",
+            0,
+            horizon,
+            (policy.anchor_name,),
+            (1.0,),
+            False,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
         )
         return TaskLocalConfidenceResult(
             anchor,

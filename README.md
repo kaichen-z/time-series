@@ -67,13 +67,15 @@ separate provisioned runs are performed.
 
 ### Task-local adaptive Numerical ensemble
 
-The opt-in v2 selector keeps the frozen Champion (currently Toto) as an exact fallback and lets at
-most two reviewed Statistical, TSFM, or Combined specialists contribute only when the current
-task's rolling history hindcasts Pareto-improve both Dr-CiK sMAE and sRMSE safety gates. Candidate
-supply is fitted with five group-aware OOF folds on the 80-task Train partition. The 20-task Dev
-partition is opened once after OOF acceptance; a frozen accepted release must then run the
-separate one-shot Public-99 regression. Public results are report-only and cannot feed the same
-release's evolution.
+The opt-in v2 selector keeps the frozen Champion (currently Toto) as an exact fallback. A reviewed
+Statistical, TSFM, or Combined recipe may contribute only when two independent sources agree:
+an exact/coarse/global morphology prior fitted without the current Train group, and at least three
+of five current-history hindcasts. Both sources must improve Dr-CiK sMAE and sRMSE under the
+frozen Pareto, raw-tail, clipping, and regret gates. Horizons of at least four steps may use fixed
+early/late halves; a rejected half preserves Toto values exactly. Candidate supply and priors are
+fitted with five group-aware OOF folds on the 80-task Train partition. The 20-task Dev partition is
+opened once after OOF acceptance; a frozen accepted release must then run the separate one-shot
+Public-99 regression. Public results are report-only and cannot feed the same release's evolution.
 
 Run the deterministic lifecycle smoke with:
 
@@ -86,7 +88,8 @@ For the formal 80/20 run, set `TASK_LOCAL_REPO`, `TASK_LOCAL_SPLIT_FILE`,
 `TASK_LOCAL_TASKS_FILE`, `TASK_LOCAL_ANCHOR_RELEASE_DIR`, `TASK_LOCAL_FORECAST_STORE`, and
 `TASK_LOCAL_OUTPUT_DIR`, then invoke `scripts/run_task_local_ensemble_evolution.sh`. Use
 `--dry-run` to inspect the exact command. This mechanism trains no TSFM parameters and grants no
-numeric weight authority to an LLM; Python searches a frozen anchor-heavy weight grid.
+numeric weight authority to an LLM; Python searches a frozen 0.1-grid with at most eight
+candidates, at most two specialists per recipe, and at least 0.5 anchor weight.
 
 After an accepted 80/20 release, run the required report-only Public-99 comparison separately:
 

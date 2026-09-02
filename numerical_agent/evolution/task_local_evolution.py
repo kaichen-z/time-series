@@ -34,6 +34,7 @@ from .task_local_ensemble import (
     GroupCandidateSupply,
     TaskLocalEnsembleRelease,
     TaskLocalTournamentPolicy,
+    execute_confidence_task_local_ensemble,
     execute_task_local_ensemble,
     task_local_fingerprint,
 )
@@ -921,13 +922,30 @@ def _evaluate_rows(
             for name in names
             if (row := task_rows.get(name)) is not None and row.diagnostic is not None
         }
-        result = execute_task_local_ensemble(
-            release.policy,
-            candidate_names=names,
-            forecasts=forecasts,
-            diagnostics=diagnostics,
-            horizon=anchor.profile.horizon,
-        )
+        if release.schema_version == 2:
+            assert release.confidence_evidence is not None
+            result = execute_confidence_task_local_ensemble(
+                release.policy,
+                release.confidence_evidence.policy,
+                candidate_names=names,
+                forecasts=forecasts,
+                diagnostics=diagnostics,
+                horizon=anchor.profile.horizon,
+                profile=anchor.profile,
+                confidence_evidence=release.confidence_evidence,
+            )
+            maximum_fold_regret = max(
+                region.maximum_fold_regret for region in result.regions
+            )
+        else:
+            result = execute_task_local_ensemble(
+                release.policy,
+                candidate_names=names,
+                forecasts=forecasts,
+                diagnostics=diagnostics,
+                horizon=anchor.profile.horizon,
+            )
+            maximum_fold_regret = result.maximum_fold_regret
         parent = drcik_point_metrics(anchor.truth, anchor.forecast)
         child = drcik_point_metrics(anchor.truth, result.forecast)
         outcomes.append(
@@ -944,7 +962,7 @@ def _evaluate_rows(
                 child_srmse=float(child["srmse"]),
                 child_smae_raw=float(child["smae_raw"]),
                 child_srmse_raw=float(child["srmse_raw"]),
-                max_fold_regret=result.maximum_fold_regret,
+                max_fold_regret=maximum_fold_regret,
             )
         )
     return tuple(outcomes)
@@ -1120,10 +1138,13 @@ def fit_oof_release(
     anchor_name: str,
     source_hashes: tuple[tuple[str, str], ...],
     policy: TaskLocalTournamentPolicy,
+    confidence_policy: ConfidencePolicy | None = None,
 ) -> tuple[TaskLocalEnsembleRelease, ConditionalUpliftReport]:
     """Fit held-out supplies for every Train group, then reconstruct on all Train."""
     if type(manifest) is not GroupFoldManifest or type(policy) is not TaskLocalTournamentPolicy:
         raise TypeError("OOF fitting requires exact manifest and policy objects")
+    if confidence_policy is not None and type(confidence_policy) is not ConfidencePolicy:
+        raise TypeError("OOF confidence policy must be exact or None")
     task_folds = dict(manifest.task_fold_map)
     all_ids = tuple(sorted(task_folds))
     report_group_keys = {
@@ -1149,8 +1170,20 @@ def fit_oof_release(
             anchor_name=anchor_name,
             maximum_candidates=policy.maximum_candidates,
         )
+        evidence = (
+            build_hierarchical_evidence(
+                rows,
+                task_ids=fit_ids,
+                group_ids={task_id: report_group_keys[task_id] for task_id in fit_ids},
+                anchor_name=anchor_name,
+                candidate_names=default,
+                policy=confidence_policy,
+            )
+            if confidence_policy is not None
+            else None
+        )
         temporary = TaskLocalEnsembleRelease(
-            schema_version=1,
+            schema_version=2 if confidence_policy is not None else 1,
             anchor_release_sha256=anchor_release_sha256,
             anchor_name=anchor_name,
             policy=policy,
@@ -1160,7 +1193,12 @@ def fit_oof_release(
             oof_report_sha256="0" * 64,
             source_hashes=source_hashes,
             metric_policy_fingerprint=METRIC_POLICY_FINGERPRINT,
-            lineage=("task_local_oof",),
+            lineage=(
+                ("task_local_oof", "task_local_confidence_v2")
+                if confidence_policy is not None
+                else ("task_local_oof",)
+            ),
+            confidence_evidence=evidence,
         )
         oof_outcomes.extend(
             _evaluate_rows(
@@ -1184,8 +1222,20 @@ def fit_oof_release(
         anchor_name=anchor_name,
         maximum_candidates=policy.maximum_candidates,
     )
+    evidence = (
+        build_hierarchical_evidence(
+            rows,
+            task_ids=all_ids,
+            group_ids=report_group_keys,
+            anchor_name=anchor_name,
+            candidate_names=default,
+            policy=confidence_policy,
+        )
+        if confidence_policy is not None
+        else None
+    )
     release = TaskLocalEnsembleRelease(
-        schema_version=1,
+        schema_version=2 if confidence_policy is not None else 1,
         anchor_release_sha256=anchor_release_sha256,
         anchor_name=anchor_name,
         policy=policy,
@@ -1195,6 +1245,11 @@ def fit_oof_release(
         oof_report_sha256=oof_report.report_fingerprint,
         source_hashes=source_hashes,
         metric_policy_fingerprint=METRIC_POLICY_FINGERPRINT,
-        lineage=("task_local_v1",),
+        lineage=(
+            ("task_local_confidence_v2",)
+            if confidence_policy is not None
+            else ("task_local_v1",)
+        ),
+        confidence_evidence=evidence,
     )
     return release, oof_report

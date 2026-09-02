@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import statistics
+from dataclasses import asdict
 from pathlib import Path
 
 from common.data import load_tasks_by_id
@@ -22,6 +23,7 @@ from .evolution.portfolio import read_policy_file
 from .evolution.task_local_ensemble import (
     TaskLocalEnsembleRelease,
     canonical_task_local_release_bytes,
+    execute_confidence_task_local_ensemble,
     execute_task_local_ensemble,
     parse_task_local_release,
     task_local_fingerprint,
@@ -35,6 +37,7 @@ from .run_champion_evolution import (
 )
 from .run_selector_evolution import _forecast_runtime_identity
 from .run_task_local_ensemble_evolution import (
+    _CONFIDENCE_HINDCAST_CONFIG,
     _materialize_rows,
     _reviewed_candidates,
     _smoke_rows,
@@ -111,6 +114,8 @@ def _score_public_rows(
     child_smae_raw: list[float] = []
     child_srmse_raw: list[float] = []
     wins = ties = losses = failures = 0
+    regional_activations = {"full": 0, "early": 0, "late": 0}
+    exact_fallbacks = 0
     for task_id in task_ids:
         task_rows = by_task[task_id]
         anchor = task_rows.get(release.anchor_name)
@@ -130,13 +135,38 @@ def _score_public_rows(
             for name in names
             if (row := task_rows.get(name)) is not None and row.diagnostic is not None
         }
-        result = execute_task_local_ensemble(
-            release.policy,
-            candidate_names=names,
-            forecasts=forecasts,
-            diagnostics=diagnostics,
-            horizon=anchor.profile.horizon,
-        )
+        if release.schema_version == 2:
+            assert release.confidence_evidence is not None
+            result = execute_confidence_task_local_ensemble(
+                release.policy,
+                release.confidence_evidence.policy,
+                candidate_names=names,
+                forecasts=forecasts,
+                diagnostics=diagnostics,
+                horizon=anchor.profile.horizon,
+                profile=anchor.profile,
+                confidence_evidence=release.confidence_evidence,
+            )
+            selected_names = tuple(
+                dict.fromkeys(
+                    name for region in result.regions for name in region.selected_names
+                )
+            )
+            region_payload = [asdict(region) for region in result.regions]
+            for region in result.regions:
+                regional_activations[region.region] += int(region.activated)
+        else:
+            result = execute_task_local_ensemble(
+                release.policy,
+                candidate_names=names,
+                forecasts=forecasts,
+                diagnostics=diagnostics,
+                horizon=anchor.profile.horizon,
+            )
+            selected_names = result.selected_names
+            region_payload = []
+            regional_activations["full"] += int(result.activated)
+        exact_fallbacks += int(not result.activated)
         parent = drcik_point_metrics(anchor.truth, anchor.forecast)
         child = drcik_point_metrics(anchor.truth, result.forecast)
         for destination, point, field in (
@@ -158,14 +188,19 @@ def _score_public_rows(
             losses += 1
         else:
             ties += 1
+        selection_payload = (
+            {"regions": region_payload}
+            if release.schema_version == 2
+            else {"weights": list(result.weights)}
+        )
         records.append(
             {
                 "task_id": task_id,
                 "status": "success",
                 "anchor_forecast": list(anchor.forecast),
                 "forecast": list(result.forecast),
-                "selected_names": list(result.selected_names),
-                "weights": list(result.weights),
+                "selected_names": list(selected_names),
+                **selection_payload,
                 "fallback_reason": result.fallback_reason,
                 "parent_smae": float(parent["smae"]),
                 "parent_srmse": float(parent["srmse"]),
@@ -186,6 +221,8 @@ def _score_public_rows(
         "wins": wins,
         "ties": ties,
         "losses": losses,
+        "regional_activations": regional_activations,
+        "exact_fallbacks": exact_fallbacks,
         "parent_mean_smae": statistics.fmean(parent_smae),
         "child_mean_smae": statistics.fmean(child_smae),
         "parent_mean_srmse": statistics.fmean(parent_srmse),
@@ -291,6 +328,14 @@ def _formal_main(args: argparse.Namespace, release_dir: Path, output: Path) -> i
         or run_manifest.get("source_hashes") != dict(source_hashes)
         or champion_fingerprint(anchor) != release.anchor_release_sha256
         or tuple(sorted(run_manifest.get("source_hashes", {}).items())) != release.source_hashes
+        or run_manifest.get("hindcast_config_fingerprint")
+        != task_local_fingerprint(_CONFIDENCE_HINDCAST_CONFIG)
+        or (
+            release.schema_version == 2
+            and release.confidence_evidence is not None
+            and run_manifest.get("confidence_policy_fingerprint")
+            != task_local_fingerprint(release.confidence_evidence.policy)
+        )
     ):
         raise ValueError("Public authority does not match the frozen evolution run")
     module = read_module(repo / "methods.py")
@@ -326,7 +371,14 @@ def _formal_main(args: argparse.Namespace, release_dir: Path, output: Path) -> i
         if set(loaded) != set(task_ids):
             raise ValueError("Public regression is missing task bodies")
         tasks = tuple(loaded[task_id] for task_id in task_ids)
-        rows = _materialize_rows(store, tasks, candidates, screening, split="public")
+        rows = _materialize_rows(
+            store,
+            tasks,
+            candidates,
+            screening,
+            split="public",
+            hindcast_config=_CONFIDENCE_HINDCAST_CONFIG,
+        )
         comparison, records = _score_public_rows(release, rows, task_ids)
         _publish(
             output,
