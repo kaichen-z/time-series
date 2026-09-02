@@ -98,6 +98,7 @@ def test_local_tournament_weights_are_deterministic_normalized_and_anchor_heavy(
     assert first.weights == (0.5, 0.5)
     assert sum(first.weights) == pytest.approx(1.0, abs=1e-12)
     assert first.weights[first.selected_names.index("toto_2_0")] >= 0.5
+    assert first.maximum_fold_regret == 0.0
 
 
 def test_smae_only_gain_cannot_hide_srmse_regression() -> None:

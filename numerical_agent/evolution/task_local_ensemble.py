@@ -14,6 +14,7 @@ from common.metrics import drcik_point_metrics, joint_scaled_error, pareto_scale
 from common.payload import canonical_json_bytes
 
 from .numerical_selector import CandidateDiagnostics
+from .screening import TaskProfile
 
 
 def _canonical_name(value: str) -> str:
@@ -23,6 +24,16 @@ def _canonical_name(value: str) -> str:
 def task_local_fingerprint(value: object) -> str:
     payload = asdict(value) if hasattr(value, "__dataclass_fields__") else value
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
+def _require_sha256(value: object, label: str) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{label} must be a lowercase SHA-256 value")
+    return value
 
 
 @dataclass(frozen=True)
@@ -84,6 +95,7 @@ class TaskLocalEnsembleResult:
     weights: tuple[float, ...]
     activated: bool
     fold_support: int
+    maximum_fold_regret: float
     fallback_reason: str | None
     policy_fingerprint: str
 
@@ -112,6 +124,12 @@ class TaskLocalEnsembleResult:
             raise ValueError("task-local activation must be an exact bool")
         if type(self.fold_support) is not int or self.fold_support < 0:
             raise ValueError("task-local fold support must be nonnegative")
+        if (
+            type(self.maximum_fold_regret) is not float
+            or not math.isfinite(self.maximum_fold_regret)
+            or self.maximum_fold_regret < 0.0
+        ):
+            raise ValueError("task-local maximum fold regret must be finite and nonnegative")
         if self.activated != (len(self.selected_names) > 1):
             raise ValueError("task-local activation must match selected specialists")
         if self.fallback_reason is not None and (
@@ -127,6 +145,199 @@ class TaskLocalEnsembleResult:
             or len(self.policy_fingerprint) != 64
         ):
             raise ValueError("task-local policy fingerprint must be SHA-256")
+
+
+@dataclass(frozen=True)
+class GroupCandidateSupply:
+    """Reviewed bounded candidate supply for one morphology bucket."""
+
+    group_key: str
+    candidate_names: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.group_key, "group candidate supply key")
+        if (
+            type(self.candidate_names) is not tuple
+            or not self.candidate_names
+            or len(self.candidate_names) > 8
+            or any(type(name) is not str or not name.isidentifier() for name in self.candidate_names)
+            or len({_canonical_name(name) for name in self.candidate_names})
+            != len(self.candidate_names)
+        ):
+            raise ValueError("group candidate supply requires at most eight unique identifiers")
+
+    def to_payload(self) -> dict[str, object]:
+        return {"group_key": self.group_key, "candidate_names": list(self.candidate_names)}
+
+
+@dataclass(frozen=True)
+class TaskLocalEnsembleRelease:
+    """Frozen candidate supplies plus the host-owned local tournament policy."""
+
+    schema_version: int
+    anchor_release_sha256: str
+    anchor_name: str
+    policy: TaskLocalTournamentPolicy
+    default_candidate_names: tuple[str, ...]
+    group_supplies: tuple[GroupCandidateSupply, ...]
+    grouping_fingerprint: str
+    oof_report_sha256: str
+    source_hashes: tuple[tuple[str, str], ...]
+    metric_policy_fingerprint: str
+    lineage: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            raise ValueError("task-local release schema must be exactly one")
+        if type(self.policy) is not TaskLocalTournamentPolicy:
+            raise ValueError("task-local release requires an exact tournament policy")
+        TaskLocalTournamentPolicy.__post_init__(self.policy)
+        if self.anchor_name != self.policy.anchor_name:
+            raise ValueError("task-local release anchor must match its policy")
+        for label, value in (
+            ("anchor release", self.anchor_release_sha256),
+            ("grouping", self.grouping_fingerprint),
+            ("OOF report", self.oof_report_sha256),
+            ("metric policy", self.metric_policy_fingerprint),
+        ):
+            _require_sha256(value, f"task-local {label} fingerprint")
+        GroupCandidateSupply("0" * 64, self.default_candidate_names)
+        if self.default_candidate_names[0] != self.anchor_name:
+            raise ValueError("task-local default supply must begin with the anchor")
+        if (
+            type(self.group_supplies) is not tuple
+            or any(type(item) is not GroupCandidateSupply for item in self.group_supplies)
+            or tuple(item.group_key for item in self.group_supplies)
+            != tuple(sorted(item.group_key for item in self.group_supplies))
+            or len({item.group_key for item in self.group_supplies}) != len(self.group_supplies)
+            or any(item.candidate_names[0] != self.anchor_name for item in self.group_supplies)
+        ):
+            raise ValueError("task-local group supplies must be unique sorted and anchored")
+        if (
+            type(self.source_hashes) is not tuple
+            or not self.source_hashes
+            or tuple(name for name, _digest in self.source_hashes)
+            != tuple(sorted(name for name, _digest in self.source_hashes))
+            or len({name for name, _digest in self.source_hashes}) != len(self.source_hashes)
+            or any(
+                type(name) is not str
+                or not name.isidentifier()
+                or _invalid_sha256(digest)
+                for name, digest in self.source_hashes
+            )
+        ):
+            raise ValueError("task-local source hashes must be unique sorted identifiers")
+        if (
+            type(self.lineage) is not tuple
+            or not self.lineage
+            or any(type(item) is not str or not item.isidentifier() for item in self.lineage)
+            or len(self.lineage) != len(set(self.lineage))
+        ):
+            raise ValueError("task-local lineage must contain unique identifiers")
+
+    def candidate_names(self, group_key: str) -> tuple[str, ...]:
+        for item in self.group_supplies:
+            if item.group_key == group_key:
+                return item.candidate_names
+        return self.default_candidate_names
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "anchor_release_sha256": self.anchor_release_sha256,
+            "anchor_name": self.anchor_name,
+            "policy": asdict(self.policy),
+            "default_candidate_names": list(self.default_candidate_names),
+            "group_supplies": [item.to_payload() for item in self.group_supplies],
+            "grouping_fingerprint": self.grouping_fingerprint,
+            "oof_report_sha256": self.oof_report_sha256,
+            "source_hashes": dict(self.source_hashes),
+            "metric_policy_fingerprint": self.metric_policy_fingerprint,
+            "lineage": list(self.lineage),
+        }
+
+
+def _invalid_sha256(value: object) -> bool:
+    try:
+        _require_sha256(value, "value")
+    except ValueError:
+        return True
+    return False
+
+
+def parse_task_local_release(payload: object) -> TaskLocalEnsembleRelease:
+    """Parse only the exact canonical v1 task-local release schema."""
+    expected = {
+        "schema_version",
+        "anchor_release_sha256",
+        "anchor_name",
+        "policy",
+        "default_candidate_names",
+        "group_supplies",
+        "grouping_fingerprint",
+        "oof_report_sha256",
+        "source_hashes",
+        "metric_policy_fingerprint",
+        "lineage",
+    }
+    if type(payload) is not dict or set(payload) != expected:
+        raise ValueError("task-local release schema is malformed")
+    policy_payload = payload["policy"]
+    policy_fields = {
+        "schema_version",
+        "anchor_name",
+        "maximum_candidates",
+        "maximum_specialists",
+        "minimum_successful_folds",
+        "minimum_anchor_weight",
+        "weight_step",
+        "minimum_joint_improvement",
+        "maximum_worst_joint_regret",
+        "maximum_raw_smae",
+        "maximum_raw_srmse",
+    }
+    if type(policy_payload) is not dict or set(policy_payload) != policy_fields:
+        raise ValueError("task-local policy schema is malformed")
+    raw_groups = payload["group_supplies"]
+    if type(raw_groups) is not list:
+        raise ValueError("task-local group supply schema is malformed")
+    groups: list[GroupCandidateSupply] = []
+    for raw_group in raw_groups:
+        if type(raw_group) is not dict or set(raw_group) != {"group_key", "candidate_names"}:
+            raise ValueError("task-local group supply schema is malformed")
+        raw_names = raw_group["candidate_names"]
+        if type(raw_names) is not list:
+            raise ValueError("task-local group candidate names are malformed")
+        groups.append(GroupCandidateSupply(raw_group["group_key"], tuple(raw_names)))
+    source_payload = payload["source_hashes"]
+    if type(source_payload) is not dict:
+        raise ValueError("task-local source hash schema is malformed")
+    raw_default = payload["default_candidate_names"]
+    raw_lineage = payload["lineage"]
+    if type(raw_default) is not list or type(raw_lineage) is not list:
+        raise ValueError("task-local release arrays are malformed")
+    try:
+        return TaskLocalEnsembleRelease(
+            schema_version=payload["schema_version"],
+            anchor_release_sha256=payload["anchor_release_sha256"],
+            anchor_name=payload["anchor_name"],
+            policy=TaskLocalTournamentPolicy(**policy_payload),
+            default_candidate_names=tuple(raw_default),
+            group_supplies=tuple(groups),
+            grouping_fingerprint=payload["grouping_fingerprint"],
+            oof_report_sha256=payload["oof_report_sha256"],
+            source_hashes=tuple(sorted(source_payload.items())),
+            metric_policy_fingerprint=payload["metric_policy_fingerprint"],
+            lineage=tuple(raw_lineage),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("task-local release schema is malformed") from error
+
+
+def canonical_task_local_release_bytes(release: TaskLocalEnsembleRelease) -> bytes:
+    if type(release) is not TaskLocalEnsembleRelease:
+        raise TypeError("canonical release encoding requires an exact task-local release")
+    return canonical_json_bytes(release.to_payload())
 
 
 @dataclass(frozen=True)
@@ -228,6 +439,7 @@ def _fallback(
         weights=(1.0,),
         activated=False,
         fold_support=fold_support,
+        maximum_fold_regret=0.0,
         fallback_reason=reason,
         policy_fingerprint=task_local_fingerprint(policy),
     )
@@ -429,6 +641,17 @@ def execute_task_local_ensemble(
         weights=weights,
         activated=True,
         fold_support=len(anchor_folds),
+        maximum_fold_regret=max(
+            0.0,
+            max(
+                child - parent
+                for child, parent in zip(
+                    _summary.joint_by_fold,
+                    anchor_summary.joint_by_fold,
+                    strict=True,
+                )
+            ),
+        ),
         fallback_reason=None,
         policy_fingerprint=task_local_fingerprint(policy),
     )
