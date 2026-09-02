@@ -7,8 +7,17 @@ import math
 import pytest
 
 from numerical_agent.evolution.numerical_selector import CandidateDiagnostics
+from numerical_agent.evolution.screening import TaskProfile
+from numerical_agent.evolution.task_local_confidence import (
+    ConfidenceEvidenceRecord,
+    ConfidencePolicy,
+    HierarchicalEvidenceBank,
+    WeightRecipe,
+    beta_win_probability,
+)
 from numerical_agent.evolution.task_local_ensemble import (
     TaskLocalTournamentPolicy,
+    execute_confidence_task_local_ensemble,
     execute_task_local_ensemble,
 )
 
@@ -153,3 +162,220 @@ def test_tournament_rejects_more_than_eight_candidates() -> None:
             diagnostics=inputs["diagnostics"],
             horizon=2,
         )
+
+
+def _profile(*, horizon: int) -> TaskProfile:
+    return TaskProfile(
+        task_id="task",
+        frequency="D",
+        history_length=120,
+        horizon=horizon,
+        zero_fraction=0.0,
+        signed=False,
+        integer_valued=False,
+        trend_direction="flat",
+        trend_strength=0.1,
+        periodicity_periods=(),
+        periodicity_strength=0.1,
+        periodicity_confidence=0.1,
+        outlier_fraction=0.0,
+        noise_relative_scale=0.2,
+        likely_stationary=True,
+        stationarity_score=0.8,
+        recent_regime_start=None,
+        recent_regime_confidence=0.1,
+        intermittency_adi=1.0,
+        intermittency_cv2=0.1,
+    )
+
+
+def _confidence_policy() -> ConfidencePolicy:
+    return ConfidencePolicy(
+        exact_minimum_support=8,
+        coarse_minimum_support=8,
+        global_minimum_support=8,
+        minimum_paired_origins=3,
+        regional_minimum_horizon=4,
+    )
+
+
+def _confidence_bank(
+    profile: TaskProfile,
+    *recipes: WeightRecipe,
+) -> HierarchicalEvidenceBank:
+    records = tuple(
+        ConfidenceEvidenceRecord(
+            level="global",
+            group_key=HierarchicalEvidenceBank.global_group_key(),
+            recipe=recipe,
+            independent_groups=8,
+            task_support=8,
+            wins=7,
+            ties=0,
+            losses=1,
+            posterior_win_probability=beta_win_probability(7, 1),
+            robust_margin_smae=0.1,
+            robust_margin_srmse=0.1,
+            p90_regret_smae_raw=0.0,
+            p90_regret_srmse_raw=0.0,
+            failure_count=0,
+            clipped_smae_count=0,
+            clipped_srmse_count=0,
+        )
+        for recipe in recipes
+    )
+    return HierarchicalEvidenceBank.build(
+        _confidence_policy(),
+        records=records,
+        fit_group_ids=tuple(f"{index:064x}" for index in range(1, 9)),
+    )
+
+
+def _confidence_inputs(
+    *,
+    anchor_folds: tuple[tuple[float, ...], ...],
+    specialist_folds: tuple[tuple[float, ...], ...],
+    truths: tuple[tuple[float, ...], ...],
+    anchor_forecast: tuple[float, ...],
+    specialist_forecast: tuple[float, ...],
+) -> dict[str, object]:
+    def diagnostic(
+        name: str,
+        family: str,
+        folds: tuple[tuple[float, ...], ...],
+    ) -> CandidateDiagnostics:
+        return CandidateDiagnostics.synthetic(
+            name=name,
+            family=family,
+            median_mase=1.0,
+            fold_forecasts=folds,
+            fold_truths=truths,
+            median_smae=1.0,
+            median_srmse=1.0,
+        )
+
+    return {
+        "candidate_names": ("toto_2_0", "seasonal_naive"),
+        "forecasts": {
+            "toto_2_0": anchor_forecast,
+            "seasonal_naive": specialist_forecast,
+        },
+        "diagnostics": {
+            "toto_2_0": diagnostic("toto_2_0", "tsfm", anchor_folds),
+            "seasonal_naive": diagnostic(
+                "seasonal_naive", "statistical", specialist_folds
+            ),
+        },
+        "horizon": len(anchor_forecast),
+    }
+
+
+def test_good_local_hindcast_without_qualified_group_prior_falls_back() -> None:
+    profile = _profile(horizon=2)
+    inputs = _confidence_inputs(
+        anchor_folds=((8.0, 8.0),) * 5,
+        specialist_folds=((10.0, 10.0),) * 5,
+        truths=((10.0, 10.0),) * 5,
+        anchor_forecast=(8.0, 8.0),
+        specialist_forecast=(10.0, 10.0),
+    )
+    empty = HierarchicalEvidenceBank.build(
+        _confidence_policy(),
+        records=(),
+        fit_group_ids=tuple(f"{index:064x}" for index in range(1, 9)),
+    )
+
+    result = execute_confidence_task_local_ensemble(
+        _policy(),
+        _confidence_policy(),
+        profile=profile,
+        confidence_evidence=empty,
+        **inputs,
+    )
+
+    assert result.forecast == inputs["forecasts"]["toto_2_0"]  # type: ignore[index]
+    assert result.activated is False
+    assert result.fallback_reason == "confidence_prior_unavailable"
+
+
+def test_good_prior_with_bad_local_hindcast_falls_back() -> None:
+    profile = _profile(horizon=2)
+    recipe = WeightRecipe("full", ("toto_2_0", "seasonal_naive"), (5, 5))
+    inputs = _confidence_inputs(
+        anchor_folds=((8.0, 8.0),) * 5,
+        specialist_folds=((6.0, 6.0),) * 5,
+        truths=((10.0, 10.0),) * 5,
+        anchor_forecast=(8.0, 8.0),
+        specialist_forecast=(6.0, 6.0),
+    )
+
+    result = execute_confidence_task_local_ensemble(
+        _policy(),
+        _confidence_policy(),
+        profile=profile,
+        confidence_evidence=_confidence_bank(profile, recipe),
+        **inputs,
+    )
+
+    assert result.forecast == (8.0, 8.0)
+    assert result.activated is False
+    assert result.fallback_reason == "local_hindcast_not_confident"
+
+
+def test_early_specialist_and_late_anchor_are_concatenated_exactly() -> None:
+    profile = _profile(horizon=4)
+    early = WeightRecipe("early", ("toto_2_0", "seasonal_naive"), (5, 5))
+    inputs = _confidence_inputs(
+        anchor_folds=((8.0, 8.0, 20.0, 20.0),) * 5,
+        specialist_folds=((10.0, 10.0, 0.0, 0.0),) * 5,
+        truths=((10.0, 10.0, 20.0, 20.0),) * 5,
+        anchor_forecast=(8.0, 8.0, 20.0, 20.0),
+        specialist_forecast=(10.0, 10.0, 0.0, 0.0),
+    )
+
+    result = execute_confidence_task_local_ensemble(
+        _policy(),
+        _confidence_policy(),
+        profile=profile,
+        confidence_evidence=_confidence_bank(profile, early),
+        **inputs,
+    )
+
+    assert result.forecast == (9.0, 9.0, 20.0, 20.0)
+    assert tuple(region.region for region in result.regions) == ("early", "late")
+    assert tuple(region.activated for region in result.regions) == (True, False)
+
+
+def test_short_horizon_uses_full_gate_without_fabricated_regions() -> None:
+    profile = _profile(horizon=2)
+    full = WeightRecipe("full", ("toto_2_0", "seasonal_naive"), (5, 5))
+    inputs = _confidence_inputs(
+        anchor_folds=((8.0, 8.0),) * 5,
+        specialist_folds=((10.0, 10.0),) * 5,
+        truths=((10.0, 10.0),) * 5,
+        anchor_forecast=(8.0, 8.0),
+        specialist_forecast=(10.0, 10.0),
+    )
+
+    result = execute_confidence_task_local_ensemble(
+        _policy(),
+        _confidence_policy(),
+        profile=profile,
+        confidence_evidence=_confidence_bank(profile, full),
+        **inputs,
+    )
+
+    assert result.forecast == (9.0, 9.0)
+    assert tuple(region.region for region in result.regions) == ("full",)
+    assert result.activated is True
+
+
+def test_v1_tournament_result_is_unchanged_by_confidence_support() -> None:
+    result = execute_task_local_ensemble(_policy(), **_valid_inputs())
+
+    assert result.forecast == (9.0, 9.0)
+    assert result.selected_names == ("toto_2_0", "seasonal_naive")
+    assert result.weights == (0.5, 0.5)
+    assert result.policy_fingerprint == (
+        "b0a28d67960d80210193eec68b46ee359d3a1eec93db15968d2cbd3c7988c77b"
+    )

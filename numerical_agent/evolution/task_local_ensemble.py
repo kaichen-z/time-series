@@ -15,6 +15,12 @@ from common.payload import canonical_json_bytes
 
 from .numerical_selector import CandidateDiagnostics
 from .screening import TaskProfile
+from .task_local_confidence import (
+    ConfidencePolicy,
+    HierarchicalEvidenceBank,
+    WeightRecipe,
+    robust_effect_margin,
+)
 
 
 def _canonical_name(value: str) -> str:
@@ -671,4 +677,477 @@ def execute_task_local_ensemble(
         ),
         fallback_reason=None,
         policy_fingerprint=task_local_fingerprint(policy),
+    )
+
+
+@dataclass(frozen=True)
+class TaskLocalRegionResult:
+    """One fixed horizon region selected from trusted local evidence."""
+
+    region: str
+    start: int
+    stop: int
+    selected_names: tuple[str, ...]
+    weights: tuple[float, ...]
+    activated: bool
+    posterior_win_probability: float
+    robust_margin_smae: float
+    robust_margin_srmse: float
+
+    def __post_init__(self) -> None:
+        if self.region not in {"full", "early", "late"}:
+            raise ValueError("task-local confidence region is unsupported")
+        if (
+            type(self.start) is not int
+            or type(self.stop) is not int
+            or self.start < 0
+            or self.stop <= self.start
+        ):
+            raise ValueError("task-local confidence region bounds are invalid")
+        if (
+            type(self.selected_names) is not tuple
+            or not self.selected_names
+            or any(
+                type(name) is not str or not name.isidentifier()
+                for name in self.selected_names
+            )
+            or len({_canonical_name(name) for name in self.selected_names})
+            != len(self.selected_names)
+        ):
+            raise ValueError("task-local confidence selected names are invalid")
+        if (
+            type(self.weights) is not tuple
+            or len(self.weights) != len(self.selected_names)
+            or any(
+                type(weight) is not float
+                or not math.isfinite(weight)
+                or weight <= 0.0
+                for weight in self.weights
+            )
+            or not math.isclose(
+                math.fsum(self.weights), 1.0, rel_tol=0.0, abs_tol=1e-12
+            )
+        ):
+            raise ValueError("task-local confidence weights are invalid")
+        if type(self.activated) is not bool or self.activated != (
+            len(self.selected_names) > 1
+        ):
+            raise ValueError("task-local confidence activation is inconsistent")
+        if (
+            type(self.posterior_win_probability) is not float
+            or not 0.0 <= self.posterior_win_probability <= 1.0
+        ):
+            raise ValueError("task-local confidence posterior is invalid")
+        for margin in (self.robust_margin_smae, self.robust_margin_srmse):
+            if type(margin) is not float or not math.isfinite(margin):
+                raise ValueError("task-local confidence margin is invalid")
+
+
+@dataclass(frozen=True)
+class TaskLocalConfidenceResult:
+    """Replayable confidence-qualified regional result."""
+
+    forecast: tuple[float, ...]
+    regions: tuple[TaskLocalRegionResult, ...]
+    activated: bool
+    fallback_reason: str | None
+    policy_fingerprint: str
+    evidence_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.forecast) is not tuple
+            or not self.forecast
+            or any(type(value) is not float or not math.isfinite(value) for value in self.forecast)
+        ):
+            raise ValueError("task-local confidence result requires a finite forecast")
+        if (
+            type(self.regions) is not tuple
+            or not self.regions
+            or any(type(region) is not TaskLocalRegionResult for region in self.regions)
+        ):
+            raise ValueError("task-local confidence result requires exact regions")
+        expected_start = 0
+        for region in self.regions:
+            TaskLocalRegionResult.__post_init__(region)
+            if region.start != expected_start:
+                raise ValueError("task-local confidence regions must be contiguous")
+            expected_start = region.stop
+        if expected_start != len(self.forecast):
+            raise ValueError("task-local confidence regions must cover the horizon")
+        names = tuple(region.region for region in self.regions)
+        if names not in {("full",), ("early", "late")}:
+            raise ValueError("task-local confidence region layout is noncanonical")
+        if type(self.activated) is not bool or self.activated != any(
+            region.activated for region in self.regions
+        ):
+            raise ValueError("task-local confidence result activation is inconsistent")
+        if (self.activated and self.fallback_reason is not None) or (
+            not self.activated
+            and (type(self.fallback_reason) is not str or not self.fallback_reason)
+        ):
+            raise ValueError("task-local confidence fallback reason is inconsistent")
+        for value in (self.policy_fingerprint, self.evidence_fingerprint):
+            _require_sha256(value, "task-local confidence")
+
+
+@dataclass(frozen=True)
+class _QualifiedRecipe:
+    recipe: WeightRecipe
+    summary: _FoldSummary
+    local_margin_smae: float
+    local_margin_srmse: float
+    posterior_win_probability: float
+
+
+def _region_bounds(region: str, horizon: int) -> tuple[int, int]:
+    if region == "full":
+        return (0, horizon)
+    midpoint = (horizon + 1) // 2
+    return (0, midpoint) if region == "early" else (midpoint, horizon)
+
+
+def _slice_folds(
+    folds: Sequence[tuple[tuple[float, ...], tuple[float, ...]]],
+    *,
+    start: int,
+    stop: int,
+    horizon: int,
+) -> tuple[tuple[tuple[float, ...], tuple[float, ...]], ...] | None:
+    if any(len(forecast) != horizon or len(truth) != horizon for forecast, truth in folds):
+        return None
+    return tuple((forecast[start:stop], truth[start:stop]) for forecast, truth in folds)
+
+
+def _local_recipe_summary(
+    recipe: WeightRecipe,
+    *,
+    fold_maps: Mapping[
+        str,
+        tuple[tuple[tuple[float, ...], tuple[float, ...]], ...],
+    ],
+    anchor_folds: tuple[tuple[tuple[float, ...], tuple[float, ...]], ...],
+    start: int,
+    stop: int,
+    horizon: int,
+    policy: TaskLocalTournamentPolicy,
+    confidence_policy: ConfidencePolicy,
+) -> tuple[_FoldSummary, float, float] | None:
+    selected = {name: fold_maps.get(name) for name in recipe.names}
+    if any(value is None or len(value) != len(anchor_folds) for value in selected.values()):
+        return None
+    sliced_anchor = _slice_folds(
+        anchor_folds, start=start, stop=stop, horizon=horizon
+    )
+    if sliced_anchor is None:
+        return None
+    blended: list[tuple[tuple[float, ...], tuple[float, ...]]] = []
+    improvements_smae: list[float] = []
+    improvements_srmse: list[float] = []
+    anchor_joints: list[float] = []
+    child_joints: list[float] = []
+    for index, (_anchor_forecast, truth) in enumerate(sliced_anchor):
+        inputs: dict[str, tuple[float, ...]] = {}
+        for name in recipe.names:
+            raw = selected[name]
+            assert raw is not None
+            forecast, candidate_truth = raw[index]
+            if candidate_truth != anchor_folds[index][1] or len(forecast) != horizon:
+                return None
+            inputs[name] = forecast[start:stop]
+        child_forecast = _blend(recipe.names, recipe.weights, inputs)
+        if child_forecast is None:
+            return None
+        blended.append((child_forecast, truth))
+        anchor_point = drcik_point_metrics(truth, sliced_anchor[index][0])
+        child_point = drcik_point_metrics(truth, child_forecast)
+        anchor_smae = float(anchor_point["smae"])
+        anchor_srmse = float(anchor_point["srmse"])
+        child_smae = float(child_point["smae"])
+        child_srmse = float(child_point["srmse"])
+        improvements_smae.append(anchor_smae - child_smae)
+        improvements_srmse.append(anchor_srmse - child_srmse)
+        anchor_joints.append(joint_scaled_error(anchor_smae, anchor_srmse))
+        child_joints.append(joint_scaled_error(child_smae, child_srmse))
+    if len(blended) < confidence_policy.minimum_paired_origins:
+        return None
+    summary = _summarize(blended)
+    anchor_summary = _summarize(sliced_anchor)
+    margin_smae = robust_effect_margin(
+        improvements_smae,
+        multiplier=confidence_policy.robust_mad_multiplier,
+    )
+    margin_srmse = robust_effect_margin(
+        improvements_srmse,
+        multiplier=confidence_policy.robust_mad_multiplier,
+    )
+    if (
+        not pareto_scaled_improvement(
+            anchor_summary.median_smae,
+            anchor_summary.median_srmse,
+            summary.median_smae,
+            summary.median_srmse,
+        )
+        or anchor_summary.median_joint - summary.median_joint
+        < policy.minimum_joint_improvement
+        or margin_smae <= 0.0
+        or margin_srmse <= 0.0
+        or summary.worst_smae_raw > policy.maximum_raw_smae
+        or summary.worst_srmse_raw > policy.maximum_raw_srmse
+        or max(
+            child - parent
+            for child, parent in zip(child_joints, anchor_joints, strict=True)
+        )
+        > policy.maximum_worst_joint_regret
+    ):
+        return None
+    return summary, margin_smae, margin_srmse
+
+
+def _qualified_region(
+    region: str,
+    *,
+    policy: TaskLocalTournamentPolicy,
+    confidence_policy: ConfidencePolicy,
+    profile: TaskProfile,
+    confidence_evidence: HierarchicalEvidenceBank,
+    candidate_names: tuple[str, ...],
+    full_forecasts: Mapping[str, tuple[float, ...]],
+    fold_maps: Mapping[
+        str,
+        tuple[tuple[tuple[float, ...], tuple[float, ...]], ...],
+    ],
+    anchor_folds: tuple[tuple[tuple[float, ...], tuple[float, ...]], ...],
+    horizon: int,
+) -> tuple[TaskLocalRegionResult, tuple[float, ...], str]:
+    start, stop = _region_bounds(region, horizon)
+    anchor = full_forecasts[policy.anchor_name][start:stop]
+    recipes = {
+        record.recipe.fingerprint: record.recipe
+        for record in confidence_evidence.records
+        if record.recipe.region == region
+        and record.recipe.names[0] == policy.anchor_name
+        and set(record.recipe.names).issubset(candidate_names)
+    }
+    qualified: list[_QualifiedRecipe] = []
+    prior_seen = False
+    for recipe in recipes.values():
+        prior = confidence_evidence.resolve(profile, recipe)
+        if prior is None:
+            continue
+        prior_seen = True
+        if (
+            prior.posterior_win_probability
+            < confidence_policy.posterior_win_probability
+            or prior.robust_margin_smae <= 0.0
+            or prior.robust_margin_srmse <= 0.0
+            or prior.p90_regret_smae_raw > policy.maximum_worst_joint_regret
+            or prior.p90_regret_srmse_raw > policy.maximum_worst_joint_regret
+        ):
+            continue
+        local = _local_recipe_summary(
+            recipe,
+            fold_maps=fold_maps,
+            anchor_folds=anchor_folds,
+            start=start,
+            stop=stop,
+            horizon=horizon,
+            policy=policy,
+            confidence_policy=confidence_policy,
+        )
+        if local is None:
+            continue
+        summary, margin_smae, margin_srmse = local
+        qualified.append(
+            _QualifiedRecipe(
+                recipe,
+                summary,
+                margin_smae,
+                margin_srmse,
+                prior.posterior_win_probability,
+            )
+        )
+    if not qualified:
+        fallback = TaskLocalRegionResult(
+            region=region,
+            start=start,
+            stop=stop,
+            selected_names=(policy.anchor_name,),
+            weights=(1.0,),
+            activated=False,
+            posterior_win_probability=0.0,
+            robust_margin_smae=0.0,
+            robust_margin_srmse=0.0,
+        )
+        reason = (
+            "local_hindcast_not_confident"
+            if prior_seen
+            else "confidence_prior_unavailable"
+        )
+        return fallback, anchor, reason
+    selected = min(
+        qualified,
+        key=lambda item: (
+            item.summary.median_joint,
+            item.summary.worst_joint,
+            item.summary.median_smae,
+            item.summary.median_srmse,
+            -item.posterior_win_probability,
+            item.recipe.fingerprint,
+        ),
+    )
+    inputs = {
+        name: full_forecasts[name][start:stop]
+        for name in selected.recipe.names
+    }
+    forecast = _blend(selected.recipe.names, selected.recipe.weights, inputs)
+    if forecast is None:
+        raise ValueError("qualified task-local recipe produced an invalid forecast")
+    return (
+        TaskLocalRegionResult(
+            region=region,
+            start=start,
+            stop=stop,
+            selected_names=selected.recipe.names,
+            weights=selected.recipe.weights,
+            activated=True,
+            posterior_win_probability=selected.posterior_win_probability,
+            robust_margin_smae=selected.local_margin_smae,
+            robust_margin_srmse=selected.local_margin_srmse,
+        ),
+        forecast,
+        "",
+    )
+
+
+def execute_confidence_task_local_ensemble(
+    policy: TaskLocalTournamentPolicy,
+    confidence_policy: ConfidencePolicy,
+    *,
+    candidate_names: Sequence[str],
+    forecasts: Mapping[str, Sequence[float]],
+    diagnostics: Mapping[str, CandidateDiagnostics],
+    horizon: int,
+    profile: TaskProfile,
+    confidence_evidence: HierarchicalEvidenceBank,
+) -> TaskLocalConfidenceResult:
+    """Use group prior plus local folds, preserving the exact anchor on doubt."""
+    if (
+        type(policy) is not TaskLocalTournamentPolicy
+        or type(confidence_policy) is not ConfidencePolicy
+        or type(profile) is not TaskProfile
+        or type(confidence_evidence) is not HierarchicalEvidenceBank
+    ):
+        raise TypeError("confidence execution requires exact policy and evidence types")
+    TaskLocalTournamentPolicy.__post_init__(policy)
+    ConfidencePolicy.__post_init__(confidence_policy)
+    HierarchicalEvidenceBank.__post_init__(confidence_evidence)
+    if confidence_evidence.policy != confidence_policy:
+        raise ValueError("confidence policy and evidence bank disagree")
+    if profile.horizon != horizon or horizon <= 0:
+        raise ValueError("confidence profile and forecast horizon disagree")
+    supplied_names = tuple(candidate_names)
+    if (
+        not supplied_names
+        or len(supplied_names) > policy.maximum_candidates
+        or supplied_names[0] != policy.anchor_name
+        or len({_canonical_name(name) for name in supplied_names})
+        != len(supplied_names)
+    ):
+        raise ValueError("confidence candidate supply must be bounded and anchored")
+    full_forecasts: dict[str, tuple[float, ...]] = {}
+    fold_maps: dict[
+        str,
+        tuple[tuple[tuple[float, ...], tuple[float, ...]], ...],
+    ] = {}
+    minimum_folds = max(
+        policy.minimum_successful_folds,
+        confidence_policy.minimum_paired_origins,
+    )
+    for name in supplied_names:
+        forecast = _finite_forecast(forecasts.get(name), horizon)
+        diagnostic = diagnostics.get(name)
+        if forecast is None or type(diagnostic) is not CandidateDiagnostics:
+            continue
+        if diagnostic.name != name:
+            continue
+        folds = _fold_data(diagnostic, minimum_folds=minimum_folds)
+        if folds is None:
+            continue
+        full_forecasts[name] = forecast
+        fold_maps[name] = folds
+    anchor = _finite_forecast(forecasts.get(policy.anchor_name), horizon)
+    if anchor is None:
+        raise ValueError("task-local confidence anchor is missing or invalid")
+    if policy.anchor_name not in fold_maps:
+        fallback_region = TaskLocalRegionResult(
+            "full", 0, horizon, (policy.anchor_name,), (1.0,), False, 0.0, 0.0, 0.0
+        )
+        return TaskLocalConfidenceResult(
+            anchor,
+            (fallback_region,),
+            False,
+            "anchor_diagnostics_unavailable",
+            task_local_fingerprint(
+                {"tournament": asdict(policy), "confidence": asdict(confidence_policy)}
+            ),
+            confidence_evidence.evidence_fingerprint,
+        )
+    full_forecasts[policy.anchor_name] = anchor
+    anchor_folds = fold_maps[policy.anchor_name]
+
+    if horizon >= confidence_policy.regional_minimum_horizon:
+        regions = tuple(
+            _qualified_region(
+                region,
+                policy=policy,
+                confidence_policy=confidence_policy,
+                profile=profile,
+                confidence_evidence=confidence_evidence,
+                candidate_names=supplied_names,
+                full_forecasts=full_forecasts,
+                fold_maps=fold_maps,
+                anchor_folds=anchor_folds,
+                horizon=horizon,
+            )
+            for region in ("early", "late")
+        )
+        if any(result.activated for result, _forecast, _reason in regions):
+            selected_regions = tuple(result for result, _forecast, _reason in regions)
+            final = tuple(
+                value
+                for _result, regional_forecast, _reason in regions
+                for value in regional_forecast
+            )
+            return TaskLocalConfidenceResult(
+                final,
+                selected_regions,
+                True,
+                None,
+                task_local_fingerprint(
+                    {"tournament": asdict(policy), "confidence": asdict(confidence_policy)}
+                ),
+                confidence_evidence.evidence_fingerprint,
+            )
+    full_result, final, reason = _qualified_region(
+        "full",
+        policy=policy,
+        confidence_policy=confidence_policy,
+        profile=profile,
+        confidence_evidence=confidence_evidence,
+        candidate_names=supplied_names,
+        full_forecasts=full_forecasts,
+        fold_maps=fold_maps,
+        anchor_folds=anchor_folds,
+        horizon=horizon,
+    )
+    return TaskLocalConfidenceResult(
+        final,
+        (full_result,),
+        full_result.activated,
+        None if full_result.activated else reason,
+        task_local_fingerprint(
+            {"tournament": asdict(policy), "confidence": asdict(confidence_policy)}
+        ),
+        confidence_evidence.evidence_fingerprint,
     )
