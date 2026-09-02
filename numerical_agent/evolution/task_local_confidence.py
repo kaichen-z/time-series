@@ -125,8 +125,8 @@ class ConfidencePolicy:
     """Host-owned evidence and confidence thresholds."""
 
     schema_version: int = 2
-    exact_minimum_support: int = 8
-    coarse_minimum_support: int = 12
+    exact_minimum_support: int = 2
+    coarse_minimum_support: int = 4
     global_minimum_support: int = 20
     posterior_win_probability: float = 0.80
     minimum_paired_origins: int = 3

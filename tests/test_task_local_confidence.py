@@ -182,7 +182,9 @@ def test_confidence_parser_round_trips_and_rejects_unknown_fields() -> None:
 
 
 def test_confidence_policy_bounds_prior_single_metric_regression() -> None:
-    assert ConfidencePolicy().maximum_prior_metric_regression == 0.05
+    policy = ConfidencePolicy()
+    assert (policy.exact_minimum_support, policy.coarse_minimum_support) == (2, 4)
+    assert policy.maximum_prior_metric_regression == 0.05
     with pytest.raises(ValueError, match="prior metric regression"):
         ConfidencePolicy(maximum_prior_metric_regression=-0.01)
 

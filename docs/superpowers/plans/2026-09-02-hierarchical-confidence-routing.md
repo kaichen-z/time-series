@@ -88,13 +88,14 @@ Expected: FAIL because `task_local_confidence` does not exist.
 ```python
 @dataclass(frozen=True)
 class ConfidencePolicy:
-    schema_version: int = 1
-    exact_minimum_support: int = 8
-    coarse_minimum_support: int = 12
+    schema_version: int = 2
+    exact_minimum_support: int = 2
+    coarse_minimum_support: int = 4
     global_minimum_support: int = 20
     posterior_win_probability: float = 0.80
     minimum_paired_origins: int = 3
     robust_mad_multiplier: float = 1.0
+    maximum_prior_metric_regression: float = 0.05
     regional_minimum_horizon: int = 4
 
 

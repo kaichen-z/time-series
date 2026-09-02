@@ -45,8 +45,10 @@ three levels:
 - global candidate evidence.
 
 Use the most specific level with enough independent task groups. Minimum
-support is eight tasks for exact morphology, twelve for coarse morphology,
-and twenty for global evidence. Smaller samples fall back to the next level;
+support is two independent examples for exact morphology, four for coarse
+morphology, and twenty for global evidence. These Train-selected support floors
+remain behind the posterior threshold, connected-group cross-fitting, and
+current-task paired hindcasts. Smaller samples fall back to the next level;
 they never borrow the held-out task or its connected entity/history group.
 
 Each evidence record stores only aggregate paired values:

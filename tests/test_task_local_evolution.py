@@ -528,7 +528,7 @@ def test_sparse_evidence_has_no_prior_and_serializes_no_task_ids() -> None:
             entity=f"Entity {index}",
             history=(float(index + 1), float(index + 2), float(index + 3)),
         )
-        for index in range(3)
+        for index in range(1)
     )
     rows = _local_rows(tasks)
     group_ids = {
