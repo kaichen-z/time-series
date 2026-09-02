@@ -1,7 +1,7 @@
 # Task-Local Adaptive Ensemble Design
 
 Date: 2026-09-02
-Status: approved in chat; pending written-spec review
+Status: approved for implementation
 Scope: Numerical Agent Champion evolution and runtime selection only
 
 ## 1. Goal
@@ -25,7 +25,8 @@ must accept any future reviewed Champion as the anchor.
   weight vector per task.
 - Do not search arbitrary candidate subsets at runtime. Screening and the
   frozen release provide a bounded reviewed candidate supply.
-- Do not reopen the already-consumed Public-99 regression set.
+- Do not use Public-99 to fit, evolve, select, or revise this version. A single
+  frozen Public regression run is required after Dev acceptance.
 
 ## 3. Existing components to reuse
 
@@ -59,7 +60,9 @@ scores. Every reported Train task metric must therefore be out-of-fold.
 
 After structure selection, the exact frozen mechanism is reconstructed from
 all 80 Train tasks. The untouched 20-task Dev partition is opened exactly once
-for acceptance. Public-99 remains unavailable to this workflow.
+for acceptance. After the release is frozen, Public-99 is evaluated once as a
+version-regression benchmark. Its results cannot return to proposal, fitting,
+selection, or policy revision.
 
 ## 5. Conditional-uplift evidence
 
@@ -133,7 +136,10 @@ OOF Train promotion requires all of the following:
 - improvements represented in multiple entity/history groups.
 
 Dev applies the same frozen mechanism and thresholds without refitting. A Dev
-failure preserves the Parent byte-for-byte. Public-99 is not evaluated again.
+failure preserves the Parent byte-for-byte. After Dev acceptance, the exact
+release is evaluated once on Public-99 against Toto and reports paired capped
+and raw sMAE/sRMSE, tails, coverage, and win/tie/loss. Public output is
+report-only and cannot authorize another mutation in this version.
 
 ## 9. Failure behavior
 
@@ -179,8 +185,11 @@ Required tests:
 7. no labels, task IDs, raw forecasts, Dev, or Public enter proposal feedback;
 8. accepted package replay is bit-exact and LLM-free;
 9. deterministic fake integration plus the current 80-task OOF run;
-10. exactly one frozen 20-task Dev evaluation if OOF gates pass.
+10. exactly one frozen 20-task Dev evaluation if OOF gates pass;
+11. exactly one frozen Public-99 regression after Dev acceptance, with no API
+    path from its result back into evolution.
 
 Success means the v2 mechanism produces an OOF-safe policy and either passes
 Dev or honestly retains Toto. A claimed improvement requires both capped sMAE
-and sRMSE reporting; no result is selected from Public-99.
+and sRMSE reporting. Public-99 is mandatory final regression evidence, never a
+selection or tuning authority for the same version.
