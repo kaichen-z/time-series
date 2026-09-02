@@ -422,6 +422,11 @@ def test_prompt_has_no_labels_tasks_or_numeric_authority() -> None:
         "operator",
     ]
     assert payload["output_schema"]["relational_constraints"] == [
+        "select requires exactly 1 parent",
+        (
+            "route, horizon_route, weighted, median, and bounded_overlay "
+            "require exactly 2 parents"
+        ),
         "fallback_parent must be one of the same recipe's parents",
         "each assumption candidate_name must be one of the same recipe's parents",
         "each assumption operator must equal the same recipe's kind",
@@ -802,7 +807,19 @@ def test_proposer_retries_schema_once_without_returning_partial_output() -> None
     assert len(propose_champion_recipes(recovered, PARENT, INVENTORY, EVIDENCE)) == 5
     assert len(recovered.calls) == 2
     assert recovered.calls[0]["system"] == recovered.calls[1]["system"]
-    assert recovered.calls[0]["messages"] == recovered.calls[1]["messages"]
+    assert recovered.calls[0]["messages"] != recovered.calls[1]["messages"]
+    retry_messages = recovered.calls[1]["messages"]
+    assert len(retry_messages) == 2
+    correction = json.loads(retry_messages[1]["content"])
+    assert correction == {
+        "schema_retry": {
+            "instruction": (
+                "Discard the previous response and return a complete corrected object. "
+                "Use candidate names exactly as listed in inventory."
+            ),
+            "reason": "Champion response must be strict JSON",
+        }
+    }
 
     first = valid_response()
     first["recipes"] = first["recipes"][:4]  # type: ignore[index]

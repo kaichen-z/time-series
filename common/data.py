@@ -63,13 +63,16 @@ def _to_task(record: dict) -> Task:
     metadata = _metadata(record)
     showcase = _showcase(record)
     entity = showcase.get("entity", {})
+    raw_seasonal_period = metadata.get("seasonal_period")
     return Task(
         task_id=record["benchmark_id"],
         history_values=tuple(float(value) for value in series["history_values"]),
         future_values=_future_values(record),
         prediction_length=int(metadata["prediction_length"]),
         frequency=str(metadata["frequency"]),
-        seasonal_period=metadata.get("seasonal_period"),
+        seasonal_period=(
+            None if raw_seasonal_period is None else str(raw_seasonal_period)
+        ),
         entity_name=str(record.get("entity_name") or entity.get("name") or "unknown"),
     )
 

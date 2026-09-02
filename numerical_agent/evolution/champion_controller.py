@@ -372,7 +372,13 @@ class ChampionProposerAdapter:
             parent_recipe = cast(ChampionRecipe, parent)
         else:
             _lifecycle_fail("Codex proposer Parent is malformed")
-        return propose_champion_recipes(client, parent_recipe, inventory, evidence)
+        return propose_champion_recipes(
+            client,
+            parent_recipe,
+            inventory,
+            evidence,
+            generation=generation,
+        )
 
     def __call__(self, parent: object, evidence: ProposerEvidence) -> object:
         _lifecycle_fail("formal proposer invocation requires a host generation")
@@ -3390,13 +3396,12 @@ def _policy_forecast(
         diagnostics: dict[str, CandidateDiagnostics] = {}
         for name, row in zip(policy.recipe.parents, parent_rows, strict=True):
             if row is None or row.forecast is None:
-                return None, "parent_forecast_unavailable"
+                continue
             if row.history != fallback.history:
                 return None, "history_mismatch"
-            if row.diagnostic is None or not _valid_history_diagnostic(row.diagnostic):
-                return None, "history_diagnostic_unavailable"
             forecasts[name] = row.forecast
-            diagnostics[name] = _runtime_diagnostic(row.diagnostic)
+            if row.diagnostic is not None and _valid_history_diagnostic(row.diagnostic):
+                diagnostics[name] = _runtime_diagnostic(row.diagnostic)
         execution = cast(
             ChampionExecution,
             active_executor(
@@ -3408,7 +3413,13 @@ def _policy_forecast(
                 fallback.profile.horizon,
             ),
         )
-        if execution.fallback_reason not in {None, "assumption_not_satisfied"}:
+        if execution.fallback_reason not in {
+            None,
+            "assumption_not_satisfied",
+            "missing_parent",
+            "invalid_parent_forecast",
+            "invalid_diagnostics",
+        }:
             return None, f"runtime_{execution.fallback_reason}"
         return execution.forecast, None
 
@@ -3585,8 +3596,9 @@ def _parent_rows(
 
 
 def _stage_gate(config: ChampionEvolutionConfig, *, final: bool) -> ChampionGateConfig:
-    del final
-    return config.gate_config
+    if final or config.gate_config.minimum_improved_folds <= 1:
+        return config.gate_config
+    return replace(config.gate_config, minimum_improved_folds=1)
 
 
 def _evaluate_stage(
@@ -3688,20 +3700,44 @@ def _feedback(states: tuple[_AttemptState, ...]) -> ProposerEvidence:
     )
     if len(scored_states) + len(invalid_states) != len(states):
         _fail("every Build attempt requires genuine or typed invalid feedback")
+
+    by_recipe: dict[str, list[_AttemptState]] = {}
+    for state in states:
+        by_recipe.setdefault(champion_fingerprint(state.policy.recipe), []).append(state)
+
+    representative_scored: list[_AttemptState] = []
     invalid_attempts: list[_InvalidAttemptAggregate] = []
-    for state in invalid_states:
+    for recipe_sha256, recipe_states in by_recipe.items():
+        scored = [state for state in recipe_states if state in scored_states]
+        if scored:
+            representative_scored.append(
+                max(
+                    scored,
+                    key=lambda state: (
+                        state.stage_task_counts[-1],
+                        cast(ChampionComparison, state.comparison).accepted,
+                        cast(ChampionComparison, state.comparison).joint_improvement,
+                        state.fitted_id,
+                    ),
+                )
+            )
+            continue
+        invalid = [state for state in recipe_states if state in invalid_states]
+        if not invalid:
+            _fail("Build recipe feedback lost its host binding")
+        state = max(invalid, key=lambda item: (item.stage_task_counts[-1], item.fitted_id))
         if champion_fingerprint(state.policy) != state.fitted_id or not state.stage_task_counts:
             _fail("invalid Build attempt feedback lost its host binding")
         invalid_attempts.append(
             _InvalidAttemptAggregate(
-                structure_sha256=state.fitted_id,
+                structure_sha256=recipe_sha256,
                 kind=state.policy.recipe.kind,
                 stage_support=state.stage_task_counts[-1],
                 reason_code=state.invalid_reason,
             )
         )
     grouped: dict[tuple[str, ...], list[_AttemptState]] = {}
-    for state in scored_states:
+    for state in representative_scored:
         comparison = cast(ChampionComparison, state.comparison)
         task_ids = tuple(
             row.task_id

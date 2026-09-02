@@ -34,7 +34,11 @@ from .evolution.champion_controller import (
     partition_train_tasks,
     task_content_fingerprint,
 )
-from .evolution.champion_evidence import ChampionHistoryDiagnostic, ChampionTaskRow
+from .evolution.champion_evidence import (
+    ChampionEvidenceError,
+    ChampionHistoryDiagnostic,
+    ChampionTaskRow,
+)
 from .evolution.champion_evidence import ChampionGateConfig
 from .evolution.execution import Task as RuntimeTask
 from .evolution.forecast_store import ForecastStore
@@ -64,6 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--proposer-cache-dir", default=None)
     parser.add_argument("--candidate-minimum-gain", type=float, default=0.005)
     parser.add_argument("--research-target-gain", type=float, default=0.05)
+    parser.add_argument("--maximum-task-regret-smae", type=float, default=0.25)
+    parser.add_argument("--maximum-task-regret-srmse", type=float, default=0.25)
     parser.add_argument("--output-dir")
     parser.add_argument("--authority-root", required=True)
     parser.add_argument("--authority-identity", required=True)
@@ -89,6 +95,14 @@ def _require_normal_arguments(args: argparse.Namespace) -> None:
             "normal evolution requires "
             + ", ".join("--" + name.replace("_", "-") for name in missing)
         )
+
+
+def _formal_gate_config(args: argparse.Namespace) -> ChampionGateConfig:
+    return ChampionGateConfig(
+        maximum_task_regret_smae=float(args.maximum_task_regret_smae),
+        maximum_task_regret_srmse=float(args.maximum_task_regret_srmse),
+        minimum_improved_folds=4,
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -365,16 +379,26 @@ def _materialize_rows(
                 failure = None
             except Exception as error:
                 forecast, failure = None, f"{type(error).__name__}: {error}"[:10000]
-            diagnostic = ChampionHistoryDiagnostic.from_candidate(
-                diagnose_candidate(
-                    task,
-                    name,
-                    family,
-                    store.forecast,
-                    HindcastConfig(),
-                    runtime_settings={"forecast_store": store.identity_hash},
-                )
+            candidate_diagnostic = diagnose_candidate(
+                task,
+                name,
+                family,
+                store.forecast,
+                HindcastConfig(),
+                runtime_settings={"forecast_store": store.identity_hash},
             )
+            try:
+                diagnostic = ChampionHistoryDiagnostic.from_candidate(
+                    candidate_diagnostic
+                )
+            except ChampionEvidenceError:
+                diagnostic = None
+                if failure is None:
+                    forecast = None
+                    failure = (
+                        "HistoryDiagnosticUnavailable: "
+                        f"{candidate_diagnostic.reason_code}"
+                    )[:10000]
             rows.append(
                 ChampionTaskRow(
                     task.task_id,
@@ -714,6 +738,7 @@ def main(argv: list[str] | None = None) -> int:
         generations=args.generations,
         candidate_minimum_gain=float(args.candidate_minimum_gain),
         research_target_gain=float(args.research_target_gain),
+        gate_config=_formal_gate_config(args),
         build_task_ids=tuple(task.task_id for task in parts.build),
         screen_task_ids=_fold_stratified_screen_task_ids(
             parts.build,

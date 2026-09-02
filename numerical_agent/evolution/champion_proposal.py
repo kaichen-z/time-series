@@ -496,10 +496,12 @@ def _host_recipe_payload(
     recipe: dict[str, object],
     *,
     recipe_index: int,
+    generation: int | None,
     reserved: set[str],
 ) -> dict[str, object]:
+    prefix = "proposed" if generation is None else f"generation_{generation}"
     recipe_name = _allocate_host_identifier(
-        f"proposed_recipe_{recipe_index}", reserved
+        f"{prefix}_recipe_{recipe_index}", reserved
     )
     assumptions = cast(list[dict[str, object]], recipe["assumptions"])
     return {
@@ -511,7 +513,7 @@ def _host_recipe_payload(
             _host_assumption_payload(
                 assumption,
                 assumption_id=_allocate_host_identifier(
-                    f"proposed_assumption_{recipe_index}_{assumption_index}",
+                    f"{prefix}_assumption_{recipe_index}_{assumption_index}",
                     reserved,
                 ),
             )
@@ -526,8 +528,11 @@ def parse_champion_response(
     *,
     minimum: int = 5,
     maximum: int = 10,
+    generation: int | None = None,
 ) -> tuple[ChampionRecipe, ...]:
     """Parse an exact recipe batch with no model-owned numeric parameters."""
+    if generation is not None and (type(generation) is not int or generation <= 0):
+        _fail("Champion generation must be an exact positive integer")
     lower, upper = _validate_limits(minimum, maximum)
     inventory_names = _inventory_names(inventory)
     payload = _response_payload(response)
@@ -555,6 +560,7 @@ def parse_champion_response(
         recipe_payload = _host_recipe_payload(
             closed_recipe,
             recipe_index=recipe_index,
+            generation=generation,
             reserved=reserved,
         )
         try:
@@ -634,6 +640,11 @@ def _proposal_payload(
             "allowed_directions": list(_DIRECTIONS),
             "allowed_horizon_regions": list(_HORIZON_REGIONS),
             "relational_constraints": [
+                "select requires exactly 1 parent",
+                (
+                    "route, horizon_route, weighted, median, and bounded_overlay "
+                    "require exactly 2 parents"
+                ),
                 "fallback_parent must be one of the same recipe's parents",
                 "each assumption candidate_name must be one of the same recipe's parents",
                 "each assumption operator must equal the same recipe's kind",
@@ -650,6 +661,7 @@ def propose_champion_recipes(
     *,
     minimum: int = 5,
     maximum: int = 10,
+    generation: int | None = None,
 ) -> tuple[ChampionRecipe, ...]:
     """Request structures only, retrying one malformed schema exactly once."""
     if not hasattr(llm, "complete") or not callable(llm.complete):
@@ -679,12 +691,34 @@ def propose_champion_recipes(
                 inventory,
                 minimum=minimum,
                 maximum=maximum,
+                generation=generation,
             )
         except ChampionProposalError as error:
             if attempt == 1:
                 raise ChampionProposalError(
                     "Champion generation rejected after one schema retry"
                 ) from error
+            correction = {
+                "schema_retry": {
+                    "instruction": (
+                        "Discard the previous response and return a complete corrected object. "
+                        "Use candidate names exactly as listed in inventory."
+                    ),
+                    "reason": str(error),
+                }
+            }
+            messages = [
+                *messages,
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        correction,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        allow_nan=False,
+                    ),
+                },
+            ]
     raise AssertionError("unreachable")
 
 

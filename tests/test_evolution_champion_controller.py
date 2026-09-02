@@ -715,6 +715,79 @@ def test_sealed_codex_proposer_config_is_lazy_and_manifest_distinct(
             ),
         ),
     )
+
+
+def test_sealed_codex_proposer_allocates_generation_scoped_host_ids(monkeypatch) -> None:
+    class Response:
+        text = json.dumps(
+            {
+                "recipes": [
+                    {
+                        "kind": "select",
+                        "parents": [f"better_{letter}"],
+                        "fallback_parent": f"better_{letter}",
+                        "assumptions": [
+                            {
+                                "candidate_name": f"better_{letter}",
+                                "feature": feature,
+                                "direction": "above",
+                                "horizon_region": "full",
+                                "operator": "select",
+                            }
+                        ],
+                    }
+                    for letter, feature in zip(
+                        "abcde",
+                        (
+                            "history_length",
+                            "horizon",
+                            "horizon_ratio",
+                            "zero_fraction",
+                            "trend_strength",
+                        ),
+                        strict=True,
+                    )
+                ]
+            }
+        )
+
+    class DeterministicClient:
+        def __init__(self, config) -> None:
+            self.config = config
+
+        def complete(self, **kwargs):
+            return Response()
+
+    monkeypatch.setattr(llm_module, "CodexCLIClient", DeterministicClient)
+    inventory = ToolDictionary(
+        "generation_scoped_inventory",
+        None,
+        0,
+        tuple(
+            MethodDefinition(name, "statistical", "fixture", status="accepted")
+            for name in ("baseline_leaf", "better_a", "better_b", "better_c", "better_d", "better_e")
+        ),
+    )
+    adapter = ChampionProposerAdapter.codex_cli(
+        identity="gpt-5.6-sol",
+        model="gpt-5.6-sol",
+        reasoning_effort="high",
+        inventory=inventory,
+    )
+    evidence = ProposerEvidence(
+        label="adaptive_train_build_diagnostic",
+        independent_generalization_claim=False,
+        morphology=(),
+        comparisons=(),
+    )
+
+    first = adapter.propose(PARENT, evidence, generation=1)
+    second = adapter.propose(PARENT, evidence, generation=2)
+
+    assert first[0].name == "generation_1_recipe_0"
+    assert second[0].name == "generation_2_recipe_0"
+    assert first[0].assumptions[0].assumption_id == "generation_1_assumption_0_0"
+    assert second[0].assumptions[0].assumption_id == "generation_2_assumption_0_0"
     adapter = ChampionProposerAdapter.codex_cli(
         identity="gpt-5.6-sol",
         model="gpt-5.6-sol",
@@ -1969,6 +2042,89 @@ def test_successive_halving_runs_fixed_8_32_64_schedule() -> None:
     assert result.generations[0].full_build_children <= 3
 
 
+def test_materialized_child_uses_safe_fallback_when_specialist_is_unavailable() -> None:
+    rows = tuple(
+        replace(row, forecast=None, failure_reason="NotApplicable")
+        if row.candidate_name == "better_a"
+        else row
+        for row in _rows(1, enriched=True)
+    )
+    recipe = ChampionRecipe(
+        name="safe_specialist_route",
+        kind="route",
+        parents=("baseline_leaf", "better_a"),
+        fallback_parent="baseline_leaf",
+        assumptions=(
+            EvolutionAssumption(
+                assumption_id="specialist_history",
+                candidate_name="better_a",
+                feature="history_length",
+                direction="above",
+                horizon_region="full",
+                operator="route",
+                rationale="History length supports the specialist.",
+                failure_condition="History length stops supporting the specialist.",
+            ),
+        ),
+    )
+    policy = FittedChampionPolicy(
+        recipe=recipe,
+        thresholds=(("specialist_history", 0.0),),
+    )
+
+    materialized = controller_module._materialize_policy(
+        policy,
+        "safe_specialist_child",
+        rows,
+        ("build_case_000",),
+    )
+    fallback = next(row for row in rows if row.candidate_name == "baseline_leaf")
+
+    assert materialized[0].forecast == fallback.forecast
+    assert materialized[0].failure_reason is None
+
+
+def test_provisional_halving_allows_local_gain_but_full_build_keeps_fold_gate() -> None:
+    def localized_rows(improved_indices: set[int]) -> tuple[ChampionTaskRow, ...]:
+        baseline = {
+            row.task_id: row.forecast
+            for row in ROWS_64
+            if row.candidate_name == "baseline_leaf"
+        }
+        localized: list[ChampionTaskRow] = []
+        for row in ROWS_64:
+            index = int(row.task_id.rsplit("_", 1)[1])
+            if row.candidate_name.startswith("better_") and index not in improved_indices:
+                localized.append(replace(row, forecast=baseline[row.task_id]))
+            else:
+                localized.append(row)
+        return tuple(localized)
+
+    strict_config = replace(
+        _config(),
+        gate_config=ChampionGateConfig(minimum_improved_folds=4),
+    )
+    enough_full_folds = run_build_evolution(
+        PARENT,
+        localized_rows({0, 11, 12, 13}),
+        RecordingProposer("better"),
+        strict_config,
+    )
+    only_one_full_fold = run_build_evolution(
+        PARENT,
+        localized_rows({0}),
+        RecordingProposer("better"),
+        strict_config,
+    )
+
+    assert enough_full_folds.shortlist
+    assert any(
+        attempt.stage_task_counts == (8, 32, 64)
+        for attempt in enough_full_folds.generations[0].attempts
+    )
+    assert only_one_full_fold.shortlist == ()
+
+
 def test_rejected_child_feedback_does_not_change_the_mutation_parent() -> None:
     parent = _parent()
     proposer = RecordingProposer("worse")
@@ -1998,7 +2154,31 @@ def test_build_feedback_is_labeled_non_independent() -> None:
         and attempt.independent_generalization_claim is False
         for attempt in result.generations[0].attempts
     )
-    assert len(result.generations[0].feedback.comparisons) == len(result.generations[0].attempts)
+    recipe_count = len(
+        {
+            champion_fingerprint(attempt.policy.recipe)
+            for attempt in result.generations[0].attempts
+        }
+    )
+    assert len(result.generations[0].feedback.comparisons) == recipe_count
+
+
+def test_build_feedback_is_bounded_by_proposed_recipe_not_numeric_expansions() -> None:
+    class FeedbackRecorder:
+        def __init__(self) -> None:
+            self.feedback: list[ProposerEvidence] = []
+
+        def __call__(self, parent, evidence) -> tuple[ChampionRecipe, ...]:
+            self.feedback.append(evidence)
+            return _proposal_batch("better", len(self.feedback) - 1)
+
+    proposer = FeedbackRecorder()
+    result = run_build_evolution(PARENT, ROWS_64, proposer, _config(generations=2))
+
+    first = result.generations[0]
+    assert len(first.attempts) > 5
+    assert len(first.feedback.comparisons) == 5
+    assert len(proposer.feedback[1].comparisons) == 5
 
 
 def test_threshold_defaults_and_membership_are_fingerprinted() -> None:
@@ -2224,13 +2404,24 @@ def test_unscorable_child_is_typed_pruned_without_aborting_valid_siblings() -> N
     assert all(attempt.comparison is None for attempt in invalid)
     assert all(attempt.invalid_reason == "unscorable_child" for attempt in invalid)
     generation_feedback = result.generations[0].feedback
-    valid_count = len(result.generations[0].attempts) - len(invalid)
-    assert len(generation_feedback.comparisons) == valid_count
-    assert len(generation_feedback.invalid_attempts) == len(invalid)
-    assert len(generation_feedback.comparisons) + len(generation_feedback.invalid_attempts) == len(
-        result.generations[0].attempts
+    valid_count = len(
+        {
+            champion_fingerprint(attempt.policy.recipe)
+            for attempt in result.generations[0].attempts
+            if attempt.status != "invalid"
+        }
     )
-    invalid_fingerprints = {champion_fingerprint(attempt.policy) for attempt in invalid}
+    invalid_count = len(
+        {champion_fingerprint(attempt.policy.recipe) for attempt in invalid}
+    )
+    assert len(generation_feedback.comparisons) == valid_count
+    assert len(generation_feedback.invalid_attempts) == invalid_count
+    assert len(generation_feedback.comparisons) + len(generation_feedback.invalid_attempts) == len(
+        {champion_fingerprint(attempt.policy.recipe) for attempt in result.generations[0].attempts}
+    )
+    invalid_fingerprints = {
+        champion_fingerprint(attempt.policy.recipe) for attempt in invalid
+    }
     assert {
         item.structure_sha256 for item in generation_feedback.invalid_attempts
     } == invalid_fingerprints
@@ -2484,7 +2675,7 @@ def test_callback_cannot_loosen_or_leave_the_registered_gate_mutated() -> None:
     assert config.fingerprint == original_fingerprint
 
 
-def test_registered_fold_gate_remains_authoritative_on_the_first_screen() -> None:
+def test_provisional_screen_relaxes_fold_gate_before_full_build() -> None:
     all_ids = tuple(f"build_case_{index:03d}" for index in range(64))
     first_stage = tuple(f"build_case_{index:03d}" for index in range(0, 40, 5))
     second_stage = (
@@ -2498,9 +2689,12 @@ def test_registered_fold_gate_remains_authoritative_on_the_first_screen() -> Non
 
     result = run_build_evolution(PARENT, ROWS_64, RecordingProposer("better"), config)
 
-    assert all(attempt.stage_task_counts == (8,) for attempt in result.generations[0].attempts)
-    assert result.generations[0].full_build_children == 0
-    assert result.shortlist == ()
+    assert any(
+        attempt.stage_task_counts == (8, 32, 64)
+        for attempt in result.generations[0].attempts
+    )
+    assert result.generations[0].full_build_children
+    assert result.shortlist
 
 
 def test_normalized_row_inventory_collision_fails_before_proposer() -> None:

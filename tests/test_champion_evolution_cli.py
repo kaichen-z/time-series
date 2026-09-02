@@ -14,6 +14,7 @@ from numerical_agent.run_champion_evolution import (
     _balanced_task_folds,
     _clean_git_source,
     _fold_stratified_screen_task_ids,
+    _formal_gate_config,
     _inventory,
     _load_screening_policy,
     _materialize_rows,
@@ -39,6 +40,27 @@ def test_evolution_cli_has_no_public_option() -> None:
     options = _options(build_parser())
     assert "--public" not in options
     assert "--public-output" not in options
+
+
+def test_evolution_cli_binds_explicit_task_regret_limits() -> None:
+    args = build_parser().parse_args(
+        [
+            "--authority-root",
+            "authority",
+            "--authority-identity",
+            "a" * 64,
+            "--maximum-task-regret-smae",
+            "0.30",
+            "--maximum-task-regret-srmse",
+            "0.31",
+        ]
+    )
+
+    gate = _formal_gate_config(args)
+
+    assert gate.maximum_task_regret_smae == 0.30
+    assert gate.maximum_task_regret_srmse == 0.31
+    assert gate.minimum_improved_folds == 4
 
 
 def test_provision_only_creates_authority_without_reading_tasks(tmp_path: Path) -> None:
@@ -145,6 +167,48 @@ def test_evolution_loader_rejects_duplicate_requested_jsonl_rows(
 
     with pytest.raises(ValueError, match="duplicate requested task"):
         load_evolution_partitions(split, tasks)
+
+
+def test_evolution_loader_normalizes_numeric_seasonal_period(
+    tmp_path: Path,
+) -> None:
+    split = tmp_path / "split.json"
+    split.write_text(
+        json.dumps(
+            {
+                "partitions": {
+                    "train": {"task_ids": ["train"]},
+                    "dev": {"task_ids": []},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    tasks = tmp_path / "tasks.jsonl"
+    tasks.write_text(
+        json.dumps(
+            {
+                "benchmark_id": "train",
+                "entity_name": "entity",
+                "series": {
+                    "history_values": [1.0, 2.0],
+                    "future_values": [3.0],
+                },
+                "task_metadata": {
+                    "prediction_length": 1,
+                    "frequency": "D",
+                    "seasonal_period": 24,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    train, dev = load_evolution_partitions(split, tasks, include_dev=False)
+
+    assert dev == ()
+    assert train[0].seasonal_period == "24"
 
 
 def test_clean_git_source_accepts_gitfile_worktree(
@@ -379,3 +443,54 @@ def test_formal_specialist_inapplicability_is_a_complete_failed_row() -> None:
     assert inactive.forecast is None
     assert inactive.failure_reason == "NotApplicable: screening_policy"
     assert by_key[("long_history_stat", "long")].forecast is not None
+
+
+def test_formal_invalid_history_diagnostic_prunes_only_that_candidate() -> None:
+    screening = ScreeningPolicy(
+        (
+            ScreeningEntry(
+                "broad_stat",
+                "statistical",
+                "keep",
+                ApplicabilityPolicy(),
+                "reviewed broad method",
+            ),
+        ),
+        ("broad_stat",),
+    )
+    task = SimpleNamespace(
+        task_id="too_short_for_hindcast",
+        entity_name="short_entity",
+        history_values=(1.0, 2.0),
+        future_values=(3.0, 4.0),
+        prediction_length=2,
+        frequency="D",
+    )
+
+    class Store:
+        identity_hash = "fixture-store"
+
+        @staticmethod
+        def forecast(
+            _name: str,
+            history: tuple[float, ...],
+            horizon: int,
+            _frequency: str,
+        ) -> tuple[float, ...]:
+            return (history[-1],) * horizon
+
+    rows = _materialize_rows(
+        Store(),  # type: ignore[arg-type]
+        (task,),  # type: ignore[arg-type]
+        (("broad_stat", "statistical"),),
+        screening,
+        {"too_short_for_hindcast": 0},
+        "build",
+    )
+
+    assert len(rows) == 1
+    assert rows[0].forecast is None
+    assert rows[0].diagnostic is None
+    assert rows[0].failure_reason == (
+        "HistoryDiagnosticUnavailable: insufficient_history"
+    )
