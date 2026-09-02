@@ -19,6 +19,7 @@ from .numerical_handoff import (
 )
 from .numerical_package import (
     _ChampionNumericalForecastPackage,
+    _TaskLocalNumericalForecastPackage,
     NumericalForecastPackage,
     RankedNumericalForecast,
     forecast_tuple,
@@ -42,6 +43,12 @@ from .screening import (
     materialize_active_dictionary,
     profile_task,
 )
+from .task_local_ensemble import (
+    TaskLocalEnsembleRelease,
+    execute_task_local_ensemble,
+    task_local_fingerprint,
+)
+from .task_local_evolution import task_morphology_key
 
 
 CandidateRunner = Callable[[str, tuple[float, ...], int, str], Sequence[float]]
@@ -95,6 +102,7 @@ def run_numerical_loop(
     diagnostics: Mapping[str, CandidateDiagnostics] | None = None,
     component_fingerprints: Mapping[str, str] | None = None,
     champion_release: ChampionRelease | None = None,
+    task_local_release: TaskLocalEnsembleRelease | None = None,
 ) -> NumericalForecastPackage:
     """Run screening, materialization, hindcasting, Morphology, and protected selection.
 
@@ -110,6 +118,13 @@ def run_numerical_loop(
         raise TypeError("hindcast_config must be a HindcastConfig")
     if champion_release is not None and type(champion_release) is not ChampionRelease:
         raise TypeError("champion_release must be a ChampionRelease or None")
+    if task_local_release is not None:
+        if type(task_local_release) is not TaskLocalEnsembleRelease:
+            raise TypeError("task_local_release must be a TaskLocalEnsembleRelease or None")
+        if champion_release is None:
+            raise ValueError("task-local execution requires its frozen Champion anchor")
+        if task_local_release.anchor_release_sha256 != champion_fingerprint(champion_release):
+            raise ValueError("task-local release does not bind the supplied Champion")
     policies = _combined_policy_map(combined_policies)
 
     # Deterministic morphology and screening always precede candidate execution.
@@ -124,6 +139,15 @@ def run_numerical_loop(
             screening_policy=screening_policy,
             combined_policies=policies,
             release=champion_release,
+        )
+    if task_local_release is not None:
+        active_names, families = _with_task_local_namespace(
+            active_names,
+            families,
+            screening_policy=screening_policy,
+            combined_policies=policies,
+            release=task_local_release,
+            profile=profile,
         )
     _validate_active_namespace(active_names, families, policies)
     active_leaf_names = tuple(
@@ -342,6 +366,40 @@ def run_numerical_loop(
                 "Champion selector returned a non-finite or wrong-horizon forecast"
             )
 
+    if task_local_release is not None:
+        supply = task_local_release.candidate_names(task_morphology_key(profile))
+        local_result = execute_task_local_ensemble(
+            task_local_release.policy,
+            candidate_names=supply,
+            forecasts={item.name: item.forecast for item in alternatives if item.name in supply},
+            diagnostics={
+                item.name: stable_diagnostics[item.name]
+                for item in alternatives
+                if item.name in supply and item.name in stable_diagnostics
+            },
+            horizon=safe_task.horizon,
+        )
+        decision = SelectionDecision(
+            mode="ensemble" if local_result.activated else "single",
+            selected=local_result.selected_names,
+            weights=local_result.weights,
+            forecast=local_result.forecast,
+            confidence=0.0,
+            reason_codes=(
+                "task_local_ensemble",
+                "activated" if local_result.activated else "anchor_fallback",
+            ),
+            rejected={},
+            baseline_name=task_local_release.anchor_name,
+            considered_candidates=supply,
+        )
+        fallback_reason = local_result.fallback_reason
+        card = None
+        accepted = ()
+        handoff = ()
+        if not valid_forecast(decision.forecast, safe_task.horizon):
+            raise ValueError("task-local selector returned an invalid forecast")
+
     fingerprints = build_component_fingerprints(
         input_fingerprint=task_input_fingerprint(
             task_id=safe_task.task_id,
@@ -360,8 +418,16 @@ def run_numerical_loop(
     )
     if champion_release is not None:
         fingerprints = _with_champion_fingerprints(fingerprints, champion_release)
+    if task_local_release is not None:
+        fingerprints = _with_task_local_fingerprints(
+            fingerprints,
+            task_local_release,
+            task_local_release.candidate_names(task_morphology_key(profile)),
+        )
     package_type = (
-        _ChampionNumericalForecastPackage
+        _TaskLocalNumericalForecastPackage
+        if task_local_release is not None
+        else _ChampionNumericalForecastPackage
         if champion_release is not None
         else NumericalForecastPackage
     )
@@ -488,6 +554,40 @@ def _with_champion_fallback_namespace(
             raise ValueError("Champion configured Combined fallback has no policy")
         for parent in policy.parents:
             include(parent)
+    return tuple(names), resolved
+
+
+def _with_task_local_namespace(
+    active_names: tuple[str, ...],
+    families: Mapping[str, str],
+    *,
+    screening_policy: ScreeningPolicy,
+    combined_policies: Mapping[str, CombinedPolicy],
+    release: TaskLocalEnsembleRelease,
+    profile: object,
+) -> tuple[tuple[str, ...], dict[str, str]]:
+    names = list(active_names)
+    resolved = dict(families)
+
+    def include(name: str) -> None:
+        if name in resolved:
+            return
+        entry = screening_policy.get(name)
+        if entry is None or entry.status not in {"keep", "specialized"}:
+            raise ValueError(f"task-local candidate {name!r} is not reviewed")
+        names.append(name)
+        resolved[name] = entry.family
+        if entry.family == "combined":
+            policy = combined_policies.get(name)
+            if policy is None:
+                raise ValueError("task-local Combined candidate has no policy")
+            for parent in policy.parents:
+                include(parent)
+
+    if not hasattr(profile, "task_id"):
+        raise ValueError("task-local namespace requires a TaskProfile")
+    for candidate in release.candidate_names(task_morphology_key(profile)):
+        include(candidate)
     return tuple(names), resolved
 
 
@@ -744,4 +844,27 @@ def _with_champion_fingerprints(
             f"{sorted(conflicts)!r}"
         )
     result.update(champion)
+    return MappingProxyType(dict(sorted(result.items())))
+
+
+def _with_task_local_fingerprints(
+    fingerprints: Mapping[str, str],
+    release: TaskLocalEnsembleRelease,
+    supply: tuple[str, ...],
+) -> Mapping[str, str]:
+    additions = {
+        "task_local_release": task_local_fingerprint(release),
+        "task_local_policy": task_local_fingerprint(release.policy),
+        "task_local_group_supply": task_local_fingerprint({"candidate_names": list(supply)}),
+    }
+    result = dict(fingerprints)
+    conflicts = {
+        key for key, value in additions.items() if key in result and result[key] != value
+    }
+    if conflicts:
+        raise ValueError(
+            "provided component fingerprints conflict with task-local values: "
+            f"{sorted(conflicts)!r}"
+        )
+    result.update(additions)
     return MappingProxyType(dict(sorted(result.items())))

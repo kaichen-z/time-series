@@ -420,8 +420,14 @@ def _blend(
     forecasts: Mapping[str, tuple[float, ...]],
 ) -> tuple[float, ...] | None:
     horizon = len(forecasts[names[0]])
+    equal = len(set(weights)) == 1
     values = tuple(
-        math.fsum(weight * forecasts[name][step] for name, weight in zip(names, weights, strict=True))
+        statistics.fmean(forecasts[name][step] for name in names)
+        if equal
+        else sum(
+            weight * forecasts[name][step]
+            for name, weight in zip(names, weights, strict=True)
+        )
         for step in range(horizon)
     )
     return values if all(math.isfinite(value) for value in values) else None

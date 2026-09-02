@@ -13,6 +13,7 @@ from numerical_agent.evolution.champion import (
     ChampionRelease,
     EvolutionAssumption,
     FittedChampionPolicy,
+    champion_fingerprint,
 )
 from numerical_agent.evolution.champion_runtime import (
     ChampionExecution,
@@ -31,6 +32,10 @@ from numerical_agent.evolution.screening import (
     FeatureTest,
     ScreeningEntry,
     ScreeningPolicy,
+)
+from numerical_agent.evolution.task_local_ensemble import (
+    TaskLocalEnsembleRelease,
+    TaskLocalTournamentPolicy,
 )
 
 
@@ -106,6 +111,8 @@ def _run(
     release: ChampionRelease | None = None,
     calls: Counter[str] | None = None,
     screening: ScreeningPolicy | None = None,
+    task_local_release: TaskLocalEnsembleRelease | None = None,
+    diagnostics: dict[str, CandidateDiagnostics] | None = None,
 ):
     runner_calls = calls if calls is not None else Counter()
 
@@ -121,10 +128,78 @@ def _run(
         _task(),
         screening_policy=_screening() if screening is None else screening,
         candidate_runner=runner,
-        diagnostics=_diagnostics(),
+        diagnostics=_diagnostics() if diagnostics is None else diagnostics,
         decision_policy=DecisionPolicy(ensemble_enabled=False),
         champion_release=release,
+        task_local_release=task_local_release,
     )
+
+
+def _task_local_release(anchor: ChampionRelease) -> TaskLocalEnsembleRelease:
+    return TaskLocalEnsembleRelease(
+        schema_version=1,
+        anchor_release_sha256=champion_fingerprint(anchor),
+        anchor_name="specialist",
+        policy=TaskLocalTournamentPolicy(anchor_name="specialist"),
+        default_candidate_names=("specialist", "safe_anchor"),
+        group_supplies=(),
+        grouping_fingerprint="0" * 64,
+        oof_report_sha256="1" * 64,
+        source_hashes=anchor.source_hashes,
+        metric_policy_fingerprint=anchor.metric_policy_fingerprint,
+        lineage=("task_local_v1",),
+    )
+
+
+def test_task_local_release_replays_package_without_rerunning_leaves() -> None:
+    champion = _release()
+    calls: Counter[str] = Counter()
+    truth = (1.0, 2.0)
+    diagnostics = {
+        "specialist": CandidateDiagnostics.synthetic(
+            name="specialist",
+            family="statistical",
+            median_mase=1.0,
+            fold_forecasts=((0.0, 0.0),) * 3,
+            fold_truths=(truth,) * 3,
+            median_smae=1.0,
+            median_srmse=1.0,
+        ),
+        "safe_anchor": CandidateDiagnostics.synthetic(
+            name="safe_anchor",
+            family="tsfm",
+            median_mase=0.0,
+            fold_forecasts=(truth,) * 3,
+            fold_truths=(truth,) * 3,
+            median_smae=0.0,
+            median_srmse=0.0,
+        ),
+    }
+
+    package = _run(
+        release=champion,
+        task_local_release=_task_local_release(champion),
+        diagnostics=diagnostics,
+        calls=calls,
+    )
+
+    assert package.selection_decision.selected == ("specialist", "safe_anchor")
+    assert package.selection_decision.weights == (0.5, 0.5)
+    assert package.final_forecast == (4.0, 4.5)
+    assert calls == Counter({"safe_anchor": 1, "specialist": 1})
+    assert set(package.component_fingerprints) >= {
+        "task_local_release",
+        "task_local_policy",
+        "task_local_group_supply",
+    }
+
+
+def test_legacy_champion_path_is_unchanged_without_task_local_release() -> None:
+    first = _run(release=_release())
+    second = _run(release=_release(), task_local_release=None)
+
+    assert first == second
+    assert "task_local_release" not in first.component_fingerprints
 
 
 def test_champion_selects_only_an_already_materialized_ranked_forecast(

@@ -23,6 +23,9 @@ _RETRIEVAL_FIELDS = frozenset({"assumption_id", "kind", "claim", "failure_condit
 _CHAMPION_FINGERPRINT_KEYS = frozenset(
     {"champion_release", "champion_recipe", "champion_assumptions"}
 )
+_TASK_LOCAL_FINGERPRINT_KEYS = frozenset(
+    {"task_local_release", "task_local_policy", "task_local_group_supply"}
+)
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -246,6 +249,27 @@ class _ChampionNumericalForecastPackage(NumericalForecastPackage):
         ):
             raise ValueError(
                 "Champion component fingerprints must be complete SHA-256 values"
+            )
+
+
+@dataclass(frozen=True)
+class _TaskLocalNumericalForecastPackage(NumericalForecastPackage):
+    """Runtime-only package type binding Champion plus local-tournament provenance."""
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        raise TypeError("Task-local package type is sealed")
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.selection_decision.reason_codes[:1] != ("task_local_ensemble",):
+            raise ValueError("Task-local package requires the fixed provenance marker")
+        required = _CHAMPION_FINGERPRINT_KEYS | _TASK_LOCAL_FINGERPRINT_KEYS
+        if required - set(self.component_fingerprints) or any(
+            _SHA256.fullmatch(self.component_fingerprints[key]) is None
+            for key in required
+        ):
+            raise ValueError(
+                "Task-local component fingerprints must be complete SHA-256 values"
             )
 
 
