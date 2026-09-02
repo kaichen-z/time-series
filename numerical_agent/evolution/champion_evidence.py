@@ -48,6 +48,31 @@ _UNIT_PROFILE_FIELDS = frozenset({
     "stationarity_score",
     "recent_regime_confidence",
 })
+_STRUCTURAL_RECIPE_KINDS = frozenset({
+    "select",
+    "route",
+    "horizon_route",
+    "weighted",
+    "median",
+    "bounded_overlay",
+})
+_STRUCTURAL_FEATURES = frozenset({
+    "history_length",
+    "horizon",
+    "horizon_ratio",
+    "zero_fraction",
+    "trend_strength",
+    "periodicity_strength",
+    "periodicity_confidence",
+    "outlier_fraction",
+    "noise_relative_scale",
+    "stationarity_score",
+    "recent_regime_confidence",
+    "intermittency_adi",
+    "intermittency_cv2",
+})
+_STRUCTURAL_DIRECTIONS = frozenset({"above", "below"})
+_STRUCTURAL_HORIZON_REGIONS = frozenset({"early", "late", "full"})
 
 
 class ChampionEvidenceError(ValueError):
@@ -1078,6 +1103,104 @@ class _InvalidAttemptAggregate:
 
 
 @dataclass(frozen=True)
+class _StructuralAssumption:
+    """Closed, text-free assumption shape previously proposed by the model."""
+
+    candidate_name: str
+    feature: str
+    direction: Literal["above", "below"]
+    horizon_region: Literal["early", "late", "full"]
+    operator: Literal[
+        "select", "route", "horizon_route", "weighted", "median",
+        "bounded_overlay",
+    ]
+
+    def __post_init__(self) -> None:
+        _public_identifier(self.candidate_name, "structure assumption candidate")
+        if type(self.feature) is not str or self.feature not in _STRUCTURAL_FEATURES:
+            _fail("structure assumption feature must be a closed reviewed feature")
+        if type(self.direction) is not str or self.direction not in _STRUCTURAL_DIRECTIONS:
+            _fail("structure assumption direction must be a closed direction")
+        if (
+            type(self.horizon_region) is not str
+            or self.horizon_region not in _STRUCTURAL_HORIZON_REGIONS
+        ):
+            _fail("structure assumption horizon region must be a closed region")
+        if type(self.operator) is not str or self.operator not in _STRUCTURAL_RECIPE_KINDS:
+            _fail("structure assumption operator must be a closed recipe kind")
+
+    def to_payload(self) -> dict[str, str]:
+        return {
+            "candidate_name": self.candidate_name,
+            "feature": self.feature,
+            "direction": self.direction,
+            "horizon_region": self.horizon_region,
+            "operator": self.operator,
+        }
+
+
+@dataclass(frozen=True)
+class _ScoredRecipeStructure:
+    """Host-bound recipe shape that gives opaque Build scores semantic meaning."""
+
+    candidate_name: str
+    recipe_sha256: str
+    kind: Literal[
+        "select", "route", "horizon_route", "weighted", "median",
+        "bounded_overlay",
+    ]
+    parents: tuple[str, ...]
+    fallback_parent: str
+    assumptions: tuple[_StructuralAssumption, ...]
+    stage_support: int
+
+    def __post_init__(self) -> None:
+        _public_identifier(self.candidate_name, "structure candidate_name")
+        if type(self.recipe_sha256) is not str or _SHA256.fullmatch(
+            self.recipe_sha256
+        ) is None:
+            _fail("structure recipe_sha256 must be a canonical SHA-256")
+        if type(self.kind) is not str or self.kind not in _STRUCTURAL_RECIPE_KINDS:
+            _fail("structure kind must be a closed recipe kind")
+        if type(self.parents) is not tuple or any(
+            type(parent) is not str for parent in self.parents
+        ):
+            _fail("structure parents must be an exact string tuple")
+        expected_parents = 1 if self.kind == "select" else 2
+        if len(self.parents) != expected_parents:
+            _fail("structure parent count must match its recipe kind")
+        for parent in self.parents:
+            _public_identifier(parent, "structure parent")
+        normalized = tuple(unicodedata.normalize("NFKC", item).casefold() for item in self.parents)
+        if len(normalized) != len(set(normalized)):
+            _fail("structure parents must be normalized-unique")
+        _public_identifier(self.fallback_parent, "structure fallback parent")
+        if self.fallback_parent not in self.parents:
+            _fail("structure fallback parent must be one of its parents")
+        if type(self.assumptions) is not tuple or not 1 <= len(self.assumptions) <= 3:
+            _fail("structure requires one through three exact assumptions")
+        if any(type(item) is not _StructuralAssumption for item in self.assumptions):
+            _fail("structure assumptions must use exact closed records")
+        for item in self.assumptions:
+            _StructuralAssumption.__post_init__(item)
+            if item.candidate_name not in self.parents or item.operator != self.kind:
+                _fail("structure assumption must bind its own parent and recipe kind")
+        if type(self.stage_support) is not int or not 1 <= self.stage_support <= _MAX_ROWS:
+            _fail("structure stage support must be a positive bounded integer")
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "candidate_name": self.candidate_name,
+            "recipe_sha256": self.recipe_sha256,
+            "kind": self.kind,
+            "parents": list(self.parents),
+            "fallback_parent": self.fallback_parent,
+            "assumptions": [item.to_payload() for item in self.assumptions],
+            "stage_support": self.stage_support,
+        }
+
+
+@dataclass(frozen=True)
 class ProposerEvidence:
     """The complete recursively sanitized projection allowed into a proposer."""
 
@@ -1086,6 +1209,7 @@ class ProposerEvidence:
     morphology: tuple[MorphologyAggregate, ...]
     comparisons: tuple[_ProposerComparison, ...]
     invalid_attempts: tuple[_InvalidAttemptAggregate, ...] = ()
+    structures: tuple[_ScoredRecipeStructure, ...] = ()
 
     def __post_init__(self) -> None:
         if self.label != "adaptive_train_build_diagnostic":
@@ -1115,6 +1239,20 @@ class ProposerEvidence:
             _fail("invalid attempt evidence contains a duplicate structure/reason")
         if invalid_keys != tuple(sorted(invalid_keys)):
             _fail("invalid attempt evidence must use canonical deterministic order")
+        if type(self.structures) is not tuple or any(
+            type(item) is not _ScoredRecipeStructure for item in self.structures
+        ):
+            _fail("scored recipe structures must be an exact aggregate tuple")
+        for item in self.structures:
+            _ScoredRecipeStructure.__post_init__(item)
+        structure_names = tuple(item.candidate_name for item in self.structures)
+        if len(structure_names) != len(set(structure_names)):
+            _fail("scored recipe structures contain duplicate candidates")
+        if structure_names != tuple(sorted(structure_names)):
+            _fail("scored recipe structures must use canonical deterministic order")
+        comparison_names = tuple(item.candidate_name for item in self.comparisons)
+        if self.structures and set(structure_names) != set(comparison_names):
+            _fail("scored recipe structures must exactly bind comparison candidates")
 
     def to_payload(self) -> dict[str, object]:
         """Return a JSON-safe payload with no scorer-internal identities or arrays."""
@@ -1154,6 +1292,7 @@ def _proposer_payload(evidence: ProposerEvidence) -> dict[str, object]:
             }
             for item in evidence.invalid_attempts
         ],
+        "structures": [item.to_payload() for item in evidence.structures],
     }
 
 

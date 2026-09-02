@@ -2178,7 +2178,73 @@ def test_build_feedback_is_bounded_by_proposed_recipe_not_numeric_expansions() -
     first = result.generations[0]
     assert len(first.attempts) > 5
     assert len(first.feedback.comparisons) == 5
+    assert len(first.feedback.structures) == 5
+    assert {item.candidate_name for item in first.feedback.structures} == {
+        item.candidate_name for item in first.feedback.comparisons
+    }
+    assert all(item.stage_support in {8, 32, 64} for item in first.feedback.structures)
+    attempted_recipes = {
+        champion_fingerprint(attempt.policy.recipe): attempt.policy.recipe
+        for attempt in first.attempts
+    }
+    for item in first.feedback.structures:
+        assert item.recipe_sha256 in attempted_recipes
+        recipe = attempted_recipes[item.recipe_sha256]
+        assert item.kind == recipe.kind
+        assert item.parents == recipe.parents
+        assert item.fallback_parent == recipe.fallback_parent
+        assert tuple(
+            (
+                assumption.candidate_name,
+                assumption.feature,
+                assumption.direction,
+                assumption.horizon_region,
+                assumption.operator,
+            )
+            for assumption in recipe.assumptions
+        ) == tuple(
+            (
+                assumption.candidate_name,
+                assumption.feature,
+                assumption.direction,
+                assumption.horizon_region,
+                assumption.operator,
+            )
+            for assumption in item.assumptions
+        )
     assert len(proposer.feedback[1].comparisons) == 5
+    assert proposer.feedback[1].structures == first.feedback.structures
+
+
+def test_first_screen_keeps_low_middle_high_tied_threshold_representatives() -> None:
+    result = run_build_evolution(PARENT, ROWS_64, RecordingProposer("better"), _config())
+    attempts_by_recipe: dict[str, list[object]] = {}
+    for attempt in result.generations[0].attempts:
+        attempts_by_recipe.setdefault(
+            champion_fingerprint(attempt.policy.recipe), []
+        ).append(attempt)
+
+    preserved = False
+    for attempts in attempts_by_recipe.values():
+        all_thresholds = sorted(
+            attempt.policy.thresholds[0][1] for attempt in attempts
+        )
+        next_screen = sorted(
+            attempt.policy.thresholds[0][1]
+            for attempt in attempts
+            if attempt.stage_task_counts[:2] == (8, 32)
+        )
+        if len(next_screen) != 3:
+            continue
+        assert next_screen == [
+            all_thresholds[0],
+            all_thresholds[len(all_thresholds) // 2],
+            all_thresholds[-1],
+        ]
+        preserved = True
+        break
+
+    assert preserved
 
 
 def test_threshold_defaults_and_membership_are_fingerprinted() -> None:

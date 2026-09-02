@@ -99,7 +99,11 @@ expansion and all evaluation belong exclusively to trusted host code. A
 malformed response causes at most one identical schema retry and no partial
 recipe is retained. In every recipe, fallback_parent must be one of that same
 recipe's parents; every assumption candidate_name must be one of those same
-parents; and every assumption operator must exactly equal that recipe's kind."""
+parents; and every assumption operator must exactly equal that recipe's kind.
+For later generations, evidence.structures binds each opaque scored candidate_name
+to its exact prior kind, parents, fallback, and closed assumptions. Use that binding
+to refine promising but unstable structures; never treat a build_child hash as a
+method name."""
 
 
 class ChampionProposalError(ValueError):
@@ -606,6 +610,10 @@ def _validated_evidence(evidence: object) -> dict[str, object]:
     canonical = cast(ProposerEvidence, evidence)
     try:
         ProposerEvidence.__post_init__(canonical)
+        comparison_names = {item.candidate_name for item in canonical.comparisons}
+        structure_names = {item.candidate_name for item in canonical.structures}
+        if comparison_names and comparison_names != structure_names:
+            _fail("scored proposer evidence requires an exact structure binding")
         return canonical.to_payload()
     except (AttributeError, ChampionEvidenceError, TypeError, ValueError) as error:
         raise ChampionProposalError("proposer evidence is invalid") from error

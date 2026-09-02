@@ -28,6 +28,8 @@ from .champion import (
 )
 from .champion_evidence import (
     _InvalidAttemptAggregate,
+    _ScoredRecipeStructure,
+    _StructuralAssumption,
     ChampionComparison,
     ChampionEvidenceError,
     ChampionGateConfig,
@@ -1051,6 +1053,7 @@ def _parse_sanitized_feedback(payload: dict[str, object]) -> ProposerEvidence:
         "morphology",
         "comparisons",
         "invalid_attempts",
+        "structures",
     }:
         _lifecycle_fail("checkpoint feedback has a malformed schema")
     if (
@@ -1072,6 +1075,11 @@ def _parse_sanitized_feedback(payload: dict[str, object]) -> ProposerEvidence:
         payload["invalid_attempts"],
         frozenset(_InvalidAttemptAggregate.__dataclass_fields__),
         "invalid-attempt",
+    )
+    structure_payloads = _validated_feedback_list(
+        payload["structures"],
+        frozenset(_ScoredRecipeStructure.__dataclass_fields__),
+        "structure",
     )
     try:
         morphology = tuple(
@@ -1113,12 +1121,44 @@ def _parse_sanitized_feedback(payload: dict[str, object]) -> ProposerEvidence:
         invalid_attempts = tuple(
             _InvalidAttemptAggregate(**item) for item in invalid_payloads  # type: ignore[arg-type]
         )
+        structures: list[_ScoredRecipeStructure] = []
+        for item in structure_payloads:
+            parents = item["parents"]
+            assumptions = item["assumptions"]
+            if type(parents) is not list or any(
+                type(parent) is not str for parent in parents
+            ):
+                _lifecycle_fail("checkpoint structure parents are malformed")
+            if type(assumptions) is not list:
+                _lifecycle_fail("checkpoint structure assumptions are malformed")
+            parsed_assumptions: list[_StructuralAssumption] = []
+            for raw_assumption in assumptions:
+                if (
+                    type(raw_assumption) is not dict
+                    or set(raw_assumption) != set(_StructuralAssumption.__dataclass_fields__)
+                ):
+                    _lifecycle_fail("checkpoint structure assumption is malformed")
+                parsed_assumptions.append(
+                    _StructuralAssumption(**raw_assumption)  # type: ignore[arg-type]
+                )
+            structures.append(
+                _ScoredRecipeStructure(
+                    candidate_name=item["candidate_name"],  # type: ignore[arg-type]
+                    recipe_sha256=item["recipe_sha256"],  # type: ignore[arg-type]
+                    kind=item["kind"],  # type: ignore[arg-type]
+                    parents=tuple(parents),
+                    fallback_parent=item["fallback_parent"],  # type: ignore[arg-type]
+                    assumptions=tuple(parsed_assumptions),
+                    stage_support=item["stage_support"],  # type: ignore[arg-type]
+                )
+            )
         evidence = ProposerEvidence(
             label="adaptive_train_build_diagnostic",
             independent_generalization_claim=False,
             morphology=morphology,
             comparisons=tuple(comparisons),
             invalid_attempts=invalid_attempts,
+            structures=tuple(structures),
         )
         ProposerEvidence.__post_init__(evidence)
         _assert_sanitized(payload)
@@ -3662,6 +3702,49 @@ def _rank(state: _AttemptState) -> tuple[float, float, float, str]:
     )
 
 
+def _policy_parameter_key(state: _AttemptState) -> tuple[tuple[float, ...], str]:
+    policy = state.policy
+    numeric = (
+        *(value for _, value in policy.thresholds),
+        *policy.weights,
+        policy.overlay_alpha,
+        policy.correction_cap,
+        policy.horizon_split,
+    )
+    return numeric, state.fitted_id
+
+
+def _comparison_behavior_key(state: _AttemptState) -> str:
+    if state.comparison is None:
+        _fail("attempt has no trusted comparison")
+    payload = asdict(cast(ChampionComparison, state.comparison))
+    payload.pop("child_name")
+    return champion_fingerprint(payload)
+
+
+def _tied_parameter_representatives(
+    anchor: _AttemptState,
+    states: tuple[_AttemptState, ...],
+) -> tuple[_AttemptState, ...]:
+    recipe_sha256 = champion_fingerprint(anchor.policy.recipe)
+    behavior_sha256 = _comparison_behavior_key(anchor)
+    tied = tuple(
+        sorted(
+            (
+                state
+                for state in states
+                if champion_fingerprint(state.policy.recipe) == recipe_sha256
+                and _comparison_behavior_key(state) == behavior_sha256
+            ),
+            key=_policy_parameter_key,
+        )
+    )
+    if not tied:
+        _fail("tied parameter group lost its anchor")
+    positions = tuple(sorted({0, len(tied) // 2, len(tied) - 1}))
+    return tuple(tied[index] for index in positions)
+
+
 def _diverse(
     states: tuple[_AttemptState, ...],
     *,
@@ -3675,7 +3758,8 @@ def _diverse(
         kind = state.policy.recipe.kind
         if kind in seen_kinds:
             continue
-        selected.append(state)
+        representatives = _tied_parameter_representatives(state, ranked)
+        selected.append(representatives[len(representatives) // 2])
         seen_kinds.add(kind)
         seen_structures.add((kind, state.policy.recipe.parents))
         if len(selected) == limit:
@@ -3684,10 +3768,23 @@ def _diverse(
         structure = (state.policy.recipe.kind, state.policy.recipe.parents)
         if state in selected or structure in seen_structures:
             continue
-        selected.append(state)
+        representatives = _tied_parameter_representatives(state, ranked)
+        selected.append(representatives[len(representatives) // 2])
         seen_structures.add(structure)
         if len(selected) == limit:
-            break
+            return tuple(selected)
+    anchors = tuple(selected)
+    tied_groups = tuple(_tied_parameter_representatives(anchor, ranked) for anchor in anchors)
+    for representative_index in (0, 2):
+        for representatives in tied_groups:
+            if representative_index >= len(representatives):
+                continue
+            candidate = representatives[representative_index]
+            if candidate in selected:
+                continue
+            selected.append(candidate)
+            if len(selected) == limit:
+                return tuple(selected)
     return tuple(selected)
 
 
@@ -3762,6 +3859,32 @@ def _feedback(states: tuple[_AttemptState, ...]) -> ProposerEvidence:
             evidence_parts.append(sanitize_build_evidence(parent_rows + child_rows, comparisons))
         except (ChampionEvidenceError, TypeError, ValueError) as error:
             raise ChampionControllerError("Build feedback could not be sanitized") from error
+    structures = tuple(
+        sorted(
+            (
+                _ScoredRecipeStructure(
+                    candidate_name=cast(ChampionComparison, state.comparison).child_name,
+                    recipe_sha256=champion_fingerprint(state.policy.recipe),
+                    kind=state.policy.recipe.kind,
+                    parents=state.policy.recipe.parents,
+                    fallback_parent=state.policy.recipe.fallback_parent,
+                    assumptions=tuple(
+                        _StructuralAssumption(
+                            candidate_name=assumption.candidate_name,
+                            feature=assumption.feature,
+                            direction=assumption.direction,
+                            horizon_region=assumption.horizon_region,
+                            operator=assumption.operator,
+                        )
+                        for assumption in state.policy.recipe.assumptions
+                    ),
+                    stage_support=state.stage_task_counts[-1],
+                )
+                for state in representative_scored
+            ),
+            key=lambda item: item.candidate_name,
+        )
+    )
     return ProposerEvidence(
         label="adaptive_train_build_diagnostic",
         independent_generalization_claim=False,
@@ -3783,6 +3906,7 @@ def _feedback(states: tuple[_AttemptState, ...]) -> ProposerEvidence:
                 key=lambda item: (item.structure_sha256, item.reason_code),
             )
         ),
+        structures=structures,
     )
 
 
@@ -4126,6 +4250,12 @@ def run_build_evolution(
                 sorted(
                     feedback.invalid_attempts + generation_feedback.invalid_attempts,
                     key=lambda item: (item.structure_sha256, item.reason_code),
+                )
+            ),
+            structures=tuple(
+                sorted(
+                    feedback.structures + generation_feedback.structures,
+                    key=lambda item: item.candidate_name,
                 )
             ),
         )
@@ -4490,6 +4620,16 @@ def _combined_feedback(result: BuildEvolutionResult) -> ProposerEvidence:
                     for item in generation.feedback.invalid_attempts
                 ),
                 key=lambda item: (item.structure_sha256, item.reason_code),
+            )
+        ),
+        structures=tuple(
+            sorted(
+                (
+                    item
+                    for generation in result.generations
+                    for item in generation.feedback.structures
+                ),
+                key=lambda item: item.candidate_name,
             )
         ),
     )
