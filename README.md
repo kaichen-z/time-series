@@ -88,6 +88,21 @@ For the formal 80/20 run, set `TASK_LOCAL_REPO`, `TASK_LOCAL_SPLIT_FILE`,
 `--dry-run` to inspect the exact command. This mechanism trains no TSFM parameters and grants no
 numeric weight authority to an LLM; Python searches a frozen anchor-heavy weight grid.
 
+After an accepted 80/20 release, run the required report-only Public-99 comparison separately:
+
+```bash
+python -m numerical_agent.evaluate_frozen_task_local_ensemble \
+  --repo runs/method_evolution/v001 \
+  --split-file splits/drcik_public_80_20_99_v1.json \
+  --tasks-file external/Dr-CiK/full-download/Dr-CiK_public/tasks \
+  --anchor-release-dir runs/champion_evolution/latest \
+  --release-dir runs/task_local_ensemble/v001 \
+  --forecast-store runs/champion_forecasts/latest \
+  --output-dir runs/task_local_ensemble/v001-public
+```
+
+The evaluator refuses a Dev-rejected release and refuses to overwrite a completed Public report.
+
 The current proposal adapter is not yet wired into the formal 80/20 command. It does not train or
 modify LLM/TSFM weights, and no performance result is claimed. Python owns schema, namespace,
 parent, finite-forecast, horizon, fallback, and immutable TSFM-manifest checks; proposals cannot

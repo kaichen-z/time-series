@@ -9,6 +9,7 @@ import subprocess
 import pytest
 
 from common.payload import read_json_object
+from numerical_agent.evaluate_frozen_task_local_ensemble import main as public_main
 from numerical_agent.run_task_local_ensemble_evolution import main
 
 
@@ -70,3 +71,51 @@ def test_shell_runner_dry_run_names_the_formal_train_dev_command() -> None:
     assert result.returncode == 0
     assert "run_task_local_ensemble_evolution" in result.stdout
     assert "--anchor-release-dir runs/champion_evolution/latest" in result.stdout
+
+
+def test_public99_runs_once_after_acceptance_and_compares_toto(tmp_path: Path) -> None:
+    release_dir = tmp_path / "release"
+    output = tmp_path / "public"
+    assert main(["--smoke", "--output-dir", str(release_dir)]) == 0
+
+    assert public_main(
+        ["--smoke", "--release-dir", str(release_dir), "--output-dir", str(output)]
+    ) == 0
+
+    report = read_json_object(output / "public_regression_report.json")
+    comparison = report["comparison"]
+    assert report["public_task_count"] == 99
+    assert comparison["baseline"] == "toto_2_0"
+    assert {
+        "child_mean_smae",
+        "child_mean_srmse",
+        "child_p90_smae_raw",
+        "child_p95_srmse_raw",
+        "wins",
+        "ties",
+        "losses",
+    } <= set(comparison)
+    assert (output / "evaluation_complete.json").is_file()
+
+    with pytest.raises(ValueError, match="already completed"):
+        public_main(
+            ["--smoke", "--release-dir", str(release_dir), "--output-dir", str(output)]
+        )
+
+
+def test_public99_rejects_a_dev_rejected_release_before_scoring(tmp_path: Path) -> None:
+    release_dir = tmp_path / "rejected"
+    assert main(
+        ["--smoke", "--smoke-dev-regression", "--output-dir", str(release_dir)]
+    ) == 0
+
+    with pytest.raises(ValueError, match="accepted"):
+        public_main(
+            [
+                "--smoke",
+                "--release-dir",
+                str(release_dir),
+                "--output-dir",
+                str(tmp_path / "public"),
+            ]
+        )
