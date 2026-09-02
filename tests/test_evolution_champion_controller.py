@@ -2084,6 +2084,81 @@ def test_materialized_child_uses_safe_fallback_when_specialist_is_unavailable() 
     assert materialized[0].failure_reason is None
 
 
+def test_stage_uses_active_parent_when_child_fallback_is_unavailable() -> None:
+    rows = tuple(
+        replace(row, forecast=None, failure_reason="NotApplicable")
+        if row.candidate_name == "better_a"
+        else row
+        for row in _rows(8, enriched=True)
+    )
+    recipe = ChampionRecipe(
+        name="specialist_pair_without_anchor",
+        kind="route",
+        parents=("better_a", "better_b"),
+        fallback_parent="better_a",
+        assumptions=(
+            EvolutionAssumption(
+                assumption_id="route_to_b",
+                candidate_name="better_b",
+                feature="history_length",
+                direction="above",
+                horizon_region="full",
+                operator="route",
+                rationale="History length supports the specialist.",
+                failure_condition="History length stops supporting the specialist.",
+            ),
+        ),
+    )
+    policy = FittedChampionPolicy(
+        recipe=recipe,
+        thresholds=(("route_to_b", 0.0),),
+    )
+    state = controller_module._AttemptState(
+        fitted_id=champion_fingerprint(policy),
+        score_name="outer_anchor_child",
+        policy=policy,
+    )
+    task_ids = tuple(f"build_case_{index:03d}" for index in range(8))
+
+    evaluated = controller_module._evaluate_stage(
+        state,
+        parent_recipe=PARENT.policy.recipe,
+        parent_policy=PARENT.policy,
+        rows=rows,
+        task_ids=task_ids,
+        gate=ChampionGateConfig(minimum_improved_folds=0),
+    )
+    child_rows = tuple(
+        row for row in evaluated.evidence_rows if row.candidate_name == state.score_name
+    )
+    parent_by_task = {
+        row.task_id: row.forecast
+        for row in rows
+        if row.candidate_name == "baseline_leaf"
+    }
+
+    assert len(child_rows) == 8
+    assert all(row.forecast == parent_by_task[row.task_id] for row in child_rows)
+    assert all(row.failure_reason is None for row in child_rows)
+    assert evaluated.comparison is not None
+    assert evaluated.comparison.child_coverage == 1.0
+    assert evaluated.comparison.child_failure_rate == 0.0
+
+
+def test_outer_parent_fallback_does_not_hide_invalid_child_execution() -> None:
+    child = replace(
+        next(row for row in _rows(1) if row.candidate_name == "better_a"),
+        candidate_name="invalid_child",
+        forecast=None,
+        failure_reason="invalid_policy_materialization",
+    )
+    parent = next(row for row in _rows(1) if row.candidate_name == "baseline_leaf")
+
+    result = controller_module._apply_outer_parent_fallback((child,), (parent,))
+
+    assert result == (child,)
+
+
 def test_provisional_halving_allows_local_gain_but_full_build_keeps_fold_gate() -> None:
     def localized_rows(improved_indices: set[int]) -> tuple[ChampionTaskRow, ...]:
         baseline = {

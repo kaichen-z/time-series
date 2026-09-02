@@ -3603,6 +3603,53 @@ def _materialize_policy(
     return tuple(materialized)
 
 
+_OUTER_PARENT_FALLBACK_REASONS = frozenset({
+    "fallback_unavailable",
+    "history_unavailable",
+})
+
+
+def _apply_outer_parent_fallback(
+    child_rows: tuple[ChampionTaskRow, ...],
+    parent_rows: tuple[ChampionTaskRow, ...],
+) -> tuple[ChampionTaskRow, ...]:
+    """Use the exact active Parent only when a Child dependency is unavailable."""
+    if type(child_rows) is not tuple or type(parent_rows) is not tuple:
+        _fail("outer Parent fallback requires exact row tuples")
+    if any(type(row) is not ChampionTaskRow for row in child_rows + parent_rows):
+        _fail("outer Parent fallback requires exact Champion rows")
+    parent_by_task = {row.task_id: row for row in parent_rows}
+    if len(parent_by_task) != len(parent_rows):
+        _fail("outer Parent fallback received duplicate Parent tasks")
+    result: list[ChampionTaskRow] = []
+    for child in child_rows:
+        if (
+            child.forecast is not None
+            or child.failure_reason not in _OUTER_PARENT_FALLBACK_REASONS
+        ):
+            result.append(child)
+            continue
+        parent = parent_by_task.get(child.task_id)
+        if parent is None or parent.forecast is None:
+            result.append(child)
+            continue
+        if (
+            child.profile != parent.profile
+            or child.truth != parent.truth
+            or child.fold != parent.fold
+            or child.split != parent.split
+        ):
+            _fail("outer Parent fallback row identity drifted")
+        fallback = replace(
+            child,
+            forecast=parent.forecast,
+            failure_reason=None,
+        )
+        ChampionTaskRow.__post_init__(fallback)
+        result.append(fallback)
+    return tuple(result)
+
+
 def _parent_rows(
     parent_recipe: ChampionRecipe,
     parent_policy: FittedChampionPolicy | None,
@@ -3665,6 +3712,7 @@ def _evaluate_stage(
         task_ids,
         executor=executor,
     )
+    child_rows = _apply_outer_parent_fallback(child_rows, parent_rows)
     evidence_rows = parent_rows + child_rows
     try:
         parent_score = cast(ChampionScore, active_scorer(evidence_rows, parent_name))
@@ -4508,6 +4556,7 @@ def _evaluate_lifecycle_stage(
             split=split,
             executor=runtime_bindings.executor,
         )
+        child_rows = _apply_outer_parent_fallback(child_rows, materialized_parent)
         evidence_fingerprint = champion_fingerprint(
             {
                 "input_rows": rows,
