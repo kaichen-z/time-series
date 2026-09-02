@@ -9,15 +9,22 @@ import pytest
 from common.data import Task
 from numerical_agent.evolution.screening import TaskProfile
 from numerical_agent.evolution.numerical_selector import CandidateDiagnostics
+from numerical_agent.evolution.task_local_confidence import (
+    ConfidencePolicy,
+    WeightRecipe,
+)
 from numerical_agent.evolution.task_local_ensemble import (
     TaskLocalTournamentPolicy,
     parse_task_local_release,
 )
 from numerical_agent.evolution.task_local_evolution import (
     TaskLocalTaskRow,
+    build_cross_fitted_evidence,
     build_group_fold_manifest,
+    build_hierarchical_evidence,
     evaluate_task_local_release,
     fit_oof_release,
+    score_recipe_on_task,
     task_morphology_key,
 )
 
@@ -292,3 +299,170 @@ def test_task_local_release_round_trip_rejects_schema_drift() -> None:
     payload["unexpected"] = True
     with pytest.raises(ValueError, match="schema"):
         parse_task_local_release(payload)
+
+
+def test_recipe_score_uses_real_forecasts_and_preserves_opaque_group() -> None:
+    task = _ten_tasks()[0]
+    rows = {
+        row.candidate_name: row
+        for row in _local_rows((task,))
+    }
+    score = score_recipe_on_task(
+        WeightRecipe("full", ("toto_2_0", "seasonal_naive"), (5, 5)),
+        rows["toto_2_0"],
+        rows,
+        task_group_sha256="a" * 64,
+    )
+
+    assert score is not None
+    assert score.task_group_sha256 == "a" * 64
+    assert score.improvement_smae == pytest.approx(0.1)
+    assert score.improvement_srmse == pytest.approx(0.1)
+    assert score.improvement_joint == pytest.approx(0.1)
+    assert score.regret_smae_raw == 0.0
+    assert score.regret_srmse_raw == 0.0
+
+
+def test_cross_fitted_bank_excludes_every_held_out_connected_group() -> None:
+    tasks = _ten_tasks()
+    rows = _local_rows(tasks)
+    manifest = build_group_fold_manifest(tasks, seed=17)
+    banks = build_cross_fitted_evidence(
+        rows,
+        manifest,
+        anchor_name="toto_2_0",
+        supplies={
+            fold: ("toto_2_0", "seasonal_naive")
+            for fold in range(manifest.fold_count)
+        },
+        policy=ConfidencePolicy(),
+    )
+
+    assert set(banks) == set(range(manifest.fold_count))
+    for fold, bank in banks.items():
+        held_out = {
+            group_sha
+            for group_sha, _task_ids, group_fold in manifest.groups
+            if group_fold == fold
+        }
+        assert not held_out.intersection(bank.fit_group_ids)
+        assert len(bank.fit_group_ids) == len(manifest.groups) - len(held_out)
+
+
+def test_hierarchical_evidence_emits_global_record_only_with_full_support() -> None:
+    tasks = tuple(
+        _task(
+            f"evidence_{index}",
+            entity=f"Entity {index}",
+            history=(float(index + 1), float(index + 2), float(index + 3)),
+        )
+        for index in range(20)
+    )
+    rows = _local_rows(tasks)
+    group_ids = {
+        task.task_id: f"{index + 1:064x}"
+        for index, task in enumerate(tasks)
+    }
+    bank = build_hierarchical_evidence(
+        rows,
+        task_ids=tuple(task.task_id for task in tasks),
+        group_ids=group_ids,
+        anchor_name="toto_2_0",
+        candidate_names=("toto_2_0", "seasonal_naive"),
+        policy=ConfidencePolicy(),
+    )
+    recipe = WeightRecipe(
+        "full", ("toto_2_0", "seasonal_naive"), (5, 5)
+    )
+    global_records = [
+        record
+        for record in bank.records
+        if record.level == "global" and record.recipe == recipe
+    ]
+
+    assert len(global_records) == 1
+    assert global_records[0].task_support == 20
+    assert global_records[0].independent_groups == 20
+    assert global_records[0].wins == 20
+    assert global_records[0].posterior_win_probability > 0.99
+
+
+def test_sparse_exact_bucket_falls_back_to_qualified_coarse_record() -> None:
+    tasks = tuple(
+        _task(
+            f"coarse_{index}",
+            entity=f"Entity {index}",
+            history=(float(index + 1), float(index + 2), float(index + 3)),
+        )
+        for index in range(4)
+    )
+    rows = tuple(
+        replace(
+            row,
+            profile=replace(
+                row.profile,
+                frequency=("D", "H", "W", "M")[index],
+                periodicity_periods=(),
+                periodicity_strength=0.1,
+                periodicity_confidence=0.1,
+            ),
+        )
+        for index, task in enumerate(tasks)
+        for row in _local_rows((task,))
+    )
+    group_ids = {
+        task.task_id: f"{index + 1:064x}"
+        for index, task in enumerate(tasks)
+    }
+    policy = ConfidencePolicy(
+        exact_minimum_support=2,
+        coarse_minimum_support=4,
+        global_minimum_support=4,
+    )
+    recipe = WeightRecipe(
+        "full", ("toto_2_0", "seasonal_naive"), (5, 5)
+    )
+
+    bank = build_hierarchical_evidence(
+        rows,
+        task_ids=tuple(task.task_id for task in tasks),
+        group_ids=group_ids,
+        anchor_name="toto_2_0",
+        candidate_names=("toto_2_0", "seasonal_naive"),
+        policy=policy,
+    )
+
+    resolved = bank.resolve(rows[0].profile, recipe)
+    assert resolved is not None
+    assert resolved.level == "coarse"
+
+
+def test_sparse_evidence_has_no_prior_and_serializes_no_task_ids() -> None:
+    tasks = tuple(
+        _task(
+            f"secret_task_{index}",
+            entity=f"Entity {index}",
+            history=(float(index + 1), float(index + 2), float(index + 3)),
+        )
+        for index in range(3)
+    )
+    rows = _local_rows(tasks)
+    group_ids = {
+        task.task_id: f"{index + 1:064x}"
+        for index, task in enumerate(tasks)
+    }
+    recipe = WeightRecipe(
+        "full", ("toto_2_0", "seasonal_naive"), (5, 5)
+    )
+
+    bank = build_hierarchical_evidence(
+        rows,
+        task_ids=tuple(task.task_id for task in tasks),
+        group_ids=group_ids,
+        anchor_name="toto_2_0",
+        candidate_names=("toto_2_0", "seasonal_naive"),
+        policy=ConfidencePolicy(),
+    )
+
+    assert bank.resolve(rows[0].profile, recipe) is None
+    assert "secret_task" not in repr(bank.to_payload())

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import math
 import statistics
 import unicodedata
@@ -19,6 +20,16 @@ from common.payload import canonical_json_bytes
 from .execution import Task as RuntimeTask
 from .numerical_selector import CandidateDiagnostics
 from .screening import TaskProfile, profile_task
+from .task_local_confidence import (
+    ConfidenceEvidenceRecord,
+    ConfidencePolicy,
+    HierarchicalEvidenceBank,
+    WeightRecipe,
+    beta_win_probability,
+    coarse_morphology_key,
+    exact_morphology_key,
+    robust_effect_margin,
+)
 from .task_local_ensemble import (
     GroupCandidateSupply,
     TaskLocalEnsembleRelease,
@@ -344,6 +355,326 @@ class TaskLocalTaskRow:
             raise ValueError("task-local diagnostic identity mismatch")
         if type(self.split) is not str or self.split not in {"train", "dev", "public"}:
             raise ValueError("task-local row split is unsupported")
+
+
+@dataclass(frozen=True)
+class RecipeTaskScore:
+    """Anonymous trusted score for one recipe on one Train task group."""
+
+    task_group_sha256: str
+    improvement_smae: float
+    improvement_srmse: float
+    improvement_joint: float
+    regret_smae_raw: float
+    regret_srmse_raw: float
+    child_smae_clipped: bool
+    child_srmse_clipped: bool
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.task_group_sha256) is not str
+            or len(self.task_group_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.task_group_sha256
+            )
+        ):
+            raise ValueError("recipe score requires an opaque group SHA-256")
+        for name in (
+            "improvement_smae",
+            "improvement_srmse",
+            "improvement_joint",
+            "regret_smae_raw",
+            "regret_srmse_raw",
+        ):
+            value = getattr(self, name)
+            if type(value) is not float or not math.isfinite(value):
+                raise ValueError("recipe scores must be finite exact floats")
+        if self.regret_smae_raw < 0.0 or self.regret_srmse_raw < 0.0:
+            raise ValueError("recipe score regrets must be nonnegative")
+        if type(self.child_smae_clipped) is not bool or type(self.child_srmse_clipped) is not bool:
+            raise ValueError("recipe clipping flags must be exact booleans")
+
+
+def _recipe_bounds(region: str, horizon: int) -> tuple[int, int] | None:
+    if region == "full":
+        return (0, horizon)
+    if horizon < 4:
+        return None
+    midpoint = (horizon + 1) // 2
+    return (0, midpoint) if region == "early" else (midpoint, horizon)
+
+
+def score_recipe_on_task(
+    recipe: WeightRecipe,
+    anchor: TaskLocalTaskRow,
+    task_rows: Mapping[str, TaskLocalTaskRow],
+    *,
+    task_group_sha256: str,
+) -> RecipeTaskScore | None:
+    """Score a closed recipe using only already-materialized trusted rows."""
+    if type(recipe) is not WeightRecipe or type(anchor) is not TaskLocalTaskRow:
+        raise TypeError("recipe scoring requires exact recipe and task rows")
+    if recipe.names[0] != anchor.candidate_name or anchor.forecast is None:
+        raise ValueError("recipe score anchor identity is inconsistent")
+    bounds = _recipe_bounds(recipe.region, len(anchor.truth))
+    if bounds is None:
+        return None
+    start, stop = bounds
+    selected: list[TaskLocalTaskRow] = []
+    for name in recipe.names:
+        row = task_rows.get(name)
+        if (
+            type(row) is not TaskLocalTaskRow
+            or row.task_id != anchor.task_id
+            or row.truth != anchor.truth
+            or row.forecast is None
+        ):
+            return None
+        selected.append(row)
+    truth = anchor.truth[start:stop]
+    parent_forecast = anchor.forecast[start:stop]
+    child_forecast = tuple(
+        math.fsum(
+            weight * row.forecast[index]
+            for weight, row in zip(recipe.weights, selected, strict=True)
+        )
+        for index in range(start, stop)
+    )
+    if not truth or any(not math.isfinite(value) for value in child_forecast):
+        return None
+    parent = drcik_point_metrics(truth, parent_forecast)
+    child = drcik_point_metrics(truth, child_forecast)
+    parent_smae = float(parent["smae"])
+    parent_srmse = float(parent["srmse"])
+    child_smae = float(child["smae"])
+    child_srmse = float(child["srmse"])
+    return RecipeTaskScore(
+        task_group_sha256=task_group_sha256,
+        improvement_smae=parent_smae - child_smae,
+        improvement_srmse=parent_srmse - child_srmse,
+        improvement_joint=joint_scaled_error(parent_smae, parent_srmse)
+        - joint_scaled_error(child_smae, child_srmse),
+        regret_smae_raw=max(
+            0.0, float(child["smae_raw"]) - float(parent["smae_raw"])
+        ),
+        regret_srmse_raw=max(
+            0.0, float(child["srmse_raw"]) - float(parent["srmse_raw"])
+        ),
+        child_smae_clipped=bool(child["smae_clipped"]),
+        child_srmse_clipped=bool(child["srmse_clipped"]),
+    )
+
+
+def _confidence_recipes(
+    anchor_name: str, candidate_names: Sequence[str]
+) -> tuple[WeightRecipe, ...]:
+    supplied = tuple(candidate_names)
+    if (
+        not supplied
+        or supplied[0] != anchor_name
+        or len(supplied) > 8
+        or len(set(supplied)) != len(supplied)
+        or any(type(name) is not str or not name.isidentifier() for name in supplied)
+    ):
+        raise ValueError("confidence recipe supply must be unique, bounded, and anchored")
+    specialists = tuple(sorted(supplied[1:], key=_canonical_identity))
+    recipes: list[WeightRecipe] = []
+    for region in ("full", "early", "late"):
+        for count in range(1, min(2, len(specialists)) + 1):
+            for chosen in itertools.combinations(specialists, count):
+                for anchor_units in range(5, 10):
+                    remainder = 10 - anchor_units
+                    allocations = (
+                        ((remainder,),)
+                        if count == 1
+                        else tuple(
+                            (left, remainder - left)
+                            for left in range(1, remainder)
+                        )
+                    )
+                    for specialist_units in allocations:
+                        if any(unit <= 0 for unit in specialist_units):
+                            continue
+                        recipes.append(
+                            WeightRecipe(
+                                region,
+                                (anchor_name, *chosen),
+                                (anchor_units, *specialist_units),
+                            )
+                        )
+    return tuple(sorted(recipes, key=lambda recipe: recipe.fingerprint))
+
+
+def _evidence_record(
+    *,
+    level: str,
+    group_key: str,
+    recipe: WeightRecipe,
+    task_support: int,
+    scores: Sequence[RecipeTaskScore],
+    policy: ConfidencePolicy,
+) -> ConfidenceEvidenceRecord:
+    wins = sum(score.improvement_joint > 1e-12 for score in scores)
+    losses = sum(score.improvement_joint < -1e-12 for score in scores)
+    ties = len(scores) - wins - losses
+    return ConfidenceEvidenceRecord(
+        level=level,
+        group_key=group_key,
+        recipe=recipe,
+        independent_groups=len({score.task_group_sha256 for score in scores}),
+        task_support=task_support,
+        wins=wins,
+        ties=ties,
+        losses=losses,
+        posterior_win_probability=beta_win_probability(wins, losses),
+        robust_margin_smae=robust_effect_margin(
+            tuple(score.improvement_smae for score in scores),
+            multiplier=policy.robust_mad_multiplier,
+        ),
+        robust_margin_srmse=robust_effect_margin(
+            tuple(score.improvement_srmse for score in scores),
+            multiplier=policy.robust_mad_multiplier,
+        ),
+        p90_regret_smae_raw=float(
+            linear_quantile([score.regret_smae_raw for score in scores], 0.9)
+        ),
+        p90_regret_srmse_raw=float(
+            linear_quantile([score.regret_srmse_raw for score in scores], 0.9)
+        ),
+        failure_count=task_support - len(scores),
+        clipped_smae_count=sum(score.child_smae_clipped for score in scores),
+        clipped_srmse_count=sum(score.child_srmse_clipped for score in scores),
+    )
+
+
+def build_hierarchical_evidence(
+    rows: Sequence[TaskLocalTaskRow],
+    *,
+    task_ids: Sequence[str],
+    group_ids: Mapping[str, str],
+    anchor_name: str,
+    candidate_names: Sequence[str],
+    policy: ConfidencePolicy,
+) -> HierarchicalEvidenceBank:
+    """Build anonymous exact/coarse/global recipe evidence from Train rows."""
+    requested = tuple(task_ids)
+    if type(policy) is not ConfidencePolicy:
+        raise TypeError("hierarchical evidence requires an exact confidence policy")
+    ConfidencePolicy.__post_init__(policy)
+    if (
+        not requested
+        or len(requested) != len(set(requested))
+        or set(requested) != set(group_ids)
+    ):
+        raise ValueError("hierarchical evidence requires exact task/group coverage")
+    for digest in group_ids.values():
+        RecipeTaskScore(digest, 0.0, 0.0, 0.0, 0.0, 0.0, False, False)
+    rows_by_task = _rows_by_task(rows, requested)
+    profiles: dict[str, TaskProfile] = {}
+    for task_id in requested:
+        task_rows = rows_by_task[task_id]
+        anchor = task_rows.get(anchor_name)
+        if anchor is None:
+            raise ValueError("hierarchical evidence is missing an anchor row")
+        profiles[task_id] = anchor.profile
+
+    recipes = _confidence_recipes(anchor_name, candidate_names)
+    scored: dict[str, dict[str, RecipeTaskScore]] = {}
+    for recipe in recipes:
+        per_task: dict[str, RecipeTaskScore] = {}
+        for task_id in requested:
+            anchor = rows_by_task[task_id][anchor_name]
+            result = score_recipe_on_task(
+                recipe,
+                anchor,
+                rows_by_task[task_id],
+                task_group_sha256=group_ids[task_id],
+            )
+            if result is not None:
+                per_task[task_id] = result
+        scored[recipe.fingerprint] = per_task
+
+    exact_buckets: dict[str, list[str]] = defaultdict(list)
+    coarse_buckets: dict[str, list[str]] = defaultdict(list)
+    for task_id in requested:
+        exact_buckets[exact_morphology_key(profiles[task_id])].append(task_id)
+        coarse_buckets[coarse_morphology_key(profiles[task_id])].append(task_id)
+    levels: tuple[tuple[str, Mapping[str, Sequence[str]], int], ...] = (
+        ("exact", exact_buckets, policy.exact_minimum_support),
+        ("coarse", coarse_buckets, policy.coarse_minimum_support),
+        (
+            "global",
+            {HierarchicalEvidenceBank.global_group_key(): requested},
+            policy.global_minimum_support,
+        ),
+    )
+    records: list[ConfidenceEvidenceRecord] = []
+    for recipe in recipes:
+        per_task = scored[recipe.fingerprint]
+        for level, buckets, minimum_support in levels:
+            for group_key, members in sorted(buckets.items()):
+                member_ids = tuple(members)
+                scores = tuple(
+                    per_task[task_id]
+                    for task_id in member_ids
+                    if task_id in per_task
+                )
+                if (
+                    len(scores) < minimum_support
+                    or len({score.task_group_sha256 for score in scores}) < 2
+                ):
+                    continue
+                records.append(
+                    _evidence_record(
+                        level=level,
+                        group_key=group_key,
+                        recipe=recipe,
+                        task_support=len(member_ids),
+                        scores=scores,
+                        policy=policy,
+                    )
+                )
+    return HierarchicalEvidenceBank.build(
+        policy,
+        records=records,
+        fit_group_ids=tuple(sorted(set(group_ids.values()))),
+    )
+
+
+def build_cross_fitted_evidence(
+    rows: Sequence[TaskLocalTaskRow],
+    manifest: GroupFoldManifest,
+    *,
+    anchor_name: str,
+    supplies: Mapping[int, Sequence[str]],
+    policy: ConfidencePolicy,
+) -> Mapping[int, HierarchicalEvidenceBank]:
+    """Fit one evidence bank per outer fold without its connected groups."""
+    if type(manifest) is not GroupFoldManifest:
+        raise TypeError("cross-fitted evidence requires an exact group manifest")
+    if set(supplies) != set(range(manifest.fold_count)):
+        raise ValueError("cross-fitted evidence requires one supply per fold")
+    task_folds = dict(manifest.task_fold_map)
+    all_ids = tuple(sorted(task_folds))
+    group_ids = {
+        task_id: group_sha
+        for group_sha, group_tasks, _fold in manifest.groups
+        for task_id in group_tasks
+    }
+    result: dict[int, HierarchicalEvidenceBank] = {}
+    for fold in range(manifest.fold_count):
+        fit_ids = tuple(task_id for task_id in all_ids if task_folds[task_id] != fold)
+        fit_groups = {task_id: group_ids[task_id] for task_id in fit_ids}
+        result[fold] = build_hierarchical_evidence(
+            rows,
+            task_ids=fit_ids,
+            group_ids=fit_groups,
+            anchor_name=anchor_name,
+            candidate_names=supplies[fold],
+            policy=policy,
+        )
+    return MappingProxyType(result)
 
 
 @dataclass(frozen=True)
