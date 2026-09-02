@@ -63,9 +63,10 @@ frozen release or proposer feedback.
 
 ## 4. Current-task local evidence
 
-Increase the history-only diagnostic from three rolling origins to five where
-history length permits it. Short histories retain the existing smaller fold
-count and are treated as lower-confidence rather than padded or fabricated.
+Use five history-only rolling origins where history length permits it and
+deterministically reduce to four or three origins for longer forecast horizons.
+Tasks that cannot supply three genuine origins remain lower-confidence; no
+origin is padded or fabricated.
 
 For every candidate/weight recipe, compute paired improvement over Toto on
 the exact same origins. Local evidence must satisfy all of the following:
@@ -82,7 +83,9 @@ Beta-Binomial posterior with a neutral Beta(1,1) prior for win probability and
 a robust effect margin based on median minus scaled MAD. Activation requires:
 
 - posterior probability that win rate exceeds 0.5 of at least 0.80;
-- positive robust effect margin for both sMAE and sRMSE;
+- positive robust joint-effect margin at the group-prior layer, with neither
+  individual group margin worse than -0.05;
+- positive robust effect margins for both sMAE and sRMSE in the current task;
 - local and group evidence pointing in the same direction; and
 - the existing deterministic Pareto and tail gates.
 

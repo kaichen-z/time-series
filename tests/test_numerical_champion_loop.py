@@ -252,6 +252,7 @@ def test_v2_regional_package_replays_and_materializes_each_leaf_once() -> None:
                 ties=0,
                 losses=1,
                 posterior_win_probability=beta_win_probability(7, 1),
+                robust_margin_joint=0.1,
                 robust_margin_smae=0.1,
                 robust_margin_srmse=0.1,
                 p90_regret_smae_raw=0.0,

@@ -124,18 +124,19 @@ def coarse_morphology_key(profile: TaskProfile) -> str:
 class ConfidencePolicy:
     """Host-owned evidence and confidence thresholds."""
 
-    schema_version: int = 1
+    schema_version: int = 2
     exact_minimum_support: int = 8
     coarse_minimum_support: int = 12
     global_minimum_support: int = 20
     posterior_win_probability: float = 0.80
     minimum_paired_origins: int = 3
     robust_mad_multiplier: float = 1.0
+    maximum_prior_metric_regression: float = 0.05
     regional_minimum_horizon: int = 4
 
     def __post_init__(self) -> None:
-        if type(self.schema_version) is not int or self.schema_version != 1:
-            raise ValueError("confidence policy schema must be exactly one")
+        if type(self.schema_version) is not int or self.schema_version != 2:
+            raise ValueError("confidence policy schema must be exactly two")
         supports = (
             self.exact_minimum_support,
             self.coarse_minimum_support,
@@ -167,6 +168,12 @@ class ConfidencePolicy:
             or self.robust_mad_multiplier < 0.0
         ):
             raise ValueError("robust MAD multiplier must be finite and nonnegative")
+        if (
+            type(self.maximum_prior_metric_regression) is not float
+            or not math.isfinite(self.maximum_prior_metric_regression)
+            or not 0.0 <= self.maximum_prior_metric_regression <= 0.25
+        ):
+            raise ValueError("prior metric regression must be within [0, 0.25]")
 
 
 @dataclass(frozen=True)
@@ -227,6 +234,7 @@ class ConfidenceEvidenceRecord:
     ties: int
     losses: int
     posterior_win_probability: float
+    robust_margin_joint: float
     robust_margin_smae: float
     robust_margin_srmse: float
     p90_regret_smae_raw: float
@@ -277,6 +285,7 @@ class ConfidenceEvidenceRecord:
         ):
             raise ValueError("confidence evidence posterior probability is forged")
         for name in (
+            "robust_margin_joint",
             "robust_margin_smae",
             "robust_margin_srmse",
             "p90_regret_smae_raw",
@@ -299,6 +308,7 @@ class ConfidenceEvidenceRecord:
             "ties": self.ties,
             "losses": self.losses,
             "posterior_win_probability": self.posterior_win_probability,
+            "robust_margin_joint": self.robust_margin_joint,
             "robust_margin_smae": self.robust_margin_smae,
             "robust_margin_srmse": self.robust_margin_srmse,
             "p90_regret_smae_raw": self.p90_regret_smae_raw,
@@ -339,14 +349,14 @@ class HierarchicalEvidenceBank:
         normalized_groups = tuple(sorted(fit_group_ids))
         fit_fingerprint = _sha256({"fit_group_ids": list(normalized_groups)})
         base = _bank_payload(
-            schema_version=1,
+            schema_version=2,
             policy=policy,
             records=normalized_records,
             fit_group_ids=normalized_groups,
             fit_group_fingerprint=fit_fingerprint,
         )
         return cls(
-            schema_version=1,
+            schema_version=2,
             policy=policy,
             records=normalized_records,
             fit_group_ids=normalized_groups,
@@ -355,8 +365,8 @@ class HierarchicalEvidenceBank:
         )
 
     def __post_init__(self) -> None:
-        if type(self.schema_version) is not int or self.schema_version != 1:
-            raise ValueError("confidence evidence bank schema must be exactly one")
+        if type(self.schema_version) is not int or self.schema_version != 2:
+            raise ValueError("confidence evidence bank schema must be exactly two")
         if type(self.policy) is not ConfidencePolicy:
             raise ValueError("confidence evidence bank requires an exact policy")
         ConfidencePolicy.__post_init__(self.policy)
@@ -402,19 +412,35 @@ class HierarchicalEvidenceBank:
     def resolve(
         self, profile: TaskProfile, recipe: WeightRecipe
     ) -> ConfidenceEvidenceRecord | None:
-        if type(profile) is not TaskProfile or type(recipe) is not WeightRecipe:
-            raise TypeError("confidence resolution requires exact profile and recipe values")
+        return self.resolve_many(profile, (recipe,))[0]
+
+    def resolve_many(
+        self,
+        profile: TaskProfile,
+        recipes: Sequence[WeightRecipe],
+    ) -> tuple[ConfidenceEvidenceRecord | None, ...]:
+        """Resolve many recipes with one evidence index construction."""
+        if type(profile) is not TaskProfile:
+            raise TypeError("confidence resolution requires an exact profile")
+        supplied = tuple(recipes)
+        if any(type(recipe) is not WeightRecipe for recipe in supplied):
+            raise TypeError("confidence resolution requires exact recipe values")
         keys = (
             ("exact", exact_morphology_key(profile), self.policy.exact_minimum_support),
             ("coarse", coarse_morphology_key(profile), self.policy.coarse_minimum_support),
             ("global", self.global_group_key(), self.policy.global_minimum_support),
         )
         by_key = {_record_key(record): record for record in self.records}
-        for level, group_key, minimum_support in keys:
-            record = by_key.get((level, group_key, recipe.fingerprint))
-            if record is not None and record.task_support >= minimum_support:
-                return record
-        return None
+        resolved: list[ConfidenceEvidenceRecord | None] = []
+        for recipe in supplied:
+            selected = None
+            for level, group_key, minimum_support in keys:
+                record = by_key.get((level, group_key, recipe.fingerprint))
+                if record is not None and record.task_support >= minimum_support:
+                    selected = record
+                    break
+            resolved.append(selected)
+        return tuple(resolved)
 
     def to_payload(self) -> dict[str, object]:
         payload = _bank_payload(
@@ -471,6 +497,7 @@ def _parse_record(payload: object) -> ConfidenceEvidenceRecord:
         "ties",
         "losses",
         "posterior_win_probability",
+        "robust_margin_joint",
         "robust_margin_smae",
         "robust_margin_srmse",
         "p90_regret_smae_raw",
@@ -492,6 +519,7 @@ def _parse_record(payload: object) -> ConfidenceEvidenceRecord:
             ties=payload["ties"],
             losses=payload["losses"],
             posterior_win_probability=payload["posterior_win_probability"],
+            robust_margin_joint=payload["robust_margin_joint"],
             robust_margin_smae=payload["robust_margin_smae"],
             robust_margin_srmse=payload["robust_margin_srmse"],
             p90_regret_smae_raw=payload["p90_regret_smae_raw"],

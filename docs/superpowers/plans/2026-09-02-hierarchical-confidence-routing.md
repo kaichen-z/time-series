@@ -229,7 +229,7 @@ For each legal recipe, materialize its full, early, or late slice from existing 
 
 - [ ] **Step 4: Implement exact/coarse/global aggregate records**
 
-For every recipe and hierarchy bucket, aggregate only tasks in `task_ids`. Count wins by positive joint improvement with `1e-12` tolerance, retain separate robust margins for sMAE/sRMSE, count independent `group_ids`, and compute raw P90 regrets using `linear_quantile`. Emit a level only when its configured support and independent-group constraints pass.
+For every recipe and hierarchy bucket, aggregate only tasks in `task_ids`. Count wins by positive joint improvement with `1e-12` tolerance, retain robust joint and separate sMAE/sRMSE margins, count independent `group_ids`, and compute raw P90 regrets using `linear_quantile`. Emit a level only when its configured support and independent-group constraints pass.
 
 - [ ] **Step 5: Add sparse hierarchy fallback and disagreement tests**
 
@@ -313,10 +313,13 @@ Expected: FAIL because v1 executor has no confidence arguments.
 
 Reuse exact paired folds. For each legal recipe, blend the same fold origins,
 calculate paired improvements in both metrics, and require minimum origin
-support, positive medians, positive robust margins, bounded raw errors, and
-existing worst-joint regret. A recipe is confidence-qualified only when
+support, positive medians, robust joint and paired margins, bounded raw errors,
+and existing worst-joint regret. A recipe is confidence-qualified only when
 `bank.resolve(profile, recipe)` exists, posterior probability meets the policy
-threshold, both prior margins are positive, and local margins are positive.
+threshold, its robust joint margin is positive, neither individual prior
+margin is below -0.05, and both current-task local margins are positive. Use
+five hindcast origins where feasible and deterministically reduce to four or
+three without fabricating folds.
 
 - [ ] **Step 4: Implement fixed early/late region execution**
 

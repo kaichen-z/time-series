@@ -202,6 +202,9 @@ def _confidence_policy() -> ConfidencePolicy:
 def _confidence_bank(
     profile: TaskProfile,
     *recipes: WeightRecipe,
+    robust_margin_joint: float = 0.1,
+    robust_margin_smae: float = 0.1,
+    robust_margin_srmse: float = 0.1,
 ) -> HierarchicalEvidenceBank:
     records = tuple(
         ConfidenceEvidenceRecord(
@@ -214,8 +217,9 @@ def _confidence_bank(
             ties=0,
             losses=1,
             posterior_win_probability=beta_win_probability(7, 1),
-            robust_margin_smae=0.1,
-            robust_margin_srmse=0.1,
+            robust_margin_joint=robust_margin_joint,
+            robust_margin_smae=robust_margin_smae,
+            robust_margin_srmse=robust_margin_srmse,
             p90_regret_smae_raw=0.0,
             p90_regret_srmse_raw=0.0,
             failure_count=0,
@@ -368,6 +372,69 @@ def test_short_horizon_uses_full_gate_without_fabricated_regions() -> None:
     assert result.forecast == (9.0, 9.0)
     assert tuple(region.region for region in result.regions) == ("full",)
     assert result.activated is True
+
+
+def test_joint_positive_prior_allows_small_single_metric_group_tradeoff() -> None:
+    profile = _profile(horizon=2)
+    recipe = WeightRecipe("full", ("toto_2_0", "seasonal_naive"), (5, 5))
+    inputs = _confidence_inputs(
+        anchor_folds=((8.0, 8.0),) * 5,
+        specialist_folds=((10.0, 10.0),) * 5,
+        truths=((10.0, 10.0),) * 5,
+        anchor_forecast=(8.0, 8.0),
+        specialist_forecast=(10.0, 10.0),
+    )
+
+    result = execute_confidence_task_local_ensemble(
+        _policy(),
+        _confidence_policy(),
+        profile=profile,
+        confidence_evidence=_confidence_bank(
+            profile,
+            recipe,
+            robust_margin_joint=0.05,
+            robust_margin_srmse=-0.01,
+        ),
+        **inputs,
+    )
+
+    assert result.activated is True
+    assert result.forecast == (9.0, 9.0)
+
+
+@pytest.mark.parametrize(
+    ("joint_margin", "srmse_margin"),
+    ((0.0, 0.1), (0.1, -0.051)),
+)
+def test_nonpositive_joint_or_excessive_prior_tradeoff_falls_back(
+    joint_margin: float,
+    srmse_margin: float,
+) -> None:
+    profile = _profile(horizon=2)
+    recipe = WeightRecipe("full", ("toto_2_0", "seasonal_naive"), (5, 5))
+    inputs = _confidence_inputs(
+        anchor_folds=((8.0, 8.0),) * 5,
+        specialist_folds=((10.0, 10.0),) * 5,
+        truths=((10.0, 10.0),) * 5,
+        anchor_forecast=(8.0, 8.0),
+        specialist_forecast=(10.0, 10.0),
+    )
+
+    result = execute_confidence_task_local_ensemble(
+        _policy(),
+        _confidence_policy(),
+        profile=profile,
+        confidence_evidence=_confidence_bank(
+            profile,
+            recipe,
+            robust_margin_joint=joint_margin,
+            robust_margin_srmse=srmse_margin,
+        ),
+        **inputs,
+    )
+
+    assert result.activated is False
+    assert result.forecast == (8.0, 8.0)
 
 
 def test_v1_tournament_result_is_unchanged_by_confidence_support() -> None:

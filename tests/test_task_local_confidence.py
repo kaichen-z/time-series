@@ -69,6 +69,7 @@ def _record(
         ties=0,
         losses=1,
         posterior_win_probability=beta_win_probability(7, 1),
+        robust_margin_joint=0.09,
         robust_margin_smae=0.1,
         robust_margin_srmse=0.08,
         p90_regret_smae_raw=0.05,
@@ -178,6 +179,12 @@ def test_confidence_parser_round_trips_and_rejects_unknown_fields() -> None:
     malformed["records"][0]["mean_smae"] = 0.0  # type: ignore[index]
     with pytest.raises(ValueError, match="evidence record schema"):
         parse_hierarchical_evidence(malformed)
+
+
+def test_confidence_policy_bounds_prior_single_metric_regression() -> None:
+    assert ConfidencePolicy().maximum_prior_metric_regression == 0.05
+    with pytest.raises(ValueError, match="prior metric regression"):
+        ConfidencePolicy(maximum_prior_metric_regression=-0.01)
 
 
 def test_evidence_bank_rejects_forged_derived_probability() -> None:

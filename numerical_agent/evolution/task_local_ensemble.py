@@ -978,16 +978,20 @@ def _qualified_region(
     }
     qualified: list[_QualifiedRecipe] = []
     prior_seen = False
-    for recipe in recipes.values():
-        prior = confidence_evidence.resolve(profile, recipe)
+    supplied_recipes = tuple(recipes.values())
+    resolved_priors = confidence_evidence.resolve_many(profile, supplied_recipes)
+    for recipe, prior in zip(supplied_recipes, resolved_priors, strict=True):
         if prior is None:
             continue
         prior_seen = True
         if (
             prior.posterior_win_probability
             < confidence_policy.posterior_win_probability
-            or prior.robust_margin_smae <= 0.0
-            or prior.robust_margin_srmse <= 0.0
+            or prior.robust_margin_joint <= 0.0
+            or prior.robust_margin_smae
+            < -confidence_policy.maximum_prior_metric_regression
+            or prior.robust_margin_srmse
+            < -confidence_policy.maximum_prior_metric_regression
             or prior.p90_regret_smae_raw > policy.maximum_worst_joint_regret
             or prior.p90_regret_srmse_raw > policy.maximum_worst_joint_regret
         ):

@@ -529,6 +529,10 @@ def _evidence_record(
         ties=ties,
         losses=losses,
         posterior_win_probability=beta_win_probability(wins, losses),
+        robust_margin_joint=robust_effect_margin(
+            tuple(score.improvement_joint for score in scores),
+            multiplier=policy.robust_mad_multiplier,
+        ),
         robust_margin_smae=robust_effect_margin(
             tuple(score.improvement_smae for score in scores),
             multiplier=policy.robust_mad_multiplier,

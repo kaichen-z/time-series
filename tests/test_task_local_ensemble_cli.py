@@ -12,6 +12,11 @@ from common.payload import read_json_object
 from numerical_agent.evaluate_frozen_task_local_ensemble import main as public_main
 from numerical_agent.evolution.task_local_ensemble import parse_task_local_release
 from numerical_agent.run_task_local_ensemble_evolution import main
+from numerical_agent.run_task_local_ensemble_evolution import (
+    _CONFIDENCE_HINDCAST_CONFIG,
+    _adaptive_hindcast_config,
+)
+from numerical_agent.evolution.execution import Task as RuntimeTask
 
 
 def test_smoke_runs_eight_train_two_dev_and_freezes_after_acceptance(
@@ -33,6 +38,17 @@ def test_smoke_runs_eight_train_two_dev_and_freezes_after_acceptance(
     )
     assert release.schema_version == 2
     assert release.confidence_evidence is not None
+
+
+def test_confidence_hindcast_uses_three_origins_for_long_horizon_history() -> None:
+    task = RuntimeTask(
+        "long_horizon", tuple(float(i) for i in range(112)), 168, "D", ()
+    )
+
+    config = _adaptive_hindcast_config(task, _CONFIDENCE_HINDCAST_CONFIG)
+
+    assert config.folds == 3
+    assert config.min_successful_folds == 3
 
 
 def test_failed_dev_publishes_no_task_local_release(tmp_path: Path) -> None:

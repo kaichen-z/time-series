@@ -50,6 +50,18 @@ from .run_selector_evolution import _forecast_runtime_identity
 _CONFIDENCE_HINDCAST_CONFIG = HindcastConfig(folds=5, min_successful_folds=3)
 
 
+def _adaptive_hindcast_config(
+    task: RuntimeTask,
+    maximum: HindcastConfig,
+) -> HindcastConfig:
+    """Use every feasible origin up to five, retaining at least three when possible."""
+    history_length = len(task.history)
+    fold_horizon = min(task.horizon, max(1, history_length // 4))
+    feasible = max(1, history_length // fold_horizon - 1)
+    folds = min(maximum.folds, max(maximum.min_successful_folds, feasible))
+    return replace(maximum, folds=folds)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--smoke", action="store_true")
@@ -286,12 +298,15 @@ def _materialize_rows(
                 except Exception as error:
                     failure = f"{type(error).__name__}: {error}"[:10000]
                 try:
+                    task_hindcast_config = _adaptive_hindcast_config(
+                        task, hindcast_config
+                    )
                     diagnostic = diagnose_candidate(
                         task,
                         name,
                         family,
                         store.forecast,
-                        hindcast_config,
+                        task_hindcast_config,
                         runtime_settings={"forecast_store": store.identity_hash},
                     )
                 except Exception as error:
@@ -392,7 +407,10 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
                 else {}
             ),
             "hindcast_config_fingerprint": task_local_fingerprint(
-                _CONFIDENCE_HINDCAST_CONFIG
+                {
+                    "mode": "adaptive_three_to_five_origins",
+                    "maximum": asdict(_CONFIDENCE_HINDCAST_CONFIG),
+                }
             ),
             "train_task_ids_sha256": hashlib.sha256("\n".join(train_ids).encode()).hexdigest(),
             "dev_task_ids_sha256": hashlib.sha256("\n".join(dev_ids).encode()).hexdigest(),
