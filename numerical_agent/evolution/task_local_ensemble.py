@@ -51,6 +51,9 @@ class TaskLocalTournamentPolicy:
     maximum_worst_joint_regret: float = 0.25
     maximum_raw_smae: float = 10.0
     maximum_raw_srmse: float = 10.0
+    minimum_activation_support: int = 4
+    minimum_activation_groups: int = 2
+    minimum_activation_precision: float = 0.6
 
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int or self.schema_version != 1:
@@ -61,6 +64,8 @@ class TaskLocalTournamentPolicy:
             ("maximum_candidates", 2, 8),
             ("maximum_specialists", 1, 2),
             ("minimum_successful_folds", 1, 100),
+            ("minimum_activation_support", 1, 1_000_000),
+            ("minimum_activation_groups", 1, 1_000_000),
         ):
             value = getattr(self, name)
             if type(value) is not int or not lower <= value <= upper:
@@ -74,6 +79,7 @@ class TaskLocalTournamentPolicy:
             "maximum_worst_joint_regret",
             "maximum_raw_smae",
             "maximum_raw_srmse",
+            "minimum_activation_precision",
         ):
             value = getattr(self, name)
             if type(value) is not float or not math.isfinite(value) or value < 0.0:
@@ -84,6 +90,8 @@ class TaskLocalTournamentPolicy:
             raise ValueError("v1 uses the exact one-tenth weight grid")
         if self.maximum_raw_smae <= 0.0 or self.maximum_raw_srmse <= 0.0:
             raise ValueError("raw tail limits must be positive")
+        if self.minimum_activation_precision > 1.0:
+            raise ValueError("minimum activation precision must be a rate")
 
 
 @dataclass(frozen=True)
@@ -295,6 +303,9 @@ def parse_task_local_release(payload: object) -> TaskLocalEnsembleRelease:
         "maximum_worst_joint_regret",
         "maximum_raw_smae",
         "maximum_raw_srmse",
+        "minimum_activation_support",
+        "minimum_activation_groups",
+        "minimum_activation_precision",
     }
     if type(policy_payload) is not dict or set(policy_payload) != policy_fields:
         raise ValueError("task-local policy schema is malformed")

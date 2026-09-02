@@ -629,6 +629,7 @@ def _report(
     split: str,
     oof_task_count: int,
     fit_leakage_count: int,
+    policy: TaskLocalTournamentPolicy,
 ) -> ConditionalUpliftReport:
     if not outcomes:
         raise ValueError("conditional uplift requires task outcomes")
@@ -676,18 +677,21 @@ def _report(
         probability = 0.9 if label.startswith("p90") else 0.95
         if _quantile(child, probability) > _quantile(parent, probability) + 1e-12:
             rejections.append(label)
-    if len(activated) < 4:
+    if len(activated) < policy.minimum_activation_support:
         rejections.append("activation_support")
     activated_groups = len({item.group_key for item in activated})
-    if activated_groups < 2:
+    if activated_groups < policy.minimum_activation_groups:
         rejections.append("activation_groups")
-    if wins + losses == 0 or wins / (wins + losses) < 0.6:
+    if (
+        wins + losses == 0
+        or wins / (wins + losses) < policy.minimum_activation_precision
+    ):
         rejections.append("activation_precision")
     max_regret_smae = max(max(0.0, value) for value in delta_smae)
     max_regret_srmse = max(max(0.0, value) for value in delta_srmse)
-    if max_regret_smae > 0.25:
+    if max_regret_smae > policy.maximum_worst_joint_regret:
         rejections.append("task_regret_smae")
-    if max_regret_srmse > 0.25:
+    if max_regret_srmse > policy.maximum_worst_joint_regret:
         rejections.append("task_regret_srmse")
     payload = {
         "split": split,
@@ -773,6 +777,7 @@ def evaluate_task_local_release(
         split=split,
         oof_task_count=len(outcomes) if split == "oof" else 0,
         fit_leakage_count=0,
+        policy=release.policy,
     )
 
 
@@ -839,6 +844,7 @@ def fit_oof_release(
         split="oof",
         oof_task_count=len(oof_outcomes),
         fit_leakage_count=0,
+        policy=policy,
     )
     default, supplies = fit_group_candidate_supply(
         rows,

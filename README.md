@@ -65,6 +65,29 @@ fake smoke is `pytest -q tests/test_champion_evolution_e2e.py`. It proves wiring
 80/20 result or a Public-99 result. No new Champion experimental result is claimed here until those
 separate provisioned runs are performed.
 
+### Task-local adaptive Numerical ensemble
+
+The opt-in v2 selector keeps the frozen Champion (currently Toto) as an exact fallback and lets at
+most two reviewed Statistical, TSFM, or Combined specialists contribute only when the current
+task's rolling history hindcasts Pareto-improve both Dr-CiK sMAE and sRMSE safety gates. Candidate
+supply is fitted with five group-aware OOF folds on the 80-task Train partition. The 20-task Dev
+partition is opened once after OOF acceptance; a frozen accepted release must then run the
+separate one-shot Public-99 regression. Public results are report-only and cannot feed the same
+release's evolution.
+
+Run the deterministic lifecycle smoke with:
+
+```bash
+python -m numerical_agent.run_task_local_ensemble_evolution \
+  --smoke --output-dir /tmp/task-local-smoke
+```
+
+For the formal 80/20 run, set `TASK_LOCAL_REPO`, `TASK_LOCAL_SPLIT_FILE`,
+`TASK_LOCAL_TASKS_FILE`, `TASK_LOCAL_ANCHOR_RELEASE_DIR`, `TASK_LOCAL_FORECAST_STORE`, and
+`TASK_LOCAL_OUTPUT_DIR`, then invoke `scripts/run_task_local_ensemble_evolution.sh`. Use
+`--dry-run` to inspect the exact command. This mechanism trains no TSFM parameters and grants no
+numeric weight authority to an LLM; Python searches a frozen anchor-heavy weight grid.
+
 The current proposal adapter is not yet wired into the formal 80/20 command. It does not train or
 modify LLM/TSFM weights, and no performance result is claimed. Python owns schema, namespace,
 parent, finite-forecast, horizon, fallback, and immutable TSFM-manifest checks; proposals cannot
