@@ -25,6 +25,9 @@ from numerical_agent.evolution.numerical_package import NumericalForecastPackage
 from numerical_agent.evolution.numerical_selector import (
     CandidateDiagnostics,
     DecisionPolicy,
+    SelectionArithmetic,
+    SelectionDecision,
+    replay_selection_forecast,
 )
 from numerical_agent.evolution.screening import (
     ApplicabilityClause,
@@ -36,6 +39,13 @@ from numerical_agent.evolution.screening import (
 from numerical_agent.evolution.task_local_ensemble import (
     TaskLocalEnsembleRelease,
     TaskLocalTournamentPolicy,
+)
+from numerical_agent.evolution.task_local_confidence import (
+    ConfidenceEvidenceRecord,
+    ConfidencePolicy,
+    HierarchicalEvidenceBank,
+    WeightRecipe,
+    beta_win_probability,
 )
 
 
@@ -149,6 +159,157 @@ def _task_local_release(anchor: ChampionRelease) -> TaskLocalEnsembleRelease:
         metric_policy_fingerprint=anchor.metric_policy_fingerprint,
         lineage=("task_local_v1",),
     )
+
+
+def test_horizon_weighted_arithmetic_replays_early_and_late_weights() -> None:
+    arithmetic = SelectionArithmetic(
+        "horizon_weighted",
+        inputs=(
+            SelectionArithmetic("leaf", candidate_name="toto_2_0"),
+            SelectionArithmetic("leaf", candidate_name="seasonal_naive"),
+        ),
+        horizon_stops=(2, 4),
+        region_weights=((0.6, 0.4), (1.0, 0.0)),
+    )
+    decision = SelectionDecision(
+        mode="combined",
+        selected=("toto_2_0", "seasonal_naive"),
+        weights=(0.8, 0.2),
+        forecast=(8.8, 8.8, 20.0, 20.0),
+        confidence=0.0,
+        reason_codes=("task_local_ensemble", "activated"),
+        rejected={},
+        combination_type="task_local_horizon_weighted",
+        arithmetic=arithmetic,
+    )
+
+    replayed = replay_selection_forecast(
+        decision,
+        {
+            "toto_2_0": (8.0, 8.0, 20.0, 20.0),
+            "seasonal_naive": (10.0, 10.0, 0.0, 0.0),
+        },
+    )
+
+    assert replayed == (8.8, 8.8, 20.0, 20.0)
+
+
+def test_horizon_weighted_arithmetic_rejects_noncovering_or_unnormalized_rows() -> None:
+    leaves = (
+        SelectionArithmetic("leaf", candidate_name="toto_2_0"),
+        SelectionArithmetic("leaf", candidate_name="seasonal_naive"),
+    )
+    with pytest.raises(ValueError, match="region weights"):
+        SelectionArithmetic(
+            "horizon_weighted",
+            inputs=leaves,
+            horizon_stops=(2, 4),
+            region_weights=((0.6, 0.4), (0.8, 0.3)),
+        )
+
+
+def test_v2_regional_package_replays_and_materializes_each_leaf_once() -> None:
+    champion = _release()
+    calls: Counter[str] = Counter()
+    task = Task("regional", (1.0, 2.0, 3.0) * 12, 4, "D", ())
+    truth = (7.0, 7.0, 3.0, 4.0)
+    diagnostics = {
+        "specialist": CandidateDiagnostics.synthetic(
+            name="specialist",
+            family="statistical",
+            median_mase=1.0,
+            fold_forecasts=((1.0, 2.0, 3.0, 4.0),) * 5,
+            fold_truths=(truth,) * 5,
+            median_smae=1.0,
+            median_srmse=1.0,
+        ),
+        "safe_anchor": CandidateDiagnostics.synthetic(
+            name="safe_anchor",
+            family="tsfm",
+            median_mase=1.0,
+            fold_forecasts=((7.0, 7.0, 0.0, 0.0),) * 5,
+            fold_truths=(truth,) * 5,
+            median_smae=1.0,
+            median_srmse=1.0,
+        ),
+    }
+    confidence_policy = ConfidencePolicy(
+        exact_minimum_support=8,
+        coarse_minimum_support=8,
+        global_minimum_support=8,
+    )
+    recipe = WeightRecipe("early", ("specialist", "safe_anchor"), (5, 5))
+    evidence = HierarchicalEvidenceBank.build(
+        confidence_policy,
+        records=(
+            ConfidenceEvidenceRecord(
+                level="global",
+                group_key=HierarchicalEvidenceBank.global_group_key(),
+                recipe=recipe,
+                independent_groups=8,
+                task_support=8,
+                wins=7,
+                ties=0,
+                losses=1,
+                posterior_win_probability=beta_win_probability(7, 1),
+                robust_margin_smae=0.1,
+                robust_margin_srmse=0.1,
+                p90_regret_smae_raw=0.0,
+                p90_regret_srmse_raw=0.0,
+                failure_count=0,
+                clipped_smae_count=0,
+                clipped_srmse_count=0,
+            ),
+        ),
+        fit_group_ids=tuple(f"{index:064x}" for index in range(1, 9)),
+    )
+    release = TaskLocalEnsembleRelease(
+        schema_version=2,
+        anchor_release_sha256=champion_fingerprint(champion),
+        anchor_name="specialist",
+        policy=TaskLocalTournamentPolicy(anchor_name="specialist"),
+        default_candidate_names=("specialist", "safe_anchor"),
+        group_supplies=(),
+        grouping_fingerprint="0" * 64,
+        oof_report_sha256="1" * 64,
+        source_hashes=champion.source_hashes,
+        metric_policy_fingerprint=champion.metric_policy_fingerprint,
+        lineage=("task_local_confidence_v2",),
+        confidence_evidence=evidence,
+    )
+
+    def runner(
+        name: str, _history: tuple[float, ...], horizon: int, _frequency: str
+    ) -> tuple[float, ...]:
+        calls[name] += 1
+        return (
+            tuple(float(index + 1) for index in range(horizon))
+            if name == "specialist"
+            else (7.0,) * horizon
+        )
+
+    package = run_numerical_loop(
+        task,
+        screening_policy=_screening(),
+        candidate_runner=runner,
+        diagnostics=diagnostics,
+        decision_policy=DecisionPolicy(ensemble_enabled=False),
+        champion_release=champion,
+        task_local_release=release,
+    )
+
+    assert package.final_forecast == (4.0, 4.5, 3.0, 4.0)
+    assert package.selection_decision.arithmetic is not None
+    assert package.selection_decision.arithmetic.operation == "horizon_weighted"
+    assert replay_selection_forecast(
+        package.selection_decision,
+        {item.name: item.forecast for item in package.ranked_alternatives},
+    ) == package.final_forecast
+    assert calls == Counter({"safe_anchor": 1, "specialist": 1})
+    assert set(package.component_fingerprints) >= {
+        "task_local_confidence",
+        "task_local_result",
+    }
 
 
 def test_task_local_release_replays_package_without_rerunning_leaves() -> None:

@@ -19,6 +19,7 @@ from .task_local_confidence import (
     ConfidencePolicy,
     HierarchicalEvidenceBank,
     WeightRecipe,
+    parse_hierarchical_evidence,
     robust_effect_margin,
 )
 
@@ -29,6 +30,13 @@ def _canonical_name(value: str) -> str:
 
 def task_local_fingerprint(value: object) -> str:
     payload = asdict(value) if hasattr(value, "__dataclass_fields__") else value
+    if (
+        isinstance(payload, dict)
+        and payload.get("schema_version") == 1
+        and "confidence_evidence" in payload
+        and "anchor_release_sha256" in payload
+    ):
+        payload.pop("confidence_evidence")
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 
@@ -199,10 +207,11 @@ class TaskLocalEnsembleRelease:
     source_hashes: tuple[tuple[str, str], ...]
     metric_policy_fingerprint: str
     lineage: tuple[str, ...]
+    confidence_evidence: HierarchicalEvidenceBank | None = None
 
     def __post_init__(self) -> None:
-        if type(self.schema_version) is not int or self.schema_version != 1:
-            raise ValueError("task-local release schema must be exactly one")
+        if type(self.schema_version) is not int or self.schema_version not in {1, 2}:
+            raise ValueError("task-local release schema must be exactly one or two")
         if type(self.policy) is not TaskLocalTournamentPolicy:
             raise ValueError("task-local release requires an exact tournament policy")
         TaskLocalTournamentPolicy.__post_init__(self.policy)
@@ -248,6 +257,14 @@ class TaskLocalEnsembleRelease:
             or len(self.lineage) != len(set(self.lineage))
         ):
             raise ValueError("task-local lineage must contain unique identifiers")
+        if self.schema_version == 1 and self.confidence_evidence is not None:
+            raise ValueError("schema-one task-local releases cannot carry confidence")
+        if self.schema_version == 2:
+            if type(self.confidence_evidence) is not HierarchicalEvidenceBank:
+                raise ValueError("schema-two task-local release requires confidence evidence")
+            HierarchicalEvidenceBank.__post_init__(self.confidence_evidence)
+            if self.lineage[-1] != "task_local_confidence_v2":
+                raise ValueError("schema-two task-local release lineage is noncanonical")
 
     def candidate_names(self, group_key: str) -> tuple[str, ...]:
         for item in self.group_supplies:
@@ -256,7 +273,7 @@ class TaskLocalEnsembleRelease:
         return self.default_candidate_names
 
     def to_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": self.schema_version,
             "anchor_release_sha256": self.anchor_release_sha256,
             "anchor_name": self.anchor_name,
@@ -269,6 +286,10 @@ class TaskLocalEnsembleRelease:
             "metric_policy_fingerprint": self.metric_policy_fingerprint,
             "lineage": list(self.lineage),
         }
+        if self.schema_version == 2:
+            assert self.confidence_evidence is not None
+            payload["confidence_evidence"] = self.confidence_evidence.to_payload()
+        return payload
 
 
 def _invalid_sha256(value: object) -> bool:
@@ -280,8 +301,8 @@ def _invalid_sha256(value: object) -> bool:
 
 
 def parse_task_local_release(payload: object) -> TaskLocalEnsembleRelease:
-    """Parse only the exact canonical v1 task-local release schema."""
-    expected = {
+    """Parse the exact canonical v1 or confidence-routed v2 release schema."""
+    base_fields = {
         "schema_version",
         "anchor_release_sha256",
         "anchor_name",
@@ -294,7 +315,17 @@ def parse_task_local_release(payload: object) -> TaskLocalEnsembleRelease:
         "metric_policy_fingerprint",
         "lineage",
     }
-    if type(payload) is not dict or set(payload) != expected:
+    if type(payload) is not dict or type(payload.get("schema_version")) is not int:
+        raise ValueError("task-local release schema is malformed")
+    schema_version = payload["schema_version"]
+    expected = (
+        base_fields
+        if schema_version == 1
+        else base_fields | {"confidence_evidence"}
+        if schema_version == 2
+        else set()
+    )
+    if not expected or set(payload) != expected:
         raise ValueError("task-local release schema is malformed")
     policy_payload = payload["policy"]
     policy_fields = {
@@ -346,6 +377,11 @@ def parse_task_local_release(payload: object) -> TaskLocalEnsembleRelease:
             source_hashes=tuple(sorted(source_payload.items())),
             metric_policy_fingerprint=payload["metric_policy_fingerprint"],
             lineage=tuple(raw_lineage),
+            confidence_evidence=(
+                parse_hierarchical_evidence(payload["confidence_evidence"])
+                if schema_version == 2
+                else None
+            ),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError("task-local release schema is malformed") from error

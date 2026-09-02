@@ -31,6 +31,7 @@ from .numerical_selector import (
     CandidateDiagnostics,
     DecisionPolicy,
     HindcastConfig,
+    SelectionArithmetic,
     SelectionDecision,
     diagnose_active_candidates,
     select_assumption_guided_forecast,
@@ -44,7 +45,9 @@ from .screening import (
     profile_task,
 )
 from .task_local_ensemble import (
+    TaskLocalConfidenceResult,
     TaskLocalEnsembleRelease,
+    execute_confidence_task_local_ensemble,
     execute_task_local_ensemble,
     task_local_fingerprint,
 )
@@ -368,32 +371,60 @@ def run_numerical_loop(
 
     if task_local_release is not None:
         supply = task_local_release.candidate_names(task_morphology_key(profile))
-        local_result = execute_task_local_ensemble(
-            task_local_release.policy,
-            candidate_names=supply,
-            forecasts={item.name: item.forecast for item in alternatives if item.name in supply},
-            diagnostics={
-                item.name: stable_diagnostics[item.name]
-                for item in alternatives
-                if item.name in supply and item.name in stable_diagnostics
-            },
-            horizon=safe_task.horizon,
-        )
-        decision = SelectionDecision(
-            mode="ensemble" if local_result.activated else "single",
-            selected=local_result.selected_names,
-            weights=local_result.weights,
-            forecast=local_result.forecast,
-            confidence=0.0,
-            reason_codes=(
-                "task_local_ensemble",
-                "activated" if local_result.activated else "anchor_fallback",
-            ),
-            rejected={},
-            baseline_name=task_local_release.anchor_name,
-            considered_candidates=supply,
-        )
-        fallback_reason = local_result.fallback_reason
+        local_forecasts = {
+            item.name: item.forecast
+            for item in alternatives
+            if item.name in supply
+        }
+        local_diagnostics = {
+            item.name: stable_diagnostics[item.name]
+            for item in alternatives
+            if item.name in supply and item.name in stable_diagnostics
+        }
+        if task_local_release.schema_version == 2:
+            assert task_local_release.confidence_evidence is not None
+            confidence_result = execute_confidence_task_local_ensemble(
+                task_local_release.policy,
+                task_local_release.confidence_evidence.policy,
+                candidate_names=supply,
+                forecasts=local_forecasts,
+                diagnostics=local_diagnostics,
+                horizon=safe_task.horizon,
+                profile=profile,
+                confidence_evidence=task_local_release.confidence_evidence,
+            )
+            decision = _confidence_selection_decision(
+                confidence_result,
+                supply=supply,
+                anchor_name=task_local_release.anchor_name,
+                horizon=safe_task.horizon,
+            )
+            fallback_reason = confidence_result.fallback_reason
+            local_result: object = confidence_result
+        else:
+            legacy_result = execute_task_local_ensemble(
+                task_local_release.policy,
+                candidate_names=supply,
+                forecasts=local_forecasts,
+                diagnostics=local_diagnostics,
+                horizon=safe_task.horizon,
+            )
+            decision = SelectionDecision(
+                mode="ensemble" if legacy_result.activated else "single",
+                selected=legacy_result.selected_names,
+                weights=legacy_result.weights,
+                forecast=legacy_result.forecast,
+                confidence=0.0,
+                reason_codes=(
+                    "task_local_ensemble",
+                    "activated" if legacy_result.activated else "anchor_fallback",
+                ),
+                rejected={},
+                baseline_name=task_local_release.anchor_name,
+                considered_candidates=supply,
+            )
+            fallback_reason = legacy_result.fallback_reason
+            local_result = legacy_result
         card = None
         accepted = ()
         handoff = ()
@@ -423,6 +454,7 @@ def run_numerical_loop(
             fingerprints,
             task_local_release,
             task_local_release.candidate_names(task_morphology_key(profile)),
+            local_result,
         )
     package_type = (
         _TaskLocalNumericalForecastPackage
@@ -851,12 +883,21 @@ def _with_task_local_fingerprints(
     fingerprints: Mapping[str, str],
     release: TaskLocalEnsembleRelease,
     supply: tuple[str, ...],
+    result: object,
 ) -> Mapping[str, str]:
     additions = {
         "task_local_release": task_local_fingerprint(release),
         "task_local_policy": task_local_fingerprint(release.policy),
         "task_local_group_supply": task_local_fingerprint({"candidate_names": list(supply)}),
     }
+    if release.schema_version == 2:
+        assert release.confidence_evidence is not None
+        additions.update(
+            {
+                "task_local_confidence": release.confidence_evidence.evidence_fingerprint,
+                "task_local_result": task_local_fingerprint(result),
+            }
+        )
     result = dict(fingerprints)
     conflicts = {
         key for key, value in additions.items() if key in result and result[key] != value
@@ -868,3 +909,83 @@ def _with_task_local_fingerprints(
         )
     result.update(additions)
     return MappingProxyType(dict(sorted(result.items())))
+
+
+def _confidence_selection_decision(
+    result: TaskLocalConfidenceResult,
+    *,
+    supply: tuple[str, ...],
+    anchor_name: str,
+    horizon: int,
+) -> SelectionDecision:
+    selected = tuple(
+        name
+        for name in supply
+        if any(name in region.selected_names for region in result.regions)
+    )
+    if not selected or selected[0] != anchor_name:
+        raise ValueError("confidence result does not preserve its supplied anchor")
+    leaves = tuple(
+        SelectionArithmetic("leaf", candidate_name=name) for name in selected
+    )
+    aligned_rows = tuple(
+        tuple(
+            region.weights[region.selected_names.index(name)]
+            if name in region.selected_names
+            else 0.0
+            for name in selected
+        )
+        for region in result.regions
+    )
+    lengths = tuple(region.stop - region.start for region in result.regions)
+    attribution = tuple(
+        math.fsum(
+            length * row[index]
+            for length, row in zip(lengths, aligned_rows, strict=True)
+        )
+        / horizon
+        for index in range(len(selected))
+    )
+    if len(selected) == 1:
+        mode = "single"
+        combination_type = None
+        arithmetic = leaves[0]
+    elif len(result.regions) == 1 or len(set(aligned_rows)) == 1:
+        mode = "ensemble"
+        combination_type = None
+        arithmetic = SelectionArithmetic(
+            "fmean" if len(set(attribution)) == 1 else "weighted",
+            inputs=leaves,
+            weights=() if len(set(attribution)) == 1 else attribution,
+        )
+    else:
+        mode = "combined"
+        combination_type = "task_local_horizon_weighted"
+        arithmetic = SelectionArithmetic(
+            "horizon_weighted",
+            inputs=leaves,
+            horizon_stops=tuple(region.stop for region in result.regions),
+            region_weights=aligned_rows,
+        )
+    activated_posteriors = tuple(
+        region.posterior_win_probability
+        for region in result.regions
+        if region.activated
+    )
+    return SelectionDecision(
+        mode=mode,
+        selected=selected,
+        weights=attribution,
+        forecast=result.forecast,
+        confidence=min(activated_posteriors) if activated_posteriors else 0.0,
+        reason_codes=(
+            "task_local_ensemble",
+            "confidence_v2",
+            "activated" if result.activated else "anchor_fallback",
+        ),
+        rejected={},
+        combination_type=combination_type,
+        baseline_name=anchor_name,
+        considered_candidates=supply,
+        arithmetic=arithmetic,
+    )

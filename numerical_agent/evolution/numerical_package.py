@@ -26,6 +26,9 @@ _CHAMPION_FINGERPRINT_KEYS = frozenset(
 _TASK_LOCAL_FINGERPRINT_KEYS = frozenset(
     {"task_local_release", "task_local_policy", "task_local_group_supply"}
 )
+_TASK_LOCAL_CONFIDENCE_FINGERPRINT_KEYS = frozenset(
+    {"task_local_confidence", "task_local_result"}
+)
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -264,6 +267,8 @@ class _TaskLocalNumericalForecastPackage(NumericalForecastPackage):
         if self.selection_decision.reason_codes[:1] != ("task_local_ensemble",):
             raise ValueError("Task-local package requires the fixed provenance marker")
         required = _CHAMPION_FINGERPRINT_KEYS | _TASK_LOCAL_FINGERPRINT_KEYS
+        if "confidence_v2" in self.selection_decision.reason_codes:
+            required |= _TASK_LOCAL_CONFIDENCE_FINGERPRINT_KEYS
         if required - set(self.component_fingerprints) or any(
             _SHA256.fullmatch(self.component_fingerprints[key]) is None
             for key in required

@@ -15,6 +15,7 @@ from numerical_agent.evolution.task_local_confidence import (
 )
 from numerical_agent.evolution.task_local_ensemble import (
     TaskLocalTournamentPolicy,
+    canonical_task_local_release_bytes,
     parse_task_local_release,
 )
 from numerical_agent.evolution.task_local_evolution import (
@@ -299,6 +300,60 @@ def test_task_local_release_round_trip_rejects_schema_drift() -> None:
     payload["unexpected"] = True
     with pytest.raises(ValueError, match="schema"):
         parse_task_local_release(payload)
+
+
+def test_v2_release_round_trips_exact_confidence_evidence() -> None:
+    tasks = _ten_tasks()
+    release, _report = fit_oof_release(
+        _local_rows(tasks),
+        build_group_fold_manifest(tasks, seed=17),
+        anchor_release_sha256="a" * 64,
+        anchor_name="toto_2_0",
+        source_hashes=(("dictionary", "b" * 64),),
+        policy=TaskLocalTournamentPolicy(),
+    )
+    bank = build_hierarchical_evidence(
+        _local_rows(tasks),
+        task_ids=tuple(task.task_id for task in tasks),
+        group_ids={task.task_id: f"{index + 1:064x}" for index, task in enumerate(tasks)},
+        anchor_name="toto_2_0",
+        candidate_names=("toto_2_0", "seasonal_naive"),
+        policy=ConfidencePolicy(
+            exact_minimum_support=8,
+            coarse_minimum_support=8,
+            global_minimum_support=8,
+        ),
+    )
+    v2 = replace(
+        release,
+        schema_version=2,
+        confidence_evidence=bank,
+        lineage=("task_local_confidence_v2",),
+    )
+
+    payload = v2.to_payload()
+    assert parse_task_local_release(payload) == v2
+    assert canonical_task_local_release_bytes(v2) == canonical_task_local_release_bytes(
+        parse_task_local_release(payload)
+    )
+
+
+def test_v1_release_payload_does_not_gain_confidence_fields() -> None:
+    tasks = _ten_tasks()
+    release, _report = fit_oof_release(
+        _local_rows(tasks),
+        build_group_fold_manifest(tasks, seed=17),
+        anchor_release_sha256="a" * 64,
+        anchor_name="toto_2_0",
+        source_hashes=(("dictionary", "b" * 64),),
+        policy=TaskLocalTournamentPolicy(),
+    )
+
+    payload = release.to_payload()
+
+    assert release.schema_version == 1
+    assert "confidence_evidence" not in payload
+    assert parse_task_local_release(payload) == release
 
 
 def test_recipe_score_uses_real_forecasts_and_preserves_opaque_group() -> None:

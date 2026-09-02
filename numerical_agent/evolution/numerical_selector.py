@@ -521,12 +521,22 @@ class SelectionArithmetic:
     strength: float | None = None
     clip_multiplier: float | None = None
     scale: float | None = None
+    horizon_stops: tuple[int, ...] = ()
+    region_weights: tuple[tuple[float, ...], ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.operation, str):
             raise ValueError("selection arithmetic operation must be a string")
         inputs = tuple(self.inputs)
         raw_weights = tuple(self.weights)
+        horizon_stops = tuple(self.horizon_stops)
+        try:
+            region_weights = tuple(
+                tuple(float(value) for value in row)
+                for row in self.region_weights
+            )
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError("selection arithmetic region weights are invalid") from error
         if any(
             isinstance(value, bool) or not isinstance(value, (int, float))
             for value in raw_weights
@@ -535,10 +545,12 @@ class SelectionArithmetic:
         weights = tuple(float(value) for value in raw_weights)
         object.__setattr__(self, "inputs", inputs)
         object.__setattr__(self, "weights", weights)
+        object.__setattr__(self, "horizon_stops", horizon_stops)
+        object.__setattr__(self, "region_weights", region_weights)
         if self.operation == "leaf":
             if not isinstance(self.candidate_name, str) or not self.candidate_name:
                 raise ValueError("selection arithmetic leaf requires a candidate")
-            if inputs or weights or any(
+            if inputs or weights or horizon_stops or region_weights or any(
                 value is not None
                 for value in (self.strength, self.clip_multiplier, self.scale)
             ):
@@ -548,6 +560,32 @@ class SelectionArithmetic:
             raise ValueError("selection arithmetic operation requires two or more inputs")
         if any(not isinstance(item, SelectionArithmetic) for item in inputs):
             raise ValueError("selection arithmetic inputs must be immutable recipes")
+        if self.operation == "horizon_weighted":
+            if weights or any(
+                value is not None
+                for value in (self.strength, self.clip_multiplier, self.scale)
+            ):
+                raise ValueError("horizon-weighted arithmetic has unexpected fields")
+            if (
+                not horizon_stops
+                or len(horizon_stops) != len(region_weights)
+                or any(type(stop) is not int or stop <= 0 for stop in horizon_stops)
+                or tuple(sorted(set(horizon_stops))) != horizon_stops
+                or any(
+                    len(row) != len(inputs)
+                    or any(not math.isfinite(value) or value < 0.0 for value in row)
+                    or math.fsum(row) != 1.0
+                    for row in region_weights
+                )
+            ):
+                raise ValueError(
+                    "horizon-weighted arithmetic requires normalized region weights"
+                )
+            return
+        if horizon_stops or region_weights:
+            raise ValueError(
+                f"{self.operation} arithmetic has unexpected horizon fields"
+            )
         if self.operation in {"blend", "weighted"}:
             if (
                 len(weights) != len(inputs)
@@ -687,6 +725,8 @@ def _expected_arithmetic_operation(decision: SelectionDecision) -> str:
             return "fmean"
         return "weighted"
     if decision.mode == "combined":
+        if decision.combination_type == "task_local_horizon_weighted":
+            return "horizon_weighted"
         if decision.combination_type in _BLEND_SELECTION_TYPES:
             return "blend"
         if decision.combination_type in _WEIGHTED_SELECTION_TYPES:
@@ -721,6 +761,27 @@ def _arithmetic_attribution_weights(
             *(value * arithmetic.strength
               for value in _arithmetic_attribution_weights(specialist)),
         )
+    if arithmetic.operation == "horizon_weighted":
+        lengths = tuple(
+            stop - (arithmetic.horizon_stops[index - 1] if index else 0)
+            for index, stop in enumerate(arithmetic.horizon_stops)
+        )
+        horizon = arithmetic.horizon_stops[-1]
+        factors = tuple(
+            math.fsum(
+                length * row[index]
+                for length, row in zip(
+                    lengths, arithmetic.region_weights, strict=True
+                )
+            )
+            / horizon
+            for index in range(len(arithmetic.inputs))
+        )
+        return tuple(
+            value * factor
+            for item, factor in zip(arithmetic.inputs, factors, strict=True)
+            for value in _arithmetic_attribution_weights(item)
+        )
     factors = (
         arithmetic.weights
         if arithmetic.operation in {"blend", "weighted"}
@@ -745,6 +806,24 @@ def _replay_arithmetic(
             raise ValueError("selection arithmetic references an unavailable forecast") from error
         return tuple(float(value) for value in values)
     values = tuple(_replay_arithmetic(item, forecasts) for item in arithmetic.inputs)
+    if arithmetic.operation == "horizon_weighted":
+        horizon = arithmetic.horizon_stops[-1]
+        if any(len(value) != horizon for value in values):
+            raise ValueError(
+                "horizon-weighted arithmetic leaves do not cover the registered horizon"
+            )
+        result: list[float] = []
+        start = 0
+        for stop, weights in zip(
+            arithmetic.horizon_stops, arithmetic.region_weights, strict=True
+        ):
+            region = _weighted_values(
+                tuple(value[start:stop] for value in values),
+                weights,
+            )
+            result.extend(region)
+            start = stop
+        return tuple(result)
     if arithmetic.operation == "blend":
         return _blend_values(values[0], values[1], arithmetic.weights[0])
     if arithmetic.operation == "weighted":
