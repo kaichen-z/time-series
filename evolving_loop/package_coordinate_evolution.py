@@ -195,6 +195,15 @@ class PackageCoordinateBundle:
             raise ValueError("package coordinate Child requires a HarnessPolicy")
         if target not in {"retrieval", "decision"}:
             raise ValueError("package coordinate policy Child target is invalid")
+        child = self._provisional_policy_child(policy, target)
+        if _changed_modules(self, child) != (target,):
+            raise ValueError("package coordinate Child crossed module ownership")
+        return child
+
+    def _provisional_policy_child(
+        self, policy: HarnessPolicy, target: Literal["retrieval", "decision"]
+    ) -> "PackageCoordinateBundle":
+        """Build a traceable policy candidate before ownership acceptance."""
         return PackageCoordinateBundle(
             generation=self.generation + 1,
             coordinate=target,
@@ -461,7 +470,12 @@ class PackageCoordinateController:
                 reason = "package phase returned the wrong coordinate target"
             else:
                 child = (
-                    current.with_policy(outcome.bundle, target=target)
+                    PackageCoordinateState(
+                        current.bundle._provisional_policy_child(
+                            outcome.bundle, target
+                        ),
+                        current.registry,
+                    )
                     if outcome.accepted
                     else current
                 )

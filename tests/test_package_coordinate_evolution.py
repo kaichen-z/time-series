@@ -115,11 +115,17 @@ def test_seed_bundle_cannot_claim_a_parent_sha(tmp_path) -> None:
 
 def test_state_coordinate_mutators_preserve_unowned_bytes_and_seal_once(tmp_path) -> None:
     _task, parent = _bundle(tmp_path)
+    retrieval_release = _accepted_release(
+        tmp_path / "retrieval-child", "v002", "v001", strategy="entity_first"
+    )
     retrieval_policy = replace(
-        parent.bundle.policy,
+        embed_retrieval_release(
+            parent.bundle.policy,
+            retrieval_release,
+            changelog="changed Retrieval release",
+        ),
         version="v002",
         parent=parent.bundle.policy.version,
-        decision_prompt="changed Retrieval-owned policy payload",
     )
     child = parent.with_policy(retrieval_policy, target="retrieval")
 
@@ -129,6 +135,16 @@ def test_state_coordinate_mutators_preserve_unowned_bytes_and_seal_once(tmp_path
     assert child.registry is parent.registry
     assert child.bundle.numerical_release_payload == parent.bundle.numerical_release_payload
     assert child.bundle.numerical_manifest_sha256 == parent.bundle.numerical_manifest_sha256
+    parent_fingerprints = package_principal_fingerprints(parent.bundle)
+    child_fingerprints = package_principal_fingerprints(child.bundle)
+    assert child_fingerprints["retrieval"] != parent_fingerprints["retrieval"]
+    assert child_fingerprints["numerical"] == parent_fingerprints["numerical"]
+    assert child_fingerprints["decision"] == parent_fingerprints["decision"]
+    with pytest.raises(ValueError, match="crossed module ownership"):
+        parent.with_policy(
+            replace(parent.bundle.policy, decision_prompt="cross-coordinate change"),
+            target="retrieval",
+        )
     sealed = child.bundle.seal_acceptance("a" * 64)
     assert sealed.acceptance_evidence_sha256 == "a" * 64
     with pytest.raises(ValueError, match="once"):
@@ -181,18 +197,56 @@ def test_bundle_identity_binds_numerical_retrieval_and_decision(tmp_path) -> Non
     )
 
     assert set(fingerprints) == {"numerical", "retrieval", "decision"}
-    assert (
-        package_principal_fingerprints(changed_numerical)["numerical"]
-        != fingerprints["numerical"]
+    for changed, target in (
+        (changed_numerical, "numerical"),
+        (changed_retrieval, "retrieval"),
+        (changed_decision, "decision"),
+    ):
+        changed_fingerprints = package_principal_fingerprints(changed)
+        for coordinate in ("numerical", "retrieval", "decision"):
+            if coordinate == target:
+                assert changed_fingerprints[coordinate] != fingerprints[coordinate]
+            else:
+                assert changed_fingerprints[coordinate] == fingerprints[coordinate]
+
+
+def test_numerical_mutation_replaces_release_and_registry_atomically(tmp_path) -> None:
+    task, parent = _bundle(tmp_path)
+    release_payload = parent.bundle.to_payload()["numerical_release_payload"]
+    assert isinstance(release_payload, dict)
+    release_payload["source_fingerprints"] = {"dictionary": "9" * 64}
+    release = parse_numerical_supply_release(release_payload)
+    package = _package()
+    registry = _frozen_registry(
+        (
+            (
+                task,
+                replace(
+                    package,
+                    component_fingerprints={
+                        **dict(package.component_fingerprints),
+                        "numerical_supply_release": release.fingerprint,
+                    },
+                ),
+            ),
+        ),
+        release=release,
     )
-    assert (
-        package_principal_fingerprints(changed_retrieval)["retrieval"]
-        != fingerprints["retrieval"]
-    )
-    assert (
-        package_principal_fingerprints(changed_decision)["decision"]
-        != fingerprints["decision"]
-    )
+
+    child = parent.with_numerical(release, registry)
+
+    assert child.bundle.parent_sha256 == parent.bundle.fingerprint()
+    assert child.bundle.coordinate == "numerical"
+    assert child.bundle.numerical_release_sha256 == release.fingerprint
+    assert child.bundle.numerical_manifest_sha256 == registry.fingerprint
+    assert child.registry is registry
+    assert child.bundle.policy == parent.bundle.policy
+    assert child.bundle.runtime_fingerprints == parent.bundle.runtime_fingerprints
+    parent_fingerprints = package_principal_fingerprints(parent.bundle)
+    child_fingerprints = package_principal_fingerprints(child.bundle)
+    assert child_fingerprints["numerical"] != parent_fingerprints["numerical"]
+    assert child_fingerprints["retrieval"] == parent_fingerprints["retrieval"]
+    assert child_fingerprints["decision"] == parent_fingerprints["decision"]
 
 
 def test_controller_accepts_retrieval_then_decision_only(tmp_path) -> None:
