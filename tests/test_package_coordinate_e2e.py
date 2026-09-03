@@ -19,6 +19,7 @@ from evolving_loop.decision_agent.agent import DecisionAgent
 from evolving_loop.package_coordinate_evolution import (
     PackageCoordinateBundle,
     PackageCoordinateController,
+    PackageCoordinateState,
 )
 from evolving_loop.package_decision_evolution import (
     PackageDecisionEvaluator,
@@ -44,7 +45,7 @@ from tests.test_package_decision_evolution import (
     _decision_task,
     _safe_default_package,
 )
-from tests.test_package_retrieval_evolution import _frozen_registry
+from tests.test_package_retrieval_evolution import _frozen_registry, _seed_supply_release
 
 
 _RETRIEVAL_DEPENDENCIES = {
@@ -408,18 +409,29 @@ def test_package_coordinate_evolution_closes_deterministic_80_20_loop(
         decision_engine,
         accepted_release_path=lambda _policy: accepted_release_paths[0],
     )
-    parent = PackageCoordinateBundle(
-        generation=0,
-        parent_sha256=None,
-        numerical_manifest_sha256=registry.fingerprint,
-        policy=parent_policy,
-        runtime_fingerprints={
-            "bridge_runtime": _RETRIEVAL_DEPENDENCIES["bridge_runtime"],
-            "retrieval_runtime": _RETRIEVAL_DEPENDENCIES["retrieval_factory"],
-            "decision_runtime": _RETRIEVAL_DEPENDENCIES["decision_factory"],
-            "retrieval_verifier": retrieval_evaluator.verifier_hash,
-            "metric_policy": METRIC_POLICY_FINGERPRINT,
-        },
+    numerical_release = _seed_supply_release()
+    parent = PackageCoordinateState(
+        PackageCoordinateBundle(
+            generation=0,
+            coordinate="seed",
+            parent_sha256=None,
+            numerical_release_payload=numerical_release.to_payload(),
+            numerical_release_sha256=numerical_release.fingerprint,
+            numerical_manifest_sha256=registry.fingerprint,
+            policy=parent_policy,
+            runtime_fingerprints={
+                "bridge_runtime": _RETRIEVAL_DEPENDENCIES["bridge_runtime"],
+                "numerical_runtime": "6" * 64,
+                "retrieval_runtime": _RETRIEVAL_DEPENDENCIES["retrieval_factory"],
+                "decision_runtime": _RETRIEVAL_DEPENDENCIES["decision_factory"],
+                "retrieval_verifier": retrieval_evaluator.verifier_hash,
+                "metric_policy": METRIC_POLICY_FINGERPRINT,
+                "model_runtime": "7" * 64,
+                "llm_runtime": "8" * 64,
+            },
+            acceptance_evidence_sha256=None,
+        ),
+        registry,
     )
 
     numerical_calls = 0
@@ -443,9 +455,9 @@ def test_package_coordinate_evolution_closes_deterministic_80_20_loop(
     assert tuple(step.target for step in trace) == ("retrieval", "decision")
     assert all(step.accepted for step in trace)
     assert all(not step.public_test_accessed for step in trace)
-    assert selected.numerical_manifest_sha256 == registry.fingerprint
-    assert selected.policy.retrieval_genome.version == "v001"
-    assert selected.policy.version == "v002"
+    assert selected.bundle.numerical_manifest_sha256 == registry.fingerprint
+    assert selected.bundle.policy.retrieval_genome.version == "v001"
+    assert selected.bundle.policy.version == "v002"
     assert accepted_results[0].accepted is True
     assert accepted_results[0].parent_dev.task_count == 20
     assert numerical_calls == 0

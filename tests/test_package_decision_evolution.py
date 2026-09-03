@@ -36,6 +36,7 @@ from tests.test_package_retrieval_evolution import (
     _package,
     _retrieval_card,
     _round_response,
+    _seed_supply_release,
     _task,
 )
 
@@ -94,6 +95,30 @@ def _decision_task():
                 role="supporting",
             ),
         ),
+    )
+
+
+def _schema2_bundle(registry, policy):
+    release = _seed_supply_release()
+    return PackageCoordinateBundle(
+        generation=0,
+        coordinate="seed",
+        parent_sha256=None,
+        numerical_release_payload=release.to_payload(),
+        numerical_release_sha256=release.fingerprint,
+        numerical_manifest_sha256=registry.fingerprint,
+        policy=policy,
+        runtime_fingerprints={
+            "bridge_runtime": "1" * 64,
+            "numerical_runtime": "6" * 64,
+            "retrieval_runtime": "2" * 64,
+            "decision_runtime": "3" * 64,
+            "retrieval_verifier": "4" * 64,
+            "metric_policy": "5" * 64,
+            "model_runtime": "7" * 64,
+            "llm_runtime": "8" * 64,
+        },
+        acceptance_evidence_sha256=None,
     )
 
 
@@ -310,19 +335,7 @@ def test_pipeline_preserves_non_anchor_round1_decision_on_round2_failure(
         FakeLLMClient([_request_specialist(), _decision_response("specialist")]),
         prompt=policy.decision_prompt,
     )
-    bundle = PackageCoordinateBundle(
-        generation=0,
-        parent_sha256=None,
-        numerical_manifest_sha256=registry.fingerprint,
-        policy=policy,
-        runtime_fingerprints={
-            "bridge_runtime": "1" * 64,
-            "retrieval_runtime": "2" * 64,
-            "decision_runtime": "3" * 64,
-            "retrieval_verifier": "4" * 64,
-            "metric_policy": "5" * 64,
-        },
-    )
+    bundle = _schema2_bundle(registry, policy)
     pipeline_evaluator = PackagePipelineEvaluator(
         lambda _policy: retrieval,
         lambda _policy: decision,
@@ -400,19 +413,7 @@ def test_pipeline_cache_only_fails_before_factories_or_live_inference(tmp_path) 
         raise AssertionError("cache-only evaluation invoked Decision")
 
     evaluator = PackagePipelineEvaluator(retrieval_factory, decision_factory)
-    bundle = PackageCoordinateBundle(
-        generation=0,
-        parent_sha256=None,
-        numerical_manifest_sha256=registry.fingerprint,
-        policy=policy,
-        runtime_fingerprints={
-            "bridge_runtime": "1" * 64,
-            "retrieval_runtime": "2" * 64,
-            "decision_runtime": "3" * 64,
-            "retrieval_verifier": "4" * 64,
-            "metric_policy": "5" * 64,
-        },
-    )
+    bundle = _schema2_bundle(registry, policy)
 
     with pytest.raises(RuntimeError, match="cache-only"):
         evaluator.evaluate(bundle, registry, (task,), stage="replay", cache_only=True)
@@ -448,19 +449,7 @@ def test_pipeline_propagates_component_integrity_mismatch(
         lambda _policy: retrieval,
         lambda _policy: decision,
     )
-    bundle = PackageCoordinateBundle(
-        generation=0,
-        parent_sha256=None,
-        numerical_manifest_sha256=registry.fingerprint,
-        policy=policy,
-        runtime_fingerprints={
-            "bridge_runtime": "1" * 64,
-            "retrieval_runtime": "2" * 64,
-            "decision_runtime": "3" * 64,
-            "retrieval_verifier": "4" * 64,
-            "metric_policy": "5" * 64,
-        },
-    )
+    bundle = _schema2_bundle(registry, policy)
 
     with pytest.raises(ValueError, match=mismatch.capitalize()):
         evaluator.evaluate(bundle, registry, (task,), stage="screen8")
