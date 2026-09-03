@@ -7,13 +7,17 @@ import math
 import statistics
 import unicodedata
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from common.metrics import drcik_point_metrics, joint_scaled_error
 from common.payload import canonical_json_bytes
 
 from .numerical_selector import CandidateDiagnostics
 from .task_local_evolution import GroupFoldManifest, TaskLocalTaskRow
+
+
+_ATLAS_BUILD_TASK_COUNT = 64
+_NONFINITE_REGRET_SENTINEL = 1.0
 
 
 def _canonical_name(value: str) -> str:
@@ -557,6 +561,7 @@ class AtlasRelease:
     policy: AtlasPolicy
     full_build_model: AtlasModel
     build_fold_models: tuple[tuple[int, AtlasModel], ...]
+    build_fold_held_out_task_sha256s: tuple[tuple[int, tuple[str, ...]], ...]
     source_sha256: str
     policy_sha256: str
     fold_manifest_sha256: str
@@ -570,6 +575,8 @@ class AtlasRelease:
         if type(self.full_build_model) is not AtlasModel:
             raise ValueError("Atlas release requires an exact full-Build model")
         AtlasModel.__post_init__(self.full_build_model)
+        if self.full_build_model.training_task_count != _ATLAS_BUILD_TASK_COUNT:
+            raise ValueError("Atlas release requires the exact 64-task Build universe")
         if type(self.build_fold_models) is not tuple or tuple(
             fold for fold, _model in self.build_fold_models
         ) != (0, 1, 2, 3, 4):
@@ -578,6 +585,24 @@ class AtlasRelease:
             if type(model) is not AtlasModel:
                 raise ValueError("Atlas fold models must be exact")
             AtlasModel.__post_init__(model)
+        if (
+            type(self.build_fold_held_out_task_sha256s) is not tuple
+            or tuple(
+                fold for fold, _hashes in self.build_fold_held_out_task_sha256s
+            )
+            != (0, 1, 2, 3, 4)
+        ):
+            raise ValueError("Atlas release requires numbered held-out fold identities")
+        for _fold, hashes in self.build_fold_held_out_task_sha256s:
+            if (
+                type(hashes) is not tuple
+                or not hashes
+                or hashes != tuple(sorted(hashes))
+                or len(hashes) != len(set(hashes))
+            ):
+                raise ValueError("Atlas held-out task hashes must be unique and sorted")
+            for value in hashes:
+                _require_sha256(value, "Atlas held-out task")
         full_tasks = set(self.full_build_model.training_task_sha256s)
         full_groups = set(self.full_build_model.training_group_sha256s)
         omitted_tasks = [
@@ -588,12 +613,14 @@ class AtlasRelease:
             full_groups - set(model.training_group_sha256s)
             for _fold, model in self.build_fold_models
         ]
+        expected_omissions = dict(self.build_fold_held_out_task_sha256s)
         if any(
             not omitted_task
             or not omitted_group
+            or omitted_task != set(expected_omissions[fold])
             or not set(model.training_task_sha256s) < full_tasks
             or not set(model.training_group_sha256s) < full_groups
-            for (_fold, model), omitted_task, omitted_group in zip(
+            for (fold, model), omitted_task, omitted_group in zip(
                 self.build_fold_models, omitted_tasks, omitted_groups, strict=True
             )
         ):
@@ -626,10 +653,32 @@ class AtlasRelease:
             "build_fold_models": [
                 [fold, model.to_payload()] for fold, model in self.build_fold_models
             ],
+            "build_fold_held_out_task_sha256s": [
+                [fold, list(hashes)]
+                for fold, hashes in self.build_fold_held_out_task_sha256s
+            ],
             "source_sha256": self.source_sha256,
             "policy_sha256": self.policy_sha256,
             "fold_manifest_sha256": self.fold_manifest_sha256,
         }
+
+    def validate_manifest(self, manifest: GroupFoldManifest) -> None:
+        """Bind every numbered fold omission to one exact 64-task manifest."""
+        if type(manifest) is not GroupFoldManifest or manifest.fold_count != 5:
+            raise ValueError("Atlas release requires an exact five-fold manifest")
+        if len(manifest.task_fold_map) != _ATLAS_BUILD_TASK_COUNT:
+            raise ValueError("Atlas release manifest requires exactly 64 Build tasks")
+        if self.fold_manifest_sha256 != _sha256(manifest.to_payload()):
+            raise ValueError("Atlas release fold manifest fingerprint mismatch")
+        expected_full = tuple(
+            sorted(_task_sha256(task_id) for task_id in manifest.task_fold_map)
+        )
+        if self.full_build_model.training_task_sha256s != expected_full:
+            raise ValueError("Atlas release tasks do not match the fold manifest")
+        if self.build_fold_held_out_task_sha256s != _manifest_held_out_hashes(
+            manifest
+        ):
+            raise ValueError("Atlas release numbered folds do not match the manifest")
 
 
 @dataclass(frozen=True)
@@ -721,6 +770,29 @@ def _group_map(manifest: GroupFoldManifest) -> dict[str, str]:
     }
 
 
+def _task_sha256(task_id: str) -> str:
+    return _sha256({"task_id": task_id})
+
+
+def _manifest_held_out_hashes(
+    manifest: GroupFoldManifest,
+) -> tuple[tuple[int, tuple[str, ...]], ...]:
+    task_folds = dict(manifest.task_fold_map)
+    return tuple(
+        (
+            fold,
+            tuple(
+                sorted(
+                    _task_sha256(task_id)
+                    for task_id, assigned_fold in task_folds.items()
+                    if assigned_fold == fold
+                )
+            ),
+        )
+        for fold in range(5)
+    )
+
+
 def _validated_atlas_rows(
     rows: Sequence[TaskLocalTaskRow], manifest: GroupFoldManifest
 ) -> tuple[tuple[TaskLocalTaskRow, ...], tuple[str, ...], dict[str, str]]:
@@ -736,9 +808,37 @@ def _validated_atlas_rows(
         raise ValueError("Atlas fitting rows must be unique Train rows")
     task_ids = tuple(sorted({row.task_id for row in snapshot}))
     group_ids = _group_map(manifest)
-    if set(task_ids) != set(group_ids):
-        raise ValueError("Atlas fitting rows do not match the group manifest")
+    if (
+        len(task_ids) != _ATLAS_BUILD_TASK_COUNT
+        or set(task_ids) != set(group_ids)
+    ):
+        raise ValueError(
+            "Atlas fitting requires the exact registered 64-task Build universe"
+        )
     by_task = _rows_by_task(snapshot, task_ids)
+    expected_candidates = set(by_task[task_ids[0]])
+    candidate_families: dict[str, str] = {}
+    for task_id in task_ids:
+        task_rows = by_task[task_id]
+        if set(task_rows) != expected_candidates:
+            raise ValueError("Atlas fitting requires complete per-task row identities")
+        anchor = task_rows.get("toto_2_0")
+        if anchor is None:
+            raise ValueError("Atlas fitting requires a Toto anchor row on every task")
+        for row in task_rows.values():
+            if row.profile != anchor.profile:
+                raise ValueError("Atlas task rows must share one exact profile")
+            if row.history != anchor.history:
+                raise ValueError("Atlas task rows must share one exact history")
+            if row.truth != anchor.truth:
+                raise ValueError("Atlas task rows must share one exact truth")
+            prior_family = candidate_families.setdefault(
+                row.candidate_name, row.family
+            )
+            if prior_family != row.family:
+                raise ValueError(
+                    "Atlas candidate identity must bind one reviewed family"
+                )
     if any(
         "toto_2_0" not in by_task[task_id]
         or by_task[task_id]["toto_2_0"].forecast is None
@@ -748,6 +848,14 @@ def _validated_atlas_rows(
             "Atlas fitting requires the successful Toto anchor on every task"
         )
     return snapshot, task_ids, group_ids
+
+
+def _raw_regret(candidate: float, anchor: float) -> float:
+    if not math.isfinite(candidate):
+        return _NONFINITE_REGRET_SENTINEL
+    if not math.isfinite(anchor):
+        return 0.0
+    return max(0.0, float(candidate - anchor))
 
 
 def _training_record(
@@ -766,11 +874,13 @@ def _training_record(
         feature=atlas_feature(candidate, anchor),
         improvement_smae=float(anchor_point["smae"] - candidate_point["smae"]),
         improvement_srmse=float(anchor_point["srmse"] - candidate_point["srmse"]),
-        regret_smae_raw=max(
-            0.0, float(candidate_point["smae_raw"] - anchor_point["smae_raw"])
+        regret_smae_raw=_raw_regret(
+            float(candidate_point["smae_raw"]),
+            float(anchor_point["smae_raw"]),
         ),
-        regret_srmse_raw=max(
-            0.0, float(candidate_point["srmse_raw"] - anchor_point["srmse_raw"])
+        regret_srmse_raw=_raw_regret(
+            float(candidate_point["srmse_raw"]),
+            float(anchor_point["srmse_raw"]),
         ),
     )
 
@@ -956,16 +1066,12 @@ def fit_atlas_release(
         policy=policy,
         full_build_model=full_model,
         build_fold_models=tuple(fold_models),
+        build_fold_held_out_task_sha256s=_manifest_held_out_hashes(fold_manifest),
         source_sha256=_sha256(
             [
                 {
-                    "task_sha256": _sha256({"task_id": row.task_id}),
-                    "candidate_name": row.candidate_name,
                     "group_sha256": group_ids[row.task_id],
-                    "forecast": (
-                        list(row.forecast) if row.forecast is not None else None
-                    ),
-                    "truth": list(row.truth),
+                    "row": asdict(row),
                 }
                 for row in sorted(
                     snapshot, key=lambda item: (item.task_id, item.candidate_name)
@@ -1283,6 +1389,7 @@ def parse_atlas_release(payload: object) -> AtlasRelease:
         "policy",
         "full_build_model",
         "build_fold_models",
+        "build_fold_held_out_task_sha256s",
         "source_sha256",
         "policy_sha256",
         "fold_manifest_sha256",
@@ -1313,11 +1420,24 @@ def parse_atlas_release(payload: object) -> AtlasRelease:
     )
     if len(fold_models) != len(raw_folds):
         raise ValueError("Atlas fold model payload is malformed")
+    raw_omissions = payload["build_fold_held_out_task_sha256s"]
+    if type(raw_omissions) is not list:
+        raise ValueError("Atlas held-out fold payload is malformed")
+    held_out_task_sha256s = tuple(
+        (pair[0], tuple(pair[1]))
+        for pair in raw_omissions
+        if type(pair) is list
+        and len(pair) == 2
+        and type(pair[1]) is list
+    )
+    if len(held_out_task_sha256s) != len(raw_omissions):
+        raise ValueError("Atlas held-out fold payload is malformed")
     return AtlasRelease(
         schema_version=payload["schema_version"],
         policy=policy,
         full_build_model=_parse_model(payload["full_build_model"]),
         build_fold_models=fold_models,
+        build_fold_held_out_task_sha256s=held_out_task_sha256s,
         source_sha256=payload["source_sha256"],
         policy_sha256=payload["policy_sha256"],
         fold_manifest_sha256=payload["fold_manifest_sha256"],

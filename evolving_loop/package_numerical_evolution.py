@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import cast
 
 from common.payload import canonical_json_bytes
@@ -21,6 +21,7 @@ from numerical_agent.evolution.champion import (
     ChampionRecipe,
     ChampionRelease,
     FittedChampionPolicy,
+    _parse_fitted_policy,
     champion_fingerprint,
     parse_champion_release,
 )
@@ -31,6 +32,7 @@ from numerical_agent.evolution.champion_controller import (
 from numerical_agent.evolution.champion_evidence import (
     ChampionTaskRow,
     ProposerEvidence,
+    validate_proposer_evidence,
 )
 from numerical_agent.evolution.champion_runtime import execute_champion
 from numerical_agent.evolution.execution import Task as RuntimeTask
@@ -38,6 +40,7 @@ from numerical_agent.evolution.forecast_store import ForecastStore
 from numerical_agent.evolution.numerical_loop import run_numerical_loop
 from numerical_agent.evolution.numerical_package import (
     RankedNumericalForecast,
+    snapshot_diagnostics,
     valid_forecast,
 )
 from numerical_agent.evolution.numerical_selector import (
@@ -106,6 +109,8 @@ class NumericalRecipeFit:
     build_fold_policies: tuple[tuple[int, FittedChampionPolicy], ...]
     full_build_task_ids: tuple[str, ...]
     fold_training_task_ids: tuple[tuple[int, tuple[str, ...]], ...]
+    parent_sha256: str
+    fold_manifest_sha256: str
     numerical_score_sha256: str
 
     def __post_init__(self) -> None:
@@ -129,6 +134,7 @@ class NumericalRecipeFit:
             type(self.full_build_task_ids) is not tuple
             or len(self.full_build_task_ids) != 64
             or len(self.full_build_task_ids) != len(set(self.full_build_task_ids))
+            or self.full_build_task_ids != tuple(sorted(self.full_build_task_ids))
             or any(
                 type(task_id) is not str or not task_id
                 for task_id in self.full_build_task_ids
@@ -145,18 +151,24 @@ class NumericalRecipeFit:
                 type(task_ids) is not tuple
                 or not task_ids
                 or len(task_ids) != len(set(task_ids))
+                or task_ids != tuple(sorted(task_ids))
                 or not set(task_ids) < universe
             ):
                 _fail("Numerical fold training membership is incomplete")
-        if (
-            type(self.numerical_score_sha256) is not str
-            or len(self.numerical_score_sha256) != 64
-            or any(
-                character not in "0123456789abcdef"
-                for character in self.numerical_score_sha256
-            )
+        omitted = [
+            universe - set(task_ids) for _fold, task_ids in self.fold_training_task_ids
+        ]
+        if set().union(*omitted) != universe or sum(
+            len(task_ids) for task_ids in omitted
+        ) != len(universe):
+            _fail("Numerical fold training complements are not disjoint and complete")
+        for value, label in (
+            (self.parent_sha256, "Parent"),
+            (self.fold_manifest_sha256, "fold manifest"),
+            (self.numerical_score_sha256, "score"),
         ):
-            _fail("Numerical fit score must be a lowercase SHA-256 value")
+            if type(value) is not str or _SHA256.fullmatch(value) is None:
+                _fail(f"Numerical fit {label} must be a lowercase SHA-256 value")
 
 
 def fit_numerical_recipe(
@@ -234,6 +246,8 @@ def fit_numerical_recipe(
         build_fold_policies=tuple(fold_policies),
         full_build_task_ids=task_ids,
         fold_training_task_ids=tuple(memberships),
+        parent_sha256=champion_fingerprint(parent),
+        fold_manifest_sha256=_digest(fold_manifest.to_payload()),
         numerical_score_sha256=score_sha256,
     )
 
@@ -261,6 +275,176 @@ class NumericalCoordinateCandidate:
             type(self.invalid_reason) is not str or not self.invalid_reason
         ):
             _fail("candidate invalid reason must be a nonempty string or None")
+
+
+def _diagnostic_task_sha256(task: ContextTask) -> str:
+    return _digest(
+        {
+            "task_id": task.numeric.task_id,
+            "history_values": list(task.numeric.history_values),
+            "prediction_length": task.numeric.prediction_length,
+            "frequency": task.numeric.frequency,
+        }
+    )
+
+
+def _hindcast_policy_sha256(policy: HindcastConfig) -> str:
+    return _digest({"hindcast_config": asdict(policy)})
+
+
+def _diagnostic_sha256(diagnostic: CandidateDiagnostics) -> str:
+    return _digest({"diagnostic": asdict(diagnostic)})
+
+
+@dataclass(frozen=True)
+class _NumericalDiagnosticsRecord:
+    task_id: str
+    task_history_sha256: str
+    candidate_name: str
+    diagnostic: CandidateDiagnostics
+    diagnostic_sha256: str
+
+    def __post_init__(self) -> None:
+        if type(self.task_id) is not str or not self.task_id:
+            _fail("diagnostics record requires a task identity")
+        if type(self.candidate_name) is not str or not self.candidate_name:
+            _fail("diagnostics record requires a candidate identity")
+        if (
+            type(self.diagnostic) is not CandidateDiagnostics
+            or self.diagnostic.name != self.candidate_name
+        ):
+            _fail("diagnostics record candidate binding mismatch")
+        if (
+            type(self.task_history_sha256) is not str
+            or _SHA256.fullmatch(self.task_history_sha256) is None
+        ):
+            _fail("diagnostics record history fingerprint is invalid")
+        if self.diagnostic_sha256 != _diagnostic_sha256(self.diagnostic):
+            _fail("diagnostics record content fingerprint mismatch")
+
+
+@dataclass(frozen=True)
+class FrozenNumericalDiagnosticsRegistry:
+    """Content-addressed history-only hindcast diagnostics authority."""
+
+    records: tuple[_NumericalDiagnosticsRecord, ...]
+    hindcast_policy_sha256: str
+    fingerprint: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        if type(self.records) is not tuple or any(
+            type(record) is not _NumericalDiagnosticsRecord for record in self.records
+        ):
+            _fail("frozen diagnostics registry requires exact records")
+        keys: list[tuple[str, str]] = []
+        for record in self.records:
+            _NumericalDiagnosticsRecord.__post_init__(record)
+            keys.append((record.task_id, record.candidate_name))
+        if keys != sorted(keys) or len(keys) != len(set(keys)):
+            _fail("frozen diagnostics records must be unique and sorted")
+        if (
+            type(self.hindcast_policy_sha256) is not str
+            or _SHA256.fullmatch(self.hindcast_policy_sha256) is None
+        ):
+            _fail("frozen diagnostics hindcast fingerprint is invalid")
+        object.__setattr__(
+            self,
+            "fingerprint",
+            _digest(
+                {
+                    "hindcast_policy_sha256": self.hindcast_policy_sha256,
+                    "records": [
+                        {
+                            "task_id": record.task_id,
+                            "task_history_sha256": record.task_history_sha256,
+                            "candidate_name": record.candidate_name,
+                            "diagnostic_sha256": record.diagnostic_sha256,
+                        }
+                        for record in self.records
+                    ],
+                }
+            ),
+        )
+
+    @classmethod
+    def build(
+        cls,
+        tasks: Sequence[ContextTask],
+        diagnostics_by_task: Mapping[str, Mapping[str, CandidateDiagnostics]],
+        hindcast_policy: HindcastConfig,
+    ) -> FrozenNumericalDiagnosticsRegistry:
+        if type(hindcast_policy) is not HindcastConfig:
+            _fail("frozen diagnostics require an exact hindcast policy")
+        supplied_tasks = tuple(tasks)
+        if not supplied_tasks or any(
+            type(task) is not ContextTask for task in supplied_tasks
+        ):
+            _fail("frozen diagnostics require exact host task records")
+        by_id = {task.numeric.task_id: task for task in supplied_tasks}
+        if len(by_id) != len(supplied_tasks):
+            _fail("frozen diagnostics task identities must be unique")
+        if not isinstance(diagnostics_by_task, Mapping):
+            _fail("frozen diagnostics source must be a task mapping")
+        if set(diagnostics_by_task) - set(by_id):
+            _fail("frozen diagnostics contain an unregistered task")
+        records: list[_NumericalDiagnosticsRecord] = []
+        for task_id in sorted(diagnostics_by_task):
+            raw = diagnostics_by_task[task_id]
+            if not isinstance(raw, Mapping):
+                _fail("frozen diagnostics task values must be candidate mappings")
+            active: list[tuple[str, str]] = []
+            for name in sorted(raw):
+                diagnostic = raw[name]
+                if (
+                    type(name) is not str
+                    or type(diagnostic) is not CandidateDiagnostics
+                ):
+                    _fail("frozen diagnostics contain an invalid candidate record")
+                active.append((name, diagnostic.family))
+            frozen = snapshot_diagnostics(raw, tuple(active))
+            task_sha256 = _diagnostic_task_sha256(by_id[task_id])
+            for name in sorted(frozen):
+                diagnostic = frozen[name]
+                records.append(
+                    _NumericalDiagnosticsRecord(
+                        task_id=task_id,
+                        task_history_sha256=task_sha256,
+                        candidate_name=name,
+                        diagnostic=diagnostic,
+                        diagnostic_sha256=_diagnostic_sha256(diagnostic),
+                    )
+                )
+        return cls(
+            records=tuple(records),
+            hindcast_policy_sha256=_hindcast_policy_sha256(hindcast_policy),
+        )
+
+    @property
+    def task_ids(self) -> tuple[str, ...]:
+        return tuple(sorted({record.task_id for record in self.records}))
+
+    def diagnostics_for(
+        self,
+        task: ContextTask,
+        hindcast_policy: HindcastConfig,
+    ) -> dict[str, CandidateDiagnostics]:
+        FrozenNumericalDiagnosticsRegistry.__post_init__(self)
+        if type(task) is not ContextTask:
+            _fail("frozen diagnostics lookup requires an exact task")
+        if (
+            type(hindcast_policy) is not HindcastConfig
+            or _hindcast_policy_sha256(hindcast_policy) != self.hindcast_policy_sha256
+        ):
+            _fail("frozen diagnostics hindcast policy mismatch")
+        records = tuple(
+            record for record in self.records if record.task_id == task.numeric.task_id
+        )
+        if not records:
+            return {}
+        task_sha256 = _diagnostic_task_sha256(task)
+        if any(record.task_history_sha256 != task_sha256 for record in records):
+            _fail("frozen diagnostics task history mismatch")
+        return {record.candidate_name: record.diagnostic for record in records}
 
 
 def _history_diagnostic(diagnostic: CandidateDiagnostics) -> CandidateDiagnostics:
@@ -317,9 +501,7 @@ class NumericalPackageMaterializer:
         atlas_release: AtlasRelease | None = None,
         decision_policy: DecisionPolicy = DecisionPolicy(),
         hindcast_config: HindcastConfig = HindcastConfig(),
-        diagnostics_by_task: (
-            Mapping[str, Mapping[str, CandidateDiagnostics]] | None
-        ) = None,
+        diagnostics_registry: object | None = None,
     ) -> None:
         if not hasattr(forecast_store, "forecast") or not callable(
             forecast_store.forecast
@@ -330,11 +512,16 @@ class NumericalPackageMaterializer:
         if (
             type(fold_manifest) is not GroupFoldManifest
             or fold_manifest.fold_count != 5
+            or len(fold_manifest.task_fold_map) != 64
         ):
-            _fail("Numerical materializer requires an exact five-fold manifest")
+            _fail(
+                "Numerical materializer requires the exact 64-task five-fold manifest"
+            )
         tasks = tuple(original_tasks)
-        if not tasks or any(type(task) is not ContextTask for task in tasks):
-            _fail("Numerical materializer requires exact host-held ContextTask records")
+        if len(tasks) != 100 or any(type(task) is not ContextTask for task in tasks):
+            _fail(
+                "Numerical materializer requires the exact 100 host-held Train+Dev tasks"
+            )
         task_ids = tuple(task.numeric.task_id for task in tasks)
         if len(task_ids) != len(set(task_ids)):
             _fail("Numerical materializer host task identities must be unique")
@@ -345,18 +532,31 @@ class NumericalPackageMaterializer:
             _fail("Numerical materializer Combined policies must be exact")
         if atlas_release is not None and type(atlas_release) is not AtlasRelease:
             _fail("Numerical materializer Atlas release must be exact or None")
+        if atlas_release is not None:
+            try:
+                atlas_release.validate_manifest(fold_manifest)
+            except ValueError as error:
+                raise NumericalPackageEvolutionError(
+                    "Numerical materializer Atlas fold manifest mismatch"
+                ) from error
         if (
             type(decision_policy) is not DecisionPolicy
             or type(hindcast_config) is not HindcastConfig
         ):
             _fail("Numerical materializer runtime policies must be exact")
-        diagnostics = dict(diagnostics_by_task or {})
-        if set(diagnostics) - set(task_ids) or any(
-            not isinstance(value, Mapping)
-            or any(type(item) is not CandidateDiagnostics for item in value.values())
-            for value in diagnostics.values()
+        if (
+            diagnostics_registry is not None
+            and type(diagnostics_registry) is not FrozenNumericalDiagnosticsRegistry
         ):
-            _fail("Numerical materializer diagnostics are not task-bound")
+            _fail("Numerical materializer requires a frozen diagnostics registry")
+        if type(diagnostics_registry) is FrozenNumericalDiagnosticsRegistry:
+            FrozenNumericalDiagnosticsRegistry.__post_init__(diagnostics_registry)
+            if set(diagnostics_registry.task_ids) - set(task_ids):
+                _fail("Numerical materializer diagnostics are not task-bound")
+            if diagnostics_registry.hindcast_policy_sha256 != _hindcast_policy_sha256(
+                hindcast_config
+            ):
+                _fail("Numerical materializer diagnostics hindcast policy mismatch")
         self.forecast_store = forecast_store
         self.screening_policy = screening_policy
         self.fold_manifest = fold_manifest
@@ -371,7 +571,7 @@ class NumericalPackageMaterializer:
         self.atlas_release = atlas_release
         self.decision_policy = decision_policy
         self.hindcast_config = hindcast_config
-        self.diagnostics_by_task = diagnostics
+        self.diagnostics_registry = diagnostics_registry
 
     def _family(self, recipe: ChampionRecipe) -> str:
         if recipe.kind != "select":
@@ -451,6 +651,16 @@ class NumericalPackageMaterializer:
                 source_fingerprints={
                     **self.source_fingerprints,
                     "numerical_fit": fit.numerical_score_sha256,
+                    **(
+                        {
+                            "diagnostics_registry": (
+                                self.diagnostics_registry.fingerprint
+                            )
+                        }
+                        if type(self.diagnostics_registry)
+                        is FrozenNumericalDiagnosticsRegistry
+                        else {}
+                    ),
                 },
                 runtime_fingerprints=self.runtime_fingerprints,
             )
@@ -459,21 +669,57 @@ class NumericalPackageMaterializer:
                 "Numerical materializer could not bind the fitted release"
             ) from error
 
-    def _policy_for_task(
-        self, fit: NumericalRecipeFit, task_id: str
-    ) -> FittedChampionPolicy:
-        fold = self.fold_manifest.task_fold_map.get(task_id)
-        return (
-            fit.full_build_policy
-            if fold is None
-            else dict(fit.build_fold_policies)[fold]
+    def _validated_fit_binding(
+        self,
+        parent_release: NumericalSupplyRelease,
+        fit: NumericalRecipeFit,
+    ) -> ChampionRelease:
+        try:
+            anchor_release = parse_champion_release(
+                cast(dict[str, object], _plain(parent_release.anchor_release_payload))
+            )
+        except Exception as error:
+            raise NumericalPackageEvolutionError(
+                "Numerical Parent anchor is not a valid Champion release"
+            ) from error
+        if fit.parent_sha256 != champion_fingerprint(anchor_release):
+            _fail("Numerical recipe fit does not bind the supplied Parent")
+        manifest_sha256 = _digest(self.fold_manifest.to_payload())
+        if fit.fold_manifest_sha256 != manifest_sha256:
+            _fail("Numerical recipe fit fold manifest mismatch")
+        manifest_ids = set(self.fold_manifest.task_fold_map)
+        if set(fit.full_build_task_ids) != manifest_ids:
+            _fail("Numerical recipe fit Build membership mismatch")
+        memberships = dict(fit.fold_training_task_ids)
+        for fold in range(5):
+            held_out = {
+                task_id
+                for task_id, assigned_fold in self.fold_manifest.task_fold_map.items()
+                if assigned_fold == fold
+            }
+            if set(memberships[fold]) != manifest_ids - held_out:
+                _fail("Numerical recipe fit fold training membership mismatch")
+        expected_score = champion_fingerprint(
+            {
+                "recipe": fit.recipe,
+                "parent": anchor_release,
+                "manifest": self.fold_manifest.to_payload(),
+                "full_build_policy": fit.full_build_policy,
+                "build_fold_policies": list(fit.build_fold_policies),
+                "full_build_task_ids": fit.full_build_task_ids,
+                "fold_training_task_ids": list(fit.fold_training_task_ids),
+            }
         )
+        if fit.numerical_score_sha256 != expected_score:
+            _fail("Numerical recipe fit content fingerprint mismatch")
+        return anchor_release
 
     def _proposal_forecast(
         self,
         source,
-        fit: NumericalRecipeFit,
+        policy: FittedChampionPolicy,
         task: ContextTask,
+        candidate_id: str,
         family: str,
     ) -> RankedNumericalForecast | None:
         forecasts = {item.name: item.forecast for item in source.ranked_alternatives}
@@ -483,7 +729,7 @@ class NumericalPackageMaterializer:
         }
         try:
             execution = execute_champion(
-                self._policy_for_task(fit, task.numeric.task_id),
+                policy,
                 forecasts,
                 diagnostics,
                 source.task_profile,
@@ -494,12 +740,12 @@ class NumericalPackageMaterializer:
             return None
         if not valid_forecast(execution.forecast, task.numeric.prediction_length):
             return None
-        proxy = diagnostics.get(fit.recipe.fallback_parent)
+        proxy = diagnostics.get(policy.recipe.fallback_parent)
         if proxy is None:
             return None
         diagnostic = replace(
             proxy,
-            name=fit.recipe.name,
+            name=candidate_id,
             family=family,
             folds=(),
             successful_folds=0,
@@ -512,7 +758,7 @@ class NumericalPackageMaterializer:
         )
         return RankedNumericalForecast(
             rank=len(source.ranked_alternatives) + 1,
-            name=fit.recipe.name,
+            name=candidate_id,
             family=family,
             forecast=tuple(execution.forecast),
             diagnostics=diagnostic,
@@ -522,11 +768,19 @@ class NumericalPackageMaterializer:
         self,
         source,
         task: ContextTask,
+        *,
+        candidate_id: str,
     ) -> RankedNumericalForecast | None:
         if self.atlas_release is None:
             return None
         by_name = {item.name: item for item in source.ranked_alternatives}
-        anchor_name = self.atlas_release.full_build_model.selected_pool[0]
+        fold = self.fold_manifest.task_fold_map.get(task.numeric.task_id)
+        model = (
+            self.atlas_release.full_build_model
+            if fold is None
+            else dict(self.atlas_release.build_fold_models)[fold]
+        )
+        anchor_name = model.selected_pool[0]
         anchor = by_name.get(anchor_name)
         if anchor is None:
             return None
@@ -547,7 +801,7 @@ class NumericalPackageMaterializer:
 
         anchor_row = row(anchor)
         candidates: list[AtlasMaterializedCandidate] = []
-        for name in self.atlas_release.full_build_model.selected_pool[1:]:
+        for name in model.selected_pool[1:]:
             item = by_name.get(name)
             if item is None:
                 continue
@@ -559,7 +813,6 @@ class NumericalPackageMaterializer:
             candidates.append(
                 AtlasMaterializedCandidate(name, item.family, feature, item.forecast)
             )
-        fold = self.fold_manifest.task_fold_map.get(task.numeric.task_id)
         group_sha256 = next(
             (
                 group_sha
@@ -585,7 +838,7 @@ class NumericalPackageMaterializer:
             return None
         diagnostic = replace(
             _history_diagnostic(anchor.diagnostics),
-            name="atlas_70_30",
+            name=candidate_id,
             family="atlas_overlay",
             successful_folds=0,
             eligible=False,
@@ -593,11 +846,62 @@ class NumericalPackageMaterializer:
         )
         return RankedNumericalForecast(
             rank=len(source.ranked_alternatives) + 2,
-            name="atlas_70_30",
+            name=candidate_id,
             family="atlas_overlay",
             forecast=routed.forecast,
             diagnostics=diagnostic,
         )
+
+    def _stored_policy_for_task(
+        self,
+        specification: NumericalAlternativeSpec,
+        task_id: str,
+    ) -> FittedChampionPolicy:
+        fold = self.fold_manifest.task_fold_map.get(task_id)
+        payload = (
+            specification.full_build_policy_payload
+            if fold is None
+            else dict(specification.build_fold_policy_payloads)[fold]
+        )
+        return _parse_fitted_policy(_plain(payload))
+
+    def _materialize_alternative(
+        self,
+        source,
+        task: ContextTask,
+        specification: NumericalAlternativeSpec,
+    ) -> RankedNumericalForecast | None:
+        if specification.materializer_kind == "dictionary":
+            return next(
+                (
+                    item
+                    for item in source.ranked_alternatives
+                    if item.name == specification.candidate_id
+                    and item.family == specification.family
+                ),
+                None,
+            )
+        if specification.materializer_kind == "atlas":
+            return self._atlas_forecast(
+                source,
+                task,
+                candidate_id=specification.candidate_id,
+            )
+        if specification.materializer_kind in {"champion", "bounded_overlay"}:
+            try:
+                policy = self._stored_policy_for_task(
+                    specification, task.numeric.task_id
+                )
+            except Exception:
+                return None
+            return self._proposal_forecast(
+                source,
+                policy,
+                task,
+                specification.candidate_id,
+                specification.family,
+            )
+        return None
 
     def materialize(
         self,
@@ -641,23 +945,19 @@ class NumericalPackageMaterializer:
             ):
                 _fail("Numerical materialization label-free task content drifted")
 
+        anchor_release = self._validated_fit_binding(parent_release, fit)
         release = self._release(parent_release, fit, version=version)
-        try:
-            anchor_release = parse_champion_release(
-                cast(dict[str, object], _plain(parent_release.anchor_release_payload))
-            )
-        except Exception as error:
-            raise NumericalPackageEvolutionError(
-                "Numerical Parent anchor is not a valid Champion release"
-            ) from error
-        family = self._family(fit.recipe)
 
         def package_builder(
             original: ContextTask,
             supplied_release: NumericalSupplyRelease,
         ):
             safe = safe_by_id[original.numeric.task_id]
-            diagnostics = self.diagnostics_by_task.get(original.numeric.task_id)
+            diagnostics = (
+                self.diagnostics_registry.diagnostics_for(safe, self.hindcast_config)
+                if type(self.diagnostics_registry) is FrozenNumericalDiagnosticsRegistry
+                else {}
+            )
             source = run_numerical_loop(
                 RuntimeTask(
                     safe.numeric.task_id,
@@ -671,11 +971,7 @@ class NumericalPackageMaterializer:
                 combined_policies=self.combined_policies,
                 decision_policy=self.decision_policy,
                 hindcast_config=self.hindcast_config,
-                diagnostics=(
-                    dict(diagnostics)
-                    if diagnostics is not None
-                    else None
-                ),
+                diagnostics=(diagnostics if diagnostics else None),
                 component_fingerprints={
                     **self.source_fingerprints,
                     **self.runtime_fingerprints,
@@ -683,12 +979,14 @@ class NumericalPackageMaterializer:
                 champion_release=anchor_release,
             )
             materialized = {item.name: item for item in source.ranked_alternatives}
-            proposal = self._proposal_forecast(source, fit, safe, family)
-            if proposal is not None:
-                materialized[proposal.name] = proposal
-            atlas = self._atlas_forecast(source, safe)
-            if atlas is not None:
-                materialized[atlas.name] = atlas
+            for specification in supplied_release.alternatives:
+                alternative = self._materialize_alternative(
+                    source,
+                    safe,
+                    specification,
+                )
+                if alternative is not None:
+                    materialized[alternative.name] = alternative
             return bound_numerical_package(source, supplied_release, materialized)
 
         try:
@@ -761,14 +1059,22 @@ class NumericalPackageProposer:
         if not rows or any(type(row) is not ChampionTaskRow for row in rows):
             _fail("Numerical proposer requires exact Build rows")
         evolution_tasks = tuple(tasks)
-        if not evolution_tasks or any(
+        if len(evolution_tasks) != 100 or any(
             type(task) is not ContextTask for task in evolution_tasks
         ):
-            _fail("Numerical proposer requires exact evolution tasks")
+            _fail("Numerical proposer requires the exact 100 Train+Dev tasks")
         if len({task.numeric.task_id for task in evolution_tasks}) != len(
             evolution_tasks
         ):
             _fail("Numerical proposer evolution task identities must be unique")
+        if (
+            type(fold_manifest) is not GroupFoldManifest
+            or fold_manifest.fold_count != 5
+            or len(fold_manifest.task_fold_map) != 64
+        ):
+            _fail("Numerical proposer requires the exact 64-task five-fold manifest")
+        if {row.task_id for row in rows} != set(fold_manifest.task_fold_map):
+            _fail("Numerical proposer Build row universe does not match the manifest")
         if not set(fold_manifest.task_fold_map).issubset(
             task.numeric.task_id for task in evolution_tasks
         ):
@@ -798,8 +1104,12 @@ class NumericalPackageProposer:
             _fail("Numerical proposal feedback must be exact sanitized evidence")
         if type(generation) is not int or generation < 0:
             _fail("Numerical proposal generation must be nonnegative")
-        if type(child_count) is not int or not 1 <= child_count <= 3:
-            _fail("Numerical proposal child count must be within one through three")
+        if type(child_count) is not int or child_count != 3:
+            _fail("formal Numerical proposal requires exactly three Child slots")
+        expected_task_ids = tuple(sorted(task.numeric.task_id for task in self.tasks))
+        if parent_registry.task_ids != expected_task_ids:
+            _fail("Numerical proposal tasks do not match the Parent registry")
+        build_task_ids = tuple(sorted(self.fold_manifest.task_fold_map))
         try:
             sanitized_feedback = ProposerEvidence(
                 label=feedback.label,
@@ -809,7 +1119,12 @@ class NumericalPackageProposer:
                 invalid_attempts=tuple(feedback.invalid_attempts),
                 structures=tuple(feedback.structures),
             )
-            sanitized_feedback.to_payload()
+            validate_proposer_evidence(sanitized_feedback, build_task_ids)
+        except Exception as error:
+            raise NumericalPackageEvolutionError(
+                "Numerical proposal feedback identity validation failed"
+            ) from error
+        try:
             parent_anchor = parse_champion_release(
                 cast(dict[str, object], _plain(parent_release.anchor_release_payload))
             )
@@ -840,6 +1155,8 @@ class NumericalPackageProposer:
         safe_tasks = tuple(_sanitized_context_task(task) for task in self.tasks)
         children: list[NumericalCoordinateCandidate] = []
         attempted: list[str] = []
+        accepted_release_sha256s: set[str] = set()
+        accepted_proposal_sha256s: set[str] = set()
         for recipe in unique:
             if len(children) == child_count:
                 break
@@ -859,22 +1176,35 @@ class NumericalPackageProposer:
                     parent_anchor,
                 )
                 slot = len(children)
+                expected_version = f"n{generation * 3 + slot + 1:03d}"
                 candidate = self.materializer.materialize(
                     parent_release,
                     fit,
                     safe_tasks,
-                    version=f"n{generation * 3 + slot + 1:03d}",
+                    version=expected_version,
                     generation=generation,
+                )
+                if type(candidate) is NumericalCoordinateCandidate:
+                    NumericalCoordinateCandidate.__post_init__(candidate)
+                release_sha256 = (
+                    candidate.release.fingerprint
+                    if type(candidate) is NumericalCoordinateCandidate
+                    else ""
                 )
                 if (
                     type(candidate) is not NumericalCoordinateCandidate
                     or candidate.invalid_reason is not None
+                    or candidate.release.version != expected_version
                     or candidate.release.parent_sha256 != parent_release.fingerprint
                     or candidate.registry.release_sha256
                     != candidate.release.fingerprint
+                    or release_sha256 in accepted_release_sha256s
+                    or proposal_sha256 in accepted_proposal_sha256s
                 ):
                     continue
                 children.append(replace(candidate, proposal_sha256=proposal_sha256))
+                accepted_release_sha256s.add(release_sha256)
+                accepted_proposal_sha256s.add(proposal_sha256)
             except Exception:
                 continue
 
@@ -901,6 +1231,7 @@ class NumericalPackageProposer:
 
 
 __all__ = [
+    "FrozenNumericalDiagnosticsRegistry",
     "NumericalCoordinateCandidate",
     "NumericalPackageMaterializer",
     "NumericalPackageProposer",

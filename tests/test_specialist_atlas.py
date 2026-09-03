@@ -323,3 +323,128 @@ def test_atlas_task_185_shape_falls_back_when_predicted_regret_exceeds_quarter()
     assert routed.activated is False
     assert routed.forecast == catastrophic_overlay_case.anchor.forecast
     assert routed.fallback_reason == "predicted_regret_exceeds_limit"
+
+
+def test_atlas_fitting_requires_the_exact_64_task_build_universe() -> None:
+    tasks = _atlas_tasks(63)
+    manifest = build_group_fold_manifest(tasks, seed=20260903)
+
+    with pytest.raises(ValueError, match="64"):
+        fit_atlas_release(_atlas_rows(tasks), manifest, AtlasPolicy())
+
+
+def test_atlas_release_binds_each_model_to_its_numbered_manifest_fold() -> None:
+    tasks = _atlas_tasks()
+    manifest = build_group_fold_manifest(tasks, seed=20260903)
+    release = fit_atlas_release(_atlas_rows(tasks), manifest, AtlasPolicy())
+    models = dict(release.build_fold_models)
+
+    with pytest.raises(ValueError, match="fold"):
+        replace(
+            release,
+            build_fold_models=tuple(
+                (fold, models[(fold + 1) % 5]) for fold in range(5)
+            ),
+        )
+
+
+def test_atlas_fitting_rejects_different_truths_within_one_task() -> None:
+    tasks = _atlas_tasks()
+    manifest = build_group_fold_manifest(tasks, seed=20260903)
+    rows = list(_atlas_rows(tasks))
+    rows[1] = replace(rows[1], truth=(999.0, 1000.0))
+
+    with pytest.raises(ValueError, match="truth"):
+        fit_atlas_release(tuple(rows), manifest, AtlasPolicy())
+
+
+def test_atlas_source_fingerprint_covers_every_feature_driving_field() -> None:
+    tasks = _atlas_tasks()
+    manifest = build_group_fold_manifest(tasks, seed=20260903)
+    rows = _atlas_rows(tasks)
+    source = fit_atlas_release(rows, manifest, AtlasPolicy()).source_sha256
+
+    changed_diagnostic = list(rows)
+    changed_diagnostic[1] = replace(
+        changed_diagnostic[1],
+        diagnostic=replace(
+            changed_diagnostic[1].diagnostic,
+            median_smae=0.19,
+            recent_smae=0.19,
+            worst_smae=0.19,
+        ),
+    )
+    changed_family = list(rows)
+    for index, row in enumerate(changed_family):
+        if row.candidate_name == "seasonal_naive":
+            changed_family[index] = replace(
+                row,
+                family="combined",
+                diagnostic=replace(row.diagnostic, family="combined"),
+            )
+    changed_history = list(rows)
+    first_task = rows[0].task_id
+    for index, row in enumerate(changed_history):
+        if row.task_id == first_task:
+            changed_history[index] = replace(
+                row, history=tuple(value + 0.125 for value in row.history)
+            )
+    changed_profile = list(rows)
+    for index, row in enumerate(changed_profile):
+        if row.task_id == first_task:
+            changed_profile[index] = replace(
+                row,
+                profile=replace(
+                    row.profile,
+                    trend_strength=row.profile.trend_strength + 0.01,
+                ),
+            )
+
+    variants = (
+        tuple(changed_diagnostic),
+        tuple(changed_family),
+        tuple(changed_history),
+        tuple(changed_profile),
+    )
+    assert all(
+        fit_atlas_release(variant, manifest, AtlasPolicy()).source_sha256
+        != source
+        for variant in variants
+    )
+
+
+def test_atlas_zero_scale_raw_regret_is_encoded_as_finite_over_cap() -> None:
+    tasks = _atlas_tasks()
+    manifest = build_group_fold_manifest(tasks, seed=20260903)
+    rows = list(_atlas_rows(tasks))
+    first_task = tasks[0].task_id
+    for index, row in enumerate(rows):
+        if row.task_id != first_task:
+            continue
+        rows[index] = replace(
+            row,
+            truth=(0.0, 0.0),
+            forecast=(
+                (0.0, 0.0)
+                if row.candidate_name == "toto_2_0"
+                else (1.0, 1.0)
+            ),
+        )
+
+    release = fit_atlas_release(tuple(rows), manifest, AtlasPolicy())
+    group_sha256 = next(
+        group_sha
+        for group_sha, task_ids, _fold in manifest.groups
+        if first_task in task_ids
+    )
+    record = next(
+        item
+        for item in release.full_build_model.records
+        if item.group_sha256 == group_sha256
+        and item.candidate_name == "seasonal_naive"
+    )
+
+    assert record.regret_smae_raw > 0.25
+    assert record.regret_srmse_raw > 0.25
+    assert record.regret_smae_raw < float("inf")
+    assert record.regret_srmse_raw < float("inf")

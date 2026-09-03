@@ -8,15 +8,20 @@ from dataclasses import dataclass, replace
 import pytest
 
 from common.data import Task as DataTask
+import evolving_loop.package_numerical_evolution as numerical_evolution
 from evolving_loop.data import ContextTask, Document
 from evolving_loop.package_numerical_evolution import (
+    FrozenNumericalDiagnosticsRegistry,
     NumericalCoordinateCandidate,
     NumericalPackageEvolutionError,
     NumericalPackageMaterializer,
     NumericalPackageProposer,
     fit_numerical_recipe,
 )
-from evolving_loop.package_numerical_supply import NumericalSupplyRelease
+from evolving_loop.package_numerical_supply import (
+    NumericalAlternativeSpec,
+    NumericalSupplyRelease,
+)
 from evolving_loop.package_registry import FrozenNumericalPackageRegistry
 from numerical_agent.evolution.champion import (
     ChampionRecipe,
@@ -26,10 +31,16 @@ from numerical_agent.evolution.champion import (
 )
 from numerical_agent.evolution.champion_evidence import ChampionTaskRow
 from numerical_agent.evolution.champion_controller import ChampionProposerAdapter
-from numerical_agent.evolution.champion_evidence import ProposerEvidence
+from numerical_agent.evolution.champion_evidence import (
+    MorphologyAggregate,
+    ProposerEvidence,
+)
 from numerical_agent.evolution.champion_proposal import expand_recipe
 from numerical_agent.evolution.execution import Task as RuntimeTask
-from numerical_agent.evolution.numerical_selector import CandidateDiagnostics
+from numerical_agent.evolution.numerical_selector import (
+    CandidateDiagnostics,
+    HindcastConfig,
+)
 from numerical_agent.evolution.screening import (
     ApplicabilityPolicy,
     ScreeningEntry,
@@ -202,9 +213,13 @@ def _supply_parent() -> NumericalSupplyRelease:
 
 def _registry_for_release(
     release: NumericalSupplyRelease,
+    task_ids: tuple[str, ...] | None = None,
 ) -> FrozenNumericalPackageRegistry:
     registry = object.__new__(FrozenNumericalPackageRegistry)
     registry._release_sha256 = release.fingerprint
+    if task_ids is None:
+        task_ids = tuple(task.numeric.task_id for task in _evolution_tasks())
+    registry._packages = {task_id: None for task_id in task_ids}
     return registry
 
 
@@ -375,21 +390,7 @@ def test_numerical_materializer_rejects_label_bearing_task_inputs() -> None:
     tasks = _tasks()
     manifest = build_group_fold_manifest(tasks, seed=20260903)
     fit = fit_numerical_recipe(_recipe(), _build_rows(tasks), manifest, _parent())
-    labeled = tuple(
-        ContextTask(
-            numeric=task,
-            target_name="demand",
-            target_description="daily demand",
-            history_timestamps=tuple(
-                f"h{index}" for index in range(len(task.history_values))
-            ),
-            future_timestamps=("f0", "f1"),
-            documents=(Document("doc", "context", "supporting", "fact"),),
-            gt_evidence=("doc",),
-            labels_public=True,
-        )
-        for task in tasks
-    )
+    labeled = _evolution_tasks()
     materializer = NumericalPackageMaterializer(
         forecast_store=_NeverForecastStore(),
         screening_policy=ScreeningPolicy(
@@ -460,6 +461,9 @@ def test_numerical_materializer_builds_complete_registry_with_toto_anchor() -> N
         }
         for task in original_tasks
     }
+    diagnostics_registry = FrozenNumericalDiagnosticsRegistry.build(
+        original_tasks, diagnostics, HindcastConfig()
+    )
     screening = ScreeningPolicy(
         (
             ScreeningEntry(
@@ -486,7 +490,7 @@ def test_numerical_materializer_builds_complete_registry_with_toto_anchor() -> N
         original_tasks=original_tasks,
         source_fingerprints={"dictionary": "2" * 64},
         runtime_fingerprints={"materializer": "3" * 64},
-        diagnostics_by_task=diagnostics,
+        diagnostics_registry=diagnostics_registry,
     )
     sanitized = tuple(
         replace(
@@ -514,6 +518,10 @@ def test_numerical_materializer_builds_complete_registry_with_toto_anchor() -> N
         sorted(task.numeric.task_id for task in original_tasks)
     )
     assert candidate.release.parent_sha256 == _supply_parent().fingerprint
+    assert (
+        candidate.release.source_fingerprints["diagnostics_registry"]
+        == diagnostics_registry.fingerprint
+    )
     assert candidate.release.alternatives[0].candidate_id == _recipe().name
     for task in original_tasks:
         package = candidate.registry.package_for(task)
@@ -574,9 +582,7 @@ def _atlas_fit_rows(tasks: tuple[DataTask, ...]) -> tuple[TaskLocalTaskRow, ...]
 def test_numerical_materializer_includes_only_policy_accepted_atlas_routes() -> None:
     build_tasks = _tasks()
     manifest = build_group_fold_manifest(build_tasks, seed=20260903)
-    fit = fit_numerical_recipe(
-        _recipe(), _build_rows(build_tasks), manifest, _parent()
-    )
+    fit = fit_numerical_recipe(_recipe(), _build_rows(build_tasks), manifest, _parent())
     atlas_release = fit_atlas_release(
         _atlas_fit_rows(build_tasks), manifest, AtlasPolicy()
     )
@@ -632,7 +638,9 @@ def test_numerical_materializer_includes_only_policy_accepted_atlas_routes() -> 
         source_fingerprints={"dictionary": "2" * 64},
         runtime_fingerprints={"materializer": "3" * 64},
         atlas_release=atlas_release,
-        diagnostics_by_task=diagnostics,
+        diagnostics_registry=FrozenNumericalDiagnosticsRegistry.build(
+            original_tasks, diagnostics, HindcastConfig()
+        ),
     )
     sanitized = tuple(
         replace(
@@ -654,6 +662,549 @@ def test_numerical_materializer_includes_only_policy_accepted_atlas_routes() -> 
 
     package = candidate.registry.package_for(original_tasks[-1])
     assert package.protected_baseline.name == "toto_2_0"
-    assert "atlas_70_30" in {
-        item.name for item in package.ranked_alternatives
+    assert "atlas_70_30" in {item.name for item in package.ranked_alternatives}
+
+
+def _screening() -> ScreeningPolicy:
+    return ScreeningPolicy(
+        (
+            ScreeningEntry(
+                "toto_2_0",
+                "tsfm",
+                "keep",
+                ApplicabilityPolicy(),
+                "reviewed anchor",
+            ),
+            ScreeningEntry(
+                "seasonal_naive",
+                "statistical",
+                "keep",
+                ApplicabilityPolicy(),
+                "reviewed alternative",
+            ),
+        ),
+        ("toto_2_0",),
+    )
+
+
+def _history_diagnostics(
+    tasks: tuple[ContextTask, ...],
+) -> dict[str, dict[str, CandidateDiagnostics]]:
+    return {
+        task.numeric.task_id: {
+            name: CandidateDiagnostics.synthetic(
+                name=name,
+                family=family,
+                median_mase=score,
+                fold_forecasts=((1.0, 2.0),) * 3,
+                fold_truths=((1.0, 2.0),) * 3,
+                median_smae=score,
+                recent_smae=score,
+                worst_smae=score,
+                median_srmse=score,
+                recent_srmse=score,
+                worst_srmse=score,
+                worst_smae_raw=score,
+                worst_srmse_raw=score,
+            )
+            for name, family, score in (
+                ("toto_2_0", "tsfm", 0.7),
+                ("seasonal_naive", "statistical", 0.2),
+            )
+        }
+        for task in tasks
     }
+
+
+def _label_free(tasks: tuple[ContextTask, ...]) -> tuple[ContextTask, ...]:
+    return tuple(
+        replace(
+            task,
+            numeric=task.numeric_view(),
+            documents=tuple(
+                replace(document, role=None, subtype=None)
+                for document in task.documents
+            ),
+            gt_evidence=(),
+            labels_public=False,
+        )
+        for task in tasks
+    )
+
+
+def test_build_atlas_materialization_uses_only_the_matching_fold_model_pool() -> None:
+    build_tasks = _tasks()
+    manifest = build_group_fold_manifest(build_tasks, seed=20260903)
+    fit = fit_numerical_recipe(_recipe(), _build_rows(build_tasks), manifest, _parent())
+    atlas = fit_atlas_release(_atlas_fit_rows(build_tasks), manifest, AtlasPolicy())
+    assert len(atlas.full_build_model.selected_pool) > 1
+    atlas = replace(
+        atlas,
+        full_build_model=replace(
+            atlas.full_build_model,
+            selected_pool=("toto_2_0",),
+            records=(),
+        ),
+    )
+    original_tasks = _evolution_tasks()
+    materializer = NumericalPackageMaterializer(
+        forecast_store=_FixtureForecastStore(),
+        screening_policy=_screening(),
+        fold_manifest=manifest,
+        original_tasks=original_tasks,
+        source_fingerprints={"dictionary": "2" * 64},
+        runtime_fingerprints={"materializer": "3" * 64},
+        atlas_release=atlas,
+        diagnostics_registry=FrozenNumericalDiagnosticsRegistry.build(
+            original_tasks, _history_diagnostics(original_tasks), HindcastConfig()
+        ),
+    )
+
+    candidate = materializer.materialize(
+        _supply_parent(),
+        fit,
+        _label_free(original_tasks),
+        version="n001",
+        generation=0,
+    )
+
+    build_package = candidate.registry.package_for(original_tasks[0])
+    assert "atlas_70_30" in {item.name for item in build_package.ranked_alternatives}
+
+
+def test_materializer_rejects_recipe_fit_from_a_different_fold_manifest() -> None:
+    build_tasks = _tasks()
+    fitted_manifest = build_group_fold_manifest(build_tasks, seed=20260903)
+    execution_manifest = build_group_fold_manifest(build_tasks, seed=20260904)
+    fit = fit_numerical_recipe(
+        _recipe(), _build_rows(build_tasks), fitted_manifest, _parent()
+    )
+    original_tasks = _evolution_tasks()
+    materializer = NumericalPackageMaterializer(
+        forecast_store=_NeverForecastStore(),
+        screening_policy=_screening(),
+        fold_manifest=execution_manifest,
+        original_tasks=original_tasks,
+        source_fingerprints={"dictionary": "2" * 64},
+        runtime_fingerprints={"materializer": "3" * 64},
+    )
+
+    with pytest.raises(NumericalPackageEvolutionError, match="manifest"):
+        materializer.materialize(
+            _supply_parent(),
+            fit,
+            _label_free(original_tasks),
+            version="n001",
+            generation=0,
+        )
+
+
+def test_materializer_rejects_recipe_fit_from_a_different_parent() -> None:
+    build_tasks = _tasks()
+    manifest = build_group_fold_manifest(build_tasks, seed=20260903)
+    fit = fit_numerical_recipe(_recipe(), _build_rows(build_tasks), manifest, _parent())
+    other_anchor = replace(_parent(), source_hashes=(("dictionary", "9" * 64),))
+    other_parent = NumericalSupplyRelease(
+        schema_version=1,
+        version="n000",
+        parent_sha256=None,
+        anchor_release_payload=other_anchor.to_payload(),
+        alternatives=(),
+        atlas_release_sha256=None,
+        source_fingerprints={"dictionary": "2" * 64},
+        runtime_fingerprints={"materializer": "3" * 64},
+    )
+    original_tasks = _evolution_tasks()
+    materializer = NumericalPackageMaterializer(
+        forecast_store=_NeverForecastStore(),
+        screening_policy=_screening(),
+        fold_manifest=manifest,
+        original_tasks=original_tasks,
+        source_fingerprints={"dictionary": "2" * 64},
+        runtime_fingerprints={"materializer": "3" * 64},
+    )
+
+    with pytest.raises(NumericalPackageEvolutionError, match="Parent"):
+        materializer.materialize(
+            other_parent,
+            fit,
+            _label_free(original_tasks),
+            version="n001",
+            generation=0,
+        )
+
+
+def test_materializer_rejects_tampered_per_fold_training_complements() -> None:
+    build_tasks = _tasks()
+    manifest = build_group_fold_manifest(build_tasks, seed=20260903)
+    fit = fit_numerical_recipe(_recipe(), _build_rows(build_tasks), manifest, _parent())
+    memberships = dict(fit.fold_training_task_ids)
+    tampered = replace(
+        fit,
+        fold_training_task_ids=tuple(
+            (fold, memberships[(fold + 1) % 5]) for fold in range(5)
+        ),
+    )
+    original_tasks = _evolution_tasks()
+    materializer = NumericalPackageMaterializer(
+        forecast_store=_NeverForecastStore(),
+        screening_policy=_screening(),
+        fold_manifest=manifest,
+        original_tasks=original_tasks,
+        source_fingerprints={"dictionary": "2" * 64},
+        runtime_fingerprints={"materializer": "3" * 64},
+    )
+
+    with pytest.raises(NumericalPackageEvolutionError, match="membership"):
+        materializer.materialize(
+            _supply_parent(),
+            tampered,
+            _label_free(original_tasks),
+            version="n001",
+            generation=0,
+        )
+
+
+def test_materializer_rejects_an_atlas_release_from_another_manifest() -> None:
+    build_tasks = _tasks()
+    fitted_manifest = build_group_fold_manifest(build_tasks, seed=20260903)
+    execution_manifest = build_group_fold_manifest(build_tasks, seed=20260904)
+    atlas = fit_atlas_release(
+        _atlas_fit_rows(build_tasks), fitted_manifest, AtlasPolicy()
+    )
+
+    with pytest.raises(NumericalPackageEvolutionError, match="Atlas.*manifest"):
+        NumericalPackageMaterializer(
+            forecast_store=_FixtureForecastStore(),
+            screening_policy=_screening(),
+            fold_manifest=execution_manifest,
+            original_tasks=_evolution_tasks(),
+            source_fingerprints={"dictionary": "2" * 64},
+            runtime_fingerprints={"materializer": "3" * 64},
+            atlas_release=atlas,
+        )
+
+
+def test_formal_proposer_requires_exactly_three_slots() -> None:
+    parent = _supply_parent()
+    proposer = _package_proposer(_RecordingMaterializer())
+
+    with pytest.raises(NumericalPackageEvolutionError, match="three"):
+        proposer.propose(
+            parent,
+            _registry_for_release(parent),
+            ProposerEvidence("adaptive_train_build_diagnostic", False, (), ()),
+            generation=0,
+            child_count=2,
+        )
+
+
+@dataclass
+class _MalformedResultMaterializer:
+    failure: str
+    cached: NumericalCoordinateCandidate | None = None
+
+    def materialize(
+        self,
+        parent_release: NumericalSupplyRelease,
+        fit,
+        tasks,
+        *,
+        version: str,
+        generation: int,
+    ) -> NumericalCoordinateCandidate:
+        del tasks, generation
+        if self.failure == "duplicate" and self.cached is not None:
+            return self.cached
+        release = NumericalSupplyRelease(
+            schema_version=1,
+            version="n999" if self.failure == "version" else version,
+            parent_sha256=(
+                "f" * 64 if self.failure == "parent" else parent_release.fingerprint
+            ),
+            anchor_release_payload=_parent().to_payload(),
+            alternatives=(),
+            atlas_release_sha256=None,
+            source_fingerprints=parent_release.source_fingerprints,
+            runtime_fingerprints=parent_release.runtime_fingerprints,
+        )
+        candidate = NumericalCoordinateCandidate(
+            release=release,
+            registry=_registry_for_release(release),
+            proposal_sha256=fit.numerical_score_sha256,
+        )
+        if self.failure == "duplicate":
+            self.cached = candidate
+        return candidate
+
+
+@pytest.mark.parametrize(
+    ("failure", "valid_count"),
+    (("version", 0), ("parent", 0), ("duplicate", 1)),
+)
+def test_formal_proposer_rejects_malformed_or_duplicate_valid_results(
+    failure: str,
+    valid_count: int,
+) -> None:
+    parent = _supply_parent()
+    proposer = _package_proposer(_MalformedResultMaterializer(failure))
+
+    children = proposer.propose(
+        parent,
+        _registry_for_release(parent),
+        ProposerEvidence("adaptive_train_build_diagnostic", False, (), ()),
+        generation=0,
+        child_count=3,
+    )
+
+    assert sum(child.invalid_reason is None for child in children) == valid_count
+    assert len({child.proposal_sha256 for child in children}) == 3
+
+
+def test_proposer_revalidates_feedback_against_every_build_task_identity() -> None:
+    parent = _supply_parent()
+    feedback = ProposerEvidence(
+        "adaptive_train_build_diagnostic",
+        False,
+        (
+            MorphologyAggregate(
+                group_id="history:build_case_000",
+                support=1,
+                candidate_name="seasonal_naive",
+                mean_delta_smae=0.0,
+                mean_delta_srmse=0.0,
+                coverage=1.0,
+                p95_regret_smae=0.0,
+                p95_regret_srmse=0.0,
+            ),
+        ),
+        (),
+    )
+
+    with pytest.raises(NumericalPackageEvolutionError, match="identity"):
+        _package_proposer(_RecordingMaterializer()).propose(
+            parent,
+            _registry_for_release(parent),
+            feedback,
+            generation=0,
+            child_count=3,
+        )
+
+
+def test_proposer_rejects_incomplete_build_rows_before_the_callback() -> None:
+    tasks = _tasks()
+    manifest = build_group_fold_manifest(tasks, seed=20260903)
+    omitted_task_id = tasks[0].task_id
+    incomplete_rows = tuple(
+        row for row in _build_rows(tasks) if row.task_id != omitted_task_id
+    )
+
+    with pytest.raises(NumericalPackageEvolutionError, match="Build row universe"):
+        NumericalPackageProposer(
+            proposer=ChampionProposerAdapter.scripted(
+                identity="incomplete_rows_fixture",
+                proposal_batches=(_proposal_batch(),),
+                config={"fixture": True},
+            ),
+            materializer=_RecordingMaterializer(),
+            build_rows=incomplete_rows,
+            fold_manifest=manifest,
+            tasks=_evolution_tasks(),
+        )
+
+
+def test_proposer_binds_tasks_to_the_parent_registry_exactly() -> None:
+    parent = _supply_parent()
+    registered = tuple(task.numeric.task_id for task in _evolution_tasks())
+    wrong_registry_ids = (*registered[:-1], "public_case_100")
+
+    with pytest.raises(NumericalPackageEvolutionError, match="Parent registry"):
+        _package_proposer(_RecordingMaterializer()).propose(
+            parent,
+            _registry_for_release(parent, wrong_registry_ids),
+            ProposerEvidence("adaptive_train_build_diagnostic", False, (), ()),
+            generation=0,
+            child_count=3,
+        )
+
+
+def test_proposer_and_materializer_reject_non_100_task_universes() -> None:
+    tasks = _tasks()
+    manifest = build_group_fold_manifest(tasks, seed=20260903)
+    extra = replace(
+        _evolution_tasks()[-1],
+        numeric=replace(
+            _evolution_tasks()[-1].numeric,
+            task_id="public_case_100",
+        ),
+    )
+    oversized = (*_evolution_tasks(), extra)
+
+    with pytest.raises(NumericalPackageEvolutionError, match="100"):
+        NumericalPackageProposer(
+            proposer=ChampionProposerAdapter.scripted(
+                identity="oversized_fixture",
+                proposal_batches=(_proposal_batch(),),
+                config={"fixture": True},
+            ),
+            materializer=_RecordingMaterializer(),
+            build_rows=_build_rows(tasks),
+            fold_manifest=manifest,
+            tasks=oversized,
+        )
+    with pytest.raises(NumericalPackageEvolutionError, match="100"):
+        NumericalPackageMaterializer(
+            forecast_store=_FixtureForecastStore(),
+            screening_policy=_screening(),
+            fold_manifest=manifest,
+            original_tasks=oversized,
+            source_fingerprints={"dictionary": "2" * 64},
+            runtime_fingerprints={"materializer": "3" * 64},
+        )
+
+
+def _retained_combined_spec() -> NumericalAlternativeSpec:
+    assumptions = tuple(
+        EvolutionAssumption(
+            assumption_id=f"retained_{name}",
+            candidate_name=name,
+            feature="history_length",
+            direction="above",
+            horizon_region="full",
+            operator="weighted",
+            rationale="Reviewed histories support this retained supplier.",
+            failure_condition="Reviewed histories stop supporting this supplier.",
+        )
+        for name in ("toto_2_0", "seasonal_naive")
+    )
+    recipe = ChampionRecipe(
+        name="retained_weighted",
+        kind="weighted",
+        parents=("toto_2_0", "seasonal_naive"),
+        fallback_parent="toto_2_0",
+        assumptions=assumptions,
+    )
+
+    def policy(weight: float) -> FittedChampionPolicy:
+        return FittedChampionPolicy(
+            recipe=recipe,
+            thresholds=tuple(
+                (assumption.assumption_id, 0.0) for assumption in assumptions
+            ),
+            weights=(weight, 1.0 - weight),
+        )
+
+    return NumericalAlternativeSpec(
+        candidate_id=recipe.name,
+        family="combined",
+        materializer_kind="champion",
+        recipe_payload=recipe.to_payload(),
+        full_build_policy_payload=policy(0.5).to_payload(),
+        build_fold_policy_payloads=tuple(
+            (fold, policy(0.40 + fold * 0.01).to_payload()) for fold in range(5)
+        ),
+        assumption_ids=tuple(item.assumption_id for item in assumptions),
+        failure_conditions=tuple(item.failure_condition for item in assumptions),
+    )
+
+
+def test_materializer_rematerializes_every_retained_parent_alternative() -> None:
+    build_tasks = _tasks()
+    manifest = build_group_fold_manifest(build_tasks, seed=20260903)
+    fit = fit_numerical_recipe(_recipe(), _build_rows(build_tasks), manifest, _parent())
+    parent = NumericalSupplyRelease(
+        schema_version=1,
+        version="n000",
+        parent_sha256=None,
+        anchor_release_payload=_parent().to_payload(),
+        alternatives=(_retained_combined_spec(),),
+        atlas_release_sha256=None,
+        source_fingerprints={"dictionary": "2" * 64},
+        runtime_fingerprints={"materializer": "3" * 64},
+    )
+    original_tasks = _evolution_tasks()
+    materializer = NumericalPackageMaterializer(
+        forecast_store=_FixtureForecastStore(),
+        screening_policy=_screening(),
+        fold_manifest=manifest,
+        original_tasks=original_tasks,
+        source_fingerprints={"dictionary": "2" * 64},
+        runtime_fingerprints={"materializer": "3" * 64},
+        diagnostics_registry=FrozenNumericalDiagnosticsRegistry.build(
+            original_tasks, _history_diagnostics(original_tasks), HindcastConfig()
+        ),
+    )
+
+    candidate = materializer.materialize(
+        parent,
+        fit,
+        _label_free(original_tasks),
+        version="n001",
+        generation=0,
+    )
+
+    assert {
+        item.name
+        for item in candidate.registry.package_for(
+            original_tasks[0]
+        ).ranked_alternatives
+    } == {
+        "toto_2_0",
+        "select_seasonal_naive",
+        "retained_weighted",
+    }
+
+
+def test_diagnostics_registry_is_frozen_and_bound_to_history_and_policy() -> None:
+    registry_type = getattr(
+        numerical_evolution, "FrozenNumericalDiagnosticsRegistry", None
+    )
+    assert registry_type is not None
+    tasks = _evolution_tasks()
+    safe_tasks = _label_free(tasks)
+    diagnostics = _history_diagnostics(tasks)
+    policy = HindcastConfig()
+    registry = registry_type.build(tasks, diagnostics, policy)
+    fingerprint = registry.fingerprint
+    first_task = tasks[0].numeric.task_id
+    diagnostics[first_task]["seasonal_naive"] = replace(
+        diagnostics[first_task]["seasonal_naive"],
+        median_smae=9.0,
+    )
+
+    frozen = registry.diagnostics_for(safe_tasks[0], policy)
+
+    assert registry.fingerprint == fingerprint
+    assert frozen["seasonal_naive"].median_smae == 0.2
+    changed_history = replace(
+        safe_tasks[0],
+        numeric=replace(
+            safe_tasks[0].numeric,
+            history_values=tuple(
+                value + 1.0 for value in safe_tasks[0].numeric.history_values
+            ),
+        ),
+    )
+    with pytest.raises(NumericalPackageEvolutionError, match="history"):
+        registry.diagnostics_for(changed_history, policy)
+    with pytest.raises(NumericalPackageEvolutionError, match="hindcast"):
+        registry.diagnostics_for(
+            safe_tasks[0],
+            HindcastConfig(folds=4, min_successful_folds=2),
+        )
+
+
+def test_materializer_rejects_unregistered_diagnostics_mappings() -> None:
+    build_tasks = _tasks()
+    manifest = build_group_fold_manifest(build_tasks, seed=20260903)
+
+    with pytest.raises(NumericalPackageEvolutionError, match="frozen.*diagnostics"):
+        NumericalPackageMaterializer(
+            forecast_store=_FixtureForecastStore(),
+            screening_policy=_screening(),
+            fold_manifest=manifest,
+            original_tasks=_evolution_tasks(),
+            source_fingerprints={"dictionary": "2" * 64},
+            runtime_fingerprints={"materializer": "3" * 64},
+            diagnostics_registry=_history_diagnostics(_evolution_tasks()),
+        )
