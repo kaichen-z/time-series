@@ -9,10 +9,9 @@ from evolving_loop.package_coordinate_evolution import (
     PackageCoordinateController,
     package_principal_fingerprints,
 )
-from evolving_loop.package_registry import FrozenNumericalPackageRegistry
 from tests.test_coordinate_evolution import _accepted_release, _bound_policy
 from tests.test_package_decision_evolution import _decision_task
-from tests.test_package_retrieval_evolution import _package
+from tests.test_package_retrieval_evolution import _frozen_registry, _package
 
 
 def _runtime_fingerprints() -> dict[str, str]:
@@ -27,7 +26,7 @@ def _runtime_fingerprints() -> dict[str, str]:
 
 def _bundle(tmp_path, *, policy: HarnessPolicy | None = None):
     task = _decision_task()
-    registry = FrozenNumericalPackageRegistry(((task, _package()),))
+    registry = _frozen_registry(((task, _package()),))
     if policy is None:
         release = _accepted_release(tmp_path / "releases", "v001", "v000")
         policy = _bound_policy(release)

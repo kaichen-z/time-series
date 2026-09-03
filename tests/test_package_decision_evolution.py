@@ -26,6 +26,7 @@ from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 from tests.test_coordinate_evolution import _accepted_release, _bound_policy
 from tests.test_package_retrieval_evolution import (
     _decision_response,
+    _frozen_registry,
     _package,
     _retrieval_card,
     _round_response,
@@ -128,7 +129,7 @@ def _decision_dependencies() -> dict[str, str]:
 
 def _evaluator(tmp_path, parent: HarnessPolicy, *, child_improves: bool = True):
     task = _decision_task()
-    registry = FrozenNumericalPackageRegistry(((task, _safe_default_package()),))
+    registry = _frozen_registry(((task, _safe_default_package()),))
     skills = RetrievalSkillLibrary(tmp_path / "retrieval.json", persist=False).clone(
         read_only=True
     )

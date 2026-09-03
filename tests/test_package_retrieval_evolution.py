@@ -15,6 +15,7 @@ from evolving_loop.package_registry import (
     FrozenNumericalPackageRegistry,
     PackageRegistryError,
 )
+from evolving_loop.package_numerical_supply import NumericalSupplyRelease
 from evolving_loop.retrieval_agent.quality import score_retrieval_card_quality
 from evolving_loop.retrieval_agent.evolution import build_inference_cache_key
 from evolving_loop.retrieval_agent.policy import RetrievalGenome
@@ -115,6 +116,28 @@ def _release(*, lineage: tuple[str, ...] = ("champion_a",)) -> ChampionRelease:
     )
 
 
+def _seed_supply_release() -> NumericalSupplyRelease:
+    return NumericalSupplyRelease(
+        schema_version=1,
+        version="n000",
+        parent_sha256=None,
+        anchor_release_payload=_release().to_payload(),
+        alternatives=(),
+        atlas_release_sha256=None,
+        source_fingerprints={"dictionary": "4" * 64},
+        runtime_fingerprints={"materializer": "5" * 64},
+    )
+
+
+def _frozen_registry(entries):
+    release = _seed_supply_release()
+    return FrozenNumericalPackageRegistry(
+        entries,
+        release_sha256=release.fingerprint,
+        expected_task_ids=tuple(sorted(task.numeric.task_id for task, _package in entries)),
+    )
+
+
 def _diagnostic(
     name: str,
     family: str,
@@ -201,6 +224,7 @@ def _package(
         component_fingerprints={
             **dict(package.component_fingerprints),
             "morphology_card": card.fingerprint,
+            "numerical_supply_release": _seed_supply_release().fingerprint,
         },
     )
 
@@ -273,7 +297,7 @@ def _decision_response(candidate_id: str = "specialist") -> str:
 
 def _package_evaluator(tmp_path):
     task = _task()
-    registry = FrozenNumericalPackageRegistry(((task, _package()),))
+    registry = _frozen_registry(((task, _package()),))
     library = RetrievalSkillLibrary(tmp_path / "skills.json", persist=False).clone(
         read_only=True
     )
@@ -309,7 +333,7 @@ def _package_evaluator(tmp_path):
 def test_registry_rejects_a_rebound_task() -> None:
     task = _task()
     package = _package()
-    registry = FrozenNumericalPackageRegistry(((task, package),))
+    registry = _frozen_registry(((task, package),))
 
     assert registry.package_for(task) is package
     with pytest.raises(PackageRegistryError, match="task binding"):
@@ -318,8 +342,8 @@ def test_registry_rejects_a_rebound_task() -> None:
 
 def test_registry_identity_changes_with_a_materialized_forecast() -> None:
     task = _task()
-    left = FrozenNumericalPackageRegistry(((task, _package()),))
-    right = FrozenNumericalPackageRegistry(
+    left = _frozen_registry(((task, _package()),))
+    right = _frozen_registry(
         ((task, _package(specialist=(2.0, 3.0))),)
     )
 
@@ -328,8 +352,8 @@ def test_registry_identity_changes_with_a_materialized_forecast() -> None:
 
 def test_registry_identity_changes_with_the_champion_release() -> None:
     task = _task()
-    left = FrozenNumericalPackageRegistry(((task, _package()),))
-    right = FrozenNumericalPackageRegistry(
+    left = _frozen_registry(((task, _package()),))
+    right = _frozen_registry(
         ((task, _package(lineage=("champion_b",))),)
     )
 
@@ -337,7 +361,7 @@ def test_registry_identity_changes_with_the_champion_release() -> None:
 
 
 def test_registry_manifest_is_transitively_immutable() -> None:
-    registry = FrozenNumericalPackageRegistry(((_task(), _package()),))
+    registry = _frozen_registry(((_task(), _package()),))
     entries = registry.manifest["entries"]
 
     with pytest.raises(TypeError):
@@ -452,7 +476,7 @@ def test_package_retrieval_evaluator_requires_canonical_dependency_hashes(
     tmp_path,
 ) -> None:
     task = _task()
-    registry = FrozenNumericalPackageRegistry(((task, _package()),))
+    registry = _frozen_registry(((task, _package()),))
 
     with pytest.raises(ValueError, match="fingerprint"):
         PackageRetrievalEvaluator(

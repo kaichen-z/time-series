@@ -44,6 +44,7 @@ from tests.test_package_decision_evolution import (
     _decision_task,
     _safe_default_package,
 )
+from tests.test_package_retrieval_evolution import _frozen_registry
 
 
 _RETRIEVAL_DEPENDENCIES = {
@@ -285,8 +286,8 @@ def test_package_coordinate_evolution_closes_deterministic_80_20_loop(
     train = tuple(_context_task(index, split="train") for index in range(80))
     dev = tuple(_context_task(index, split="dev") for index in range(20))
     entries = tuple((task, _champion_package(task)) for task in (*train, *dev))
-    registry = FrozenNumericalPackageRegistry(entries)
-    replica = FrozenNumericalPackageRegistry(entries)
+    registry = _frozen_registry(entries)
+    replica = _frozen_registry(entries)
     selected_candidates: list[str] = []
     active_genome: list[RetrievalGenome] = []
     accepted_results = []
