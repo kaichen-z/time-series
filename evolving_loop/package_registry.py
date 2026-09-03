@@ -183,7 +183,7 @@ class FrozenNumericalPackageRegistry:
         self._packages = MappingProxyType(packages)
         self._task_hashes = MappingProxyType(task_hashes)
         self._package_hashes = MappingProxyType(package_hashes)
-        self.release_sha256 = release_sha256
+        self._release_sha256 = release_sha256
         frozen_manifest = _freeze_json(manifest)
         if not isinstance(frozen_manifest, Mapping):  # pragma: no cover
             raise AssertionError("frozen package manifest must remain a mapping")
@@ -193,6 +193,10 @@ class FrozenNumericalPackageRegistry:
     @property
     def task_ids(self) -> tuple[str, ...]:
         return tuple(sorted(self._packages))
+
+    @property
+    def release_sha256(self) -> str:
+        return self._release_sha256
 
     @property
     def manifest(self) -> Mapping[str, object]:

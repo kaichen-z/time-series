@@ -24,6 +24,7 @@ from numerical_agent.evolution.champion import (
     ChampionRelease,
     EvolutionAssumption,
     FittedChampionPolicy,
+    champion_fingerprint,
 )
 from numerical_agent.evolution.execution import Task
 from numerical_agent.evolution.numerical_handoff import task_input_fingerprint
@@ -179,13 +180,20 @@ def _wide_package() -> NumericalForecastPackage:
             for index, item in enumerate(alternatives, start=1)
         ),
         retrieval_handoff=(),
-        component_fingerprints={"task_input": "6" * 64},
+        component_fingerprints={
+            "task_input": "6" * 64,
+            "champion_release": champion_fingerprint(_anchor_release()),
+            "champion_recipe": champion_fingerprint(_anchor_release().policy.recipe),
+            "champion_assumptions": champion_fingerprint(
+                _anchor_release().policy.recipe.assumptions
+            ),
+        },
     )
 
 
 def _materialized_forecasts() -> dict[str, RankedNumericalForecast]:
     return {
-        "safe_anchor": _ranked("safe_anchor", "tsfm", (1.0, 1.0)),
+        "safe_anchor": _ranked("safe_anchor", "tsfm", (9.0, 9.0)),
         "seasonal_naive": _ranked("seasonal_naive", "statistical", (2.0, 2.0)),
         "toto_2_0": _ranked("toto_2_0", "tsfm", (3.0, 3.0)),
         "weighted_pair": _ranked("weighted_pair", "combined", (4.0, 4.0)),
@@ -240,11 +248,11 @@ def _package_for_task(
                 frequency=task.numeric.frequency,
                 horizon=task.numeric.prediction_length,
             ),
-            "champion_release": hashlib.sha256(
-                str(anchor.to_payload()).encode("utf-8")
-            ).hexdigest(),
-            "champion_recipe": "7" * 64,
-            "champion_assumptions": "8" * 64,
+            "champion_release": champion_fingerprint(anchor),
+            "champion_recipe": champion_fingerprint(anchor.policy.recipe),
+            "champion_assumptions": champion_fingerprint(
+                anchor.policy.recipe.assumptions
+            ),
         },
     )
     return bound_numerical_package(source, release, _materialized_forecasts())
@@ -303,9 +311,9 @@ def test_non_seed_supply_rejects_full_build_policy_reused_for_every_fold():
 def test_bounded_package_keeps_anchor_plus_one_per_family_and_deduplicates_vectors():
     source = _wide_package()
     materialized = {
-        "safe_anchor": _ranked("safe_anchor", "tsfm", (1.0, 1.0)),
+        "safe_anchor": _ranked("safe_anchor", "tsfm", (9.0, 9.0)),
         "seasonal_naive": _ranked("seasonal_naive", "statistical", (2.0, 2.0)),
-        "toto_2_0": _ranked("toto_2_0", "tsfm", (1.0, 1.0)),
+        "toto_2_0": _ranked("toto_2_0", "tsfm", (9.0, 9.0)),
         "weighted_pair": _ranked("weighted_pair", "combined", (3.0, 3.0)),
         "atlas_70_30": _ranked("atlas_70_30", "atlas_overlay", (4.0, 4.0)),
     }
@@ -323,6 +331,19 @@ def test_bounded_package_keeps_anchor_plus_one_per_family_and_deduplicates_vecto
     assert len(package.ranked_alternatives) <= 5
 
 
+def test_bounded_package_rejects_a_materialized_anchor_with_a_different_forecast():
+    materialized = {
+        **_materialized_forecasts(),
+        "safe_anchor": _ranked("safe_anchor", "tsfm", (1.0, 1.0)),
+    }
+    with pytest.raises(NumericalSupplyError, match="exact protected anchor"):
+        bound_numerical_package(
+            _wide_package(),
+            _supply_release(),
+            materialized,
+        )
+
+
 def test_fixed_atlas_blend_is_never_promoted_to_anchor():
     package = bound_numerical_package(
         _wide_package(),
@@ -333,6 +354,20 @@ def test_fixed_atlas_blend_is_never_promoted_to_anchor():
     assert package.protected_baseline.name != "atlas_70_30"
 
 
+def test_fixed_atlas_blend_is_rejected_as_the_source_anchor():
+    source = _wide_package()
+    atlas = next(
+        item for item in source.ranked_alternatives if item.name == "atlas_70_30"
+    )
+
+    with pytest.raises(NumericalSupplyError, match="fixed Atlas"):
+        bound_numerical_package(
+            replace(source, protected_baseline=atlas),
+            _supply_release(),
+            _materialized_forecasts(),
+        )
+
+
 def test_registry_binds_exact_supply_release_and_task_universe():
     tasks = _registry_tasks()
     release = _supply_release()
@@ -341,6 +376,33 @@ def test_registry_binds_exact_supply_release_and_task_universe():
     assert registry.release_sha256 == release.fingerprint
     assert registry.task_ids == tuple(sorted(task.numeric.task_id for task in tasks))
     assert registry.manifest["release_sha256"] == release.fingerprint
+
+
+def test_registry_builder_rejects_package_champion_provenance_that_drifts_from_anchor():
+    tasks = _registry_tasks()
+    release = _supply_release()
+
+    def package_builder(task: ContextTask, supply: NumericalSupplyRelease):
+        package = _package_for_task(task, supply)
+        return replace(
+            package,
+            component_fingerprints={
+                **dict(package.component_fingerprints),
+                "champion_release": "0" * 64,
+            },
+        )
+
+    with pytest.raises(NumericalSupplyError, match="Champion provenance"):
+        build_package_registry(tasks, release, package_builder)
+
+
+def test_registry_release_sha256_is_read_only():
+    registry = build_package_registry(
+        _registry_tasks(), _supply_release(), _package_for_task
+    )
+
+    with pytest.raises(AttributeError):
+        registry.release_sha256 = "0" * 64
 
 
 def test_registry_rejects_missing_or_extra_task_packages():

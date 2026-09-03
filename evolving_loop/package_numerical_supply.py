@@ -16,6 +16,7 @@ from numerical_agent.evolution.champion import (
     ChampionRelease,
     FittedChampionPolicy,
     _parse_fitted_policy,
+    champion_fingerprint,
     parse_champion_recipe,
     parse_champion_release,
 )
@@ -375,6 +376,24 @@ def _supply_parent_fingerprint(release: NumericalSupplyRelease) -> str:
     ).hexdigest()
 
 
+def _validate_champion_provenance(
+    package: NumericalForecastPackage,
+    release: NumericalSupplyRelease,
+) -> None:
+    try:
+        anchor = parse_champion_release(_plain(release.anchor_release_payload))
+    except ChampionContractError as error:  # pragma: no cover - release validates it
+        raise AssertionError("validated supply anchor became unparsable") from error
+    expected = {
+        "champion_release": champion_fingerprint(anchor),
+        "champion_recipe": champion_fingerprint(anchor.policy.recipe),
+        "champion_assumptions": champion_fingerprint(anchor.policy.recipe.assumptions),
+    }
+    actual = package.component_fingerprints
+    if any(actual.get(key) != value for key, value in expected.items()):
+        _fail("package Champion provenance does not match the supply anchor")
+
+
 def bound_numerical_package(
     source: NumericalForecastPackage,
     release: NumericalSupplyRelease,
@@ -387,6 +406,9 @@ def bound_numerical_package(
         _fail("release must be a NumericalSupplyRelease")
     if not isinstance(materialized, Mapping):
         _fail("materialized forecasts must be a mapping")
+    _validate_champion_provenance(source, release)
+    if source.protected_baseline.name == "atlas_70_30":
+        _fail("fixed Atlas blend cannot be the protected source anchor")
     anchor = _materialized_item(
         materialized,
         candidate_id=source.protected_baseline.name,
@@ -395,6 +417,8 @@ def bound_numerical_package(
     )
     if anchor is None:
         _fail("materialized forecasts must contain the source protected anchor")
+    if anchor != source.protected_baseline:
+        _fail("materialized anchor must equal the exact protected anchor")
 
     retained = [anchor]
     retained_names = {anchor.name}
@@ -481,8 +505,11 @@ def build_package_registry(
     supplied_tasks = tuple(tasks)
     if any(not isinstance(task, ContextTask) for task in supplied_tasks):
         _fail("registry tasks must be ContextTask records")
+    entries = tuple((task, package_builder(task, release)) for task in supplied_tasks)
+    for _task, package in entries:
+        _validate_champion_provenance(package, release)
     return FrozenNumericalPackageRegistry(
-        tuple((task, package_builder(task, release)) for task in supplied_tasks),
+        entries,
         release_sha256=release.fingerprint,
         expected_task_ids=tuple(sorted(task.numeric.task_id for task in supplied_tasks)),
     )

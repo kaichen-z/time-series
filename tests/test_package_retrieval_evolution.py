@@ -116,12 +116,14 @@ def _release(*, lineage: tuple[str, ...] = ("champion_a",)) -> ChampionRelease:
     )
 
 
-def _seed_supply_release() -> NumericalSupplyRelease:
+def _seed_supply_release(
+    *, lineage: tuple[str, ...] = ("champion_a",)
+) -> NumericalSupplyRelease:
     return NumericalSupplyRelease(
         schema_version=1,
         version="n000",
         parent_sha256=None,
-        anchor_release_payload=_release().to_payload(),
+        anchor_release_payload=_release(lineage=lineage).to_payload(),
         alternatives=(),
         atlas_release_sha256=None,
         source_fingerprints={"dictionary": "4" * 64},
@@ -129,8 +131,8 @@ def _seed_supply_release() -> NumericalSupplyRelease:
     )
 
 
-def _frozen_registry(entries):
-    release = _seed_supply_release()
+def _frozen_registry(entries, *, release: NumericalSupplyRelease | None = None):
+    release = release or _seed_supply_release()
     return FrozenNumericalPackageRegistry(
         entries,
         release_sha256=release.fingerprint,
@@ -224,7 +226,9 @@ def _package(
         component_fingerprints={
             **dict(package.component_fingerprints),
             "morphology_card": card.fingerprint,
-            "numerical_supply_release": _seed_supply_release().fingerprint,
+            "numerical_supply_release": _seed_supply_release(
+                lineage=lineage
+            ).fingerprint,
         },
     )
 
@@ -354,7 +358,8 @@ def test_registry_identity_changes_with_the_champion_release() -> None:
     task = _task()
     left = _frozen_registry(((task, _package()),))
     right = _frozen_registry(
-        ((task, _package(lineage=("champion_b",))),)
+        ((task, _package(lineage=("champion_b",))),),
+        release=_seed_supply_release(lineage=("champion_b",)),
     )
 
     assert left.fingerprint != right.fingerprint
