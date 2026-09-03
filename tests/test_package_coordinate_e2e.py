@@ -1,464 +1,280 @@
+"""Deterministic two-cycle N -> R -> D package co-evolution end to end."""
 from __future__ import annotations
 
-import json
+import hashlib
 from dataclasses import replace
 
-from common.evolution_core.contracts import METRIC_POLICY_FINGERPRINT
-from common.llm import FakeLLMClient, LLMResponse
-from evolving_loop.co_evolution import (
-    CoEvolutionConfig,
-    HarnessPolicy,
-    embed_retrieval_release,
+from evolving_loop.co_evolution import HarnessPolicy, embed_retrieval_release
+from evolving_loop.package_candidate_proposal import (
+    PackageCandidate,
+    embed_retrieval_candidate,
 )
-from evolving_loop.coordinate_evolution import (
-    DecisionEvolutionPhaseAdapter,
-    RetrievalEvolutionPhaseAdapter,
-)
-from evolving_loop.data import ContextTask, Document
-from evolving_loop.decision_agent.agent import DecisionAgent
 from evolving_loop.package_coordinate_evolution import (
-    PackageCoordinateBundle,
     PackageCoordinateController,
     PackageCoordinateState,
 )
-from evolving_loop.package_decision_evolution import (
-    PackageDecisionEvaluator,
-    PackageDecisionEvolutionEngine,
-)
-from evolving_loop.package_registry import FrozenNumericalPackageRegistry
-from evolving_loop.package_retrieval_evolution import PackageRetrievalEvaluator
-from evolving_loop.retrieval_agent.evolution import (
-    RetrievalEvolutionConfig,
-    RetrievalEvolutionEngine,
+from evolving_loop.package_numerical_supply import parse_numerical_supply_release
+from evolving_loop.package_metrics import PackageGateConfig
+from evolving_loop.package_stage_runner import (
+    InMemoryPackageArtifactSink,
+    PackageCoordinatePhaseRunner,
 )
 from evolving_loop.retrieval_agent.policy import (
     RetrievalGenome,
     _write_accepted_retrieval_release,
-    write_retrieval_release,
 )
 from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
-from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
-from numerical_agent.evolution.execution import Task
-from numerical_agent.evolution.numerical_handoff import task_input_fingerprint
-from numerical_agent.evolution.screening import profile_task
-from tests.test_package_decision_evolution import (
-    _decision_task,
-    _safe_default_package,
+from tests.test_coordinate_evolution import _audit
+from tests.test_package_coordinate_evolution import _bundle
+from tests.test_package_decision_evolution import _decision_task
+from tests.test_package_stage_runner import (
+    DEV_20,
+    TRAIN_80,
+    _evaluation,
+    _schedule,
+    _task_map,
 )
-from tests.test_package_retrieval_evolution import _frozen_registry, _seed_supply_release
+from tests.test_package_retrieval_evolution import _package, _frozen_registry
 
 
-_RETRIEVAL_DEPENDENCIES = {
-    "retrieval_factory": "1" * 64,
-    "decision_factory": "2" * 64,
-    "bridge_runtime": "3" * 64,
-}
+# --------------------------------------------------------------------------
+# deterministic evaluator: strictly improving in cycle one, regressing after
+# --------------------------------------------------------------------------
 
 
-def _context_task(index: int, *, split: str) -> ContextTask:
-    template = ContextTask(
-        numeric=replace(
-            # Reuse the frozen package's exact history and resolved target.
-            # Identity and entity diversity are supplied below.
-            _decision_task().numeric,
-            task_id=f"{split}-{index:03d}",
-            entity_name=(
-                f"Train Entity {index // 8:02d}"
-                if split == "train"
-                else f"Dev Entity {index // 2:02d}"
+class _CycleEvaluator:
+    def __init__(self) -> None:
+        self.stages_seen: list[str] = []
+        self.cache_only_calls = 0
+
+    @staticmethod
+    def _error(generation: int) -> float:
+        if generation == 0:
+            return 1.0
+        if generation <= 3:
+            return round(1.0 - 0.05 * generation, 4)
+        return 1.5
+
+    def evaluate(self, bundle, registry, tasks, *, stage, cache_only=False):
+        task_ids = tuple(task.numeric.task_id for task in tasks)
+        if cache_only:
+            self.cache_only_calls += 1
+        else:
+            self.stages_seen.append(stage)
+        return _evaluation(bundle.fingerprint(), task_ids, self._error(bundle.generation))
+
+
+# --------------------------------------------------------------------------
+# scripted proposers, one per coordinate
+# --------------------------------------------------------------------------
+
+
+def _numerical_variant(current: PackageCoordinateState, slot: int) -> PackageCoordinateState:
+    parent_release = parse_numerical_supply_release(
+        current.bundle.to_payload()["numerical_release_payload"]
+    )
+    generation = int(parent_release.version[1:]) + 1
+    payload = parent_release.to_payload()
+    payload["version"] = f"n{generation:03d}"
+    payload["parent_sha256"] = parent_release.fingerprint
+    payload["source_fingerprints"] = {
+        "dictionary": hashlib.sha256(f"gen{generation}:slot{slot}".encode()).hexdigest()
+    }
+    release = parse_numerical_supply_release(payload)
+    package = _package()
+    registry = _frozen_registry(
+        (
+            (
+                _decision_task(),
+                replace(
+                    package,
+                    component_fingerprints={
+                        **dict(package.component_fingerprints),
+                        "numerical_supply_release": release.fingerprint,
+                    },
+                ),
             ),
         ),
-        target_name="sales",
-        target_description="Daily sales",
-        history_timestamps=tuple(
-            f"2026-01-{position + 1:02d}" for position in range(36)
-        ),
-        future_timestamps=("2026-02-06", "2026-02-07"),
-        documents=(),
-        gt_evidence=(),
-        labels_public=True,
+        release=release,
     )
-    entity = template.numeric.entity_name
-    support = (
-        f"{entity} sales remain at one and two units during the forecast window."
-    )
-    cycle = (
-        f"A scheduled seasonal cycle will persist and increase {entity} sales by "
-        "1 unit from 2026-02-06 through 2026-02-07."
-    )
-    return replace(
-        template,
-        documents=(
-            Document("support", support, role="supporting"),
-            Document("cycle_support", cycle, role="supporting"),
-            Document(
-                "distractor",
-                "Another entity's inventory changes during an unrelated window.",
-                role="distractor",
-            ),
-        ),
-        gt_evidence=(support,),
-    )
+    return current.with_numerical(release, registry)
 
 
-def _champion_package(task: ContextTask):
-    template = _safe_default_package()
-    numeric = task.numeric
-    profile = profile_task(
-        Task(
-            numeric.task_id,
-            numeric.history_values,
-            numeric.prediction_length,
-            numeric.frequency,
-            (),
+class _NumericalProposer:
+    target = "numerical"
+
+    def propose(self, parent, feedback, *, generation, child_count):
+        return tuple(
+            PackageCandidate(
+                slot=slot,
+                target="numerical",
+                state=_numerical_variant(parent, slot),
+                proposal_sha256=_numerical_variant(parent, slot).bundle.fingerprint(),
+            )
+            for slot in range(child_count)
         )
-    )
-    fingerprints = {
-        **dict(template.component_fingerprints),
-        "task_input": task_input_fingerprint(
-            task_id=numeric.task_id,
-            history=numeric.history_values,
-            frequency=numeric.frequency,
-            horizon=numeric.prediction_length,
-        ),
-    }
-    return replace(
-        template,
-        task_profile=profile,
-        component_fingerprints=fingerprints,
-    )
 
 
-def _chain(
-    *,
-    chain_id: str,
-    document_id: str,
-    content: str,
-    start: str,
-    end: str,
-    addressed_assumption_ids: tuple[str, ...] = (),
-) -> dict[str, object]:
-    return {
-        "chain_id": chain_id,
-        "claim": content,
-        "entity_match": True,
-        "target_match": True,
-        "temporal_relation": "overlaps_future",
-        "mechanism": "future_driver",
-        "direction": "up" if addressed_assumption_ids else "stable",
-        "magnitude_kind": "absolute" if addressed_assumption_ids else "none",
-        "magnitude_value": 1.0 if addressed_assumption_ids else None,
-        "start_timestamp": start,
-        "end_timestamp": end,
-        "citations": [{"document_id": document_id, "exact_quote": content}],
-        "missing_links": [],
-        "used_skill_ids": [],
-        "addressed_assumption_ids": list(addressed_assumption_ids),
-        "stance": "supports",
-        "numeric_eligible": True,
-    }
+class _RetrievalProposer:
+    target = "retrieval"
 
+    def __init__(self, skills: RetrievalSkillLibrary) -> None:
+        self.skills = skills
 
-class _DeterministicRetrievalLLM:
-    def complete(self, *, system, messages, temperature=0.0) -> LLMResponse:
-        del system, temperature
-        payload = json.loads(messages[0]["content"])
-        documents = {
-            item["document_id"]: item["content"] for item in payload["documents"]
-        }
-        start, end = payload["target"]["forecast_window"]
-        if "assumptions" in payload:
-            chains = [
-                _chain(
-                    chain_id="cycle_chain",
-                    document_id="cycle_support",
-                    content=documents["cycle_support"],
-                    start=start,
-                    end=end,
-                    addressed_assumption_ids=("assumption_001",),
+    def _candidate_genome(self, parent, slot: int) -> RetrievalGenome:
+        return replace(
+            RetrievalGenome.seed(),
+            version=f"v{900 + slot:03d}",
+            parent=parent.bundle.policy.version,
+            max_selected_documents=6 + slot,
+        )
+
+    def propose(self, parent, feedback, *, generation, child_count):
+        children = []
+        for slot in range(child_count):
+            genome = self._candidate_genome(parent, slot)
+            policy = embed_retrieval_candidate(
+                parent.bundle.policy,
+                genome,
+                self.skills,
+                changelog=f"candidate {slot}",
+            )
+            state = parent.with_policy(policy, target="retrieval")
+            children.append(
+                PackageCandidate(
+                    slot=slot,
+                    target="retrieval",
+                    state=state,
+                    proposal_sha256=state.bundle.fingerprint(),
                 )
-            ]
-        else:
-            chains = [
-                _chain(
-                    chain_id="support_chain",
-                    document_id="support",
-                    content=documents["support"],
-                    start=start,
-                    end=end,
+            )
+        return tuple(children)
+
+
+class _DecisionProposer:
+    target = "decision"
+
+    def propose(self, parent, feedback, *, generation, child_count):
+        children = []
+        for slot in range(child_count):
+            policy = replace(
+                parent.bundle.policy,
+                decision_prompt=f"{parent.bundle.policy.decision_prompt} :: child {slot}",
+            )
+            state = parent.with_policy(policy, target="decision")
+            children.append(
+                PackageCandidate(
+                    slot=slot,
+                    target="decision",
+                    state=state,
+                    proposal_sha256=state.bundle.fingerprint(),
                 )
-            ]
-        return LLMResponse(
-            json.dumps(
-                {
-                    "evidence_chains": chains,
-                    "counterevidence": [],
-                    "missing_information": [],
-                    "sufficient": True,
-                }
             )
+        return tuple(children)
+
+
+class _RetrievalPublisher:
+    def __init__(self, tmp_path, skills: RetrievalSkillLibrary) -> None:
+        self.tmp_path = tmp_path
+        self.skills = skills
+        self._n = 1
+
+    def publish(self, finalist, phase_parent):
+        self._n += 1
+        version = f"v{self._n:03d}"
+        accepted_genome = replace(
+            finalist.state.bundle.policy.retrieval_genome,
+            version=version,
+            parent=phase_parent.bundle.policy.version,
         )
-
-
-class _DeterministicDecisionLLM:
-    def __init__(self, *, specialist: bool, selected: list[str]) -> None:
-        self.specialist = specialist
-        self.selected = selected
-        self.calls = 0
-
-    def complete(self, *, system, messages, temperature=0.0) -> LLMResponse:
-        del system, messages, temperature
-        if not self.specialist:
-            candidate = "safe_anchor"
-            payload = {
-                "selected_candidate_id": candidate,
-                "supporting_document_ids": [],
-                "rationale": "Retain the frozen safe default.",
-                "request_more_retrieval": False,
-                "gaps": [],
-                "used_skill_names": [],
-            }
-        elif self.calls == 0:
-            candidate = "specialist"
-            payload = {
-                "selected_candidate_id": candidate,
-                "supporting_document_ids": ["support"],
-                "rationale": "Request the named seasonal discriminator.",
-                "request_more_retrieval": True,
-                "gaps": [
-                    {
-                        "assumption_id": "assumption_001",
-                        "gap_type": "continuation_or_reversal",
-                        "missing_information": "Evidence the seasonal cycle persists",
-                        "priority": "high",
-                    }
-                ],
-                "used_skill_names": [],
-            }
-        else:
-            candidate = "specialist"
-            payload = {
-                "selected_candidate_id": candidate,
-                "supporting_document_ids": ["cycle_support"],
-                "rationale": "Verified evidence supports the materialized specialist.",
-                "request_more_retrieval": False,
-                "gaps": [],
-                "used_skill_names": [],
-            }
-        self.calls += 1
-        self.selected.append(candidate)
-        return LLMResponse(json.dumps(payload))
-
-
-def _retrieval_proposals(parent: RetrievalGenome) -> list[str]:
-    payloads: list[dict[str, object]] = []
-    for index, scope in enumerate(("A", "B", "C"), start=1):
-        payload = parent.to_payload()
-        payload.update({"version": f"v{index:03d}", "parent": parent.version})
-        if scope == "A":
-            payload["round1_prompt"] = (
-                f"{parent.round1_prompt}\nUse verified evidence to prefer specialist."
-            )
-        elif scope == "B":
-            payload["max_citations_per_chain"] = 2
-        else:
-            payload["round2_strategy"] = "gap_first"
-        payloads.append(payload)
-    return [json.dumps(payload) for payload in payloads]
-
-
-def _accepted_audit(registry: FrozenNumericalPackageRegistry) -> dict[str, object]:
-    return {
-        "state": "accepted",
-        "train_dev_split_sha256": registry.fingerprint,
-        "verifier_sha256": "4" * 64,
-        "evaluator_sha256": "5" * 64,
-        "metric_sha256": METRIC_POLICY_FINGERPRINT,
-        "metric_cap": 5.0,
-        "train_summary": {"task_count": 80},
-        "dev_summary": {"task_count": 20},
-        "acceptance_reason": "package Train/Dev gates passed",
-    }
-
-
-def test_package_coordinate_evolution_closes_deterministic_80_20_loop(
-    tmp_path, monkeypatch
-) -> None:
-    train = tuple(_context_task(index, split="train") for index in range(80))
-    dev = tuple(_context_task(index, split="dev") for index in range(20))
-    entries = tuple((task, _champion_package(task)) for task in (*train, *dev))
-    registry = _frozen_registry(entries)
-    replica = _frozen_registry(entries)
-    selected_candidates: list[str] = []
-    active_genome: list[RetrievalGenome] = []
-    accepted_results = []
-    accepted_release_paths = []
-
-    skills = RetrievalSkillLibrary(tmp_path / "skills.json", persist=False).clone(
-        read_only=True
-    )
-
-    def retrieval_factory(genome: RetrievalGenome, library):
-        active_genome[:] = [genome]
-        return TwoStageRetrievalAgent(
-            _DeterministicRetrievalLLM(),
-            genome,
-            library,
-        )
-
-    def retrieval_decision_factory():
-        specialist = bool(
-            active_genome
-            and "prefer specialist" in active_genome[0].round1_prompt
-        )
-        return DecisionAgent(
-            _DeterministicDecisionLLM(
-                specialist=specialist,
-                selected=selected_candidates,
-            )
-        )
-
-    retrieval_evaluator = PackageRetrievalEvaluator(
-        registry,
-        retrieval_factory,
-        retrieval_decision_factory,
-        dependency_fingerprints=_RETRIEVAL_DEPENDENCIES,
-    )
-    seed = RetrievalGenome.seed()
-    retrieval_engine = RetrievalEvolutionEngine(
-        FakeLLMClient(_retrieval_proposals(seed)),
-        retrieval_evaluator,
-        RetrievalEvolutionConfig(
-            generations=1,
-            promote=1,
-            train_folds=4,
-            strict_gain_target="final",
-            transient_retries=0,
-        ),
-        skill_library=skills,
-    )
-    releases = tmp_path / "releases"
-    seed_release = write_retrieval_release(releases, seed)
-    parent_policy = embed_retrieval_release(
-        HarnessPolicy(),
-        seed_release,
-        changelog="Frozen package Retrieval seed.",
-    )
-
-    def publish_accepted(result):
-        accepted_results.append(result)
         release = _write_accepted_retrieval_release(
-            releases,
-            result.release_genome,
-            audit=_accepted_audit(registry),
+            self.tmp_path / f"accepted-{version}",
+            accepted_genome,
+            audit=_audit(version[-1]),
         )
-        accepted_release_paths.append(release.path)
-        return release.path
-
-    retrieval_phase = RetrievalEvolutionPhaseAdapter(
-        retrieval_engine,
-        parent_release_path=seed_release.path,
-        accepted_release_path=publish_accepted,
-    )
-
-    def decision_retrieval_factory(policy: HarnessPolicy):
-        return TwoStageRetrievalAgent(
-            _DeterministicRetrievalLLM(),
-            policy.retrieval_genome,
-            skills,
-        )
-
-    def decision_factory(policy: HarnessPolicy):
-        return DecisionAgent(
-            _DeterministicDecisionLLM(
-                specialist="prefer specialist" in policy.decision_prompt,
-                selected=selected_candidates,
+        policy = replace(
+            embed_retrieval_release(
+                phase_parent.bundle.policy, release, changelog="accepted"
             ),
-            prompt=policy.decision_prompt,
+            version=version,
+            parent=phase_parent.bundle.policy.version,
         )
+        return phase_parent.with_policy(policy, target="retrieval")
 
-    decision_evaluator = PackageDecisionEvaluator(
-        registry,
-        decision_retrieval_factory,
-        decision_factory,
-        dependency_fingerprints=_RETRIEVAL_DEPENDENCIES,
+
+# --------------------------------------------------------------------------
+# the end-to-end test
+# --------------------------------------------------------------------------
+
+
+def _phase_runner(target, proposer, evaluator, sink, *, publisher=None):
+    return PackageCoordinatePhaseRunner(
+        target=target,
+        proposer=proposer,
+        evaluator=evaluator,
+        schedule=_schedule(),
+        task_map=_task_map(),
+        gate_config=PackageGateConfig(),
+        artifact_store=sink,
+        retrieval_publisher=publisher,
+        child_count=3,
     )
-    decision_engine = PackageDecisionEvolutionEngine(
-        FakeLLMClient(
-            [
-                json.dumps(
-                    {
-                        "decision_prompt": (
-                            "prefer specialist using verified seasonal evidence"
-                        ),
-                        "changelog": "Use the materialized specialist when verified.",
-                    }
-                )
-            ]
+
+
+def test_package_coordinate_evolution_closes_deterministic_two_cycle_loop(tmp_path) -> None:
+    _task, seed_state = _bundle(tmp_path)
+    skills = RetrievalSkillLibrary(tmp_path / "skills.json", persist=False).clone(
+        persist=False, read_only=True
+    )
+    evaluator = _CycleEvaluator()
+    sink = InMemoryPackageArtifactSink()
+
+    controller = PackageCoordinateController(
+        _phase_runner("numerical", _NumericalProposer(), evaluator, sink),
+        _phase_runner(
+            "retrieval",
+            _RetrievalProposer(skills),
+            evaluator,
+            sink,
+            publisher=_RetrievalPublisher(tmp_path, skills),
         ),
-        decision_evaluator,
-        CoEvolutionConfig(
-            generations=1,
-            children_per_generation=1,
-            mode="genome",
-            target="decision",
-            screening_tolerance=1e-12,
-        ),
-    )
-    decision_phase = DecisionEvolutionPhaseAdapter(
-        decision_engine,
-        accepted_release_path=lambda _policy: accepted_release_paths[0],
-    )
-    numerical_release = _seed_supply_release()
-    parent = PackageCoordinateState(
-        PackageCoordinateBundle(
-            generation=0,
-            coordinate="seed",
-            parent_sha256=None,
-            numerical_release_payload=numerical_release.to_payload(),
-            numerical_release_sha256=numerical_release.fingerprint,
-            numerical_manifest_sha256=registry.fingerprint,
-            policy=parent_policy,
-            runtime_fingerprints={
-                "bridge_runtime": _RETRIEVAL_DEPENDENCIES["bridge_runtime"],
-                "numerical_runtime": "6" * 64,
-                "retrieval_runtime": _RETRIEVAL_DEPENDENCIES["retrieval_factory"],
-                "decision_runtime": _RETRIEVAL_DEPENDENCIES["decision_factory"],
-                "retrieval_verifier": retrieval_evaluator.verifier_hash,
-                "metric_policy": METRIC_POLICY_FINGERPRINT,
-                "model_runtime": "7" * 64,
-                "llm_runtime": "8" * 64,
-            },
-            acceptance_evidence_sha256=None,
-        ),
-        registry,
+        _phase_runner("decision", _DecisionProposer(), evaluator, sink),
     )
 
-    numerical_calls = 0
+    selected, trace = controller.run(seed_state, seed_state)
 
-    def forbidden_numerical_loop(*_args, **_kwargs):
-        nonlocal numerical_calls
-        numerical_calls += 1
-        raise AssertionError("package evolution must not rerun Numerical")
-
-    monkeypatch.setattr(
-        "numerical_agent.evolution.numerical_loop.run_numerical_loop",
-        forbidden_numerical_loop,
+    assert tuple(step.target for step in trace) == (
+        "numerical",
+        "retrieval",
+        "decision",
+        "numerical",
+        "retrieval",
+        "decision",
     )
-    selected, trace = PackageCoordinateController(
-        retrieval_phase,
-        decision_phase,
-    ).run(parent, train, dev)
-
-    assert len(train) == 80 and len(dev) == 20
-    assert registry.fingerprint == replica.fingerprint
-    assert tuple(step.target for step in trace) == ("retrieval", "decision")
-    assert all(step.accepted for step in trace)
+    assert [step.accepted for step in trace] == [True, True, True, False, False, False]
     assert all(not step.public_test_accessed for step in trace)
-    assert selected.bundle.numerical_manifest_sha256 == registry.fingerprint
-    assert selected.bundle.policy.retrieval_genome.version == "v001"
-    assert selected.bundle.policy.version == "v002"
-    assert accepted_results[0].accepted is True
-    assert accepted_results[0].parent_dev.task_count == 20
-    assert numerical_calls == 0
-    assert set(selected_candidates) <= {"safe_anchor", "specialist"}
+
+    # every accepted step's parent hash chains to the preceding accepted bundle
+    accepted_chain = [step for step in trace if step.accepted]
+    for earlier, later in zip(accepted_chain, accepted_chain[1:]):
+        assert later.parent_bytes_sha256 == earlier.accepted_bytes_sha256
+    # every rejected step preserves the exact Parent
+    for step in trace:
+        if not step.accepted:
+            assert step.accepted_bytes_sha256 == step.parent_bytes_sha256
+            assert step.accepted_registry_sha256 == step.parent_registry_sha256
+
+    assert selected.bundle.generation == 3
+    assert selected.bundle.acceptance_evidence_sha256 is not None
+    # no Public partition task ever entered the evaluator
+    assert "public" not in " ".join(evaluator.stages_seen)
+    assert set(evaluator.stages_seen) <= {
+        "screen8",
+        "screen32",
+        "build64",
+        "calibration16",
+        "dev20",
+    }
+    # the Numerical coordinate replaced both the release and the registry
+    assert selected.bundle.numerical_release_sha256 != seed_state.bundle.numerical_release_sha256
+    assert selected.bundle.numerical_manifest_sha256 != seed_state.bundle.numerical_manifest_sha256

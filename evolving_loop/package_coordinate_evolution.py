@@ -4,14 +4,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, Protocol
 
 from evolving_loop.co_evolution import HarnessPolicy
-from evolving_loop.coordinate_evolution import CoordinatePhaseOutcome, CoordinatePhaseRunner
-from evolving_loop.data import ContextTask
 from evolving_loop.package_numerical_supply import (
     NumericalSupplyError,
     NumericalSupplyRelease,
@@ -404,119 +402,162 @@ def _step(
     )
 
 
-def _acceptance_evidence(outcome: CoordinatePhaseOutcome) -> str:
-    return _digest(
-        {
-            "target": outcome.target,
-            "policy": outcome.bundle.to_payload(),
-            "reason": outcome.reason,
-            "improved": outcome.improved,
-        }
+_PHASE_TARGETS: tuple[PackageCoordinateTarget, ...] = ("numerical", "retrieval", "decision")
+
+
+class PackageCoordinatePhase(Protocol):
+    """A per-coordinate successive-halving phase runner."""
+
+    target: PackageCoordinateTarget
+
+    def run(
+        self,
+        parent: "PackageCoordinateState",
+        initial: "PackageCoordinateState",
+        *,
+        generation: int,
+    ) -> object: ...
+
+
+def _skip_step(
+    generation: int, state: "PackageCoordinateState", reason: str
+) -> PackageCoordinateStep:
+    return _step(
+        generation=generation,
+        target="decision",
+        parent=state,
+        child=state,
+        accepted_state=state,
+        accepted=False,
+        reason=reason,
+        public_test_accessed=False,
     )
 
 
 class PackageCoordinateController:
-    """Accept already-gated Retrieval and Decision phases against package state."""
+    """Run two ordered Numerical -> Retrieval -> Decision cycles with early stopping."""
 
     def __init__(
         self,
-        retrieval_phase: CoordinatePhaseRunner | None,
-        decision_phase: CoordinatePhaseRunner | None,
+        numerical_phase: PackageCoordinatePhase | None,
+        retrieval_phase: PackageCoordinatePhase | None,
+        decision_phase: PackageCoordinatePhase | None,
+        *,
+        cycles: int = 2,
     ) -> None:
-        self.retrieval_phase = retrieval_phase
-        self.decision_phase = decision_phase
+        if type(cycles) is not int or cycles < 1:
+            raise ValueError("package coordinate controller requires at least one cycle")
+        self._phases: tuple[
+            tuple[PackageCoordinateTarget, PackageCoordinatePhase | None], ...
+        ] = (
+            ("numerical", numerical_phase),
+            ("retrieval", retrieval_phase),
+            ("decision", decision_phase),
+        )
+        self.cycles = cycles
 
     def run(
         self,
-        parent: PackageCoordinateState,
-        train_tasks: Sequence[ContextTask],
-        dev_tasks: Sequence[ContextTask],
-    ) -> tuple[PackageCoordinateState, tuple[PackageCoordinateStep, ...]]:
-        if not isinstance(parent, PackageCoordinateState):
-            raise ValueError("package coordinate controller requires a package state")
+        parent: "PackageCoordinateState",
+        initial: "PackageCoordinateState",
+    ) -> tuple["PackageCoordinateState", tuple[PackageCoordinateStep, ...]]:
+        if not isinstance(parent, PackageCoordinateState) or not isinstance(
+            initial, PackageCoordinateState
+        ):
+            raise ValueError("package coordinate controller requires package states")
         current = parent
         trace: list[PackageCoordinateStep] = []
-        phases: tuple[
-            tuple[Literal["retrieval", "decision"], CoordinatePhaseRunner | None], ...
-        ] = (
-            ("retrieval", self.retrieval_phase),
-            ("decision", self.decision_phase),
-        )
-        for generation, (target, runner) in enumerate(phases):
-            if runner is None:
-                continue
-            if target == "decision" and not current.bundle.policy.has_accepted_retrieval_release:
-                trace.append(
-                    _step(
-                        generation=generation,
-                        target=target,
-                        parent=current,
-                        child=current,
-                        accepted_state=current,
-                        accepted=False,
-                        reason=(
-                            "Decision phase requires a non-v000 accepted Retrieval release"
-                        ),
-                        public_test_accessed=False,
+        generation = 0
+        for _cycle in range(self.cycles):
+            cycle_accepted = False
+            for target, phase in self._phases:
+                if phase is None:
+                    generation += 1
+                    continue
+                if (
+                    target == "decision"
+                    and not current.bundle.policy.has_accepted_retrieval_release
+                ):
+                    trace.append(
+                        _skip_step(
+                            generation,
+                            current,
+                            "Decision phase requires a non-v000 accepted Retrieval release",
+                        )
                     )
-                )
-                continue
-            outcome = runner.run(current.bundle.policy, train_tasks, dev_tasks)
-            if not isinstance(outcome, CoordinatePhaseOutcome):
-                raise ValueError("package coordinate runner returned an invalid outcome")
-            if outcome.target != target:
-                child = current
-                accepted = False
-                reason = "package phase returned the wrong coordinate target"
-            else:
-                child = (
-                    PackageCoordinateState(
-                        current.bundle._provisional_policy_child(
-                            outcome.bundle, target
-                        ),
-                        current.registry,
-                    )
-                    if outcome.accepted
-                    else current
-                )
-                changed = _changed_modules(current.bundle, child.bundle)
-                lineage_valid = (
-                    outcome.bundle.version != current.bundle.policy.version
-                    and outcome.bundle.parent == current.bundle.policy.version
-                )
-                accepted = bool(
-                    outcome.accepted
-                    and outcome.improved
-                    and not outcome.public_test_accessed
-                    and lineage_valid
-                    and changed == (target,)
-                )
-                if outcome.public_test_accessed:
-                    reason = "Public Regression access is forbidden"
-                elif not lineage_valid and outcome.accepted:
-                    reason = "package coordinate Child has detached lineage"
-                elif outcome.accepted and changed != (target,):
-                    reason = "package coordinate Child crossed module ownership"
-                elif outcome.accepted and not outcome.improved:
-                    reason = "package coordinate Child reported no improvement"
-                else:
-                    reason = outcome.reason
-            accepted_state = (
-                child.seal_acceptance(_acceptance_evidence(outcome))
-                if accepted
-                else current
-            )
-            trace.append(
+                    generation += 1
+                    continue
+                outcome = phase.run(current, initial, generation=generation)
+                step, current = self._apply(generation, target, current, outcome)
+                trace.append(step)
+                cycle_accepted = cycle_accepted or step.accepted
+                generation += 1
+            if not cycle_accepted:
+                break
+        return current, tuple(trace)
+
+    @staticmethod
+    def _apply(
+        generation: int,
+        target: PackageCoordinateTarget,
+        current: "PackageCoordinateState",
+        outcome: object,
+    ) -> tuple[PackageCoordinateStep, "PackageCoordinateState"]:
+        reason = getattr(outcome, "reason", "")
+        if not isinstance(reason, str) or not reason:
+            reason = "package coordinate phase produced no reason"
+        public = bool(getattr(outcome, "public_test_accessed", False))
+        selected = getattr(outcome, "selected", None)
+        accepted = bool(getattr(outcome, "accepted", False))
+
+        def rejected(step_reason: str) -> tuple[PackageCoordinateStep, "PackageCoordinateState"]:
+            return (
                 _step(
                     generation=generation,
                     target=target,
                     parent=current,
-                    child=child,
-                    accepted_state=accepted_state,
-                    accepted=accepted,
-                    reason=reason,
-                    public_test_accessed=outcome.public_test_accessed,
-                )
+                    child=current,
+                    accepted_state=current,
+                    accepted=False,
+                    reason=step_reason,
+                    public_test_accessed=public,
+                ),
+                current,
             )
-            current = accepted_state
-        return current, tuple(trace)
+
+        if getattr(outcome, "target", None) != target:
+            return rejected("package phase returned the wrong coordinate target")
+        if public:
+            return rejected("Public Regression access is forbidden")
+        if not accepted:
+            return rejected(reason)
+        if (
+            not getattr(outcome, "improved", False)
+            or not isinstance(selected, PackageCoordinateState)
+            or selected.bundle.acceptance_evidence_sha256 is None
+            or selected.bundle.parent_sha256 != current.bundle.fingerprint()
+            or _changed_modules(current.bundle, selected.bundle) != (target,)
+        ):
+            return rejected("package coordinate Child failed a lineage or ownership gate")
+        if target == "numerical" and (
+            selected.bundle.numerical_release_sha256
+            == current.bundle.numerical_release_sha256
+            or selected.bundle.numerical_manifest_sha256
+            == current.bundle.numerical_manifest_sha256
+        ):
+            return rejected("accepted Numerical Child did not replace release and registry")
+        if target in ("retrieval", "decision") and (
+            selected.registry.fingerprint != current.registry.fingerprint
+        ):
+            return rejected("accepted contextual Child changed the Numerical registry")
+        step = _step(
+            generation=generation,
+            target=target,
+            parent=current,
+            child=selected,
+            accepted_state=selected,
+            accepted=True,
+            reason=reason,
+            public_test_accessed=False,
+        )
+        return step, selected

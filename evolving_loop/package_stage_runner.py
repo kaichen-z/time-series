@@ -391,7 +391,9 @@ class PackagePhaseEvaluator(Protocol):
 class RetrievalAcceptedPublisher(Protocol):
     """Rebase behavior onto the next accepted Retrieval release and re-embed it."""
 
-    def publish(self, finalist: PackageCandidate) -> PackageCoordinateState: ...
+    def publish(
+        self, finalist: PackageCandidate, phase_parent: PackageCoordinateState
+    ) -> PackageCoordinateState: ...
 
 
 class PackageCoordinatePhaseRunner:
@@ -601,9 +603,14 @@ class PackageCoordinatePhaseRunner:
         selected_state = finalist.state
         if self.target == "retrieval":
             assert self.retrieval_publisher is not None
-            selected_state = self.retrieval_publisher.publish(finalist)
+            selected_state = self.retrieval_publisher.publish(finalist, parent)
             if not isinstance(selected_state, PackageCoordinateState):
                 raise PackageStageError("Retrieval publisher returned an invalid state")
+            if (
+                selected_state.bundle.parent_sha256 != parent.bundle.fingerprint()
+                or selected_state.bundle.coordinate != "retrieval"
+            ):
+                raise PackageStageError("Retrieval publisher broke direct lineage")
         # Immediate cache-backed replay; a miss never reruns the model here.
         try:
             replayed = self.evaluator.evaluate(
