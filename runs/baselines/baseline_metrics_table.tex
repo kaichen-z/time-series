@@ -1,0 +1,22 @@
+% Requires \usepackage{booktabs}.
+\begin{table}[t]
+  \centering
+  \caption{Baseline point-forecast accuracy (mean $\pm$ standard error) on all labeled tasks. Forecast trajectories are reduced by their step-wise mean; task-level sMAE and sRMSE are clipped at 5 before averaging.}
+  \label{tab:baseline-point-metrics}
+  \begin{tabular}{lrrr}
+    \toprule
+    Method & Tasks & sMAE $\downarrow$ & sRMSE $\downarrow$ \\
+    \midrule
+    Gemini 3.1 Flash Lite & 199 & $\mathbf{0.428 \pm 0.040}$ & $0.656 \pm 0.056$ \\
+    Moirai & 199 & $0.460 \pm 0.047$ & $\mathbf{0.654 \pm 0.056}$ \\
+    Chronos & 199 & $0.505 \pm 0.062$ & $0.701 \pm 0.069$ \\
+    Seasonal Naive & 199 & $0.506 \pm 0.049$ & $0.729 \pm 0.061$ \\
+    Ses & 199 & $0.615 \pm 0.047$ & $0.839 \pm 0.058$ \\
+    Aurora & 199 & $0.623 \pm 0.070$ & $0.791 \pm 0.073$ \\
+    Naive & 199 & $0.630 \pm 0.057$ & $0.833 \pm 0.063$ \\
+    Arima & 199 & $0.660 \pm 0.069$ & $0.836 \pm 0.072$ \\
+    Ets & 199 & $0.680 \pm 0.084$ & $0.868 \pm 0.088$ \\
+    Qwen3.5 9B & 199 & $0.681 \pm 0.058$ & $0.918 \pm 0.067$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
