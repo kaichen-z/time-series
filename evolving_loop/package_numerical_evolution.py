@@ -10,11 +10,21 @@ from typing import cast
 
 from common.payload import canonical_json_bytes
 from evolving_loop.data import ContextTask
+from evolving_loop.package_candidate_proposal import (
+    PackageCandidate,
+    PackageProposalFeedback,
+    proposal_fingerprint,
+)
+from evolving_loop.package_coordinate_evolution import (
+    PackageCoordinateState,
+    package_principal_fingerprints,
+)
 from evolving_loop.package_numerical_supply import (
     NumericalAlternativeSpec,
     NumericalSupplyRelease,
     bound_numerical_package,
     build_package_registry,
+    parse_numerical_supply_release,
 )
 from evolving_loop.package_registry import FrozenNumericalPackageRegistry
 from numerical_agent.evolution.champion import (
@@ -1230,9 +1240,124 @@ class NumericalPackageProposer:
         return tuple(children)
 
 
+class NumericalCandidateProposer:
+    """Adapt the formal Numerical proposer to isolated package states."""
+
+    def __init__(self, proposer: object) -> None:
+        if not callable(getattr(proposer, "propose", None)):
+            _fail("package Numerical adapter requires a formal proposer")
+        self.proposer = proposer
+
+    def propose(
+        self,
+        parent: PackageCoordinateState,
+        feedback: PackageProposalFeedback,
+        *,
+        generation: int,
+        child_count: int,
+    ) -> tuple[PackageCandidate, ...]:
+        if not isinstance(parent, PackageCoordinateState) or not isinstance(
+            feedback, PackageProposalFeedback
+        ):
+            _fail("package Numerical proposal requires typed state and feedback")
+        if type(generation) is not int or generation < 0:
+            _fail("package Numerical proposal generation must be nonnegative")
+        if type(child_count) is not int or child_count != 3:
+            _fail("formal package Numerical proposal requires exactly three slots")
+        try:
+            parent_release = parse_numerical_supply_release(
+                cast(dict[str, object], _plain(parent.bundle.numerical_release_payload))
+            )
+        except Exception as error:
+            raise NumericalPackageEvolutionError(
+                "package Numerical Parent release is invalid"
+            ) from error
+        sanitized = ProposerEvidence(
+            "adaptive_train_build_diagnostic",
+            False,
+            (),
+            (),
+        )
+        proposed = self.proposer.propose(
+            parent_release,
+            parent.registry,
+            sanitized,
+            generation=generation,
+            child_count=child_count,
+        )
+        if type(proposed) is not tuple or len(proposed) != 3:
+            _fail("formal Numerical proposer violated three-slot cardinality")
+        parent_fingerprints = package_principal_fingerprints(parent.bundle)
+        seen_numerical: set[str] = set()
+        children: list[PackageCandidate] = []
+        for slot, candidate in enumerate(proposed):
+            reason: str | None = None
+            child_state = parent
+            raw_identity = (
+                candidate.proposal_sha256
+                if type(candidate) is NumericalCoordinateCandidate
+                else "invalid_schema"
+            )
+            if type(candidate) is not NumericalCoordinateCandidate:
+                reason = "invalid_schema"
+            elif candidate.invalid_reason is not None:
+                reason = "materialization_failed"
+            elif (
+                candidate.release.version != f"n{generation * 3 + slot + 1:03d}"
+                or candidate.release.parent_sha256 != parent_release.fingerprint
+                or candidate.registry.release_sha256 != candidate.release.fingerprint
+            ):
+                reason = "invalid_schema"
+            elif candidate.release.fingerprint in seen_numerical:
+                reason = "duplicate_child"
+            else:
+                try:
+                    candidate_state = parent.with_numerical(
+                        candidate.release,
+                        candidate.registry,
+                    )
+                    fingerprints = package_principal_fingerprints(
+                        candidate_state.bundle
+                    )
+                    if (
+                        fingerprints["retrieval"]
+                        != parent_fingerprints["retrieval"]
+                        or fingerprints["decision"]
+                        != parent_fingerprints["decision"]
+                        or fingerprints["numerical"]
+                        == parent_fingerprints["numerical"]
+                    ):
+                        reason = "cross_coordinate_change"
+                    else:
+                        child_state = candidate_state
+                        seen_numerical.add(candidate.release.fingerprint)
+                except Exception:
+                    reason = "materialization_failed"
+            identity = proposal_fingerprint(
+                target="numerical",
+                generation=generation,
+                slot=slot,
+                payload={
+                    "raw_proposal_sha256": raw_identity,
+                    "invalid_reason": reason,
+                },
+            )
+            children.append(
+                PackageCandidate(
+                    slot=slot,
+                    target="numerical",
+                    state=child_state,
+                    proposal_sha256=identity,
+                    invalid_reason=reason,
+                )
+            )
+        return tuple(children)
+
+
 __all__ = [
     "FrozenNumericalDiagnosticsRegistry",
     "NumericalCoordinateCandidate",
+    "NumericalCandidateProposer",
     "NumericalPackageMaterializer",
     "NumericalPackageProposer",
     "NumericalPackageEvolutionError",

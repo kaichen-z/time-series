@@ -21,6 +21,15 @@ from evolving_loop.coordinate_evolution import principal_module_fingerprints
 from evolving_loop.data import ContextTask
 from evolving_loop.decision_agent.agent import DecisionAgent
 from evolving_loop.evaluation import ResolvedOutcome
+from evolving_loop.package_candidate_proposal import (
+    PackageCandidate,
+    PackageProposalFeedback,
+    proposal_fingerprint,
+)
+from evolving_loop.package_coordinate_evolution import (
+    PackageCoordinateState,
+    package_principal_fingerprints,
+)
 from evolving_loop.package_metrics import PackageEvaluation
 from evolving_loop.package_pipeline_evaluator import PackagePipelineEvaluator
 from evolving_loop.package_registry import FrozenNumericalPackageRegistry
@@ -398,3 +407,161 @@ class PackageDecisionEvolutionEngine(CoEvolutionEngine):
             )
             incumbent = selected
         return incumbent, tuple(history)
+
+
+def _proposal_evaluation(
+    policy: HarnessPolicy,
+    summary: Mapping[str, float | int],
+) -> PolicyEvaluation:
+    """Project aggregate package feedback onto the legacy mutation boundary."""
+    diagnostics = {
+        key: float(value)
+        for key, value in summary.items()
+        if type(value) in {int, float}
+    }
+    mean_srmse = diagnostics.get("mean_srmse", 0.0)
+    return PolicyEvaluation(
+        version=policy.version,
+        system_reward=-mean_srmse,
+        module_rewards={
+            "coding": 0.0,
+            "retrieval": 0.0,
+            "decision": -mean_srmse,
+        },
+        outcomes=(),
+        failure_traces=(),
+        diagnostics=diagnostics,
+    )
+
+
+class DecisionCandidateProposer:
+    """Adapt Decision-only mutation to isolated package Child records."""
+
+    def __init__(self, engine: PackageDecisionEvolutionEngine) -> None:
+        if not isinstance(engine, PackageDecisionEvolutionEngine):
+            raise PackageDecisionEvolutionError(
+                "package Decision adapter requires PackageDecisionEvolutionEngine"
+            )
+        self.engine = engine
+
+    def propose(
+        self,
+        parent: PackageCoordinateState,
+        feedback: PackageProposalFeedback,
+        *,
+        generation: int,
+        child_count: int,
+    ) -> tuple[PackageCandidate, ...]:
+        if not isinstance(parent, PackageCoordinateState) or not isinstance(
+            feedback, PackageProposalFeedback
+        ):
+            raise PackageDecisionEvolutionError(
+                "package Decision proposal requires typed state and feedback"
+            )
+        if type(generation) is not int or generation < 0:
+            raise PackageDecisionEvolutionError(
+                "package Decision generation must be non-negative"
+            )
+        if type(child_count) is not int or child_count != 3:
+            raise PackageDecisionEvolutionError(
+                "formal package Decision proposal requires exactly three slots"
+            )
+        policy = parent.bundle.policy
+        if not policy.has_accepted_retrieval_release:
+            raise PackageDecisionEvolutionError(
+                "package Decision requires an accepted Retrieval Parent"
+            )
+        if re.fullmatch(r"v[0-9]{3}", policy.version) is None:
+            raise PackageDecisionEvolutionError(
+                "package Decision Parent version must use vNNN"
+            )
+        first_version = int(policy.version[1:]) + generation * 3 + 1
+        if first_version + 2 > 999:
+            raise PackageDecisionEvolutionError(
+                "package Decision proposal version namespace exhausted"
+            )
+        self.engine._version = first_version
+        evaluation = _proposal_evaluation(policy, feedback.parent_summary)
+        parent_fingerprints = package_principal_fingerprints(parent.bundle)
+        parent_policy_fingerprints = principal_module_fingerprints(policy)
+        seen_decision: set[str] = set()
+        children: list[PackageCandidate] = []
+        for slot in range(3):
+            child_policy = self.engine.mutate(
+                policy,
+                evaluation,
+                child_index=slot,
+            )
+            expected_version = f"v{first_version + slot:03d}"
+            reason: str | None = None
+            child_state = parent
+            if (
+                not isinstance(child_policy, HarnessPolicy)
+                or child_policy.version != expected_version
+                or child_policy.parent != policy.version
+            ):
+                reason = "invalid_schema"
+            else:
+                child_policy_fingerprints = principal_module_fingerprints(child_policy)
+                if any(
+                    child_policy_fingerprints[name]
+                    != parent_policy_fingerprints[name]
+                    for name in ("numerical_morphology", "retrieval")
+                ):
+                    reason = "cross_coordinate_change"
+                elif (
+                    child_policy_fingerprints["decision"]
+                    == parent_policy_fingerprints["decision"]
+                ):
+                    reason = (
+                        "unknown_candidate"
+                        if "unknown_candidate" in child_policy.changelog
+                        else "invalid_schema"
+                    )
+                else:
+                    candidate_state = parent.with_policy(
+                        child_policy,
+                        target="decision",
+                    )
+                    fingerprints = package_principal_fingerprints(
+                        candidate_state.bundle
+                    )
+                    decision_identity = fingerprints["decision"]
+                    if decision_identity in seen_decision:
+                        reason = "duplicate_child"
+                    else:
+                        child_state = candidate_state
+                        seen_decision.add(decision_identity)
+            raw_payload = (
+                child_policy.to_payload()
+                if isinstance(child_policy, HarnessPolicy)
+                else {"invalid": type(child_policy).__name__}
+            )
+            identity = proposal_fingerprint(
+                target="decision",
+                generation=generation,
+                slot=slot,
+                payload={
+                    "policy": raw_payload,
+                    "invalid_reason": reason,
+                },
+            )
+            children.append(
+                PackageCandidate(
+                    slot=slot,
+                    target="decision",
+                    state=child_state,
+                    proposal_sha256=identity,
+                    invalid_reason=reason,
+                )
+            )
+        return tuple(children)
+
+
+__all__ = [
+    "DecisionCandidateProposer",
+    "PackageDecisionEvaluator",
+    "PackageDecisionEvolutionEngine",
+    "PackageDecisionEvolutionError",
+    "package_decision_gate_failures",
+]

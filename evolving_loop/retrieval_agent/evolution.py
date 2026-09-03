@@ -18,7 +18,7 @@ import fcntl
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 from common.llm import (
     JsonExtractionError,
@@ -44,6 +44,13 @@ from .skill_library import (
     _restore_quarantined_artifact_entry,
     _skill_library_cache_identity,
 )
+
+if TYPE_CHECKING:
+    from evolving_loop.package_candidate_proposal import (
+        PackageCandidate,
+        PackageProposalFeedback,
+    )
+    from evolving_loop.package_coordinate_evolution import PackageCoordinateState
 
 
 RETRIEVAL_EVOLUTION_CHECKPOINT_SCHEMA_VERSION = 3
@@ -2833,6 +2840,441 @@ def parse_scoped_child(
     return child
 
 
+def retrieval_behavior_fingerprint(genome: RetrievalGenome) -> str:
+    """Hash every Retrieval behavior field while excluding lineage identity."""
+    if not isinstance(genome, RetrievalGenome):
+        raise RetrievalEvolutionError(
+            "Retrieval behavior fingerprint requires a typed Genome"
+        )
+    payload = genome.to_payload()
+    del payload["version"]
+    del payload["parent"]
+    return _digest(payload)
+
+
+def rebase_retrieval_candidate(
+    candidate: RetrievalGenome,
+    accepted_parent: RetrievalGenome,
+) -> RetrievalGenome:
+    """Rebase an evaluated behavior onto the next accepted Retrieval identity."""
+    if not isinstance(candidate, RetrievalGenome) or not isinstance(
+        accepted_parent, RetrievalGenome
+    ):
+        raise RetrievalEvolutionError("Retrieval rebase requires typed Genomes")
+    version_number = int(accepted_parent.version[1:]) + 1
+    if version_number > 999:
+        raise RetrievalEvolutionError("Retrieval accepted version namespace exhausted")
+    behavior = retrieval_behavior_fingerprint(candidate)
+    rebased = replace(
+        candidate,
+        version=f"v{version_number:03d}",
+        parent=accepted_parent.version,
+    )
+    if retrieval_behavior_fingerprint(rebased) != behavior:
+        raise RetrievalEvolutionError("Retrieval rebase changed candidate behavior")
+    return rebased
+
+
+@dataclass(frozen=True)
+class _RetrievalGenomeProposalSlot:
+    scope: RetrievalChildScope
+    version: str
+    proposal: Mapping[str, object]
+    genome: RetrievalGenome | None
+    proposal_sha256: str
+
+
+class RetrievalGenomeProposer:
+    """Request exactly the A/B/C Retrieval Genome slots without evaluation."""
+
+    def __init__(
+        self,
+        mutation_llm: LLMClient,
+        *,
+        transient_retries: int,
+        version_origin: str | None = None,
+        event: Callable[..., None] | None = None,
+        checkpoint: Callable[[], None] | None = None,
+    ) -> None:
+        if not callable(getattr(mutation_llm, "complete", None)):
+            raise RetrievalEvolutionError("Retrieval proposer requires an LLM client")
+        if type(transient_retries) is not int or transient_retries < 0:
+            raise RetrievalEvolutionError(
+                "Retrieval proposer retries must be a non-negative integer"
+            )
+        if version_origin is not None and (
+            not isinstance(version_origin, str)
+            or re.fullmatch(r"v[0-9]{3}", version_origin) is None
+        ):
+            raise RetrievalEvolutionError(
+                "Retrieval proposer version origin must use vNNN"
+            )
+        self.mutation_llm = mutation_llm
+        self.transient_retries = transient_retries
+        self.version_origin = version_origin
+        self._event_callback = event
+        self._checkpoint_callback = checkpoint
+        self._last_slots: tuple[_RetrievalGenomeProposalSlot, ...] = ()
+
+    @property
+    def proposal_sha256s(self) -> tuple[str, ...]:
+        return tuple(slot.proposal_sha256 for slot in self._last_slots)
+
+    def _event(self, kind: str, **payload: object) -> None:
+        if self._event_callback is not None:
+            self._event_callback(kind, **payload)
+
+    def _checkpoint(self) -> None:
+        if self._checkpoint_callback is not None:
+            self._checkpoint_callback()
+
+    @staticmethod
+    def _safe_feedback(feedback: Mapping[str, object] | None) -> dict[str, object]:
+        if feedback is None:
+            return {}
+        if not isinstance(feedback, Mapping) or any(
+            not isinstance(key, str) for key in feedback
+        ):
+            raise RetrievalEvolutionError(
+                "Retrieval proposal feedback must be a typed mapping"
+            )
+        forbidden = (
+            "task_id",
+            "task_trace",
+            "per_task",
+            "entity",
+            "forecast",
+            "future_value",
+            "truth",
+            "document",
+            "quote",
+            "residual",
+        )
+
+        def inspect(value: object) -> None:
+            if isinstance(value, Mapping):
+                for key, item in value.items():
+                    if not isinstance(key, str) or any(
+                        part in key.casefold() for part in forbidden
+                    ):
+                        raise RetrievalEvolutionError(
+                            "Retrieval proposal feedback contains task-level data"
+                        )
+                    inspect(item)
+            elif isinstance(value, (tuple, list)):
+                for item in value:
+                    inspect(item)
+            elif value is not None and type(value) not in {str, int, float, bool}:
+                raise RetrievalEvolutionError(
+                    "Retrieval proposal feedback is not canonical JSON"
+                )
+
+        copied = json.loads(
+            json.dumps(
+                dict(feedback),
+                ensure_ascii=False,
+                sort_keys=True,
+                allow_nan=False,
+            )
+        )
+        inspect(copied)
+        return cast(dict[str, object], copied)
+
+    def propose_slot(
+        self,
+        parent: RetrievalGenome,
+        *,
+        scope: RetrievalChildScope,
+        version: str,
+        generation: int,
+        feedback: Mapping[str, object] | None,
+        skill_library: RetrievalSkillLibrary | None,
+    ) -> _RetrievalGenomeProposalSlot:
+        library = (
+            None
+            if skill_library is None
+            else skill_library.clone(persist=False, read_only=True)
+        )
+        system = (
+            "Return one complete typed Retrieval Genome JSON object. "
+            "Obey the supplied immutable scope and host-owned schema."
+        )
+        payload: dict[str, object] = {
+            "schema_version": 1,
+            "generation": generation,
+            "scope": scope,
+            "required_version": version,
+            "required_parent": parent.version,
+            "mutable_fields": sorted(
+                _PRIMARY_SCOPE_FIELDS[scope] | {"active_skill_ids"}
+            ),
+            "owned_skill_stage": _SCOPE_SKILL_STAGE[scope],
+            "active_skill_catalog": [
+                {
+                    "skill_id": skill.skill_id,
+                    "stage": skill.stage,
+                    "applicability": skill.applicability.to_payload(),
+                }
+                for skill in (
+                    () if library is None else _evolution_skill_catalog(library)
+                )
+            ],
+            "parent_genome": parent.to_payload(),
+        }
+        safe_feedback = self._safe_feedback(feedback)
+        if safe_feedback:
+            payload["feedback"] = safe_feedback
+        attempts = self.transient_retries + 1
+        for attempt in range(attempts):
+            try:
+                response = self.mutation_llm.complete(
+                    system=system,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": json.dumps(
+                                payload,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                        }
+                    ],
+                    temperature=0.0,
+                )
+                try:
+                    proposal = parse_json_object(response.text)
+                except JsonExtractionError:
+                    self._event(
+                        "mutation_response_invalid",
+                        generation=generation,
+                        scope=scope,
+                        error="invalid_mutation_response",
+                    )
+                    proposal = {
+                        "invalid_mutation_response": "invalid_mutation_response"
+                    }
+                child = parse_scoped_child(
+                    parent,
+                    proposal,
+                    scope=scope,
+                    skill_library=library,
+                )
+                valid = child is not None and child.version == version
+                identity = (
+                    child.fingerprint()
+                    if valid and child is not None
+                    else _digest(
+                        {
+                            "scope": scope,
+                            "version": version,
+                            "proposal": proposal,
+                        }
+                    )
+                )
+                return _RetrievalGenomeProposalSlot(
+                    scope=scope,
+                    version=version,
+                    proposal=dict(proposal),
+                    genome=child if valid else None,
+                    proposal_sha256=identity,
+                )
+            except TransientLLMError:
+                if attempt + 1 >= attempts:
+                    self._event(
+                        "transient_exhausted",
+                        operation="mutation",
+                        generation=generation,
+                        scope=scope,
+                        error="transient_model_failure",
+                    )
+                    self._checkpoint()
+                    raise
+                self._event(
+                    "transient_retry",
+                    operation="mutation",
+                    generation=generation,
+                    scope=scope,
+                    attempt=attempt + 1,
+                )
+                self._checkpoint()
+        raise AssertionError("unreachable mutation retry loop")
+
+    def propose(
+        self,
+        parent: RetrievalGenome,
+        *,
+        generation: int,
+        feedback: Mapping[str, object] | None,
+        skill_library: RetrievalSkillLibrary | None,
+    ) -> tuple[RetrievalGenome | None, ...]:
+        if not isinstance(parent, RetrievalGenome):
+            raise RetrievalEvolutionError("Retrieval proposal requires a typed Parent")
+        if type(generation) is not int or generation < 0:
+            raise RetrievalEvolutionError(
+                "Retrieval proposal generation must be non-negative"
+            )
+        origin = self.version_origin or parent.version
+        origin_number = int(origin[1:])
+        versions = tuple(
+            origin_number + generation * len(CHILD_SCOPES) + index
+            for index in range(1, len(CHILD_SCOPES) + 1)
+        )
+        if versions[-1] > 999:
+            raise RetrievalEvolutionError("Retrieval proposal version namespace exhausted")
+        slots = tuple(
+            self.propose_slot(
+                parent,
+                scope=scope,
+                version=f"v{version:03d}",
+                generation=generation,
+                feedback=feedback,
+                skill_library=skill_library,
+            )
+            for scope, version in zip(CHILD_SCOPES, versions, strict=True)
+        )
+        self._last_slots = slots
+        return tuple(slot.genome for slot in slots)
+
+
+class RetrievalCandidateProposer:
+    """Adapt pure Retrieval Genome proposals to isolated package states."""
+
+    def __init__(
+        self,
+        proposer: RetrievalGenomeProposer,
+        *,
+        skill_library: RetrievalSkillLibrary,
+    ) -> None:
+        if not isinstance(proposer, RetrievalGenomeProposer):
+            raise RetrievalEvolutionError(
+                "package Retrieval proposer requires RetrievalGenomeProposer"
+            )
+        if not isinstance(skill_library, RetrievalSkillLibrary):
+            raise RetrievalEvolutionError(
+                "package Retrieval proposer requires a Skill library"
+            )
+        self.proposer = proposer
+        self.skill_library = skill_library
+
+    def propose(
+        self,
+        parent: PackageCoordinateState,
+        feedback: PackageProposalFeedback,
+        *,
+        generation: int,
+        child_count: int,
+    ) -> tuple[PackageCandidate, ...]:
+        from evolving_loop.package_candidate_proposal import (
+            PackageCandidate,
+            PackageProposalFeedback,
+            embed_retrieval_candidate,
+            proposal_fingerprint,
+        )
+        from evolving_loop.package_coordinate_evolution import (
+            PackageCoordinateState,
+            package_principal_fingerprints,
+        )
+
+        if not isinstance(parent, PackageCoordinateState) or not isinstance(
+            feedback, PackageProposalFeedback
+        ):
+            raise RetrievalEvolutionError(
+                "package Retrieval proposal requires typed state and feedback"
+            )
+        if type(generation) is not int or generation < 0:
+            raise RetrievalEvolutionError(
+                "package Retrieval generation must be non-negative"
+            )
+        if type(child_count) is not int or child_count != 3:
+            raise RetrievalEvolutionError(
+                "formal package Retrieval proposal requires exactly three slots"
+            )
+        parent_genome = parent.bundle.policy.retrieval_genome
+        if parent_genome is None:
+            raise RetrievalEvolutionError(
+                "package Retrieval proposal requires a bound Retrieval Parent"
+            )
+        library = self.skill_library.clone(persist=False, read_only=True)
+        genomes = self.proposer.propose(
+            parent_genome,
+            generation=generation,
+            feedback=feedback.to_payload(),
+            skill_library=library,
+        )
+        raw_identities = self.proposer.proposal_sha256s
+        if len(genomes) != 3 or len(raw_identities) != 3:
+            raise RetrievalEvolutionError(
+                "Retrieval Genome proposer violated three-slot cardinality"
+            )
+        parent_fingerprints = package_principal_fingerprints(parent.bundle)
+        seen_behaviors: set[str] = set()
+        children: list[PackageCandidate] = []
+        for slot, (genome, raw_identity) in enumerate(
+            zip(genomes, raw_identities, strict=True)
+        ):
+            reason: str | None = None
+            child_state = parent
+            if (
+                genome is None
+                or genome.parent != parent_genome.version
+                or genome.version == parent_genome.version
+            ):
+                reason = "invalid_schema"
+            else:
+                behavior = retrieval_behavior_fingerprint(genome)
+                if behavior in seen_behaviors:
+                    reason = "duplicate_child"
+                else:
+                    try:
+                        policy = embed_retrieval_candidate(
+                            parent.bundle.policy,
+                            genome,
+                            library,
+                            changelog=f"Retrieval candidate slot {slot}.",
+                        )
+                        candidate_state = parent.with_policy(
+                            policy,
+                            target="retrieval",
+                        )
+                        fingerprints = package_principal_fingerprints(
+                            candidate_state.bundle
+                        )
+                        if (
+                            fingerprints["numerical"]
+                            != parent_fingerprints["numerical"]
+                            or fingerprints["decision"]
+                            != parent_fingerprints["decision"]
+                            or fingerprints["retrieval"]
+                            == parent_fingerprints["retrieval"]
+                            or candidate_state.registry is not parent.registry
+                        ):
+                            reason = "cross_coordinate_change"
+                        else:
+                            child_state = candidate_state
+                            seen_behaviors.add(behavior)
+                    except Exception:
+                        reason = "cross_coordinate_change"
+            identity = proposal_fingerprint(
+                target="retrieval",
+                generation=generation,
+                slot=slot,
+                payload={
+                    "raw_proposal_sha256": raw_identity,
+                    "invalid_reason": reason,
+                },
+            )
+            children.append(
+                PackageCandidate(
+                    slot=slot,
+                    target="retrieval",
+                    state=child_state,
+                    proposal_sha256=identity,
+                    invalid_reason=reason,
+                )
+            )
+        return tuple(children)
+
+
 @dataclass(frozen=True)
 class RetrievalEvolutionConfig:
     generations: int = 3
@@ -3774,8 +4216,17 @@ class RetrievalEvolutionEngine:
 
         children: list[tuple[RetrievalChildScope, RetrievalGenome]] = []
         rejections: dict[str, str] = {}
+        assert self._original_parent is not None
+        proposer = RetrievalGenomeProposer(
+            self.mutation_llm,
+            transient_retries=self.config.transient_retries,
+            version_origin=self._original_parent.version,
+            event=self._event,
+            checkpoint=lambda: self._save_checkpoint(
+                status="running", result=None
+            ),
+        )
         for index, scope in enumerate(CHILD_SCOPES, start=1):
-            assert self._original_parent is not None
             version_number = (
                 int(self._original_parent.version[1:]) + generation * 3 + index
             )
@@ -3789,27 +4240,18 @@ class RetrievalEvolutionEngine:
                 None,
             )
             if existing is None:
-                proposal = self._request_child(
+                proposed = proposer.propose_slot(
                     parent,
-                    scope,
-                    version,
-                    generation,
-                    skill_library=parent_library,
-                )
-                child = parse_scoped_child(
-                    parent,
-                    proposal,
                     scope=scope,
+                    version=version,
+                    generation=generation,
+                    feedback={},
                     skill_library=parent_library,
                 )
-                if child is None or child.version != version:
-                    raw_fingerprint = _digest(
-                        {
-                            "scope": scope,
-                            "version": version,
-                            "proposal": proposal,
-                        }
-                    )
+                proposal = proposed.proposal
+                child = proposed.genome
+                if child is None:
+                    raw_fingerprint = proposed.proposal_sha256
                     raw_children.append(
                         {
                             "scope": scope,
@@ -3879,85 +4321,27 @@ class RetrievalEvolutionEngine:
         *,
         skill_library: RetrievalSkillLibrary | None,
     ) -> Mapping[str, object]:
-        system = (
-            "Return one complete typed Retrieval Genome JSON object. "
-            "Obey the supplied immutable scope and host-owned schema."
-        )
-        payload = {
-            "schema_version": 1,
-            "generation": generation,
-            "scope": scope,
-            "required_version": version,
-            "required_parent": parent.version,
-            "mutable_fields": sorted(
-                _PRIMARY_SCOPE_FIELDS[scope] | {"active_skill_ids"}
+        proposer = RetrievalGenomeProposer(
+            self.mutation_llm,
+            transient_retries=self.config.transient_retries,
+            version_origin=(
+                self._original_parent.version
+                if self._original_parent is not None
+                else parent.version
             ),
-            "owned_skill_stage": _SCOPE_SKILL_STAGE[scope],
-            "active_skill_catalog": [
-                {
-                    "skill_id": skill.skill_id,
-                    "stage": skill.stage,
-                    "applicability": skill.applicability.to_payload(),
-                }
-                for skill in (
-                    ()
-                    if skill_library is None
-                    else _evolution_skill_catalog(skill_library)
-                )
-            ],
-            "parent_genome": parent.to_payload(),
-        }
-        attempts = self.config.transient_retries + 1
-        for attempt in range(attempts):
-            try:
-                response = self.mutation_llm.complete(
-                    system=system,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": json.dumps(
-                                payload,
-                                ensure_ascii=False,
-                                sort_keys=True,
-                            ),
-                        }
-                    ],
-                    temperature=0.0,
-                )
-                try:
-                    return parse_json_object(response.text)
-                except JsonExtractionError as error:
-                    del error
-                    self._event(
-                        "mutation_response_invalid",
-                        generation=generation,
-                        scope=scope,
-                        error="invalid_mutation_response",
-                    )
-                    return {
-                        "invalid_mutation_response": "invalid_mutation_response"
-                    }
-            except TransientLLMError as error:
-                if attempt + 1 >= attempts:
-                    self._event(
-                        "transient_exhausted",
-                        operation="mutation",
-                        generation=generation,
-                        scope=scope,
-                        error="transient_model_failure",
-                    )
-                    self._save_checkpoint(status="running", result=None)
-                    raise
-                self._event(
-                    "transient_retry",
-                    operation="mutation",
-                    generation=generation,
-                    scope=scope,
-                    attempt=attempt + 1,
-                )
-                self._save_checkpoint(status="running", result=None)
-
-        raise AssertionError("unreachable mutation retry loop")
+            event=self._event,
+            checkpoint=lambda: self._save_checkpoint(
+                status="running", result=None
+            ),
+        )
+        return proposer.propose_slot(
+            parent,
+            scope=scope,
+            version=version,
+            generation=generation,
+            feedback={},
+            skill_library=skill_library,
+        ).proposal
 
     def _evaluate_batch(
         self,
@@ -6049,13 +6433,17 @@ __all__ = [
     "CHILD_SCOPES",
     "RetrievalCheckpointError",
     "RetrievalEvaluation",
+    "RetrievalCandidateProposer",
     "RetrievalEvolutionConfig",
     "RetrievalEvolutionEngine",
     "RetrievalEvolutionError",
     "RetrievalEvolutionResult",
     "RetrievalGenerationTrace",
+    "RetrievalGenomeProposer",
     "RetrievalInferenceCacheKey",
     "build_inference_cache_key",
     "combine_retrieval_evaluations",
     "parse_scoped_child",
+    "rebase_retrieval_candidate",
+    "retrieval_behavior_fingerprint",
 ]
