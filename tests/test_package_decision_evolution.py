@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 
 import pytest
 
+import evolving_loop.package_decision_evolution as package_decision_module
 from common.llm import FakeLLMClient
 from evolving_loop.co_evolution import CoEvolutionConfig, HarnessPolicy
 from evolving_loop.coordinate_evolution import (
@@ -24,6 +26,7 @@ from evolving_loop.package_metrics import PackageEvaluation
 from evolving_loop.package_pipeline_evaluator import PackagePipelineEvaluator
 from evolving_loop.package_registry import FrozenNumericalPackageRegistry
 from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
+from evolving_loop.retrieval_agent.policy import RetrievalGenome
 from evolving_loop.retrieval_agent.schemas import EvidenceCitation
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 from tests.test_coordinate_evolution import _accepted_release, _bound_policy
@@ -54,6 +57,29 @@ def _safe_default_package():
         considered_candidates=(safe.name,),
     )
     return replace(package, selection_decision=decision, final_forecast=safe.forecast)
+
+
+def _specialist_default_package():
+    package = _package()
+    specialist = next(
+        item for item in package.ranked_alternatives if item.name == "specialist"
+    )
+    decision = replace(
+        package.selection_decision,
+        mode="single",
+        selected=(specialist.name,),
+        weights=(1.0,),
+        forecast=specialist.forecast,
+        reason_codes=("frozen_champion", "test_specialist_default"),
+        assumption_ids=(),
+        assumption_kinds=(),
+        considered_candidates=(specialist.name,),
+    )
+    return replace(
+        package,
+        selection_decision=decision,
+        final_forecast=specialist.forecast,
+    )
 
 
 def _decision_task():
@@ -222,31 +248,66 @@ def test_package_decision_evaluator_exposes_shared_package_evaluation(tmp_path) 
     ] == pytest.approx(11.0 / 3.0)
 
 
-def test_pipeline_preserves_round1_when_typed_round2_is_malformed(
+def test_decision_compatibility_is_projection_only(tmp_path, monkeypatch) -> None:
+    release = _accepted_release(tmp_path / "releases", "v001", "v000")
+    parent = _bound_policy(release)
+    task, evaluator = _evaluator(tmp_path, parent)
+
+    def forbidden_rescore(*_args, **_kwargs):
+        raise AssertionError("compatibility adapter re-scored Numerical alternatives")
+
+    monkeypatch.setattr(
+        package_decision_module,
+        "drcik_point_metrics",
+        forbidden_rescore,
+        raising=False,
+    )
+
+    evaluation = evaluator.evaluate(parent, (task,))
+
+    assert evaluation.outcomes[0].coding_oracle_smae == pytest.approx(0.0)
+    assert evaluation.outcomes[0].coding_oracle_srmse == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize("round2_failure", ("malformed", "empty"))
+def test_pipeline_preserves_non_anchor_round1_decision_on_round2_failure(
     tmp_path,
     monkeypatch,
+    round2_failure,
 ) -> None:
     release = _accepted_release(tmp_path / "releases", "v001", "v000")
     policy = _bound_policy(release)
     round2_task = _decision_task()
-    registry = _frozen_registry(((round2_task, _safe_default_package()),))
+    package = _specialist_default_package()
+    registry = _frozen_registry(((round2_task, package),))
     skills = RetrievalSkillLibrary(tmp_path / "pipeline-skills.json", persist=False).clone(
         read_only=True
     )
-    original_round2 = TwoStageRetrievalAgent.run_round2
+    if round2_failure == "malformed":
+        original_round2 = TwoStageRetrievalAgent.run_round2
 
-    def malformed_round2(self, *args, **kwargs):
-        verified = original_round2(self, *args, **kwargs)
-        return replace(
-            verified,
-            rejected=(*verified.rejected, "invalid_round2_response"),
+        def malformed_round2(self, *args, **kwargs):
+            verified = original_round2(self, *args, **kwargs)
+            return replace(
+                verified,
+                rejected=(*verified.rejected, "invalid_round2_response"),
+            )
+
+        monkeypatch.setattr(TwoStageRetrievalAgent, "run_round2", malformed_round2)
+        round2_response = _round2_response(round2_task)
+    else:
+        round2_response = json.dumps(
+            {
+                "evidence_chains": [],
+                "counterevidence": [],
+                "missing_information": ["no verified evidence"],
+                "sufficient": False,
+            }
         )
-
-    monkeypatch.setattr(TwoStageRetrievalAgent, "run_round2", malformed_round2)
-    retrieval_llm = FakeLLMClient([_round_response(), _round2_response(round2_task)])
+    retrieval_llm = FakeLLMClient([_round_response(), round2_response])
     retrieval = TwoStageRetrievalAgent(retrieval_llm, policy.retrieval_genome, skills)
     decision = DecisionAgent(
-        FakeLLMClient([_request_specialist(), _decision_response("safe_anchor")]),
+        FakeLLMClient([_request_specialist(), _decision_response("specialist")]),
         prompt=policy.decision_prompt,
     )
     bundle = PackageCoordinateBundle(
@@ -269,6 +330,44 @@ def test_pipeline_preserves_round1_when_typed_round2_is_malformed(
     expected_round1_sha256 = (
         "d5665af50cc5250bbb423546e0e0ef037c257b3dbdda2a3c6cf533331d3d85e3"
     )
+    specialist = next(
+        item for item in package.ranked_alternatives if item.name == "specialist"
+    )
+    grounding = next(
+        item
+        for item in package.accepted_assumptions
+        if specialist.name in item.candidate_names
+    )
+    expected_decision_sha256 = hashlib.sha256(
+        json.dumps(
+            {
+                "selected": {
+                    "candidate_id": specialist.name,
+                    "forecast": list(specialist.forecast),
+                    "assumption": grounding.claim,
+                    "failure_condition": grounding.failure_condition,
+                    "hindcast_smae": specialist.diagnostics.median_smae,
+                    "hindcast_srmse": specialist.diagnostics.median_srmse,
+                    "source_document_ids": [],
+                    "tags": ["numerical_package", specialist.family],
+                    "hindcast_smape": specialist.diagnostics.median_smae,
+                },
+                "host_default_id": specialist.name,
+                "requested_more_retrieval": False,
+                "rationale": (
+                    "Verified same-entity evidence supports the specialist."
+                ),
+                "supporting_document_ids": ["support"],
+                "llm_override_accepted": False,
+                "rejection_reason": None,
+                "used_skill_names": [],
+                "gaps": [],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
     evaluation = pipeline_evaluator.evaluate(
         bundle,
@@ -279,7 +378,92 @@ def test_pipeline_preserves_round1_when_typed_round2_is_malformed(
 
     assert evaluation.task_rows[0].fallback_count == 0
     assert evaluation.task_rows[0].final_retrieval_sha256 == expected_round1_sha256
+    assert evaluation.task_rows[0].selected_candidate_id == "specialist"
+    assert evaluation.task_rows[0].final_forecast == (1.0, 2.0)
+    assert evaluation.task_rows[0].final_decision_sha256 == expected_decision_sha256
     assert len(retrieval_llm.calls) == 2
+
+
+def test_pipeline_cache_only_fails_before_factories_or_live_inference(tmp_path) -> None:
+    release = _accepted_release(tmp_path / "releases", "v001", "v000")
+    policy = _bound_policy(release)
+    task = _decision_task()
+    registry = _frozen_registry(((task, _safe_default_package()),))
+    calls: list[str] = []
+
+    def retrieval_factory(_policy):
+        calls.append("retrieval")
+        raise AssertionError("cache-only evaluation invoked Retrieval")
+
+    def decision_factory(_policy):
+        calls.append("decision")
+        raise AssertionError("cache-only evaluation invoked Decision")
+
+    evaluator = PackagePipelineEvaluator(retrieval_factory, decision_factory)
+    bundle = PackageCoordinateBundle(
+        generation=0,
+        parent_sha256=None,
+        numerical_manifest_sha256=registry.fingerprint,
+        policy=policy,
+        runtime_fingerprints={
+            "bridge_runtime": "1" * 64,
+            "retrieval_runtime": "2" * 64,
+            "decision_runtime": "3" * 64,
+            "retrieval_verifier": "4" * 64,
+            "metric_policy": "5" * 64,
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="cache-only"):
+        evaluator.evaluate(bundle, registry, (task,), stage="replay", cache_only=True)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("mismatch", ("retrieval", "decision"))
+def test_pipeline_propagates_component_integrity_mismatch(
+    tmp_path,
+    mismatch,
+) -> None:
+    release = _accepted_release(tmp_path / "releases", "v001", "v000")
+    policy = _bound_policy(release)
+    task = _decision_task()
+    registry = _frozen_registry(((task, _safe_default_package()),))
+    skills = RetrievalSkillLibrary(tmp_path / "integrity-skills.json", persist=False).clone(
+        read_only=True
+    )
+    retrieval_genome = (
+        RetrievalGenome.seed() if mismatch == "retrieval" else policy.retrieval_genome
+    )
+    retrieval = TwoStageRetrievalAgent(
+        FakeLLMClient([_round_response()]),
+        retrieval_genome,
+        skills,
+    )
+    decision = DecisionAgent(
+        FakeLLMClient([_decision_response("safe_anchor")] * 2),
+        prompt=("wrong prompt" if mismatch == "decision" else policy.decision_prompt),
+    )
+    evaluator = PackagePipelineEvaluator(
+        lambda _policy: retrieval,
+        lambda _policy: decision,
+    )
+    bundle = PackageCoordinateBundle(
+        generation=0,
+        parent_sha256=None,
+        numerical_manifest_sha256=registry.fingerprint,
+        policy=policy,
+        runtime_fingerprints={
+            "bridge_runtime": "1" * 64,
+            "retrieval_runtime": "2" * 64,
+            "decision_runtime": "3" * 64,
+            "retrieval_verifier": "4" * 64,
+            "metric_policy": "5" * 64,
+        },
+    )
+
+    with pytest.raises(ValueError, match=mismatch.capitalize()):
+        evaluator.evaluate(bundle, registry, (task,), stage="screen8")
 
 
 def test_decision_evaluator_rejects_policy_without_accepted_retrieval(

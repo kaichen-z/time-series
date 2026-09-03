@@ -22,7 +22,6 @@ from evolving_loop.package_metrics import PackageEvaluation, PackageTaskScore
 from evolving_loop.package_registry import FrozenNumericalPackageRegistry
 from evolving_loop.retrieval_agent.quality import score_retrieval_card_quality
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
-from evolving_loop.retrieval_agent.verifier import merge_verified_rounds
 
 
 def _canonical_digest(value: object) -> str:
@@ -80,6 +79,11 @@ class PackagePipelineEvaluator:
             raise ValueError("package bundle Numerical manifest does not match registry")
         if type(cache_only) is not bool:
             raise ValueError("cache_only must be a boolean")
+        if cache_only:
+            raise RuntimeError(
+                "cache-only package evaluation is unavailable until the immutable "
+                "cache backend is configured"
+            )
         retrieval_genome = bundle.policy.retrieval_genome
         if retrieval_genome is None:
             raise ValueError("package bundle requires a bound Retrieval Genome")
@@ -139,24 +143,25 @@ class PackagePipelineEvaluator:
                 decision, DecisionAgent
             ):
                 raise TypeError("package pipeline factories returned invalid agents")
+            if (
+                expected_retrieval_sha256 is not None
+                and retrieval.genome.fingerprint() != expected_retrieval_sha256
+            ):
+                raise ValueError("package pipeline changed the bound Retrieval Genome")
+            if (
+                expected_decision_prompt_sha256 is not None
+                and hashlib.sha256(decision.prompt.encode("utf-8")).hexdigest()
+                != expected_decision_prompt_sha256
+            ):
+                raise ValueError("package pipeline changed the bound Decision prompt")
             try:
-                result = run_numerical_two_stage(task, package, retrieval, decision)
-                if (
-                    expected_retrieval_sha256 is not None
-                    and result.fingerprints.get("retrieval_genome")
-                    != expected_retrieval_sha256
-                ):
-                    raise ValueError(
-                        "package pipeline changed the bound Retrieval Genome"
-                    )
-                if (
-                    expected_decision_prompt_sha256 is not None
-                    and result.fingerprints.get("decision_prompt")
-                    != expected_decision_prompt_sha256
-                ):
-                    raise ValueError(
-                        "package pipeline changed the bound Decision prompt"
-                    )
+                result = run_numerical_two_stage(
+                    task,
+                    package,
+                    retrieval,
+                    decision,
+                    preserve_round1_on_round2_failure=True,
+                )
             except TransientLLMError:
                 raise
             except (TypeError, ValueError) as error:
@@ -169,6 +174,18 @@ class PackagePipelineEvaluator:
                     )
                 )
                 continue
+            if (
+                expected_retrieval_sha256 is not None
+                and result.fingerprints.get("retrieval_genome")
+                != expected_retrieval_sha256
+            ):
+                raise ValueError("package pipeline changed the bound Retrieval Genome")
+            if (
+                expected_decision_prompt_sha256 is not None
+                and result.fingerprints.get("decision_prompt")
+                != expected_decision_prompt_sha256
+            ):
+                raise ValueError("package pipeline changed the bound Decision prompt")
             scored.append(cls._score_result(task, package, result, metric_cap=metric_cap))
 
         diagnostic_names = tuple(
@@ -209,17 +226,7 @@ class PackagePipelineEvaluator:
 
         retrieval_card = result.retrieval_card
         fallback_count = int(result.fallback_reason is not None)
-        invalid_round2_count = 0
-        # A malformed optional Round 2 cannot erase a verified Round 1 behavior
-        # artifact. The final safe selection remains scored, but the failed
-        # extension is excluded from Retrieval behavior identity and fallback burden.
-        if (
-            result.fallback_reason == "invalid_round2_response"
-            and retrieval_card.round1.chains
-        ):
-            retrieval_card = merge_verified_rounds(retrieval_card.round1, None)
-            fallback_count = 0
-            invalid_round2_count = 1
+        invalid_round2_count = int(result.round2_failure_reason is not None)
         quality = score_retrieval_card_quality(task, retrieval_card)
         final_retrieval_sha256 = _canonical_digest(retrieval_card.to_payload())
         invalid_count = (
@@ -249,6 +256,10 @@ class PackagePipelineEvaluator:
                 final_srmse=final_srmse,
                 final_smae_raw=final_smae_raw,
                 final_srmse_raw=final_srmse_raw,
+                final_forecast=result.forecast,
+                numerical_oracle_smae=oracle_smae,
+                numerical_oracle_srmse=oracle_srmse,
+                numerical_candidate_count=len(alternatives),
                 smae_clipped=bool(final["smae_clipped"]),
                 srmse_clipped=bool(final["srmse_clipped"]),
                 invalid_count=invalid_count,
@@ -329,6 +340,10 @@ class PackagePipelineEvaluator:
                 final_srmse=final_srmse,
                 final_smae_raw=final_smae_raw,
                 final_srmse_raw=final_srmse_raw,
+                final_forecast=anchor.forecast,
+                numerical_oracle_smae=oracle_smae,
+                numerical_oracle_srmse=oracle_srmse,
+                numerical_candidate_count=len(alternatives),
                 smae_clipped=bool(metrics["smae_clipped"]),
                 srmse_clipped=bool(metrics["srmse_clipped"]),
                 invalid_count=1,

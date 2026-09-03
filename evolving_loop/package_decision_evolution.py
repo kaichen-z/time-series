@@ -9,7 +9,6 @@ from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 
 from common.llm import LLMClient, TransientLLMError
-from common.metrics import drcik_point_metrics
 from evolving_loop.co_evolution import (
     CoEvolutionConfig,
     CoEvolutionEngine,
@@ -147,27 +146,8 @@ class PackageDecisionEvaluator:
         outcomes: list[ResolvedOutcome] = []
         for task in resolved:
             row = rows[task.numeric.task_id]
-            candidates = tuple(
-                (
-                    alternative.name,
-                    drcik_point_metrics(
-                        tuple(task.numeric.future_values),
-                        alternative.forecast,
-                        cap=self.metric_cap,
-                    ),
-                )
-                for alternative in self.registry.package_for(task).ranked_alternatives
-            )
-            _oracle_name, oracle = min(
-                candidates,
-                key=lambda item: (
-                    float(item[1]["srmse"]),
-                    float(item[1]["smae"]),
-                    item[0],
-                ),
-            )
-            oracle_smae = float(oracle["smae"])
-            oracle_srmse = float(oracle["srmse"])
+            oracle_smae = row.numerical_oracle_smae
+            oracle_srmse = row.numerical_oracle_srmse
             outcomes.append(
                 ResolvedOutcome(
                     task_id=task.numeric.task_id,
@@ -179,7 +159,7 @@ class PackageDecisionEvaluator:
                     contextual_oracle_srmse=oracle_srmse,
                     decision_selection_smae_regret=row.final_smae - oracle_smae,
                     decision_selection_srmse_regret=row.final_srmse - oracle_srmse,
-                    candidate_count=len(candidates),
+                    candidate_count=row.numerical_candidate_count,
                 )
             )
         outcomes_tuple = tuple(outcomes)

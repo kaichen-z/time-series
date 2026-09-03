@@ -42,6 +42,10 @@ class PackageTaskScore:
     final_srmse: float
     final_smae_raw: float
     final_srmse_raw: float
+    final_forecast: tuple[float, ...]
+    numerical_oracle_smae: float
+    numerical_oracle_srmse: float
+    numerical_candidate_count: int
     smae_clipped: bool
     srmse_clipped: bool
     invalid_count: int
@@ -62,6 +66,8 @@ class PackageTaskScore:
             "final_srmse",
             "final_smae_raw",
             "final_srmse_raw",
+            "numerical_oracle_smae",
+            "numerical_oracle_srmse",
         ):
             value = getattr(self, field_name)
             if (
@@ -72,6 +78,20 @@ class PackageTaskScore:
             ):
                 raise ValueError(f"{field_name} must be finite and non-negative")
             object.__setattr__(self, field_name, float(value))
+        try:
+            forecast_values = tuple(self.final_forecast)
+            if any(isinstance(value, bool) for value in forecast_values):
+                raise ValueError
+            forecast = tuple(float(value) for value in forecast_values)
+        except (TypeError, ValueError) as error:
+            raise ValueError("final_forecast must contain finite numbers") from error
+        if not forecast or any(not math.isfinite(value) for value in forecast):
+            raise ValueError("final_forecast must contain finite numbers")
+        object.__setattr__(self, "final_forecast", forecast)
+        if type(self.numerical_candidate_count) is not int or (
+            self.numerical_candidate_count <= 0
+        ):
+            raise ValueError("numerical_candidate_count must be a positive integer")
         if (
             type(self.smae_clipped) is not bool
             or type(self.srmse_clipped) is not bool
@@ -120,6 +140,49 @@ class PackageTaskScore:
 
     def to_payload(self) -> dict[str, object]:
         return asdict(self)
+
+
+def _evaluation_fields(
+    rows: tuple[PackageTaskScore, ...],
+    expected_task_ids: tuple[str, ...],
+) -> dict[str, int | float]:
+    def mean(field_name: str) -> float:
+        return (
+            statistics.fmean(float(getattr(row, field_name)) for row in rows)
+            if rows
+            else 0.0
+        )
+
+    def quantile(field_name: str, probability: float) -> float:
+        return (
+            linear_quantile(
+                [float(getattr(row, field_name)) for row in rows], probability
+            )
+            if rows
+            else 0.0
+        )
+
+    mean_smae = mean("final_smae")
+    mean_srmse = mean("final_srmse")
+    return {
+        "task_count": len(rows),
+        "coverage": len(rows) / len(expected_task_ids),
+        "mean_smae": mean_smae,
+        "mean_srmse": mean_srmse,
+        "mean_joint": (mean_smae + mean_srmse) / 2.0,
+        "mean_smae_raw": mean("final_smae_raw"),
+        "mean_srmse_raw": mean("final_srmse_raw"),
+        "p90_smae": quantile("final_smae", 0.90),
+        "p95_smae": quantile("final_smae", 0.95),
+        "p90_srmse": quantile("final_srmse", 0.90),
+        "p95_srmse": quantile("final_srmse", 0.95),
+        "invalid_count": sum(row.invalid_count for row in rows),
+        "catastrophic_count": sum(row.catastrophic_count for row in rows),
+        "fallback_count": sum(row.fallback_count for row in rows),
+        "clipped_count": sum(
+            int(row.smae_clipped or row.srmse_clipped) for row in rows
+        ),
+    }
 
 
 @dataclass(frozen=True)
@@ -189,9 +252,22 @@ class PackageEvaluation:
             for task_id in missing_task_ids
         ):
             raise ValueError("package evaluation missing task IDs must be non-empty")
-        object.__setattr__(self, "task_rows", task_rows)
-        object.__setattr__(self, "expected_task_ids", expected_task_ids)
-        object.__setattr__(self, "missing_task_ids", missing_task_ids)
+        if (
+            not expected_task_ids
+            or len(expected_task_ids) != len(set(expected_task_ids))
+        ):
+            raise ValueError("package evaluation requires unique expected task IDs")
+        row_ids = tuple(row.task_id for row in task_rows)
+        if len(row_ids) != len(set(row_ids)):
+            raise ValueError("package evaluation task rows must be unique")
+        if set(row_ids) - set(expected_task_ids):
+            raise ValueError("package evaluation rows are outside expected membership")
+        canonical_rows = tuple(sorted(task_rows, key=lambda row: row.task_id))
+        canonical_expected = tuple(sorted(expected_task_ids))
+        canonical_missing = tuple(sorted(set(canonical_expected) - set(row_ids)))
+        object.__setattr__(self, "task_rows", canonical_rows)
+        object.__setattr__(self, "expected_task_ids", canonical_expected)
+        object.__setattr__(self, "missing_task_ids", canonical_missing)
         for field_name in (
             "coverage",
             "mean_smae",
@@ -244,6 +320,14 @@ class PackageEvaluation:
                 {key: float(value) for key, value in sorted(diagnostics.items())}
             ),
         )
+        derived = _evaluation_fields(canonical_rows, canonical_expected)
+        if missing_task_ids != canonical_missing or any(
+            getattr(self, field_name) != value
+            for field_name, value in derived.items()
+        ):
+            raise ValueError(
+                "package evaluation derived fields do not match task rows"
+            )
 
     @classmethod
     def from_rows(
@@ -275,46 +359,12 @@ class PackageEvaluation:
         scored = tuple(sorted(scored, key=lambda row: row.task_id))
         missing = tuple(sorted(set(expected) - set(row_ids)))
 
-        def mean(field_name: str) -> float:
-            return (
-                statistics.fmean(float(getattr(row, field_name)) for row in scored)
-                if scored
-                else 0.0
-            )
-
-        def quantile(field_name: str, probability: float) -> float:
-            return (
-                linear_quantile(
-                    [float(getattr(row, field_name)) for row in scored], probability
-                )
-                if scored
-                else 0.0
-            )
-
-        mean_smae = mean("final_smae")
-        mean_srmse = mean("final_srmse")
         return cls(
             candidate_sha256=candidate_sha256,
             task_rows=scored,
             expected_task_ids=expected,
             missing_task_ids=missing,
-            task_count=len(scored),
-            coverage=len(scored) / len(expected),
-            mean_smae=mean_smae,
-            mean_srmse=mean_srmse,
-            mean_joint=(mean_smae + mean_srmse) / 2.0,
-            mean_smae_raw=mean("final_smae_raw"),
-            mean_srmse_raw=mean("final_srmse_raw"),
-            p90_smae=quantile("final_smae", 0.90),
-            p95_smae=quantile("final_smae", 0.95),
-            p90_srmse=quantile("final_srmse", 0.90),
-            p95_srmse=quantile("final_srmse", 0.95),
-            invalid_count=sum(row.invalid_count for row in scored),
-            catastrophic_count=sum(row.catastrophic_count for row in scored),
-            fallback_count=sum(row.fallback_count for row in scored),
-            clipped_count=sum(
-                int(row.smae_clipped or row.srmse_clipped) for row in scored
-            ),
+            **_evaluation_fields(scored, expected),
             secondary_diagnostics=secondary_diagnostics or {},
             public_test_accessed=False,
         )
@@ -447,19 +497,25 @@ def package_full_gate_failures(
             failures.append("initial_toto_mean_srmse")
 
     if stage.casefold().startswith("build"):
-        if fold_manifest is None or not hasattr(fold_manifest, "task_fold_map"):
+        if (
+            fold_manifest is None
+            or not hasattr(fold_manifest, "task_fold_map")
+            or getattr(fold_manifest, "fold_count", None) != 5
+        ):
             failures.append("fold_manifest")
         else:
             task_fold_map = dict(fold_manifest.task_fold_map)
-            if set(task_fold_map) != set(parent_rows) or set(task_fold_map) != set(
-                child_rows
+            folds = set(task_fold_map.values())
+            if (
+                set(task_fold_map) != set(parent_rows)
+                or set(task_fold_map) != set(child_rows)
+                or folds != set(range(5))
             ):
                 failures.append("fold_manifest")
             else:
-                folds = tuple(sorted(set(task_fold_map.values())))
                 nonregressing = 0
                 improving = 0
-                for fold in folds:
+                for fold in range(5):
                     task_ids = tuple(
                         task_id
                         for task_id, assigned_fold in task_fold_map.items()
@@ -486,7 +542,7 @@ def package_full_gate_failures(
                         if (
                             (child_smae + child_srmse) / 2.0
                             < (parent_smae + parent_srmse) / 2.0
-                            - config.tolerance
+                            - 1e-12
                         ):
                             improving += 1
                 if nonregressing < 4:

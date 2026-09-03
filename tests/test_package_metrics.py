@@ -34,6 +34,10 @@ def _score(
         final_srmse=srmse,
         final_smae_raw=raw_smae,
         final_srmse_raw=raw_srmse,
+        final_forecast=(smae, srmse),
+        numerical_oracle_smae=max(0.0, smae - 0.1),
+        numerical_oracle_srmse=max(0.0, srmse - 0.1),
+        numerical_candidate_count=2,
         smae_clipped=raw_smae != smae,
         srmse_clipped=raw_srmse != srmse,
         invalid_count=invalid_count,
@@ -112,9 +116,15 @@ def test_package_evaluation_records_missing_membership_and_freezes_diagnostics()
 def test_result_bytes_exclude_only_candidate_publication_identity():
     evaluation = _evaluation((_score("task_1"),))
     changed_candidate = replace(evaluation, candidate_sha256="b" * 64)
-    changed_result = replace(
-        evaluation,
-        task_rows=(replace(evaluation.task_rows[0], final_retrieval_sha256="9" * 64),),
+    changed_result = PackageEvaluation.from_rows(
+        evaluation.candidate_sha256,
+        (
+            replace(
+                evaluation.task_rows[0],
+                final_retrieval_sha256="9" * 64,
+            ),
+        ),
+        expected_task_ids=evaluation.expected_task_ids,
     )
 
     assert evaluation.result_bytes() == changed_candidate.result_bytes()
@@ -157,8 +167,10 @@ def test_full_gate_requires_half_percent_joint_gain():
     )
 
 
-class _FiveFoldManifest:
-    task_fold_map = {f"task_{index}": index for index in range(5)}
+class _FoldManifest:
+    def __init__(self, fold_count: int, task_fold_map: dict[str, int]) -> None:
+        self.fold_count = fold_count
+        self.task_fold_map = task_fold_map
 
 
 def test_build_gate_requires_four_safe_and_three_improving_folds():
@@ -174,10 +186,88 @@ def test_build_gate_requires_four_safe_and_three_improving_folds():
         parent,
         PackageGateConfig(),
         stage="build",
-        fold_manifest=_FiveFoldManifest(),
+        fold_manifest=_FoldManifest(
+            5,
+            {f"task_{index}": index for index in range(5)},
+        ),
     )
     assert "nonregressing_folds" in failures
     assert "improving_folds" in failures
+
+
+@pytest.mark.parametrize("fold_count", (4, 5))
+def test_build_gate_rejects_non_five_or_unpopulated_fold_universe(
+    fold_count,
+) -> None:
+    parent = _uniform_evaluation(1.0)
+    child = _uniform_evaluation(0.9)
+    four_populated = {
+        "task_0": 0,
+        "task_1": 1,
+        "task_2": 2,
+        "task_3": 3,
+        "task_4": 3,
+    }
+
+    failures = package_full_gate_failures(
+        child,
+        parent,
+        PackageGateConfig(),
+        stage="build",
+        fold_manifest=_FoldManifest(fold_count, four_populated),
+    )
+
+    assert "fold_manifest" in failures
+
+
+def test_build_fold_thresholds_accept_exactly_four_safe_and_three_improving():
+    parent = _uniform_evaluation(1.0)
+    child = _evaluation(
+        tuple(
+            _score(f"task_{index}", smae=value, srmse=value)
+            for index, value in enumerate((0.9, 0.9, 0.9, 1.0, 1.1))
+        )
+    )
+
+    failures = package_full_gate_failures(
+        child,
+        parent,
+        PackageGateConfig(),
+        stage="build",
+        fold_manifest=_FoldManifest(
+            5,
+            {f"task_{index}": index for index in range(5)},
+        ),
+    )
+
+    assert "nonregressing_folds" not in failures
+    assert "improving_folds" not in failures
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        {"mean_smae": 0.0},
+        {"coverage": 0.0},
+        {"invalid_count": 7},
+    ),
+)
+def test_package_evaluation_rejects_tampered_derived_aggregates(mutation) -> None:
+    evaluation = _uniform_evaluation(1.0)
+
+    with pytest.raises(ValueError, match="derived"):
+        replace(evaluation, **mutation)
+
+
+def test_package_evaluation_rejects_row_replacement_without_reaggregation() -> None:
+    evaluation = _uniform_evaluation(1.0)
+    changed_rows = (
+        _score("task_0", smae=0.5, srmse=0.5),
+        *evaluation.task_rows[1:],
+    )
+
+    with pytest.raises(ValueError, match="derived"):
+        replace(evaluation, task_rows=changed_rows)
 
 
 def test_task_185_shaped_overlay_is_rejected_by_joint_regret():
