@@ -1,0 +1,92 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+Current Python version 3.10 is below the recommended 3.11 version. It is recommended to upgrade to Python 3.11 or higher for the best experience.
+Loading weights:   0%|          | 0/760 [00:00<?, ?it/s]Loading weights:   0%|          | 1/760 [00:00<04:04,  3.11it/s]Loading weights:   0%|          | 2/760 [00:00<04:37,  2.74it/s]Loading weights:   2%|▏         | 15/760 [00:00<00:28, 26.16it/s]Loading weights:   4%|▍         | 29/760 [00:00<00:14, 49.77it/s]Loading weights:   6%|▌         | 42/760 [00:01<00:10, 65.40it/s]Loading weights:   7%|▋         | 52/760 [00:01<00:09, 71.43it/s]Loading weights:   9%|▊         | 66/760 [00:01<00:08, 84.76it/s]Loading weights:  11%|█         | 80/760 [00:01<00:07, 94.06it/s]Loading weights:  12%|█▏        | 91/760 [00:01<00:07, 91.50it/s]Loading weights:  13%|█▎        | 102/760 [00:01<00:09, 71.75it/s]Loading weights:  16%|█▌        | 119/760 [00:01<00:07, 89.55it/s]Loading weights:  17%|█▋        | 132/760 [00:02<00:06, 92.43it/s]Loading weights:  19%|█▉        | 146/760 [00:02<00:05, 103.50it/s]Loading weights:  21%|██        | 158/760 [00:02<00:05, 100.58it/s]Loading weights:  23%|██▎       | 173/760 [00:02<00:05, 99.44it/s] Loading weights:  25%|██▍       | 187/760 [00:02<00:05, 105.12it/s]Loading weights:  26%|██▌       | 198/760 [00:02<00:05, 105.58it/s]Loading weights:  28%|██▊       | 209/760 [00:02<00:05, 101.54it/s]Loading weights:  29%|██▉       | 224/760 [00:02<00:05, 106.67it/s]Loading weights:  32%|███▏      | 240/760 [00:02<00:04, 117.56it/s]Loading weights:  34%|███▎      | 255/760 [00:03<00:04, 119.92it/s]Loading weights:  35%|███▌      | 268/760 [00:03<00:04, 113.19it/s]Loading weights:  37%|███▋      | 280/760 [00:03<00:04, 100.17it/s]Loading weights:  39%|███▊      | 294/760 [00:03<00:04, 108.73it/s]Loading weights:  40%|████      | 307/760 [00:03<00:03, 113.75it/s]Loading weights:  43%|████▎     | 325/760 [00:03<00:03, 125.36it/s]Loading weights:  44%|████▍     | 338/760 [00:04<00:05, 78.05it/s] Loading weights:  46%|████▌     | 349/760 [00:04<00:08, 48.54it/s]Loading weights:  47%|████▋     | 360/760 [00:04<00:07, 54.72it/s]Loading weights:  49%|████▉     | 373/760 [00:04<00:05, 66.35it/s]Loading weights:  51%|█████     | 385/760 [00:04<00:05, 73.60it/s]Loading weights:  52%|█████▏    | 398/760 [00:04<00:04, 83.14it/s]Loading weights:  54%|█████▍    | 409/760 [00:05<00:04, 84.04it/s]Loading weights:  55%|█████▌    | 419/760 [00:05<00:04, 84.76it/s]Loading weights:  72%|███████▏  | 549/760 [00:05<00:00, 376.05it/s]Loading weights:  96%|█████████▋| 733/760 [00:05<00:00, 749.17it/s]Loading weights: 100%|██████████| 760/760 [00:05<00:00, 139.66it/s]
+[transformers] Setting `pad_token_id` to `eos_token_id`:248044 for open-end generation.
+[transformers] Setting `pad_token_id` to `eos_token_id`:248044 for open-end generation.
+[transformers] Setting `pad_token_id` to `eos_token_id`:248044 for open-end generation.
+[transformers] Setting `pad_token_id` to `eos_token_id`:248044 for open-end generation.
+[transformers] Setting `pad_token_id` to `eos_token_id`:248044 for open-end generation.
+[transformers] Setting `pad_token_id` to `eos_token_id`:248044 for open-end generation.
+[transformers] Setting `pad_token_id` to `eos_token_id`:248044 for open-end generation.
+[transformers] Setting `pad_token_id` to `eos_token_id`:248044 for open-end generation.
+[transformers] Setting `pad_token_id` to `eos_token_id`:248044 for open-end generation.
+[transformers] Setting `pad_token_id` to `eos_token_id`:248044 for open-end generation.
+[1/80] task_1 H=188 paths=10/10
+[transformers] Setting `pad_token_id` to `eos_token_id`:248044 for open-end generation.
+Traceback (most recent call last):
+  File "/usr/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/usr/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/home/ik832/time-series/baseline/run.py", line 587, in <module>
+    args.qwen_parse_retries,
+  File "/home/ik832/time-series/baseline/run.py", line 557, in main
+    raise ValueError("--qwen-parse-retries must be non-negative")
+  File "/home/ik832/time-series/baseline/run.py", line 472, in _forecast
+    return [_one_sample(sample_index) for sample_index in range(samples)]
+  File "/home/ik832/time-series/baseline/run.py", line 306, in _qwen
+    }
+  File "/home/ik832/time-series/common/llm.py", line 652, in complete
+    output_ids = self._model.generate(
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+    return func(*args, **kwargs)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/transformers/generation/utils.py", line 2584, in generate
+    result = decoding_method(
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/transformers/generation/utils.py", line 2798, in _sample
+    outputs = model_forward(**model_inputs, return_dict=True)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/transformers/utils/generic.py", line 907, in wrapper
+    output = func(self, *args, **kwargs)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/transformers/models/qwen3_5/modeling_qwen3_5.py", line 1815, in forward
+    outputs = self.model(
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/transformers/utils/generic.py", line 907, in wrapper
+    output = func(self, *args, **kwargs)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/transformers/models/qwen3_5/modeling_qwen3_5.py", line 1597, in forward
+    outputs = self.language_model(
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/transformers/utils/generic.py", line 1036, in wrapper
+    output = func(self, *args, **kwargs)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/transformers/utils/output_capturing.py", line 252, in wrapper
+    outputs = func(self, *args, **kwargs)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/transformers/models/qwen3_5/modeling_qwen3_5.py", line 1203, in forward
+    hidden_states = decoder_layer(
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/transformers/modeling_layers.py", line 93, in __call__
+    return super().__call__(*args, **kwargs)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/transformers/models/qwen3_5/modeling_qwen3_5.py", line 784, in forward
+    hidden_states = self.linear_attn(
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/transformers/models/qwen3_5/modeling_qwen3_5.py", line 524, in forward
+    core_attn_out, last_recurrent_state = self.recurrent_gated_delta_rule(
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/fla/ops/gated_delta_rule/fused_recurrent.py", line 454, in fused_recurrent_gated_delta_rule
+    o, final_state = FusedRecurrentFunction.apply(
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/torch/autograd/function.py", line 596, in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/fla/utils/_decorators.py", line 152, in wrapper
+    return fn(*processed_args, **processed_kwargs)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/fla/ops/gated_delta_rule/fused_recurrent.py", line 275, in forward
+    o, final_state = fused_recurrent_gated_delta_rule_fwd(
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/fla/ops/gated_delta_rule/fused_recurrent.py", line 218, in fused_recurrent_gated_delta_rule_fwd
+    fused_recurrent_gated_delta_rule_fwd_kernel[grid](
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/triton/runtime/jit.py", line 370, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+  File "/PHShome/ik832/.local/lib/python3.10/site-packages/triton/runtime/autotuner.py", line 458, in run
+    kwargs[v] = heur({**dict(zip(self.arg_names, args)), **kwargs})
+KeyboardInterrupt
