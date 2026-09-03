@@ -6,14 +6,24 @@ from dataclasses import replace
 
 import pytest
 
+from common.data import Task
 from numerical_agent.evolution.numerical_selector import CandidateDiagnostics
 from numerical_agent.evolution.screening import TaskProfile
 from numerical_agent.evolution.specialist_atlas import (
+    AtlasMaterializedCandidate,
     AtlasPolicy,
+    AtlasTaskCase,
     atlas_feature,
+    fit_atlas_oof,
+    fit_atlas_release,
+    parse_atlas_release,
+    route_atlas_task,
     select_specialist_pool,
 )
-from numerical_agent.evolution.task_local_evolution import TaskLocalTaskRow
+from numerical_agent.evolution.task_local_evolution import (
+    TaskLocalTaskRow,
+    build_group_fold_manifest,
+)
 
 
 def _profile(task_id: str, *, periodic: bool = False) -> TaskProfile:
@@ -178,3 +188,138 @@ def test_specialist_pool_retains_complementary_candidates_not_global_mean_only()
     )
 
     assert selected == ("toto_2_0", "early_specialist", "late_specialist")
+
+
+def _atlas_tasks(count: int = 64) -> tuple[Task, ...]:
+    return tuple(
+        Task(
+            task_id=f"atlas_{index:03d}",
+            history_values=tuple(float(index + offset) for offset in range(8)),
+            future_values=(10.0 + index, 11.0 + index),
+            prediction_length=2,
+            frequency="D",
+            seasonal_period="7",
+            entity_name=f"Atlas entity {index:03d}",
+        )
+        for index in range(count)
+    )
+
+
+def _atlas_rows(tasks: tuple[Task, ...]) -> tuple[TaskLocalTaskRow, ...]:
+    rows: list[TaskLocalTaskRow] = []
+    for task in tasks:
+        anchor_forecast = tuple(value + 2.0 for value in task.future_values)
+        specialist_forecast = tuple(value + 0.2 for value in task.future_values)
+        for name, family, forecast, score in (
+            ("toto_2_0", "tsfm", anchor_forecast, 0.7),
+            ("seasonal_naive", "statistical", specialist_forecast, 0.2),
+        ):
+            rows.append(
+                TaskLocalTaskRow(
+                    task_id=task.task_id,
+                    candidate_name=name,
+                    family=family,
+                    profile=replace(_profile(task.task_id), history_length=8),
+                    history=task.history_values,
+                    truth=task.future_values,
+                    forecast=forecast,
+                    diagnostic=_diagnostic(
+                        name,
+                        family,
+                        forecast,
+                        smae=score,
+                        srmse=score,
+                    ),
+                    split="train",
+                )
+            )
+    return tuple(rows)
+
+
+def test_atlas_release_contains_full_build_and_five_oof_models() -> None:
+    tasks = _atlas_tasks()
+    manifest = build_group_fold_manifest(tasks, seed=20260903)
+
+    release = fit_atlas_release(_atlas_rows(tasks), manifest, AtlasPolicy())
+
+    assert tuple(fold for fold, _model in release.build_fold_models) == (0, 1, 2, 3, 4)
+    assert release.full_build_model.training_task_count == 64
+    assert parse_atlas_release(release.to_payload()) == release
+
+
+def test_atlas_policy_caps_predicted_regret_at_one_quarter() -> None:
+    with pytest.raises(ValueError, match="regret"):
+        AtlasPolicy(maximum_predicted_regret=0.2500000001)
+
+
+def test_atlas_release_rejects_full_build_model_reused_for_oof_folds() -> None:
+    tasks = _atlas_tasks()
+    manifest = build_group_fold_manifest(tasks, seed=20260903)
+    release = fit_atlas_release(_atlas_rows(tasks), manifest, AtlasPolicy())
+
+    with pytest.raises(ValueError, match="held-out"):
+        replace(
+            release,
+            build_fold_models=tuple(
+                (fold, release.full_build_model) for fold in range(5)
+            ),
+        )
+
+
+def test_atlas_oof_route_never_uses_held_out_group_labels() -> None:
+    tasks = _atlas_tasks()
+    manifest = build_group_fold_manifest(tasks, seed=20260903)
+
+    result = fit_atlas_oof(_atlas_rows(tasks), manifest, AtlasPolicy())
+
+    assert len(result.tasks) == 64
+    for task_result in result.tasks:
+        assert task_result.group_sha256 not in task_result.training_group_sha256s
+
+
+def test_atlas_task_185_shape_falls_back_when_predicted_regret_exceeds_quarter() -> (
+    None
+):
+    tasks = _atlas_tasks()
+    rows = _atlas_rows(tasks)
+    manifest = build_group_fold_manifest(tasks, seed=20260903)
+    release = fit_atlas_release(rows, manifest, AtlasPolicy())
+    catastrophic_model = replace(
+        release.full_build_model,
+        records=tuple(
+            replace(record, regret_smae_raw=0.9, regret_srmse_raw=0.8)
+            for record in release.full_build_model.records
+        ),
+    )
+    catastrophic_release = replace(release, full_build_model=catastrophic_model)
+    anchor = next(row for row in rows if row.candidate_name == "toto_2_0")
+    specialist = next(
+        row
+        for row in rows
+        if row.task_id == anchor.task_id and row.candidate_name == "seasonal_naive"
+    )
+    catastrophic_overlay_case = AtlasTaskCase(
+        group_sha256="f" * 64,
+        anchor=AtlasMaterializedCandidate(
+            candidate_name=anchor.candidate_name,
+            family=anchor.family,
+            feature=None,
+            forecast=anchor.forecast,
+        ),
+        candidates=(
+            AtlasMaterializedCandidate(
+                candidate_name=specialist.candidate_name,
+                family=specialist.family,
+                feature=atlas_feature(specialist, anchor),
+                forecast=specialist.forecast,
+            ),
+        ),
+    )
+
+    routed = route_atlas_task(
+        catastrophic_overlay_case, catastrophic_release, fold=None
+    )
+
+    assert routed.activated is False
+    assert routed.forecast == catastrophic_overlay_case.anchor.forecast
+    assert routed.fallback_reason == "predicted_regret_exceeds_limit"
