@@ -19,6 +19,9 @@ from evolving_loop.package_decision_evolution import (
     PackageDecisionEvolutionError,
     package_decision_gate_failures,
 )
+from evolving_loop.package_coordinate_evolution import PackageCoordinateBundle
+from evolving_loop.package_metrics import PackageEvaluation
+from evolving_loop.package_pipeline_evaluator import PackagePipelineEvaluator
 from evolving_loop.package_registry import FrozenNumericalPackageRegistry
 from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
 from evolving_loop.retrieval_agent.schemas import EvidenceCitation
@@ -202,6 +205,81 @@ def test_decision_evaluator_reports_materialized_selection_regret(tmp_path) -> N
     )
     assert evaluation.diagnostics["public_test_accessed"] == 0.0
     assert evaluation.diagnostics["fallback_count"] == 0.0
+
+
+def test_package_decision_evaluator_exposes_shared_package_evaluation(tmp_path) -> None:
+    release = _accepted_release(tmp_path / "releases", "v001", "v000")
+    parent = _bound_policy(release)
+    task, evaluator = _evaluator(tmp_path, parent)
+
+    evaluation = evaluator.evaluate_package(parent, (task,), stage="build")
+
+    assert isinstance(evaluation, PackageEvaluation)
+    assert evaluation.coverage == 1.0
+    assert evaluation.task_rows[0].selected_candidate_id == "safe_anchor"
+    assert evaluation.secondary_diagnostics[
+        "decision_selection_smae_regret"
+    ] == pytest.approx(11.0 / 3.0)
+
+
+def test_pipeline_preserves_round1_when_typed_round2_is_malformed(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    release = _accepted_release(tmp_path / "releases", "v001", "v000")
+    policy = _bound_policy(release)
+    round2_task = _decision_task()
+    registry = _frozen_registry(((round2_task, _safe_default_package()),))
+    skills = RetrievalSkillLibrary(tmp_path / "pipeline-skills.json", persist=False).clone(
+        read_only=True
+    )
+    original_round2 = TwoStageRetrievalAgent.run_round2
+
+    def malformed_round2(self, *args, **kwargs):
+        verified = original_round2(self, *args, **kwargs)
+        return replace(
+            verified,
+            rejected=(*verified.rejected, "invalid_round2_response"),
+        )
+
+    monkeypatch.setattr(TwoStageRetrievalAgent, "run_round2", malformed_round2)
+    retrieval_llm = FakeLLMClient([_round_response(), _round2_response(round2_task)])
+    retrieval = TwoStageRetrievalAgent(retrieval_llm, policy.retrieval_genome, skills)
+    decision = DecisionAgent(
+        FakeLLMClient([_request_specialist(), _decision_response("safe_anchor")]),
+        prompt=policy.decision_prompt,
+    )
+    bundle = PackageCoordinateBundle(
+        generation=0,
+        parent_sha256=None,
+        numerical_manifest_sha256=registry.fingerprint,
+        policy=policy,
+        runtime_fingerprints={
+            "bridge_runtime": "1" * 64,
+            "retrieval_runtime": "2" * 64,
+            "decision_runtime": "3" * 64,
+            "retrieval_verifier": "4" * 64,
+            "metric_policy": "5" * 64,
+        },
+    )
+    pipeline_evaluator = PackagePipelineEvaluator(
+        lambda _policy: retrieval,
+        lambda _policy: decision,
+    )
+    expected_round1_sha256 = (
+        "d5665af50cc5250bbb423546e0e0ef037c257b3dbdda2a3c6cf533331d3d85e3"
+    )
+
+    evaluation = pipeline_evaluator.evaluate(
+        bundle,
+        registry,
+        (round2_task,),
+        stage="screen8",
+    )
+
+    assert evaluation.task_rows[0].fallback_count == 0
+    assert evaluation.task_rows[0].final_retrieval_sha256 == expected_round1_sha256
+    assert len(retrieval_llm.calls) == 2
 
 
 def test_decision_evaluator_rejects_policy_without_accepted_retrieval(

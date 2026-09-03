@@ -11,6 +11,7 @@ from common.llm import FakeLLMClient
 from evolving_loop.data import ContextTask, Document
 from evolving_loop.decision_agent.agent import DecisionAgent
 from evolving_loop.package_retrieval_evolution import PackageRetrievalEvaluator
+from evolving_loop.package_metrics import PackageEvaluation
 from evolving_loop.package_registry import (
     FrozenNumericalPackageRegistry,
     PackageRegistryError,
@@ -424,6 +425,25 @@ def test_package_retrieval_evaluator_scores_final_choice_over_frozen_pool(
     assert evaluation.catastrophic_count == 0
     assert evaluation.promotion_evidence == ()
     assert evaluation.promotion_replays == ()
+
+
+def test_package_retrieval_evaluator_exposes_shared_package_evaluation(
+    tmp_path,
+) -> None:
+    task, genome, library, evaluator, _cache_key = _package_evaluator(tmp_path)
+
+    evaluation = evaluator.evaluate_package(
+        genome,
+        (task,),
+        stage="g0_parent_screen_train",
+        skill_library=library,
+    )
+
+    assert isinstance(evaluation, PackageEvaluation)
+    assert evaluation.candidate_sha256 == genome.fingerprint()
+    assert evaluation.coverage == 1.0
+    assert evaluation.task_rows[0].selected_candidate_id == "specialist"
+    assert evaluation.secondary_diagnostics["retrieval_supporting_recall"] == 1.0
 
 
 @pytest.mark.parametrize(
