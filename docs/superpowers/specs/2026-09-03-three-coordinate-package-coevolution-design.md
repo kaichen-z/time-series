@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-03
 
-**Status:** Draft for user review
+**Status:** Approved by user
 
 **Scope:** Numerical, Retrieval, and Decision co-evolution over the Dr-CiK 80/20 split, followed by one frozen Public-99 regression evaluation
 
