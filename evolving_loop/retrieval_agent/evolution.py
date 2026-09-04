@@ -3024,8 +3024,9 @@ class RetrievalGenomeProposer:
         safe_feedback = self._safe_feedback(feedback)
         if safe_feedback:
             payload["feedback"] = safe_feedback
-        attempts = self.transient_retries + 1
-        for attempt in range(attempts):
+        transient_failures = 0
+        schema_retry_used = False
+        while True:
             try:
                 response = self.mutation_llm.complete(
                     system=system,
@@ -3071,6 +3072,26 @@ class RetrievalGenomeProposer:
                         }
                     )
                 )
+                if not valid and not schema_retry_used:
+                    try:
+                        parsed = RetrievalGenome.from_payload(proposal)
+                    except (RetrievalPolicyError, TypeError, ValueError):
+                        pass
+                    else:
+                        if parsed.parent != parent.version or parsed.version != version:
+                            schema_retry_used = True
+                            payload["previous_response_error"] = {
+                                "code": "invalid_scoped_genome",
+                                "required_parent": parent.version,
+                                "required_version": version,
+                            }
+                            self._event(
+                                "schema_retry",
+                                operation="mutation",
+                                generation=generation,
+                                scope=scope,
+                            )
+                            continue
                 return _RetrievalGenomeProposalSlot(
                     scope=scope,
                     version=version,
@@ -3079,7 +3100,7 @@ class RetrievalGenomeProposer:
                     proposal_sha256=identity,
                 )
             except TransientLLMError:
-                if attempt + 1 >= attempts:
+                if transient_failures >= self.transient_retries:
                     self._event(
                         "transient_exhausted",
                         operation="mutation",
@@ -3089,15 +3110,15 @@ class RetrievalGenomeProposer:
                     )
                     self._checkpoint()
                     raise
+                transient_failures += 1
                 self._event(
                     "transient_retry",
                     operation="mutation",
                     generation=generation,
                     scope=scope,
-                    attempt=attempt + 1,
+                    attempt=transient_failures,
                 )
                 self._checkpoint()
-        raise AssertionError("unreachable mutation retry loop")
 
     def propose(
         self,
