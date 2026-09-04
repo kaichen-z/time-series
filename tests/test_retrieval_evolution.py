@@ -222,6 +222,34 @@ def test_genome_proposer_retries_one_invalid_scoped_response_with_constraints() 
     }
 
 
+def test_genome_proposer_normalizes_host_lineage_after_one_schema_retry() -> None:
+    parent = RetrievalGenome.seed()
+    first = _proposal(parent, "v001", "A")
+    first["parent"] = None
+    second = _proposal(parent, "v001", "A")
+    second["parent"] = parent.to_payload()
+    canonical = {**second, "parent": "v000"}
+    llm = FakeLLMClient([json.dumps(first), json.dumps(second)])
+    proposer = RetrievalGenomeProposer(
+        llm,
+        transient_retries=0,
+        version_origin=parent.version,
+    )
+
+    slot = proposer.propose_slot(
+        parent,
+        scope="A",
+        version="v001",
+        generation=0,
+        feedback={},
+        skill_library=None,
+    )
+
+    assert slot.genome == RetrievalGenome.from_payload(canonical)
+    assert slot.proposal == canonical
+    assert len(llm.calls) == 2
+
+
 @dataclass(frozen=True)
 class _EvaluationCall:
     version: str

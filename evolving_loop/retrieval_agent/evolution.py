@@ -3061,24 +3061,18 @@ class RetrievalGenomeProposer:
                     skill_library=library,
                 )
                 valid = child is not None and child.version == version
-                identity = (
-                    child.fingerprint()
-                    if valid and child is not None
-                    else _digest(
-                        {
-                            "scope": scope,
-                            "version": version,
-                            "proposal": proposal,
-                        }
+                if not valid:
+                    normalized = dict(proposal)
+                    normalized["parent"] = parent.version
+                    normalized["version"] = version
+                    normalized_child = parse_scoped_child(
+                        parent,
+                        normalized,
+                        scope=scope,
+                        skill_library=library,
                     )
-                )
-                if not valid and not schema_retry_used:
-                    try:
-                        parsed = RetrievalGenome.from_payload(proposal)
-                    except (RetrievalPolicyError, TypeError, ValueError):
-                        pass
-                    else:
-                        if parsed.parent != parent.version or parsed.version != version:
+                    if normalized_child is not None:
+                        if not schema_retry_used:
                             schema_retry_used = True
                             payload["previous_response_error"] = {
                                 "code": "invalid_scoped_genome",
@@ -3092,6 +3086,26 @@ class RetrievalGenomeProposer:
                                 scope=scope,
                             )
                             continue
+                        proposal = normalized
+                        child = normalized_child
+                        valid = True
+                        self._event(
+                            "schema_normalized",
+                            operation="mutation",
+                            generation=generation,
+                            scope=scope,
+                        )
+                identity = (
+                    child.fingerprint()
+                    if valid and child is not None
+                    else _digest(
+                        {
+                            "scope": scope,
+                            "version": version,
+                            "proposal": proposal,
+                        }
+                    )
+                )
                 return _RetrievalGenomeProposalSlot(
                     scope=scope,
                     version=version,

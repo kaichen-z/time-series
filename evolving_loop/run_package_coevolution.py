@@ -1307,6 +1307,38 @@ class _InteractionFeedbackManager:
         self.store.write_task_feedback(next_generation, projection)
         return projection
 
+    def finish_cycle_without_retrieval(
+        self,
+        state: PackageCoordinateState,
+        *,
+        generation: int,
+    ) -> TaskEvidenceProjection:
+        if not isinstance(state, PackageCoordinateState) or generation < 0:
+            raise ValueError("interaction feedback cycle boundary is invalid")
+        next_generation = generation + 1
+        projection = self._empty_treatment_projection(state, next_generation)
+        self.store.write_task_feedback(next_generation, projection)
+        return projection
+
+    @staticmethod
+    def _empty_treatment_projection(
+        state: PackageCoordinateState,
+        generation: int,
+    ) -> TaskEvidenceProjection:
+        source = state.bundle.fingerprint()
+        return TaskEvidenceProjection(
+            source_bundle_sha256=source,
+            request_namespace_sha256=_digest(
+                {
+                    "source_bundle_sha256": source,
+                    "generation": generation,
+                    "feedback_mode": "task",
+                    "status": "no_verified_non_seed_retrieval_trace",
+                }
+            ),
+            cases=(),
+        )
+
     def for_numerical(
         self,
         state: PackageCoordinateState,
@@ -1321,7 +1353,11 @@ class _InteractionFeedbackManager:
                 "task feedback artifact belongs to a different Parent bundle"
             )
         if self.feedback_mode == "task" and not projection.cases:
-            raise PackageArtifactError("task feedback treatment projection is empty")
+            expected = self._empty_treatment_projection(state, generation)
+            if projection != expected:
+                raise PackageArtifactError(
+                    "task feedback treatment projection is unexpectedly empty"
+                )
         if self.feedback_mode == "none" and projection.cases:
             raise PackageArtifactError("task feedback control projection is not empty")
         return projection
@@ -1360,6 +1396,14 @@ class _CheckpointingPhase:
             self.target == "retrieval"
             and not selected.bundle.policy.has_accepted_retrieval_release
         ):
+            if (
+                actual == 1
+                and isinstance(feedback_manager, _InteractionFeedbackManager)
+            ):
+                feedback_manager.finish_cycle_without_retrieval(
+                    selected,
+                    generation=actual + 1,
+                )
             self.recorder.record(
                 _skip_step(
                     actual + 1,
