@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import evolving_loop.run_package_coevolution as run_module
 from common.data import Task as DataTask
 from common.evolution_core.task_feedback import TaskEvidenceProjection
 from common.llm import FakeLLMClient
@@ -337,6 +338,15 @@ def test_interaction_feedback_reports_unavailable_retrieval_as_typed_cases(
     assert case.stance == "uncertain"
     assert case.target_match == "unmatched"
     assert case.decision_action == "unresolved"
+
+
+def test_smoke_acceptance_uses_artifact_store_digest_contract(tmp_path) -> None:
+    store = PackageArtifactStore(tmp_path / "artifacts")
+    payload = {"schema_version": 1, "formal_run": False}
+
+    evidence_sha256 = run_module._record_smoke_acceptance(store, payload)
+
+    assert store.contains_evidence(evidence_sha256)
 
 
 def test_skipped_cycle1_decision_persists_explicit_empty_treatment_feedback(
