@@ -1,10 +1,12 @@
 """Immutable caches, append-only trace artifacts, and exact resume."""
+
 from __future__ import annotations
 
 import json
 
 import pytest
 
+from common.evolution_core.task_feedback import TaskEvidenceProjection
 from evolving_loop.package_artifacts import (
     PackageArtifactError,
     PackageArtifactStore,
@@ -13,6 +15,7 @@ from evolving_loop.package_artifacts import (
     PackageCheckpoint,
     PackageInferenceCache,
 )
+from tests.test_task_evidence_feedback import _case
 
 
 _RUN = "a" * 64
@@ -59,7 +62,9 @@ def _checkpoint(
     current_payload = (
         current
         if current is not None
-        else (steps[-1]["accepted_bundle_payload"] if steps else _bundle_payload("seed"))
+        else (
+            steps[-1]["accepted_bundle_payload"] if steps else _bundle_payload("seed")
+        )
     )
     return PackageCheckpoint(
         schema_version=1,
@@ -72,6 +77,45 @@ def _checkpoint(
         cache_fingerprints=(),
         consumed_stages=tuple(consumed_stages),
     )
+
+
+def _task_projection() -> TaskEvidenceProjection:
+    return TaskEvidenceProjection(
+        source_bundle_sha256="a" * 64,
+        request_namespace_sha256="b" * 64,
+        cases=(_case(),),
+    )
+
+
+def test_task_feedback_artifact_round_trips_and_binds_projection_bytes(
+    tmp_path,
+) -> None:
+    store = PackageArtifactStore(tmp_path)
+    projection = _task_projection()
+
+    store.write_task_feedback(3, projection)
+    restored = store.load_task_feedback(3)
+
+    assert restored == projection
+    assert restored.fingerprint == projection.fingerprint
+
+
+def test_interaction_completion_distinguishes_incomplete_chain(tmp_path) -> None:
+    store = PackageArtifactStore(tmp_path)
+
+    store.complete(
+        {"schema_version": 2},
+        accepted_steps=1,
+        rejected_steps=2,
+        formal_run=False,
+        full_chain_exercised=False,
+    )
+
+    completion = json.loads(
+        (tmp_path / "evaluation_complete.json").read_text(encoding="utf-8")
+    )
+    assert completion["status"] == "incomplete_chain"
+    assert completion["full_chain_exercised"] is False
 
 
 # --------------------------------------------------------------------------
@@ -122,9 +166,13 @@ def test_resume_rejects_schedule_or_bundle_drift(tmp_path) -> None:
     store = PackageArtifactStore(tmp_path)
     store.write_checkpoint(_checkpoint())
     with pytest.raises(PackageArtifactError, match="schedule"):
-        store.load_checkpoint(expected_run_sha256=_RUN, expected_schedule_sha256="e" * 64)
+        store.load_checkpoint(
+            expected_run_sha256=_RUN, expected_schedule_sha256="e" * 64
+        )
     with pytest.raises(PackageArtifactError, match="run identity"):
-        store.load_checkpoint(expected_run_sha256="e" * 64, expected_schedule_sha256=_SCHEDULE)
+        store.load_checkpoint(
+            expected_run_sha256="e" * 64, expected_schedule_sha256=_SCHEDULE
+        )
 
 
 def test_consumed_dev_stage_cannot_be_evaluated_twice(tmp_path) -> None:
@@ -189,4 +237,8 @@ def test_store_is_a_durable_stage_artifact_sink(tmp_path) -> None:
     store.record_acceptance_evidence(evidence_sha, payload)
     assert store.contains_evidence(evidence_sha) is True
     store.record_candidate_evidence("numerical", 0, "f" * 64, {"slot": 0})
-    assert (tmp_path / "candidate_evidence" / "numerical-0-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff.json").exists()
+    assert (
+        tmp_path
+        / "candidate_evidence"
+        / "numerical-0-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff.json"
+    ).exists()

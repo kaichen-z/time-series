@@ -88,6 +88,21 @@ def test_projection_rejects_duplicate_case_identity() -> None:
         )
 
 
+def test_projection_identity_payload_round_trips_exact_bytes() -> None:
+    projection = TaskEvidenceProjection(
+        source_bundle_sha256="a" * 64,
+        request_namespace_sha256="b" * 64,
+        cases=(_case(),),
+    )
+
+    restored = TaskEvidenceProjection.from_identity_payload(
+        projection.to_identity_payload()
+    )
+
+    assert restored == projection
+    assert restored.fingerprint == projection.fingerprint
+
+
 def test_case_requires_closed_morphology_and_feedback_enums() -> None:
     with pytest.raises(TaskFeedbackError, match="trend"):
         replace(_morphology(), trend="possibly_up")

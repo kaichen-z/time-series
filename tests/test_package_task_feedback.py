@@ -45,7 +45,9 @@ def _verified_state_and_result(tmp_path):
     return task, state, result
 
 
-def test_ledger_projects_verified_train_trace_without_task_or_document_ids(tmp_path) -> None:
+def test_ledger_projects_verified_train_trace_without_task_or_document_ids(
+    tmp_path,
+) -> None:
     task, state, result = _verified_state_and_result(tmp_path)
     ledger = PackageTaskFeedbackLedger({task.numeric.task_id: "train"})
 
@@ -77,7 +79,9 @@ def test_ledger_projects_verified_train_trace_without_task_or_document_ids(tmp_p
             item["evidence_chain_sha256"],
         )
     }
-    assert all(document.document_id not in payload_strings for document in task.documents)
+    assert all(
+        document.document_id not in payload_strings for document in task.documents
+    )
 
 
 def test_ledger_rejects_public_membership_and_cross_bundle_replay(tmp_path) -> None:
@@ -95,7 +99,9 @@ def test_ledger_rejects_public_membership_and_cross_bundle_replay(tmp_path) -> N
         ledger.build_projection(changed, (task.numeric.task_id,), generation=3)
 
 
-def test_pipeline_evaluator_captures_only_successful_verified_inference(tmp_path) -> None:
+def test_pipeline_evaluator_captures_only_successful_verified_inference(
+    tmp_path,
+) -> None:
     task, state, _result = _verified_state_and_result(tmp_path)
     ledger = PackageTaskFeedbackLedger({task.numeric.task_id: "dev"})
     skills = RetrievalSkillLibrary(tmp_path / "pipeline-skills.json", persist=False)
@@ -128,3 +134,15 @@ def test_pipeline_evaluator_captures_only_successful_verified_inference(tmp_path
 
     assert evaluation.coverage == 1.0
     assert len(projection.cases) == 1
+
+
+def test_ledger_does_not_disguise_fallback_inference_as_empty_evidence(
+    tmp_path,
+) -> None:
+    task, state, result = _verified_state_and_result(tmp_path)
+    ledger = PackageTaskFeedbackLedger({task.numeric.task_id: "train"})
+
+    ledger.record(state.bundle, task, replace(result, fallback_reason="invalid_round2"))
+
+    with pytest.raises(TaskFeedbackError, match="missing"):
+        ledger.build_projection(state.bundle, (task.numeric.task_id,), generation=3)

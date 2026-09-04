@@ -1,4 +1,5 @@
 """Run package-native Numerical, Retrieval, and Decision co-evolution."""
+
 from __future__ import annotations
 
 import argparse
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import cast
 
 from common.evolution_core.contracts import METRIC_POLICY_FINGERPRINT
+from common.evolution_core.task_feedback import TaskEvidenceProjection
 from common.llm import CodexCLIClient, CodexCLIConfig
 from common.payload import canonical_json_bytes, read_json_object
 from evolving_loop.co_evolution import (
@@ -77,6 +79,7 @@ from evolving_loop.package_stage_runner import (
     PackageStageEvidence,
     PackageStageSchedule,
 )
+from evolving_loop.package_task_feedback import PackageTaskFeedbackLedger
 from evolving_loop.retrieval_agent.evolution import (
     CHILD_SCOPES,
     RetrievalCandidateProposer,
@@ -207,9 +210,7 @@ class PackageCacheBackedEvaluator:
     ) -> PackageCacheKey:
         return PackageCacheKey(
             layer="decision",
-            task_sha256=_digest(
-                [task_registry_fingerprint(task) for task in tasks]
-            ),
+            task_sha256=_digest([task_registry_fingerprint(task) for task in tasks]),
             candidate_sha256=bundle.fingerprint(),
             dependency_fingerprints={
                 **self.runtime_fingerprints,
@@ -301,14 +302,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=20260903)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--interaction-smoke", action="store_true")
+    parser.add_argument("--feedback-mode", choices=("none", "task"), default="none")
     _add_tsfm_runtime_options(parser)
     return parser
 
 
-def _validated_split(path: str | Path) -> tuple[dict[str, object], tuple[str, ...], tuple[str, ...]]:
+def _validated_split(
+    path: str | Path,
+) -> tuple[dict[str, object], tuple[str, ...], tuple[str, ...]]:
     payload = read_json_object(path)
     claimed = payload.get("manifest_sha256")
-    unsigned = {key: value for key, value in payload.items() if key != "manifest_sha256"}
+    unsigned = {
+        key: value for key, value in payload.items() if key != "manifest_sha256"
+    }
     if claimed != _split_digest(unsigned):
         raise ValueError("split manifest digest mismatch")
     try:
@@ -319,7 +326,9 @@ def _validated_split(path: str | Path) -> tuple[dict[str, object], tuple[str, ..
         dev = tuple(partitions["dev"]["task_ids"])
         public = tuple(partitions["public_test"]["task_ids"])
     except (KeyError, TypeError) as error:
-        raise ValueError("split manifest is missing Train/Dev/Public membership") from error
+        raise ValueError(
+            "split manifest is missing Train/Dev/Public membership"
+        ) from error
     if target_sizes != _FORMAL_COUNTS or actual_sizes != _FORMAL_COUNTS:
         raise ValueError("split manifest must register exactly 80/20/99 tasks")
     memberships = (train, dev, public)
@@ -349,13 +358,21 @@ def _validated_split(path: str | Path) -> tuple[dict[str, object], tuple[str, ..
 
 
 def _validate_mode(args: argparse.Namespace) -> None:
-    expected = (1, 1) if args.smoke else (2, 3)
+    if args.smoke and args.interaction_smoke:
+        raise ValueError("smoke modes are mutually exclusive")
+    expected = (2, 1) if args.interaction_smoke else (1, 1) if args.smoke else (2, 3)
     if (args.cycles, args.children_per_coordinate) != expected:
-        label = "non-formal smoke" if args.smoke else "formal"
+        label = (
+            "interaction smoke"
+            if args.interaction_smoke
+            else "non-formal smoke" if args.smoke else "formal"
+        )
         raise ValueError(
             f"{label} evolution requires cycles={expected[0]} and "
             f"children-per-coordinate={expected[1]}"
         )
+    if args.feedback_mode != "none" and not args.interaction_smoke:
+        raise ValueError("task feedback is available only in interaction smoke")
     if args.seed != _FORMAL_SEED:
         raise ValueError(f"package evolution seed must be {_FORMAL_SEED}")
     for name in ("tasks_file", "forecast_store"):
@@ -376,6 +393,8 @@ def _configuration_identity(args: argparse.Namespace) -> str:
             "children_per_coordinate": args.children_per_coordinate,
             "seed": args.seed,
             "smoke": args.smoke,
+            "interaction_smoke": args.interaction_smoke,
+            "feedback_mode": args.feedback_mode,
             "forecast_runtime": _forecast_runtime_identity(args),
         }
     )
@@ -398,7 +417,10 @@ def _early_resume_guard(args: argparse.Namespace) -> bool:
     if not completion_path.exists():
         return False
     completion = read_json_object(completion_path)
-    if completion.get("status") != "complete" or not (output / "final_bundle.json").is_file():
+    if (
+        completion.get("status") not in {"complete", "incomplete_chain"}
+        or not (output / "final_bundle.json").is_file()
+    ):
         raise PackageArtifactError("resume completion marker is malformed")
     return True
 
@@ -488,7 +510,9 @@ def _runtime_fingerprints(
         ),
         "retrieval_runtime": _digest(
             {
-                "implementation": _file_sha256(root / "retrieval_agent" / "two_stage_agent.py"),
+                "implementation": _file_sha256(
+                    root / "retrieval_agent" / "two_stage_agent.py"
+                ),
                 "seed_release": seed_release.manifest_file_sha256,
             }
         ),
@@ -502,7 +526,10 @@ def _runtime_fingerprints(
         "metric_policy": METRIC_POLICY_FINGERPRINT,
         "model_runtime": _digest(model),
         "llm_runtime": _digest(
-            {**model, "client": _file_sha256(Path(__file__).parents[1] / "common" / "llm.py")}
+            {
+                **model,
+                "client": _file_sha256(Path(__file__).parents[1] / "common" / "llm.py"),
+            }
         ),
     }
 
@@ -538,7 +565,8 @@ def _initial_supply_release(
                     assumption.assumption_id for assumption in policy.recipe.assumptions
                 ),
                 failure_conditions=tuple(
-                    assumption.failure_condition for assumption in policy.recipe.assumptions
+                    assumption.failure_condition
+                    for assumption in policy.recipe.assumptions
                 ),
             )
         )
@@ -558,7 +586,8 @@ def _initial_supply_release(
                     assumption.assumption_id for assumption in policy.recipe.assumptions
                 ),
                 failure_conditions=tuple(
-                    assumption.failure_condition for assumption in policy.recipe.assumptions
+                    assumption.failure_condition
+                    for assumption in policy.recipe.assumptions
                 ),
             )
         )
@@ -726,10 +755,9 @@ class _SmokeRetrievalProposer:
                     changelog="Non-formal smoke Retrieval Child.",
                 )
                 state = parent.with_policy(policy, target="retrieval")
-                if (
-                    retrieval_behavior_fingerprint(slot.genome)
-                    == retrieval_behavior_fingerprint(parent_genome)
-                ):
+                if retrieval_behavior_fingerprint(
+                    slot.genome
+                ) == retrieval_behavior_fingerprint(parent_genome):
                     reason = "duplicate_child"
                     state = parent
             except Exception:
@@ -812,7 +840,6 @@ class _SmokeNumericalProposer:
         generation: int,
         child_count: int,
     ) -> tuple[PackageCandidate, ...]:
-        del feedback
         if child_count != 1:
             raise ValueError("smoke Numerical proposes exactly one Child")
         release = parse_numerical_supply_release(
@@ -821,7 +848,9 @@ class _SmokeNumericalProposer:
         anchor = parse_champion_release(
             cast(dict[str, object], release.to_payload()["anchor_release_payload"])
         )
-        raw_identity = _digest({"parent": release.fingerprint, "generation": generation})
+        raw_identity = _digest(
+            {"parent": release.fingerprint, "generation": generation}
+        )
         state = parent
         reason: str | None = "materialization_failed"
         try:
@@ -829,6 +858,7 @@ class _SmokeNumericalProposer:
                 anchor,
                 ProposerEvidence("adaptive_train_build_diagnostic", False, (), ()),
                 generation=generation + 1,
+                task_evidence=feedback.task_evidence,
             )
             reviewed = {row.candidate_name for row in self.build_rows}
             recipe = next(
@@ -911,6 +941,50 @@ class _SmokeNumericalProposer:
         return (PackageCandidate(0, "numerical", state, identity, reason),)
 
 
+_INTERACTION_INTEGRITY_FAILURES = frozenset(
+    {
+        "task_coverage",
+        "invalid_count",
+        "catastrophic_count",
+        "clipped_count",
+        "fallback_count",
+        "public_test_accessed",
+    }
+)
+
+
+def _interaction_smoke_gate_failures(
+    target: str, failures: Sequence[str]
+) -> tuple[str, ...]:
+    """Retrieval smoke publication needs integrity, not forecast gain."""
+    resolved = tuple(failures)
+    if target != "retrieval":
+        return resolved
+    return tuple(item for item in resolved if item in _INTERACTION_INTEGRITY_FAILURES)
+
+
+def _interaction_smoke_is_complete(
+    steps: Sequence[Mapping[str, object]],
+    feedback_mode: str,
+    projection: TaskEvidenceProjection | None,
+) -> bool:
+    expected_targets = ("numerical", "retrieval", "decision") * 2
+    resolved = tuple(steps)
+    if (
+        len(resolved) != 6
+        or tuple(item.get("generation") for item in resolved) != tuple(range(6))
+        or tuple(item.get("target") for item in resolved) != expected_targets
+        or any(item.get("public_test_accessed") is not False for item in resolved)
+        or any(
+            str(item.get("reason", "")).startswith("Decision phase requires")
+            for item in resolved
+        )
+        or projection is None
+    ):
+        return False
+    return bool(projection.cases) if feedback_mode == "task" else not projection.cases
+
+
 class _SmokeCoordinatePhaseRunner:
     """One-Child non-formal runner; formal three-Child validation stays untouched."""
 
@@ -924,6 +998,7 @@ class _SmokeCoordinatePhaseRunner:
         artifact_store: PackageArtifactStore,
         *,
         retrieval_publisher: _RetrievalPublisher | None = None,
+        feedback_manager: _InteractionFeedbackManager | None = None,
     ) -> None:
         self.target = cast(str, target)
         self.proposer = proposer
@@ -932,6 +1007,7 @@ class _SmokeCoordinatePhaseRunner:
         self.task_map = dict(task_map)
         self.artifact_store = artifact_store
         self.retrieval_publisher = retrieval_publisher
+        self.feedback_manager = feedback_manager
         self.gate_config = PackageGateConfig()
 
     def _evaluate(
@@ -953,6 +1029,11 @@ class _SmokeCoordinatePhaseRunner:
         generation: int,
     ) -> PackageCoordinatePhaseOutcome:
         parent_screen = self._evaluate(parent, "screen8")
+        task_evidence = (
+            self.feedback_manager.for_numerical(parent, generation=generation)
+            if self.target == "numerical" and self.feedback_manager is not None
+            else None
+        )
         feedback = PackageProposalFeedback.from_evaluations(
             parent=parent_screen,
             gate_names=(
@@ -960,6 +1041,7 @@ class _SmokeCoordinatePhaseRunner:
                 "maximum_task_joint_regret",
                 "p95_srmse",
             ),
+            task_evidence=task_evidence,
         )
         candidates = tuple(
             self.proposer.propose(
@@ -1022,7 +1104,12 @@ class _SmokeCoordinatePhaseRunner:
             )
             evidence.append(record)
             self.artifact_store.record_stage_evidence(record)
-            if failures:
+            blocking_failures = (
+                _interaction_smoke_gate_failures(self.target, failures)
+                if self.feedback_manager is not None
+                else failures
+            )
+            if blocking_failures:
                 return PackageCoordinatePhaseOutcome(
                     target=cast(str, self.target),
                     parent=parent,
@@ -1035,6 +1122,12 @@ class _SmokeCoordinatePhaseRunner:
                 )
             finalist_evaluation = child_evaluation
         assert finalist_evaluation is not None
+        if self.target == "retrieval" and self.feedback_manager is not None:
+            self.feedback_manager.ledger.build_projection(
+                candidate.state.bundle,
+                self.feedback_manager.task_ids,
+                generation=generation + 1,
+            )
         selected = candidate.state
         if self.target == "retrieval":
             if self.retrieval_publisher is None:
@@ -1135,7 +1228,9 @@ class _CheckpointRecorder:
         if step.generation < len(self.steps):
             return
         if step.generation != len(self.steps):
-            raise PackageArtifactError("checkpoint coordinate generation is not contiguous")
+            raise PackageArtifactError(
+                "checkpoint coordinate generation is not contiguous"
+            )
         payload = _step_payload(step, accepted)
         self.store.append_coordinate_step(payload)
         if step.accepted:
@@ -1157,8 +1252,85 @@ class _CheckpointRecorder:
         )
 
 
+class _InteractionFeedbackManager:
+    """Persist one cycle's projection and replay it at the next Numerical step."""
+
+    def __init__(
+        self,
+        ledger: PackageTaskFeedbackLedger,
+        task_ids: Sequence[str],
+        store: PackageArtifactStore,
+        *,
+        feedback_mode: str,
+    ) -> None:
+        if type(ledger) is not PackageTaskFeedbackLedger:
+            raise ValueError("interaction feedback requires an exact ledger")
+        resolved = tuple(task_ids)
+        if not resolved or len(resolved) != len(set(resolved)):
+            raise ValueError("interaction feedback requires unique task membership")
+        if not isinstance(store, PackageArtifactStore):
+            raise ValueError("interaction feedback requires an artifact store")
+        if feedback_mode not in {"none", "task"}:
+            raise ValueError("interaction feedback mode is invalid")
+        self.ledger = ledger
+        self.task_ids = resolved
+        self.store = store
+        self.feedback_mode = feedback_mode
+
+    def finish_cycle(
+        self,
+        state: PackageCoordinateState,
+        *,
+        generation: int,
+    ) -> TaskEvidenceProjection:
+        if not isinstance(state, PackageCoordinateState) or generation < 0:
+            raise ValueError("interaction feedback cycle boundary is invalid")
+        next_generation = generation + 1
+        if self.feedback_mode == "task":
+            projection = self.ledger.build_projection(
+                state.bundle,
+                self.task_ids,
+                generation=next_generation,
+            )
+        else:
+            projection = TaskEvidenceProjection(
+                source_bundle_sha256=state.bundle.fingerprint(),
+                request_namespace_sha256=_digest(
+                    {
+                        "source_bundle_sha256": state.bundle.fingerprint(),
+                        "generation": next_generation,
+                        "feedback_mode": "none",
+                    }
+                ),
+                cases=(),
+            )
+        self.store.write_task_feedback(next_generation, projection)
+        return projection
+
+    def for_numerical(
+        self,
+        state: PackageCoordinateState,
+        *,
+        generation: int,
+    ) -> TaskEvidenceProjection | None:
+        if generation < 3:
+            return None
+        projection = self.store.load_task_feedback(generation)
+        if projection.source_bundle_sha256 != state.bundle.fingerprint():
+            raise PackageArtifactError(
+                "task feedback artifact belongs to a different Parent bundle"
+            )
+        if self.feedback_mode == "task" and not projection.cases:
+            raise PackageArtifactError("task feedback treatment projection is empty")
+        if self.feedback_mode == "none" and projection.cases:
+            raise PackageArtifactError("task feedback control projection is not empty")
+        return projection
+
+
 class _CheckpointingPhase:
-    def __init__(self, phase: object, recorder: _CheckpointRecorder, *, offset: int) -> None:
+    def __init__(
+        self, phase: object, recorder: _CheckpointRecorder, *, offset: int
+    ) -> None:
         self.phase = phase
         self.recorder = recorder
         self.offset = offset
@@ -1177,6 +1349,13 @@ class _CheckpointingPhase:
             actual, self.target, parent, outcome
         )
         self.recorder.record(step, selected)
+        feedback_manager = getattr(self.phase, "feedback_manager", None)
+        if (
+            self.target == "decision"
+            and actual == 2
+            and isinstance(feedback_manager, _InteractionFeedbackManager)
+        ):
+            feedback_manager.finish_cycle(selected, generation=actual)
         if (
             self.target == "retrieval"
             and not selected.bundle.policy.has_accepted_retrieval_release
@@ -1188,7 +1367,7 @@ class _CheckpointingPhase:
                     "Decision phase requires a non-v000 accepted Retrieval release",
                 ),
                 selected,
-        )
+            )
         return outcome
 
 
@@ -1229,9 +1408,7 @@ def _run_controller(
     recorder: _CheckpointRecorder,
 ) -> PackageCoordinateState:
     wrapped = tuple(
-        None
-        if phase is None
-        else _CheckpointingPhase(phase, recorder, offset=offset)
+        None if phase is None else _CheckpointingPhase(phase, recorder, offset=offset)
         for phase in phases
     )
     controller = PackageCoordinateController(
@@ -1261,14 +1438,16 @@ def _run_manifest_core(
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
-        "formal_run": not args.smoke,
+        "formal_run": not (args.smoke or args.interaction_smoke),
+        "interaction_smoke": args.interaction_smoke,
+        "feedback_mode": args.feedback_mode,
         "configuration_sha256": _configuration_identity(args),
         "split_manifest_sha256": split_manifest["manifest_sha256"],
         "train_task_ids_sha256": _digest([task.numeric.task_id for task in train]),
         "dev_task_ids_sha256": _digest([task.numeric.task_id for task in dev]),
         "counts": (
             {"train": 80, "build": 64, "calibration": 16, "dev": 20}
-            if not args.smoke
+            if not (args.smoke or args.interaction_smoke)
             else {"train": 80, "build": 8, "calibration": 2, "dev": 2}
         ),
         "schedule_sha256": schedule.fingerprint,
@@ -1376,8 +1555,22 @@ def _build_phases(
     def decision_factory(policy: HarnessPolicy) -> DecisionAgent:
         return DecisionAgent(llm, None, prompt=policy.decision_prompt)
 
+    feedback_ledger = (
+        PackageTaskFeedbackLedger(
+            {
+                task.numeric.task_id: ("train" if index < 80 else "dev")
+                for index, task in enumerate(tasks)
+            }
+        )
+        if args.interaction_smoke
+        else None
+    )
     cached = PackageCacheBackedEvaluator(
-        PackagePipelineEvaluator(retrieval_factory, decision_factory),
+        PackagePipelineEvaluator(
+            retrieval_factory,
+            decision_factory,
+            task_feedback_ledger=feedback_ledger,
+        ),
         Path(args.authority_dir) / "package-inference-cache",
         runtime_fingerprints=runtime_fingerprints,
     )
@@ -1432,11 +1625,25 @@ def _build_phases(
         task_map,
         split_sha256=split_sha256,
         runtime_fingerprints=runtime_fingerprints,
-        train_count=(8 if args.smoke else 80),
-        dev_count=(2 if args.smoke else 20),
+        train_count=(8 if args.smoke or args.interaction_smoke else 80),
+        dev_count=(2 if args.smoke or args.interaction_smoke else 20),
     )
-    if args.smoke:
+    if args.smoke or args.interaction_smoke:
         assert isinstance(schedule, _SmokeSchedule)
+        feedback_manager = (
+            _InteractionFeedbackManager(
+                cast(PackageTaskFeedbackLedger, feedback_ledger),
+                (
+                    *schedule.build8_ids,
+                    *schedule.calibration2_ids,
+                    *schedule.dev2_ids,
+                ),
+                artifact_store,
+                feedback_mode=args.feedback_mode,
+            )
+            if args.interaction_smoke
+            else None
+        )
         proposers = (
             _SmokeNumericalProposer(
                 champion_proposer,
@@ -1457,6 +1664,7 @@ def _build_phases(
                 task_map,
                 artifact_store,
                 retrieval_publisher=(publisher if target == "retrieval" else None),
+                feedback_manager=feedback_manager,
             )
             for target, proposer in zip(
                 ("numerical", "retrieval", "decision"), proposers, strict=True
@@ -1507,16 +1715,17 @@ def _resume_controller(
     maximum = args.cycles * 3
     if completed >= maximum:
         return current
-    if completed and completed % 3 == 0 and not any(
-        bool(step["accepted"]) for step in recorder.steps[-3:]
+    if (
+        completed
+        and completed % 3 == 0
+        and not any(bool(step["accepted"]) for step in recorder.steps[-3:])
     ):
         return current
     cycle = completed // 3
     position = completed % 3
     if position:
         partial = tuple(
-            None if index < position else phase
-            for index, phase in enumerate(phases)
+            None if index < position else phase for index, phase in enumerate(phases)
         )
         current = _run_controller(
             cast(tuple[object | None, object | None, object | None], partial),
@@ -1542,8 +1751,6 @@ def _resume_controller(
     return current
 
 
-
-
 def _execute_run(
     args: argparse.Namespace,
     split_manifest: Mapping[str, object],
@@ -1561,9 +1768,7 @@ def _execute_run(
         raise ValueError("package evolution prerequisite path is missing")
     _clean_git_source(repo)
     source_files = _source_files(repo)
-    source_fingerprints = {
-        name: _file_sha256(path) for name, path in source_files
-    }
+    source_fingerprints = {name: _file_sha256(path) for name, path in source_files}
     champion = parse_champion_release(read_json_object(champion_path))
     if "toto_2_0" not in {
         champion.policy.recipe.fallback_parent,
@@ -1612,7 +1817,7 @@ def _execute_run(
     )
     schedule: PackageStageSchedule | _SmokeSchedule = (
         _SmokeSchedule.build(formal_schedule, task_map)
-        if args.smoke
+        if args.smoke or args.interaction_smoke
         else formal_schedule
     )
 
@@ -1662,8 +1867,10 @@ def _execute_run(
             if args.atlas_release:
                 atlas = parse_atlas_release(read_json_object(args.atlas_release))
             else:
-                if args.smoke:
-                    raise ValueError("Atlas requires the formal 64-task Build authority")
+                if args.smoke or args.interaction_smoke:
+                    raise ValueError(
+                        "Atlas requires the formal 64-task Build authority"
+                    )
                 atlas_rows = _materialize_atlas_rows(
                     store,
                     tuple(task.numeric for task in build_tasks),
@@ -1702,7 +1909,7 @@ def _execute_run(
                 "model_runtime": runtime_fingerprints["model_runtime"],
             },
             combined_policies=portfolio.combined,
-            atlas_release=atlas if not args.smoke else None,
+            atlas_release=atlas if not (args.smoke or args.interaction_smoke) else None,
             decision_policy=DecisionPolicy(),
             hindcast_config=HindcastConfig(),
         )
@@ -1717,7 +1924,7 @@ def _execute_run(
                 "forecast_store": store.identity_hash,
                 "model_runtime": runtime_fingerprints["model_runtime"],
             },
-            atlas=atlas if not args.smoke else None,
+            atlas=atlas if not (args.smoke or args.interaction_smoke) else None,
         )
         registry = _build_registry(tasks, supply, materializer)
         seed_policy = replace(
@@ -1803,11 +2010,23 @@ def _execute_run(
             recorder=recorder,
         )
         accepted_steps = sum(bool(step["accepted"]) for step in recorder.steps)
+        full_chain_exercised: bool | None = None
+        if args.interaction_smoke:
+            try:
+                cycle_feedback = artifact_store.load_task_feedback(3)
+            except PackageArtifactError:
+                cycle_feedback = None
+            full_chain_exercised = _interaction_smoke_is_complete(
+                recorder.steps,
+                args.feedback_mode,
+                cycle_feedback,
+            )
         artifact_store.complete(
             current.bundle.to_payload(),
             accepted_steps=accepted_steps,
             rejected_steps=len(recorder.steps) - accepted_steps,
-            formal_run=not args.smoke,
+            formal_run=not (args.smoke or args.interaction_smoke),
+            full_chain_exercised=full_chain_exercised,
         )
         return 0
     finally:

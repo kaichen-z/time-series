@@ -1,4 +1,5 @@
 """Immutable caches, append-only trace artifacts, and exact resume."""
+
 from __future__ import annotations
 
 import hashlib
@@ -10,6 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from common.evolution_core.task_feedback import (
+    TaskEvidenceProjection,
+    TaskFeedbackError,
+)
 from evolving_loop.package_stage_runner import PackageStageEvidence
 
 
@@ -42,7 +47,11 @@ def _is_sha256(value: object) -> bool:
 
 def _canonical_json(value: object) -> bytes:
     return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
     ).encode("utf-8")
 
 
@@ -100,7 +109,9 @@ class PackageCacheKey:
             not isinstance(name, str) or not name or not _is_sha256(value)
             for name, value in dependencies.items()
         ):
-            raise PackageArtifactError("cache key dependency fingerprints must be canonical")
+            raise PackageArtifactError(
+                "cache key dependency fingerprints must be canonical"
+            )
         object.__setattr__(
             self,
             "dependency_fingerprints",
@@ -146,12 +157,15 @@ class PackageInferenceCache:
             envelope = json.loads(path.read_text("utf-8"))
             if (
                 envelope.get("key_sha256") == key.fingerprint
-                and _canonical_json(envelope.get("key")) == _canonical_json(key.to_payload())
+                and _canonical_json(envelope.get("key"))
+                == _canonical_json(key.to_payload())
                 and envelope.get("value_sha256")
                 == hashlib.sha256(_canonical_json(envelope.get("value"))).hexdigest()
             ):
                 return envelope["value"]
-            raise PackageArtifactError("cache entry does not bind its canonical key/value")
+            raise PackageArtifactError(
+                "cache entry does not bind its canonical key/value"
+            )
         if self.cache_only:
             raise PackageCacheMissError(
                 f"cache-only inference has no entry for {key.layer} {key.fingerprint[:12]}"
@@ -189,13 +203,17 @@ class PackageCheckpoint:
         if self.schema_version != 1:
             raise PackageArtifactError("package checkpoint schema must be exactly one")
         if not _is_sha256(self.run_sha256) or not _is_sha256(self.schedule_sha256):
-            raise PackageArtifactError("checkpoint identities must be canonical SHA-256")
+            raise PackageArtifactError(
+                "checkpoint identities must be canonical SHA-256"
+            )
         if not isinstance(self.initial_bundle_payload, Mapping) or not isinstance(
             self.current_bundle_payload, Mapping
         ):
             raise PackageArtifactError("checkpoint bundle payloads must be mappings")
         object.__setattr__(self, "completed_steps", tuple(self.completed_steps))
-        object.__setattr__(self, "candidate_fingerprints", tuple(self.candidate_fingerprints))
+        object.__setattr__(
+            self, "candidate_fingerprints", tuple(self.candidate_fingerprints)
+        )
         object.__setattr__(self, "cache_fingerprints", tuple(self.cache_fingerprints))
         object.__setattr__(self, "consumed_stages", tuple(self.consumed_stages))
         if any(stage not in _STAGE_ORDER for stage in self.consumed_stages):
@@ -265,6 +283,7 @@ class PackageArtifactStore:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         (self.output_dir / "candidate_evidence").mkdir(exist_ok=True)
         (self.output_dir / "accepted_bundles").mkdir(exist_ok=True)
+        (self.output_dir / "task_feedback").mkdir(exist_ok=True)
         self._stage_claims: dict[str, dict[str, object]] = {}
         claims_path = self.output_dir / "stage_claims.json"
         if claims_path.exists():
@@ -273,10 +292,15 @@ class PackageArtifactStore:
     # -- write-once run identity ----------------------------------------
 
     def write_run_manifest(self, manifest: Mapping[str, object]) -> None:
-        _write_once(self.output_dir / "run_manifest.json", _canonical_json(dict(manifest)))
+        _write_once(
+            self.output_dir / "run_manifest.json", _canonical_json(dict(manifest))
+        )
 
     def write_schedule(self, schedule_payload: Mapping[str, object]) -> None:
-        _write_once(self.output_dir / "group_folds.json", _canonical_json(dict(schedule_payload)))
+        _write_once(
+            self.output_dir / "group_folds.json",
+            _canonical_json(dict(schedule_payload)),
+        )
 
     # -- append-only evidence -----------------------------------------
 
@@ -327,8 +351,60 @@ class PackageArtifactStore:
     def publish_accepted_bundle(self, bundle_payload: Mapping[str, object]) -> str:
         data = _canonical_json(dict(bundle_payload))
         bundle_sha256 = hashlib.sha256(data).hexdigest()
-        _write_once(self.output_dir / "accepted_bundles" / f"{bundle_sha256}.json", data)
+        _write_once(
+            self.output_dir / "accepted_bundles" / f"{bundle_sha256}.json", data
+        )
         return bundle_sha256
+
+    def write_task_feedback(
+        self, generation: int, projection: TaskEvidenceProjection
+    ) -> None:
+        if type(generation) is not int or generation < 1:
+            raise PackageArtifactError("task feedback generation must be positive")
+        if type(projection) is not TaskEvidenceProjection:
+            raise PackageArtifactError(
+                "task feedback artifact requires an exact projection"
+            )
+        envelope = {
+            "schema_version": 1,
+            "generation": generation,
+            "projection_sha256": projection.fingerprint,
+            "identity": projection.to_identity_payload(),
+        }
+        _write_once(
+            self.output_dir / "task_feedback" / f"task-feedback-{generation}.json",
+            _canonical_json(envelope),
+        )
+
+    def load_task_feedback(self, generation: int) -> TaskEvidenceProjection:
+        if type(generation) is not int or generation < 1:
+            raise PackageArtifactError("task feedback generation must be positive")
+        path = self.output_dir / "task_feedback" / f"task-feedback-{generation}.json"
+        if not path.is_file():
+            raise PackageArtifactError("task feedback artifact is missing")
+        payload = json.loads(path.read_text("utf-8"))
+        if (
+            type(payload) is not dict
+            or set(payload)
+            != {
+                "schema_version",
+                "generation",
+                "projection_sha256",
+                "identity",
+            }
+            or payload["schema_version"] != 1
+            or payload["generation"] != generation
+        ):
+            raise PackageArtifactError("task feedback artifact schema is invalid")
+        try:
+            projection = TaskEvidenceProjection.from_identity_payload(
+                payload["identity"]
+            )
+        except TaskFeedbackError as error:
+            raise PackageArtifactError("task feedback artifact is invalid") from error
+        if payload["projection_sha256"] != projection.fingerprint:
+            raise PackageArtifactError("task feedback artifact digest mismatch")
+        return projection
 
     # -- stage claim ledger -----------------------------------------
 
@@ -385,9 +461,13 @@ class PackageArtifactStore:
             raise PackageArtifactError("no package checkpoint to resume")
         checkpoint = PackageCheckpoint.from_payload(json.loads(path.read_text("utf-8")))
         if checkpoint.run_sha256 != expected_run_sha256:
-            raise PackageArtifactError("resume run identity does not match the checkpoint")
+            raise PackageArtifactError(
+                "resume run identity does not match the checkpoint"
+            )
         if checkpoint.schedule_sha256 != expected_schedule_sha256:
-            raise PackageArtifactError("resume schedule identity does not match the checkpoint")
+            raise PackageArtifactError(
+                "resume schedule identity does not match the checkpoint"
+            )
         trace_path = self.output_dir / "coordinate_trace.jsonl"
         if trace_path.exists():
             recorded = [
@@ -396,7 +476,9 @@ class PackageArtifactStore:
                 if line
             ]
             if len(recorded) < len(checkpoint.completed_steps):
-                raise PackageArtifactError("checkpoint claims more steps than the trace")
+                raise PackageArtifactError(
+                    "checkpoint claims more steps than the trace"
+                )
         return checkpoint
 
     # -- completion ------------------------------------------------
@@ -408,6 +490,7 @@ class PackageArtifactStore:
         accepted_steps: int | None = None,
         rejected_steps: int | None = None,
         formal_run: bool | None = None,
+        full_chain_exercised: bool | None = None,
     ) -> str:
         if (self.output_dir / "evaluation_complete.json").exists():
             raise PackageArtifactError("this run directory is already complete")
@@ -419,13 +502,17 @@ class PackageArtifactStore:
                 raise PackageArtifactError(f"{name} must be a non-negative integer")
         if formal_run is not None and type(formal_run) is not bool:
             raise PackageArtifactError("formal_run must be a boolean")
+        if full_chain_exercised is not None and type(full_chain_exercised) is not bool:
+            raise PackageArtifactError("full_chain_exercised must be a boolean")
         supplied_summary = (
             accepted_steps is not None,
             rejected_steps is not None,
             formal_run is not None,
         )
         if any(supplied_summary) and not all(supplied_summary):
-            raise PackageArtifactError("completion summary fields must be supplied together")
+            raise PackageArtifactError(
+                "completion summary fields must be supplied together"
+            )
         data = _canonical_json(dict(final_bundle_payload))
         _write_once(self.output_dir / "final_bundle.json", data)
         final_sha256 = hashlib.sha256(data).hexdigest()
@@ -447,9 +534,18 @@ class PackageArtifactStore:
             _canonical_json(
                 {
                     "schema_version": 1,
-                    "status": "complete",
+                    "status": (
+                        "incomplete_chain"
+                        if full_chain_exercised is False
+                        else "complete"
+                    ),
                     "final_bundle_sha256": final_sha256,
                     **summary,
+                    **(
+                        {"full_chain_exercised": full_chain_exercised}
+                        if full_chain_exercised is not None
+                        else {}
+                    ),
                     "public_test_accessed": False,
                 }
             ),
@@ -482,7 +578,9 @@ class PackageArtifactStore:
         if not _is_sha256(evidence_sha256):
             raise PackageArtifactError("acceptance evidence digest must be canonical")
         if _digest(dict(payload)) != evidence_sha256:
-            raise PackageArtifactError("acceptance evidence digest does not bind its payload")
+            raise PackageArtifactError(
+                "acceptance evidence digest does not bind its payload"
+            )
         _write_once(
             self.output_dir / "accepted_bundles" / f"evidence-{evidence_sha256}.json",
             _canonical_json(dict(payload)),

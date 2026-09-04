@@ -43,9 +43,14 @@ def _digest(value: object) -> str:
 
 def _principal_key(bundle: PackageCoordinateBundle) -> tuple[str, str, str]:
     fingerprints = package_principal_fingerprints(bundle)
-    return tuple(
-        fingerprints[name] for name in ("numerical", "retrieval", "decision")
-    )  # type: ignore[return-value]
+    genome = bundle.policy.retrieval_genome
+    if genome is None:
+        raise TaskFeedbackError("task feedback bundle has no Retrieval genome")
+    return (
+        fingerprints["numerical"],
+        genome.fingerprint(),
+        fingerprints["decision"],
+    )
 
 
 def _frequency_bucket(value: str) -> str:
@@ -83,22 +88,16 @@ def _morphology(result: NumericalTwoStageResult) -> TaskMorphologyProjection:
     periodicity = (
         "strong"
         if profile.periodicity_strength >= 0.6
-        else "weak"
-        if profile.periodicity_strength >= 0.2
-        else "none"
+        else "weak" if profile.periodicity_strength >= 0.2 else "none"
     )
     intermittency = (
         "dense"
         if profile.intermittency_adi < 1.32
-        else "intermittent"
-        if profile.intermittency_adi < 2.0
-        else "sparse"
+        else "intermittent" if profile.intermittency_adi < 2.0 else "sparse"
     )
     return TaskMorphologyProjection(
         frequency=cast(str, _frequency_bucket(profile.frequency)),
-        history=cast(
-            str, _length_bucket(profile.history_length, medium=48, long=168)
-        ),
+        history=cast(str, _length_bucket(profile.history_length, medium=48, long=168)),
         horizon=cast(str, _length_bucket(profile.horizon, medium=12, long=36)),
         trend=cast(str, trend),
         periodicity=cast(str, periodicity),
@@ -114,9 +113,15 @@ def _morphology(result: NumericalTwoStageResult) -> TaskMorphologyProjection:
 
 def _stance(chains: tuple[EvidenceChain, ...]) -> str:
     values = {
-        "supported" if item.stance in {"support", "supports"} else
-        "falsified" if item.stance in {"challenge", "challenges"} else
-        "uncertain"
+        (
+            "supported"
+            if item.stance in {"support", "supports"}
+            else (
+                "falsified"
+                if item.stance in {"challenge", "challenges"}
+                else "uncertain"
+            )
+        )
         for item in chains
     }
     return next(iter(values)) if len(values) == 1 else "uncertain"
@@ -174,12 +179,12 @@ class PackageTaskFeedbackLedger:
             raise TaskFeedbackError("task feedback requires Train or Dev membership")
         partitions = dict(partition_by_task)
         if any(
-            type(task_id) is not str
-            or not task_id
-            or partition not in {"train", "dev"}
+            type(task_id) is not str or not task_id or partition not in {"train", "dev"}
             for task_id, partition in partitions.items()
         ):
-            raise TaskFeedbackError("task feedback membership must be Train or Dev only")
+            raise TaskFeedbackError(
+                "task feedback membership must be Train or Dev only"
+            )
         self.partition_by_task = MappingProxyType(dict(sorted(partitions.items())))
         self._traces: dict[tuple[tuple[str, str, str], str], _VerifiedTrace] = {}
 
@@ -190,19 +195,26 @@ class PackageTaskFeedbackLedger:
         result: NumericalTwoStageResult,
     ) -> None:
         if type(bundle) is not PackageCoordinateBundle:
-            raise TaskFeedbackError("task feedback trace requires an exact package bundle")
+            raise TaskFeedbackError(
+                "task feedback trace requires an exact package bundle"
+            )
         if type(task) is not ContextTask or type(result) is not NumericalTwoStageResult:
-            raise TaskFeedbackError("task feedback trace requires verified inference types")
+            raise TaskFeedbackError(
+                "task feedback trace requires verified inference types"
+            )
         task_id = task.numeric.task_id
         partition = self.partition_by_task.get(task_id)
         if partition not in {"train", "dev"}:
             raise TaskFeedbackError("task feedback trace is outside Train or Dev")
         if result.fallback_reason is not None:
-            raise TaskFeedbackError("fallback inference cannot become task feedback")
+            return
         if result.numerical.task_profile.task_id != task_id:
             raise TaskFeedbackError("task feedback trace task identity mismatch")
         genome = bundle.policy.retrieval_genome
-        if genome is None or result.fingerprints.get("retrieval_genome") != genome.fingerprint():
+        if (
+            genome is None
+            or result.fingerprints.get("retrieval_genome") != genome.fingerprint()
+        ):
             raise TaskFeedbackError("task feedback trace Retrieval bundle mismatch")
         decision_sha256 = hashlib.sha256(
             bundle.policy.decision_prompt.encode("utf-8")
@@ -249,7 +261,10 @@ class PackageTaskFeedbackLedger:
         if (
             not resolved
             or len(resolved) != len(set(resolved))
-            or any(type(task_id) is not str or task_id not in self.partition_by_task for task_id in resolved)
+            or any(
+                type(task_id) is not str or task_id not in self.partition_by_task
+                for task_id in resolved
+            )
         ):
             raise TaskFeedbackError("task feedback projection membership is invalid")
         if type(generation) is not int or generation < 1:
@@ -259,7 +274,9 @@ class PackageTaskFeedbackLedger:
         for task_id in sorted(resolved):
             trace = self._traces.get((principal, task_id))
             if trace is None:
-                raise TaskFeedbackError("task feedback trace is missing for this bundle")
+                raise TaskFeedbackError(
+                    "task feedback trace is missing for this bundle"
+                )
             traces.append(trace)
         namespace = _digest(
             {
@@ -276,14 +293,18 @@ class PackageTaskFeedbackLedger:
             )
             groundings = tuple(trace.result.numerical.accepted_assumptions)
             if len(handoff) != len(groundings):
-                raise TaskFeedbackError("task feedback assumption mapping is incomplete")
+                raise TaskFeedbackError(
+                    "task feedback assumption mapping is incomplete"
+                )
             allowed = {item.assumption_id for item in handoff}
             if any(
                 assumption_id not in allowed
                 for chain in trace.result.retrieval_card.chains
                 for assumption_id in chain.addressed_assumption_ids
             ):
-                raise TaskFeedbackError("task feedback contains an unknown assumption ID")
+                raise TaskFeedbackError(
+                    "task feedback contains an unknown assumption ID"
+                )
             pending.extend(
                 (trace, assumption, frozenset(grounding.candidate_names))
                 for assumption, grounding in zip(handoff, groundings, strict=True)
@@ -296,10 +317,17 @@ class PackageTaskFeedbackLedger:
                 if assumption.assumption_id in item.addressed_assumption_ids
             )
             chain_sha256 = _digest(
-                [item.to_payload() for item in sorted(chains, key=lambda item: item.chain_id)]
+                [
+                    item.to_payload()
+                    for item in sorted(chains, key=lambda item: item.chain_id)
+                ]
             )
             selected = trace.result.final_decision.selected.candidate_id
-            action = "unresolved" if not targets else "selected" if selected in targets else "rejected"
+            action = (
+                "unresolved"
+                if not targets
+                else "selected" if selected in targets else "rejected"
+            )
             cases.append(
                 TaskEvidenceCase(
                     case_id=f"case_{index:03d}_{namespace[:8]}",
@@ -308,9 +336,13 @@ class PackageTaskFeedbackLedger:
                     claim=assumption.claim,
                     failure_condition=assumption.failure_condition,
                     stance=cast(str, _stance(chains)),
-                    target_match="matched" if any(
-                        item.entity_match and item.target_match for item in chains
-                    ) else "unmatched",
+                    target_match=(
+                        "matched"
+                        if any(
+                            item.entity_match and item.target_match for item in chains
+                        )
+                        else "unmatched"
+                    ),
                     window_relation=cast(str, _window_relation(chains)),
                     magnitude_status=cast(str, _magnitude_status(chains)),
                     mechanism=cast(str, _mechanism(chains)),

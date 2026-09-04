@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 
 class TaskFeedbackError(ValueError):
@@ -36,9 +37,7 @@ FrequencyBucket = Literal[
     "subdaily", "daily", "weekly", "monthly", "quarterly", "yearly", "other"
 ]
 LengthBucket = Literal["short", "medium", "long"]
-TrendBucket = Literal[
-    "strong_down", "weak_down", "flat", "weak_up", "strong_up"
-]
+TrendBucket = Literal["strong_down", "weak_down", "flat", "weak_up", "strong_up"]
 StrengthBucket = Literal["none", "weak", "strong"]
 IntermittencyBucket = Literal["dense", "intermittent", "sparse"]
 RegimeBucket = Literal["stable", "recent_shift"]
@@ -58,9 +57,7 @@ _FREQUENCIES = frozenset(
     {"subdaily", "daily", "weekly", "monthly", "quarterly", "yearly", "other"}
 )
 _LENGTHS = frozenset({"short", "medium", "long"})
-_TRENDS = frozenset(
-    {"strong_down", "weak_down", "flat", "weak_up", "strong_up"}
-)
+_TRENDS = frozenset({"strong_down", "weak_down", "flat", "weak_up", "strong_up"})
 _STRENGTHS = frozenset({"none", "weak", "strong"})
 _INTERMITTENCY = frozenset({"dense", "intermittent", "sparse"})
 _REGIMES = frozenset({"stable", "recent_shift"})
@@ -109,7 +106,9 @@ def _require_safe_text(value: object, label: str) -> str:
         or _DOCUMENT_IDENTITY.search(value)
         or any(marker in normalized for marker in _FORBIDDEN_TEXT)
     ):
-        raise TaskFeedbackError(f"task feedback {label} contains forbidden identity or result data")
+        raise TaskFeedbackError(
+            f"task feedback {label} contains forbidden identity or result data"
+        )
     return value
 
 
@@ -167,13 +166,17 @@ class TaskEvidenceCase:
         if type(self.case_id) is not str or _CASE_ID.fullmatch(self.case_id) is None:
             raise TaskFeedbackError("task feedback case_id is not request-local")
         if type(self.morphology) is not TaskMorphologyProjection:
-            raise TaskFeedbackError("task feedback morphology must use the exact projection")
+            raise TaskFeedbackError(
+                "task feedback morphology must use the exact projection"
+            )
         TaskMorphologyProjection.__post_init__(self.morphology)
         if (
             type(self.assumption_id) is not str
             or _IDENTIFIER.fullmatch(self.assumption_id) is None
         ):
-            raise TaskFeedbackError("task feedback assumption_id is not a safe identifier")
+            raise TaskFeedbackError(
+                "task feedback assumption_id is not a safe identifier"
+            )
         _require_safe_text(self.claim, "claim")
         _require_safe_text(self.failure_condition, "failure_condition")
         _require_enum(self.stance, _STANCES, "stance")
@@ -238,17 +241,110 @@ class TaskEvidenceProjection:
             "cases": [item.to_payload() for item in self.cases],
         }
 
+    def to_identity_payload(self) -> dict[str, object]:
+        return {
+            "source_bundle_sha256": self.source_bundle_sha256,
+            "request_namespace_sha256": self.request_namespace_sha256,
+            "projection": self.to_payload(),
+        }
+
+    @classmethod
+    def from_identity_payload(cls, raw: object) -> "TaskEvidenceProjection":
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "source_bundle_sha256",
+            "request_namespace_sha256",
+            "projection",
+        }:
+            raise TaskFeedbackError("task feedback identity payload schema is invalid")
+        projection = raw["projection"]
+        if (
+            not isinstance(projection, Mapping)
+            or set(projection) != {"schema_version", "cases"}
+            or projection["schema_version"] != 1
+            or type(projection["cases"]) is not list
+        ):
+            raise TaskFeedbackError(
+                "task feedback projection payload schema is invalid"
+            )
+        cases: list[TaskEvidenceCase] = []
+        for raw_case in projection["cases"]:
+            if not isinstance(raw_case, Mapping) or set(raw_case) != {
+                "case_id",
+                "morphology",
+                "assumption_id",
+                "claim",
+                "failure_condition",
+                "stance",
+                "target_match",
+                "window_relation",
+                "magnitude_status",
+                "mechanism",
+                "decision_action",
+                "evidence_chain_sha256",
+            }:
+                raise TaskFeedbackError("task feedback case payload schema is invalid")
+            morphology = raw_case["morphology"]
+            if not isinstance(morphology, Mapping) or set(morphology) != {
+                "frequency",
+                "history",
+                "horizon",
+                "trend",
+                "periodicity",
+                "intermittency",
+                "recent_regime",
+            }:
+                raise TaskFeedbackError(
+                    "task feedback morphology payload schema is invalid"
+                )
+            cases.append(
+                TaskEvidenceCase(
+                    case_id=cast(str, raw_case["case_id"]),
+                    morphology=TaskMorphologyProjection(
+                        frequency=cast(FrequencyBucket, morphology["frequency"]),
+                        history=cast(LengthBucket, morphology["history"]),
+                        horizon=cast(LengthBucket, morphology["horizon"]),
+                        trend=cast(TrendBucket, morphology["trend"]),
+                        periodicity=cast(StrengthBucket, morphology["periodicity"]),
+                        intermittency=cast(
+                            IntermittencyBucket, morphology["intermittency"]
+                        ),
+                        recent_regime=cast(RegimeBucket, morphology["recent_regime"]),
+                    ),
+                    assumption_id=cast(str, raw_case["assumption_id"]),
+                    claim=cast(str, raw_case["claim"]),
+                    failure_condition=cast(str, raw_case["failure_condition"]),
+                    stance=cast(
+                        Literal["supported", "falsified", "uncertain"],
+                        raw_case["stance"],
+                    ),
+                    target_match=cast(
+                        Literal["matched", "unmatched"], raw_case["target_match"]
+                    ),
+                    window_relation=cast(
+                        Literal["overlaps", "precedes", "after", "unknown"],
+                        raw_case["window_relation"],
+                    ),
+                    magnitude_status=cast(
+                        Literal["present", "missing", "conflicting", "not_applicable"],
+                        raw_case["magnitude_status"],
+                    ),
+                    mechanism=cast(Mechanism, raw_case["mechanism"]),
+                    decision_action=cast(
+                        Literal["selected", "rejected", "unresolved"],
+                        raw_case["decision_action"],
+                    ),
+                    evidence_chain_sha256=cast(str, raw_case["evidence_chain_sha256"]),
+                )
+            )
+        return cls(
+            source_bundle_sha256=cast(str, raw["source_bundle_sha256"]),
+            request_namespace_sha256=cast(str, raw["request_namespace_sha256"]),
+            cases=tuple(cases),
+        )
+
     @property
     def fingerprint(self) -> str:
-        return hashlib.sha256(
-            _canonical_json(
-                {
-                    "source_bundle_sha256": self.source_bundle_sha256,
-                    "request_namespace_sha256": self.request_namespace_sha256,
-                    "projection": self.to_payload(),
-                }
-            )
-        ).hexdigest()
+        return hashlib.sha256(_canonical_json(self.to_identity_payload())).hexdigest()
 
 
 __all__ = [

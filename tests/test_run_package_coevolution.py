@@ -1,4 +1,5 @@
 """Package-native evolution CLI, cache, and Public-firewall contracts."""
+
 from __future__ import annotations
 
 import json
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from common.data import Task as DataTask
+from common.evolution_core.task_feedback import TaskEvidenceProjection
 from evolving_loop.data import ContextTask, load_context_tasks_by_ids
 from evolving_loop.package_artifacts import (
     PackageArtifactError,
@@ -17,21 +19,28 @@ from evolving_loop.package_artifacts import (
 )
 from evolving_loop.run_package_coevolution import (
     PackageCacheBackedEvaluator,
+    _InteractionFeedbackManager,
     _SmokeNumericalProposer,
     _build_registry,
     _configuration_identity,
     _early_resume_guard,
+    _interaction_smoke_gate_failures,
+    _interaction_smoke_is_complete,
     _state_from_payload,
     _step_payload,
+    _validate_mode,
     build_parser,
     main,
 )
 from evolving_loop.package_coordinate_evolution import PackageCoordinateStep
 from evolving_loop.package_candidate_proposal import PackageProposalFeedback
+from evolving_loop.package_task_feedback import PackageTaskFeedbackLedger
 from evolving_loop.package_numerical_supply import parse_numerical_supply_release
 from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
 from tests.test_package_coordinate_evolution import _bundle
 from tests.test_package_stage_runner import _evaluation
+from tests.test_package_task_feedback import _verified_state_and_result
+from tests.test_task_evidence_feedback import _case
 
 
 def _record(task_id: str, *, labeled: bool = True) -> dict[str, object]:
@@ -93,8 +102,7 @@ def test_build_registry_thaws_frozen_numerical_anchor(
 
     assert rebuilt.release_sha256 == release.fingerprint
     assert (
-        rebuilt.package_for(task).final_forecast
-        == package.protected_baseline.forecast
+        rebuilt.package_for(task).final_forecast == package.protected_baseline.forecast
     )
 
 
@@ -218,6 +226,167 @@ def test_parser_has_no_public_input_or_evaluation_flag() -> None:
     assert "public_output" not in destinations
 
 
+def test_interaction_smoke_requires_two_cycles_one_child_and_explicit_feedback_mode(
+    tmp_path,
+) -> None:
+    required = [
+        "--repo",
+        str(tmp_path / "repo"),
+        "--split-file",
+        str(tmp_path / "split.json"),
+        "--tasks-file",
+        str(tmp_path / "tasks"),
+        "--numerical-champion-release",
+        str(tmp_path / "champion.json"),
+        "--forecast-store",
+        str(tmp_path / "forecasts"),
+        "--retrieval-seed-release",
+        str(tmp_path / "retrieval"),
+        "--retrieval-skills",
+        str(tmp_path / "skills.json"),
+        "--output-dir",
+        str(tmp_path / "output"),
+        "--authority-dir",
+        str(tmp_path / "authority"),
+    ]
+    treatment = build_parser().parse_args(
+        [
+            *required,
+            "--interaction-smoke",
+            "--children-per-coordinate",
+            "1",
+            "--feedback-mode",
+            "task",
+        ]
+    )
+    control = build_parser().parse_args(
+        [
+            *required,
+            "--interaction-smoke",
+            "--children-per-coordinate",
+            "1",
+            "--feedback-mode",
+            "none",
+        ]
+    )
+
+    _validate_mode(treatment)
+    _validate_mode(control)
+    assert _configuration_identity(treatment) != _configuration_identity(control)
+
+    forbidden = build_parser().parse_args([*required, "--feedback-mode", "task"])
+    with pytest.raises(ValueError, match="interaction"):
+        _validate_mode(forbidden)
+
+
+def test_interaction_feedback_manager_persists_cycle1_projection_for_cycle2(
+    tmp_path,
+) -> None:
+    task, state, result = _verified_state_and_result(tmp_path)
+    ledger = PackageTaskFeedbackLedger({task.numeric.task_id: "train"})
+    ledger.record(state.bundle, task, result)
+    store = PackageArtifactStore(tmp_path / "artifacts")
+    manager = _InteractionFeedbackManager(
+        ledger,
+        (task.numeric.task_id,),
+        store,
+        feedback_mode="task",
+    )
+
+    manager.finish_cycle(state, generation=2)
+    projection = manager.for_numerical(state, generation=3)
+
+    assert projection is not None
+    assert len(projection.cases) == 1
+    assert store.load_task_feedback(3) == projection
+
+
+def test_interaction_retrieval_gate_ignores_gain_but_keeps_integrity_failures() -> None:
+    gain_only = (
+        "minimum_relative_joint_gain",
+        "mean_smae",
+        "p95_srmse",
+        "improving_folds",
+    )
+    assert _interaction_smoke_gate_failures("retrieval", gain_only) == ()
+    assert _interaction_smoke_gate_failures(
+        "retrieval", (*gain_only, "task_coverage", "fallback_count")
+    ) == ("task_coverage", "fallback_count")
+    assert _interaction_smoke_gate_failures("decision", gain_only) == gain_only
+
+
+def test_interaction_completion_requires_six_invoked_phases_and_matching_feedback() -> (
+    None
+):
+    steps = tuple(
+        {
+            "generation": generation,
+            "target": target,
+            "reason": "phase invoked",
+            "public_test_accessed": False,
+        }
+        for generation, target in enumerate(("numerical", "retrieval", "decision") * 2)
+    )
+    treatment = TaskEvidenceProjection(
+        source_bundle_sha256="a" * 64,
+        request_namespace_sha256="b" * 64,
+        cases=(_case(),),
+    )
+    control = TaskEvidenceProjection(
+        source_bundle_sha256="a" * 64,
+        request_namespace_sha256="b" * 64,
+        cases=(),
+    )
+
+    assert _interaction_smoke_is_complete(steps, "task", treatment) is True
+    assert _interaction_smoke_is_complete(steps, "none", control) is True
+    assert _interaction_smoke_is_complete(steps[:-1], "task", treatment) is False
+    skipped = (
+        *steps[:2],
+        {**steps[2], "reason": "Decision phase requires a release"},
+        *steps[3:],
+    )
+    assert _interaction_smoke_is_complete(skipped, "task", treatment) is False
+
+
+def test_smoke_numerical_proposer_forwards_cycle_feedback(tmp_path) -> None:
+    _task, state = _bundle(tmp_path)
+    projection = TaskEvidenceProjection(
+        source_bundle_sha256=state.bundle.fingerprint(),
+        request_namespace_sha256="b" * 64,
+        cases=(_case(),),
+    )
+    feedback = PackageProposalFeedback(
+        parent_summary={"task_count": 1},
+        rejected_summaries=(),
+        gate_names=(),
+        structures=(),
+        task_evidence=projection,
+    )
+
+    class CapturingChampion:
+        def __init__(self) -> None:
+            self.task_evidence = None
+
+        def propose(self, _anchor, _aggregate, *, generation, task_evidence=None):
+            self.task_evidence = task_evidence
+            return ()
+
+    champion = CapturingChampion()
+    proposer = _SmokeNumericalProposer(
+        champion,
+        SimpleNamespace(),
+        (),
+        SimpleNamespace(task_fold_map={}),
+        (),
+    )
+
+    children = proposer.propose(state, feedback, generation=3, child_count=1)
+
+    assert children[0].invalid_reason == "materialization_failed"
+    assert champion.task_evidence is projection
+
+
 def test_runner_loads_only_train_and_dev_membership(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -257,15 +426,24 @@ def test_runner_loads_only_train_and_dev_membership(
         )
     }
     argv = [
-        "--repo", str(required["repo"]),
-        "--split-file", str(split_path),
-        "--tasks-file", str(required["tasks"]),
-        "--numerical-champion-release", str(required["champion"]),
-        "--forecast-store", str(required["forecasts"]),
-        "--retrieval-seed-release", str(required["retrieval"]),
-        "--retrieval-skills", str(required["skills"]),
-        "--output-dir", str(required["output"]),
-        "--authority-dir", str(required["authority"]),
+        "--repo",
+        str(required["repo"]),
+        "--split-file",
+        str(split_path),
+        "--tasks-file",
+        str(required["tasks"]),
+        "--numerical-champion-release",
+        str(required["champion"]),
+        "--forecast-store",
+        str(required["forecasts"]),
+        "--retrieval-seed-release",
+        str(required["retrieval"]),
+        "--retrieval-skills",
+        str(required["skills"]),
+        "--output-dir",
+        str(required["output"]),
+        "--authority-dir",
+        str(required["authority"]),
     ]
 
     assert main(argv) == 0
@@ -332,7 +510,9 @@ def test_id_filtered_loader_rejects_missing_duplicate_unlabeled_or_unexpected_re
         load_context_tasks_by_ids(duplicate, ("task_a",))
 
     unlabeled = tmp_path / "unlabeled.jsonl"
-    unlabeled.write_text(json.dumps(_record("task_a", labeled=False)) + "\n", encoding="utf-8")
+    unlabeled.write_text(
+        json.dumps(_record("task_a", labeled=False)) + "\n", encoding="utf-8"
+    )
     with pytest.raises(ValueError, match="unlabeled"):
         load_context_tasks_by_ids(unlabeled, ("task_a",))
 
@@ -370,9 +550,7 @@ def test_cache_backed_evaluator_replays_exact_bundle_stage_task_set_and_runtime(
         runtime_fingerprints=state.bundle.runtime_fingerprints,
     )
 
-    live = evaluator.evaluate(
-        state.bundle, state.registry, (task,), stage="dev20"
-    )
+    live = evaluator.evaluate(state.bundle, state.registry, (task,), stage="dev20")
     replay = evaluator.evaluate(
         state.bundle,
         state.registry,
@@ -472,15 +650,24 @@ def test_completion_records_formality_and_coordinate_counts(tmp_path) -> None:
 def test_resume_rejects_runtime_fingerprint_change(tmp_path) -> None:
     parser = build_parser()
     common = [
-        "--repo", str(tmp_path / "repo"),
-        "--split-file", str(tmp_path / "split.json"),
-        "--tasks-file", str(tmp_path / "tasks"),
-        "--numerical-champion-release", str(tmp_path / "champion.json"),
-        "--forecast-store", str(tmp_path / "forecasts"),
-        "--retrieval-seed-release", str(tmp_path / "retrieval"),
-        "--retrieval-skills", str(tmp_path / "skills.json"),
-        "--output-dir", str(tmp_path / "output"),
-        "--authority-dir", str(tmp_path / "authority"),
+        "--repo",
+        str(tmp_path / "repo"),
+        "--split-file",
+        str(tmp_path / "split.json"),
+        "--tasks-file",
+        str(tmp_path / "tasks"),
+        "--numerical-champion-release",
+        str(tmp_path / "champion.json"),
+        "--forecast-store",
+        str(tmp_path / "forecasts"),
+        "--retrieval-seed-release",
+        str(tmp_path / "retrieval"),
+        "--retrieval-skills",
+        str(tmp_path / "skills.json"),
+        "--output-dir",
+        str(tmp_path / "output"),
+        "--authority-dir",
+        str(tmp_path / "authority"),
     ]
     original = parser.parse_args(common)
     output = tmp_path / "output"
@@ -499,15 +686,24 @@ def test_resume_of_complete_run_stops_before_model_construction(tmp_path) -> Non
     parser = build_parser()
     args = parser.parse_args(
         [
-            "--repo", str(tmp_path / "repo"),
-            "--split-file", str(tmp_path / "split.json"),
-            "--tasks-file", str(tmp_path / "tasks"),
-            "--numerical-champion-release", str(tmp_path / "champion.json"),
-            "--forecast-store", str(tmp_path / "forecasts"),
-            "--retrieval-seed-release", str(tmp_path / "retrieval"),
-            "--retrieval-skills", str(tmp_path / "skills.json"),
-            "--output-dir", str(tmp_path / "output"),
-            "--authority-dir", str(tmp_path / "authority"),
+            "--repo",
+            str(tmp_path / "repo"),
+            "--split-file",
+            str(tmp_path / "split.json"),
+            "--tasks-file",
+            str(tmp_path / "tasks"),
+            "--numerical-champion-release",
+            str(tmp_path / "champion.json"),
+            "--forecast-store",
+            str(tmp_path / "forecasts"),
+            "--retrieval-seed-release",
+            str(tmp_path / "retrieval"),
+            "--retrieval-skills",
+            str(tmp_path / "skills.json"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--authority-dir",
+            str(tmp_path / "authority"),
             "--resume",
         ]
     )
