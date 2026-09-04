@@ -191,6 +191,37 @@ def test_extracted_genome_proposer_preserves_scoped_fixture_fingerprints() -> No
     assert len({retrieval_behavior_fingerprint(child) for child in children}) == 3
 
 
+def test_genome_proposer_retries_one_invalid_scoped_response_with_constraints() -> None:
+    parent = RetrievalGenome.seed()
+    invalid = _proposal(parent, "v001", "A")
+    invalid["parent"] = None
+    valid = _proposal(parent, "v001", "A")
+    llm = FakeLLMClient([json.dumps(invalid), json.dumps(valid)])
+    proposer = RetrievalGenomeProposer(
+        llm,
+        transient_retries=0,
+        version_origin=parent.version,
+    )
+
+    slot = proposer.propose_slot(
+        parent,
+        scope="A",
+        version="v001",
+        generation=0,
+        feedback={},
+        skill_library=None,
+    )
+
+    assert slot.genome == RetrievalGenome.from_payload(valid)
+    assert len(llm.calls) == 2
+    retry_payload = json.loads(llm.calls[1]["messages"][0]["content"])
+    assert retry_payload["previous_response_error"] == {
+        "code": "invalid_scoped_genome",
+        "required_parent": "v000",
+        "required_version": "v001",
+    }
+
+
 @dataclass(frozen=True)
 class _EvaluationCall:
     version: str

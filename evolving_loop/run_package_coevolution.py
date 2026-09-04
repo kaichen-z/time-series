@@ -1719,6 +1719,7 @@ def _resume_controller(
         completed
         and completed % 3 == 0
         and not any(bool(step["accepted"]) for step in recorder.steps[-3:])
+        and not args.interaction_smoke
     ):
         return current
     cycle = completed // 3
@@ -1737,9 +1738,23 @@ def _resume_controller(
         )
         cycle_steps = recorder.steps[cycle * 3 : (cycle + 1) * 3]
         cycle += 1
-        if not any(bool(step["accepted"]) for step in cycle_steps):
+        if (
+            not any(bool(step["accepted"]) for step in cycle_steps)
+            and not args.interaction_smoke
+        ):
             return current
-    if cycle < args.cycles:
+    if args.interaction_smoke:
+        while cycle < args.cycles:
+            current = _run_controller(
+                cast(tuple[object | None, object | None, object | None], phases),
+                cycles=1,
+                offset=cycle * 3,
+                parent=current,
+                initial=initial,
+                recorder=recorder,
+            )
+            cycle += 1
+    elif cycle < args.cycles:
         current = _run_controller(
             cast(tuple[object | None, object | None, object | None], phases),
             cycles=args.cycles - cycle,

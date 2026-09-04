@@ -19,6 +19,7 @@ from evolving_loop.package_artifacts import (
 )
 from evolving_loop.run_package_coevolution import (
     PackageCacheBackedEvaluator,
+    _CheckpointRecorder,
     _InteractionFeedbackManager,
     _SmokeNumericalProposer,
     _build_registry,
@@ -26,6 +27,8 @@ from evolving_loop.run_package_coevolution import (
     _early_resume_guard,
     _interaction_smoke_gate_failures,
     _interaction_smoke_is_complete,
+    _run_controller,
+    _resume_controller,
     _state_from_payload,
     _step_payload,
     _validate_mode,
@@ -35,6 +38,7 @@ from evolving_loop.run_package_coevolution import (
 from evolving_loop.package_coordinate_evolution import PackageCoordinateStep
 from evolving_loop.package_candidate_proposal import PackageProposalFeedback
 from evolving_loop.package_task_feedback import PackageTaskFeedbackLedger
+from evolving_loop.package_stage_runner import PackageCoordinatePhaseOutcome
 from evolving_loop.package_numerical_supply import parse_numerical_supply_release
 from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
 from tests.test_package_coordinate_evolution import _bundle
@@ -347,6 +351,75 @@ def test_interaction_completion_requires_six_invoked_phases_and_matching_feedbac
         *steps[3:],
     )
     assert _interaction_smoke_is_complete(skipped, "task", treatment) is False
+
+
+@pytest.mark.parametrize("resume_from", ("fresh", "partial_cycle", "complete_cycle"))
+def test_interaction_runs_two_cycles_when_every_coordinate_is_rejected(
+    tmp_path, resume_from
+) -> None:
+    _task, state = _bundle(tmp_path)
+    recorder = _CheckpointRecorder(
+        PackageArtifactStore(tmp_path / "artifacts"),
+        run_sha256="a" * 64,
+        schedule_sha256="b" * 64,
+        initial=state,
+        checkpoint=None,
+    )
+
+    class RejectingPhase:
+        def __init__(self, target: str) -> None:
+            self.target = target
+
+        def run(self, parent, _initial, *, generation):
+            return PackageCoordinatePhaseOutcome(
+                target=self.target,
+                parent=parent,
+                finalist=None,
+                selected=parent,
+                accepted=False,
+                improved=False,
+                reason=f"rejected generation {generation}",
+                evidence=(),
+            )
+
+    phases = tuple(
+        RejectingPhase(target) for target in ("numerical", "retrieval", "decision")
+    )
+    current = state
+    if resume_from == "partial_cycle":
+        current = _run_controller(
+            (phases[0], None, None),
+            cycles=1,
+            offset=0,
+            parent=current,
+            initial=state,
+            recorder=recorder,
+        )
+        assert len(recorder.steps) == 1
+    elif resume_from == "complete_cycle":
+        current = _resume_controller(
+            SimpleNamespace(cycles=1, interaction_smoke=True),
+            phases=phases,
+            initial=state,
+            current=current,
+            recorder=recorder,
+        )
+        assert len(recorder.steps) == 3
+
+    _resume_controller(
+        SimpleNamespace(cycles=2, interaction_smoke=True),
+        phases=phases,
+        initial=state,
+        current=current,
+        recorder=recorder,
+    )
+
+    assert tuple(step["generation"] for step in recorder.steps) == tuple(range(6))
+    assert tuple(step["target"] for step in recorder.steps) == (
+        "numerical",
+        "retrieval",
+        "decision",
+    ) * 2
 
 
 def test_smoke_numerical_proposer_forwards_cycle_feedback(tmp_path) -> None:
