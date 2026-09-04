@@ -151,7 +151,6 @@ class TaskEvidenceCase:
     """One sanitized task/assumption observation with no reusable task identity."""
 
     case_id: str
-    partition: Literal["train", "dev"]
     morphology: TaskMorphologyProjection
     assumption_id: str
     claim: str
@@ -167,7 +166,6 @@ class TaskEvidenceCase:
     def __post_init__(self) -> None:
         if type(self.case_id) is not str or _CASE_ID.fullmatch(self.case_id) is None:
             raise TaskFeedbackError("task feedback case_id is not request-local")
-        _require_enum(self.partition, frozenset({"train", "dev"}), "partition")
         if type(self.morphology) is not TaskMorphologyProjection:
             raise TaskFeedbackError("task feedback morphology must use the exact projection")
         TaskMorphologyProjection.__post_init__(self.morphology)
@@ -193,7 +191,6 @@ class TaskEvidenceCase:
     def to_payload(self) -> dict[str, object]:
         return {
             "case_id": self.case_id,
-            "partition": self.partition,
             "morphology": self.morphology.to_payload(),
             "assumption_id": self.assumption_id,
             "claim": self.claim,

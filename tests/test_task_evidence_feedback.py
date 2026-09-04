@@ -30,7 +30,6 @@ def _morphology() -> TaskMorphologyProjection:
 def _case(case_id: str = "case_000_deadbeef") -> TaskEvidenceCase:
     return TaskEvidenceCase(
         case_id=case_id,
-        partition="train",
         morphology=_morphology(),
         assumption_id="trend_ready",
         claim="The recent trend persists.",
@@ -62,9 +61,8 @@ def test_projection_is_canonical_and_contains_no_host_identity() -> None:
     assert len(projection.fingerprint) == 64
 
 
-def test_case_rejects_public_partition() -> None:
-    with pytest.raises(TaskFeedbackError, match="partition"):
-        replace(_case(), partition="public")
+def test_model_facing_case_does_not_expose_train_or_dev_partition() -> None:
+    assert "partition" not in _case().to_payload()
 
 
 @pytest.mark.parametrize(

@@ -14,12 +14,14 @@ from evolving_loop.co_evolution import HarnessPolicy
 from evolving_loop.data import ContextTask
 from evolving_loop.decision_agent.agent import DecisionAgent
 from evolving_loop.numerical_two_stage import (
+    NumericalTwoStageResult,
     numerical_package_fingerprint,
     run_numerical_two_stage,
 )
 from evolving_loop.package_coordinate_evolution import PackageCoordinateBundle
 from evolving_loop.package_metrics import PackageEvaluation, PackageTaskScore
 from evolving_loop.package_registry import FrozenNumericalPackageRegistry
+from evolving_loop.package_task_feedback import PackageTaskFeedbackLedger
 from evolving_loop.retrieval_agent.quality import score_retrieval_card_quality
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 
@@ -53,14 +55,20 @@ class PackagePipelineEvaluator:
         decision_factory: Callable[[HarnessPolicy], DecisionAgent],
         *,
         metric_cap: float = 5.0,
+        task_feedback_ledger: PackageTaskFeedbackLedger | None = None,
     ) -> None:
         if not callable(retrieval_factory) or not callable(decision_factory):
             raise ValueError("package pipeline factories must be callable")
         if not math.isfinite(metric_cap) or metric_cap <= 0.0:
             raise ValueError("package pipeline metric cap must be positive and finite")
+        if task_feedback_ledger is not None and type(
+            task_feedback_ledger
+        ) is not PackageTaskFeedbackLedger:
+            raise ValueError("package pipeline task feedback ledger is invalid")
         self.retrieval_factory = retrieval_factory
         self.decision_factory = decision_factory
         self.metric_cap = float(metric_cap)
+        self.task_feedback_ledger = task_feedback_ledger
 
     def evaluate(
         self,
@@ -99,6 +107,13 @@ class PackagePipelineEvaluator:
             expected_decision_prompt_sha256=hashlib.sha256(
                 bundle.policy.decision_prompt.encode("utf-8")
             ).hexdigest(),
+            trace_sink=(
+                None
+                if self.task_feedback_ledger is None
+                else lambda task, result: self.task_feedback_ledger.record(
+                    bundle, task, result
+                )
+            ),
         )
 
     @classmethod
@@ -114,6 +129,7 @@ class PackagePipelineEvaluator:
         metric_cap: float,
         expected_retrieval_sha256: str | None = None,
         expected_decision_prompt_sha256: str | None = None,
+        trace_sink: Callable[[ContextTask, NumericalTwoStageResult], None] | None = None,
     ) -> PackageEvaluation:
         """Shared compatibility boundary; callers supply already-bound factories."""
         if not isinstance(registry, FrozenNumericalPackageRegistry):
@@ -186,6 +202,8 @@ class PackagePipelineEvaluator:
                 != expected_decision_prompt_sha256
             ):
                 raise ValueError("package pipeline changed the bound Decision prompt")
+            if trace_sink is not None:
+                trace_sink(task, result)
             scored.append(cls._score_result(task, package, result, metric_cap=metric_cap))
 
         diagnostic_names = tuple(
