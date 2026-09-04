@@ -2180,7 +2180,7 @@ def _execute_run(
             forecast_store=store,
             screening_policy=screening,
             fold_manifest=formal_schedule.fold_manifest,
-            original_tasks=registry_tasks,
+            original_tasks=tasks,
             source_fingerprints=source_fingerprints,
             runtime_fingerprints={
                 "forecast_store": store.identity_hash,
