@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import cast
 
 from common.evolution_core.contracts import METRIC_POLICY_FINGERPRINT
-from common.evolution_core.task_feedback import TaskEvidenceProjection
+from common.evolution_core.task_feedback import (
+    TaskEvidenceCase,
+    TaskEvidenceProjection,
+    TaskFeedbackError,
+    TaskMorphologyProjection,
+)
 from common.llm import CodexCLIClient, CodexCLIConfig
 from common.payload import canonical_json_bytes, read_json_object
 from evolving_loop.co_evolution import (
@@ -1137,9 +1142,8 @@ class _SmokeCoordinatePhaseRunner:
             finalist_evaluation = child_evaluation
         assert finalist_evaluation is not None
         if self.target == "retrieval" and self.feedback_manager is not None:
-            self.feedback_manager.ledger.build_projection(
-                candidate.state.bundle,
-                self.feedback_manager.task_ids,
+            self.feedback_manager.build_projection(
+                candidate.state,
                 generation=generation + 1,
             )
         selected = candidate.state
@@ -1276,6 +1280,7 @@ class _InteractionFeedbackManager:
         store: PackageArtifactStore,
         *,
         feedback_mode: str,
+        tasks: Mapping[str, ContextTask] | None = None,
     ) -> None:
         if type(ledger) is not PackageTaskFeedbackLedger:
             raise ValueError("interaction feedback requires an exact ledger")
@@ -1286,10 +1291,155 @@ class _InteractionFeedbackManager:
             raise ValueError("interaction feedback requires an artifact store")
         if feedback_mode not in {"none", "task"}:
             raise ValueError("interaction feedback mode is invalid")
+        resolved_tasks = {} if tasks is None else dict(tasks)
+        if tasks is not None and any(
+            task_id not in resolved_tasks
+            or not isinstance(resolved_tasks[task_id], ContextTask)
+            or resolved_tasks[task_id].numeric.task_id != task_id
+            for task_id in resolved
+        ):
+            raise ValueError("interaction feedback tasks do not match membership")
         self.ledger = ledger
         self.task_ids = resolved
         self.store = store
         self.feedback_mode = feedback_mode
+        self.tasks = resolved_tasks
+
+    @staticmethod
+    def _morphology(
+        state: PackageCoordinateState, task: ContextTask
+    ) -> TaskMorphologyProjection:
+        profile = state.registry.package_for(task).task_profile
+        if profile.trend_strength < 0.2 or profile.trend_direction not in {
+            "up",
+            "down",
+        }:
+            trend = "flat"
+        else:
+            prefix = "strong" if profile.trend_strength >= 0.6 else "weak"
+            trend = f"{prefix}_{profile.trend_direction}"
+        periodicity = (
+            "strong"
+            if profile.periodicity_strength >= 0.6
+            else "weak" if profile.periodicity_strength >= 0.2 else "none"
+        )
+        intermittency = (
+            "dense"
+            if profile.intermittency_adi < 1.32
+            else "intermittent" if profile.intermittency_adi < 2.0 else "sparse"
+        )
+
+        def length(value: int, medium: int, long: int) -> str:
+            return "short" if value < medium else "medium" if value < long else "long"
+
+        frequency = profile.frequency.strip().casefold()
+        frequency_bucket = (
+            "subdaily"
+            if frequency in {"s", "sec", "t", "min", "h"}
+            else "daily"
+            if frequency in {"d", "b", "day", "daily"}
+            else "weekly"
+            if frequency in {"w", "week", "weekly"}
+            else "monthly"
+            if frequency in {"m", "ms", "month", "monthly"}
+            else "quarterly"
+            if frequency in {"q", "quarter", "quarterly"}
+            else "yearly"
+            if frequency in {"y", "a", "year", "yearly", "annual"}
+            else "other"
+        )
+        return TaskMorphologyProjection(
+            frequency=cast(str, frequency_bucket),
+            history=cast(str, length(profile.history_length, 48, 168)),
+            horizon=cast(str, length(profile.horizon, 12, 36)),
+            trend=cast(str, trend),
+            periodicity=cast(str, periodicity),
+            intermittency=cast(str, intermittency),
+            recent_regime=(
+                "recent_shift"
+                if profile.recent_regime_start is not None
+                and profile.recent_regime_confidence >= 0.5
+                else "stable"
+            ),
+        )
+
+    def _unavailable_treatment_projection(
+        self,
+        state: PackageCoordinateState,
+        generation: int,
+    ) -> TaskEvidenceProjection:
+        release = parse_numerical_supply_release(
+            state.bundle.to_payload()["numerical_release_payload"]
+        )
+        assumptions = parse_champion_release(
+            release.to_payload()["anchor_release_payload"]
+        ).policy.recipe.assumptions
+        source = state.bundle.fingerprint()
+        namespace = _digest(
+            {
+                "source_bundle_sha256": source,
+                "generation": generation,
+                "status": "retrieval_trace_unavailable",
+                "assumption_ids": [item.assumption_id for item in assumptions],
+            }
+        )
+        cases: list[TaskEvidenceCase] = []
+        for task_id in sorted(self.task_ids):
+            task = self.tasks[task_id]
+            morphology = self._morphology(state, task)
+            for assumption in assumptions:
+                index = len(cases)
+                evidence_sha256 = _digest(
+                    {
+                        "status": "retrieval_trace_unavailable",
+                        "morphology": morphology.to_payload(),
+                        "assumption_id": assumption.assumption_id,
+                    }
+                )
+                cases.append(
+                    TaskEvidenceCase(
+                        case_id=f"case_{index:03d}_{namespace[:8]}",
+                        morphology=morphology,
+                        assumption_id=assumption.assumption_id,
+                        claim="Retrieval could not verify this numerical assumption.",
+                        failure_condition=(
+                            "No verified Retrieval trace was available for this "
+                            "assumption."
+                        ),
+                        stance="uncertain",
+                        target_match="unmatched",
+                        window_relation="unknown",
+                        magnitude_status="not_applicable",
+                        mechanism="unknown",
+                        decision_action="unresolved",
+                        evidence_chain_sha256=evidence_sha256,
+                    )
+                )
+        return TaskEvidenceProjection(
+            source_bundle_sha256=source,
+            request_namespace_sha256=namespace,
+            cases=tuple(cases),
+        )
+
+    def build_projection(
+        self,
+        state: PackageCoordinateState,
+        *,
+        generation: int,
+    ) -> TaskEvidenceProjection:
+        try:
+            return self.ledger.build_projection(
+                state.bundle,
+                self.task_ids,
+                generation=generation,
+            )
+        except TaskFeedbackError as error:
+            if (
+                str(error) != "task feedback trace is missing for this bundle"
+                or not self.tasks
+            ):
+                raise
+            return self._unavailable_treatment_projection(state, generation)
 
     def finish_cycle(
         self,
@@ -1301,9 +1451,8 @@ class _InteractionFeedbackManager:
             raise ValueError("interaction feedback cycle boundary is invalid")
         next_generation = generation + 1
         if self.feedback_mode == "task":
-            projection = self.ledger.build_projection(
-                state.bundle,
-                self.task_ids,
+            projection = self.build_projection(
+                state,
                 generation=next_generation,
             )
         else:
@@ -1698,6 +1847,7 @@ def _build_phases(
                 ),
                 artifact_store,
                 feedback_mode=args.feedback_mode,
+                tasks=task_map,
             )
             if args.interaction_smoke
             else None
