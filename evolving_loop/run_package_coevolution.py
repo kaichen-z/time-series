@@ -158,6 +158,16 @@ def _split_digest(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _record_smoke_acceptance(
+    store: PackageArtifactStore, payload: Mapping[str, object]
+) -> str:
+    evidence_sha256 = _split_digest(dict(payload))
+    store.record_acceptance_evidence(evidence_sha256, payload)
+    if not store.contains_evidence(evidence_sha256):
+        raise ValueError("smoke acceptance evidence was not durable")
+    return evidence_sha256
+
+
 def _evaluation_from_payload(payload: object) -> PackageEvaluation:
     if not isinstance(payload, Mapping):
         raise ValueError("cached package evaluation must be an object")
@@ -1181,10 +1191,7 @@ class _SmokeCoordinatePhaseRunner:
             "stage_evidence": [item.to_payload() for item in evidence],
             "replay_result_sha256": hashlib.sha256(replay.result_bytes()).hexdigest(),
         }
-        evidence_sha256 = _digest(acceptance)
-        self.artifact_store.record_acceptance_evidence(evidence_sha256, acceptance)
-        if not self.artifact_store.contains_evidence(evidence_sha256):
-            raise ValueError("smoke acceptance evidence was not durable")
+        evidence_sha256 = _record_smoke_acceptance(self.artifact_store, acceptance)
         return PackageCoordinatePhaseOutcome(
             target=cast(str, self.target),
             parent=parent,
