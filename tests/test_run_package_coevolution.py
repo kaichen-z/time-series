@@ -314,6 +314,31 @@ def test_interaction_feedback_manager_persists_cycle1_projection_for_cycle2(
     assert store.load_task_feedback(3) == projection
 
 
+def test_interaction_feedback_reports_unavailable_retrieval_as_typed_cases(
+    tmp_path,
+) -> None:
+    task, state = _bundle(tmp_path)
+    ledger = PackageTaskFeedbackLedger({task.numeric.task_id: "train"})
+    store = PackageArtifactStore(tmp_path / "artifacts")
+    manager = _InteractionFeedbackManager(
+        ledger,
+        (task.numeric.task_id,),
+        store,
+        feedback_mode="task",
+        tasks={task.numeric.task_id: task},
+    )
+
+    projection = manager.finish_cycle(state, generation=2)
+
+    assert projection.source_bundle_sha256 == state.bundle.fingerprint()
+    assert len(projection.cases) == 1
+    case = projection.cases[0]
+    assert case.assumption_id == "history_ready"
+    assert case.stance == "uncertain"
+    assert case.target_match == "unmatched"
+    assert case.decision_action == "unresolved"
+
+
 def test_skipped_cycle1_decision_persists_explicit_empty_treatment_feedback(
     tmp_path,
 ) -> None:
