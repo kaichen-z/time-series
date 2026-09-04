@@ -754,28 +754,48 @@ class _SmokeRetrievalProposer:
         if parent_genome is None:
             raise ValueError("smoke Retrieval requires a bound Parent")
         number = int(parent_genome.version[1:]) + 1
-        slot = self.proposer.propose_slot(
-            parent_genome,
-            scope=CHILD_SCOPES[0],
-            version=f"v{number:03d}",
-            generation=generation,
-            feedback=feedback.to_payload(),
-            skill_library=self.library.clone(persist=False, read_only=True),
-        )
+        version = f"v{number:03d}"
+        try:
+            slot = self.proposer.propose_slot(
+                parent_genome,
+                scope=CHILD_SCOPES[0],
+                version=version,
+                generation=generation,
+                feedback=feedback.to_payload(),
+                skill_library=self.library.clone(persist=False, read_only=True),
+            )
+            proposed_genome = slot.genome
+            raw_proposal_sha256 = slot.proposal_sha256
+        except RuntimeError:
+            if not self.lineage_only:
+                raise
+            proposed_genome = replace(
+                parent_genome,
+                version=version,
+                parent=parent_genome.version,
+            )
+            raw_proposal_sha256 = _digest(
+                {
+                    "generation": generation,
+                    "scope": CHILD_SCOPES[0],
+                    "status": "proposal_model_unavailable",
+                    "version": version,
+                }
+            )
         reason: str | None = None
         state = parent
-        if slot.genome is None:
+        if proposed_genome is None:
             reason = "invalid_schema"
         else:
             try:
                 genome = (
                     replace(
                         parent_genome,
-                        version=slot.genome.version,
+                        version=proposed_genome.version,
                         parent=parent_genome.version,
                     )
                     if self.lineage_only
-                    else slot.genome
+                    else proposed_genome
                 )
                 policy = embed_retrieval_candidate(
                     parent.bundle.policy,
@@ -797,7 +817,7 @@ class _SmokeRetrievalProposer:
             generation=generation,
             slot=0,
             payload={
-                "raw_proposal_sha256": slot.proposal_sha256,
+                "raw_proposal_sha256": raw_proposal_sha256,
                 "invalid_reason": reason,
             },
         )
