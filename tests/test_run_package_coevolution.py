@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import hashlib
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from common.data import Task as DataTask
 from common.evolution_core.task_feedback import TaskEvidenceProjection
+from evolving_loop.co_evolution import HarnessPolicy, embed_retrieval_release
 from evolving_loop.data import ContextTask, load_context_tasks_by_ids
 from evolving_loop.package_artifacts import (
     PackageArtifactError,
@@ -41,6 +43,7 @@ from evolving_loop.package_task_feedback import PackageTaskFeedbackLedger
 from evolving_loop.package_stage_runner import PackageCoordinatePhaseOutcome
 from evolving_loop.package_numerical_supply import parse_numerical_supply_release
 from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
+from evolving_loop.retrieval_agent.policy import RetrievalRelease
 from tests.test_package_coordinate_evolution import _bundle
 from tests.test_package_stage_runner import _evaluation
 from tests.test_package_task_feedback import _verified_state_and_result
@@ -303,6 +306,73 @@ def test_interaction_feedback_manager_persists_cycle1_projection_for_cycle2(
     assert projection is not None
     assert len(projection.cases) == 1
     assert store.load_task_feedback(3) == projection
+
+
+def test_skipped_cycle1_decision_persists_explicit_empty_treatment_feedback(
+    tmp_path,
+) -> None:
+    seed = RetrievalRelease.load(
+        Path("evolving_loop/retrieval_agent/releases/v000")
+    )
+    policy = embed_retrieval_release(
+        HarnessPolicy(), seed, changelog="Bind the Retrieval seed."
+    )
+    task, state = _bundle(tmp_path, policy=policy)
+    ledger = PackageTaskFeedbackLedger({task.numeric.task_id: "train"})
+    store = PackageArtifactStore(tmp_path / "artifacts")
+    manager = _InteractionFeedbackManager(
+        ledger,
+        (task.numeric.task_id,),
+        store,
+        feedback_mode="task",
+    )
+    recorder = _CheckpointRecorder(
+        store,
+        run_sha256="a" * 64,
+        schedule_sha256="b" * 64,
+        initial=state,
+        checkpoint=None,
+    )
+
+    class RejectingPhase:
+        def __init__(self, target, feedback_manager=None) -> None:
+            self.target = target
+            self.feedback_manager = feedback_manager
+
+        def run(self, parent, _initial, *, generation):
+            return PackageCoordinatePhaseOutcome(
+                target=self.target,
+                parent=parent,
+                finalist=None,
+                selected=parent,
+                accepted=False,
+                improved=False,
+                reason=f"rejected generation {generation}",
+                evidence=(),
+            )
+
+    current = _run_controller(
+        (
+            RejectingPhase("numerical"),
+            RejectingPhase("retrieval", manager),
+            RejectingPhase("decision", manager),
+        ),
+        cycles=1,
+        offset=0,
+        parent=state,
+        initial=state,
+        recorder=recorder,
+    )
+
+    projection = manager.for_numerical(current, generation=3)
+    assert projection is not None
+    assert projection.cases == ()
+    assert store.load_task_feedback(3) == projection
+    assert tuple(step["target"] for step in recorder.steps) == (
+        "numerical",
+        "retrieval",
+        "decision",
+    )
 
 
 def test_interaction_retrieval_gate_ignores_gain_but_keeps_integrity_failures() -> None:
