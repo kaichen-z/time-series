@@ -3026,6 +3026,7 @@ class RetrievalGenomeProposer:
             payload["feedback"] = safe_feedback
         transient_failures = 0
         schema_retry_used = False
+        schema_fallback: _RetrievalGenomeProposalSlot | None = None
         while True:
             try:
                 response = self.mutation_llm.complete(
@@ -3098,6 +3099,13 @@ class RetrievalGenomeProposer:
                             )
                     if effective_child is not None:
                         if not schema_retry_used and lineage_mismatch:
+                            schema_fallback = _RetrievalGenomeProposalSlot(
+                                scope=scope,
+                                version=version,
+                                proposal=dict(effective),
+                                genome=effective_child,
+                                proposal_sha256=effective_child.fingerprint(),
+                            )
                             schema_retry_used = True
                             payload["previous_response_error"] = {
                                 "code": "invalid_scoped_genome",
@@ -3159,6 +3167,16 @@ class RetrievalGenomeProposer:
                     attempt=transient_failures,
                 )
                 self._checkpoint()
+            except RuntimeError:
+                if schema_fallback is None:
+                    raise
+                self._event(
+                    "schema_retry_fallback",
+                    operation="mutation",
+                    generation=generation,
+                    scope=scope,
+                )
+                return schema_fallback
 
     def propose(
         self,

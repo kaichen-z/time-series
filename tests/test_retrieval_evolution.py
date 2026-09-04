@@ -258,6 +258,54 @@ def test_genome_proposer_projects_schema_retry_onto_host_owned_scope() -> None:
     assert len(llm.calls) == 2
 
 
+def test_genome_proposer_uses_validated_projection_when_schema_retry_is_unavailable() -> None:
+    parent = RetrievalGenome.seed()
+    first = _proposal(parent, "v001", "A")
+    first["parent"] = parent.to_payload()
+    first["round2_prompt"] = f"{parent.round2_prompt}\nOut-of-scope rewrite."
+    canonical = parent.to_payload()
+    canonical.update(
+        {
+            "version": "v001",
+            "parent": "v000",
+            "round1_prompt": first["round1_prompt"],
+        }
+    )
+
+    class CorrectionUnavailableLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, **_kwargs: object) -> LLMResponse:
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResponse(text=json.dumps(first))
+            raise RuntimeError("Codex CLI failed to initialize")
+
+    llm = CorrectionUnavailableLLM()
+    events: list[tuple[str, dict[str, object]]] = []
+    proposer = RetrievalGenomeProposer(
+        llm,
+        transient_retries=0,
+        version_origin=parent.version,
+        event=lambda kind, **payload: events.append((kind, payload)),
+    )
+
+    slot = proposer.propose_slot(
+        parent,
+        scope="A",
+        version="v001",
+        generation=0,
+        feedback={},
+        skill_library=None,
+    )
+
+    assert slot.genome == RetrievalGenome.from_payload(canonical)
+    assert slot.proposal == canonical
+    assert llm.calls == 2
+    assert [kind for kind, _payload in events][-1] == "schema_retry_fallback"
+
+
 @dataclass(frozen=True)
 class _EvaluationCall:
     version: str
