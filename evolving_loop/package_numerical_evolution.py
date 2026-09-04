@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from typing import cast
 
+from common.evolution_core.task_feedback import TaskEvidenceProjection
 from common.payload import canonical_json_bytes
 from evolving_loop.data import ContextTask
 from evolving_loop.package_candidate_proposal import (
@@ -1103,6 +1104,7 @@ class NumericalPackageProposer:
         *,
         generation: int,
         child_count: int = 3,
+        task_evidence: TaskEvidenceProjection | None = None,
     ) -> tuple[NumericalCoordinateCandidate, ...]:
         if type(parent_release) is not NumericalSupplyRelease:
             _fail("Numerical proposal requires an exact Parent release")
@@ -1116,6 +1118,8 @@ class NumericalPackageProposer:
             _fail("Numerical proposal generation must be nonnegative")
         if type(child_count) is not int or child_count != 3:
             _fail("formal Numerical proposal requires exactly three Child slots")
+        if task_evidence is not None and type(task_evidence) is not TaskEvidenceProjection:
+            _fail("Numerical task evidence must use the exact sanitized projection")
         expected_task_ids = tuple(sorted(task.numeric.task_id for task in self.tasks))
         if parent_registry.task_ids != expected_task_ids:
             _fail("Numerical proposal tasks do not match the Parent registry")
@@ -1142,6 +1146,7 @@ class NumericalPackageProposer:
                 parent_anchor,
                 sanitized_feedback,
                 generation=generation + 1,
+                task_evidence=task_evidence,
             )
         except Exception as error:
             raise NumericalPackageEvolutionError(
@@ -1264,6 +1269,12 @@ class NumericalCandidateProposer:
             _fail("package Numerical proposal generation must be nonnegative")
         if type(child_count) is not int or child_count != 3:
             _fail("formal package Numerical proposal requires exactly three slots")
+        if (
+            feedback.task_evidence is not None
+            and feedback.task_evidence.source_bundle_sha256
+            != parent.bundle.fingerprint()
+        ):
+            _fail("Numerical task evidence belongs to a different Parent bundle")
         try:
             parent_release = parse_numerical_supply_release(
                 cast(dict[str, object], _plain(parent.bundle.numerical_release_payload))
@@ -1278,12 +1289,17 @@ class NumericalCandidateProposer:
             (),
             (),
         )
+        proposal_kwargs = {
+            "generation": generation,
+            "child_count": child_count,
+        }
+        if feedback.task_evidence is not None:
+            proposal_kwargs["task_evidence"] = feedback.task_evidence
         proposed = self.proposer.propose(
             parent_release,
             parent.registry,
             sanitized,
-            generation=generation,
-            child_count=child_count,
+            **proposal_kwargs,
         )
         if type(proposed) is not tuple or len(proposed) != 3:
             _fail("formal Numerical proposer violated three-slot cardinality")

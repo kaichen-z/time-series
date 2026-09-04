@@ -9,6 +9,7 @@ from dataclasses import replace
 import pytest
 
 from common.llm import FakeLLMClient
+from common.evolution_core.task_feedback import TaskEvidenceProjection
 from evolving_loop.co_evolution import CoEvolutionConfig, HarnessPolicy
 from evolving_loop.package_candidate_proposal import (
     PackageCandidate,
@@ -39,6 +40,7 @@ from numerical_agent.evolution.champion_evidence import ProposerEvidence
 from tests.test_package_coordinate_evolution import _bundle
 from tests.test_package_decision_evolution import _decision_task
 from tests.test_package_retrieval_evolution import _frozen_registry, _package
+from tests.test_task_evidence_feedback import _case
 
 
 def _evaluation(candidate: str, task_id: str, error: float) -> PackageEvaluation:
@@ -190,6 +192,22 @@ def test_package_feedback_contains_no_task_ids_values_or_dev_residuals() -> None
         "fallback_count",
         "coverage",
     }
+
+
+def test_package_feedback_carries_exact_sanitized_task_projection() -> None:
+    projection = TaskEvidenceProjection(
+        source_bundle_sha256="a" * 64,
+        request_namespace_sha256="b" * 64,
+        cases=(_case(),),
+    )
+
+    feedback = PackageProposalFeedback.from_evaluations(
+        parent=_evaluation("a" * 64, "task_185", 1.0),
+        task_evidence=projection,
+    )
+
+    assert feedback.task_evidence is projection
+    assert feedback.to_payload()["task_evidence"] == projection.to_payload()
 
 
 @pytest.mark.parametrize(
@@ -375,6 +393,48 @@ def test_each_proposer_returns_exactly_three_canonical_slots(tmp_path) -> None:
         assert len({child.proposal_sha256 for child in children}) == 3
 
     assert isinstance(numerical_engine.feedback, ProposerEvidence)
+
+
+def test_numerical_adapter_forwards_task_evidence_only_to_numerical(tmp_path) -> None:
+    _task, parent = _bundle(tmp_path)
+    projection = TaskEvidenceProjection(
+        source_bundle_sha256=parent.bundle.fingerprint(),
+        request_namespace_sha256="b" * 64,
+        cases=(_case(),),
+    )
+    feedback = PackageProposalFeedback.from_evaluations(
+        parent=_evaluation(parent.bundle.fingerprint(), "task_185", 1.0),
+        task_evidence=projection,
+    )
+
+    class CapturingNumericalProposer:
+        def __init__(self) -> None:
+            self.task_evidence = None
+
+        def propose(
+            self,
+            _release,
+            _registry,
+            _aggregate,
+            *,
+            generation,
+            child_count,
+            task_evidence=None,
+        ):
+            self.task_evidence = task_evidence
+            return _numerical_children(parent, generation=generation)
+
+    engine = CapturingNumericalProposer()
+
+    children = NumericalCandidateProposer(engine).propose(
+        parent,
+        feedback,
+        generation=2,
+        child_count=3,
+    )
+
+    assert len(children) == 3
+    assert engine.task_evidence is projection
 
 
 def test_invalid_proposal_slots_retain_exact_parent_and_unique_identity(tmp_path) -> None:

@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Protocol
 
+from common.evolution_core.task_feedback import TaskEvidenceProjection
 from evolving_loop.co_evolution import HarnessPolicy
 from evolving_loop.package_coordinate_evolution import (
     PackageCoordinateState,
@@ -284,12 +285,13 @@ def _summary(evaluation: PackageEvaluation) -> dict[str, float | int]:
 
 @dataclass(frozen=True)
 class PackageProposalFeedback:
-    """The complete aggregate-only evidence permitted into proposal models."""
+    """The complete sanitized evidence permitted into proposal models."""
 
     parent_summary: Mapping[str, float | int]
     rejected_summaries: tuple[Mapping[str, float | int | str], ...]
     gate_names: tuple[str, ...]
     structures: tuple[Mapping[str, object], ...]
+    task_evidence: TaskEvidenceProjection | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.parent_summary, Mapping) or set(
@@ -338,6 +340,12 @@ class PackageProposalFeedback:
         object.__setattr__(self, "rejected_summaries", tuple(rejected))
         object.__setattr__(self, "gate_names", tuple(sorted(set(self.gate_names))))
         object.__setattr__(self, "structures", tuple(structures))
+        if self.task_evidence is not None and type(
+            self.task_evidence
+        ) is not TaskEvidenceProjection:
+            raise ValueError("task evidence must use the exact sanitized projection")
+        if self.task_evidence is not None:
+            TaskEvidenceProjection.__post_init__(self.task_evidence)
 
     @classmethod
     def from_evaluations(
@@ -347,6 +355,7 @@ class PackageProposalFeedback:
         rejected_children: Sequence[PackageEvaluation] = (),
         gate_names: Sequence[str] = (),
         structures: Sequence[Mapping[str, object]] = (),
+        task_evidence: TaskEvidenceProjection | None = None,
     ) -> "PackageProposalFeedback":
         rejected = tuple(rejected_children)
         if any(not isinstance(item, PackageEvaluation) for item in rejected):
@@ -359,15 +368,19 @@ class PackageProposalFeedback:
             ),
             gate_names=tuple(gate_names),
             structures=tuple(structures),
+            task_evidence=task_evidence,
         )
 
     def to_payload(self) -> dict[str, object]:
-        return {
+        payload = {
             "parent_summary": dict(self.parent_summary),
             "rejected_summaries": [dict(item) for item in self.rejected_summaries],
             "gate_names": list(self.gate_names),
             "structures": [_plain(item) for item in self.structures],
         }
+        if self.task_evidence is not None:
+            payload["task_evidence"] = self.task_evidence.to_payload()
+        return payload
 
 
 @dataclass(frozen=True)

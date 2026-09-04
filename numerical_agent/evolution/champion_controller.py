@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable, Literal, NoReturn, cast
 
 from common.data import Task
+from common.evolution_core.task_feedback import TaskEvidenceProjection
 from common.metrics import joint_scaled_error
 from common.payload import canonical_json_bytes, strict_json_loads
 
@@ -341,10 +342,20 @@ class ChampionProposerAdapter:
         evidence: ProposerEvidence,
         *,
         generation: int,
+        task_evidence: TaskEvidenceProjection | None = None,
     ) -> tuple[ChampionRecipe, ...]:
         self.verify()
         if type(generation) is not int or generation <= 0:
             _lifecycle_fail("formal proposer generation must be a positive integer")
+        if task_evidence is not None and type(task_evidence) is not TaskEvidenceProjection:
+            _lifecycle_fail("formal proposer task evidence is malformed")
+        if task_evidence is not None:
+            try:
+                TaskEvidenceProjection.__post_init__(task_evidence)
+            except (TypeError, ValueError) as error:
+                raise ChampionLifecycleError(
+                    "formal proposer task evidence is malformed"
+                ) from error
         if self.kind == "scripted":
             batches = _parse_scripted_batches(self.behavior_json)
             if generation > len(batches):
@@ -381,6 +392,7 @@ class ChampionProposerAdapter:
             inventory,
             evidence,
             generation=generation,
+            task_evidence=task_evidence,
         )
 
     def __call__(self, parent: object, evidence: ProposerEvidence) -> object:

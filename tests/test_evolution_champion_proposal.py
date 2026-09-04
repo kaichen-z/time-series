@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 
 import pytest
 
+from common.evolution_core.task_feedback import TaskEvidenceProjection
 from common.llm import FakeLLMClient
 from numerical_agent.dictionary import MethodDefinition, ToolDictionary
 from numerical_agent.evolution import champion_proposal as proposal_module
@@ -26,6 +27,7 @@ from numerical_agent.evolution.champion_proposal import (
     propose_champion_recipes,
 )
 from numerical_agent.evolution.screening import TaskProfile
+from tests.test_task_evidence_feedback import _case
 
 
 def _inventory() -> ToolDictionary:
@@ -81,6 +83,14 @@ EVIDENCE = ProposerEvidence(
     morphology=(),
     comparisons=(),
 )
+
+
+def _task_evidence() -> TaskEvidenceProjection:
+    return TaskEvidenceProjection(
+        source_bundle_sha256="a" * 64,
+        request_namespace_sha256="b" * 64,
+        cases=(_case(),),
+    )
 
 
 def _assumption(
@@ -222,6 +232,41 @@ def valid_response() -> dict[str, object]:
 
 def timesfm_seasonal_response() -> dict[str, object]:
     return valid_response()
+
+
+def test_proposer_receives_exact_task_evidence_projection() -> None:
+    projection = _task_evidence()
+    llm = FakeLLMClient([json.dumps(valid_response())])
+
+    recipes = propose_champion_recipes(
+        llm,
+        PARENT,
+        INVENTORY,
+        EVIDENCE,
+        task_evidence=projection,
+    )
+
+    prompt = json.loads(llm.calls[0]["messages"][0]["content"])
+    assert len(recipes) == 5
+    assert prompt["task_evidence"] == projection.to_payload()
+
+
+def test_proposer_rejects_task_feedback_handle_copied_into_output() -> None:
+    projection = _task_evidence()
+    leaked = valid_response()
+    leaked["copied_case"] = projection.cases[0].case_id
+    llm = FakeLLMClient([json.dumps(leaked), json.dumps(leaked)])
+
+    with pytest.raises(ChampionProposalError, match="after one schema retry"):
+        propose_champion_recipes(
+            llm,
+            PARENT,
+            INVENTORY,
+            EVIDENCE,
+            task_evidence=projection,
+        )
+
+    assert len(llm.calls) == 2
 
 
 def test_parser_reconstructs_task2_text_and_ids_from_closed_structure() -> None:

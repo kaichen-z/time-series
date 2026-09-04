@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 
 import pytest
 
+from common.evolution_core.task_feedback import TaskEvidenceProjection
 from common.data import Task as DataTask
 import evolving_loop.package_numerical_evolution as numerical_evolution
 from evolving_loop.data import ContextTask, Document
@@ -52,6 +53,7 @@ from numerical_agent.evolution.task_local_evolution import (
     TaskLocalTaskRow,
     build_group_fold_manifest,
 )
+from tests.test_task_evidence_feedback import _case
 
 
 def _recipe(candidate_name: str = "seasonal_naive") -> ChampionRecipe:
@@ -348,6 +350,26 @@ def test_numerical_proposer_returns_three_direct_lineage_states() -> None:
 
     assert len(children) == 3
     assert len({child.proposal_sha256 for child in children}) == 3
+
+
+def test_numerical_package_proposer_accepts_sanitized_task_evidence() -> None:
+    parent_release = _supply_parent()
+    projection = TaskEvidenceProjection(
+        source_bundle_sha256="a" * 64,
+        request_namespace_sha256="b" * 64,
+        cases=(_case(),),
+    )
+
+    children = _package_proposer(_RecordingMaterializer()).propose(
+        parent_release,
+        _registry_for_release(parent_release),
+        ProposerEvidence("adaptive_train_build_diagnostic", False, (), ()),
+        generation=0,
+        child_count=3,
+        task_evidence=projection,
+    )
+
+    assert len(children) == 3
     assert all(child.invalid_reason is None for child in children)
     assert all(
         child.release.parent_sha256 == parent_release.fingerprint for child in children
