@@ -1045,6 +1045,19 @@ actually improved the forecasting backbone. It also reports `revision_accept_rat
 
 ## Public development split
 
+### Package-native co-evolution
+
+Run Numerical, Retrieval, and Decision package co-evolution through the dedicated
+entry point:
+
+```bash
+TIME_SERIES_PYTHON=.venv/bin/python scripts/run_package_coevolution.sh --help
+```
+
+The registered Dev partition is part of evolution. Public-99 is historically
+consumed final regression evidence and is evaluated only from a sealed final bundle;
+Public output must never be fed back into evolution, mutation, selection, or reruns.
+
 ```bash
 pip install -e '.[chronos,huggingface]'
 drcik-agent run-hf --public-dev --output-dir outputs/public-dev

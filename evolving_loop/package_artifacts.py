@@ -401,12 +401,47 @@ class PackageArtifactStore:
 
     # -- completion ------------------------------------------------
 
-    def complete(self, final_bundle_payload: Mapping[str, object]) -> str:
+    def complete(
+        self,
+        final_bundle_payload: Mapping[str, object],
+        *,
+        accepted_steps: int | None = None,
+        rejected_steps: int | None = None,
+        formal_run: bool | None = None,
+    ) -> str:
         if (self.output_dir / "evaluation_complete.json").exists():
             raise PackageArtifactError("this run directory is already complete")
+        for name, value in (
+            ("accepted_steps", accepted_steps),
+            ("rejected_steps", rejected_steps),
+        ):
+            if value is not None and (type(value) is not int or value < 0):
+                raise PackageArtifactError(f"{name} must be a non-negative integer")
+        if formal_run is not None and type(formal_run) is not bool:
+            raise PackageArtifactError("formal_run must be a boolean")
+        supplied_summary = (
+            accepted_steps is not None,
+            rejected_steps is not None,
+            formal_run is not None,
+        )
+        if any(supplied_summary) and not all(supplied_summary):
+            raise PackageArtifactError("completion summary fields must be supplied together")
         data = _canonical_json(dict(final_bundle_payload))
         _write_once(self.output_dir / "final_bundle.json", data)
         final_sha256 = hashlib.sha256(data).hexdigest()
+        summary = {
+            **(
+                {
+                    "accepted_steps": accepted_steps,
+                    "rejected_steps": rejected_steps,
+                    "formal_run": formal_run,
+                }
+                if accepted_steps is not None
+                and rejected_steps is not None
+                and formal_run is not None
+                else {}
+            )
+        }
         _atomic_write(
             self.output_dir / "evaluation_complete.json",
             _canonical_json(
@@ -414,6 +449,7 @@ class PackageArtifactStore:
                     "schema_version": 1,
                     "status": "complete",
                     "final_bundle_sha256": final_sha256,
+                    **summary,
                     "public_test_accessed": False,
                 }
             ),
