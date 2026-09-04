@@ -1211,7 +1211,7 @@ def _state_from_payload(
     )
     bundle = PackageCoordinateBundle(policy=policy, **raw)
     release = parse_numerical_supply_release(
-        cast(dict[str, object], bundle.numerical_release_payload)
+        cast(dict[str, object], bundle.to_payload()["numerical_release_payload"])
     )
     registry = _build_registry(tasks, release, materializer)
     if registry.fingerprint != bundle.numerical_manifest_sha256:

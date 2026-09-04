@@ -21,6 +21,7 @@ from evolving_loop.run_package_coevolution import (
     _build_registry,
     _configuration_identity,
     _early_resume_guard,
+    _state_from_payload,
     _step_payload,
     build_parser,
     main,
@@ -28,6 +29,7 @@ from evolving_loop.run_package_coevolution import (
 from evolving_loop.package_coordinate_evolution import PackageCoordinateStep
 from evolving_loop.package_candidate_proposal import PackageProposalFeedback
 from evolving_loop.package_numerical_supply import parse_numerical_supply_release
+from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
 from tests.test_package_coordinate_evolution import _bundle
 from tests.test_package_stage_runner import _evaluation
 
@@ -148,6 +150,26 @@ def test_step_payload_serializes_frozen_coordinate_trace(tmp_path) -> None:
     assert restored["accepted_fingerprints"] == fingerprints
     assert restored["changed_modules"] == ["numerical"]
     assert restored["accepted_bundle_payload"]["schema_version"] == 2
+
+
+def test_state_from_payload_thaws_frozen_numerical_release(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task, state = _bundle(tmp_path)
+    monkeypatch.setattr(
+        "evolving_loop.run_package_coevolution._build_registry",
+        lambda *_args, **_kwargs: state.registry,
+    )
+
+    restored = _state_from_payload(
+        state.bundle.to_payload(),
+        tasks=(task,),
+        materializer=object(),
+        library=RetrievalSkillLibrary(tmp_path / "skills.json", persist=False),
+    )
+
+    assert restored.bundle.fingerprint() == state.bundle.fingerprint()
+    assert restored.registry is state.registry
 
 
 def _split_manifest() -> dict[str, object]:
