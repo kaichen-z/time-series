@@ -12,6 +12,7 @@ import pytest
 
 from common.data import Task as DataTask
 from common.evolution_core.task_feedback import TaskEvidenceProjection
+from common.llm import FakeLLMClient
 from evolving_loop.co_evolution import HarnessPolicy, embed_retrieval_release
 from evolving_loop.data import ContextTask, load_context_tasks_by_ids
 from evolving_loop.package_artifacts import (
@@ -24,6 +25,7 @@ from evolving_loop.run_package_coevolution import (
     _CheckpointRecorder,
     _InteractionFeedbackManager,
     _SmokeNumericalProposer,
+    _SmokeRetrievalProposer,
     _build_registry,
     _configuration_identity,
     _early_resume_guard,
@@ -43,6 +45,10 @@ from evolving_loop.package_task_feedback import PackageTaskFeedbackLedger
 from evolving_loop.package_stage_runner import PackageCoordinatePhaseOutcome
 from evolving_loop.package_numerical_supply import parse_numerical_supply_release
 from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
+from evolving_loop.retrieval_agent.evolution import (
+    RetrievalGenomeProposer,
+    retrieval_behavior_fingerprint,
+)
 from evolving_loop.retrieval_agent.policy import RetrievalRelease
 from tests.test_package_coordinate_evolution import _bundle
 from tests.test_package_stage_runner import _evaluation
@@ -387,6 +393,48 @@ def test_interaction_retrieval_gate_ignores_gain_but_keeps_integrity_failures() 
         "retrieval", (*gain_only, "task_coverage", "fallback_count")
     ) == ("task_coverage", "fallback_count")
     assert _interaction_smoke_gate_failures("decision", gain_only) == gain_only
+
+
+def test_interaction_retrieval_uses_lineage_only_child_for_cached_handoff(
+    tmp_path,
+) -> None:
+    _task, parent = _bundle(tmp_path)
+    parent_genome = parent.bundle.policy.retrieval_genome
+    assert parent_genome is not None
+    proposal = parent_genome.to_payload()
+    proposal.update(
+        {
+            "version": "v002",
+            "parent": "v001",
+            "round1_prompt": f"{parent_genome.round1_prompt}\nMutation.",
+        }
+    )
+    library = RetrievalSkillLibrary(tmp_path / "skills.json", persist=False)
+    proposer = _SmokeRetrievalProposer(
+        RetrievalGenomeProposer(
+            FakeLLMClient([json.dumps(proposal)]),
+            transient_retries=0,
+            version_origin=parent_genome.version,
+        ),
+        library,
+        lineage_only=True,
+    )
+
+    child = proposer.propose(
+        parent,
+        PackageProposalFeedback({}, (), (), ()),
+        generation=1,
+        child_count=1,
+    )[0]
+
+    child_genome = child.state.bundle.policy.retrieval_genome
+    assert child.invalid_reason is None
+    assert child_genome is not None
+    assert child_genome.version == "v002"
+    assert child_genome.parent == "v001"
+    assert retrieval_behavior_fingerprint(child_genome) == (
+        retrieval_behavior_fingerprint(parent_genome)
+    )
 
 
 def test_interaction_completion_requires_six_invoked_phases_and_matching_feedback() -> (

@@ -715,10 +715,15 @@ class _RetrievalPublisher:
 
 class _SmokeRetrievalProposer:
     def __init__(
-        self, proposer: RetrievalGenomeProposer, library: RetrievalSkillLibrary
+        self,
+        proposer: RetrievalGenomeProposer,
+        library: RetrievalSkillLibrary,
+        *,
+        lineage_only: bool = False,
     ) -> None:
         self.proposer = proposer
         self.library = library
+        self.lineage_only = lineage_only
 
     def propose(
         self,
@@ -748,15 +753,24 @@ class _SmokeRetrievalProposer:
             reason = "invalid_schema"
         else:
             try:
+                genome = (
+                    replace(
+                        parent_genome,
+                        version=slot.genome.version,
+                        parent=parent_genome.version,
+                    )
+                    if self.lineage_only
+                    else slot.genome
+                )
                 policy = embed_retrieval_candidate(
                     parent.bundle.policy,
-                    slot.genome,
+                    genome,
                     self.library.clone(persist=False, read_only=True),
                     changelog="Non-formal smoke Retrieval Child.",
                 )
                 state = parent.with_policy(policy, target="retrieval")
-                if retrieval_behavior_fingerprint(
-                    slot.genome
+                if not self.lineage_only and retrieval_behavior_fingerprint(
+                    genome
                 ) == retrieval_behavior_fingerprint(parent_genome):
                     reason = "duplicate_child"
                     state = parent
@@ -1696,7 +1710,11 @@ def _build_phases(
                 schedule.fold_manifest,
                 tasks,
             ),
-            _SmokeRetrievalProposer(retrieval_genomes, library),
+            _SmokeRetrievalProposer(
+                retrieval_genomes,
+                library,
+                lineage_only=args.interaction_smoke,
+            ),
             _SmokeDecisionProposer(decision_engine),
         )
         return tuple(
