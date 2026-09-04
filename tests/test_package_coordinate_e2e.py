@@ -2,19 +2,24 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 
+from common.llm import FakeLLMClient
 from evolving_loop.co_evolution import HarnessPolicy, embed_retrieval_release
+from evolving_loop.decision_agent.agent import DecisionAgent
 from evolving_loop.package_candidate_proposal import (
     PackageCandidate,
     embed_retrieval_candidate,
 )
 from evolving_loop.package_coordinate_evolution import (
+    PackageCoordinateBundle,
     PackageCoordinateController,
     PackageCoordinateState,
 )
 from evolving_loop.package_numerical_supply import parse_numerical_supply_release
 from evolving_loop.package_metrics import PackageGateConfig
+from evolving_loop.package_pipeline_evaluator import PackagePipelineEvaluator
 from evolving_loop.package_stage_runner import (
     InMemoryPackageArtifactSink,
     PackageCoordinatePhaseRunner,
@@ -23,10 +28,17 @@ from evolving_loop.retrieval_agent.policy import (
     RetrievalGenome,
     _write_accepted_retrieval_release,
 )
+from evolving_loop.retrieval_agent.schemas import RetrievalRoundResult
 from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
+from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
+from evolving_loop.retrieval_agent.verifier import merge_verified_rounds
 from tests.test_coordinate_evolution import _audit
 from tests.test_package_coordinate_evolution import _bundle
-from tests.test_package_decision_evolution import _decision_task
+from tests.test_package_decision_evolution import (
+    _decision_task,
+    _request_specialist,
+    _round2_response,
+)
 from tests.test_package_stage_runner import (
     DEV_20,
     TRAIN_80,
@@ -34,7 +46,12 @@ from tests.test_package_stage_runner import (
     _schedule,
     _task_map,
 )
-from tests.test_package_retrieval_evolution import _package, _frozen_registry
+from tests.test_package_retrieval_evolution import (
+    _decision_response,
+    _frozen_registry,
+    _package,
+    _round_response,
+)
 
 
 # --------------------------------------------------------------------------
@@ -45,6 +62,7 @@ from tests.test_package_retrieval_evolution import _package, _frozen_registry
 class _CycleEvaluator:
     def __init__(self) -> None:
         self.stages_seen: list[str] = []
+        self.task_ids_seen: list[tuple[str, ...]] = []
         self.cache_only_calls = 0
 
     @staticmethod
@@ -61,6 +79,7 @@ class _CycleEvaluator:
             self.cache_only_calls += 1
         else:
             self.stages_seen.append(stage)
+            self.task_ids_seen.append(task_ids)
         return _evaluation(bundle.fingerprint(), task_ids, self._error(bundle.generation))
 
 
@@ -221,7 +240,25 @@ def _phase_runner(target, proposer, evaluator, sink, *, publisher=None):
     )
 
 
-def test_package_coordinate_evolution_closes_deterministic_two_cycle_loop(tmp_path) -> None:
+def test_package_coordinate_evolution_closes_deterministic_two_cycle_loop(
+    tmp_path, monkeypatch
+) -> None:
+    forbidden_calls = {"public_loader": 0, "legacy_runner": 0}
+
+    def forbid_public_loader(*_args, **_kwargs):
+        forbidden_calls["public_loader"] += 1
+        raise AssertionError("package evolution attempted to load Public tasks")
+
+    def forbid_legacy_runner(*_args, **_kwargs):
+        forbidden_calls["legacy_runner"] += 1
+        raise AssertionError("package evolution attempted to run legacy co-evolution")
+
+    monkeypatch.setattr(
+        "evolving_loop.data.load_huggingface_context_tasks", forbid_public_loader
+    )
+    monkeypatch.setattr(
+        "evolving_loop.co_evolution.CoEvolutionEngine.evolve", forbid_legacy_runner
+    )
     _task, seed_state = _bundle(tmp_path)
     skills = RetrievalSkillLibrary(tmp_path / "skills.json", persist=False).clone(
         persist=False, read_only=True
@@ -251,8 +288,10 @@ def test_package_coordinate_evolution_closes_deterministic_two_cycle_loop(tmp_pa
         "retrieval",
         "decision",
     )
+    assert _schedule().counts == (8, 32, 64, 16, 20)
     assert [step.accepted for step in trace] == [True, True, True, False, False, False]
     assert all(not step.public_test_accessed for step in trace)
+    assert forbidden_calls == {"public_loader": 0, "legacy_runner": 0}
 
     # every accepted step's parent hash chains to the preceding accepted bundle
     accepted_chain = [step for step in trace if step.accepted]
@@ -275,6 +314,84 @@ def test_package_coordinate_evolution_closes_deterministic_two_cycle_loop(tmp_pa
         "calibration16",
         "dev20",
     }
+    assert {
+        task_id for task_ids in evaluator.task_ids_seen for task_id in task_ids
+    } == {task.task_id for task in (*TRAIN_80, *DEV_20)}
     # the Numerical coordinate replaced both the release and the registry
     assert selected.bundle.numerical_release_sha256 != seed_state.bundle.numerical_release_sha256
     assert selected.bundle.numerical_manifest_sha256 != seed_state.bundle.numerical_manifest_sha256
+
+    # Durable bundle bytes reconstruct the exact state when bound to the same registry.
+    replay_payload = selected.bundle.to_payload()
+    assert replay_payload.pop("schema_version") == 2
+    policy_payload = replay_payload.pop("policy")
+    replayed = PackageCoordinateState(
+        PackageCoordinateBundle(
+            policy=HarnessPolicy(**policy_payload),
+            **replay_payload,
+        ),
+        selected.registry,
+    )
+    assert replayed.registry.task_ids == selected.registry.task_ids
+    assert replayed.registry.fingerprint == selected.registry.fingerprint
+    assert replayed.bundle.canonical_bytes() == selected.bundle.canonical_bytes()
+
+    # Exercise the typed second Retrieval round through the final package pipeline.
+    retrieval_llm = FakeLLMClient([_round_response(), _round2_response(_task)])
+    retrieval = TwoStageRetrievalAgent(
+        retrieval_llm,
+        selected.bundle.policy.retrieval_genome,
+        skills,
+    )
+    decision = DecisionAgent(
+        FakeLLMClient([_request_specialist(), _decision_response("specialist")]),
+        prompt=selected.bundle.policy.decision_prompt,
+    )
+    typed_round1: list[RetrievalRoundResult] = []
+    typed_round2: list[RetrievalRoundResult] = []
+    original_round1 = TwoStageRetrievalAgent.run_round1
+    original_round2 = TwoStageRetrievalAgent.run_round2
+
+    def record_round1(self, *args, **kwargs):
+        result = original_round1(self, *args, **kwargs)
+        typed_round1.append(result)
+        return result
+
+    def make_round2_malformed(self, *args, **kwargs):
+        result = original_round2(self, *args, **kwargs)
+        typed_round2.append(result)
+        return replace(
+            result,
+            rejected=(*result.rejected, "invalid_round2_response"),
+        )
+
+    monkeypatch.setattr(TwoStageRetrievalAgent, "run_round1", record_round1)
+    monkeypatch.setattr(TwoStageRetrievalAgent, "run_round2", make_round2_malformed)
+    evaluation = PackagePipelineEvaluator(
+        lambda _policy: retrieval,
+        lambda _policy: decision,
+    ).evaluate(
+        selected.bundle,
+        selected.registry,
+        (_task,),
+        stage="screen8",
+    )
+
+    expected_round1_card = merge_verified_rounds(typed_round1[0], None)
+    expected_round1_sha256 = hashlib.sha256(
+        json.dumps(
+            expected_round1_card.to_payload(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    row = evaluation.task_rows[0]
+    assert len(retrieval_llm.calls) == 2
+    assert len(typed_round2) == 1
+    assert all(
+        type(result) is RetrievalRoundResult
+        for result in (*typed_round1, *typed_round2)
+    )
+    assert row.final_retrieval_sha256 == expected_round1_sha256
+    assert row.fallback_count == 0
