@@ -229,6 +229,68 @@ def test_package_feedback_rejects_task_identity_disguised_as_structure() -> None
             )
 
 
+@pytest.mark.parametrize(
+    ("field", "leak"),
+    (
+        ("feature", "private entity observation"),
+        ("direction", ["quoted document excerpt"]),
+        ("horizon_region", {"note": "forecast truth residual"}),
+        ("feature", [1.0, 2.0]),
+    ),
+)
+def test_package_feedback_rejects_nonstructural_assumption_values(field, leak) -> None:
+    assumption = {
+        "candidate_name": "safe_anchor",
+        "feature": "trend_strength",
+        "direction": "above",
+        "horizon_region": "full",
+        "operator": "route",
+    }
+    assumption[field] = leak
+
+    with pytest.raises(ValueError, match="assumption|closed|structural"):
+        PackageProposalFeedback(
+            parent_summary={"task_count": 1},
+            rejected_summaries=(),
+            gate_names=(),
+            structures=(
+                {
+                    "kind": "route",
+                    "parents": ("safe_anchor", "seasonal_anchor"),
+                    "fallback_parent": "safe_anchor",
+                    "assumptions": (assumption,),
+                    "structure_sha256": "a" * 64,
+                },
+            ),
+        )
+
+
+def test_package_feedback_rejects_nested_task_identity_substring() -> None:
+    with pytest.raises(ValueError, match="task identity|forbidden"):
+        PackageProposalFeedback(
+            parent_summary={"task_count": 1},
+            rejected_summaries=(),
+            gate_names=(),
+            structures=(
+                {
+                    "kind": "route",
+                    "parents": ("candidate_task_185", "seasonal_anchor"),
+                    "fallback_parent": "candidate_task_185",
+                    "assumptions": (
+                        {
+                            "candidate_name": "candidate_task_185",
+                            "feature": "trend_strength",
+                            "direction": "above",
+                            "horizon_region": "full",
+                            "operator": "route",
+                        },
+                    ),
+                    "structure_sha256": "a" * 64,
+                },
+            ),
+        )
+
+
 def test_package_candidate_rejects_open_ended_invalid_reason(tmp_path) -> None:
     _task, parent = _bundle(tmp_path)
 

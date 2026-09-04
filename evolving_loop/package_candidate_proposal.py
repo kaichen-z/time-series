@@ -22,7 +22,7 @@ from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
-_TASK_IDENTITY = re.compile(r"(?i)\btask[_-]?\d")
+_TASK_IDENTITY = re.compile(r"(?i)task[_-]?\d")
 _SUMMARY_KEYS = frozenset(
     {
         "task_count",
@@ -115,6 +115,25 @@ _STRUCTURE_KINDS = frozenset(
 _ASSUMPTION_KEYS = frozenset(
     {"candidate_name", "feature", "direction", "horizon_region", "operator"}
 )
+_ASSUMPTION_FEATURES = frozenset(
+    {
+        "history_length",
+        "horizon",
+        "horizon_ratio",
+        "zero_fraction",
+        "trend_strength",
+        "periodicity_strength",
+        "periodicity_confidence",
+        "outlier_fraction",
+        "noise_relative_scale",
+        "stationarity_score",
+        "recent_regime_confidence",
+        "intermittency_adi",
+        "intermittency_cv2",
+    }
+)
+_ASSUMPTION_DIRECTIONS = frozenset({"above", "below"})
+_ASSUMPTION_HORIZON_REGIONS = frozenset({"early", "late", "full"})
 
 
 def _plain(value: object) -> object:
@@ -180,13 +199,19 @@ def _validate_structure(structure: Mapping[str, object]) -> None:
     ):
         raise ValueError("proposal structure requires a closed SHA-256 identity")
     kind = structure.get("kind")
-    if kind is not None and kind not in _STRUCTURE_KINDS:
+    if kind is not None and (
+        type(kind) is not str or kind not in _STRUCTURE_KINDS
+    ):
         raise ValueError("proposal structure kind must use the closed operator set")
     target = structure.get("target")
-    if target is not None and target not in {"numerical", "retrieval", "decision"}:
+    if target is not None and (
+        type(target) is not str or target not in {"numerical", "retrieval", "decision"}
+    ):
         raise ValueError("proposal structure target must use the coordinate set")
     reason = structure.get("invalid_reason")
-    if reason is not None and reason not in _INVALID_REASONS:
+    if reason is not None and (
+        type(reason) is not str or reason not in _INVALID_REASONS
+    ):
         raise ValueError("proposal structure reason must use the closed reason set")
     support = structure.get("stage_support")
     if support is not None and (type(support) is not int or support <= 0):
@@ -194,7 +219,7 @@ def _validate_structure(structure: Mapping[str, object]) -> None:
     for key in ("candidate_name", "fallback_parent"):
         name = structure.get(key)
         if name is not None and (
-            not isinstance(name, str) or not name.isidentifier() or name.startswith("_")
+            type(name) is not str or not name.isidentifier() or name.startswith("_")
         ):
             raise ValueError("proposal structure names must be closed identifiers")
     parents = structure.get("parents")
@@ -202,24 +227,53 @@ def _validate_structure(structure: Mapping[str, object]) -> None:
         not isinstance(parents, (tuple, list))
         or not parents
         or any(
-            not isinstance(parent, str)
+            type(parent) is not str
             or not parent.isidentifier()
             or parent.startswith("_")
             for parent in parents
         )
     ):
         raise ValueError("proposal structure parents must be closed identifiers")
+    if parents is not None and kind is not None:
+        expected_parent_count = 1 if kind == "select" else 2
+        if len(parents) != expected_parent_count or len(set(parents)) != len(parents):
+            raise ValueError("proposal structure parents must match the operator")
+    fallback_parent = structure.get("fallback_parent")
+    if fallback_parent is not None and (
+        not isinstance(parents, (tuple, list)) or fallback_parent not in parents
+    ):
+        raise ValueError("proposal structure fallback must use a parent identity")
     assumptions = structure.get("assumptions")
     if assumptions is not None:
-        if not isinstance(assumptions, (tuple, list)) or any(
-            not isinstance(item, Mapping) or set(item) != _ASSUMPTION_KEYS
+        if not isinstance(assumptions, (tuple, list)) or not 1 <= len(assumptions) <= 3 or any(
+            not isinstance(item, Mapping)
+            or set(item) != _ASSUMPTION_KEYS
+            or any(type(value) is not str for value in item.values())
             for item in assumptions
         ):
             raise ValueError("proposal assumptions must use the closed structural schema")
+        if not isinstance(parents, (tuple, list)) or type(kind) is not str:
+            raise ValueError("proposal assumptions require structural parent identities")
         for assumption in assumptions:
-            _validate_safe_mapping(assumption, context="proposal assumption")
-            if assumption.get("operator") not in _STRUCTURE_KINDS:
-                raise ValueError("proposal assumption operator must be closed")
+            candidate_name = assumption["candidate_name"]
+            feature = assumption["feature"]
+            direction = assumption["direction"]
+            horizon_region = assumption["horizon_region"]
+            operator = assumption["operator"]
+            if (
+                not candidate_name.isidentifier()
+                or candidate_name.startswith("_")
+                or candidate_name not in parents
+            ):
+                raise ValueError("proposal assumption candidate must use a parent identity")
+            if feature not in _ASSUMPTION_FEATURES:
+                raise ValueError("proposal assumption feature must be closed")
+            if direction not in _ASSUMPTION_DIRECTIONS:
+                raise ValueError("proposal assumption direction must be closed")
+            if horizon_region not in _ASSUMPTION_HORIZON_REGIONS:
+                raise ValueError("proposal assumption horizon region must be closed")
+            if operator not in _STRUCTURE_KINDS or operator != kind:
+                raise ValueError("proposal assumption operator must match the structure")
 
 
 def _summary(evaluation: PackageEvaluation) -> dict[str, float | int]:
