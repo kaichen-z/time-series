@@ -5,13 +5,10 @@ import hashlib
 import json
 import math
 import re
-import statistics
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 from types import MappingProxyType
 
 from common.llm import LLMClient, TransientLLMError
-from common.metrics import drcik_point_metrics, linear_quantile
 from evolving_loop.co_evolution import (
     CoEvolutionConfig,
     CoEvolutionEngine,
@@ -24,7 +21,17 @@ from evolving_loop.coordinate_evolution import principal_module_fingerprints
 from evolving_loop.data import ContextTask
 from evolving_loop.decision_agent.agent import DecisionAgent
 from evolving_loop.evaluation import ResolvedOutcome
-from evolving_loop.numerical_two_stage import run_numerical_two_stage
+from evolving_loop.package_candidate_proposal import (
+    PackageCandidate,
+    PackageProposalFeedback,
+    proposal_fingerprint,
+)
+from evolving_loop.package_coordinate_evolution import (
+    PackageCoordinateState,
+    package_principal_fingerprints,
+)
+from evolving_loop.package_metrics import PackageEvaluation
+from evolving_loop.package_pipeline_evaluator import PackagePipelineEvaluator
 from evolving_loop.package_registry import FrozenNumericalPackageRegistry
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 
@@ -50,110 +57,6 @@ def _canonical_json(value: object) -> bytes:
 
 def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value)).hexdigest()
-
-
-@dataclass(frozen=True)
-class _DecisionTaskRow:
-    outcome: ResolvedOutcome
-    invalid_count: int
-    catastrophic_count: int
-    fallback_count: int
-    trace: Mapping[str, object]
-
-
-def _score_task(
-    task: ContextTask,
-    package,
-    retrieval: TwoStageRetrievalAgent,
-    decision: DecisionAgent,
-    *,
-    metric_cap: float,
-    expected_retrieval_sha256: str,
-    expected_decision_prompt_sha256: str,
-) -> _DecisionTaskRow:
-    result = run_numerical_two_stage(task, package, retrieval, decision)
-    if result.fingerprints.get("retrieval_genome") != expected_retrieval_sha256:
-        raise PackageDecisionEvolutionError(
-            "package Decision evaluation changed the accepted Retrieval Genome"
-        )
-    if result.fingerprints.get("decision_prompt") != expected_decision_prompt_sha256:
-        raise PackageDecisionEvolutionError(
-            "package Decision evaluation changed the Decision prompt"
-        )
-    truth = tuple(task.numeric.future_values)
-    final = drcik_point_metrics(truth, result.forecast, cap=metric_cap)
-    candidates = tuple(
-        (
-            alternative.name,
-            drcik_point_metrics(
-                truth,
-                alternative.forecast,
-                cap=metric_cap,
-            ),
-        )
-        for alternative in package.ranked_alternatives
-    )
-    if not candidates:
-        raise PackageDecisionEvolutionError(
-            "package Decision evaluation requires materialized alternatives"
-        )
-    _oracle_name, oracle = min(
-        candidates,
-        key=lambda item: (
-            float(item[1]["srmse"]),
-            float(item[1]["smae"]),
-            item[0],
-        ),
-    )
-    fallback_count = int(result.fallback_reason is not None)
-    invalid_count = fallback_count + int(
-        result.final_decision.rejection_reason is not None
-        and result.fallback_reason is None
-    )
-    catastrophic_count = int(
-        bool(final["smae_clipped"]) or bool(final["srmse_clipped"])
-    )
-    final_smae = float(final["smae"])
-    final_srmse = float(final["srmse"])
-    oracle_smae = float(oracle["smae"])
-    oracle_srmse = float(oracle["srmse"])
-    outcome = ResolvedOutcome(
-        task_id=task.numeric.task_id,
-        final_smae=final_smae,
-        final_srmse=final_srmse,
-        coding_oracle_smae=oracle_smae,
-        coding_oracle_srmse=oracle_srmse,
-        contextual_oracle_smae=oracle_smae,
-        contextual_oracle_srmse=oracle_srmse,
-        decision_selection_smae_regret=final_smae - oracle_smae,
-        decision_selection_srmse_regret=final_srmse - oracle_srmse,
-        candidate_count=len(candidates),
-    )
-    return _DecisionTaskRow(
-        outcome=outcome,
-        invalid_count=invalid_count,
-        catastrophic_count=catastrophic_count,
-        fallback_count=fallback_count,
-        trace=MappingProxyType(
-            {
-                "task_id": task.numeric.task_id,
-                "fallback_reason": result.fallback_reason,
-                "decision_rejection_reason": (
-                    result.final_decision.rejection_reason or ""
-                ),
-                "selected_candidate_id": result.final_decision.selected.candidate_id,
-                "numerical_package_sha256": result.fingerprints[
-                    "numerical_package"
-                ],
-                "final_retrieval_sha256": result.fingerprints[
-                    "final_retrieval_artifact"
-                ],
-                "final_decision_sha256": result.fingerprints[
-                    "final_decision_artifact"
-                ],
-            }
-        ),
-    )
 
 
 class PackageDecisionEvaluator:
@@ -204,6 +107,35 @@ class PackageDecisionEvaluator:
             }
         )
 
+    def evaluate_package(
+        self,
+        policy: HarnessPolicy,
+        tasks: Sequence[ContextTask],
+        *,
+        stage: str,
+    ) -> PackageEvaluation:
+        if not isinstance(policy, HarnessPolicy):
+            raise PackageDecisionEvolutionError(
+                "package Decision evaluation requires a HarnessPolicy"
+            )
+        if not policy.has_accepted_retrieval_release:
+            raise PackageDecisionEvolutionError(
+                "package Decision requires a non-v000 accepted Retrieval release"
+            )
+        return PackagePipelineEvaluator._evaluate_components(
+            candidate_sha256=hashlib.sha256(policy.canonical_bytes()).hexdigest(),
+            registry=self.registry,
+            tasks=tasks,
+            stage=stage,
+            retrieval_factory=lambda: self.retrieval_factory(policy),
+            decision_factory=lambda: self.decision_factory(policy),
+            metric_cap=self.metric_cap,
+            expected_retrieval_sha256=policy.retrieval_genome.fingerprint(),
+            expected_decision_prompt_sha256=hashlib.sha256(
+                policy.decision_prompt.encode("utf-8")
+            ).hexdigest(),
+        )
+
     def evaluate(
         self,
         policy: HarnessPolicy,
@@ -218,48 +150,40 @@ class PackageDecisionEvaluator:
                 "package Decision requires a non-v000 accepted Retrieval release"
             )
         resolved = tuple(tasks)
-        if not resolved or any(
-            not isinstance(task, ContextTask)
-            or not task.labels_public
-            or not task.numeric.future_values
-            for task in resolved
-        ):
-            raise PackageDecisionEvolutionError(
-                "package Decision evaluation requires resolved labeled tasks"
+        package = self.evaluate_package(policy, resolved, stage="compatibility")
+        rows = {row.task_id: row for row in package.task_rows}
+        outcomes: list[ResolvedOutcome] = []
+        for task in resolved:
+            row = rows[task.numeric.task_id]
+            oracle_smae = row.numerical_oracle_smae
+            oracle_srmse = row.numerical_oracle_srmse
+            outcomes.append(
+                ResolvedOutcome(
+                    task_id=task.numeric.task_id,
+                    final_smae=row.final_smae,
+                    final_srmse=row.final_srmse,
+                    coding_oracle_smae=oracle_smae,
+                    coding_oracle_srmse=oracle_srmse,
+                    contextual_oracle_smae=oracle_smae,
+                    contextual_oracle_srmse=oracle_srmse,
+                    decision_selection_smae_regret=row.final_smae - oracle_smae,
+                    decision_selection_srmse_regret=row.final_srmse - oracle_srmse,
+                    candidate_count=row.numerical_candidate_count,
+                )
             )
-        task_ids = tuple(task.numeric.task_id for task in resolved)
-        if len(task_ids) != len(set(task_ids)):
-            raise PackageDecisionEvolutionError(
-                "package Decision task IDs must be unique"
-            )
-        retrieval_sha256 = policy.retrieval_genome.fingerprint()
-        decision_prompt_sha256 = hashlib.sha256(
-            policy.decision_prompt.encode("utf-8")
-        ).hexdigest()
-        rows = tuple(
-            _score_task(
-                task,
-                self.registry.package_for(task),
-                self.retrieval_factory(policy),
-                self.decision_factory(policy),
-                metric_cap=self.metric_cap,
-                expected_retrieval_sha256=retrieval_sha256,
-                expected_decision_prompt_sha256=decision_prompt_sha256,
-            )
-            for task in resolved
-        )
-        outcomes = tuple(row.outcome for row in rows)
-        diagnostics = evaluation_diagnostics(outcomes)
-        final_smae = [float(row.outcome.final_smae) for row in rows]
+        outcomes_tuple = tuple(outcomes)
+        diagnostics = evaluation_diagnostics(outcomes_tuple)
         diagnostics.update(
             {
-                "p90_smae": linear_quantile(final_smae, 0.90),
-                "p95_smae": linear_quantile(final_smae, 0.95),
-                "invalid_count": float(sum(row.invalid_count for row in rows)),
-                "catastrophic_count": float(
-                    sum(row.catastrophic_count for row in rows)
-                ),
-                "fallback_count": float(sum(row.fallback_count for row in rows)),
+                "p90_smae": package.p90_smae,
+                "p95_smae": package.p95_smae,
+                "p90_srmse": package.p90_srmse,
+                "p95_srmse": package.p95_srmse,
+                "invalid_count": float(package.invalid_count),
+                "catastrophic_count": float(package.catastrophic_count),
+                "clipped_count": float(package.clipped_count),
+                "fallback_count": float(package.fallback_count),
+                "coverage": package.coverage,
                 "public_test_accessed": 0.0,
             }
         )
@@ -268,8 +192,8 @@ class PackageDecisionEvaluator:
             version=policy.version,
             system_reward=reward,
             module_rewards={"coding": 0.0, "retrieval": 0.0, "decision": reward},
-            outcomes=outcomes,
-            failure_traces=tuple(dict(row.trace) for row in rows),
+            outcomes=outcomes_tuple,
+            failure_traces=tuple(row.to_payload() for row in package.task_rows),
             diagnostics=diagnostics,
         )
 
@@ -483,3 +407,161 @@ class PackageDecisionEvolutionEngine(CoEvolutionEngine):
             )
             incumbent = selected
         return incumbent, tuple(history)
+
+
+def _proposal_evaluation(
+    policy: HarnessPolicy,
+    summary: Mapping[str, float | int],
+) -> PolicyEvaluation:
+    """Project aggregate package feedback onto the legacy mutation boundary."""
+    diagnostics = {
+        key: float(value)
+        for key, value in summary.items()
+        if type(value) in {int, float}
+    }
+    mean_srmse = diagnostics.get("mean_srmse", 0.0)
+    return PolicyEvaluation(
+        version=policy.version,
+        system_reward=-mean_srmse,
+        module_rewards={
+            "coding": 0.0,
+            "retrieval": 0.0,
+            "decision": -mean_srmse,
+        },
+        outcomes=(),
+        failure_traces=(),
+        diagnostics=diagnostics,
+    )
+
+
+class DecisionCandidateProposer:
+    """Adapt Decision-only mutation to isolated package Child records."""
+
+    def __init__(self, engine: PackageDecisionEvolutionEngine) -> None:
+        if not isinstance(engine, PackageDecisionEvolutionEngine):
+            raise PackageDecisionEvolutionError(
+                "package Decision adapter requires PackageDecisionEvolutionEngine"
+            )
+        self.engine = engine
+
+    def propose(
+        self,
+        parent: PackageCoordinateState,
+        feedback: PackageProposalFeedback,
+        *,
+        generation: int,
+        child_count: int,
+    ) -> tuple[PackageCandidate, ...]:
+        if not isinstance(parent, PackageCoordinateState) or not isinstance(
+            feedback, PackageProposalFeedback
+        ):
+            raise PackageDecisionEvolutionError(
+                "package Decision proposal requires typed state and feedback"
+            )
+        if type(generation) is not int or generation < 0:
+            raise PackageDecisionEvolutionError(
+                "package Decision generation must be non-negative"
+            )
+        if type(child_count) is not int or child_count != 3:
+            raise PackageDecisionEvolutionError(
+                "formal package Decision proposal requires exactly three slots"
+            )
+        policy = parent.bundle.policy
+        if not policy.has_accepted_retrieval_release:
+            raise PackageDecisionEvolutionError(
+                "package Decision requires an accepted Retrieval Parent"
+            )
+        if re.fullmatch(r"v[0-9]{3}", policy.version) is None:
+            raise PackageDecisionEvolutionError(
+                "package Decision Parent version must use vNNN"
+            )
+        first_version = int(policy.version[1:]) + generation * 3 + 1
+        if first_version + 2 > 999:
+            raise PackageDecisionEvolutionError(
+                "package Decision proposal version namespace exhausted"
+            )
+        self.engine._version = first_version
+        evaluation = _proposal_evaluation(policy, feedback.parent_summary)
+        parent_fingerprints = package_principal_fingerprints(parent.bundle)
+        parent_policy_fingerprints = principal_module_fingerprints(policy)
+        seen_decision: set[str] = set()
+        children: list[PackageCandidate] = []
+        for slot in range(3):
+            child_policy = self.engine.mutate(
+                policy,
+                evaluation,
+                child_index=slot,
+            )
+            expected_version = f"v{first_version + slot:03d}"
+            reason: str | None = None
+            child_state = parent
+            if (
+                not isinstance(child_policy, HarnessPolicy)
+                or child_policy.version != expected_version
+                or child_policy.parent != policy.version
+            ):
+                reason = "invalid_schema"
+            else:
+                child_policy_fingerprints = principal_module_fingerprints(child_policy)
+                if any(
+                    child_policy_fingerprints[name]
+                    != parent_policy_fingerprints[name]
+                    for name in ("numerical_morphology", "retrieval")
+                ):
+                    reason = "cross_coordinate_change"
+                elif (
+                    child_policy_fingerprints["decision"]
+                    == parent_policy_fingerprints["decision"]
+                ):
+                    reason = (
+                        "unknown_candidate"
+                        if "unknown_candidate" in child_policy.changelog
+                        else "invalid_schema"
+                    )
+                else:
+                    candidate_state = parent.with_policy(
+                        child_policy,
+                        target="decision",
+                    )
+                    fingerprints = package_principal_fingerprints(
+                        candidate_state.bundle
+                    )
+                    decision_identity = fingerprints["decision"]
+                    if decision_identity in seen_decision:
+                        reason = "duplicate_child"
+                    else:
+                        child_state = candidate_state
+                        seen_decision.add(decision_identity)
+            raw_payload = (
+                child_policy.to_payload()
+                if isinstance(child_policy, HarnessPolicy)
+                else {"invalid": type(child_policy).__name__}
+            )
+            identity = proposal_fingerprint(
+                target="decision",
+                generation=generation,
+                slot=slot,
+                payload={
+                    "policy": raw_payload,
+                    "invalid_reason": reason,
+                },
+            )
+            children.append(
+                PackageCandidate(
+                    slot=slot,
+                    target="decision",
+                    state=child_state,
+                    proposal_sha256=identity,
+                    invalid_reason=reason,
+                )
+            )
+        return tuple(children)
+
+
+__all__ = [
+    "DecisionCandidateProposer",
+    "PackageDecisionEvaluator",
+    "PackageDecisionEvolutionEngine",
+    "PackageDecisionEvolutionError",
+    "package_decision_gate_failures",
+]

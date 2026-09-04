@@ -5,15 +5,13 @@ import hashlib
 import json
 import math
 import re
-import statistics
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 
-from common.metrics import drcik_point_metrics, linear_quantile
 from evolving_loop.data import ContextTask
 from evolving_loop.decision_agent.agent import DecisionAgent
-from evolving_loop.numerical_two_stage import run_numerical_two_stage
+from evolving_loop.package_metrics import PackageEvaluation
+from evolving_loop.package_pipeline_evaluator import PackagePipelineEvaluator
 from evolving_loop.package_registry import FrozenNumericalPackageRegistry
 from evolving_loop.retrieval_agent.evolution import (
     RetrievalEvaluation,
@@ -21,7 +19,6 @@ from evolving_loop.retrieval_agent.evolution import (
     RetrievalInferenceCacheKey,
 )
 from evolving_loop.retrieval_agent.policy import RetrievalGenome
-from evolving_loop.retrieval_agent.quality import score_retrieval_card_quality
 from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 
@@ -43,131 +40,6 @@ def _canonical_json(value: object) -> bytes:
 
 def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value)).hexdigest()
-
-
-@dataclass(frozen=True)
-class _PackageRetrievalRow:
-    task_id: str
-    entity_name: str
-    final_smae: float
-    final_srmse: float
-    oracle_smae: float
-    oracle_srmse: float
-    supporting_recall: float
-    distractor_avoidance: float
-    exact_quote_validity: float
-    complete_chain_rate: float
-    invalid_count: int
-    catastrophic_count: int
-    numerical_package_sha256: str
-    final_retrieval_sha256: str
-    final_decision_sha256: str
-
-
-def _score_metrics(
-    truth: tuple[float, ...],
-    forecast: tuple[float, ...],
-    *,
-    cap: float,
-) -> dict[str, float | bool]:
-    return drcik_point_metrics(truth, forecast, cap=cap)
-
-
-def _score_task(
-    task: ContextTask,
-    package,
-    retrieval: TwoStageRetrievalAgent,
-    decision: DecisionAgent,
-    *,
-    metric_cap: float,
-) -> _PackageRetrievalRow:
-    result = run_numerical_two_stage(task, package, retrieval, decision)
-    truth = tuple(task.numeric.future_values)
-    final = _score_metrics(truth, result.forecast, cap=metric_cap)
-    alternatives = tuple(
-        (
-            item.name,
-            _score_metrics(truth, item.forecast, cap=metric_cap),
-        )
-        for item in package.ranked_alternatives
-    )
-    if not alternatives:
-        raise RetrievalEvolutionError(
-            "frozen Numerical package has no materialized alternatives"
-        )
-    oracle_name, oracle = min(
-        alternatives,
-        key=lambda item: (
-            float(item[1]["srmse"]),
-            float(item[1]["smae"]),
-            item[0],
-        ),
-    )
-    del oracle_name
-    quality = score_retrieval_card_quality(task, result.retrieval_card)
-    invalid_count = quality.rejection_count + int(result.fallback_reason is not None)
-    catastrophic_count = int(
-        bool(final["smae_clipped"]) or bool(final["srmse_clipped"])
-    )
-    return _PackageRetrievalRow(
-        task_id=task.numeric.task_id,
-        entity_name=task.numeric.entity_name,
-        final_smae=float(final["smae"]),
-        final_srmse=float(final["srmse"]),
-        oracle_smae=float(oracle["smae"]),
-        oracle_srmse=float(oracle["srmse"]),
-        supporting_recall=quality.supporting_recall,
-        distractor_avoidance=quality.distractor_avoidance,
-        exact_quote_validity=quality.exact_quote_validity,
-        complete_chain_rate=quality.complete_chain_rate,
-        invalid_count=invalid_count,
-        catastrophic_count=catastrophic_count,
-        numerical_package_sha256=result.fingerprints["numerical_package"],
-        final_retrieval_sha256=result.fingerprints["final_retrieval_artifact"],
-        final_decision_sha256=result.fingerprints["final_decision_artifact"],
-    )
-
-
-def _aggregate(version: str, rows: tuple[_PackageRetrievalRow, ...]) -> RetrievalEvaluation:
-    if not rows:
-        raise RetrievalEvolutionError("package evaluation requires at least one task")
-
-    def mean(field_name: str) -> float:
-        return statistics.fmean(float(getattr(row, field_name)) for row in rows)
-
-    final_smae = [row.final_smae for row in rows]
-    return RetrievalEvaluation(
-        version=version,
-        task_count=len(rows),
-        mean_final_smae=mean("final_smae"),
-        mean_final_srmse=mean("final_srmse"),
-        mean_contextual_oracle_smae=mean("oracle_smae"),
-        mean_contextual_oracle_srmse=mean("oracle_srmse"),
-        p90_smae=linear_quantile(final_smae, 0.90),
-        p95_smae=linear_quantile(final_smae, 0.95),
-        supporting_recall=mean("supporting_recall"),
-        distractor_avoidance=mean("distractor_avoidance"),
-        exact_quote_validity=mean("exact_quote_validity"),
-        complete_chain_rate=mean("complete_chain_rate"),
-        invalid_count=sum(row.invalid_count for row in rows),
-        catastrophic_count=sum(row.catastrophic_count for row in rows),
-        task_traces=tuple(
-            {
-                "task_id": row.task_id,
-                "entity_name": row.entity_name,
-                "final_smae": row.final_smae,
-                "final_srmse": row.final_srmse,
-                "contextual_oracle_smae": row.oracle_smae,
-                "contextual_oracle_srmse": row.oracle_srmse,
-                "numerical_package_sha256": row.numerical_package_sha256,
-                "final_retrieval_sha256": row.final_retrieval_sha256,
-                "final_decision_sha256": row.final_decision_sha256,
-            }
-            for row in rows
-        ),
-        promotion_evidence=(),
-        promotion_replays=(),
-    )
 
 
 class PackageRetrievalEvaluator:
@@ -215,6 +87,55 @@ class PackageRetrievalEvaluator:
             }
         )
 
+    def evaluate_package(
+        self,
+        genome: RetrievalGenome,
+        tasks: Sequence[ContextTask],
+        *,
+        stage: str,
+        skill_library: RetrievalSkillLibrary,
+    ) -> PackageEvaluation:
+        return self._evaluate_package(
+            genome,
+            tasks,
+            stage=stage,
+            skill_library=skill_library,
+            metric_cap=5.0,
+        )
+
+    def _evaluate_package(
+        self,
+        genome: RetrievalGenome,
+        tasks: Sequence[ContextTask],
+        *,
+        stage: str,
+        skill_library: RetrievalSkillLibrary,
+        metric_cap: float,
+    ) -> PackageEvaluation:
+        if not isinstance(genome, RetrievalGenome):
+            raise TypeError("package evaluator requires a RetrievalGenome")
+        if not isinstance(skill_library, RetrievalSkillLibrary) or not getattr(
+            skill_library, "_read_only", False
+        ):
+            raise ValueError("package evaluator requires a read-only Skill library")
+        before = tuple(skill.to_payload() for skill in skill_library.all())
+        evaluation = PackagePipelineEvaluator._evaluate_components(
+            candidate_sha256=genome.fingerprint(),
+            registry=self.registry,
+            tasks=tasks,
+            stage=stage,
+            retrieval_factory=lambda: self.retrieval_factory(genome, skill_library),
+            decision_factory=self.decision_factory,
+            metric_cap=metric_cap,
+            expected_retrieval_sha256=genome.fingerprint(),
+        )
+        after = tuple(skill.to_payload() for skill in skill_library.all())
+        if after != before:
+            raise RetrievalEvolutionError(
+                "package evaluator mutated the accepted Retrieval Skill snapshot"
+            )
+        return evaluation
+
     def evaluate(
         self,
         genome: RetrievalGenome,
@@ -260,20 +181,34 @@ class PackageRetrievalEvaluator:
             for task in tasks
         ):
             raise ValueError("package evaluator requires resolved labeled tasks")
-        before = tuple(skill.to_payload() for skill in skill_library.all())
-        rows = tuple(
-            _score_task(
-                task,
-                self.registry.package_for(task),
-                self.retrieval_factory(genome, skill_library),
-                self.decision_factory(),
-                metric_cap=metric_cap,
-            )
-            for task in tasks
+        package = self._evaluate_package(
+            genome,
+            tasks,
+            stage=stage,
+            skill_library=skill_library,
+            metric_cap=metric_cap,
         )
-        after = tuple(skill.to_payload() for skill in skill_library.all())
-        if after != before:
-            raise RetrievalEvolutionError(
-                "package evaluator mutated the accepted Retrieval Skill snapshot"
-            )
-        return _aggregate(genome.version, rows)
+        diagnostics = package.secondary_diagnostics
+        return RetrievalEvaluation(
+            version=genome.version,
+            task_count=package.task_count,
+            mean_final_smae=package.mean_smae,
+            mean_final_srmse=package.mean_srmse,
+            mean_contextual_oracle_smae=(
+                package.mean_smae - diagnostics["numerical_oracle_smae_gap"]
+            ),
+            mean_contextual_oracle_srmse=(
+                package.mean_srmse - diagnostics["numerical_oracle_srmse_gap"]
+            ),
+            p90_smae=package.p90_smae,
+            p95_smae=package.p95_smae,
+            supporting_recall=diagnostics["retrieval_supporting_recall"],
+            distractor_avoidance=diagnostics["retrieval_distractor_avoidance"],
+            exact_quote_validity=diagnostics["retrieval_exact_quote_validity"],
+            complete_chain_rate=diagnostics["retrieval_complete_chain_rate"],
+            invalid_count=package.invalid_count,
+            catastrophic_count=package.catastrophic_count,
+            task_traces=tuple(row.to_payload() for row in package.task_rows),
+            promotion_evidence=(),
+            promotion_replays=(),
+        )

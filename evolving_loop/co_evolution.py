@@ -213,9 +213,10 @@ def _canonical_retrieval_release_payload(
     if not (
         (genome.version == "v000" and state == "seed")
         or (genome.version != "v000" and state == "accepted")
+        or (genome.version != "v000" and state == "candidate")
     ):
         raise ValueError(
-            "HarnessPolicy permits only the v000 seed or an accepted Retrieval release"
+            "HarnessPolicy Retrieval release state is invalid"
         )
     # Canonicalize every tuple/mapping distinction before freezing it.
     canonical_plain = json.loads(_canonical_json_bytes(plain).decode("utf-8"))
@@ -421,6 +422,14 @@ def embed_retrieval_release(
         release, RetrievalRelease
     ):
         raise ValueError("a verified RetrievalRelease is required")
+    state = release.manifest.get("state")
+    if not (
+        (release.genome.version == "v000" and state == "seed")
+        or (release.genome.version != "v000" and state == "accepted")
+    ):
+        raise ValueError(
+            "accepted embedding permits only the v000 seed or an accepted Retrieval release"
+        )
     embedded = {
         "genome": release.genome.to_payload(),
         "round1_prompt": release.round1_prompt,

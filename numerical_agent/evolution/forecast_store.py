@@ -35,6 +35,10 @@ class CacheIntegrityError(ValueError):
     """An existing active cache row is corrupt and must abort the lifecycle."""
 
 
+class CacheMissError(RuntimeError):
+    """A cache-only lifecycle requested an unavailable forecast."""
+
+
 class ForecastStore:
     """Content-addressed history-only forecast cache shared across selector generations."""
 
@@ -50,11 +54,14 @@ class ForecastStore:
         runtime_identity: Mapping[str, object] | None,
         statistical_time_budget_s: float = 20.0,
         statistical_failure_limit: int = 2,
+        cache_only: bool = False,
     ) -> None:
         if statistical_time_budget_s <= 0:
             raise ValueError("statistical_time_budget_s must be positive")
         if statistical_failure_limit < 1:
             raise ValueError("statistical_failure_limit must be positive")
+        if type(cache_only) is not bool:
+            raise ValueError("cache_only must be an exact bool")
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.not_applicable = _HistoryOnlyNotApplicable
@@ -70,6 +77,7 @@ class ForecastStore:
         self.portfolio = portfolio
         self.runtimes = runtimes
         self.screening_hash = screening_hash
+        self.cache_only = cache_only
         self.tsfm = {policy.name: policy for policy in portfolio.tsfm}
         self.combined = {policy.name: policy for policy in portfolio.combined}
         identity = {
@@ -150,6 +158,8 @@ class ForecastStore:
                     str(error) or "active hindcast cache row is noncanonical"
                 ) from error
         self.misses += 1
+        if self.cache_only:
+            raise CacheMissError(f"cache-only forecast is unavailable for {name}")
         try:
             values = self._execute(name, history, horizon, frequency)
         except self.not_applicable as error:

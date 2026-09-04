@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Sequence
 
 # The numeric half lives in common/ so numbers-only packages need not depend on this one.
 from common.data import (  # noqa: F401  (re-exported for existing importers)
@@ -132,6 +134,70 @@ def load_context_tasks(
         if _is_labeled(record) or include_unlabeled:
             tasks.append(_to_context_task(record))
     return tasks
+
+
+_BENCHMARK_ID = re.compile(r'"benchmark_id"\s*:\s*("(?:[^"\\]|\\.)*")')
+
+
+def load_context_tasks_by_ids(
+    tasks_file: str | Path,
+    allowed_task_ids: Sequence[str],
+) -> tuple[ContextTask, ...]:
+    """Load exactly the requested labeled records without converting other rows."""
+    requested = tuple(allowed_task_ids)
+    if (
+        not requested
+        or any(type(task_id) is not str or not task_id for task_id in requested)
+        or len(requested) != len(set(requested))
+    ):
+        raise ValueError("requested task IDs must be non-empty unique strings")
+    if any(Path(task_id).name != task_id for task_id in requested):
+        raise ValueError("requested task IDs must be safe path components")
+
+    wanted = set(requested)
+    records: dict[str, dict] = {}
+
+    def retain(record: object, *, expected_id: str | None = None) -> None:
+        if type(record) is not dict:
+            if expected_id is not None:
+                raise ValueError(f"unexpected task record for {expected_id}")
+            return
+        raw_id = record.get("benchmark_id")
+        if expected_id is not None and raw_id != expected_id:
+            raise ValueError(f"unexpected task record for {expected_id}")
+        if type(raw_id) is not str or raw_id not in wanted:
+            return
+        if raw_id in records:
+            raise ValueError(f"duplicate requested task record: {raw_id}")
+        records[raw_id] = record
+
+    source = Path(tasks_file)
+    if source.is_dir():
+        for task_id in requested:
+            path = source / f"{task_id}.json"
+            if path.is_file():
+                retain(json.loads(path.read_text(encoding="utf-8")), expected_id=task_id)
+    elif source.suffix.lower() == ".json":
+        payload = json.loads(source.read_text(encoding="utf-8"))
+        for record in payload if type(payload) is list else (payload,):
+            retain(record)
+    else:
+        with source.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                match = _BENCHMARK_ID.search(line)
+                if match is None or json.loads(match.group(1)) not in wanted:
+                    continue
+                retain(json.loads(line))
+
+    missing = tuple(task_id for task_id in requested if task_id not in records)
+    if missing:
+        raise ValueError(f"missing requested task records: {missing[:3]}")
+    unlabeled = tuple(task_id for task_id in requested if not _is_labeled(records[task_id]))
+    if unlabeled:
+        raise ValueError(f"unlabeled requested task records: {unlabeled[:3]}")
+    return tuple(_to_context_task(records[task_id]) for task_id in requested)
 
 
 def load_huggingface_context_tasks(*, labels_public: bool) -> list[ContextTask]:

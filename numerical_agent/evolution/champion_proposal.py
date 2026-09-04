@@ -8,6 +8,7 @@ import math
 import unicodedata
 from typing import cast
 
+from common.evolution_core.task_feedback import TaskEvidenceProjection
 from common.llm import LLMClient
 from common.metrics import linear_quantile
 from common.payload import strict_json_loads
@@ -626,11 +627,12 @@ def _proposal_payload(
     *,
     minimum: int,
     maximum: int,
+    task_evidence: TaskEvidenceProjection | None = None,
 ) -> dict[str, object]:
     lower, upper = _validate_limits(minimum, maximum)
     inventory_names = _inventory_names(inventory)
     validated_parent = _validated_parent(parent, inventory_names)
-    return {
+    payload = {
         "parent": _structural_recipe_payload(validated_parent),
         "inventory": _inventory_payload(inventory),
         "evidence": _validated_evidence(evidence),
@@ -659,6 +661,15 @@ def _proposal_payload(
             ],
         },
     }
+    if task_evidence is not None:
+        if type(task_evidence) is not TaskEvidenceProjection:
+            _fail("task evidence must use the exact sanitized projection")
+        try:
+            TaskEvidenceProjection.__post_init__(task_evidence)
+        except (TypeError, ValueError) as error:
+            raise ChampionProposalError("task evidence is invalid") from error
+        payload["task_evidence"] = task_evidence.to_payload()
+    return payload
 
 
 def propose_champion_recipes(
@@ -670,6 +681,7 @@ def propose_champion_recipes(
     minimum: int = 5,
     maximum: int = 10,
     generation: int | None = None,
+    task_evidence: TaskEvidenceProjection | None = None,
 ) -> tuple[ChampionRecipe, ...]:
     """Request structures only, retrying one malformed schema exactly once."""
     if not hasattr(llm, "complete") or not callable(llm.complete):
@@ -680,6 +692,16 @@ def propose_champion_recipes(
         evidence,
         minimum=minimum,
         maximum=maximum,
+        task_evidence=task_evidence,
+    )
+    forbidden_handles = (
+        ()
+        if task_evidence is None
+        else tuple(
+            value
+            for item in task_evidence.cases
+            for value in (item.case_id, item.evidence_chain_sha256)
+        )
     )
     try:
         content = json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False)
@@ -694,6 +716,10 @@ def propose_champion_recipes(
             temperature=0.0,
         )
         try:
+            if any(handle in response.text for handle in forbidden_handles):
+                raise ChampionProposalError(
+                    "Champion response copied a task feedback handle"
+                )
             return parse_champion_response(
                 response.text,
                 inventory,

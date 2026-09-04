@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Callable, Literal, NoReturn, cast
 
 from common.data import Task
+from common.evolution_core.task_feedback import TaskEvidenceProjection
+from common.metrics import joint_scaled_error
 from common.payload import canonical_json_bytes, strict_json_loads
 
 from .champion import (
@@ -340,10 +342,20 @@ class ChampionProposerAdapter:
         evidence: ProposerEvidence,
         *,
         generation: int,
+        task_evidence: TaskEvidenceProjection | None = None,
     ) -> tuple[ChampionRecipe, ...]:
         self.verify()
         if type(generation) is not int or generation <= 0:
             _lifecycle_fail("formal proposer generation must be a positive integer")
+        if task_evidence is not None and type(task_evidence) is not TaskEvidenceProjection:
+            _lifecycle_fail("formal proposer task evidence is malformed")
+        if task_evidence is not None:
+            try:
+                TaskEvidenceProjection.__post_init__(task_evidence)
+            except (TypeError, ValueError) as error:
+                raise ChampionLifecycleError(
+                    "formal proposer task evidence is malformed"
+                ) from error
         if self.kind == "scripted":
             batches = _parse_scripted_batches(self.behavior_json)
             if generation > len(batches):
@@ -380,6 +392,7 @@ class ChampionProposerAdapter:
             inventory,
             evidence,
             generation=generation,
+            task_evidence=task_evidence,
         )
 
     def __call__(self, parent: object, evidence: ProposerEvidence) -> object:
@@ -4058,6 +4071,89 @@ def _validate_stored_policy_ids(generations: list[BuildGeneration]) -> None:
                 _fail("stored fitted policy fingerprint drifted")
 
 
+def fit_champion_recipe(
+    recipe: ChampionRecipe,
+    rows: tuple[ChampionTaskRow, ...],
+    parent: ChampionRelease,
+) -> FittedChampionPolicy:
+    """Fit one structural recipe on an exact, host-held Build row universe."""
+    if type(recipe) is not ChampionRecipe:
+        _fail("package fitting requires an exact ChampionRecipe")
+    if (
+        type(rows) is not tuple
+        or not rows
+        or any(type(row) is not ChampionTaskRow for row in rows)
+    ):
+        _fail("package fitting requires a nonempty exact Build row tuple")
+    if type(parent) is not ChampionRelease:
+        _fail("package fitting requires an exact ChampionRelease Parent")
+    _validated_parent(parent)
+    canonical_rows = tuple(
+        sorted(rows, key=lambda row: (row.task_id, row.candidate_name))
+    )
+    task_count = len({row.task_id for row in canonical_rows})
+    snapshot, task_ids, candidate_names = _validated_rows(
+        canonical_rows,
+        build_size=task_count,
+    )
+    if any(name not in candidate_names for name in recipe.parents):
+        _fail("package recipe references a candidate outside the Build rows")
+
+    recipe_sha256 = champion_fingerprint(recipe)
+    parent_sha256 = champion_fingerprint(parent)
+    rows_sha256 = champion_fingerprint(snapshot)
+    recipe_state = _capture_object_graph(recipe)
+    parent_state = _capture_object_graph(parent)
+    rows_state = _capture_object_graph(snapshot)
+    changed = False
+    scored: tuple[tuple[FittedChampionPolicy, ChampionScore], ...] | None = None
+    try:
+        policies = expand_recipe(recipe, snapshot)
+        values: list[tuple[FittedChampionPolicy, ChampionScore]] = []
+        for policy in policies:
+            score_name = f"package_fit_{champion_fingerprint(policy)}"
+            materialized = _materialize_policy(
+                policy,
+                score_name,
+                snapshot,
+                task_ids,
+                executor=execute_champion,
+            )
+            if any(
+                row.forecast is None
+                or len(row.forecast) != row.profile.horizon
+                or any(not math.isfinite(value) for value in row.forecast)
+                for row in materialized
+            ):
+                _fail("package fitting produced an incomplete or nonfinite forecast")
+            values.append((policy, score_policy(materialized, score_name)))
+        scored = tuple(values)
+    finally:
+        changed = any(
+            (
+                _fingerprint_changed(recipe, recipe_sha256),
+                _fingerprint_changed(parent, parent_sha256),
+                _fingerprint_changed(snapshot, rows_sha256),
+            )
+        )
+        _restore_object_graph(recipe_state)
+        _restore_object_graph(parent_state)
+        _restore_object_graph(rows_state)
+    if changed:
+        _fail("package fitting attempted to mutate frozen inputs")
+    if not scored:
+        _fail("package fitting produced no scored policy")
+    return min(
+        scored,
+        key=lambda item: (
+            joint_scaled_error(item[1].mean_smae, item[1].mean_srmse),
+            item[1].mean_srmse,
+            item[1].mean_smae,
+            champion_fingerprint(item[0]),
+        ),
+    )[0]
+
+
 def run_build_evolution(
     parent: object,
     rows: tuple[ChampionTaskRow, ...] | list[ChampionTaskRow],
@@ -5190,6 +5286,7 @@ __all__ = [
     "TrainPartitions",
     "canonical_release_bytes",
     "partition_train_tasks",
+    "fit_champion_recipe",
     "run_build_evolution",
     "task_content_fingerprint",
 ]

@@ -128,6 +128,7 @@ class NumericalTwoStageResult:
     forecast: tuple[float, ...]
     fingerprints: Mapping[str, str]
     fallback_reason: str | None = None
+    round2_failure_reason: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.numerical, NumericalForecastPackage):
@@ -160,6 +161,13 @@ class NumericalTwoStageResult:
             not isinstance(self.fallback_reason, str) or not self.fallback_reason
         ):
             raise ValueError("fallback_reason must be a non-empty string or None")
+        if self.round2_failure_reason is not None and (
+            not isinstance(self.round2_failure_reason, str)
+            or not self.round2_failure_reason
+        ):
+            raise ValueError(
+                "round2_failure_reason must be a non-empty string or None"
+            )
         object.__setattr__(self, "forecast", forecast)
         object.__setattr__(
             self,
@@ -173,8 +181,12 @@ def run_numerical_two_stage(
     numerical: NumericalForecastPackage,
     retrieval: TwoStageRetrievalAgent,
     decision: DecisionAgent,
+    *,
+    preserve_round1_on_round2_failure: bool = False,
 ) -> NumericalTwoStageResult:
     """Run fixed two-stage Retrieval and Decision over one frozen Numerical package."""
+    if type(preserve_round1_on_round2_failure) is not bool:
+        raise ValueError("preserve_round1_on_round2_failure must be a boolean")
     _validate_inputs(task, numerical, retrieval, decision)
     retrieval_task = _sanitized_context_task(task)
     execution_retrieval = _frozen_retrieval_executor(retrieval)
@@ -192,6 +204,7 @@ def run_numerical_two_stage(
         candidates,
     )
     fallback_reason = handoff_failure
+    round2_failure_reason: str | None = None
 
     round1 = _run_round1(execution_retrieval, retrieval_task)
     if _fatal_round_failure(round1, "round1"):
@@ -257,6 +270,20 @@ def run_numerical_two_stage(
                     else "round2_no_verified_evidence"
                 )
 
+    if (
+        preserve_round1_on_round2_failure
+        and (round1.chains or round1.counterevidence)
+        and fallback_reason is not None
+        and (
+            fallback_reason == "invalid_round2_response"
+            or fallback_reason.startswith("round2_")
+        )
+    ):
+        round2_failure_reason = fallback_reason
+        round2 = None
+        sent_gaps = ()
+        fallback_reason = None
+
     card = merge_verified_rounds(round1, round2, gaps=sent_gaps)
     if fallback_reason is not None:
         card = _record_rejection(card, fallback_reason)
@@ -296,6 +323,7 @@ def run_numerical_two_stage(
             final,
         ),
         fallback_reason=fallback_reason,
+        round2_failure_reason=round2_failure_reason,
     )
 
 

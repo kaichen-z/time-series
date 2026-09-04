@@ -123,7 +123,20 @@ class FrozenNumericalPackageRegistry:
     def __init__(
         self,
         entries: Sequence[tuple[ContextTask, NumericalForecastPackage]],
+        *,
+        release_sha256: str,
+        expected_task_ids: Sequence[str],
     ) -> None:
+        if not isinstance(release_sha256, str) or _SHA256.fullmatch(release_sha256) is None:
+            raise PackageRegistryError("registry supply release must be canonical")
+        expected = tuple(expected_task_ids)
+        if (
+            not expected
+            or any(not isinstance(task_id, str) or not task_id for task_id in expected)
+            or len(expected) != len(set(expected))
+        ):
+            raise PackageRegistryError("registry requires a complete task coverage universe")
+        expected = tuple(sorted(expected))
         supplied = tuple(entries)
         if not supplied:
             raise PackageRegistryError("package registry cannot be empty")
@@ -142,11 +155,19 @@ class FrozenNumericalPackageRegistry:
             if task_id in packages:
                 raise PackageRegistryError("package registry task IDs must be unique")
             _validate_task_package_binding(task, package)
+            if package.component_fingerprints.get("numerical_supply_release") != release_sha256:
+                raise PackageRegistryError(
+                    "registry package Numerical supply release mismatch"
+                )
             packages[task_id] = package
             task_hashes[task_id] = task_registry_fingerprint(task)
             package_hashes[task_id] = numerical_package_fingerprint(package)
+        if tuple(sorted(packages)) != expected:
+            raise PackageRegistryError("registry requires complete task coverage")
         manifest = {
             "schema_version": 1,
+            "release_sha256": release_sha256,
+            "task_ids": list(expected),
             "entries": [
                 {
                     "task_id": task_id,
@@ -162,6 +183,7 @@ class FrozenNumericalPackageRegistry:
         self._packages = MappingProxyType(packages)
         self._task_hashes = MappingProxyType(task_hashes)
         self._package_hashes = MappingProxyType(package_hashes)
+        self._release_sha256 = release_sha256
         frozen_manifest = _freeze_json(manifest)
         if not isinstance(frozen_manifest, Mapping):  # pragma: no cover
             raise AssertionError("frozen package manifest must remain a mapping")
@@ -171,6 +193,10 @@ class FrozenNumericalPackageRegistry:
     @property
     def task_ids(self) -> tuple[str, ...]:
         return tuple(sorted(self._packages))
+
+    @property
+    def release_sha256(self) -> str:
+        return self._release_sha256
 
     @property
     def manifest(self) -> Mapping[str, object]:

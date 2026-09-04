@@ -1261,6 +1261,29 @@ class ProposerEvidence:
         return payload
 
 
+def validate_proposer_evidence(
+    evidence: ProposerEvidence,
+    task_ids: tuple[str, ...],
+) -> ProposerEvidence:
+    """Revalidate one callback payload against the complete Build identity set."""
+    if type(evidence) is not ProposerEvidence:
+        _fail("proposer evidence validation requires an exact payload")
+    ProposerEvidence.__post_init__(evidence)
+    if (
+        type(task_ids) is not tuple
+        or not task_ids
+        or len(task_ids) != len(set(task_ids))
+        or any(type(task_id) is not str or not task_id for task_id in task_ids)
+    ):
+        _fail("proposer evidence validation requires unique Build task identities")
+    _assert_sanitized(
+        _proposer_payload(evidence),
+        identity_index=_build_identity_index(task_ids),
+        validated_strings=set(),
+    )
+    return evidence
+
+
 def _proposer_payload(evidence: ProposerEvidence) -> dict[str, object]:
     return {
         "label": evidence.label,
@@ -1678,4 +1701,5 @@ __all__ = [
     "compare_champion",
     "sanitize_build_evidence",
     "score_policy",
+    "validate_proposer_evidence",
 ]

@@ -23,10 +23,12 @@ from evolving_loop.retrieval_agent.evolution import (
     RetrievalEvolutionError,
     RetrievalEvolutionResult,
     RetrievalForecastingFailure,
+    RetrievalGenomeProposer,
     RetrievalGenerationTrace,
     build_inference_cache_key,
     combine_retrieval_evaluations,
     parse_scoped_child,
+    retrieval_behavior_fingerprint,
 )
 from evolving_loop.retrieval_agent.policy import (
     RetrievalGenome,
@@ -161,6 +163,32 @@ def _responses(generations: int) -> list[str]:
             children.append(RetrievalGenome.from_payload(payload))
         parent = children[0]
     return responses
+
+
+def test_extracted_genome_proposer_preserves_scoped_fixture_fingerprints() -> None:
+    parent = RetrievalGenome.seed()
+    payloads = tuple(
+        _proposal(parent, f"v{index:03d}", scope)
+        for index, scope in enumerate(("A", "B", "C"), start=1)
+    )
+    proposer = RetrievalGenomeProposer(
+        FakeLLMClient([json.dumps(payload) for payload in payloads]),
+        transient_retries=2,
+        version_origin=parent.version,
+    )
+
+    children = proposer.propose(
+        parent,
+        generation=0,
+        feedback={},
+        skill_library=None,
+    )
+
+    assert all(child is not None for child in children)
+    assert tuple(child.fingerprint() for child in children if child is not None) == tuple(
+        RetrievalGenome.from_payload(payload).fingerprint() for payload in payloads
+    )
+    assert len({retrieval_behavior_fingerprint(child) for child in children}) == 3
 
 
 @dataclass(frozen=True)
