@@ -21,9 +21,11 @@ from evolving_loop.run_package_coevolution import (
     _build_registry,
     _configuration_identity,
     _early_resume_guard,
+    _step_payload,
     build_parser,
     main,
 )
+from evolving_loop.package_coordinate_evolution import PackageCoordinateStep
 from evolving_loop.package_candidate_proposal import PackageProposalFeedback
 from evolving_loop.package_numerical_supply import parse_numerical_supply_release
 from tests.test_package_coordinate_evolution import _bundle
@@ -112,6 +114,40 @@ def test_smoke_numerical_proposer_thaws_frozen_anchor_before_fallback(tmp_path) 
     )
 
     assert candidates[0].invalid_reason == "materialization_failed"
+
+
+def test_step_payload_serializes_frozen_coordinate_trace(tmp_path) -> None:
+    _task, state = _bundle(tmp_path)
+    fingerprints = {
+        "numerical": "1" * 64,
+        "retrieval": "2" * 64,
+        "decision": "3" * 64,
+    }
+    step = PackageCoordinateStep(
+        generation=0,
+        target="numerical",
+        accepted=False,
+        reason="kept parent",
+        parent_fingerprints=fingerprints,
+        child_fingerprints=fingerprints,
+        accepted_fingerprints=fingerprints,
+        changed_modules=("numerical",),
+        parent_bytes_sha256="4" * 64,
+        child_bytes_sha256="5" * 64,
+        accepted_bytes_sha256="4" * 64,
+        parent_registry_sha256="6" * 64,
+        child_registry_sha256="7" * 64,
+        accepted_registry_sha256="6" * 64,
+    )
+
+    payload = _step_payload(step, state)
+    restored = json.loads(json.dumps(payload, sort_keys=True))
+
+    assert restored["parent_fingerprints"] == fingerprints
+    assert restored["child_fingerprints"] == fingerprints
+    assert restored["accepted_fingerprints"] == fingerprints
+    assert restored["changed_modules"] == ["numerical"]
+    assert restored["accepted_bundle_payload"]["schema_version"] == 2
 
 
 def _split_manifest() -> dict[str, object]:

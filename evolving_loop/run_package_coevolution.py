@@ -6,7 +6,7 @@ import hashlib
 import json
 import shutil
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
@@ -1089,7 +1089,24 @@ class _SmokeCoordinatePhaseRunner:
 def _step_payload(
     step: PackageCoordinateStep, accepted: PackageCoordinateState
 ) -> dict[str, object]:
-    return {**asdict(step), "accepted_bundle_payload": accepted.bundle.to_payload()}
+    return {
+        "generation": step.generation,
+        "target": step.target,
+        "accepted": step.accepted,
+        "reason": step.reason,
+        "parent_fingerprints": dict(step.parent_fingerprints),
+        "child_fingerprints": dict(step.child_fingerprints),
+        "accepted_fingerprints": dict(step.accepted_fingerprints),
+        "changed_modules": list(step.changed_modules),
+        "parent_bytes_sha256": step.parent_bytes_sha256,
+        "child_bytes_sha256": step.child_bytes_sha256,
+        "accepted_bytes_sha256": step.accepted_bytes_sha256,
+        "parent_registry_sha256": step.parent_registry_sha256,
+        "child_registry_sha256": step.child_registry_sha256,
+        "accepted_registry_sha256": step.accepted_registry_sha256,
+        "public_test_accessed": step.public_test_accessed,
+        "accepted_bundle_payload": accepted.bundle.to_payload(),
+    }
 
 
 class _CheckpointRecorder:
