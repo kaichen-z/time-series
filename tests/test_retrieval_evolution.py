@@ -222,13 +222,19 @@ def test_genome_proposer_retries_one_invalid_scoped_response_with_constraints() 
     }
 
 
-def test_genome_proposer_normalizes_host_lineage_after_one_schema_retry() -> None:
+def test_genome_proposer_projects_schema_retry_onto_host_owned_scope() -> None:
     parent = RetrievalGenome.seed()
     first = _proposal(parent, "v001", "A")
     first["parent"] = None
     second = _proposal(parent, "v001", "A")
     second["parent"] = parent.to_payload()
-    canonical = {**second, "parent": "v000"}
+    second["max_selected_documents"] = 7
+    second["round2_prompt"] = f"{parent.round2_prompt}\nOut-of-scope rewrite."
+    canonical = {
+        **second,
+        "parent": "v000",
+        "round2_prompt": parent.round2_prompt,
+    }
     llm = FakeLLMClient([json.dumps(first), json.dumps(second)])
     proposer = RetrievalGenomeProposer(
         llm,
@@ -247,6 +253,8 @@ def test_genome_proposer_normalizes_host_lineage_after_one_schema_retry() -> Non
 
     assert slot.genome == RetrievalGenome.from_payload(canonical)
     assert slot.proposal == canonical
+    assert slot.genome.max_selected_documents == 7
+    assert slot.genome.round2_prompt == parent.round2_prompt
     assert len(llm.calls) == 2
 
 
