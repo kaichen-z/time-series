@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import hashlib
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,11 +17,15 @@ from evolving_loop.package_artifacts import (
 )
 from evolving_loop.run_package_coevolution import (
     PackageCacheBackedEvaluator,
+    _SmokeNumericalProposer,
+    _build_registry,
     _configuration_identity,
     _early_resume_guard,
     build_parser,
     main,
 )
+from evolving_loop.package_candidate_proposal import PackageProposalFeedback
+from evolving_loop.package_numerical_supply import parse_numerical_supply_release
 from tests.test_package_coordinate_evolution import _bundle
 from tests.test_package_stage_runner import _evaluation
 
@@ -56,6 +61,57 @@ def _context_task(task_id: str) -> ContextTask:
         future_timestamps=("2026-01-03",),
         documents=(),
     )
+
+
+def test_build_registry_thaws_frozen_numerical_anchor(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task, state = _bundle(tmp_path)
+    release = parse_numerical_supply_release(
+        state.bundle.to_payload()["numerical_release_payload"]
+    )
+    package = state.registry.package_for(task)
+    monkeypatch.setattr(
+        "evolving_loop.run_package_coevolution.run_numerical_loop",
+        lambda *_args, **_kwargs: package,
+    )
+    materializer = SimpleNamespace(
+        screening_policy=None,
+        forecast_store=SimpleNamespace(forecast=lambda *_args: ()),
+        combined_policies=(),
+        decision_policy=None,
+        hindcast_config=None,
+        source_fingerprints={},
+        runtime_fingerprints={},
+    )
+
+    rebuilt = _build_registry((task,), release, materializer)
+
+    assert rebuilt.release_sha256 == release.fingerprint
+    assert (
+        rebuilt.package_for(task).final_forecast
+        == package.protected_baseline.forecast
+    )
+
+
+def test_smoke_numerical_proposer_thaws_frozen_anchor_before_fallback(tmp_path) -> None:
+    task, state = _bundle(tmp_path)
+    proposer = _SmokeNumericalProposer(
+        SimpleNamespace(propose=lambda *_args, **_kwargs: ()),
+        object(),
+        (),
+        object(),
+        (task,),
+    )
+
+    candidates = proposer.propose(
+        state,
+        PackageProposalFeedback({}, (), (), ()),
+        generation=0,
+        child_count=1,
+    )
+
+    assert candidates[0].invalid_reason == "materialization_failed"
 
 
 def _split_manifest() -> dict[str, object]:

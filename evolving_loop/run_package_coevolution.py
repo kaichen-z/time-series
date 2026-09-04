@@ -579,7 +579,9 @@ def _build_registry(
     release: NumericalSupplyRelease,
     materializer: NumericalPackageMaterializer,
 ) -> FrozenNumericalPackageRegistry:
-    anchor = parse_champion_release(dict(release.anchor_release_payload))
+    anchor = parse_champion_release(
+        cast(dict[str, object], release.to_payload()["anchor_release_payload"])
+    )
 
     def build(original: ContextTask, supplied: NumericalSupplyRelease):
         safe = _sanitized_context_task(original)
@@ -814,9 +816,11 @@ class _SmokeNumericalProposer:
         if child_count != 1:
             raise ValueError("smoke Numerical proposes exactly one Child")
         release = parse_numerical_supply_release(
-            cast(dict[str, object], parent.bundle.numerical_release_payload)
+            parent.bundle.to_payload()["numerical_release_payload"]
         )
-        anchor = parse_champion_release(dict(release.anchor_release_payload))
+        anchor = parse_champion_release(
+            cast(dict[str, object], release.to_payload()["anchor_release_payload"])
+        )
         raw_identity = _digest({"parent": release.fingerprint, "generation": generation})
         state = parent
         reason: str | None = "materialization_failed"
