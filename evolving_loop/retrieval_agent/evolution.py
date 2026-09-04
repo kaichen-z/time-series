@@ -3062,6 +3062,10 @@ class RetrievalGenomeProposer:
                 )
                 valid = child is not None and child.version == version
                 if not valid:
+                    lineage_mismatch = (
+                        proposal.get("parent") != parent.version
+                        or proposal.get("version") != version
+                    )
                     normalized = dict(proposal)
                     normalized["parent"] = parent.version
                     normalized["version"] = version
@@ -3071,8 +3075,29 @@ class RetrievalGenomeProposer:
                         scope=scope,
                         skill_library=library,
                     )
-                    if normalized_child is not None:
-                        if not schema_retry_used:
+                    effective = normalized
+                    effective_child = normalized_child
+                    if normalized_child is None and (
+                        schema_retry_used or lineage_mismatch
+                    ):
+                        parent_payload = parent.to_payload()
+                        if set(proposal) == set(parent_payload):
+                            effective = dict(parent_payload)
+                            for field_name in (
+                                _PRIMARY_SCOPE_FIELDS[scope]
+                                | {"active_skill_ids"}
+                            ):
+                                effective[field_name] = proposal[field_name]
+                            effective["parent"] = parent.version
+                            effective["version"] = version
+                            effective_child = parse_scoped_child(
+                                parent,
+                                effective,
+                                scope=scope,
+                                skill_library=library,
+                            )
+                    if effective_child is not None:
+                        if not schema_retry_used and lineage_mismatch:
                             schema_retry_used = True
                             payload["previous_response_error"] = {
                                 "code": "invalid_scoped_genome",
@@ -3086,15 +3111,16 @@ class RetrievalGenomeProposer:
                                 scope=scope,
                             )
                             continue
-                        proposal = normalized
-                        child = normalized_child
-                        valid = True
-                        self._event(
-                            "schema_normalized",
-                            operation="mutation",
-                            generation=generation,
-                            scope=scope,
-                        )
+                        if schema_retry_used:
+                            proposal = effective
+                            child = effective_child
+                            valid = True
+                            self._event(
+                                "schema_normalized",
+                                operation="mutation",
+                                generation=generation,
+                                scope=scope,
+                            )
                 identity = (
                     child.fingerprint()
                     if valid and child is not None
