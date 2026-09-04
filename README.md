@@ -1058,6 +1058,25 @@ The registered Dev partition is part of evolution. Public-99 is historically
 consumed final regression evidence and is evaluated only from a sealed final bundle;
 Public output must never be fed back into evolution, mutation, selection, or reruns.
 
+After the formal evolution run has written its completion marker, score the frozen
+bundle once in a separate output directory:
+
+```bash
+python -m evolving_loop.evaluate_frozen_package_bundle \
+  --evolution-dir /absolute/path/to/package-evolution \
+  --final-bundle /absolute/path/to/package-evolution/final_bundle.json \
+  --split-file /absolute/path/to/splits/drcik_public_80_20_99_v1.json \
+  --tasks-file /absolute/path/to/Dr-CiK_public/tasks \
+  --repo /absolute/path/to/method-evolution/release \
+  --forecast-store /absolute/path/to/forecast-store \
+  --output-dir /absolute/path/to/package-public99
+```
+
+The evaluator verifies the sealed direct lineage and runtime identities before it
+loads exactly the registered 99 Public tasks. Its output is one-shot and reports
+point metrics (sMAE and sRMSE) only; it does not compute sCRPS and cannot resume or
+feed a result back into evolution.
+
 ```bash
 pip install -e '.[chronos,huggingface]'
 drcik-agent run-hf --public-dev --output-dir outputs/public-dev
