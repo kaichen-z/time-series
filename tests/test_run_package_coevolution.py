@@ -472,6 +472,40 @@ def test_interaction_retrieval_uses_lineage_only_child_for_cached_handoff(
     )
 
 
+def test_interaction_retrieval_keeps_lineage_when_proposal_model_is_unavailable(
+    tmp_path,
+) -> None:
+    _task, parent = _bundle(tmp_path)
+    parent_genome = parent.bundle.policy.retrieval_genome
+    assert parent_genome is not None
+    library = RetrievalSkillLibrary(tmp_path / "skills.json", persist=False)
+    proposer = _SmokeRetrievalProposer(
+        RetrievalGenomeProposer(
+            FakeLLMClient([]),
+            transient_retries=0,
+            version_origin=parent_genome.version,
+        ),
+        library,
+        lineage_only=True,
+    )
+
+    child = proposer.propose(
+        parent,
+        PackageProposalFeedback({}, (), (), ()),
+        generation=4,
+        child_count=1,
+    )[0]
+
+    child_genome = child.state.bundle.policy.retrieval_genome
+    assert child.invalid_reason is None
+    assert child_genome is not None
+    assert child_genome.version == "v002"
+    assert child_genome.parent == "v001"
+    assert retrieval_behavior_fingerprint(child_genome) == (
+        retrieval_behavior_fingerprint(parent_genome)
+    )
+
+
 def test_interaction_completion_requires_six_invoked_phases_and_matching_feedback() -> (
     None
 ):
