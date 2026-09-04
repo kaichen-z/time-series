@@ -618,6 +618,18 @@ def _initial_supply_release(
     )
 
 
+def _scheduled_registry_tasks(
+    tasks: Sequence[ContextTask], task_ids: Sequence[str]
+) -> tuple[ContextTask, ...]:
+    by_id = {task.numeric.task_id: task for task in tasks}
+    resolved = tuple(task_ids)
+    if len(resolved) != len(set(resolved)) or any(
+        task_id not in by_id for task_id in resolved
+    ):
+        raise ValueError("registry task schedule is invalid")
+    return tuple(by_id[task_id] for task_id in resolved)
+
+
 def _build_registry(
     tasks: Sequence[ContextTask],
     release: NumericalSupplyRelease,
@@ -2074,6 +2086,18 @@ def _execute_run(
         if args.smoke or args.interaction_smoke
         else formal_schedule
     )
+    registry_tasks = _scheduled_registry_tasks(
+        tasks,
+        (
+            (
+                *schedule.build8_ids,
+                *schedule.calibration2_ids,
+                *schedule.dev2_ids,
+            )
+            if isinstance(schedule, _SmokeSchedule)
+            else tuple(task.numeric.task_id for task in tasks)
+        ),
+    )
 
     module = read_module(repo / "methods.py")
     portfolio = read_policy_file(repo / "policies.py")
@@ -2156,7 +2180,7 @@ def _execute_run(
             forecast_store=store,
             screening_policy=screening,
             fold_manifest=formal_schedule.fold_manifest,
-            original_tasks=tasks,
+            original_tasks=registry_tasks,
             source_fingerprints=source_fingerprints,
             runtime_fingerprints={
                 "forecast_store": store.identity_hash,
@@ -2180,7 +2204,7 @@ def _execute_run(
             },
             atlas=atlas if not (args.smoke or args.interaction_smoke) else None,
         )
-        registry = _build_registry(tasks, supply, materializer)
+        registry = _build_registry(registry_tasks, supply, materializer)
         seed_policy = replace(
             embed_retrieval_release(
                 HarnessPolicy(), authority_seed, changelog="Package co-evolution seed."
@@ -2225,7 +2249,7 @@ def _execute_run(
             initial=initial,
             run_sha256=run_sha256,
             schedule_sha256=schedule.fingerprint,
-            tasks=tasks,
+            tasks=registry_tasks,
             materializer=materializer,
             library=library,
         )
@@ -2240,7 +2264,7 @@ def _execute_run(
         phases = _build_phases(
             args,
             initial=initial,
-            tasks=tasks,
+            tasks=registry_tasks,
             task_map=task_map,
             schedule=schedule,
             formal_schedule=formal_schedule,

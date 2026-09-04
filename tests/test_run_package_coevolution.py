@@ -120,6 +120,21 @@ def test_build_registry_thaws_frozen_numerical_anchor(
     )
 
 
+def test_smoke_registry_materializes_only_scheduled_tasks() -> None:
+    tasks = tuple(_context_task(f"task_{index}") for index in range(5))
+
+    selected = run_module._scheduled_registry_tasks(
+        tasks,
+        ("task_3", "task_1", "task_4"),
+    )
+
+    assert tuple(task.numeric.task_id for task in selected) == (
+        "task_3",
+        "task_1",
+        "task_4",
+    )
+
+
 def test_smoke_numerical_proposer_thaws_frozen_anchor_before_fallback(tmp_path) -> None:
     task, state = _bundle(tmp_path)
     proposer = _SmokeNumericalProposer(
