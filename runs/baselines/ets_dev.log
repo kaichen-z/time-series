@@ -1,0 +1,272 @@
+[1/199] task_42 H=100 paths=100/100 sMAE=4.770 mean=4.770
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[2/199] task_43 H=50 paths=100/100 sMAE=5.000 mean=4.885
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[3/199] task_44 H=60 paths=100/100 sMAE=0.335 mean=3.368
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[4/199] task_45 H=100 paths=100/100 sMAE=5.000 mean=3.776
+[5/199] task_46 H=100 paths=100/100 sMAE=0.359 mean=3.093
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[6/199] task_47 H=50 paths=100/100 sMAE=0.267 mean=2.622
+[7/199] task_48 H=100 paths=100/100 sMAE=0.531 mean=2.323
+[8/199] task_49 H=60 paths=100/100 sMAE=0.250 mean=2.064
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[9/199] task_50 H=120 paths=100/100 sMAE=5.000 mean=2.390
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[10/199] task_51 H=120 paths=100/100 sMAE=0.212 mean=2.172
+[11/199] task_52 H=60 paths=100/100 sMAE=0.059 mean=1.980
+[12/199] task_53 H=120 paths=100/100 sMAE=0.952 mean=1.895
+[13/199] task_54 H=100 paths=100/100 sMAE=0.294 mean=1.772
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[14/199] task_55 H=120 paths=100/100 sMAE=2.171 mean=1.800
+[15/199] task_56 H=150 paths=100/100 sMAE=0.175 mean=1.692
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[16/199] task_57 H=100 paths=100/100 sMAE=5.000 mean=1.898
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[17/199] task_58 H=100 paths=100/100 sMAE=0.395 mean=1.810
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[18/199] task_59 H=180 paths=100/100 sMAE=0.220 mean=1.722
+[19/199] task_60 H=100 paths=100/100 sMAE=4.935 mean=1.891
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[20/199] task_61 H=50 paths=100/100 sMAE=5.000 mean=2.046
+[21/199] task_62 H=100 paths=100/100 sMAE=0.361 mean=1.966
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[22/199] task_63 H=60 paths=100/100 sMAE=0.381 mean=1.894
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[23/199] task_64 H=100 paths=100/100 sMAE=5.000 mean=2.029
+[24/199] task_65 H=100 paths=100/100 sMAE=0.362 mean=1.960
+[25/199] task_66 H=50 paths=100/100 sMAE=0.817 mean=1.914
+[26/199] task_67 H=50 paths=100/100 sMAE=0.292 mean=1.851
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[27/199] task_68 H=50 paths=100/100 sMAE=0.238 mean=1.792
+[28/199] task_69 H=100 paths=100/100 sMAE=0.565 mean=1.748
+[29/199] task_70 H=60 paths=100/100 sMAE=0.260 mean=1.697
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[30/199] task_71 H=120 paths=100/100 sMAE=5.000 mean=1.807
+[31/199] task_72 H=120 paths=100/100 sMAE=0.164 mean=1.754
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[32/199] task_73 H=120 paths=100/100 sMAE=0.277 mean=1.708
+[33/199] task_74 H=90 paths=100/100 sMAE=1.875 mean=1.713
+[34/199] task_75 H=60 paths=100/100 sMAE=0.045 mean=1.664
+[35/199] task_76 H=120 paths=100/100 sMAE=0.985 mean=1.644
+[36/199] task_77 H=140 paths=100/100 sMAE=0.079 mean=1.601
+[37/199] task_78 H=100 paths=100/100 sMAE=0.288 mean=1.565
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[38/199] task_79 H=120 paths=100/100 sMAE=4.443 mean=1.641
+[39/199] task_80 H=150 paths=100/100 sMAE=0.146 mean=1.603
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[40/199] task_81 H=100 paths=100/100 sMAE=5.000 mean=1.688
+[41/199] task_82 H=100 paths=100/100 sMAE=0.144 mean=1.650
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[42/199] task_83 H=100 paths=100/100 sMAE=0.370 mean=1.619
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[43/199] task_84 H=180 paths=100/100 sMAE=0.211 mean=1.587
+[44/199] task_85 H=56 paths=100/100 sMAE=0.493 mean=1.562
+[45/199] task_86 H=56 paths=100/100 sMAE=0.331 mean=1.534
+[46/199] task_87 H=56 paths=100/100 sMAE=0.203 mean=1.506
+[47/199] task_88 H=56 paths=100/100 sMAE=0.290 mean=1.480
+[48/199] task_89 H=56 paths=100/100 sMAE=0.320 mean=1.456
+[49/199] task_90 H=56 paths=100/100 sMAE=0.302 mean=1.432
+[50/199] task_91 H=56 paths=100/100 sMAE=0.352 mean=1.410
+[51/199] task_92 H=56 paths=100/100 sMAE=0.172 mean=1.386
+[52/199] task_93 H=56 paths=100/100 sMAE=0.288 mean=1.365
+[53/199] task_94 H=56 paths=100/100 sMAE=0.318 mean=1.345
+[54/199] task_95 H=56 paths=100/100 sMAE=0.446 mean=1.329
+[55/199] task_96 H=56 paths=100/100 sMAE=0.327 mean=1.310
+[56/199] task_97 H=56 paths=100/100 sMAE=0.199 mean=1.291
+[57/199] task_98 H=56 paths=100/100 sMAE=0.246 mean=1.272
+[58/199] task_99 H=56 paths=100/100 sMAE=0.385 mean=1.257
+[59/199] task_100 H=56 paths=100/100 sMAE=0.457 mean=1.243
+[60/199] task_101 H=56 paths=100/100 sMAE=0.170 mean=1.225
+[61/199] task_102 H=56 paths=100/100 sMAE=0.495 mean=1.213
+[62/199] task_103 H=56 paths=100/100 sMAE=0.328 mean=1.199
+[63/199] task_104 H=56 paths=100/100 sMAE=0.250 mean=1.184
+[64/199] task_105 H=56 paths=100/100 sMAE=0.286 mean=1.170
+[65/199] task_106 H=56 paths=100/100 sMAE=0.320 mean=1.157
+[66/199] task_107 H=24 paths=100/100 sMAE=0.509 mean=1.147
+[67/199] task_108 H=24 paths=100/100 sMAE=0.265 mean=1.134
+[68/199] task_109 H=24 paths=100/100 sMAE=0.377 mean=1.123
+[69/199] task_110 H=24 paths=100/100 sMAE=0.469 mean=1.113
+[70/199] task_111 H=24 paths=100/100 sMAE=0.405 mean=1.103
+[71/199] task_112 H=24 paths=100/100 sMAE=0.448 mean=1.094
+[72/199] task_113 H=24 paths=100/100 sMAE=0.781 mean=1.090
+[73/199] task_114 H=24 paths=100/100 sMAE=0.516 mean=1.082
+[74/199] task_115 H=24 paths=100/100 sMAE=0.988 mean=1.081
+[75/199] task_116 H=24 paths=100/100 sMAE=0.183 mean=1.069
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[76/199] task_117 H=24 paths=100/100 sMAE=3.590 mean=1.102
+[77/199] task_118 H=24 paths=100/100 sMAE=0.464 mean=1.093
+[78/199] task_119 H=24 paths=100/100 sMAE=2.672 mean=1.114
+[79/199] task_120 H=24 paths=100/100 sMAE=5.000 mean=1.163
+[80/199] task_121 H=24 paths=100/100 sMAE=0.760 mean=1.158
+[81/199] task_122 H=24 paths=100/100 sMAE=0.323 mean=1.148
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[82/199] task_123 H=24 paths=100/100 sMAE=0.432 mean=1.139
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[83/199] task_124 H=24 paths=100/100 sMAE=0.191 mean=1.127
+[84/199] task_125 H=24 paths=100/100 sMAE=0.117 mean=1.115
+[85/199] task_126 H=24 paths=100/100 sMAE=0.246 mean=1.105
+[86/199] task_127 H=24 paths=100/100 sMAE=0.319 mean=1.096
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[87/199] task_128 H=24 paths=100/100 sMAE=0.432 mean=1.088
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[88/199] task_129 H=24 paths=100/100 sMAE=0.202 mean=1.078
+[89/199] task_130 H=24 paths=100/100 sMAE=0.113 mean=1.067
+[90/199] task_131 H=24 paths=100/100 sMAE=0.247 mean=1.058
+[91/199] task_132 H=24 paths=100/100 sMAE=0.321 mean=1.050
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[92/199] task_133 H=24 paths=100/100 sMAE=0.431 mean=1.044
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[93/199] task_134 H=24 paths=100/100 sMAE=0.190 mean=1.034
+[94/199] task_135 H=24 paths=100/100 sMAE=0.112 mean=1.025
+[95/199] task_136 H=24 paths=100/100 sMAE=0.246 mean=1.016
+[96/199] task_137 H=24 paths=100/100 sMAE=0.322 mean=1.009
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[97/199] task_138 H=24 paths=100/100 sMAE=0.430 mean=1.003
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[98/199] task_139 H=24 paths=100/100 sMAE=0.190 mean=0.995
+[99/199] task_140 H=24 paths=100/100 sMAE=0.110 mean=0.986
+[100/199] task_141 H=24 paths=100/100 sMAE=0.246 mean=0.979
+[101/199] task_142 H=24 paths=100/100 sMAE=0.950 mean=0.978
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[102/199] task_143 H=24 paths=100/100 sMAE=0.443 mean=0.973
+[103/199] task_144 H=24 paths=100/100 sMAE=0.790 mean=0.971
+[104/199] task_145 H=72 paths=100/100 sMAE=1.005 mean=0.972
+[105/199] task_146 H=72 paths=100/100 sMAE=0.282 mean=0.965
+[106/199] task_147 H=72 paths=100/100 sMAE=0.486 mean=0.960
+[107/199] task_148 H=72 paths=100/100 sMAE=0.220 mean=0.954
+[108/199] task_149 H=72 paths=100/100 sMAE=0.456 mean=0.949
+[109/199] task_150 H=72 paths=100/100 sMAE=1.518 mean=0.954
+[110/199] task_151 H=72 paths=100/100 sMAE=0.289 mean=0.948
+[111/199] task_152 H=72 paths=100/100 sMAE=0.398 mean=0.943
+[112/199] task_153 H=72 paths=100/100 sMAE=0.225 mean=0.937
+[113/199] task_154 H=72 paths=100/100 sMAE=0.525 mean=0.933
+[114/199] task_155 H=72 paths=100/100 sMAE=1.011 mean=0.934
+[115/199] task_156 H=72 paths=100/100 sMAE=0.373 mean=0.929
+[116/199] task_157 H=72 paths=100/100 sMAE=0.409 mean=0.924
+[117/199] task_158 H=72 paths=100/100 sMAE=0.239 mean=0.919
+[118/199] task_159 H=72 paths=100/100 sMAE=0.411 mean=0.914
+[119/199] task_160 H=24 paths=100/100 sMAE=0.293 mean=0.909
+[120/199] task_161 H=24 paths=100/100 sMAE=0.433 mean=0.905
+[121/199] task_162 H=24 paths=100/100 sMAE=3.663 mean=0.928
+[122/199] task_163 H=24 paths=100/100 sMAE=0.073 mean=0.921
+[123/199] task_164 H=72 paths=100/100 sMAE=1.026 mean=0.922
+[124/199] task_165 H=72 paths=100/100 sMAE=0.337 mean=0.917
+[125/199] task_166 H=72 paths=100/100 sMAE=0.513 mean=0.914
+[126/199] task_167 H=72 paths=100/100 sMAE=0.221 mean=0.908
+[127/199] task_168 H=72 paths=100/100 sMAE=0.429 mean=0.904
+[128/199] task_169 H=56 paths=100/100 sMAE=0.547 mean=0.902
+[129/199] task_170 H=56 paths=100/100 sMAE=0.297 mean=0.897
+[130/199] task_171 H=56 paths=100/100 sMAE=0.374 mean=0.893
+[131/199] task_172 H=56 paths=100/100 sMAE=0.478 mean=0.890
+[132/199] task_173 H=56 paths=100/100 sMAE=0.352 mean=0.886
+[133/199] task_174 H=24 paths=100/100 sMAE=0.805 mean=0.885
+[134/199] task_175 H=24 paths=100/100 sMAE=0.283 mean=0.881
+[135/199] task_176 H=24 paths=100/100 sMAE=0.366 mean=0.877
+[136/199] task_177 H=24 paths=100/100 sMAE=0.278 mean=0.872
+[137/199] task_178 H=24 paths=100/100 sMAE=0.363 mean=0.869
+[138/199] task_179 H=24 paths=100/100 sMAE=0.557 mean=0.866
+[139/199] task_180 H=24 paths=100/100 sMAE=0.253 mean=0.862
+[140/199] task_181 H=24 paths=100/100 sMAE=0.393 mean=0.859
+[141/199] task_182 H=24 paths=100/100 sMAE=0.227 mean=0.854
+[142/199] task_183 H=24 paths=100/100 sMAE=0.341 mean=0.851
+[143/199] task_184 H=24 paths=100/100 sMAE=0.470 mean=0.848
+[144/199] task_185 H=24 paths=100/100 sMAE=0.595 mean=0.846
+[145/199] task_186 H=24 paths=100/100 sMAE=0.273 mean=0.842
+[146/199] task_187 H=24 paths=100/100 sMAE=0.245 mean=0.838
+[147/199] task_188 H=24 paths=100/100 sMAE=0.287 mean=0.834
+[148/199] task_189 H=24 paths=100/100 sMAE=1.405 mean=0.838
+[149/199] task_190 H=24 paths=100/100 sMAE=1.222 mean=0.841
+[150/199] task_191 H=24 paths=100/100 sMAE=1.755 mean=0.847
+[151/199] task_192 H=24 paths=100/100 sMAE=1.386 mean=0.850
+[152/199] task_193 H=24 paths=100/100 sMAE=1.159 mean=0.852
+[153/199] task_194 H=24 paths=100/100 sMAE=0.321 mean=0.849
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[154/199] task_195 H=24 paths=100/100 sMAE=0.431 mean=0.846
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[155/199] task_196 H=24 paths=100/100 sMAE=0.189 mean=0.842
+[156/199] task_197 H=24 paths=100/100 sMAE=0.113 mean=0.837
+[157/199] task_198 H=24 paths=100/100 sMAE=0.246 mean=0.834
+[158/199] task_199 H=56 paths=100/100 sMAE=0.110 mean=0.829
+[159/199] task_200 H=120 paths=100/100 sMAE=0.027 mean=0.824
+[160/199] task_201 H=90 paths=100/100 sMAE=0.043 mean=0.819
+[161/199] task_202 H=50 paths=100/100 sMAE=0.341 mean=0.816
+[162/199] task_203 H=100 paths=100/100 sMAE=0.101 mean=0.812
+[163/199] task_204 H=120 paths=100/100 sMAE=0.046 mean=0.807
+[164/199] task_205 H=30 paths=100/100 sMAE=0.003 mean=0.802
+[165/199] task_206 H=120 paths=100/100 sMAE=0.382 mean=0.800
+[166/199] task_207 H=180 paths=100/100 sMAE=0.054 mean=0.795
+[167/199] task_208 H=120 paths=100/100 sMAE=0.032 mean=0.791
+[168/199] task_209 H=150 paths=100/100 sMAE=0.055 mean=0.786
+[169/199] task_210 H=200 paths=100/100 sMAE=0.020 mean=0.782
+[170/199] task_211 H=150 paths=100/100 sMAE=0.144 mean=0.778
+[171/199] task_212 H=120 paths=100/100 sMAE=0.059 mean=0.774
+[172/199] task_213 H=50 paths=100/100 sMAE=0.119 mean=0.770
+[173/199] task_214 H=120 paths=100/100 sMAE=0.018 mean=0.766
+[174/199] task_215 H=240 paths=100/100 sMAE=0.101 mean=0.762
+[175/199] task_216 H=180 paths=100/100 sMAE=0.036 mean=0.758
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[176/199] task_217 H=120 paths=100/100 sMAE=0.067 mean=0.754
+[177/199] task_218 H=56 paths=100/100 sMAE=0.116 mean=0.750
+[178/199] task_219 H=120 paths=100/100 sMAE=0.039 mean=0.746
+[179/199] task_220 H=90 paths=100/100 sMAE=0.046 mean=0.742
+[180/199] task_221 H=50 paths=100/100 sMAE=0.339 mean=0.740
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[181/199] task_222 H=100 paths=100/100 sMAE=0.230 mean=0.737
+[182/199] task_223 H=100 paths=100/100 sMAE=0.126 mean=0.734
+[183/199] task_224 H=120 paths=100/100 sMAE=0.065 mean=0.730
+[184/199] task_225 H=30 paths=100/100 sMAE=0.003 mean=0.726
+[185/199] task_226 H=120 paths=100/100 sMAE=0.369 mean=0.724
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[186/199] task_227 H=100 paths=100/100 sMAE=0.345 mean=0.722
+[187/199] task_228 H=120 paths=100/100 sMAE=0.028 mean=0.718
+[188/199] task_229 H=150 paths=100/100 sMAE=0.046 mean=0.715
+[189/199] task_230 H=180 paths=100/100 sMAE=0.088 mean=0.712
+/PHShome/ik832/.local/lib/python3.10/site-packages/statsmodels/tsa/holtwinters/model.py:903: ConvergenceWarning: Optimization failed to converge. Check mle_retvals.
+  warnings.warn(
+[190/199] task_231 H=150 paths=100/100 sMAE=0.081 mean=0.708
+[191/199] task_232 H=200 paths=100/100 sMAE=0.027 mean=0.705
+[192/199] task_233 H=120 paths=100/100 sMAE=0.035 mean=0.701
+[193/199] task_234 H=150 paths=100/100 sMAE=0.179 mean=0.698
+[194/199] task_235 H=120 paths=100/100 sMAE=0.036 mean=0.695
+[195/199] task_236 H=120 paths=100/100 sMAE=0.184 mean=0.692
+[196/199] task_237 H=50 paths=100/100 sMAE=0.121 mean=0.689
+[197/199] task_238 H=120 paths=100/100 sMAE=0.028 mean=0.686
+[198/199] task_239 H=240 paths=100/100 sMAE=0.051 mean=0.683
+[199/199] task_240 H=180 paths=100/100 sMAE=0.033 mean=0.680
+wrote forecasts to runs/baselines/ets_dev.jsonl
