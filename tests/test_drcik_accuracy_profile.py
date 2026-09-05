@@ -119,12 +119,16 @@ def test_task_difficulty_features_use_hand_checked_percentile_buckets() -> None:
     features = task_difficulty_features(_profile())
 
     assert features["task_a"]["difficulty_score"] == 0.0
+    assert features["task_a"]["difficulty_percentile_score"] == 0.0
     assert features["task_a"]["difficulty_decile"] == "0"
-    assert features["task_b"]["difficulty_score"] == pytest.approx(1.0 / 3.0)
+    assert features["task_b"]["difficulty_score"] == 1.0
+    assert features["task_b"]["difficulty_percentile_score"] == pytest.approx(1.0 / 3.0)
     assert features["task_b"]["difficulty_decile"] == "3"
-    assert features["task_c"]["difficulty_score"] == pytest.approx(2.0 / 3.0)
+    assert features["task_c"]["difficulty_score"] == 2.0
+    assert features["task_c"]["difficulty_percentile_score"] == pytest.approx(2.0 / 3.0)
     assert features["task_c"]["difficulty_decile"] == "6"
     assert features["task_c"]["model_quintiles"][BASELINE_PANEL[0]] == "3"
-    assert features["task_d"]["difficulty_score"] == 1.0
+    assert features["task_d"]["difficulty_score"] == 3.0
+    assert features["task_d"]["difficulty_percentile_score"] == 1.0
     assert features["task_d"]["difficulty_decile"] == "9"
     assert features["task_d"]["model_quintiles"][BASELINE_PANEL[0]] == "4"

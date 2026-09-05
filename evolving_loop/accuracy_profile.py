@@ -214,10 +214,15 @@ def task_difficulty_features(profile: Mapping[str, object]) -> dict[str, dict[st
             percentiles[task_id][model] = rank / denominator
     result = {}
     for task_id in task_ids:
-        aggregate = statistics.median(percentiles[task_id].values())
+        aggregate_percentile = statistics.median(percentiles[task_id].values())
+        aggregate_smae = statistics.median(
+            float(validated["tasks"][task_id]["smae"][model])
+            for model in BASELINE_PANEL
+        )
         result[task_id] = {
-            "difficulty_score": aggregate,
-            "difficulty_decile": str(min(9, int(aggregate * 10.0))),
+            "difficulty_score": aggregate_smae,
+            "difficulty_percentile_score": aggregate_percentile,
+            "difficulty_decile": str(min(9, int(aggregate_percentile * 10.0))),
             "model_percentiles": dict(percentiles[task_id]),
             "model_quintiles": {
                 model: str(min(4, int(percentiles[task_id][model] * 5.0)))

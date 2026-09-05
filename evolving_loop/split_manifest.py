@@ -24,6 +24,7 @@ RECOMMENDED_PUBLIC_SPLIT_SIZES = {
     "public_test": 99,
 }
 DEFAULT_ACCURACY_TRIALS = 32768
+MAX_RELATIVE_DIFFICULTY_GAP = 0.05
 
 
 def horizon_bin(length: int) -> str:
@@ -277,11 +278,12 @@ def _accuracy_objective(
 
 def _accuracy_assignment_key(
     objective: dict[str, float], signature: str
-) -> tuple[float, float, float, str]:
+) -> tuple[int, float, float, float, str]:
     return (
+        int(objective["relative_mean_difficulty_gap"] > MAX_RELATIVE_DIFFICULTY_GAP),
+        objective["relative_mean_difficulty_gap"],
         objective["max_normalized_bin_deviation"],
         objective["total_normalized_distribution_deviation"],
-        objective["max_mean_difficulty_gap"],
         signature,
     )
 
@@ -302,7 +304,11 @@ def _best_accuracy_assignment(
         grouped[_entity(record)].append(record)
     sizes = {entity: len(rows) for entity, rows in grouped.items()}
     entities = sorted(grouped)
-    best: tuple[tuple[float, float, float, str], dict[str, list[dict]], dict[str, float]] | None = None
+    best: tuple[
+        tuple[int, float, float, float, str],
+        dict[str, list[dict]],
+        dict[str, float],
+    ] | None = None
     for trial in range(trials):
         ordered = sorted(entities, key=lambda item: _stable_key(seed, trial, item))
         dev = _exact_subset(sizes, ordered, dev_size)
@@ -314,6 +320,12 @@ def _best_accuracy_assignment(
         if test is None:
             continue
         partitions = _partition_records(records, dev_set, set(test))
+        if any(
+            len({_entity(record) for record in partition_rows})
+            < (len(partition_rows) + 1) // 2
+            for partition_rows in partitions.values()
+        ):
+            continue
         signature = "|".join(
             ",".join(sorted(str(record["benchmark_id"]) for record in partitions[name]))
             for name in PARTITION_NAMES
@@ -408,6 +420,7 @@ def build_accuracy_stratified_split_manifest(
         "difficulty_source_commit": profile["source_commit"],
         "difficulty_panel_models": list(BASELINE_PANEL),
         "assignment_trials": trials,
+        "minimum_entity_fraction": 0.5,
         "target_sizes": {
             "train": train_size,
             "dev": dev_size,

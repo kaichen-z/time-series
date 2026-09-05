@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -57,7 +58,7 @@ def _single_entity_records() -> list[dict]:
             hops=4,
             origin="synthetic",
         )
-        for index in range(12)
+        for index in range(13)
     ]
 
 
@@ -145,7 +146,7 @@ def test_accuracy_stratified_split_is_exact_deterministic_and_explicit() -> None
         records,
         profile,
         seed=29,
-        train_size=6,
+        train_size=7,
         dev_size=3,
         public_test_size=3,
         trials=512,
@@ -154,7 +155,7 @@ def test_accuracy_stratified_split_is_exact_deterministic_and_explicit() -> None
         list(reversed(records)),
         profile,
         seed=29,
-        train_size=6,
+        train_size=7,
         dev_size=3,
         public_test_size=3,
         trials=512,
@@ -162,7 +163,7 @@ def test_accuracy_stratified_split_is_exact_deterministic_and_explicit() -> None
 
     assert first == second
     assert first["schema_version"] == 2
-    assert first["actual_sizes"] == {"train": 6, "dev": 3, "public_test": 3}
+    assert first["actual_sizes"] == {"train": 7, "dev": 3, "public_test": 3}
     assert first["selection_uses_future_values"] is True
     assert first["selection_uses_model_metrics"] is True
     assert first["selection_uses_gt_evidence"] is False
@@ -184,7 +185,7 @@ def test_accuracy_stratified_split_balances_controlled_difficulty() -> None:
         records,
         _accuracy_profile(records),
         seed=29,
-        train_size=6,
+        train_size=7,
         dev_size=3,
         public_test_size=3,
         trials=512,
@@ -194,8 +195,8 @@ def test_accuracy_stratified_split_balances_controlled_difficulty() -> None:
         manifest["partitions"][name]["difficulty"]["mean_score"]
         for name in ("train", "dev", "public_test")
     ]
-    assert max(means) - min(means) <= 0.20
-    assert manifest["objective"]["max_mean_difficulty_gap"] <= 0.20
+    assert max(means) - min(means) <= 0.025
+    assert manifest["objective"]["relative_mean_difficulty_gap"] <= 0.05
 
 
 def test_accuracy_stratified_split_rejects_wrong_task_coverage() -> None:
@@ -208,11 +209,22 @@ def test_accuracy_stratified_split_rejects_wrong_task_coverage() -> None:
             records,
             profile,
             seed=29,
-            train_size=6,
+            train_size=7,
             dev_size=3,
             public_test_size=3,
             trials=32,
         )
+
+
+def test_committed_v2_retains_effective_entity_diversity() -> None:
+    """Catches accuracy balancing collapsing Dev onto too few repeated entities."""
+    path = Path(__file__).parents[1] / "splits" / "drcik_public_80_20_99_v2.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+
+    for name in ("train", "dev", "public_test"):
+        task_count = manifest["actual_sizes"][name]
+        entity_count = len(manifest["partitions"][name]["entities"])
+        assert entity_count >= (task_count + 1) // 2
 
 
 def test_write_split_manifest_round_trips_json(tmp_path) -> None:
