@@ -8,7 +8,7 @@ public Dr-CiK development set. The official 80 hidden-test tasks are never inclu
 Use `drcik_public_80_20_99_v2.json` for new balanced internal evolution experiments. It preserves
 80 Train / 20 Dev / 99 Test and entity disjointness, while balancing a frozen seven-model baseline
 accuracy profile. Train, Dev, and Test cover 50, 10, and 53 entities respectively. The manifest
-SHA-256 is `16aff5b76f04faf034c89b668a772880c472b5e71635d91690f95e585a140207`.
+SHA-256 is `704adef52061d6904ef7029b7a6fc0d6ebea4c4a6d8049fc7fcfb928fa442871`.
 
 V2 deliberately uses public future labels through baseline sMAE, and records that fact in the
 manifest. Its 99 tasks are a balanced internal test, not a fresh untouched benchmark. The official

@@ -21,7 +21,17 @@ BASELINE_PANEL = (
     "seasonal_naive",
 )
 PROFILE_SCHEMA = "drcik-public-baseline-accuracy-v1"
+SOURCE_COMMIT = "1d0d9690e6d81fd00d344700216cfd40f35638f5"
 SOURCE_LOGS = {model: f"runs/baselines/{model}_dev.log" for model in BASELINE_PANEL}
+SOURCE_SHA256 = {
+    "arima": "6fbe90f0d35c03508b9a621d4d610ce20facd5317ca23eca3ae973d29b4af242",
+    "ets": "4c0df11ee45209001537bf94399c93ba3c2089515b5f7c45601bc1c82d318b55",
+    "ses": "b76c5ec656d9c525efb134be4d1c340da604412d6eaad967365c4e4353f3aea7",
+    "chronos": "676677765977d0a839fc190fae880055c03b429838384033b006e4a5b66eceeb",
+    "aurora": "d073890b63eceaa9ceb28166f8526b43750dc935cc371d3570857b3d8974774c",
+    "moirai": "4336575b6638ff6439c91aec5805c66fe296c9cf55577a251985f5efa7c45993",
+    "seasonal_naive": "54465c4494323f97963f3d289fb57c99fe0a9396f6d0a278993f36a789f3cb39",
+}
 _SCORE_PATTERN = re.compile(
     r"\b(task_\d+)\s+H=\d+\s+paths=\d+/\d+\s+sMAE=([^\s]+)"
 )
@@ -107,6 +117,13 @@ def _validated_sources(
     return normalized
 
 
+def _pinned_sources() -> dict[str, dict[str, str]]:
+    return {
+        model: {"path": SOURCE_LOGS[model], "sha256": SOURCE_SHA256[model]}
+        for model in BASELINE_PANEL
+    }
+
+
 def build_accuracy_profile(
     scores_by_model: Mapping[str, Mapping[str, float]],
     *,
@@ -116,8 +133,12 @@ def build_accuracy_profile(
     """Create a canonical offline evidence artifact from the fixed baseline panel."""
     if type(source_commit) is not str or _HEX_40.fullmatch(source_commit) is None:
         raise ValueError("source commit must be 40 lowercase hex characters")
+    if source_commit != SOURCE_COMMIT:
+        raise ValueError("accuracy profile must use the pinned source commit")
     scores = _validated_scores(scores_by_model)
     sources = _validated_sources(source_files)
+    if sources != _pinned_sources():
+        raise ValueError("accuracy profile source files do not match pinned paths and digests")
     task_ids = sorted(scores[BASELINE_PANEL[0]])
     payload = {
         "schema_version": 1,
@@ -158,7 +179,18 @@ def validate_accuracy_profile(
     }
     if set(profile) != expected_fields:
         raise ValueError("accuracy profile fields do not match schema")
-    if profile["schema_version"] != 1 or profile["profile_schema"] != PROFILE_SCHEMA:
+    submitted_digest = profile["profile_sha256"]
+    if type(submitted_digest) is not str or _HEX_64.fullmatch(submitted_digest) is None:
+        raise ValueError("accuracy profile digest must be 64 lowercase hex characters")
+    unsigned = dict(profile)
+    unsigned.pop("profile_sha256")
+    if _canonical_digest(unsigned) != submitted_digest:
+        raise ValueError("accuracy profile digest mismatch")
+    if type(profile["schema_version"]) is not int or profile["schema_version"] != 1:
+        raise ValueError("unsupported accuracy profile schema")
+    if type(profile["task_count"]) is not int or profile["task_count"] <= 0:
+        raise ValueError("accuracy profile task_count must be a positive integer")
+    if profile["profile_schema"] != PROFILE_SCHEMA:
         raise ValueError("unsupported accuracy profile schema")
     if profile["dataset"] != "ServiceNow/Dr-CiK" or profile["source_split"] != "public_dev":
         raise ValueError("accuracy profile dataset identity mismatch")

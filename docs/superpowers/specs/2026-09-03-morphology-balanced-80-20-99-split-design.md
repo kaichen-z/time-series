@@ -52,7 +52,8 @@ being developed. The old Public-99 remains available only for historical v1 comp
 Commit `splits/drcik_public_baseline_accuracy_v1.json` as the small, offline input artifact. It
 contains, for every public task, each panel member's capped sMAE parsed from the published baseline
 logs, plus source commit, source paths, per-source SHA-256 digests, panel membership, schema version,
-and a canonical artifact digest.
+and a canonical artifact digest. The builder accepts only the pinned commit and exact seven source
+paths/digests; provenance is validated rather than merely copied into the artifact.
 
 For each model independently, sort all 199 tasks by `(capped_smae, task_id)` and convert rank to a
 percentile in `[0, 1]`. The task's primary difficulty score is the median raw capped sMAE across the
@@ -79,7 +80,8 @@ The deterministic objective balances:
 Every partition must contain at least one entity for every two tasks. Candidates are compared
 lexicographically by passing the 5% relative mean-difficulty gate, lowest relative mean-difficulty
 gap, maximum normalized bin deviation, total normalized distribution deviation, and stable
-membership signature. All objective components are stored in the manifest. The number of
+membership signature. If no candidate passes the 5% gate, generation fails instead of publishing
+the best failing candidate. All objective components are stored in the manifest. The number of
 deterministic trials is a versioned constant.
 
 ## 6. Manifest Contract
@@ -113,7 +115,7 @@ Tests are written before production changes and must prove:
 
 The committed v2 is accepted only if the maximum relative gap between the three partitions' mean
 aggregate difficulty scores is at most 5%, compared with roughly 12% for v1. The audit also reports
-each baseline's per-partition mean capped sMAE and aggregate median/P90/max. Residual model-specific
+each baseline's per-partition mean capped sMAE and aggregate median/linearly-interpolated P90/max. Residual model-specific
 differences are reported; the split is generated once and is not repeatedly reshuffled to improve a
 particular model.
 

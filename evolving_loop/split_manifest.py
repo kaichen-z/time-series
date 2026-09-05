@@ -9,6 +9,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from common.metrics import linear_quantile
+
 from .accuracy_profile import (
     BASELINE_PANEL,
     task_difficulty_features,
@@ -338,12 +340,13 @@ def _best_accuracy_assignment(
         raise ValueError(
             "entity-disjoint groups cannot satisfy the requested exact Dev/Public-Test sizes"
         )
+    best_gap = best[2]["relative_mean_difficulty_gap"]
+    if best_gap > MAX_RELATIVE_DIFFICULTY_GAP:
+        raise ValueError(
+            "no candidate passed the 5% relative mean difficulty gate; "
+            f"best achieved {best_gap:.6f}"
+        )
     return best[1], best[2]
-
-
-def _nearest_rank(values: Sequence[float], probability: float) -> float:
-    ordered = sorted(values)
-    return ordered[round((len(ordered) - 1) * probability)]
 
 
 def build_accuracy_stratified_split_manifest(
@@ -391,7 +394,7 @@ def build_accuracy_stratified_split_manifest(
             "difficulty": {
                 "mean_score": statistics.fmean(scores),
                 "median_score": statistics.median(scores),
-                "p90_score": _nearest_rank(scores, 0.90),
+                "p90_score": linear_quantile(scores, 0.90),
                 "max_score": max(scores),
                 "baseline_mean_smae": {
                     model: statistics.fmean(
@@ -410,7 +413,7 @@ def build_accuracy_stratified_split_manifest(
         "seed": seed,
         "grouping": "entity_disjoint",
         "stratification_features": list(_accuracy_stratification_features()),
-        "selection_uses_history_values": False,
+        "selection_uses_history_values": True,
         "selection_uses_future_values": True,
         "selection_uses_gt_evidence": False,
         "selection_uses_document_labels": False,

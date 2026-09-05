@@ -83,7 +83,7 @@
 
 - [x] **Step 3: Implement deterministic v2 assignment**
 
-  Reuse entity extraction, exact subset-sum, and stable hashing. Add generic distribution scoring for `frequency`, `horizon_bin`, `difficulty_decile`, and `<model>_quintile`. Reject assignments with fewer than one entity per two tasks. Compare candidates by the 5% mean-difficulty gate, relative mean-difficulty gap, maximum normalized bin deviation, total normalized deviation, and membership signature. Serialize per-partition difficulty summaries and objective evidence into schema v2.
+  Reuse entity extraction, exact subset-sum, and stable hashing. Add generic distribution scoring for `frequency`, `horizon_bin`, `difficulty_decile`, and `<model>_quintile`. Reject assignments with fewer than one entity per two tasks, and fail generation if no candidate passes the 5% mean-difficulty gate. Compare passing candidates by relative mean-difficulty gap, maximum normalized bin deviation, total normalized deviation, and membership signature. Serialize per-partition difficulty summaries, using the shared linearly interpolated quantile implementation for P90, and objective evidence into schema v2.
 
 - [x] **Step 4: Add opt-in CLI arguments**
 

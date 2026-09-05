@@ -8,14 +8,15 @@ The v2 assignment reduces the relative gap in mean task difficulty from 12.05% t
 retaining exact 80/20/99 sizes and entity disjointness. Difficulty is the per-task median capped
 sMAE across seven frozen no-context baselines.
 
-| Split | v1 tasks/entities | v1 mean/median/P90 | v2 tasks/entities | v2 mean/median/P90 |
+| Split | v1 tasks/entities | v1 mean/median/P90/max | v2 tasks/entities | v2 mean/median/P90/max |
 |---|---:|---:|---:|---:|
-| Train | 80 / 47 | 0.5287 / 0.3505 / 0.9570 | 80 / 50 | 0.5592 / 0.3580 / 0.9570 |
-| Dev | 20 / 10 | 0.5248 / 0.3320 / 0.5190 | 20 / 10 | 0.5597 / 0.3060 / 0.5280 |
-| Test | 99 / 56 | 0.5922 / 0.3360 / 1.5410 | 99 / 53 | 0.5605 / 0.3360 / 1.3030 |
+| Train | 80 / 47 | 0.5287 / 0.3505 / 0.9570 / 5.0000 | 80 / 50 | 0.5592 / 0.3580 / 0.9637 / 5.0000 |
+| Dev | 20 / 10 | 0.5248 / 0.3320 / 0.5228 / 5.0000 | 20 / 10 | 0.5597 / 0.3060 / 0.5666 / 5.0000 |
+| Test | 99 / 56 | 0.5922 / 0.3360 / 1.5616 / 5.0000 | 99 / 53 | 0.5605 / 0.3360 / 1.3712 / 5.0000 |
 
-V2 substantially removes the mean Train/Test difficulty shift. Test P90 also falls from 1.541 to
-1.303, although its upper tail remains harder than Train and Dev; that residual is reported rather
+P90 is the repository-standard linearly interpolated quantile with endpoints included. V2
+substantially removes the mean Train/Test difficulty shift. Test P90 also falls from 1.5616 to
+1.3712, although its upper tail remains harder than Train and Dev; that residual is reported rather
 than triggering repeated reshuffling.
 
 ## Per-baseline capped sMAE
@@ -38,10 +39,11 @@ model-specific percentile quintiles are secondary distribution strata.
 - Baseline source commit: `1d0d9690e6d81fd00d344700216cfd40f35638f5`
 - Accuracy profile: `splits/drcik_public_baseline_accuracy_v1.json`
 - V2 manifest: `splits/drcik_public_80_20_99_v2.json`
-- V2 manifest SHA-256: `16aff5b76f04faf034c89b668a772880c472b5e71635d91690f95e585a140207`
+- V2 manifest SHA-256: `704adef52061d6904ef7029b7a6fc0d6ebea4c4a6d8049fc7fcfb928fa442871`
 - Assignment seed/trials: `20260905` / `32768`
 - Entity minimum: one entity per two tasks in every partition
 
-Because v2 uses model errors derived from public future labels, this is an internal balanced
-protocol. It is unsuitable as evidence of untouched generalization. The 80 human-authored hidden
+Because the baselines consume task histories and their errors are derived from public future
+labels, v2 uses both history values and outcome-derived model metrics for selection. This is an
+internal balanced protocol, not evidence of untouched generalization. The 80 human-authored hidden
 tasks scored by the Dr-CiK maintainers remain the final test.

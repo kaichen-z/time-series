@@ -6,6 +6,9 @@ import pytest
 
 from evolving_loop.accuracy_profile import (
     BASELINE_PANEL,
+    SOURCE_COMMIT,
+    SOURCE_LOGS,
+    SOURCE_SHA256,
     build_accuracy_profile,
     parse_baseline_log,
     task_difficulty_features,
@@ -26,17 +29,17 @@ def _scores() -> dict[str, dict[str, float]]:
 def _sources() -> dict[str, dict[str, str]]:
     return {
         model: {
-            "path": f"runs/baselines/{model}_dev.log",
-            "sha256": str(index + 1) * 64,
+            "path": SOURCE_LOGS[model],
+            "sha256": SOURCE_SHA256[model],
         }
-        for index, model in enumerate(BASELINE_PANEL)
+        for model in BASELINE_PANEL
     }
 
 
 def _profile() -> dict:
     return build_accuracy_profile(
         _scores(),
-        source_commit="1" * 40,
+        source_commit=SOURCE_COMMIT,
         source_files=_sources(),
     )
 
@@ -66,7 +69,7 @@ def test_profile_is_canonical_under_model_and_task_reordering() -> None:
     first = _profile()
     second = build_accuracy_profile(
         reversed_scores,
-        source_commit="1" * 40,
+        source_commit=SOURCE_COMMIT,
         source_files=reversed_sources,
     )
 
@@ -82,7 +85,7 @@ def test_profile_validation_rejects_incomplete_or_invalid_scores() -> None:
     with pytest.raises(ValueError, match="task coverage"):
         build_accuracy_profile(
             incomplete,
-            source_commit="1" * 40,
+            source_commit=SOURCE_COMMIT,
             source_files=_sources(),
         )
 
@@ -91,7 +94,7 @@ def test_profile_validation_rejects_incomplete_or_invalid_scores() -> None:
     with pytest.raises(ValueError, match="finite"):
         build_accuracy_profile(
             invalid,
-            source_commit="1" * 40,
+            source_commit=SOURCE_COMMIT,
             source_files=_sources(),
         )
 
@@ -100,7 +103,7 @@ def test_profile_validation_rejects_incomplete_or_invalid_scores() -> None:
     with pytest.raises(ValueError, match="number"):
         build_accuracy_profile(
             boolean,
-            source_commit="1" * 40,
+            source_commit=SOURCE_COMMIT,
             source_files=_sources(),
         )
 
@@ -111,6 +114,38 @@ def test_profile_digest_detects_score_tampering() -> None:
     changed["tasks"]["task_a"]["smae"][BASELINE_PANEL[0]] = 0.5
 
     with pytest.raises(ValueError, match="digest mismatch"):
+        validate_accuracy_profile(changed)
+
+
+def test_profile_rejects_unpinned_source_provenance() -> None:
+    """Catches valid-looking metadata that does not identify the frozen GitHub logs."""
+    with pytest.raises(ValueError, match="pinned source commit"):
+        build_accuracy_profile(
+            _scores(),
+            source_commit="2" * 40,
+            source_files=_sources(),
+        )
+
+    changed_sources = _sources()
+    changed_sources[BASELINE_PANEL[0]]["sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="pinned paths and digests"):
+        build_accuracy_profile(
+            _scores(),
+            source_commit=SOURCE_COMMIT,
+            source_files=changed_sources,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("schema_version", True), ("schema_version", 1.0), ("task_count", 4.0)),
+)
+def test_profile_validation_rejects_json_scalar_type_aliases(field: str, value: object) -> None:
+    """Catches Python bool/int equality accepting a non-canonical signed profile."""
+    changed = copy.deepcopy(_profile())
+    changed[field] = value
+
+    with pytest.raises(ValueError, match="digest mismatch|positive integer"):
         validate_accuracy_profile(changed)
 
 

@@ -16,7 +16,7 @@
     "moirai_difficulty_quintile",
     "seasonal_naive_difficulty_quintile"
   ],
-  "selection_uses_history_values": false,
+  "selection_uses_history_values": true,
   "selection_uses_future_values": true,
   "selection_uses_gt_evidence": false,
   "selection_uses_document_labels": false,
@@ -266,7 +266,7 @@
       "difficulty": {
         "mean_score": 0.559225,
         "median_score": 0.358,
-        "p90_score": 0.957,
+        "p90_score": 0.9637000000000006,
         "max_score": 5.0,
         "baseline_mean_smae": {
           "arima": 0.6643625,
@@ -389,7 +389,7 @@
       "difficulty": {
         "mean_score": 0.55965,
         "median_score": 0.30600000000000005,
-        "p90_score": 0.528,
+        "p90_score": 0.5666000000000005,
         "max_score": 5.0,
         "baseline_mean_smae": {
           "arima": 0.67305,
@@ -638,7 +638,7 @@
       "difficulty": {
         "mean_score": 0.5605252525252525,
         "median_score": 0.336,
-        "p90_score": 1.303,
+        "p90_score": 1.3712000000000009,
         "max_score": 5.0,
         "baseline_mean_smae": {
           "arima": 0.6542323232323233,
@@ -652,5 +652,5 @@
       }
     }
   },
-  "manifest_sha256": "16aff5b76f04faf034c89b668a772880c472b5e71635d91690f95e585a140207"
+  "manifest_sha256": "704adef52061d6904ef7029b7a6fc0d6ebea4c4a6d8049fc7fcfb928fa442871"
 }
