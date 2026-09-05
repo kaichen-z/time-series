@@ -415,13 +415,17 @@ def _fixed_forecast(case, name: str) -> ForecastResult:
 def _result(case, selected, weights, forecast, mode, *, assumption_ids=()) -> ForecastResult:
     del weights
     truth = list(case.task.future)
-    oracle = min(
-        (
-            mase(truth, list(values), list(case.task.history))
-            for name, values in case.forecasts.items()
-            if name in case.active_names and len(values) == case.task.horizon
-        ),
-        default=None,
+    oracle = (
+        min(
+            (
+                mase(truth, list(values), list(case.task.history))
+                for name, values in case.forecasts.items()
+                if name in case.active_names and len(values) == case.task.horizon
+            ),
+            default=None,
+        )
+        if truth
+        else None
     )
     return ForecastResult(
         case.task.task_id,

@@ -627,6 +627,49 @@ def unused_statistical_leaf(history, horizon, frequency):
     assert failed.forecast == ()
 
 
+def test_forecast_store_does_not_reuse_cache_across_deployments(tmp_path):
+    methods = tmp_path / "methods.py"
+    methods.write_text(
+        MODULE_HEADER
+        + '''
+
+def stable_method(history, horizon, frequency):
+    """Use when a last-value forecast is sufficient."""
+    return [float(history[-1])] * horizon
+''',
+        encoding="utf-8",
+    )
+    cache = tmp_path / "cache"
+    first = ForecastStore(
+        cache,
+        methods,
+        None,
+        PolicyPortfolio.flagship5(),
+        RuntimeRegistry(),
+        screening_hash="screen",
+        runtime_identity={"deployment_fingerprint": "deployment-a"},
+    )
+    try:
+        first.forecast("stable_method", (1.0, 2.0), 2, "D")
+        assert first.misses == 1
+    finally:
+        first.close()
+    second = ForecastStore(
+        cache,
+        methods,
+        None,
+        PolicyPortfolio.flagship5(),
+        RuntimeRegistry(),
+        screening_hash="screen",
+        runtime_identity={"deployment_fingerprint": "deployment-b"},
+    )
+    try:
+        second.forecast("stable_method", (1.0, 2.0), 2, "D")
+        assert second.hits == 0
+        assert second.misses == 1
+    finally:
+        second.close()
+
 def test_selector_cli_requires_frozen_screen_and_has_no_test_option():
     parser = build_parser()
     args = parser.parse_args([

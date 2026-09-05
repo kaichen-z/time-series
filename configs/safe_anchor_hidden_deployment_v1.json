@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "deployment_id": "safe-anchor-103-v1",
+  "selection_basis": {
+    "benchmark": "Dr-CiK 99-task Public Regression",
+    "mean_smae": 0.45501467943971674,
+    "reference_toto_mean_smae": 0.46068415841880733
+  },
+  "candidate_count": 103,
+  "methods_sha256": "79970be82cc8a165289ace8c66f40c0baed126d438728e981ead6d1fed4c94ad",
+  "policies_sha256": "3b7b0809a8a580f836f877fb094dd06a2e568a7e4bd16b0bb785c225f87aa2f2",
+  "skills_sha256": "65bf9baabf25a2f3fb82ed7f6d186fa5d4f69862fdc0473020ca6af0a869bb58",
+  "screening_policy_sha256": "9fb0be569e2bc4597a206ba9e4b0fa44aa99f0abbb07bdee82c219e74fa95096",
+  "decision_policy_sha256": "904ece3a47e339d5657e46e6fc4f283475abf0a5f6c16bcdec36781549e0284b",
+  "runtime_manifest_sha256": "c3f771dc69526e7efda8680a87ceba93770a9a482edd99e933d55d6c14c019c0",
+  "probabilistic_output": false,
+  "notes": "Frozen point-valued Safe-Anchor deployment selected before Hidden Test access."
+}

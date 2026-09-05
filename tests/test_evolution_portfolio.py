@@ -483,6 +483,23 @@ def test_combined_forecast_is_computed_from_both_parent_forecasts(tmp_path: Path
     assert combined.status == SUCCESS
 
 
+def test_scored_tsfm_preserves_invalid_status_for_wrong_length_output() -> None:
+    class InvalidRuntime(FakeTSFMRuntime):
+        def forecast(self, candidate, history, horizon, frequency):
+            del candidate, history, horizon, frequency
+            return ()
+
+    policy = _portfolio().tsfm[0]
+    outcome = _run_tsfm(
+        policy,
+        _tasks()[0],
+        _registry(InvalidRuntime({method_id: 1.0 for method_id in FLAGSHIP_METHOD_IDS})),
+    )
+
+    assert outcome.status == INVALID
+    assert "invalid forecast" in outcome.detail
+
+
 def test_93_methods_plus_portfolio_reports_parent_and_child_counts() -> None:
     names = tuple(f"method_{index:03d}" for index in range(93))
     parent = _portfolio()

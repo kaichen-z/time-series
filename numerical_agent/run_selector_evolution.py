@@ -263,6 +263,7 @@ def _build_case(
     config,
     *,
     group_id: str = "",
+    forecast_from_store: bool = False,
 ) -> DecisionCase:
     active = materialize_active_dictionary(screening, profile_task(task))
     diagnostics = {}
@@ -288,6 +289,15 @@ def _build_case(
         outcome = final_by_key.get((name, task.task_id))
         if outcome is not None and outcome.status == SUCCESS:
             forecasts[name] = tuple(outcome.forecast)
+        elif forecast_from_store:
+            try:
+                forecasts[name] = tuple(
+                    store.forecast(name, task.history, task.horizon, task.frequency)
+                )
+            except Exception:
+                # Candidate-level failure is already represented by its diagnostics;
+                # a hidden run must continue so the frozen selector can use another candidate.
+                continue
     return DecisionCase(
         task,
         tuple(name for name, _, _ in specs),

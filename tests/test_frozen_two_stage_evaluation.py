@@ -11,6 +11,7 @@ import common.evolution_core.contracts as evolution_contracts
 from common.payload import canonical_json_bytes
 from numerical_agent.evaluate_frozen_two_stage import (
     ForecastResult,
+    _build_case,
     _hindcast_config_for_policy,
     _paired_counts,
     _report,
@@ -19,11 +20,33 @@ from numerical_agent.evaluate_frozen_two_stage import (
     score_forecast_results,
     verify_frozen_policies,
 )
+from numerical_agent.export_hidden_two_stage import (
+    build_parser as build_hidden_parser,
+    load_hidden_tasks,
+    run_hidden_two_stage,
+    verify_hidden_deployment,
+    write_hidden_submission,
+)
 from numerical_agent.evolution.execution import Task
 from numerical_agent.evolution.module import MODULE_HEADER, parse_module
-from numerical_agent.evolution.numerical_selector import CandidateDiagnostics, DecisionPolicy
-from numerical_agent.evolution.portfolio import CombinedPolicy, PolicyPortfolio
+from numerical_agent.evolution.numerical_selector import (
+    CandidateDiagnostics,
+    DecisionPolicy,
+    HindcastConfig,
+)
+from numerical_agent.evolution.portfolio import (
+    CombinedPolicy,
+    PolicyPortfolio,
+    TSFMPolicy,
+    forecast_tsfm,
+)
+from numerical_agent.evolution.screening import (
+    ApplicabilityPolicy,
+    ScreeningEntry,
+    ScreeningPolicy,
+)
 from numerical_agent.evolution.selector_evolution import DecisionCase
+from numerical_agent.providers import RuntimeRegistry
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -512,3 +535,264 @@ def test_frozen_selector_records_history_only_top_k_assumptions():
 
     assert result.assumption_ids
     assert any(value.startswith("periodic_persistence") for value in result.assumption_ids)
+
+
+def test_hidden_loader_selects_only_hidden_rows_and_strips_embedded_answers(tmp_path):
+    hidden = {
+        "benchmark_id": "task_hidden",
+        "labels_public": False,
+        "origin": "human",
+        "task_metadata": {"prediction_length": 2, "frequency": "D"},
+        "series": {
+            "history_values": [1.0, 2.0, 3.0],
+            "future_values": [999.0, 999.0],
+            "future_timestamps": ["2026-01-01", "2026-01-02"],
+        },
+        "documents": [{"id": "doc_1", "role": "supporting", "subtype": "answer"}],
+        "annotations": {"gt_evidence": ["secret"]},
+    }
+    public = {
+        **hidden,
+        "benchmark_id": "task_public",
+        "labels_public": True,
+    }
+    (tmp_path / "task_hidden.json").write_text(json.dumps(hidden), encoding="utf-8")
+    (tmp_path / "task_public.json").write_text(json.dumps(public), encoding="utf-8")
+
+    tasks = load_hidden_tasks(tmp_path)
+
+    assert tasks == (Task("task_hidden", (1.0, 2.0, 3.0), 2, "D", ()),)
+
+
+def test_hidden_selector_never_requires_future_values():
+    diagnostics = {
+        "naive": CandidateDiagnostics.synthetic(
+            name="naive", family="statistical", median_mase=1.0
+        )
+    }
+    case = DecisionCase(
+        Task("hidden", (1.0, 2.0, 3.0), 2, "D", ()),
+        ("naive",),
+        diagnostics,
+        {"naive": (3.0, 3.0)},
+        {"naive": "statistical"},
+    )
+
+    result = _selector_forecast(case, DecisionPolicy(ensemble_enabled=False))
+
+    assert result.forecast == (3.0, 3.0)
+    assert result.oracle_mase is None
+
+
+def test_hidden_case_executes_final_forecasts_without_outcome_labels():
+    class Store:
+        tsfm = {}
+
+        @staticmethod
+        def forecast(name, history, horizon, frequency):
+            del name, frequency
+            return (float(history[-1]),) * horizon
+
+    screening = ScreeningPolicy(
+        (
+            ScreeningEntry(
+                "naive",
+                "statistical",
+                "keep",
+                ApplicabilityPolicy(),
+                "broad history-only baseline",
+            ),
+        ),
+        ("naive",),
+    )
+    task = Task("hidden", tuple(float(value) for value in range(1, 13)), 2, "D", ())
+
+    case = _build_case(
+        task,
+        screening,
+        "screen-hash",
+        {},
+        Store(),
+        HindcastConfig(folds=1, min_successful_folds=1),
+        forecast_from_store=True,
+    )
+
+    assert case.forecasts == {"naive": (12.0, 12.0)}
+    assert case.task.future == ()
+
+
+def test_hidden_two_stage_run_is_frozen_and_label_free():
+    class Store:
+        tsfm = {}
+
+        @staticmethod
+        def forecast(name, history, horizon, frequency):
+            del name, frequency
+            return (float(history[-1]),) * horizon
+
+    screening = ScreeningPolicy(
+        (
+            ScreeningEntry(
+                "naive",
+                "statistical",
+                "keep",
+                ApplicabilityPolicy(),
+                "broad history-only baseline",
+            ),
+        ),
+        ("naive",),
+    )
+    tasks = (Task("hidden", tuple(float(value) for value in range(1, 13)), 2, "D", ()),)
+
+    results = run_hidden_two_stage(
+        tasks,
+        screening=screening,
+        screening_hash="screen-hash",
+        decision_policy=DecisionPolicy(ensemble_enabled=False),
+        store=Store(),
+        hindcast_config=HindcastConfig(folds=1, min_successful_folds=1),
+    )
+
+    assert results == (
+        ForecastResult(
+            "hidden", (12.0, 12.0), ("naive",), ("statistical",), "single"
+        ),
+    )
+
+
+def test_hidden_export_cli_has_no_training_scoring_or_llm_options():
+    options = {action.dest for action in build_hidden_parser()._actions}
+    assert {"repo", "screening_dir", "selector_dir", "tasks_file", "output_dir"} <= options
+    assert "score_public" not in options
+    assert "generations" not in options
+    assert "codex_model" not in options
+    assert "llm_backend" not in options
+
+
+def test_hidden_deployment_binds_approved_policy_and_candidate_source_hashes(tmp_path):
+    repo = tmp_path / "repo"
+    screen = tmp_path / "screen"
+    selector = tmp_path / "selector"
+    repo.mkdir(); screen.mkdir(); selector.mkdir()
+    methods_hash = _write(repo / "methods.py", "methods")
+    policies_hash = _write(repo / "policies.py", "policies")
+    skills_hash = _write(repo / "skills.py", "skills")
+    runtime_manifest_hash = hashlib.sha256(
+        (ROOT / "numerical_agent" / "tsfm" / "runtime_manifests.json").read_bytes()
+    ).hexdigest()
+    screening_hash = _write(screen / "frozen_screening_policy.py", "screen")
+    decision_hash = _write(selector / "frozen_decision_policy.py", "decision")
+    (screen / "screening_manifest.json").write_text(json.dumps({
+        "frozen_screening_policy_sha256": screening_hash,
+        "source_hashes": {"methods.py": methods_hash, "policies.py": policies_hash},
+        "public_test_accessed": False,
+    }))
+    (selector / "selector_manifest.json").write_text(json.dumps({
+        "screening_policy_sha256": screening_hash,
+        "frozen_decision_policy_sha256": decision_hash,
+        "public_test_accessed": False,
+    }))
+    deployment = tmp_path / "deployment.json"
+    deployment.write_text(json.dumps({
+        "schema_version": 1,
+        "deployment_id": "safe-anchor",
+        "candidate_count": 103,
+        "methods_sha256": methods_hash,
+        "policies_sha256": policies_hash,
+        "skills_sha256": skills_hash,
+        "runtime_manifest_sha256": runtime_manifest_hash,
+        "screening_policy_sha256": screening_hash,
+        "decision_policy_sha256": decision_hash,
+    }))
+
+    assert verify_hidden_deployment(repo, screen, selector, deployment)["deployment_id"] == (
+        "safe-anchor"
+    )
+
+    incomplete = json.loads(deployment.read_text(encoding="utf-8"))
+    incomplete.pop("skills_sha256")
+    deployment.write_text(json.dumps(incomplete), encoding="utf-8")
+    with pytest.raises(ValueError, match="manifest"):
+        verify_hidden_deployment(repo, screen, selector, deployment)
+    incomplete["skills_sha256"] = skills_hash
+    deployment.write_text(json.dumps(incomplete), encoding="utf-8")
+
+    (repo / "methods.py").write_text("same names, changed code", encoding="utf-8")
+    with pytest.raises(ValueError, match="methods.py"):
+        verify_hidden_deployment(repo, screen, selector, deployment)
+
+
+def test_forecast_only_tsfm_path_never_needs_future_or_scores():
+    class Runtime:
+        @staticmethod
+        def supports(candidate):
+            return candidate.provider == "timesfm"
+
+        @staticmethod
+        def forecast(candidate, history, horizon, frequency):
+            del candidate, frequency
+            return (float(history[-1]),) * horizon
+
+    values = forecast_tsfm(
+        TSFMPolicy("timesfm_2_5", "method_tsfm_0031"),
+        history=(1.0, 2.0, 3.0),
+        horizon=2,
+        frequency="D",
+        runtimes=RuntimeRegistry({"timesfm": Runtime()}),
+    )
+
+    assert values == (3.0, 3.0)
+
+
+def test_hidden_submission_requires_full_coverage_and_writes_official_samples(tmp_path):
+    output = tmp_path / "submission"
+    tasks = (
+        Task("task_1", (1.0, 2.0), 2, "D", ()),
+        Task("task_2", (4.0, 5.0), 1, "D", ()),
+    )
+    results = (
+        ForecastResult("task_1", (3.0, 4.0), ("a",), ("statistical",), "single"),
+        ForecastResult("task_2", (6.0,), ("b",), ("tsfm",), "single"),
+    )
+
+    summary = write_hidden_submission(
+        tasks,
+        results,
+        output_dir=output,
+        samples=100,
+        screening_policy_sha256="screen",
+        decision_policy_sha256="decision",
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (output / "forecasts.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows == [
+        {"benchmark_id": "task_1", "samples": [[3.0, 4.0]] * 100},
+        {"benchmark_id": "task_2", "samples": [[6.0]] * 100},
+    ]
+    assert summary["task_count"] == 2
+    assert summary["labels_accessed"] is False
+    assert summary["probabilistic"] is False
+    assert (output / "submission_complete.json").is_file()
+
+    with pytest.raises(ValueError, match="already completed"):
+        write_hidden_submission(
+            tasks,
+            results,
+            output_dir=output,
+            samples=100,
+            screening_policy_sha256="screen",
+            decision_policy_sha256="decision",
+        )
+
+    with pytest.raises(ValueError, match="coverage"):
+        write_hidden_submission(
+            tasks,
+            results[:1],
+            output_dir=tmp_path / "incomplete",
+            samples=100,
+            screening_policy_sha256="screen",
+            decision_policy_sha256="decision",
+        )
