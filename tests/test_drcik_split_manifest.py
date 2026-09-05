@@ -4,8 +4,10 @@ import json
 
 import pytest
 
+from evolving_loop.accuracy_profile import BASELINE_PANEL, build_accuracy_profile
 from evolving_loop.split_manifest import (
     RECOMMENDED_PUBLIC_SPLIT_SIZES,
+    build_accuracy_stratified_split_manifest,
     build_split_manifest,
     load_public_records,
     write_split_manifest,
@@ -44,6 +46,42 @@ def _records() -> list[dict]:
                 )
             )
     return rows
+
+
+def _single_entity_records() -> list[dict]:
+    return [
+        _record(
+            f"task_{index}",
+            f"single_entity_{index}",
+            frequency="1 hour" if index % 2 == 0 else "1 day",
+            hops=4,
+            origin="synthetic",
+        )
+        for index in range(12)
+    ]
+
+
+def _accuracy_profile(records: list[dict]) -> dict:
+    task_ids = sorted(str(row["benchmark_id"]) for row in records)
+    scores = {
+        model: {
+            task_id: float(index) / max(1, len(task_ids) - 1)
+            for index, task_id in enumerate(task_ids)
+        }
+        for model in BASELINE_PANEL
+    }
+    sources = {
+        model: {
+            "path": f"runs/baselines/{model}_dev.log",
+            "sha256": str(index + 1) * 64,
+        }
+        for index, model in enumerate(BASELINE_PANEL)
+    }
+    return build_accuracy_profile(
+        scores,
+        source_commit="1" * 40,
+        source_files=sources,
+    )
 
 
 def test_build_split_manifest_is_exact_deterministic_and_entity_disjoint() -> None:
@@ -96,6 +134,85 @@ def test_recommended_public_split_reserves_dev_and_large_test() -> None:
         "dev": 20,
         "public_test": 99,
     }
+
+
+def test_accuracy_stratified_split_is_exact_deterministic_and_explicit() -> None:
+    """Catches v2 losing entity isolation or hiding its outcome-derived selection inputs."""
+    records = _single_entity_records()
+    profile = _accuracy_profile(records)
+
+    first = build_accuracy_stratified_split_manifest(
+        records,
+        profile,
+        seed=29,
+        train_size=6,
+        dev_size=3,
+        public_test_size=3,
+        trials=512,
+    )
+    second = build_accuracy_stratified_split_manifest(
+        list(reversed(records)),
+        profile,
+        seed=29,
+        train_size=6,
+        dev_size=3,
+        public_test_size=3,
+        trials=512,
+    )
+
+    assert first == second
+    assert first["schema_version"] == 2
+    assert first["actual_sizes"] == {"train": 6, "dev": 3, "public_test": 3}
+    assert first["selection_uses_future_values"] is True
+    assert first["selection_uses_model_metrics"] is True
+    assert first["selection_uses_gt_evidence"] is False
+    assert first["difficulty_profile_sha256"] == profile["profile_sha256"]
+    assert first["assignment_trials"] == 512
+    entity_sets = [
+        set(first["partitions"][name]["entities"])
+        for name in ("train", "dev", "public_test")
+    ]
+    assert entity_sets[0].isdisjoint(entity_sets[1])
+    assert entity_sets[0].isdisjoint(entity_sets[2])
+    assert entity_sets[1].isdisjoint(entity_sets[2])
+
+
+def test_accuracy_stratified_split_balances_controlled_difficulty() -> None:
+    """Catches an objective that records difficulty fields without balancing them."""
+    records = _single_entity_records()
+    manifest = build_accuracy_stratified_split_manifest(
+        records,
+        _accuracy_profile(records),
+        seed=29,
+        train_size=6,
+        dev_size=3,
+        public_test_size=3,
+        trials=512,
+    )
+
+    means = [
+        manifest["partitions"][name]["difficulty"]["mean_score"]
+        for name in ("train", "dev", "public_test")
+    ]
+    assert max(means) - min(means) <= 0.20
+    assert manifest["objective"]["max_mean_difficulty_gap"] <= 0.20
+
+
+def test_accuracy_stratified_split_rejects_wrong_task_coverage() -> None:
+    """Catches a partial accuracy ledger silently assigning unprofiled public tasks."""
+    records = _single_entity_records()
+    profile = _accuracy_profile(records[:-1])
+
+    with pytest.raises(ValueError, match="task coverage"):
+        build_accuracy_stratified_split_manifest(
+            records,
+            profile,
+            seed=29,
+            train_size=6,
+            dev_size=3,
+            public_test_size=3,
+            trials=32,
+        )
 
 
 def test_write_split_manifest_round_trips_json(tmp_path) -> None:
