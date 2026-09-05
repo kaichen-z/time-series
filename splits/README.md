@@ -1,7 +1,39 @@
 # Dr-CiK public evolution splits
 
-The repository freezes three deterministic, entity-disjoint manifests over the 199 tasks in the
+The repository freezes deterministic, entity-disjoint manifests over the 199 tasks in the
 public Dr-CiK development set. The official 80 hidden-test tasks are never included.
+
+## Toto-balanced internal protocol (v3)
+
+Use `drcik_public_80_20_99_v3.json` when Train, Dev, and Public Test must also have comparable Toto
+difficulty. V3 retains the frozen seven-model baseline profile from v2 and additionally balances
+Toto 2.0 capped sMAE and capped sRMSE. It uses seed `20260906`, searches 32,768 entity-disjoint
+assignments, and rejects any result whose relative mean gap exceeds 5% for the baseline aggregate,
+Toto sMAE, or Toto sRMSE.
+
+The selected split has 44 / 12 / 57 entities and relative mean gaps of 0.69% (baseline aggregate),
+2.77% (Toto sMAE), and 2.46% (Toto sRMSE). Its manifest SHA-256 is
+`5f6ddec2ae460b292629f78e76784db1d58da79df1fcbbe993b5e9aa1d93b835`.
+
+V3 uses public future labels and model outcomes to construct all three partitions. Therefore its
+99-task partition is an internally balanced test, not untouched test evidence; Hidden-80 remains
+the final test. The Toto evidence is frozen in `drcik_public_toto_accuracy_v1.json` and is bound to
+the exact ForecastStore rows and frozen Public-99 result artifact from which it was recomputed.
+
+Recreate the split after rebuilding that profile with
+`python -m evolving_loop.build_toto_accuracy_profile --help`:
+
+```bash
+python -m evolving_loop.split_manifest \
+  --tasks-path external/Dr-CiK/full-download/Dr-CiK_public/tasks \
+  --accuracy-profile splits/drcik_public_baseline_accuracy_v1.json \
+  --toto-accuracy-profile splits/drcik_public_toto_accuracy_v1.json \
+  --output splits/drcik_public_80_20_99_v3.json \
+  --seed 20260906 \
+  --trials 32768
+```
+
+See `docs/results/DRCIK_80_20_99_V3_TOTO_BALANCE_REPORT.md` for the v1/v2/v3 audit.
 
 ## Accuracy-balanced internal protocol (v2)
 

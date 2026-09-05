@@ -10,6 +10,8 @@ import statistics
 from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 
+from common.evolution_core.contracts import METRIC_POLICY_FINGERPRINT
+
 
 BASELINE_PANEL = (
     "arima",
@@ -21,6 +23,7 @@ BASELINE_PANEL = (
     "seasonal_naive",
 )
 PROFILE_SCHEMA = "drcik-public-baseline-accuracy-v1"
+TOTO_PROFILE_SCHEMA = "drcik-public-toto-accuracy-v1"
 SOURCE_COMMIT = "1d0d9690e6d81fd00d344700216cfd40f35638f5"
 SOURCE_LOGS = {model: f"runs/baselines/{model}_dev.log" for model in BASELINE_PANEL}
 SOURCE_SHA256 = {
@@ -122,6 +125,173 @@ def _pinned_sources() -> dict[str, dict[str, str]]:
         model: {"path": SOURCE_LOGS[model], "sha256": SOURCE_SHA256[model]}
         for model in BASELINE_PANEL
     }
+
+
+def _validated_toto_source_artifacts(
+    source_artifacts: Mapping[str, object],
+) -> dict[str, dict[str, str]]:
+    if set(source_artifacts) != {"task_snapshot", "train_dev", "public_test"}:
+        raise ValueError(
+            "Toto source artifacts must bind the task snapshot, Train/Dev, and Public Test"
+        )
+    task_snapshot = source_artifacts["task_snapshot"]
+    train_dev = source_artifacts["train_dev"]
+    public_test = source_artifacts["public_test"]
+    if not isinstance(task_snapshot, Mapping) or set(task_snapshot) != {
+        "kind",
+        "split_manifest_sha256",
+        "selected_tasks_sha256",
+    }:
+        raise ValueError("Toto task snapshot source binding is malformed")
+    if task_snapshot["kind"] != "labeled_task_snapshot":
+        raise ValueError("Toto task snapshot source must contain labeled numeric tasks")
+    if not isinstance(train_dev, Mapping) or set(train_dev) != {
+        "kind",
+        "manifest_sha256",
+        "identity_sha256",
+        "selected_entries_sha256",
+    }:
+        raise ValueError("Toto Train/Dev source binding is malformed")
+    if train_dev["kind"] != "forecast_store":
+        raise ValueError("Toto Train/Dev source must be a forecast store")
+    if not isinstance(public_test, Mapping) or set(public_test) != {
+        "kind",
+        "artifact_sha256",
+        "row_key",
+        "source_commit",
+        "evaluation_source_sha256",
+        "runtime_manifest_sha256",
+        "worker_adapter_sha256",
+        "model_checkpoint",
+    }:
+        raise ValueError("Toto Public Test source binding is malformed")
+    if public_test["kind"] != "frozen_toto_forecasts":
+        raise ValueError("Toto Public Test source must contain frozen forecasts")
+    if public_test["row_key"] != "E_toto_reference":
+        raise ValueError("Toto Public Test source row is not the frozen reference")
+    if public_test["model_checkpoint"] != "Datadog/Toto-2.0-22m":
+        raise ValueError("Toto Public Test checkpoint identity mismatch")
+    for field in ("split_manifest_sha256", "selected_tasks_sha256"):
+        value = task_snapshot[field]
+        if type(value) is not str or _HEX_64.fullmatch(value) is None:
+            raise ValueError(f"Toto task snapshot {field} must be 64 lowercase hex characters")
+    for field in ("manifest_sha256", "identity_sha256", "selected_entries_sha256"):
+        value = train_dev[field]
+        if type(value) is not str or _HEX_64.fullmatch(value) is None:
+            raise ValueError(f"Toto Train/Dev {field} must be 64 lowercase hex characters")
+    source_commit = public_test["source_commit"]
+    if type(source_commit) is not str or _HEX_40.fullmatch(source_commit) is None:
+        raise ValueError("Toto Public Test source commit must be 40 lowercase hex characters")
+    for field in (
+        "artifact_sha256",
+        "evaluation_source_sha256",
+        "runtime_manifest_sha256",
+        "worker_adapter_sha256",
+    ):
+        value = public_test[field]
+        if type(value) is not str or _HEX_64.fullmatch(value) is None:
+            raise ValueError(f"Toto Public Test {field} must be 64 lowercase hex characters")
+    return {
+        "task_snapshot": {str(key): str(value) for key, value in task_snapshot.items()},
+        "train_dev": {str(key): str(value) for key, value in train_dev.items()},
+        "public_test": {str(key): str(value) for key, value in public_test.items()},
+    }
+
+
+def build_toto_accuracy_profile(
+    task_metrics: Mapping[str, Mapping[str, float]],
+    *,
+    source_artifacts: Mapping[str, object],
+) -> dict:
+    """Create a canonical per-task Toto sMAE/sRMSE difficulty artifact."""
+    if not isinstance(task_metrics, Mapping) or not task_metrics:
+        raise ValueError("Toto accuracy profile requires task metrics")
+    normalized = {}
+    for task_id, raw_metrics in task_metrics.items():
+        if type(task_id) is not str or not task_id:
+            raise ValueError("Toto task IDs must be non-empty strings")
+        if not isinstance(raw_metrics, Mapping) or set(raw_metrics) != {"smae", "srmse"}:
+            raise ValueError(f"Toto task {task_id} must contain sMAE and sRMSE")
+        metrics = {}
+        for metric in ("smae", "srmse"):
+            raw_value = raw_metrics[metric]
+            if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+                raise ValueError(f"Toto {metric} for {task_id} must be a number")
+            value = float(raw_value)
+            if not math.isfinite(value) or not 0.0 <= value <= 5.0:
+                raise ValueError(f"Toto {metric} for {task_id} must be in [0, 5]")
+            metrics[metric] = value
+        normalized[task_id] = metrics
+    payload = {
+        "schema_version": 1,
+        "profile_schema": TOTO_PROFILE_SCHEMA,
+        "dataset": "ServiceNow/Dr-CiK",
+        "source_split": "public_dev",
+        "model_name": "toto_2_0",
+        "metric_cap": 5.0,
+        "metric_policy_fingerprint": METRIC_POLICY_FINGERPRINT,
+        "source_artifacts": _validated_toto_source_artifacts(source_artifacts),
+        "task_count": len(normalized),
+        "tasks": dict(sorted(normalized.items())),
+    }
+    payload["profile_sha256"] = _canonical_digest(payload)
+    return payload
+
+
+def validate_toto_accuracy_profile(
+    profile: Mapping[str, object],
+    expected_task_ids: Collection[str] | None = None,
+) -> dict:
+    """Fail closed unless Toto task metrics are complete and provenance-bound."""
+    expected_fields = {
+        "schema_version",
+        "profile_schema",
+        "dataset",
+        "source_split",
+        "model_name",
+        "metric_cap",
+        "metric_policy_fingerprint",
+        "source_artifacts",
+        "task_count",
+        "tasks",
+        "profile_sha256",
+    }
+    if set(profile) != expected_fields:
+        raise ValueError("Toto accuracy profile fields do not match schema")
+    submitted_digest = profile["profile_sha256"]
+    if type(submitted_digest) is not str or _HEX_64.fullmatch(submitted_digest) is None:
+        raise ValueError("Toto accuracy profile digest must be 64 lowercase hex characters")
+    unsigned = dict(profile)
+    unsigned.pop("profile_sha256")
+    if _canonical_digest(unsigned) != submitted_digest:
+        raise ValueError("Toto accuracy profile digest mismatch")
+    if type(profile["schema_version"]) is not int or profile["schema_version"] != 1:
+        raise ValueError("unsupported Toto accuracy profile schema")
+    if profile["profile_schema"] != TOTO_PROFILE_SCHEMA:
+        raise ValueError("unsupported Toto accuracy profile schema")
+    if profile["dataset"] != "ServiceNow/Dr-CiK" or profile["source_split"] != "public_dev":
+        raise ValueError("Toto accuracy profile dataset identity mismatch")
+    if profile["model_name"] != "toto_2_0" or profile["metric_cap"] != 5.0:
+        raise ValueError("Toto accuracy profile model or metric cap mismatch")
+    if profile["metric_policy_fingerprint"] != METRIC_POLICY_FINGERPRINT:
+        raise ValueError("Toto accuracy profile metric policy mismatch")
+    raw_tasks = profile["tasks"]
+    if not isinstance(raw_tasks, Mapping) or not raw_tasks:
+        raise ValueError("Toto accuracy profile tasks must be a non-empty mapping")
+    source_artifacts = profile["source_artifacts"]
+    if not isinstance(source_artifacts, Mapping):
+        raise ValueError("Toto accuracy profile source artifacts must be a mapping")
+    rebuilt = build_toto_accuracy_profile(
+        raw_tasks,
+        source_artifacts=source_artifacts,
+    )
+    if type(profile["task_count"]) is not int or profile["task_count"] != len(raw_tasks):
+        raise ValueError("Toto accuracy profile task count mismatch")
+    if expected_task_ids is not None and set(raw_tasks) != set(expected_task_ids):
+        raise ValueError("Toto accuracy profile task coverage mismatch")
+    if dict(profile) != rebuilt:
+        raise ValueError("Toto accuracy profile is not canonical")
+    return rebuilt
 
 
 def build_accuracy_profile(
@@ -261,6 +431,37 @@ def task_difficulty_features(profile: Mapping[str, object]) -> dict[str, dict[st
                 for model in BASELINE_PANEL
             },
         }
+    return result
+
+
+def task_toto_difficulty_features(
+    profile: Mapping[str, object],
+) -> dict[str, dict[str, object]]:
+    """Return independent Toto sMAE and sRMSE strata for every public task."""
+    validated = validate_toto_accuracy_profile(profile)
+    task_ids = sorted(validated["tasks"])
+    denominator = max(1, len(task_ids) - 1)
+    percentiles: dict[str, dict[str, float]] = {task_id: {} for task_id in task_ids}
+    for metric in ("smae", "srmse"):
+        ordered = sorted(
+            task_ids,
+            key=lambda task_id: (validated["tasks"][task_id][metric], task_id),
+        )
+        percentile_by_value = {}
+        for rank, task_id in enumerate(ordered):
+            value = float(validated["tasks"][task_id][metric])
+            percentile_by_value.setdefault(value, rank / denominator)
+            percentiles[task_id][metric] = percentile_by_value[value]
+    result = {}
+    for task_id in task_ids:
+        item = {}
+        for metric in ("smae", "srmse"):
+            percentile = percentiles[task_id][metric]
+            item[metric] = float(validated["tasks"][task_id][metric])
+            item[f"{metric}_percentile"] = percentile
+            item[f"{metric}_decile"] = str(min(9, int(percentile * 10.0)))
+            item[f"{metric}_quintile"] = str(min(4, int(percentile * 5.0)))
+        result[task_id] = item
     return result
 
 
