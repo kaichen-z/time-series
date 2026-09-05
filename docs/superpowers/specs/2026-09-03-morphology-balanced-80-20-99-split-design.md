@@ -1,162 +1,127 @@
-# Morphology-Balanced Dr-CiK 80/20/99 Split v2
+# Accuracy-Stratified Dr-CiK 80/20/99 Split v2
 
-Date: 2026-09-03  
-Status: approved in chat; implementation pending  
-Scope: local labeled Dr-CiK `public_dev` tasks only
+Date: 2026-09-05
+Status: approved in chat
+Scope: the 199 labeled synthetic Dr-CiK `public_dev` tasks
 
 ## 1. Problem
 
-The existing manifest, `splits/drcik_public_80_20_99_v1.json`, is deterministic and
-entity-disjoint, but its assignment objective balances only frequency, forecast-horizon bucket,
-reasoning hops, and origin. On the current baseline ledger, most fixed forecasters have materially
-higher capped sMAE and sRMSE on Public-99 than on Train-80. The effect is visible even for methods
-that never participate in self-evolution, so it is not solely an evolved-policy overfit.
+The frozen v1 manifest is deterministic and entity-disjoint, but it balances only frequency,
+horizon bucket, reasoning hops, and origin. The last two fields are constant across the public 199,
+so v1 does not directly balance empirical forecast difficulty. A fixed seven-model baseline panel
+shows mean task-level median capped sMAE of 0.5287 / 0.5247 / 0.5922 on Train-80 / Dev-20 /
+Public-99. Public-99 is about 12% harder than Train-80 on this proxy and has a materially heavier
+tail.
 
-The original split did not use future values or model errors, which was correct. The missing piece
-is label-free forecast-difficulty stratification: historical periodicity, trend, intermittency,
-noise, outliers, stationarity, recent regime change, available-history length, and the ratio between
-forecast horizon and history length.
+## 2. Goal
 
-## 2. Goals
+Create `splits/drcik_public_80_20_99_v2.json` with exactly 80 Train, 20 Dev, and 99 internal Test
+tasks while:
 
-Create a new deterministic manifest, `splits/drcik_public_80_20_99_v2.json`, that:
+- keeping every entity wholly inside one partition;
+- balancing frequency, horizon bucket, and empirical difficulty;
+- deriving difficulty from a frozen, heterogeneous baseline panel rather than the current Toto or
+  any evolved Champion;
+- making all label use and source provenance explicit and reproducible;
+- preserving `splits/drcik_public_80_20_99_v1.json` byte-for-byte; and
+- leaving the official Hidden-80 as the only final, locally unscored test.
 
-- contains exactly 80 Train, 20 Dev, and 99 Public Regression tasks;
-- keeps every entity wholly inside one partition;
-- balances coarse metadata and history-only morphology across all three partitions;
-- never reads or derives from future values, ground-truth evidence, document labels, forecast
-  errors, model names, or prior evaluation outcomes;
-- records enough schema and distribution metadata to reproduce and audit the assignment; and
-- leaves v1 byte-for-byte unchanged for historical result reproduction.
+## 3. Scientific Boundary
 
-## 3. Non-goals and Scientific Boundary
+V2 is a balanced internal development/test protocol, not fresh generalization evidence. Its
+difficulty signal is computed from public future labels through published baseline forecasts.
+Therefore the manifest must declare `selection_uses_future_values: true` and
+`selection_uses_model_metrics: true`. It must never be described as an untouched test.
 
-The v2 split is not a newly unseen test set. The project has already observed results on all 199
-labeled tasks and used the old Public-99 repeatedly. V2 is therefore a better-balanced development
-and engineering-regression protocol, not fresh generalization evidence. The official Hidden-80
-submission remains the only locally unscored final test.
+The fixed panel is bound to GitHub commit
+`1d0d9690e6d81fd00d344700216cfd40f35638f5` and contains seven complete no-context methods:
 
-V2 selection must not optimize equal baseline accuracy across partitions. Baseline error is used
-only after the manifest is frozen to audit whether history-profile balance reduced the observed
-difficulty gap. The assignment algorithm itself is blind to all future labels and model outputs.
+- `arima`
+- `ets`
+- `ses`
+- `chronos`
+- `aurora`
+- `moirai`
+- `seasonal_naive`
 
-## 4. Approaches Considered
+Toto and all locally evolved policies are excluded so the split cannot be optimized for the system
+being developed. The old Public-99 remains available only for historical v1 comparisons.
 
-1. Repartition only the existing Train-80 and Dev-20. This preserves Public-99 identity but cannot
-   address the measured Train/Public difficulty imbalance.
-2. Repartition all 199 labeled tasks using history-only morphology while preserving v1. This is the
-   selected approach because it addresses the imbalance without label-based task selection.
-3. Replace 80/20/99 with repeated group cross-validation. This would improve uncertainty estimates
-   but would remove the fixed protocol required by the current evolution and frozen-evaluation
-   interfaces.
+## 4. Accuracy Profile
 
-## 5. History-Only Profile
+Commit `splits/drcik_public_baseline_accuracy_v1.json` as the small, offline input artifact. It
+contains, for every public task, each panel member's capped sMAE parsed from the published baseline
+logs, plus source commit, source paths, per-source SHA-256 digests, panel membership, schema version,
+and a canonical artifact digest.
 
-Each public task is converted to the same deterministic TaskProfile semantics used by Numerical
-screening. Only these inputs are allowed:
+For each model independently, sort all 199 tasks by `(capped_smae, task_id)` and convert rank to a
+percentile in `[0, 1]`. The task's primary difficulty score is the median raw capped sMAE across the
+seven models; its stratification score is the median of the seven percentiles and is bucketed into
+ten deterministic deciles. The robust raw median retains tail magnitude, while percentile buckets
+prevent a weak or high-variance baseline from dominating the categorical distribution objective.
 
-- `series.history_values`;
-- `task_metadata.frequency`;
-- `task_metadata.prediction_length`; and
-- the entity name, used only for grouping.
+Input validation fails closed on missing/extra task IDs, missing/extra panel members, booleans,
+non-finite values, or scores outside `[0, 5]`.
 
-The split profile contains closed, coarse buckets rather than raw floating-point measurements:
+## 5. Assignment
 
-- frequency;
-- horizon bucket and history-length bucket;
-- horizon/history ratio bucket;
-- trend direction and trend-strength bucket;
-- periodicity-strength and periodicity-confidence buckets;
-- intermittent/dense class and zero-fraction bucket;
-- signed/nonnegative and integer/continuous flags;
-- noise-scale and outlier-fraction buckets;
-- stationary/nonstationary class; and
-- recent-regime confidence bucket.
+Candidate assignments use a fixed seed, stable SHA-256 ordering, exact subset-sum feasibility, and
+entity-level grouping. They retain the v1 contract of exact task counts and deterministic
+task/entity membership.
 
-Bucket boundaries are fixed constants in code and versioned by a profile-schema identifier. They
-are selected before any v2 baseline evaluation. Continuous values are clipped to finite bounded
-ranges before bucketing; empty or non-finite histories fail closed.
+The deterministic objective balances:
 
-The manifest stores only aggregate bucket counts and task/entity membership. It does not copy raw
-history, future values, task-level profiles, documents, or labels.
+1. frequency and horizon-bin distributions;
+2. aggregate panel-difficulty deciles;
+3. each baseline's own difficulty quintiles; and
+4. the mean aggregate difficulty percentile in each partition.
 
-## 6. Assignment Objective
+Every partition must contain at least one entity for every two tasks. Candidates are compared
+lexicographically by passing the 5% relative mean-difficulty gate, lowest relative mean-difficulty
+gap, maximum normalized bin deviation, total normalized distribution deviation, and stable
+membership signature. All objective components are stored in the manifest. The number of
+deterministic trials is a versioned constant.
 
-Assignment remains deterministic and entity-disjoint. Candidate assignments are generated from a
-fixed seed and stable hashes exactly as in v1. For each assignment, the host computes:
+## 6. Manifest Contract
 
-1. exact requested-size feasibility;
-2. normalized absolute distribution error for the original metadata strata;
-3. normalized absolute distribution error for every morphology bucket;
-4. the maximum single-bin deviation across partitions; and
-5. a deterministic membership signature for tie-breaking.
+V2 uses schema version 2 and preserves the consumer-facing
+`partitions.<train|dev|public_test>.task_ids` structure. It additionally records:
 
-Candidates are ordered lexicographically by:
-
-1. lowest maximum morphology-bin deviation;
-2. lowest total morphology imbalance;
-3. lowest original-metadata imbalance; and
-4. stable membership signature.
-
-This prevents a large set of easy bins from hiding one badly imbalanced rare regime. No term in the
-objective may depend on target values after the forecast origin or on any model prediction.
-
-## 7. Manifest Contract
-
-V2 increments the split schema and adds:
-
-- `profile_schema` and its SHA-256 fingerprint;
-- `selection_uses_history_values: true`;
-- explicit false declarations for future values, GT evidence, document labels, and model metrics;
-- morphology stratification feature names and bucket boundaries;
-- per-partition metadata and morphology distributions;
-- objective components for the accepted assignment; and
+- `difficulty_profile_schema` and profile SHA-256;
+- source baseline commit and panel names;
+- `stratification_features`, including aggregate decile and per-model quintiles;
+- explicit selection-use booleans;
+- per-partition metadata and difficulty distributions;
+- objective components and trial count; and
 - a canonical manifest SHA-256 covering every field except the digest itself.
 
-Consumers continue reading `partitions.<name>.task_ids`, so existing Train/Dev/Public loaders need no
-semantic change. Formal runners opt into v2 explicitly at first; repository-wide defaults do not
-switch until baseline regrouping and integrity checks pass.
+Existing runners do not switch defaults in this change. V2 is selected explicitly until later
+experiments deliberately migrate.
 
-## 8. Validation and Tests
+## 7. Tests and Acceptance
 
-Tests must be written before production changes and must prove:
+Tests are written before production changes and must prove:
 
-- exact 80/20/99 sizes, full task coverage, unique IDs, and entity disjointness;
-- deterministic output under input reordering;
-- no future/GT/document/model-result content reaches the profile or manifest;
-- changing only forbidden fields cannot change the split;
-- changing a permitted history profile can change the balance score;
-- malformed, empty, or non-finite history fails closed;
-- v1 generation and the committed v1 artifact remain unchanged;
-- v2 has lower maximum and total history-profile imbalance than v1 on the 199-task source; and
-- every existing consumer can load a v2 fixture through the unchanged task-ID contract.
+- exact 80/20/99 sizes, total coverage, unique IDs, and entity disjointness;
+- deterministic output under input and profile reordering;
+- strict accuracy-profile validation and canonical digest verification;
+- task percentile and bucket calculations with deterministic tie-breaking;
+- explicit label/model-metric declarations in v2;
+- unchanged v1 generation and committed v1 digest;
+- unchanged task-ID consumer compatibility; and
+- lower aggregate difficulty imbalance than v1 on the real 199-task data.
 
-After v2 is generated and frozen, fixed baseline forecasts are regrouped without tuning. The audit
-reports per split:
+The committed v2 is accepted only if the maximum relative gap between the three partitions' mean
+aggregate difficulty scores is at most 5%, compared with roughly 12% for v1. The audit also reports
+each baseline's per-partition mean capped sMAE and aggregate median/P90/max. Residual model-specific
+differences are reported; the split is generated once and is not repeatedly reshuffled to improve a
+particular model.
 
-- mean and standard error of capped sMAE and sRMSE;
-- medians, P90/P95, raw-tail maxima, and clipped-task counts;
-- results by frequency, horizon ratio, and morphology group; and
-- Train/Public gaps with paired uncertainty where task identity permits it.
+## 8. Deliverables
 
-Failure to reduce the label-free profile imbalance rejects v2. Failure to equalize realized
-forecast errors does not trigger another task reshuffle; it is reported as residual distribution
-shift.
-
-## 9. Migration
-
-1. Add the v2 profile/assignment implementation and tests without changing defaults.
-2. Generate and commit `drcik_public_80_20_99_v2.json` from the same 199 public labeled records.
-3. Verify v1 immutability and emit a v1-versus-v2 balance report.
-4. Regroup or rerun fixed baselines once on v2 and publish the difficulty audit.
-5. If integrity and balance gates pass, run future Numerical evolution with explicit v2 paths.
-6. Keep every existing v1 result labeled with its original manifest digest; never compare v1 Train
-   directly with v2 Public as if they were one protocol.
-
-## 10. Expected Outcome
-
-V2 should make Train, Dev, and Public more similar in observable historical morphology, so Train
-cross-fit gains are a less optimistic guide to Public behavior. It cannot guarantee identical
-forecast errors because entity-specific future regimes remain unknown at split time. The primary
-success criterion is a demonstrably better label-free balance with intact leakage boundaries, not
-post-hoc equalized accuracy.
+- accuracy profile parser/builder and deterministic scoring helpers;
+- accuracy-aware split generator and CLI options;
+- committed offline accuracy profile;
+- committed v2 split manifest;
+- v1-versus-v2 balance report;
+- focused tests and full split-test verification.

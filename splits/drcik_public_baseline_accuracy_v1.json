@@ -1,0 +1,2239 @@
+{
+  "schema_version": 1,
+  "profile_schema": "drcik-public-baseline-accuracy-v1",
+  "dataset": "ServiceNow/Dr-CiK",
+  "source_split": "public_dev",
+  "source_commit": "1d0d9690e6d81fd00d344700216cfd40f35638f5",
+  "panel_models": [
+    "arima",
+    "ets",
+    "ses",
+    "chronos",
+    "aurora",
+    "moirai",
+    "seasonal_naive"
+  ],
+  "source_files": {
+    "arima": {
+      "path": "runs/baselines/arima_dev.log",
+      "sha256": "6fbe90f0d35c03508b9a621d4d610ce20facd5317ca23eca3ae973d29b4af242"
+    },
+    "ets": {
+      "path": "runs/baselines/ets_dev.log",
+      "sha256": "4c0df11ee45209001537bf94399c93ba3c2089515b5f7c45601bc1c82d318b55"
+    },
+    "ses": {
+      "path": "runs/baselines/ses_dev.log",
+      "sha256": "b76c5ec656d9c525efb134be4d1c340da604412d6eaad967365c4e4353f3aea7"
+    },
+    "chronos": {
+      "path": "runs/baselines/chronos_dev.log",
+      "sha256": "676677765977d0a839fc190fae880055c03b429838384033b006e4a5b66eceeb"
+    },
+    "aurora": {
+      "path": "runs/baselines/aurora_dev.log",
+      "sha256": "d073890b63eceaa9ceb28166f8526b43750dc935cc371d3570857b3d8974774c"
+    },
+    "moirai": {
+      "path": "runs/baselines/moirai_dev.log",
+      "sha256": "4336575b6638ff6439c91aec5805c66fe296c9cf55577a251985f5efa7c45993"
+    },
+    "seasonal_naive": {
+      "path": "runs/baselines/seasonal_naive_dev.log",
+      "sha256": "54465c4494323f97963f3d289fb57c99fe0a9396f6d0a278993f36a789f3cb39"
+    }
+  },
+  "task_count": 199,
+  "tasks": {
+    "task_100": {
+      "smae": {
+        "arima": 0.519,
+        "ets": 0.457,
+        "ses": 0.649,
+        "chronos": 0.366,
+        "aurora": 0.494,
+        "moirai": 0.363,
+        "seasonal_naive": 0.214
+      }
+    },
+    "task_101": {
+      "smae": {
+        "arima": 0.362,
+        "ets": 0.17,
+        "ses": 0.282,
+        "chronos": 0.221,
+        "aurora": 0.41,
+        "moirai": 0.269,
+        "seasonal_naive": 0.214
+      }
+    },
+    "task_102": {
+      "smae": {
+        "arima": 0.519,
+        "ets": 0.495,
+        "ses": 0.608,
+        "chronos": 0.48,
+        "aurora": 0.607,
+        "moirai": 0.512,
+        "seasonal_naive": 0.524
+      }
+    },
+    "task_103": {
+      "smae": {
+        "arima": 0.493,
+        "ets": 0.328,
+        "ses": 0.536,
+        "chronos": 0.322,
+        "aurora": 0.543,
+        "moirai": 0.337,
+        "seasonal_naive": 0.414
+      }
+    },
+    "task_104": {
+      "smae": {
+        "arima": 0.399,
+        "ets": 0.25,
+        "ses": 0.39,
+        "chronos": 0.233,
+        "aurora": 0.389,
+        "moirai": 0.238,
+        "seasonal_naive": 0.227
+      }
+    },
+    "task_105": {
+      "smae": {
+        "arima": 0.311,
+        "ets": 0.286,
+        "ses": 0.441,
+        "chronos": 0.293,
+        "aurora": 0.427,
+        "moirai": 0.313,
+        "seasonal_naive": 0.332
+      }
+    },
+    "task_106": {
+      "smae": {
+        "arima": 0.355,
+        "ets": 0.32,
+        "ses": 0.315,
+        "chronos": 0.283,
+        "aurora": 0.345,
+        "moirai": 0.305,
+        "seasonal_naive": 0.439
+      }
+    },
+    "task_107": {
+      "smae": {
+        "arima": 0.495,
+        "ets": 0.509,
+        "ses": 0.683,
+        "chronos": 0.551,
+        "aurora": 0.723,
+        "moirai": 0.618,
+        "seasonal_naive": 0.783
+      }
+    },
+    "task_108": {
+      "smae": {
+        "arima": 0.434,
+        "ets": 0.265,
+        "ses": 0.377,
+        "chronos": 0.294,
+        "aurora": 0.268,
+        "moirai": 0.288,
+        "seasonal_naive": 0.361
+      }
+    },
+    "task_109": {
+      "smae": {
+        "arima": 0.447,
+        "ets": 0.377,
+        "ses": 1.101,
+        "chronos": 0.386,
+        "aurora": 0.523,
+        "moirai": 0.48,
+        "seasonal_naive": 0.402
+      }
+    },
+    "task_110": {
+      "smae": {
+        "arima": 0.668,
+        "ets": 0.469,
+        "ses": 0.837,
+        "chronos": 0.417,
+        "aurora": 0.412,
+        "moirai": 0.434,
+        "seasonal_naive": 0.402
+      }
+    },
+    "task_111": {
+      "smae": {
+        "arima": 0.299,
+        "ets": 0.405,
+        "ses": 0.712,
+        "chronos": 0.297,
+        "aurora": 0.394,
+        "moirai": 0.421,
+        "seasonal_naive": 0.326
+      }
+    },
+    "task_112": {
+      "smae": {
+        "arima": 1.236,
+        "ets": 0.448,
+        "ses": 1.092,
+        "chronos": 0.676,
+        "aurora": 0.612,
+        "moirai": 0.512,
+        "seasonal_naive": 0.9
+      }
+    },
+    "task_113": {
+      "smae": {
+        "arima": 1.059,
+        "ets": 0.781,
+        "ses": 1.111,
+        "chronos": 1.038,
+        "aurora": 1.141,
+        "moirai": 0.933,
+        "seasonal_naive": 1.024
+      }
+    },
+    "task_114": {
+      "smae": {
+        "arima": 0.769,
+        "ets": 0.516,
+        "ses": 1.068,
+        "chronos": 0.445,
+        "aurora": 0.613,
+        "moirai": 0.562,
+        "seasonal_naive": 0.664
+      }
+    },
+    "task_115": {
+      "smae": {
+        "arima": 1.231,
+        "ets": 0.988,
+        "ses": 1.104,
+        "chronos": 0.919,
+        "aurora": 0.834,
+        "moirai": 0.674,
+        "seasonal_naive": 0.616
+      }
+    },
+    "task_116": {
+      "smae": {
+        "arima": 0.549,
+        "ets": 0.183,
+        "ses": 0.986,
+        "chronos": 0.072,
+        "aurora": 0.242,
+        "moirai": 0.117,
+        "seasonal_naive": 0.096
+      }
+    },
+    "task_117": {
+      "smae": {
+        "arima": 3.731,
+        "ets": 3.59,
+        "ses": 1.489,
+        "chronos": 3.069,
+        "aurora": 3.788,
+        "moirai": 3.779,
+        "seasonal_naive": 3.913
+      }
+    },
+    "task_118": {
+      "smae": {
+        "arima": 1.523,
+        "ets": 0.464,
+        "ses": 1.064,
+        "chronos": 0.618,
+        "aurora": 0.699,
+        "moirai": 0.7,
+        "seasonal_naive": 0.712
+      }
+    },
+    "task_119": {
+      "smae": {
+        "arima": 2.813,
+        "ets": 2.672,
+        "ses": 1.226,
+        "chronos": 2.276,
+        "aurora": 2.457,
+        "moirai": 2.703,
+        "seasonal_naive": 2.628
+      }
+    },
+    "task_120": {
+      "smae": {
+        "arima": 5.0,
+        "ets": 5.0,
+        "ses": 3.349,
+        "chronos": 5.0,
+        "aurora": 5.0,
+        "moirai": 5.0,
+        "seasonal_naive": 4.976
+      }
+    },
+    "task_121": {
+      "smae": {
+        "arima": 1.488,
+        "ets": 0.76,
+        "ses": 1.028,
+        "chronos": 0.764,
+        "aurora": 0.975,
+        "moirai": 1.031,
+        "seasonal_naive": 0.721
+      }
+    },
+    "task_122": {
+      "smae": {
+        "arima": 0.372,
+        "ets": 0.323,
+        "ses": 0.45,
+        "chronos": 0.333,
+        "aurora": 0.347,
+        "moirai": 0.336,
+        "seasonal_naive": 0.364
+      }
+    },
+    "task_123": {
+      "smae": {
+        "arima": 0.499,
+        "ets": 0.432,
+        "ses": 0.562,
+        "chronos": 0.43,
+        "aurora": 0.442,
+        "moirai": 0.431,
+        "seasonal_naive": 0.436
+      }
+    },
+    "task_124": {
+      "smae": {
+        "arima": 0.236,
+        "ets": 0.191,
+        "ses": 0.28,
+        "chronos": 0.181,
+        "aurora": 0.202,
+        "moirai": 0.189,
+        "seasonal_naive": 0.194
+      }
+    },
+    "task_125": {
+      "smae": {
+        "arima": 0.107,
+        "ets": 0.117,
+        "ses": 0.138,
+        "chronos": 0.105,
+        "aurora": 0.113,
+        "moirai": 0.107,
+        "seasonal_naive": 0.109
+      }
+    },
+    "task_126": {
+      "smae": {
+        "arima": 0.39,
+        "ets": 0.246,
+        "ses": 0.423,
+        "chronos": 0.241,
+        "aurora": 0.258,
+        "moirai": 0.24,
+        "seasonal_naive": 0.234
+      }
+    },
+    "task_127": {
+      "smae": {
+        "arima": 0.381,
+        "ets": 0.319,
+        "ses": 0.443,
+        "chronos": 0.332,
+        "aurora": 0.351,
+        "moirai": 0.336,
+        "seasonal_naive": 0.364
+      }
+    },
+    "task_128": {
+      "smae": {
+        "arima": 0.493,
+        "ets": 0.432,
+        "ses": 0.581,
+        "chronos": 0.431,
+        "aurora": 0.44,
+        "moirai": 0.431,
+        "seasonal_naive": 0.436
+      }
+    },
+    "task_129": {
+      "smae": {
+        "arima": 0.245,
+        "ets": 0.202,
+        "ses": 0.263,
+        "chronos": 0.181,
+        "aurora": 0.2,
+        "moirai": 0.189,
+        "seasonal_naive": 0.194
+      }
+    },
+    "task_130": {
+      "smae": {
+        "arima": 0.107,
+        "ets": 0.113,
+        "ses": 0.13,
+        "chronos": 0.104,
+        "aurora": 0.112,
+        "moirai": 0.107,
+        "seasonal_naive": 0.109
+      }
+    },
+    "task_131": {
+      "smae": {
+        "arima": 0.388,
+        "ets": 0.247,
+        "ses": 0.443,
+        "chronos": 0.241,
+        "aurora": 0.251,
+        "moirai": 0.24,
+        "seasonal_naive": 0.234
+      }
+    },
+    "task_132": {
+      "smae": {
+        "arima": 0.379,
+        "ets": 0.321,
+        "ses": 0.456,
+        "chronos": 0.334,
+        "aurora": 0.351,
+        "moirai": 0.336,
+        "seasonal_naive": 0.364
+      }
+    },
+    "task_133": {
+      "smae": {
+        "arima": 0.495,
+        "ets": 0.431,
+        "ses": 0.57,
+        "chronos": 0.43,
+        "aurora": 0.44,
+        "moirai": 0.431,
+        "seasonal_naive": 0.436
+      }
+    },
+    "task_134": {
+      "smae": {
+        "arima": 0.236,
+        "ets": 0.19,
+        "ses": 0.284,
+        "chronos": 0.181,
+        "aurora": 0.206,
+        "moirai": 0.189,
+        "seasonal_naive": 0.194
+      }
+    },
+    "task_135": {
+      "smae": {
+        "arima": 0.105,
+        "ets": 0.112,
+        "ses": 0.13,
+        "chronos": 0.104,
+        "aurora": 0.112,
+        "moirai": 0.107,
+        "seasonal_naive": 0.109
+      }
+    },
+    "task_136": {
+      "smae": {
+        "arima": 0.382,
+        "ets": 0.246,
+        "ses": 0.447,
+        "chronos": 0.241,
+        "aurora": 0.255,
+        "moirai": 0.24,
+        "seasonal_naive": 0.234
+      }
+    },
+    "task_137": {
+      "smae": {
+        "arima": 0.377,
+        "ets": 0.322,
+        "ses": 0.44,
+        "chronos": 0.332,
+        "aurora": 0.342,
+        "moirai": 0.336,
+        "seasonal_naive": 0.364
+      }
+    },
+    "task_138": {
+      "smae": {
+        "arima": 0.494,
+        "ets": 0.43,
+        "ses": 0.566,
+        "chronos": 0.43,
+        "aurora": 0.441,
+        "moirai": 0.431,
+        "seasonal_naive": 0.436
+      }
+    },
+    "task_139": {
+      "smae": {
+        "arima": 0.237,
+        "ets": 0.19,
+        "ses": 0.282,
+        "chronos": 0.181,
+        "aurora": 0.191,
+        "moirai": 0.189,
+        "seasonal_naive": 0.194
+      }
+    },
+    "task_140": {
+      "smae": {
+        "arima": 0.107,
+        "ets": 0.11,
+        "ses": 0.115,
+        "chronos": 0.104,
+        "aurora": 0.112,
+        "moirai": 0.107,
+        "seasonal_naive": 0.109
+      }
+    },
+    "task_141": {
+      "smae": {
+        "arima": 0.389,
+        "ets": 0.246,
+        "ses": 0.429,
+        "chronos": 0.242,
+        "aurora": 0.25,
+        "moirai": 0.24,
+        "seasonal_naive": 0.234
+      }
+    },
+    "task_142": {
+      "smae": {
+        "arima": 1.34,
+        "ets": 0.95,
+        "ses": 1.103,
+        "chronos": 0.999,
+        "aurora": 1.098,
+        "moirai": 0.933,
+        "seasonal_naive": 1.024
+      }
+    },
+    "task_143": {
+      "smae": {
+        "arima": 1.109,
+        "ets": 0.443,
+        "ses": 0.989,
+        "chronos": 0.485,
+        "aurora": 0.656,
+        "moirai": 0.587,
+        "seasonal_naive": 0.367
+      }
+    },
+    "task_144": {
+      "smae": {
+        "arima": 1.286,
+        "ets": 0.79,
+        "ses": 1.021,
+        "chronos": 0.755,
+        "aurora": 0.881,
+        "moirai": 1.031,
+        "seasonal_naive": 0.721
+      }
+    },
+    "task_145": {
+      "smae": {
+        "arima": 0.807,
+        "ets": 1.005,
+        "ses": 0.747,
+        "chronos": 0.798,
+        "aurora": 1.009,
+        "moirai": 0.861,
+        "seasonal_naive": 1.148
+      }
+    },
+    "task_146": {
+      "smae": {
+        "arima": 0.436,
+        "ets": 0.282,
+        "ses": 0.793,
+        "chronos": 0.178,
+        "aurora": 0.513,
+        "moirai": 0.235,
+        "seasonal_naive": 0.343
+      }
+    },
+    "task_147": {
+      "smae": {
+        "arima": 0.336,
+        "ets": 0.486,
+        "ses": 0.396,
+        "chronos": 0.382,
+        "aurora": 0.447,
+        "moirai": 0.416,
+        "seasonal_naive": 0.445
+      }
+    },
+    "task_148": {
+      "smae": {
+        "arima": 0.393,
+        "ets": 0.22,
+        "ses": 0.45,
+        "chronos": 0.293,
+        "aurora": 0.292,
+        "moirai": 0.336,
+        "seasonal_naive": 0.418
+      }
+    },
+    "task_149": {
+      "smae": {
+        "arima": 0.614,
+        "ets": 0.456,
+        "ses": 1.093,
+        "chronos": 0.445,
+        "aurora": 0.541,
+        "moirai": 0.487,
+        "seasonal_naive": 0.434
+      }
+    },
+    "task_150": {
+      "smae": {
+        "arima": 0.914,
+        "ets": 1.518,
+        "ses": 0.775,
+        "chronos": 0.846,
+        "aurora": 1.025,
+        "moirai": 0.861,
+        "seasonal_naive": 1.148
+      }
+    },
+    "task_151": {
+      "smae": {
+        "arima": 0.462,
+        "ets": 0.289,
+        "ses": 0.777,
+        "chronos": 0.165,
+        "aurora": 0.529,
+        "moirai": 0.235,
+        "seasonal_naive": 0.343
+      }
+    },
+    "task_152": {
+      "smae": {
+        "arima": 0.335,
+        "ets": 0.398,
+        "ses": 0.556,
+        "chronos": 0.384,
+        "aurora": 0.446,
+        "moirai": 0.416,
+        "seasonal_naive": 0.445
+      }
+    },
+    "task_153": {
+      "smae": {
+        "arima": 0.38,
+        "ets": 0.225,
+        "ses": 0.307,
+        "chronos": 0.262,
+        "aurora": 0.283,
+        "moirai": 0.336,
+        "seasonal_naive": 0.418
+      }
+    },
+    "task_154": {
+      "smae": {
+        "arima": 0.606,
+        "ets": 0.525,
+        "ses": 0.745,
+        "chronos": 0.45,
+        "aurora": 0.551,
+        "moirai": 0.487,
+        "seasonal_naive": 0.434
+      }
+    },
+    "task_155": {
+      "smae": {
+        "arima": 0.834,
+        "ets": 1.011,
+        "ses": 0.572,
+        "chronos": 0.801,
+        "aurora": 1.051,
+        "moirai": 0.861,
+        "seasonal_naive": 1.148
+      }
+    },
+    "task_156": {
+      "smae": {
+        "arima": 0.462,
+        "ets": 0.373,
+        "ses": 0.746,
+        "chronos": 0.181,
+        "aurora": 0.533,
+        "moirai": 0.235,
+        "seasonal_naive": 0.343
+      }
+    },
+    "task_157": {
+      "smae": {
+        "arima": 0.352,
+        "ets": 0.409,
+        "ses": 0.506,
+        "chronos": 0.384,
+        "aurora": 0.446,
+        "moirai": 0.416,
+        "seasonal_naive": 0.445
+      }
+    },
+    "task_158": {
+      "smae": {
+        "arima": 0.384,
+        "ets": 0.239,
+        "ses": 0.432,
+        "chronos": 0.267,
+        "aurora": 0.297,
+        "moirai": 0.336,
+        "seasonal_naive": 0.418
+      }
+    },
+    "task_159": {
+      "smae": {
+        "arima": 0.643,
+        "ets": 0.411,
+        "ses": 0.926,
+        "chronos": 0.416,
+        "aurora": 0.57,
+        "moirai": 0.487,
+        "seasonal_naive": 0.434
+      }
+    },
+    "task_160": {
+      "smae": {
+        "arima": 0.887,
+        "ets": 0.293,
+        "ses": 0.947,
+        "chronos": 0.075,
+        "aurora": 0.335,
+        "moirai": 0.144,
+        "seasonal_naive": 0.212
+      }
+    },
+    "task_161": {
+      "smae": {
+        "arima": 1.301,
+        "ets": 0.433,
+        "ses": 0.952,
+        "chronos": 0.406,
+        "aurora": 0.552,
+        "moirai": 0.484,
+        "seasonal_naive": 0.476
+      }
+    },
+    "task_162": {
+      "smae": {
+        "arima": 3.562,
+        "ets": 3.663,
+        "ses": 1.94,
+        "chronos": 3.32,
+        "aurora": 4.317,
+        "moirai": 3.865,
+        "seasonal_naive": 3.664
+      }
+    },
+    "task_163": {
+      "smae": {
+        "arima": 0.875,
+        "ets": 0.073,
+        "ses": 1.226,
+        "chronos": 0.075,
+        "aurora": 0.156,
+        "moirai": 0.141,
+        "seasonal_naive": 0.059
+      }
+    },
+    "task_164": {
+      "smae": {
+        "arima": 0.841,
+        "ets": 1.026,
+        "ses": 0.741,
+        "chronos": 0.75,
+        "aurora": 0.995,
+        "moirai": 0.861,
+        "seasonal_naive": 1.148
+      }
+    },
+    "task_165": {
+      "smae": {
+        "arima": 0.456,
+        "ets": 0.337,
+        "ses": 0.794,
+        "chronos": 0.165,
+        "aurora": 0.491,
+        "moirai": 0.235,
+        "seasonal_naive": 0.343
+      }
+    },
+    "task_166": {
+      "smae": {
+        "arima": 0.356,
+        "ets": 0.513,
+        "ses": 0.354,
+        "chronos": 0.386,
+        "aurora": 0.466,
+        "moirai": 0.416,
+        "seasonal_naive": 0.445
+      }
+    },
+    "task_167": {
+      "smae": {
+        "arima": 0.384,
+        "ets": 0.221,
+        "ses": 0.35,
+        "chronos": 0.272,
+        "aurora": 0.33,
+        "moirai": 0.336,
+        "seasonal_naive": 0.418
+      }
+    },
+    "task_168": {
+      "smae": {
+        "arima": 0.595,
+        "ets": 0.429,
+        "ses": 0.845,
+        "chronos": 0.429,
+        "aurora": 0.584,
+        "moirai": 0.487,
+        "seasonal_naive": 0.434
+      }
+    },
+    "task_169": {
+      "smae": {
+        "arima": 0.559,
+        "ets": 0.547,
+        "ses": 0.584,
+        "chronos": 0.549,
+        "aurora": 0.586,
+        "moirai": 0.546,
+        "seasonal_naive": 0.567
+      }
+    },
+    "task_170": {
+      "smae": {
+        "arima": 0.427,
+        "ets": 0.297,
+        "ses": 0.447,
+        "chronos": 0.31,
+        "aurora": 0.449,
+        "moirai": 0.297,
+        "seasonal_naive": 0.397
+      }
+    },
+    "task_171": {
+      "smae": {
+        "arima": 0.46,
+        "ets": 0.374,
+        "ses": 0.478,
+        "chronos": 0.368,
+        "aurora": 0.456,
+        "moirai": 0.352,
+        "seasonal_naive": 0.363
+      }
+    },
+    "task_172": {
+      "smae": {
+        "arima": 0.485,
+        "ets": 0.478,
+        "ses": 0.558,
+        "chronos": 0.478,
+        "aurora": 0.565,
+        "moirai": 0.477,
+        "seasonal_naive": 0.49
+      }
+    },
+    "task_173": {
+      "smae": {
+        "arima": 0.366,
+        "ets": 0.352,
+        "ses": 0.358,
+        "chronos": 0.305,
+        "aurora": 0.373,
+        "moirai": 0.315,
+        "seasonal_naive": 0.422
+      }
+    },
+    "task_174": {
+      "smae": {
+        "arima": 1.07,
+        "ets": 0.805,
+        "ses": 0.906,
+        "chronos": 0.488,
+        "aurora": 0.958,
+        "moirai": 0.498,
+        "seasonal_naive": 0.628
+      }
+    },
+    "task_175": {
+      "smae": {
+        "arima": 0.509,
+        "ets": 0.283,
+        "ses": 0.724,
+        "chronos": 0.188,
+        "aurora": 0.3,
+        "moirai": 0.218,
+        "seasonal_naive": 0.236
+      }
+    },
+    "task_176": {
+      "smae": {
+        "arima": 0.506,
+        "ets": 0.366,
+        "ses": 1.029,
+        "chronos": 0.34,
+        "aurora": 0.411,
+        "moirai": 0.468,
+        "seasonal_naive": 0.4
+      }
+    },
+    "task_177": {
+      "smae": {
+        "arima": 0.5,
+        "ets": 0.278,
+        "ses": 0.604,
+        "chronos": 0.177,
+        "aurora": 0.274,
+        "moirai": 0.182,
+        "seasonal_naive": 0.272
+      }
+    },
+    "task_178": {
+      "smae": {
+        "arima": 0.383,
+        "ets": 0.363,
+        "ses": 0.719,
+        "chronos": 0.324,
+        "aurora": 0.427,
+        "moirai": 0.401,
+        "seasonal_naive": 0.405
+      }
+    },
+    "task_179": {
+      "smae": {
+        "arima": 0.685,
+        "ets": 0.557,
+        "ses": 0.944,
+        "chronos": 0.362,
+        "aurora": 0.663,
+        "moirai": 0.305,
+        "seasonal_naive": 0.375
+      }
+    },
+    "task_180": {
+      "smae": {
+        "arima": 0.507,
+        "ets": 0.253,
+        "ses": 0.504,
+        "chronos": 0.215,
+        "aurora": 0.292,
+        "moirai": 0.219,
+        "seasonal_naive": 0.252
+      }
+    },
+    "task_181": {
+      "smae": {
+        "arima": 0.401,
+        "ets": 0.393,
+        "ses": 1.099,
+        "chronos": 0.314,
+        "aurora": 0.256,
+        "moirai": 0.342,
+        "seasonal_naive": 0.276
+      }
+    },
+    "task_182": {
+      "smae": {
+        "arima": 0.24,
+        "ets": 0.227,
+        "ses": 0.395,
+        "chronos": 0.16,
+        "aurora": 0.256,
+        "moirai": 0.193,
+        "seasonal_naive": 0.248
+      }
+    },
+    "task_183": {
+      "smae": {
+        "arima": 0.358,
+        "ets": 0.341,
+        "ses": 0.554,
+        "chronos": 0.321,
+        "aurora": 0.49,
+        "moirai": 0.355,
+        "seasonal_naive": 0.41
+      }
+    },
+    "task_184": {
+      "smae": {
+        "arima": 0.742,
+        "ets": 0.47,
+        "ses": 0.8,
+        "chronos": 0.179,
+        "aurora": 0.633,
+        "moirai": 0.258,
+        "seasonal_naive": 0.434
+      }
+    },
+    "task_185": {
+      "smae": {
+        "arima": 0.571,
+        "ets": 0.595,
+        "ses": 0.51,
+        "chronos": 0.324,
+        "aurora": 0.557,
+        "moirai": 0.261,
+        "seasonal_naive": 1.08
+      }
+    },
+    "task_186": {
+      "smae": {
+        "arima": 0.339,
+        "ets": 0.273,
+        "ses": 0.552,
+        "chronos": 0.259,
+        "aurora": 0.522,
+        "moirai": 0.415,
+        "seasonal_naive": 0.35
+      }
+    },
+    "task_187": {
+      "smae": {
+        "arima": 0.281,
+        "ets": 0.245,
+        "ses": 0.596,
+        "chronos": 0.068,
+        "aurora": 0.391,
+        "moirai": 0.067,
+        "seasonal_naive": 0.316
+      }
+    },
+    "task_188": {
+      "smae": {
+        "arima": 0.307,
+        "ets": 0.287,
+        "ses": 0.907,
+        "chronos": 0.177,
+        "aurora": 0.32,
+        "moirai": 0.259,
+        "seasonal_naive": 0.279
+      }
+    },
+    "task_189": {
+      "smae": {
+        "arima": 1.341,
+        "ets": 1.405,
+        "ses": 1.299,
+        "chronos": 1.791,
+        "aurora": 1.541,
+        "moirai": 1.746,
+        "seasonal_naive": 1.693
+      }
+    },
+    "task_190": {
+      "smae": {
+        "arima": 0.707,
+        "ets": 1.222,
+        "ses": 1.459,
+        "chronos": 1.256,
+        "aurora": 0.706,
+        "moirai": 1.188,
+        "seasonal_naive": 1.08
+      }
+    },
+    "task_191": {
+      "smae": {
+        "arima": 1.964,
+        "ets": 1.755,
+        "ses": 2.704,
+        "chronos": 2.074,
+        "aurora": 1.138,
+        "moirai": 1.999,
+        "seasonal_naive": 2.0
+      }
+    },
+    "task_192": {
+      "smae": {
+        "arima": 0.556,
+        "ets": 1.386,
+        "ses": 1.686,
+        "chronos": 1.436,
+        "aurora": 0.897,
+        "moirai": 1.303,
+        "seasonal_naive": 1.16
+      }
+    },
+    "task_193": {
+      "smae": {
+        "arima": 0.496,
+        "ets": 1.159,
+        "ses": 0.531,
+        "chronos": 1.392,
+        "aurora": 0.93,
+        "moirai": 1.195,
+        "seasonal_naive": 1.072
+      }
+    },
+    "task_194": {
+      "smae": {
+        "arima": 0.378,
+        "ets": 0.321,
+        "ses": 0.447,
+        "chronos": 0.332,
+        "aurora": 0.356,
+        "moirai": 0.336,
+        "seasonal_naive": 0.364
+      }
+    },
+    "task_195": {
+      "smae": {
+        "arima": 0.487,
+        "ets": 0.431,
+        "ses": 0.565,
+        "chronos": 0.43,
+        "aurora": 0.441,
+        "moirai": 0.431,
+        "seasonal_naive": 0.436
+      }
+    },
+    "task_196": {
+      "smae": {
+        "arima": 0.243,
+        "ets": 0.189,
+        "ses": 0.283,
+        "chronos": 0.181,
+        "aurora": 0.203,
+        "moirai": 0.189,
+        "seasonal_naive": 0.194
+      }
+    },
+    "task_197": {
+      "smae": {
+        "arima": 0.106,
+        "ets": 0.113,
+        "ses": 0.129,
+        "chronos": 0.104,
+        "aurora": 0.112,
+        "moirai": 0.107,
+        "seasonal_naive": 0.109
+      }
+    },
+    "task_198": {
+      "smae": {
+        "arima": 0.398,
+        "ets": 0.246,
+        "ses": 0.445,
+        "chronos": 0.242,
+        "aurora": 0.269,
+        "moirai": 0.24,
+        "seasonal_naive": 0.234
+      }
+    },
+    "task_199": {
+      "smae": {
+        "arima": 0.08,
+        "ets": 0.11,
+        "ses": 0.085,
+        "chronos": 0.085,
+        "aurora": 0.121,
+        "moirai": 0.069,
+        "seasonal_naive": 0.113
+      }
+    },
+    "task_200": {
+      "smae": {
+        "arima": 0.122,
+        "ets": 0.027,
+        "ses": 0.026,
+        "chronos": 0.081,
+        "aurora": 0.254,
+        "moirai": 0.031,
+        "seasonal_naive": 0.04
+      }
+    },
+    "task_201": {
+      "smae": {
+        "arima": 0.075,
+        "ets": 0.043,
+        "ses": 0.041,
+        "chronos": 0.082,
+        "aurora": 0.173,
+        "moirai": 0.103,
+        "seasonal_naive": 0.047
+      }
+    },
+    "task_202": {
+      "smae": {
+        "arima": 0.202,
+        "ets": 0.341,
+        "ses": 0.19,
+        "chronos": 0.178,
+        "aurora": 0.188,
+        "moirai": 0.095,
+        "seasonal_naive": 0.288
+      }
+    },
+    "task_203": {
+      "smae": {
+        "arima": 0.112,
+        "ets": 0.101,
+        "ses": 0.096,
+        "chronos": 0.085,
+        "aurora": 0.065,
+        "moirai": 0.079,
+        "seasonal_naive": 0.046
+      }
+    },
+    "task_204": {
+      "smae": {
+        "arima": 0.04,
+        "ets": 0.046,
+        "ses": 0.041,
+        "chronos": 0.052,
+        "aurora": 0.319,
+        "moirai": 0.036,
+        "seasonal_naive": 0.042
+      }
+    },
+    "task_205": {
+      "smae": {
+        "arima": 0.004,
+        "ets": 0.003,
+        "ses": 0.003,
+        "chronos": 0.012,
+        "aurora": 0.048,
+        "moirai": 0.002,
+        "seasonal_naive": 0.005
+      }
+    },
+    "task_206": {
+      "smae": {
+        "arima": 1.828,
+        "ets": 0.382,
+        "ses": 0.439,
+        "chronos": 0.457,
+        "aurora": 0.608,
+        "moirai": 0.528,
+        "seasonal_naive": 0.606
+      }
+    },
+    "task_207": {
+      "smae": {
+        "arima": 0.036,
+        "ets": 0.054,
+        "ses": 0.039,
+        "chronos": 0.127,
+        "aurora": 0.26,
+        "moirai": 0.056,
+        "seasonal_naive": 0.147
+      }
+    },
+    "task_208": {
+      "smae": {
+        "arima": 0.021,
+        "ets": 0.032,
+        "ses": 0.025,
+        "chronos": 0.027,
+        "aurora": 0.156,
+        "moirai": 0.005,
+        "seasonal_naive": 0.032
+      }
+    },
+    "task_209": {
+      "smae": {
+        "arima": 0.053,
+        "ets": 0.055,
+        "ses": 0.049,
+        "chronos": 0.043,
+        "aurora": 0.052,
+        "moirai": 0.037,
+        "seasonal_naive": 0.048
+      }
+    },
+    "task_210": {
+      "smae": {
+        "arima": 0.018,
+        "ets": 0.02,
+        "ses": 0.017,
+        "chronos": 0.03,
+        "aurora": 0.07,
+        "moirai": 0.019,
+        "seasonal_naive": 0.024
+      }
+    },
+    "task_211": {
+      "smae": {
+        "arima": 0.082,
+        "ets": 0.144,
+        "ses": 0.144,
+        "chronos": 0.133,
+        "aurora": 0.237,
+        "moirai": 0.118,
+        "seasonal_naive": 0.108
+      }
+    },
+    "task_212": {
+      "smae": {
+        "arima": 0.034,
+        "ets": 0.059,
+        "ses": 0.05,
+        "chronos": 0.028,
+        "aurora": 0.036,
+        "moirai": 0.037,
+        "seasonal_naive": 0.051
+      }
+    },
+    "task_213": {
+      "smae": {
+        "arima": 0.103,
+        "ets": 0.119,
+        "ses": 0.06,
+        "chronos": 0.028,
+        "aurora": 0.081,
+        "moirai": 0.022,
+        "seasonal_naive": 0.057
+      }
+    },
+    "task_214": {
+      "smae": {
+        "arima": 0.02,
+        "ets": 0.018,
+        "ses": 0.018,
+        "chronos": 0.021,
+        "aurora": 0.118,
+        "moirai": 0.021,
+        "seasonal_naive": 0.018
+      }
+    },
+    "task_215": {
+      "smae": {
+        "arima": 0.092,
+        "ets": 0.101,
+        "ses": 0.087,
+        "chronos": 0.064,
+        "aurora": 0.065,
+        "moirai": 0.28,
+        "seasonal_naive": 0.081
+      }
+    },
+    "task_216": {
+      "smae": {
+        "arima": 0.043,
+        "ets": 0.036,
+        "ses": 0.036,
+        "chronos": 0.064,
+        "aurora": 0.038,
+        "moirai": 0.036,
+        "seasonal_naive": 0.036
+      }
+    },
+    "task_217": {
+      "smae": {
+        "arima": 0.027,
+        "ets": 0.067,
+        "ses": 0.033,
+        "chronos": 0.065,
+        "aurora": 0.05,
+        "moirai": 0.01,
+        "seasonal_naive": 0.052
+      }
+    },
+    "task_218": {
+      "smae": {
+        "arima": 0.075,
+        "ets": 0.116,
+        "ses": 0.085,
+        "chronos": 0.093,
+        "aurora": 0.118,
+        "moirai": 0.069,
+        "seasonal_naive": 0.113
+      }
+    },
+    "task_219": {
+      "smae": {
+        "arima": 0.13,
+        "ets": 0.039,
+        "ses": 0.039,
+        "chronos": 0.064,
+        "aurora": 0.254,
+        "moirai": 0.031,
+        "seasonal_naive": 0.04
+      }
+    },
+    "task_220": {
+      "smae": {
+        "arima": 0.045,
+        "ets": 0.046,
+        "ses": 0.044,
+        "chronos": 0.079,
+        "aurora": 0.173,
+        "moirai": 0.103,
+        "seasonal_naive": 0.047
+      }
+    },
+    "task_221": {
+      "smae": {
+        "arima": 0.205,
+        "ets": 0.339,
+        "ses": 0.189,
+        "chronos": 0.186,
+        "aurora": 0.191,
+        "moirai": 0.095,
+        "seasonal_naive": 0.288
+      }
+    },
+    "task_222": {
+      "smae": {
+        "arima": 0.057,
+        "ets": 0.23,
+        "ses": 0.087,
+        "chronos": 0.025,
+        "aurora": 0.361,
+        "moirai": 0.026,
+        "seasonal_naive": 0.136
+      }
+    },
+    "task_223": {
+      "smae": {
+        "arima": 0.109,
+        "ets": 0.126,
+        "ses": 0.12,
+        "chronos": 0.069,
+        "aurora": 0.065,
+        "moirai": 0.079,
+        "seasonal_naive": 0.046
+      }
+    },
+    "task_224": {
+      "smae": {
+        "arima": 0.036,
+        "ets": 0.065,
+        "ses": 0.044,
+        "chronos": 0.052,
+        "aurora": 0.319,
+        "moirai": 0.036,
+        "seasonal_naive": 0.042
+      }
+    },
+    "task_225": {
+      "smae": {
+        "arima": 0.003,
+        "ets": 0.003,
+        "ses": 0.002,
+        "chronos": 0.01,
+        "aurora": 0.048,
+        "moirai": 0.002,
+        "seasonal_naive": 0.005
+      }
+    },
+    "task_226": {
+      "smae": {
+        "arima": 1.681,
+        "ets": 0.369,
+        "ses": 0.435,
+        "chronos": 0.462,
+        "aurora": 0.601,
+        "moirai": 0.528,
+        "seasonal_naive": 0.606
+      }
+    },
+    "task_227": {
+      "smae": {
+        "arima": 0.243,
+        "ets": 0.345,
+        "ses": 0.249,
+        "chronos": 0.142,
+        "aurora": 0.175,
+        "moirai": 0.07,
+        "seasonal_naive": 0.191
+      }
+    },
+    "task_228": {
+      "smae": {
+        "arima": 0.025,
+        "ets": 0.028,
+        "ses": 0.024,
+        "chronos": 0.028,
+        "aurora": 0.156,
+        "moirai": 0.005,
+        "seasonal_naive": 0.032
+      }
+    },
+    "task_229": {
+      "smae": {
+        "arima": 0.044,
+        "ets": 0.046,
+        "ses": 0.046,
+        "chronos": 0.049,
+        "aurora": 0.052,
+        "moirai": 0.037,
+        "seasonal_naive": 0.048
+      }
+    },
+    "task_230": {
+      "smae": {
+        "arima": 0.058,
+        "ets": 0.088,
+        "ses": 0.075,
+        "chronos": 0.063,
+        "aurora": 0.138,
+        "moirai": 0.062,
+        "seasonal_naive": 0.104
+      }
+    },
+    "task_231": {
+      "smae": {
+        "arima": 0.046,
+        "ets": 0.081,
+        "ses": 0.042,
+        "chronos": 0.036,
+        "aurora": 0.083,
+        "moirai": 0.03,
+        "seasonal_naive": 0.072
+      }
+    },
+    "task_232": {
+      "smae": {
+        "arima": 0.024,
+        "ets": 0.027,
+        "ses": 0.024,
+        "chronos": 0.023,
+        "aurora": 0.073,
+        "moirai": 0.019,
+        "seasonal_naive": 0.024
+      }
+    },
+    "task_233": {
+      "smae": {
+        "arima": 0.017,
+        "ets": 0.035,
+        "ses": 0.021,
+        "chronos": 0.01,
+        "aurora": 0.076,
+        "moirai": 0.005,
+        "seasonal_naive": 0.026
+      }
+    },
+    "task_234": {
+      "smae": {
+        "arima": 0.096,
+        "ets": 0.179,
+        "ses": 0.179,
+        "chronos": 0.169,
+        "aurora": 0.237,
+        "moirai": 0.118,
+        "seasonal_naive": 0.108
+      }
+    },
+    "task_235": {
+      "smae": {
+        "arima": 0.032,
+        "ets": 0.036,
+        "ses": 0.031,
+        "chronos": 0.027,
+        "aurora": 0.035,
+        "moirai": 0.037,
+        "seasonal_naive": 0.051
+      }
+    },
+    "task_236": {
+      "smae": {
+        "arima": 0.035,
+        "ets": 0.184,
+        "ses": 0.064,
+        "chronos": 0.028,
+        "aurora": 0.112,
+        "moirai": 0.033,
+        "seasonal_naive": 0.185
+      }
+    },
+    "task_237": {
+      "smae": {
+        "arima": 0.093,
+        "ets": 0.121,
+        "ses": 0.06,
+        "chronos": 0.028,
+        "aurora": 0.089,
+        "moirai": 0.022,
+        "seasonal_naive": 0.057
+      }
+    },
+    "task_238": {
+      "smae": {
+        "arima": 0.017,
+        "ets": 0.028,
+        "ses": 0.019,
+        "chronos": 0.019,
+        "aurora": 0.118,
+        "moirai": 0.021,
+        "seasonal_naive": 0.018
+      }
+    },
+    "task_239": {
+      "smae": {
+        "arima": 0.098,
+        "ets": 0.051,
+        "ses": 0.07,
+        "chronos": 0.06,
+        "aurora": 0.065,
+        "moirai": 0.28,
+        "seasonal_naive": 0.081
+      }
+    },
+    "task_240": {
+      "smae": {
+        "arima": 0.031,
+        "ets": 0.033,
+        "ses": 0.032,
+        "chronos": 0.071,
+        "aurora": 0.052,
+        "moirai": 0.036,
+        "seasonal_naive": 0.036
+      }
+    },
+    "task_42": {
+      "smae": {
+        "arima": 1.354,
+        "ets": 4.77,
+        "ses": 1.235,
+        "chronos": 0.253,
+        "aurora": 0.165,
+        "moirai": 0.443,
+        "seasonal_naive": 0.377
+      }
+    },
+    "task_43": {
+      "smae": {
+        "arima": 5.0,
+        "ets": 5.0,
+        "ses": 3.62,
+        "chronos": 5.0,
+        "aurora": 5.0,
+        "moirai": 2.098,
+        "seasonal_naive": 2.604
+      }
+    },
+    "task_44": {
+      "smae": {
+        "arima": 0.481,
+        "ets": 0.335,
+        "ses": 0.35,
+        "chronos": 0.355,
+        "aurora": 0.308,
+        "moirai": 0.314,
+        "seasonal_naive": 0.477
+      }
+    },
+    "task_45": {
+      "smae": {
+        "arima": 1.293,
+        "ets": 5.0,
+        "ses": 2.167,
+        "chronos": 0.214,
+        "aurora": 0.45,
+        "moirai": 0.957,
+        "seasonal_naive": 0.59
+      }
+    },
+    "task_46": {
+      "smae": {
+        "arima": 0.506,
+        "ets": 0.359,
+        "ses": 0.384,
+        "chronos": 0.584,
+        "aurora": 0.626,
+        "moirai": 0.351,
+        "seasonal_naive": 0.194
+      }
+    },
+    "task_47": {
+      "smae": {
+        "arima": 0.198,
+        "ets": 0.267,
+        "ses": 0.224,
+        "chronos": 0.154,
+        "aurora": 0.133,
+        "moirai": 0.291,
+        "seasonal_naive": 0.213
+      }
+    },
+    "task_48": {
+      "smae": {
+        "arima": 0.499,
+        "ets": 0.531,
+        "ses": 0.501,
+        "chronos": 0.285,
+        "aurora": 0.396,
+        "moirai": 0.121,
+        "seasonal_naive": 0.104
+      }
+    },
+    "task_49": {
+      "smae": {
+        "arima": 0.26,
+        "ets": 0.25,
+        "ses": 0.256,
+        "chronos": 0.381,
+        "aurora": 0.252,
+        "moirai": 0.322,
+        "seasonal_naive": 0.591
+      }
+    },
+    "task_50": {
+      "smae": {
+        "arima": 5.0,
+        "ets": 5.0,
+        "ses": 1.609,
+        "chronos": 5.0,
+        "aurora": 5.0,
+        "moirai": 2.901,
+        "seasonal_naive": 2.024
+      }
+    },
+    "task_51": {
+      "smae": {
+        "arima": 0.184,
+        "ets": 0.212,
+        "ses": 0.23,
+        "chronos": 0.829,
+        "aurora": 0.301,
+        "moirai": 0.706,
+        "seasonal_naive": 0.403
+      }
+    },
+    "task_52": {
+      "smae": {
+        "arima": 0.076,
+        "ets": 0.059,
+        "ses": 0.058,
+        "chronos": 0.082,
+        "aurora": 0.173,
+        "moirai": 0.086,
+        "seasonal_naive": 0.056
+      }
+    },
+    "task_53": {
+      "smae": {
+        "arima": 2.732,
+        "ets": 0.952,
+        "ses": 1.644,
+        "chronos": 0.331,
+        "aurora": 4.866,
+        "moirai": 0.29,
+        "seasonal_naive": 2.032
+      }
+    },
+    "task_54": {
+      "smae": {
+        "arima": 0.067,
+        "ets": 0.294,
+        "ses": 0.052,
+        "chronos": 0.023,
+        "aurora": 0.036,
+        "moirai": 0.007,
+        "seasonal_naive": 0.041
+      }
+    },
+    "task_55": {
+      "smae": {
+        "arima": 2.037,
+        "ets": 2.171,
+        "ses": 1.853,
+        "chronos": 1.305,
+        "aurora": 1.507,
+        "moirai": 0.877,
+        "seasonal_naive": 2.519
+      }
+    },
+    "task_56": {
+      "smae": {
+        "arima": 0.123,
+        "ets": 0.175,
+        "ses": 0.185,
+        "chronos": 0.083,
+        "aurora": 0.354,
+        "moirai": 0.117,
+        "seasonal_naive": 0.19
+      }
+    },
+    "task_57": {
+      "smae": {
+        "arima": 5.0,
+        "ets": 5.0,
+        "ses": 2.821,
+        "chronos": 2.271,
+        "aurora": 2.283,
+        "moirai": 1.13,
+        "seasonal_naive": 0.961
+      }
+    },
+    "task_58": {
+      "smae": {
+        "arima": 0.171,
+        "ets": 0.395,
+        "ses": 0.28,
+        "chronos": 0.164,
+        "aurora": 0.297,
+        "moirai": 0.071,
+        "seasonal_naive": 0.17
+      }
+    },
+    "task_59": {
+      "smae": {
+        "arima": 0.185,
+        "ets": 0.22,
+        "ses": 0.17,
+        "chronos": 0.667,
+        "aurora": 0.368,
+        "moirai": 0.82,
+        "seasonal_naive": 0.34
+      }
+    },
+    "task_60": {
+      "smae": {
+        "arima": 1.366,
+        "ets": 4.935,
+        "ses": 1.327,
+        "chronos": 0.17,
+        "aurora": 0.166,
+        "moirai": 0.443,
+        "seasonal_naive": 0.377
+      }
+    },
+    "task_61": {
+      "smae": {
+        "arima": 5.0,
+        "ets": 5.0,
+        "ses": 2.451,
+        "chronos": 5.0,
+        "aurora": 5.0,
+        "moirai": 2.098,
+        "seasonal_naive": 2.604
+      }
+    },
+    "task_62": {
+      "smae": {
+        "arima": 0.141,
+        "ets": 0.361,
+        "ses": 0.356,
+        "chronos": 0.14,
+        "aurora": 0.139,
+        "moirai": 0.077,
+        "seasonal_naive": 0.124
+      }
+    },
+    "task_63": {
+      "smae": {
+        "arima": 0.51,
+        "ets": 0.381,
+        "ses": 0.391,
+        "chronos": 0.361,
+        "aurora": 0.319,
+        "moirai": 0.314,
+        "seasonal_naive": 0.477
+      }
+    },
+    "task_64": {
+      "smae": {
+        "arima": 1.206,
+        "ets": 5.0,
+        "ses": 2.623,
+        "chronos": 0.226,
+        "aurora": 0.404,
+        "moirai": 0.957,
+        "seasonal_naive": 0.59
+      }
+    },
+    "task_65": {
+      "smae": {
+        "arima": 0.567,
+        "ets": 0.362,
+        "ses": 0.394,
+        "chronos": 0.56,
+        "aurora": 0.626,
+        "moirai": 0.351,
+        "seasonal_naive": 0.194
+      }
+    },
+    "task_66": {
+      "smae": {
+        "arima": 1.184,
+        "ets": 0.817,
+        "ses": 1.276,
+        "chronos": 0.535,
+        "aurora": 1.731,
+        "moirai": 0.042,
+        "seasonal_naive": 1.048
+      }
+    },
+    "task_67": {
+      "smae": {
+        "arima": 0.285,
+        "ets": 0.292,
+        "ses": 0.324,
+        "chronos": 0.085,
+        "aurora": 0.398,
+        "moirai": 0.165,
+        "seasonal_naive": 0.368
+      }
+    },
+    "task_68": {
+      "smae": {
+        "arima": 0.181,
+        "ets": 0.238,
+        "ses": 0.199,
+        "chronos": 0.148,
+        "aurora": 0.146,
+        "moirai": 0.291,
+        "seasonal_naive": 0.213
+      }
+    },
+    "task_69": {
+      "smae": {
+        "arima": 0.53,
+        "ets": 0.565,
+        "ses": 0.515,
+        "chronos": 0.296,
+        "aurora": 0.383,
+        "moirai": 0.121,
+        "seasonal_naive": 0.104
+      }
+    },
+    "task_70": {
+      "smae": {
+        "arima": 0.224,
+        "ets": 0.26,
+        "ses": 0.265,
+        "chronos": 0.433,
+        "aurora": 0.252,
+        "moirai": 0.322,
+        "seasonal_naive": 0.591
+      }
+    },
+    "task_71": {
+      "smae": {
+        "arima": 1.602,
+        "ets": 5.0,
+        "ses": 3.657,
+        "chronos": 5.0,
+        "aurora": 5.0,
+        "moirai": 2.901,
+        "seasonal_naive": 2.024
+      }
+    },
+    "task_72": {
+      "smae": {
+        "arima": 0.313,
+        "ets": 0.164,
+        "ses": 0.167,
+        "chronos": 0.213,
+        "aurora": 0.32,
+        "moirai": 0.116,
+        "seasonal_naive": 0.234
+      }
+    },
+    "task_73": {
+      "smae": {
+        "arima": 0.153,
+        "ets": 0.277,
+        "ses": 0.162,
+        "chronos": 0.832,
+        "aurora": 0.336,
+        "moirai": 0.706,
+        "seasonal_naive": 0.403
+      }
+    },
+    "task_74": {
+      "smae": {
+        "arima": 1.563,
+        "ets": 1.875,
+        "ses": 1.617,
+        "chronos": 0.575,
+        "aurora": 0.392,
+        "moirai": 1.336,
+        "seasonal_naive": 1.081
+      }
+    },
+    "task_75": {
+      "smae": {
+        "arima": 0.066,
+        "ets": 0.045,
+        "ses": 0.046,
+        "chronos": 0.089,
+        "aurora": 0.173,
+        "moirai": 0.086,
+        "seasonal_naive": 0.056
+      }
+    },
+    "task_76": {
+      "smae": {
+        "arima": 2.47,
+        "ets": 0.985,
+        "ses": 2.164,
+        "chronos": 0.33,
+        "aurora": 5.0,
+        "moirai": 0.29,
+        "seasonal_naive": 2.032
+      }
+    },
+    "task_77": {
+      "smae": {
+        "arima": 0.084,
+        "ets": 0.079,
+        "ses": 0.079,
+        "chronos": 0.054,
+        "aurora": 0.085,
+        "moirai": 0.047,
+        "seasonal_naive": 0.073
+      }
+    },
+    "task_78": {
+      "smae": {
+        "arima": 0.084,
+        "ets": 0.288,
+        "ses": 0.052,
+        "chronos": 0.023,
+        "aurora": 0.039,
+        "moirai": 0.007,
+        "seasonal_naive": 0.041
+      }
+    },
+    "task_79": {
+      "smae": {
+        "arima": 2.074,
+        "ets": 4.443,
+        "ses": 1.73,
+        "chronos": 1.306,
+        "aurora": 1.424,
+        "moirai": 0.877,
+        "seasonal_naive": 2.519
+      }
+    },
+    "task_80": {
+      "smae": {
+        "arima": 0.231,
+        "ets": 0.146,
+        "ses": 0.171,
+        "chronos": 0.09,
+        "aurora": 0.354,
+        "moirai": 0.117,
+        "seasonal_naive": 0.19
+      }
+    },
+    "task_81": {
+      "smae": {
+        "arima": 5.0,
+        "ets": 5.0,
+        "ses": 2.766,
+        "chronos": 2.69,
+        "aurora": 2.561,
+        "moirai": 1.13,
+        "seasonal_naive": 0.961
+      }
+    },
+    "task_82": {
+      "smae": {
+        "arima": 0.149,
+        "ets": 0.144,
+        "ses": 0.137,
+        "chronos": 0.09,
+        "aurora": 0.174,
+        "moirai": 0.085,
+        "seasonal_naive": 0.093
+      }
+    },
+    "task_83": {
+      "smae": {
+        "arima": 0.165,
+        "ets": 0.37,
+        "ses": 0.261,
+        "chronos": 0.197,
+        "aurora": 0.294,
+        "moirai": 0.071,
+        "seasonal_naive": 0.17
+      }
+    },
+    "task_84": {
+      "smae": {
+        "arima": 0.146,
+        "ets": 0.211,
+        "ses": 0.115,
+        "chronos": 0.821,
+        "aurora": 0.377,
+        "moirai": 0.82,
+        "seasonal_naive": 0.34
+      }
+    },
+    "task_85": {
+      "smae": {
+        "arima": 0.525,
+        "ets": 0.493,
+        "ses": 0.613,
+        "chronos": 0.479,
+        "aurora": 0.607,
+        "moirai": 0.512,
+        "seasonal_naive": 0.524
+      }
+    },
+    "task_86": {
+      "smae": {
+        "arima": 0.496,
+        "ets": 0.331,
+        "ses": 0.55,
+        "chronos": 0.323,
+        "aurora": 0.543,
+        "moirai": 0.337,
+        "seasonal_naive": 0.414
+      }
+    },
+    "task_87": {
+      "smae": {
+        "arima": 0.37,
+        "ets": 0.203,
+        "ses": 0.386,
+        "chronos": 0.238,
+        "aurora": 0.389,
+        "moirai": 0.238,
+        "seasonal_naive": 0.227
+      }
+    },
+    "task_88": {
+      "smae": {
+        "arima": 0.311,
+        "ets": 0.29,
+        "ses": 0.437,
+        "chronos": 0.295,
+        "aurora": 0.427,
+        "moirai": 0.313,
+        "seasonal_naive": 0.332
+      }
+    },
+    "task_89": {
+      "smae": {
+        "arima": 0.356,
+        "ets": 0.32,
+        "ses": 0.315,
+        "chronos": 0.285,
+        "aurora": 0.345,
+        "moirai": 0.305,
+        "seasonal_naive": 0.439
+      }
+    },
+    "task_90": {
+      "smae": {
+        "arima": 0.497,
+        "ets": 0.302,
+        "ses": 0.393,
+        "chronos": 0.396,
+        "aurora": 0.417,
+        "moirai": 0.325,
+        "seasonal_naive": 0.358
+      }
+    },
+    "task_91": {
+      "smae": {
+        "arima": 0.513,
+        "ets": 0.352,
+        "ses": 0.529,
+        "chronos": 0.387,
+        "aurora": 0.495,
+        "moirai": 0.363,
+        "seasonal_naive": 0.214
+      }
+    },
+    "task_92": {
+      "smae": {
+        "arima": 0.334,
+        "ets": 0.172,
+        "ses": 0.27,
+        "chronos": 0.262,
+        "aurora": 0.41,
+        "moirai": 0.269,
+        "seasonal_naive": 0.214
+      }
+    },
+    "task_93": {
+      "smae": {
+        "arima": 0.343,
+        "ets": 0.288,
+        "ses": 0.361,
+        "chronos": 0.301,
+        "aurora": 0.328,
+        "moirai": 0.37,
+        "seasonal_naive": 0.433
+      }
+    },
+    "task_94": {
+      "smae": {
+        "arima": 0.477,
+        "ets": 0.318,
+        "ses": 0.411,
+        "chronos": 0.41,
+        "aurora": 0.417,
+        "moirai": 0.325,
+        "seasonal_naive": 0.358
+      }
+    },
+    "task_95": {
+      "smae": {
+        "arima": 0.427,
+        "ets": 0.446,
+        "ses": 0.425,
+        "chronos": 0.354,
+        "aurora": 0.354,
+        "moirai": 0.37,
+        "seasonal_naive": 0.58
+      }
+    },
+    "task_96": {
+      "smae": {
+        "arima": 0.507,
+        "ets": 0.327,
+        "ses": 0.526,
+        "chronos": 0.411,
+        "aurora": 0.495,
+        "moirai": 0.363,
+        "seasonal_naive": 0.214
+      }
+    },
+    "task_97": {
+      "smae": {
+        "arima": 0.353,
+        "ets": 0.199,
+        "ses": 0.321,
+        "chronos": 0.222,
+        "aurora": 0.41,
+        "moirai": 0.269,
+        "seasonal_naive": 0.214
+      }
+    },
+    "task_98": {
+      "smae": {
+        "arima": 0.338,
+        "ets": 0.246,
+        "ses": 0.309,
+        "chronos": 0.3,
+        "aurora": 0.328,
+        "moirai": 0.37,
+        "seasonal_naive": 0.433
+      }
+    },
+    "task_99": {
+      "smae": {
+        "arima": 0.439,
+        "ets": 0.385,
+        "ses": 0.492,
+        "chronos": 0.395,
+        "aurora": 0.417,
+        "moirai": 0.325,
+        "seasonal_naive": 0.358
+      }
+    }
+  },
+  "profile_sha256": "cabb2ed1ae84b02bf9013f3d732623afa296f5669fb5f9d3b2d06cc0a9028bf6"
+}
