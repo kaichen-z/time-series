@@ -51,7 +51,7 @@ def test_frozen_evaluation_refuses_existing_completed_report(tmp_path: Path) -> 
 def test_frozen_loader_rejects_duplicate_requested_jsonl_rows(tmp_path: Path) -> None:
     split = tmp_path / "split.json"
     split.write_text(
-        json.dumps({"partitions": {"public": {"task_ids": ["public"]}}}),
+        json.dumps({"partitions": {"public_test": {"task_ids": ["public"]}}}),
         encoding="utf-8",
     )
     row = {

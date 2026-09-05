@@ -52,7 +52,15 @@ def _sha256(path: Path) -> str:
 def _public_ids(split_file: str | Path) -> tuple[str, ...]:
     payload = read_json_object(split_file)
     try:
-        values = payload["partitions"]["public"]["task_ids"]  # type: ignore[index]
+        partitions = payload["partitions"]  # type: ignore[index]
+        if type(partitions) is not dict:
+            raise TypeError
+        public_keys = tuple(
+            key for key in ("public_test", "public") if key in partitions
+        )
+        if len(public_keys) != 1:
+            raise KeyError
+        values = partitions[public_keys[0]]["task_ids"]
     except (KeyError, TypeError) as error:
         raise ValueError("split manifest needs Public task IDs") from error
     if type(values) is not list or any(
