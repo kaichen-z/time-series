@@ -7,13 +7,16 @@ import json
 import math
 import statistics
 from dataclasses import asdict, dataclass, replace
-from typing import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Callable, Mapping, Sequence
 
 from common.metrics import (
     drcik_point_metrics, joint_scaled_error, pareto_scaled_improvement, mae, mase, smape,
 )
 
 from .execution import Task
+
+if TYPE_CHECKING:
+    from .assumptions import ForecastAssumption
 
 
 CandidateRunner = Callable[
@@ -852,8 +855,9 @@ def select_assumption_guided_forecast(
     families: Mapping[str, str],
     history: Sequence[float] = (),
     conditioned_names: Sequence[str] = (),
+    assumptions: Sequence[ForecastAssumption] | None = None,
 ) -> SelectionDecision:
-    """Route a diverse Top-k of history-only assumptions into the safe Verifier."""
+    """Route generated or externally grounded assumptions into the safe Verifier."""
     if not policy.assumption_guidance_enabled:
         return select_numerical_forecast(
             policy,
@@ -872,12 +876,27 @@ def select_assumption_guided_forecast(
         rank_diverse_assumptions,
     )
 
-    assumptions = generate_forecast_assumptions(
-        profile,
-        active_names,
-        families,
-        history=history,
-    )
+    generated_internally = assumptions is None
+    if assumptions is None:
+        assumptions = generate_forecast_assumptions(
+            profile,
+            active_names,
+            families,
+            history=history,
+        )
+    else:
+        assumptions = tuple(assumptions)
+        active = set(active_names)
+        unknown = {
+            name
+            for assumption in assumptions
+            for name in assumption.candidate_names
+            if name not in active
+        }
+        if unknown:
+            raise ValueError(
+                f"grounded assumptions route inactive candidates: {sorted(unknown)!r}"
+            )
     ranked = rank_diverse_assumptions(
         assumptions,
         diagnostics,
@@ -886,7 +905,7 @@ def select_assumption_guided_forecast(
         min_confidence=policy.assumption_min_confidence,
     )
     pool = assumption_candidate_pool(ranked, active_names=active_names)
-    if not pool:
+    if not pool and generated_internally:
         pool = tuple(active_names)
     justified = tuple(
         dict.fromkeys(name for item in ranked for name in item.candidate_names)
