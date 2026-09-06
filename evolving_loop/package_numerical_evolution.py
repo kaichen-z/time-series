@@ -620,6 +620,10 @@ class NumericalPackageMaterializer:
             item
             for item in parent.alternatives
             if item.family != family and item.candidate_id != alternative.candidate_id
+            and any(
+                policy != item.full_build_policy_payload
+                for _fold, policy in item.build_fold_policy_payloads
+            )
         ]
         retained.append(alternative)
         if self.atlas_release is not None:

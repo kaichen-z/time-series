@@ -1130,6 +1130,23 @@ def _retained_combined_spec() -> NumericalAlternativeSpec:
     )
 
 
+def _seed_only_retained_combined_spec() -> NumericalAlternativeSpec:
+    retained = _retained_combined_spec()
+    payload = retained.to_payload()
+    return NumericalAlternativeSpec(
+        candidate_id=retained.candidate_id,
+        family=retained.family,
+        materializer_kind=retained.materializer_kind,
+        recipe_payload=payload["recipe_payload"],
+        full_build_policy_payload=payload["full_build_policy_payload"],
+        build_fold_policy_payloads=tuple(
+            (fold, payload["full_build_policy_payload"]) for fold in range(5)
+        ),
+        assumption_ids=retained.assumption_ids,
+        failure_conditions=retained.failure_conditions,
+    )
+
+
 def test_materializer_rematerializes_every_retained_parent_alternative() -> None:
     build_tasks = _tasks()
     manifest = build_group_fold_manifest(build_tasks, seed=20260903)
@@ -1175,6 +1192,46 @@ def test_materializer_rematerializes_every_retained_parent_alternative() -> None
         "select_seasonal_naive",
         "retained_weighted",
     }
+
+
+def test_materializer_drops_seed_only_retained_alternative_from_nonseed_release() -> None:
+    build_tasks = _tasks()
+    manifest = build_group_fold_manifest(build_tasks, seed=20260903)
+    fit = fit_numerical_recipe(_recipe(), _build_rows(build_tasks), manifest, _parent())
+    parent = NumericalSupplyRelease(
+        schema_version=1,
+        version="n000",
+        parent_sha256=None,
+        anchor_release_payload=_parent().to_payload(),
+        alternatives=(_seed_only_retained_combined_spec(),),
+        atlas_release_sha256=None,
+        source_fingerprints={"dictionary": "2" * 64},
+        runtime_fingerprints={"materializer": "3" * 64},
+    )
+    original_tasks = _evolution_tasks()
+    materializer = NumericalPackageMaterializer(
+        forecast_store=_FixtureForecastStore(),
+        screening_policy=_screening(),
+        fold_manifest=manifest,
+        original_tasks=original_tasks,
+        source_fingerprints={"dictionary": "2" * 64},
+        runtime_fingerprints={"materializer": "3" * 64},
+        diagnostics_registry=FrozenNumericalDiagnosticsRegistry.build(
+            original_tasks, _history_diagnostics(original_tasks), HindcastConfig()
+        ),
+    )
+
+    candidate = materializer.materialize(
+        parent,
+        fit,
+        _label_free(original_tasks),
+        version="n001",
+        generation=0,
+    )
+
+    assert tuple(item.candidate_id for item in candidate.release.alternatives) == (
+        _recipe().name,
+    )
 
 
 def test_diagnostics_registry_is_frozen_and_bound_to_history_and_policy() -> None:
