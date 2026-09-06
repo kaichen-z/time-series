@@ -114,6 +114,7 @@ from numerical_agent.evolution.module import read_module
 from numerical_agent.evolution.numerical_loop import run_numerical_loop
 from numerical_agent.evolution.numerical_selector import DecisionPolicy, HindcastConfig
 from numerical_agent.evolution.portfolio import read_policy_file
+from numerical_agent.evolution.screening import ScreeningPolicy
 from numerical_agent.evolution.specialist_atlas import (
     AtlasPolicy,
     AtlasRelease,
@@ -702,6 +703,8 @@ def _build_registry(
     tasks: Sequence[ContextTask],
     release: NumericalSupplyRelease,
     materializer: NumericalPackageMaterializer,
+    *,
+    fallback_screening_policy: ScreeningPolicy | None = None,
 ) -> FrozenNumericalPackageRegistry:
     anchor = parse_champion_release(
         cast(dict[str, object], release.to_payload()["anchor_release_payload"])
@@ -709,25 +712,36 @@ def _build_registry(
 
     def build(original: ContextTask, supplied: NumericalSupplyRelease):
         safe = _sanitized_context_task(original)
-        source = run_numerical_loop(
-            RuntimeTask(
-                safe.numeric.task_id,
-                safe.numeric.history_values,
-                safe.numeric.prediction_length,
-                safe.numeric.frequency,
-                (),
-            ),
-            screening_policy=materializer.screening_policy,
-            candidate_runner=materializer.forecast_store.forecast,
-            combined_policies=materializer.combined_policies,
-            decision_policy=materializer.decision_policy,
-            hindcast_config=materializer.hindcast_config,
-            component_fingerprints={
-                **materializer.source_fingerprints,
-                **materializer.runtime_fingerprints,
-            },
-            champion_release=anchor,
+        runtime_task = RuntimeTask(
+            safe.numeric.task_id,
+            safe.numeric.history_values,
+            safe.numeric.prediction_length,
+            safe.numeric.frequency,
+            (),
         )
+
+        def source_with(screening_policy: ScreeningPolicy):
+            return run_numerical_loop(
+                runtime_task,
+                screening_policy=screening_policy,
+                candidate_runner=materializer.forecast_store.forecast,
+                combined_policies=materializer.combined_policies,
+                decision_policy=materializer.decision_policy,
+                hindcast_config=materializer.hindcast_config,
+                component_fingerprints={
+                    **materializer.source_fingerprints,
+                    **materializer.runtime_fingerprints,
+                },
+                champion_release=anchor,
+            )
+
+        source = source_with(materializer.screening_policy)
+        if (
+            fallback_screening_policy is not None
+            and source.protected_baseline.name
+            != anchor.policy.recipe.fallback_parent
+        ):
+            source = source_with(fallback_screening_policy)
         alternatives = {item.name: item for item in source.ranked_alternatives}
         for specification in supplied.alternatives:
             item = materializer._materialize_alternative(source, safe, specification)

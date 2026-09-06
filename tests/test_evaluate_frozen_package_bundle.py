@@ -11,11 +11,18 @@ import pytest
 from evolving_loop.evaluate_frozen_package_bundle import (
     _claim_output,
     _PublicStateEvaluator,
+    _public_supply_screening,
     FrozenPackageEvaluationError,
     build_attribution_states,
     main,
     score_frozen_states,
     verify_frozen_package_run,
+)
+from evolving_loop.package_numerical_supply import NumericalSupplyRelease
+from numerical_agent.evolution.screening import (
+    ApplicabilityPolicy,
+    ScreeningEntry,
+    ScreeningPolicy,
 )
 from evolving_loop.package_artifacts import PackageArtifactStore, PackageCheckpoint
 from evolving_loop.package_coordinate_evolution import package_principal_fingerprints
@@ -248,9 +255,21 @@ def test_public_registry_uses_verified_source_fingerprints(monkeypatch, tmp_path
     verified = verify_frozen_package_run(evolution, final_bundle, runtime)
     trusted = {"methods": "1" * 64, "dictionary": "2" * 64}
     evaluator = object.__new__(_PublicStateEvaluator)
+    screening = ScreeningPolicy(
+        entries=(
+            ScreeningEntry(
+                "specialist",
+                "tsfm",
+                "keep",
+                ApplicabilityPolicy(),
+                "reviewed test candidate",
+            ),
+        ),
+        fallback_names=("specialist",),
+    )
     evaluator.resources = SimpleNamespace(
         store=object(),
-        screening=object(),
+        screening=screening,
         source_fingerprints=trusted,
         portfolio=SimpleNamespace(combined=()),
     )
@@ -260,8 +279,9 @@ def test_public_registry_uses_verified_source_fingerprints(monkeypatch, tmp_path
     seen = {}
     registry = SimpleNamespace(fingerprint="registry")
 
-    def capture(_tasks, _release, materializer):
+    def capture(_tasks, _release, materializer, **kwargs):
         seen["source_fingerprints"] = materializer.source_fingerprints
+        seen["fallback_screening_policy"] = kwargs["fallback_screening_policy"]
         return registry
 
     monkeypatch.setattr(
@@ -270,6 +290,61 @@ def test_public_registry_uses_verified_source_fingerprints(monkeypatch, tmp_path
 
     assert evaluator._registry(build_attribution_states(verified)[0], ()) is registry
     assert seen["source_fingerprints"] == trusted
+    assert seen["fallback_screening_policy"] is None
+
+
+def test_public_screening_limits_toto_release_to_frozen_supply():
+    from tests.test_package_retrieval_evolution import _release
+
+    champion = _release()
+    assumption = replace(
+        champion.policy.recipe.assumptions[0], candidate_name="toto_2_0"
+    )
+    recipe = replace(
+        champion.policy.recipe,
+        name="toto_anchor",
+        parents=("toto_2_0",),
+        fallback_parent="toto_2_0",
+        assumptions=(assumption,),
+    )
+    champion = replace(
+        champion,
+        policy=replace(champion.policy, recipe=recipe),
+    )
+    release = NumericalSupplyRelease(
+        schema_version=1,
+        version="n000",
+        parent_sha256=None,
+        anchor_release_payload=champion.to_payload(),
+        alternatives=(),
+        atlas_release_sha256=None,
+        source_fingerprints={"dictionary": "4" * 64},
+        runtime_fingerprints={"materializer": "5" * 64},
+    )
+    policy = ScreeningPolicy(
+        entries=(
+            ScreeningEntry(
+                "unrelated",
+                "statistical",
+                "keep",
+                ApplicabilityPolicy(),
+                "not in the frozen supply",
+            ),
+            ScreeningEntry(
+                "toto_2_0",
+                "tsfm",
+                "keep",
+                ApplicabilityPolicy(),
+                "frozen anchor",
+            ),
+        ),
+        fallback_names=("unrelated", "toto_2_0"),
+    )
+
+    restricted = _public_supply_screening(policy, (), release)
+
+    assert tuple(item.name for item in restricted.entries) == ("toto_2_0",)
+    assert restricted.fallback_names == ()
 
 
 def _split_payload(public_ids: list[str]) -> dict[str, object]:

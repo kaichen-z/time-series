@@ -29,7 +29,10 @@ from evolving_loop.package_coordinate_evolution import (
 )
 from evolving_loop.package_metrics import PackageEvaluation
 from evolving_loop.package_numerical_evolution import NumericalPackageMaterializer
-from evolving_loop.package_numerical_supply import parse_numerical_supply_release
+from evolving_loop.package_numerical_supply import (
+    NumericalSupplyRelease,
+    parse_numerical_supply_release,
+)
 from evolving_loop.package_pipeline_evaluator import PackagePipelineEvaluator
 from evolving_loop.package_registry import FrozenNumericalPackageRegistry
 from evolving_loop.package_stage_runner import PackageStageSchedule
@@ -49,11 +52,13 @@ from evolving_loop.run_package_coevolution import (
     _source_files,
     _split_digest,
 )
+from numerical_agent.evolution.champion import parse_champion_release
 from numerical_agent.evolution.forecast_store import ForecastStore
 from numerical_agent.evolution.module import read_module
 from numerical_agent.evolution.numerical_selector import DecisionPolicy, HindcastConfig
-from numerical_agent.evolution.portfolio import read_policy_file
+from numerical_agent.evolution.portfolio import CombinedPolicy, read_policy_file
 from numerical_agent.evolution.specialist_atlas import parse_atlas_release
+from numerical_agent.evolution.screening import ScreeningPolicy
 from numerical_agent.evolution.task_local_evolution import GroupFoldManifest
 from numerical_agent.main import _add_tsfm_runtime_options, _runtime_registry
 from numerical_agent.run_selector_evolution import _forecast_runtime_identity
@@ -718,6 +723,48 @@ def _library_from_policy(policy: HarnessPolicy, path: Path) -> RetrievalSkillLib
     return _activate_verified_release_library(library) if active else library
 
 
+def _public_supply_screening(
+    policy: ScreeningPolicy,
+    combined_policies: Sequence[CombinedPolicy],
+    release: NumericalSupplyRelease,
+) -> ScreeningPolicy:
+    """Limit Public materialization to the candidates named by a Toto release."""
+    if type(release) is not NumericalSupplyRelease:
+        raise TypeError("Public screening requires a Numerical supply release")
+    anchor = parse_champion_release(_plain(release.anchor_release_payload))
+    if anchor.policy.recipe.fallback_parent != "toto_2_0":
+        return policy
+    combined = {item.name: item for item in combined_policies}
+    required = set(anchor.policy.recipe.parents)
+    required.update(
+        item.candidate_id
+        for item in release.alternatives
+        if item.materializer_kind == "dictionary"
+    )
+    pending = list(required)
+    while pending:
+        name = pending.pop()
+        entry = policy.get(name)
+        if entry is None:
+            raise FrozenPackageEvaluationError(
+                f"frozen Numerical candidate {name!r} left the reviewed Dictionary"
+            )
+        if entry.family == "combined":
+            combined_policy = combined.get(name)
+            if combined_policy is None:
+                raise FrozenPackageEvaluationError(
+                    f"frozen Combined candidate {name!r} has no reviewed policy"
+                )
+            for parent in combined_policy.parents:
+                if parent not in required:
+                    required.add(parent)
+                    pending.append(parent)
+    entries = tuple(item for item in policy.entries if item.name in required)
+    if {item.name for item in entries} != required:
+        raise FrozenPackageEvaluationError("frozen Numerical supply is incomplete")
+    return ScreeningPolicy(entries=entries, fallback_names=())
+
+
 class _PublicStateEvaluator:
     def __init__(
         self,
@@ -756,7 +803,11 @@ class _PublicStateEvaluator:
             return cached
         materializer = object.__new__(NumericalPackageMaterializer)
         materializer.forecast_store = self.resources.store
-        materializer.screening_policy = self.resources.screening
+        materializer.screening_policy = _public_supply_screening(
+            self.resources.screening,
+            tuple(self.resources.portfolio.combined),
+            release,
+        )
         materializer.fold_manifest = self.verified.schedule.fold_manifest
         materializer.source_fingerprints = dict(self.resources.source_fingerprints)
         materializer.runtime_fingerprints = dict(release.runtime_fingerprints)
@@ -765,7 +816,16 @@ class _PublicStateEvaluator:
         materializer.decision_policy = DecisionPolicy()
         materializer.hindcast_config = HindcastConfig()
         materializer.diagnostics_registry = None
-        registry = _build_registry(tasks, release, materializer)
+        registry = _build_registry(
+            tasks,
+            release,
+            materializer,
+            fallback_screening_policy=(
+                self.resources.screening
+                if materializer.screening_policy is not self.resources.screening
+                else None
+            ),
+        )
         self._registries[release.fingerprint] = registry
         return registry
 
