@@ -53,6 +53,8 @@ from evolving_loop.retrieval_agent.evolution import (
 from evolving_loop.retrieval_agent.policy import RetrievalRelease
 from tests.test_package_coordinate_evolution import _bundle
 from tests.test_package_stage_runner import _evaluation
+from tests.test_package_stage_runner import _schedule as _formal_schedule
+from tests.test_package_stage_runner import _task_map as _formal_task_map
 from tests.test_package_task_feedback import _verified_state_and_result
 from tests.test_task_evidence_feedback import _case
 
@@ -133,6 +135,28 @@ def test_smoke_registry_materializes_only_scheduled_tasks() -> None:
         "task_1",
         "task_4",
     )
+
+
+def test_smoke_schedule_avoids_a_build8_with_fewer_than_five_groups() -> None:
+    formal = _formal_schedule()
+    task_map = _formal_task_map()
+    crowded = set(formal.screen8_ids[:5])
+    varied = {}
+    for index, (task_id, task) in enumerate(sorted(task_map.items())):
+        numeric = replace(
+            task.numeric,
+            history_values=(float(index), float(index + 1), float(index + 2)),
+            entity_name=("crowded_entity" if task_id in crowded else f"entity_{task_id}"),
+        )
+        varied[task_id] = replace(task, numeric=numeric)
+
+    smoke = run_module._SmokeSchedule.build(formal, varied)
+
+    entities = {varied[task_id].numeric.entity_name for task_id in smoke.build8_ids}
+    assert len(smoke.build8_ids) == 8
+    assert len(entities) >= 5
+    assert set(smoke.build8_ids) <= set(formal.screen32_ids)
+    assert smoke.fold_manifest.fold_count == 5
 
 
 def test_smoke_numerical_proposer_thaws_frozen_anchor_before_fallback(tmp_path) -> None:

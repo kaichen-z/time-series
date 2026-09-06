@@ -487,7 +487,44 @@ class _SmokeSchedule:
         formal: PackageStageSchedule,
         task_map: Mapping[str, ContextTask],
     ) -> "_SmokeSchedule":
-        build_ids = formal.screen8_ids
+        screen_tasks = tuple(
+            task_map[task_id].numeric for task_id in formal.screen32_ids
+        )
+        screen_groups = build_group_fold_manifest(
+            screen_tasks,
+            seed=formal.seed,
+            fold_count=5,
+        ).groups
+        choices: dict[
+            tuple[int, int], tuple[tuple[str, ...], ...]
+        ] = {(0, 0): ()}
+        for _group_sha256, member_ids, _fold in screen_groups:
+            updated = dict(choices)
+            for (size, count), selected in choices.items():
+                next_size = size + len(member_ids)
+                if next_size > 8:
+                    continue
+                candidate = (*selected, member_ids)
+                key = (next_size, count + 1)
+                if key not in updated or candidate < updated[key]:
+                    updated[key] = candidate
+            choices = updated
+        eligible = tuple(
+            (count, selected)
+            for (size, count), selected in choices.items()
+            if size == 8 and count >= 5
+        )
+        if not eligible:
+            raise ValueError(
+                "smoke Build-8 cannot preserve five indivisible task groups"
+            )
+        _count, selected_groups = min(
+            eligible,
+            key=lambda item: (-item[0], item[1]),
+        )
+        build_ids = tuple(
+            sorted(task_id for group in selected_groups for task_id in group)
+        )
         fold = build_group_fold_manifest(
             tuple(task_map[task_id].numeric for task_id in build_ids),
             seed=formal.seed,
