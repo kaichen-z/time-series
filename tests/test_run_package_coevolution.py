@@ -233,6 +233,34 @@ def test_smoke_schedule_avoids_a_build8_with_fewer_than_five_groups() -> None:
     assert smoke.fold_manifest.fold_count == 5
 
 
+def test_interaction_demo_schedule_can_hold_out_nine_dev_tasks() -> None:
+    formal = _formal_schedule()
+    task_map = _formal_task_map()
+    varied = {
+        task_id: replace(
+            task,
+            numeric=replace(
+                task.numeric,
+                history_values=(float(index), float(index + 1), float(index + 2)),
+                entity_name=f"demo_entity_{index}",
+            ),
+        )
+        for index, (task_id, task) in enumerate(sorted(task_map.items()))
+    }
+
+    demo = run_module._SmokeSchedule.build(formal, varied, dev_count=9)
+
+    assert len(demo.build8_ids) == 8
+    assert len(demo.calibration2_ids) == 2
+    assert len(demo.dev_ids) == 9
+    assert demo.stage_ids("dev20") == formal.dev20_ids[:9]
+    assert demo.to_payload()["counts"] == {
+        "build": 8,
+        "calibration": 2,
+        "dev": 9,
+    }
+
+
 def test_smoke_numerical_proposer_thaws_frozen_anchor_before_fallback(tmp_path) -> None:
     task, state = _bundle(tmp_path)
     proposer = _SmokeNumericalProposer(
@@ -468,6 +496,12 @@ def test_parser_exposes_label_informed_regression_split_opt_in() -> None:
     destinations = {action.dest for action in build_parser()._actions}
 
     assert "allow_label_informed_regression_split" in destinations
+
+
+def test_parser_exposes_bounded_demo_dev_count() -> None:
+    destinations = {action.dest for action in build_parser()._actions}
+
+    assert "demo_dev_count" in destinations
 
 
 def test_parser_has_no_public_input_or_evaluation_flag() -> None:

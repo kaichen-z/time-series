@@ -322,6 +322,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--interaction-smoke", action="store_true")
+    parser.add_argument(
+        "--demo-dev-count",
+        type=int,
+        default=2,
+        help="non-formal interaction-smoke Dev size within [2, 20]",
+    )
     parser.add_argument("--feedback-mode", choices=("none", "task"), default="none")
     parser.add_argument(
         "--allow-label-informed-regression-split",
@@ -420,6 +426,10 @@ def _validate_mode(args: argparse.Namespace) -> None:
         )
     if args.feedback_mode != "none" and args.smoke:
         raise ValueError("task feedback requires formal or interaction evolution")
+    if not 2 <= args.demo_dev_count <= 20:
+        raise ValueError("--demo-dev-count must be within [2, 20]")
+    if not args.interaction_smoke and args.demo_dev_count != 2:
+        raise ValueError("--demo-dev-count is available only with interaction smoke")
     if args.seed != _FORMAL_SEED:
         raise ValueError(f"package evolution seed must be {_FORMAL_SEED}")
     for name in ("tasks_file", "forecast_store"):
@@ -441,6 +451,7 @@ def _configuration_identity(args: argparse.Namespace) -> str:
             "seed": args.seed,
             "smoke": args.smoke,
             "interaction_smoke": args.interaction_smoke,
+            "demo_dev_count": args.demo_dev_count,
             "feedback_mode": args.feedback_mode,
             "allow_label_informed_regression_split": (
                 args.allow_label_informed_regression_split
@@ -477,12 +488,12 @@ def _early_resume_guard(args: argparse.Namespace) -> bool:
 
 @dataclass(frozen=True)
 class _SmokeSchedule:
-    """Explicit non-formal 8/2/2 schedule; never accepted by the formal runner."""
+    """Explicit non-formal 8/2/N schedule; never accepted by the formal runner."""
 
     seed: int
     build8_ids: tuple[str, ...]
     calibration2_ids: tuple[str, ...]
-    dev2_ids: tuple[str, ...]
+    dev_ids: tuple[str, ...]
     fold_manifest: GroupFoldManifest
 
     @classmethod
@@ -490,7 +501,11 @@ class _SmokeSchedule:
         cls,
         formal: PackageStageSchedule,
         task_map: Mapping[str, ContextTask],
+        *,
+        dev_count: int = 2,
     ) -> "_SmokeSchedule":
+        if type(dev_count) is not int or not 2 <= dev_count <= 20:
+            raise ValueError("smoke Dev count must be within [2, 20]")
         screen_tasks = tuple(
             task_map[task_id].numeric for task_id in formal.screen32_ids
         )
@@ -538,7 +553,7 @@ class _SmokeSchedule:
             seed=formal.seed,
             build8_ids=build_ids,
             calibration2_ids=formal.calibration16_ids[:2],
-            dev2_ids=formal.dev20_ids[:2],
+            dev_ids=formal.dev20_ids[:dev_count],
             fold_manifest=fold,
         )
 
@@ -548,7 +563,7 @@ class _SmokeSchedule:
                 "screen8": self.build8_ids,
                 "build64": self.build8_ids,
                 "calibration16": self.calibration2_ids,
-                "dev20": self.dev2_ids,
+                "dev20": self.dev_ids,
             }[stage]
         except KeyError as error:
             raise ValueError(f"unknown smoke stage {stage!r}") from error
@@ -563,10 +578,10 @@ class _SmokeSchedule:
             "schema_version": 1,
             "formal_run": False,
             "seed": self.seed,
-            "counts": {"build": 8, "calibration": 2, "dev": 2},
+            "counts": {"build": 8, "calibration": 2, "dev": len(self.dev_ids)},
             "build8_ids": list(self.build8_ids),
             "calibration2_ids": list(self.calibration2_ids),
-            "dev2_ids": list(self.dev2_ids),
+            "dev_ids": list(self.dev_ids),
             "fold_manifest": self.fold_manifest.to_payload(),
         }
 
@@ -1843,7 +1858,12 @@ def _run_manifest_core(
         "counts": (
             {"train": 80, "build": 64, "calibration": 16, "dev": 20}
             if not (args.smoke or args.interaction_smoke)
-            else {"train": 80, "build": 8, "calibration": 2, "dev": 2}
+            else {
+                "train": 80,
+                "build": 8,
+                "calibration": 2,
+                "dev": len(schedule.dev_ids),
+            }
         ),
         "schedule_sha256": schedule.fingerprint,
         "source_fingerprints": dict(source_fingerprints),
@@ -2021,7 +2041,11 @@ def _build_phases(
         split_sha256=split_sha256,
         runtime_fingerprints=runtime_fingerprints,
         train_count=(8 if args.smoke or args.interaction_smoke else 80),
-        dev_count=(2 if args.smoke or args.interaction_smoke else 20),
+        dev_count=(
+            len(schedule.dev_ids)
+            if isinstance(schedule, _SmokeSchedule)
+            else 20
+        ),
     )
     feedback_manager = None
     if args.interaction_smoke or args.feedback_mode == "task":
@@ -2029,7 +2053,7 @@ def _build_phases(
             (
                 *schedule.build8_ids,
                 *schedule.calibration2_ids,
-                *schedule.dev2_ids,
+                *schedule.dev_ids,
             )
             if isinstance(schedule, _SmokeSchedule)
             else (
@@ -2239,7 +2263,11 @@ def _execute_run(
         seed=args.seed,
     )
     schedule: PackageStageSchedule | _SmokeSchedule = (
-        _SmokeSchedule.build(formal_schedule, task_map)
+        _SmokeSchedule.build(
+            formal_schedule,
+            task_map,
+            dev_count=(args.demo_dev_count if args.interaction_smoke else 2),
+        )
         if args.smoke or args.interaction_smoke
         else formal_schedule
     )
@@ -2249,7 +2277,7 @@ def _execute_run(
             (
                 *schedule.build8_ids,
                 *schedule.calibration2_ids,
-                *schedule.dev2_ids,
+                *schedule.dev_ids,
             )
             if isinstance(schedule, _SmokeSchedule)
             else tuple(task.numeric.task_id for task in tasks)
