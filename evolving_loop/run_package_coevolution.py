@@ -319,12 +319,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--interaction-smoke", action="store_true")
     parser.add_argument("--feedback-mode", choices=("none", "task"), default="none")
+    parser.add_argument(
+        "--allow-label-informed-regression-split",
+        action="store_true",
+        help=(
+            "explicitly admit a frozen split stratified with baseline future-error "
+            "metrics; this does not permit evidence or document-label selection"
+        ),
+    )
     _add_tsfm_runtime_options(parser)
     return parser
 
 
 def _validated_split(
     path: str | Path,
+    *,
+    allow_label_informed_regression_split: bool = False,
 ) -> tuple[dict[str, object], tuple[str, ...], tuple[str, ...]]:
     payload = read_json_object(path)
     claimed = payload.get("manifest_sha256")
@@ -360,15 +370,33 @@ def _validated_split(
         for right in memberships[index + 1 :]
     ):
         raise ValueError("split manifest partitions must be task-disjoint")
-    if any(
-        payload.get(name) is not False
-        for name in (
-            "selection_uses_future_values",
-            "selection_uses_gt_evidence",
-            "selection_uses_document_labels",
+    if payload.get("selection_uses_gt_evidence") is not False:
+        raise ValueError("split selection must not use ground-truth evidence")
+    if payload.get("selection_uses_document_labels") is not False:
+        raise ValueError("split selection must not use document labels")
+    uses_future = payload.get("selection_uses_future_values") is True
+    if uses_future and not allow_label_informed_regression_split:
+        raise ValueError(
+            "label-informed split requires explicit regression-only opt-in"
         )
-    ):
-        raise ValueError("split manifest selection must be label-free")
+    if uses_future:
+        if payload.get("selection_uses_model_metrics") is not True:
+            raise ValueError("label-informed split must use model metrics")
+        if not isinstance(payload.get("toto_difficulty_model"), str) or not str(
+            payload["toto_difficulty_model"]
+        ).strip():
+            raise ValueError("label-informed split requires a Toto model identity")
+        profile = payload.get("toto_difficulty_profile_sha256")
+        if (
+            not isinstance(profile, str)
+            or len(profile) != 64
+            or any(character not in "0123456789abcdef" for character in profile)
+        ):
+            raise ValueError(
+                "label-informed split requires a canonical profile fingerprint"
+            )
+    elif payload.get("selection_uses_future_values") is not False:
+        raise ValueError("split future-value selection marker must be boolean")
     return payload, train, dev
 
 
@@ -410,6 +438,9 @@ def _configuration_identity(args: argparse.Namespace) -> str:
             "smoke": args.smoke,
             "interaction_smoke": args.interaction_smoke,
             "feedback_mode": args.feedback_mode,
+            "allow_label_informed_regression_split": (
+                args.allow_label_informed_regression_split
+            ),
             "forecast_runtime": _forecast_runtime_identity(args),
         }
     )
@@ -1687,6 +1718,9 @@ def _run_manifest_core(
         "formal_run": not (args.smoke or args.interaction_smoke),
         "interaction_smoke": args.interaction_smoke,
         "feedback_mode": args.feedback_mode,
+        "allow_label_informed_regression_split": (
+            args.allow_label_informed_regression_split
+        ),
         "configuration_sha256": _configuration_identity(args),
         "split_manifest_sha256": split_manifest["manifest_sha256"],
         "train_task_ids_sha256": _digest([task.numeric.task_id for task in train]),
@@ -2316,7 +2350,12 @@ def _execute_run(
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _validate_mode(args)
-    split, train_ids, dev_ids = _validated_split(args.split_file)
+    split, train_ids, dev_ids = _validated_split(
+        args.split_file,
+        allow_label_informed_regression_split=(
+            args.allow_label_informed_regression_split
+        ),
+    )
     tasks = load_context_tasks_by_ids(args.tasks_file, (*train_ids, *dev_ids))
     if tuple(task.numeric.task_id for task in tasks) != (*train_ids, *dev_ids):
         raise ValueError("loaded tasks do not match exact Train and Dev membership")

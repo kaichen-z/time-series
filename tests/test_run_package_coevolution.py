@@ -245,6 +245,78 @@ def _split_manifest() -> dict[str, object]:
     return payload
 
 
+def _write_split_manifest(path: Path, payload: dict[str, object]) -> None:
+    unsigned = {key: value for key, value in payload.items() if key != "manifest_sha256"}
+    encoded = json.dumps(unsigned, sort_keys=True, separators=(",", ":"))
+    payload["manifest_sha256"] = hashlib.sha256(encoded.encode()).hexdigest()
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_label_informed_split_requires_explicit_regression_opt_in(tmp_path) -> None:
+    split = _split_manifest()
+    split.update(
+        {
+            "selection_uses_future_values": True,
+            "selection_uses_model_metrics": True,
+            "toto_difficulty_model": "toto_2_0",
+            "toto_difficulty_profile_sha256": "a" * 64,
+        }
+    )
+    split_path = tmp_path / "split.json"
+    _write_split_manifest(split_path, split)
+
+    with pytest.raises(ValueError, match="label-informed"):
+        run_module._validated_split(split_path)
+
+    payload, train, dev = run_module._validated_split(
+        split_path,
+        allow_label_informed_regression_split=True,
+    )
+
+    assert payload["selection_uses_future_values"] is True
+    assert len(train) == 80
+    assert len(dev) == 20
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("selection_uses_gt_evidence", True, "ground-truth evidence"),
+        ("selection_uses_document_labels", True, "document labels"),
+        ("selection_uses_model_metrics", False, "model metrics"),
+        ("toto_difficulty_model", "", "Toto model"),
+        ("toto_difficulty_profile_sha256", "not-a-digest", "profile fingerprint"),
+    ),
+)
+def test_label_informed_split_opt_in_keeps_closed_authority(
+    tmp_path, field, value, message
+) -> None:
+    split = _split_manifest()
+    split.update(
+        {
+            "selection_uses_future_values": True,
+            "selection_uses_model_metrics": True,
+            "toto_difficulty_model": "toto_2_0",
+            "toto_difficulty_profile_sha256": "a" * 64,
+            field: value,
+        }
+    )
+    split_path = tmp_path / "split.json"
+    _write_split_manifest(split_path, split)
+
+    with pytest.raises(ValueError, match=message):
+        run_module._validated_split(
+            split_path,
+            allow_label_informed_regression_split=True,
+        )
+
+
+def test_parser_exposes_label_informed_regression_split_opt_in() -> None:
+    destinations = {action.dest for action in build_parser()._actions}
+
+    assert "allow_label_informed_regression_split" in destinations
+
+
 def test_parser_has_no_public_input_or_evaluation_flag() -> None:
     parser = build_parser()
 
