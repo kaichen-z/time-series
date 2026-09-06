@@ -464,5 +464,8 @@ def test_public_evaluator_loads_exactly_99_public_tasks(monkeypatch, tmp_path):
     assert len(seen) == 99
     report = json.loads((output / "public_report.json").read_text())
     assert report["metadata"]["public_result_may_feed_evolution"] is False
+    forecast_lines = (output / "public_forecasts.jsonl").read_text().splitlines()
+    assert len(forecast_lines) == 4 * 99
+    assert all(isinstance(json.loads(line), dict) for line in forecast_lines)
     with pytest.raises(FrozenPackageEvaluationError, match="already"):
         main(args)

@@ -1076,7 +1076,7 @@ def _publish(output: Path, report: Mapping[str, object]) -> None:
         per_task = cast(Mapping[str, Sequence[Mapping[str, object]]], report_payload["per_task"])
         for state_name, rows in per_task.items():
             for row in rows:
-                handle.write(canonical_json_bytes({"state": state_name, **dict(row)}) + b"\n")
+                handle.write(_canonical_bytes({"state": state_name, **dict(row)}) + b"\n")
         handle.flush()
         os.fsync(handle.fileno())
     (output / "evaluation_complete.json").write_bytes(

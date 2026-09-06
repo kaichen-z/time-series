@@ -2,8 +2,8 @@
 
 **Experiment date:** 2026-09-06
 
-**Status:** Design audit and interaction smoke complete; formal and Public-99
-results pending.
+**Status:** Design audit, interaction smoke, formal co-evolution, and frozen
+Public-99 regression complete.
 
 ## Scope and interpretation
 
@@ -128,5 +128,94 @@ regression test before the production change: group-safe five-fold smoke
 sampling, trying later Numerical recipes after one fit fails, and exposing plus
 enforcing the closed Retrieval mutation schema with a validated repair fallback.
 
-Formal evolution and Public-99 evidence will be added only after the formal
-bundle is sealed and the separate Public evaluator finishes once.
+## Formal co-evolution result
+
+The sealed formal run is
+`runs/package_coevolution/gpt56luna_medium_toto_balanced_v3_g2_20260906_r3`.
+It used `gpt-5.6-luna` at medium reasoning effort with task-level feedback and
+the frozen v3 80/20/99 membership.
+
+- Completion status: `complete`; formal run: `true`; Public access: `false`.
+- Coordinate trace: Numerical rejected, Retrieval rejected, Decision skipped
+  because no non-seed Retrieval release had been accepted.
+- Accepted steps: zero. Rejected steps: three. The final bundle is therefore
+  byte-identical to the initial Toto-safe package.
+- All three Numerical proposals were structurally valid and had distinct bundle
+  hashes. Each tied the parent on Screen-8. Two advanced to Screen-32 and tied;
+  one advanced to Build-64 and tied. Build-64 means were sMAE
+  `0.3156137831`, sRMSE `0.4981515333`, and joint `0.4068826582` for both
+  child and parent. It failed the minimum-gain and improving-fold gates.
+- Two Retrieval proposals were structurally valid and one failed the closed
+  schema. The valid proposals also tied through Screen-8 and Screen-32; one
+  reached Build-64 and reproduced the same means above, so it failed the same
+  two gates.
+- Calibration-16 and Dev-20 were never opened because no candidate cleared the
+  Build-64 gate. This is a valid zero-gain result, not a phase-unavailable or
+  coverage failure.
+- Atlas fitting was unavailable and the run recorded that optional condition;
+  it did not invalidate the protected Toto path or the formal coordinate trace.
+
+The result identifies a concrete bottleneck: the generated alternatives existed
+and were evaluable, but the seed Decision policy selected Toto on every staged
+task. The Numerical oracle diagnostics show that alternatives were sometimes
+better, while the final-selection regret remained positive. The immediate
+research problem is therefore forecast-aware routing/decision learning, not
+simply adding more mutation cycles.
+
+It also exposes a stronger interaction deadlock. Because the accepted Numerical
+release had no Retrieval handoff assumptions, the host contract set
+`empty_retrieval_handoff`; the final Decision was then forced to the safe
+default regardless of any retrieved document. Consequently every Retrieval
+child was guaranteed to tie the parent, and Decision evolution was ineligible
+until Retrieval had first been accepted. The next design should either seed a
+small set of host-certified candidate assumptions or allow a paired
+Retrieval+Decision proposal with a Train-only joint gate. Merely running more
+cycles under the current eligibility rules cannot solve this state.
+
+## Frozen Public-99 result
+
+The one-shot regression output is
+`runs/package_coevolution_public/gpt56luna_medium_toto_balanced_v3_g2_r3_public99_20260906`.
+The evaluator authenticated the sealed formal lineage and exact v3 Public-99
+membership before scoring.
+
+- Status: `public_regression_complete`; coverage: `1.0`; task count: `99`.
+- Mean sMAE: `0.3825908769`.
+- Mean sRMSE: `0.5881977402` capped and `0.6009912901` raw.
+- Mean joint point error: `0.4853943086`.
+- One task had a clipped metric; no task crossed the configured catastrophic
+  threshold.
+- Final versus initial Toto: 0 wins, 99 ties, 0 losses; all mean deltas are
+  exactly zero. The four attribution states have identical metrics because no
+  coordinate was accepted.
+- Public selection flags remain false: the result may not feed evolution, and
+  no sCRPS is reported.
+
+The evaluator initially made 18 context-model calls before the empty-handoff
+invariant was recognized. Those unpublished cached responses were discarded.
+For all 99 reported tasks, the evaluator then used an audited equivalence
+shortcut: the host contract already forced the final forecast to the numerical
+safe default, so three context-model calls per task were skipped. The report
+records the reason and counts under `metadata.execution_audit`; this changes no
+forecast or point metric and avoids spending model quota on outputs that the
+host must discard.
+
+## Final design verdict
+
+The infrastructure is now a complete and auditable three-coordinate experiment,
+but this run shows that the current *search topology* is not yet an effective
+co-evolution algorithm. Its safety properties are sound: immutable numerical
+anchors, host-verified evidence, stage gates, exact lineage, and a sealed Public
+boundary. Its learning path is too restrictive: Numerical must first publish an
+assumption-bearing challenger before Retrieval can affect the forecast, while
+Decision cannot evolve before Retrieval publishes. In this run that dependency
+cycle collapsed to Toto.
+
+The most defensible next experiment is a pre-registered Train-only paired gate:
+materialize a small, cross-fitted set of numerical alternatives; attach
+host-generated, typed failure assumptions to each; compare parent,
+Retrieval-only, Decision-only, and Retrieval+Decision children on held-out Build
+folds; then admit at most one package to Calibration and Dev. A learned
+forecast-utility retrieval reranker can follow once this basic interaction path
+has demonstrated nonzero causal leverage. Public-99 must remain closed for that
+new search.
