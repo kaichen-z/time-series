@@ -285,7 +285,7 @@
             <span class="agent-index">01 · FORECAST</span>
             <h3>Numerical Agent</h3>
             <p>只根据历史数值提出多个可执行候选，并用历史 hindcast 检验。</p>
-            <span class="io"><span><b>输入</b>历史、频率、horizon、旧 skill</span><span><b>输出</b>forecast、assumption、失败条件</span></span>
+            <span class="io"><span><b>输入</b>历史、频率、horizon、旧 skill</span><span><b>输出</b>forecast、candidate-bound assumption、失败条件</span></span>
           </button>
           <div class="arrow" aria-hidden="true">→</div>
           <button class="agent-card" type="button" data-agent="retrieval" aria-pressed="false">
@@ -305,7 +305,7 @@
 
         <div class="detail" id="agent-detail" style="--detail-color: var(--blue)">
           <div><h3 id="detail-input-title">Numerical 看得到</h3><ul id="detail-input"><li>历史 observations</li><li>frequency 与 forecast horizon</li><li>旧 Numerical skills</li><li>上一周期的 sanitized task feedback</li></ul></div>
-          <div><h3 id="detail-output-title">Numerical 必须发布</h3><ul id="detail-output"><li>确定长度的有限 forecast array</li><li>结构化 morphology assumptions</li><li>每个 assumption 的 failure condition</li><li>history-only hindcast 分数</li></ul></div>
+          <div><h3 id="detail-output-title">Numerical 必须发布</h3><ul id="detail-output"><li>确定长度的有限 forecast array</li><li>用 candidate_names 绑定的 morphology assumptions</li><li>每个 assumption 的 failure condition</li><li>history-only hindcast 分数</li></ul></div>
           <div><h3 id="detail-limit-title">Numerical 绝不能看</h3><ul id="detail-limit"><li>future labels / gt_evidence</li><li>文档与 Retrieval artifact</li><li>Dev/Public evaluator 分数</li><li>不可执行的自由文本预测</li></ul></div>
         </div>
         <div class="example-stage" id="agent-example" style="--detail-color: var(--blue)">
@@ -328,14 +328,15 @@
     {"candidate_id": "linear_trend", "forecast": [145, 151, 157, 163], "hindcast_srmse": 0.41}
   ],
   "assumptions": [{
-    "assumption_id": "a_trend",
+    "assumption_id": "a_toto_continuation",
+    "candidate_names": ["toto"],
     "kind": "trend_persistence",
-    "claim": "Recent upward trend continues for four weeks.",
+    "claim": "Toto's learned upward continuation remains valid for four weeks.",
     "failure_condition": "A near-term promotion ends or demand reverts."
   }]
 }</pre></div>
           </div>
-          <p class="example-handoff"><b id="example-handoff-label">交给 Retrieval：</b> <span id="example-handoff-text">forecast 保留在 host；只有清洗后的四字段 assumption 可以进入 Retrieval Round 2。</span></p>
+          <p class="example-handoff"><b id="example-handoff-label">交给 Retrieval：</b> <span id="example-handoff-text">Numerical 用 candidate_names 明确绑定；host 再生成 opaque assumption ID 并私存映射。Retrieval 只能看到清洗后的四字段 assumption。</span></p>
         </div>
       </div>
 
@@ -498,7 +499,7 @@ authority/
         titles: ['Numerical 看得到', 'Numerical 必须发布', 'Numerical 绝不能看'],
         columns: [
           ['历史 observations', 'frequency 与 forecast horizon', '旧 Numerical skills', '上一周期的 sanitized task feedback'],
-          ['确定长度的有限 forecast array', '结构化 morphology assumptions', '每个 assumption 的 failure condition', 'history-only hindcast 分数'],
+          ['确定长度的有限 forecast array', '用 candidate_names 绑定的 morphology assumptions', '每个 assumption 的 failure condition', 'history-only hindcast 分数'],
           ['future labels / gt_evidence', '文档与 Retrieval artifact', 'Dev/Public evaluator 分数', '不可执行的自由文本预测']
         ],
         exampleTitle: 'Numerical payload 示例',
@@ -519,14 +520,15 @@ authority/
             {candidate_id: 'linear_trend', forecast: [145, 151, 157, 163], hindcast_srmse: 0.41}
           ],
           assumptions: [{
-            assumption_id: 'a_trend',
+            assumption_id: 'a_toto_continuation',
+            candidate_names: ['toto'],
             kind: 'trend_persistence',
-            claim: 'Recent upward trend continues for four weeks.',
+            claim: "Toto's learned upward continuation remains valid for four weeks.",
             failure_condition: 'A near-term promotion ends or demand reverts.'
           }]
         },
         handoffLabel: '交给 Retrieval：',
-        handoffText: 'forecast 保留在 host；只有清洗后的四字段 assumption 可以进入 Retrieval Round 2。'
+        handoffText: 'Numerical 用 candidate_names 明确绑定；host 再生成 opaque assumption ID 并私存映射。Retrieval 只能看到清洗后的四字段 assumption。'
       },
       retrieval: {
         color: 'var(--cyan)',
@@ -545,16 +547,16 @@ authority/
           }],
           round1: {evidence_chains: [], counterevidence: [], missing_information: ['promotion end date'], sufficient: false},
           gaps: [{
-            assumption_id: 'a_trend',
+            assumption_id: 'assumption_001',
             gap_type: 'continuation_or_reversal',
             missing_information: 'Will the recent growth continue after the promotion?',
             priority: 'high'
           }],
           assumptions: [{
-            assumption_id: 'a_trend',
+            assumption_id: 'assumption_001',
             kind: 'trend_persistence',
-            claim: 'Recent upward trend continues for four weeks.',
-            failure_condition: 'A near-term promotion ends or demand reverts.'
+            claim: 'A history-supported directional trend persists through the requested horizon.',
+            failure_condition: 'The directional trend flattens or reverses.'
           }],
           retrieval_skills: ['event_window_verification']
         },
@@ -574,7 +576,7 @@ authority/
             citations: [{document_id: 'doc_promo', exact_quote: 'Weekly orders are expected to return to the pre-campaign level, about 15% below the campaign level.'}],
             missing_links: [],
             used_skill_ids: ['event_window_verification'],
-            addressed_assumption_ids: ['a_trend'],
+            addressed_assumption_ids: ['assumption_001'],
             stance: 'challenges',
             numeric_eligible: true
           }],
@@ -583,7 +585,7 @@ authority/
           sufficient: true
         },
         handoffLabel: '交给 Decision：',
-        handoffText: 'host 会重新核对 exact quote、时间窗和 15% magnitude；验证失败的 chain 不会进入 Decision。'
+        handoffText: 'host 私下保留 assumption_001 → ["toto"]；Retrieval 看不到 candidate 名称。host 会核对 exact quote、时间窗和 15% magnitude。'
       },
       decision: {
         color: 'var(--purple)',
@@ -596,14 +598,14 @@ authority/
         exampleTitle: 'Decision payload 示例',
         exampleInput: {
           candidates: [
-            {candidate_id: 'toto', forecast: [143, 146, 147, 149], assumption: 'learned continuation', hindcast_srmse: 0.38},
+            {candidate_id: 'toto', forecast: [143, 146, 147, 149], assumption: "Toto's learned upward continuation remains valid", hindcast_srmse: 0.38},
             {candidate_id: 'seasonal_naive', forecast: [119, 122, 139, 141], assumption: 'return toward recent weekly pattern', hindcast_srmse: 0.44},
             {candidate_id: 'linear_trend', forecast: [145, 151, 157, 163], assumption: 'trend persists', hindcast_srmse: 0.41}
           ],
           host_default_id: 'toto',
           verified_evidence: [{
             chain_id: 'chain_promo_end',
-            addressed_assumption_ids: ['a_trend'],
+            addressed_assumption_ids: ['assumption_001'],
             stance: 'challenges',
             direction: 'down',
             magnitude_value: 0.15,
@@ -619,7 +621,7 @@ authority/
           used_skill_names: []
         },
         handoffLabel: '写入下一轮 feedback：',
-        handoffText: 'a_trend 被标记为 falsified/rejected；下一轮 Numerical 可据此避免再次盲目外推，但看不到 future labels。'
+        handoffText: 'host 用私有映射确认 assumption_001 challenges Toto、且不指向 seasonal_naive，才授权 override；下一轮 Numerical 只收到清洗后的失败归因。'
       }
     };
 

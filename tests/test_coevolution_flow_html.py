@@ -114,11 +114,16 @@ global.document = {
   createElement() { return new Element(); }
 };
 new Function(source)();
-cards[1].listeners.click();
-console.log(JSON.stringify({
-  input: ids['example-input'].textContent,
-  output: ids['example-output'].textContent
-}));
+const payloads = {};
+for (const card of cards) {
+  card.listeners.click();
+  payloads[card.dataset.agent] = {
+    input: ids['example-input'].textContent,
+    output: ids['example-output'].textContent,
+    handoff: ids['example-handoff-text'].textContent
+  };
+}
+console.log(JSON.stringify(payloads));
 """
     completed = subprocess.run(
         ["node", "-e", harness],
@@ -129,13 +134,33 @@ console.log(JSON.stringify({
     )
     result = json.loads(completed.stdout)
 
-    assert '"documents"' in result["input"]
-    assert '"assumptions"' in result["input"]
-    assert '"evidence_chains"' in result["output"]
-    assert '"exact_quote"' in result["output"]
+    numerical_output = json.loads(result["numerical"]["output"])
+    assert numerical_output["assumptions"][0]["candidate_names"] == ["toto"]
+    assert numerical_output["assumptions"][0]["assumption_id"] == (
+        "a_toto_continuation"
+    )
 
-    retrieval_input = json.loads(result["input"])
-    retrieval_output = json.loads(result["output"])
+    assert '"documents"' in result["retrieval"]["input"]
+    assert '"assumptions"' in result["retrieval"]["input"]
+    assert '"evidence_chains"' in result["retrieval"]["output"]
+    assert '"exact_quote"' in result["retrieval"]["output"]
+
+    retrieval_input = json.loads(result["retrieval"]["input"])
+    retrieval_output = json.loads(result["retrieval"]["output"])
+    safe_assumption = retrieval_input["assumptions"][0]
+    assert safe_assumption["assumption_id"] == "assumption_001"
+    assert "candidate_names" not in safe_assumption
+    assert retrieval_input["gaps"][0]["assumption_id"] == "assumption_001"
+    assert retrieval_output["evidence_chains"][0][
+        "addressed_assumption_ids"
+    ] == ["assumption_001"]
+    assert "assumption_001 → [\"toto\"]" in result["retrieval"]["handoff"]
+
+    decision_input = json.loads(result["decision"]["input"])
+    assert decision_input["verified_evidence"][0][
+        "addressed_assumption_ids"
+    ] == ["assumption_001"]
+    assert "challenges Toto" in result["decision"]["handoff"]
     assert [
         RetrievalAssumption.from_payload(item)
         for item in retrieval_input["assumptions"]
