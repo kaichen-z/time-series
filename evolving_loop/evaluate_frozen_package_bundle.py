@@ -31,6 +31,7 @@ from evolving_loop.package_metrics import PackageEvaluation
 from evolving_loop.package_numerical_evolution import NumericalPackageMaterializer
 from evolving_loop.package_numerical_supply import (
     NumericalSupplyRelease,
+    numerical_runtime_implementation,
     parse_numerical_supply_release,
 )
 from evolving_loop.package_pipeline_evaluator import PackagePipelineEvaluator
@@ -679,7 +680,13 @@ def _runtime_authority(
         runtime = {
             "bridge_runtime": _file_sha256(root / "numerical_two_stage.py"),
             "numerical_runtime": _digest(
-                {"source": source_fingerprints, "forecast_store": store.identity_hash}
+                {
+                    "source": source_fingerprints,
+                    "forecast_store": store.identity_hash,
+                    "implementation": dict(
+                        numerical_runtime_implementation(root, _file_sha256)
+                    ),
+                }
             ),
             "retrieval_runtime": _digest(
                 {

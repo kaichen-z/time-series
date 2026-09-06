@@ -1002,7 +1002,17 @@ class NumericalPackageMaterializer:
                 )
                 if alternative is not None:
                     materialized[alternative.name] = alternative
-            return bound_numerical_package(source, supplied_release, materialized)
+            return bound_numerical_package(
+                source,
+                supplied_release,
+                materialized,
+                history=safe.numeric.history_values,
+                task_fold=self.fold_manifest.task_fold_map.get(
+                    safe.numeric.task_id
+                ),
+                decision_policy=self.decision_policy,
+                min_successful_folds=self.hindcast_config.min_successful_folds,
+            )
 
         try:
             registry = build_package_registry(

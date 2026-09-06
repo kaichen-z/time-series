@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import Literal
 
@@ -20,12 +22,24 @@ from numerical_agent.evolution.champion import (
     parse_champion_recipe,
     parse_champion_release,
 )
+from numerical_agent.evolution.champion_runtime import execute_champion
+from numerical_agent.evolution.analysis_skills_template import analyze_series
+from numerical_agent.evolution.morphology import (
+    AssumptionGrounding,
+    MorphologyCard,
+    MorphologyObservation,
+    MorphologyToolCall,
+)
+from numerical_agent.evolution.morphology_consistency import (
+    check_morphology_assumptions,
+)
+from numerical_agent.evolution.numerical_handoff import safe_retrieval_projection
 from numerical_agent.evolution.numerical_package import (
     NumericalForecastPackage,
     RankedNumericalForecast,
     valid_forecast,
 )
-from numerical_agent.evolution.numerical_selector import SelectionDecision
+from numerical_agent.evolution.numerical_selector import DecisionPolicy, SelectionDecision
 
 
 NumericalSupplyFamily = Literal[
@@ -69,6 +83,35 @@ _ALTERNATIVE_KEYS = frozenset(
 
 class NumericalSupplyError(ValueError):
     """Raised when a Numerical supply release violates its closed contract."""
+
+
+def numerical_runtime_implementation(
+    root: Path,
+    file_sha256: Callable[[Path], str],
+) -> Mapping[str, str]:
+    """Hash the closed implementation surface that can alter Numerical packages."""
+    agent = root.parent / "numerical_agent" / "evolution"
+    paths = {
+        "analysis_skills": agent / "analysis_skills_template.py",
+        "assumptions": agent / "assumptions.py",
+        "champion_contract": agent / "champion.py",
+        "champion_runtime": agent / "champion_runtime.py",
+        "handoff": agent / "numerical_handoff.py",
+        "loop": agent / "numerical_loop.py",
+        "morphology": agent / "morphology.py",
+        "morphology_consistency": agent / "morphology_consistency.py",
+        "numerical_package": agent / "numerical_package.py",
+        "portfolio": agent / "portfolio.py",
+        "screening": agent / "screening.py",
+        "selector": agent / "numerical_selector.py",
+        "metrics": root.parent / "common" / "metrics.py",
+        "runner": root / "run_package_coevolution.py",
+        "materializer": root / "package_numerical_evolution.py",
+        "supply": root / "package_numerical_supply.py",
+    }
+    return MappingProxyType(
+        {name: file_sha256(path) for name, path in sorted(paths.items())}
+    )
 
 
 def _fail(message: str) -> None:
@@ -394,10 +437,191 @@ def _validate_champion_provenance(
         _fail("package Champion provenance does not match the supply anchor")
 
 
+def _morphology_kind(source: NumericalForecastPackage) -> tuple[str, float] | None:
+    profile = source.task_profile
+    choices: list[tuple[str, float]] = []
+    if profile.periodicity_periods and profile.periodicity_confidence >= 0.25:
+        choices.append(("seasonality", profile.periodicity_confidence))
+    if profile.trend_direction != "flat" and profile.trend_strength >= 0.25:
+        choices.append(("trend", profile.trend_strength))
+    if profile.zero_fraction > 0.3 or profile.intermittency_adi > 1.32:
+        choices.append(
+            (
+                "intermittency",
+                max(
+                    profile.zero_fraction,
+                    min(1.0, max(0.0, profile.intermittency_adi - 1.0) / 2.0),
+                ),
+            )
+        )
+    if (
+        profile.recent_regime_start is not None
+        and profile.recent_regime_confidence >= 0.25
+    ):
+        choices.append(("regime", profile.recent_regime_confidence))
+    if profile.noise_relative_scale >= 0.25 or profile.outlier_fraction >= 0.1:
+        choices.append(
+            (
+                "noise",
+                min(1.0, max(profile.noise_relative_scale, profile.outlier_fraction)),
+            )
+        )
+    if profile.likely_stationary or (
+        profile.trend_direction == "flat" and profile.trend_strength < 0.25
+    ):
+        choices.append(("level", max(0.5, profile.stationarity_score)))
+    if not choices:
+        return None
+    return max(choices, key=lambda item: (item[1], item[0]))
+
+
+def _verified_assumption_projection(
+    source: NumericalForecastPackage,
+    release: NumericalSupplyRelease,
+    retained: Sequence[RankedNumericalForecast],
+    materialized: Mapping[str, RankedNumericalForecast],
+    *,
+    history: Sequence[float] | None,
+    task_fold: int | None,
+    decision_policy: DecisionPolicy | None,
+    min_successful_folds: int | None,
+) -> tuple[
+    MorphologyCard | None,
+    tuple[AssumptionGrounding, ...],
+    Mapping[str, str],
+    tuple[Mapping[str, str], ...],
+]:
+    if history is None:
+        return (
+            source.morphology_card,
+            source.accepted_assumptions,
+            source.rejected_assumptions,
+            source.retrieval_handoff,
+        )
+    if task_fold is not None and (
+        type(task_fold) is not int or not 0 <= task_fold <= 4
+    ):
+        return None, (), {}, ()
+    try:
+        values = tuple(float(value) for value in history)
+    except (TypeError, ValueError):
+        return None, (), {}, ()
+    if (
+        len(values) < 2
+        or len(values) != source.task_profile.history_length
+        or not all(math.isfinite(value) for value in values)
+    ):
+        return None, (), {}, ()
+    selected_kind = _morphology_kind(source)
+    if selected_kind is None:
+        return None, (), {}, ()
+
+    full_call = MorphologyToolCall("host_full_history", "analyze_series", 0, len(values))
+    recent_start = max(1, len(values) // 2)
+    recent_call = MorphologyToolCall(
+        "host_recent_history", "analyze_series", recent_start, len(values)
+    )
+    calls = (full_call, recent_call)
+    observations = (
+        MorphologyObservation(
+            full_call,
+            analyze_series(values, source.task_profile.frequency),
+        ),
+        MorphologyObservation(
+            recent_call,
+            analyze_series(values[recent_start:], source.task_profile.frequency),
+        ),
+    )
+    forecasts = {name: item.forecast for name, item in materialized.items()}
+    diagnostics = {name: item.diagnostics for name, item in materialized.items()}
+    retained_by_name = {item.name: item for item in retained}
+    kind, confidence = selected_kind
+    proposals: list[AssumptionGrounding] = []
+    for specification in release.alternatives:
+        candidate_id = specification.candidate_id
+        try:
+            payload = (
+                specification.full_build_policy_payload
+                if task_fold is None
+                else dict(specification.build_fold_policy_payloads)[task_fold]
+            )
+            policy = _parse_policy(
+                _plain(payload),
+                f"release policy for {candidate_id!r}",
+            )
+        except Exception:
+            continue
+        candidate = retained_by_name.get(candidate_id)
+        if candidate is None or candidate.name == retained[0].name:
+            continue
+        try:
+            execution = execute_champion(
+                policy,
+                forecasts,
+                diagnostics,
+                source.task_profile,
+                values,
+                source.task_profile.horizon,
+            )
+        except Exception:
+            continue
+        if (
+            execution.fallback_reason is not None
+            or not execution.activated_assumptions
+            or tuple(execution.forecast) != candidate.forecast
+        ):
+            continue
+        proposals.append(
+            AssumptionGrounding(
+                assumption_id=f"{candidate_id}__host_verified",
+                kind=kind,
+                claim=(
+                    f"The frozen {candidate.family} policy is active under the "
+                    "observed historical morphology."
+                ),
+                failure_condition=(
+                    "The observed morphology or the frozen policy activation "
+                    "condition no longer holds."
+                ),
+                supporting_call_ids=tuple(call.call_id for call in calls),
+                candidate_names=(candidate_id,),
+                prior_confidence=max(0.25, min(1.0, confidence)),
+            )
+        )
+    if not proposals:
+        return None, (), {}, ()
+
+    card = MorphologyCard(
+        short_term="Host-generated history-only morphology for frozen alternatives.",
+        long_term="Only host-validated candidate assumptions may reach Retrieval.",
+        tool_calls=calls,
+        observations=observations,
+        assumptions=tuple(proposals),
+    )
+    retained_diagnostics = {item.name: item.diagnostics for item in retained}
+    retained_forecasts = {item.name: item.forecast for item in retained}
+    consistency = check_morphology_assumptions(
+        card,
+        profile=source.task_profile,
+        active_names=tuple(item.name for item in retained),
+        diagnostics=retained_diagnostics,
+        forecasts=retained_forecasts,
+        policy=decision_policy,
+        min_successful_folds=min_successful_folds,
+        protected_anchor_name=retained[0].name,
+    )
+    return (card, *safe_retrieval_projection(consistency.accepted, consistency.rejected))
+
+
 def bound_numerical_package(
     source: NumericalForecastPackage,
     release: NumericalSupplyRelease,
     materialized: Mapping[str, RankedNumericalForecast],
+    *,
+    history: Sequence[float] | None = None,
+    task_fold: int | None = None,
+    decision_policy: DecisionPolicy | None = None,
+    min_successful_folds: int | None = None,
 ) -> NumericalForecastPackage:
     """Project a source package onto a bounded, diverse supply release."""
     if not isinstance(source, NumericalForecastPackage):
@@ -473,18 +697,33 @@ def bound_numerical_package(
             canonical_json_bytes(dict(release.runtime_fingerprints))
         ).hexdigest(),
     }
+    morphology_card, accepted, rejected, handoff = _verified_assumption_projection(
+        source,
+        release,
+        ranked,
+        materialized,
+        history=history,
+        task_fold=task_fold,
+        decision_policy=decision_policy,
+        min_successful_folds=min_successful_folds,
+    )
+    component_fingerprints["morphology_card"] = (
+        morphology_card.fingerprint
+        if morphology_card is not None
+        else hashlib.sha256(b'{"enabled":false}').hexdigest()
+    )
     return NumericalForecastPackage(
         task_profile=source.task_profile,
         active_candidate_names=tuple(item.name for item in ranked),
         candidate_diagnostics={item.name: item.diagnostics for item in ranked},
-        morphology_card=source.morphology_card,
-        accepted_assumptions=source.accepted_assumptions,
-        rejected_assumptions=source.rejected_assumptions,
+        morphology_card=morphology_card,
+        accepted_assumptions=accepted,
+        rejected_assumptions=rejected,
         selection_decision=selection,
         final_forecast=anchor.forecast,
         protected_baseline=anchor,
         ranked_alternatives=ranked,
-        retrieval_handoff=source.retrieval_handoff,
+        retrieval_handoff=handoff,
         component_fingerprints=component_fingerprints,
         fallback_reason=source.fallback_reason,
     )
@@ -523,5 +762,6 @@ __all__ = [
     "NumericalSupplyRelease",
     "bound_numerical_package",
     "build_package_registry",
+    "numerical_runtime_implementation",
     "parse_numerical_supply_release",
 ]

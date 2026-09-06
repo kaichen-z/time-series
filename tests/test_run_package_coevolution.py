@@ -30,6 +30,7 @@ from evolving_loop.run_package_coevolution import (
     _build_registry,
     _configuration_identity,
     _early_resume_guard,
+    _initial_supply_release,
     _interaction_smoke_gate_failures,
     _interaction_smoke_is_complete,
     _run_controller,
@@ -121,6 +122,78 @@ def test_build_registry_thaws_frozen_numerical_anchor(
     assert (
         rebuilt.package_for(task).final_forecast == package.protected_baseline.forecast
     )
+
+
+def test_initial_supply_gives_each_seed_its_own_executable_assumption(tmp_path) -> None:
+    _task, state = _bundle(tmp_path)
+    parent = parse_numerical_supply_release(
+        state.bundle.to_payload()["numerical_release_payload"]
+    )
+    champion = run_module.parse_champion_release(
+        dict(parent.to_payload()["anchor_release_payload"])
+    )
+
+    release = _initial_supply_release(
+        champion,
+        (("naive_last", "statistical"), ("timesfm_2_5", "tsfm")),
+        source_fingerprints={"dictionary": "4" * 64},
+        runtime_fingerprints={"materializer": "5" * 64},
+        atlas=None,
+    )
+
+    for specification in release.alternatives:
+        recipe = parse_champion_recipe(
+            specification.to_payload()["recipe_payload"]
+        )
+        assert recipe.parents == (specification.candidate_id,)
+        assert recipe.fallback_parent == specification.candidate_id
+        assert tuple(
+            assumption.candidate_name for assumption in recipe.assumptions
+        ) == (specification.candidate_id,)
+
+
+@pytest.mark.parametrize(
+    "changed_file",
+    (
+        "package_numerical_supply.py",
+        "morphology.py",
+        "assumptions.py",
+        "screening.py",
+        "numerical_selector.py",
+        "metrics.py",
+    ),
+)
+def test_numerical_runtime_binds_validation_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    changed_file: str,
+) -> None:
+    changed_sha256 = ["1" * 64]
+
+    def fake_file_sha256(path: Path) -> str:
+        if path.name == changed_file:
+            return changed_sha256[0]
+        return "2" * 64
+
+    monkeypatch.setattr(run_module, "_file_sha256", fake_file_sha256)
+    args = SimpleNamespace(model="gpt-5.6-luna", reasoning_effort="medium")
+    store = SimpleNamespace(identity_hash="3" * 64)
+    seed = SimpleNamespace(manifest_file_sha256="4" * 64)
+
+    before = run_module._runtime_fingerprints(
+        args,
+        source_fingerprints={"dictionary": "5" * 64},
+        forecast_store=store,
+        seed_release=seed,
+    )
+    changed_sha256[0] = "6" * 64
+    after = run_module._runtime_fingerprints(
+        args,
+        source_fingerprints={"dictionary": "5" * 64},
+        forecast_store=store,
+        seed_release=seed,
+    )
+
+    assert before["numerical_runtime"] != after["numerical_runtime"]
 
 
 def test_smoke_registry_materializes_only_scheduled_tasks() -> None:

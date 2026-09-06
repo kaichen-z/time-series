@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Sequence
 from dataclasses import replace
 
@@ -357,6 +358,85 @@ def test_bounded_package_keeps_anchor_plus_one_per_family_and_deduplicates_vecto
     assert package.selection_decision.selected == ("safe_anchor",)
     assert package.protected_baseline.name == "safe_anchor"
     assert len(package.ranked_alternatives) <= 5
+
+
+def test_bounded_package_projects_verified_alternative_assumption_to_safe_handoff():
+    source = _wide_package()
+    release = _supply_release(
+        alternatives=(_alternative("seasonal_naive", "statistical"),)
+    )
+
+    package = bound_numerical_package(
+        source,
+        release,
+        _materialized_forecasts(),
+        history=(1.0, 2.0, 3.0) * 12,
+        task_fold=None,
+    )
+
+    assert package.morphology_card is not None
+    assert tuple(
+        grounding.candidate_names for grounding in package.accepted_assumptions
+    ) == (("seasonal_naive",),)
+    assert len(package.retrieval_handoff) == 1
+    assert set(package.retrieval_handoff[0]) == {
+        "assumption_id",
+        "kind",
+        "claim",
+        "failure_condition",
+    }
+    assert "seasonal_naive" not in json.dumps(
+        [dict(item) for item in package.retrieval_handoff]
+    )
+    assert (
+        package.component_fingerprints["morphology_card"]
+        == package.morphology_card.fingerprint
+    )
+
+
+def test_bounded_package_uses_release_policy_and_clears_stale_morphology_on_rejection():
+    source = _wide_package()
+    permissive = _supply_release(
+        alternatives=(_alternative("seasonal_naive", "statistical"),)
+    )
+    populated = bound_numerical_package(
+        source,
+        permissive,
+        _materialized_forecasts(),
+        history=(1.0, 2.0, 3.0) * 12,
+        task_fold=None,
+    )
+    strict_policy = _policy("seasonal_naive", 1_000.0)
+    base_alternative = _alternative("seasonal_naive", "statistical")
+    strict_alternative = NumericalAlternativeSpec(
+        candidate_id=base_alternative.candidate_id,
+        family=base_alternative.family,
+        materializer_kind=base_alternative.materializer_kind,
+        recipe_payload=base_alternative.to_payload()["recipe_payload"],
+        full_build_policy_payload=strict_policy.to_payload(),
+        build_fold_policy_payloads=tuple(
+            (fold, payload)
+            for fold, payload in base_alternative.to_payload()[
+                "build_fold_policy_payloads"
+            ]
+        ),
+        assumption_ids=base_alternative.assumption_ids,
+        failure_conditions=base_alternative.failure_conditions,
+    )
+
+    rejected = bound_numerical_package(
+        populated,
+        _supply_release(alternatives=(strict_alternative,)),
+        _materialized_forecasts(),
+        history=(1.0, 2.0, 3.0) * 12,
+        task_fold=None,
+    )
+
+    disabled = hashlib.sha256(b'{"enabled":false}').hexdigest()
+    assert rejected.morphology_card is None
+    assert rejected.accepted_assumptions == ()
+    assert rejected.retrieval_handoff == ()
+    assert rejected.component_fingerprints["morphology_card"] == disabled
 
 
 def test_bounded_package_rejects_a_materialized_anchor_with_a_different_forecast():

@@ -71,6 +71,7 @@ from evolving_loop.package_numerical_supply import (
     NumericalSupplyRelease,
     bound_numerical_package,
     build_package_registry,
+    numerical_runtime_implementation,
     parse_numerical_supply_release,
 )
 from evolving_loop.package_pipeline_evaluator import PackagePipelineEvaluator
@@ -100,6 +101,8 @@ from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 from numerical_agent.evolution.champion import (
     ChampionRecipe,
+    EvolutionAssumption,
+    FittedChampionPolicy,
     champion_fingerprint,
     parse_champion_release,
 )
@@ -590,6 +593,9 @@ def _runtime_fingerprints(
             {
                 "source": dict(source_fingerprints),
                 "forecast_store": forecast_store.identity_hash,
+                "implementation": dict(
+                    numerical_runtime_implementation(root, _file_sha256)
+                ),
             }
         ),
         "retrieval_runtime": _digest(
@@ -628,6 +634,29 @@ def _initial_supply_release(
 ) -> NumericalSupplyRelease:
     policy = champion.policy
     protected_names = set(policy.recipe.parents)
+
+    def seed_policy(candidate_id: str) -> FittedChampionPolicy:
+        assumption = EvolutionAssumption(
+            assumption_id=f"{candidate_id}_history_ready",
+            candidate_name=candidate_id,
+            feature="history_length",
+            direction="above",
+            horizon_region="full",
+            operator="select",
+            rationale="The candidate is executable on the observed history.",
+            failure_condition="The candidate is no longer executable on the observed history.",
+        )
+        return FittedChampionPolicy(
+            recipe=ChampionRecipe(
+                name=f"seed_{candidate_id}",
+                kind="select",
+                parents=(candidate_id,),
+                fallback_parent=candidate_id,
+                assumptions=(assumption,),
+            ),
+            thresholds=((assumption.assumption_id, 1.0),),
+        )
+
     selected: list[NumericalAlternativeSpec] = []
     seen_families: set[str] = set()
     for candidate_id, family in candidates:
@@ -635,43 +664,47 @@ def _initial_supply_release(
             continue
         if candidate_id in protected_names or family in seen_families:
             continue
+        candidate_policy = seed_policy(candidate_id)
         selected.append(
             NumericalAlternativeSpec(
                 candidate_id=candidate_id,
                 family=cast(str, family),
                 materializer_kind="dictionary",
-                recipe_payload=policy.recipe.to_payload(),
-                full_build_policy_payload=policy.to_payload(),
+                recipe_payload=candidate_policy.recipe.to_payload(),
+                full_build_policy_payload=candidate_policy.to_payload(),
                 build_fold_policy_payloads=tuple(
-                    (fold, policy.to_payload()) for fold in range(5)
+                    (fold, candidate_policy.to_payload()) for fold in range(5)
                 ),
                 assumption_ids=tuple(
-                    assumption.assumption_id for assumption in policy.recipe.assumptions
+                    assumption.assumption_id
+                    for assumption in candidate_policy.recipe.assumptions
                 ),
                 failure_conditions=tuple(
                     assumption.failure_condition
-                    for assumption in policy.recipe.assumptions
+                    for assumption in candidate_policy.recipe.assumptions
                 ),
             )
         )
         seen_families.add(family)
     if atlas is not None:
+        candidate_policy = seed_policy("atlas_70_30")
         selected.append(
             NumericalAlternativeSpec(
                 candidate_id="atlas_70_30",
                 family="atlas_overlay",
                 materializer_kind="atlas",
-                recipe_payload=policy.recipe.to_payload(),
-                full_build_policy_payload=policy.to_payload(),
+                recipe_payload=candidate_policy.recipe.to_payload(),
+                full_build_policy_payload=candidate_policy.to_payload(),
                 build_fold_policy_payloads=tuple(
-                    (fold, policy.to_payload()) for fold in range(5)
+                    (fold, candidate_policy.to_payload()) for fold in range(5)
                 ),
                 assumption_ids=tuple(
-                    assumption.assumption_id for assumption in policy.recipe.assumptions
+                    assumption.assumption_id
+                    for assumption in candidate_policy.recipe.assumptions
                 ),
                 failure_conditions=tuple(
                     assumption.failure_condition
-                    for assumption in policy.recipe.assumptions
+                    for assumption in candidate_policy.recipe.assumptions
                 ),
             )
         )
@@ -747,7 +780,25 @@ def _build_registry(
             item = materializer._materialize_alternative(source, safe, specification)
             if item is not None:
                 alternatives[item.name] = item
-        return bound_numerical_package(source, supplied, alternatives)
+        task_fold_map = getattr(
+            getattr(materializer, "fold_manifest", None), "task_fold_map", {}
+        )
+        task_fold = (
+            task_fold_map.get(safe.numeric.task_id)
+            if isinstance(task_fold_map, Mapping)
+            else None
+        )
+        return bound_numerical_package(
+            source,
+            supplied,
+            alternatives,
+            history=safe.numeric.history_values,
+            task_fold=task_fold,
+            decision_policy=materializer.decision_policy,
+            min_successful_folds=getattr(
+                materializer.hindcast_config, "min_successful_folds", None
+            ),
+        )
 
     return build_package_registry(tasks, release, build)
 
