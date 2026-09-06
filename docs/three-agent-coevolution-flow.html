@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Time-Series 三 Agent Co-evolution 流程</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07101d;
+      --panel: #0d1929;
+      --panel-2: #122238;
+      --line: #29425f;
+      --text: #ecf4ff;
+      --muted: #94a9c2;
+      --blue: #64b5ff;
+      --cyan: #58ddd0;
+      --amber: #ffc66d;
+      --rose: #ff879d;
+      --green: #6be39b;
+      --purple: #b5a1ff;
+      --shadow: 0 20px 55px rgba(0, 0, 0, .28);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+    button { font: inherit; }
+    .shell { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 34px 0 64px; }
+    .hero {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: end;
+      gap: 28px;
+      padding: 30px;
+      border: 1px solid var(--line);
+      background: #0a1727;
+      box-shadow: var(--shadow);
+    }
+    .eyebrow { margin: 0 0 8px; color: var(--cyan); font-size: 12px; letter-spacing: .16em; text-transform: uppercase; }
+    h1 { margin: 0; max-width: 760px; font-size: clamp(30px, 5vw, 58px); line-height: 1.05; letter-spacing: -.035em; font-weight: 500; }
+    .hero p { max-width: 780px; margin: 16px 0 0; color: var(--muted); font-size: 16px; }
+    .hero-state { min-width: 205px; padding: 17px 18px; border-left: 3px solid var(--amber); background: var(--panel-2); }
+    .hero-state strong { display: block; color: var(--amber); font-weight: 500; }
+    .hero-state span { color: var(--muted); font-size: 13px; }
+
+    .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 24px 0; }
+    .tabs button {
+      border: 1px solid var(--line);
+      background: transparent;
+      color: var(--muted);
+      padding: 10px 15px;
+      cursor: pointer;
+    }
+    .tabs button:hover, .tabs button:focus-visible { color: var(--text); border-color: var(--blue); }
+    .tabs button[aria-selected="true"] { color: #07101d; background: var(--blue); border-color: var(--blue); }
+    .view { display: none; }
+    .view.active { display: block; }
+    .section { margin-top: 22px; padding: 24px; border: 1px solid var(--line); background: var(--panel); }
+    .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 20px; margin-bottom: 20px; }
+    h2 { margin: 0; font-size: 21px; font-weight: 500; letter-spacing: -.01em; }
+    h3 { margin: 0; font-size: 16px; font-weight: 500; }
+    .section-head p, .note, .small { margin: 0; color: var(--muted); font-size: 13px; }
+
+    .split-flow { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); align-items: stretch; }
+    .split-card { position: relative; min-height: 118px; padding: 16px; border: 1px solid var(--line); background: var(--panel-2); }
+    .split-card + .split-card { border-left: 0; }
+    .split-card.train { grid-column: span 2; }
+    .split-card.build { grid-column: span 2; }
+    .split-card.cal { grid-column: span 2; }
+    .split-card.dev { grid-column: span 2; }
+    .split-card.public { grid-column: span 1; border-color: #70546a; background: #261828; }
+    .split-card .n { display: block; font-size: 28px; line-height: 1; color: var(--blue); }
+    .split-card.public .n { color: var(--rose); }
+    .split-card strong { display: block; margin: 9px 0 3px; font-weight: 500; }
+    .split-card small { color: var(--muted); }
+    .split-card .demo-n { color: var(--amber); }
+
+    .agent-flow { display: grid; grid-template-columns: 1fr 44px 1fr 44px 1fr; align-items: stretch; }
+    .agent-card {
+      position: relative;
+      min-height: 225px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      padding: 20px;
+      color: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+    .agent-card:hover, .agent-card:focus-visible, .agent-card.selected { border-color: var(--agent-color); outline: none; }
+    .agent-card::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--agent-color); }
+    .agent-card[data-agent="numerical"] { --agent-color: var(--blue); }
+    .agent-card[data-agent="retrieval"] { --agent-color: var(--cyan); }
+    .agent-card[data-agent="decision"] { --agent-color: var(--purple); }
+    .agent-index { color: var(--agent-color); font-size: 12px; letter-spacing: .12em; }
+    .agent-card h3 { margin: 8px 0 10px; font-size: 21px; }
+    .agent-card p { margin: 0 0 15px; color: var(--muted); }
+    .io { display: grid; gap: 7px; font-size: 12px; }
+    .io span { display: grid; grid-template-columns: 52px 1fr; gap: 8px; }
+    .io b { color: var(--agent-color); font-weight: 500; }
+    .arrow { display: grid; place-items: center; color: var(--line); font-size: 29px; }
+
+    .detail {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 1px;
+      margin-top: 14px;
+      border: 1px solid var(--line);
+      background: var(--line);
+    }
+    .detail > div { min-height: 145px; padding: 18px; background: #0a1524; }
+    .detail h3 { margin-bottom: 10px; color: var(--detail-color, var(--blue)); }
+    .detail ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+    .detail li + li { margin-top: 5px; }
+
+    .runtime { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 7px; align-items: center; }
+    .runtime-step { min-height: 118px; padding: 13px; border: 1px solid var(--line); background: var(--panel-2); }
+    .runtime-step strong { display: block; margin-bottom: 7px; font-size: 13px; color: var(--cyan); }
+    .runtime-step span { color: var(--muted); font-size: 12px; }
+    .runtime-arrow { text-align: center; color: var(--line); }
+    .fallback-strip { margin-top: 12px; padding: 12px 15px; border: 1px dashed var(--amber); color: var(--amber); font-size: 13px; }
+
+    .cycle { display: grid; grid-template-columns: 84px repeat(3, 1fr); border: 1px solid var(--line); }
+    .cycle + .cycle { border-top: 0; }
+    .cycle-title { display: grid; place-items: center; padding: 16px 8px; color: var(--muted); background: #091421; }
+    .phase { min-height: 154px; padding: 17px; border-left: 1px solid var(--line); background: var(--panel-2); }
+    .phase .coordinate { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; }
+    .phase h3 { margin: 7px 0; }
+    .phase p { margin: 0; color: var(--muted); font-size: 13px; }
+    .phase.numerical .coordinate { color: var(--blue); }
+    .phase.retrieval .coordinate { color: var(--cyan); }
+    .phase.decision .coordinate { color: var(--purple); }
+    .phase .handoff { display: block; margin-top: 12px; color: var(--amber); font-size: 12px; }
+
+    .gate-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+    .gate { min-height: 150px; padding: 17px; border-top: 3px solid var(--gate-color); background: var(--panel-2); }
+    .gate:nth-child(1) { --gate-color: var(--blue); }
+    .gate:nth-child(2) { --gate-color: var(--cyan); }
+    .gate:nth-child(3) { --gate-color: var(--amber); }
+    .gate:nth-child(4) { --gate-color: var(--rose); }
+    .gate b { color: var(--gate-color); font-weight: 500; }
+    .gate p { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
+
+    .feedback-loop { display: grid; grid-template-columns: 1fr 70px 1fr 70px 1fr; align-items: center; }
+    .feedback-node { min-height: 118px; padding: 17px; border: 1px solid var(--line); background: var(--panel-2); }
+    .feedback-node strong { display: block; color: var(--amber); margin-bottom: 7px; }
+    .feedback-node span { color: var(--muted); font-size: 13px; }
+    .feedback-arrow { text-align: center; color: var(--amber); font-size: 22px; }
+
+    .result-banner { display: grid; grid-template-columns: auto 1fr; gap: 20px; align-items: center; padding: 22px; border: 1px solid #725b31; background: #241d12; }
+    .result-zero { font-size: 46px; line-height: 1; color: var(--amber); }
+    .result-banner h2 { margin-bottom: 5px; }
+    .result-banner p { margin: 0; color: #d1bd95; }
+    .attempts { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+    .attempt { padding: 15px; border: 1px solid var(--line); background: var(--panel-2); }
+    .attempt .gen { color: var(--muted); font-size: 11px; }
+    .attempt strong { display: block; margin: 7px 0; }
+    .attempt span { font-size: 12px; }
+    .accepted { color: var(--green); }
+    .rejected { color: var(--rose); }
+    .metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .metric { padding: 17px; border: 1px solid var(--line); background: var(--panel-2); }
+    .metric h3 { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .1em; }
+    .metric .value { display: flex; align-items: center; gap: 10px; margin-top: 9px; font-size: 20px; }
+    .metric .same { color: var(--amber); }
+    .metric small { display: block; margin-top: 6px; color: var(--muted); }
+    .bottleneck { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); }
+    .bottleneck div { padding: 17px; background: #0a1524; }
+    .bottleneck b { display: block; color: var(--rose); font-weight: 500; }
+    .bottleneck span { color: var(--muted); font-size: 12px; }
+    .task-list { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-word; }
+
+    .artifact-layout { display: grid; grid-template-columns: .9fr 1.1fr; gap: 16px; }
+    .tree { margin: 0; padding: 19px; border: 1px solid var(--line); background: #07111e; color: #b8cae0; font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+    .artifact-notes { display: grid; gap: 10px; }
+    .artifact-note { padding: 17px; border: 1px solid var(--line); background: var(--panel-2); }
+    .artifact-note b { display: block; margin-bottom: 6px; color: var(--cyan); font-weight: 500; }
+    .artifact-note span { color: var(--muted); font-size: 13px; }
+    .boundary { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .boundary th, .boundary td { padding: 12px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+    .boundary th { color: var(--cyan); background: var(--panel-2); font-weight: 500; }
+    .boundary td { color: var(--muted); }
+
+    .legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 15px; color: var(--muted); font-size: 12px; }
+    .legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; background: currentColor; }
+    .legend .ok { color: var(--green); }
+    .legend .warn { color: var(--amber); }
+    .legend .bad { color: var(--rose); }
+    .legend .info { color: var(--blue); }
+    .footer { margin-top: 22px; color: var(--muted); text-align: right; font-size: 12px; }
+
+    @media (max-width: 900px) {
+      .hero { grid-template-columns: 1fr; }
+      .hero-state { min-width: 0; }
+      .split-flow { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+      .split-card, .split-card.train, .split-card.build, .split-card.cal, .split-card.dev, .split-card.public { grid-column: span 1; border: 1px solid var(--line); }
+      .split-card.public { grid-column: 1 / -1; }
+      .agent-flow { grid-template-columns: 1fr; gap: 8px; }
+      .arrow { transform: rotate(90deg); min-height: 28px; }
+      .runtime { grid-template-columns: 1fr; }
+      .runtime-arrow { transform: rotate(90deg); }
+      .cycle { grid-template-columns: 62px 1fr; }
+      .cycle-title { grid-row: span 3; }
+      .phase { border-left: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+      .phase:last-child { border-bottom: 0; }
+      .gate-grid, .attempts { grid-template-columns: repeat(2, 1fr); }
+      .feedback-loop { grid-template-columns: 1fr; gap: 8px; }
+      .feedback-arrow { transform: rotate(90deg); }
+      .artifact-layout { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 580px) {
+      .shell { width: min(100% - 20px, 1180px); padding-top: 10px; }
+      .hero, .section { padding: 18px; }
+      .section-head { display: block; }
+      .section-head p { margin-top: 6px; }
+      .tabs { display: grid; grid-template-columns: 1fr 1fr; }
+      .detail, .gate-grid, .attempts, .metric-grid, .bottleneck { grid-template-columns: 1fr; }
+      .result-banner { grid-template-columns: 1fr; }
+      .result-zero { font-size: 38px; }
+      .cycle { grid-template-columns: 1fr; }
+      .cycle-title { grid-row: auto; place-items: start; }
+      .phase { border-left: 0; border-top: 1px solid var(--line); }
+      .boundary { display: block; overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Current implementation · 2026-09-06</p>
+        <h1>Time-Series 三 Agent Co-evolution</h1>
+        <p>Numerical 负责提出可执行预测，Retrieval 负责寻找和验证上下文证据，Decision 只能在已执行候选中选择。Evolution 逐个冻结坐标，只有通过隔离 gate 的 Child 才替换 Parent。</p>
+      </div>
+      <aside class="hero-state" aria-label="当前状态">
+        <strong>流程可运行，效果尚未产生</strong>
+        <span>8/2/9 demo 完成 · 9/9 fallback Toto · Public-99 未访问</span>
+      </aside>
+    </header>
+
+    <nav class="tabs" aria-label="流程视图">
+      <button type="button" data-view="pipeline" aria-selected="true">01 推理流程</button>
+      <button type="button" data-view="evolution" aria-selected="false">02 Co-evolve</button>
+      <button type="button" data-view="demo" aria-selected="false">03 8/2/9 实跑</button>
+      <button type="button" data-view="artifacts" aria-selected="false">04 产物与边界</button>
+    </nav>
+
+    <section class="view active" id="pipeline" aria-label="推理流程">
+      <div class="section">
+        <div class="section-head">
+          <h2>数据如何被使用</h2>
+          <p>正式规模在上，当前 demo 规模用黄色标注</p>
+        </div>
+        <div class="split-flow">
+          <div class="split-card train"><span class="n">80</span><strong>Train pool</strong><small>产生候选、hindcast 与任务反馈<br><span class="demo-n">demo 只取其中 8</span></small></div>
+          <div class="split-card build"><span class="n">64</span><strong>Build gate</strong><small>首轮性能与安全筛选<br><span class="demo-n">demo：8</span></small></div>
+          <div class="split-card cal"><span class="n">16</span><strong>Calibration gate</strong><small>防止只适配 Build<br><span class="demo-n">demo：2</span></small></div>
+          <div class="split-card dev"><span class="n">20</span><strong>Dev gate</strong><small>evolution 的最终接受依据<br><span class="demo-n">demo：9</span></small></div>
+          <div class="split-card public"><span class="n">99</span><strong>Public</strong><small>冻结后一次性测试，不反馈</small></div>
+        </div>
+        <p class="note" style="margin-top:12px">Build、Calibration、Dev 按任务隔离；Public-99 不进入 proposal、selection、rerun 或 feedback。</p>
+      </div>
+
+      <div class="section">
+        <div class="section-head">
+          <h2>单个任务经过三个 Agent</h2>
+          <p>点击 Agent 查看它实际能看到什么</p>
+        </div>
+        <div class="agent-flow">
+          <button class="agent-card selected" type="button" data-agent="numerical" aria-pressed="true">
+            <span class="agent-index">01 · FORECAST</span>
+            <h3>Numerical Agent</h3>
+            <p>只根据历史数值提出多个可执行候选，并用历史 hindcast 检验。</p>
+            <span class="io"><span><b>输入</b>历史、频率、horizon、旧 skill</span><span><b>输出</b>forecast、assumption、失败条件</span></span>
+          </button>
+          <div class="arrow" aria-hidden="true">→</div>
+          <button class="agent-card" type="button" data-agent="retrieval" aria-pressed="false">
+            <span class="agent-index">02 · EVIDENCE</span>
+            <h3>Retrieval Agent</h3>
+            <p>先做 assumption-blind 检索，再围绕缺口验证经过清洗的 assumptions。</p>
+            <span class="io"><span><b>输入</b>文档、目标、typed gap、safe assumption</span><span><b>输出</b>引用、证据链、反证、完整性</span></span>
+          </button>
+          <div class="arrow" aria-hidden="true">→</div>
+          <button class="agent-card" type="button" data-agent="decision" aria-pressed="false">
+            <span class="agent-index">03 · SELECT</span>
+            <h3>Decision Agent</h3>
+            <p>把历史表现与已验证证据对齐，只能选择已执行的候选。</p>
+            <span class="io"><span><b>输入</b>候选、hindcast、verified evidence</span><span><b>输出</b>选择、引用，或 Toto fallback</span></span>
+          </button>
+        </div>
+
+        <div class="detail" id="agent-detail" style="--detail-color: var(--blue)">
+          <div><h3 id="detail-input-title">Numerical 看得到</h3><ul id="detail-input"><li>历史 observations</li><li>frequency 与 forecast horizon</li><li>旧 Numerical skills</li><li>上一周期的 sanitized task feedback</li></ul></div>
+          <div><h3 id="detail-output-title">Numerical 必须发布</h3><ul id="detail-output"><li>确定长度的有限 forecast array</li><li>结构化 morphology assumptions</li><li>每个 assumption 的 failure condition</li><li>history-only hindcast 分数</li></ul></div>
+          <div><h3 id="detail-limit-title">Numerical 绝不能看</h3><ul id="detail-limit"><li>future labels / gt_evidence</li><li>文档与 Retrieval artifact</li><li>Dev/Public evaluator 分数</li><li>不可执行的自由文本预测</li></ul></div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-head"><h2>Two-stage Retrieval 的内部顺序</h2><p>host 在每个边界做 schema 与引用验证</p></div>
+        <div class="runtime">
+          <div class="runtime-step"><strong>Round 1</strong><span>只看 target、documents、retrieval skills；不知道 Numerical 候选。</span></div>
+          <div class="runtime-arrow">→</div>
+          <div class="runtime-step"><strong>Host verify</strong><span>逐字引用、实体、目标、时间、机制、预算。</span></div>
+          <div class="runtime-arrow">→</div>
+          <div class="runtime-step"><strong>Provisional Decision</strong><span>发现证据缺口，产生 typed gaps。</span></div>
+          <div class="runtime-arrow">→</div>
+          <div class="runtime-step"><strong>Round 2 + Final</strong><span>只接收四字段 safe assumptions；合并后再次 Decision。</span></div>
+        </div>
+        <div class="fallback-strip">Fail closed：Round 1 无效 → 纯 Numerical/Toto；Round 2 无效 → 保留已验证 Round 1；Decision 无有效 override → Toto。</div>
+      </div>
+    </section>
+
+    <section class="view" id="evolution" aria-label="Co-evolve 流程">
+      <div class="section">
+        <div class="section-head"><h2>Coordinate evolution：一次只改一个 Agent</h2><p>Parent 始终是最后一个被 gate 接受的完整 bundle</p></div>
+        <div class="cycle">
+          <div class="cycle-title">Cycle 1</div>
+          <div class="phase numerical"><span class="coordinate">Generation 0</span><h3>改 Numerical</h3><p>其余 Retrieval、Decision 冻结。产生可执行 Child 与 assumptions。</p><span class="handoff">结果写入 task ledger</span></div>
+          <div class="phase retrieval"><span class="coordinate">Generation 1</span><h3>改 Retrieval</h3><p>Numerical、Decision 冻结。改变 prompt、证据链 policy 或 Round 2。</p><span class="handoff">验证 citation 与 skill provenance</span></div>
+          <div class="phase decision"><span class="coordinate">Generation 2</span><h3>改 Decision</h3><p>Numerical、Retrieval 冻结。只改变候选选择策略。</p><span class="handoff">计算 selection regret</span></div>
+        </div>
+        <div class="cycle">
+          <div class="cycle-title">Cycle 2</div>
+          <div class="phase numerical"><span class="coordinate">Generation 3</span><h3>Numerical 再进化</h3><p>读取上一周期的 failure-attributed task feedback，再提出 Child。</p><span class="handoff">这是当前真正的跨 Agent 交互点</span></div>
+          <div class="phase retrieval"><span class="coordinate">Generation 4</span><h3>Retrieval 再进化</h3><p>围绕当前 bundle 继续尝试局部 mutation。</p><span class="handoff">只继承已接受的 release</span></div>
+          <div class="phase decision"><span class="coordinate">Generation 5</span><h3>Decision 再进化</h3><p>在当前候选与证据接口上重新优化选择。</p><span class="handoff">若全周期无接受项则 early stop</span></div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-head"><h2>每个有效 Child 都要过的 gate</h2><p>前一层失败后，后层不应成为发布依据</p></div>
+        <div class="gate-grid">
+          <div class="gate"><b>1 · Structural</b><p>schema、坐标 ownership、forecast 长度、有限值、release lineage、不可变 runtime 身份。</p></div>
+          <div class="gate"><b>2 · Build</b><p>coverage、joint gain、task regret、fold 稳定性、tail 与 catastrophe 安全。</p></div>
+          <div class="gate"><b>3 · Calibration</b><p>检查 Build 上的收益能否跨到独立小集合，防止局部过拟合。</p></div>
+          <div class="gate"><b>4 · Dev</b><p>独立 Dev 上最终判定。通过才更新完整 bundle；Public 仍保持 sealed。</p></div>
+        </div>
+        <p class="note" style="margin-top:12px">Interaction smoke 中 Retrieval 允许按完整性而非 forecast gain 接受，目的是验证三 Agent 通路；这不等于正式 finalist。</p>
+      </div>
+
+      <div class="section">
+        <div class="section-head"><h2>失败如何反馈到下一轮</h2><p>反馈是 typed evidence，不是让 Agent 互相任意改代码</p></div>
+        <div class="feedback-loop">
+          <div class="feedback-node"><strong>Observed outcome</strong><span>候选覆盖、证据质量、最终选择与 fallback 都进入 task ledger。</span></div>
+          <div class="feedback-arrow">→</div>
+          <div class="feedback-node"><strong>Failure attribution</strong><span>区分 Numerical coverage、Retrieval chain、Decision regret；去掉未来值和危险字段。</span></div>
+          <div class="feedback-arrow">→</div>
+          <div class="feedback-node"><strong>Next Numerical proposal</strong><span>下一周期只看到 sanitized cases，据此保留或改变 assumption/operator。</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="demo" aria-label="8/2/9 运行结果">
+      <div class="result-banner">
+        <div class="result-zero">0%</div>
+        <div><h2>流程完整执行，但这一轮没有 forecast 改善</h2><p>两次 Retrieval mutation 被 smoke 接受；Numerical 与 Decision Child 均被 gate 拒绝。最终 bundle 在 9 个 Dev task 上仍全部回退 Toto。</p></div>
+      </div>
+
+      <div class="section">
+        <div class="section-head"><h2>两轮、六次 coordinate 尝试</h2><p>Luna proposal；实际重新评分；LLM proposal 使用缓存</p></div>
+        <div class="attempts">
+          <div class="attempt"><span class="gen">GEN 0</span><strong>Numerical</strong><span class="rejected">拒绝 · 结构无效</span></div>
+          <div class="attempt"><span class="gen">GEN 1</span><strong>Retrieval</strong><span class="accepted">接受 · smoke 完整性</span></div>
+          <div class="attempt"><span class="gen">GEN 2</span><strong>Decision</strong><span class="rejected">拒绝 · Build gate</span></div>
+          <div class="attempt"><span class="gen">GEN 3</span><strong>Numerical</strong><span class="rejected">拒绝 · 结构无效</span></div>
+          <div class="attempt"><span class="gen">GEN 4</span><strong>Retrieval</strong><span class="accepted">接受 · smoke 完整性</span></div>
+          <div class="attempt"><span class="gen">GEN 5</span><strong>Decision</strong><span class="rejected">拒绝 · Build gate</span></div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-head"><h2>9 个 held-out Dev task</h2><p>数值越低越好；Parent 与最终 Child 完全相同</p></div>
+        <div class="metric-grid">
+          <div class="metric"><h3>Joint</h3><div class="value"><span>0.640444097</span><span>→</span><span>0.640444097</span></div><small class="same">Δ 0.000000000</small></div>
+          <div class="metric"><h3>sMAE</h3><div class="value"><span>0.475259285</span><span>→</span><span>0.475259285</span></div><small class="same">Δ 0.000000000</small></div>
+          <div class="metric"><h3>sRMSE</h3><div class="value"><span>0.805628908</span><span>→</span><span>0.805628908</span></div><small class="same">Δ 0.000000000</small></div>
+        </div>
+        <p class="task-list" style="margin:14px 0 0">task_114 · task_115 · task_118 · task_142 · task_152 · task_156 · task_163 · task_184 · task_188</p>
+      </div>
+
+      <div class="section">
+        <div class="section-head"><h2>为什么没有提升</h2><p>这是结果诊断，不是流程失败</p></div>
+        <div class="bottleneck">
+          <div><b>Numerical Child ×2</b><span>未通过结构校验，因此没有新的可发布 assumption/forecast。</span></div>
+          <div><b>Retrieval chain 0%</b><span>没有形成可供 Decision 使用的完整 verified evidence chain。</span></div>
+          <div><b>Decision fallback 9/9</b><span>没有足够的合法证据支持切换到 specialist。</span></div>
+          <div><b>Final = Toto</b><span>安全规则正常工作，但候选集合没有发生有效变化。</span></div>
+        </div>
+        <div class="legend"><span class="ok">被 smoke 接受</span><span class="warn">安全 fallback</span><span class="bad">被 gate 拒绝</span><span class="info">已重新评分</span></div>
+      </div>
+    </section>
+
+    <section class="view" id="artifacts" aria-label="产物与安全边界">
+      <div class="section">
+        <div class="section-head"><h2>一次 run 会留下什么</h2><p>全部使用 fingerprint、lineage 与 checkpoint 绑定</p></div>
+        <div class="artifact-layout">
+          <pre class="tree">demo_8_2_9_luna_20260906/
+├── run_manifest.json
+├── checkpoint.json
+├── coordinate_trace.jsonl
+├── stage_evidence.jsonl
+├── task_feedback/
+│   └── task-feedback-3.json
+├── candidate_evidence/
+│   ├── numerical-0-....json
+│   ├── retrieval-1-....json
+│   └── decision-2-....json
+├── accepted_bundles/
+├── final_bundle.json
+└── evaluation_complete.json
+
+authority/
+├── llm-cache/
+├── package-inference-cache/
+└── retrieval_releases/</pre>
+          <div class="artifact-notes">
+            <div class="artifact-note"><b>run_manifest</b><span>锁定 split、runtime、模型、seed、8/2/9 schedule 与源码 fingerprint；resume 时必须一致。</span></div>
+            <div class="artifact-note"><b>coordinate_trace</b><span>每个 generation 的 Parent、Child、accepted bundle、changed module、拒绝原因与 Public access 状态。</span></div>
+            <div class="artifact-note"><b>stage_evidence</b><span>保存 Build / Calibration / Dev 的 parent-child 指标、task rows 与 gate failures。</span></div>
+            <div class="artifact-note"><b>final_bundle + completion</b><span>只包含已接受坐标；完成标记封闭 run lineage，之后才允许独立的一次性 Public evaluator。</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-head"><h2>谁能看到什么</h2><p>防止 label leakage 与跨坐标作弊</p></div>
+        <table class="boundary">
+          <thead><tr><th>边界</th><th>允许</th><th>禁止</th><th>失败行为</th></tr></thead>
+          <tbody>
+            <tr><td>Numerical proposal</td><td>历史、horizon、hindcast、sanitized feedback</td><td>documents、future labels、GT evidence、Public</td><td>结构无效则 Child 拒绝</td></tr>
+            <tr><td>Retrieval Round 2</td><td>四字段 assumption + typed gaps + documents</td><td>candidate ID、forecast array、source code、hindcast score</td><td>保留 verified Round 1</td></tr>
+            <tr><td>Decision</td><td>执行过的候选、历史分数、verified evidence</td><td>创造新 trajectory、引用未验证文本</td><td>回退 Toto</td></tr>
+            <tr><td>Public-99</td><td>sealed final bundle，一次性 point metrics</td><td>feedback、mutation、rerun selection、sCRPS</td><td>发现访问则 evolution step 拒绝</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <p class="footer">Source of truth: package co-evolution code + demo_8_2_9_luna_20260906 artifacts</p>
+  </main>
+
+  <script>
+    const viewButtons = [...document.querySelectorAll('[data-view]')];
+    const views = [...document.querySelectorAll('.view')];
+    viewButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        viewButtons.forEach((item) => item.setAttribute('aria-selected', String(item === button)));
+        views.forEach((view) => view.classList.toggle('active', view.id === button.dataset.view));
+      });
+    });
+
+    const agentData = {
+      numerical: {
+        color: 'var(--blue)',
+        titles: ['Numerical 看得到', 'Numerical 必须发布', 'Numerical 绝不能看'],
+        columns: [
+          ['历史 observations', 'frequency 与 forecast horizon', '旧 Numerical skills', '上一周期的 sanitized task feedback'],
+          ['确定长度的有限 forecast array', '结构化 morphology assumptions', '每个 assumption 的 failure condition', 'history-only hindcast 分数'],
+          ['future labels / gt_evidence', '文档与 Retrieval artifact', 'Dev/Public evaluator 分数', '不可执行的自由文本预测']
+        ]
+      },
+      retrieval: {
+        color: 'var(--cyan)',
+        titles: ['Retrieval 看得到', 'Retrieval 必须发布', 'Retrieval 绝不能看'],
+        columns: [
+          ['task target 与文档正文', 'Round 1 verified chains', 'provisional Decision 的 typed gaps', '清洗后的四字段 assumptions'],
+          ['exact quotes 与 document IDs', 'entity / target / time / mechanism', 'support 与 counterevidence chains', 'complete、gaps、rejected'],
+          ['future labels / gt_evidence', 'candidate ID 与 forecast 数组', 'Numerical source code', 'evaluator-only document role']
+        ]
+      },
+      decision: {
+        color: 'var(--purple)',
+        titles: ['Decision 看得到', 'Decision 必须发布', 'Decision 绝不能做'],
+        columns: [
+          ['已执行 candidates', 'history-only hindcast diagnostics', 'host-verified evidence chains', '当前 accepted decision skills'],
+          ['一个候选 selection', '支持 selection 的 verified citations', '必要时明确 preserve/fallback', '可审计的 selection reason'],
+          ['创造未执行 forecast', '采用未验证 quote', '用 future outcome 选择', '绕过 Toto fallback']
+        ]
+      }
+    };
+
+    const agentCards = [...document.querySelectorAll('.agent-card')];
+    const detail = document.getElementById('agent-detail');
+    const titleIds = ['detail-input-title', 'detail-output-title', 'detail-limit-title'];
+    const listIds = ['detail-input', 'detail-output', 'detail-limit'];
+    agentCards.forEach((card) => {
+      card.addEventListener('click', () => {
+        const data = agentData[card.dataset.agent];
+        agentCards.forEach((item) => {
+          item.classList.toggle('selected', item === card);
+          item.setAttribute('aria-pressed', String(item === card));
+        });
+        detail.style.setProperty('--detail-color', data.color);
+        data.titles.forEach((title, index) => {
+          document.getElementById(titleIds[index]).textContent = title;
+          document.getElementById(listIds[index]).replaceChildren(
+            ...data.columns[index].map((text) => {
+              const li = document.createElement('li');
+              li.textContent = text;
+              return li;
+            })
+          );
+        });
+      });
+    });
+  </script>
+</body>
+</html>
