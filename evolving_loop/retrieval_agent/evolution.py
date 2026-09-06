@@ -3063,10 +3063,6 @@ class RetrievalGenomeProposer:
                 )
                 valid = child is not None and child.version == version
                 if not valid:
-                    lineage_mismatch = (
-                        proposal.get("parent") != parent.version
-                        or proposal.get("version") != version
-                    )
                     normalized = dict(proposal)
                     normalized["parent"] = parent.version
                     normalized["version"] = version
@@ -3078,9 +3074,7 @@ class RetrievalGenomeProposer:
                     )
                     effective = normalized
                     effective_child = normalized_child
-                    if normalized_child is None and (
-                        schema_retry_used or lineage_mismatch
-                    ):
+                    if normalized_child is None:
                         parent_payload = parent.to_payload()
                         if set(proposal) == set(parent_payload):
                             effective = dict(parent_payload)
@@ -3097,38 +3091,37 @@ class RetrievalGenomeProposer:
                                 scope=scope,
                                 skill_library=library,
                             )
+                    if not schema_retry_used and effective_child is not None:
+                        schema_fallback = _RetrievalGenomeProposalSlot(
+                            scope=scope,
+                            version=version,
+                            proposal=dict(effective),
+                            genome=effective_child,
+                            proposal_sha256=effective_child.fingerprint(),
+                        )
+                        schema_retry_used = True
+                        payload["previous_response_error"] = {
+                            "code": "invalid_scoped_genome",
+                            "required_parent": parent.version,
+                            "required_version": version,
+                        }
+                        self._event(
+                            "schema_retry",
+                            operation="mutation",
+                            generation=generation,
+                            scope=scope,
+                        )
+                        continue
                     if effective_child is not None:
-                        if not schema_retry_used and lineage_mismatch:
-                            schema_fallback = _RetrievalGenomeProposalSlot(
-                                scope=scope,
-                                version=version,
-                                proposal=dict(effective),
-                                genome=effective_child,
-                                proposal_sha256=effective_child.fingerprint(),
-                            )
-                            schema_retry_used = True
-                            payload["previous_response_error"] = {
-                                "code": "invalid_scoped_genome",
-                                "required_parent": parent.version,
-                                "required_version": version,
-                            }
-                            self._event(
-                                "schema_retry",
-                                operation="mutation",
-                                generation=generation,
-                                scope=scope,
-                            )
-                            continue
-                        if schema_retry_used:
-                            proposal = effective
-                            child = effective_child
-                            valid = True
-                            self._event(
-                                "schema_normalized",
-                                operation="mutation",
-                                generation=generation,
-                                scope=scope,
-                            )
+                        proposal = effective
+                        child = effective_child
+                        valid = True
+                        self._event(
+                            "schema_normalized",
+                            operation="mutation",
+                            generation=generation,
+                            scope=scope,
+                        )
                 identity = (
                     child.fingerprint()
                     if valid and child is not None

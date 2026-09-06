@@ -51,6 +51,7 @@ from evolving_loop.retrieval_agent.evolution import (
     retrieval_behavior_fingerprint,
 )
 from evolving_loop.retrieval_agent.policy import RetrievalRelease
+from numerical_agent.evolution.champion import parse_champion_recipe
 from tests.test_package_coordinate_evolution import _bundle
 from tests.test_package_stage_runner import _evaluation
 from tests.test_package_stage_runner import _schedule as _formal_schedule
@@ -177,6 +178,61 @@ def test_smoke_numerical_proposer_thaws_frozen_anchor_before_fallback(tmp_path) 
     )
 
     assert candidates[0].invalid_reason == "materialization_failed"
+
+
+def test_smoke_numerical_proposer_tries_next_recipe_after_fit_failure(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task, state = _bundle(tmp_path)
+
+    def recipe(name: str, parent: str):
+        return parse_champion_recipe(
+            {
+                "name": name,
+                "kind": "select",
+                "parents": [parent],
+                "fallback_parent": parent,
+                "assumptions": [
+                    {
+                        "assumption_id": f"{name}_assumption",
+                        "candidate_name": parent,
+                        "feature": "history_length",
+                        "direction": "above",
+                        "horizon_region": "full",
+                        "operator": "select",
+                        "rationale": "Exercise smoke fallback ordering.",
+                        "failure_condition": "The candidate is unavailable.",
+                    }
+                ],
+            }
+        )
+
+    recipes = (recipe("first", "a"), recipe("second", "b"))
+    ordered = tuple(sorted(recipes, key=run_module.champion_fingerprint))
+    attempted: list[str] = []
+
+    def reject_fit(candidate, *_args):
+        attempted.append(candidate.name)
+        raise ValueError("candidate forecast is incomplete")
+
+    monkeypatch.setattr(run_module, "fit_champion_recipe", reject_fit)
+    proposer = _SmokeNumericalProposer(
+        SimpleNamespace(propose=lambda *_args, **_kwargs: recipes),
+        object(),
+        (SimpleNamespace(candidate_name="a"), SimpleNamespace(candidate_name="b")),
+        object(),
+        (task,),
+    )
+
+    candidates = proposer.propose(
+        state,
+        PackageProposalFeedback({}, (), (), ()),
+        generation=0,
+        child_count=1,
+    )
+
+    assert candidates[0].invalid_reason == "materialization_failed"
+    assert attempted == [item.name for item in ordered]
 
 
 def test_step_payload_serializes_frozen_coordinate_trace(tmp_path) -> None:

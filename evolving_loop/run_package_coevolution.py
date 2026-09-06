@@ -961,6 +961,75 @@ class _SmokeNumericalProposer:
         self.fold_manifest = fold_manifest
         self.tasks = tuple(tasks)
 
+    def _materialize_recipe(
+        self,
+        parent: PackageCoordinateState,
+        release: NumericalSupplyRelease,
+        anchor: object,
+        recipe: ChampionRecipe,
+    ) -> PackageCoordinateState:
+        full = fit_champion_recipe(recipe, self.build_rows, anchor)
+        folds = []
+        for fold in range(5):
+            ids = {
+                task_id
+                for task_id, assigned in self.fold_manifest.task_fold_map.items()
+                if assigned != fold
+            }
+            rows = tuple(row for row in self.build_rows if row.task_id in ids)
+            folds.append((fold, fit_champion_recipe(recipe, rows, anchor)))
+        family = "combined"
+        if recipe.kind == "select":
+            entry = self.materializer.screening_policy.get(recipe.parents[0])
+            if entry is None:
+                raise ValueError("unknown Numerical smoke parent")
+            family = entry.family
+        alternative = NumericalAlternativeSpec(
+            candidate_id=recipe.name,
+            family=cast(str, family),
+            materializer_kind="champion",
+            recipe_payload=recipe.to_payload(),
+            full_build_policy_payload=full.to_payload(),
+            build_fold_policy_payloads=tuple(
+                (fold, policy.to_payload()) for fold, policy in folds
+            ),
+            assumption_ids=tuple(item.assumption_id for item in recipe.assumptions),
+            failure_conditions=tuple(
+                item.failure_condition for item in recipe.assumptions
+            ),
+        )
+        by_family = {item.family: item for item in release.alternatives}
+        by_family[alternative.family] = alternative
+        alternatives = tuple(
+            by_family[family]
+            for family in ("statistical", "tsfm", "combined", "atlas_overlay")
+            if family in by_family
+        )
+        child_release = NumericalSupplyRelease(
+            schema_version=1,
+            version=f"n{int(release.version[1:]) + 1:03d}",
+            parent_sha256=release.fingerprint,
+            anchor_release_payload=dict(release.anchor_release_payload),
+            alternatives=alternatives,
+            atlas_release_sha256=release.atlas_release_sha256,
+            source_fingerprints={
+                **release.source_fingerprints,
+                "smoke_fit": _digest(
+                    {
+                        "recipe": recipe.to_payload(),
+                        "full": full.to_payload(),
+                        "folds": [policy.to_payload() for _fold, policy in folds],
+                    }
+                ),
+            },
+            runtime_fingerprints=release.runtime_fingerprints,
+        )
+        smoke_materializer = object.__new__(NumericalPackageMaterializer)
+        smoke_materializer.__dict__.update(self.materializer.__dict__)
+        smoke_materializer.fold_manifest = self.fold_manifest
+        registry = _build_registry(self.tasks, child_release, smoke_materializer)
+        return parent.with_numerical(child_release, registry)
+
     def propose(
         self,
         parent: PackageCoordinateState,
@@ -990,77 +1059,21 @@ class _SmokeNumericalProposer:
                 task_evidence=feedback.task_evidence,
             )
             reviewed = {row.candidate_name for row in self.build_rows}
-            recipe = next(
-                item
-                for item in sorted(recipes, key=champion_fingerprint)
-                if isinstance(item, ChampionRecipe)
-                and set(item.parents).issubset(reviewed)
-            )
-            full = fit_champion_recipe(recipe, self.build_rows, anchor)
-            folds = []
-            for fold in range(5):
-                ids = {
-                    task_id
-                    for task_id, assigned in self.fold_manifest.task_fold_map.items()
-                    if assigned != fold
-                }
-                rows = tuple(row for row in self.build_rows if row.task_id in ids)
-                folds.append((fold, fit_champion_recipe(recipe, rows, anchor)))
-            family = "combined"
-            if recipe.kind == "select":
-                entry = self.materializer.screening_policy.get(recipe.parents[0])
-                if entry is None:
-                    raise ValueError("unknown Numerical smoke parent")
-                family = entry.family
-            alternative = NumericalAlternativeSpec(
-                candidate_id=recipe.name,
-                family=cast(str, family),
-                materializer_kind="champion",
-                recipe_payload=recipe.to_payload(),
-                full_build_policy_payload=full.to_payload(),
-                build_fold_policy_payloads=tuple(
-                    (fold, policy.to_payload()) for fold, policy in folds
-                ),
-                assumption_ids=tuple(item.assumption_id for item in recipe.assumptions),
-                failure_conditions=tuple(
-                    item.failure_condition for item in recipe.assumptions
-                ),
-            )
-            by_family = {item.family: item for item in release.alternatives}
-            by_family[alternative.family] = alternative
-            alternatives = tuple(
-                by_family[family]
-                for family in ("statistical", "tsfm", "combined", "atlas_overlay")
-                if family in by_family
-            )
-            child_release = NumericalSupplyRelease(
-                schema_version=1,
-                version=f"n{int(release.version[1:]) + 1:03d}",
-                parent_sha256=release.fingerprint,
-                anchor_release_payload=dict(release.anchor_release_payload),
-                alternatives=alternatives,
-                atlas_release_sha256=release.atlas_release_sha256,
-                source_fingerprints={
-                    **release.source_fingerprints,
-                    "smoke_fit": _digest(
-                        {
-                            "recipe": recipe.to_payload(),
-                            "full": full.to_payload(),
-                            "folds": [policy.to_payload() for _fold, policy in folds],
-                        }
-                    ),
-                },
-                runtime_fingerprints=release.runtime_fingerprints,
-            )
-            smoke_materializer = object.__new__(NumericalPackageMaterializer)
-            smoke_materializer.__dict__.update(self.materializer.__dict__)
-            smoke_materializer.fold_manifest = self.fold_manifest
-            registry = _build_registry(self.tasks, child_release, smoke_materializer)
-            state = parent.with_numerical(child_release, registry)
+        except Exception:
+            recipes = ()
+            reviewed = set()
+        for recipe in sorted(recipes, key=champion_fingerprint):
+            if not isinstance(recipe, ChampionRecipe) or not set(
+                recipe.parents
+            ).issubset(reviewed):
+                continue
+            try:
+                state = self._materialize_recipe(parent, release, anchor, recipe)
+            except Exception:
+                continue
             raw_identity = champion_fingerprint(recipe)
             reason = None
-        except Exception:
-            pass
+            break
         identity = proposal_fingerprint(
             target="numerical",
             generation=generation,

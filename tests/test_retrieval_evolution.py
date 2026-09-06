@@ -222,6 +222,37 @@ def test_genome_proposer_retries_one_invalid_scoped_response_with_constraints() 
     }
 
 
+def test_genome_proposer_retries_out_of_scope_response_with_valid_lineage() -> None:
+    parent = RetrievalGenome.seed()
+    invalid = _proposal(parent, "v001", "A")
+    invalid["round2_prompt"] = f"{parent.round2_prompt}\nOut-of-scope rewrite."
+    valid = _proposal(parent, "v001", "A")
+    llm = FakeLLMClient([json.dumps(invalid), json.dumps(valid)])
+    proposer = RetrievalGenomeProposer(
+        llm,
+        transient_retries=0,
+        version_origin=parent.version,
+    )
+
+    slot = proposer.propose_slot(
+        parent,
+        scope="A",
+        version="v001",
+        generation=0,
+        feedback={},
+        skill_library=None,
+    )
+
+    assert slot.genome == RetrievalGenome.from_payload(valid)
+    assert len(llm.calls) == 2
+    retry_payload = json.loads(llm.calls[1]["messages"][0]["content"])
+    assert retry_payload["previous_response_error"] == {
+        "code": "invalid_scoped_genome",
+        "required_parent": "v000",
+        "required_version": "v001",
+    }
+
+
 def test_genome_proposer_projects_schema_retry_onto_host_owned_scope() -> None:
     parent = RetrievalGenome.seed()
     first = _proposal(parent, "v001", "A")
@@ -2472,6 +2503,7 @@ def test_invalid_scope_proposal_still_leaves_exactly_three_a_b_c_child_slots() -
         evaluator,
         [
             json.dumps(invalid_a),
+            "not json",
             json.dumps(_proposal(parent, "v002", "B")),
             json.dumps(_proposal(parent, "v003", "C")),
         ],
@@ -2484,7 +2516,7 @@ def test_invalid_scope_proposal_still_leaves_exactly_three_a_b_c_child_slots() -
     )
 
     generation = result.generations[0]
-    assert len(llm.calls) == 3
+    assert len(llm.calls) == 4
     assert generation.child_versions == ("v001", "v002", "v003")
     assert generation.child_scopes == ("A", "B", "C")
     assert len(generation.child_fingerprints) == 3
