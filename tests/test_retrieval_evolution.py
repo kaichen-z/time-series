@@ -337,6 +337,44 @@ def test_genome_proposer_uses_validated_projection_when_schema_retry_is_unavaila
     assert [kind for kind, _payload in events][-1] == "schema_retry_fallback"
 
 
+def test_genome_proposer_uses_validated_projection_when_schema_retry_is_noop() -> None:
+    parent = RetrievalGenome.seed()
+    first = _proposal(parent, "v001", "A")
+    first["round2_prompt"] = f"{parent.round2_prompt}\nOut-of-scope rewrite."
+    noop = parent.to_payload()
+    noop.update({"version": "v001", "parent": "v000"})
+    canonical = parent.to_payload()
+    canonical.update(
+        {
+            "version": "v001",
+            "parent": "v000",
+            "round1_prompt": first["round1_prompt"],
+        }
+    )
+    llm = FakeLLMClient([json.dumps(first), json.dumps(noop)])
+    events: list[tuple[str, dict[str, object]]] = []
+    proposer = RetrievalGenomeProposer(
+        llm,
+        transient_retries=0,
+        version_origin=parent.version,
+        event=lambda kind, **payload: events.append((kind, payload)),
+    )
+
+    slot = proposer.propose_slot(
+        parent,
+        scope="A",
+        version="v001",
+        generation=0,
+        feedback={},
+        skill_library=None,
+    )
+
+    assert slot.genome == RetrievalGenome.from_payload(canonical)
+    assert slot.proposal == canonical
+    assert len(llm.calls) == 2
+    assert [kind for kind, _payload in events][-1] == "schema_retry_fallback"
+
+
 @dataclass(frozen=True)
 class _EvaluationCall:
     version: str
@@ -2492,7 +2530,7 @@ def test_unpromoted_named_candidate_cannot_become_train_winner_or_reach_dev(
     )
 
 
-def test_invalid_scope_proposal_still_leaves_exactly_three_a_b_c_child_slots() -> None:
+def test_projected_scope_proposal_still_leaves_exactly_three_a_b_c_child_slots() -> None:
     parent = RetrievalGenome.seed()
     invalid_a = _proposal(parent, "v001", "A")
     invalid_a["round2_strategy"] = "gap_first"
@@ -2520,7 +2558,7 @@ def test_invalid_scope_proposal_still_leaves_exactly_three_a_b_c_child_slots() -
     assert generation.child_versions == ("v001", "v002", "v003")
     assert generation.child_scopes == ("A", "B", "C")
     assert len(generation.child_fingerprints) == 3
-    assert generation.rejection_reasons["v001"] == "invalid_scoped_candidate"
+    assert generation.rejection_reasons["v001"] == "screen_rank:not_promoted"
 
 
 def test_malformed_mutation_response_is_a_rejected_slot_not_an_aborted_run() -> None:

@@ -3122,6 +3122,14 @@ class RetrievalGenomeProposer:
                             generation=generation,
                             scope=scope,
                         )
+                    elif schema_retry_used and schema_fallback is not None:
+                        self._event(
+                            "schema_retry_fallback",
+                            operation="mutation",
+                            generation=generation,
+                            scope=scope,
+                        )
+                        return schema_fallback
                 identity = (
                     child.fingerprint()
                     if valid and child is not None
