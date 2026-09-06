@@ -414,8 +414,8 @@ def _validate_mode(args: argparse.Namespace) -> None:
             f"{label} evolution requires cycles={expected[0]} and "
             f"children-per-coordinate={expected[1]}"
         )
-    if args.feedback_mode != "none" and not args.interaction_smoke:
-        raise ValueError("task feedback is available only in interaction smoke")
+    if args.feedback_mode != "none" and args.smoke:
+        raise ValueError("task feedback requires formal or interaction evolution")
     if args.seed != _FORMAL_SEED:
         raise ValueError(f"package evolution seed must be {_FORMAL_SEED}")
     for name in ("tasks_file", "forecast_store"):
@@ -1842,7 +1842,7 @@ def _build_phases(
                 for index, task in enumerate(tasks)
             }
         )
-        if args.interaction_smoke
+        if args.interaction_smoke or args.feedback_mode == "task"
         else None
     )
     cached = PackageCacheBackedEvaluator(
@@ -1908,23 +1908,30 @@ def _build_phases(
         train_count=(8 if args.smoke or args.interaction_smoke else 80),
         dev_count=(2 if args.smoke or args.interaction_smoke else 20),
     )
+    feedback_manager = None
+    if args.interaction_smoke or args.feedback_mode == "task":
+        feedback_ids = (
+            (
+                *schedule.build8_ids,
+                *schedule.calibration2_ids,
+                *schedule.dev2_ids,
+            )
+            if isinstance(schedule, _SmokeSchedule)
+            else (
+                *schedule.build64_ids,
+                *schedule.calibration16_ids,
+                *schedule.dev20_ids,
+            )
+        )
+        feedback_manager = _InteractionFeedbackManager(
+            cast(PackageTaskFeedbackLedger, feedback_ledger),
+            feedback_ids,
+            artifact_store,
+            feedback_mode=args.feedback_mode,
+            tasks=task_map,
+        )
     if args.smoke or args.interaction_smoke:
         assert isinstance(schedule, _SmokeSchedule)
-        feedback_manager = (
-            _InteractionFeedbackManager(
-                cast(PackageTaskFeedbackLedger, feedback_ledger),
-                (
-                    *schedule.build8_ids,
-                    *schedule.calibration2_ids,
-                    *schedule.dev2_ids,
-                ),
-                artifact_store,
-                feedback_mode=args.feedback_mode,
-                tasks=task_map,
-            )
-            if args.interaction_smoke
-            else None
-        )
         proposers = (
             _SmokeNumericalProposer(
                 champion_proposer,
@@ -1980,6 +1987,7 @@ def _build_phases(
             PackageGateConfig(),
             artifact_store,
             retrieval_publisher=(publisher if target == "retrieval" else None),
+            feedback_manager=feedback_manager,
             child_count=3,
         )
         for target, proposer in zip(

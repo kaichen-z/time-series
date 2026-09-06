@@ -327,7 +327,7 @@ def test_parser_has_no_public_input_or_evaluation_flag() -> None:
     assert "public_output" not in destinations
 
 
-def test_interaction_smoke_requires_two_cycles_one_child_and_explicit_feedback_mode(
+def test_task_feedback_is_available_in_interaction_and_formal_modes(
     tmp_path,
 ) -> None:
     required = [
@@ -375,9 +375,23 @@ def test_interaction_smoke_requires_two_cycles_one_child_and_explicit_feedback_m
     _validate_mode(control)
     assert _configuration_identity(treatment) != _configuration_identity(control)
 
-    forbidden = build_parser().parse_args([*required, "--feedback-mode", "task"])
-    with pytest.raises(ValueError, match="interaction"):
-        _validate_mode(forbidden)
+    formal = build_parser().parse_args([*required, "--feedback-mode", "task"])
+    _validate_mode(formal)
+
+    one_cycle_smoke = build_parser().parse_args(
+        [
+            *required,
+            "--smoke",
+            "--cycles",
+            "1",
+            "--children-per-coordinate",
+            "1",
+            "--feedback-mode",
+            "task",
+        ]
+    )
+    with pytest.raises(ValueError, match="formal or interaction"):
+        _validate_mode(one_cycle_smoke)
 
 
 def test_interaction_feedback_manager_persists_cycle1_projection_for_cycle2(

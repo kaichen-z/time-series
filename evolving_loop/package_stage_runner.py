@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from common.data import Task as DataTask
+from common.evolution_core.task_feedback import TaskEvidenceProjection
 from evolving_loop.data import ContextTask
 from evolving_loop.package_candidate_proposal import (
     PackageCandidate,
@@ -396,6 +397,17 @@ class RetrievalAcceptedPublisher(Protocol):
     ) -> PackageCoordinateState: ...
 
 
+class PackageTaskFeedbackProvider(Protocol):
+    """Supply one Parent-bound sanitized projection to a Numerical phase."""
+
+    def for_numerical(
+        self,
+        state: PackageCoordinateState,
+        *,
+        generation: int,
+    ) -> TaskEvidenceProjection | None: ...
+
+
 class PackageCoordinatePhaseRunner:
     """Run one coordinate generation through the registered halving schedule."""
 
@@ -410,6 +422,7 @@ class PackageCoordinatePhaseRunner:
         artifact_store: PackageStageArtifactSink,
         *,
         retrieval_publisher: RetrievalAcceptedPublisher | None = None,
+        feedback_manager: PackageTaskFeedbackProvider | None = None,
         child_count: int = 3,
     ) -> None:
         if target not in ("numerical", "retrieval", "decision"):
@@ -428,6 +441,10 @@ class PackageCoordinatePhaseRunner:
             raise PackageStageError("a formal coordinate generation proposes three Children")
         if target == "retrieval" and retrieval_publisher is None:
             raise PackageStageError("the Retrieval coordinate requires an accepted publisher")
+        if feedback_manager is not None and not callable(
+            getattr(feedback_manager, "for_numerical", None)
+        ):
+            raise PackageStageError("task feedback provider requires for_numerical(...)")
         self.target = target
         self.proposer = proposer
         self.evaluator = evaluator
@@ -436,6 +453,7 @@ class PackageCoordinatePhaseRunner:
         self.gate_config = gate_config
         self.artifact_store = artifact_store
         self.retrieval_publisher = retrieval_publisher
+        self.feedback_manager = feedback_manager
         self.child_count = child_count
 
     # -- evaluation helpers -------------------------------------------------
@@ -486,11 +504,17 @@ class PackageCoordinatePhaseRunner:
             raise PackageStageError("phase generation must be non-negative")
 
         parent_screen = self._evaluate(parent, "screen8")
+        task_evidence = (
+            self.feedback_manager.for_numerical(parent, generation=generation)
+            if self.target == "numerical" and self.feedback_manager is not None
+            else None
+        )
         feedback = PackageProposalFeedback.from_evaluations(
             parent=parent_screen,
             rejected_children=(),
             gate_names=_GATE_NAMES,
             structures=(),
+            task_evidence=task_evidence,
         )
         candidates = tuple(
             self.proposer.propose(
@@ -675,5 +699,6 @@ __all__ = [
     "PackageStageError",
     "PackageStageEvidence",
     "PackageStageSchedule",
+    "PackageTaskFeedbackProvider",
     "RetrievalAcceptedPublisher",
 ]

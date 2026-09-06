@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 
 from common.data import Task as DataTask
+from common.evolution_core.task_feedback import TaskEvidenceProjection
 from evolving_loop.co_evolution import HarnessPolicy
 from evolving_loop.data import ContextTask, Document
 from evolving_loop.package_candidate_proposal import PackageCandidate
@@ -352,6 +353,62 @@ def test_structurally_invalid_slots_reject_the_phase(tmp_path) -> None:
     assert outcome.accepted is False
     assert outcome.selected.bundle.fingerprint() == parent.bundle.fingerprint()
     assert "invalid" in outcome.reason
+
+
+def test_formal_numerical_phase_injects_generation_bound_task_feedback(
+    tmp_path,
+) -> None:
+    _task, parent = _bundle(tmp_path)
+    projection = TaskEvidenceProjection(
+        source_bundle_sha256=parent.bundle.fingerprint(),
+        request_namespace_sha256="b" * 64,
+        cases=(),
+    )
+
+    class FeedbackManager:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def for_numerical(self, state, *, generation):
+            self.calls.append((state.bundle.fingerprint(), generation))
+            return projection
+
+    class CapturingProposer:
+        def __init__(self) -> None:
+            self.task_evidence = None
+
+        def propose(self, state, feedback, *, generation, child_count):
+            self.task_evidence = feedback.task_evidence
+            return tuple(
+                PackageCandidate(
+                    slot=slot,
+                    target="numerical",
+                    state=state,
+                    proposal_sha256=f"{slot:064x}",
+                    invalid_reason="materialization_failed",
+                )
+                for slot in range(child_count)
+            )
+
+    manager = FeedbackManager()
+    proposer = CapturingProposer()
+    runner = PackageCoordinatePhaseRunner(
+        target="numerical",
+        proposer=proposer,
+        evaluator=_ScriptedEvaluator({parent.bundle.fingerprint(): 1.0}),
+        schedule=_schedule(),
+        task_map=_task_map(),
+        gate_config=PackageGateConfig(),
+        artifact_store=InMemoryPackageArtifactSink(),
+        feedback_manager=manager,
+        child_count=3,
+    )
+
+    outcome = runner.run(parent, parent, generation=3)
+
+    assert outcome.accepted is False
+    assert manager.calls == [(parent.bundle.fingerprint(), 3)]
+    assert proposer.task_evidence is projection
 
 
 def test_accepted_phase_records_sealed_acceptance_evidence(tmp_path) -> None:
