@@ -161,6 +161,11 @@ def test_initial_supply_gives_each_seed_its_own_executable_assumption(tmp_path) 
         "screening.py",
         "numerical_selector.py",
         "metrics.py",
+        "specialist_atlas.py",
+        "task_local_evolution.py",
+        "package_stage_runner.py",
+        "package_metrics.py",
+        "package_task_feedback.py",
     ),
 )
 def test_numerical_runtime_binds_validation_dependencies(
@@ -196,6 +201,40 @@ def test_numerical_runtime_binds_validation_dependencies(
     assert before["numerical_runtime"] != after["numerical_runtime"]
 
 
+def test_formal_atlas_materializes_train_rows_and_validates_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+    manifest = object()
+    atlas = SimpleNamespace(
+        validate_manifest=lambda supplied: seen.setdefault("manifest", supplied)
+    )
+
+    def materialize(*args, split, hindcast_config):
+        seen["split"] = split
+        seen["hindcast_config"] = hindcast_config
+        return ("train-row",)
+
+    def fit(rows, supplied_manifest, policy):
+        seen["rows"] = rows
+        seen["fit_manifest"] = supplied_manifest
+        seen["policy"] = policy
+        return atlas
+
+    monkeypatch.setattr(run_module, "_materialize_atlas_rows", materialize)
+    monkeypatch.setattr(run_module, "fit_atlas_release", fit)
+
+    fitted = run_module._fit_formal_atlas(
+        object(), (), (), object(), manifest
+    )
+
+    assert fitted is atlas
+    assert seen["split"] == "train"
+    assert seen["rows"] == ("train-row",)
+    assert seen["fit_manifest"] is manifest
+    assert seen["manifest"] is manifest
+
+
 def test_smoke_registry_materializes_only_scheduled_tasks() -> None:
     tasks = tuple(_context_task(f"task_{index}") for index in range(5))
 
@@ -211,7 +250,7 @@ def test_smoke_registry_materializes_only_scheduled_tasks() -> None:
     )
 
 
-def test_smoke_schedule_avoids_a_build8_with_fewer_than_five_groups() -> None:
+def test_smoke_schedule_avoids_a_train8_with_fewer_than_five_groups() -> None:
     formal = _formal_schedule()
     task_map = _formal_task_map()
     crowded = set(formal.screen8_ids[:5])
@@ -226,10 +265,10 @@ def test_smoke_schedule_avoids_a_build8_with_fewer_than_five_groups() -> None:
 
     smoke = run_module._SmokeSchedule.build(formal, varied)
 
-    entities = {varied[task_id].numeric.entity_name for task_id in smoke.build8_ids}
-    assert len(smoke.build8_ids) == 8
+    entities = {varied[task_id].numeric.entity_name for task_id in smoke.train8_ids}
+    assert len(smoke.train8_ids) == 8
     assert len(entities) >= 5
-    assert set(smoke.build8_ids) <= set(formal.screen32_ids)
+    assert set(smoke.train8_ids) <= set(formal.screen32_ids)
     assert smoke.fold_manifest.fold_count == 5
 
 
@@ -250,15 +289,43 @@ def test_interaction_demo_schedule_can_hold_out_nine_dev_tasks() -> None:
 
     demo = run_module._SmokeSchedule.build(formal, varied, dev_count=9)
 
-    assert len(demo.build8_ids) == 8
-    assert len(demo.calibration2_ids) == 2
+    assert len(demo.train8_ids) == 8
     assert len(demo.dev_ids) == 9
+    assert demo.stage_ids("train80") == demo.train8_ids
     assert demo.stage_ids("dev20") == formal.dev20_ids[:9]
     assert demo.to_payload()["counts"] == {
-        "build": 8,
-        "calibration": 2,
+        "train": 8,
         "dev": 9,
     }
+
+
+def test_interaction_feedback_partitions_follow_smoke_schedule_membership() -> None:
+    formal = _formal_schedule()
+    task_map = _formal_task_map()
+    varied = {
+        task_id: replace(
+            task,
+            numeric=replace(
+                task.numeric,
+                history_values=(float(index), float(index + 1), float(index + 2)),
+                entity_name=f"feedback_entity_{index}",
+            ),
+        )
+        for index, (task_id, task) in enumerate(sorted(task_map.items()))
+    }
+    demo = run_module._SmokeSchedule.build(formal, varied, dev_count=9)
+    scheduled = tuple(
+        varied[task_id] for task_id in (*demo.train8_ids, *demo.dev_ids)
+    )
+
+    partitions = run_module._feedback_partitions(demo, scheduled)
+
+    assert {task_id for task_id, split in partitions.items() if split == "train"} == set(
+        demo.train8_ids
+    )
+    assert {task_id for task_id, split in partitions.items() if split == "dev"} == set(
+        demo.dev_ids
+    )
 
 
 def test_smoke_numerical_proposer_thaws_frozen_anchor_before_fallback(tmp_path) -> None:
@@ -1114,7 +1181,7 @@ def test_cache_backed_evaluator_replays_exact_bundle_stage_task_set_and_runtime(
             state.bundle,
             state.registry,
             (task,),
-            stage="calibration16",
+            stage="train80",
             cache_only=True,
         )
 

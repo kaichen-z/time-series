@@ -27,8 +27,8 @@ available to the next Numerical proposal stage.
 - Split: `splits/drcik_public_80_20_99_v3.json`
 - File SHA-256:
   `e2cc50dc95b3bdcd0dcc4b0df8d7eac3ff59ad9ce18268aa3d663e182733307d`
-- Evolution: 80 Train tasks, internally divided into 64 Build and 16 Calibration,
-  plus 20 Dev tasks.
+- Evolution: all 80 Train tasks, with nested 8/32 screens and entity-grouped
+  five-fold cross-fit, plus one read-only 20-task Dev acceptance gate.
 - Final regression: 99 Public tasks, loaded only after a final bundle is sealed.
 - Initial Numerical release: the frozen Toto safe-anchor release produced by the
   completed v3 Numerical run.
@@ -65,10 +65,11 @@ Decision caches may be reused only through their content-addressed identities.
 
 The existing package-native gates remain authoritative:
 
-- 8-task and 32-task screens precede the 64-task Build gate.
-- Build requires full coverage, bounded regret, tail non-regression, at least
+- 8-task and 32-task screens precede the full 80-task Train cross-fit gate.
+- Train cross-fit requires full coverage, bounded regret, tail non-regression, at least
   0.5% joint gain, and the configured fold-stability gate.
-- The unchanged Build finalist must then pass Calibration-16 and Dev-20.
+- The unchanged Train finalist must then pass Dev-20, the only independent
+  acceptance gate. Dev task-level outcomes never enter proposal feedback.
 - Acceptance changes exactly one principal module fingerprint and preserves
   direct lineage.
 - A full Numerical-Retrieval-Decision cycle with no accepted coordinate stops
@@ -104,4 +105,3 @@ will not change this registered run after Public-99 is opened.
 - an evidence-backed design review with links to primary sources; and
 - a concise result summary distinguishing development, frozen regression, and
   genuinely hidden-test claims.
-

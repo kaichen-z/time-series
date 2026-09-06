@@ -1,4 +1,4 @@
-"""Target-agnostic 8/32/64/16/20 successive-halving package phase runner."""
+"""Target-agnostic 8/32/80/20 successive-halving package phase runner."""
 from __future__ import annotations
 
 import hashlib
@@ -25,7 +25,6 @@ from evolving_loop.package_metrics import (
     package_rank_key,
     package_screen_failures,
 )
-from numerical_agent.evolution.champion_controller import partition_train_tasks
 from numerical_agent.evolution.task_local_evolution import (
     GroupFoldManifest,
     build_group_fold_manifest,
@@ -35,28 +34,24 @@ from numerical_agent.evolution.task_local_evolution import (
 _STAGE_ORDER: tuple[str, ...] = (
     "screen8",
     "screen32",
-    "build64",
-    "calibration16",
+    "train80",
     "dev20",
 )
 _STAGE_SIZES: Mapping[str, int] = {
     "screen8": 8,
     "screen32": 32,
-    "build64": 64,
-    "calibration16": 16,
+    "train80": 80,
     "dev20": 20,
 }
 _PROMOTE_LIMITS: Mapping[str, int] = {
     "screen8": 2,
     "screen32": 1,
-    "build64": 1,
-    "calibration16": 1,
+    "train80": 1,
     "dev20": 1,
 }
 _SCREEN_STAGES: frozenset[str] = frozenset({"screen8", "screen32"})
 _FULL_STAGE_KIND: Mapping[str, str] = {
-    "build64": "build",
-    "calibration16": "calibration",
+    "train80": "train",
     "dev20": "dev",
 }
 _DEFAULT_SEED = 20260903
@@ -117,13 +112,12 @@ def _take_whole_groups(
 
 @dataclass(frozen=True)
 class PackageStageSchedule:
-    """Registered nested 8/32/64/16/20 task universe with a five-fold Build manifest."""
+    """Registered nested 8/32/80/20 universe with five-fold Train cross-fit."""
 
     seed: int
     screen8_ids: tuple[str, ...]
     screen32_ids: tuple[str, ...]
-    build64_ids: tuple[str, ...]
-    calibration16_ids: tuple[str, ...]
+    train80_ids: tuple[str, ...]
     dev20_ids: tuple[str, ...]
     fold_manifest: GroupFoldManifest
 
@@ -133,8 +127,7 @@ class PackageStageSchedule:
         stages = {
             "screen8": self.screen8_ids,
             "screen32": self.screen32_ids,
-            "build64": self.build64_ids,
-            "calibration16": self.calibration16_ids,
+            "train80": self.train80_ids,
             "dev20": self.dev20_ids,
         }
         for stage, ids in stages.items():
@@ -148,20 +141,16 @@ class PackageStageSchedule:
                 raise PackageStageError(f"{stage} membership is not a registered set")
         if not set(self.screen8_ids) <= set(self.screen32_ids):
             raise PackageStageError("screen8 must nest inside screen32")
-        if not set(self.screen32_ids) <= set(self.build64_ids):
-            raise PackageStageError("screen32 must nest inside build64")
-        if not set(self.build64_ids).isdisjoint(self.calibration16_ids):
-            raise PackageStageError("Build and Calibration must be disjoint")
-        if not set(self.dev20_ids).isdisjoint(
-            set(self.build64_ids) | set(self.calibration16_ids)
-        ):
+        if not set(self.screen32_ids) <= set(self.train80_ids):
+            raise PackageStageError("screen32 must nest inside train80")
+        if not set(self.dev20_ids).isdisjoint(self.train80_ids):
             raise PackageStageError("Dev must be disjoint from the Train partition")
         if not isinstance(self.fold_manifest, GroupFoldManifest):
             raise PackageStageError("stage schedule requires a GroupFoldManifest")
         if self.fold_manifest.fold_count != 5:
-            raise PackageStageError("Build cross-fit requires exactly five folds")
-        if set(self.fold_manifest.task_fold_map) != set(self.build64_ids):
-            raise PackageStageError("fold manifest must cover the exact Build universe")
+            raise PackageStageError("Train cross-fit requires exactly five folds")
+        if set(self.fold_manifest.task_fold_map) != set(self.train80_ids):
+            raise PackageStageError("fold manifest must cover the exact Train universe")
 
     @classmethod
     def build(
@@ -179,13 +168,8 @@ class PackageStageSchedule:
             raise PackageStageError("registered Train partition requires exactly 80 tasks")
         if len(dev) != 20 or any(type(task) is not DataTask for task in dev):
             raise PackageStageError("registered Dev partition requires exactly 20 tasks")
-        partitions = partition_train_tasks(
-            train, build_size=64, calibration_size=16, seed=seed
-        )
-        build_tasks = tuple(partitions.build)
-        calibration_tasks = tuple(partitions.calibration)
-        fold_manifest = build_group_fold_manifest(build_tasks, seed=seed, fold_count=5)
-        group_order = _entity_group_order(build_tasks, seed)
+        fold_manifest = build_group_fold_manifest(train, seed=seed, fold_count=5)
+        group_order = _entity_group_order(train, seed)
         screen32 = _take_whole_groups(group_order, 32, stage="screen32")
         screen32_groups = tuple(
             group for group in group_order if set(group) <= set(screen32)
@@ -195,15 +179,14 @@ class PackageStageSchedule:
             seed=seed,
             screen8_ids=screen8,
             screen32_ids=screen32,
-            build64_ids=tuple(sorted(task.task_id for task in build_tasks)),
-            calibration16_ids=tuple(sorted(task.task_id for task in calibration_tasks)),
+            train80_ids=tuple(sorted(task.task_id for task in train)),
             dev20_ids=tuple(sorted(task.task_id for task in dev)),
             fold_manifest=fold_manifest,
         )
 
     @property
-    def counts(self) -> tuple[int, int, int, int, int]:
-        return (8, 32, 64, 16, 20)
+    def counts(self) -> tuple[int, int, int, int]:
+        return (8, 32, 80, 20)
 
     def stage_ids(self, stage: str) -> tuple[str, ...]:
         if stage not in _STAGE_SIZES:
@@ -211,8 +194,7 @@ class PackageStageSchedule:
         return {
             "screen8": self.screen8_ids,
             "screen32": self.screen32_ids,
-            "build64": self.build64_ids,
-            "calibration16": self.calibration16_ids,
+            "train80": self.train80_ids,
             "dev20": self.dev20_ids,
         }[stage]
 
@@ -236,12 +218,11 @@ class PackageStageSchedule:
 
     def to_payload(self) -> dict[str, object]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "seed": self.seed,
             "screen8_ids": list(self.screen8_ids),
             "screen32_ids": list(self.screen32_ids),
-            "build64_ids": list(self.build64_ids),
-            "calibration16_ids": list(self.calibration16_ids),
+            "train80_ids": list(self.train80_ids),
             "dev20_ids": list(self.dev20_ids),
             "fold_manifest": self.fold_manifest.to_payload(),
         }
@@ -483,7 +464,7 @@ class PackageCoordinatePhaseRunner:
             parent_eval,
             self.gate_config,
             stage=_FULL_STAGE_KIND[stage],
-            fold_manifest=self.schedule.fold_manifest if stage == "build64" else None,
+            fold_manifest=self.schedule.fold_manifest if stage == "train80" else None,
             initial=initial_eval,
         )
 

@@ -16,7 +16,7 @@ from .numerical_selector import CandidateDiagnostics
 from .task_local_evolution import GroupFoldManifest, TaskLocalTaskRow
 
 
-_ATLAS_BUILD_TASK_COUNT = 64
+_ATLAS_BUILD_TASK_COUNT = 80
 _NONFINITE_REGRET_SENTINEL = 1.0
 
 
@@ -462,7 +462,7 @@ class AtlasCandidateEstimate:
 
 @dataclass(frozen=True)
 class AtlasModel:
-    """Frozen nearest-neighbor evidence fitted from one Build partition."""
+    """Frozen nearest-neighbor evidence fitted from one Train partition."""
 
     feature_scales: tuple[float, ...]
     training_task_sha256s: tuple[str, ...]
@@ -573,14 +573,14 @@ class AtlasRelease:
             raise ValueError("Atlas release requires an exact policy")
         AtlasPolicy.__post_init__(self.policy)
         if type(self.full_build_model) is not AtlasModel:
-            raise ValueError("Atlas release requires an exact full-Build model")
+            raise ValueError("Atlas release requires an exact full-Train model")
         AtlasModel.__post_init__(self.full_build_model)
         if self.full_build_model.training_task_count != _ATLAS_BUILD_TASK_COUNT:
-            raise ValueError("Atlas release requires the exact 64-task Build universe")
+            raise ValueError("Atlas release requires the exact 80-task Train universe")
         if type(self.build_fold_models) is not tuple or tuple(
             fold for fold, _model in self.build_fold_models
         ) != (0, 1, 2, 3, 4):
-            raise ValueError("Atlas release requires Build models zero through four")
+            raise ValueError("Atlas release requires Train models zero through four")
         for _fold, model in self.build_fold_models:
             if type(model) is not AtlasModel:
                 raise ValueError("Atlas fold models must be exact")
@@ -624,14 +624,14 @@ class AtlasRelease:
                 self.build_fold_models, omitted_tasks, omitted_groups, strict=True
             )
         ):
-            raise ValueError("Atlas fold model does not exclude held-out Build groups")
+            raise ValueError("Atlas fold model does not exclude held-out Train groups")
         if (
             set().union(*omitted_tasks) != full_tasks
             or sum(len(values) for values in omitted_tasks) != len(full_tasks)
             or set().union(*omitted_groups) != full_groups
             or sum(len(values) for values in omitted_groups) != len(full_groups)
         ):
-            raise ValueError("Atlas held-out Build partitions are not disjoint and complete")
+            raise ValueError("Atlas held-out Train partitions are not disjoint and complete")
         for value, label in (
             (self.source_sha256, "source"),
             (self.policy_sha256, "policy"),
@@ -663,11 +663,11 @@ class AtlasRelease:
         }
 
     def validate_manifest(self, manifest: GroupFoldManifest) -> None:
-        """Bind every numbered fold omission to one exact 64-task manifest."""
+        """Bind every numbered fold omission to one exact 80-task Train manifest."""
         if type(manifest) is not GroupFoldManifest or manifest.fold_count != 5:
             raise ValueError("Atlas release requires an exact five-fold manifest")
         if len(manifest.task_fold_map) != _ATLAS_BUILD_TASK_COUNT:
-            raise ValueError("Atlas release manifest requires exactly 64 Build tasks")
+            raise ValueError("Atlas release manifest requires exactly 80 Train tasks")
         if self.fold_manifest_sha256 != _sha256(manifest.to_payload()):
             raise ValueError("Atlas release fold manifest fingerprint mismatch")
         expected_full = tuple(
@@ -813,7 +813,7 @@ def _validated_atlas_rows(
         or set(task_ids) != set(group_ids)
     ):
         raise ValueError(
-            "Atlas fitting requires the exact registered 64-task Build universe"
+            "Atlas fitting requires the exact registered 80-task Train universe"
         )
     by_task = _rows_by_task(snapshot, task_ids)
     expected_candidates = set(by_task[task_ids[0]])
@@ -1038,7 +1038,7 @@ def fit_atlas_release(
     fold_manifest: GroupFoldManifest,
     policy: AtlasPolicy,
 ) -> AtlasRelease:
-    """Fit five OOF Atlas models and freeze a separate full-Build model."""
+    """Fit five OOF Atlas models and freeze a separate full-Train model."""
     if type(policy) is not AtlasPolicy:
         raise TypeError("Atlas release fitting requires an exact policy")
     AtlasPolicy.__post_init__(policy)
@@ -1155,7 +1155,7 @@ def route_atlas_task(
     *,
     fold: int | None,
 ) -> AtlasTaskResult:
-    """Route one label-free task through an OOF or frozen full-Build Atlas model."""
+    """Route one label-free task through an OOF or frozen full-Train Atlas model."""
     if type(task_case) is not AtlasTaskCase:
         raise TypeError("Atlas routing requires an exact task case")
     AtlasTaskCase.__post_init__(task_case)
@@ -1298,7 +1298,7 @@ def fit_atlas_oof(
     fold_manifest: GroupFoldManifest,
     policy: AtlasPolicy,
 ) -> AtlasOOFResult:
-    """Fit every Atlas partition and route each Build task out of fold."""
+    """Fit every Atlas partition and route each Train task out of fold."""
     snapshot, task_ids, group_ids = _validated_atlas_rows(rows, fold_manifest)
     release = fit_atlas_release(snapshot, fold_manifest, policy)
     by_task = _rows_by_task(snapshot, task_ids)

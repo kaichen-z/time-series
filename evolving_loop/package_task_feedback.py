@@ -267,6 +267,8 @@ class PackageTaskFeedbackLedger:
             )
         ):
             raise TaskFeedbackError("task feedback projection membership is invalid")
+        if any(self.partition_by_task[task_id] != "train" for task_id in resolved):
+            raise TaskFeedbackError("task feedback projection is Train-only")
         if type(generation) is not int or generation < 1:
             raise TaskFeedbackError("task feedback generation must be positive")
         principal = _principal_key(bundle)

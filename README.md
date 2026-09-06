@@ -1058,6 +1058,13 @@ The registered Dev partition is part of evolution. Public-99 is historically
 consumed final regression evidence and is evaluated only from a sealed final bundle;
 Public output must never be fed back into evolution, mutation, selection, or reruns.
 
+The package-native controller uses all 80 Train tasks: three Children are narrowed through nested
+8-task and 32-task screens, then the finalist is evaluated with entity-grouped five-fold cross-fit
+on Train-80. There is no permanent Calibration partition in this controller. The unchanged Train
+finalist reaches Dev-20, which is the only independent acceptance gate. Detailed task feedback is
+constructed from Train traces only; Dev returns acceptance evidence but cannot feed the next
+proposal. Interaction smoke uses the analogous 8 Train / N Dev schedule.
+
 After the formal evolution run has written its completion marker, score the frozen
 bundle once in a separate output directory:
 

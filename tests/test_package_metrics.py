@@ -173,7 +173,8 @@ class _FoldManifest:
         self.task_fold_map = task_fold_map
 
 
-def test_build_gate_requires_four_safe_and_three_improving_folds():
+@pytest.mark.parametrize("stage", ("build", "train"))
+def test_train_gate_requires_four_safe_and_three_improving_folds(stage):
     parent = _uniform_evaluation(1.0)
     child = _evaluation(
         tuple(
@@ -185,7 +186,7 @@ def test_build_gate_requires_four_safe_and_three_improving_folds():
         child,
         parent,
         PackageGateConfig(),
-        stage="build",
+        stage=stage,
         fold_manifest=_FoldManifest(
             5,
             {f"task_{index}": index for index in range(5)},

@@ -455,7 +455,7 @@ def package_full_gate_failures(
     fold_manifest: object | None = None,
     initial: PackageEvaluation | None = None,
 ) -> tuple[str, ...]:
-    """Return Build/Calibration/Dev acceptance failures."""
+    """Return Train/Dev acceptance failures."""
     if not isinstance(stage, str) or not stage:
         raise ValueError("package full gate requires a stage")
     failures = list(package_screen_failures(child, parent, config))
@@ -496,7 +496,7 @@ def package_full_gate_failures(
         if child.mean_srmse > initial.mean_srmse + config.tolerance:
             failures.append("initial_toto_mean_srmse")
 
-    if stage.casefold().startswith("build"):
+    if stage.casefold().startswith(("build", "train")):
         if (
             fold_manifest is None
             or not hasattr(fold_manifest, "task_fold_map")

@@ -288,7 +288,7 @@ def test_package_coordinate_evolution_closes_deterministic_two_cycle_loop(
         "retrieval",
         "decision",
     )
-    assert _schedule().counts == (8, 32, 64, 16, 20)
+    assert _schedule().counts == (8, 32, 80, 20)
     assert [step.accepted for step in trace] == [True, True, True, False, False, False]
     assert all(not step.public_test_accessed for step in trace)
     assert forbidden_calls == {"public_loader": 0, "legacy_runner": 0}
@@ -310,8 +310,7 @@ def test_package_coordinate_evolution_closes_deterministic_two_cycle_loop(
     assert set(evaluator.stages_seen) <= {
         "screen8",
         "screen32",
-        "build64",
-        "calibration16",
+        "train80",
         "dev20",
     }
     assert {

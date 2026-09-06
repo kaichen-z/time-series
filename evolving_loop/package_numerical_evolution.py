@@ -131,11 +131,11 @@ class NumericalRecipeFit:
             type(self.full_build_policy) is not FittedChampionPolicy
             or self.full_build_policy.recipe != self.recipe
         ):
-            _fail("Numerical full-Build policy does not bind its recipe")
+            _fail("Numerical full-Train policy does not bind its recipe")
         if type(self.build_fold_policies) is not tuple or tuple(
             fold for fold, _policy in self.build_fold_policies
         ) != (0, 1, 2, 3, 4):
-            _fail("Numerical fit requires policies for Build folds zero through four")
+            _fail("Numerical fit requires policies for Train folds zero through four")
         if any(
             type(policy) is not FittedChampionPolicy or policy.recipe != self.recipe
             for _fold, policy in self.build_fold_policies
@@ -143,7 +143,7 @@ class NumericalRecipeFit:
             _fail("Numerical fold policy does not bind its recipe")
         if (
             type(self.full_build_task_ids) is not tuple
-            or len(self.full_build_task_ids) != 64
+            or len(self.full_build_task_ids) != 80
             or len(self.full_build_task_ids) != len(set(self.full_build_task_ids))
             or self.full_build_task_ids != tuple(sorted(self.full_build_task_ids))
             or any(
@@ -151,11 +151,11 @@ class NumericalRecipeFit:
                 for task_id in self.full_build_task_ids
             )
         ):
-            _fail("Numerical fit requires the exact 64-task Build universe")
+            _fail("Numerical fit requires the exact 80-task Train universe")
         if type(self.fold_training_task_ids) is not tuple or tuple(
             fold for fold, _task_ids in self.fold_training_task_ids
         ) != (0, 1, 2, 3, 4):
-            _fail("Numerical fit requires training membership for every Build fold")
+            _fail("Numerical fit requires training membership for every Train fold")
         universe = set(self.full_build_task_ids)
         for _fold, task_ids in self.fold_training_task_ids:
             if (
@@ -188,11 +188,11 @@ def fit_numerical_recipe(
     fold_manifest: GroupFoldManifest,
     parent: ChampionRelease,
 ) -> NumericalRecipeFit:
-    """Fit one full-Build policy and five held-out-group policies."""
+    """Fit one full-Train policy and five held-out-group policies."""
     if type(recipe) is not ChampionRecipe:
         _fail("Numerical fitting requires an exact ChampionRecipe")
     if type(build_rows) not in {tuple, list} or not build_rows:
-        _fail("Numerical fitting requires a nonempty exact Build row sequence")
+        _fail("Numerical fitting requires a nonempty exact Train row sequence")
     supplied_rows = tuple(build_rows)
     if any(type(row) is not ChampionTaskRow for row in supplied_rows):
         _fail("Numerical fitting requires exact ChampionTaskRow values")
@@ -200,18 +200,18 @@ def fit_numerical_recipe(
         sorted(supplied_rows, key=lambda row: (row.task_id, row.candidate_name))
     )
     if any(row.split != "build" for row in rows):
-        _fail("Numerical fitting accepts Build rows only")
+        _fail("Numerical fitting accepts internal Train rows only")
     if type(fold_manifest) is not GroupFoldManifest or fold_manifest.fold_count != 5:
         _fail("Numerical fitting requires an exact five-fold group manifest")
     if type(parent) is not ChampionRelease:
         _fail("Numerical fitting requires an exact ChampionRelease Parent")
 
     task_ids = tuple(sorted({row.task_id for row in rows}))
-    if len(task_ids) != 64 or set(task_ids) != set(fold_manifest.task_fold_map):
-        _fail("Numerical fitting requires the exact registered 64-task Build universe")
+    if len(task_ids) != 80 or set(task_ids) != set(fold_manifest.task_fold_map):
+        _fail("Numerical fitting requires the exact registered 80-task Train universe")
     task_folds = dict(fold_manifest.task_fold_map)
     if any(row.fold != task_folds[row.task_id] for row in rows):
-        _fail("Build row folds do not match the registered group manifest")
+        _fail("Train row folds do not match the registered group manifest")
 
     try:
         full_build_policy = fit_champion_recipe(recipe, rows, parent)
@@ -523,10 +523,10 @@ class NumericalPackageMaterializer:
         if (
             type(fold_manifest) is not GroupFoldManifest
             or fold_manifest.fold_count != 5
-            or len(fold_manifest.task_fold_map) != 64
+            or len(fold_manifest.task_fold_map) != 80
         ):
             _fail(
-                "Numerical materializer requires the exact 64-task five-fold manifest"
+                "Numerical materializer requires the exact 80-task Train five-fold manifest"
             )
         tasks = tuple(original_tasks)
         if len(tasks) != 100 or any(type(task) is not ContextTask for task in tasks):
@@ -537,7 +537,7 @@ class NumericalPackageMaterializer:
         if len(task_ids) != len(set(task_ids)):
             _fail("Numerical materializer host task identities must be unique")
         if not set(fold_manifest.task_fold_map).issubset(task_ids):
-            _fail("Numerical materializer is missing registered Build tasks")
+            _fail("Numerical materializer is missing registered Train tasks")
         policies = tuple(combined_policies)
         if any(type(policy) is not CombinedPolicy for policy in policies):
             _fail("Numerical materializer Combined policies must be exact")
@@ -704,7 +704,7 @@ class NumericalPackageMaterializer:
             _fail("Numerical recipe fit fold manifest mismatch")
         manifest_ids = set(self.fold_manifest.task_fold_map)
         if set(fit.full_build_task_ids) != manifest_ids:
-            _fail("Numerical recipe fit Build membership mismatch")
+            _fail("Numerical recipe fit Train membership mismatch")
         memberships = dict(fit.fold_training_task_ids)
         for fold in range(5):
             held_out = {
@@ -1082,7 +1082,7 @@ class NumericalPackageProposer:
             _fail("Numerical proposer requires a materializer boundary")
         rows = tuple(build_rows)
         if not rows or any(type(row) is not ChampionTaskRow for row in rows):
-            _fail("Numerical proposer requires exact Build rows")
+            _fail("Numerical proposer requires exact Train rows")
         evolution_tasks = tuple(tasks)
         if len(evolution_tasks) != 100 or any(
             type(task) is not ContextTask for task in evolution_tasks
@@ -1095,15 +1095,15 @@ class NumericalPackageProposer:
         if (
             type(fold_manifest) is not GroupFoldManifest
             or fold_manifest.fold_count != 5
-            or len(fold_manifest.task_fold_map) != 64
+            or len(fold_manifest.task_fold_map) != 80
         ):
-            _fail("Numerical proposer requires the exact 64-task five-fold manifest")
+            _fail("Numerical proposer requires the exact 80-task Train five-fold manifest")
         if {row.task_id for row in rows} != set(fold_manifest.task_fold_map):
-            _fail("Numerical proposer Build row universe does not match the manifest")
+            _fail("Numerical proposer Train row universe does not match the manifest")
         if not set(fold_manifest.task_fold_map).issubset(
             task.numeric.task_id for task in evolution_tasks
         ):
-            _fail("Numerical proposer evolution tasks omit registered Build rows")
+            _fail("Numerical proposer evolution tasks omit registered Train rows")
         self.proposer = proposer
         self.materializer = materializer
         self.build_rows = rows

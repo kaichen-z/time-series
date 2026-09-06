@@ -120,11 +120,68 @@ class NamedPackageState:
 @dataclass(frozen=True)
 class VerifiedPackageRun:
     run_manifest: Mapping[str, object]
-    schedule: PackageStageSchedule
+    schedule: PackageStageSchedule | "_LegacyPackageStageSchedule"
     initial_state: PackageCoordinateState
     final_state: PackageCoordinateState
     trace: tuple[PackageCoordinateStep, ...]
     runtime_fingerprints: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class _LegacyPackageStageSchedule:
+    """Read-only schema-v1 schedule reference for already sealed runs."""
+
+    seed: int
+    screen8_ids: tuple[str, ...]
+    screen32_ids: tuple[str, ...]
+    build64_ids: tuple[str, ...]
+    calibration16_ids: tuple[str, ...]
+    dev20_ids: tuple[str, ...]
+    fold_manifest: GroupFoldManifest
+
+    def __post_init__(self) -> None:
+        stages = (
+            (self.screen8_ids, 8),
+            (self.screen32_ids, 32),
+            (self.build64_ids, 64),
+            (self.calibration16_ids, 16),
+            (self.dev20_ids, 20),
+        )
+        if type(self.seed) is not int or any(
+            type(ids) is not tuple
+            or len(ids) != size
+            or ids != tuple(sorted(ids))
+            or len(ids) != len(set(ids))
+            or any(type(task_id) is not str or not task_id for task_id in ids)
+            for ids, size in stages
+        ):
+            raise FrozenPackageEvaluationError("legacy evolution schedule is malformed")
+        build = set(self.build64_ids)
+        calibration = set(self.calibration16_ids)
+        train = build | calibration
+        if (
+            not set(self.screen8_ids) <= set(self.screen32_ids) <= build
+            or build & calibration
+            or train & set(self.dev20_ids)
+            or set(self.fold_manifest.task_fold_map) != build
+        ):
+            raise FrozenPackageEvaluationError("legacy evolution schedule is malformed")
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "seed": self.seed,
+            "screen8_ids": list(self.screen8_ids),
+            "screen32_ids": list(self.screen32_ids),
+            "build64_ids": list(self.build64_ids),
+            "calibration16_ids": list(self.calibration16_ids),
+            "dev20_ids": list(self.dev20_ids),
+            "fold_manifest": self.fold_manifest.to_payload(),
+        }
+
+    @property
+    def fingerprint(self) -> str:
+        return _digest(self.to_payload())
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -159,7 +216,9 @@ def _read_canonical_json(path: Path, label: str) -> dict[str, object]:
     return payload
 
 
-def _schedule_from_payload(payload: Mapping[str, object]) -> PackageStageSchedule:
+def _schedule_from_payload(
+    payload: Mapping[str, object],
+) -> PackageStageSchedule | _LegacyPackageStageSchedule:
     try:
         fold = cast(Mapping[str, object], payload["fold_manifest"])
         groups = tuple(
@@ -177,15 +236,28 @@ def _schedule_from_payload(payload: Mapping[str, object]) -> PackageStageSchedul
             groups=groups,
             grouping_fingerprint=cast(str, fold["grouping_fingerprint"]),
         )
-        return PackageStageSchedule(
-            seed=cast(int, payload["seed"]),
-            screen8_ids=tuple(cast(Sequence[str], payload["screen8_ids"])),
-            screen32_ids=tuple(cast(Sequence[str], payload["screen32_ids"])),
-            build64_ids=tuple(cast(Sequence[str], payload["build64_ids"])),
-            calibration16_ids=tuple(cast(Sequence[str], payload["calibration16_ids"])),
-            dev20_ids=tuple(cast(Sequence[str], payload["dev20_ids"])),
-            fold_manifest=manifest,
-        )
+        schema_version = payload.get("schema_version")
+        common = {
+            "seed": cast(int, payload["seed"]),
+            "screen8_ids": tuple(cast(Sequence[str], payload["screen8_ids"])),
+            "screen32_ids": tuple(cast(Sequence[str], payload["screen32_ids"])),
+            "dev20_ids": tuple(cast(Sequence[str], payload["dev20_ids"])),
+            "fold_manifest": manifest,
+        }
+        if schema_version == 2:
+            return PackageStageSchedule(
+                **common,
+                train80_ids=tuple(cast(Sequence[str], payload["train80_ids"])),
+            )
+        if schema_version == 1:
+            return _LegacyPackageStageSchedule(
+                **common,
+                build64_ids=tuple(cast(Sequence[str], payload["build64_ids"])),
+                calibration16_ids=tuple(
+                    cast(Sequence[str], payload["calibration16_ids"])
+                ),
+            )
+        raise ValueError("unsupported schedule schema")
     except (KeyError, TypeError, ValueError) as error:
         raise FrozenPackageEvaluationError("evolution schedule is malformed") from error
 

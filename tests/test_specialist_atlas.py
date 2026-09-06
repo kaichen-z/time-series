@@ -190,7 +190,7 @@ def test_specialist_pool_retains_complementary_candidates_not_global_mean_only()
     assert selected == ("toto_2_0", "early_specialist", "late_specialist")
 
 
-def _atlas_tasks(count: int = 64) -> tuple[Task, ...]:
+def _atlas_tasks(count: int = 80) -> tuple[Task, ...]:
     return tuple(
         Task(
             task_id=f"atlas_{index:03d}",
@@ -243,7 +243,7 @@ def test_atlas_release_contains_full_build_and_five_oof_models() -> None:
     release = fit_atlas_release(_atlas_rows(tasks), manifest, AtlasPolicy())
 
     assert tuple(fold for fold, _model in release.build_fold_models) == (0, 1, 2, 3, 4)
-    assert release.full_build_model.training_task_count == 64
+    assert release.full_build_model.training_task_count == 80
     assert parse_atlas_release(release.to_payload()) == release
 
 
@@ -272,7 +272,7 @@ def test_atlas_oof_route_never_uses_held_out_group_labels() -> None:
 
     result = fit_atlas_oof(_atlas_rows(tasks), manifest, AtlasPolicy())
 
-    assert len(result.tasks) == 64
+    assert len(result.tasks) == 80
     for task_result in result.tasks:
         assert task_result.group_sha256 not in task_result.training_group_sha256s
 
@@ -325,11 +325,11 @@ def test_atlas_task_185_shape_falls_back_when_predicted_regret_exceeds_quarter()
     assert routed.fallback_reason == "predicted_regret_exceeds_limit"
 
 
-def test_atlas_fitting_requires_the_exact_64_task_build_universe() -> None:
-    tasks = _atlas_tasks(63)
+def test_atlas_fitting_requires_the_exact_80_task_train_universe() -> None:
+    tasks = _atlas_tasks(79)
     manifest = build_group_fold_manifest(tasks, seed=20260903)
 
-    with pytest.raises(ValueError, match="64"):
+    with pytest.raises(ValueError, match="80-task Train"):
         fit_atlas_release(_atlas_rows(tasks), manifest, AtlasPolicy())
 
 

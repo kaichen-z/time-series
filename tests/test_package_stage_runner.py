@@ -1,4 +1,4 @@
-"""Registered 8/32/64/16/20 successive-halving package phase runner."""
+"""Registered 8/32/80/20 successive-halving package phase runner."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -203,15 +203,17 @@ def test_schedule_is_nested_registered_and_group_aware() -> None:
     schedule = _schedule()
     assert len(schedule.screen8_ids) == 8
     assert len(schedule.screen32_ids) == 32
-    assert len(schedule.build64_ids) == 64
-    assert len(schedule.calibration16_ids) == 16
+    assert len(schedule.train80_ids) == 80
     assert len(schedule.dev20_ids) == 20
     assert set(schedule.screen8_ids) <= set(schedule.screen32_ids)
-    assert set(schedule.screen32_ids) <= set(schedule.build64_ids)
-    assert set(schedule.build64_ids).isdisjoint(schedule.calibration16_ids)
+    assert set(schedule.screen32_ids) <= set(schedule.train80_ids)
+    assert set(schedule.train80_ids).isdisjoint(schedule.dev20_ids)
     assert schedule.fold_manifest.fold_count == 5
-    assert set(schedule.fold_manifest.task_fold_map) == set(schedule.build64_ids)
-    assert schedule.counts == (8, 32, 64, 16, 20)
+    assert set(schedule.fold_manifest.task_fold_map) == set(schedule.train80_ids)
+    assert schedule.counts == (8, 32, 80, 20)
+    assert schedule.stage_ids("train80") == schedule.train80_ids
+    with pytest.raises(PackageStageError, match="unknown stage"):
+        schedule.stage_ids("calibration16")
     assert len(schedule.fingerprint) == 64
 
 
@@ -235,7 +237,7 @@ def test_tasks_for_verifies_exact_membership() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_only_one_child_can_open_calibration_and_dev(tmp_path) -> None:
+def test_only_one_child_can_open_full_train_and_dev(tmp_path) -> None:
     proposer = _DecisionProposer(("a", "b", "c"))
     _task, parent = _bundle(tmp_path)
     # child errors: two survive the 8-task screen, one wins from 32 onward.
@@ -263,8 +265,8 @@ def test_only_one_child_can_open_calibration_and_dev(tmp_path) -> None:
     parent_sha = parent.bundle.fingerprint()
     assert evaluator.child_stage_counts("screen8", parent_sha) == 3
     assert evaluator.child_stage_counts("screen32", parent_sha) <= 2
-    assert evaluator.child_stage_counts("build64", parent_sha) <= 1
-    assert evaluator.child_stage_counts("calibration16", parent_sha) <= 1
+    assert evaluator.child_stage_counts("train80", parent_sha) <= 1
+    assert evaluator.child_stage_counts("calibration16", parent_sha) == 0
     assert evaluator.child_stage_counts("dev20", parent_sha) <= 1
     assert len(evaluator.child_fingerprints_seen_on("dev20", parent_sha)) <= 1
     assert outcome.accepted is True

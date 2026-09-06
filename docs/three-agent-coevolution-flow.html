@@ -70,9 +70,8 @@
     .split-flow { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); align-items: stretch; }
     .split-card { position: relative; min-height: 118px; padding: 16px; border: 1px solid var(--line); background: var(--panel-2); }
     .split-card + .split-card { border-left: 0; }
-    .split-card.train { grid-column: span 2; }
-    .split-card.build { grid-column: span 2; }
-    .split-card.cal { grid-column: span 2; }
+    .split-card.train { grid-column: span 4; }
+    .split-card.crossfit { grid-column: span 2; }
     .split-card.dev { grid-column: span 2; }
     .split-card.public { grid-column: span 1; border-color: #70546a; background: #261828; }
     .split-card .n { display: block; font-size: 28px; line-height: 1; color: var(--blue); }
@@ -147,12 +146,11 @@
     .phase.decision .coordinate { color: var(--purple); }
     .phase .handoff { display: block; margin-top: 12px; color: var(--amber); font-size: 12px; }
 
-    .gate-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+    .gate-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
     .gate { min-height: 150px; padding: 17px; border-top: 3px solid var(--gate-color); background: var(--panel-2); }
     .gate:nth-child(1) { --gate-color: var(--blue); }
     .gate:nth-child(2) { --gate-color: var(--cyan); }
     .gate:nth-child(3) { --gate-color: var(--amber); }
-    .gate:nth-child(4) { --gate-color: var(--rose); }
     .gate b { color: var(--gate-color); font-weight: 500; }
     .gate p { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
 
@@ -208,7 +206,7 @@
       .hero { grid-template-columns: 1fr; }
       .hero-state { min-width: 0; }
       .split-flow { grid-template-columns: repeat(2, 1fr); gap: 8px; }
-      .split-card, .split-card.train, .split-card.build, .split-card.cal, .split-card.dev, .split-card.public { grid-column: span 1; border: 1px solid var(--line); }
+      .split-card, .split-card.train, .split-card.crossfit, .split-card.dev, .split-card.public { grid-column: span 1; border: 1px solid var(--line); }
       .split-card.public { grid-column: 1 / -1; }
       .agent-flow { grid-template-columns: 1fr; gap: 8px; }
       .arrow { transform: rotate(90deg); min-height: 28px; }
@@ -250,15 +248,15 @@
         <p>Numerical 负责提出可执行预测，Retrieval 负责寻找和验证上下文证据，Decision 只能在已执行候选中选择。Evolution 逐个冻结坐标，只有通过隔离 gate 的 Child 才替换 Parent。</p>
       </div>
       <aside class="hero-state" aria-label="当前状态">
-        <strong>流程可运行，效果尚未产生</strong>
-        <span>8/2/9 demo 完成 · 9/9 fallback Toto · Public-99 未访问</span>
+        <strong>Train / Dev 职责已统一</strong>
+        <span>80 Train cross-fit · 20 Dev 唯一验收门 · Public-99 sealed</span>
       </aside>
     </header>
 
     <nav class="tabs" aria-label="流程视图">
       <button type="button" data-view="pipeline" aria-selected="true">01 推理流程</button>
       <button type="button" data-view="evolution" aria-selected="false">02 Co-evolve</button>
-      <button type="button" data-view="demo" aria-selected="false">03 8/2/9 实跑</button>
+      <button type="button" data-view="demo" aria-selected="false">03 历史 8/2/9</button>
       <button type="button" data-view="artifacts" aria-selected="false">04 产物与边界</button>
     </nav>
 
@@ -266,16 +264,15 @@
       <div class="section">
         <div class="section-head">
           <h2>数据如何被使用</h2>
-          <p>正式规模在上，当前 demo 规模用黄色标注</p>
+          <p>当前正式协议；黄色仅标注新版 smoke 的缩小规模</p>
         </div>
         <div class="split-flow">
-          <div class="split-card train"><span class="n">80</span><strong>Train pool</strong><small>产生候选、hindcast 与任务反馈<br><span class="demo-n">demo 只取其中 8</span></small></div>
-          <div class="split-card build"><span class="n">64</span><strong>Build gate</strong><small>首轮性能与安全筛选<br><span class="demo-n">demo：8</span></small></div>
-          <div class="split-card cal"><span class="n">16</span><strong>Calibration gate</strong><small>防止只适配 Build<br><span class="demo-n">demo：2</span></small></div>
-          <div class="split-card dev"><span class="n">20</span><strong>Dev gate</strong><small>evolution 的最终接受依据<br><span class="demo-n">demo：9</span></small></div>
+          <div class="split-card train"><span class="n">80</span><strong>Train：学习与选择</strong><small>产生候选、hindcast、任务反馈；内部按 8 → 32 → 80 successive halving<br><span class="demo-n">smoke：8 Train，不再切 Calibration</span></small></div>
+          <div class="split-card crossfit"><span class="n">5×</span><strong>Train cross-fit</strong><small>按 entity 分组做 5-fold OOF；每题都轮流作为 held-out Train</small></div>
+          <div class="split-card dev"><span class="n">20</span><strong>Dev：唯一验收门</strong><small>冻结 Child 后只做 accept / reject<br><span class="demo-n">smoke：N 个 Dev</span></small></div>
           <div class="split-card public"><span class="n">99</span><strong>Public</strong><small>冻结后一次性测试，不反馈</small></div>
         </div>
-        <p class="note" style="margin-top:12px">Build、Calibration、Dev 按任务隔离；Public-99 不进入 proposal、selection、rerun 或 feedback。</p>
+        <p class="note" style="margin-top:12px">详细 task feedback 只来自 Train。Dev 不参与 proposal、参数调整或任务级反馈；Public-99 不进入 selection、rerun 或 feedback。</p>
       </div>
 
       <div class="section">
@@ -378,9 +375,8 @@
         <div class="section-head"><h2>每个有效 Child 都要过的 gate</h2><p>前一层失败后，后层不应成为发布依据</p></div>
         <div class="gate-grid">
           <div class="gate"><b>1 · Structural</b><p>schema、坐标 ownership、forecast 长度、有限值、release lineage、不可变 runtime 身份。</p></div>
-          <div class="gate"><b>2 · Build</b><p>coverage、joint gain、task regret、fold 稳定性、tail 与 catastrophe 安全。</p></div>
-          <div class="gate"><b>3 · Calibration</b><p>检查 Build 上的收益能否跨到独立小集合，防止局部过拟合。</p></div>
-          <div class="gate"><b>4 · Dev</b><p>独立 Dev 上最终判定。通过才更新完整 bundle；Public 仍保持 sealed。</p></div>
+          <div class="gate"><b>2 · Train cross-fit</b><p>8 → 32 → 80 筛选；完整 Train-80 上检查 OOF joint gain、task regret、fold 稳定性、tail 与 catastrophe 安全。</p></div>
+          <div class="gate"><b>3 · Dev acceptance</b><p>冻结后的唯一独立验收门。只返回通过或拒绝所需的聚合证据，不把 task-level Dev 结果送回 Agent；Public 保持 sealed。</p></div>
         </div>
         <p class="note" style="margin-top:12px">Interaction smoke 中 Retrieval 允许按完整性而非 forecast gain 接受，目的是验证三 Agent 通路；这不等于正式 finalist。</p>
       </div>
@@ -397,10 +393,10 @@
       </div>
     </section>
 
-    <section class="view" id="demo" aria-label="8/2/9 运行结果">
+    <section class="view" id="demo" aria-label="历史 8/2/9 运行结果">
       <div class="result-banner">
         <div class="result-zero">0%</div>
-        <div><h2>流程完整执行，但这一轮没有 forecast 改善</h2><p>两次 Retrieval mutation 被 smoke 接受；Numerical 与 Decision Child 均被 gate 拒绝。最终 bundle 在 9 个 Dev task 上仍全部回退 Toto。</p></div>
+        <div><h2>历史旧协议记录：不是新版 8/N 的结果</h2><p>这次 8 Train / 2 Calibration / 9 Dev 运行发生在协议迁移前。两次 Retrieval mutation 被 smoke 接受；最终 bundle 在 9 个 Dev task 上仍全部回退 Toto。</p></div>
       </div>
 
       <div class="section">
@@ -408,10 +404,10 @@
         <div class="attempts">
           <div class="attempt"><span class="gen">GEN 0</span><strong>Numerical</strong><span class="rejected">拒绝 · 结构无效</span></div>
           <div class="attempt"><span class="gen">GEN 1</span><strong>Retrieval</strong><span class="accepted">接受 · smoke 完整性</span></div>
-          <div class="attempt"><span class="gen">GEN 2</span><strong>Decision</strong><span class="rejected">拒绝 · Build gate</span></div>
+          <div class="attempt"><span class="gen">GEN 2</span><strong>Decision</strong><span class="rejected">拒绝 · 旧 Build gate</span></div>
           <div class="attempt"><span class="gen">GEN 3</span><strong>Numerical</strong><span class="rejected">拒绝 · 结构无效</span></div>
           <div class="attempt"><span class="gen">GEN 4</span><strong>Retrieval</strong><span class="accepted">接受 · smoke 完整性</span></div>
-          <div class="attempt"><span class="gen">GEN 5</span><strong>Decision</strong><span class="rejected">拒绝 · Build gate</span></div>
+          <div class="attempt"><span class="gen">GEN 5</span><strong>Decision</strong><span class="rejected">拒绝 · 旧 Build gate</span></div>
         </div>
       </div>
 
@@ -441,7 +437,7 @@
       <div class="section">
         <div class="section-head"><h2>一次 run 会留下什么</h2><p>全部使用 fingerprint、lineage 与 checkpoint 绑定</p></div>
         <div class="artifact-layout">
-          <pre class="tree">demo_8_2_9_luna_20260906/
+          <pre class="tree">formal_train80_dev20_run/
 ├── run_manifest.json
 ├── checkpoint.json
 ├── coordinate_trace.jsonl
@@ -461,9 +457,9 @@ authority/
 ├── package-inference-cache/
 └── retrieval_releases/</pre>
           <div class="artifact-notes">
-            <div class="artifact-note"><b>run_manifest</b><span>锁定 split、runtime、模型、seed、8/2/9 schedule 与源码 fingerprint；resume 时必须一致。</span></div>
+            <div class="artifact-note"><b>run_manifest</b><span>锁定 split、runtime、模型、seed、Train-80 / Dev-20 schedule、5-fold manifest 与源码 fingerprint；resume 时必须一致。</span></div>
             <div class="artifact-note"><b>coordinate_trace</b><span>每个 generation 的 Parent、Child、accepted bundle、changed module、拒绝原因与 Public access 状态。</span></div>
-            <div class="artifact-note"><b>stage_evidence</b><span>保存 Build / Calibration / Dev 的 parent-child 指标、task rows 与 gate failures。</span></div>
+            <div class="artifact-note"><b>stage_evidence</b><span>保存 screen8 / screen32 / train80 / dev20 的 parent-child 指标与 gate failures；任务级反馈只从 Train 生成。</span></div>
             <div class="artifact-note"><b>final_bundle + completion</b><span>只包含已接受坐标；完成标记封闭 run lineage，之后才允许独立的一次性 Public evaluator。</span></div>
           </div>
         </div>
@@ -474,7 +470,7 @@ authority/
         <table class="boundary">
           <thead><tr><th>边界</th><th>允许</th><th>禁止</th><th>失败行为</th></tr></thead>
           <tbody>
-            <tr><td>Numerical proposal</td><td>历史、horizon、hindcast、sanitized feedback</td><td>documents、future labels、GT evidence、Public</td><td>结构无效则 Child 拒绝</td></tr>
+            <tr><td>Numerical proposal</td><td>历史、horizon、Train hindcast、Train-only sanitized feedback</td><td>documents、future labels、GT evidence、Dev task feedback、Public</td><td>结构无效则 Child 拒绝</td></tr>
             <tr><td>Retrieval Round 2</td><td>四字段 assumption + typed gaps + documents</td><td>candidate ID、forecast array、source code、hindcast score</td><td>保留 verified Round 1</td></tr>
             <tr><td>Decision</td><td>执行过的候选、历史分数、verified evidence</td><td>创造新 trajectory、引用未验证文本</td><td>回退 Toto</td></tr>
             <tr><td>Public-99</td><td>sealed final bundle，一次性 point metrics</td><td>feedback、mutation、rerun selection、sCRPS</td><td>发现访问则 evolution step 拒绝</td></tr>
@@ -483,7 +479,7 @@ authority/
       </div>
     </section>
 
-    <p class="footer">Source of truth: package co-evolution code + demo_8_2_9_luna_20260906 artifacts</p>
+    <p class="footer">Source of truth: package co-evolution code · historical metrics: demo_8_2_9_luna_20260906</p>
   </main>
 
   <script>

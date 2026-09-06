@@ -85,7 +85,7 @@ from evolving_loop.package_stage_runner import (
     PackageStageEvidence,
     PackageStageSchedule,
 )
-from evolving_loop.package_task_feedback import PackageTaskFeedbackLedger
+from evolving_loop.package_task_feedback import PackageTaskFeedbackLedger, Partition
 from evolving_loop.retrieval_agent.evolution import (
     CHILD_SCOPES,
     RetrievalCandidateProposer,
@@ -488,11 +488,10 @@ def _early_resume_guard(args: argparse.Namespace) -> bool:
 
 @dataclass(frozen=True)
 class _SmokeSchedule:
-    """Explicit non-formal 8/2/N schedule; never accepted by the formal runner."""
+    """Explicit non-formal 8/N schedule; never accepted by the formal runner."""
 
     seed: int
-    build8_ids: tuple[str, ...]
-    calibration2_ids: tuple[str, ...]
+    train8_ids: tuple[str, ...]
     dev_ids: tuple[str, ...]
     fold_manifest: GroupFoldManifest
 
@@ -535,7 +534,7 @@ class _SmokeSchedule:
         )
         if not eligible:
             raise ValueError(
-                "smoke Build-8 cannot preserve five indivisible task groups"
+                "smoke Train-8 cannot preserve five indivisible task groups"
             )
         _count, selected_groups = min(
             eligible,
@@ -551,8 +550,7 @@ class _SmokeSchedule:
         )
         return cls(
             seed=formal.seed,
-            build8_ids=build_ids,
-            calibration2_ids=formal.calibration16_ids[:2],
+            train8_ids=build_ids,
             dev_ids=formal.dev20_ids[:dev_count],
             fold_manifest=fold,
         )
@@ -560,9 +558,8 @@ class _SmokeSchedule:
     def stage_ids(self, stage: str) -> tuple[str, ...]:
         try:
             return {
-                "screen8": self.build8_ids,
-                "build64": self.build8_ids,
-                "calibration16": self.calibration2_ids,
+                "screen8": self.train8_ids,
+                "train80": self.train8_ids,
                 "dev20": self.dev_ids,
             }[stage]
         except KeyError as error:
@@ -575,12 +572,11 @@ class _SmokeSchedule:
 
     def to_payload(self) -> dict[str, object]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "formal_run": False,
             "seed": self.seed,
-            "counts": {"build": 8, "calibration": 2, "dev": len(self.dev_ids)},
-            "build8_ids": list(self.build8_ids),
-            "calibration2_ids": list(self.calibration2_ids),
+            "counts": {"train": 8, "dev": len(self.dev_ids)},
+            "train8_ids": list(self.train8_ids),
             "dev_ids": list(self.dev_ids),
             "fold_manifest": self.fold_manifest.to_payload(),
         }
@@ -637,6 +633,27 @@ def _runtime_fingerprints(
             }
         ),
     }
+
+
+def _fit_formal_atlas(
+    forecast_store: ForecastStore,
+    train_tasks: Sequence[ContextTask],
+    candidates: Sequence[tuple[str, str]],
+    screening_policy: ScreeningPolicy,
+    fold_manifest: GroupFoldManifest,
+) -> AtlasRelease:
+    """Fit and validate Atlas strictly from the registered Train universe."""
+    rows = _materialize_atlas_rows(
+        forecast_store,
+        tuple(task.numeric for task in train_tasks),
+        candidates,
+        screening_policy,
+        split="train",
+        hindcast_config=HindcastConfig(),
+    )
+    release = fit_atlas_release(rows, fold_manifest, AtlasPolicy())
+    release.validate_manifest(fold_manifest)
+    return release
 
 
 def _initial_supply_release(
@@ -745,6 +762,34 @@ def _scheduled_registry_tasks(
     ):
         raise ValueError("registry task schedule is invalid")
     return tuple(by_id[task_id] for task_id in resolved)
+
+
+def _feedback_partitions(
+    schedule: PackageStageSchedule | _SmokeSchedule,
+    tasks: Sequence[ContextTask],
+) -> dict[str, Partition]:
+    """Bind feedback partitions to registered schedule membership, never position."""
+    train_ids = set(
+        schedule.train8_ids
+        if isinstance(schedule, _SmokeSchedule)
+        else schedule.train80_ids
+    )
+    dev_ids = set(
+        schedule.dev_ids
+        if isinstance(schedule, _SmokeSchedule)
+        else schedule.dev20_ids
+    )
+    task_ids = tuple(task.numeric.task_id for task in tasks)
+    if (
+        len(task_ids) != len(set(task_ids))
+        or set(task_ids) != train_ids | dev_ids
+        or train_ids & dev_ids
+    ):
+        raise ValueError("feedback tasks do not match registered Train/Dev membership")
+    return {
+        task_id: cast(Partition, "train" if task_id in train_ids else "dev")
+        for task_id in task_ids
+    }
 
 
 def _build_registry(
@@ -1297,7 +1342,7 @@ class _SmokeCoordinatePhaseRunner:
             )
         evidence: list[PackageStageEvidence] = []
         finalist_evaluation: PackageEvaluation | None = None
-        for stage in ("build64", "calibration16", "dev20"):
+        for stage in ("train80", "dev20"):
             parent_evaluation = self._evaluate(parent, stage)
             initial_evaluation = self._evaluate(initial, stage)
             child_evaluation = self._evaluate(candidate.state, stage)
@@ -1306,12 +1351,11 @@ class _SmokeCoordinatePhaseRunner:
                 parent_evaluation,
                 self.gate_config,
                 stage={
-                    "build64": "build",
-                    "calibration16": "calibration",
+                    "train80": "build",
                     "dev20": "dev",
                 }[stage],
                 fold_manifest=(
-                    self.schedule.fold_manifest if stage == "build64" else None
+                    self.schedule.fold_manifest if stage == "train80" else None
                 ),
                 initial=initial_evaluation,
             )
@@ -1856,13 +1900,12 @@ def _run_manifest_core(
         "train_task_ids_sha256": _digest([task.numeric.task_id for task in train]),
         "dev_task_ids_sha256": _digest([task.numeric.task_id for task in dev]),
         "counts": (
-            {"train": 80, "build": 64, "calibration": 16, "dev": 20}
+            {"train": 80, "dev": 20, "train_crossfit_folds": 5}
             if not (args.smoke or args.interaction_smoke)
             else {
-                "train": 80,
-                "build": 8,
-                "calibration": 2,
+                "train": 8,
                 "dev": len(schedule.dev_ids),
+                "train_crossfit_folds": 5,
             }
         ),
         "schedule_sha256": schedule.fingerprint,
@@ -1971,12 +2014,7 @@ def _build_phases(
         return DecisionAgent(llm, None, prompt=policy.decision_prompt)
 
     feedback_ledger = (
-        PackageTaskFeedbackLedger(
-            {
-                task.numeric.task_id: ("train" if index < 80 else "dev")
-                for index, task in enumerate(tasks)
-            }
-        )
+        PackageTaskFeedbackLedger(_feedback_partitions(schedule, tasks))
         if args.interaction_smoke or args.feedback_mode == "task"
         else None
     )
@@ -2050,17 +2088,9 @@ def _build_phases(
     feedback_manager = None
     if args.interaction_smoke or args.feedback_mode == "task":
         feedback_ids = (
-            (
-                *schedule.build8_ids,
-                *schedule.calibration2_ids,
-                *schedule.dev_ids,
-            )
+            schedule.train8_ids
             if isinstance(schedule, _SmokeSchedule)
-            else (
-                *schedule.build64_ids,
-                *schedule.calibration16_ids,
-                *schedule.dev20_ids,
-            )
+            else schedule.train80_ids
         )
         feedback_manager = _InteractionFeedbackManager(
             cast(PackageTaskFeedbackLedger, feedback_ledger),
@@ -2274,11 +2304,7 @@ def _execute_run(
     registry_tasks = _scheduled_registry_tasks(
         tasks,
         (
-            (
-                *schedule.build8_ids,
-                *schedule.calibration2_ids,
-                *schedule.dev_ids,
-            )
+            (*schedule.train8_ids, *schedule.dev_ids)
             if isinstance(schedule, _SmokeSchedule)
             else tuple(task.numeric.task_id for task in tasks)
         ),
@@ -2308,16 +2334,16 @@ def _execute_run(
             forecast_store=store,
             seed_release=authority_seed,
         )
-        build_ids = (
-            schedule.build8_ids
+        train_stage_ids = (
+            schedule.train8_ids
             if isinstance(schedule, _SmokeSchedule)
-            else schedule.build64_ids
+            else schedule.train80_ids
         )
-        build_tasks = tuple(task_map[task_id] for task_id in build_ids)
+        train_stage_tasks = tuple(task_map[task_id] for task_id in train_stage_ids)
         fold_manifest = schedule.fold_manifest
         build_rows = _materialize_champion_rows(
             store,
-            tuple(task.numeric for task in build_tasks),
+            tuple(task.numeric for task in train_stage_tasks),
             candidates,
             screening,
             dict(fold_manifest.task_fold_map),
@@ -2332,17 +2358,15 @@ def _execute_run(
             else:
                 if args.smoke or args.interaction_smoke:
                     raise ValueError(
-                        "Atlas requires the formal 64-task Build authority"
+                        "Atlas requires the formal 80-task Train authority"
                     )
-                atlas_rows = _materialize_atlas_rows(
+                atlas = _fit_formal_atlas(
                     store,
-                    tuple(task.numeric for task in build_tasks),
+                    train_stage_tasks,
                     candidates,
                     screening,
-                    split="build",
-                    hindcast_config=HindcastConfig(),
+                    fold_manifest,
                 )
-                atlas = fit_atlas_release(atlas_rows, fold_manifest, AtlasPolicy())
             atlas.validate_manifest(fold_manifest)
             atlas_status = {"available": True, "sha256": atlas.fingerprint}
             output.mkdir(parents=True, exist_ok=True)

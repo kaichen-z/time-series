@@ -22,8 +22,7 @@ _CACHE_LAYERS: frozenset[str] = frozenset({"numerical", "retrieval", "decision"}
 _STAGE_ORDER: tuple[str, ...] = (
     "screen8",
     "screen32",
-    "build64",
-    "calibration16",
+    "train80",
     "dev20",
 )
 _SHA256_CHARS = set("0123456789abcdef")

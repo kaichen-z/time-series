@@ -11,6 +11,7 @@ import pytest
 from evolving_loop.evaluate_frozen_package_bundle import (
     _claim_output,
     _inert_context_is_fixed,
+    _schedule_from_payload,
     _PublicStateEvaluator,
     _public_supply_screening,
     FrozenPackageEvaluationError,
@@ -30,6 +31,8 @@ from evolving_loop.package_coordinate_evolution import package_principal_fingerp
 from evolving_loop.run_package_coevolution import _digest as _run_digest
 from tests.test_package_coordinate_evolution import _bundle
 from tests.test_package_stage_runner import _evaluation, _schedule
+from tests.test_package_stage_runner import DEV_20, TRAIN_80
+from numerical_agent.evolution.task_local_evolution import build_group_fold_manifest
 
 
 def _split_digest(value: object) -> str:
@@ -38,11 +41,28 @@ def _split_digest(value: object) -> str:
     ).hexdigest()
 
 
-def _sealed_run(tmp_path):
+def _legacy_schedule():
+    build = tuple(TRAIN_80[:64])
+    manifest = build_group_fold_manifest(build, seed=20260903)
+    payload = {
+        "schema_version": 1,
+        "seed": 20260903,
+        "screen8_ids": sorted(task.task_id for task in build[:8]),
+        "screen32_ids": sorted(task.task_id for task in build[:32]),
+        "build64_ids": sorted(task.task_id for task in build),
+        "calibration16_ids": sorted(task.task_id for task in TRAIN_80[64:]),
+        "dev20_ids": sorted(task.task_id for task in DEV_20),
+        "fold_manifest": manifest.to_payload(),
+    }
+
+    return _schedule_from_payload(payload)
+
+
+def _sealed_run(tmp_path, *, schedule=None):
     evolution = tmp_path / "evolution"
     store = PackageArtifactStore(evolution)
     _task, state = _bundle(tmp_path / "bundle")
-    schedule = _schedule()
+    schedule = _schedule() if schedule is None else schedule
     runtime = dict(state.bundle.runtime_fingerprints)
     core = {
         "schema_version": 1,
@@ -96,6 +116,18 @@ def _sealed_run(tmp_path):
         formal_run=True,
     )
     return evolution, evolution / "final_bundle.json", runtime, state, schedule
+
+
+def test_public_evaluator_authenticates_complete_legacy_schedule_run(tmp_path) -> None:
+    legacy = _legacy_schedule()
+    evolution, final_bundle, runtime, _state, _schedule_value = _sealed_run(
+        tmp_path, schedule=legacy
+    )
+
+    verified = verify_frozen_package_run(evolution, final_bundle, runtime)
+
+    assert verified.schedule.fingerprint == legacy.fingerprint
+    assert verified.schedule.fold_manifest == legacy.fold_manifest
 
 
 @pytest.mark.parametrize(

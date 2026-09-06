@@ -89,7 +89,7 @@ def test_ledger_rejects_public_membership_and_cross_bundle_replay(tmp_path) -> N
     with pytest.raises(TaskFeedbackError, match="Train or Dev"):
         PackageTaskFeedbackLedger({task.numeric.task_id: "public"})
 
-    ledger = PackageTaskFeedbackLedger({task.numeric.task_id: "dev"})
+    ledger = PackageTaskFeedbackLedger({task.numeric.task_id: "train"})
     ledger.record(state.bundle, task, result)
     changed = replace(
         state.bundle,
@@ -99,7 +99,7 @@ def test_ledger_rejects_public_membership_and_cross_bundle_replay(tmp_path) -> N
         ledger.build_projection(changed, (task.numeric.task_id,), generation=3)
 
 
-def test_pipeline_evaluator_captures_only_successful_verified_inference(
+def test_pipeline_evaluator_captures_dev_trace_but_never_projects_it_as_feedback(
     tmp_path,
 ) -> None:
     task, state, _result = _verified_state_and_result(tmp_path)
@@ -128,12 +128,11 @@ def test_pipeline_evaluator_captures_only_successful_verified_inference(
     evaluation = evaluator.evaluate(
         state.bundle, state.registry, (task,), stage="dev20"
     )
-    projection = ledger.build_projection(
-        state.bundle, (task.numeric.task_id,), generation=3
-    )
-
     assert evaluation.coverage == 1.0
-    assert len(projection.cases) == 1
+    with pytest.raises(TaskFeedbackError, match="Train-only"):
+        ledger.build_projection(
+            state.bundle, (task.numeric.task_id,), generation=3
+        )
 
 
 def test_ledger_does_not_disguise_fallback_inference_as_empty_evidence(

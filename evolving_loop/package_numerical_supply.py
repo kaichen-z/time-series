@@ -104,9 +104,14 @@ def numerical_runtime_implementation(
         "portfolio": agent / "portfolio.py",
         "screening": agent / "screening.py",
         "selector": agent / "numerical_selector.py",
+        "specialist_atlas": agent / "specialist_atlas.py",
+        "task_local_evolution": agent / "task_local_evolution.py",
         "metrics": root.parent / "common" / "metrics.py",
         "runner": root / "run_package_coevolution.py",
         "materializer": root / "package_numerical_evolution.py",
+        "package_metrics": root / "package_metrics.py",
+        "stage_runner": root / "package_stage_runner.py",
+        "task_feedback": root / "package_task_feedback.py",
         "supply": root / "package_numerical_supply.py",
     }
     return MappingProxyType(

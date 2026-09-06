@@ -89,7 +89,7 @@ def _parent() -> ChampionRelease:
     )
 
 
-def _tasks(count: int = 64) -> tuple[DataTask, ...]:
+def _tasks(count: int = 80) -> tuple[DataTask, ...]:
     return tuple(
         DataTask(
             task_id=f"build_case_{index:03d}",
@@ -164,7 +164,7 @@ def test_fit_numerical_recipe_never_accepts_dev_or_public_rows() -> None:
         ChampionTaskRow(**{**rows[-1].__dict__, "split": "dev"}),
     )
 
-    with pytest.raises(NumericalPackageEvolutionError, match="Build"):
+    with pytest.raises(NumericalPackageEvolutionError, match="Train"):
         fit_numerical_recipe(_recipe(), contaminated, manifest, _parent())
 
 
@@ -262,7 +262,7 @@ def _evolution_tasks() -> tuple[ContextTask, ...]:
             numeric=DataTask(
                 task_id=(
                     f"build_case_{index:03d}"
-                    if index < 64
+                    if index < 80
                     else f"evolution_{index:03d}"
                 ),
                 history_values=tuple(
@@ -1021,7 +1021,7 @@ def test_proposer_rejects_incomplete_build_rows_before_the_callback() -> None:
         row for row in _build_rows(tasks) if row.task_id != omitted_task_id
     )
 
-    with pytest.raises(NumericalPackageEvolutionError, match="Build row universe"):
+    with pytest.raises(NumericalPackageEvolutionError, match="Train row universe"):
         NumericalPackageProposer(
             proposer=ChampionProposerAdapter.scripted(
                 identity="incomplete_rows_fixture",

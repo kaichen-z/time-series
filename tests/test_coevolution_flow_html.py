@@ -53,6 +53,10 @@ def test_coevolution_flow_html_covers_the_live_pipeline() -> None:
     assert "task_114" in source
     assert "Public-99" in source
     assert "fallback" in source
+    assert "80 Train cross-fit" in source
+    assert "20 Dev 唯一验收门" in source
+    assert "详细 task feedback 只来自 Train" in source
+    assert "历史旧协议记录：不是新版 8/N 的结果" in source
 
 
 def test_coevolution_flow_html_is_self_contained_and_small() -> None:
