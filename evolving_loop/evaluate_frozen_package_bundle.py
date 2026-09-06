@@ -758,7 +758,7 @@ class _PublicStateEvaluator:
         materializer.forecast_store = self.resources.store
         materializer.screening_policy = self.resources.screening
         materializer.fold_manifest = self.verified.schedule.fold_manifest
-        materializer.source_fingerprints = dict(release.source_fingerprints)
+        materializer.source_fingerprints = dict(self.resources.source_fingerprints)
         materializer.runtime_fingerprints = dict(release.runtime_fingerprints)
         materializer.combined_policies = tuple(self.resources.portfolio.combined)
         materializer.atlas_release = self.atlas
@@ -878,29 +878,48 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--model", default="gpt-5.6-sol")
     parser.add_argument("--reasoning-effort", default="high")
+    parser.add_argument(
+        "--resume-unscored-start",
+        action="store_true",
+        help="resume an output containing only the canonical started marker",
+    )
     _add_tsfm_runtime_options(parser)
     return parser
 
 
-def _claim_output(output: Path, evolution: Path) -> None:
+def _claim_output(
+    output: Path,
+    evolution: Path,
+    *,
+    resume_unscored_start: bool = False,
+) -> None:
     if output == evolution or evolution in output.parents:
         raise FrozenPackageEvaluationError(
             "Public output must be separate from the evolution directory"
         )
+    started = output / "evaluation_started.json"
+    marker = canonical_json_bytes(
+        {"schema_version": 1, "status": "public_evaluation_started"}
+    )
     existed = output.exists()
     output.mkdir(parents=True, exist_ok=True)
     if (output / "evaluation_complete.json").exists():
         raise FrozenPackageEvaluationError("Public output already completed")
-    if existed and any(output.iterdir()):
-        raise FrozenPackageEvaluationError("Public output already contains artifacts")
-    started = output / "evaluation_started.json"
+    if existed:
+        entries = tuple(output.iterdir())
+        if entries:
+            if (
+                resume_unscored_start
+                and set(entries) == {started}
+                and started.read_bytes() == marker
+            ):
+                return
+            if set(entries) == {started}:
+                raise FrozenPackageEvaluationError("Public output was already claimed")
+            raise FrozenPackageEvaluationError("Public output already contains artifacts")
     try:
         with started.open("xb") as handle:
-            handle.write(
-                canonical_json_bytes(
-                    {"schema_version": 1, "status": "public_evaluation_started"}
-                )
-            )
+            handle.write(marker)
             handle.flush()
             os.fsync(handle.fileno())
     except FileExistsError as error:
@@ -960,9 +979,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     evolution = Path(args.evolution_dir).resolve()
     output = Path(args.output_dir).resolve()
-    if (output / "evaluation_started.json").exists() or (
-        output / "evaluation_complete.json"
-    ).exists():
+    if (output / "evaluation_complete.json").exists():
         raise FrozenPackageEvaluationError("Public output was already claimed")
     manifest = _read_canonical_json(evolution / "run_manifest.json", "run manifest")
     resources: _RuntimeResources | None = None
@@ -970,7 +987,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         runtime, resources = _runtime_authority(args, manifest)
         verified = verify_frozen_package_run(evolution, args.final_bundle, runtime)
-        _claim_output(output, evolution)
+        _claim_output(
+            output,
+            evolution,
+            resume_unscored_start=args.resume_unscored_start,
+        )
         public_ids = _public_membership(Path(args.split_file), verified)
         tasks = load_context_tasks_by_ids(args.tasks_file, public_ids)
         if tuple(task.numeric.task_id for task in tasks) != public_ids:

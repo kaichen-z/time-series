@@ -4,10 +4,13 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 from evolving_loop.evaluate_frozen_package_bundle import (
+    _claim_output,
+    _PublicStateEvaluator,
     FrozenPackageEvaluationError,
     build_attribution_states,
     main,
@@ -223,6 +226,50 @@ def test_identical_attribution_states_are_scored_once(tmp_path):
     assert report["per_task"]["final_bundle"][0]["supporting_document_ids"] == [
         "doc_initial_toto"
     ]
+
+
+def test_public_claim_resumes_only_an_explicit_unscored_start(tmp_path):
+    evolution = tmp_path / "evolution"
+    evolution.mkdir()
+    output = tmp_path / "public"
+
+    _claim_output(output, evolution)
+    with pytest.raises(FrozenPackageEvaluationError, match="already claimed"):
+        _claim_output(output, evolution)
+
+    _claim_output(output, evolution, resume_unscored_start=True)
+    (output / "llm-cache").mkdir()
+    with pytest.raises(FrozenPackageEvaluationError, match="contains artifacts"):
+        _claim_output(output, evolution, resume_unscored_start=True)
+
+
+def test_public_registry_uses_verified_source_fingerprints(monkeypatch, tmp_path):
+    evolution, final_bundle, runtime, _state, _schedule_value = _sealed_run(tmp_path)
+    verified = verify_frozen_package_run(evolution, final_bundle, runtime)
+    trusted = {"methods": "1" * 64, "dictionary": "2" * 64}
+    evaluator = object.__new__(_PublicStateEvaluator)
+    evaluator.resources = SimpleNamespace(
+        store=object(),
+        screening=object(),
+        source_fingerprints=trusted,
+        portfolio=SimpleNamespace(combined=()),
+    )
+    evaluator.verified = verified
+    evaluator.atlas = None
+    evaluator._registries = {}
+    seen = {}
+    registry = SimpleNamespace(fingerprint="registry")
+
+    def capture(_tasks, _release, materializer):
+        seen["source_fingerprints"] = materializer.source_fingerprints
+        return registry
+
+    monkeypatch.setattr(
+        "evolving_loop.evaluate_frozen_package_bundle._build_registry", capture
+    )
+
+    assert evaluator._registry(build_attribution_states(verified)[0], ()) is registry
+    assert seen["source_fingerprints"] == trusted
 
 
 def _split_payload(public_ids: list[str]) -> dict[str, object]:
