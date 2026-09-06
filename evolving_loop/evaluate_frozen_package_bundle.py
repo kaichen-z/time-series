@@ -56,6 +56,7 @@ from numerical_agent.evolution.champion import parse_champion_release
 from numerical_agent.evolution.forecast_store import ForecastStore
 from numerical_agent.evolution.module import read_module
 from numerical_agent.evolution.numerical_selector import DecisionPolicy, HindcastConfig
+from numerical_agent.evolution.numerical_package import NumericalForecastPackage
 from numerical_agent.evolution.portfolio import CombinedPolicy, read_policy_file
 from numerical_agent.evolution.specialist_atlas import parse_atlas_release
 from numerical_agent.evolution.screening import ScreeningPolicy
@@ -610,9 +611,17 @@ def score_frozen_states(
         comparisons.setdefault(
             key, _comparison(evaluations[child.name], evaluations[baseline.name])
         )
+    metadata = dict(_METADATA)
+    audit = (
+        evaluator.audit_metadata()
+        if callable(getattr(evaluator, "audit_metadata", None))
+        else None
+    )
+    if audit:
+        metadata["execution_audit"] = _plain(audit)
     return {
         "schema_version": 1,
-        "metadata": dict(_METADATA),
+        "metadata": metadata,
         "states": summaries,
         "comparisons": comparisons,
         "coordinate_attribution": attribution,
@@ -765,6 +774,18 @@ def _public_supply_screening(
     return ScreeningPolicy(entries=entries, fallback_names=())
 
 
+def _inert_context_is_fixed(package: NumericalForecastPackage) -> bool:
+    """Return whether the host contract fixes the final forecast before LLM calls."""
+    if not isinstance(package, NumericalForecastPackage):
+        return False
+    anchor = package.protected_baseline
+    return bool(
+        not package.retrieval_handoff
+        and tuple(package.selection_decision.selected) == (anchor.name,)
+        and tuple(package.final_forecast) == tuple(anchor.forecast)
+    )
+
+
 class _PublicStateEvaluator:
     def __init__(
         self,
@@ -777,12 +798,19 @@ class _PublicStateEvaluator:
         self.resources = resources
         self._registries: dict[str, FrozenNumericalPackageRegistry] = {}
         self._details: dict[str, Mapping[str, Sequence[str]]] = {}
+        self._inert_context_shortcuts = 0
+        cache_dir = Path(args.output_dir) / "llm-cache"
+        self._discarded_cached_calls = (
+            sum(path.is_file() for path in cache_dir.rglob("*"))
+            if cache_dir.is_dir()
+            else 0
+        )
         self.llm = CodexCLIClient(
             CodexCLIConfig(
                 model=args.model,
                 reasoning_effort=args.reasoning_effort,
                 timeout_seconds=900,
-                cache_dir=Path(args.output_dir) / "llm-cache",
+                cache_dir=cache_dir,
             )
         )
         atlas_path = Path(args.evolution_dir) / "atlas_release.json"
@@ -864,6 +892,24 @@ class _PublicStateEvaluator:
         ).hexdigest()
         for task in tasks:
             package = registry.package_for(task)
+            if _inert_context_is_fixed(package):
+                scored = PackagePipelineEvaluator._score_contract_fallback(
+                    task,
+                    package,
+                    FrozenPackageEvaluationError(
+                        "empty Retrieval handoff fixes the host-default forecast"
+                    ),
+                    metric_cap=5.0,
+                )
+                scored = replace(
+                    scored,
+                    row=replace(scored.row, invalid_count=0),
+                )
+                details[task.numeric.task_id] = ()
+                self._inert_context_shortcuts += 1
+                rows.append(scored.row)
+                diagnostics.append(scored.diagnostics)
+                continue
             retrieval = retrieval_factory(policy)
             decision = decision_factory(policy)
             try:
@@ -914,6 +960,16 @@ class _PublicStateEvaluator:
 
     def details_for(self, name: str) -> Mapping[str, Sequence[str]]:
         return self._details.get(name, {})
+
+    def audit_metadata(self) -> Mapping[str, object]:
+        return {
+            "inert_context_shortcut": {
+                "task_count": self._inert_context_shortcuts,
+                "reason": "empty_retrieval_handoff_forces_host_default",
+                "llm_calls_skipped_per_task": 3,
+                "discarded_prepublication_cache_entries": self._discarded_cached_calls,
+            }
+        }
 
     def close(self) -> None:
         return None
@@ -968,9 +1024,13 @@ def _claim_output(
     if existed:
         entries = tuple(output.iterdir())
         if entries:
+            resumable = {started}
+            llm_cache = output / "llm-cache"
+            if llm_cache.is_dir() and not llm_cache.is_symlink():
+                resumable.add(llm_cache)
             if (
                 resume_unscored_start
-                and set(entries) == {started}
+                and set(entries) == resumable
                 and started.read_bytes() == marker
             ):
                 return

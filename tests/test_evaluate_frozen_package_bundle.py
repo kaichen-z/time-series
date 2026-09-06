@@ -10,6 +10,7 @@ import pytest
 
 from evolving_loop.evaluate_frozen_package_bundle import (
     _claim_output,
+    _inert_context_is_fixed,
     _PublicStateEvaluator,
     _public_supply_screening,
     FrozenPackageEvaluationError,
@@ -235,7 +236,7 @@ def test_identical_attribution_states_are_scored_once(tmp_path):
     ]
 
 
-def test_public_claim_resumes_only_an_explicit_unscored_start(tmp_path):
+def test_public_claim_resumes_only_an_explicit_unpublished_start(tmp_path):
     evolution = tmp_path / "evolution"
     evolution.mkdir()
     output = tmp_path / "public"
@@ -246,8 +247,38 @@ def test_public_claim_resumes_only_an_explicit_unscored_start(tmp_path):
 
     _claim_output(output, evolution, resume_unscored_start=True)
     (output / "llm-cache").mkdir()
+    _claim_output(output, evolution, resume_unscored_start=True)
+    (output / "public_report.json").write_text("{}")
     with pytest.raises(FrozenPackageEvaluationError, match="contains artifacts"):
         _claim_output(output, evolution, resume_unscored_start=True)
+
+
+def test_empty_handoff_with_selected_anchor_is_a_fixed_context_path():
+    from tests.test_package_retrieval_evolution import _package
+
+    original = _package()
+    anchor = original.protected_baseline
+    package = replace(
+        original,
+        retrieval_handoff=(),
+        accepted_assumptions=(),
+        selection_decision=replace(
+            original.selection_decision,
+            selected=(anchor.name,),
+            weights=(1.0,),
+            forecast=anchor.forecast,
+        ),
+        final_forecast=anchor.forecast,
+    )
+
+    assert _inert_context_is_fixed(package)
+    assert not _inert_context_is_fixed(
+        replace(
+            package,
+            retrieval_handoff=original.retrieval_handoff,
+            accepted_assumptions=original.accepted_assumptions,
+        )
+    )
 
 
 def test_public_registry_uses_verified_source_fingerprints(monkeypatch, tmp_path):
