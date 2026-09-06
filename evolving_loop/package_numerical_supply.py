@@ -267,7 +267,7 @@ class NumericalSupplyRelease:
             _fail("Numerical supply permits one alternative per family")
         if self.version != "n000":
             for item in alternatives:
-                if any(
+                if all(
                     policy == item.full_build_policy_payload
                     for _fold, policy in item.build_fold_policy_payloads
                 ):

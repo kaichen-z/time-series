@@ -308,6 +308,34 @@ def test_non_seed_supply_rejects_full_build_policy_reused_for_every_fold():
         _supply_release(alternatives=(repeated_policy,))
 
 
+def test_non_seed_supply_allows_one_cross_fitted_fold_to_equal_full_by_coincidence():
+    policy = _policy("seasonal_naive")
+    cross_fitted = NumericalAlternativeSpec(
+        candidate_id="seasonal_naive",
+        family="statistical",
+        materializer_kind="dictionary",
+        recipe_payload=policy.recipe.to_payload(),
+        full_build_policy_payload=policy.to_payload(),
+        build_fold_policy_payloads=tuple(
+            (
+                fold,
+                (
+                    policy.to_payload()
+                    if fold == 0
+                    else _policy("seasonal_naive", float(fold)).to_payload()
+                ),
+            )
+            for fold in range(5)
+        ),
+        assumption_ids=("seasonal_naive_ready",),
+        failure_conditions=("The candidate no longer matches the history.",),
+    )
+
+    release = _supply_release(alternatives=(cross_fitted,))
+
+    assert release.alternatives == (cross_fitted,)
+
+
 def test_bounded_package_keeps_anchor_plus_one_per_family_and_deduplicates_vectors():
     source = _wide_package()
     materialized = {
