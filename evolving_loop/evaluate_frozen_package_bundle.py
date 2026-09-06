@@ -543,8 +543,22 @@ def score_frozen_states(
     evaluations: dict[str, PackageEvaluation] = {}
     per_task: dict[str, list[dict[str, object]]] = {}
     summaries: dict[str, object] = {}
+    scored_bundles: dict[
+        str, tuple[PackageEvaluation, Mapping[str, Sequence[str]]]
+    ] = {}
     for item in named:
-        evaluation = evaluator.evaluate_state(item, resolved)
+        bundle_sha256 = item.state.bundle.fingerprint()
+        cached = scored_bundles.get(bundle_sha256)
+        if cached is None:
+            evaluation = evaluator.evaluate_state(item, resolved)
+            details = (
+                evaluator.details_for(item.name)
+                if callable(getattr(evaluator, "details_for", None))
+                else {}
+            )
+            scored_bundles[bundle_sha256] = (evaluation, details)
+        else:
+            evaluation, details = cached
         if not isinstance(evaluation, PackageEvaluation):
             raise TypeError("frozen evaluator returned an invalid PackageEvaluation")
         if (
@@ -555,11 +569,6 @@ def score_frozen_states(
             raise FrozenPackageEvaluationError("Public frozen state did not score completely")
         evaluations[item.name] = evaluation
         summaries[item.name] = _state_summary(item, evaluation)
-        details = (
-            evaluator.details_for(item.name)
-            if callable(getattr(evaluator, "details_for", None))
-            else {}
-        )
         per_task[item.name] = [
             {
                 "task_id": row.task_id,

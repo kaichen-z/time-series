@@ -177,9 +177,51 @@ def test_attribution_states_are_nested_and_report_has_no_probabilistic_metric(tm
     }
     assert "scrps" not in json.dumps(report).lower()
     assert report["states"]["final_bundle"]["task_count"] == 2
-    assert report["comparisons"]["final_bundle_vs_initial_toto"]["wins"] == 2
+    assert report["comparisons"]["final_bundle_vs_initial_toto"]["ties"] == 2
     assert report["per_task"]["final_bundle"][0]["supporting_document_ids"] == [
-        "doc_final_bundle"
+        "doc_initial_toto"
+    ]
+
+
+def test_identical_attribution_states_are_scored_once(tmp_path):
+    evolution, final_bundle, runtime, _state, _schedule_value = _sealed_run(tmp_path)
+    verified = verify_frozen_package_run(evolution, final_bundle, runtime)
+    states = build_attribution_states(verified)
+    task_ids = ("public_a", "public_b")
+
+    class CountingEvaluator:
+        def __init__(self):
+            self.calls = []
+
+        def evaluate_state(self, named, tasks):
+            self.calls.append(named.name)
+            return _evaluation(
+                named.state.bundle.fingerprint(),
+                tuple(task.numeric.task_id for task in tasks),
+                0.5,
+            )
+
+        def details_for(self, name):
+            return {task_id: (f"doc_{name}",) for task_id in task_ids}
+
+    from tests.test_run_package_coevolution import _context_task
+
+    evaluator = CountingEvaluator()
+    report = score_frozen_states(
+        tuple(_context_task(task_id) for task_id in task_ids), states, evaluator
+    )
+
+    assert evaluator.calls == ["initial_toto"]
+    assert report["comparisons"]["final_bundle_vs_initial_toto"] == {
+        "wins": 0,
+        "ties": 2,
+        "losses": 0,
+        "mean_delta_smae": 0.0,
+        "mean_delta_srmse": 0.0,
+        "mean_delta_joint": 0.0,
+    }
+    assert report["per_task"]["final_bundle"][0]["supporting_document_ids"] == [
+        "doc_initial_toto"
     ]
 
 
