@@ -35,7 +35,14 @@ from .credit import (
     _accepted_retrieval_skill_from_evidence,
     recompute_retrieval_skill_evidence,
 )
-from .policy import RetrievalGenome, RetrievalPolicyError
+from .policy import (
+    BOUNDS,
+    ROUND1_STRATEGIES,
+    ROUND2_STRATEGIES,
+    SECOND_ROUND_TRIGGERS,
+    RetrievalGenome,
+    RetrievalPolicyError,
+)
 from .skill_library import (
     RetrievalSkillError,
     RetrievalSkillLibrary,
@@ -3008,6 +3015,21 @@ class RetrievalGenomeProposer:
             "mutable_fields": sorted(
                 _PRIMARY_SCOPE_FIELDS[scope] | {"active_skill_ids"}
             ),
+            "field_constraints": {
+                "round1_strategy": {"enum": sorted(ROUND1_STRATEGIES)},
+                "round2_strategy": {"enum": sorted(ROUND2_STRATEGIES)},
+                "second_round_trigger": {
+                    "enum": sorted(SECOND_ROUND_TRIGGERS)
+                },
+                **{
+                    field_name: {
+                        "type": "integer",
+                        "minimum": lower,
+                        "maximum": upper,
+                    }
+                    for field_name, (lower, upper) in BOUNDS.items()
+                },
+            },
             "owned_skill_stage": _SCOPE_SKILL_STAGE[scope],
             "active_skill_catalog": [
                 {

@@ -222,6 +222,43 @@ def test_genome_proposer_retries_one_invalid_scoped_response_with_constraints() 
     }
 
 
+def test_genome_proposer_prompt_exposes_closed_field_constraints() -> None:
+    parent = RetrievalGenome.seed()
+    valid = _proposal(parent, "v001", "A")
+    llm = FakeLLMClient([json.dumps(valid)])
+    proposer = RetrievalGenomeProposer(
+        llm,
+        transient_retries=0,
+        version_origin=parent.version,
+    )
+
+    slot = proposer.propose_slot(
+        parent,
+        scope="A",
+        version="v001",
+        generation=0,
+        feedback={},
+        skill_library=None,
+    )
+
+    assert slot.genome is not None
+    request = json.loads(llm.calls[0]["messages"][0]["content"])
+    assert request["field_constraints"] == {
+        "max_citations_per_chain": {"maximum": 8, "minimum": 1, "type": "integer"},
+        "max_evidence_chains": {"maximum": 12, "minimum": 1, "type": "integer"},
+        "max_selected_documents": {"maximum": 20, "minimum": 1, "type": "integer"},
+        "round1_strategy": {
+            "enum": ["contrastive", "entity_first", "timeline_first"]
+        },
+        "round2_strategy": {
+            "enum": ["causal_chain_first", "counterevidence_first", "gap_first"]
+        },
+        "second_round_trigger": {
+            "enum": ["always", "never", "on_incomplete_chain", "on_named_gap"]
+        },
+    }
+
+
 def test_genome_proposer_retries_out_of_scope_response_with_valid_lineage() -> None:
     parent = RetrievalGenome.seed()
     invalid = _proposal(parent, "v001", "A")
