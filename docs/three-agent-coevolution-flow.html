@@ -117,6 +117,16 @@
     .detail h3 { margin-bottom: 10px; color: var(--detail-color, var(--blue)); }
     .detail ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
     .detail li + li { margin-top: 5px; }
+    .example-stage { margin-top: 14px; border: 1px solid var(--line); background: #081321; }
+    .example-head { display: flex; justify-content: space-between; gap: 20px; padding: 14px 17px; border-bottom: 1px solid var(--line); }
+    .example-head strong { color: var(--detail-color, var(--blue)); font-weight: 500; }
+    .example-head span { color: var(--muted); font-size: 12px; }
+    .payload-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line); }
+    .payload { min-width: 0; background: #07111e; }
+    .payload-label { display: block; padding: 10px 14px; color: var(--amber); font-size: 11px; letter-spacing: .12em; border-bottom: 1px solid var(--line); }
+    .payload pre { margin: 0; padding: 15px; color: #c8daee; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .example-handoff { margin: 0; padding: 12px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+    .example-handoff b { color: var(--detail-color, var(--blue)); font-weight: 500; }
 
     .runtime { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 7px; align-items: center; }
     .runtime-step { min-height: 118px; padding: 13px; border: 1px solid var(--line); background: var(--panel-2); }
@@ -219,7 +229,9 @@
       .section-head { display: block; }
       .section-head p { margin-top: 6px; }
       .tabs { display: grid; grid-template-columns: 1fr 1fr; }
-      .detail, .gate-grid, .attempts, .metric-grid, .bottleneck { grid-template-columns: 1fr; }
+      .detail, .payload-grid, .gate-grid, .attempts, .metric-grid, .bottleneck { grid-template-columns: 1fr; }
+      .example-head { display: block; }
+      .example-head span { display: block; margin-top: 4px; }
       .result-banner { grid-template-columns: 1fr; }
       .result-zero { font-size: 38px; }
       .cycle { grid-template-columns: 1fr; }
@@ -298,6 +310,35 @@
           <div><h3 id="detail-input-title">Numerical 看得到</h3><ul id="detail-input"><li>历史 observations</li><li>frequency 与 forecast horizon</li><li>旧 Numerical skills</li><li>上一周期的 sanitized task feedback</li></ul></div>
           <div><h3 id="detail-output-title">Numerical 必须发布</h3><ul id="detail-output"><li>确定长度的有限 forecast array</li><li>结构化 morphology assumptions</li><li>每个 assumption 的 failure condition</li><li>history-only hindcast 分数</li></ul></div>
           <div><h3 id="detail-limit-title">Numerical 绝不能看</h3><ul id="detail-limit"><li>future labels / gt_evidence</li><li>文档与 Retrieval artifact</li><li>Dev/Public evaluator 分数</li><li>不可执行的自由文本预测</li></ul></div>
+        </div>
+        <div class="example-stage" id="agent-example" style="--detail-color: var(--blue)">
+          <div class="example-head"><strong id="example-title">Numerical payload 示例</strong><span>教学用虚构任务：Product A 未来 4 周销量；不是 benchmark 记录</span></div>
+          <div class="payload-grid">
+            <div class="payload"><span class="payload-label">INPUT</span><pre id="example-input">{
+  "task": {
+    "target": "product_A_weekly_sales",
+    "frequency": "W",
+    "horizon": 4,
+    "history_tail": [98, 103, 101, 119, 122, 139, 141]
+  },
+  "available_methods": ["toto", "seasonal_naive", "linear_trend"],
+  "task_feedback": []
+}</pre></div>
+            <div class="payload"><span class="payload-label">OUTPUT</span><pre id="example-output">{
+  "candidates": [
+    {"candidate_id": "toto", "forecast": [143, 146, 147, 149], "hindcast_srmse": 0.38},
+    {"candidate_id": "seasonal_naive", "forecast": [119, 122, 139, 141], "hindcast_srmse": 0.44},
+    {"candidate_id": "linear_trend", "forecast": [145, 151, 157, 163], "hindcast_srmse": 0.41}
+  ],
+  "assumptions": [{
+    "assumption_id": "a_trend",
+    "kind": "trend_persistence",
+    "claim": "Recent upward trend continues for four weeks.",
+    "failure_condition": "A near-term promotion ends or demand reverts."
+  }]
+}</pre></div>
+          </div>
+          <p class="example-handoff"><b id="example-handoff-label">交给 Retrieval：</b> <span id="example-handoff-text">forecast 保留在 host；只有清洗后的四字段 assumption 可以进入 Retrieval Round 2。</span></p>
         </div>
       </div>
 
@@ -463,7 +504,33 @@ authority/
           ['历史 observations', 'frequency 与 forecast horizon', '旧 Numerical skills', '上一周期的 sanitized task feedback'],
           ['确定长度的有限 forecast array', '结构化 morphology assumptions', '每个 assumption 的 failure condition', 'history-only hindcast 分数'],
           ['future labels / gt_evidence', '文档与 Retrieval artifact', 'Dev/Public evaluator 分数', '不可执行的自由文本预测']
-        ]
+        ],
+        exampleTitle: 'Numerical payload 示例',
+        exampleInput: {
+          task: {
+            target: 'product_A_weekly_sales',
+            frequency: 'W',
+            horizon: 4,
+            history_tail: [98, 103, 101, 119, 122, 139, 141]
+          },
+          available_methods: ['toto', 'seasonal_naive', 'linear_trend'],
+          task_feedback: []
+        },
+        exampleOutput: {
+          candidates: [
+            {candidate_id: 'toto', forecast: [143, 146, 147, 149], hindcast_srmse: 0.38},
+            {candidate_id: 'seasonal_naive', forecast: [119, 122, 139, 141], hindcast_srmse: 0.44},
+            {candidate_id: 'linear_trend', forecast: [145, 151, 157, 163], hindcast_srmse: 0.41}
+          ],
+          assumptions: [{
+            assumption_id: 'a_trend',
+            kind: 'trend_persistence',
+            claim: 'Recent upward trend continues for four weeks.',
+            failure_condition: 'A near-term promotion ends or demand reverts.'
+          }]
+        },
+        handoffLabel: '交给 Retrieval：',
+        handoffText: 'forecast 保留在 host；只有清洗后的四字段 assumption 可以进入 Retrieval Round 2。'
       },
       retrieval: {
         color: 'var(--cyan)',
@@ -472,7 +539,55 @@ authority/
           ['task target 与文档正文', 'Round 1 verified chains', 'provisional Decision 的 typed gaps', '清洗后的四字段 assumptions'],
           ['exact quotes 与 document IDs', 'entity / target / time / mechanism', 'support 与 counterevidence chains', 'complete、gaps、rejected'],
           ['future labels / gt_evidence', 'candidate ID 与 forecast 数组', 'Numerical source code', 'evaluator-only document role']
-        ]
+        ],
+        exampleTitle: 'Retrieval Round 2 payload 示例',
+        exampleInput: {
+          target: {entity: 'Product A', variable: 'weekly sales', forecast_window: 'next 4 weeks'},
+          documents: [{
+            document_id: 'doc_promo',
+            text: 'Product A promotion ends on Sep 14. Weekly orders are expected to return to the pre-campaign level, about 15% below the campaign level.'
+          }],
+          round1: {evidence_chains: [], counterevidence: [], missing_information: ['promotion end date'], sufficient: false},
+          gaps: [{
+            assumption_id: 'a_trend',
+            gap_type: 'continuation_or_reversal',
+            missing_information: 'Will the recent growth continue after the promotion?',
+            priority: 'high'
+          }],
+          assumptions: [{
+            assumption_id: 'a_trend',
+            kind: 'trend_persistence',
+            claim: 'Recent upward trend continues for four weeks.',
+            failure_condition: 'A near-term promotion ends or demand reverts.'
+          }],
+          retrieval_skills: ['event_window_verification']
+        },
+        exampleOutput: {
+          evidence_chains: [{
+            chain_id: 'chain_promo_end',
+            claim: 'The promotion ends inside the forecast window and demand is expected to fall 15%.',
+            entity_match: true,
+            target_match: true,
+            temporal_relation: 'overlaps_future',
+            mechanism: 'future_driver',
+            direction: 'down',
+            magnitude_kind: 'relative',
+            magnitude_value: 0.15,
+            start_timestamp: '2026-09-14T00:00:00Z',
+            end_timestamp: '2026-10-05T00:00:00Z',
+            citations: [{document_id: 'doc_promo', exact_quote: 'Weekly orders are expected to return to the pre-campaign level, about 15% below the campaign level.'}],
+            missing_links: [],
+            used_skill_ids: ['event_window_verification'],
+            addressed_assumption_ids: ['a_trend'],
+            stance: 'challenges',
+            numeric_eligible: true
+          }],
+          counterevidence: [],
+          missing_information: [],
+          sufficient: true
+        },
+        handoffLabel: '交给 Decision：',
+        handoffText: 'host 会重新核对 exact quote、时间窗和 15% magnitude；验证失败的 chain 不会进入 Decision。'
       },
       decision: {
         color: 'var(--purple)',
@@ -481,12 +596,40 @@ authority/
           ['已执行 candidates', 'history-only hindcast diagnostics', 'host-verified evidence chains', '当前 accepted decision skills'],
           ['一个候选 selection', '支持 selection 的 verified citations', '必要时明确 preserve/fallback', '可审计的 selection reason'],
           ['创造未执行 forecast', '采用未验证 quote', '用 future outcome 选择', '绕过 Toto fallback']
-        ]
+        ],
+        exampleTitle: 'Decision payload 示例',
+        exampleInput: {
+          candidates: [
+            {candidate_id: 'toto', forecast: [143, 146, 147, 149], assumption: 'learned continuation', hindcast_srmse: 0.38},
+            {candidate_id: 'seasonal_naive', forecast: [119, 122, 139, 141], assumption: 'return toward recent weekly pattern', hindcast_srmse: 0.44},
+            {candidate_id: 'linear_trend', forecast: [145, 151, 157, 163], assumption: 'trend persists', hindcast_srmse: 0.41}
+          ],
+          host_default_id: 'toto',
+          verified_evidence: [{
+            chain_id: 'chain_promo_end',
+            addressed_assumption_ids: ['a_trend'],
+            stance: 'challenges',
+            direction: 'down',
+            magnitude_value: 0.15,
+            document_ids: ['doc_promo']
+          }]
+        },
+        exampleOutput: {
+          selected_candidate_id: 'seasonal_naive',
+          supporting_document_ids: ['doc_promo'],
+          rationale: 'Verified promotion-end evidence challenges continued growth and supports return toward the recent weekly pattern.',
+          request_more_retrieval: false,
+          gaps: [],
+          used_skill_names: []
+        },
+        handoffLabel: '写入下一轮 feedback：',
+        handoffText: 'a_trend 被标记为 falsified/rejected；下一轮 Numerical 可据此避免再次盲目外推，但看不到 future labels。'
       }
     };
 
     const agentCards = [...document.querySelectorAll('.agent-card')];
     const detail = document.getElementById('agent-detail');
+    const example = document.getElementById('agent-example');
     const titleIds = ['detail-input-title', 'detail-output-title', 'detail-limit-title'];
     const listIds = ['detail-input', 'detail-output', 'detail-limit'];
     agentCards.forEach((card) => {
@@ -497,6 +640,7 @@ authority/
           item.setAttribute('aria-pressed', String(item === card));
         });
         detail.style.setProperty('--detail-color', data.color);
+        example.style.setProperty('--detail-color', data.color);
         data.titles.forEach((title, index) => {
           document.getElementById(titleIds[index]).textContent = title;
           document.getElementById(listIds[index]).replaceChildren(
@@ -507,6 +651,11 @@ authority/
             })
           );
         });
+        document.getElementById('example-title').textContent = data.exampleTitle;
+        document.getElementById('example-input').textContent = JSON.stringify(data.exampleInput, null, 2);
+        document.getElementById('example-output').textContent = JSON.stringify(data.exampleOutput, null, 2);
+        document.getElementById('example-handoff-label').textContent = data.handoffLabel;
+        document.getElementById('example-handoff-text').textContent = data.handoffText;
       });
     });
   </script>
