@@ -1,0 +1,1195 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Dictionary、Numerical、Retrieval 与 Decision 的统一自进化架构设计。">
+  <title>Unified Co-evolution · 设计快照 2026-09-07</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172033;
+      --muted: #617089;
+      --paper: #f5f7fb;
+      --card: rgba(255, 255, 255, 0.9);
+      --line: #dbe2ee;
+      --navy: #10243f;
+      --blue: #2d6cdf;
+      --blue-soft: #eaf1ff;
+      --green: #17866f;
+      --green-soft: #e6f6f1;
+      --violet: #7651c9;
+      --violet-soft: #f0ebff;
+      --amber: #b16b0b;
+      --amber-soft: #fff3dd;
+      --red: #bc4051;
+      --red-soft: #ffecef;
+      --shadow: 0 20px 60px rgba(25, 46, 78, 0.10);
+      --radius: 22px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      scroll-padding-top: 92px;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 7% 4%, rgba(45, 108, 223, 0.12), transparent 26rem),
+        radial-gradient(circle at 92% 18%, rgba(118, 81, 201, 0.11), transparent 25rem),
+        var(--paper);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      line-height: 1.65;
+    }
+
+    a { color: inherit; }
+
+    code, pre {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      border-bottom: 1px solid rgba(219, 226, 238, 0.8);
+      background: rgba(245, 247, 251, 0.88);
+      backdrop-filter: blur(18px);
+    }
+
+    .topbar-inner {
+      width: min(1180px, calc(100% - 32px));
+      min-height: 68px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      font-size: 14px;
+      font-weight: 780;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      border-radius: 11px;
+      display: grid;
+      place-items: center;
+      color: white;
+      background: linear-gradient(145deg, var(--blue), var(--violet));
+      box-shadow: 0 8px 20px rgba(45, 108, 223, 0.26);
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    .nav::-webkit-scrollbar { display: none; }
+
+    .nav a {
+      padding: 8px 11px;
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 13px;
+      text-decoration: none;
+      white-space: nowrap;
+      transition: 160ms ease;
+    }
+
+    .nav a:hover,
+    .nav a.active {
+      color: var(--blue);
+      background: var(--blue-soft);
+    }
+
+    main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 42px 0 72px;
+    }
+
+    .hero {
+      padding: 48px;
+      border: 1px solid rgba(219, 226, 238, 0.95);
+      border-radius: 30px;
+      color: white;
+      background:
+        linear-gradient(120deg, rgba(16, 36, 63, 0.98), rgba(31, 68, 117, 0.96)),
+        var(--navy);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      position: relative;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      width: 360px;
+      height: 360px;
+      border-radius: 50%;
+      top: -210px;
+      right: -70px;
+      border: 70px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 999px;
+      color: #dbe7ff;
+      font-size: 12px;
+      font-weight: 720;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #65dfbd;
+      box-shadow: 0 0 0 5px rgba(101, 223, 189, 0.12);
+    }
+
+    h1 {
+      max-width: 900px;
+      margin: 24px 0 14px;
+      font-size: clamp(34px, 6vw, 68px);
+      line-height: 1.05;
+      letter-spacing: -0.045em;
+    }
+
+    .hero-lead {
+      max-width: 810px;
+      margin: 0;
+      color: #cad7eb;
+      font-size: clamp(16px, 2vw, 20px);
+    }
+
+    .hero-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 28px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      padding: 6px 11px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 720;
+      background: rgba(255, 255, 255, 0.11);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+    }
+
+    .hero-note {
+      margin-top: 28px;
+      padding: 15px 17px;
+      border-left: 3px solid #65dfbd;
+      border-radius: 0 12px 12px 0;
+      color: #d9e5f6;
+      background: rgba(255, 255, 255, 0.07);
+      font-size: 14px;
+    }
+
+    section {
+      margin-top: 64px;
+    }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: 72px 1fr;
+      gap: 18px;
+      align-items: start;
+      margin-bottom: 24px;
+    }
+
+    .section-no {
+      padding-top: 3px;
+      color: var(--blue);
+      font: 760 13px/1.2 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: 0.09em;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: clamp(27px, 4vw, 40px);
+      line-height: 1.15;
+      letter-spacing: -0.025em;
+    }
+
+    .section-intro {
+      max-width: 820px;
+      margin: 9px 0 0;
+      color: var(--muted);
+    }
+
+    .status-grid,
+    .card-grid,
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .status-card,
+    .card,
+    .metric-card {
+      min-width: 0;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--card);
+      box-shadow: 0 10px 28px rgba(34, 55, 86, 0.05);
+    }
+
+    .status-card strong,
+    .metric-card strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 23px;
+      letter-spacing: -0.025em;
+    }
+
+    .status-card span,
+    .metric-card span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: minmax(170px, 1.05fr) 32px repeat(3, minmax(150px, 1fr)) 32px minmax(155px, 0.9fr);
+      align-items: stretch;
+      gap: 8px;
+      margin-top: 22px;
+    }
+
+    .flow-node {
+      position: relative;
+      padding: 19px;
+      border: 1px solid var(--line);
+      border-radius: 19px;
+      background: white;
+    }
+
+    .flow-node.supply { border-top: 4px solid var(--green); }
+    .flow-node.numerical { border-top: 4px solid var(--blue); }
+    .flow-node.retrieval { border-top: 4px solid var(--violet); }
+    .flow-node.decision { border-top: 4px solid var(--amber); }
+    .flow-node.public { border-top: 4px solid var(--red); }
+
+    .flow-label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 760;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .flow-node h3 {
+      margin: 8px 0 6px;
+      font-size: 17px;
+    }
+
+    .flow-node p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .arrow {
+      display: grid;
+      place-items: center;
+      color: #96a3b7;
+      font-size: 24px;
+      font-weight: 800;
+    }
+
+    .cycle-band {
+      margin: 12px 40px 0 calc(14.28% + 48px);
+      padding: 10px 14px;
+      border-radius: 12px;
+      color: #5b459d;
+      background: var(--violet-soft);
+      text-align: center;
+      font-size: 13px;
+      font-weight: 720;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 22px 0 0;
+    }
+
+    .legend-item,
+    .status-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 720;
+    }
+
+    .existing { color: #0f715e; background: var(--green-soft); }
+    .new { color: #235bb9; background: var(--blue-soft); }
+    .locked { color: #8e570b; background: var(--amber-soft); }
+
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: white;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 760px;
+    }
+
+    th, td {
+      padding: 15px 17px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+      font-size: 14px;
+    }
+
+    th {
+      color: #4f6079;
+      background: #f8faff;
+      font-size: 12px;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+
+    td code {
+      color: #315d9d;
+      font-size: 12px;
+    }
+
+    .card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+    .card h3 {
+      margin: 0 0 7px;
+      font-size: 19px;
+    }
+
+    .card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .card ul,
+    .detail-body ul {
+      margin: 14px 0 0;
+      padding-left: 19px;
+    }
+
+    .card li,
+    .detail-body li {
+      margin: 6px 0;
+    }
+
+    .detail-stack {
+      display: grid;
+      gap: 12px;
+    }
+
+    details {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: white;
+      overflow: hidden;
+    }
+
+    summary {
+      padding: 17px 20px;
+      cursor: pointer;
+      list-style: none;
+      font-weight: 760;
+    }
+
+    summary::-webkit-details-marker { display: none; }
+
+    summary::after {
+      content: "+";
+      float: right;
+      color: var(--blue);
+      font-size: 20px;
+      line-height: 1;
+    }
+
+    details[open] summary::after { content: "−"; }
+
+    .detail-body {
+      padding: 0 20px 20px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .detail-body strong { color: var(--ink); }
+
+    .code-panel {
+      margin: 16px 0 0;
+      border: 1px solid #263d5d;
+      border-radius: 16px;
+      color: #dbe7f8;
+      background: #10243f;
+      overflow: hidden;
+    }
+
+    .code-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 14px;
+      color: #9fb5d5;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      font-size: 12px;
+    }
+
+    .copy-button {
+      appearance: none;
+      border: 0;
+      border-radius: 8px;
+      padding: 5px 9px;
+      color: #dbe7f8;
+      background: rgba(255, 255, 255, 0.09);
+      cursor: pointer;
+      font: inherit;
+    }
+
+    pre {
+      margin: 0;
+      padding: 16px;
+      overflow-x: auto;
+      font-size: 12px;
+      line-height: 1.7;
+      white-space: pre;
+    }
+
+    .sequence {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .sequence-item {
+      padding: 18px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: white;
+    }
+
+    .sequence-step {
+      display: inline-grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      margin-bottom: 12px;
+      border-radius: 10px;
+      color: white;
+      background: var(--blue);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .sequence-item h3 {
+      margin: 0 0 6px;
+      font-size: 16px;
+    }
+
+    .sequence-item p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .guardrail {
+      display: grid;
+      grid-template-columns: 44px 1fr;
+      gap: 14px;
+      align-items: start;
+      padding: 18px;
+      border: 1px solid #f0d1d7;
+      border-radius: 18px;
+      background: var(--red-soft);
+    }
+
+    .guardrail + .guardrail { margin-top: 10px; }
+
+    .guardrail-icon {
+      width: 38px;
+      height: 38px;
+      display: grid;
+      place-items: center;
+      border-radius: 12px;
+      color: white;
+      background: var(--red);
+      font-weight: 820;
+    }
+
+    .guardrail h3 { margin: 0 0 3px; font-size: 15px; }
+    .guardrail p { margin: 0; color: #79545d; font-size: 13px; }
+
+    .metric-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    .metric-card .formula {
+      display: block;
+      margin: 10px 0 0;
+      color: #315d9d;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .timeline {
+      position: relative;
+      display: grid;
+      gap: 0;
+      padding-left: 26px;
+    }
+
+    .timeline::before {
+      content: "";
+      position: absolute;
+      top: 9px;
+      bottom: 9px;
+      left: 8px;
+      width: 2px;
+      background: var(--line);
+    }
+
+    .timeline-item {
+      position: relative;
+      padding: 0 0 23px 18px;
+    }
+
+    .timeline-item:last-child { padding-bottom: 0; }
+
+    .timeline-item::before {
+      content: "";
+      position: absolute;
+      left: -23px;
+      top: 7px;
+      width: 11px;
+      height: 11px;
+      border: 3px solid var(--paper);
+      border-radius: 50%;
+      background: var(--blue);
+      box-shadow: 0 0 0 1px var(--blue);
+    }
+
+    .timeline-item h3 { margin: 0 0 3px; font-size: 16px; }
+    .timeline-item p { margin: 0; color: var(--muted); font-size: 13px; }
+
+    .callout {
+      padding: 20px 22px;
+      border: 1px solid #bddfd5;
+      border-radius: 18px;
+      background: var(--green-soft);
+      color: #205f53;
+    }
+
+    .callout strong { color: #105447; }
+
+    .footer {
+      margin-top: 68px;
+      padding: 26px 0 8px;
+      border-top: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .footer a { color: var(--blue); }
+
+    @media (max-width: 980px) {
+      .topbar-inner { align-items: flex-start; padding: 13px 0; flex-direction: column; gap: 8px; }
+      .nav { width: 100%; }
+      .hero { padding: 36px; }
+      .status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .flow { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); min-height: 24px; }
+      .cycle-band { margin: 12px 0 0; }
+      .sequence { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 680px) {
+      main { width: min(100% - 20px, 1180px); padding-top: 20px; }
+      .hero { padding: 28px 22px; border-radius: 23px; }
+      .hero-note { font-size: 13px; }
+      section { margin-top: 48px; }
+      .section-head { grid-template-columns: 1fr; gap: 6px; }
+      .status-grid, .card-grid, .metric-grid, .sequence { grid-template-columns: 1fr; }
+      .status-card, .card, .metric-card { border-radius: 17px; }
+      .footer { flex-direction: column; }
+    }
+
+    @media print {
+      .topbar { display: none; }
+      body { background: white; }
+      main { width: 100%; padding: 0; }
+      .hero { box-shadow: none; }
+      section { break-inside: avoid; }
+      details > * { display: block; }
+      .copy-button { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand"><span class="brand-mark">CE</span> Unified Co-evolution</div>
+      <nav class="nav" aria-label="页面导航">
+        <a href="#overview">总览</a>
+        <a href="#architecture">架构</a>
+        <a href="#supply">Dictionary</a>
+        <a href="#numerical">Numerical</a>
+        <a href="#retrieval">Retrieval</a>
+        <a href="#decision">Decision</a>
+        <a href="#feedback">反馈</a>
+        <a href="#protocol">80/20/99</a>
+        <a href="#artifacts">产物</a>
+        <a href="#implementation">实施</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero" id="overview">
+      <span class="eyebrow">Design snapshot · 2026-09-07</span>
+      <h1>从 Dictionary 到三 Agent 的统一 Co-evolve</h1>
+      <p class="hero-lead">
+        先把可执行方法、TSFM、Combined 与适用规则冻结为一个可信供给；再让
+        Numerical → Retrieval → Decision 按坐标连续进化两轮，最后冻结完整系统，
+        单独打开 Public-99。
+      </p>
+      <div class="hero-meta">
+        <span class="pill">1 个 Dictionary Supply Epoch</span>
+        <span class="pill">2 轮 N → R → D</span>
+        <span class="pill">sMAE + sRMSE</span>
+        <span class="pill">Public-99 单次评测</span>
+      </div>
+      <div class="hero-note">
+        <strong>状态：</strong>设计已批准，统一 runner 尚未实现。此页描述的是目标架构和已存在模块的组合方式，
+        不是实验结果，也不声称已经得到新的 80/20/99 成绩。
+      </div>
+    </section>
+
+    <section aria-label="设计摘要">
+      <div class="status-grid">
+        <div class="status-card"><strong>4</strong><span>被统一绑定的状态坐标</span></div>
+        <div class="status-card"><strong>8 → 32 → 80</strong><span>Train 内逐级筛选与 OOF</span></div>
+        <div class="status-card"><strong>20</strong><span>只读 Dev 接受门</span></div>
+        <div class="status-card"><strong>99</strong><span>冻结后一次性回归集</span></div>
+      </div>
+    </section>
+
+    <section id="architecture">
+      <div class="section-head">
+        <div class="section-no">01 / 架构</div>
+        <div>
+          <h2>外层供给，内层三坐标</h2>
+          <p class="section-intro">
+            Dictionary 改变会使方法源码、候选空间、筛选策略和预测缓存一起变化，因此必须先完成并冻结；
+            N/R/D 才在这个固定供给上做可归因的坐标进化。
+          </p>
+        </div>
+      </div>
+
+      <div class="flow" aria-label="统一 co-evolution 流程">
+        <article class="flow-node supply">
+          <span class="flow-label">Outer epoch</span>
+          <h3>Dictionary Supply</h3>
+          <p>方法代码、TSFM、Combined、screening 一起冻结。</p>
+        </article>
+        <div class="arrow" aria-hidden="true">→</div>
+        <article class="flow-node numerical">
+          <span class="flow-label">Coordinate N</span>
+          <h3>Numerical</h3>
+          <p>运行、组合、routing、assumptions 与安全锚点。</p>
+        </article>
+        <article class="flow-node retrieval">
+          <span class="flow-label">Coordinate R</span>
+          <h3>Retrieval</h3>
+          <p>两轮检索、证据核验、Genome 与 Skills 进化。</p>
+        </article>
+        <article class="flow-node decision">
+          <span class="flow-label">Coordinate D</span>
+          <h3>Decision</h3>
+          <p>在已执行候选中做有证据的最终选择。</p>
+        </article>
+        <div class="arrow" aria-hidden="true">→</div>
+        <article class="flow-node public">
+          <span class="flow-label">Frozen only</span>
+          <h3>Public-99</h3>
+          <p>只报告，不返回 evolve。</p>
+        </article>
+      </div>
+      <div class="cycle-band">Numerical → Retrieval → Decision × 2；每一步只允许一个坐标变化</div>
+
+      <div class="legend" aria-label="实现状态图例">
+        <span class="legend-item existing"><span class="dot"></span>现有 · 直接复用</span>
+        <span class="legend-item new"><span class="dot"></span>新增 · 本次桥接</span>
+        <span class="legend-item locked"><span class="dot"></span>冻结 · 不参与 evolve</span>
+      </div>
+
+      <div class="table-wrap" style="margin-top:18px">
+        <table>
+          <thead>
+            <tr><th>层</th><th>当前代码</th><th>在新框架中的位置</th><th>状态</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>通用 Parent/Child</td>
+              <td><code>evolving_loop/co_evolution.py</code></td>
+              <td>保留为兼容底层，不承担统一编排</td>
+              <td><span class="status-tag existing">现有 · 直接复用</span></td>
+            </tr>
+            <tr>
+              <td>Dictionary supply</td>
+              <td><code>method / combined / screening evolution</code></td>
+              <td>外层 Supply Epoch，并新增标准 release</td>
+              <td><span class="status-tag new">新增 · 本次桥接</span></td>
+            </tr>
+            <tr>
+              <td>N/R/D controller</td>
+              <td><code>package_coordinate_evolution.py</code></td>
+              <td>内层两轮坐标循环</td>
+              <td><span class="status-tag existing">现有 · 直接复用</span></td>
+            </tr>
+            <tr>
+              <td>Public evaluator</td>
+              <td><code>evaluate_frozen_package_bundle.py</code></td>
+              <td>完整 bundle 冻结后单独执行</td>
+              <td><span class="status-tag locked">不参与 evolve</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="supply">
+      <div class="section-head">
+        <div class="section-no">02 / SUPPLY</div>
+        <div>
+          <h2>Dictionary Supply Epoch</h2>
+          <p class="section-intro">
+            这一层回答“系统有哪些可信方法可以用”。Python 仍在 Git repo 中，JSON release 只绑定源码和派生 inventory，
+            不把函数重新塞回 JSON blob。
+          </p>
+        </div>
+      </div>
+
+      <div class="card-grid">
+        <article class="card">
+          <h3>输入供给</h3>
+          <ul>
+            <li><code>methods.py</code>：93 个可执行 Statistical 起始方法。</li>
+            <li><code>skills.py</code>：人工审核、只看 history 的分析原语。</li>
+            <li><code>policies.py</code>：TSFM runtime 与多个 Combined 策略。</li>
+            <li>task-conditioned screening 与精确 runtime/license manifest。</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>三段 evolve</h3>
+          <ul>
+            <li>方法代码：add / repair / fork / merge / quarantine。</li>
+            <li>Combined：Statistical–TSFM、TSFM–TSFM、多 parent。</li>
+            <li>Screening：状态 + history-only applicability。</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="detail-stack" style="margin-top:14px">
+        <details open>
+          <summary>Dictionary 到底保存什么？</summary>
+          <div class="detail-body">
+            <p><strong>Python repo 是执行真相；release 是身份和审计真相。</strong></p>
+            <ul>
+              <li>函数实现继续存放在 Git 追踪的 <code>methods.py</code>。</li>
+              <li>TSFM checkpoint、adapter、license 和 runtime identity 由 Host 固定。</li>
+              <li>Combined 保存结构化 parent/operator，不保存任意执行代码。</li>
+              <li>Screening 保存方法状态和由 TaskProfile 匹配的适用条件。</li>
+              <li><code>DictionarySupplyRelease</code> 对所有源文件、inventory、规则和验收证据做统一哈希。</li>
+            </ul>
+          </div>
+        </details>
+        <details>
+          <summary>为什么不把 Dictionary 当作每轮第四个坐标？</summary>
+          <div class="detail-body">
+            Dictionary 一改，所有候选身份、forecast cache 和 Numerical registry 都可能失效。如果在 N/R/D 中间悄悄修改，
+            Child 的收益无法归因，旧预测还可能被错误复用。因此它是一整个外层 supply epoch；新的 supply 会开启新的内层 lineage。
+          </div>
+        </details>
+        <details>
+          <summary>TSFM 在这里能改什么？</summary>
+          <div class="detail-body">
+            不训练或相加模型参数。允许进化的是经过审核的 invocation、history-only preprocessing、适用规则和 Combined 结构。
+            checkpoint、adapter、许可证和模型版本不可由 LLM 替换。
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <section id="numerical">
+      <div class="section-head">
+        <div class="section-no">03 / NUMERICAL</div>
+        <div>
+          <h2>Numerical coordinate：从目录到可比较预测</h2>
+          <p class="section-intro">
+            它不再重写 Dictionary 源码，而是在冻结供给上决定当前任务运行谁、如何组合、在哪个 horizon 使用谁，以及依赖哪些假设。
+          </p>
+        </div>
+      </div>
+
+      <div class="sequence">
+        <article class="sequence-item"><span class="sequence-step">1</span><h3>TaskProfile</h3><p>周期、趋势、间歇性、regime、长度和 horizon。</p></article>
+        <article class="sequence-item"><span class="sequence-step">2</span><h3>Active Dictionary</h3><p>按当前任务 morphology 实例化候选子集。</p></article>
+        <article class="sequence-item"><span class="sequence-step">3</span><h3>Materialize once</h3><p>Statistical/TSFM leaf 只执行一次，Combined 只引用成功 leaves。</p></article>
+        <article class="sequence-item"><span class="sequence-step">4</span><h3>Rolling hindcast</h3><p>只用历史窗口构造 sMAE/sRMSE、coverage 和 tail 证据。</p></article>
+      </div>
+
+      <div class="card-grid" style="margin-top:14px">
+        <article class="card">
+          <h3>LLM 提出结构</h3>
+          <p><strong>select / route / horizon_route / weighted / median / bounded_overlay</strong></p>
+          <p style="margin-top:10px">它选择 parent、结构和封闭的 assumption 条件，不填写可以直接授权收益的数值。</p>
+        </article>
+        <article class="card">
+          <h3>Host 拟合数值</h3>
+          <p>threshold、weight、horizon 切点和 overlay cap 由 Python 在 Train OOF 上拟合。LLM 看不到 truth、Dev 或 Public 残差。</p>
+        </article>
+        <article class="card">
+          <h3>安全锚点</h3>
+          <p>Toto 是初始 fallback，而不是永久赢家。非 Toto TSFM、Statistical 或 Combined 通过相同门槛即可成为新 Champion。</p>
+        </article>
+        <article class="card">
+          <h3>Assumptions</h3>
+          <p>每个可能进入 Decision 的候选绑定<strong>多个可证伪 assumptions</strong>及 failure conditions；未进入 Decision 的试跑方法无需逐个生成。</p>
+        </article>
+      </div>
+
+      <div class="code-panel">
+        <div class="code-head"><span>Numerical coordinate · conceptual contract</span><button class="copy-button" data-copy="numerical-contract">复制</button></div>
+        <pre id="numerical-contract">Frozen DictionarySupplyRelease
+  → TaskProfile(history only)
+  → Active Dictionary
+  → materialized Statistical / TSFM leaves
+  → legal Combined forecasts
+  → rolling hindcast diagnostics
+  → 3 structural Children
+  → Host-fitted thresholds and weights
+  → 8 → 32 → Train-80 → Dev-20
+  → NumericalSupplyRelease + NumericalForecastPackage</pre>
+      </div>
+    </section>
+
+    <section id="retrieval">
+      <div class="section-head">
+        <div class="section-no">04 / RETRIEVAL</div>
+        <div>
+          <h2>Retrieval coordinate：为候选假设找证据</h2>
+          <p class="section-intro">
+            Retrieval 不知道哪一个 forecast 在真实未来上更准。它只看到清洗后的任务、文档、候选 assumptions，以及需要补足的证据缺口。
+          </p>
+        </div>
+      </div>
+
+      <div class="sequence">
+        <article class="sequence-item"><span class="sequence-step">R1</span><h3>Assumption-blind</h3><p>先对任务和文档做独立检索，不被 Numerical 的偏好诱导。</p></article>
+        <article class="sequence-item"><span class="sequence-step">D0</span><h3>Provisional Decision</h3><p>只能提出一个经过清洗的高优先级 gap。</p></article>
+        <article class="sequence-item"><span class="sequence-step">R2</span><h3>Targeted retrieval</h3><p>只针对 gap 与相关 assumption IDs 补充证据。</p></article>
+        <article class="sequence-item"><span class="sequence-step">V</span><h3>Host verifier</h3><p>核对 document、quote、target、window、stance 与 assumption 绑定。</p></article>
+      </div>
+
+      <div class="callout" style="margin-top:14px">
+        <strong>Retrieval 也会 self-evolve。</strong> 它能改变 Genome、prompt、预算、拓扑和经过 Train 验证的 Retrieval Skills；
+        不能改 Numerical forecast、Dictionary 或 Decision policy。Round 2 失败时，合法的 Round 1 不会被清空。
+      </div>
+    </section>
+
+    <section id="decision">
+      <div class="section-head">
+        <div class="section-no">05 / DECISION</div>
+        <div>
+          <h2>Decision coordinate：只在真实执行结果中选择</h2>
+          <p class="section-intro">
+            Decision 把历史回测、候选 assumptions 与经过验证的外部证据合并，但没有权限生成一条新的数值轨迹。
+          </p>
+        </div>
+      </div>
+
+      <div class="card-grid">
+        <article class="card">
+          <h3>允许</h3>
+          <ul>
+            <li>从已 materialize 的候选中选一个。</li>
+            <li>选择已经 materialize 且获准的 ensemble。</li>
+            <li>请求一个有类型、有限范围的更多检索 gap。</li>
+            <li>在 evidence 不足时保持 safe anchor。</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>禁止</h3>
+          <ul>
+            <li>凭空生成 forecast vector。</li>
+            <li>引用未验证 document 或错误 stance。</li>
+            <li>让 supporting evidence 授权相反 candidate。</li>
+            <li>读取未来 truth、Dev residual 或 Public score。</li>
+          </ul>
+        </article>
+      </div>
+      <div class="callout" style="margin-top:14px">
+        <strong>Decision 同样 self-evolve。</strong> 可变部分是 prompt、Decision Skills、evidence-use policy 和 aggregation policy；
+        accepted Retrieval release 是 Decision 进化的前置条件。
+      </div>
+    </section>
+
+    <section id="feedback">
+      <div class="section-head">
+        <div class="section-no">06 / 反馈</div>
+        <div>
+          <h2>为什么它确实是 co-evolve</h2>
+          <p class="section-intro">
+            单向执行链之外，还存在一条严格限制的 Train-only 回路：Retrieval 和 Decision 对 assumptions 的处理结果，会变成下一轮 Numerical 的结构证据。
+          </p>
+        </div>
+      </div>
+
+      <div class="flow" style="grid-template-columns: repeat(3, minmax(0, 1fr));">
+        <article class="flow-node numerical"><span class="flow-label">Cycle 1 · N</span><h3>提出候选与 assumptions</h3><p>候选结构进入 Retrieval，而不是 Train truth。</p></article>
+        <article class="flow-node retrieval"><span class="flow-label">Cycle 1 · R/D</span><h3>验证或拒绝 assumptions</h3><p>记录 stance、证据质量和最终 action。</p></article>
+        <article class="flow-node numerical"><span class="flow-label">Cycle 2 · N</span><h3>读取清洗后的结构反馈</h3><p>知道哪类结构/条件值得继续，而不是重新盲猜。</p></article>
+      </div>
+
+      <div class="table-wrap" style="margin-top:18px">
+        <table>
+          <thead><tr><th>可以反馈</th><th>绝不反馈</th></tr></thead>
+          <tbody>
+            <tr><td>candidate family、recipe kind、parent families</td><td>task ID、future truth、原始 forecast vector</td></tr>
+            <tr><td>assumption condition、evidence stance、action outcome</td><td>数值 threshold/weight、自由文本 rationale</td></tr>
+            <tr><td>不可用或未验证的封闭状态</td><td>Dev 指标、Public record、benchmark role</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="callout" style="margin-top:14px">
+        若没有 accepted non-seed Retrieval trace，下一轮 Numerical 得到明确的 empty/unavailable projection，绝不伪造“Retrieval 支持”。
+      </p>
+    </section>
+
+    <section id="protocol">
+      <div class="section-head">
+        <div class="section-no">07 / 协议</div>
+        <div>
+          <h2>80 / 20 / 99 的边界</h2>
+          <p class="section-intro">
+            新框架采用最新 Train-Dev 协议：8 和 32 都是 Train 内的早筛；Train-80 使用按 entity 分组的五折 OOF；Dev-20 只接受；Public-99 只报告。
+          </p>
+        </div>
+      </div>
+
+      <div class="timeline">
+        <article class="timeline-item"><h3>Screen-8</h3><p>低成本排除结构非法、明显失效或严重退化的 Children。</p></article>
+        <article class="timeline-item"><h3>Screen-32</h3><p>扩大任务覆盖，保留有限 finalist；行为相同的参数版本由 Host 保留代表，而不是让 hash 随机决定。</p></article>
+        <article class="timeline-item"><h3>Train-80 · 5-fold OOF</h3><p>每次用四折拟合 routing/weight，在剩余一折评分；共享 entity 的任务始终位于同一折。</p></article>
+        <article class="timeline-item"><h3>Dev-20 · read-only</h3><p>固定 Train finalist 与 Parent 做一次接受比较；不再修改 threshold、prompt、Skills 或下一轮反馈。</p></article>
+        <article class="timeline-item"><h3>Public-99 · frozen only</h3><p>完整 bundle 冻结后由独立命令打开一次；结果不能回流。</p></article>
+      </div>
+
+      <div class="metric-grid" style="margin-top:20px">
+        <article class="metric-card"><strong>sMAE</strong><span>尺度归一化的绝对误差</span><span class="formula">主要反映典型幅度偏差</span></article>
+        <article class="metric-card"><strong>sRMSE</strong><span>尺度归一化的平方误差</span><span class="formula">对大误差与尾部更敏感</span></article>
+        <article class="metric-card"><strong>Pareto gate</strong><span>两者分别约束</span><span class="formula">joint score 只排序，不单独授权</span></article>
+      </div>
+
+      <div style="margin-top:18px">
+        <div class="guardrail"><div class="guardrail-icon">T</div><div><h3>尾部与稳定性</h3><p>同时检查 coverage、crash/invalid、raw/capped P90/P95、clipping、catastrophic、oracle regret 和 safe-anchor regret。</p></div></div>
+        <div class="guardrail"><div class="guardrail-icon">P</div><div><h3>Parent 精确保留</h3><p>任何 Child 失败或越权，都返回 byte-identical Parent；不能用“部分更新”掩盖失败。</p></div></div>
+      </div>
+    </section>
+
+    <section id="artifacts">
+      <div class="section-head">
+        <div class="section-no">08 / 产物</div>
+        <div>
+          <h2>一个可追溯的最终 Bundle</h2>
+          <p class="section-intro">
+            最终状态用哈希把 Dictionary supply、Numerical release、Retrieval release、Decision policy、runtime、split 和 acceptance evidence 连成一条 lineage。
+          </p>
+        </div>
+      </div>
+
+      <div class="code-panel">
+        <div class="code-head"><span>planned run directory</span><button class="copy-button" data-copy="artifact-tree">复制</button></div>
+        <pre id="artifact-tree">run_manifest.json
+supply/
+  dictionary_supply_release.json
+  method_evolution/
+  combined_evolution/
+  screening_evolution/
+package/
+  stage_schedule.json
+  checkpoint.json
+  coordinate_trace.jsonl
+  task_feedback/
+  acceptance_evidence/
+  final_bundle.json
+completion.json
+
+separate_public_output/
+  forecasts.jsonl
+  task_metrics.jsonl
+  summary.json</pre>
+      </div>
+
+      <div class="card-grid" style="margin-top:14px">
+        <article class="card"><h3><code>DictionarySupplyRelease</code></h3><p>绑定 Git source、inventory、screening、TSFM manifests、split、metric policy 和供给验收证据。</p></article>
+        <article class="card"><h3><code>UnifiedCoEvolutionBundle</code></h3><p>绑定 dictionary_supply、numerical、retrieval、decision 四个坐标及其直接 Parent 和接受证据。</p></article>
+      </div>
+    </section>
+
+    <section id="implementation">
+      <div class="section-head">
+        <div class="section-no">09 / 实施</div>
+        <div>
+          <h2>昨天的成果放到哪里</h2>
+          <p class="section-intro">
+            不是重新写一遍，而是给现有模块加统一 release、lineage 与顶层 runner。下面把已经做过的能力逐项归位。
+          </p>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>已有成果</th><th>新框架位置</th><th>处理方式</th></tr></thead>
+          <tbody>
+            <tr><td>93 Statistical Python methods</td><td>Dictionary Supply Epoch</td><td>Git source 保持执行真相；release 绑定精确 bytes。</td></tr>
+            <tr><td>5 TSFM 与 runtime manifests</td><td>Dictionary Supply Epoch</td><td>保留 immutable model identity，不训练权重。</td></tr>
+            <tr><td>多 parent Combined</td><td>Supply + Numerical</td><td>Supply 进化合法结构；Numerical 对当前任务 materialize。</td></tr>
+            <tr><td>task-conditioned screening</td><td>Supply freeze + runtime projection</td><td>冻结规则；每题生成不同 Active Dictionary。</td></tr>
+            <tr><td>Champion / Toto anchor</td><td>Numerical coordinate</td><td>Toto 是初始 fallback，允许非 Toto Child 替换。</td></tr>
+            <tr><td>task-local adaptive weights</td><td>Numerical coordinate</td><td>Host 用 group cross-fit 拟合，不给 LLM 数值权限。</td></tr>
+            <tr><td>多个 assumptions</td><td>Numerical → Retrieval handoff</td><td>每个 Decision 候选必须有可证伪条件。</td></tr>
+            <tr><td>two-stage Retrieval self-evolve</td><td>Retrieval coordinate</td><td>Genome、prompt、budgets、Skills 保持现有隔离。</td></tr>
+            <tr><td>Decision self-evolve</td><td>Decision coordinate</td><td>只从 materialized candidates 中选择。</td></tr>
+            <tr><td>R/D → next N task feedback</td><td>Cycle boundary</td><td>仅 Train 的封闭结构投影进入第二轮 Numerical。</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="detail-stack" style="margin-top:16px">
+        <details open>
+          <summary>实施顺序</summary>
+          <div class="detail-body">
+            <ol>
+              <li>实现并验证 <code>DictionarySupplyRelease</code>。</li>
+              <li>用 typed adapter 包装现有 method、Combined、screening evolution。</li>
+              <li>扩展统一 bundle 身份与 supply epoch lineage。</li>
+              <li>先接通 <code>--supply-mode existing</code>，验证已有冻结供给可跑两轮 N/R/D。</li>
+              <li>再接通 <code>--supply-mode evolve</code> 和 checkpoint/resume。</li>
+              <li>验证冻结 Public evaluator、fake smoke、完整边界和文档。</li>
+            </ol>
+          </div>
+        </details>
+        <details>
+          <summary>不会在这次重写的东西</summary>
+          <div class="detail-body">
+            <ul>
+              <li>不破坏或替换旧 <code>CoEvolutionEngine</code> API。</li>
+              <li>不重写九个 reviewed history-only skills。</li>
+              <li>不训练或合并 TSFM 参数。</li>
+              <li>不把 Public-99 变成 proposal、selection 或 acceptance 数据。</li>
+            </ul>
+          </div>
+        </details>
+      </div>
+
+      <div class="callout" style="margin-top:18px">
+        <strong>一句话总结：</strong>先 evolve“有什么可信工具”，再 co-evolve“怎样预测、怎样找证据、怎样做最终决定”；
+        这四部分由同一个最终 bundle 绑定，但不在同一步里同时乱改。
+      </div>
+    </section>
+
+    <footer class="footer">
+      <span>Unified Dictionary and Package Co-evolution · Design snapshot 2026-09-07</span>
+      <span>Source design: <a href="superpowers/specs/2026-09-07-unified-dictionary-package-coevolution-design.md">Markdown specification</a></span>
+    </footer>
+  </main>
+
+  <script>
+    const sections = [...document.querySelectorAll('main section[id]')];
+    const links = [...document.querySelectorAll('.nav a')];
+    const byId = new Map(links.map((link) => [link.getAttribute('href').slice(1), link]));
+
+    const observer = new IntersectionObserver((entries) => {
+      const visible = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+      if (!visible) return;
+      links.forEach((link) => link.classList.remove('active'));
+      const active = byId.get(visible.target.id);
+      if (active) active.classList.add('active');
+    }, { rootMargin: '-18% 0px -68% 0px', threshold: [0, 0.2, 0.6] });
+
+    sections.forEach((section) => observer.observe(section));
+
+    document.querySelectorAll('[data-copy]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const target = document.getElementById(button.dataset.copy);
+        if (!target) return;
+        try {
+          await navigator.clipboard.writeText(target.textContent);
+          const original = button.textContent;
+          button.textContent = '已复制';
+          setTimeout(() => { button.textContent = original; }, 1200);
+        } catch (_error) {
+          button.textContent = '请选择文本复制';
+        }
+      });
+    });
+  </script>
+</body>
+</html>
