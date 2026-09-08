@@ -30,18 +30,21 @@ Parent artifact
   -> next generation
 ```
 
-The outer co-evolution scheduler invokes complete instances of that loop:
+The coordinate layer invokes complete instances of that loop. Above it, a
+global Bundle loop evaluates every proposed coordinate change through the full
+end-to-end forecasting system:
 
 ```text
-Dictionary self-evolve loop -> frozen Supply Epoch
-  -> Numerical self-evolve loop
-  -> Retrieval self-evolve loop
-  -> Decision self-evolve loop
-  -> Numerical self-evolve loop
-  -> Retrieval self-evolve loop
-  -> Decision self-evolve loop
-  -> immutable final bundle
-  -> separate one-shot Public-99 evaluation
+Base Self-Evolve Loop
+  -> Dictionary / Numerical / Retrieval / Decision coordinate loops
+  -> Parent Unified Bundle
+  -> warm-up sweep: Dictionary -> Numerical -> Retrieval -> Decision
+  -> diagnose the complete final forecast
+  -> evolve the weakest coordinate
+  -> assemble complete Bundle Children
+  -> accept one globally improved Bundle or preserve the exact Parent
+  -> repeat until budget or no global improvement
+  -> immutable final Bundle -> separate one-shot Public-99 evaluation
 ```
 
 This is co-evolution because the accepted output of one coordinate becomes the
@@ -89,13 +92,18 @@ and evidence projections, but all four follow this same lifecycle. Co-evolution
 does not flatten those loops into single function calls and does not let the
 outer scheduler mutate their internals.
 
-### 3.2 Outer Supply Epoch, inner coordinate loops
+### 3.2 Coordinate self-evolution loops
 
-Dictionary evolution is an outer supply epoch, not a fourth mutation inserted
-between every package coordinate. A Dictionary change may alter executable
-source, candidate identity, screening, forecast caches, and every downstream
-Numerical package. It therefore must finish and freeze before the package loop
-starts.
+Dictionary, Numerical, Retrieval, and Decision each instantiate the base loop
+with their own typed artifact, proposer, evaluator, and local safety gates.
+Local acceptance is necessary but not sufficient: a coordinate Child must also
+be embedded into a complete Bundle and pass the global end-to-end gate.
+
+A Dictionary change is a supply epoch rather than an in-place source edit. It
+may alter executable source, candidate identity, screening, forecast caches,
+and every downstream Numerical package. The supply Child is frozen, the
+Numerical registry and forecast cache are rebuilt under its new fingerprint,
+and only then may the resulting complete Bundle Child be evaluated.
 
 ```text
 methods.py + skills.py + policies.py + TSFM manifests
@@ -103,27 +111,57 @@ methods.py + skills.py + policies.py + TSFM manifests
   -> task-conditioned screening evolution
   -> frozen DictionarySupplyRelease
   -> build initial NumericalSupplyRelease and task registry
-  -> [N -> R -> D] x 2
+  -> initial N -> R -> D warm-up
+  -> weakest-coordinate global Bundle steps
   -> sealed UnifiedCoEvolutionBundle
 ```
 
-Changing the Dictionary after an inner cycle begins requires a new supply epoch
-and a new downstream lineage. It cannot silently reuse forecasts, registry
+Changing the Dictionary after the warm-up sweep is legal when global attribution
+selects it as the weakest coordinate. It starts a new supply epoch and a new
+transitive downstream lineage. It cannot silently reuse forecasts, registry
 entries, proposals, or acceptance evidence from the preceding epoch.
 
-Each `Numerical`, `Retrieval`, or `Decision` box in the outer schedule denotes a
+Each coordinate box denotes a
 complete self-evolution loop invocation: propose Children, screen/evaluate,
 gate, and either accept or roll back. The accepted coordinate artifact is then
 embedded into the shared package Parent before the next coordinate loop begins.
 
-### 3.3 Why not mutate all four coordinates together
+### 3.3 Global Bundle co-evolution loop
+
+The global loop owns one `UnifiedCoEvolutionBundle` Parent containing exact
+Dictionary, Numerical, Retrieval, and Decision coordinate identities. It runs
+the complete inference path and derives trusted aggregate responsibility
+signals from the final forecast:
+
+- Dictionary supply gaps, unavailable families, and applicability misses;
+- Numerical forecast regret, instability, and assumption activation failures;
+- Retrieval evidence gaps, verification failures, and assumption coverage; and
+- Decision selection regret, unsupported overrides, and fallback behavior.
+
+The first global generation performs one warm-up sweep in dependency order:
+`Dictionary -> Numerical -> Retrieval -> Decision`. Later generations use a
+Host-owned weakest-coordinate scheduler. The selected coordinate proposes
+bounded Children through its own base loop. Each surviving coordinate Child is
+then reassembled with the other frozen coordinates to form a complete Bundle
+Child.
+
+The global evaluator scores the complete final forecast. Local method quality,
+evidence quality, or Decision diagnostics cannot independently authorize a
+Bundle. Acceptance requires global sMAE/sRMSE and safety gates; rejection
+preserves the exact preceding Bundle. Exactly one principal coordinate changes
+per global transition so improvement remains attributable.
+
+The loop stops at the configured budget or after a complete attribution round
+finds no globally improving coordinate.
+
+### 3.4 Why not mutate all four coordinates together
 
 Simultaneously changing Dictionary, Numerical, Retrieval, and Decision would
 make improvements impossible to attribute and would allow one broken coordinate
 to be hidden by another. It would also make cache identity ambiguous. The chosen
 design provides one direct Parent and one owned Child transition at every step.
 
-### 3.4 Why not rewrite `CoEvolutionEngine`
+### 3.5 Why not rewrite `CoEvolutionEngine`
 
 The old engine remains useful to legacy prompt/genome/source experiments and as
 a lower-level component of Decision evolution. Replacing it would produce a
@@ -278,6 +316,11 @@ If no accepted non-seed Retrieval trace exists, the next Numerical cycle receive
 an explicit empty/unavailable treatment projection rather than fabricated
 evidence.
 
+The global Bundle loop additionally receives Host-computed aggregate attribution
+records. These records may identify the weakest coordinate and closed reason
+codes, but they cannot give an LLM raw task truth, task IDs, Dev/Public residuals,
+or authority to mutate more than the selected coordinate.
+
 ## 9. Data and evaluation protocol
 
 ### 9.1 Train-80
@@ -332,7 +375,7 @@ fields. They cannot independently authorize an active Child.
 
 ## 11. Unified state and lineage
 
-Add a `UnifiedCoEvolutionBundle` or extend the package bundle schema so the
+Add a `UnifiedCoEvolutionBundle` so the
 frozen state binds four independently identifiable coordinates:
 
 1. `dictionary_supply`;
@@ -343,11 +386,15 @@ frozen state binds four independently identifiable coordinates:
 The bundle also binds runtime identities, split identity, metric policy, stage
 schedule, acceptance evidence, and direct Parent fingerprint.
 
-Supply publication initializes a fresh inner package lineage. During the inner
-loop, exactly one of Numerical, Retrieval, or Decision may change. A rejected or
-invalid transition returns the exact Parent object and bytes. A new Dictionary
-release starts a new supply epoch rather than masquerading as an inner Numerical
-transition.
+The Bundle is the Parent/Child artifact of the global co-evolution loop. Supply
+publication initializes or rebases the transitive package lineage. During a
+global transition, exactly one of Dictionary, Numerical, Retrieval, or Decision
+may change. A rejected or invalid transition returns the exact Parent object and
+bytes. A new Dictionary release starts a new supply epoch rather than
+masquerading as an inner Numerical transition.
+
+Every coordinate Child records both its local evidence and the global
+end-to-end evidence that authorized the complete Bundle transition.
 
 ## 12. Canonical top-level runner
 
@@ -376,8 +423,11 @@ The runner supports explicit bounded modes:
 - `--resume`: resume only when every source, split, runtime, schedule, and
   checkpoint identity matches.
 
-Formal mode runs one supply epoch followed by two ordered N-R-D cycles. It does
-not automatically start another supply epoch from the same Dev outcome.
+Formal mode first runs a dependency-ordered warm-up sweep over Dictionary,
+Numerical, Retrieval, and Decision. It then uses aggregate end-to-end attribution
+to select one weakest coordinate at a time until the configured global budget or
+no-improvement stop. A later Dictionary selection starts a fresh supply epoch
+and forces transitive registry/cache rebuilding.
 
 ## 13. Artifacts
 
@@ -397,6 +447,10 @@ package/
   task_feedback/
   acceptance_evidence/
   final_bundle.json
+meta_evolution/
+  bundle_trace.jsonl
+  attribution_evidence/
+  global_acceptance_evidence/
 completion.json
 ```
 
@@ -438,12 +492,14 @@ The implementation should proceed in bounded slices:
 
 1. canonical `DictionarySupplyRelease` and parser;
 2. supply-epoch adapter over existing method, Combined, and screening evolution;
-3. unified bundle identity and lineage rules;
-4. top-level controller and runner in `existing` supply mode;
-5. `evolve` supply mode and checkpoint/resume binding;
-6. frozen Public evaluator compatibility;
-7. deterministic smoke and focused end-to-end tests;
-8. documentation and wrapper updates.
+3. unified Bundle identity and one-coordinate lineage rules;
+4. global end-to-end evaluator and attribution schema;
+5. warm-up sweep plus weakest-coordinate scheduler;
+6. top-level controller and runner in `existing` supply mode;
+7. `evolve` supply mode, transitive rebase, and checkpoint/resume binding;
+8. frozen Public evaluator compatibility;
+9. deterministic smoke and focused end-to-end tests;
+10. documentation and wrapper updates.
 
 No slice changes TSFM weights, the reviewed analysis-skill implementations, or
 Public evaluation policy.
@@ -456,7 +512,12 @@ Tests must prove:
 - a frozen existing supply can initialize and complete two N-R-D cycles;
 - the evolved supply binds exact Git source and screening/runtime identities;
 - a supply change invalidates stale package registries and caches;
-- only one inner coordinate changes per accepted package step;
+- each coordinate Child is evaluated as a complete end-to-end Bundle Child;
+- local coordinate metrics alone cannot authorize global acceptance;
+- the warm-up sweep visits all four coordinates in dependency order;
+- the weakest-coordinate scheduler is deterministic from trusted aggregate
+  attribution and cannot select multiple coordinates;
+- only one principal coordinate changes per accepted global Bundle step;
 - rejected Children preserve exact Parent bytes;
 - Numerical assumptions survive the N-to-R projection and only verified evidence
   reaches Decision;

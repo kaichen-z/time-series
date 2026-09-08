@@ -59,6 +59,7 @@ def test_design_html_covers_the_complete_unified_flow() -> None:
         "retrieval",
         "decision",
         "feedback",
+        "global-coevolve",
         "protocol",
         "artifacts",
         "implementation",
@@ -68,6 +69,10 @@ def test_design_html_covers_the_complete_unified_flow() -> None:
         "Base Self-Evolve Loop",
         "Parent → Children → Train/Dev Gate → Accept or Rollback",
         "每个坐标都是完整 self-evolve loop",
+        "Global Bundle Co-Evolve",
+        "完整系统 Bundle Child",
+        "Warm-up Sweep",
+        "Weakest-coordinate Scheduler",
         "Dictionary Supply Epoch",
         "Numerical → Retrieval → Decision",
         "8 → 32 → Train-80 → Dev-20",
@@ -82,15 +87,30 @@ def test_design_html_covers_the_complete_unified_flow() -> None:
         assert phrase in text
 
 
-def test_design_html_places_coevolution_above_the_reusable_base_loop() -> None:
+def test_design_html_places_global_coevolution_above_coordinate_loops() -> None:
     text, _parser = _page()
 
     base = text.index("Base Self-Evolve Loop")
-    outer = text.index("Outer Co-evolve Scheduler")
-    assert base < outer
+    coordinate = text.index("Coordinate Self-Evolve Loops")
+    global_loop = text.index("Global Bundle Co-Evolve")
+    assert base < coordinate < global_loop
     for coordinate in ("Dictionary Loop", "Numerical Loop", "Retrieval Loop", "Decision Loop"):
         assert coordinate in text
     assert "Co-evolve 不替代 self-evolve" in text
+
+
+def test_global_bundle_gate_uses_end_to_end_results_and_can_revisit_supply() -> None:
+    text, _parser = _page()
+
+    for phrase in (
+        "完整最终预测",
+        "局部指标不能单独授权",
+        "端到端错误归因",
+        "可以重新选择 Dictionary",
+        "一次只改变一个坐标",
+        "重新构建 Numerical registry 与 forecast cache",
+    ):
+        assert phrase in text
 
 
 def test_design_html_distinguishes_existing_and_new_work() -> None:

@@ -747,6 +747,7 @@
         <a href="#retrieval">Retrieval</a>
         <a href="#decision">Decision</a>
         <a href="#feedback">反馈</a>
+        <a href="#global-coevolve">整体 Co-evolve</a>
         <a href="#protocol">80/20/99</a>
         <a href="#artifacts">产物</a>
         <a href="#implementation">实施</a>
@@ -760,12 +761,13 @@
       <h1>从 Dictionary 到三 Agent 的统一 Co-evolve</h1>
       <p class="hero-lead">
         保留最初的 Parent→Children→Train/Dev→接受或回退 self-evolve loop；
-        Dictionary、Numerical、Retrieval、Decision 都是这个基础 loop 的实例，
-        外层 co-evolve 调度器再把它们按依赖顺序连接起来。
+        Dictionary、Numerical、Retrieval、Decision 都是这个基础 loop 的实例；
+        最外层再把完整四坐标 Bundle 当作 Parent/Child，用最终预测结果持续 co-evolve。
       </p>
       <div class="hero-meta">
-        <span class="pill">1 个 Dictionary Supply Epoch</span>
-        <span class="pill">2 轮 N → R → D</span>
+        <span class="pill">3 层嵌套进化</span>
+        <span class="pill">Supply Epoch 可按归因重启</span>
+        <span class="pill">Warm-up + 自适应坐标调度</span>
         <span class="pill">sMAE + sRMSE</span>
         <span class="pill">Public-99 单次评测</span>
       </div>
@@ -788,7 +790,7 @@
       <div class="section-head">
         <div class="section-no">01 / 架构</div>
         <div>
-          <h2>外层供给，内层三坐标</h2>
+          <h2>基础 loop、坐标 loops、整体 Bundle loop</h2>
           <p class="section-intro">
             Co-evolve 不替代 self-evolve。最初的 self-evolve loop 是可复用单元；外层只负责编排四个完整 loop，
             以及把一个 loop 接受的 Parent 状态安全交给下一个 loop。
@@ -813,16 +815,30 @@
         </article>
         <article class="loop-shell outer">
           <div class="loop-shell-head">
-            <h3>Outer Co-evolve Scheduler</h3>
-            <span>编排完整 loops，不直接改内部 artifact</span>
+            <h3>Coordinate Self-Evolve Loops</h3>
+            <span>四种 artifact，各自使用完整基础 loop</span>
           </div>
           <div class="loop-rail" aria-label="外层 co-evolve 调度">
             <span class="loop-chip coordinate">Dictionary Loop</span><span class="loop-join">→ freeze →</span>
             <span class="loop-chip coordinate">Numerical Loop</span><span class="loop-join">→</span>
             <span class="loop-chip coordinate">Retrieval Loop</span><span class="loop-join">→</span>
-            <span class="loop-chip coordinate">Decision Loop</span><span class="loop-join">↺ cycle 2</span>
+            <span class="loop-chip coordinate">Decision Loop</span><span class="loop-join">↺ next global step</span>
           </div>
           <p style="margin:12px 0 0;color:var(--muted);font-size:13px"><strong style="color:var(--ink)">每个坐标都是完整 self-evolve loop</strong>；接受后才更新共享 Package Parent。</p>
+        </article>
+        <article class="loop-shell" style="border-left:5px solid var(--red)">
+          <div class="loop-shell-head">
+            <h3>Global Bundle Co-Evolve</h3>
+            <span>最终预测决定完整系统 Parent / Child</span>
+          </div>
+          <div class="loop-rail" aria-label="整体 Bundle co-evolve">
+            <span class="loop-chip">Whole-system Parent Bundle</span><span class="loop-join">→</span>
+            <span class="loop-chip coordinate">Warm-up Sweep</span><span class="loop-join">→</span>
+            <span class="loop-chip coordinate">End-to-end Attribution</span><span class="loop-join">→</span>
+            <span class="loop-chip coordinate">Weakest-coordinate Scheduler</span><span class="loop-join">→</span>
+            <span class="loop-chip">完整系统 Bundle Child</span><span class="loop-join">→ gate ↺</span>
+          </div>
+          <p style="margin:12px 0 0;color:var(--muted);font-size:13px">每个坐标 Child 都必须重组为完整系统并改善完整最终预测；<strong style="color:var(--ink)">局部指标不能单独授权</strong>。</p>
         </article>
       </div>
 
@@ -855,7 +871,7 @@
           <p>只报告，不返回 evolve。</p>
         </article>
       </div>
-      <div class="cycle-band">Numerical → Retrieval → Decision × 2；每一步只允许一个坐标变化</div>
+      <div class="cycle-band">首轮 Dictionary → Numerical → Retrieval → Decision；之后根据端到端错误归因自适应选择最弱坐标</div>
 
       <div class="legend" aria-label="实现状态图例">
         <span class="legend-item existing"><span class="dot"></span>现有 · 直接复用</span>
@@ -884,7 +900,7 @@
             <tr>
               <td>N/R/D controller</td>
               <td><code>package_coordinate_evolution.py</code></td>
-              <td>内层两轮坐标循环</td>
+              <td>坐标循环基础；新增全局 Bundle scheduler</td>
               <td><span class="status-tag existing">现有 · 直接复用</span></td>
             </tr>
             <tr>
@@ -1107,9 +1123,57 @@
       </p>
     </section>
 
+    <section id="global-coevolve">
+      <div class="section-head">
+        <div class="section-no">07 / 整体</div>
+        <div>
+          <h2>完整系统本身也要 Co-evolve</h2>
+          <p class="section-intro">
+            坐标内部通过不代表系统通过。最外层以完整 <code>UnifiedCoEvolutionBundle</code> 为 Parent，
+            每次把一个坐标 Child 与其余冻结坐标重新组装，再运行端到端 Numerical → Retrieval → Decision 才做最终接受。
+          </p>
+        </div>
+      </div>
+
+      <div class="sequence">
+        <article class="sequence-item"><span class="sequence-step">G0</span><h3>Whole-system Parent</h3><p>绑定 Dictionary、Numerical、Retrieval、Decision 与全部 runtime/split 身份。</p></article>
+        <article class="sequence-item"><span class="sequence-step">G1</span><h3>Warm-up Sweep</h3><p>首轮按依赖顺序访问 Dictionary → Numerical → Retrieval → Decision。</p></article>
+        <article class="sequence-item"><span class="sequence-step">G2</span><h3>错误归因</h3><p>Host 从完整最终预测构造端到端错误归因，不把原始 truth 发给 LLM。</p></article>
+        <article class="sequence-item"><span class="sequence-step">G3</span><h3>Weakest-coordinate</h3><p>一次只改变一个坐标，生成完整 Bundle Children 并接受全局最优者。</p></article>
+      </div>
+
+      <div class="table-wrap" style="margin-top:18px">
+        <table>
+          <thead><tr><th>可能的最弱坐标</th><th>Host 可观察的聚合信号</th><th>下一步</th></tr></thead>
+          <tbody>
+            <tr><td>Dictionary</td><td>供给缺口、family unavailable、applicability miss</td><td>可以重新选择 Dictionary，开启新的 Supply Epoch。</td></tr>
+            <tr><td>Numerical</td><td>forecast regret、fold/tail instability、assumption 未激活</td><td>进化 selection、route、weights 或 Combined recipe。</td></tr>
+            <tr><td>Retrieval</td><td>gap 未覆盖、citation/quote verification failure</td><td>进化 Genome、query、budget、Skills。</td></tr>
+            <tr><td>Decision</td><td>selection regret、unsupported override、fallback pattern</td><td>进化 prompt、Decision Skills 和 evidence policy。</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card-grid" style="margin-top:14px">
+        <article class="card">
+          <h3>Global Child 构造</h3>
+          <p>被选坐标替换为 Child，其余三个坐标保持 exact Parent。若改变 Dictionary，必须重新构建 Numerical registry 与 forecast cache，禁止复用旧 supply 的预测。</p>
+        </article>
+        <article class="card">
+          <h3>Global acceptance</h3>
+          <p>局部指标只能做筛选；最终必须由完整系统的 sMAE、sRMSE、coverage、tail、crash/invalid 与 anchor regret 共同决定。</p>
+        </article>
+      </div>
+
+      <div class="guardrail" style="margin-top:14px">
+        <div class="guardrail-icon">1</div>
+        <div><h3>一次只改变一个坐标</h3><p>这不等于四个 Agent 互不影响；它保证每个完整 Bundle 改善可以归因，同时允许下一代根据全局结果切换目标坐标。</p></div>
+      </div>
+    </section>
+
     <section id="protocol">
       <div class="section-head">
-        <div class="section-no">07 / 协议</div>
+        <div class="section-no">08 / 协议</div>
         <div>
           <h2>80 / 20 / 99 的边界</h2>
           <p class="section-intro">
@@ -1140,7 +1204,7 @@
 
     <section id="artifacts">
       <div class="section-head">
-        <div class="section-no">08 / 产物</div>
+        <div class="section-no">09 / 产物</div>
         <div>
           <h2>一个可追溯的最终 Bundle</h2>
           <p class="section-intro">
@@ -1164,6 +1228,10 @@ package/
   task_feedback/
   acceptance_evidence/
   final_bundle.json
+meta_evolution/
+  bundle_trace.jsonl
+  attribution_evidence/
+  global_acceptance_evidence/
 completion.json
 
 separate_public_output/
@@ -1180,7 +1248,7 @@ separate_public_output/
 
     <section id="implementation">
       <div class="section-head">
-        <div class="section-no">09 / 实施</div>
+        <div class="section-no">10 / 实施</div>
         <div>
           <h2>昨天的成果放到哪里</h2>
           <p class="section-intro">
@@ -1203,6 +1271,7 @@ separate_public_output/
             <tr><td>two-stage Retrieval self-evolve</td><td>Retrieval coordinate</td><td>Genome、prompt、budgets、Skills 保持现有隔离。</td></tr>
             <tr><td>Decision self-evolve</td><td>Decision coordinate</td><td>只从 materialized candidates 中选择。</td></tr>
             <tr><td>R/D → next N task feedback</td><td>Cycle boundary</td><td>仅 Train 的封闭结构投影进入第二轮 Numerical。</td></tr>
+            <tr><td>整体 Bundle co-evolve</td><td>Global meta-loop</td><td>完整遍历后按端到端责任选择最弱坐标，完整预测决定接受。</td></tr>
           </tbody>
         </table>
       </div>
@@ -1215,9 +1284,10 @@ separate_public_output/
               <li>实现并验证 <code>DictionarySupplyRelease</code>。</li>
               <li>用 typed adapter 包装现有 method、Combined、screening evolution。</li>
               <li>扩展统一 bundle 身份与 supply epoch lineage。</li>
-              <li>先接通 <code>--supply-mode existing</code>，验证已有冻结供给可跑两轮 N/R/D。</li>
-              <li>再接通 <code>--supply-mode evolve</code> 和 checkpoint/resume。</li>
-              <li>验证冻结 Public evaluator、fake smoke、完整边界和文档。</li>
+              <li>加入全局 Bundle evaluator、端到端归因和 weakest-coordinate scheduler。</li>
+              <li>先接通 <code>--supply-mode existing</code>，验证已有冻结供给可完成 warm-up sweep。</li>
+              <li>再接通 <code>--supply-mode evolve</code>、Supply rebase 和 checkpoint/resume。</li>
+              <li>验证完整 Bundle acceptance、冻结 Public evaluator、fake smoke 和文档。</li>
             </ol>
           </div>
         </details>
