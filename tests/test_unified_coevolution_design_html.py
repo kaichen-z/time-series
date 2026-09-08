@@ -113,6 +113,27 @@ def test_global_bundle_gate_uses_end_to_end_results_and_can_revisit_supply() -> 
         assert phrase in text
 
 
+def test_retrieval_section_separates_inference_from_self_evolution() -> None:
+    text, parser = _page()
+
+    assert {"retrieval-inference-diagram", "retrieval-evolution-diagram"} <= parser.ids
+    inference = text.index("单题执行：Two-stage Retrieval")
+    evolution = text.index("跨代进化：Retrieval Self-Evolve")
+    assert inference < evolution
+    for phrase in (
+        "这不是 self-evolve",
+        "这才是 Retrieval self-evolve",
+        "Retrieval Parent = Genome + Prompt + Budgets + Skills",
+        "Child A · Round 1",
+        "Child B · Evidence Verification",
+        "Child C · Round 2",
+        "每评估一个 Retrieval Child，都会在每道任务上重新执行上面的",
+        "R1 → D0 → R2 → Verify",
+        "Accepted Retrieval Release",
+    ):
+        assert phrase in text
+
+
 def test_design_html_distinguishes_existing_and_new_work() -> None:
     text, _parser = _page()
 

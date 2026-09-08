@@ -602,6 +602,83 @@
       font-size: 13px;
     }
 
+    .layer-panel {
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: rgba(255, 255, 255, 0.92);
+      box-shadow: 0 10px 28px rgba(34, 55, 86, 0.05);
+    }
+
+    .layer-panel + .layer-panel { margin-top: 14px; }
+
+    .layer-banner {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 17px;
+    }
+
+    .layer-banner h3 {
+      margin: 0 0 4px;
+      font-size: 21px;
+    }
+
+    .layer-banner p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .layer-index {
+      flex: 0 0 auto;
+      padding: 6px 10px;
+      border-radius: 10px;
+      color: #5b459d;
+      background: var(--violet-soft);
+      font: 760 12px/1.2 "SFMono-Regular", Consolas, monospace;
+    }
+
+    .connector-note {
+      position: relative;
+      margin: 14px auto;
+      max-width: 790px;
+      padding: 14px 18px 14px 48px;
+      border: 1px dashed #b5a7db;
+      border-radius: 15px;
+      color: #5c4b8d;
+      background: #f7f3ff;
+      font-size: 13px;
+      text-align: center;
+    }
+
+    .connector-note::before {
+      content: "↓";
+      position: absolute;
+      left: 17px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 22px;
+      font-weight: 800;
+    }
+
+    .scope-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .scope-card {
+      padding: 15px;
+      border-radius: 15px;
+      background: #f8faff;
+      border: 1px solid var(--line);
+    }
+
+    .scope-card strong { display: block; margin-bottom: 5px; font-size: 14px; }
+    .scope-card span { color: var(--muted); font-size: 12px; }
+
     .guardrail {
       display: grid;
       grid-template-columns: 44px 1fr;
@@ -711,6 +788,7 @@
       .arrow { transform: rotate(90deg); min-height: 24px; }
       .cycle-band { margin: 12px 0 0; }
       .sequence { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .scope-grid { grid-template-columns: 1fr; }
     }
 
     @media (max-width: 680px) {
@@ -1041,17 +1119,65 @@
         </div>
       </div>
 
-      <div class="sequence">
-        <article class="sequence-item"><span class="sequence-step">R1</span><h3>Assumption-blind</h3><p>先对任务和文档做独立检索，不被 Numerical 的偏好诱导。</p></article>
-        <article class="sequence-item"><span class="sequence-step">D0</span><h3>Provisional Decision</h3><p>只能提出一个经过清洗的高优先级 gap。</p></article>
-        <article class="sequence-item"><span class="sequence-step">R2</span><h3>Targeted retrieval</h3><p>只针对 gap 与相关 assumption IDs 补充证据。</p></article>
-        <article class="sequence-item"><span class="sequence-step">V</span><h3>Host verifier</h3><p>核对 document、quote、target、window、stance 与 assumption 绑定。</p></article>
+      <article class="layer-panel" id="retrieval-inference-diagram">
+        <div class="layer-banner">
+          <div>
+            <h3>单题执行：Two-stage Retrieval</h3>
+            <p>固定一个 Retrieval Child，在一条任务上怎样产生经过 Host 验证的 evidence。</p>
+          </div>
+          <span class="layer-index">INFERENCE</span>
+        </div>
+        <div class="sequence">
+          <article class="sequence-item"><span class="sequence-step">R1</span><h3>Assumption-blind Search</h3><p>只看清洗后的任务与文档，不先告诉它 Numerical 偏爱哪个候选。</p></article>
+          <article class="sequence-item"><span class="sequence-step">D0</span><h3>Provisional Decision</h3><p>读取合法 R1 结果，最多产生一个清洗后的高优先级 evidence gap。</p></article>
+          <article class="sequence-item"><span class="sequence-step">R2</span><h3>Targeted Retrieval</h3><p>只围绕这个 gap 和关联 assumption IDs 定向补证据。</p></article>
+          <article class="sequence-item"><span class="sequence-step">V</span><h3>Host Verify &amp; Merge</h3><p>逐条核对 document、quote、target、window、stance 和 assumption binding。</p></article>
+        </div>
+        <div class="callout" style="margin-top:14px">
+          <strong>这不是 self-evolve。</strong> 它只是一个冻结 Retrieval Child 在一条任务上的执行流程；不会在执行过程中修改 Genome、Prompt 或 Skills。
+          Round 2 失败时，合法 Round 1 仍会保留。
+        </div>
+      </article>
+
+      <div class="connector-note">
+        每评估一个 Retrieval Child，都会在每道任务上重新执行上面的 <strong>R1 → D0 → R2 → Verify</strong>。
       </div>
 
-      <div class="callout" style="margin-top:14px">
-        <strong>Retrieval 也会 self-evolve。</strong> 它能改变 Genome、prompt、预算、拓扑和经过 Train 验证的 Retrieval Skills；
-        不能改 Numerical forecast、Dictionary 或 Decision policy。Round 2 失败时，合法的 Round 1 不会被清空。
-      </div>
+      <article class="layer-panel" id="retrieval-evolution-diagram">
+        <div class="layer-banner">
+          <div>
+            <h3>跨代进化：Retrieval Self-Evolve</h3>
+            <p>Retrieval Parent = Genome + Prompt + Budgets + Skills；这里才会产生新 Retrieval Child。</p>
+          </div>
+          <span class="layer-index">EVOLUTION</span>
+        </div>
+
+        <div class="scope-grid">
+          <article class="scope-card"><strong>Child A · Round 1</strong><span>改变 R1 prompt、search strategy、max selected documents；对应 Round-1 Skills。</span></article>
+          <article class="scope-card"><strong>Child B · Evidence Verification</strong><span>改变 chain/citation budgets、counterevidence、target match 与 temporal overlap；可作用于两轮。</span></article>
+          <article class="scope-card"><strong>Child C · Round 2</strong><span>改变 R2 prompt、targeted strategy、second-round trigger；对应 Round-2 Skills。</span></article>
+        </div>
+
+        <div class="code-panel" style="margin-top:14px">
+          <div class="code-head"><span>Retrieval self-evolve · one coordinate generation</span><button class="copy-button" data-copy="retrieval-evolve-contract">复制</button></div>
+          <pre id="retrieval-evolve-contract">Retrieval Parent Release
+  → propose scoped Child A / B / C
+  → each Child runs R1 → D0 → R2 → Verify per task
+  → Screen-8
+  → Screen-32
+  → Train-80 grouped 5-fold evaluation
+  → Dev-20 read-only gate
+  → Accepted Retrieval Release
+     or exact Retrieval Parent rollback
+  → embed release into complete Bundle Child
+  → global end-to-end Bundle gate</pre>
+        </div>
+
+        <div class="callout" style="margin-top:14px">
+          <strong>这才是 Retrieval self-evolve。</strong> 它能进化 Genome、两轮 prompts、budgets、topology 和经过 Train 验证的 Retrieval Skills；
+          不能修改 Dictionary、Numerical forecasts 或 Decision policy。
+        </div>
+      </article>
     </section>
 
     <section id="decision">

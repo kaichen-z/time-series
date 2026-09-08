@@ -269,7 +269,11 @@ the typed assumptions needed to distinguish them. It never receives future
 labels, per-task forecast scores, benchmark role labels, or raw Dev/Public
 residuals.
 
-The two-stage protocol remains:
+Retrieval has two distinct loops that must not be conflated.
+
+### 6.1 Per-task two-stage inference
+
+For one frozen Retrieval Child on one task, the two-stage inference protocol is:
 
 1. Round 1 is assumption-blind and searches the bounded task corpus.
 2. A provisional Decision may emit one sanitized evidence gap.
@@ -278,9 +282,29 @@ The two-stage protocol remains:
    assumption bindings.
 5. A malformed or failed Round 2 retains valid Round-1 evidence.
 
-Retrieval self-evolution may change its Genome, prompt, budgets, topology, and
-accepted Retrieval Skills within the existing closed contracts. It cannot alter
-the Dictionary, Numerical candidates, forecasts, or Decision policy.
+This is execution behavior, not self-evolution. It produces one verified
+Retrieval result for one task without modifying the Retrieval Parent.
+
+### 6.2 Retrieval self-evolution
+
+The Retrieval Parent is a bound Genome, prompt set, budgets, topology, and Skill
+snapshot. Each generation proposes three scoped Children:
+
+- Child A may change Round-1 prompt, strategy, and selected-document budget;
+- Child B may change evidence-chain/citation budgets, counterevidence search,
+  target matching, and temporal-overlap requirements; and
+- Child C may change Round-2 prompt, strategy, and second-round trigger.
+
+Every Retrieval Child is evaluated by running the complete per-task protocol
+above on each scheduled task. The unified package path uses the registered
+`8 -> 32 -> Train-80 -> Dev-20` stages, promotes only passing Children, and
+publishes an accepted Retrieval release or preserves the exact Retrieval
+Parent. Evaluation may also promote stage-scoped candidate Retrieval Skills
+through the trusted Train-only learner.
+
+Retrieval self-evolution cannot alter the Dictionary, Numerical candidates,
+forecasts, or Decision policy. The accepted Retrieval release is then embedded
+into a complete Bundle Child for the global end-to-end gate.
 
 ## 7. Decision coordinate
 
