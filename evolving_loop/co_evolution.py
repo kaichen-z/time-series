@@ -17,6 +17,17 @@ from evolving_loop.data import ContextTask, Document
 from evolving_loop.decision_agent.agent import DECISION_PROMPT
 from evolving_loop.evaluation import ResolvedOutcome, score_after_resolution
 from evolving_loop.harness import EvolvingForecastHarness
+from evolving_loop.meta_harness_v2 import (
+    META_HARNESS_V2_PROMPT,
+    MetaChildKind,
+    MetaHarnessProposal,
+    MetaScope,
+    MetaTrainMemoryRecord,
+    child_kind_for_slot,
+    policy_change_scope,
+    project_train_memory,
+    validate_child_scope,
+)
 from evolving_loop.retrieval_agent.agent import RETRIEVAL_PROMPT
 from evolving_loop.retrieval_agent.policy import (
     RetrievalGenome,
@@ -698,6 +709,24 @@ class CoEvolutionConfig:
     screening_dev_tasks: int = 2
     screening_promote: int = 1
     screening_tolerance: float = 0.01
+    meta_harness_v2: bool = False
+    meta_memory_window: int = 3
+
+    def __post_init__(self) -> None:
+        if type(self.meta_harness_v2) is not bool:
+            raise ValueError("Meta-Harness V2 flag must be boolean")
+        if self.meta_harness_v2 and (
+            type(self.meta_memory_window) is not int or self.meta_memory_window <= 0
+        ):
+            raise ValueError("Meta-Harness V2 memory window must be positive")
+        if self.meta_harness_v2 and (
+            self.mode != "genome"
+            or self.target != "auto"
+            or self.children_per_generation < 4
+        ):
+            raise ValueError(
+                "Meta-Harness V2 requires genome mode, auto target, and at least 4 Children"
+            )
 
 
 HarnessFactory = Callable[[HarnessPolicy], EvolvingForecastHarness]
@@ -924,6 +953,10 @@ class CoEvolutionEngine:
         self.harness_factory = harness_factory
         self.config = config or CoEvolutionConfig()
         self._version = 1
+        self._meta_memory: list[MetaTrainMemoryRecord] = []
+        self._meta_child_info: dict[
+            str, tuple[MetaChildKind, tuple[MetaScope, ...], str, bool]
+        ] = {}
 
     @staticmethod
     def weakest_agent(evaluation: PolicyEvaluation) -> str:
@@ -1021,6 +1054,13 @@ class CoEvolutionEngine:
             for reason in trace.get("retrieval_rejections", ())
             if (category := str(reason).partition(":")[0]) in safe_retrieval_categories
         })
+        if self.config.meta_harness_v2:
+            return self._mutate_meta_v2(
+                parent,
+                child_index=child_index,
+                decision_categories=decision_categories,
+                retrieval_categories=retrieval_categories,
+            )
         if self.config.target == "auto" and self.config.mode == "prompt":
             mutation_instruction = (
                 "Propose one target-blind replacement value. The host will route it to its "
@@ -1130,6 +1170,182 @@ class CoEvolutionEngine:
         if candidate is None:
             return replace(parent, version=version, parent=parent.version, changelog=reason)
         return candidate
+
+    def _mutate_meta_v2(
+        self,
+        parent: HarnessPolicy,
+        *,
+        child_index: int,
+        decision_categories: Sequence[str],
+        retrieval_categories: Sequence[str],
+    ) -> HarnessPolicy:
+        child_kind = child_kind_for_slot(child_index)
+        version = f"v{self._version:03d}"
+        self._version += 1
+        unavailable_hypothesis = (
+            "Authenticated Retrieval release requires dedicated Retrieval evolution."
+        )
+        if child_kind == "retrieval" and parent.has_accepted_retrieval_release:
+            self._meta_child_info[version] = (
+                child_kind,
+                (),
+                unavailable_hypothesis,
+                False,
+            )
+            return replace(
+                parent,
+                version=version,
+                parent=parent.version,
+                changelog="Invalid Meta-Harness V2 Child: Retrieval release is immutable.",
+            )
+
+        current_policy = parent.to_payload()
+        for field_name in (
+            "version",
+            "parent",
+            "coding_skills",
+            "retrieval_skills",
+            "decision_skills",
+            "retrieval_release_payload",
+            "retrieval_release_sha256",
+        ):
+            current_policy.pop(field_name, None)
+        payload = {
+            "child_index": child_index,
+            "requested_child_kind": child_kind,
+            "current_policy": current_policy,
+            "train_evolution_memory": list(
+                project_train_memory(
+                    self._meta_memory,
+                    window=self.config.meta_memory_window,
+                )
+            ),
+            "failure_interface_facts": {
+                "decision_rejection_categories": list(decision_categories),
+                "retrieval_rejection_categories": list(retrieval_categories),
+            },
+            "skill_inventory": {
+                "coding": [record.get("name", "") for record in parent.coding_skills],
+                "retrieval": [record.get("name", "") for record in parent.retrieval_skills],
+                "decision": [record.get("name", "") for record in parent.decision_skills],
+            },
+        }
+        try:
+            response = self.llm.complete(
+                system=META_HARNESS_V2_PROMPT,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": json.dumps(payload, ensure_ascii=False),
+                    }
+                ],
+                temperature=0.4,
+            )
+        except TransientLLMError:
+            raise
+        except Exception as exc:
+            hypothesis = "The Meta-Harness proposal call did not complete."
+            self._meta_child_info[version] = (child_kind, (), hypothesis, False)
+            return replace(
+                parent,
+                version=version,
+                parent=parent.version,
+                changelog=(
+                    f"Invalid Meta-Harness V2 Child: mutation call failed ({type(exc).__name__})."
+                ),
+            )
+        try:
+            raw = parse_json_object(response.text)
+            proposal = MetaHarnessProposal.from_payload(raw)
+            if (
+                parent.retrieval_release_payload is not None
+                and proposal.retrieval_prompt != parent.retrieval_prompt
+            ):
+                raise ValueError("authenticated Retrieval prompt is immutable")
+            candidate = replace(
+                parent,
+                version=version,
+                parent=parent.version,
+                coding_generation_prompt=proposal.coding_generation_prompt,
+                coding_revision_prompt=proposal.coding_revision_prompt,
+                retrieval_prompt=proposal.retrieval_prompt,
+                decision_prompt=proposal.decision_prompt,
+                coding_initial_programs=proposal.coding_initial_programs,
+                coding_mutations=proposal.coding_mutations,
+                coding_mutation_children=proposal.coding_mutation_children,
+                coding_validation_folds=proposal.coding_validation_folds,
+                coding_validation_horizon=proposal.coding_validation_horizon,
+                workflow=proposal.workflow,
+                enable_evidence_adjustments=proposal.enable_evidence_adjustments,
+                max_evidence_adjustments=proposal.max_evidence_adjustments,
+                decision_aggregation=proposal.decision_aggregation,
+                changelog=proposal.changelog,
+            )
+            actual = policy_change_scope(parent.to_payload(), candidate.to_payload())
+            validate_child_scope(child_kind, proposal.mutation_scope, actual)
+        except (JsonExtractionError, TypeError, ValueError):
+            hypothesis = "Host rejected malformed Meta-Harness proposal."
+            self._meta_child_info[version] = (child_kind, (), hypothesis, False)
+            return replace(
+                parent,
+                version=version,
+                parent=parent.version,
+                changelog="Invalid Meta-Harness V2 Child; exact Parent behavior preserved.",
+            )
+        self._meta_child_info[version] = (
+            child_kind,
+            actual,
+            proposal.interaction_hypothesis,
+            True,
+        )
+        return candidate
+
+    def meta_train_memory_payload(self) -> tuple[dict[str, object], ...]:
+        """Return the bounded canonical Train-only memory projection."""
+        return project_train_memory(
+            self._meta_memory,
+            window=self.config.meta_memory_window,
+        )
+
+    def _record_meta_train_results(
+        self,
+        *,
+        generation: int,
+        children: Sequence[HarnessPolicy],
+        parent_by_child: Mapping[str, PolicyEvaluation],
+        child_evaluations: Mapping[str, PolicyEvaluation],
+    ) -> None:
+        if not self.config.meta_harness_v2:
+            return
+        for child in children:
+            kind, scopes, hypothesis, valid = self._meta_child_info[child.version]
+            parent = parent_by_child[child.version]
+            evaluation = child_evaluations.get(child.version)
+            if not valid or evaluation is None:
+                status = "invalid"
+                child_smae = None
+                child_srmse = None
+            else:
+                status = (
+                    "train_improved"
+                    if evaluation.better_than(parent)
+                    else "train_rejected"
+                )
+                child_smae = evaluation.mean_smae
+                child_srmse = evaluation.mean_srmse
+            self._meta_memory.append(
+                MetaTrainMemoryRecord(
+                    generation=generation,
+                    child_kind=kind,
+                    changed_scopes=scopes,
+                    interaction_hypothesis=hypothesis,
+                    status=status,
+                    parent_train_smae=parent.mean_smae,
+                    parent_train_srmse=parent.mean_srmse,
+                    child_train_smae=child_smae,
+                    child_train_srmse=child_srmse,
+                )
+            )
 
     @staticmethod
     def _scope_genome_candidate(
@@ -1348,6 +1564,17 @@ class CoEvolutionEngine:
                     child_index=child_index,
                 )
                 children.append(child)
+                if (
+                    self.config.meta_harness_v2
+                    and not self._meta_child_info[child.version][3]
+                ):
+                    self._progress(
+                        "candidate_failed",
+                        generation=generation,
+                        child=child.version,
+                        error="invalid_meta_harness_v2_proposal",
+                    )
+                    continue
                 try:
                     child_harness = self.harness_factory(child)
                     child_harnesses[child.version] = child_harness
@@ -1375,6 +1602,12 @@ class CoEvolutionEngine:
                         child=child.version,
                         error=f"{type(exc).__name__}: {exc}",
                     )
+            self._record_meta_train_results(
+                generation=generation,
+                children=children,
+                parent_by_child={child.version: parent_train for child in children},
+                child_evaluations=train_evaluations,
+            )
             valid_children = [child for child in children if child.version in train_evaluations]
             improving_children = [
                 child
@@ -1544,6 +1777,18 @@ class CoEvolutionEngine:
             self._progress("candidate_started", generation=generation, child=child_index)
             child = self.mutate(incumbent, parent_train, child_index=child_index)
             children.append(child)
+            if (
+                self.config.meta_harness_v2
+                and not self._meta_child_info[child.version][3]
+            ):
+                self._progress(
+                    "candidate_failed",
+                    generation=generation,
+                    child=child.version,
+                    stage="screen",
+                    error="invalid_meta_harness_v2_proposal",
+                )
+                continue
             try:
                 child_harness = self.harness_factory(child)
                 child_harnesses[child.version] = child_harness
@@ -1654,6 +1899,22 @@ class CoEvolutionEngine:
                     parent_train_reward=parent_train.system_reward,
                     child_train_reward=train_evaluations[child.version].system_reward,
                 )
+
+        memory_evaluations = dict(child_screen_train)
+        memory_evaluations.update(train_evaluations)
+        self._record_meta_train_results(
+            generation=generation,
+            children=children,
+            parent_by_child={
+                child.version: (
+                    parent_train
+                    if child.version in train_evaluations
+                    else parent_screen_train
+                )
+                for child in children
+            },
+            child_evaluations=memory_evaluations,
+        )
 
         improving_versions = [
             version
@@ -1833,7 +2094,7 @@ class CoEvolutionEngine:
         temporary.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2 if self.config.meta_harness_v2 else 1,
                     "objective": EVOLUTION_OBJECTIVE,
                     "mode": self.config.mode,
                     "target": self.config.target,
@@ -1841,6 +2102,17 @@ class CoEvolutionEngine:
                     "next_generation": next_generation,
                     "incumbent": incumbent.to_payload(),
                     "history": [asdict(item) for item in history],
+                    **(
+                        {
+                            "meta_harness_v2": True,
+                            "meta_memory_window": self.config.meta_memory_window,
+                            "meta_memory": [
+                                record.to_payload() for record in self._meta_memory
+                            ],
+                        }
+                        if self.config.meta_harness_v2
+                        else {}
+                    ),
                 },
                 indent=2,
                 ensure_ascii=False,
@@ -1859,6 +2131,21 @@ class CoEvolutionEngine:
         ):
             return seed, [], 0
         payload = json.loads(Path(self.config.checkpoint_path).read_text(encoding="utf-8"))
+        schema_version = payload.get("schema_version", 1)
+        if self.config.meta_harness_v2:
+            if (
+                schema_version != 2
+                or payload.get("meta_harness_v2") is not True
+                or payload.get("meta_memory_window") != self.config.meta_memory_window
+                or type(payload.get("meta_memory")) is not list
+            ):
+                raise ValueError("checkpoint Meta-Harness V2 contract does not match this run")
+            self._meta_memory = [
+                MetaTrainMemoryRecord.from_payload(record)
+                for record in payload["meta_memory"]
+            ]
+        elif schema_version != 1:
+            raise ValueError("Meta-Harness V2 checkpoint requires Meta-Harness V2 mode")
         if payload.get("objective") != EVOLUTION_OBJECTIVE:
             raise ValueError("checkpoint objective does not match this run")
         if payload.get("mode") != self.config.mode:

@@ -121,7 +121,7 @@ def _exact_dict(payload: object, fields: frozenset[str], label: str) -> dict[str
 def _nonempty_string(value: object, field: str) -> str:
     if type(value) is not str or not value.strip():
         raise ValueError(f"{field} must be a non-empty string")
-    return value.strip()
+    return value
 
 
 def _bounded_integer(value: object, field: str, lower: int, upper: int) -> int:
@@ -201,9 +201,7 @@ class MetaHarnessProposal:
             raise ValueError("decision aggregation must be last or majority")
         return cls(
             mutation_scope=_scopes(raw["mutation_scope"], "mutation_scope"),
-            interaction_hypothesis=_nonempty_string(
-                raw["interaction_hypothesis"], "interaction_hypothesis"
-            ),
+            interaction_hypothesis=_train_hypothesis(raw["interaction_hypothesis"]),
             workflow=cast(tuple[str, ...], workflow),
             enable_evidence_adjustments=cast(bool, raw["enable_evidence_adjustments"]),
             decision_aggregation=aggregation,
@@ -288,6 +286,13 @@ def _metric(value: object, field: str, *, optional: bool) -> float | None:
 _TASK_ID_PATTERN = re.compile(r"\btask[_-]?\d+\b", re.IGNORECASE)
 
 
+def _train_hypothesis(value: object) -> str:
+    hypothesis = _nonempty_string(value, "interaction_hypothesis")
+    if _TASK_ID_PATTERN.search(hypothesis):
+        raise ValueError("interaction_hypothesis cannot contain task-level identity")
+    return hypothesis
+
+
 @dataclass(frozen=True)
 class MetaTrainMemoryRecord:
     generation: int
@@ -305,9 +310,7 @@ class MetaTrainMemoryRecord:
         if self.child_kind not in _CHILD_KINDS:
             raise ValueError("unknown child kind")
         scopes = _scopes(self.changed_scopes, "changed_scopes", allow_empty=True)
-        hypothesis = _nonempty_string(self.interaction_hypothesis, "interaction_hypothesis")
-        if _TASK_ID_PATTERN.search(hypothesis):
-            raise ValueError("Train memory cannot contain task-level identity")
+        hypothesis = _train_hypothesis(self.interaction_hypothesis)
         if self.status not in _TRAIN_STATUSES:
             raise ValueError("unknown Train-memory status")
         parent_smae = _metric(self.parent_train_smae, "parent_train_smae", optional=False)
