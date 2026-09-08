@@ -341,6 +341,63 @@
       font-weight: 720;
     }
 
+    .loop-stack {
+      display: grid;
+      gap: 12px;
+      margin: 22px 0 18px;
+    }
+
+    .loop-shell {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: white;
+    }
+
+    .loop-shell.base { border-left: 5px solid var(--green); }
+    .loop-shell.outer { border-left: 5px solid var(--violet); }
+
+    .loop-shell-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 12px;
+    }
+
+    .loop-shell-head h3 { margin: 0; font-size: 18px; }
+    .loop-shell-head span { color: var(--muted); font-size: 12px; }
+
+    .loop-rail {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 3px;
+      scrollbar-width: thin;
+    }
+
+    .loop-chip {
+      flex: 0 0 auto;
+      padding: 8px 11px;
+      border-radius: 11px;
+      color: #31506f;
+      background: #eef3f9;
+      font-size: 12px;
+      font-weight: 720;
+    }
+
+    .loop-chip.coordinate {
+      color: #5b459d;
+      background: var(--violet-soft);
+    }
+
+    .loop-join {
+      flex: 0 0 auto;
+      color: #94a3b8;
+      font-weight: 800;
+    }
+
     .legend {
       display: flex;
       flex-wrap: wrap;
@@ -702,9 +759,9 @@
       <span class="eyebrow">Design snapshot · 2026-09-07</span>
       <h1>从 Dictionary 到三 Agent 的统一 Co-evolve</h1>
       <p class="hero-lead">
-        先把可执行方法、TSFM、Combined 与适用规则冻结为一个可信供给；再让
-        Numerical → Retrieval → Decision 按坐标连续进化两轮，最后冻结完整系统，
-        单独打开 Public-99。
+        保留最初的 Parent→Children→Train/Dev→接受或回退 self-evolve loop；
+        Dictionary、Numerical、Retrieval、Decision 都是这个基础 loop 的实例，
+        外层 co-evolve 调度器再把它们按依赖顺序连接起来。
       </p>
       <div class="hero-meta">
         <span class="pill">1 个 Dictionary Supply Epoch</span>
@@ -733,10 +790,40 @@
         <div>
           <h2>外层供给，内层三坐标</h2>
           <p class="section-intro">
-            Dictionary 改变会使方法源码、候选空间、筛选策略和预测缓存一起变化，因此必须先完成并冻结；
-            N/R/D 才在这个固定供给上做可归因的坐标进化。
+            Co-evolve 不替代 self-evolve。最初的 self-evolve loop 是可复用单元；外层只负责编排四个完整 loop，
+            以及把一个 loop 接受的 Parent 状态安全交给下一个 loop。
           </p>
         </div>
+      </div>
+
+      <div class="loop-stack">
+        <article class="loop-shell base">
+          <div class="loop-shell-head">
+            <h3>Base Self-Evolve Loop</h3>
+            <span>所有坐标共同使用的最初设计</span>
+          </div>
+          <div class="loop-rail" aria-label="基础 self-evolve loop">
+            <span class="loop-chip">Parent</span><span class="loop-join">→</span>
+            <span class="loop-chip">Propose Children</span><span class="loop-join">→</span>
+            <span class="loop-chip">Train / Screen</span><span class="loop-join">→</span>
+            <span class="loop-chip">Dev Gate</span><span class="loop-join">→</span>
+            <span class="loop-chip">Accept Child or Rollback Parent</span><span class="loop-join">↺</span>
+          </div>
+          <p style="margin:12px 0 0;color:var(--muted);font-size:13px">Parent → Children → Train/Dev Gate → Accept or Rollback</p>
+        </article>
+        <article class="loop-shell outer">
+          <div class="loop-shell-head">
+            <h3>Outer Co-evolve Scheduler</h3>
+            <span>编排完整 loops，不直接改内部 artifact</span>
+          </div>
+          <div class="loop-rail" aria-label="外层 co-evolve 调度">
+            <span class="loop-chip coordinate">Dictionary Loop</span><span class="loop-join">→ freeze →</span>
+            <span class="loop-chip coordinate">Numerical Loop</span><span class="loop-join">→</span>
+            <span class="loop-chip coordinate">Retrieval Loop</span><span class="loop-join">→</span>
+            <span class="loop-chip coordinate">Decision Loop</span><span class="loop-join">↺ cycle 2</span>
+          </div>
+          <p style="margin:12px 0 0;color:var(--muted);font-size:13px"><strong style="color:var(--ink)">每个坐标都是完整 self-evolve loop</strong>；接受后才更新共享 Package Parent。</p>
+        </article>
       </div>
 
       <div class="flow" aria-label="统一 co-evolution 流程">

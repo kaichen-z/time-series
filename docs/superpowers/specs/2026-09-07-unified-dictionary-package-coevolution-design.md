@@ -17,12 +17,29 @@ The repository currently has two real but separately invoked layers:
    task-conditioned screening; and
 2. package-native `Numerical -> Retrieval -> Decision` coordinate evolution.
 
-The new canonical workflow must bind these layers into one auditable run:
+The new canonical workflow must bind these layers into one auditable run. It
+does not replace the original self-evolution loop. That loop is the reusable
+unit from which every coordinate is constructed:
 
 ```text
-Dictionary Supply Epoch
-  -> Numerical -> Retrieval -> Decision
-  -> Numerical -> Retrieval -> Decision
+Parent artifact
+  -> propose bounded Children
+  -> Train screening and evaluation
+  -> read-only Dev acceptance gate
+  -> accept one Child or preserve the exact Parent
+  -> next generation
+```
+
+The outer co-evolution scheduler invokes complete instances of that loop:
+
+```text
+Dictionary self-evolve loop -> frozen Supply Epoch
+  -> Numerical self-evolve loop
+  -> Retrieval self-evolve loop
+  -> Decision self-evolve loop
+  -> Numerical self-evolve loop
+  -> Retrieval self-evolve loop
+  -> Decision self-evolve loop
   -> immutable final bundle
   -> separate one-shot Public-99 evaluation
 ```
@@ -60,7 +77,19 @@ Numerical release, or one-coordinate lineage needed by the current system.
 
 ## 3. Chosen architecture
 
-### 3.1 Outer Supply Epoch, inner coordinate loop
+### 3.1 Base self-evolution loop
+
+The original Parent/Child loop remains the primitive abstraction. Each instance
+owns its artifact, mutator, executor, trusted evaluator, acceptance gate, and
+checkpoint. A valid rejection returns the exact Parent; a valid acceptance makes
+one Child the Parent of that coordinate's next generation.
+
+Dictionary, Numerical, Retrieval, and Decision use different artifact schemas
+and evidence projections, but all four follow this same lifecycle. Co-evolution
+does not flatten those loops into single function calls and does not let the
+outer scheduler mutate their internals.
+
+### 3.2 Outer Supply Epoch, inner coordinate loops
 
 Dictionary evolution is an outer supply epoch, not a fourth mutation inserted
 between every package coordinate. A Dictionary change may alter executable
@@ -82,14 +111,19 @@ Changing the Dictionary after an inner cycle begins requires a new supply epoch
 and a new downstream lineage. It cannot silently reuse forecasts, registry
 entries, proposals, or acceptance evidence from the preceding epoch.
 
-### 3.2 Why not mutate all four coordinates together
+Each `Numerical`, `Retrieval`, or `Decision` box in the outer schedule denotes a
+complete self-evolution loop invocation: propose Children, screen/evaluate,
+gate, and either accept or roll back. The accepted coordinate artifact is then
+embedded into the shared package Parent before the next coordinate loop begins.
+
+### 3.3 Why not mutate all four coordinates together
 
 Simultaneously changing Dictionary, Numerical, Retrieval, and Decision would
 make improvements impossible to attribute and would allow one broken coordinate
 to be hidden by another. It would also make cache identity ambiguous. The chosen
 design provides one direct Parent and one owned Child transition at every step.
 
-### 3.3 Why not rewrite `CoEvolutionEngine`
+### 3.4 Why not rewrite `CoEvolutionEngine`
 
 The old engine remains useful to legacy prompt/genome/source experiments and as
 a lower-level component of Decision evolution. Replacing it would produce a

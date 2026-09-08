@@ -65,6 +65,9 @@ def test_design_html_covers_the_complete_unified_flow() -> None:
     }
     assert expected_ids <= parser.ids
     for phrase in (
+        "Base Self-Evolve Loop",
+        "Parent → Children → Train/Dev Gate → Accept or Rollback",
+        "每个坐标都是完整 self-evolve loop",
         "Dictionary Supply Epoch",
         "Numerical → Retrieval → Decision",
         "8 → 32 → Train-80 → Dev-20",
@@ -77,6 +80,17 @@ def test_design_html_covers_the_complete_unified_flow() -> None:
         "多个可证伪 assumptions",
     ):
         assert phrase in text
+
+
+def test_design_html_places_coevolution_above_the_reusable_base_loop() -> None:
+    text, _parser = _page()
+
+    base = text.index("Base Self-Evolve Loop")
+    outer = text.index("Outer Co-evolve Scheduler")
+    assert base < outer
+    for coordinate in ("Dictionary Loop", "Numerical Loop", "Retrieval Loop", "Decision Loop"):
+        assert coordinate in text
+    assert "Co-evolve 不替代 self-evolve" in text
 
 
 def test_design_html_distinguishes_existing_and_new_work() -> None:
