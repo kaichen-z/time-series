@@ -49,6 +49,42 @@ scorer, task split, label-removal boundary, CLI, sandbox, and source-evolution h
 mutable set. The Source Engineer sees sanitized training failure structure but not task/document
 identifiers, future values, GT evidence, or development results.
 
+### Meta-Harness V2: primary coordinated experiment
+
+`--meta-harness-v2` makes the complete three-agent `HarnessPolicy` the inherited Parent. Each
+generation requests four controlled Children from the same strict JSON interface:
+
+1. Coding-only;
+2. Retrieval-only;
+3. Decision-only; and
+4. a joint Child that must change at least two role scopes.
+
+The isolated Children are causal controls; the joint Child tests whether changes that are weak in
+isolation become useful together. The Host recomputes the changed fields and rejects any mismatch
+between the requested, declared, and actual scope. It also keeps task loading, label removal,
+sMAE/sRMSE scoring, citation verification, sandboxing, resource limits, and exact Parent rollback
+outside the mutable genome.
+
+No separate Memory Agent or vector database is used. The next generation receives only the last
+three generations of bounded Train aggregates: Child kind, changed scopes, a testable interaction
+hypothesis, Parent/Child Train sMAE and sRMSE, and a closed status. Task IDs, forecasts, future
+values, documents, raw failures, Dev metrics, and Public/Holdout data are excluded. This memory is
+canonicalized in the checkpoint and validated again on resume.
+
+Run the small 8/2 protocol with:
+
+```bash
+scripts/run_meta_harness_v2.sh \
+  /path/to/Dr-CiK_public/tasks \
+  runs/meta_harness_v2/real_8_2_gpt56sol
+```
+
+This wrapper uses `gpt-5.6-sol` with medium reasoning, one generation, four Children, a six-task
+Train screen, at most two full-Train promotions, eight Train tasks, two read-only Dev tasks, and no
+Public/Holdout access. This V2 slice evolves the existing Coding/Retrieval/Decision Harness; the
+newer 103-method Dictionary/Champion package remains an external forecasting supply until its
+explicit adapter is connected.
+
 ## Runtime flow
 
 ```text

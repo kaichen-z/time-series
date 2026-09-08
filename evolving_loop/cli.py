@@ -341,6 +341,14 @@ def _add_unified_evolution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--chronos-device", default="cpu")
     parser.add_argument("--generations", type=int, default=3)
     parser.add_argument("--children", type=int, default=2)
+    parser.add_argument(
+        "--meta-harness-v2",
+        action="store_true",
+        help=(
+            "Evolve Coding, Retrieval, Decision, and coordinated Harness Children "
+            "with bounded Train-only memory."
+        ),
+    )
     _add_successive_halving_arguments(parser)
     parser.add_argument(
         "--evolve-target",
@@ -483,6 +491,14 @@ def build_parser() -> argparse.ArgumentParser:
     evolve = subparsers.choices["evolve"]
     evolve.add_argument("--generations", type=int, default=3)
     evolve.add_argument("--children", type=int, default=2)
+    evolve.add_argument(
+        "--meta-harness-v2",
+        action="store_true",
+        help=(
+            "Evolve Coding, Retrieval, Decision, and coordinated Harness Children "
+            "with bounded Train-only memory."
+        ),
+    )
     _add_successive_halving_arguments(evolve)
     evolve.add_argument(
         "--evolve-target",
@@ -700,19 +716,23 @@ def _three_way_entity_split(
     """Create deterministic entity-disjoint train/dev/holdout partitions."""
     if not 0 < dev_fraction < 1:
         raise ValueError("--dev-fraction must be between 0 and 1")
-    if not 0 < holdout_fraction < 1:
-        raise ValueError("--holdout-fraction must be between 0 and 1")
+    if not 0 <= holdout_fraction < 1:
+        raise ValueError("--holdout-fraction must be between 0 (inclusive) and 1")
     if dev_fraction + holdout_fraction >= 1:
         raise ValueError("dev and holdout fractions must sum to less than 1")
     entities = sorted({task.numeric.entity_name for task in tasks})
-    required = 3
+    required = 2 if holdout_fraction == 0 else 3
     if len(entities) < required:
         raise ValueError(
             f"entity split needs at least {required} distinct entities; got {len(entities)}"
         )
     random.Random(seed).shuffle(entities)
     dev_count = max(1, round(len(entities) * dev_fraction))
-    holdout_count = max(1, round(len(entities) * holdout_fraction))
+    holdout_count = (
+        0
+        if holdout_fraction == 0
+        else max(1, round(len(entities) * holdout_fraction))
+    )
     while dev_count + holdout_count >= len(entities):
         if dev_count >= holdout_count and dev_count > 1:
             dev_count -= 1
@@ -3835,7 +3855,26 @@ def _alternate_coordinate_evolve_command(
     }
 
 
+def _validate_meta_harness_v2_cli(args) -> bool:
+    enabled = bool(getattr(args, "meta_harness_v2", False))
+    if not enabled:
+        return False
+    if (
+        getattr(args, "evolution_mode", None) != "genome"
+        or getattr(args, "evolve_target", None) != "auto"
+        or getattr(args, "children", 0) < 4
+        or getattr(args, "coordinate_phase", None) is not None
+        or getattr(args, "dev_fraction", 0.0) <= 0.0
+    ):
+        raise ValueError(
+            "Meta-Harness V2 requires genome mode, auto target, at least 4 Children, "
+            "no coordinate phase, and a positive Dev fraction"
+        )
+    return True
+
+
 def evolve_command(args) -> dict:
+    meta_harness_v2 = _validate_meta_harness_v2_cli(args)
     coordinate_phase = getattr(args, "coordinate_phase", None)
     coordinate_preflight = None
     if coordinate_phase is not None:
@@ -3921,14 +3960,25 @@ def evolve_command(args) -> dict:
             screening_dev_tasks=args.screen_dev_tasks,
             screening_promote=args.screen_promote,
             screening_tolerance=args.screen_tolerance,
+            meta_harness_v2=meta_harness_v2,
         ),
     )
     seed_policy = _seed_policy(args)
     best, trace = engine.evolve(seed_policy, train, dev)
     best.save(args.policy_path)
     trace_path.parent.mkdir(parents=True, exist_ok=True)
-    trace_path.write_text(json.dumps([asdict(item) for item in trace], indent=2))
-    return {
+    trace_payload: object = [asdict(item) for item in trace]
+    if meta_harness_v2:
+        trace_payload = {
+            "schema_version": 2,
+            "meta_harness_v2": True,
+            "child_shapes": ["coding", "retrieval", "decision", "joint"],
+            "memory_policy": "train_only_last_3_generations",
+            "train_evolution_memory": list(engine.meta_train_memory_payload()),
+            "steps": trace_payload,
+        }
+    trace_path.write_text(json.dumps(trace_payload, indent=2))
+    result = {
         "best_policy": best.version,
         "evolution_mode": args.evolution_mode,
         "policy_path": args.policy_path,
@@ -3941,6 +3991,15 @@ def evolve_command(args) -> dict:
         "split_manifest_path": str(manifest_path),
         "holdout_status": "reserved_unscored_run_frozen_inference_to_evaluate",
     }
+    if meta_harness_v2:
+        result.update(
+            {
+                "meta_harness_v2": True,
+                "child_shapes": ["coding", "retrieval", "decision", "joint"],
+                "memory_policy": "train_only_last_3_generations",
+            }
+        )
+    return result
 
 
 def _inference_tasks(args) -> tuple[list[ContextTask], str]:

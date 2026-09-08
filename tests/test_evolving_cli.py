@@ -23,7 +23,11 @@ from evolving_loop.cli import (
     build_parser,
     inference_command,
 )
-from evolving_loop.co_evolution import HarnessPolicy, snapshot_policy_skills
+from evolving_loop.co_evolution import (
+    EvolutionStep,
+    HarnessPolicy,
+    snapshot_policy_skills,
+)
 from evolving_loop.coding_agent.skill_library import Skill, SkillLibrary
 from evolving_loop.data import ContextTask, Document, Task
 from evolving_loop.decision_agent.skill_library import DecisionSkill, DecisionSkillLibrary
@@ -96,6 +100,123 @@ def test_evolve_cli_exposes_three_evolution_modes() -> None:
 
 def test_genome_remains_the_default_evolution_mode() -> None:
     assert build_parser().parse_args(["evolve"]).evolution_mode == "genome"
+
+
+def test_meta_harness_v2_is_explicit_and_available_on_both_cli_grammars() -> None:
+    parser = build_parser()
+
+    assert parser.parse_args(["evolve"]).meta_harness_v2 is False
+    assert parser.parse_args(["--evolution", "genome"]).meta_harness_v2 is False
+    assert parser.parse_args(["evolve", "--meta-harness-v2"]).meta_harness_v2 is True
+    assert (
+        parser.parse_args(["--evolution", "genome", "--meta-harness-v2"]).meta_harness_v2
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    (
+        ("--evolution-mode", "prompt"),
+        ("--evolve-target", "coding"),
+        ("--children", "3"),
+        ("--coordinate-phase", "retrieval"),
+    ),
+)
+def test_meta_harness_v2_cli_rejects_incompatible_modes_before_task_loading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra: tuple[str, ...],
+) -> None:
+    args = build_parser().parse_args(
+        [
+            "evolve",
+            "--meta-harness-v2",
+            "--children",
+            "4",
+            "--tasks-file",
+            str(tmp_path / "must-not-load.jsonl"),
+            *extra,
+        ]
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "load_context_tasks",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Meta-Harness V2 validation must precede task loading")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Meta-Harness V2"):
+        cli_module.evolve_command(args)
+
+
+def test_meta_harness_v2_cli_writes_typed_trace_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tasks = [_manifest_task(f"task_{index}") for index in range(10)]
+    captured: dict[str, object] = {}
+
+    class Engine:
+        def __init__(self, _llm, _factory, config) -> None:
+            captured["config"] = config
+
+        def evolve(self, seed, train, dev):
+            captured["split_sizes"] = (len(train), len(dev))
+            child = replace(seed, version="v001", parent=seed.version)
+            step = EvolutionStep(
+                mode="genome",
+                generation=0,
+                parent_version=seed.version,
+                child_versions=(child.version,),
+                target_agent="coding",
+                parent_train_reward=-1.0,
+                child_train_rewards={child.version: -0.9},
+                parent_dev_reward=-1.0,
+                best_child_dev_reward=-0.9,
+                accepted_version=child.version,
+            )
+            return child, (step,)
+
+        def meta_train_memory_payload(self):
+            return ()
+
+    monkeypatch.setattr(cli_module, "load_context_tasks", lambda _path: tasks)
+    monkeypatch.setattr(cli_module, "_components", lambda _args: (None,) * 5)
+    monkeypatch.setattr(cli_module, "_factory", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(cli_module, "CoEvolutionEngine", Engine)
+    args = build_parser().parse_args(
+        [
+            "evolve",
+            "--meta-harness-v2",
+            "--children",
+            "4",
+            "--limit",
+            "10",
+            "--dev-fraction",
+            "0.2",
+            "--holdout-fraction",
+            "0",
+            "--policy-path",
+            str(tmp_path / "policy.json"),
+            "--trace-path",
+            str(tmp_path / "trace.json"),
+            "--split-manifest-path",
+            str(tmp_path / "split.json"),
+        ]
+    )
+
+    result = cli_module.evolve_command(args)
+
+    assert captured["config"].meta_harness_v2 is True
+    assert captured["split_sizes"] == (8, 2)
+    trace = json.loads((tmp_path / "trace.json").read_text(encoding="utf-8"))
+    assert trace["meta_harness_v2"] is True
+    assert trace["child_shapes"] == ["coding", "retrieval", "decision", "joint"]
+    assert trace["memory_policy"] == "train_only_last_3_generations"
+    assert result["holdout_tasks"] == 0
+    assert result["meta_harness_v2"] is True
 
 
 def test_retrieval_topology_controls_are_explicit_for_both_interfaces() -> None:
@@ -2550,6 +2671,19 @@ def test_three_way_split_is_entity_disjoint_and_reproducible() -> None:
     assert entity_sets[0].isdisjoint(entity_sets[1])
     assert entity_sets[0].isdisjoint(entity_sets[2])
     assert entity_sets[1].isdisjoint(entity_sets[2])
+
+
+def test_three_way_split_allows_explicit_train_dev_only_experiment() -> None:
+    tasks = [_manifest_task(f"task_{index}") for index in range(10)]
+
+    train, dev, holdout = _three_way_entity_split(tasks, 7, 0.2, 0.0)
+
+    assert len(train) == 8
+    assert len(dev) == 2
+    assert holdout == []
+    assert {item.numeric.entity_name for item in train}.isdisjoint(
+        item.numeric.entity_name for item in dev
+    )
 
 
 def test_harness_factory_hydrates_policy_embedded_skills(tmp_path) -> None:

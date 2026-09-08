@@ -108,16 +108,17 @@ def test_design_html_places_global_coevolution_above_coordinate_loops() -> None:
     assert "Co-evolve 不替代 self-evolve" in text
 
 
-def test_global_bundle_gate_uses_end_to_end_results_and_can_revisit_supply() -> None:
+def test_meta_harness_v2_documents_controls_joint_child_and_train_only_memory() -> None:
     text, _parser = _page()
 
     for phrase in (
-        "完整最终预测",
-        "局部指标不能单独授权",
-        "端到端错误归因",
-        "可以重新选择 Dictionary",
-        "一次只改变一个坐标",
-        "重新构建 Numerical registry 与 forecast cache",
+        "三个单角色 ablation 和一个 joint Child",
+        "requested_child_kind",
+        "Train-only memory",
+        "coding、retrieval、decision、joint",
+        "至少改变两个角色",
+        "Dictionary/Champion package adapter 尚未接入",
+        "Dev 与 Public 永不回流",
     ):
         assert phrase in text
 

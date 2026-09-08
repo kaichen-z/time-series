@@ -1808,29 +1808,29 @@ LLM output
         <div>
           <h2>为什么它确实是 co-evolve</h2>
           <p class="section-intro">
-            单向执行链之外，还存在一条严格限制的 Train-only 回路：Retrieval 和 Decision 对 assumptions 的处理结果，会变成下一轮 Numerical 的结构证据。
+            单向执行链之外，Meta-Harness V2 把完整三 Agent Harness 当作 Parent；四个受控 Child 在同一 Train 条件下比较，结果形成下一代的受限记忆。
           </p>
         </div>
       </div>
 
       <div class="flow" style="grid-template-columns: repeat(3, minmax(0, 1fr));">
-        <article class="flow-node numerical"><span class="flow-label">Cycle 1 · N</span><h3>提出候选与 assumptions</h3><p>候选结构进入 Retrieval，而不是 Train truth。</p></article>
-        <article class="flow-node retrieval"><span class="flow-label">Cycle 1 · R/D</span><h3>验证或拒绝 assumptions</h3><p>记录 stance、证据质量和最终 action。</p></article>
-        <article class="flow-node numerical"><span class="flow-label">Cycle 2 · N</span><h3>读取清洗后的结构反馈</h3><p>知道哪类结构/条件值得继续，而不是重新盲猜。</p></article>
+        <article class="flow-node numerical"><span class="flow-label">Cycle 1 · Parent</span><h3>完整 Harness Genome</h3><p>绑定 Coding、Retrieval、Decision prompts、budgets、workflow 与 aggregation。</p></article>
+        <article class="flow-node retrieval"><span class="flow-label">Cycle 1 · Children</span><h3>三个单角色控制 + 一个联合 Child</h3><p>分别测试 Coding、Retrieval、Decision，以及至少两个角色同时改变时的交互。</p></article>
+        <article class="flow-node numerical"><span class="flow-label">Cycle 2 · Memory</span><h3>读取 Train-only 聚合反馈</h3><p>只保留 scope、interaction hypothesis、Parent/Child sMAE/sRMSE 与封闭状态。</p></article>
       </div>
 
       <div class="table-wrap" style="margin-top:18px">
         <table>
           <thead><tr><th>可以反馈</th><th>绝不反馈</th></tr></thead>
           <tbody>
-            <tr><td>candidate family、recipe kind、parent families</td><td>task ID、future truth、原始 forecast vector</td></tr>
-            <tr><td>assumption condition、evidence stance、action outcome</td><td>数值 threshold/weight、自由文本 rationale</td></tr>
-            <tr><td>不可用或未验证的封闭状态</td><td>Dev 指标、Public record、benchmark role</td></tr>
+            <tr><td>Child kind、实际 changed scopes、interaction hypothesis</td><td>task ID、future truth、原始 forecast vector</td></tr>
+            <tr><td>Parent/Child Train sMAE 与 sRMSE</td><td>document text、entity、原始 failure trace</td></tr>
+            <tr><td>train_improved / train_rejected / invalid</td><td>Dev 指标、Public record、benchmark role</td></tr>
           </tbody>
         </table>
       </div>
       <p class="callout" style="margin-top:14px">
-        若没有 accepted non-seed Retrieval trace，下一轮 Numerical 得到明确的 empty/unavailable projection，绝不伪造“Retrieval 支持”。
+        不增加独立 Memory Agent：checkpoint 与 immutable lineage 是唯一记忆权威，只向 proposal prompt 投影最近三代 Train 聚合。
       </p>
     </section>
 
@@ -1840,99 +1840,106 @@ LLM output
         <div>
           <h2>完整系统本身也要 Co-evolve</h2>
           <p class="section-intro">
-            坐标内部通过不代表系统通过。最外层以完整 <code>UnifiedCoEvolutionBundle</code> 为 Parent，
-            每次把一个坐标 Child 与其余冻结坐标重新组装，再运行端到端 Numerical → Retrieval → Decision 才做最终接受。
+            当前可执行版本以完整 <code>HarnessPolicy</code> 为 Parent，同代同时产生三个单角色 ablation 和一个 joint Child；
+            所有 Child 都重跑端到端 Coding → Retrieval → Decision。Dictionary/Champion package adapter 尚未接入，不能把它误报成四坐标已运行。
           </p>
         </div>
       </div>
 
       <article class="contract-shell">
         <div class="contract-title">
-          <div><span class="eyebrow">GLOBAL BUNDLE CO-EVOLVE · 一代的真实接口</span><h3>没有一个可随意改全系统的“总 Agent”；Host 只调度一个坐标的完整 self-evolve</h3></div>
-          <span class="status target">one coordinate per global step</span>
+          <div><span class="eyebrow">META-HARNESS V2 · 一代的真实接口</span><h3>完整 Harness 是遗传单位；单角色 Child 做归因，联合 Child 测交互</h3></div>
+          <span class="status implemented">implemented · 8/2 experiment</span>
         </div>
         <div class="contract-flow">
-          <article class="contract-step" data-contract="bundle" data-stage="parent-input"><span class="stage-kicker">1 · Parent Input</span><strong>Whole-system Bundle Parent</strong><p>精确绑定 Dictionary、Numerical、Retrieval、Decision releases，以及 split/runtime/verifier/metric identities。</p></article>
-          <article class="contract-step prompt" data-contract="bundle" data-stage="llm-prompt"><span class="stage-kicker">2 · LLM Prompt</span><strong>仅调用被选坐标的 proposer</strong><p>Host 根据清洗后的端到端归因选 weakest coordinate，再把该坐标自己的合法 prompt 发给 LLM；不存在 unrestricted meta prompt。</p></article>
-          <article class="contract-step model" data-contract="bundle" data-stage="llm-output"><span class="stage-kicker">3 · LLM Output</span><strong>一个 coordinate-owned proposal</strong><p>输出仍遵守该坐标自己的 operations / recipes / Genome / Decision schema；不能一次修改两个 releases。</p></article>
-          <article class="contract-step host" data-contract="bundle" data-stage="host-actions"><span class="stage-kicker">4 · Host Actions</span><strong>重组完整 Bundle Child</strong><p>其余三坐标保持 exact Parent；运行端到端预测，比较 sMAE/sRMSE、coverage、tail、crash/invalid 和 anchor regret。</p></article>
-          <article class="contract-step release" data-contract="bundle" data-stage="release-output"><span class="stage-kicker">5 · Release Output</span><strong>Accept Child or exact rollback</strong><p>只有完整系统通过 Train 与只读 Dev gate 才发布新 <code>UnifiedCoEvolutionBundle</code>；否则返回 byte-identical Parent。</p></article>
-          <article class="contract-step" data-contract="bundle" data-stage="next-input"><span class="stage-kicker">6 · Next Input</span><strong>下一代 Parent</strong><p>新 Bundle 的端到端 attribution 决定下一次可能访问哪个坐标；Public-99 不进入这个回路。</p></article>
+          <article class="contract-step" data-contract="bundle" data-stage="parent-input"><span class="stage-kicker">1 · Parent Input</span><strong>完整 HarnessPolicy Parent</strong><p>可变面是三角色 prompts、Coding budgets、workflow、evidence controls 与 aggregation；Skills 与 authenticated release 只读。</p></article>
+          <article class="contract-step prompt" data-contract="bundle" data-stage="llm-prompt"><span class="stage-kicker">2 · LLM Prompt</span><strong>同一严格 prompt，四种 requested_child_kind</strong><p>依次请求 coding、retrieval、decision、joint，并附最近三代 Train-only memory；不含 Dev/Public/task-level 数据。</p></article>
+          <article class="contract-step model" data-contract="bundle" data-stage="llm-output"><span class="stage-kicker">3 · LLM Output</span><strong>完整、封闭的 Harness proposal</strong><p>每次返回全部字段、mutation_scope 与 interaction_hypothesis；unknown/missing/越权字段使该 Child 原子回滚。</p></article>
+          <article class="contract-step host" data-contract="bundle" data-stage="host-actions"><span class="stage-kicker">4 · Host Actions</span><strong>重算 scope + Train successive halving</strong><p>Host 验证 declared scope 等于真实 diff；全部 Child 先跑 6 个 Train，最多 2 个继续完整 8 Train。</p></article>
+          <article class="contract-step release" data-contract="bundle" data-stage="release-output"><span class="stage-kicker">5 · Release Output</span><strong>只让一个 Train finalist 看只读 Dev</strong><p>Child 必须在 sMAE 与 sRMSE 上先通过 Train Pareto gate，再在 2 个 Dev 上严格改善；否则返回 exact Parent。</p></article>
+          <article class="contract-step" data-contract="bundle" data-stage="next-input"><span class="stage-kicker">6 · Next Input</span><strong>Accepted Harness + Train memory</strong><p>下一代继承完整 accepted Harness 和最近三代 Train 聚合；Dev 与 Public 永不回流。</p></article>
         </div>
 
         <div class="io-grid">
           <article class="io-card input">
-            <h4>Host scheduler input（清洗后的 Bundle attribution）</h4>
+            <h4>Meta-Harness LLM input（每个 Child 一次）</h4>
             <pre>{
-  "parent_bundle_sha256": "...",
-  "coordinate_signals": {
-    "dictionary": {"supply_gap_rate": 0.02},
-    "numerical": {"selection_regret": 0.18},
-    "retrieval": {"unresolved_gap_rate": 0.07},
-    "decision": {"unsupported_override_rate": 0.01}
-  },
-  "public_access": false
+  "requested_child_kind": "joint",
+  "current_policy": {"...": "all mutable fields"},
+  "train_evolution_memory": [{
+    "child_kind": "retrieval",
+    "changed_scopes": ["retrieval"],
+    "status": "train_rejected",
+    "parent_train_smae": 1.04,
+    "child_train_smae": 1.02,
+    "parent_train_srmse": 1.11,
+    "child_train_srmse": 1.16
+  }]
 }</pre>
           </article>
           <article class="io-card output">
-            <h4>Host dispatch + 被选坐标的 LLM output</h4>
+            <h4>LLM output（exact schema；Host 再验证 diff）</h4>
             <pre>{
-  "selected_coordinate": "numerical",
-  "coordinate_proposal": {
-    "recipes": [{
-      "kind": "route",
-      "parents": ["toto_2_0", "seasonal_naive"],
-      "fallback_parent": "toto_2_0",
-      "assumptions": [{"...": "closed structural fields"}]
-    }]
-  },
-  "unchanged_coordinates": [
-    "dictionary", "retrieval", "decision"
-  ]
+  "mutation_scope": ["coding", "decision"],
+  "interaction_hypothesis": "Broader candidate generation needs stricter evidence-aware selection.",
+  "coding_generation_prompt": "...",
+  "coding_revision_prompt": "...",
+  "retrieval_prompt": "...",
+  "decision_prompt": "...",
+  "coding_initial_programs": 4,
+  "coding_mutations": 1,
+  "coding_mutation_children": 1,
+  "coding_validation_folds": 3,
+  "coding_validation_horizon": 8,
+  "workflow": ["retrieve", "decide"],
+  "enable_evidence_adjustments": true,
+  "max_evidence_adjustments": 3,
+  "decision_aggregation": "last",
+  "changelog": "Test coordinated coverage and selection."
 }</pre>
           </article>
         </div>
 
         <div class="ownership-grid">
-          <article class="ownership-card mutable"><h4>LLM 可以 evolve</h4><ul><li>只进化当前被调度坐标中明确开放的字段。</li><li>Dictionary 可改代码/供给规则；Numerical 可改 recipe；Retrieval/Decision 可改各自 prompts、policies、Skills。</li><li>下一 global step 可以改另一个坐标，因此多个完整 loop 会随代际协同。</li></ul></article>
-          <article class="ownership-card frozen"><h4>Host 固定，不能 evolve</h4><ul><li>weakest-coordinate scheduler、一次一坐标 ownership 与 exact-parent 规则。</li><li>verification、metrics、Train/Dev/Public split、runtime/source fingerprints。</li><li>端到端 acceptance gate；局部得分或 LLM 自评没有发布权限。</li></ul></article>
+          <article class="ownership-card mutable"><h4>LLM 可以 evolve</h4><ul><li>Coding generation/revision prompts 与受限 search/hindcast budgets。</li><li>Retrieval prompt、Decision prompt、evidence adjustment controls、aggregation。</li><li>joint Child 可原子改变至少两个角色，也可改变 retrieve/decide workflow。</li></ul></article>
+          <article class="ownership-card frozen"><h4>Host 固定，不能 evolve</h4><ul><li>requested scope、真实 diff 检查、sMAE/sRMSE、Train/Dev/Public split。</li><li>citation verifier、label firewall、sandbox、runtime authority、resource ceilings。</li><li>Skill bodies、accepted Retrieval release、successive-halving 与 exact Parent rollback。</li></ul></article>
         </div>
         <div class="handoff-bar" data-handoff="bundle-to-next-generation">Accepted Bundle → 下一代 Bundle Parent</div>
       </article>
 
       <div class="sequence">
-        <article class="sequence-item"><span class="sequence-step">G0</span><h3>Whole-system Parent</h3><p>绑定 Dictionary、Numerical、Retrieval、Decision 与全部 runtime/split 身份。</p></article>
-        <article class="sequence-item"><span class="sequence-step">G1</span><h3>Warm-up Sweep</h3><p>首轮按依赖顺序访问 Dictionary → Numerical → Retrieval → Decision。</p></article>
-        <article class="sequence-item"><span class="sequence-step">G2</span><h3>错误归因</h3><p>Host 从完整最终预测构造端到端错误归因，不把原始 truth 发给 LLM。</p></article>
-        <article class="sequence-item"><span class="sequence-step">G3</span><h3>Weakest-coordinate</h3><p>一次只改变一个坐标，生成完整 Bundle Children 并接受全局最优者。</p></article>
+        <article class="sequence-item"><span class="sequence-step">C1</span><h3>Coding control</h3><p>只改变 Coding-owned fields，测候选生成/修复的独立贡献。</p></article>
+        <article class="sequence-item"><span class="sequence-step">C2</span><h3>Retrieval control</h3><p>只改变 Retrieval prompt；typed accepted release 存在时转入专用 Retrieval evolve。</p></article>
+        <article class="sequence-item"><span class="sequence-step">C3</span><h3>Decision control</h3><p>只改变 Decision-owned fields，测选择与 evidence-use 的独立贡献。</p></article>
+        <article class="sequence-item"><span class="sequence-step">C4</span><h3>Joint interaction</h3><p>至少改变两个角色；与三个 control 使用同一 Host evaluator。</p></article>
       </div>
 
       <div class="table-wrap" style="margin-top:18px">
         <table>
-          <thead><tr><th>可能的最弱坐标</th><th>Host 可观察的聚合信号</th><th>下一步</th></tr></thead>
+          <thead><tr><th>Child shape</th><th>允许改变</th><th>它回答的问题</th></tr></thead>
           <tbody>
-            <tr><td>Dictionary</td><td>供给缺口、family unavailable、applicability miss</td><td>可以重新选择 Dictionary，开启新的 Supply Epoch。</td></tr>
-            <tr><td>Numerical</td><td>forecast regret、fold/tail instability、assumption 未激活</td><td>进化 selection、route、weights 或 Combined recipe。</td></tr>
-            <tr><td>Retrieval</td><td>gap 未覆盖、citation/quote verification failure</td><td>进化 Genome、query、budget、Skills。</td></tr>
-            <tr><td>Decision</td><td>selection regret、unsupported override、fallback pattern</td><td>进化 prompt、Decision Skills 和 evidence policy。</td></tr>
+            <tr><td>Coding-only</td><td>Coding prompts + search/hindcast budgets</td><td>单独扩大/修复数值候选是否有益？</td></tr>
+            <tr><td>Retrieval-only</td><td>Retrieval prompt</td><td>证据查询与验证指令本身是否有益？</td></tr>
+            <tr><td>Decision-only</td><td>Decision prompt + evidence/aggregation controls</td><td>只改善选择能否降低最终误差？</td></tr>
+            <tr><td>Joint</td><td>至少两个 role scopes；可含 workflow</td><td>角色变化是否只有组合起来才有效？</td></tr>
           </tbody>
         </table>
       </div>
 
       <div class="card-grid" style="margin-top:14px">
         <article class="card">
-          <h3>Global Child 构造</h3>
-          <p>被选坐标替换为 Child，其余三个坐标保持 exact Parent。若改变 Dictionary，必须重新构建 Numerical registry 与 forecast cache，禁止复用旧 supply 的预测。</p>
+          <h3>当前已实现</h3>
+          <p><code>CoEvolutionEngine(meta_harness_v2=True)</code>、严格 schema、四种 Child、Train-only memory、checkpoint v2 与 8/2 wrapper。</p>
         </article>
         <article class="card">
-          <h3>Global acceptance</h3>
-          <p>局部指标只能做筛选；最终必须由完整系统的 sMAE、sRMSE、coverage、tail、crash/invalid 与 anchor regret 共同决定。</p>
+          <h3>尚未声称已接入</h3>
+          <p>103-method Dictionary/Champion package 仍是外部 forecasting supply；后续需显式 adapter 才能进入这个 Harness Genome，不能用当前实验冒充。</p>
         </article>
       </div>
 
       <div class="guardrail" style="margin-top:14px">
-        <div class="guardrail-icon">1</div>
-        <div><h3>一次只改变一个坐标</h3><p>这不等于四个 Agent 互不影响；它保证每个完整 Bundle 改善可以归因，同时允许下一代根据全局结果切换目标坐标。</p></div>
+        <div class="guardrail-icon">4</div>
+        <div><h3>三种单角色 ablation + 一个联合 Child</h3><p>单角色 Child 提供归因基线；joint Child 捕捉交互。最终授权仍只来自完整端到端 Train 与只读 Dev 预测。</p></div>
       </div>
     </section>
 
