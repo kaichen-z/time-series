@@ -15,6 +15,8 @@ class _PageParser(HTMLParser):
         self.links: list[str] = []
         self.scripts: list[str | None] = []
         self.stylesheets: list[str] = []
+        self.contract_stages: dict[str, set[str]] = {}
+        self.handoffs: set[str] = set()
 
     def handle_starttag(
         self, tag: str, attrs: list[tuple[str, str | None]]
@@ -28,6 +30,13 @@ class _PageParser(HTMLParser):
             self.scripts.append(values.get("src"))
         if tag == "link" and values.get("rel") == "stylesheet":
             self.stylesheets.append(str(values.get("href", "")))
+        if values.get("data-contract") and values.get("data-stage"):
+            contract = str(values["data-contract"])
+            self.contract_stages.setdefault(contract, set()).add(
+                str(values["data-stage"])
+            )
+        if values.get("data-handoff"):
+            self.handoffs.add(str(values["data-handoff"]))
 
 
 def _page() -> tuple[str, _PageParser]:
@@ -130,6 +139,47 @@ def test_retrieval_section_separates_inference_from_self_evolution() -> None:
         "每评估一个 Retrieval Child，都会在每道任务上重新执行上面的",
         "R1 → D0 → R2 → Verify",
         "Accepted Retrieval Release",
+    ):
+        assert phrase in text
+
+
+def test_each_coordinate_exposes_the_same_prompt_output_host_handoff_contract() -> None:
+    _text, parser = _page()
+
+    required_stages = {
+        "parent-input",
+        "llm-prompt",
+        "llm-output",
+        "host-actions",
+        "release-output",
+        "next-input",
+    }
+    for contract in ("dictionary", "numerical", "retrieval", "decision", "bundle"):
+        assert parser.contract_stages.get(contract) == required_stages
+
+
+def test_page_connects_every_release_to_the_next_coordinate_input() -> None:
+    text, parser = _page()
+
+    assert parser.handoffs == {
+        "dictionary-to-numerical",
+        "numerical-to-retrieval",
+        "retrieval-to-decision",
+        "decision-to-bundle",
+        "bundle-to-next-generation",
+    }
+    for phrase in (
+        "LLM 可以 evolve",
+        "Host 固定，不能 evolve",
+        "DictionarySupplyRelease → Numerical Parent Input",
+        "NumericalForecastPackage → Retrieval Parent Input",
+        "VerifiedRetrievalCard → Decision Parent Input",
+        "DecisionTrace → Bundle Evaluation Input",
+        "Accepted Bundle → 下一代 Bundle Parent",
+        '"operations"',
+        '"recipes"',
+        '"evidence_chains"',
+        '"action": "select"',
     ):
         assert phrase in text
 

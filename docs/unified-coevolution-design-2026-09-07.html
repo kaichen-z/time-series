@@ -679,6 +679,204 @@
     .scope-card strong { display: block; margin-bottom: 5px; font-size: 14px; }
     .scope-card span { color: var(--muted); font-size: 12px; }
 
+    .contract-shell {
+      margin-top: 20px;
+      padding: 20px;
+      border: 1px solid #cfd9ea;
+      border-radius: 22px;
+      background: linear-gradient(180deg, #ffffff, #f9fbff);
+      box-shadow: 0 12px 34px rgba(34, 55, 86, 0.06);
+    }
+
+    .contract-title {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 14px;
+    }
+
+    .contract-title h3 { margin: 0 0 4px; font-size: 19px; }
+    .contract-title p { margin: 0; color: var(--muted); font-size: 13px; }
+
+    .contract-flow {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(150px, 1fr));
+      gap: 18px;
+      overflow-x: auto;
+      padding: 2px 2px 10px;
+      scrollbar-width: thin;
+    }
+
+    .contract-step {
+      position: relative;
+      min-width: 150px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: white;
+    }
+
+    .contract-step:not(:last-child)::after {
+      content: "→";
+      position: absolute;
+      top: 50%;
+      right: -15px;
+      transform: translate(50%, -50%);
+      z-index: 2;
+      color: #8da0bb;
+      font-weight: 850;
+    }
+
+    .contract-step.prompt { border-top: 4px solid var(--blue); }
+    .contract-step.model { border-top: 4px solid var(--violet); }
+    .contract-step.host { border-top: 4px solid var(--red); }
+    .contract-step.release { border-top: 4px solid var(--green); }
+
+    .stage-kicker {
+      display: block;
+      margin-bottom: 7px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .contract-step strong { display: block; margin-bottom: 5px; font-size: 13px; }
+    .contract-step p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+
+    .io-grid,
+    .ownership-grid,
+    .subcontract-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .subcontract-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    .io-card,
+    .ownership-card,
+    .subcontract-card {
+      min-width: 0;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: white;
+    }
+
+    .io-card h4,
+    .ownership-card h4,
+    .subcontract-card h4 {
+      margin: 0 0 8px;
+      font-size: 14px;
+    }
+
+    .io-card.prompt { border-left: 4px solid var(--blue); }
+    .io-card.model { border-left: 4px solid var(--violet); }
+    .ownership-card.mutable { border-left: 4px solid var(--violet); }
+    .ownership-card.frozen { border-left: 4px solid var(--red); }
+    .subcontract-card.statistical { border-top: 4px solid var(--blue); }
+    .subcontract-card.combined { border-top: 4px solid var(--amber); }
+    .subcontract-card.screening { border-top: 4px solid var(--green); }
+
+    .io-card pre,
+    .subcontract-card pre {
+      max-height: 360px;
+      margin: 0;
+      padding: 12px;
+      overflow: auto;
+      border-radius: 12px;
+      color: #dceaff;
+      background: #10243f;
+      font-size: 10.5px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .ownership-card ul { margin: 0; }
+
+    .handoff-bar {
+      margin-top: 14px;
+      padding: 13px 16px;
+      border: 1px solid #bcded4;
+      border-radius: 14px;
+      color: #185e50;
+      background: var(--green-soft);
+      font-size: 13px;
+      font-weight: 760;
+      text-align: center;
+    }
+
+    .handoff-chain {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(150px, 1fr));
+      gap: 18px;
+      margin-top: 18px;
+      overflow-x: auto;
+      padding: 3px 3px 10px;
+    }
+
+    .handoff-node {
+      position: relative;
+      min-width: 150px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 17px;
+      background: white;
+    }
+
+    .handoff-node:not(:last-child)::after {
+      content: "OUTPUT → INPUT";
+      position: absolute;
+      top: 50%;
+      right: -14px;
+      transform: translate(50%, -50%) rotate(-90deg);
+      z-index: 2;
+      padding: 2px 5px;
+      border-radius: 6px;
+      color: #6d7e98;
+      background: var(--paper);
+      font-size: 8px;
+      font-weight: 850;
+      letter-spacing: 0.05em;
+    }
+
+    .handoff-node strong { display: block; margin-bottom: 5px; font-size: 13px; }
+    .handoff-node span { color: var(--muted); font-size: 11px; }
+
+    .worked-example {
+      margin-top: 16px;
+      padding: 20px;
+      border-radius: 20px;
+      color: #eef5ff;
+      background: #10243f;
+    }
+
+    .worked-example h3 { margin: 0 0 5px; color: white; }
+    .worked-example > p { margin: 0 0 16px; color: #b8c8dc; font-size: 12px; }
+
+    .worked-steps {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(165px, 1fr));
+      gap: 10px;
+      overflow-x: auto;
+    }
+
+    .worked-step {
+      min-width: 165px;
+      padding: 13px;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 13px;
+      background: rgba(255, 255, 255, 0.06);
+    }
+
+    .worked-step b { display: block; margin-bottom: 5px; color: #9cc1ff; font-size: 12px; }
+    .worked-step span { color: #d6e3f2; font-size: 11px; line-height: 1.55; }
+
     .guardrail {
       display: grid;
       grid-template-columns: 44px 1fr;
@@ -789,6 +987,9 @@
       .cycle-band { margin: 12px 0 0; }
       .sequence { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .scope-grid { grid-template-columns: 1fr; }
+      .subcontract-grid { grid-template-columns: 1fr; }
+      .contract-flow { grid-template-columns: repeat(6, minmax(185px, 1fr)); }
+      .handoff-chain, .worked-steps { grid-template-columns: repeat(5, minmax(185px, 1fr)); }
     }
 
     @media (max-width: 680px) {
@@ -798,6 +999,8 @@
       section { margin-top: 48px; }
       .section-head { grid-template-columns: 1fr; gap: 6px; }
       .status-grid, .card-grid, .metric-grid, .sequence { grid-template-columns: 1fr; }
+      .io-grid, .ownership-grid { grid-template-columns: 1fr; }
+      .layer-banner, .contract-title { flex-direction: column; }
       .status-card, .card, .metric-card { border-radius: 17px; }
       .footer { flex-direction: column; }
     }
@@ -820,6 +1023,7 @@
       <nav class="nav" aria-label="页面导航">
         <a href="#overview">总览</a>
         <a href="#architecture">架构</a>
+        <a href="#contract-map">逐步 I/O</a>
         <a href="#supply">Dictionary</a>
         <a href="#numerical">Numerical</a>
         <a href="#retrieval">Retrieval</a>
@@ -992,6 +1196,44 @@
       </div>
     </section>
 
+    <section id="contract-map">
+      <div class="section-head">
+        <div class="section-no">01A / 逐步 I/O</div>
+        <div>
+          <h2>上一段的 Output，就是下一段的 Input</h2>
+          <p class="section-intro">
+            下面五段都使用同一套阅读顺序：Parent 输入 → LLM prompt → 严格 JSON → Host 验证/执行 → 冻结 artifact → 下一段输入。
+            紫色是 LLM 可提议内容，红色是 Host 永远不能交给 LLM 的权限。
+          </p>
+        </div>
+      </div>
+
+      <div class="handoff-chain" aria-label="完整 artifact handoff">
+        <article class="handoff-node"><strong>Dictionary</strong><span>输出可信方法、状态、适用条件和 runtime 身份。</span></article>
+        <article class="handoff-node"><strong>Numerical</strong><span>读取 Dictionary；输出已执行 forecasts 和可证伪 assumptions。</span></article>
+        <article class="handoff-node"><strong>Retrieval</strong><span>读取 assumptions；输出逐条核验的 evidence card。</span></article>
+        <article class="handoff-node"><strong>Decision</strong><span>读取 forecasts + evidence；输出已执行候选中的最终选择。</span></article>
+        <article class="handoff-node"><strong>Bundle Co-evolve</strong><span>读取完整端到端结果；接受一个新 Bundle 或精确回滚。</span></article>
+      </div>
+
+      <article class="worked-example">
+        <h3>一条完整示例：周期性零售序列</h3>
+        <p>这是 schema 级示例，用来说明数据怎样传递，不是一次真实实验成绩。</p>
+        <div class="worked-steps">
+          <div class="worked-step"><b>1 · Dictionary</b><span><code>seasonal_naive</code> 被标为 periodic specialist；Toto 保留为 accepted safe supply。</span></div>
+          <div class="worked-step"><b>2 · Numerical</b><span>LLM 提议 Toto 与 seasonal_naive 的 route；Host 从 Train OOF 拟合 periodicity threshold。</span></div>
+          <div class="worked-step"><b>3 · Retrieval</b><span>Numerical assumption 进入 R2；检索只返回带 exact quote、window 和 stance 的证据链。</span></div>
+          <div class="worked-step"><b>4 · Decision</b><span>Decision 只能在 Toto forecast 与已经 materialize 的 route forecast 中选择，不能写新数值。</span></div>
+          <div class="worked-step"><b>5 · Bundle</b><span>完整系统在 Train/Dev 同时满足 sMAE、sRMSE 与 tail gates 才成为下一代 Parent。</span></div>
+        </div>
+      </article>
+
+      <div class="callout" style="margin-top:14px">
+        <strong>两个不同层次：</strong>单题 inference 产生 forecast/evidence/decision；self-evolve 用很多 Train 任务比较 Parent 和 Children，
+        决定下一代应保存哪个 prompt、policy、recipe 或 Skill。
+      </div>
+    </section>
+
     <section id="supply">
       <div class="section-head">
         <div class="section-no">02 / SUPPLY</div>
@@ -1003,6 +1245,7 @@
           </p>
         </div>
       </div>
+
 
       <div class="card-grid">
         <article class="card">
@@ -1023,6 +1266,117 @@
           </ul>
         </article>
       </div>
+
++      <article class="contract-shell" aria-label="Dictionary prompt output contract">
+        <div class="contract-title">
+          <div><h3>Dictionary Self-Evolve · 一代的真实接口</h3><p>Dictionary 不是一个 prompt：它串联 Method、Combined、Screening 三个有不同 JSON schema 的子循环。</p></div>
+          <span class="layer-index">SUPPLY CONTRACT</span>
+        </div>
+        <div class="contract-flow">
+          <article class="contract-step" data-contract="dictionary" data-stage="parent-input"><span class="stage-kicker">1 · Parent Input</span><strong>Git Source + Policy Parent</strong><p><code>methods.py</code>、Combined policies、ScreeningPolicy、TSFM manifests 和 Train 聚合证据。</p></article>
+          <article class="contract-step prompt" data-contract="dictionary" data-stage="llm-prompt"><span class="stage-kicker">2 · LLM Prompt</span><strong>三个封闭请求</strong><p>方法缺陷报告、Combined 诊断、按 morphology strata 的适用性证据；不发送 Dev/Public truth。</p></article>
+          <article class="contract-step model" data-contract="dictionary" data-stage="llm-output"><span class="stage-kicker">3 · LLM Output</span><strong>严格 JSON proposal</strong><p>Method operations、Combined operations、Screening actions；它们都只是提议，不是执行权限。</p></article>
+          <article class="contract-step host" data-contract="dictionary" data-stage="host-actions"><span class="stage-kicker">4 · Host Actions</span><strong>解析、执行、评分</strong><p>AST/identity/runtime/license 检查；原子应用 Child；计算 sMAE/sRMSE、coverage、Crash/Invalid 与 oracle。</p></article>
+          <article class="contract-step release" data-contract="dictionary" data-stage="release-output"><span class="stage-kicker">5 · Release Output</span><strong>DictionarySupplyRelease</strong><p>绑定源码 bytes、inventory、状态、适用规则、TSFM 身份、metrics 与接受证据。</p></article>
+          <article class="contract-step" data-contract="dictionary" data-stage="next-input"><span class="stage-kicker">6 · Next Input</span><strong>给 Numerical</strong><p>Numerical 只能读取这个冻结 release，并据此生成每题 Active Dictionary。</p></article>
+        </div>
+
+        <div class="subcontract-grid">
+          <article class="subcontract-card statistical">
+            <h4>A · Statistical Python 子循环</h4>
+            <pre>Prompt input
+{
+  "module": "完整 methods.py",
+  "report": {
+    "mean_smae": 0.81,
+    "mean_srmse": 0.94,
+    "success": 62,
+    "not_applicable": 12,
+    "crashed": 4,
+    "invalid": 2,
+    "by_characteristic_smae": {}
+  },
+  "identity_contract": {}
+}
+
+Selector output
+{"targets":[{
+  "name":"seasonal_method",
+  "action":"repair",
+  "reason":"4 Train crashes"
+}]}
+
+Mutator output
+{"operations":[{
+  "op":"repair",
+  "name":"seasonal_method",
+  "code":"def seasonal_method(...): ...",
+  "reason":"preserve identity; fix crash"
+}]}</pre>
+          </article>
+          <article class="subcontract-card combined">
+            <h4>B · Combined Policy 子循环</h4>
+            <pre>Prompt input
+{
+  "parent_portfolio": "...",
+  "diagnostics": "Train aggregates",
+  "allowed_operations": [
+    "add", "repair", "fork", "remove"
+  ]
+}
+
+LLM output
+{"operations":[{
+  "op":"add",
+  "reason":"periodic stratum gain",
+  "policy":{
+    "name":"toto_seasonal_median",
+    "parents":["toto_2_0","seasonal_naive"],
+    "operator":"median",
+    "weights":[],
+    "signal":"periodicity_strength",
+    "threshold":0.0,
+    "above_parent":"",
+    "below_parent":"",
+    "fallback_parent":"toto_2_0"
+  }
+}]}</pre>
+          </article>
+          <article class="subcontract-card screening">
+            <h4>C · Screening 子循环</h4>
+            <pre>Prompt input
+{
+  "required_targets":["seasonal_naive"],
+  "allowed_profile_fields":["periodicity_strength"],
+  "baseline_method":"toto_2_0",
+  "train_evidence":"anonymous strata",
+  "current_policy":"..."
+}
+
+LLM output
+{"summary":"specialize on periodic series",
+ "actions":[{
+  "name":"seasonal_naive",
+  "status":"specialized",
+  "any_of":[{
+    "all_tags":["periodic"],
+    "feature_tests":[{
+      "field":"periodicity_strength",
+      "operator":"&gt;=",
+      "value":0.7
+    }]
+  }],
+  "reason":"supported Train stratum"
+}]}</pre>
+          </article>
+        </div>
+
+        <div class="ownership-grid">
+          <article class="ownership-card mutable"><h4>LLM 可以 evolve</h4><ul><li>Statistical：repair / fork / merge / evidence-backed delete；显式 supply gap 才允许 add。</li><li>Combined：2–5 leaf parents、合法 operator、受限 policy 参数。</li><li>Screening：keep / specialized / repair / quarantine 与 history-only applicability。</li></ul></article>
+          <article class="ownership-card frozen"><h4>Host 固定，不能 evolve</h4><ul><li>函数签名、AST sandbox、identity contract、NotApplicable 语义。</li><li>TSFM checkpoint、adapter、license、runtime identity。</li><li>sMAE/sRMSE、Oracle 保留、Crash/Invalid、Dev/Public 边界与接受门。</li></ul></article>
+        </div>
+        <div class="handoff-bar" data-handoff="dictionary-to-numerical">DictionarySupplyRelease → Numerical Parent Input</div>
+      </article>
 
       <div class="detail-stack" style="margin-top:14px">
         <details open>
@@ -1106,6 +1460,76 @@
   → 8 → 32 → Train-80 → Dev-20
   → NumericalSupplyRelease + NumericalForecastPackage</pre>
       </div>
++      <article class="contract-shell" aria-label="Numerical prompt output contract">
+        <div class="contract-title">
+          <div><h3>Numerical Self-Evolve · 一代的真实接口</h3><p>LLM 只提出闭合结构；Host 负责把结构扩展成可执行、带数值参数的 Children。</p></div>
+          <span class="layer-index">NUMERICAL CONTRACT</span>
+        </div>
+        <div class="contract-flow">
+          <article class="contract-step" data-contract="numerical" data-stage="parent-input"><span class="stage-kicker">1 · Parent Input</span><strong>Supply + Champion Parent</strong><p>冻结 Dictionary、当前 Champion recipe、匿名 aggregate evidence、合法 inventory。</p></article>
+          <article class="contract-step prompt" data-contract="numerical" data-stage="llm-prompt"><span class="stage-kicker">2 · LLM Prompt</span><strong>结构 proposal 请求</strong><p>给 parent、candidate names、可用 feature/operator 和上代结构反馈；不给 truth、task IDs 或数值拟合权。</p></article>
+          <article class="contract-step model" data-contract="numerical" data-stage="llm-output"><span class="stage-kicker">3 · LLM Output</span><strong>5–10 个 recipes</strong><p>每个 recipe 只有 kind、parents、fallback 和 1–3 个封闭 assumptions。</p></article>
+          <article class="contract-step host" data-contract="numerical" data-stage="host-actions"><span class="stage-kicker">4 · Host Actions</span><strong>拟合并执行</strong><p>生成 ID/文字，拟合 threshold、weight、split、cap；执行 leaves/Combined，做 8→32→80 OOF 和 Dev gate。</p></article>
+          <article class="contract-step release" data-contract="numerical" data-stage="release-output"><span class="stage-kicker">5 · Release Output</span><strong>Numerical artifacts</strong><p><code>NumericalSupplyRelease</code> 加每题 <code>NumericalForecastPackage</code>，绑定真实 forecast 与 diagnostics。</p></article>
+          <article class="contract-step" data-contract="numerical" data-stage="next-input"><span class="stage-kicker">6 · Next Input</span><strong>给 Retrieval</strong><p>只传候选 assumptions、failure conditions、候选身份和允许公开的历史诊断。</p></article>
+        </div>
+
+        <div class="io-grid">
+          <article class="io-card prompt">
+            <h4>发给 Numerical Proposer 的 user payload</h4>
+            <pre>{
+  "parent": {
+    "kind": "select",
+    "parents": ["toto_2_0"],
+    "fallback_parent": "toto_2_0",
+    "assumptions": [...]
+  },
+  "inventory": [
+    {"name":"toto_2_0","family":"foundation"},
+    {"name":"seasonal_naive","family":"statistical"}
+  ],
+  "evidence": {
+    "parent_summary": "Train aggregates",
+    "structures": "prior closed feedback"
+  },
+  "output_schema": {
+    "top_level_fields": ["recipes"],
+    "allowed_operators": [
+      "select", "route", "horizon_route",
+      "weighted", "median", "bounded_overlay"
+    ]
+  }
+}</pre>
+          </article>
+          <article class="io-card model">
+            <h4>LLM 必须返回的严格 JSON</h4>
+            <pre>{"recipes":[{
+  "kind":"route",
+  "parents":["toto_2_0","seasonal_naive"],
+  "fallback_parent":"toto_2_0",
+  "assumptions":[{
+    "candidate_name":"seasonal_naive",
+    "feature":"periodicity_strength",
+    "direction":"above",
+    "horizon_region":"full",
+    "operator":"route"
+  },{
+    "candidate_name":"toto_2_0",
+    "feature":"recent_regime_confidence",
+    "direction":"above",
+    "horizon_region":"late",
+    "operator":"route"
+  }]
+}]}</pre>
+          </article>
+        </div>
+
+        <div class="ownership-grid">
+          <article class="ownership-card mutable"><h4>LLM 可以 evolve</h4><ul><li>operator：select / route / horizon_route / weighted / median / bounded_overlay。</li><li>2–5 个合法 parent、fallback parent。</li><li>feature、direction、horizon region 组成的 1–3 个 assumptions。</li></ul></article>
+          <article class="ownership-card frozen"><h4>Host 固定，不能 evolve</h4><ul><li>threshold、weight、overlay alpha/cap、horizon split 的具体数值。</li><li>forecast 执行、缓存、sMAE/sRMSE、coverage 与 tail gates。</li><li>Toto/当前 Champion fallback、Train/Dev/Public 边界和 acceptance。</li></ul></article>
+        </div>
+        <div class="handoff-bar" data-handoff="numerical-to-retrieval">NumericalForecastPackage → Retrieval Parent Input</div>
+      </article>
     </section>
 
     <section id="retrieval">
@@ -1118,6 +1542,66 @@
           </p>
         </div>
       </div>
+
+      <article class="contract-shell">
+        <div class="contract-title">
+          <div><span class="eyebrow">RETRIEVAL SELF-EVOLVE · 一代的真实接口</span><h3>进化的是 Genome、两轮 Prompt、预算、策略与 Skills，不是 evidence 本身</h3></div>
+          <span class="status target">A / B / C 三个互斥坐标</span>
+        </div>
+        <div class="contract-flow">
+          <article class="contract-step" data-contract="retrieval" data-stage="parent-input"><span class="stage-kicker">1 · Parent Input</span><strong>Accepted Retrieval Parent</strong><p>完整 Genome、Skill history、Numerical assumptions、清洗后的历史任务与 Train-only Retrieval 诊断。</p></article>
+          <article class="contract-step prompt" data-contract="retrieval" data-stage="llm-prompt"><span class="stage-kicker">2 · LLM Prompt</span><strong>一次只改 A / B / C</strong><p>A 改 Round 1；B 改 verification budgets/rules；C 改 Round 2。Prompt 带允许字段和 Parent，不带 truth/Dev/Public。</p></article>
+          <article class="contract-step model" data-contract="retrieval" data-stage="llm-output"><span class="stage-kicker">3 · LLM Output</span><strong>完整 Retrieval Genome</strong><p>Child 必须返回严格、完整、可重放的 Genome JSON；自由字段、越权字段或未知 Skill ID 整体拒绝。</p></article>
+          <article class="contract-step host" data-contract="retrieval" data-stage="host-actions"><span class="stage-kicker">4 · Host Actions</span><strong>冻结并真实执行</strong><p>Host 验证 ownership，冻结 Genome/Skills；逐题运行 R1→D0→R2→Verify，再做 Train 筛选与只读 Dev gate。</p></article>
+          <article class="contract-step release" data-contract="retrieval" data-stage="release-output"><span class="stage-kicker">5 · Release Output</span><strong>Retrieval Release + Cards</strong><p>接受后发布绑定 Genome/Skills/验证器的 release；单题只产出经过验证的 <code>FinalRetrievalCard</code>。</p></article>
+          <article class="contract-step" data-contract="retrieval" data-stage="next-input"><span class="stage-kicker">6 · Next Input</span><strong>给 Decision</strong><p>只传 verified chains、counterevidence、missing information、assumption bindings 与 provenance。</p></article>
+        </div>
+
+        <div class="io-grid">
+          <article class="io-card input">
+            <h4>Mutation Prompt · Host → LLM（Child A 示例）</h4>
+            <pre>{
+  "coordinate": "round1",
+  "parent_genome": { "...": "完整 canonical Genome" },
+  "allowed_changes": [
+    "round1_prompt", "round1_strategy",
+    "max_selected_documents", "active_skill_ids"
+  ],
+  "train_diagnostics": {
+    "verified_chain_rate": 0.61,
+    "missing_information_rate": 0.28,
+    "failure_codes": ["target_mismatch"]
+  }
+}</pre>
+          </article>
+          <article class="io-card output">
+            <h4>LLM → Host · Child A 返回完整 Retrieval Genome</h4>
+            <pre>{
+  "schema_version": 1,
+  "version": "retrieval_child_a_01",
+  "parent": "retrieval_parent_00",
+  "round1_prompt": "Find evidence about the target and window...",
+  "round2_prompt": "Resolve the supplied verified gap...",
+  "round1_strategy": "broad_then_targeted",
+  "round2_strategy": "challenge_assumption",
+  "second_round_trigger": "on_named_gap",
+  "max_selected_documents": 6,
+  "max_evidence_chains": 4,
+  "max_citations_per_chain": 2,
+  "require_counterevidence_search": true,
+  "require_target_match": true,
+  "require_temporal_overlap": true,
+  "active_skill_ids": ["skill_entity_window_match"]
+}</pre>
+          </article>
+        </div>
+
+        <div class="ownership-grid">
+          <article class="ownership-card mutable"><h4>LLM 可以 evolve</h4><ul><li>A：Round-1 prompt、strategy、document budget 与对应 Skills。</li><li>B：chain/citation budgets、counterevidence、target/window verification flags 与跨轮 Skills。</li><li>C：Round-2 prompt、strategy、trigger 与对应 Skills。</li></ul></article>
+          <article class="ownership-card frozen"><h4>Host 固定，不能 evolve</h4><ul><li>任务清洗、document selection 上限、citation/quote/stance/时间窗验证器。</li><li>Numerical forecasts、assumption IDs、Train/Dev/Public 边界。</li><li>evidence 只能被验证或拒绝，不能由进化评分器追认。</li></ul></article>
+        </div>
+        <div class="handoff-bar" data-handoff="retrieval-to-decision">VerifiedRetrievalCard → Decision Parent Input（代码对象：FinalRetrievalCard）</div>
+      </article>
 
       <article class="layer-panel" id="retrieval-inference-diagram">
         <div class="layer-banner">
@@ -1136,6 +1620,43 @@
         <div class="callout" style="margin-top:14px">
           <strong>这不是 self-evolve。</strong> 它只是一个冻结 Retrieval Child 在一条任务上的执行流程；不会在执行过程中修改 Genome、Prompt 或 Skills。
           Round 2 失败时，合法 Round 1 仍会保留。
+        </div>
+        <div class="io-grid" style="margin-top:14px">
+          <article class="io-card input">
+            <h4>单题 R1 Prompt Payload（没有 candidate assumptions）</h4>
+            <pre>{
+  "target": {
+    "entity": "store_sales",
+    "forecast_window": ["2026-09-01", "2026-09-07"]
+  },
+  "documents": [
+    {"document_id": "doc_17", "content": "..."}
+  ],
+  "retrieval_skills": ["skill_entity_window_match"],
+  "query_plan": "broad_then_targeted"
+}</pre>
+          </article>
+          <article class="io-card output">
+            <h4>R2 后的 typed output（Host 仍要逐条复核）</h4>
+            <pre>{
+  "evidence_chains": [{
+    "claim": "A promotion applies during the forecast window.",
+    "entity": "store_sales",
+    "target": "sales",
+    "window_start": "2026-09-01",
+    "window_end": "2026-09-07",
+    "citations": [{
+      "document_id": "doc_17",
+      "quote": "The promotion runs September 1 through 7."
+    }],
+    "stance": "challenges_default",
+    "addressed_assumption_ids": ["assumption_0"]
+  }],
+  "counterevidence": [],
+  "missing_information": [],
+  "sufficient": true
+}</pre>
+          </article>
         </div>
       </article>
 
@@ -1190,6 +1711,70 @@
           </p>
         </div>
       </div>
+
+      <article class="contract-shell">
+        <div class="contract-title">
+          <div><span class="eyebrow">DECISION SELF-EVOLVE · 一代的真实接口</span><h3>进化选择规则；运行时只能选择已经执行并被 Host 认证的 forecast</h3></div>
+          <span class="status target">Prompt / Skills / Evidence policy</span>
+        </div>
+        <div class="contract-flow">
+          <article class="contract-step" data-contract="decision" data-stage="parent-input"><span class="stage-kicker">1 · Parent Input</span><strong>Decision Parent + 两份上游产物</strong><p>当前 Decision policy/Skills，加 <code>NumericalForecastPackage</code> 和 <code>FinalRetrievalCard</code>。</p></article>
+          <article class="contract-step prompt" data-contract="decision" data-stage="llm-prompt"><span class="stage-kicker">2 · LLM Prompt</span><strong>封闭选择问题</strong><p>Host 给候选 ID、historical default、assumptions、已验证 chains/impacts、prior decisions；不给 truth 或造新预测的接口。</p></article>
+          <article class="contract-step model" data-contract="decision" data-stage="llm-output"><span class="stage-kicker">3 · LLM Output</span><strong>严格 Decision JSON</strong><p>只能返回 selected candidate、supporting documents、rationale、是否补检索、gaps、used skills。</p></article>
+          <article class="contract-step host" data-contract="decision" data-stage="host-actions"><span class="stage-kicker">4 · Host Actions</span><strong>重新认证并 fallback</strong><p>检查候选已执行、citation 属于 exact verified chain、stance/assumption 支持该 override；任何失败回到 historical best。</p></article>
+          <article class="contract-step release" data-contract="decision" data-stage="release-output"><span class="stage-kicker">5 · Release Output</span><strong>DecisionTrace / Policy Release</strong><p>单题输出选中候选和证据链；跨代 Child 仅在 Train/Dev gate 后更新 Decision policy release。</p></article>
+          <article class="contract-step" data-contract="decision" data-stage="next-input"><span class="stage-kicker">6 · Next Input</span><strong>给 Bundle evaluator</strong><p>传最终已 materialize forecast、选择 trace、fallback、全部组件指纹与执行审计。</p></article>
+        </div>
+
+        <div class="io-grid">
+          <article class="io-card input">
+            <h4>Decision Prompt Payload · Host → LLM</h4>
+            <pre>{
+  "candidate_ids": ["toto_2_0", "seasonal_route_03"],
+  "historical_best": "toto_2_0",
+  "assumptions": [{
+    "assumption_id": "assumption_0",
+    "candidate_id": "seasonal_route_03",
+    "condition": "strong_periodicity"
+  }],
+  "verified_evidence": ["chain_0"],
+  "candidate_impacts": {
+    "seasonal_route_03": {"chain_ids": ["chain_0"]}
+  },
+  "prior_decisions": [],
+  "decision_skills": ["prefer_verified_override"]
+}</pre>
+          </article>
+          <article class="io-card output">
+            <h4>LLM → Host · 实际 DecisionAgent schema</h4>
+            <pre>{
+  "selected_candidate_id": "seasonal_route_03",
+  "supporting_document_ids": ["doc_17"],
+  "rationale": "Verified evidence supports the candidate assumption.",
+  "request_more_retrieval": false,
+  "gaps": [],
+  "used_skill_names": ["prefer_verified_override"]
+}</pre>
+          </article>
+        </div>
+        <div class="io-card host" style="margin-top:12px">
+          <h4>Host 认证后的标准 DecisionTrace（<code>action</code> 不是 LLM wire 字段）</h4>
+          <pre>{
+  "action": "select",
+  "selected_candidate_id": "seasonal_route_03",
+  "forecast_sha256": "...",
+  "verified_chain_ids": ["chain_0"],
+  "fallback_used": false,
+  "decision_policy_sha256": "..."
+}</pre>
+        </div>
+
+        <div class="ownership-grid">
+          <article class="ownership-card mutable"><h4>LLM 可以 evolve</h4><ul><li><code>decision_prompt</code> 与经过验证的 Decision Skills。</li><li><code>enable_evidence_adjustments</code>、<code>max_evidence_adjustments</code>。</li><li><code>decision_aggregation</code>：last 或 majority 等封闭选项。</li></ul></article>
+          <article class="ownership-card frozen"><h4>Host 固定，不能 evolve</h4><ul><li>候选 forecast 数值、candidate IDs、historical fallback。</li><li>Retrieval verifier、chain/quote/stance/assumption 授权关系。</li><li>sMAE/sRMSE、split、acceptance、ownership 与 fingerprint gate。</li></ul></article>
+        </div>
+        <div class="handoff-bar" data-handoff="decision-to-bundle">DecisionTrace → Bundle Evaluation Input</div>
+      </article>
 
       <div class="card-grid">
         <article class="card">
@@ -1260,6 +1845,60 @@
           </p>
         </div>
       </div>
+
+      <article class="contract-shell">
+        <div class="contract-title">
+          <div><span class="eyebrow">GLOBAL BUNDLE CO-EVOLVE · 一代的真实接口</span><h3>没有一个可随意改全系统的“总 Agent”；Host 只调度一个坐标的完整 self-evolve</h3></div>
+          <span class="status target">one coordinate per global step</span>
+        </div>
+        <div class="contract-flow">
+          <article class="contract-step" data-contract="bundle" data-stage="parent-input"><span class="stage-kicker">1 · Parent Input</span><strong>Whole-system Bundle Parent</strong><p>精确绑定 Dictionary、Numerical、Retrieval、Decision releases，以及 split/runtime/verifier/metric identities。</p></article>
+          <article class="contract-step prompt" data-contract="bundle" data-stage="llm-prompt"><span class="stage-kicker">2 · LLM Prompt</span><strong>仅调用被选坐标的 proposer</strong><p>Host 根据清洗后的端到端归因选 weakest coordinate，再把该坐标自己的合法 prompt 发给 LLM；不存在 unrestricted meta prompt。</p></article>
+          <article class="contract-step model" data-contract="bundle" data-stage="llm-output"><span class="stage-kicker">3 · LLM Output</span><strong>一个 coordinate-owned proposal</strong><p>输出仍遵守该坐标自己的 operations / recipes / Genome / Decision schema；不能一次修改两个 releases。</p></article>
+          <article class="contract-step host" data-contract="bundle" data-stage="host-actions"><span class="stage-kicker">4 · Host Actions</span><strong>重组完整 Bundle Child</strong><p>其余三坐标保持 exact Parent；运行端到端预测，比较 sMAE/sRMSE、coverage、tail、crash/invalid 和 anchor regret。</p></article>
+          <article class="contract-step release" data-contract="bundle" data-stage="release-output"><span class="stage-kicker">5 · Release Output</span><strong>Accept Child or exact rollback</strong><p>只有完整系统通过 Train 与只读 Dev gate 才发布新 <code>UnifiedCoEvolutionBundle</code>；否则返回 byte-identical Parent。</p></article>
+          <article class="contract-step" data-contract="bundle" data-stage="next-input"><span class="stage-kicker">6 · Next Input</span><strong>下一代 Parent</strong><p>新 Bundle 的端到端 attribution 决定下一次可能访问哪个坐标；Public-99 不进入这个回路。</p></article>
+        </div>
+
+        <div class="io-grid">
+          <article class="io-card input">
+            <h4>Host scheduler input（清洗后的 Bundle attribution）</h4>
+            <pre>{
+  "parent_bundle_sha256": "...",
+  "coordinate_signals": {
+    "dictionary": {"supply_gap_rate": 0.02},
+    "numerical": {"selection_regret": 0.18},
+    "retrieval": {"unresolved_gap_rate": 0.07},
+    "decision": {"unsupported_override_rate": 0.01}
+  },
+  "public_access": false
+}</pre>
+          </article>
+          <article class="io-card output">
+            <h4>Host dispatch + 被选坐标的 LLM output</h4>
+            <pre>{
+  "selected_coordinate": "numerical",
+  "coordinate_proposal": {
+    "recipes": [{
+      "kind": "route",
+      "parents": ["toto_2_0", "seasonal_naive"],
+      "fallback_parent": "toto_2_0",
+      "assumptions": [{"...": "closed structural fields"}]
+    }]
+  },
+  "unchanged_coordinates": [
+    "dictionary", "retrieval", "decision"
+  ]
+}</pre>
+          </article>
+        </div>
+
+        <div class="ownership-grid">
+          <article class="ownership-card mutable"><h4>LLM 可以 evolve</h4><ul><li>只进化当前被调度坐标中明确开放的字段。</li><li>Dictionary 可改代码/供给规则；Numerical 可改 recipe；Retrieval/Decision 可改各自 prompts、policies、Skills。</li><li>下一 global step 可以改另一个坐标，因此多个完整 loop 会随代际协同。</li></ul></article>
+          <article class="ownership-card frozen"><h4>Host 固定，不能 evolve</h4><ul><li>weakest-coordinate scheduler、一次一坐标 ownership 与 exact-parent 规则。</li><li>verification、metrics、Train/Dev/Public split、runtime/source fingerprints。</li><li>端到端 acceptance gate；局部得分或 LLM 自评没有发布权限。</li></ul></article>
+        </div>
+        <div class="handoff-bar" data-handoff="bundle-to-next-generation">Accepted Bundle → 下一代 Bundle Parent</div>
+      </article>
 
       <div class="sequence">
         <article class="sequence-item"><span class="sequence-step">G0</span><h3>Whole-system Parent</h3><p>绑定 Dictionary、Numerical、Retrieval、Decision 与全部 runtime/split 身份。</p></article>

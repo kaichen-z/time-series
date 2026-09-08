@@ -553,3 +553,259 @@ Tests must prove:
 
 A real run is reported separately from implementation tests. Deterministic smoke
 success does not claim an accepted 80/20 release or a Public-99 improvement.
+
+## 18. Concrete prompt, output, and handoff contracts
+
+This section is the operational reading guide for the five loops. Every loop has
+the same six stages:
+
+1. load one exact Parent artifact;
+2. construct a sanitized, coordinate-scoped LLM prompt;
+3. parse one strict JSON proposal;
+4. let the Host validate, fit, execute, and score it;
+5. publish an accepted release or preserve the exact Parent; and
+6. pass only the typed release projection to the next coordinate.
+
+“Evolvable” therefore does not mean “the LLM may edit anything.” Prompt text is
+evolvable only in Retrieval and Decision, and only inside their owned releases.
+Forecast execution, verification, metrics, data splits, source/runtime identity,
+and acceptance remain Host-owned in every loop.
+
+### 18.1 Dictionary loop
+
+**Parent input.** The Host loads the Git-tracked Statistical module, reviewed
+analysis skills, TSFM manifests, Combined policies, Screening policy, and
+Train-only aggregate diagnostics. It does not send Dev/Public labels to a model.
+
+The loop has three internal proposal interfaces:
+
+```json
+{
+  "targets": [
+    {"name": "sarima_auto", "action": "repair", "reason": "crashes on short histories"}
+  ]
+}
+```
+
+The method mutator then returns strict operations such as:
+
+```json
+{
+  "operations": [
+    {"op": "repair", "name": "sarima_auto", "reason": "guard verified preconditions", "code": "def sarima_auto(history, horizon, frequency): ..."}
+  ]
+}
+```
+
+The Combined mutator also returns `operations`, but each accepted policy is
+canonicalized to the exact fields `name`, `parents`, `operator`, `weights`,
+`signal`, `threshold`, `above_parent`, `below_parent`, and `fallback_parent`.
+The Screening mutator returns `actions` containing a method name, one of
+`keep|specialized|repair|quarantine`, typed applicability clauses, and a reason.
+
+**LLM may evolve:** Statistical add/repair/fork/merge/delete proposals; Combined
+add/repair/fork/remove proposals; per-method state and history-only applicability
+clauses.
+
+**Host keeps fixed:** Python syntax/AST and method-identity validation, TSFM
+checkpoint/license/runtime bindings, namespace ownership, exact execution,
+sMAE/sRMSE and coverage/tail/crash gates, Train/Dev/Public separation, and final
+acceptance.
+
+**Release output:** `DictionarySupplyRelease`, binding exact source bytes,
+reviewed inventory, states, applicability, TSFM identities, and acceptance
+evidence.
+
+**Handoff:** `DictionarySupplyRelease -> Numerical Parent Input`. Numerical never
+loads an unreviewed method directly from an LLM reply.
+
+### 18.2 Numerical loop
+
+**Parent input.** The Host supplies the accepted Dictionary release, current
+Champion recipe, legal candidate inventory, closed feature/operator vocabulary,
+and sanitized cross-generation structural evidence.
+
+The LLM sees a structural search problem. Its output is exactly:
+
+```json
+{
+  "recipes": [
+    {
+      "kind": "route",
+      "parents": ["toto_2_0", "seasonal_naive"],
+      "fallback_parent": "toto_2_0",
+      "assumptions": [
+        {
+          "candidate_name": "seasonal_naive",
+          "feature": "periodicity_strength",
+          "direction": "above",
+          "horizon_region": "all",
+          "operator": "route"
+        }
+      ]
+    }
+  ]
+}
+```
+
+It cannot return thresholds, weights, scores, task IDs, forecast vectors, or free
+code. The Host assigns IDs and canonical assumption text, expands the recipe over
+approved grids, materializes Statistical/TSFM leaves once, constructs Combined
+forecasts, fits thresholds/weights/caps/splits on Train only, and scores the
+Children through Screen-8, Screen-32, Train-80 grouped OOF, and read-only Dev-20.
+
+**LLM may evolve:** `select`, `route`, `horizon_route`, `weighted`, `median`, and
+`bounded_overlay` structure; two to five legal parents; fallback parent; one to
+three closed, falsifiable assumptions.
+
+**Host keeps fixed:** numeric parameters, execution/cache, safe anchor, sMAE and
+sRMSE arithmetic, coverage and tail gates, exact Parent rollback, and split
+boundaries.
+
+**Release output:** an accepted Numerical policy/supply release plus, per task, a
+`NumericalForecastPackage` containing only forecasts that were really executed,
+their diagnostics, assumptions, and fingerprints.
+
+**Handoff:** `NumericalForecastPackage -> Retrieval Parent Input`. Retrieval gets
+the allowed assumptions and candidate identities, not future truth.
+
+### 18.3 Retrieval loop
+
+There are two different operations that must not be conflated.
+
+At inference time, one frozen Retrieval Child runs:
+
+```text
+sanitized task/documents
+  -> Round 1 assumption-blind retrieval
+  -> provisional Decision emits at most one sanitized gap
+  -> Round 2 targeted retrieval using that gap and assumption IDs
+  -> Host verifies and merges exact chains
+```
+
+Each round returns a strict `RetrievalRoundResult`, for example:
+
+```json
+{
+  "evidence_chains": [
+    {
+      "claim": "A promotion applies during the forecast window.",
+      "entity": "store_sales",
+      "target": "sales",
+      "window_start": "2026-09-01",
+      "window_end": "2026-09-07",
+      "citations": [
+        {"document_id": "doc_17", "quote": "The promotion runs September 1 through 7."}
+      ],
+      "stance": "challenges_default",
+      "addressed_assumption_ids": ["assumption_0"]
+    }
+  ],
+  "counterevidence": [],
+  "missing_information": [],
+  "sufficient": true
+}
+```
+
+Retrieval self-evolution instead changes the Parent Genome. It proposes one of
+three ownership-scoped Children:
+
+- A: Round-1 prompt/strategy/document budget and Round-1 Skills;
+- B: chain/citation budgets, counterevidence, target-match and temporal-overlap
+  requirements, and cross-round Skills; or
+- C: Round-2 prompt/strategy/trigger and Round-2 Skills.
+
+The proposal must be a complete canonical Genome containing schema/version/
+parent, both prompts and strategies, second-round trigger, all three budgets, all
+three verification flags, and active Skill IDs. The Host freezes a detached
+Genome/Skill snapshot before any call, executes the full inference path on every
+scheduled task, and applies Train and read-only Dev gates.
+
+**LLM may evolve:** the three scoped Genome regions and validated Retrieval
+Skills.
+
+**Host keeps fixed:** task sanitization, document-budget ceiling, citation/quote/
+entity/target/window/stance verification, assumption identities, Numerical
+forecasts, metrics, splits, and acceptance.
+
+**Release output:** an accepted Retrieval release plus per-task verified
+`FinalRetrievalCard` artifacts.
+
+**Handoff:** `VerifiedRetrievalCard -> Decision Parent Input`.
+
+### 18.4 Decision loop
+
+**Parent input.** The prompt contains the current Decision policy/Skills, candidate
+IDs from the Numerical package, the historical-best fallback, assumptions,
+Host-verified evidence/impact bindings, and prior Decisions. It contains no future
+truth and no function for creating a new forecast vector.
+
+The actual LLM wire output is:
+
+```json
+{
+  "selected_candidate_id": "seasonal_route_03",
+  "supporting_document_ids": ["doc_17"],
+  "rationale": "Verified evidence supports the candidate assumption.",
+  "request_more_retrieval": false,
+  "gaps": [],
+  "used_skill_names": ["prefer_verified_override"]
+}
+```
+
+The Host independently confirms that the candidate was executed, every cited
+document belongs to an exact verified chain, and the chain’s stance and addressed
+assumption authorize that candidate. Otherwise it falls back to the historical
+best. Only after this check does the Host normalize the result to a
+`DecisionTrace` with `action: select`, selected candidate/forecast hashes,
+verified chain IDs, fallback status, and policy fingerprint.
+
+**LLM may evolve:** `decision_prompt`, validated Decision Skills,
+`enable_evidence_adjustments`, `max_evidence_adjustments`, and closed aggregation
+options such as `last` or `majority`.
+
+**Host keeps fixed:** forecast values and candidate supply, historical fallback,
+Retrieval verification and authorization semantics, metrics, splits, ownership,
+and acceptance.
+
+**Handoff:** `DecisionTrace -> Bundle Evaluation Input`.
+
+### 18.5 Global Bundle co-evolution
+
+The outer layer is a Host controller, not an unrestricted meta-LLM. Its Parent is
+the exact four-coordinate Bundle plus source/runtime/split/verifier/metric
+fingerprints. After the dependency-ordered warm-up, the Host converts end-to-end
+failures into sanitized coordinate-level attribution and deterministically picks
+one weakest coordinate. It then calls only that coordinate’s proposer using the
+coordinate’s own strict schema.
+
+The returned Child replaces exactly one coordinate; the other three remain exact
+Parent releases. The Host reassembles and runs the complete
+Dictionary-to-Numerical-to-Retrieval-to-Decision pipeline. Local improvement can
+promote a finalist but cannot publish it. Only whole-system Train and read-only
+Dev gates over sMAE, sRMSE, coverage, tails, crash/invalid, and anchor regret may
+publish a new `UnifiedCoEvolutionBundle`.
+
+**LLM may evolve:** only the fields owned by the selected coordinate. Across
+global generations the scheduler may choose different coordinates, producing
+co-evolution through sequential, attributable whole-Bundle changes.
+
+**Host keeps fixed:** weakest-coordinate scheduling, one-coordinate ownership,
+exact Parent preservation, all verification, evaluation metrics, splits,
+fingerprints, and global acceptance.
+
+**Handoff:** `Accepted Bundle -> next-generation Bundle Parent`. A rejected Child
+returns the byte-identical Parent. Public-99 is opened only after freeze and never
+feeds another generation.
+
+### 18.6 One end-to-end example
+
+For a periodic retail series, Dictionary may supply `seasonal_naive` as a
+periodic specialist while retaining Toto as an accepted safe supply. Numerical
+may propose a route between them and a falsifiable periodicity assumption; the
+Host fits its threshold from Train OOF. Retrieval Round 1 searches without seeing
+the assumption, then Round 2 investigates the one gap tied to it. Decision may
+override Toto only if an exact verified chain authorizes the already-executed
+route candidate. Finally the global controller accepts the coordinate Child only
+if this complete pipeline improves the Bundle gate. The accepted Bundle, not any
+intermediate LLM response, becomes the next generation’s Parent.
