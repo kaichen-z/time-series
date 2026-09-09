@@ -214,7 +214,20 @@ class CodexCLIClient:
         normalized = json.dumps(parsed, ensure_ascii=False)
         if cache_path is not None:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(normalized, encoding="utf-8")
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{cache_path.name}.",
+                suffix=".tmp",
+                dir=cache_path.parent,
+            )
+            temporary_path = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    handle.write(normalized)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary_path, cache_path)
+            finally:
+                temporary_path.unlink(missing_ok=True)
         return LLMResponse(text=normalized)
 
     def _execute(self, prompt: str) -> str:

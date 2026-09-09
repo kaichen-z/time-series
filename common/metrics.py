@@ -63,6 +63,7 @@ def drcik_point_metrics(
     if not raw:
         raise ValueError("Dr-CiK point metrics require at least one forecast")
     first = raw[0]
+    trajectories: tuple[tuple[float, ...], ...] | None = None
     if isinstance(first, Sequence) and not isinstance(first, (str, bytes)):
         trajectories = tuple(
             tuple(float(value) for value in sample)  # type: ignore[arg-type]
@@ -70,25 +71,47 @@ def drcik_point_metrics(
         )
         if any(len(sample) != len(truth) for sample in trajectories):
             raise ValueError("every forecast trajectory must match the future horizon")
-        prediction = [
-            statistics.fmean(sample[step] for sample in trajectories)
-            for step in range(len(truth))
-        ]
+        forecast_values = tuple(value for sample in trajectories for value in sample)
     else:
         prediction = [float(value) for value in raw]  # type: ignore[arg-type]
         _check_same_length(truth, prediction)
-    if not all(math.isfinite(value) for value in (*truth, *prediction)):
+        forecast_values = tuple(prediction)
+    if not all(math.isfinite(value) for value in (*truth, *forecast_values)):
         raise ValueError("Dr-CiK inputs must contain only finite values")
 
-    scale = statistics.fmean(abs(value) for value in truth)
-    absolute_error = mae(truth, prediction)
-    squared_error = rmse(truth, prediction)
-    if scale > 0.0:
-        smae_raw = absolute_error / scale
-        srmse_raw = squared_error / scale
+    if trajectories is not None:
+        # Aggregate samples at their own safe scale first.  Scoring all raw
+        # samples together would let cancelling extremes erase a tiny but
+        # genuine truth signal through underflow.
+        trajectory_scale = max(1.0, *(abs(value) for value in forecast_values))
+        prediction = [
+            statistics.fmean(
+                sample[step] / trajectory_scale for sample in trajectories
+            )
+            * trajectory_scale
+            for step in range(len(truth))
+        ]
     else:
-        smae_raw = 0.0 if absolute_error == 0.0 else math.inf
-        srmse_raw = 0.0 if squared_error == 0.0 else math.inf
+        prediction = list(forecast_values)
+
+    # Compute the scale-free scores in a unit range.  Direct subtraction of
+    # opposite-sign, near-float-limit inputs can overflow even though every
+    # observation is finite; sMAE and sRMSE are invariant to this rescaling.
+    normalizer = max(1.0, *(abs(value) for value in (*truth, *prediction)))
+    scaled_truth = [value / normalizer for value in truth]
+    scaled_prediction = [value / normalizer for value in prediction]
+    scaled_scale = statistics.fmean(abs(value) for value in scaled_truth)
+    scaled_mae = mae(scaled_truth, scaled_prediction)
+    scaled_rmse = rmse(scaled_truth, scaled_prediction)
+    scale = scaled_scale * normalizer
+    absolute_error = scaled_mae * normalizer
+    squared_error = scaled_rmse * normalizer
+    if scaled_scale > 0.0:
+        smae_raw = scaled_mae / scaled_scale
+        srmse_raw = scaled_rmse / scaled_scale
+    else:
+        smae_raw = 0.0 if scaled_mae == 0.0 else math.inf
+        srmse_raw = 0.0 if scaled_rmse == 0.0 else math.inf
     return {
         "scale": scale,
         "mae": absolute_error,
