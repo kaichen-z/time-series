@@ -1,0 +1,3 @@
+scripts/run_meta_harness_v2.sh \
+  /Users/yyoraa/time-series/external/Dr-CiK/full-download/Dr-CiK_public/tasks \
+  /Users/yyoraa/time-series/.worktrees/unified-coevolution/runs/meta_harness_v2/real_8_2_gpt56sol

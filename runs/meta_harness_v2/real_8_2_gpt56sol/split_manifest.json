@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "seed": 7,
+  "dev_fraction": 0.2,
+  "holdout_fraction": 0.0,
+  "train": {
+    "task_ids": [
+      "task_104",
+      "task_141",
+      "task_181",
+      "task_202",
+      "task_220",
+      "task_57",
+      "task_113",
+      "task_164"
+    ],
+    "entities": [
+      "Geological Bedrock Corridor freeway",
+      "High Plateau Observatory Complex",
+      "Ironclad Integrity",
+      "Portal-X-88",
+      "Sterling Gate Facility",
+      "The Birchwood Residence",
+      "ThermalCore-88",
+      "Vesper Heights"
+    ]
+  },
+  "dev": {
+    "task_ids": [
+      "task_128",
+      "task_51"
+    ],
+    "entities": [
+      "Oakhaven Basin",
+      "Vanguard North Complex"
+    ]
+  },
+  "holdout": {
+    "task_ids": [],
+    "entities": []
+  }
+}

@@ -1,0 +1,218 @@
+{
+  "schema_version": 2,
+  "meta_harness_v2": true,
+  "child_shapes": [
+    "coding",
+    "retrieval",
+    "decision",
+    "joint"
+  ],
+  "memory_policy": "train_only_last_3_generations",
+  "train_evolution_memory": [
+    {
+      "generation": 0,
+      "child_kind": "coding",
+      "changed_scopes": [
+        "coding"
+      ],
+      "interaction_hypothesis": "Generating three structurally distinct numerical hypotheses and applying one fold-diagnostic-driven mutation will improve the chance that the unchanged retrieval and decision agents receive an executable candidate whose assumptions match the series, compared with the current single unmutated hypothesis.",
+      "status": "train_improved",
+      "parent_train_smae": 0.492059391954909,
+      "parent_train_srmse": 0.7457046235740619,
+      "child_train_smae": 0.4030457417714014,
+      "child_train_srmse": 0.6110000122275605
+    },
+    {
+      "generation": 0,
+      "child_kind": "retrieval",
+      "changed_scopes": [
+        "retrieval"
+      ],
+      "interaction_hypothesis": "A retrieval-first ledger that separately records chain identity, contradiction checks, and quantitative-edit eligibility will reduce unsupported evidence adjustments while preserving valid future-event overrides by the unchanged Decision Agent.",
+      "status": "train_rejected",
+      "parent_train_smae": 0.492059391954909,
+      "parent_train_srmse": 0.7457046235740619,
+      "child_train_smae": 0.492059391954909,
+      "child_train_srmse": 0.7457046235740619
+    },
+    {
+      "generation": 0,
+      "child_kind": "decision",
+      "changed_scopes": [
+        "decision"
+      ],
+      "interaction_hypothesis": "Requiring the Decision Agent to compare each candidate against an explicit evidence-to-assumption falsification record before overriding the hindcast winner will reduce unsupported evidence overrides while preserving correct selections of validated future-adjusted and history-cleaned candidates.",
+      "status": "train_rejected",
+      "parent_train_smae": 0.3808905400708848,
+      "parent_train_srmse": 0.4992347913659363,
+      "child_train_smae": 0.3808905400708848,
+      "child_train_srmse": 0.4992347913659363
+    },
+    {
+      "generation": 0,
+      "child_kind": "joint",
+      "changed_scopes": [],
+      "interaction_hypothesis": "Host rejected malformed Meta-Harness proposal.",
+      "status": "invalid",
+      "parent_train_smae": 0.3808905400708848,
+      "parent_train_srmse": 0.4992347913659363,
+      "child_train_smae": null,
+      "child_train_srmse": null
+    }
+  ],
+  "steps": [
+    {
+      "mode": "genome",
+      "generation": 0,
+      "parent_version": "v000",
+      "child_versions": [
+        "v001",
+        "v002",
+        "v003",
+        "v004"
+      ],
+      "target_agent": "decision",
+      "parent_train_reward": -0.7457046235740619,
+      "child_train_rewards": {
+        "v001": -0.6110000122275605,
+        "v002": -0.7457046235740619,
+        "v003": -0.4992347913659363
+      },
+      "parent_dev_reward": -2.1713863634363233,
+      "best_child_dev_reward": -0.6891347333690299,
+      "accepted_version": "v001",
+      "parent_train_module_rewards": {
+        "coding_srmse": -0.6207229404002443,
+        "retrieval_srmse_gain": 0.0,
+        "retrieval_smae_gain": 0.0,
+        "coding_smae": -0.4047077553665541,
+        "decision_srmse_regret": -0.12498168317381761,
+        "decision_smae_regret": -0.08735163658835496
+      },
+      "parent_dev_module_rewards": {
+        "coding_smae": -0.38109505523392684,
+        "coding_srmse": -0.7336630450334258,
+        "retrieval_smae_gain": 0.0,
+        "retrieval_srmse_gain": 0.0,
+        "decision_smae_regret": -1.1949426124319356,
+        "decision_srmse_regret": -1.4377233184028975
+      },
+      "best_child_train_module_rewards": {
+        "coding_srmse": -0.5657015665211103,
+        "retrieval_srmse_gain": 0.0,
+        "retrieval_smae_gain": 0.0,
+        "coding_smae": -0.36847005256831145,
+        "decision_srmse_regret": -0.045298445706450266,
+        "decision_smae_regret": -0.034575689203089975
+      },
+      "best_child_dev_module_rewards": {
+        "coding_smae": -0.31271353585655454,
+        "coding_srmse": -0.6716933143181959,
+        "retrieval_smae_gain": 0.0,
+        "retrieval_srmse_gain": 0.0,
+        "decision_smae_regret": -0.008673485196553837,
+        "decision_srmse_regret": -0.01744141905083396
+      },
+      "parent_train_diagnostics": {
+        "mean_coding_oracle_srmse": 0.6207229404002443,
+        "mean_retrieval_exact_quote_validity": 1.0,
+        "mean_coding_oracle_smae": 0.4047077553665541,
+        "mean_retrieval_complete_chain_rate": 0.0,
+        "mean_retrieval_contextual_oracle_smae_gain": 0.0,
+        "mean_retrieval_gt_evidence_recall": 0.0,
+        "mean_selection_srmse_regret": 0.12498168317381761,
+        "mean_retrieval_supporting_recall": 0.31154206154206154,
+        "retrieval_invalid_count": 2.0,
+        "retrieval_catastrophic_count": 1.0,
+        "mean_contextual_oracle_smae": 0.4047077553665541,
+        "mean_srmse": 0.7457046235740619,
+        "mean_selection_smae_regret": 0.08735163658835496,
+        "mean_retrieval_distractor_avoidance": 0.8899999999999999,
+        "mean_retrieval_contextual_oracle_srmse_gain": 0.0,
+        "mean_smae": 0.492059391954909,
+        "mean_contextual_oracle_srmse": 0.6207229404002443
+      },
+      "parent_dev_diagnostics": {
+        "mean_smae": 1.5760376676658623,
+        "mean_srmse": 2.1713863634363233,
+        "mean_coding_oracle_smae": 0.38109505523392684,
+        "mean_coding_oracle_srmse": 0.7336630450334258,
+        "mean_contextual_oracle_smae": 0.38109505523392684,
+        "mean_contextual_oracle_srmse": 0.7336630450334258,
+        "mean_selection_smae_regret": 1.1949426124319356,
+        "mean_selection_srmse_regret": 1.4377233184028975,
+        "mean_retrieval_supporting_recall": 0.2976190476190476,
+        "mean_retrieval_gt_evidence_recall": 0.0,
+        "mean_retrieval_distractor_avoidance": 0.8,
+        "mean_retrieval_exact_quote_validity": 1.0,
+        "mean_retrieval_complete_chain_rate": 0.0,
+        "mean_retrieval_contextual_oracle_smae_gain": 0.0,
+        "mean_retrieval_contextual_oracle_srmse_gain": 0.0,
+        "retrieval_invalid_count": 0.0,
+        "retrieval_catastrophic_count": 0.0
+      },
+      "best_child_train_diagnostics": {
+        "mean_coding_oracle_srmse": 0.5657015665211103,
+        "mean_retrieval_exact_quote_validity": 1.0,
+        "mean_coding_oracle_smae": 0.36847005256831145,
+        "mean_retrieval_complete_chain_rate": 0.0,
+        "mean_retrieval_contextual_oracle_smae_gain": 0.0,
+        "mean_retrieval_gt_evidence_recall": 0.0,
+        "mean_selection_srmse_regret": 0.045298445706450266,
+        "mean_retrieval_supporting_recall": 0.31808968058968057,
+        "retrieval_invalid_count": 2.0,
+        "retrieval_catastrophic_count": 0.0,
+        "mean_contextual_oracle_smae": 0.36847005256831145,
+        "mean_srmse": 0.6110000122275605,
+        "mean_selection_smae_regret": 0.034575689203089975,
+        "mean_retrieval_distractor_avoidance": 0.8499999999999999,
+        "mean_retrieval_contextual_oracle_srmse_gain": 0.0,
+        "mean_smae": 0.4030457417714014,
+        "mean_contextual_oracle_srmse": 0.5657015665211103
+      },
+      "best_child_dev_diagnostics": {
+        "mean_smae": 0.32138702105310835,
+        "mean_srmse": 0.6891347333690299,
+        "mean_coding_oracle_smae": 0.31271353585655454,
+        "mean_coding_oracle_srmse": 0.6716933143181959,
+        "mean_contextual_oracle_smae": 0.31271353585655454,
+        "mean_contextual_oracle_srmse": 0.6716933143181959,
+        "mean_selection_smae_regret": 0.008673485196553837,
+        "mean_selection_srmse_regret": 0.01744141905083396,
+        "mean_retrieval_supporting_recall": 0.3214285714285714,
+        "mean_retrieval_gt_evidence_recall": 0.0,
+        "mean_retrieval_distractor_avoidance": 0.88,
+        "mean_retrieval_exact_quote_validity": 1.0,
+        "mean_retrieval_complete_chain_rate": 0.0,
+        "mean_retrieval_contextual_oracle_smae_gain": 0.0,
+        "mean_retrieval_contextual_oracle_srmse_gain": 0.0,
+        "retrieval_invalid_count": 0.0,
+        "retrieval_catastrophic_count": 0.0
+      },
+      "child_changelogs": {
+        "v001": "Coding-only mutation: expanded initial generation from one to three structurally diverse programs and added one diagnostic-driven mutation round with one descendant. Strengthened causal, deterministic, edge-case-safe coding requirements while leaving retrieval, decision, validation, workflow, evidence adjustment, and aggregation policies unchanged.",
+        "v002": "Retrieval-only mutation: introduced a fixed ledger sequence, explicit same-chain identity checks, four mandatory gates for quantitative future edits, contradiction handling, visible-history overlap validation, and named missing-gate reporting; all coding, decision, coordination, validation, and runtime settings remain unchanged.",
+        "v003": "Decision-only mutation: added an explicit evidence-to-assumption admissibility record, stricter temporal and mechanism matching, contradiction checks, and conservative retrieval-gap criteria while preserving the safe hindcast baseline.",
+        "v004": "Invalid Meta-Harness V2 Child; exact Parent behavior preserved."
+      },
+      "successive_halving": true,
+      "parent_screen_train_reward": -0.4992347913659363,
+      "parent_screen_dev_reward": null,
+      "child_screen_train_rewards": {
+        "v001": -0.4493328524840223,
+        "v002": -0.4992347913659363,
+        "v003": -0.4992347913659363
+      },
+      "child_screen_dev_rewards": null,
+      "promoted_versions": [
+        "v001",
+        "v002"
+      ],
+      "screen_prune_reasons": {
+        "v003": "not_top_k",
+        "v004": "screen_failed",
+        "v002": "full_train_not_improved"
+      }
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "best_policy": "v001",
+  "evolution_mode": "genome",
+  "policy_path": "/Users/yyoraa/time-series/.worktrees/unified-coevolution/runs/meta_harness_v2/real_8_2_gpt56sol/best_policy.json",
+  "trace_path": "/Users/yyoraa/time-series/.worktrees/unified-coevolution/runs/meta_harness_v2/real_8_2_gpt56sol/evolution_trace.json",
+  "checkpoint_path": "/Users/yyoraa/time-series/.worktrees/unified-coevolution/runs/meta_harness_v2/real_8_2_gpt56sol/checkpoint.json",
+  "progress_path": "/Users/yyoraa/time-series/.worktrees/unified-coevolution/runs/meta_harness_v2/real_8_2_gpt56sol/progress.jsonl",
+  "train_tasks": 8,
+  "dev_tasks": 2,
+  "holdout_tasks": 0,
+  "split_manifest_path": "/Users/yyoraa/time-series/.worktrees/unified-coevolution/runs/meta_harness_v2/real_8_2_gpt56sol/split_manifest.json",
+  "holdout_status": "reserved_unscored_run_frozen_inference_to_evaluate",
+  "meta_harness_v2": true,
+  "child_shapes": [
+    "coding",
+    "retrieval",
+    "decision",
+    "joint"
+  ],
+  "memory_policy": "train_only_last_3_generations"
+}
