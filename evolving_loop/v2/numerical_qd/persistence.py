@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import stat
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -85,13 +86,14 @@ class NumericalQDRunStore:
         resolved = result.root.resolve()
         if any(resolved.is_relative_to(repository / name) for name in protected):
             raise NumericalQDStoreError("output cannot be created in source or legacy paths")
-        result._safe(result.root)
+        result._verify_root_paths()
         durable.V2RunStore._require_v2_manifest(result.root)
         if not result._safe(result.root / "checkpoint.json").is_file():
             raise NumericalQDStoreError("initialize the Kernel before the Numerical QD store")
         if result.directory.exists() and any(result.directory.iterdir()):
             if result._read("manifest.json") != _MANIFEST:
                 raise NumericalQDStoreError("Numerical QD manifest mismatch")
+            result._catalog()
         for name in _LAYOUT:
             result._safe(result.directory / name)
             durable._ensure_directory(result.directory / name)
@@ -110,6 +112,26 @@ class NumericalQDRunStore:
         if not isinstance(relative, str) or (relative != "checkpoint.json" and not _FILES.fullmatch(relative)):
             raise NumericalQDStoreError("invalid Numerical QD artifact path")
         return self._safe(self.directory / relative)
+
+    def _verify_root_paths(self):
+        """Check path ownership before the Kernel's readers can follow links."""
+        required_files = ("run_manifest.json", "budget_plan.json", "checkpoint.json",
+                          "accepted_bundle.json", "promotion_history.jsonl", "archive/index.jsonl")
+        try:
+            for name in ("", *durable._LAYOUT):
+                if not self._safe(self.root / name).is_dir():
+                    raise NumericalQDStoreError("missing real V2 authority directory")
+            for name in required_files:
+                if not self._safe(self.root / name).is_file():
+                    raise NumericalQDStoreError("missing real V2 authority file")
+            # Includes closure/evidence/candidate/Bundle paths subsequently
+            # discovered by Kernel replay, as well as all their ancestors.
+            for path in self.root.rglob("*"):
+                mode = self._safe(path).lstat().st_mode
+                if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+                    raise NumericalQDStoreError("V2 authority requires real files and directories")
+        except OSError as error:
+            raise NumericalQDStoreError("cannot verify V2 authority paths") from error
 
     def _read(self, relative):
         try:
@@ -342,15 +364,20 @@ class NumericalQDRunStore:
             raise NumericalQDStoreError("QD log append readback mismatch")
         return path
 
-    def _catalog(self):
-        result = {}
+    def _catalog(self, completed_operations=None):
+        if not self._safe(self.directory).is_dir():
+            raise NumericalQDStoreError("missing Numerical QD directory")
+        result, directories = {}, set()
         for path in self.directory.rglob("*"):
             self._safe(path)
             if path.is_dir():
                 relative = path.relative_to(self.directory).as_posix()
                 if relative not in _LAYOUT and not re.fullmatch(rf"results/{_SHA}", relative):
                     raise NumericalQDStoreError("unexpected artifact directory")
+                directories.add(relative)
                 continue
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise NumericalQDStoreError("artifact must be a regular file")
             name = path.relative_to(self.directory).as_posix()
             if _TEMP.fullmatch(path.name):
                 continue
@@ -365,6 +392,12 @@ class NumericalQDRunStore:
             elif path.suffix == ".py" and hashlib.sha256(data).hexdigest() != path.stem:
                 raise NumericalQDStoreError("source file SHA mismatch")
             result[name] = hashlib.sha256(data).hexdigest()
+        operations = result if completed_operations is None else completed_operations
+        expected_directories = set(_LAYOUT) | {
+            str(Path(name).parent) for name in operations if name.startswith("results/")
+        }
+        if directories != expected_directories:
+            raise NumericalQDStoreError("missing or unreferenced Numerical QD directory")
         return dict(sorted(result.items()))
 
     def _kernel(self, expected):
@@ -381,6 +414,7 @@ class NumericalQDRunStore:
         return payload
 
     def _verify_state(self, checkpoint):
+        self._verify_root_paths()
         if self._read("manifest.json") != _MANIFEST:
             raise NumericalQDStoreError("Numerical QD manifest mismatch")
         durable.V2RunStore._require_v2_manifest(self.root)
@@ -396,9 +430,16 @@ class NumericalQDRunStore:
         config = NumericalQDConfigV2.from_payload(self._object(checkpoint.config_sha256))
         if config.seed != checkpoint.counter["seed"]:
             raise NumericalQDStoreError("RNG seed differs from committed config")
+        manifest = _payload(self._safe(self.root / "run_manifest.json").read_bytes())
+        if (config.kernel_protocol.to_payload() != manifest.get("kernel_protocol")
+                or config.kernel_protocol.fingerprint() != bundle.protocol_fingerprint):
+            raise NumericalQDStoreError("config protocol must match the Kernel manifest and active Bundle")
         # Input bytes may be external operator files; their commitments are
         # compared with the caller on resume, never resolved as filesystem paths.
         budget = self._object(checkpoint.budget_checkpoint_sha256)
+        if (checkpoint.budget_checkpoint_sha256 != kernel["budget"]["checkpoint_sha256"]
+                or canonical_v2_bytes(budget) != canonical_v2_bytes(kernel["budget"])):
+            raise NumericalQDStoreError("runner Budget must exactly match the Kernel-owned checkpoint")
         try:
             plan_payload = _payload(self._safe(self.root / "budget_plan.json").read_bytes())
             plan = BudgetPlan(plan_payload["hard_limit_seconds"], plan_payload["finalization_reserve_fraction"],
@@ -533,25 +574,88 @@ class NumericalQDRunStore:
             raise NumericalQDStoreError("runner checkpoint immutable bytes mismatch")
         expected = dict(checkpoint.completed_operation_sha256s)
         expected[f"objects/{checkpoint.checkpoint_sha256}.json"] = hashlib.sha256(checkpoint.canonical_bytes()).hexdigest()
-        if self._catalog() != expected:
+        if self._catalog(expected) != expected:
             raise NumericalQDStoreError("missing, changed, or partial immutable operations")
         self._verify_state(checkpoint)
+        completion = self._safe(self.root / "evaluation_complete.json")
+        if completion.exists():
+            self._verify_completion(_payload(completion.read_bytes()), self._completion_payload(checkpoint))
         return checkpoint
 
-    def write_completion(self, payload):
-        checkpoint = NumericalQDCheckpointV2.from_payload(self._read("checkpoint.json"))
-        self.resume(checkpoint.config_sha256, dict(checkpoint.input_sha256s),
-                    checkpoint.kernel_checkpoint_sha256, checkpoint.budget_checkpoint_sha256)
+    def _completion_payload(self, checkpoint):
+        """Derive completion facts solely from already verified persisted state."""
         kernel = self._kernel(checkpoint.kernel_checkpoint_sha256)
         if not kernel["budget"]["finalization_started"]:
             raise NumericalQDStoreError("completion requires Kernel finalization")
+        bundle = EvolutionBundleV2.from_payload(self._object(checkpoint.active_bundle_sha256))
+        archive = NumericalQDArchive.from_payload(self._object(checkpoint.qd_snapshot_sha256))
+        attempts, proposal_use = [], ResourceUse()
+        for name in sorted(checkpoint.completed_operation_sha256s):
+            if name.startswith("proposals/"):
+                batch = self._proposal(self._read(name))
+                attempts.extend(batch.attempts)
+                proposal_use += batch.resource_use
+        charged = ResourceUse.from_payload(kernel["budget"]["charged_use"])
+        if any(getattr(proposal_use, name) > getattr(charged, name) for name in ResourceUse.field_names()):
+            raise NumericalQDStoreError("completion proposal use exceeds Kernel-owned accounting")
+        transitions = tuple(kernel["completed_transitions"].values())
+        dev_accessed = False
+        for transition in transitions:
+            evidence_sha = require_sha256(transition["acceptance_evidence_sha256"], "acceptance evidence SHA")
+            evidence = _payload(self._safe(self.root / "acceptance" / f"{evidence_sha}.json").read_bytes())
+            if fingerprint_payload(evidence) != evidence_sha:
+                raise NumericalQDStoreError("completion evidence content SHA mismatch")
+            comparison = evidence["dev_comparison"]
+            dev_accessed |= bool(comparison["parent_metrics"] or comparison["candidate_metrics"])
+        return {
+            "schema_version": 1, "status": "numerical_qd_complete",
+            "runner_checkpoint_sha256": checkpoint.checkpoint_sha256,
+            "kernel_checkpoint_sha256": checkpoint.kernel_checkpoint_sha256,
+            "budget_checkpoint_sha256": checkpoint.budget_checkpoint_sha256,
+            "active_bundle_sha256": checkpoint.active_bundle_sha256,
+            "active_genome_sha256": checkpoint.active_genome_sha256,
+            "qd_snapshot_sha256": checkpoint.qd_snapshot_sha256,
+            "summary": {
+                "supply_sha256": bundle.numerical_release_sha256,
+                "registry_sha256": bundle.numerical_registry_sha256,
+                "bundle_sha256": bundle.fingerprint(),
+                "qd_snapshot_sha256": checkpoint.qd_snapshot_sha256,
+                "mutation_policy_sha256": checkpoint.mutation_policy_sha256,
+                "proposer_prompt_sha256": checkpoint.proposer_prompt_sha256,
+                "occupied_cells": len(archive.cells),
+                "accepted_count": sum(value["decision"] == "accept" for value in transitions),
+                "rejected_count": sum(value["decision"] == "reject" for value in transitions),
+                "provider_attempts": len(attempts),
+                "llm_attempts": sum(attempt.provider == "llm" for attempt in attempts),
+                "llm_calls": proposal_use.llm_calls,
+                "llm_provider_used": proposal_use.llm_calls > 0,
+                "budget": kernel["budget"],
+                "dev_accessed": dev_accessed,
+                "public_test_accessed": False,
+            },
+        }
+
+    @staticmethod
+    def _verify_completion(payload, expected):
+        _require_exact_schema(payload, tuple(expected), field="Numerical QD completion")
+        _require_exact_schema(payload["summary"], tuple(expected["summary"]), field="completion summary")
+        # Canonical comparison distinguishes boolean/count aliases as well as
+        # missing fields, invented claims and changed identities or metrics.
+        if canonical_v2_bytes(payload) != canonical_v2_bytes(expected):
+            raise NumericalQDStoreError("completion conflicts with verified finalized authority")
+
+    def write_completion(self, payload):
+        """Accept status-only convenience or the exact derived closed envelope."""
+        checkpoint = NumericalQDCheckpointV2.from_payload(self._read("checkpoint.json"))
+        self.resume(checkpoint.config_sha256, dict(checkpoint.input_sha256s),
+                    checkpoint.kernel_checkpoint_sha256, checkpoint.budget_checkpoint_sha256)
+        expected = self._completion_payload(checkpoint)
         payload = _payload(payload)
-        if payload.get("status") != "numerical_qd_complete":
-            raise NumericalQDStoreError("invalid Numerical QD completion status")
+        if payload != {"status": "numerical_qd_complete"}:
+            self._verify_completion(payload, expected)
         path = self._safe(self.root / "evaluation_complete.json")
-        durable.write_once_json(path, payload)
-        if _payload(path.read_bytes()) != payload:
-            raise NumericalQDStoreError("completion canonical readback failed")
+        durable.write_once_json(path, expected)
+        self._verify_completion(_payload(path.read_bytes()), expected)
         return path
 
 

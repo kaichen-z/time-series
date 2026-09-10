@@ -8,6 +8,7 @@ import pytest
 
 from evolving_loop.v2 import store as core_store
 from evolving_loop.v2.budget import BudgetLedger, ResourceUse
+from evolving_loop.v2.kernel import EvolutionKernel
 from evolving_loop.v2.contracts import canonical_v2_bytes, fingerprint_payload
 from evolving_loop.v2.numerical_qd import persistence as api
 from evolving_loop.v2.numerical_qd.contracts import (
@@ -18,7 +19,7 @@ from evolving_loop.v2.numerical_qd.contracts import (
 )
 from evolving_loop.v2.numerical_qd.hyperband import advance_hyperband, evaluation_cache_key
 from evolving_loop.v2.numerical_qd.map_elites import NumericalQDArchive
-from tests.test_evolution_v2_kernel import kernel
+from tests.test_evolution_v2_kernel import kernel, child as kernel_child
 from tests.test_evolution_v2_numerical_hyperband import (
     CELL, SPLIT, PROTOCOL, METRIC, DESCRIPTOR, ADAPTER, RUNTIME,
     evaluation, manifest, sha,
@@ -97,10 +98,17 @@ def add_rung(world):
         store.write_task_result(task.task_sha256, HyperbandTaskResultV2(
             row.genome_sha256, task.task_id, key, "passed", row, False, None))
     aggregate = evaluation(args["active_genome_sha256"], fixed.task_ids, subset=fixed.fingerprint())
-    ledger = BudgetLedger(kernel.budget.plan, monotonic=lambda: 0.0)
-    reservation = ledger.reserve_stage("rung-0", ResourceUse(task_executions=8))
-    ledger.close_stage(reservation, ResourceUse(task_executions=8))
-    captured = ledger.checkpoint()
+    parent = kernel.active_bundle()
+    candidate = kernel_child(parent)
+    reservation = kernel.reserve_evaluation(candidate, ResourceUse(task_executions=8))
+    closed = kernel.close_evaluation(parent, candidate, permit=reservation, status="passed",
+        train_objectives={"loss": 1.0}, train_behavior_descriptors={"family": "statistical"},
+        dev_comparison={"passed": False, "parent_metrics": {"loss": 1.0}, "candidate_metrics": {"loss": 2.0}},
+        resource_use=ResourceUse(task_executions=8))
+    # Real issuer-owned accounting and rejected transition keep the active seed.
+    kernel.evaluate_transition(parent, candidate, target="retrieval", evaluation=closed, permit=reservation)
+    kernel_payload = json.loads(kernel.checkpoint_path.read_bytes())
+    captured = kernel_payload["budget"]
     outcome = HyperbandBudgetOutcomeV2("completed", None, reservation.reservation_sha256,
         ResourceUse(task_executions=8).to_payload(), captured["checkpoint_sha256"], captured)
     advanced = advance_hyperband(state, fixed, (aggregate,), outcome).state
@@ -112,6 +120,7 @@ def add_rung(world):
     archive = archive.insert((entry,))
     updated = args | dict(qd_snapshot_sha256=persist(store, archive),
         hyperband_state_sha256=persist(store, advanced),
+        kernel_checkpoint_sha256=kernel_payload["checkpoint_sha256"],
         budget_checkpoint_sha256=outcome.ledger_checkpoint_sha256)
     return updated, rung, entry
 
@@ -444,6 +453,7 @@ def test_every_rung_and_archive_write_boundary_leaves_rejectable_partial_state(w
             if path.is_file() and str(path.relative_to(root)) not in baseline: path.unlink()
         for name, data in baseline.items(): (root / name).write_bytes(data)
         replica = api.NumericalQDRunStore(root)
+        replica_kernel = EvolutionKernel.resume(core_store.V2RunStore(root), kernel.budget.plan, monotonic=lambda: 0.0)
         count = 0
         def after_write():
             nonlocal count
@@ -458,9 +468,12 @@ def test_every_rung_and_archive_write_boundary_leaves_rejectable_partial_state(w
         with monkeypatch.context() as patch:
             patch.setattr(core_store, "_atomic_write", crash_atomic)
             patch.setattr(core_store, "append_jsonl", crash_append)
-            with pytest.raises(OSError, match="rung crash"):
-                changed, _, _ = add_rung((replica, args, kernel, archive, state))
+            # Kernel finally-accounting can replace the injected OSError with
+            # its own closed-authority ValueError after the durable write.
+            with pytest.raises((OSError, ValueError)):
+                changed, _, _ = add_rung((replica, args, replica_kernel, archive, state))
                 replica.write_state(**changed)
+        assert count >= boundary
         if boundary == len(steps):
             assert resume(replica, updated).hyperband_state_sha256 == updated["hyperband_state_sha256"]
         else:
@@ -619,3 +632,239 @@ def test_full_genome_history_is_not_limited_to_structural_policy_depth(world):
     reread, sources, _ = store.verify_candidate(genome.fingerprint())
     assert reread.generation == 66
     assert sources == {SOURCE_SHA: SOURCE}
+
+
+def forge_runner_checkpoint(store, checkpoint, **changes):
+    """Simulate fully rehashed persisted authority; semantic checks must reject it."""
+    body = checkpoint.to_payload()
+    body.pop("checkpoint_sha256")
+    body.update(changes, completed_operation_sha256s=store._catalog())
+    changed = NumericalQDCheckpointV2.seal(**body)
+    persist(store, changed)
+    (store.directory / "checkpoint.json").write_bytes(changed.canonical_bytes())
+    return changed
+
+
+def finalized_state(world, *, rung=False):
+    store, args, kernel, *_ = world
+    if rung:
+        args, _, _ = add_rung(world)
+    kernel.finalize()
+    payload = json.loads(kernel.checkpoint_path.read_bytes())
+    args = args | {"kernel_checkpoint_sha256": payload["checkpoint_sha256"],
+                   "budget_checkpoint_sha256": persist(store, payload["budget"])}
+    return args, store.write_state(**args)
+
+
+def expected_completion(world, checkpoint, *, rung=False, providers=0, llm_calls=0, llm_attempts=0):
+    store, _, kernel, *_ = world
+    bundle = kernel.active_bundle()
+    return {"schema_version": 1, "status": "numerical_qd_complete",
+        "runner_checkpoint_sha256": checkpoint.checkpoint_sha256,
+        "kernel_checkpoint_sha256": checkpoint.kernel_checkpoint_sha256,
+        "budget_checkpoint_sha256": checkpoint.budget_checkpoint_sha256,
+        "active_bundle_sha256": checkpoint.active_bundle_sha256,
+        "active_genome_sha256": checkpoint.active_genome_sha256,
+        "qd_snapshot_sha256": checkpoint.qd_snapshot_sha256,
+        "summary": {"supply_sha256": bundle.numerical_release_sha256,
+            "registry_sha256": bundle.numerical_registry_sha256,
+            "bundle_sha256": bundle.fingerprint(), "qd_snapshot_sha256": checkpoint.qd_snapshot_sha256,
+            "mutation_policy_sha256": checkpoint.mutation_policy_sha256,
+            "proposer_prompt_sha256": checkpoint.proposer_prompt_sha256,
+            "occupied_cells": int(rung), "accepted_count": 0, "rejected_count": int(rung),
+            "provider_attempts": providers, "llm_attempts": llm_attempts,
+            "llm_calls": llm_calls, "llm_provider_used": llm_calls > 0,
+            "budget": json.loads(kernel.checkpoint_path.read_bytes())["budget"],
+            "dev_accessed": rung, "public_test_accessed": False}}
+
+
+@pytest.mark.parametrize("operation", ["write_state", "resume", "completion"])
+def test_r1_runner_budget_must_exactly_match_kernel_owned_budget(world, operation):
+    store, args, kernel, *_ = world
+    if operation == "completion":
+        args, checkpoint = finalized_state(world)
+    else:
+        checkpoint = store.write_state(**args)
+    ledger = BudgetLedger(kernel.budget.plan, monotonic=lambda: 0.0)
+    reservation = ledger.reserve_stage("unrelated-eight-tasks", ResourceUse(task_executions=8))
+    ledger.close_stage(reservation, ResourceUse(task_executions=8))
+    if operation == "completion": ledger.begin_finalization()
+    bad_sha = persist(store, ledger.checkpoint())
+    changed = args | {"budget_checkpoint_sha256": bad_sha}
+    assert json.loads(kernel.checkpoint_path.read_bytes())["budget"]["charged_use"]["task_executions"] == 0
+    if operation == "write_state":
+        with pytest.raises(ValueError): store.write_state(**changed)
+    else:
+        forge_runner_checkpoint(store, checkpoint, budget_checkpoint_sha256=bad_sha)
+        with pytest.raises(ValueError):
+            if operation == "resume": resume(store, changed)
+            else: store.write_completion({"status": "numerical_qd_complete"})
+
+
+def test_r1_final_runner_uses_current_kernel_budget_and_retains_exact_historical_rung(world):
+    store, *_ = world
+    args, rung, _ = add_rung(world)
+    historical = rung.budget_outcome.to_payload()["ledger_checkpoint"]
+    historical_path = store.directory / f'objects/{historical["checkpoint_sha256"]}.json'
+    kernel = world[2]
+    kernel.finalize()
+    current = json.loads(kernel.checkpoint_path.read_bytes())
+    args = args | {"kernel_checkpoint_sha256": current["checkpoint_sha256"],
+                   "budget_checkpoint_sha256": persist(store, current["budget"])}
+    checkpoint = store.write_state(**args)
+    assert checkpoint.budget_checkpoint_sha256 == current["budget"]["checkpoint_sha256"]
+    assert checkpoint.budget_checkpoint_sha256 != historical["checkpoint_sha256"]
+    assert historical_path.read_bytes() == canonical_v2_bytes(historical)
+    assert resume(store, args) == checkpoint
+
+
+@pytest.mark.parametrize("name", ["run_manifest.json", "accepted_bundle.json", "checkpoint.json",
+    "budget_plan.json", "promotion_history.jsonl", "archive", "archive/index.jsonl",
+    "archive/objects", "archive_object", "acceptance", "acceptance_evidence", "evaluations", "evaluation_record"])
+def test_r2_same_byte_external_symlinks_fail_before_kernel_resume(world, tmp_path, monkeypatch, name):
+    store, args, *_ = world
+    args, _, _ = add_rung(world)
+    store.write_state(**args)
+    if name == "archive_object": path = next((store.root / "archive/objects").glob("*.json"))
+    elif name == "acceptance_evidence": path = next((store.root / "acceptance").glob("*.json"))
+    elif name == "evaluation_record": path = next((store.root / "evaluations").rglob("closed.json"))
+    else: path = store.root / name
+    external = tmp_path / "external-authority"
+    path.rename(external)
+    path.symlink_to(external, target_is_directory=external.is_dir())
+    entered = []
+    real_resume = EvolutionKernel.resume
+    def observed(cls, *args, **kwargs):
+        entered.append(True)
+        return real_resume(*args, **kwargs)
+    monkeypatch.setattr(EvolutionKernel, "resume", classmethod(observed))
+    with pytest.raises(ValueError): resume(store, args)
+    assert not entered
+
+
+@pytest.mark.parametrize("rung", [False, True])
+def test_r3_completion_has_closed_truthful_summary_and_exact_resume_is_noop(world, rung):
+    store, *_ = world
+    args, checkpoint = finalized_state(world, rung=rung)
+    path = store.write_completion({"status": "numerical_qd_complete"})
+    assert json.loads(path.read_bytes()) == expected_completion(world, checkpoint, rung=rung)
+    before = files(store.root)
+    assert resume(store, args) == checkpoint
+    assert files(store.root) == before
+
+
+@pytest.mark.parametrize("damage", ["partial", "noncanonical", "unknown", "wrong_status", "runner", "kernel",
+    "budget_sha", "bundle", "occupied_cells", "accepted_count", "provider_attempts", "llm_provider_used",
+    "budget_payload", "dev_accessed", "public_test_accessed", "boolean_count", "real_model_claim"])
+def test_r3_resume_rejects_malformed_or_mismatched_existing_completion(world, damage):
+    store, *_ = world
+    args, checkpoint = finalized_state(world)
+    payload = expected_completion(world, checkpoint)
+    if damage == "unknown": payload["unknown"] = True
+    elif damage == "wrong_status": payload["status"] = "joint_complete"
+    elif damage in {"runner", "kernel", "budget_sha", "bundle"}:
+        field = {"runner": "runner_checkpoint_sha256", "kernel": "kernel_checkpoint_sha256",
+                 "budget_sha": "budget_checkpoint_sha256", "bundle": "active_bundle_sha256"}[damage]
+        payload[field] = "f" * 64
+    elif damage in {"occupied_cells", "accepted_count", "provider_attempts"}: payload["summary"][damage] = 100
+    elif damage in {"llm_provider_used", "dev_accessed", "public_test_accessed"}: payload["summary"][damage] = True
+    elif damage == "budget_payload": payload["summary"]["budget"]["charged_use"]["task_executions"] = 8
+    elif damage == "boolean_count": payload["summary"]["accepted_count"] = False
+    elif damage == "real_model_claim": payload["summary"]["real_model_used"] = True
+    data = b'{"status":' if damage == "partial" else (
+        json.dumps(payload, indent=2).encode() if damage == "noncanonical" else canonical_v2_bytes(payload))
+    (store.root / "evaluation_complete.json").write_bytes(data)
+    with pytest.raises(ValueError): resume(store, args)
+
+
+def test_r3_premature_root_completion_is_rejected(world):
+    store, args, *_ = world
+    checkpoint = store.write_state(**args)
+    (store.root / "evaluation_complete.json").write_bytes(canonical_v2_bytes(expected_completion(world, checkpoint)))
+    with pytest.raises(ValueError): resume(store, args)
+
+
+@pytest.mark.parametrize("field", ["occupied_cells", "dev_accessed", "public_test_accessed", "provider_attempts"])
+def test_r3_completion_writer_rejects_caller_summary_claims(world, field):
+    store, *_ = world
+    _, checkpoint = finalized_state(world)
+    payload = expected_completion(world, checkpoint)
+    payload["summary"][field] = True if field.endswith("accessed") else 42
+    with pytest.raises(ValueError): store.write_completion(payload)
+    assert not (store.root / "evaluation_complete.json").exists()
+
+
+@pytest.mark.parametrize("field", ["task_materializer", "split_manifest", "metric_policy", "label_firewall",
+    "artifact_validator", "sandbox_policy", "promotion_policy"])
+@pytest.mark.parametrize("operation", ["write_state", "resume"])
+def test_r4_config_protocol_must_match_every_kernel_commitment(world, field, operation):
+    store, args, *_ = world
+    checkpoint = store.write_state(**args) if operation == "resume" else None
+    config = json.loads((store.directory / f'objects/{args["config_sha256"]}.json').read_bytes())
+    config["kernel_protocol"][field] = "f" * 64
+    changed = args | {"config_sha256": persist(store, config)}
+    if checkpoint is not None:
+        forge_runner_checkpoint(store, checkpoint, config_sha256=changed["config_sha256"])
+    with pytest.raises(ValueError):
+        if operation == "write_state": store.write_state(**changed)
+        else: resume(store, changed)
+
+
+@pytest.mark.parametrize("name", ["proposals", "results", "rungs", "archive"])
+def test_r5_missing_required_empty_directory_is_corruption(world, name):
+    store, args, *_ = world
+    store.write_state(**args)
+    (store.directory / name).rmdir()
+    with pytest.raises(ValueError): resume(store, args)
+
+
+@pytest.mark.parametrize("temporary", [False, True])
+def test_r5_unreferenced_result_directory_is_not_ignored(world, temporary):
+    store, args, *_ = world
+    store.write_state(**args)
+    path = store.directory / "results" / ("f" * 64)
+    path.mkdir()
+    if temporary: (path / ".task.json.crash.tmp").write_bytes(b"partial")
+    with pytest.raises(ValueError): resume(store, args)
+    with pytest.raises(ValueError): store.write_state(**args)
+
+
+def test_r5_crash_after_result_directory_creation_fails_closed(world, monkeypatch):
+    store, args, *_ = world
+    store.write_state(**args)
+    task = manifest().tasks[0]
+    value = evaluation(args["active_genome_sha256"], (task.task_id,), subset=task.fingerprint())
+    key = evaluation_cache_key(value.genome_sha256, task.task_sha256, SPLIT, METRIC, DESCRIPTOR, RUNTIME, PROTOCOL, ADAPTER)
+    result = HyperbandTaskResultV2(value.genome_sha256, task.task_id, key, "passed", value, False, None)
+    real = core_store._ensure_directory
+    def crash(directory):
+        real(directory)
+        raise OSError("directory published before file")
+    with monkeypatch.context() as patch:
+        patch.setattr(core_store, "_ensure_directory", crash)
+        with pytest.raises(OSError): store.write_task_result(task.task_sha256, result)
+    assert (store.directory / "results" / value.genome_sha256).is_dir()
+    with pytest.raises(ValueError): resume(store, args)
+
+
+def test_r3_failed_llm_attempts_do_not_claim_an_actual_model_call(world):
+    store, *_ = world
+    attempts = [dict(provider="llm", resource_use=ResourceUse().to_payload(), failure_reason="unavailable"),
+                dict(provider="deterministic", resource_use=ResourceUse().to_payload(), failure_reason=None)]
+    payload = dict(provider="hybrid", resource_use=ResourceUse().to_payload(), failure_reason=None,
+                   proposals=[], source_sha256s=[], attempts=attempts)
+    store.write_proposal_attempt(fingerprint_payload(payload), payload)
+    args, checkpoint = finalized_state(world)
+    path = store.write_completion({"status": "numerical_qd_complete"})
+    assert json.loads(path.read_bytes()) == expected_completion(world, checkpoint, providers=2, llm_attempts=1)
+    assert resume(store, args) == checkpoint
+
+
+def test_r3_completion_cannot_claim_unaccounted_llm_calls(world):
+    store, *_ = world
+    use = ResourceUse(llm_calls=1)
+    payload = dict(provider="llm", resource_use=use.to_payload(), failure_reason=None,
+        proposals=[], source_sha256s=[], attempts=[dict(provider="llm", resource_use=use.to_payload(), failure_reason=None)])
+    store.write_proposal_attempt(fingerprint_payload(payload), payload)
+    finalized_state(world)
+    with pytest.raises(ValueError): store.write_completion({"status": "numerical_qd_complete"})
