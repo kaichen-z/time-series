@@ -17,6 +17,7 @@ from .contracts import (
     TrainMutationFeedbackV2,
 )
 from .descriptors import DescriptorPolicyV2, describe_history
+from .map_elites import ArchiveInsertionV2, CounterRandom, NumericalQDArchive
 from .mutation import MutationProposalV2, MutationResultV2, apply_mutation, record_train_outcome
 from .nsga2 import (
     constraint_compare, crowding_distances, non_dominated_fronts, select_survivors,
@@ -27,6 +28,9 @@ from .proposers import (
 )
 
 __all__ = [
+    "ArchiveInsertionV2",
+    "CounterRandom",
+    "NumericalQDArchive",
     "ConstraintReportV2",
     "DescriptorPolicyV2",
     "MorphologyCellV2",
