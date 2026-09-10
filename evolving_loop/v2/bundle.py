@@ -5,7 +5,7 @@ import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, Protocol
 
 from .contracts import canonical_v2_bytes, require_sha256
 
@@ -50,6 +50,16 @@ def _bundle_sha256(value: object, field: str) -> str:
         return require_sha256(value, field)
     except ValueError as error:
         raise BundleContractError(str(error)) from error
+
+
+class _CanonicalEvidenceBinding(Protocol):
+    """Kernel-side evidence interface needed to seal one accepted Child."""
+
+    candidate_bundle_sha256: str
+
+    def to_payload(self) -> Mapping[str, object]: ...
+
+    def canonical_bytes(self) -> bytes: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,7 +177,7 @@ class EvolutionBundleV2:
         return hashlib.sha256(self.canonical_bytes()).hexdigest()
 
     def provisional_child(
-        self, target: MutationTarget, changes: Mapping[str, str]
+        self, target: MutationTarget, changes: Mapping[str, object]
     ) -> "EvolutionBundleV2":
         """Create a direct provisional Child from candidate-owned identities."""
         if not isinstance(changes, Mapping):
@@ -185,37 +195,27 @@ class EvolutionBundleV2:
             "acceptance_evidence_sha256": None,
         }
         for scope, value in changes.items():
-            fingerprint = _bundle_sha256(value, f"changes.{scope}")
-            for field in _PRINCIPAL_FIELDS[scope]:
-                updates[field] = fingerprint
+            if scope == "numerical":
+                if type(value) is not tuple or len(value) != 2:
+                    raise BundleContractError(
+                        "changes.numerical must be an atomic pair of release and "
+                        "registry SHA-256 identities"
+                    )
+                release_sha256 = _bundle_sha256(
+                    value[0], "changes.numerical.release_sha256"
+                )
+                registry_sha256 = _bundle_sha256(
+                    value[1], "changes.numerical.registry_sha256"
+                )
+                updates["numerical_release_sha256"] = release_sha256
+                updates["numerical_registry_sha256"] = registry_sha256
+            else:
+                updates[_PRINCIPAL_FIELDS[scope][0]] = _bundle_sha256(
+                    value, f"changes.{scope}"
+                )
         child = replace(self, **updates)
         validate_child_scope(self, child, target)
         return child
-
-    def seal_acceptance(
-        self,
-        evidence_sha256: str,
-        archive_snapshot_sha256: str,
-        scheduler_state_sha256: str,
-    ) -> "EvolutionBundleV2":
-        """Seal a provisional Child with Host-owned post-evaluation identities."""
-        if self.generation == 0 or self.parent_bundle_sha256 is None:
-            raise BundleContractError("only a provisional Child can be sealed")
-        if self.acceptance_evidence_sha256 is not None:
-            raise BundleContractError("acceptance evidence may be sealed only once")
-        evidence = _bundle_sha256(evidence_sha256, "acceptance_evidence_sha256")
-        archive = _bundle_sha256(
-            archive_snapshot_sha256, "archive_snapshot_sha256"
-        )
-        scheduler = _bundle_sha256(
-            scheduler_state_sha256, "scheduler_state_sha256"
-        )
-        return replace(
-            self,
-            acceptance_evidence_sha256=evidence,
-            archive_snapshot_sha256=archive,
-            scheduler_state_sha256=scheduler,
-        )
 
 
 def principal_fingerprints(bundle: EvolutionBundleV2) -> Mapping[str, str]:
@@ -289,6 +289,57 @@ def validate_child_scope(
                 "Child changed scope does not match the declared target"
             )
     return scopes
+
+
+def _seal_acceptance(
+    parent: EvolutionBundleV2,
+    provisional_child: EvolutionBundleV2,
+    target: MutationTarget,
+    evidence: _CanonicalEvidenceBinding,
+    archive_snapshot_sha256: str,
+    scheduler_state_sha256: str,
+) -> EvolutionBundleV2:
+    """Kernel-only acceptance seal over a freshly revalidated provisional Child."""
+    if provisional_child.acceptance_evidence_sha256 is not None:
+        raise BundleContractError("acceptance evidence may be sealed only once")
+
+    validate_child_scope(parent, provisional_child, target)
+    child_sha256 = provisional_child.fingerprint()
+    try:
+        bound_child_sha256 = evidence.candidate_bundle_sha256
+        evidence_payload = evidence.to_payload()
+        evidence_bytes = evidence.canonical_bytes()
+    except (AttributeError, TypeError) as error:
+        raise BundleContractError(
+            "acceptance evidence must be a canonical evidence-binding object"
+        ) from error
+
+    _bundle_sha256(bound_child_sha256, "evidence.candidate_bundle_sha256")
+    if bound_child_sha256 != child_sha256:
+        raise BundleContractError(
+            "acceptance evidence must bind the exact provisional Child fingerprint"
+        )
+    if not isinstance(evidence_payload, Mapping):
+        raise BundleContractError("acceptance evidence payload must be an object")
+    if evidence_payload.get("candidate_bundle_sha256") != bound_child_sha256:
+        raise BundleContractError(
+            "acceptance evidence payload must bind the exact provisional Child fingerprint"
+        )
+    canonical_evidence_bytes = canonical_v2_bytes(evidence_payload)
+    if type(evidence_bytes) is not bytes or evidence_bytes != canonical_evidence_bytes:
+        raise BundleContractError("acceptance evidence bytes must be canonical")
+
+    evidence_sha256 = hashlib.sha256(canonical_evidence_bytes).hexdigest()
+    archive = _bundle_sha256(archive_snapshot_sha256, "archive_snapshot_sha256")
+    scheduler = _bundle_sha256(
+        scheduler_state_sha256, "scheduler_state_sha256"
+    )
+    return replace(
+        provisional_child,
+        acceptance_evidence_sha256=evidence_sha256,
+        archive_snapshot_sha256=archive,
+        scheduler_state_sha256=scheduler,
+    )
 
 
 __all__ = [

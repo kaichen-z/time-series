@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import pytest
 
@@ -12,6 +12,7 @@ from evolving_loop.v2 import (
     principal_fingerprints,
     validate_child_scope,
 )
+from evolving_loop.v2.bundle import _seal_acceptance
 
 
 def sha256_for(label: str) -> str:
@@ -46,6 +47,23 @@ def reject_transition(
     return parent
 
 
+@dataclass(frozen=True)
+class EvidenceBinding:
+    candidate_bundle_sha256: str
+    decision: str = "accept"
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "candidate_bundle_sha256": self.candidate_bundle_sha256,
+            "decision": self.decision,
+        }
+
+    def canonical_bytes(self) -> bytes:
+        from evolving_loop.v2 import canonical_v2_bytes
+
+        return canonical_v2_bytes(self.to_payload())
+
+
 def test_seed_bundle_binds_every_replay_dependency():
     bundle = seed_bundle()
     assert set(bundle.to_payload()) == {
@@ -68,9 +86,11 @@ def test_seed_bundle_binds_every_replay_dependency():
 
 def test_single_coordinate_and_joint_children_enforce_actual_diff():
     parent = seed_bundle()
-    numerical = parent.provisional_child("numerical", {"numerical": "1" * 64})
+    numerical = parent.provisional_child(
+        "numerical", {"numerical": ("1" * 64, "2" * 64)}
+    )
     assert numerical.numerical_release_sha256 == "1" * 64
-    assert numerical.numerical_registry_sha256 == "1" * 64
+    assert numerical.numerical_registry_sha256 == "2" * 64
     assert changed_scopes(parent, numerical) == ("numerical",)
 
     with pytest.raises(BundleContractError, match="exactly one"):
@@ -160,6 +180,20 @@ def test_scope_validation_requires_declared_change_and_atomic_numerical_pair():
     with pytest.raises(BundleContractError, match="release and registry"):
         validate_child_scope(parent, release_only, "numerical")
 
+    with pytest.raises(BundleContractError, match="atomic pair"):
+        parent.provisional_child("numerical", {"numerical": "1" * 64})
+
+    with pytest.raises(BundleContractError, match="release and registry"):
+        parent.provisional_child(
+            "numerical",
+            {
+                "numerical": (
+                    parent.numerical_release_sha256,
+                    sha256_for("new-numerical-registry"),
+                )
+            },
+        )
+
     with pytest.raises(BundleContractError, match="at least two"):
         validate_child_scope(parent, wrong_scope, "joint")
 
@@ -236,16 +270,19 @@ def test_principal_fingerprints_ignore_host_owned_and_acceptance_metadata():
 def test_acceptance_sealing_is_host_only_non_circular_and_one_time():
     parent = seed_bundle()
     provisional = parent.provisional_child("decision", {"decision": "4" * 64})
-    evidence = hashlib.sha256(
-        provisional.canonical_bytes() + b"evaluation-evidence"
-    ).hexdigest()
-    sealed = provisional.seal_acceptance(
+    evidence = EvidenceBinding(candidate_bundle_sha256=provisional.fingerprint())
+    evidence_sha256 = hashlib.sha256(evidence.canonical_bytes()).hexdigest()
+    sealed = _seal_acceptance(
+        parent,
+        provisional,
+        "decision",
         evidence,
         sha256_for("post-evaluation-archive"),
         sha256_for("post-evaluation-scheduler"),
     )
 
-    assert sealed.acceptance_evidence_sha256 == evidence
+    assert not hasattr(EvolutionBundleV2, "seal_acceptance")
+    assert sealed.acceptance_evidence_sha256 == evidence_sha256
     assert sealed.archive_snapshot_sha256 == sha256_for("post-evaluation-archive")
     assert sealed.scheduler_state_sha256 == sha256_for("post-evaluation-scheduler")
     assert sealed.fingerprint() != provisional.fingerprint()
@@ -253,14 +290,50 @@ def test_acceptance_sealing_is_host_only_non_circular_and_one_time():
     assert sealed.parent_bundle_sha256 == provisional.parent_bundle_sha256
 
     with pytest.raises(BundleContractError, match="only once"):
-        sealed.seal_acceptance(
-            sha256_for("replacement-evidence"),
+        _seal_acceptance(
+            parent,
+            sealed,
+            "decision",
+            evidence,
             sha256_for("replacement-archive"),
             sha256_for("replacement-scheduler"),
         )
-    with pytest.raises(BundleContractError, match="provisional Child"):
-        parent.seal_acceptance(
-            evidence,
+
+
+def test_host_sealing_revalidates_scope_and_rejects_authority_smuggling():
+    parent = seed_bundle()
+    provisional = parent.provisional_child("decision", {"decision": "4" * 64})
+    tampered = replace(
+        provisional, harness_policy_sha256=sha256_for("smuggled-harness")
+    )
+    matching_tampered_evidence = EvidenceBinding(
+        candidate_bundle_sha256=tampered.fingerprint()
+    )
+
+    with pytest.raises(BundleContractError, match="Host-owned harness"):
+        _seal_acceptance(
+            parent,
+            tampered,
+            "decision",
+            matching_tampered_evidence,
+            sha256_for("post-evaluation-archive"),
+            sha256_for("post-evaluation-scheduler"),
+        )
+
+
+def test_host_sealing_rejects_evidence_for_an_unrelated_provisional_child():
+    parent = seed_bundle()
+    provisional = parent.provisional_child("decision", {"decision": "4" * 64})
+    unrelated_evidence = EvidenceBinding(
+        candidate_bundle_sha256=sha256_for("unrelated-provisional-child")
+    )
+
+    with pytest.raises(BundleContractError, match="exact provisional Child"):
+        _seal_acceptance(
+            parent,
+            provisional,
+            "decision",
+            unrelated_evidence,
             sha256_for("post-evaluation-archive"),
             sha256_for("post-evaluation-scheduler"),
         )
