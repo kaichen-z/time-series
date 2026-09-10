@@ -162,6 +162,8 @@ def execute_hyperband_rung(
     Cached evaluations retain their original bracket/rung and resource evidence.
     Current-rung cost is exclusively budget_outcome.resource_use. An interrupted
     or failed execution cannot become a completed HyperbandStateV2 rung.
+    Persist budget_outcome.ledger_checkpoint exactly as returned; a later ledger
+    checkpoint includes a new elapsed time and therefore has a different SHA.
     """
 
     _validate_next_manifest(state, manifest)
@@ -179,8 +181,9 @@ def execute_hyperband_rung(
         raise ValueError("resume rejects open or partial rung reservations")
 
     def outcome(status, reason, reservation=None, use=ResourceUse()):
+        snapshot = ledger.checkpoint()
         return HyperbandBudgetOutcomeV2(status, reason, reservation, use.to_payload(),
-                                       ledger.checkpoint()["checkpoint_sha256"])
+                                       snapshot["checkpoint_sha256"], snapshot)
 
     # This gate precedes cache lookup and the Host's task-data access.
     gate = ledger.can_open_stage(ResourceUse())

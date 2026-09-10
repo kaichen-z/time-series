@@ -8,7 +8,7 @@ from dataclasses import dataclass, fields
 from types import MappingProxyType
 from typing import Literal
 
-from ..budget import ResourceUse
+from ..budget import BudgetLedger, ResourceUse, _CHECKPOINT_FIELDS as _BUDGET_CHECKPOINT_FIELDS
 from ..contracts import (
     _freeze_json_value,
     _require_choice,
@@ -545,13 +545,14 @@ class RungManifestV2(_CanonicalContract):
 
 @dataclass(frozen=True, slots=True)
 class HyperbandBudgetOutcomeV2(_CanonicalContract):
-    """Closed work accounting plus the caller-owned ledger checkpoint identity."""
+    """Closed work plus the exact immutable ledger snapshot the caller persists."""
 
     status: Literal["completed", "blocked", "failed"]
     reason: str | None
     reservation_sha256: str | None
     resource_use: Mapping[str, int | float]
     ledger_checkpoint_sha256: str
+    ledger_checkpoint: Mapping[str, object]
 
     def __post_init__(self):
         _require_choice(self.status, "budget status", frozenset({"completed", "blocked", "failed"}))
@@ -567,11 +568,37 @@ class HyperbandBudgetOutcomeV2(_CanonicalContract):
         if self.status == "blocked" and use != ResourceUse():
             raise ValueError("blocked work cannot carry a charge")
         object.__setattr__(self, "resource_use", _freeze_json_value(use.to_payload()))
+        checkpoint = _require_exact_schema(
+            self.ledger_checkpoint, tuple(_BUDGET_CHECKPOINT_FIELDS), field="ledger_checkpoint"
+        )
+        checkpoint = _strict_json_value(checkpoint)
+        _schema_version(checkpoint["schema_version"])
+        require_sha256(checkpoint["plan_sha256"], "ledger checkpoint plan SHA")
+        elapsed = checkpoint["prior_elapsed_wall_seconds"]
+        if type(elapsed) is not float or elapsed < 0.0:
+            raise ValueError("ledger checkpoint elapsed wall seconds must be a nonnegative float")
+        total = ResourceUse.from_payload(checkpoint["charged_use"])
+        if any(getattr(use, name) > getattr(total, name) for name in ResourceUse.field_names()):
+            raise ValueError("outcome resource use exceeds the ledger checkpoint total")
+        if _sequence(checkpoint["open_reservations"], "ledger open reservations"):
+            raise ValueError("outcome ledger checkpoint cannot contain open reservations")
+        _sorted_strings(checkpoint["closed_stage_ids"], "ledger closed stage IDs")
+        closed = _sorted_strings(checkpoint["closed_reservation_sha256s"], "ledger closed reservations", sha=True)
+        if self.reservation_sha256 is not None and self.reservation_sha256 not in closed:
+            raise ValueError("outcome reservation is not closed in the ledger checkpoint")
+        if type(checkpoint["finalization_started"]) is not bool:
+            raise ValueError("ledger finalization_started must be boolean")
+        if checkpoint["exhausted_reason"] is not None:
+            _text(checkpoint["exhausted_reason"], "ledger exhausted_reason")
+        if (checkpoint["checkpoint_sha256"] != self.ledger_checkpoint_sha256
+                or BudgetLedger.checkpoint_sha256(checkpoint) != self.ledger_checkpoint_sha256):
+            raise ValueError("ledger checkpoint SHA mismatch")
+        object.__setattr__(self, "ledger_checkpoint", _freeze_json_value(checkpoint))
 
 
 def _hyperband_survivor_count(bracket, initial_count, index, count, reduction):
     if index == len(bracket.resources) - 1:
-        return 1
+        return count
     if initial_count == 3 and bracket.name == "explore":
         return (2, 1)[index]
     return max(1, count // reduction)

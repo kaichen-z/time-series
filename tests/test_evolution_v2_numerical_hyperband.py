@@ -8,7 +8,7 @@ import pytest
 
 from evolving_loop.v2.budget import BudgetLedger, BudgetPlan, ResourceUse
 from evolving_loop.v2.numerical_qd.contracts import (
-    ConstraintReportV2, HyperbandBracketV2, HyperbandBudgetOutcomeV2,
+    ConstraintReportV2, HyperbandBracketV2, HyperbandBudgetOutcomeV2, HyperbandExecutionV2,
     HyperbandStateV2, MorphologyCellV2, NumericalEvaluationV2,
     NumericalObjectiveVectorV2, RungManifestV2, TaskCacheRowV2, TrainTaskV2,
 )
@@ -81,8 +81,12 @@ def evaluation(candidate, tasks, *, subset, bracket="explore", rung=0,
 
 
 def completed_budget():
-    return HyperbandBudgetOutcomeV2("completed", None, sha("reservation"),
-                                   ResourceUse().to_payload(), sha("checkpoint"))
+    budget = ledger(FakeClock())
+    reservation = budget.reserve_stage("completed-rung", ResourceUse())
+    budget.close_stage(reservation, ResourceUse())
+    checkpoint = budget.checkpoint()
+    return HyperbandBudgetOutcomeV2("completed", None, reservation.reservation_sha256,
+                                   ResourceUse().to_payload(), checkpoint["checkpoint_sha256"], checkpoint)
 
 
 def rung_evaluations(current, rung_manifest):
@@ -445,15 +449,15 @@ def test_all_cached_replay_has_no_repeated_task_or_callback_wall_charge():
     assert budget.charged_use == ResourceUse()
 
 
-@pytest.mark.parametrize("name,resources", [("confirm", (32, 80)), ("replay", (80,))])
-def test_every_bracket_round_trips_completed_prefixes(name, resources):
+@pytest.mark.parametrize("name,resources,survivors", [("confirm", (32, 80), 1), ("replay", (80,), 2)])
+def test_every_bracket_round_trips_completed_prefixes(name, resources, survivors):
     current = state(count=2, name=name)
     for resource in resources:
         committed = manifest(resource)
         result = advance_hyperband(current, committed, rung_evaluations(current, committed), completed_budget())
         current = HyperbandStateV2.from_payload(result.state.to_payload())
     assert current.complete
-    assert len(current.active_candidates) == 1
+    assert len(current.active_candidates) == survivors
     with pytest.raises(ValueError, match="complete"):
         advance_hyperband(current, committed, (), completed_budget())
 
@@ -476,9 +480,9 @@ def test_next_rung_cannot_change_the_committed_universe(change):
 @pytest.mark.parametrize("status", ["blocked", "failed"])
 def test_pure_advance_rejects_unclosed_or_failed_budget_outcome(status):
     current, committed = state(), manifest()
-    denied = HyperbandBudgetOutcomeV2(status, "finalization_reserve",
-                                      None if status == "blocked" else sha("reservation"),
-                                      ResourceUse().to_payload(), sha("checkpoint"))
+    closed = completed_budget()
+    denied = replace(closed, status=status, reason="finalization_reserve",
+                     reservation_sha256=None if status == "blocked" else closed.reservation_sha256)
     with pytest.raises(ValueError, match="completed"):
         advance_hyperband(current, committed, rung_evaluations(current, committed), denied)
     assert current.rungs == ()
@@ -526,3 +530,94 @@ def test_closed_ledger_without_completed_rung_checkpoint_cannot_repeat_work():
     with pytest.raises(ValueError, match="completed state"):
         run(current, committed, budget, host(clock, budget))
     assert budget.charged_use == before
+
+
+@pytest.mark.parametrize("mode", ["completed", "failed", "blocked"])
+def test_outcome_preserves_exact_ledger_snapshot_with_ticking_clock(mode):
+    class TickingClock(FakeClock):
+        def __call__(self):
+            self.now += 0.0001
+            return self.now
+
+    clock = TickingClock()
+    budget = ledger(clock)
+    if mode == "blocked":
+        clock.advance(800.0)
+    result = run(state(count=1), manifest(), budget, host(clock, budget, fail=mode == "failed"))
+    outcome = result.budget_outcome
+    snapshot = outcome.ledger_checkpoint
+    assert outcome.status == mode
+    assert snapshot["checkpoint_sha256"] == outcome.ledger_checkpoint_sha256
+    assert BudgetLedger.checkpoint_sha256(snapshot) == outcome.ledger_checkpoint_sha256
+    assert snapshot["open_reservations"] == ()
+    assert snapshot["charged_use"]["task_executions"] == budget.charged_use.task_executions
+    if mode != "blocked":
+        assert outcome.reservation_sha256 in snapshot["closed_reservation_sha256s"]
+
+    # Persist the returned snapshot, even though a later Host read has a new SHA.
+    later = budget.checkpoint()
+    assert later["checkpoint_sha256"] != outcome.ledger_checkpoint_sha256
+    restored = HyperbandExecutionV2.from_payload(json.loads(json.dumps(result.to_payload(), allow_nan=False)))
+    assert restored == result
+    exported = restored.budget_outcome.to_payload()["ledger_checkpoint"]
+    resumed = BudgetLedger.resume(budget.plan, exported, monotonic=FakeClock())
+    assert resumed.charged_use == budget.charged_use
+    assert resumed.elapsed_wall_seconds == snapshot["prior_elapsed_wall_seconds"]
+
+    before = result.canonical_bytes()
+    exported["charged_use"]["task_executions"] = 999
+    exported["closed_stage_ids"].append("unrelated")
+    assert result.canonical_bytes() == before
+    with pytest.raises(TypeError):
+        snapshot["charged_use"]["task_executions"] = 999
+
+
+@pytest.mark.parametrize("tamper", ["snapshot", "outer_sha", "inner_sha", "extra_field", "nonfinite"])
+def test_outcome_rejects_tampered_ledger_snapshot(tamper):
+    clock = FakeClock()
+    budget = ledger(clock)
+    payload = run(state(count=1), manifest(), budget, host(clock, budget)).budget_outcome.to_payload()
+    snapshot = payload["ledger_checkpoint"]
+    if tamper == "snapshot":
+        snapshot["charged_use"]["task_executions"] += 1
+    elif tamper == "outer_sha":
+        payload["ledger_checkpoint_sha256"] = sha("changed")
+    elif tamper == "inner_sha":
+        snapshot["checkpoint_sha256"] = sha("changed")
+    elif tamper == "extra_field":
+        snapshot["unrecognized"] = True
+        snapshot["checkpoint_sha256"] = BudgetLedger.checkpoint_sha256(snapshot)
+        payload["ledger_checkpoint_sha256"] = snapshot["checkpoint_sha256"]
+    else:
+        snapshot["prior_elapsed_wall_seconds"] = float("nan")
+    with pytest.raises((TypeError, ValueError)):
+        HyperbandBudgetOutcomeV2.from_payload(payload)
+
+
+@pytest.mark.parametrize("name,count,reduction,populations", [
+    ("explore", 16, 2, (8, 4, 4)),
+    ("confirm", 16, 2, (8, 8)),
+    ("replay", 16, 2, (16,)),
+    ("explore", 4, 1, (4, 4, 4)),
+    ("explore", 10, 3, (3, 1, 1)),
+    ("explore", 3, 8, (2, 1, 1)),
+])
+def test_full_bracket_preserves_terminal_population_after_configured_promotions(name, count, reduction, populations):
+    current = state(count=count, name=name, reduction=reduction)
+    observed = []
+    for resource in current.bracket.resources:
+        committed = manifest(resource)
+        before = current.active_candidates
+        result = advance_hyperband(current, committed, rung_evaluations(current, committed), completed_budget())
+        current = HyperbandStateV2.from_payload(json.loads(json.dumps(result.state.to_payload(), allow_nan=False)))
+        observed.append(len(current.active_candidates))
+        if current.complete:
+            assert current.active_candidates == before
+    assert tuple(observed) == populations
+    assert current.complete
+    assert current.rungs[-1].survivor_sha256s == current.active_candidates
+    if len(current.active_candidates) > 1:
+        payload = current.to_payload()
+        payload["rungs"][-1]["survivor_sha256s"] = [current.active_candidates[0]]
+        with pytest.raises(ValueError, match="promotion schedule"):
+            HyperbandStateV2.from_payload(payload)
