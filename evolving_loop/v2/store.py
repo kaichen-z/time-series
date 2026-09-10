@@ -28,6 +28,36 @@ class StoreContractError(ValueError):
     """Raised when a V2 write would violate the persistence contract."""
 
 
+def _fsync_directory(directory: Path) -> None:
+    """Durably publish directory entries where the platform supports it."""
+    if os.name == "nt":
+        # Windows does not support opening directories for os.fsync. File data
+        # is still flushed before os.replace; directory fsync is POSIX-only.
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _ensure_directory(directory: Path) -> None:
+    """Create a directory chain and durably publish each new path entry."""
+    missing: list[Path] = []
+    current = directory
+    while not current.exists():
+        missing.append(current)
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    directory.mkdir(parents=True, exist_ok=True)
+    for created in missing:
+        _fsync_directory(created)
+        _fsync_directory(created.parent)
+
+
 def _canonical_bytes(payload: Mapping[str, object]) -> bytes:
     try:
         return canonical_v2_bytes(payload)
@@ -36,7 +66,7 @@ def _canonical_bytes(payload: Mapping[str, object]) -> bytes:
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_directory(path.parent)
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -51,6 +81,7 @@ def _atomic_write(path: Path, data: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        _fsync_directory(path.parent)
     finally:
         if temporary is not None and temporary.exists():
             temporary.unlink()
@@ -88,11 +119,14 @@ def append_jsonl(path: str | Path, payload: Mapping[str, object]) -> Path:
     """Append one canonical JSON object and make the append durable."""
     destination = Path(path)
     data = _canonical_bytes(payload)
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_directory(destination.parent)
+    is_new = not destination.exists()
     with destination.open("ab") as handle:
         handle.write(data)
         handle.flush()
         os.fsync(handle.fileno())
+    if is_new:
+        _fsync_directory(destination.parent)
     return destination
 
 
@@ -127,24 +161,32 @@ class V2RunStore:
         if destination.is_dir() and any(destination.iterdir()):
             cls._require_v2_manifest(destination)
         else:
-            destination.mkdir(parents=True, exist_ok=True)
+            _ensure_directory(destination)
         for relative in _LAYOUT:
-            (destination / relative).mkdir(parents=True, exist_ok=True)
+            _ensure_directory(destination / relative)
         return cls(destination)
 
     @staticmethod
     def _require_v2_manifest(root: Path) -> None:
         manifest_path = root / "run_manifest.json"
         try:
+            raw = manifest_path.read_bytes()
             parsed = strict_json_loads(
-                manifest_path.read_text(encoding="utf-8"),
+                raw.decode("utf-8"),
                 context=str(manifest_path),
             )
         except (OSError, UnicodeError, ValueError) as error:
             raise StoreContractError(
                 "refuse to adopt non-empty directory without an Evolution V2 manifest"
             ) from error
-        if not isinstance(parsed, dict) or parsed.get("system") != "evolution_v2":
+        if not isinstance(parsed, dict):
+            raise StoreContractError(
+                "refuse to adopt non-empty directory without an Evolution V2 manifest"
+            )
+        canonical = _canonical_bytes(parsed)
+        if raw != canonical:
+            raise StoreContractError("run manifest must use canonical Evolution V2 JSON")
+        if parsed.get("system") != "evolution_v2":
             raise StoreContractError(
                 "refuse to adopt non-empty directory without an Evolution V2 manifest"
             )

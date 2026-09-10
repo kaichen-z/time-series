@@ -15,7 +15,12 @@ from .contracts import (
     fingerprint_payload,
     require_sha256,
 )
-from .store import StoreContractError, append_jsonl, write_once_json
+from .store import (
+    StoreContractError,
+    _ensure_directory,
+    append_jsonl,
+    write_once_json,
+)
 
 
 _RECORD_FIELDS = (
@@ -264,7 +269,7 @@ class EvolutionArchive:
             raise ArchiveContractError("archive root must be a directory")
         self.objects = self.root / "objects"
         self.index = self.root / "index.jsonl"
-        self.objects.mkdir(parents=True, exist_ok=True)
+        _ensure_directory(self.objects)
         self._records: dict[str, ArchiveRecord] = {}
         self._load()
 

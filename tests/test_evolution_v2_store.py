@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import pytest
 
+from evolving_loop.v2 import store as store_module
 from evolving_loop.v2.contracts import canonical_v2_bytes
 from evolving_loop.v2.store import StoreContractError, V2RunStore, write_atomic_json
 
@@ -128,7 +130,11 @@ def test_jsonl_progress_and_promotion_history_append_canonical_fsynced_records(
 ):
     store = V2RunStore.create(tmp_path / "run")
     fsynced: list[int] = []
+    fsynced_directories: list[Path] = []
     monkeypatch.setattr("evolving_loop.v2.store.os.fsync", fsynced.append)
+    monkeypatch.setattr(
+        store_module, "_fsync_directory", fsynced_directories.append
+    )
 
     store.append_progress({"step": 1})
     store.append_progress({"step": 2})
@@ -141,6 +147,7 @@ def test_jsonl_progress_and_promotion_history_append_canonical_fsynced_records(
         {"action": "activate", "bundle": sha256_for("bundle")}
     )
     assert len(fsynced) == 3
+    assert fsynced_directories == [store.root, store.root]
 
 
 def test_create_accepts_empty_or_v2_run_but_refuses_legacy_non_empty_directory(
@@ -165,3 +172,95 @@ def test_create_accepts_empty_or_v2_run_but_refuses_legacy_non_empty_directory(
     (unknown / "state.json").write_text("{}\n", encoding="utf-8")
     with pytest.raises(StoreContractError, match="refuse.*non-empty"):
         V2RunStore.create(unknown)
+
+
+@pytest.mark.parametrize(
+    "manifest, message",
+    [
+        (
+            b'{"schema_version":1,"system":"evolution_v2","value":1e999}\n',
+            "finite",
+        ),
+        (
+            b'{"system": "evolution_v2", "schema_version": 1}\n',
+            "canonical",
+        ),
+    ],
+)
+def test_resume_rejects_invalid_manifest_before_creating_layout(
+    tmp_path, manifest, message
+):
+    root = tmp_path / "run"
+    root.mkdir()
+    (root / "run_manifest.json").write_bytes(manifest)
+
+    with pytest.raises(StoreContractError, match=message):
+        V2RunStore.create(root)
+
+    assert [path.name for path in root.iterdir()] == ["run_manifest.json"]
+
+
+def test_atomic_publication_fsyncs_new_directories_and_destination_parent_in_order(
+    tmp_path, monkeypatch
+):
+    store = V2RunStore.create(tmp_path / "run")
+    candidate = sha256_for("new-candidate")
+    destination = store.root / "evaluations" / candidate / "train.json"
+    events: list[tuple[str, Path]] = []
+    real_replace = store_module.os.replace
+
+    def observed_replace(source, target):
+        real_replace(source, target)
+        events.append(("replace", Path(target)))
+
+    monkeypatch.setattr(store_module.os, "replace", observed_replace)
+    monkeypatch.setattr(
+        store_module,
+        "_fsync_directory",
+        lambda path: events.append(("fsync_directory", Path(path))),
+        raising=False,
+    )
+
+    store.write_evaluation(candidate, "train", {"status": "passed"})
+
+    candidate_directory = destination.parent
+    assert ("fsync_directory", candidate_directory.parent) in events
+    assert events[-2:] == [
+        ("replace", destination),
+        ("fsync_directory", candidate_directory),
+    ]
+
+
+def test_new_jsonl_filename_is_directory_durable_after_file_fsync(
+    tmp_path, monkeypatch
+):
+    store = V2RunStore.create(tmp_path / "run")
+    events: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        store_module.os, "fsync", lambda descriptor: events.append(("file", descriptor))
+    )
+    monkeypatch.setattr(
+        store_module,
+        "_fsync_directory",
+        lambda path: events.append(("directory", Path(path))),
+        raising=False,
+    )
+
+    store.append_progress({"step": 1})
+
+    assert events[0][0] == "file"
+    assert events[1:] == [("directory", store.root)]
+
+
+def test_directory_fsync_failures_are_not_swallowed(tmp_path, monkeypatch):
+    store = V2RunStore.create(tmp_path / "run")
+
+    def fail_fsync(_path):
+        raise OSError("directory fsync failed")
+
+    monkeypatch.setattr(
+        store_module, "_fsync_directory", fail_fsync, raising=False
+    )
+
+    with pytest.raises(OSError, match="directory fsync failed"):
+        store.write_checkpoint({"generation": 1})

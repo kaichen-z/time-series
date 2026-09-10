@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from evolving_loop.v2 import archive as archive_module
+from evolving_loop.v2 import store as store_module
 from evolving_loop.v2.archive import (
     ArchiveContractError,
     ArchiveRecord,
@@ -123,6 +125,33 @@ def test_archive_is_content_addressed_append_only_and_reconstructs_lineage(tmp_p
         archive.append(
             child_artifact, record_for(child_artifact, parents=(parent,))
         )
+
+
+def test_archive_object_directory_is_fsynced_before_index_append(
+    tmp_path, monkeypatch
+):
+    archive = EvolutionArchive(tmp_path / "archive")
+    artifact = FakeArtifact("ordered-publication")
+    events: list[tuple[str, Path]] = []
+    real_append_jsonl = archive_module.append_jsonl
+
+    monkeypatch.setattr(
+        store_module,
+        "_fsync_directory",
+        lambda path: events.append(("fsync_directory", Path(path))),
+    )
+
+    def observed_index_append(path, payload):
+        events.append(("append_index", Path(path)))
+        return real_append_jsonl(path, payload)
+
+    monkeypatch.setattr(archive_module, "append_jsonl", observed_index_append)
+
+    archive.append(artifact, record_for(artifact))
+
+    object_fsync = events.index(("fsync_directory", archive.objects))
+    index_append = events.index(("append_index", archive.index))
+    assert object_fsync < index_append
 
 
 def test_archive_accepts_protocol_artifact_without_duplicate_payload_metadata(tmp_path):
