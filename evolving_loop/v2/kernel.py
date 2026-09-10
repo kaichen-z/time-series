@@ -15,7 +15,7 @@ from pathlib import Path
 
 from common.payload import strict_json_loads
 
-from .archive import ArchiveRecord, EvolutionArchive
+from .archive import ArchiveRecord, EvolutionArchive, verify_selected_lineage
 from .budget import BudgetLedger, BudgetPlan, ResourceUse, StagePermit
 from .bundle import (
     EvolutionBundleV2,
@@ -221,12 +221,7 @@ def _record(bundle, kind, parents, train=None):
 
 
 class PromotionHost:
-    """Single-writer Host: durable intent precedes atomic pointer replacement.
-
-    History is a hash chain. Recovery only applies its last verified event when
-    the pointer is either that event's prior or desired identity. Other drift
-    fails closed; no heuristic repair or human-approval flag is supported.
-    """
+    """Single-writer publication with checkpoint-bound pending and committed events."""
 
     _EVENT_FIELDS = (
         "schema_version",
@@ -246,122 +241,175 @@ class PromotionHost:
     def __init__(self, kernel: EvolutionKernel):
         self._kernel = kernel
 
+    def _validate_event(self, event, previous, known, sequence):
+        _require_exact_schema(event, self._EVENT_FIELDS, field="promotion event")
+        body = {k: v for k, v in event.items() if k != "event_sha256"}
+        if event["event_sha256"] != fingerprint_payload(body):
+            raise KernelAuthorityError("promotion event digest mismatch")
+        if type(event["schema_version"]) is not int or event["schema_version"] != 1:
+            raise KernelAuthorityError("promotion event schema mismatch")
+        if type(event["sequence"]) is not int or event["sequence"] != sequence:
+            raise KernelAuthorityError("promotion event sequence mismatch")
+        prior = previous["bundle_sha256"] if previous else None
+        previous_sha = previous["event_sha256"] if previous else None
+        if (
+            event["prior_bundle_sha256"] != prior
+            or event["previous_event_sha256"] != previous_sha
+        ):
+            raise KernelAuthorityError("promotion event prior identity mismatch")
+        require_sha256(event["bundle_sha256"], "promotion Bundle")
+        if previous is None:
+            if (
+                event["action"],
+                event["reason"],
+                event["bundle_sha256"],
+                event["acceptance_evidence_sha256"],
+            ) != ("seed", "seed", self._kernel._seed_sha, None):
+                raise KernelAuthorityError(
+                    "promotion history must begin at committed seed"
+                )
+        elif event["action"] == "activate":
+            matches = [
+                t
+                for t in self._kernel._transitions.values()
+                if t["sealed_bundle_sha256"] == event["bundle_sha256"]
+            ]
+            if len(matches) != 1 or event["reason"] != "accepted":
+                raise KernelAuthorityError(
+                    "activation requires an authorized completed transition"
+                )
+            transition = matches[0]
+            if (
+                transition["decision"] != "accept"
+                or transition["parent_bundle_sha256"] != prior
+                or transition["acceptance_evidence_sha256"]
+                != event["acceptance_evidence_sha256"]
+            ):
+                raise KernelAuthorityError("promotion acceptance binding mismatch")
+        elif event["action"] == "rollback":
+            if (
+                event["bundle_sha256"] not in known
+                or event["bundle_sha256"] == prior
+                or event["reason"] not in self._ROLLBACK_REASONS
+                or known[event["bundle_sha256"]] != event["acceptance_evidence_sha256"]
+            ):
+                raise KernelAuthorityError(
+                    "rollback requires known prior active and closed reason"
+                )
+        else:
+            raise KernelAuthorityError("invalid promotion action")
+
     def history(self) -> tuple[dict[str, object], ...]:
+        """Verify the history chain independently of possibly corrupt source objects."""
         path = self._kernel.store.root / "promotion_history.jsonl"
         if not path.exists():
             return ()
         data = path.read_bytes()
         if not data or not data.endswith(b"\n"):
             raise KernelAuthorityError("promotion history is truncated")
-        result = []
-        active = None
-        known = set()
-        for line in data.splitlines(keepends=True):
-            try:
+        result, known = [], {}
+        try:
+            for line in data.splitlines(keepends=True):
                 event = strict_json_loads(
                     line.decode("utf-8"), context="promotion history"
                 )
-                _require_exact_schema(
-                    event, self._EVENT_FIELDS, field="promotion event"
-                )
                 if canonical_v2_bytes(event) != line:
                     raise ValueError("noncanonical promotion event")
-                body = {k: v for k, v in event.items() if k != "event_sha256"}
-                if event["event_sha256"] != fingerprint_payload(body):
-                    raise ValueError("promotion event digest mismatch")
-                if (
-                    type(event["schema_version"]) is not int
-                    or event["schema_version"] != 1
-                ):
-                    raise ValueError("promotion event schema mismatch")
-                if type(event["sequence"]) is not int or event["sequence"] != len(
-                    result
-                ):
-                    raise ValueError("promotion event sequence mismatch")
-                previous = result[-1]["event_sha256"] if result else None
-                if (
-                    event["previous_event_sha256"] != previous
-                    or event["prior_bundle_sha256"] != active
-                ):
-                    raise ValueError("promotion history prior identity mismatch")
-                bundle = self._kernel._verified_bundle(event["bundle_sha256"])
-                if (
-                    event["acceptance_evidence_sha256"]
-                    != bundle.acceptance_evidence_sha256
-                ):
-                    raise ValueError("promotion acceptance evidence mismatch")
-                if not result:
-                    if (
-                        event["action"] != "seed"
-                        or bundle.fingerprint() != self._kernel._seed_sha
-                        or event["reason"] != "seed"
-                    ):
-                        raise ValueError(
-                            "promotion history must begin at committed seed"
-                        )
-                elif event["action"] == "activate":
-                    if (
-                        bundle.parent_bundle_sha256 != active
-                        or event["reason"] != "accepted"
-                    ):
-                        raise ValueError("activation Parent mismatch")
-                elif event["action"] == "rollback":
-                    if (
-                        bundle.fingerprint() not in known
-                        or event["reason"] not in self._ROLLBACK_REASONS
-                        or bundle.fingerprint() == active
-                    ):
-                        raise ValueError(
-                            "rollback requires known prior active and closed reason"
-                        )
-                else:
-                    raise ValueError("invalid promotion action")
-                active = bundle.fingerprint()
-                known.add(active)
+                self._validate_event(
+                    event, result[-1] if result else None, known, len(result)
+                )
                 result.append(event)
-            except (TypeError, ValueError, UnicodeError) as error:
-                raise KernelAuthorityError(
-                    f"invalid promotion history: {error}"
-                ) from error
+                known[event["bundle_sha256"]] = event["acceptance_evidence_sha256"]
+        except (ValueError, TypeError, UnicodeError) as error:
+            raise KernelAuthorityError(f"invalid promotion history: {error}") from error
         return tuple(result)
 
-    def reconcile(self) -> EvolutionBundleV2:
+    def _publication_state(self):
+        kernel = self._kernel
         history = self.history()
-        if not history:
-            raise KernelAuthorityError("missing promotion history")
-        event = history[-1]
-        bundle = self._kernel._verified_bundle(event["bundle_sha256"])
-        path = self._kernel.store.root / "accepted_bundle.json"
-        if path.exists():
-            pointer = EvolutionBundleV2.from_payload(_read(path))
-            if pointer.fingerprint() == bundle.fingerprint():
-                return bundle
-            if pointer.fingerprint() != event["prior_bundle_sha256"]:
+        committed = kernel._committed_event_sha
+        positions = [i for i, e in enumerate(history) if e["event_sha256"] == committed]
+        index = positions[0] if len(positions) == 1 else -1
+        if committed is not None and index < 0:
+            raise KernelAuthorityError("committed publication event is missing")
+        if kernel._active_sha != (
+            history[index]["bundle_sha256"] if index >= 0 else None
+        ):
+            raise KernelAuthorityError("checkpoint committed active identity mismatch")
+        prefix = history[: index + 1]
+        tail = history[index + 1 :]
+        pending = kernel._pending_event
+        if pending is None:
+            if tail:
                 raise KernelAuthorityError(
-                    "active pointer drift from promotion history"
+                    "history contains an uncommitted, unauthorized event"
                 )
-        elif event["action"] != "seed":
-            raise KernelAuthorityError("active pointer missing after seed")
-        self._kernel.store.publish_active_bundle(bundle.to_payload())
+        else:
+            known = {
+                e["bundle_sha256"]: e["acceptance_evidence_sha256"] for e in prefix
+            }
+            self._validate_event(
+                pending, prefix[-1] if prefix else None, known, len(prefix)
+            )
+            if tail not in ((), (pending,)):
+                raise KernelAuthorityError("pending publication does not match history")
+        return history, bool(tail)
+
+    def _pointer_sha(self):
+        path = self._kernel.store.root / "accepted_bundle.json"
+        return (
+            EvolutionBundleV2.from_payload(_read(path)).fingerprint()
+            if path.exists()
+            else None
+        )
+
+    def reconcile(self) -> EvolutionBundleV2:
+        kernel = self._kernel
+        _, appended = self._publication_state()
+        pending = kernel._pending_event
+        if pending is None:
+            if self._pointer_sha() != kernel._active_sha:
+                raise KernelAuthorityError(
+                    "active pointer drift after committed publication"
+                )
+            return kernel._verified_bundle(
+                kernel._active_sha, recovery=kernel._terminal is not None
+            )
+        bundle = kernel._verified_bundle(
+            pending["bundle_sha256"], recovery=kernel._terminal is not None
+        )
+        if self._pointer_sha() not in (kernel._active_sha, bundle.fingerprint()):
+            raise KernelAuthorityError(
+                "active pointer drift from explicit pending publication"
+            )
+        if not appended:
+            kernel.store.append_promotion(pending)
+        kernel.store.publish_active_bundle(bundle.to_payload())
+        kernel._committed_event_sha = pending["event_sha256"]
+        kernel._active_sha = bundle.fingerprint()
+        kernel._pending_event = None
+        kernel._checkpoint()
         return bundle
 
     def _publish(self, action, bundle, reason, history):
+        kernel = self._kernel
         event = {
             "schema_version": 1,
             "sequence": len(history),
             "previous_event_sha256": history[-1]["event_sha256"] if history else None,
             "action": action,
-            "prior_bundle_sha256": history[-1]["bundle_sha256"] if history else None,
+            "prior_bundle_sha256": kernel._active_sha,
             "bundle_sha256": bundle.fingerprint(),
             "acceptance_evidence_sha256": bundle.acceptance_evidence_sha256,
             "reason": reason,
         }
         event["event_sha256"] = fingerprint_payload(event)
-        self._kernel.store.append_promotion(event)
-        self._kernel.store.publish_active_bundle(bundle.to_payload())
-        return bundle
+        kernel._pending_event = event
+        kernel._checkpoint()
+        return self.reconcile()
 
     def activate(self, bundle: EvolutionBundleV2) -> EvolutionBundleV2:
+        self._kernel._require_mutable()
         verified = self._kernel._verified_bundle(bundle.fingerprint())
         if verified.acceptance_evidence_sha256 is None:
             raise KernelAuthorityError("activation requires a sealed Bundle")
@@ -375,34 +423,76 @@ class PromotionHost:
     def rollback(
         self, *, reason: str, bundle_sha256: str | None = None
     ) -> EvolutionBundleV2:
+        kernel = self._kernel
         if reason not in self._ROLLBACK_REASONS:
             raise KernelAuthorityError(
                 "rollback requires a closed canary/integrity reason"
             )
-        active = self.reconcile()
-        history = self.history()
+        history, _ = self._publication_state()
+        if kernel._pending_event is not None or kernel._terminal is not None:
+            return self.reconcile()
+        if self._pointer_sha() != kernel._active_sha:
+            raise KernelAuthorityError(
+                "active pointer drift after committed publication"
+            )
         if (
             bundle_sha256 is None
             and history[-1]["action"] == "rollback"
             and history[-1]["reason"] == reason
         ):
-            self._kernel._checkpoint()
-            return active
+            return self.reconcile()
         target = bundle_sha256 or history[-1]["prior_bundle_sha256"]
-        if target is None or target not in {
-            event["bundle_sha256"] for event in history[:-1]
-        }:
+        if target is None or target not in {e["bundle_sha256"] for e in history[:-1]}:
             raise KernelAuthorityError("rollback requires a known prior active Bundle")
-        bundle = self._kernel._verified_bundle(target)
-        if bundle.fingerprint() == active.fingerprint():
-            return bundle
-        result = self._publish("rollback", bundle, reason, history)
-        self._kernel._checkpoint()
-        return result
+        corrupt_source = False
+        try:
+            self.reconcile()
+        except (KernelAuthorityError, ValueError):
+            if reason not in ("integrity_failed", "safety_failed"):
+                raise
+            corrupt_source = True
+        bundle = kernel._verified_bundle(target, recovery=corrupt_source)
+        if corrupt_source:
+            selected = verify_selected_lineage(kernel.store.root / "archive", target)
+            kernel._archive_snapshot = selected["archive_snapshot_sha256"]
+            kernel._terminal = {
+                "status": "recovered_requires_new_epoch",
+                "invalidated_bundle_sha256": kernel._active_sha,
+                "destination_bundle_sha256": target,
+                "destination_lineage": list(selected["lineage"]),
+                "archive_snapshot_sha256": selected["archive_snapshot_sha256"],
+                "reason": reason,
+            }
+        return self._publish("rollback", bundle, reason, history)
 
 
 class EvolutionKernel:
-    """Immutable protocol gate over trusted evaluations and a resource ledger."""
+    """Trusted evaluations, durable budget closures, and automatic publication."""
+
+    _CHECKPOINT_FIELDS = (
+        "schema_version",
+        "budget",
+        "archive_snapshot_sha256",
+        "active_bundle_sha256",
+        "committed_event_sha256",
+        "pending_publication",
+        "budget_closures",
+        "completed_transitions",
+        "terminal_recovery",
+        "checkpoint_sha256",
+    )
+
+    def _configure(self, store, protocol, budget, seed):
+        if type(protocol) is not KernelProtocolCommitment:
+            raise KernelAuthorityError("kernel requires the full protocol commitment")
+        if seed.generation != 0 or seed.protocol_fingerprint != protocol.fingerprint():
+            raise KernelAuthorityError("seed protocol commitment mismatch")
+        self.store, self.protocol, self.budget = store, protocol, budget
+        self._seed_sha, self._runtimes = seed.fingerprint(), seed.runtime_fingerprints
+        self._closed, self._permits, self._closures, self._transitions = {}, {}, {}, {}
+        self._active_sha = self._committed_event_sha = self._pending_event = None
+        self._terminal = self._last_checkpoint_sha = None
+        self.promotion_host = PromotionHost(self)
 
     def __init__(
         self,
@@ -412,58 +502,58 @@ class EvolutionKernel:
         *,
         seed: EvolutionBundleV2,
     ):
-        if type(protocol) is not KernelProtocolCommitment:
-            raise KernelAuthorityError("kernel requires the full protocol commitment")
-        if seed.generation != 0 or seed.protocol_fingerprint != protocol.fingerprint():
-            raise KernelAuthorityError("seed protocol commitment mismatch")
-        self.store, self.protocol, self.budget = store, protocol, budget
-        self._seed_sha = seed.fingerprint()
-        self._runtimes = seed.runtime_fingerprints
-        self._closed: dict[str, tuple[ClosedEvaluation, dict[str, object]]] = {}
-        manifest = {
-            "system": "evolution_v2",
-            "kernel_protocol": protocol.to_payload(),
-            "runtime_fingerprints": dict(self._runtimes),
-            "seed_bundle_sha256": self._seed_sha,
-            "budget_plan_sha256": budget.plan.fingerprint(),
-        }
-        path = store.root / "run_manifest.json"
-        if path.exists():
-            existing = _read(path)
-            if any(existing.get(key) != value for key, value in manifest.items()):
-                raise KernelAuthorityError(
-                    "run manifest protocol or authority mismatch"
-                )
-        else:
-            store.write_run_manifest(manifest)
+        # A constructor never adopts or repairs an established/partial run.
+        if any(path.is_file() for path in store.root.rglob("*")):
+            raise KernelAuthorityError(
+                "constructor requires a fresh run; use resume for established authority"
+            )
+        if (
+            budget.charged_use != ResourceUse()
+            or budget.checkpoint()["open_reservations"]
+        ):
+            raise KernelAuthorityError("fresh kernel requires an unused budget ledger")
+        self._configure(store, protocol, budget, seed)
+        store.write_run_manifest(self._manifest())
         store.write_budget_plan(budget.plan.to_payload())
         self.archive = EvolutionArchive(store.root / "archive")
-        self.promotion_host = PromotionHost(self)
-        history = self.promotion_host.history()
-        checkpoint_path = store.root / "checkpoint.json"
-        if checkpoint_path.exists():
-            self._validate_checkpoint(_read(checkpoint_path), history)
-        if not history:
-            if (store.root / "accepted_bundle.json").exists():
-                raise KernelAuthorityError(
-                    "active pointer exists without promotion history"
-                )
-            if self.archive.index.exists():
-                self._verified_bundle(self._seed_sha)
-            else:
-                self.archive.append(
-                    _BundleArtifact(seed, "bundle"), _record(seed, "bundle", ())
-                )
-            self.promotion_host._publish("seed", seed, "seed", ())
-        self.promotion_host.reconcile()
-        self._checkpoint()
+        self.archive.append(
+            _BundleArtifact(seed, "bundle"), _record(seed, "bundle", ())
+        )
+        self._archive_snapshot = self.archive.snapshot_sha256()
+        self.promotion_host._publish("seed", seed, "seed", ())
+
+    def _manifest(self):
+        return {
+            "system": "evolution_v2",
+            "kernel_protocol": self.protocol.to_payload(),
+            "runtime_fingerprints": dict(self._runtimes),
+            "seed_bundle_sha256": self._seed_sha,
+            "budget_plan_sha256": self.budget.plan.fingerprint(),
+        }
 
     @classmethod
     def resume(
         cls, store: V2RunStore, plan: BudgetPlan, *, monotonic: Callable[[], float]
     ):
-        manifest = _read(store.root / "run_manifest.json")
         try:
+            manifest = _read(store.root / "run_manifest.json")
+            _read(store.root / "budget_plan.json", plan.fingerprint())
+            checkpoint = _read(store.root / "checkpoint.json")
+            _require_exact_schema(
+                checkpoint, cls._CHECKPOINT_FIELDS, field="kernel checkpoint"
+            )
+            if (
+                fingerprint_payload(
+                    {k: v for k, v in checkpoint.items() if k != "checkpoint_sha256"}
+                )
+                != checkpoint["checkpoint_sha256"]
+            ):
+                raise ValueError("checkpoint digest mismatch")
+            if (
+                type(checkpoint["schema_version"]) is not int
+                or checkpoint["schema_version"] != 2
+            ):
+                raise ValueError("checkpoint schema mismatch")
             protocol = KernelProtocolCommitment.from_payload(
                 manifest["kernel_protocol"]
             )
@@ -471,36 +561,75 @@ class EvolutionKernel:
             seed = EvolutionBundleV2.from_payload(
                 _read(store.root / "archive" / "objects" / f"{seed_sha}.json", seed_sha)
             )
-            checkpoint = _read(store.root / "checkpoint.json")
             budget = BudgetLedger.resume(
                 plan, checkpoint["budget"], monotonic=monotonic
             )
-            if fingerprint_payload(
-                {k: v for k, v in checkpoint.items() if k != "checkpoint_sha256"}
-            ) != checkpoint.get("checkpoint_sha256"):
-                raise ValueError("kernel checkpoint digest mismatch")
+            if budget.checkpoint()["open_reservations"]:
+                raise ValueError(
+                    "open reservation cannot be resumed or reissued; recover in a new epoch"
+                )
+            kernel = cls.__new__(cls)
+            kernel._configure(store, protocol, budget, seed)
+            if any(manifest.get(k) != v for k, v in kernel._manifest().items()):
+                raise ValueError("manifest protocol/authority mismatch")
+            kernel._closures = dict(checkpoint["budget_closures"])
+            kernel._transitions = dict(checkpoint["completed_transitions"])
+            kernel._active_sha = checkpoint["active_bundle_sha256"]
+            kernel._committed_event_sha = checkpoint["committed_event_sha256"]
+            kernel._pending_event = checkpoint["pending_publication"]
+            kernel._terminal = checkpoint["terminal_recovery"]
+            kernel._archive_snapshot = checkpoint["archive_snapshot_sha256"]
+            kernel._last_checkpoint_sha = checkpoint["checkpoint_sha256"]
+            if kernel._terminal is not None:
+                # Only finish an already authorized terminal recovery. No mutable
+                # or partially verified archive escapes this path.
+                kernel.archive = None
+                kernel._validate_terminal()
+                kernel.promotion_host.reconcile()
+                raise KernelAuthorityError("recovered run requires a new epoch")
+            kernel.archive = EvolutionArchive(store.root / "archive")
+            kernel._verify_checkpoint_state()
+            kernel.promotion_host.reconcile()
+            return kernel
         except (KeyError, TypeError, ValueError) as error:
             raise KernelAuthorityError(
                 f"resume authority verification failed: {error}"
             ) from error
-        return cls(store, protocol, budget, seed=seed)
+
+    def _require_mutable(self):
+        if self._terminal is not None:
+            raise KernelAuthorityError("recovered run requires a new epoch")
 
     @staticmethod
     def stage_id(child: EvolutionBundleV2) -> str:
         return f"evaluation:{child.fingerprint()}"
+
+    def reserve_evaluation(
+        self, child: EvolutionBundleV2, estimate: ResourceUse
+    ) -> StagePermit:
+        """Issue the only valid permit instance and durably reserve its resources."""
+        self._require_mutable()
+        self.active_bundle()
+        permit = self.budget.reserve_stage(self.stage_id(child), estimate)
+        if permit.allowed:
+            self._permits[permit.reservation_sha256] = permit
+        self._checkpoint()
+        return permit
 
     def _permit(self, child, permit):
         if (
             type(permit) is not StagePermit
             or not permit.allowed
             or permit.reason is not None
+            or self._permits.get(permit.reservation_sha256) is not permit
         ):
-            raise KernelAuthorityError("transition requires a live stage permit")
-        reservations = self.budget.checkpoint()["open_reservations"]
+            raise KernelAuthorityError(
+                "transition requires the exact kernel-issued stage permit"
+            )
         if not any(
             r["reservation_sha256"] == permit.reservation_sha256
             and r["stage_id"] == self.stage_id(child)
-            for r in reservations
+            for r in self.budget.checkpoint()["open_reservations"]
         ):
             raise KernelAuthorityError(
                 "transition requires a live candidate-bound stage permit"
@@ -519,12 +648,8 @@ class EvolutionKernel:
         dev_comparison: Mapping[str, object],
         resource_use: ResourceUse,
     ) -> ClosedEvaluation:
-        """Seal trusted evaluator output; ``status`` describes Train only.
-
-        The caller owns the trusted evaluation boundary. This method and its
-        returned object must never be supplied to a proposer or candidate.
-        Actual use is consumed by evaluate_transition, including rejection.
-        """
+        """Mint trusted immutable output. Train status and Dev values stay separate."""
+        self._require_mutable()
         reservation = self._permit(child, permit)
         if reservation in self._closed:
             raise KernelAuthorityError("stage already has a closed evaluation")
@@ -554,8 +679,130 @@ class EvolutionKernel:
             dev_comparison,
             resource_use.to_payload(),
         )
-        self._closed[reservation] = (result, train)
+        self._closed[reservation] = (result, train, permit)
         return result
+
+    def _issued_evaluation(self, evaluation, permit):
+        # Resolve authority by object identity, never caller-supplied hashes.
+        for issued in self._closed.values():
+            if evaluation is issued[0]:
+                return issued
+        for issued in self._closed.values():
+            if permit is issued[2]:
+                return issued
+        raise KernelAuthorityError("closed evaluation was not issued by this kernel")
+
+    def _account(self, issued):
+        evaluation, train, permit = issued
+        reservation = evaluation.reservation_sha256
+        if reservation in self._closures:
+            return self._load_closure(reservation)
+        before = self.budget.checkpoint()
+        outcome = self.budget.close_stage(
+            permit, ResourceUse.from_payload(evaluation.resource_use)
+        )
+        closure = {
+            "schema_version": 1,
+            "candidate_bundle_sha256": evaluation.candidate_bundle_sha256,
+            "parent_bundle_sha256": evaluation.parent_bundle_sha256,
+            "reservation_sha256": reservation,
+            "stage_id": f"evaluation:{evaluation.candidate_bundle_sha256}",
+            "evaluation_sha256": evaluation.fingerprint(),
+            "resource_use": dict(evaluation.resource_use),
+            "allowed": outcome.allowed,
+            "reason": outcome.reason,
+            "budget_before": before,
+            "budget_after": self.budget.checkpoint(),
+        }
+        # Actual use is already charged even if one of these writes fails.
+        self.store.write_evaluation(evaluation.candidate_bundle_sha256, "train", train)
+        self.store.write_evaluation(
+            evaluation.candidate_bundle_sha256, "closed", evaluation.to_payload()
+        )
+        self.store.write_evaluation(
+            evaluation.candidate_bundle_sha256, "budget_closure", closure
+        )
+        self._closures[reservation] = {
+            "candidate_bundle_sha256": evaluation.candidate_bundle_sha256,
+            "closure_sha256": fingerprint_payload(closure),
+        }
+        self._checkpoint()
+        return closure
+
+    def _load_closure(self, reservation):
+        ref = self._closures.get(reservation)
+        if ref is None:
+            raise KernelAuthorityError("missing durable budget closure")
+        _require_exact_schema(
+            ref,
+            ("candidate_bundle_sha256", "closure_sha256"),
+            field="closure reference",
+        )
+        require_sha256(ref["candidate_bundle_sha256"], "closure candidate")
+        require_sha256(ref["closure_sha256"], "closure SHA")
+        closure = _read(
+            self.store.root
+            / "evaluations"
+            / ref["candidate_bundle_sha256"]
+            / "budget_closure.json",
+            ref["closure_sha256"],
+        )
+        _require_exact_schema(
+            closure,
+            (
+                "schema_version",
+                "candidate_bundle_sha256",
+                "parent_bundle_sha256",
+                "reservation_sha256",
+                "stage_id",
+                "evaluation_sha256",
+                "resource_use",
+                "allowed",
+                "reason",
+                "budget_before",
+                "budget_after",
+            ),
+            field="budget closure",
+        )
+        if type(closure["schema_version"]) is not int or closure["schema_version"] != 1:
+            raise KernelAuthorityError("budget closure schema mismatch")
+        if (
+            closure["candidate_bundle_sha256"] != ref["candidate_bundle_sha256"]
+            or closure["reservation_sha256"] != reservation
+            or closure["stage_id"] != f"evaluation:{ref['candidate_bundle_sha256']}"
+        ):
+            raise KernelAuthorityError("candidate-specific budget closure mismatch")
+        replay = BudgetLedger.resume(
+            self.budget.plan, closure["budget_before"], monotonic=lambda: 0.0
+        )
+        opened = [
+            r
+            for r in replay.checkpoint()["open_reservations"]
+            if r["reservation_sha256"] == reservation
+        ]
+        if len(opened) != 1 or opened[0]["stage_id"] != closure["stage_id"]:
+            raise KernelAuthorityError("budget closure reservation binding mismatch")
+        outcome = replay.close_stage(
+            reservation, ResourceUse.from_payload(closure["resource_use"])
+        )
+        if type(closure["allowed"]) is not bool or (
+            outcome.allowed,
+            outcome.reason,
+        ) != (closure["allowed"], closure["reason"]):
+            raise KernelAuthorityError("budget closure outcome mismatch")
+        BudgetLedger.resume(
+            self.budget.plan, closure["budget_after"], monotonic=lambda: 0.0
+        )
+        expected = replay.checkpoint()
+        if any(
+            expected[k] != closure["budget_after"][k]
+            for k in expected
+            if k not in ("prior_elapsed_wall_seconds", "checkpoint_sha256")
+        ):
+            raise KernelAuthorityError("budget closure actual accounting mismatch")
+        if reservation not in self.budget.checkpoint()["closed_reservation_sha256s"]:
+            raise KernelAuthorityError("budget closure not in durable ledger")
+        return closure
 
     def evaluate_transition(
         self,
@@ -566,55 +813,40 @@ class EvolutionKernel:
         evaluation: ClosedEvaluation,
         permit: StagePermit | None = None,
     ) -> EvolutionBundleV2:
-        # Active identity is checked first, but a live trusted evaluation is
-        # still charged in finally if any subsequent authority check rejects it.
-        active = self.active_bundle()
-        reservation = self._permit(child, permit)
-        issued = self._closed.get(reservation)
-        if issued is None:
-            raise KernelAuthorityError(
-                "closed evaluation was not issued by this kernel"
-            )
-        trusted, train = issued
-        closed = False
+        issued = self._issued_evaluation(evaluation, permit)
+        trusted, train, _ = issued
         try:
+            self._require_mutable()
+            active = self.active_bundle()
             if parent.fingerprint() != active.fingerprint():
                 raise KernelAuthorityError("transition Parent is not active")
+            self._permit(child, permit)
             validate_child_scope(parent, child, target)
             if (
                 parent.protocol_fingerprint != self.protocol.fingerprint()
                 or child.protocol_fingerprint != self.protocol.fingerprint()
+                or parent.runtime_fingerprints != self._runtimes
             ):
-                raise KernelAuthorityError("transition protocol commitment mismatch")
-            if dict(parent.runtime_fingerprints) != dict(self._runtimes):
-                raise KernelAuthorityError("transition runtime mismatch")
+                raise KernelAuthorityError("transition protocol/runtime mismatch")
             if (
                 evaluation is not trusted
-                or evaluation.parent_bundle_sha256 != parent.fingerprint()
-                or evaluation.candidate_bundle_sha256 != child.fingerprint()
+                or trusted.parent_bundle_sha256 != parent.fingerprint()
+                or trusted.candidate_bundle_sha256 != child.fingerprint()
             ):
                 raise KernelAuthorityError(
                     "closed evaluation authority or Bundle binding mismatch"
                 )
-            outcome = self.budget.close_stage(
-                permit, ResourceUse.from_payload(trusted.resource_use)
-            )
-            closed = True
-            self._checkpoint()
-            self.store.write_evaluation(child.fingerprint(), "train", train)
-            self.store.write_evaluation(
-                child.fingerprint(), "closed", evaluation.to_payload()
-            )
+            closure = self._account(issued)
             self.archive.append(
                 _BundleArtifact(child, "bundle"),
                 _record(child, "bundle", (parent.fingerprint(),), train),
             )
-            snapshot = self.archive.snapshot_sha256()
+            self._archive_snapshot = self.archive.snapshot_sha256()
             decision = (
                 "accept"
-                if outcome.allowed
-                and evaluation.status == "passed"
-                and evaluation.dev_comparison["passed"]
+                if closure["allowed"]
+                and trusted.status == "passed"
+                and trusted.dev_comparison["passed"]
                 else "reject"
             )
             evidence = AcceptanceEvidence(
@@ -624,54 +856,73 @@ class EvolutionKernel:
                 target,
                 self.protocol.fingerprint(),
                 self._runtimes,
-                evaluation.fingerprint(),
-                evaluation.train_evaluation_sha256,
-                evaluation.dev_comparison,
-                outcome.allowed,
+                trusted.fingerprint(),
+                trusted.train_evaluation_sha256,
+                trusted.dev_comparison,
+                closure["allowed"],
                 decision,
-                snapshot,
+                self._archive_snapshot,
                 parent.scheduler_state_sha256,
             )
             self.store.write_acceptance(evidence.fingerprint(), evidence.to_payload())
+            self._transitions[child.fingerprint()] = {
+                "parent_bundle_sha256": parent.fingerprint(),
+                "acceptance_evidence_sha256": evidence.fingerprint(),
+                "budget_closure_sha256": fingerprint_payload(closure),
+                "decision": decision,
+                "archive_snapshot_sha256": self._archive_snapshot,
+                "sealed_bundle_sha256": None,
+            }
+            self._checkpoint()
             evidence = self.load_acceptance(evidence.fingerprint())
-            # Progress and archive carry Train results only, never Dev decisions.
             self.store.append_progress(
                 {
                     "candidate_bundle_sha256": child.fingerprint(),
-                    "train_evaluation_sha256": evaluation.train_evaluation_sha256,
-                    "status": evaluation.status,
-                    "resource_use": dict(evaluation.resource_use),
+                    "train_evaluation_sha256": trusted.train_evaluation_sha256,
+                    "status": trusted.status,
+                    "resource_use": dict(trusted.resource_use),
                 }
             )
-            if evidence.decision == "reject":
+            if decision == "reject":
                 return parent
             sealed = _seal_acceptance(
-                parent, child, target, evidence, snapshot, parent.scheduler_state_sha256
+                parent,
+                child,
+                target,
+                evidence,
+                self._archive_snapshot,
+                parent.scheduler_state_sha256,
             )
             self.archive.append(
                 _BundleArtifact(sealed, "acceptance_seal"),
                 _record(sealed, "acceptance_seal", (child.fingerprint(),), train),
             )
+            self._archive_snapshot = self.archive.snapshot_sha256()
+            self._transitions[child.fingerprint()][
+                "sealed_bundle_sha256"
+            ] = sealed.fingerprint()
+            self._checkpoint()
             self.promotion_host.activate(sealed)
             return sealed
         except (ValueError, TypeError) as error:
             raise KernelAuthorityError(str(error)) from error
         finally:
-            if not closed:
-                self.budget.close_stage(
-                    permit, ResourceUse.from_payload(trusted.resource_use)
-                )
-            self._closed.pop(reservation, None)
-            # Do not reconcile a pending publication here: a failed pointer
-            # write must stay failed until explicit Host retry or restart.
-            self._checkpoint()
+            # Issuer-owned actual work is charged regardless of caller permit,
+            # pointer integrity, scope, or evaluation-authenticity failures.
+            self._account(issued)
 
     def load_acceptance(self, identity: str) -> AcceptanceEvidence:
+        return self._load_acceptance(identity, recovery=False)
+
+    def _load_acceptance(self, identity, *, recovery):
         try:
             require_sha256(identity, "acceptance evidence SHA")
             evidence = AcceptanceEvidence.from_payload(
                 _read(self.store.root / "acceptance" / f"{identity}.json", identity)
             )
+            ref = self._transitions.get(evidence.candidate_bundle_sha256)
+            if ref is None or ref["acceptance_evidence_sha256"] != identity:
+                raise ValueError("evidence lacks an authorized durable transition")
             evaluation = ClosedEvaluation.from_payload(
                 _read(
                     self.store.root
@@ -681,11 +932,17 @@ class EvolutionKernel:
                     evidence.evaluation_sha256,
                 )
             )
+            closure = self._load_closure(evaluation.reservation_sha256)
             if (
-                evaluation.reservation_sha256
-                not in self.budget.checkpoint()["closed_reservation_sha256s"]
+                ref["budget_closure_sha256"] != fingerprint_payload(closure)
+                or closure["allowed"] != evidence.budget_allowed
+                or closure["candidate_bundle_sha256"]
+                != evidence.candidate_bundle_sha256
+                or closure["parent_bundle_sha256"] != evidence.parent_bundle_sha256
+                or closure["evaluation_sha256"] != evaluation.fingerprint()
+                or closure["resource_use"] != dict(evaluation.resource_use)
             ):
-                raise ValueError("acceptance requires an accounted budget reservation")
+                raise ValueError("acceptance budget closure binding mismatch")
             train = _read(
                 self.store.root
                 / "evaluations"
@@ -716,29 +973,27 @@ class EvolutionKernel:
                     raise ValueError(f"Train evaluation {name} mismatch")
             decision = (
                 "accept"
-                if evidence.budget_allowed
+                if closure["allowed"]
                 and evaluation.status == "passed"
                 and evidence.dev_comparison["passed"]
                 else "reject"
             )
             if (
                 evidence.decision != decision
+                or ref["decision"] != decision
+                or ref["parent_bundle_sha256"] != evidence.parent_bundle_sha256
+                or ref["archive_snapshot_sha256"] != evidence.archive_snapshot_sha256
                 or evidence.protocol_fingerprint != self.protocol.fingerprint()
                 or evidence.runtime_fingerprints != self._runtimes
             ):
-                raise ValueError("acceptance decision/protocol/runtime mismatch")
-            self.archive.lineage(evidence.candidate_bundle_sha256)
-            parent = EvolutionBundleV2.from_payload(
-                _read(
-                    self.archive.objects / f"{evidence.parent_bundle_sha256}.json",
-                    evidence.parent_bundle_sha256,
+                raise ValueError(
+                    "acceptance decision/protocol/runtime/transition mismatch"
                 )
+            provisional = self._archive_bundle(
+                evidence.candidate_bundle_sha256, recovery=recovery
             )
-            provisional = EvolutionBundleV2.from_payload(
-                _read(
-                    self.archive.objects / f"{evidence.candidate_bundle_sha256}.json",
-                    evidence.candidate_bundle_sha256,
-                )
+            parent = self._archive_bundle(
+                evidence.parent_bundle_sha256, recovery=recovery
             )
             validate_child_scope(parent, provisional, evidence.target)
             if (
@@ -747,17 +1002,21 @@ class EvolutionKernel:
             ):
                 raise ValueError("acceptance Parent protocol/runtime mismatch")
             prefix = hashlib.sha256()
-            expected_record = _record(
+            expected = _record(
                 provisional, "bundle", (parent.fingerprint(),), train
             ).to_payload()
-            for line in self.archive.index.read_bytes().splitlines(keepends=True):
+            for line in (
+                (self.store.root / "archive" / "index.jsonl")
+                .read_bytes()
+                .splitlines(keepends=True)
+            ):
                 prefix.update(line)
                 record = strict_json_loads(
                     line.decode("utf-8"), context="archive index"
                 )["record"]
                 if record["artifact_sha256"] == provisional.fingerprint():
                     if (
-                        record != expected_record
+                        record != expected
                         or prefix.hexdigest() != evidence.archive_snapshot_sha256
                     ):
                         raise ValueError(
@@ -770,13 +1029,21 @@ class EvolutionKernel:
                 f"invalid acceptance evidence: {error}"
             ) from error
 
-    def _verified_bundle(self, identity: str) -> EvolutionBundleV2:
-        try:
-            require_sha256(identity, "Bundle SHA")
-            self.archive.lineage(identity)  # Revalidates every indexed object.
-            bundle = EvolutionBundleV2.from_payload(
-                _read(self.archive.objects / f"{identity}.json", identity)
+    def _archive_bundle(self, identity, *, recovery):
+        require_sha256(identity, "Bundle SHA")
+        if recovery:
+            selected = verify_selected_lineage(self.store.root / "archive", identity)
+            return EvolutionBundleV2.from_payload(selected["payloads"][identity])
+        self.archive.lineage(identity)
+        return EvolutionBundleV2.from_payload(
+            _read(
+                self.store.root / "archive" / "objects" / f"{identity}.json", identity
             )
+        )
+
+    def _verified_bundle(self, identity, *, recovery=False) -> EvolutionBundleV2:
+        try:
+            bundle = self._archive_bundle(identity, recovery=recovery)
             if (
                 bundle.protocol_fingerprint != self.protocol.fingerprint()
                 or bundle.runtime_fingerprints != self._runtimes
@@ -788,17 +1055,18 @@ class EvolutionKernel:
                 return bundle
             if bundle.acceptance_evidence_sha256 is None:
                 raise ValueError("Bundle is not sealed")
-            evidence = self.load_acceptance(bundle.acceptance_evidence_sha256)
-            if evidence.decision != "accept":
-                raise ValueError("Bundle evidence does not accept")
-            parent = self._verified_bundle(evidence.parent_bundle_sha256)
-            provisional = EvolutionBundleV2.from_payload(
-                _read(
-                    self.archive.objects / f"{evidence.candidate_bundle_sha256}.json",
-                    evidence.candidate_bundle_sha256,
-                )
+            evidence = self._load_acceptance(
+                bundle.acceptance_evidence_sha256, recovery=recovery
             )
-            self.archive.lineage(evidence.candidate_bundle_sha256)
+            ref = self._transitions[evidence.candidate_bundle_sha256]
+            if evidence.decision != "accept" or ref["sealed_bundle_sha256"] != identity:
+                raise ValueError("sealed Bundle not authorized by completed transition")
+            parent = self._verified_bundle(
+                evidence.parent_bundle_sha256, recovery=recovery
+            )
+            provisional = self._archive_bundle(
+                evidence.candidate_bundle_sha256, recovery=recovery
+            )
             expected = _seal_acceptance(
                 parent,
                 provisional,
@@ -809,30 +1077,20 @@ class EvolutionKernel:
             )
             if expected.canonical_bytes() != bundle.canonical_bytes():
                 raise ValueError("sealed Bundle differs from acceptance evidence")
-            prefix = hashlib.sha256()
-            found_provisional = False
-            for line in self.archive.index.read_bytes().splitlines(keepends=True):
+            for line in (
+                (self.store.root / "archive" / "index.jsonl")
+                .read_bytes()
+                .splitlines(keepends=True)
+            ):
                 record = strict_json_loads(
                     line.decode("utf-8"), context="archive index"
                 )["record"]
-                prefix.update(line)
-                if record["artifact_sha256"] == provisional.fingerprint():
-                    if (
-                        record["artifact_kind"] != "bundle"
-                        or record["parent_sha256s"] != [parent.fingerprint()]
-                        or prefix.hexdigest() != evidence.archive_snapshot_sha256
-                    ):
-                        raise ValueError(
-                            "provisional archive snapshot/lineage mismatch"
-                        )
-                    found_provisional = True
                 if record["artifact_sha256"] == identity:
-                    if (
-                        not found_provisional
-                        or record["artifact_kind"] != "acceptance_seal"
-                        or record["parent_sha256s"] != [provisional.fingerprint()]
-                    ):
+                    if record["artifact_kind"] != "acceptance_seal" or record[
+                        "parent_sha256s"
+                    ] != [provisional.fingerprint()]:
                         raise ValueError("acceptance seal archive lineage mismatch")
+                    break
             return bundle
         except (KeyError, TypeError, ValueError) as error:
             raise KernelAuthorityError(f"invalid archived Bundle: {error}") from error
@@ -840,70 +1098,113 @@ class EvolutionKernel:
     def active_bundle(self) -> EvolutionBundleV2:
         return self.promotion_host.reconcile()
 
-    def _validate_checkpoint(self, checkpoint, history):
-        try:
-            _require_exact_schema(
-                checkpoint,
-                (
-                    "schema_version",
-                    "budget",
-                    "archive_snapshot_sha256",
-                    "active_bundle_sha256",
-                    "checkpoint_sha256",
-                ),
-                field="kernel checkpoint",
+    def _verify_checkpoint_state(self):
+        self.promotion_host._publication_state()
+        prefix, snapshots = hashlib.sha256(), set()
+        for line in (
+            (self.store.root / "archive" / "index.jsonl")
+            .read_bytes()
+            .splitlines(keepends=True)
+        ):
+            prefix.update(line)
+            snapshots.add(prefix.hexdigest())
+        if self._archive_snapshot not in snapshots:
+            raise KernelAuthorityError(
+                "checkpoint archive snapshot is not a verified prefix"
             )
-            if (
-                type(checkpoint["schema_version"]) is not int
-                or checkpoint["schema_version"] != 1
-            ):
-                raise ValueError("checkpoint schema mismatch")
-            if (
-                fingerprint_payload(
-                    {k: v for k, v in checkpoint.items() if k != "checkpoint_sha256"}
-                )
-                != checkpoint["checkpoint_sha256"]
-            ):
-                raise ValueError("checkpoint digest mismatch")
-            if not history or checkpoint["active_bundle_sha256"] not in (
-                history[-1]["bundle_sha256"],
-                history[-1]["prior_bundle_sha256"],
-            ):
-                raise ValueError("checkpoint active identity mismatch")
-            prefix = hashlib.sha256()
-            snapshots = {prefix.hexdigest()}
-            for line in self.archive.index.read_bytes().splitlines(keepends=True):
-                prefix.update(line)
-                snapshots.add(prefix.hexdigest())
-            if checkpoint["archive_snapshot_sha256"] not in snapshots:
-                raise ValueError("checkpoint archive snapshot is not a verified prefix")
-            durable = checkpoint["budget"]
-            current = self.budget.checkpoint()
-            for key in current:
-                if (
-                    key not in ("checkpoint_sha256", "prior_elapsed_wall_seconds")
-                    and current[key] != durable[key]
-                ):
-                    raise ValueError("checkpoint budget does not match supplied ledger")
-            if (
-                current["prior_elapsed_wall_seconds"]
-                < durable["prior_elapsed_wall_seconds"]
-            ):
-                raise ValueError("checkpoint budget elapsed time regressed")
-        except (KeyError, TypeError, ValueError) as error:
-            raise KernelAuthorityError(f"invalid checkpoint: {error}") from error
+        total = ResourceUse()
+        for reservation in self._closures:
+            closure = self._load_closure(reservation)
+            total = total + ResourceUse.from_payload(closure["resource_use"])
+        if total != self.budget.charged_use or set(self._closures) != set(
+            self.budget.checkpoint()["closed_reservation_sha256s"]
+        ):
+            raise KernelAuthorityError(
+                "checkpoint budget closures do not account for the ledger"
+            )
+        for candidate, ref in self._transitions.items():
+            require_sha256(candidate, "transition candidate")
+            _require_exact_schema(
+                ref,
+                (
+                    "parent_bundle_sha256",
+                    "acceptance_evidence_sha256",
+                    "budget_closure_sha256",
+                    "decision",
+                    "archive_snapshot_sha256",
+                    "sealed_bundle_sha256",
+                ),
+                field="completed transition",
+            )
+            evidence = self.load_acceptance(ref["acceptance_evidence_sha256"])
+            if evidence.candidate_bundle_sha256 != candidate:
+                raise KernelAuthorityError("checkpoint transition candidate mismatch")
+            if ref["sealed_bundle_sha256"] is not None:
+                self._verified_bundle(ref["sealed_bundle_sha256"])
+
+    def _validate_terminal(self):
+        value = self._terminal
+        _require_exact_schema(
+            value,
+            (
+                "status",
+                "invalidated_bundle_sha256",
+                "destination_bundle_sha256",
+                "destination_lineage",
+                "archive_snapshot_sha256",
+                "reason",
+            ),
+            field="terminal recovery",
+        )
+        if value["status"] != "recovered_requires_new_epoch" or value["reason"] not in (
+            "integrity_failed",
+            "safety_failed",
+        ):
+            raise KernelAuthorityError("invalid terminal recovery")
+        history, _ = self.promotion_host._publication_state()
+        event = self._pending_event or history[-1]
+        if (
+            event["action"] != "rollback"
+            or event["reason"] != value["reason"]
+            or event["prior_bundle_sha256"] != value["invalidated_bundle_sha256"]
+            or event["bundle_sha256"] != value["destination_bundle_sha256"]
+        ):
+            raise KernelAuthorityError("terminal recovery is not bound to rollback")
+        selected = verify_selected_lineage(
+            self.store.root / "archive", value["destination_bundle_sha256"]
+        )
+        if (
+            list(selected["lineage"]) != value["destination_lineage"]
+            or selected["archive_snapshot_sha256"] != value["archive_snapshot_sha256"]
+            or self._archive_snapshot != value["archive_snapshot_sha256"]
+        ):
+            raise KernelAuthorityError("terminal destination lineage/index mismatch")
 
     def _checkpoint(self):
-        path = self.store.root / "accepted_bundle.json"
-        active_sha = fingerprint_payload(_read(path)) if path.exists() else None
+        # Never derive authority from the active pointer: it may be the failure
+        # being handled while authentic work still must be durably accounted.
+        manifest = _read(self.store.root / "run_manifest.json")
+        if any(manifest.get(k) != v for k, v in self._manifest().items()):
+            raise KernelAuthorityError("run manifest protocol/authority mismatch")
+        _read(self.store.root / "budget_plan.json", self.budget.plan.fingerprint())
+        if self._last_checkpoint_sha is not None:
+            existing = _read(self.store.root / "checkpoint.json")
+            if existing.get("checkpoint_sha256") != self._last_checkpoint_sha:
+                raise KernelAuthorityError("checkpoint changed outside the kernel")
         checkpoint = {
-            "schema_version": 1,
+            "schema_version": 2,
             "budget": self.budget.checkpoint(),
-            "archive_snapshot_sha256": self.archive.snapshot_sha256(),
-            "active_bundle_sha256": active_sha,
+            "archive_snapshot_sha256": self._archive_snapshot,
+            "active_bundle_sha256": self._active_sha,
+            "committed_event_sha256": self._committed_event_sha,
+            "pending_publication": self._pending_event,
+            "budget_closures": self._closures,
+            "completed_transitions": self._transitions,
+            "terminal_recovery": self._terminal,
         }
         checkpoint["checkpoint_sha256"] = fingerprint_payload(checkpoint)
         self.store.write_checkpoint(checkpoint)
+        self._last_checkpoint_sha = checkpoint["checkpoint_sha256"]
 
 
 __all__ = [

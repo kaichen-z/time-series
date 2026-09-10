@@ -135,6 +135,24 @@ def test_archive_record_requires_positive_integer_artifact_version(version):
         ArchiveRecord.from_payload(payload)
 
 
+def test_selected_lineage_verifies_destination_without_returning_mutable_archive(tmp_path):
+    parent = FakeArtifact("parent")
+    child = FakeArtifact("child")
+    archive = EvolutionArchive(tmp_path / "archive")
+    archive.append(parent, record_for(parent))
+    archive.append(child, record_for(child, parents=(parent.fingerprint(),)))
+    (archive.objects / f"{child.fingerprint()}.json").write_bytes(b"corrupt\n")
+    result = archive_module.verify_selected_lineage(archive.root, parent.fingerprint())
+    assert result["lineage"] == (parent.fingerprint(),)
+    assert result["payloads"][parent.fingerprint()]["label"] == "parent"
+    assert not isinstance(result, EvolutionArchive)
+    with pytest.raises(ArchiveContractError):
+        EvolutionArchive(archive.root)
+    (archive.objects / f"{parent.fingerprint()}.json").write_bytes(b"corrupt\n")
+    with pytest.raises(ArchiveContractError):
+        archive_module.verify_selected_lineage(archive.root, parent.fingerprint())
+
+
 def test_archive_is_content_addressed_append_only_and_reconstructs_lineage(tmp_path):
     archive = EvolutionArchive(tmp_path / "archive")
     parent_artifact = FakeArtifact("parent")

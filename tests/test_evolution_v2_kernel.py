@@ -46,9 +46,7 @@ def child(parent):
 
 
 def evaluation(kernel, parent, candidate, *, passed=True, status="passed", actual=1):
-    permit = kernel.budget.reserve_stage(
-        kernel.stage_id(candidate), ResourceUse(task_executions=2)
-    )
+    permit = kernel.reserve_evaluation(candidate, ResourceUse(task_executions=2))
     result = kernel.close_evaluation(
         parent,
         candidate,
@@ -278,7 +276,7 @@ def test_archive_omission_and_evidence_corruption_fail_closed(kernel):
 def test_train_payload_rejects_dev_and_non_json_host_objects(kernel):
     parent = kernel.active_bundle()
     candidate = child(parent)
-    permit = kernel.budget.reserve_stage(kernel.stage_id(candidate), ResourceUse())
+    permit = kernel.reserve_evaluation(candidate, ResourceUse())
     for payload in (
         {"dev_comparison": {}},
         {"nested": {"public_ids": []}},
@@ -331,7 +329,7 @@ def test_active_kernel_reconstruction_cannot_replace_charged_ledger_with_empty_o
 ):
     transition(kernel)
     empty = BudgetLedger(kernel.budget.plan, monotonic=lambda: 0.0)
-    with pytest.raises(api.KernelAuthorityError, match="budget|reservation"):
+    with pytest.raises(api.KernelAuthorityError, match="fresh|budget|reservation"):
         api.EvolutionKernel(kernel.store, protocol(), empty, seed=seed())
 
 
@@ -361,7 +359,7 @@ def test_stale_parent_and_consumed_permit_fail_closed(kernel):
             parent, stale_child, target="decision", evaluation=result, permit=permit
         )
     assert kernel.budget.charged_use.task_executions == 2
-    with pytest.raises(api.KernelAuthorityError, match="permit"):
+    with pytest.raises(api.KernelAuthorityError, match="Parent|permit"):
         kernel.evaluate_transition(
             parent, stale_child, target="decision", evaluation=result, permit=permit
         )
@@ -414,3 +412,198 @@ def test_kernel_accepts_each_declared_mutation_scope(kernel, target, changes):
     )
     assert accepted.generation == 1
     assert kernel.load_acceptance(accepted.acceptance_evidence_sha256).target == target
+
+
+def test_budget_overrun_cannot_be_resealed_as_allowed_by_self_hash(kernel):
+    transition(kernel, actual=3)
+    (path,) = (kernel.store.root / "acceptance").glob("*.json")
+    evidence = api.AcceptanceEvidence.from_payload(json.loads(path.read_text()))
+    forged = replace(evidence, budget_allowed=True, decision="accept")
+    kernel.store.write_acceptance(forged.fingerprint(), forged.to_payload())
+    with pytest.raises(api.KernelAuthorityError, match="closure|budget|transition"):
+        kernel.load_acceptance(forged.fingerprint())
+
+
+@pytest.mark.parametrize("failure", ["missing", "fabricated", "copied", "pointer"])
+def test_authentic_evaluation_is_accounted_once_across_early_failures(kernel, failure):
+    parent = kernel.active_bundle()
+    candidate = child(parent)
+    result, permit = evaluation(kernel, parent, candidate)
+    if failure == "missing":
+        supplied = None
+    elif failure == "fabricated":
+        supplied = StagePermit(True, None, "f" * 64)
+    elif failure == "copied":
+        supplied = replace(permit)
+    else:
+        supplied = permit
+        drift = replace(parent, numerical_release_sha256="e" * 64)
+        kernel.store.publish_active_bundle(drift.to_payload())
+    for _ in range(2):
+        with pytest.raises(api.KernelAuthorityError):
+            kernel.evaluate_transition(
+                parent,
+                candidate,
+                target="retrieval",
+                evaluation=result,
+                permit=supplied,
+            )
+        assert kernel.budget.charged_use.task_executions == 1
+        assert not kernel.budget.checkpoint()["open_reservations"]
+
+
+def test_completed_activation_pointer_drift_is_not_recovered_as_pending(kernel):
+    parent, _, _ = transition(kernel)
+    kernel.store.publish_active_bundle(parent.to_payload())
+    for read_active in (
+        kernel.active_bundle,
+        lambda: api.EvolutionKernel.resume(
+            kernel.store, kernel.budget.plan, monotonic=lambda: 0.0
+        ),
+    ):
+        with pytest.raises(api.KernelAuthorityError, match="pointer|committed"):
+            read_active()
+        assert (
+            json.loads((kernel.store.root / "accepted_bundle.json").read_text())
+            == parent.to_payload()
+        )
+
+
+@pytest.mark.parametrize(
+    "missing", ["run_manifest.json", "budget_plan.json", "checkpoint.json"]
+)
+def test_established_authority_files_are_never_reconstructed(kernel, missing):
+    transition(kernel, passed=False)
+    path = kernel.store.root / missing
+    path.unlink()
+    with pytest.raises(api.KernelAuthorityError):
+        api.EvolutionKernel(kernel.store, protocol(), kernel.budget, seed=seed())
+    assert not path.exists()
+    with pytest.raises(api.KernelAuthorityError):
+        api.EvolutionKernel.resume(
+            kernel.store, kernel.budget.plan, monotonic=lambda: 0.0
+        )
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("artifact", ["train", "closed", "evidence"])
+@pytest.mark.parametrize("damage", ["missing", "changed"])
+def test_resume_verifies_completed_rejected_transition_artifacts(
+    kernel, artifact, damage
+):
+    _, candidate, _ = transition(kernel, passed=False)
+    if artifact == "evidence":
+        (path,) = (kernel.store.root / "acceptance").glob("*.json")
+    else:
+        path = (
+            kernel.store.root
+            / "evaluations"
+            / candidate.fingerprint()
+            / f"{artifact}.json"
+        )
+    if damage == "missing":
+        path.unlink()
+    else:
+        payload = json.loads(path.read_text())
+        payload["unexpected"] = "tampered"
+        path.write_bytes(canonical_v2_bytes(payload))
+    with pytest.raises(api.KernelAuthorityError):
+        api.EvolutionKernel.resume(
+            kernel.store, kernel.budget.plan, monotonic=lambda: 0.0
+        )
+
+
+@pytest.mark.parametrize("damage", ["evidence", "object"])
+@pytest.mark.parametrize("reason", ["integrity_failed", "safety_failed"])
+def test_integrity_rollback_restores_verified_parent_despite_corrupted_source(
+    kernel, damage, reason
+):
+    parent, _, accepted = transition(kernel)
+    if damage == "evidence":
+        path = (
+            kernel.store.root
+            / "acceptance"
+            / f"{accepted.acceptance_evidence_sha256}.json"
+        )
+    else:
+        path = kernel.archive.objects / f"{accepted.fingerprint()}.json"
+    path.write_bytes(b"corrupt\n")
+    restored = kernel.promotion_host.rollback(reason=reason)
+    assert restored == parent
+    assert kernel.active_bundle() == parent
+    checkpoint = json.loads((kernel.store.root / "checkpoint.json").read_text())
+    assert checkpoint["terminal_recovery"]["status"] == "recovered_requires_new_epoch"
+    assert (
+        checkpoint["terminal_recovery"]["invalidated_bundle_sha256"]
+        == accepted.fingerprint()
+    )
+    with pytest.raises(api.KernelAuthorityError, match="new epoch"):
+        api.EvolutionKernel.resume(
+            kernel.store, kernel.budget.plan, monotonic=lambda: 0.0
+        )
+    with pytest.raises(api.KernelAuthorityError, match="new epoch"):
+        kernel.reserve_evaluation(child(parent), ResourceUse())
+    assert path.read_bytes() == b"corrupt\n"
+
+
+@pytest.mark.parametrize("damage", ["parent", "index"])
+def test_integrity_rollback_never_skips_destination_or_index_corruption(kernel, damage):
+    parent, _, accepted = transition(kernel)
+    (kernel.archive.objects / f"{accepted.fingerprint()}.json").write_bytes(
+        b"corrupt\n"
+    )
+    path = (
+        kernel.archive.index
+        if damage == "index"
+        else kernel.archive.objects / f"{parent.fingerprint()}.json"
+    )
+    path.write_bytes(b"corrupt\n")
+    with pytest.raises(api.KernelAuthorityError):
+        kernel.promotion_host.rollback(reason="integrity_failed")
+    assert (
+        json.loads((kernel.store.root / "accepted_bundle.json").read_text())
+        == accepted.to_payload()
+    )
+
+
+def test_copied_live_permit_cannot_mint_host_evaluation(kernel):
+    parent = kernel.active_bundle()
+    candidate = child(parent)
+    result, original = evaluation(kernel, parent, candidate)
+    with pytest.raises(api.KernelAuthorityError, match="permit"):
+        kernel.evaluate_transition(
+            parent,
+            candidate,
+            target="retrieval",
+            evaluation=result,
+            permit=StagePermit(True, None, original.reservation_sha256),
+        )
+
+
+def test_resume_with_open_reservation_fails_closed_and_never_reissues_permit(kernel):
+    candidate = child(kernel.active_bundle())
+    permit = kernel.reserve_evaluation(candidate, ResourceUse(task_executions=2))
+    assert permit.allowed
+    with pytest.raises(api.KernelAuthorityError, match="open reservation"):
+        api.EvolutionKernel.resume(
+            kernel.store, kernel.budget.plan, monotonic=lambda: 0.0
+        )
+
+
+def test_wrong_issued_permit_cannot_redirect_actual_accounting(kernel):
+    parent = kernel.active_bundle()
+    first = parent.provisional_child("decision", {"decision": "c" * 64})
+    _, first_permit = evaluation(kernel, parent, first)
+    second = child(parent)
+    second_eval, _ = evaluation(kernel, parent, second, actual=2)
+    with pytest.raises(api.KernelAuthorityError):
+        kernel.evaluate_transition(
+            parent,
+            second,
+            target="retrieval",
+            evaluation=second_eval,
+            permit=first_permit,
+        )
+    assert kernel.budget.charged_use.task_executions == 2
+    open_stages = kernel.budget.checkpoint()["open_reservations"]
+    assert [stage["stage_id"] for stage in open_stages] == [kernel.stage_id(first)]

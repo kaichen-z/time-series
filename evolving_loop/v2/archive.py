@@ -304,6 +304,9 @@ class EvolutionArchive:
     def lineage(self, artifact_sha256: str) -> tuple[str, ...]:
         identity = _archive_sha256(artifact_sha256, "artifact_sha256")
         self._load()
+        return self._ordered_lineage(identity)
+
+    def _ordered_lineage(self, identity: str) -> tuple[str, ...]:
         if identity not in self._records:
             raise ArchiveContractError(f"artifact {identity} is not indexed")
         ordered: list[str] = []
@@ -328,7 +331,7 @@ class EvolutionArchive:
             data = b""
         return hashlib.sha256(data).hexdigest()
 
-    def _load(self) -> None:
+    def _load(self, *, verify_objects: bool = True) -> None:
         self._records = {}
         try:
             data = self.index.read_bytes()
@@ -373,7 +376,8 @@ class EvolutionArchive:
                 raise ArchiveContractError(f"artifact {identity} is already indexed")
             self._validate_prior_parents(record)
             self._validate_archive_bindings(record)
-            self._verify_object(identity, record)
+            if verify_objects:
+                self._verify_object(identity, record)
             self._records[identity] = record
 
     def _validate_artifact(
@@ -481,4 +485,35 @@ class EvolutionArchive:
                 raise ArchiveContractError("artifact/record runtime mismatch")
 
 
-__all__ = ["ArchiveContractError", "ArchiveRecord", "EvolutionArchive"]
+def verify_selected_lineage(root: str | Path, artifact_sha256: str) -> Mapping[str, object]:
+    """Read-only integrity recovery: verify the index and destination ancestry.
+
+    A corrupt object outside the requested lineage does not prevent inspecting
+    a verified prior state. No partially verified archive instance escapes this
+    function; normal archive construction and mutation remain fully strict.
+    """
+    identity = _archive_sha256(artifact_sha256, "artifact_sha256")
+    source = Path(root)
+    if not (source / "index.jsonl").is_file():
+        raise ArchiveContractError("selected lineage requires the archive index")
+    reader = object.__new__(EvolutionArchive)
+    reader.root = source
+    reader.objects = source / "objects"
+    reader.index = source / "index.jsonl"
+    reader._load(verify_objects=False)
+    lineage = reader._ordered_lineage(identity)
+    payloads = {}
+    for ancestor in lineage:
+        reader._verify_object(ancestor, reader._records[ancestor])
+        payloads[ancestor] = strict_json_loads(
+            (reader.objects / f"{ancestor}.json").read_text(encoding="utf-8"),
+            context=f"verified archive object {ancestor}",
+        )
+    return _freeze({
+        "lineage": lineage,
+        "payloads": payloads,
+        "archive_snapshot_sha256": hashlib.sha256(reader.index.read_bytes()).hexdigest(),
+    })
+
+
+__all__ = ["ArchiveContractError", "ArchiveRecord", "EvolutionArchive", "verify_selected_lineage"]
