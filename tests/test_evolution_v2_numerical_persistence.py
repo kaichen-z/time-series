@@ -424,6 +424,58 @@ def test_successful_proposal_attempt_persists_exact_normalized_sources(world):
     assert store.write_proposal_attempt(identity, payload) == path
 
 
+def contextual_attempt(world, generation=1, counter=1):
+    from evolving_loop.v2.numerical_qd.proposers import primitive_proposer_request
+    store, args, *_ = world
+    genome = store._object(args["active_genome_sha256"])
+    state = parent_state(inventory=NumericalInventoryV2.from_payload(store._object(genome["inventory_sha256"])))
+    request = primitive_proposer_request(parent_genome=genome, parent_state=state.to_payload(), selected_cells=[],
+        train_feedback=[], remaining_budget=ResourceUse(wall_seconds=1.0).to_payload(),
+        allowed_mutation_operators=sorted(state.mutation_policy.operators), counter_draw=0,
+        max_proposals=1, max_response_bytes=1024)
+    request_sha = persist(store, request)
+    args = args | {"counter": dict(args["counter"]) | {"counter": counter}}
+    store.write_state(**args)
+    batch = {"provider": "deterministic", "resource_use": ResourceUse().to_payload(),
+        "failure_reason": "empty", "proposals": [], "source_sha256s": [],
+        "attempts": [{"provider": "deterministic", "resource_use": ResourceUse().to_payload(), "failure_reason": "empty"}]}
+    return args, {"context": {"generation": generation, "parent_genome_sha256": args["active_genome_sha256"],
+        "request_sha256": request_sha, "counter": {"seed": 42, "stream": "numerical", "start": counter - 1, "end": counter}},
+        "batch": batch}
+
+
+def test_contextual_identical_batches_remain_distinct_completion_attempts(world):
+    store, _, kernel, *_ = world
+    args, first = contextual_attempt(world)
+    first_path = store.write_proposal_attempt(fingerprint_payload(first), first)
+    args, second = contextual_attempt((store, args, *world[2:]), generation=2, counter=2)
+    second_path = store.write_proposal_attempt(fingerprint_payload(second), second)
+    assert first["batch"] == second["batch"] and first_path != second_path
+    kernel.finalize()
+    current = json.loads(kernel.checkpoint_path.read_bytes())
+    args.update(kernel_checkpoint_sha256=current["checkpoint_sha256"],
+                budget_checkpoint_sha256=persist(store, current["budget"]))
+    store.write_state(**args)
+    complete = json.loads(store.write_completion({"status": "numerical_qd_complete"}).read_bytes())
+    assert complete["summary"]["provider_attempts"] == 2
+    assert complete["summary"]["llm_calls"] == 0
+
+
+@pytest.mark.parametrize("damage", ["generation", "parent", "request", "counter", "seed", "range", "extra"])
+def test_contextual_attempt_rejects_unbound_request_or_counter(world, damage):
+    store, *_ = world
+    _, payload = contextual_attempt(world)
+    if damage == "generation": payload["context"]["generation"] = 0
+    elif damage == "parent": payload["context"]["parent_genome_sha256"] = "f" * 64
+    elif damage == "request": payload["context"]["request_sha256"] = "f" * 64
+    elif damage == "counter": payload["context"]["counter"]["end"] = 2
+    elif damage == "seed": payload["context"]["counter"]["seed"] = 43
+    elif damage == "range": payload["context"]["counter"]["start"] = 1
+    else: payload["context"]["extra"] = True
+    with pytest.raises(ValueError):
+        store.write_proposal_attempt(fingerprint_payload(payload), payload)
+
+
 def test_open_budget_checkpoint_cannot_publish_state(world):
     store, args, kernel, *_ = world
     ledger = BudgetLedger(kernel.budget.plan, monotonic=lambda: 0.0)

@@ -282,7 +282,30 @@ class NumericalQDRunStore:
 
     def _proposal(self, payload):
         from .mutation import MutationProposalV2
-        from .proposers import NormalizedProposalBatchV2, ProviderAttemptV2
+        from .proposers import NormalizedProposalBatchV2, ProviderAttemptV2, primitive_proposer_request
+
+        if "context" in payload or "batch" in payload:
+            envelope = _require_exact_schema(payload, ("context", "batch"), field="contextual proposal attempt")
+            context = _require_exact_schema(envelope["context"],
+                ("generation", "parent_genome_sha256", "request_sha256", "counter"), field="proposal context")
+            generation = context["generation"]
+            if type(generation) is not int or generation < 1:
+                raise NumericalQDStoreError("proposal context requires a positive generation")
+            for name in ("parent_genome_sha256", "request_sha256"):
+                require_sha256(context[name], name)
+            request = primitive_proposer_request(**self._object(context["request_sha256"]))
+            parent = self.verify_candidate(context["parent_genome_sha256"])[0]
+            if parent.to_payload() != request["parent_genome"] or generation <= parent.generation:
+                raise NumericalQDStoreError("proposal request/Parent/generation mismatch")
+            counter = _require_exact_schema(context["counter"], ("seed", "stream", "start", "end"), field="proposal counter range")
+            if (any(type(counter[name]) is not int for name in ("seed", "start", "end"))
+                    or not 0 <= counter["start"] < counter["end"]):
+                raise NumericalQDStoreError("proposal counter range must be nonempty and ordered")
+            checkpoint = NumericalQDCheckpointV2.from_payload(self._read("checkpoint.json"))
+            if (counter["seed"] != checkpoint.counter["seed"] or counter["stream"] != checkpoint.counter["stream"]
+                    or counter["end"] > checkpoint.counter["counter"]):
+                raise NumericalQDStoreError("proposal counter range was not checkpointed before dispatch")
+            payload = envelope["batch"]
 
         value = _require_exact_schema(payload, ("provider", "resource_use", "failure_reason",
             "proposals", "source_sha256s", "attempts"), field="proposal attempt")
@@ -302,6 +325,11 @@ class NumericalQDRunStore:
         self._proposal(payload)
         if fingerprint_payload(payload) != attempt_sha256:
             raise NumericalQDStoreError("proposal attempt content SHA mismatch")
+        if "context" in payload:
+            for path in self._safe(self.directory / "proposals").glob("*.json"):
+                existing = self._read(f"proposals/{path.name}")
+                if existing.get("context") == payload["context"] and existing != payload:
+                    raise NumericalQDStoreError("one proposal context cannot have conflicting completed batches")
         return self._write(f"proposals/{attempt_sha256}.json", payload)
 
     def write_task_result(self, task_sha256, result):
