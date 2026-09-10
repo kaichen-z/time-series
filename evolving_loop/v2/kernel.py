@@ -246,7 +246,7 @@ class _BundleArtifact:
         return self.bundle.fingerprint()
 
 
-def _record(bundle, kind, parents, train=None):
+def _record(bundle, kind, parents, train=None, accepted_releases=()):
     train = train or {
         "status": "seed",
         "train_objectives": {},
@@ -265,7 +265,7 @@ def _record(bundle, kind, parents, train=None):
         train["train_objectives"],
         train["status"],
         train["resource_use"],
-        (),
+        accepted_releases,
         (),
     )
 
@@ -546,6 +546,7 @@ class EvolutionKernel:
         self._unpersisted_closures = {}
         self._active_sha = self._committed_event_sha = self._pending_event = None
         self._terminal = self._last_checkpoint_sha = None
+        self._bootstrap_preflight_sha = None
         self.promotion_host = PromotionHost(self)
 
     @staticmethod
@@ -571,9 +572,12 @@ class EvolutionKernel:
         *,
         seed: EvolutionBundleV2,
         checkpoint_path: str | Path | None = None,
+        bootstrap_preflight_sha256: str | None = None,
     ):
         # A constructor never adopts or repairs an established/partial run.
-        if any(path.is_file() for path in store.root.rglob("*")):
+        preflight_path = store.root / "seed_bootstrap_preflight.json"
+        if any(path.is_file() and not (bootstrap_preflight_sha256 is not None and path == preflight_path)
+               for path in store.root.rglob("*")):
             raise KernelAuthorityError(
                 "constructor requires a fresh run; use resume for established authority"
             )
@@ -583,6 +587,9 @@ class EvolutionKernel:
         ):
             raise KernelAuthorityError("fresh kernel requires an unused budget ledger")
         self._configure(store, protocol, budget, seed, checkpoint_path)
+        self._bootstrap_preflight_sha = bootstrap_preflight_sha256
+        if bootstrap_preflight_sha256 is not None:
+            self._verify_bootstrap_preflight(seed)
         store.write_run_manifest(self._manifest())
         store.write_budget_plan(budget.plan.to_payload())
         self.archive = EvolutionArchive(store.root / "archive")
@@ -593,13 +600,32 @@ class EvolutionKernel:
         self.promotion_host._publish("seed", seed, "seed", ())
 
     def _manifest(self):
-        return {
+        result = {
             "system": "evolution_v2",
             "kernel_protocol": self.protocol.to_payload(),
             "runtime_fingerprints": dict(self._runtimes),
             "seed_bundle_sha256": self._seed_sha,
             "budget_plan_sha256": self.budget.plan.fingerprint(),
         }
+        if self._bootstrap_preflight_sha is not None:
+            result["seed_bootstrap_preflight_sha256"] = self._bootstrap_preflight_sha
+        return result
+
+    def _verify_bootstrap_preflight(self, seed):
+        identity = require_sha256(self._bootstrap_preflight_sha, "bootstrap preflight SHA")
+        value = _read(self.store.root / "seed_bootstrap_preflight.json", identity)
+        _require_exact_schema(value, ("schema_version", "stage", "seed_supply_sha256", "protocol_sha256",
+            "budget_plan_sha256", "input_sha256s", "estimate"), field="seed bootstrap preflight")
+        if (type(value["schema_version"]) is not int or value["schema_version"] != 1
+                or value["stage"] != "seed_bootstrap"
+                or value["seed_supply_sha256"] != seed.numerical_release_sha256
+                or value["protocol_sha256"] != self.protocol.fingerprint()
+                or value["budget_plan_sha256"] != self.budget.plan.fingerprint()):
+            raise KernelAuthorityError("seed bootstrap preflight authority mismatch")
+        for sha in value["input_sha256s"].values():
+            require_sha256(sha, "bootstrap input SHA")
+        ResourceUse.from_payload(value["estimate"])
+        return value
 
     @classmethod
     def resume(
@@ -645,6 +671,9 @@ class EvolutionKernel:
                 )
             kernel = cls.__new__(cls)
             kernel._configure(store, protocol, budget, seed, checkpoint_path)
+            kernel._bootstrap_preflight_sha = manifest.get("seed_bootstrap_preflight_sha256")
+            if kernel._bootstrap_preflight_sha is not None:
+                kernel._verify_bootstrap_preflight(seed)
             if any(manifest.get(k) != v for k, v in kernel._manifest().items()):
                 raise ValueError("manifest protocol/authority mismatch")
             kernel._closures = dict(checkpoint["budget_closures"])
@@ -726,9 +755,16 @@ class EvolutionKernel:
         train_behavior_descriptors: Mapping[str, object],
         dev_comparison: Mapping[str, object],
         resource_use: ResourceUse,
+        account_only: bool = False,
     ) -> ClosedEvaluation:
         """Mint trusted immutable output. Train status and Dev values stay separate."""
         self._require_mutable()
+        if type(account_only) is not bool:
+            raise KernelAuthorityError("account_only must be boolean")
+        if account_only and _dev(dev_comparison) != {
+            "passed": False, "parent_metrics": {}, "candidate_metrics": {}
+        }:
+            raise KernelAuthorityError("account-only work cannot carry Dev comparison")
         reservation = self._permit(child, permit)
         if reservation in self._closed:
             raise KernelAuthorityError("stage already has a closed evaluation")
@@ -759,7 +795,32 @@ class EvolutionKernel:
             resource_use.to_payload(),
         )
         self._closed[reservation] = (result, train, permit)
+        if account_only:
+            # This mode consumes issuer-owned work without minting acceptance
+            # authority. Its closure participates in ordinary resume/finalize.
+            self._account(self._closed[reservation])
+            del self._closed[reservation]
+            del self._permits[reservation]
         return result
+
+    def _numerical_release_references(self, bundle, train):
+        """Resolve an explicitly typed Numerical pair; old fake records stay empty."""
+        identity = train["train_behavior_descriptors"].get("numerical_artifacts_sha256")
+        if identity is None:
+            return ()
+        require_sha256(identity, "numerical artifacts SHA")
+        from .numerical_qd.contracts import FrozenNumericalRegistryEnvelopeV2
+        from evolving_loop.package_numerical_supply import parse_numerical_supply_release
+
+        payload = _read(self.store.root / "numerical_qd" / "objects" / f"{identity}.json", identity)
+        _require_exact_schema(payload, ("supply", "registry"), field="Numerical release artifacts")
+        release = parse_numerical_supply_release(payload["supply"])
+        registry = FrozenNumericalRegistryEnvelopeV2.from_payload(payload["registry"])
+        if (release.fingerprint != bundle.numerical_release_sha256
+                or registry.release_sha256 != release.fingerprint
+                or registry.registry_sha256 != bundle.numerical_registry_sha256):
+            raise KernelAuthorityError("typed Numerical release/registry mismatch")
+        return tuple(sorted((release.fingerprint, registry.registry_sha256)))
 
     def _issued_evaluation(self, evaluation, permit):
         # Resolve authority by object identity, never caller-supplied hashes.
@@ -949,6 +1010,8 @@ class EvolutionKernel:
                 raise KernelAuthorityError(
                     "closed evaluation authority or Bundle binding mismatch"
                 )
+            release_references = (self._numerical_release_references(child, train)
+                                  if target == "numerical" else ())
             closure = self._account(issued)
             self.archive.append(
                 _BundleArtifact(child, "bundle"),
@@ -1008,7 +1071,8 @@ class EvolutionKernel:
             )
             self.archive.append(
                 _BundleArtifact(sealed, "acceptance_seal"),
-                _record(sealed, "acceptance_seal", (child.fingerprint(),), train),
+                _record(sealed, "acceptance_seal", (child.fingerprint(),), train,
+                        release_references),
             )
             self._archive_snapshot = self.archive.snapshot_sha256()
             self._transitions[child.fingerprint()][
@@ -1191,6 +1255,12 @@ class EvolutionKernel:
             )
             if expected.canonical_bytes() != bundle.canonical_bytes():
                 raise ValueError("sealed Bundle differs from acceptance evidence")
+            train = _read(self.store.root / "evaluations" / provisional.fingerprint() / "train.json",
+                          evidence.train_evaluation_sha256)
+            release_references = (self._numerical_release_references(bundle, train)
+                                  if evidence.target == "numerical" else ())
+            expected_record = _record(bundle, "acceptance_seal", (provisional.fingerprint(),),
+                                      train, release_references).to_payload()
             for line in (
                 (self.store.root / "archive" / "index.jsonl")
                 .read_bytes()
@@ -1200,9 +1270,7 @@ class EvolutionKernel:
                     line.decode("utf-8"), context="archive index"
                 )["record"]
                 if record["artifact_sha256"] == identity:
-                    if record["artifact_kind"] != "acceptance_seal" or record[
-                        "parent_sha256s"
-                    ] != [provisional.fingerprint()]:
+                    if record != expected_record:
                         raise ValueError("acceptance seal archive lineage mismatch")
                     break
             return bundle
@@ -1239,8 +1307,12 @@ class EvolutionKernel:
         total = ResourceUse()
         if prior_elapsed_wall_seconds is None:
             prior_elapsed_wall_seconds = self.budget.elapsed_wall_seconds
-        for reservation in self._closures:
-            closure = self._load_closure(reservation)
+        # Canonical JSON sorts reservation keys. Floating-point accumulation
+        # must nevertheless reproduce the ledger's original close order.
+        closures = sorted((self._load_closure(reservation) for reservation in self._closures),
+            key=lambda closure: len(closure["budget_before"]["closed_reservation_sha256s"]))
+        bootstrap_refs = []
+        for closure in closures:
             if (
                 prior_elapsed_wall_seconds
                 < closure["budget_after"]["prior_elapsed_wall_seconds"]
@@ -1249,12 +1321,35 @@ class EvolutionKernel:
                     "checkpoint elapsed time precedes a verified budget closure"
                 )
             total = total + ResourceUse.from_payload(closure["resource_use"])
+            folder = self.store.root / "evaluations" / closure["candidate_bundle_sha256"]
+            record = _read(folder / "closed.json", closure["evaluation_sha256"])
+            train = _read(folder / "train.json", record["train_evaluation_sha256"])
+            bootstrap_sha = train["train_behavior_descriptors"].get("seed_bootstrap_preflight_sha256")
+            if bootstrap_sha is not None:
+                bootstrap_refs.append(bootstrap_sha)
+                if record["dev_comparison_sha256"] != fingerprint_payload({
+                        "passed": False, "parent_metrics": {}, "candidate_metrics": {}}):
+                    raise KernelAuthorityError("seed bootstrap cannot carry Dev comparison")
         if total != self.budget.charged_use or set(self._closures) != set(
             self.budget.checkpoint()["closed_reservation_sha256s"]
         ):
             raise KernelAuthorityError(
                 "checkpoint budget closures do not account for the ledger"
             )
+        if bootstrap_refs != ([] if self._bootstrap_preflight_sha is None else [self._bootstrap_preflight_sha]):
+            raise KernelAuthorityError("seed bootstrap manifest/closure commitment mismatch")
+        if self._bootstrap_preflight_sha is not None:
+            seed = self._verified_bundle(self._seed_sha)
+            preflight = self._verify_bootstrap_preflight(seed)
+            expected = seed.provisional_child("numerical", {"numerical": (self._bootstrap_preflight_sha,
+                fingerprint_payload({"seed_bootstrap": self._bootstrap_preflight_sha}))})
+            matches = [closure for closure in closures if closure["candidate_bundle_sha256"] == expected.fingerprint()]
+            if len(matches) != 1 or matches[0]["parent_bundle_sha256"] != self._seed_sha:
+                raise KernelAuthorityError("seed bootstrap requires exactly one issuer-owned closure")
+            opened = [row for row in matches[0]["budget_before"]["open_reservations"]
+                      if row["reservation_sha256"] == matches[0]["reservation_sha256"]]
+            if len(opened) != 1 or opened[0]["estimate"] != preflight["estimate"]:
+                raise KernelAuthorityError("seed bootstrap admission differs from preflight")
         for candidate, ref in self._transitions.items():
             require_sha256(candidate, "transition candidate")
             _require_exact_schema(

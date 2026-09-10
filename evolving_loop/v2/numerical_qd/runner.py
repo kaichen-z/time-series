@@ -1,0 +1,794 @@
+"""Numerical self-evolution with one Kernel-owned resource and promotion authority.
+
+``task_manifest`` is the adapter's committed GroupFoldManifest (or its payload).
+``seed_supply`` accepts the existing NumericalSupplyRelease, its payload, or the
+Task 7 ImportedNumericalSeedV2. Bootstrap inventory/policies are derived from
+verified adapter sources. The optional host ``adapter.monotonic`` clock supports
+deterministic execution; the default is the real monotonic clock.
+"""
+from __future__ import annotations
+
+import copy
+import hashlib
+import statistics
+import time
+from dataclasses import dataclass, replace
+from pathlib import Path
+
+from common.metrics import drcik_point_metrics, joint_scaled_error, linear_quantile
+from common.payload import strict_json_loads
+from evolving_loop.package_numerical_supply import (
+    NumericalSupplyRelease, bound_numerical_package, build_package_registry,
+    parse_numerical_supply_release,
+)
+from evolving_loop.package_registry import task_registry_fingerprint
+from numerical_agent.evolution.champion import ChampionRecipe, EvolutionAssumption, parse_champion_release
+from numerical_agent.evolution.champion_evidence import ChampionTaskRow
+from numerical_agent.evolution.execution import MethodForecastError, Task as RuntimeTask
+from numerical_agent.evolution.numerical_loop import run_numerical_loop
+from numerical_agent.evolution.screening import _policy_payload, profile_task
+
+from ..budget import BudgetLedger, ResourceUse, StagePermit
+from ..bundle import EvolutionBundleV2
+from ..contracts import canonical_v2_bytes, fingerprint_payload
+from ..kernel import EvolutionKernel
+from ..store import V2RunStore, write_once_json
+from .adapters import (
+    ImportedNumericalSeedV2, LegacyNumericalAdapter, NumericalWorkStopped, _canonical_member,
+    evaluate_numerical_child, freeze_qd_supply, import_numerical_seed,
+)
+from .config import NumericalQDConfigV2
+from .contracts import (
+    ConstraintReportV2, FrozenNumericalRegistryEnvelopeV2,
+    HyperbandBracketV2, HyperbandBudgetOutcomeV2, HyperbandStateV2,
+    HyperbandTaskResultV2, MutationOperatorStatsV2, MutationStateV2,
+    NumericalGenomeV2, NumericalInventoryV2, NumericalMemberV2,
+    NumericalMutationPolicyV2, NumericalObjectiveVectorV2, NumericalProposerPromptV2,
+    NumericalQDEntryV2, TaskCacheRowV2, TrainMutationFeedbackV2, TrainTaskV2,
+)
+from .descriptors import describe_history
+from .hyperband import (
+    _read_cache, _task_evaluation, advance_hyperband, choose_bracket,
+    evaluation_cache_key, fixed_rung_manifest,
+)
+from .map_elites import CounterRandom, NumericalQDArchive
+from .mutation import MutationProposalV2, apply_mutation, record_train_outcome
+from .nsga2 import select_survivors
+from .persistence import NumericalQDRunStore, NumericalQDStoreError
+from .proposers import (
+    DeterministicProposalProvider, HybridProposalProvider, LLMProposalProvider,
+    NormalizedProposalBatchV2, ProviderAttemptV2, primitive_proposer_request,
+)
+
+
+_NO_DEV = {"passed": False, "parent_metrics": {}, "candidate_metrics": {}}
+
+
+class _SeedBootstrapClock:
+    """Bootstrap-only deferred admission; every subsequent stage sees real time."""
+    def __init__(self, monotonic):
+        self.monotonic, self.start, self.active = monotonic, monotonic(), False
+
+    def __call__(self):
+        return self.monotonic() if self.active else self.start
+
+
+@dataclass(frozen=True)
+class NumericalQDRunResultV2:
+    status: str
+    active_bundle: EvolutionBundleV2
+    occupied_cells: int
+    accepted_steps: int
+    rejected_steps: int
+    mutation_policy_sha256: str
+    proposer_prompt_sha256: str
+    seed_mutation_policy_sha256: str
+    seed_proposer_prompt_sha256: str
+    budget: dict
+    public_test_accessed: bool = False
+
+
+def _read(path):
+    raw = Path(path).read_bytes()
+    value = strict_json_loads(raw.decode(), context=str(path))
+    if type(value) is not dict or canonical_v2_bytes(value) != raw:
+        raise ValueError("runner requires canonical persisted objects")
+    return value
+
+
+def _persist(store, value):
+    payload = value.to_payload() if hasattr(value, "to_payload") else value
+    identity = payload.get("checkpoint_sha256", fingerprint_payload(payload))
+    store.write_object(identity, payload)
+    return identity
+
+
+def _available(kernel):
+    values = {name: max(0.0 if type(limit) is float else 0,
+                        limit - getattr(kernel.budget.charged_use, name))
+              for name, limit in kernel.budget.plan.ceilings.to_payload().items()}
+    values["wall_seconds"] = min(values["wall_seconds"], max(0.0,
+        kernel.budget.plan.search_deadline_seconds - kernel.budget.elapsed_wall_seconds))
+    return ResourceUse.from_payload(values)
+
+
+class _KernelWork:
+    """Host facade: every provider reservation and close is issued by Kernel."""
+
+    def __init__(self, kernel, parent, generation):
+        self.kernel, self.parent, self.generation = kernel, parent, generation
+        self.children = {}
+
+    def reserve_stage(self, stage, estimate):
+        identity = fingerprint_payload({"generation": self.generation, "stage": stage})
+        child = self.parent.provisional_child("numerical", {"numerical": (
+            identity, fingerprint_payload({"work_registry": identity}))})
+        permit = self.kernel.reserve_evaluation(child, estimate)
+        if permit.allowed:
+            self.children[permit.reservation_sha256] = child
+        return permit
+
+    def close_stage(self, permit, actual, *, status="passed", objectives=None):
+        child = self.children.pop(permit.reservation_sha256)
+        self.kernel.close_evaluation(self.parent, child, permit=permit, status=status,
+            train_objectives=objectives or {}, train_behavior_descriptors={},
+            dev_comparison=_NO_DEV, resource_use=actual, account_only=True)
+        checkpoint = _read(self.kernel.checkpoint_path)
+        reference = checkpoint["budget_closures"][permit.reservation_sha256]
+        closure = _read(self.kernel.store.root / "evaluations" /
+                        reference["candidate_bundle_sha256"] / "budget_closure.json")
+        return StagePermit(closure["allowed"], closure["reason"], None)
+
+    def can_open_stage(self, estimate):
+        return self.kernel.budget.can_open_stage(estimate)
+
+
+class _UnavailableProvider:
+    def propose(self, request):
+        return NormalizedProposalBatchV2((), (), ResourceUse(), "llm", "unavailable",
+            (ProviderAttemptV2("llm", ResourceUse(), "unavailable"),))
+
+
+def _bootstrap(config, release, adapter):
+    """Build immutable policy metadata; never score Dev or execute proposal code."""
+    train = tuple(t for t in adapter.tasks if t.numeric.task_id in adapter.fold_manifest.task_fold_map)
+    members, policies, cells = [], {}, set()
+    for sha, source in sorted(adapter.sources.items()):
+        module = adapter.validate_source(source)
+        for name in module.names():
+            entry = adapter.materializer.screening_policy.get(name)
+            if entry is None or entry.status == "quarantined" or name in adapter.materializer.screening_policy.fallback_names:
+                continue
+            family = entry.family if entry.family in {"statistical", "tsfm", "combined"} else "program"
+            declared = tuple(sorted({describe_history(t.numeric.history_values,
+                t.numeric.prediction_length, t.numeric.frequency, family,
+                config.descriptor_policy).fingerprint() for t in train}))
+            cells.update(declared)
+            assumption = EvolutionAssumption(name + "_history", name, "history_length", "above", "full", "select",
+                "History supports the candidate.", "History is unavailable.")
+            recipe = ChampionRecipe("select_" + name, "select", (name,), name, (assumption,))
+            policy = recipe.to_payload()
+            policies[fingerprint_payload(policy)] = policy
+            members.append(NumericalMemberV2(name, family, sha, fingerprint_payload(policy), (), declared, "active"))
+    if not members:
+        raise ValueError("seed requires an executable verified adapter source")
+    operators = tuple(sorted(config.mutation["operators"]))
+    policy = NumericalMutationPolicyV2(1, {op: MutationOperatorStatsV2(0, 0, 0, 0, 0) for op in operators})
+    prompt = NumericalProposerPromptV2(1, "Propose a bounded mutation using Train evidence and declared cells.",
+        "numerical_mutation_batch_v1", config.proposer["max_response_bytes"], operators, None)
+    state = MutationStateV2(NumericalInventoryV2(1, tuple(members)), policy, prompt, tuple(sorted(cells)),
+        config.mutation["max_parents_per_child"], config.mutation["max_inventory_size"])
+    screen = _policy_payload(adapter.materializer.screening_policy)
+    combined = {"policies": [item.to_payload() for item in adapter.materializer.combined_policies]}
+    genome = NumericalGenomeV2(1, 0, (), operators[0], state.inventory.fingerprint(),
+        fingerprint_payload(screen), fingerprint_payload(combined), policy.fingerprint(), prompt.fingerprint(),
+        config.runtime_fingerprints, config.kernel_protocol.fingerprint())
+    return state, genome, policies, screen, combined
+
+
+def _seed_registry(release, adapter, *, account_work=None):
+    anchor = parse_champion_release(release.to_payload()["anchor_release_payload"])
+    def forecast(*args):
+        if account_work is not None:
+            account_work(ResourceUse(task_executions=1))
+        return adapter.forecast_trusted(*args, account_work=account_work)
+    def build(task, supplied):
+        source = run_numerical_loop(RuntimeTask(task.numeric.task_id, task.numeric.history_values,
+            task.numeric.prediction_length, task.numeric.frequency, ()),
+            screening_policy=adapter.materializer.screening_policy,
+            candidate_runner=forecast, champion_release=anchor)
+        return bound_numerical_package(source, supplied, {item.name: item for item in source.ranked_alternatives})
+    return build_package_registry(adapter.tasks, release, build)
+
+
+def _train_rows(adapter):
+    rows = []
+    for task in adapter.tasks:
+        task = task.numeric
+        if task.task_id not in adapter.fold_manifest.task_fold_map:
+            continue
+        profile = profile_task(RuntimeTask(task.task_id, task.history_values, task.prediction_length, task.frequency, ()))
+        # Task 7 verifies these Host rows and recomputes forecasts from exact
+        # persisted source bytes before fitting. This placeholder is not scored.
+        rows.append(ChampionTaskRow(task.task_id, "host_binding", profile, task.future_values,
+            (0.0,) * task.prediction_length, fold=adapter.fold_manifest.task_fold_map[task.task_id], split="build", history=task.history_values))
+    return tuple(rows)
+
+
+def _state_for(store, genome, config, declared_cells, policy=None, prompt=None):
+    return MutationStateV2(NumericalInventoryV2.from_payload(store._object(genome.inventory_sha256)),
+        policy or NumericalMutationPolicyV2.from_payload(store._object(genome.mutation_policy_sha256)),
+        prompt or NumericalProposerPromptV2.from_payload(store._object(genome.proposer_prompt_sha256)),
+        declared_cells, config.mutation["max_parents_per_child"], config.mutation["max_inventory_size"])
+
+
+def _persist_state(store, state, genome):
+    for value in (state.inventory, state.mutation_policy, state.proposer_prompt, genome):
+        _persist(store, value)
+    return store.verify_candidate(genome.fingerprint())[0]
+
+
+def _aggregate(values, manifest, bracket, index):
+    ordered = sorted(values, key=lambda v: v.task_ids)
+    fields = ("mean_capped_smae", "mean_capped_srmse", "mean_raw_joint_error", "normalized_execution_cost")
+    means = {name: float(statistics.fmean(getattr(value.objectives, name) for value in ordered)) for name in fields}
+    objective = NumericalObjectiveVectorV2(means["mean_capped_smae"], means["mean_capped_srmse"],
+        float(linear_quantile([value.objectives.mean_capped_srmse for value in ordered], 0.95)),
+        means["mean_raw_joint_error"], means["normalized_execution_cost"])
+    violations = tuple(sorted({name for value in ordered for name in value.constraints.violations}))
+    cells = {cell.fingerprint(): cell for value in ordered for cell in value.cells}
+    use = ResourceUse()
+    for value in ordered:
+        use += ResourceUse.from_payload(value.resource_use)
+    return replace(ordered[0], task_subset_sha256=manifest.fingerprint(), bracket=bracket, rung=index,
+        task_ids=tuple(sorted(task for value in ordered for task in value.task_ids)),
+        task_statuses={task: status for value in ordered for task, status in value.task_statuses.items()},
+        objectives=objective, constraints=ConstraintReportV2(all(v.constraints.feasible for v in ordered), violations),
+        cells=tuple(cells[sha] for sha in sorted(cells)), resource_use=use.to_payload())
+
+
+def _rung(kernel, work, state, manifest, children, adapter, config, cache):
+    """Task 6 pure advancement around explicit real Kernel reservations."""
+    started, executed = 0.0, 0
+    reported = ResourceUse()
+    pending, results = [], []
+    for candidate in state.active_candidates:
+        for task in manifest.tasks:
+            key = evaluation_cache_key(candidate, task.task_sha256, manifest.split_sha256,
+                config.kernel_protocol.metric_policy, config.descriptor_policy.fingerprint(),
+                config.runtime_fingerprints, manifest.protocol_sha256, adapter.fingerprint)
+            hit = _read_cache(cache, key, candidate, task, config.kernel_protocol.metric_policy,
+                config.descriptor_policy.fingerprint(), config.runtime_fingerprints, adapter.fingerprint)
+            pending.append((candidate, task, key, hit))
+    missing = sum(hit is None for _, _, _, hit in pending)
+    estimate = replace(_available(kernel), task_executions=missing,
+                       wall_seconds=float(missing * config.adapter["task_timeout_seconds"]))
+    permit = work.reserve_stage("rung-" + state.fingerprint() + "-" + manifest.fingerprint(), estimate)
+    if not permit.allowed:
+        return None, (), permit.reason
+    failure = None
+    try:
+        for candidate, task, key, hit in pending:
+            if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
+                failure = "finalization_reserve"
+                break
+            if hit is not None:
+                value = hit.evaluation
+            else:
+                before = adapter.monotonic()
+                snapshot = adapter.resource_snapshot()
+                executed += 1
+                try:
+                    value = evaluate_numerical_child(adapter, children[candidate], task,
+                        descriptor_policy=config.descriptor_policy, metric_policy_sha256=config.kernel_protocol.metric_policy,
+                        bracket=state.bracket.name, rung=len(state.rungs), resource_use=ResourceUse(task_executions=1))
+                    value = _task_evaluation(value, candidate, task, config.kernel_protocol.metric_policy,
+                        config.descriptor_policy.fingerprint(), config.runtime_fingerprints, adapter.fingerprint)
+                except (ValueError, TypeError, TimeoutError):
+                    failure = "invalid_response"
+                    break
+                finally:
+                    extra = adapter.resource_delta(snapshot)
+                    reported += extra
+                    duration = adapter.monotonic() - before
+                    started += duration
+                if any(getattr(reported, name) > getattr(estimate, name) for name in ResourceUse.field_names()):
+                    failure = "budget_overrun"
+                    break
+                if duration >= config.adapter["task_timeout_seconds"]:
+                    failure = "timeout"
+                    break
+                value = replace(value, resource_use=(ResourceUse.from_payload(value.resource_use) + extra).to_payload())
+                if value.constraints.feasible and value.task_statuses[task.task_id] == "passed":
+                    cache[key] = TaskCacheRowV2(key, task.task_sha256, value)
+            results.append((task, HyperbandTaskResultV2(candidate, task.task_id, key,
+                value.task_statuses[task.task_id], value, hit is not None, None)))
+    finally:
+        actual = reported + ResourceUse(task_executions=executed, wall_seconds=float(started))
+        closed = work.close_stage(permit, actual, status="failed" if failure else "passed")
+    if not closed.allowed:
+        failure = closed.reason
+    if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
+        failure = failure or "finalization_reserve"
+    if failure:
+        return None, (), failure
+    captured = _read(kernel.checkpoint_path)["budget"]
+    outcome = HyperbandBudgetOutcomeV2("completed", None, permit.reservation_sha256,
+        actual.to_payload(), captured["checkpoint_sha256"], captured)
+    aggregates = tuple(_aggregate([result.evaluation for _, result in results if result.candidate_sha256 == candidate],
+        manifest, state.bracket.name, len(state.rungs)) for candidate in state.active_candidates)
+    return advance_hyperband(state, manifest, aggregates, outcome).state, tuple(results), None
+
+
+def _dev_compare(parent_registry, child_registry, parent_name, child_name, adapter, kernel, account_work):
+    """Trusted Dev20 comparison. Only the caller's sealed evidence sees values."""
+    scores = [[], []]
+    count = 0
+    for task in sorted(adapter.tasks, key=lambda t: t.numeric.task_id):
+        if task.numeric.task_id in adapter.fold_manifest.task_fold_map:
+            continue
+        for index, registry in enumerate((parent_registry, child_registry)):
+            if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
+                return _NO_DEV
+            account_work()
+            count += 1
+            package = registry.package_for(task)
+            member_name = (parent_name, child_name)[index]
+            forecast = next((item.forecast for item in package.ranked_alternatives
+                             if item.name == member_name), package.protected_baseline.forecast)
+            scores[index].append(drcik_point_metrics(task.numeric.future_values, forecast, cap=5.0))
+    metrics = [{"mean_smae": float(statistics.fmean(row["smae"] for row in values)),
+                "mean_srmse": float(statistics.fmean(row["srmse"] for row in values))} for values in scores]
+    passed = (count == 40 and metrics[1]["mean_smae"] < metrics[0]["mean_smae"]
+              and metrics[1]["mean_srmse"] <= metrics[0]["mean_srmse"])
+    return {"passed": passed, "parent_metrics": metrics[0], "candidate_metrics": metrics[1]}
+
+
+def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry, archive, children,
+                   winner, generation, config):
+    """Bill durable material envelopes, excluding authority/control persistence."""
+    available = _available(kernel)
+    if available.artifact_bytes == 0:
+        return None, "artifact_bytes_exhausted"
+    estimate = ResourceUse(artifact_bytes=available.artifact_bytes,
+        wall_seconds=min(available.wall_seconds / 2.0, len(adapter.tasks) * config.adapter["task_timeout_seconds"]))
+    permit = work.reserve_stage("freeze-" + winner, estimate)
+    if not permit.allowed:
+        return None, permit.reason
+    objects = store.directory / "objects"
+    existing = set(objects.glob("*.json"))
+    before = adapter.monotonic()
+    result, reason = None, "freeze_failed"
+    try:
+        frozen = freeze_qd_supply(adapter, parent_release, parent_registry, archive,
+            tuple(children.values()), descriptor_policy=config.descriptor_policy, version=f"n{generation:03d}")
+        payload = {"supply": frozen.release.to_payload(), "registry": frozen.envelope.to_payload()}
+        if len(canonical_v2_bytes(payload)) > estimate.artifact_bytes:
+            reason = "artifact_bytes_exhausted"
+        else:
+            pair_sha = _persist(store, payload)
+            pair = store._object(pair_sha)
+            release = parse_numerical_supply_release(pair["supply"])
+            registry = FrozenNumericalRegistryEnvelopeV2.from_payload(pair["registry"]).restore(adapter.tasks)
+            result = release, registry, pair_sha
+    except (ValueError, TypeError, TimeoutError, MethodForecastError):
+        reason = "freeze_failed"
+    finally:
+        # The single typed pair embeds all package envelopes. Count each new
+        # material file once, including a completed write followed by failure.
+        produced = set(objects.glob("*.json")) - existing
+        closed = work.close_stage(permit, ResourceUse(
+            artifact_bytes=sum(path.stat().st_size for path in produced if path.is_file()),
+            wall_seconds=float(adapter.monotonic() - before)), status="passed" if result else "failed")
+    if not closed.allowed:
+        return None, closed.reason
+    return result, None if result else reason
+
+
+def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, llm_client=None,
+                     resume=False, stop_after=None) -> NumericalQDRunResultV2:
+    """Run to the committed resource/deadline limit, or pause after N generations.
+
+    Stops are closed generation boundaries. A crash within an unpublished
+    operation fails closed through Task 8; no partial operation is replayed.
+    """
+    if type(config) is not NumericalQDConfigV2:
+        config = NumericalQDConfigV2.from_payload(config)
+    if not isinstance(adapter, LegacyNumericalAdapter):
+        raise TypeError("runner requires the typed LegacyNumericalAdapter boundary")
+    if stop_after is not None and (type(stop_after) is not int or stop_after < 1):
+        raise ValueError("stop_after must be a positive generation count")
+    adapter = copy.copy(adapter)
+    adapter.preflight_resources()
+    if any(task.numeric.prediction_length > config.adapter["max_forecast_values"] for task in adapter.tasks):
+        raise ValueError("task forecast size exceeds the configured adapter limit")
+    adapter.monotonic = getattr(adapter, "monotonic", time.monotonic)
+    manifest_payload = task_manifest.to_payload() if hasattr(task_manifest, "to_payload") else task_manifest
+    if manifest_payload != adapter.fold_manifest.to_payload():
+        raise ValueError("task manifest differs from adapter's exact Train80 groups")
+    imported = seed_supply if type(seed_supply) is ImportedNumericalSeedV2 else None
+    release = imported.release if imported else (seed_supply if type(seed_supply) is NumericalSupplyRelease
+                                                else parse_numerical_supply_release(seed_supply))
+    seed_state, seed_genome, seed_policies, screen, combined = _bootstrap(config, release, adapter)
+    task_commitments = {task.numeric.task_id: task_registry_fingerprint(task) for task in adapter.tasks}
+    inputs = {"seed_supply": fingerprint_payload(release.to_payload()),
+        "task_manifest": fingerprint_payload({"folds": manifest_payload, "tasks": task_commitments}),
+        "adapter": adapter.fingerprint, "sources": fingerprint_payload(dict(adapter.sources))}
+    if imported:
+        inputs["seed_registry"] = imported.envelope.fingerprint()
+    root = Path(output_dir)
+    if resume:
+        store = NumericalQDRunStore(root)
+        # Store preflight precedes the Kernel read, including finished no-op runs.
+        store._verify_root_paths(require_checkpoint=True)
+        kernel_payload = _read(root / "checkpoint.json")
+        checkpoint = store.resume(config.fingerprint(), inputs, kernel_payload["checkpoint_sha256"],
+                                  kernel_payload["budget"]["checkpoint_sha256"])
+        kernel = EvolutionKernel.resume(V2RunStore(root), config.budget, monotonic=adapter.monotonic)
+        active = kernel.active_bundle()
+        archive = NumericalQDArchive.from_payload(store._object(checkpoint.qd_snapshot_sha256))
+        state = _state_for(store, seed_genome, config, seed_state.declared_cells,
+            NumericalMutationPolicyV2.from_payload(store._object(checkpoint.mutation_policy_sha256)),
+            NumericalProposerPromptV2.from_payload(store._object(checkpoint.proposer_prompt_sha256)))
+        active_genome = store.verify_candidate(checkpoint.active_genome_sha256)[0]
+        hyperband = HyperbandStateV2.from_payload(store._object(checkpoint.hyperband_state_sha256))
+        random = CounterRandom(**dict(checkpoint.counter))
+        objects = [store._object(Path(name).stem) for name in checkpoint.completed_operation_sha256s
+                   if name.startswith("objects/")]
+        steps = [value["numerical_qd_step"] for value in objects if "numerical_qd_step" in value]
+        generation = max((step["generation"] for step in steps), default=0)
+        attempts = [store._read(name) for name in checkpoint.completed_operation_sha256s if name.startswith("proposals/")]
+        if any(attempt.get("context", {}).get("generation", 0) > generation for attempt in attempts):
+            raise NumericalQDStoreError("unfinished generation cannot be resampled; resume requires a closed generation or a new epoch")
+        previous_feedback = (max(steps, key=lambda step: step["generation"])["train_feedback"] if steps else None)
+        pairs = [value for value in objects if set(value) == {"supply", "registry"}]
+        pair = next(value for value in pairs if parse_numerical_supply_release(value["supply"]).fingerprint == active.numerical_release_sha256)
+        parent_release = parse_numerical_supply_release(pair["supply"])
+        parent_registry = FrozenNumericalRegistryEnvelopeV2.from_payload(pair["registry"]).restore(adapter.tasks)
+    else:
+        if root.exists() and any(root.iterdir()):
+            raise ValueError("fresh numerical run requires an empty output directory")
+        kernel_store = V2RunStore.create(root)
+        bootstrap_sha, bootstrap_use, bridge = None, ResourceUse(), None
+        if imported:
+            registry = imported.envelope.restore(adapter.tasks)
+            ledger = BudgetLedger(config.budget, monotonic=adapter.monotonic)
+        else:
+            bridge = _SeedBootstrapClock(adapter.monotonic)
+            ledger = BudgetLedger(config.budget, monotonic=bridge)
+            bootstrap_estimate = replace(config.budget.ceilings,
+                wall_seconds=min(config.budget.ceilings.wall_seconds, config.budget.search_deadline_seconds / 2.0),
+                artifact_bytes=config.budget.ceilings.artifact_bytes)
+            if (bootstrap_estimate.task_executions == 0 or bootstrap_estimate.wall_seconds == 0.0
+                    or not ledger.can_open_stage(bootstrap_estimate).allowed):
+                raise ValueError("seed bootstrap preflight budget denied")
+            preflight = {"schema_version": 1, "stage": "seed_bootstrap", "seed_supply_sha256": release.fingerprint,
+                "protocol_sha256": config.kernel_protocol.fingerprint(), "budget_plan_sha256": config.budget.fingerprint(),
+                "input_sha256s": inputs, "estimate": bootstrap_estimate.to_payload()}
+            bootstrap_sha = fingerprint_payload(preflight)
+            preflight_path = write_once_json(root / "seed_bootstrap_preflight.json", preflight)
+            if _read(preflight_path) != preflight:
+                raise ValueError("seed bootstrap preflight readback mismatch")
+            def account_bootstrap(use, *, begun=False):
+                nonlocal bootstrap_use
+                bootstrap_use += use
+            registry = _seed_registry(release, adapter, account_work=account_bootstrap)
+            bootstrap_use = replace(bootstrap_use, wall_seconds=float(adapter.monotonic() - bridge.start),
+                                    artifact_bytes=preflight_path.stat().st_size)
+        active = EvolutionBundleV2(2, 0, None, release.fingerprint, registry.fingerprint,
+            **dict(config.fixed_bundle_components), protocol_fingerprint=config.kernel_protocol.fingerprint(),
+            runtime_fingerprints=config.runtime_fingerprints, acceptance_evidence_sha256=None)
+        kernel = EvolutionKernel(kernel_store, config.kernel_protocol, ledger, seed=active,
+                                 bootstrap_preflight_sha256=bootstrap_sha)
+        if bridge is not None:
+            candidate = active.provisional_child("numerical", {"numerical": (bootstrap_sha,
+                fingerprint_payload({"seed_bootstrap": bootstrap_sha}))})
+            permit = kernel.reserve_evaluation(candidate, bootstrap_estimate)
+            bridge.active = True  # Never pause/rebase any search stage's clock.
+            if not permit.allowed:
+                raise ValueError("seed bootstrap differs from its committed admission")
+            kernel.close_evaluation(active, candidate, permit=permit, status="passed", train_objectives={},
+                train_behavior_descriptors={"seed_bootstrap_preflight_sha256": bootstrap_sha},
+                dev_comparison=_NO_DEV, resource_use=bootstrap_use, account_only=True)
+        store = NumericalQDRunStore.create(root)
+        for sha, source in adapter.sources.items():
+            store.write_source(sha, source.encode())
+        for payload in (config, screen, combined, *seed_policies.values()):
+            _persist(store, payload)
+        _persist_state(store, seed_state, seed_genome)
+        imported_seed = import_numerical_seed(release, registry, tasks=adapter.tasks)
+        _persist(store, {"supply": release.to_payload(), "registry": imported_seed.envelope.to_payload()})
+        state, active_genome = seed_state, seed_genome
+        archive = NumericalQDArchive(capacity=config.map_elites["cell_capacity"])
+        hyperband = HyperbandStateV2(HyperbandBracketV2.registered("explore"), (seed_genome.fingerprint(),),
+            config.hyperband["reduction_factor"], config.kernel_protocol.split_manifest, config.kernel_protocol.fingerprint(), ())
+        random, generation = CounterRandom(config.seed, "numerical"), 0
+        previous_feedback = None
+        parent_release, parent_registry = release, registry
+
+    def checkpoint_state():
+        current = _read(kernel.checkpoint_path)
+        return store.write_state(config_sha256=config.fingerprint(), input_sha256s=inputs,
+            active_bundle_sha256=_persist(store, active), active_genome_sha256=active_genome.fingerprint(),
+            qd_snapshot_sha256=_persist(store, archive), mutation_policy_sha256=_persist(store, state.mutation_policy),
+            proposer_prompt_sha256=_persist(store, state.proposer_prompt), hyperband_state_sha256=_persist(store, hyperband),
+            counter=random.to_payload(), budget_checkpoint_sha256=_persist(store, current["budget"]),
+            kernel_checkpoint_sha256=current["checkpoint_sha256"])
+
+    def result(status):
+        current = _read(kernel.checkpoint_path)
+        transitions = tuple(current["completed_transitions"].values())
+        return NumericalQDRunResultV2(status, active, len(archive.cells),
+            sum(row["decision"] == "accept" for row in transitions), sum(row["decision"] == "reject" for row in transitions),
+            state.mutation_policy.fingerprint(), state.proposer_prompt.fingerprint(), seed_state.mutation_policy.fingerprint(),
+            seed_state.proposer_prompt.fingerprint(), current["budget"])
+
+    if (root / "evaluation_complete.json").exists():
+        return result("numerical_qd_complete")
+    if not resume:
+        checkpoint_state()
+    groups = {}
+    for task in adapter.tasks:
+        if task.numeric.task_id in adapter.fold_manifest.task_fold_map:
+            groups.setdefault(task.numeric.entity_name, []).append(TrainTaskV2(task.numeric.task_id,
+                task.numeric.entity_name, task_commitments[task.numeric.task_id], "train",
+                config.kernel_protocol.split_manifest, config.kernel_protocol.fingerprint()))
+    # Validate all registered boundaries before charged dispatch.
+    for resource in (8, 32, 80):
+        fixed_rung_manifest(groups, resource, config.kernel_protocol.split_manifest, config.kernel_protocol.fingerprint())
+    cache = {}
+    feedback = (TrainMutationFeedbackV2.from_payload(previous_feedback) if previous_feedback else
+                TrainMutationFeedbackV2("train", sorted(config.mutation["operators"])[0], False, False, False, ()))
+    while not kernel.budget.finalization_started:
+        if stop_after is not None and generation >= stop_after:
+            return result("numerical_qd_paused")
+        if not kernel.budget.can_open_stage(ResourceUse(task_executions=1)).allowed:
+            break
+        generation += 1
+        counter_start = random.counter
+        sampled = archive.sample_parent(feedback, random).genome_sha256 if archive.entries else seed_genome.fingerprint()
+        selected = store.verify_candidate(sampled)[0]
+        parent_state = _state_for(store, selected, config, seed_state.declared_cells, state.mutation_policy, state.proposer_prompt)
+        selected = replace(selected, mutation_policy_sha256=state.mutation_policy.fingerprint(),
+                           proposer_prompt_sha256=state.proposer_prompt.fingerprint())
+        _persist_state(store, parent_state, selected)
+        draw = random.randbelow(2 ** 32)
+        checkpoint_state()  # RNG authority is durable before any provider call.
+        proposal_budget = replace(_available(kernel), wall_seconds=min(
+            config.adapter["task_timeout_seconds"], _available(kernel).wall_seconds))
+        request = primitive_proposer_request(parent_genome=selected.to_payload(), parent_state=parent_state.to_payload(),
+            selected_cells=[{"cell_sha256": cell, "member_ids": sorted(m.member_id for m in parent_state.inventory.members
+                if cell in m.applicability_cells)} for cell in parent_state.declared_cells],
+            train_feedback=[feedback.to_payload()], remaining_budget=proposal_budget.to_payload(),
+            allowed_mutation_operators=sorted(config.mutation["operators"]), counter_draw=draw,
+            max_proposals=config.proposer["max_proposals_per_generation"], max_response_bytes=config.proposer["max_response_bytes"])
+        request_sha = _persist(store, request)
+        work = _KernelWork(kernel, active, generation)
+        artifact_permit = work.reserve_stage("proposal-artifacts-" + request_sha, ResourceUse(artifact_bytes=
+            2 * max(config.proposer["max_response_bytes"], len(parent_state.canonical_bytes())) + 4096))
+        if not artifact_permit.allowed:
+            break
+        deterministic = DeterministicProposalProvider(monotonic=adapter.monotonic)
+        if config.proposer["provider"] == "hybrid":
+            provider = LLMProposalProvider(llm_client, monotonic=adapter.monotonic) if llm_client else _UnavailableProvider()
+            batch = HybridProposalProvider(provider, deterministic, work).propose(request)
+        else:
+            permit = work.reserve_stage("proposal-" + fingerprint_payload(request), ResourceUse(wall_seconds=proposal_budget.wall_seconds))
+            if not permit.allowed:
+                work.close_stage(artifact_permit, ResourceUse())
+                break
+            batch = deterministic.propose(request)
+            work.close_stage(permit, batch.resource_use)
+        payload = {"provider": batch.provider, "resource_use": batch.resource_use.to_payload(),
+            "failure_reason": batch.failure_reason, "proposals": [p.to_payload() for p in batch.proposals],
+            "source_sha256s": [sha for sha, _ in batch.source_artifacts],
+            "attempts": [{"provider": attempt.provider, "resource_use": attempt.resource_use.to_payload(),
+                          "failure_reason": attempt.failure_reason} for attempt in batch.attempts]}
+        attempt_payload = {"context": {"generation": generation,
+            "parent_genome_sha256": selected.fingerprint(), "request_sha256": request_sha,
+            "counter": {"seed": random.seed, "stream": random.stream, "start": counter_start, "end": random.counter}},
+            "batch": payload}
+        batch_sha = fingerprint_payload(attempt_payload)
+        artifact_paths = [store.directory / f"sources/{sha}.py" for sha, _ in batch.source_artifacts]
+        artifact_paths.append(store.directory / f"proposals/{batch_sha}.json")
+        new_paths = [path for path in artifact_paths if not path.exists()]
+        try:
+            for sha, source in batch.source_artifacts:
+                store.write_source(sha, source)
+            store.write_proposal_attempt(batch_sha, attempt_payload)
+        finally:
+            work.close_stage(artifact_permit, ResourceUse(artifact_bytes=sum(
+                path.stat().st_size for path in new_paths if path.is_file())))
+        batch = store._proposal(store._read(f"proposals/{batch_sha}.json"))
+        children, child_states, attempted, budget_blocked = {}, {}, [], False
+        for proposal in batch.proposals:
+            attempted.append((proposal.operator, None))
+            proposal_payload = proposal.to_payload()
+            policy_ready = True
+            for key in ("member", "child", "replacement"):
+                if key not in proposal_payload:
+                    continue
+                member = NumericalMemberV2.from_payload(proposal_payload[key])
+                structural = {"schema_version": 1, "operator": proposal.operator,
+                    "parents": [m.to_payload() for name in member.parent_ids for m in parent_state.inventory.members if m.member_id == name],
+                    "applicability_cells": list(member.applicability_cells)}
+                if fingerprint_payload(structural) != member.policy_sha256:
+                    # Source mutations may reuse a verified recipe, but cannot
+                    # introduce an unresolvable arbitrary policy commitment.
+                    if not (store.directory / f"objects/{member.policy_sha256}.json").exists():
+                        policy_ready = False
+                        break
+                else:
+                    _persist(store, structural)
+                # Exact policy/source readback precedes the atomic transition.
+                store._object(member.policy_sha256)
+                store._source(member.source_sha256)
+            if not policy_ready:
+                continue
+            candidate_state = apply_mutation(parent_state, proposal).state
+            genome = NumericalGenomeV2(1, generation, (selected.fingerprint(),), proposal.operator,
+                candidate_state.inventory.fingerprint(), selected.screening_policy_sha256, selected.combined_policy_sha256,
+                candidate_state.mutation_policy.fingerprint(), candidate_state.proposer_prompt.fingerprint(),
+                config.runtime_fingerprints, config.kernel_protocol.fingerprint())
+            try:
+                _persist_state(store, candidate_state, genome)
+                genome, sources, policies = store.verify_candidate(genome.fingerprint())
+            except ValueError:
+                continue
+            adapter.sources = dict(adapter.sources) | {sha: data.decode() for sha, data in sources.items()}
+            remaining = _available(kernel)
+            # Reserve an upper bound, then release unused capacity at closure.
+            # Each uncached forecast/worker start checks this bound before work.
+            estimate = replace(remaining,
+                wall_seconds=min(remaining.wall_seconds / 2.0,
+                    remaining.task_executions * config.adapter["task_timeout_seconds"]),
+                subprocesses=remaining.subprocesses)
+            permit = work.reserve_stage("materialize-" + genome.fingerprint(), estimate)
+            if not permit.allowed:
+                budget_blocked = True
+                break
+            before = adapter.monotonic()
+            child, failure = None, None
+            actual = ResourceUse()
+            def account_work(use, *, begun=False):
+                nonlocal actual
+                next_use = actual + use
+                if begun:
+                    actual = next_use
+                if (kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds
+                        or adapter.monotonic() - before >= estimate.wall_seconds
+                        or any(getattr(next_use, name) > getattr(estimate, name)
+                               for name in ResourceUse.field_names())):
+                    raise NumericalWorkStopped("materialization resource boundary")
+                actual = next_use
+            try:
+                child = adapter.materialize_child(parent_release, genome, candidate_state,
+                    member_id=_canonical_member(candidate_state).member_id, policies=policies,
+                    build_rows=_train_rows(adapter), descriptor_policy=config.descriptor_policy,
+                    version=f"n{generation:03d}", parent_state=parent_state, proposal=proposal,
+                    account_work=account_work, task_timeout_seconds=config.adapter["task_timeout_seconds"])
+            except NumericalWorkStopped:
+                failure, budget_blocked = "materialization_budget", True
+            except (ValueError, TypeError, TimeoutError, MethodForecastError):
+                failure = "materialization_failed"
+            finally:
+                closed = work.close_stage(permit, replace(actual, wall_seconds=float(adapter.monotonic() - before)),
+                    status="failed" if failure else "passed")
+            if child is not None and closed.allowed:
+                children[genome.fingerprint()] = child
+                child_states[genome.fingerprint()] = candidate_state
+                attempted[-1] = (proposal.operator, genome.fingerprint())
+            if budget_blocked:
+                break
+        reason, evaluations = "no_feasible_child", ()
+        if children and _available(kernel).wall_seconds > 0:
+            try:
+                bracket = choose_bracket(len(children), 0.0, _available(kernel).wall_seconds, config)
+            except ValueError:
+                bracket = None
+                budget_blocked = True
+            if bracket:
+                hyperband = HyperbandStateV2(bracket, tuple(sorted(children)), config.hyperband["reduction_factor"],
+                    config.kernel_protocol.split_manifest, config.kernel_protocol.fingerprint(), ())
+                while not hyperband.complete:
+                    manifest = fixed_rung_manifest(groups, bracket.resources[len(hyperband.rungs)],
+                        config.kernel_protocol.split_manifest, config.kernel_protocol.fingerprint())
+                    advanced, task_results, reason = _rung(kernel, work, hyperband, manifest, children, adapter, config, cache)
+                    if advanced is None:
+                        budget_blocked = reason not in {"invalid_response", "timeout"}
+                        break
+                    _persist(store, manifest)
+                    for task, task_result in task_results:
+                        if not task_result.cache_hit:
+                            store.write_task_result(task.task_sha256, task_result)
+                    hyperband = advanced
+                    store.write_rung(hyperband.rungs[-1])
+                    _persist(store, hyperband)
+                    checkpoint_state()
+                if hyperband.complete:
+                    evaluations = hyperband.rungs[-1].evaluations
+        entries = []
+        for evaluation in evaluations:
+            if not evaluation.constraints.feasible:
+                continue
+            for cell in evaluation.cells:
+                task_rows = [row.evaluation for row in cache.values() if row.evaluation.genome_sha256 == evaluation.genome_sha256
+                             and cell in row.evaluation.cells]
+                cell_eval = _aggregate(task_rows, hyperband.rungs[-1].manifest, hyperband.bracket.name, len(hyperband.rungs) - 1)
+                entries.append(NumericalQDEntryV2(1, evaluation.genome_sha256, evaluation.fingerprint(), cell,
+                    cell_eval.task_ids, cell_eval.objectives, cell_eval.constraints, evaluation.train_diagnostic_categories))
+        if entries:
+            archive = archive.insert(entries)
+            for entry in sorted(entries, key=lambda item: item.fingerprint()):
+                store.append_qd_entry(entry)
+        for operator, genome_sha in attempted:
+            feasible = any(e.genome_sha256 == genome_sha and e.constraints.feasible for e in evaluations)
+            inserted = any(e.genome_sha256 == genome_sha for e in entries)
+            feedback = TrainMutationFeedbackV2("train", operator,
+                feasible, feasible, inserted, ())
+            state = record_train_outcome(state, feedback.to_payload())
+            _persist(store, state.mutation_policy)
+            _persist(store, state.proposer_prompt)
+        _persist(store, archive)
+        checkpoint_state()
+        candidates = tuple(NumericalQDEntryV2(1, value.genome_sha256, value.fingerprint(), value.cells[0],
+            value.task_ids, value.objectives, value.constraints, value.train_diagnostic_categories)
+            for value in evaluations if value.constraints.feasible)
+        winner = select_survivors(candidates, 1)[0].genome_sha256 if candidates else None
+        if winner is not None:
+            frozen_pair, reason = _freeze_output(kernel, work, store, adapter, parent_release, parent_registry,
+                archive, children, winner, generation, config)
+            if frozen_pair is None:
+                budget_blocked = reason != "freeze_failed"
+        else:
+            frozen_pair = None
+            reason = reason or "no_feasible_child"
+        if frozen_pair is not None:
+            frozen_release, frozen_registry, pair_sha = frozen_pair
+            candidate = active.provisional_child("numerical", {"numerical": (frozen_release.fingerprint, frozen_registry.fingerprint)})
+            permit = kernel.reserve_evaluation(candidate, ResourceUse(task_executions=40,
+                wall_seconds=float(40 * config.adapter["task_timeout_seconds"])))
+            if permit.allowed:
+                before = adapter.monotonic()
+                comparison, count = _NO_DEV, 0
+                def account_dev():
+                    nonlocal count
+                    count += 1
+                try:
+                    parent_genome, parent_sources, parent_policies = store.verify_candidate(active_genome.fingerprint())
+                    adapter.sources = dict(adapter.sources) | {sha: data.decode() for sha, data in parent_sources.items()}
+                    active_state = _state_for(store, parent_genome, config, seed_state.declared_cells)
+                    parent_name = adapter._recipe(_canonical_member(active_state), parent_policies, None, None).name
+                    comparison = _dev_compare(parent_registry, frozen_registry, parent_name,
+                        children[winner].fit.recipe.name, adapter, kernel, account_dev)
+                except (ValueError, TypeError, TimeoutError, MethodForecastError):
+                    comparison = _NO_DEV
+                finally:
+                    evaluation = next(value for value in evaluations if value.genome_sha256 == winner)
+                    closed = kernel.close_evaluation(active, candidate, permit=permit, status="passed" if count == 40 else "failed",
+                        train_objectives=evaluation.objectives.to_payload(),
+                        train_behavior_descriptors={"numerical_artifacts_sha256": pair_sha}, dev_comparison=comparison,
+                        resource_use=ResourceUse(task_executions=count, wall_seconds=float(adapter.monotonic() - before)))
+                    previous = active
+                    active = kernel.evaluate_transition(previous, candidate, target="numerical", evaluation=closed, permit=permit)
+                if active is not previous:
+                    active_genome = children[winner].genome
+                    parent_release, parent_registry = frozen_release, frozen_registry
+                    reason = "accepted"
+                else:
+                    reason = "rejected"
+            else:
+                reason = permit.reason
+        _persist(store, {"numerical_qd_step": {"generation": generation, "status": reason,
+            "active_bundle_sha256": active.fingerprint(), "winner_genome_sha256": winner,
+            "proposal_attempt_sha256": batch_sha, "train_feedback": feedback.to_payload()}})
+        checkpoint_state()
+        if budget_blocked:
+            break
+    kernel.finalize()
+    checkpoint_state()
+    store.write_completion({"status": "numerical_qd_complete"})
+    return result("numerical_qd_complete")
+
+
+__all__ = ["NumericalQDRunResultV2", "run_numerical_qd"]

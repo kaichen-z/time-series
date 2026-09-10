@@ -50,8 +50,11 @@ from .proposers import (
     DeterministicProposalProvider, HybridProposalProvider, LLMProposalProvider,
     NormalizedProposalBatchV2, ProviderAttemptV2, primitive_proposer_request,
 )
+from .runner import NumericalQDRunResultV2, run_numerical_qd
 
 __all__ = [
+    "NumericalQDRunResultV2",
+    "run_numerical_qd",
     "FrozenNumericalArtifactsV2",
     "FrozenNumericalPackageEnvelopeV2",
     "FrozenNumericalRegistryEnvelopeV2",
