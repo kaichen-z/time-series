@@ -509,11 +509,12 @@ class _VerifiedForecastStore:
     """Execute selected source bytes; only the protected legacy anchor delegates."""
 
     def __init__(self, directory, sources, anchor_names, trusted_store, *, account_work=None,
-                 task_timeout_seconds=20.0):
+                 task_timeout_seconds=20.0, trusted_forecast=None):
         self.methods, self.runtimes, self.cache = {}, {}, {}
         self.anchor_names, self.trusted_store = set(anchor_names), trusted_store
         self.account_work = account_work or (lambda use: None)
         self.task_timeout_seconds = task_timeout_seconds
+        self.trusted_forecast = trusted_forecast
         for sha, source in sorted(sources.items()):
             if hashlib.sha256(source.encode()).hexdigest() != sha:
                 raise ValueError("executable source SHA mismatch")
@@ -540,7 +541,8 @@ class _VerifiedForecastStore:
                 value = self.runtimes[sha].forecast(name, history, horizon, frequency)
             elif name in self.anchor_names:
                 self.account_work(ResourceUse(task_executions=1))
-                value = self.trusted_store.forecast(name, history, horizon, frequency)
+                value = (self.trusted_forecast(name, history, horizon, frequency, account_work=self.account_work)
+                    if self.trusted_forecast is not None else self.trusted_store.forecast(name, history, horizon, frequency))
             else:
                 raise MethodForecastError("method is outside the verified executable source closure")
             self.cache[key] = tuple(value)
@@ -553,12 +555,12 @@ class _VerifiedForecastStore:
 
 @contextmanager
 def _source_bound_materializer(materializer, sources, anchor, *, account_work=None,
-                               task_timeout_seconds=20.0):
+                               task_timeout_seconds=20.0, trusted_forecast=None):
     if type(materializer) is not NumericalPackageMaterializer:
         raise ValueError("source binding requires an exact NumericalPackageMaterializer")
     with tempfile.TemporaryDirectory(prefix="numerical-qd-materialize-") as directory:
         store = _VerifiedForecastStore(directory, sources, anchor.policy.recipe.parents, materializer.forecast_store,
-            account_work=account_work, task_timeout_seconds=task_timeout_seconds)
+            account_work=account_work, task_timeout_seconds=task_timeout_seconds, trusted_forecast=trusted_forecast)
         try:
             # Reuse the legacy materializer without mutating the injected instance.
             # Old cached diagnostics may refer to different source bytes: recompute.
@@ -627,7 +629,8 @@ class LegacyNumericalAdapter:
     """Trusted host boundary; injected materializers retain the legacy signature."""
 
     def __init__(self, *, materializer, tasks, fold_manifest, sources, proposer=None,
-                 host_evaluator=None, host_evaluator_sha256=None):
+                 host_evaluator=None, host_evaluator_sha256=None, resource_kinds=(),
+                 resource_reporter=None, resource_reporter_sha256=None):
         self.tasks = _tasks(tasks)
         if len(self.tasks) != 100 or type(fold_manifest) is not GroupFoldManifest or fold_manifest.fold_count != 5:
             raise ValueError("adapter requires exactly 80 grouped Train plus 20 Dev tasks")
@@ -653,6 +656,65 @@ class LegacyNumericalAdapter:
         self.host_evaluator = host_evaluator
         self.host_evaluator_sha256 = host_evaluator_sha256
         self.sources = _sources(sources)
+        self.resource_kinds = tuple(resource_kinds)
+        self.resource_reporter, self.resource_reporter_sha256 = resource_reporter, resource_reporter_sha256
+        self.preflight_resources()
+
+    def declared_resource_kinds(self):
+        """Explicit model/store declarations; live legacy inference is not CPU-only by default."""
+        from numerical_agent.evolution.forecast_store import ForecastStore
+        store = getattr(self.materializer, "forecast_store", None)
+        kinds = set(self.resource_kinds) | set(getattr(store, "resource_kinds", ()))
+        if isinstance(store, ForecastStore) and not store.cache_only:
+            kinds.update(("gpu_seconds", "subprocesses"))
+        aliases = {"gpu": ("gpu_seconds",), "cuda": ("gpu_seconds",), "native": ("subprocesses",),
+                   "token": ("llm_calls", "input_tokens", "output_tokens")}
+        for name in getattr(self.materializer, "runtime_fingerprints", {}):
+            for token, fields in aliases.items():
+                if token in name.lower():
+                    kinds.update(fields)
+        allowed = set(ResourceUse.field_names()) - {"wall_seconds", "task_executions"}
+        if not kinds <= allowed:
+            raise ValueError("external resource declarations must use governed resource fields")
+        return tuple(sorted(kinds))
+
+    def preflight_resources(self):
+        kinds = self.declared_resource_kinds()
+        if kinds and not callable(self.resource_reporter):
+            raise ValueError("declared external work requires an identified Host resource reporter")
+        if self.resource_reporter is not None:
+            if not callable(self.resource_reporter):
+                raise ValueError("Host resource reporter must be callable")
+            require_sha256(self.resource_reporter_sha256, "resource reporter identity")
+            self.resource_snapshot()
+        elif self.resource_reporter_sha256 is not None:
+            raise ValueError("resource reporter identity requires a reporter")
+        return kinds
+
+    def resource_snapshot(self):
+        """Cumulative Host-only counters; dispatch/wall are measured separately."""
+        value = self.resource_reporter() if self.resource_reporter is not None else ResourceUse()
+        if type(value) is not ResourceUse or any(getattr(value, name) != 0
+                for name in ResourceUse.field_names() if name not in self.declared_resource_kinds()):
+            raise ValueError("resource reporter must return exact declared cumulative ResourceUse")
+        return value
+
+    def resource_delta(self, before):
+        after = self.resource_snapshot()
+        values = {name: getattr(after, name) - getattr(before, name) for name in ResourceUse.field_names()}
+        if any(value < 0 for value in values.values()):
+            raise ValueError("Host resource reporter counters moved backwards")
+        return ResourceUse.from_payload(values)
+
+    def forecast_trusted(self, *args, account_work=None):
+        before = self.resource_snapshot()
+        try:
+            return self.materializer.forecast_store.forecast(*args)
+        finally:
+            used = self.resource_delta(before)
+            if used != ResourceUse() and account_work is not None:
+                # The reporter observes work already begun, even on exceptions.
+                account_work(used, begun=True)
 
     @property
     def candidate_tasks(self):
@@ -661,7 +723,8 @@ class LegacyNumericalAdapter:
     @property
     def fingerprint(self):
         return fingerprint_payload({"implementation": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                                    "host_evaluator": self.host_evaluator_sha256})
+            "host_evaluator": self.host_evaluator_sha256, "resource_reporter": self.resource_reporter_sha256,
+            "resource_kinds": list(self.declared_resource_kinds())})
 
     def propose_legacy(self, release, registry, feedback, *, generation, task_evidence=None):
         """Retain the existing proposer, Train fitting, and three-child contract."""
@@ -749,6 +812,7 @@ class LegacyNumericalAdapter:
                           build_rows, descriptor_policy: DescriptorPolicyV2, version,
                           parent_state=None, proposal=None, account_work=None,
                           task_timeout_seconds=20.0) -> MaterializedNumericalChildV2:
+        self.preflight_resources()
         if type(genome) is not NumericalGenomeV2 or type(state) is not MutationStateV2:
             raise ValueError("typed genome and state required")
         if (genome.inventory_sha256 != state.inventory.fingerprint()
@@ -776,7 +840,8 @@ class LegacyNumericalAdapter:
         anchor = parse_champion_release(parent_release.to_payload()["anchor_release_payload"])
         with _source_bound_materializer(self.materializer,
                 {sha: self.sources[sha] for sha in source_dependencies}, anchor,
-                account_work=account_work, task_timeout_seconds=task_timeout_seconds) as materializer:
+                account_work=account_work, task_timeout_seconds=task_timeout_seconds,
+                trusted_forecast=self.forecast_trusted) as materializer:
             rows = _verified_build_rows(build_rows, self.tasks, self.fold_manifest, recipe, anchor,
                                         materializer.forecast_store)
             fit = fit_numerical_recipe(recipe, rows, self.fold_manifest, anchor)

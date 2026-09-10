@@ -167,6 +167,49 @@ def test_materialization_failure_keeps_exact_started_forecasts(world, failure_at
     assert sum(charges, ResourceUse()) == ResourceUse(task_executions=2 * failure_at, subprocesses=1)
 
 
+@pytest.mark.parametrize("resource", ["gpu_seconds", "subprocesses", "output_tokens"])
+def test_declared_external_resources_require_an_identified_host_reporter(world, resource):
+    import copy
+    adapter = world[0]
+    materializer = copy.copy(adapter.materializer)
+    class ExternalStore(CheapStore):
+        resource_kinds = (resource,)
+        def forecast(self, *args):
+            raise AssertionError("uninstrumented external work must not start")
+    materializer.forecast_store = ExternalStore()
+    with pytest.raises(ValueError, match="resource reporter"):
+        LegacyNumericalAdapter(materializer=materializer, tasks=adapter.tasks,
+            fold_manifest=adapter.fold_manifest, sources=adapter.sources)
+
+
+def test_host_reporter_identity_and_failed_work_are_accounted(world):
+    import copy
+    from evolving_loop.v2.budget import ResourceUse
+    adapter = world[0]
+    materializer = copy.copy(adapter.materializer)
+    class ExternalStore(CheapStore):
+        resource_kinds = ("gpu_seconds", "subprocesses", "output_tokens")
+        used = ResourceUse()
+        def forecast(self, *args):
+            self.used += ResourceUse(gpu_seconds=0.25, subprocesses=1, output_tokens=3)
+            raise ValueError("reported external failure")
+    external = ExternalStore()
+    materializer.forecast_store = external
+    instrumented = LegacyNumericalAdapter(materializer=materializer, tasks=adapter.tasks,
+        fold_manifest=adapter.fold_manifest, sources=adapter.sources,
+        resource_reporter=lambda: external.used, resource_reporter_sha256="a" * 64)
+    other = copy.copy(instrumented)
+    other.resource_reporter_sha256 = "b" * 64
+    assert instrumented.fingerprint != other.fingerprint
+    charges = []
+    def account(use, *, begun=False):
+        charges.append(use)
+    with pytest.raises(ValueError, match="reported external failure"):
+        materialize((instrumented, *world[1:]), account_work=account)
+    assert sum(charges, ResourceUse()) == ResourceUse(task_executions=2,
+        gpu_seconds=0.25, subprocesses=2, output_tokens=3)
+
+
 def test_seed_import_and_strict_registry_roundtrip_do_not_rewrite_inputs(world, tmp_path):
     adapter, release, registry, _, _ = world
     artifacts = {"supply.json": release.to_payload(), "registry.json": dict(registry.manifest)}
