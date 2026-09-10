@@ -126,6 +126,47 @@ def materialize(world, state=None, **kwargs):
         descriptor_policy=descriptor_policy(), version="n001", **kwargs)
 
 
+def test_verified_store_accounts_uncached_dispatches_and_real_worker_starts(tmp_path):
+    from evolving_loop.v2.budget import ResourceUse
+    from evolving_loop.v2.numerical_qd.adapters import _VerifiedForecastStore
+    from numerical_agent.evolution.execution import MethodForecastError
+    charges = []
+    store = _VerifiedForecastStore(tmp_path, {SOURCE_SHA: SOURCE}, {"toto_2_0"}, CheapStore(),
+                                  account_work=charges.append)
+    try:
+        store.forecast("seasonal_naive", (1.0, 2.0), 2, "D")
+        store.forecast("seasonal_naive", (1.0, 2.0), 2, "D")
+        store.forecast("lagged", (1.0, 2.0), 2, "D")
+        store.forecast("toto_2_0", (1.0, 2.0), 2, "D")
+        with pytest.raises(MethodForecastError):
+            store.forecast("unknown", (1.0, 2.0), 2, "D")
+    finally:
+        store.close()
+    assert sum(charges, ResourceUse()) == ResourceUse(task_executions=3, subprocesses=1)
+
+
+@pytest.mark.parametrize("failure_at", [1, 3])
+def test_materialization_failure_keeps_exact_started_forecasts(world, failure_at):
+    import copy
+    from evolving_loop.v2.budget import ResourceUse
+    charges = []
+    adapter = copy.copy(world[0])
+    materializer = copy.copy(adapter.materializer)
+    class FailingAnchor(CheapStore):
+        calls = 0
+        def forecast(self, *args):
+            self.calls += 1
+            if self.calls == failure_at:
+                raise ValueError("anchor failed")
+            return super().forecast(*args)
+    materializer.forecast_store = FailingAnchor()
+    adapter.materializer = materializer
+    with pytest.raises(ValueError, match="anchor failed"):
+        materialize((adapter, *world[1:]), account_work=charges.append)
+    assert materializer.forecast_store.calls == failure_at
+    assert sum(charges, ResourceUse()) == ResourceUse(task_executions=2 * failure_at, subprocesses=1)
+
+
 def test_seed_import_and_strict_registry_roundtrip_do_not_rewrite_inputs(world, tmp_path):
     adapter, release, registry, _, _ = world
     artifacts = {"supply.json": release.to_payload(), "registry.json": dict(registry.manifest)}

@@ -476,12 +476,44 @@ def _canonical_member(state):
     return min(eligible, key=lambda member: (member.status != "specialized", -len(member.parent_ids)))
 
 
+class NumericalWorkStopped(BaseException):
+    """Host budget/deadline stop; legacy per-method error recovery cannot swallow it."""
+
+
+class _AccountedProcessContext:
+    """Observe native startup in the Host wrapper, including failed handshakes."""
+
+    def __init__(self, context, account_work):
+        self.context, self.account_work = context, account_work
+
+    def __getattr__(self, name):
+        return getattr(self.context, name)
+
+    def Process(self, *args, **kwargs):
+        return _AccountedProcess(self.context.Process(*args, **kwargs), self.account_work)
+
+
+class _AccountedProcess:
+    def __init__(self, process, account_work):
+        self.process, self.account_work = process, account_work
+
+    def __getattr__(self, name):
+        return getattr(self.process, name)
+
+    def start(self):
+        self.account_work(ResourceUse(subprocesses=1))
+        return self.process.start()
+
+
 class _VerifiedForecastStore:
     """Execute selected source bytes; only the protected legacy anchor delegates."""
 
-    def __init__(self, directory, sources, anchor_names, trusted_store):
+    def __init__(self, directory, sources, anchor_names, trusted_store, *, account_work=None,
+                 task_timeout_seconds=20.0):
         self.methods, self.runtimes, self.cache = {}, {}, {}
         self.anchor_names, self.trusted_store = set(anchor_names), trusted_store
+        self.account_work = account_work or (lambda use: None)
+        self.task_timeout_seconds = task_timeout_seconds
         for sha, source in sorted(sources.items()):
             if hashlib.sha256(source.encode()).hexdigest() != sha:
                 raise ValueError("executable source SHA mismatch")
@@ -501,9 +533,13 @@ class _VerifiedForecastStore:
             if name in self.methods:
                 sha = self.methods[name]
                 if sha not in self.runtimes:
-                    self.runtimes[sha] = IsolatedForecastRuntime(self.paths[sha])
+                    runtime = IsolatedForecastRuntime(self.paths[sha], time_budget_s=self.task_timeout_seconds)
+                    runtime._context = _AccountedProcessContext(runtime._context, self.account_work)
+                    self.runtimes[sha] = runtime
+                self.account_work(ResourceUse(task_executions=1))
                 value = self.runtimes[sha].forecast(name, history, horizon, frequency)
             elif name in self.anchor_names:
+                self.account_work(ResourceUse(task_executions=1))
                 value = self.trusted_store.forecast(name, history, horizon, frequency)
             else:
                 raise MethodForecastError("method is outside the verified executable source closure")
@@ -516,11 +552,13 @@ class _VerifiedForecastStore:
 
 
 @contextmanager
-def _source_bound_materializer(materializer, sources, anchor):
+def _source_bound_materializer(materializer, sources, anchor, *, account_work=None,
+                               task_timeout_seconds=20.0):
     if type(materializer) is not NumericalPackageMaterializer:
         raise ValueError("source binding requires an exact NumericalPackageMaterializer")
     with tempfile.TemporaryDirectory(prefix="numerical-qd-materialize-") as directory:
-        store = _VerifiedForecastStore(directory, sources, anchor.policy.recipe.parents, materializer.forecast_store)
+        store = _VerifiedForecastStore(directory, sources, anchor.policy.recipe.parents, materializer.forecast_store,
+            account_work=account_work, task_timeout_seconds=task_timeout_seconds)
         try:
             # Reuse the legacy materializer without mutating the injected instance.
             # Old cached diagnostics may refer to different source bytes: recompute.
@@ -709,7 +747,8 @@ class LegacyNumericalAdapter:
 
     def materialize_child(self, parent_release, genome, state, *, member_id, policies,
                           build_rows, descriptor_policy: DescriptorPolicyV2, version,
-                          parent_state=None, proposal=None) -> MaterializedNumericalChildV2:
+                          parent_state=None, proposal=None, account_work=None,
+                          task_timeout_seconds=20.0) -> MaterializedNumericalChildV2:
         if type(genome) is not NumericalGenomeV2 or type(state) is not MutationStateV2:
             raise ValueError("typed genome and state required")
         if (genome.inventory_sha256 != state.inventory.fingerprint()
@@ -736,7 +775,8 @@ class LegacyNumericalAdapter:
         recipe = self._recipe(member, policies, parent_state, proposal, _source_dependencies=source_dependencies)
         anchor = parse_champion_release(parent_release.to_payload()["anchor_release_payload"])
         with _source_bound_materializer(self.materializer,
-                {sha: self.sources[sha] for sha in source_dependencies}, anchor) as materializer:
+                {sha: self.sources[sha] for sha in source_dependencies}, anchor,
+                account_work=account_work, task_timeout_seconds=task_timeout_seconds) as materializer:
             rows = _verified_build_rows(build_rows, self.tasks, self.fold_manifest, recipe, anchor,
                                         materializer.forecast_store)
             fit = fit_numerical_recipe(recipe, rows, self.fold_manifest, anchor)
