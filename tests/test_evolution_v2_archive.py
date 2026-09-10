@@ -110,6 +110,31 @@ def record_for(
     return ArchiveRecord.from_payload(train_record_payload(artifact, parents=parents))
 
 
+@pytest.mark.parametrize("version", [2, 7])
+def test_archive_tracks_artifact_schema_version_and_still_rejects_mismatch(tmp_path, version):
+    class VersionedArtifact(FakeArtifact):
+        @property
+        def schema_version(self):
+            return version
+    artifact = VersionedArtifact("versioned")
+    payload = train_record_payload(artifact)
+    payload["schema_version"] = version
+    archive = EvolutionArchive(tmp_path / "archive")
+    identity = archive.append(artifact, ArchiveRecord.from_payload(payload))
+    assert EvolutionArchive(archive.root).lineage(identity) == (identity,)
+    other = VersionedArtifact("mismatched")
+    with pytest.raises(ArchiveContractError, match="schema_version"):
+        archive.append(other, ArchiveRecord.from_payload(train_record_payload(other)))
+
+
+@pytest.mark.parametrize("version", [0, -1, True, 2.0, "2"])
+def test_archive_record_requires_positive_integer_artifact_version(version):
+    payload = train_record_payload()
+    payload["schema_version"] = version
+    with pytest.raises(ArchiveContractError, match="schema_version"):
+        ArchiveRecord.from_payload(payload)
+
+
 def test_archive_is_content_addressed_append_only_and_reconstructs_lineage(tmp_path):
     archive = EvolutionArchive(tmp_path / "archive")
     parent_artifact = FakeArtifact("parent")

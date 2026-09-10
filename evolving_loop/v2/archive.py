@@ -134,8 +134,8 @@ class ArchiveRecord:
     source_lineage_sha256s: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if type(self.schema_version) is not int or self.schema_version != 1:
-            raise ArchiveContractError("schema_version must be integer 1")
+        if type(self.schema_version) is not int or self.schema_version <= 0:
+            raise ArchiveContractError("schema_version must be a positive integer")
         artifact_sha256 = _archive_sha256(
             self.artifact_sha256, "artifact_sha256"
         )

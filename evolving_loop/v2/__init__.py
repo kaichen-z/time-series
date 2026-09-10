@@ -25,8 +25,20 @@ from .contracts import (
     load_v2_config,
     require_sha256,
 )
+from .kernel import (
+    AcceptanceEvidence,
+    ClosedEvaluation,
+    EvolutionKernel,
+    KernelAuthorityError,
+    PromotionHost,
+)
 
 __all__ = [
+    "AcceptanceEvidence",
+    "ClosedEvaluation",
+    "EvolutionKernel",
+    "KernelAuthorityError",
+    "PromotionHost",
     "BudgetContractError",
     "BudgetLedger",
     "BudgetPlan",
