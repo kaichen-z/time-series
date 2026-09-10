@@ -75,7 +75,7 @@ _PACKAGE_TYPES = {cls.__name__: cls for cls in (
 # imported capabilities and attribute access to a closed, numerical-only surface.
 # Checking references (not just calls) also rejects aliases/callbacks to file IO.
 _SOURCE_IMPORTS = frozenset({"math", "statistics", "itertools", "functools", "collections",
-                              "numpy", "numpy.linalg", "numpy.fft"})
+                              "numpy"})
 _SOURCE_ATTRIBUTES = frozenset("""
     abs absolute accumulate acos acosh add all allclose amax amin angle any append
     arange arccos arccosh arcsin arcsinh arctan arctan2 arctanh argmax argmin argsort
@@ -107,48 +107,137 @@ _SOURCE_BUILTINS = frozenset("""
     ArithmeticError Exception OverflowError TypeError ValueError ZeroDivisionError
 """.split())
 _NOT_APPLICABLE_CLASS = ast.dump(ast.parse(MODULE_HEADER).body[-1])
-_DTYPE_POSITION = {"array": 1, "asarray": 1, "zeros": 1, "ones": 1, "zeros_like": 1,
-    "ones_like": 1, "full": 2, "fromiter": 1, "identity": 1, "tri": 3, "arange": 3,
-    "linspace": 5, "logspace": 5, "geomspace": 4, "dtype": 0}
 _NUMERIC_DTYPES = frozenset("""bool int float int32 int64 float32 float64 complex64 complex128
     i4 i8 f4 f8 c8 c16 ?""".split())
+_NUMPY_SCALARS = frozenset({"bool_", "int32", "int64", "float32", "float64"})
+_NUMPY_CONSTANTS = frozenset({"e", "pi", "inf", "nan", "newaxis"})
+# Closed signatures, not NumPy's full signatures. The positional tuple length
+# is the explicit maximum; only its named slots and the listed keyword-only
+# slots are admitted. In particular no slot can bind out, casting, like, order,
+# where, subok, device, or a future NumPy option. Dtype slots are checked below.
+_NUMPY_CALL_SIGNATURES = {
+    "array": (("object", "dtype"), ()),
+    "asarray": (("a", "dtype"), ()),
+    "full": (("shape", "fill_value", "dtype"), ()),
+    "zeros": (("shape", "dtype"), ()),
+    "ones": (("shape", "dtype"), ()),
+    "mean": (("a", "axis", "dtype"), ("keepdims",)),
+    "min": (("a", "axis"), ("keepdims",)),
+    "max": (("a", "axis"), ("keepdims",)),
+    "sum": (("a", "axis", "dtype"), ("keepdims",)),
+    "std": (("a", "axis", "dtype"), ("keepdims",)),
+    "var": (("a", "axis", "dtype"), ("keepdims",)),
+    "median": (("a", "axis"), ("keepdims",)),
+    **{name: (("value",), ()) for name in _NUMPY_SCALARS},
+}
+# Unresolved receivers cannot expose ndarray reductions (whose positional
+# signatures differ from the module functions), dtype objects, or ufuncs.
+# tolist is the only admitted ndarray method and takes no arguments.
+_SOURCE_VALUE_METHODS = {"tolist": 0, "split": 2, "get": 2, "keys": 0,
+                         "items": 0, "values": 0, "count": 1, "append": 1}
+_SOURCE_VALUE_PROPERTIES = frozenset({"T", "shape", "ndim", "size", "real", "imag"})
 
 
-def _check_numeric_coercions(tree):
-    """Do not let NumPy stringify callables via dtype, aliases, or unpacking."""
+def _check_numeric_coercions(tree, symbols):
+    """Resolve stable imports and require every NumPy call to bind a safe slot."""
     nodes = tuple(ast.walk(tree))
     parents = {id(child): node for node in nodes for child in ast.iter_child_nodes(node)}
-    aliases = {alias.asname or alias.name: _DTYPE_POSITION[alias.name]
-               for node in nodes if isinstance(node, ast.ImportFrom)
-               for alias in node.names if alias.name in _DTYPE_POSITION}
-    bindings = {node.id for node in nodes if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load)}
-    bindings.update(node.arg for node in nodes if isinstance(node, ast.arg))
-    bindings.update(node.name for node in nodes if isinstance(node, (ast.FunctionDef, ast.ClassDef)))
-    bindings.update(node.asname or node.name.split(".")[0] for node in nodes if isinstance(node, ast.alias))
+    imports = {}
+    for node in nodes:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            if isinstance(node, ast.ImportFrom) and (node.level or node.module not in _SOURCE_IMPORTS):
+                raise ValueError("source import is outside the closed numerical capabilities")
+            for alias in node.names:
+                name = alias.asname or alias.name.split(".")[0]
+                path = tuple(alias.name.split(".")) if isinstance(node, ast.Import) else (node.module, alias.name)
+                if name in imports and imports[name] != path:
+                    raise ValueError("source import aliases must have one stable meaning")
+                if path[0].startswith("numpy") and (path[0] != "numpy" or len(path) > 2
+                        or len(path) == 2 and path[1] not in
+                        _NUMPY_CALL_SIGNATURES.keys() | _NUMPY_CONSTANTS):
+                    raise ValueError("source NumPy import has no reviewed call signature")
+                imports[name] = path
+    # Python's symbol tables cover every binding form, including exception and
+    # match targets. Conservatively disallow shadowing across all source scopes.
+    bindings = set(imports)
+    pending = [symbols]
+    while pending:
+        scope = pending.pop()
+        for symbol in scope.get_symbols():
+            if symbol.is_assigned() or symbol.is_parameter() or symbol.is_namespace():
+                name = symbol.get_name()
+                bindings.add(name)
+                if name in imports:
+                    raise ValueError("source cannot rebind or shadow an import alias")
+        pending.extend(scope.get_children())
+
+    def imported_path(node):
+        if isinstance(node, ast.Name):
+            return imports.get(node.id)
+        if isinstance(node, ast.Attribute):
+            base = imported_path(node.value)
+            if base is not None:
+                return (*base, node.attr)
+        return None
 
     def numeric_dtype(value):
         if isinstance(value, ast.Constant):
             return value.value is None or type(value.value) is str and value.value in _NUMERIC_DTYPES
-        if isinstance(value, ast.Name):
-            return value.id in {"bool", "int", "float"} - bindings
-        return isinstance(value, ast.Attribute) and value.attr in {"bool_", "int32", "int64", "float32", "float64"}
+        if isinstance(value, ast.Name) and value.id in {"bool", "int", "float"} - bindings:
+            return True
+        path = imported_path(value)
+        return path is not None and len(path) == 2 and path[0] == "numpy" and path[1] in _NUMPY_SCALARS
 
+    dtype_nodes = set()
     for node in nodes:
-        position = (_DTYPE_POSITION.get(node.attr) if isinstance(node, ast.Attribute) else
-                    aliases.get(node.id) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) else None)
-        if position is not None:
-            call = parents.get(id(node))
-            if not isinstance(call, ast.Call) or call.func is not node:
-                raise ValueError("dtype-capable operations require a direct checked call")
-            if any(isinstance(arg, ast.Starred) for arg in call.args) or any(k.arg is None for k in call.keywords):
-                raise ValueError("dtype-capable calls cannot unpack unchecked arguments")
-            if len(call.args) > position and not numeric_dtype(call.args[position]):
-                raise ValueError("source dtype must be an explicit numeric type")
+        if isinstance(node, ast.Call):
+            path = imported_path(node.func)
+            if path is not None and path[0] == "numpy":
+                if len(path) != 2 or path[1] not in _NUMPY_CALL_SIGNATURES:
+                    raise ValueError("source NumPy callable has no reviewed signature")
+                positional, keyword_only = _NUMPY_CALL_SIGNATURES[path[1]]
+                if len(node.args) > len(positional) or any(isinstance(arg, ast.Starred) for arg in node.args):
+                    raise ValueError("source NumPy call exceeds its checked positional signature")
+                arguments = dict(zip(positional, node.args))
+                for keyword in node.keywords:
+                    if (keyword.arg not in (*positional, *keyword_only) or keyword.arg in arguments
+                            or path[1] in _NUMPY_SCALARS):
+                        raise ValueError("source NumPy call has an unreviewed semantic parameter")
+                    arguments[keyword.arg] = keyword.value
+                if "dtype" in arguments:
+                    if not numeric_dtype(arguments["dtype"]):
+                        raise ValueError("source dtype must be an explicit numeric type")
+                    dtype_nodes.add(id(arguments["dtype"]))
         if isinstance(node, ast.keyword):
             if node.arg is None or node.arg in {"out", "casting"}:
                 raise ValueError("source cannot coerce objects through output buffers or unchecked keywords")
             if node.arg == "dtype" and not numeric_dtype(node.value):
                 raise ValueError("source dtype must be an explicit numeric type")
+
+    for node in nodes:
+        if not isinstance(node, (ast.Name, ast.Attribute)):
+            continue
+        path = imported_path(node)
+        parent = parents.get(id(node))
+        if path is not None and path[0] == "numpy":
+            if len(path) == 1:
+                if not isinstance(parent, ast.Attribute) or parent.value is not node:
+                    raise ValueError("source NumPy namespace cannot escape direct attribute access")
+            elif len(path) == 2 and path[1] in _NUMPY_CONSTANTS:
+                continue
+            elif len(path) == 2 and path[1] in _NUMPY_CALL_SIGNATURES:
+                if (not isinstance(parent, ast.Call) or parent.func is not node) and id(node) not in dtype_nodes:
+                    raise ValueError("source NumPy callable requires a direct checked call")
+            else:
+                raise ValueError("source NumPy attribute has no reviewed signature")
+        elif isinstance(node, ast.Attribute) and path is None:
+            if node.attr in _SOURCE_VALUE_METHODS:
+                if (not isinstance(parent, ast.Call) or parent.func is not node or parent.keywords
+                        or len(parent.args) > _SOURCE_VALUE_METHODS[node.attr]
+                        or any(isinstance(arg, ast.Starred) for arg in parent.args)):
+                    raise ValueError("source value method requires a direct bounded call")
+            elif node.attr not in _SOURCE_VALUE_PROPERTIES:
+                raise ValueError("source unresolved attribute has no reviewed call signature")
 
 
 def _check_source_names(source, tree):
@@ -187,12 +276,13 @@ def _check_source_names(source, tree):
                     and name not in globals_allowed):
                 raise ValueError(f"source name is outside the closed deterministic capabilities: {name}")
         pending.extend(scope.get_children())
+    return table
 
 
 def _check_numerical_capabilities(source):
     tree = ast.parse(source)
-    _check_source_names(source, tree)
-    _check_numeric_coercions(tree)
+    symbols = _check_source_names(source, tree)
+    _check_numeric_coercions(tree, symbols)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             if any(alias.name not in _SOURCE_IMPORTS for alias in node.names):

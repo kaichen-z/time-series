@@ -821,3 +821,186 @@ def test_explicit_numeric_array_dtypes_remain_executable(world, conversion):
         + conversion + "\n    return np.full(horizon, np.mean(values)).tolist()")
     outcome = world[0].forecast_source(source, "seasonal_naive", world[0].tasks[0])
     assert outcome.status == "passed" and outcome.forecast == (3.5, 3.5)
+
+
+# Independent public-behavior cases for the intentionally small NumPy surface.
+# The last argument list reaches the permitted positional boundary, so adding
+# one more argument must reject instead of reaching an output/casting slot.
+_NUMPY_CALL_CASES = [
+    ("array", "[1.0, 3.0], None", 2.0),
+    ("asarray", "[1.0, 3.0], None", 2.0),
+    ("full", "2, 2.0, None", 2.0),
+    ("zeros", "2, None", 0.0),
+    ("ones", "2, None", 1.0),
+    ("mean", "[1.0, 3.0], None, None", 2.0),
+    ("min", "[1.0, 3.0], None", 1.0),
+    ("max", "[1.0, 3.0], None", 3.0),
+    ("sum", "[1.0, 3.0], None, None", 4.0),
+    ("std", "[1.0, 3.0], None, None", 1.0),
+    ("var", "[1.0, 3.0], None, None", 1.0),
+    ("median", "[1.0, 3.0], None", 2.0),
+    ("bool_", "1", 1.0),
+    ("int32", "2", 2.0),
+    ("int64", "2", 2.0),
+    ("float32", "2.0", 2.0),
+    ("float64", "2.0", 2.0),
+]
+
+
+def test_numpy_max_positional_output_address_reproducer_rejects(world):
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon", '''import numpy as np
+    values = np.asarray([lambda: 0])
+    output = np.asarray(" " * 100)
+    label = np.max(values, None, output).tolist()
+    address = int(label.split("0x")[1].split(">")[0], 16)
+    return [address * 1.0] * horizon''')
+    with pytest.raises(ValueError):
+        world[0].validate_source(source)
+
+
+@pytest.mark.parametrize("name, arguments, expected", _NUMPY_CALL_CASES)
+@pytest.mark.parametrize("form", ["direct", "import_alias", "assignment_alias", "star", "keywords"])
+def test_numpy_signature_rejects_positional_overflow_and_hidden_arguments(world, name, arguments, expected, form):
+    setup = "import numpy as np"
+    if form == "import_alias":
+        setup += f"\n    from numpy import {name} as operation"
+        call = f"operation({arguments}, None)"
+    elif form == "assignment_alias":
+        setup += f"\n    operation = np.{name}"
+        call = f"operation({arguments}, None)"
+    elif form == "star":
+        call = f"np.{name}(*({arguments}, None))"
+    elif form == "keywords":
+        call = f"np.{name}({arguments}, **{{'out': None}})"
+    else:
+        call = f"np.{name}({arguments}, None)"
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon",
+        setup + "\n    value = " + call + "\n    return [1.0] * horizon")
+    with pytest.raises(ValueError):
+        world[0].validate_source(source)
+
+
+@pytest.mark.parametrize("name, arguments, expected", _NUMPY_CALL_CASES)
+@pytest.mark.parametrize("keyword", ["out", "casting", "dtype", "like", "order", "subok",
+    "signature", "where", "device", "overwrite_input", "unknown_future_option"])
+def test_numpy_signature_rejects_unreviewed_semantic_keywords(world, name, arguments, expected, keyword):
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon",
+        f"import numpy as np\n    value = np.{name}({arguments}, {keyword}='U100')\n    return [1.0] * horizon")
+    with pytest.raises(ValueError):
+        world[0].validate_source(source)
+
+
+@pytest.mark.parametrize("name, arguments, expected", _NUMPY_CALL_CASES)
+@pytest.mark.parametrize("form", ["direct", "import_alias"])
+def test_numpy_signature_numeric_controls_execute(world, name, arguments, expected, form):
+    setup = "import numpy as np"
+    operation = "np." + name
+    if form == "import_alias":
+        setup += f"\n    from numpy import {name} as operation"
+        operation = "operation"
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon", setup
+        + f"\n    value = {operation}({arguments})\n    return [float(np.mean(value))] * horizon")
+    outcome = world[0].forecast_source(source, "seasonal_naive", world[0].tasks[0])
+    assert outcome.status == "passed" and outcome.forecast == (expected, expected)
+
+
+@pytest.mark.parametrize("statement", [
+    "module = np\n    value = module.max(history, None, None)",
+    "operation = np.max\n    value = operation(history, None, None)",
+    "operations = [np.max]\n    value = operations[0](history, None, None)",
+    "value = list(map(np.max, [history]))",
+    "def invoke(operation):\n        return operation(history, None, None)\n    value = invoke(np.max)",
+    "value = (lambda module: module.max(history, None, None))(np)",
+    "value = np.asarray(history).max(None, None)",
+    "operation = np.asarray(history).max\n    value = operation(None, None)",
+    "value = np.max(*(history,))",
+    "value = np.max(history, **{})",
+    "from numpy import max as operation\n    value = operation(*(history, None, None))",
+    "from numpy import max as operation\n    value = operation(history, **{'out': None})",
+    "value = np.concatenate((np.asarray(history),), 0, None)",
+    "value = np.add(history, history, None)",
+    "value = np.add.reduce(history, None, None, None)",
+    "value = np.linalg.norm(history)",
+    "from numpy.linalg import norm\n    value = norm(history)",
+    "from numpy import float64 as numeric_type\n    numeric_type = 'U100'\n    value = np.asarray(lambda: 0, dtype=numeric_type)",
+    "np = {'dtype': 'U100'}\n    value = np.get('dtype')",
+    "def helper(np):\n        return np.max(history, None, None)\n    value = helper(history)",
+])
+def test_numpy_signature_unresolved_aliases_and_unreviewed_operations_reject(world, statement):
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon",
+        "import numpy as np\n    " + statement + "\n    return [1.0] * horizon")
+    with pytest.raises(ValueError):
+        world[0].validate_source(source)
+
+
+@pytest.mark.parametrize("expression, expected", [
+    ("np.mean(a=history, axis=None, dtype=float, keepdims=True)", 3.5),
+    ("np.max(a=history, axis=None, keepdims=True)", 7.0),
+    ("np.asarray(history, dtype=numeric_type)", 3.5),
+    ("np.full(shape=horizon, fill_value=2.0, dtype=float)", 2.0),
+])
+def test_numpy_signature_reviewed_keywords_and_imported_dtype_execute(world, expression, expected):
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon",
+        "import numpy as np\n    from numpy import float64 as numeric_type\n    value = "
+        + expression + "\n    return [float(np.mean(value))] * horizon")
+    outcome = world[0].forecast_source(source, "seasonal_naive", world[0].tasks[0])
+    assert outcome.status == "passed" and outcome.forecast == (expected, expected)
+
+
+@pytest.mark.parametrize("name, arguments", [
+    ("array", "[lambda: 0], 'U100'"),
+    ("asarray", "[lambda: 0], 'U100'"),
+    ("full", "1, lambda: 0, 'U100'"),
+    ("zeros", "1, 'U100'"),
+    ("ones", "1, 'U100'"),
+    ("mean", "[lambda: 0], None, 'U100'"),
+    ("sum", "[lambda: 0], None, 'U100'"),
+    ("std", "[lambda: 0], None, 'U100'"),
+    ("var", "[lambda: 0], None, 'U100'"),
+    ("mean", "[lambda: 0], None, None, np.asarray(' ' * 100)"),
+    ("min", "[lambda: 0], None, np.asarray(' ' * 100)"),
+    ("max", "[lambda: 0], None, np.asarray(' ' * 100)"),
+    ("sum", "[lambda: 0], None, None, np.asarray(' ' * 100)"),
+    ("std", "[lambda: 0], None, None, np.asarray(' ' * 100)"),
+    ("var", "[lambda: 0], None, None, np.asarray(' ' * 100)"),
+    ("median", "[lambda: 0], None, np.asarray(' ' * 100)"),
+])
+@pytest.mark.parametrize("form", ["direct", "import_alias"])
+def test_numpy_signature_all_positional_dtype_and_output_slots_reject(world, name, arguments, form):
+    setup = "import numpy as np"
+    operation = "np." + name
+    if form == "import_alias":
+        setup += f"\n    from numpy import {name} as operation"
+        operation = "operation"
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon",
+        setup + f"\n    value = {operation}({arguments})\n    return [1.0] * horizon")
+    with pytest.raises(ValueError):
+        world[0].validate_source(source)
+
+
+@pytest.mark.parametrize("statement", [
+    "values = np.asarray(history)\n    value = values.tolist(None)",
+    "values = np.asarray(history)\n    value = values.tolist(*())",
+    "values = np.asarray(history)\n    value = values.tolist(**{})",
+    "operation = np.asarray(history).tolist\n    value = operation()",
+    "try:\n        raise ValueError('bad')\n    except ValueError as np:\n        value = 1.0",
+    "value = [np for np in history]",
+    "match history:\n        case [np, *rest]:\n            value = 1.0",
+    "import math as np\n    value = np.mean(history)",
+    "def helper():\n        from math import fsum as operation\n        return operation(history)\n    from numpy import max as operation\n    value = operation(history)",
+    "value = np.float64(dtype='U100')",
+    "value = np.asarray(history, None, dtype=float)",
+])
+def test_numpy_signature_methods_and_all_import_binding_forms_reject(world, statement):
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon",
+        "import numpy as np\n    " + statement + "\n    return [1.0] * horizon")
+    with pytest.raises(ValueError):
+        world[0].validate_source(source)
+
+
+@pytest.mark.parametrize("statement", ["from . import numpy as np", "from .numpy import max as operation"])
+def test_numpy_signature_relative_imports_reject_as_validation_errors(world, statement):
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon",
+        statement + "\n    return [1.0] * horizon")
+    with pytest.raises(ValueError):
+        world[0].validate_source(source)
