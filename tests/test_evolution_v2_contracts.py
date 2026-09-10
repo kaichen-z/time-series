@@ -56,6 +56,17 @@ def valid_config_payload() -> dict[str, object]:
     }
 
 
+def valid_feedback_payload() -> dict[str, object]:
+    return {
+        "parent_sha256": sha256_for("parent"),
+        "train_evaluation_sha256": sha256_for("train-evaluation"),
+        "train_objectives": {"smae": 0.5, "failures": 0},
+        "train_behavior_descriptors": {"trend": "high"},
+        "failure_categories": ["timeout"],
+        "remaining_proposal_budget": {"children": 3, "tokens": 1_000},
+    }
+
+
 def test_v2_canonical_bytes_are_order_independent_and_strict():
     left = canonical_v2_bytes({"b": [2, 1], "a": "x"})
     right = canonical_v2_bytes({"a": "x", "b": [2, 1]})
@@ -110,14 +121,7 @@ def test_protocol_commitment_has_an_exact_sha256_schema():
 
 
 def test_sanitized_feedback_is_closed_and_rejects_evaluator_only_keys():
-    payload = {
-        "parent_sha256": sha256_for("parent"),
-        "train_evaluation_sha256": sha256_for("train-evaluation"),
-        "train_objectives": {"smae": 0.5, "failures": 0},
-        "train_behavior_descriptors": {"trend": "high"},
-        "failure_categories": ["timeout"],
-        "remaining_proposal_budget": {"children": 3, "tokens": 1_000},
-    }
+    payload = valid_feedback_payload()
     feedback = SanitizedEvolutionFeedback.from_payload(payload)
     assert feedback.to_payload() == payload
 
@@ -140,6 +144,20 @@ def test_sanitized_feedback_is_closed_and_rejects_evaluator_only_keys():
 
     with pytest.raises(ValueError, match="exact schema"):
         SanitizedEvolutionFeedback.from_payload(payload | {"notes": "not closed"})
+
+
+def test_sanitized_feedback_cannot_be_mutated_after_validation():
+    payload = valid_feedback_payload()
+    payload["remaining_proposal_budget"] = {"nested": [{"children": 3}]}
+    feedback = SanitizedEvolutionFeedback.from_payload(payload)
+
+    with pytest.raises(TypeError):
+        feedback.train_objectives["dev_metrics"] = {}
+    nested = feedback.remaining_proposal_budget["nested"]
+    with pytest.raises(TypeError):
+        nested[0]["future_values"] = []
+
+    assert feedback.to_payload() == payload
 
 
 def test_v2_config_rejects_unknown_keys_and_wrong_boolean_integer_aliases():
@@ -185,6 +203,20 @@ def test_v2_config_requires_valid_runtime_and_protocol_fingerprints():
     payload["kernel_protocol"] = valid_protocol_payload() | {"extra": sha256_for("x")}
     with pytest.raises(ValueError, match="exact schema"):
         EvolutionV2Config.from_payload(payload)
+
+
+def test_v2_config_mappings_cannot_be_mutated_after_validation():
+    payload = valid_config_payload()
+    config = EvolutionV2Config.from_payload(payload)
+
+    with pytest.raises(TypeError):
+        config.archive_capacities["numerical"] = 0
+    with pytest.raises(AttributeError):
+        config.hyperband["resource_levels"].append(160)
+    with pytest.raises(TypeError):
+        config.runtime_fingerprints["python"] = "not-a-sha"
+
+    assert config.to_payload() == payload
 
 
 @pytest.mark.parametrize(

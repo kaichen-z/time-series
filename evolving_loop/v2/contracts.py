@@ -8,6 +8,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
 
 from common.payload import strict_json_loads
@@ -95,6 +96,16 @@ def _strict_json_value(value: object, *, field: str = "payload") -> object:
     if isinstance(value, (list, tuple)):
         return [_strict_json_value(item, field=f"{field}[]") for item in value]
     raise TypeError(f"{field} contains non-JSON value {type(value).__name__}")
+
+
+def _freeze_json_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _freeze_json_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json_value(item) for item in value)
+    return value
 
 
 def canonical_v2_bytes(payload: Mapping[str, object]) -> bytes:
@@ -247,10 +258,18 @@ class SanitizedEvolutionFeedback:
             ("remaining_proposal_budget", budget),
         ):
             _reject_reserved_feedback_keys(value, field=field)
-        object.__setattr__(self, "train_objectives", objectives)
-        object.__setattr__(self, "train_behavior_descriptors", descriptors)
+        object.__setattr__(self, "train_objectives", _freeze_json_value(objectives))
+        object.__setattr__(
+            self,
+            "train_behavior_descriptors",
+            _freeze_json_value(descriptors),
+        )
         object.__setattr__(self, "failure_categories", categories)
-        object.__setattr__(self, "remaining_proposal_budget", budget)
+        object.__setattr__(
+            self,
+            "remaining_proposal_budget",
+            _freeze_json_value(budget),
+        )
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> "SanitizedEvolutionFeedback":
@@ -364,9 +383,13 @@ class EvolutionV2Config:
             )
 
         object.__setattr__(self, "enabled_mutation_scopes", scopes)
-        object.__setattr__(self, "archive_capacities", capacities)
-        object.__setattr__(self, "hyperband", hyperband)
-        object.__setattr__(self, "runtime_fingerprints", runtimes)
+        object.__setattr__(
+            self, "archive_capacities", _freeze_json_value(capacities)
+        )
+        object.__setattr__(self, "hyperband", _freeze_json_value(hyperband))
+        object.__setattr__(
+            self, "runtime_fingerprints", _freeze_json_value(runtimes)
+        )
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> "EvolutionV2Config":
