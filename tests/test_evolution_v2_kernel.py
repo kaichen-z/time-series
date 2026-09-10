@@ -12,6 +12,7 @@ from evolving_loop.v2.contracts import (
     fingerprint_payload,
 )
 from evolving_loop.v2.store import V2RunStore
+from evolving_loop.v2.fakes import FakeClock, run_fake_kernel, smoke_config
 
 
 def protocol():
@@ -115,6 +116,46 @@ def test_rejection_keeps_exact_parent_and_train_only_records(kernel, passed, sta
         assert "candidate_metrics" not in path.read_text()
     record = json.loads(kernel.archive.index.read_text().splitlines()[-1])["record"]
     assert record["evaluation_status"] == status
+
+
+@pytest.mark.parametrize("passed", [True, False])
+def test_closed_record_binds_dev_only_in_decision_evidence_and_resumes(kernel, passed):
+    _, candidate, accepted = transition(kernel, passed=passed)
+    (evidence_path,) = (kernel.store.root / "acceptance").glob("*.json")
+    evidence = kernel.load_acceptance(evidence_path.stem)
+    path = kernel.store.root / "evaluations" / candidate.fingerprint() / "closed.json"
+    closed = json.loads(path.read_text())
+    assert "dev_comparison" not in closed
+    assert closed["dev_comparison_sha256"] == fingerprint_payload(
+        evidence.dev_comparison
+    )
+    assert evidence.evaluation_sha256 == fingerprint_payload(closed)
+    closure = json.loads(path.with_name("budget_closure.json").read_text())
+    assert closure["evaluation_sha256"] == evidence.evaluation_sha256
+    resumed = api.EvolutionKernel.resume(
+        kernel.store, kernel.budget.plan, monotonic=FakeClock()
+    )
+    assert resumed.active_bundle() == accepted
+    assert resumed.load_acceptance(evidence_path.stem) == evidence
+
+
+def test_rehashed_rejected_evidence_cannot_change_dev_bound_to_closed_record(kernel):
+    transition(kernel, passed=False)
+    (path,) = (kernel.store.root / "acceptance").glob("*.json")
+    evidence = json.loads(path.read_text())
+    evidence["dev_comparison"]["candidate_metrics"]["loss"] = 0.123
+    forged_sha = fingerprint_payload(evidence)
+    kernel.store.write_acceptance(forged_sha, evidence)
+    checkpoint = json.loads(kernel.checkpoint_path.read_text())
+    checkpoint["completed_transitions"][evidence["candidate_bundle_sha256"]][
+        "acceptance_evidence_sha256"
+    ] = forged_sha
+    rehash_checkpoint(checkpoint)
+    kernel.checkpoint_path.write_bytes(canonical_v2_bytes(checkpoint))
+    with pytest.raises(api.KernelAuthorityError, match="Dev|dev_comparison"):
+        api.EvolutionKernel.resume(
+            kernel.store, kernel.budget.plan, monotonic=FakeClock()
+        )
 
 
 @pytest.mark.parametrize(
@@ -324,6 +365,125 @@ def test_resume_rejects_checkpoint_with_unrelated_identity_even_if_rehashed(
         )
 
 
+@pytest.mark.parametrize("operation", ["reserve", "finalize"])
+def test_live_checkpoint_write_rejects_changed_body_with_stale_checksum(
+    kernel, operation
+):
+    candidate = child(kernel.active_bundle())
+    path = kernel.checkpoint_path
+    checkpoint = json.loads(path.read_text())
+    checkpoint["active_bundle_sha256"] = "f" * 64
+    corrupted = canonical_v2_bytes(checkpoint)
+    path.write_bytes(corrupted)
+    with pytest.raises(api.KernelAuthorityError, match="checkpoint"):
+        if operation == "reserve":
+            kernel.reserve_evaluation(candidate, ResourceUse(task_executions=2))
+        else:
+            kernel.finalize()
+    assert path.read_bytes() == corrupted
+
+
+def rehash_checkpoint(payload):
+    payload["checkpoint_sha256"] = fingerprint_payload(
+        {key: value for key, value in payload.items() if key != "checkpoint_sha256"}
+    )
+
+
+def test_resume_rejects_elapsed_rewind_even_when_both_checkpoint_layers_are_rehashed(
+    tmp_path,
+):
+    config = smoke_config()
+    run_fake_kernel(tmp_path, config, stop_after_stage="fake-numerical")
+    for path in (tmp_path / "checkpoint.json", tmp_path / "kernel/checkpoint.json"):
+        checkpoint = json.loads(path.read_text())
+        assert checkpoint["budget"]["prior_elapsed_wall_seconds"] == 1.0
+        checkpoint["budget"]["prior_elapsed_wall_seconds"] = 0.0
+        rehash_checkpoint(checkpoint["budget"])
+        if "checkpoint_sha256" in checkpoint:
+            rehash_checkpoint(checkpoint)
+        path.write_bytes(canonical_v2_bytes(checkpoint))
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    with pytest.raises(api.KernelAuthorityError, match="elapsed"):
+        run_fake_kernel(tmp_path, config, resume=True)
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize(
+    "boundary,elapsed", [("budget_before", 20.0), ("budget_after", 0.0)]
+)
+def test_resume_rejects_closure_elapsed_moving_backwards(tmp_path, boundary, elapsed):
+    clock = FakeClock()
+    plan = BudgetPlan(1000, 0.2, ResourceUse(task_executions=100))
+    kernel = api.EvolutionKernel(
+        V2RunStore.create(tmp_path / "run"),
+        protocol(),
+        BudgetLedger(plan, monotonic=clock),
+        seed=seed(),
+    )
+    parent = kernel.active_bundle()
+    candidate = child(parent)
+    result, permit = evaluation(kernel, parent, candidate)
+    clock.advance(10.0)
+    with pytest.raises(api.KernelAuthorityError, match="permit"):
+        kernel.evaluate_transition(
+            parent, candidate, target="retrieval", evaluation=result
+        )
+    path = (
+        kernel.store.root
+        / "evaluations"
+        / candidate.fingerprint()
+        / "budget_closure.json"
+    )
+    closure = json.loads(path.read_text())
+    closure[boundary]["prior_elapsed_wall_seconds"] = elapsed
+    rehash_checkpoint(closure[boundary])
+    path.write_bytes(canonical_v2_bytes(closure))
+    checkpoint = json.loads(kernel.checkpoint_path.read_text())
+    checkpoint["budget_closures"][permit.reservation_sha256]["closure_sha256"] = (
+        fingerprint_payload(closure)
+    )
+    rehash_checkpoint(checkpoint)
+    kernel.checkpoint_path.write_bytes(canonical_v2_bytes(checkpoint))
+    before = {p: p.read_bytes() for p in kernel.store.root.rglob("*") if p.is_file()}
+    with pytest.raises(api.KernelAuthorityError, match="elapsed"):
+        api.EvolutionKernel.resume(kernel.store, plan, monotonic=FakeClock())
+    assert {
+        p: p.read_bytes() for p in kernel.store.root.rglob("*") if p.is_file()
+    } == before
+
+
+def test_resume_preserves_elapsed_closure_and_excludes_downtime(tmp_path, monkeypatch):
+    clock = FakeClock()
+    plan = BudgetPlan(1000, 0.2, ResourceUse(task_executions=100))
+    kernel = api.EvolutionKernel(
+        V2RunStore.create(tmp_path / "run"),
+        protocol(),
+        BudgetLedger(plan, monotonic=clock),
+        seed=seed(),
+    )
+    parent = kernel.active_bundle()
+    candidate = child(parent)
+    result, permit = evaluation(kernel, parent, candidate, passed=False)
+    clock.advance(797.0)
+    close_stage = kernel.budget.close_stage
+
+    def advancing_close(*args):
+        clock.advance(2.0)
+        return close_stage(*args)
+
+    monkeypatch.setattr(kernel.budget, "close_stage", advancing_close)
+    kernel.evaluate_transition(
+        parent, candidate, target="retrieval", evaluation=result, permit=permit
+    )
+    fresh_clock = FakeClock(10000.0)
+    resumed = api.EvolutionKernel.resume(kernel.store, plan, monotonic=fresh_clock)
+    assert resumed.budget.elapsed_wall_seconds == 799.0
+    assert resumed.budget.can_open_stage(ResourceUse()).allowed
+    fresh_clock.advance(1.0)
+    assert resumed.budget.elapsed_wall_seconds == 800.0
+    assert resumed.budget.can_open_stage(ResourceUse()).reason == "finalization_reserve"
+
+
 def test_active_kernel_reconstruction_cannot_replace_charged_ledger_with_empty_one(
     kernel,
 ):
@@ -380,9 +540,17 @@ def test_exact_evidence_and_closed_evaluation_schemas_reject_extra_authority(ker
         / "closed.json"
     )
     closed = json.loads(closed_path.read_text())
+    in_memory = api.ClosedEvaluation.from_record_payload(
+        closed, dev_comparison=evidence.dev_comparison
+    ).to_payload()
+    in_memory["host"] = {}
+    with pytest.raises(ValueError, match="exact schema"):
+        api.ClosedEvaluation.from_payload(in_memory)
     closed["host"] = {}
     with pytest.raises(ValueError, match="exact schema"):
-        api.ClosedEvaluation.from_payload(closed)
+        api.ClosedEvaluation.from_record_payload(
+            closed, dev_comparison=evidence.dev_comparison
+        )
 
 
 def test_acceptance_reader_rejects_omitted_provisional_archive_record(kernel):

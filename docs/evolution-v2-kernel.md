@@ -123,7 +123,7 @@ smoke/
   archive/objects/<sha256>.json      immutable Bundle objects
   candidates/<sha256>/proposal.json  provisional candidate proposal
   evaluations/<sha256>/train.json   sanitized Train evaluation
-  evaluations/<sha256>/closed.json  closed evaluation identity/reference record
+  evaluations/<sha256>/closed.json  schema-2 closed record with Dev digest only
   evaluations/<sha256>/budget_closure.json
   acceptance/<sha256>.json          sealed Host decision and Dev comparison
   accepted_bundle.json              atomic active Bundle payload
@@ -141,7 +141,10 @@ There are two acceptance artifacts, two progress lines, and two promotion lines
 Objects, manifests, plans, proposals, evaluations, evidence, and completion use
 write-once canonical bytes: identical retries are allowed, different bytes fail.
 Checkpoints and the active Bundle use atomic replacement; indexes/history append
-with fsync durability. Archive loading verifies index/record hashes, object bytes,
+with fsync durability. Before replacing its checkpoint, a live kernel rereads the
+canonical body and requires its recomputed digest to match both the stored claim
+and its last written digest. Corruption fails without overwriting those bytes.
+Archive loading verifies index/record hashes, object bytes,
 protocol/runtime bindings, and parent lineage. The sealed Bundle's archive
 snapshot precedes its own seal record, avoiding a circular hash. The current
 archive records leave `accepted_release_sha256s` empty; sealed-release authority
@@ -152,8 +155,20 @@ is instead recorded in promotion history and acceptance evidence.
 Only the Host may issue usable evaluation permits, bind closed evaluation work,
 seal acceptance, and publish. It charges actual work even when transition
 validation fails. Passing closed status, Dev comparison, and budget closure are
-required for acceptance. Dev values remain in sealed acceptance evidence; they
-do not enter proposer requests, archive objectives, or progress records.
+required for acceptance. Raw Dev values are persisted only in `acceptance/`
+decision evidence, for both accepted and rejected decisions. The schema-2
+`closed.json` records evaluation identities, terminal status, Train evaluation
+reference, resource use, and `dev_comparison_sha256`. Its canonical digest is
+the `evaluation_sha256` in both evidence and the immutable budget closure.
+Evidence loading verifies the closed-record digest and its Dev digest before
+reconstructing the evaluator-only aggregate in memory. Proposer requests,
+archive objectives, progress, and budget records contain no raw Dev values.
+
+An early transition failure still closes and charges issuer-owned work. If no
+decision evidence is written, no raw Dev is persisted; the closed record retains
+only its digest. Earlier experimental schema-1 closed files containing raw Dev
+are not accepted as schema-2 records or silently rewritten. Preserve such runs
+for audit and use a fresh run with this version.
 
 Evidence binds the active Parent, provisional Child, target, protocol, runtimes,
 Train evaluation, budget decision, and Dev comparison. The sealed Child contains
@@ -192,7 +207,12 @@ use and releases the reservation; an overrun is charged in full, closes with
 `budget_overrun`, and exhausts subsequent search. Finalization permanently closes
 search. Ledger resume preserves charged use, prior elapsed time, stage and
 reservation identities, exhaustion, and finalization; a new monotonic origin
-does not reset prior use. These are accounting gates, not an OS watchdog.
+does not reset prior use. Closure verification requires elapsed time to be
+nondecreasing from `budget_before` to `budget_after`. The checkpoint's saved
+elapsed time must cover every verified closure's `budget_after`, even if its
+checksum is recomputed. Downtime between processes is excluded; elapsed time
+after resume is added to the saved total. These are accounting gates, not an
+OS watchdog.
 
 The fake runner declares 1.0 synthetic wall second and 20 task executions per
 stage: total 2.0 seconds and 40 executions, with all other resource fields zero.

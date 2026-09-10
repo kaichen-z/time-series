@@ -99,7 +99,7 @@ class _CanonicalContract:
 
 @dataclass(frozen=True, slots=True)
 class ClosedEvaluation(_CanonicalContract):
-    """Immutable evaluator-only aggregates, bound to a single budget stage."""
+    """Issuer-owned in-memory aggregates, bound to a single budget stage."""
 
     schema_version: int
     parent_bundle_sha256: str
@@ -131,6 +131,33 @@ class ClosedEvaluation(_CanonicalContract):
         object.__setattr__(self, "dev_comparison", _dev(self.dev_comparison))
         use = ResourceUse.from_payload(self.resource_use)
         object.__setattr__(self, "resource_use", _freeze_json_value(use.to_payload()))
+
+    def to_record_payload(self) -> dict[str, object]:
+        """Durable identity record; raw Dev is persisted only in decision evidence."""
+        payload = self.to_payload()
+        payload["schema_version"] = 2
+        payload["dev_comparison_sha256"] = fingerprint_payload(
+            payload.pop("dev_comparison")
+        )
+        return payload
+
+    @classmethod
+    def from_record_payload(cls, payload, *, dev_comparison):
+        """Reconstruct evaluator aggregates only from digest-bound decision evidence."""
+        record = _require_exact_schema(
+            payload,
+            tuple(f.name for f in fields(cls) if f.name != "dev_comparison")
+            + ("dev_comparison_sha256",),
+            field="closed evaluation record",
+        )
+        if type(record["schema_version"]) is not int or record["schema_version"] != 2:
+            raise KernelAuthorityError("closed evaluation record schema must be 2")
+        digest = require_sha256(record.pop("dev_comparison_sha256"), "Dev digest")
+        if digest != fingerprint_payload(dev_comparison):
+            raise KernelAuthorityError("closed evaluation Dev digest mismatch")
+        record["schema_version"] = 1
+        record["dev_comparison"] = dev_comparison
+        return cls.from_payload(record)
 
 
 @dataclass(frozen=True, slots=True)
@@ -613,7 +640,11 @@ class EvolutionKernel:
                 kernel.promotion_host.reconcile()
                 raise KernelAuthorityError("recovered run requires a new epoch")
             kernel.archive = EvolutionArchive(store.root / "archive")
-            kernel._verify_checkpoint_state()
+            kernel._verify_checkpoint_state(
+                prior_elapsed_wall_seconds=checkpoint["budget"][
+                    "prior_elapsed_wall_seconds"
+                ]
+            )
             kernel.promotion_host.reconcile()
             return kernel
         except (KeyError, TypeError, ValueError) as error:
@@ -737,7 +768,9 @@ class EvolutionKernel:
                     "parent_bundle_sha256": evaluation.parent_bundle_sha256,
                     "reservation_sha256": reservation,
                     "stage_id": f"evaluation:{evaluation.candidate_bundle_sha256}",
-                    "evaluation_sha256": evaluation.fingerprint(),
+                    "evaluation_sha256": fingerprint_payload(
+                        evaluation.to_record_payload()
+                    ),
                     "resource_use": dict(evaluation.resource_use),
                     "allowed": outcome.allowed,
                     "reason": outcome.reason,
@@ -751,7 +784,7 @@ class EvolutionKernel:
         # Actual use is already charged even if one of these writes fails.
         self.store.write_evaluation(evaluation.candidate_bundle_sha256, "train", train)
         self.store.write_evaluation(
-            evaluation.candidate_bundle_sha256, "closed", evaluation.to_payload()
+            evaluation.candidate_bundle_sha256, "closed", evaluation.to_record_payload()
         )
         self.store.write_evaluation(
             evaluation.candidate_bundle_sha256, "budget_closure", closure
@@ -828,6 +861,11 @@ class EvolutionKernel:
         BudgetLedger.resume(
             self.budget.plan, closure["budget_after"], monotonic=lambda: 0.0
         )
+        if (
+            closure["budget_after"]["prior_elapsed_wall_seconds"]
+            < closure["budget_before"]["prior_elapsed_wall_seconds"]
+        ):
+            raise KernelAuthorityError("budget closure elapsed time moved backwards")
         expected = replay.checkpoint()
         if any(
             expected[k] != closure["budget_after"][k]
@@ -891,7 +929,7 @@ class EvolutionKernel:
                 target,
                 self.protocol.fingerprint(),
                 self._runtimes,
-                trusted.fingerprint(),
+                closure["evaluation_sha256"],
                 trusted.train_evaluation_sha256,
                 trusted.dev_comparison,
                 closure["allowed"],
@@ -958,14 +996,15 @@ class EvolutionKernel:
             ref = self._transitions.get(evidence.candidate_bundle_sha256)
             if ref is None or ref["acceptance_evidence_sha256"] != identity:
                 raise ValueError("evidence lacks an authorized durable transition")
-            evaluation = ClosedEvaluation.from_payload(
+            evaluation = ClosedEvaluation.from_record_payload(
                 _read(
                     self.store.root
                     / "evaluations"
                     / evidence.candidate_bundle_sha256
                     / "closed.json",
                     evidence.evaluation_sha256,
-                )
+                ),
+                dev_comparison=evidence.dev_comparison,
             )
             closure = self._load_closure(evaluation.reservation_sha256)
             if (
@@ -974,7 +1013,7 @@ class EvolutionKernel:
                 or closure["candidate_bundle_sha256"]
                 != evidence.candidate_bundle_sha256
                 or closure["parent_bundle_sha256"] != evidence.parent_bundle_sha256
-                or closure["evaluation_sha256"] != evaluation.fingerprint()
+                or closure["evaluation_sha256"] != evidence.evaluation_sha256
                 or closure["resource_use"] != dict(evaluation.resource_use)
             ):
                 raise ValueError("acceptance budget closure binding mismatch")
@@ -1143,7 +1182,7 @@ class EvolutionKernel:
         self.budget.begin_finalization()
         self._checkpoint()
 
-    def _verify_checkpoint_state(self):
+    def _verify_checkpoint_state(self, *, prior_elapsed_wall_seconds=None):
         self.promotion_host._publication_state()
         prefix, snapshots = hashlib.sha256(), set()
         for line in (
@@ -1158,8 +1197,17 @@ class EvolutionKernel:
                 "checkpoint archive snapshot is not a verified prefix"
             )
         total = ResourceUse()
+        if prior_elapsed_wall_seconds is None:
+            prior_elapsed_wall_seconds = self.budget.elapsed_wall_seconds
         for reservation in self._closures:
             closure = self._load_closure(reservation)
+            if (
+                prior_elapsed_wall_seconds
+                < closure["budget_after"]["prior_elapsed_wall_seconds"]
+            ):
+                raise KernelAuthorityError(
+                    "checkpoint elapsed time precedes a verified budget closure"
+                )
             total = total + ResourceUse.from_payload(closure["resource_use"])
         if total != self.budget.charged_use or set(self._closures) != set(
             self.budget.checkpoint()["closed_reservation_sha256s"]
@@ -1254,7 +1302,13 @@ class EvolutionKernel:
         _read(self.store.root / "budget_plan.json", self.budget.plan.fingerprint())
         if self._last_checkpoint_sha is not None:
             existing = _read(self.checkpoint_path)
-            if existing.get("checkpoint_sha256") != self._last_checkpoint_sha:
+            digest = fingerprint_payload(
+                {k: v for k, v in existing.items() if k != "checkpoint_sha256"}
+            )
+            if (
+                digest != existing.get("checkpoint_sha256")
+                or digest != self._last_checkpoint_sha
+            ):
                 raise KernelAuthorityError("checkpoint changed outside the kernel")
         checkpoint = {
             "schema_version": 2,

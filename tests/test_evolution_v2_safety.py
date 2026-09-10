@@ -366,13 +366,10 @@ def test_dev_sentinels_remain_only_in_evaluator_evidence(kernel, passed):
         raw = path.read_text()
         if any(sentinel in raw for sentinel in sentinels):
             relative = path.relative_to(kernel.store.root)
-            assert (
-                relative.parts[0] == "acceptance"
-                or relative == Path("evaluations") / child.fingerprint() / "closed.json"
-            )
+            assert relative.parts[0] == "acceptance"
             assert all(sentinel in raw for sentinel in sentinels)
             evidence_paths.add(relative)
-    assert len(evidence_paths) == 2
+    assert len(evidence_paths) == 1
     assert all(
         sentinel not in json.dumps(kernel.budget.checkpoint()) for sentinel in sentinels
     )
@@ -381,6 +378,49 @@ def test_dev_sentinels_remain_only_in_evaluator_evidence(kernel, passed):
         sentinel not in json.dumps(next_child.to_payload()) for sentinel in sentinels
     )
     EvolutionArchive(kernel.archive.root)
+
+
+@pytest.mark.parametrize("failure", ["permit", "scope", "acceptance_write"])
+def test_early_failure_without_decision_evidence_never_persists_raw_dev(
+    kernel, monkeypatch, failure
+):
+    parent = kernel.active_bundle()
+    child = numerical_child(parent)
+    sentinel = "EARLY_DEV_ONLY_68d84ec"
+    evaluation, permit = close(
+        kernel,
+        parent,
+        child,
+        dev={
+            "passed": True,
+            "parent_metrics": {"trace": sentinel},
+            "candidate_metrics": {"trace": sentinel},
+        },
+    )
+    if failure == "acceptance_write":
+
+        def fail(*args):
+            raise OSError("acceptance write failed")
+
+        monkeypatch.setattr(kernel.store, "write_acceptance", fail)
+    with pytest.raises((KernelAuthorityError, OSError)):
+        kernel.evaluate_transition(
+            parent,
+            child,
+            target="retrieval" if failure == "scope" else "numerical",
+            evaluation=evaluation,
+            permit=None if failure == "permit" else permit,
+        )
+    assert not list((kernel.store.root / "acceptance").glob("*.json"))
+    for raw, _mtime in snapshot(kernel.store.root).values():
+        assert sentinel.encode() not in raw
+        assert b'"dev_comparison":' not in raw
+    resumed = EvolutionKernel.resume(
+        kernel.store, kernel.budget.plan, monotonic=lambda: 0.0
+    )
+    assert resumed.budget.charged_use.task_executions == 1
+    assert not resumed.budget.checkpoint()["open_reservations"]
+    assert resumed.active_bundle() == parent
 
 
 def test_fake_next_proposal_and_checkpoints_do_not_receive_dev_sentinel(
@@ -422,11 +462,9 @@ def test_fake_next_proposal_and_checkpoints_do_not_receive_dev_sentinel(
     for relative, (raw, _mtime) in snapshot(root).items():
         if sentinel.encode() in raw:
             path = Path(relative)
-            assert path.parts[0] == "acceptance" or (
-                path.parts[0] == "evaluations" and path.name == "closed.json"
-            )
+            assert path.parts[0] == "acceptance"
             containing.append(relative)
-    assert len(containing) == 4
+    assert len(containing) == 2
 
 
 def test_public_validation_output_sentinel_cannot_feed_back_to_source(tmp_path, capsys):
