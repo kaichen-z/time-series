@@ -79,25 +79,25 @@ _SOURCE_IMPORTS = frozenset({"math", "statistics", "itertools", "functools", "co
 _SOURCE_ATTRIBUTES = frozenset("""
     abs absolute accumulate acos acosh add all allclose amax amin angle any append
     arange arccos arccosh arcsin arcsinh arctan arctan2 arctanh argmax argmin argsort
-    around array array_equal asarray asin asinh astype atan atan2 atanh average
+    around array array_equal asarray asin asinh atan atan2 atanh average
     bincount bool_ broadcast_to cbrt ceil chain clip column_stack combinations comb
     concatenate conj conjugate convolve copy corrcoef cos cosh count count_nonzero
     Counter cov cumprod cumsum cycle degrees deque diagonal diff digitize divmod dot
     dtype e eig eigh eigvals eigvalsh einsum enumerate erf erfc exp
-    exp2 expand_dims expm1 fabs factorial fft fftfreq fftshift fill finfo flat flatten
+    exp2 expand_dims expm1 fabs factorial fft fftfreq fftshift finfo flat flatten
     float32 float64 floor fmax fmean fmin fmod frexp fromiter fromkeys fsum full
-    full_like gamma gcd geomspace get gradient groupby harmonic_mean hstack hypot
+    gamma gcd geomspace get gradient groupby harmonic_mean hstack hypot
     identity ifft ifftshift imag inf inner int32 int64 interp inv irfft isclose
     isfinite isinf isnan islice items keys ldexp lgamma linalg linspace log log10
     log1p log2 logaddexp logical_and logical_not logical_or logspace lstsq matmul
-    max maximum mean median min minimum mod mode moveaxis nan nan_to_num nanargmax
+    max maximum mean median min minimum mode moveaxis nan nan_to_num nanargmax
     nanargmin nanmax nanmean nanmedian nanmin nanpercentile nanquantile nanstd nansum
-    nanvar ndim negative newaxis nextafter norm ones ones_like outer pad partition
+    nanvar ndim negative newaxis nextafter norm ones ones_like outer partition
     percentile permutations pi pinv polyfit polyval power prod product pstdev pvariance
     quantile quantiles radians ravel real reciprocal reduce repeat reshape resize
     rfft rfftfreq roll round row_stack searchsorted shape sign sin sinh size solve
     sort split sqrt square squeeze stack starmap std stdev subtract sum svd swapaxes
-    take tan tanh tau tensordot tile tolist trace transpose trapz trapezoid tri tril
+    tan tanh tau tensordot tile tolist trace transpose trapz trapezoid tri tril
     triu trunc tuple unique values var variance vdot vstack where zip_longest zeros
     zeros_like T
 """.split())
@@ -107,6 +107,48 @@ _SOURCE_BUILTINS = frozenset("""
     ArithmeticError Exception OverflowError TypeError ValueError ZeroDivisionError
 """.split())
 _NOT_APPLICABLE_CLASS = ast.dump(ast.parse(MODULE_HEADER).body[-1])
+_DTYPE_POSITION = {"array": 1, "asarray": 1, "zeros": 1, "ones": 1, "zeros_like": 1,
+    "ones_like": 1, "full": 2, "fromiter": 1, "identity": 1, "tri": 3, "arange": 3,
+    "linspace": 5, "logspace": 5, "geomspace": 4, "dtype": 0}
+_NUMERIC_DTYPES = frozenset("""bool int float int32 int64 float32 float64 complex64 complex128
+    i4 i8 f4 f8 c8 c16 ?""".split())
+
+
+def _check_numeric_coercions(tree):
+    """Do not let NumPy stringify callables via dtype, aliases, or unpacking."""
+    nodes = tuple(ast.walk(tree))
+    parents = {id(child): node for node in nodes for child in ast.iter_child_nodes(node)}
+    aliases = {alias.asname or alias.name: _DTYPE_POSITION[alias.name]
+               for node in nodes if isinstance(node, ast.ImportFrom)
+               for alias in node.names if alias.name in _DTYPE_POSITION}
+    bindings = {node.id for node in nodes if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load)}
+    bindings.update(node.arg for node in nodes if isinstance(node, ast.arg))
+    bindings.update(node.name for node in nodes if isinstance(node, (ast.FunctionDef, ast.ClassDef)))
+    bindings.update(node.asname or node.name.split(".")[0] for node in nodes if isinstance(node, ast.alias))
+
+    def numeric_dtype(value):
+        if isinstance(value, ast.Constant):
+            return value.value is None or type(value.value) is str and value.value in _NUMERIC_DTYPES
+        if isinstance(value, ast.Name):
+            return value.id in {"bool", "int", "float"} - bindings
+        return isinstance(value, ast.Attribute) and value.attr in {"bool_", "int32", "int64", "float32", "float64"}
+
+    for node in nodes:
+        position = (_DTYPE_POSITION.get(node.attr) if isinstance(node, ast.Attribute) else
+                    aliases.get(node.id) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) else None)
+        if position is not None:
+            call = parents.get(id(node))
+            if not isinstance(call, ast.Call) or call.func is not node:
+                raise ValueError("dtype-capable operations require a direct checked call")
+            if any(isinstance(arg, ast.Starred) for arg in call.args) or any(k.arg is None for k in call.keywords):
+                raise ValueError("dtype-capable calls cannot unpack unchecked arguments")
+            if len(call.args) > position and not numeric_dtype(call.args[position]):
+                raise ValueError("source dtype must be an explicit numeric type")
+        if isinstance(node, ast.keyword):
+            if node.arg is None or node.arg in {"out", "casting"}:
+                raise ValueError("source cannot coerce objects through output buffers or unchecked keywords")
+            if node.arg == "dtype" and not numeric_dtype(node.value):
+                raise ValueError("source dtype must be an explicit numeric type")
 
 
 def _check_source_names(source, tree):
@@ -150,6 +192,7 @@ def _check_source_names(source, tree):
 def _check_numerical_capabilities(source):
     tree = ast.parse(source)
     _check_source_names(source, tree)
+    _check_numeric_coercions(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             if any(alias.name not in _SOURCE_IMPORTS for alias in node.names):
@@ -163,6 +206,12 @@ def _check_numerical_capabilities(source):
                 raise ValueError("source attribute is outside the closed numerical capabilities")
         elif isinstance(node, (ast.Set, ast.SetComp, ast.Global, ast.Nonlocal)):
             raise ValueError("source cannot depend on unordered or shared runtime state")
+        elif isinstance(node, (ast.JoinedStr, ast.FormattedValue, ast.Mod)):
+            # Percent and f-string formatting invoke arbitrary object repr even
+            # without loading str/repr/format. Numeric remainders use divmod/fmod.
+            raise ValueError("source cannot implicitly format process-dependent objects")
+        elif isinstance(node, ast.Subscript) and not isinstance(node.ctx, ast.Load):
+            raise ValueError("source cannot coerce objects through indexed mutation")
         elif isinstance(node, ast.ClassDef) and ast.dump(node) != _NOT_APPLICABLE_CLASS:
             raise ValueError("source classes are outside the closed numerical capabilities")
 

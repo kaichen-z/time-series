@@ -726,3 +726,98 @@ def test_invalid_lexical_binding_is_a_source_validation_error(world, statement):
         statement + "\n    return [1.0] * horizon")
     with pytest.raises(ValueError):
         world[0].validate_source(source)
+
+
+@pytest.mark.parametrize("statement", [
+    'label = f"{(lambda: 0)}"',
+    'label = f"{(lambda: 0)!r}"',
+    'label = f"{history[-1]}"',
+    'label = "%s" % (lambda: 0)',
+    'template = "%r"\n    label = template % (lambda: 0)',
+    'label = b"%r" % (lambda: 0)',
+    'label = "{}".format(lambda: 0)',
+    'formatter = "{}".format\n    label = formatter(lambda: 0)',
+    'import numpy as np\n    label = np.mod("%s", lambda: 0)',
+    'from numpy import mod as formatter\n    label = formatter("%s", lambda: 0)',
+])
+def test_implicit_object_formatting_cannot_derive_function_addresses(world, statement):
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon", statement + '''
+    address = int(label.split("0x")[1].split(">")[0], 16)
+    return [float(address)] * horizon''')
+    with pytest.raises(ValueError):
+        world[0].validate_source(source)
+
+
+def test_numeric_remainders_remain_available_without_formatting(world):
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon", '''import math
+    _, remainder = divmod(int(history[-1]), 3)
+    value = math.fmod(float(remainder), 2.0)
+    return [value] * horizon''')
+    outcome = world[0].forecast_source(source, "seasonal_naive", world[0].tasks[0])
+    assert outcome.status == "passed" and outcome.forecast == (1.0, 1.0)
+
+
+def test_fresh_process_materialization_preserves_cache_identity_and_evaluation():
+    import os
+    import subprocess
+    import sys
+    command = '''import json
+from evolving_loop.v2.numerical_qd.adapters import evaluate_numerical_child
+from evolving_loop.v2.numerical_qd.hyperband import evaluation_cache_key, _task_evaluation
+from tests.test_evolution_v2_numerical_adapters import world, materialize, train_manifest, descriptor_policy
+fixture = world.__wrapped__()
+adapter = fixture[0]
+child = materialize(fixture)
+task = train_manifest(adapter).tasks[0]
+evaluation = evaluate_numerical_child(adapter, child, task, descriptor_policy=descriptor_policy(),
+    metric_policy_sha256="6" * 64, bracket="explore", rung=0)
+_task_evaluation(evaluation, child.genome.fingerprint(), task, "6" * 64,
+    descriptor_policy().fingerprint(), child.genome.runtime_fingerprints, adapter.fingerprint)
+key = evaluation_cache_key(child.genome.fingerprint(), task.task_sha256, task.split_sha256,
+    "6" * 64, descriptor_policy().fingerprint(), child.genome.runtime_fingerprints,
+    task.protocol_sha256, adapter.fingerprint)
+print(json.dumps(dict(cache_key=key, evaluation=evaluation.to_payload()), sort_keys=True))
+'''
+    results = []
+    for seed in ("7", "777"):
+        completed = subprocess.run([sys.executable, "-c", command], capture_output=True, text=True,
+            check=True, timeout=30, cwd=ROOT, env=dict(os.environ, PYTHONHASHSEED=seed))
+        results.append(json.loads(completed.stdout))
+    assert results[0] == results[1]
+    assert len(results[0]["cache_key"]) == 64
+    assert results[0]["evaluation"]["task_statuses"] == {"build_case_000": "passed"}
+
+
+@pytest.mark.parametrize("statement", [
+    'label = np.asarray(lambda: 0, dtype="U100").tolist()',
+    'label = np.asarray(lambda: 0, "U100").tolist()',
+    'from numpy import asarray as convert\n    label = convert(lambda: 0, "U100").tolist()',
+    'convert = np.asarray\n    label = convert(lambda: 0, "U100").tolist()',
+    'label = np.asarray(lambda: 0, dtype="U" + "100").tolist()',
+    'label = np.asarray(lambda: 0, **{"dtype": "U100"}).tolist()',
+    'label = np.asarray(*((lambda: 0), "U100")).tolist()',
+    'label = np.asarray(lambda: 0).astype("U100").tolist()',
+    'label = np.full_like(np.asarray(" " * 100), lambda: 0).tolist()',
+    'values = np.asarray([" " * 100])\n    values[0] = lambda: 0\n    label = values[0]',
+    'values = np.asarray([" " * 100])\n    values.fill(lambda: 0)\n    label = values[0]',
+    'float = "U100"\n    label = np.asarray(lambda: 0, dtype=float).tolist()',
+    'label = np.pad(np.asarray([" " * 100]), (1, 0), constant_values=lambda: 0)[0]',
+    'label = np.take(np.asarray([lambda: 0]), [0], None, np.asarray([" " * 100]))[0]',
+    'label = np.concatenate((np.asarray([lambda: 0]),), out=np.asarray([" " * 100]), casting="unsafe")[0]',
+    'label = np.concatenate((np.asarray([lambda: 0]),), 0, np.asarray([" " * 100]), **{"casting": "unsafe"})[0]',
+])
+def test_numpy_object_string_coercion_cannot_format_process_addresses(world, statement):
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon", "import numpy as np\n    " + statement + '''
+    address = int(label.split("0x")[1].split(">")[0], 16)
+    return [address * 1.0] * horizon''')
+    with pytest.raises(ValueError):
+        world[0].validate_source(source)
+
+
+@pytest.mark.parametrize("conversion", ["np.asarray(history, dtype=float)", "np.asarray(history, 'float64')",
+    "np.array(history, np.float64)", "np.asarray(history, dtype=None)"])
+def test_explicit_numeric_array_dtypes_remain_executable(world, conversion):
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon", "import numpy as np\n    values = "
+        + conversion + "\n    return np.full(horizon, np.mean(values)).tolist()")
+    outcome = world[0].forecast_source(source, "seasonal_naive", world[0].tasks[0])
+    assert outcome.status == "passed" and outcome.forecast == (3.5, 3.5)
