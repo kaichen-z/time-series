@@ -1,8 +1,16 @@
 """Strict Numerical quality-diversity artifacts for Evolution V2."""
 
 from .config import NumericalQDConfigV2, load_numerical_qd_config
+from .adapters import (
+    FrozenNumericalArtifactsV2, ImportedNumericalSeedV2, LegacyNumericalAdapter,
+    MaterializedNumericalChildV2, evaluate_numerical_child, freeze_qd_supply,
+    import_numerical_seed,
+)
 from .contracts import (
     ConstraintReportV2,
+    FrozenNumericalPackageEnvelopeV2,
+    FrozenNumericalRegistryEnvelopeV2,
+    NumericalSourceOutcomeV2,
     HyperbandAdvanceV2,
     HyperbandBracketV2,
     HyperbandBudgetOutcomeV2,
@@ -42,6 +50,16 @@ from .proposers import (
 )
 
 __all__ = [
+    "FrozenNumericalArtifactsV2",
+    "FrozenNumericalPackageEnvelopeV2",
+    "FrozenNumericalRegistryEnvelopeV2",
+    "ImportedNumericalSeedV2",
+    "LegacyNumericalAdapter",
+    "MaterializedNumericalChildV2",
+    "NumericalSourceOutcomeV2",
+    "evaluate_numerical_child",
+    "freeze_qd_supply",
+    "import_numerical_seed",
     "HyperbandAdvanceV2",
     "HyperbandBracketV2",
     "HyperbandBudgetOutcomeV2",

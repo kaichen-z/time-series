@@ -768,3 +768,100 @@ class HyperbandExecutionV2(_CanonicalContract):
             object.__setattr__(self, name, tuple(_nested(value, cls)
                                for value in _sequence(getattr(self, name), name)))
         object.__setattr__(self, "budget_outcome", _nested(self.budget_outcome, HyperbandBudgetOutcomeV2))
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenNumericalPackageEnvelopeV2(_CanonicalContract):
+    """Full closed package serialization, including the legacy runtime identity."""
+
+    schema_version: int
+    legacy_package_sha256: str
+    payload: Mapping[str, object]
+
+    def __post_init__(self):
+        from .adapters import _decode_package
+        from ...numerical_two_stage import numerical_package_fingerprint
+
+        _schema_version(self.schema_version)
+        require_sha256(self.legacy_package_sha256, "legacy_package_sha256")
+        payload = _strict_json_value(self.payload)
+        package = _decode_package(payload)
+        if numerical_package_fingerprint(package) != self.legacy_package_sha256:
+            raise ValueError("package content does not match legacy package SHA")
+        object.__setattr__(self, "payload", _freeze_json_value(payload))
+
+    def restore(self):
+        from .adapters import _decode_package
+        return _decode_package(_plain(self.payload))
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenNumericalRegistryEnvelopeV2(_CanonicalContract):
+    """Content-addressed packages and exact host-task commitments; never a pickle."""
+
+    schema_version: int
+    release_sha256: str
+    registry_sha256: str
+    entries: Mapping[str, Mapping[str, str]]
+    package_sha256s: tuple[str, ...]
+    packages: Mapping[str, FrozenNumericalPackageEnvelopeV2]
+
+    def __post_init__(self):
+        _schema_version(self.schema_version)
+        require_sha256(self.release_sha256, "release_sha256")
+        require_sha256(self.registry_sha256, "registry_sha256")
+        shas = _sorted_strings(self.package_sha256s, "package_sha256s", sha=True, nonempty=True)
+        values = _require_exact_schema(self.packages, shas, field="packages")
+        packages = {}
+        for sha, value in values.items():
+            package = _nested(value, FrozenNumericalPackageEnvelopeV2)
+            if package.fingerprint() != sha:
+                raise ValueError("package envelope content SHA mismatch")
+            if package.restore().component_fingerprints.get("numerical_supply_release") != self.release_sha256:
+                raise ValueError("package envelope release mismatch")
+            packages[sha] = package
+        entries = _require_mapping(self.entries, "entries")
+        if not entries:
+            raise ValueError("registry envelope requires task entries")
+        normalized = {}
+        for task_id, entry in entries.items():
+            _text(task_id, "task_id")
+            entry = _require_exact_schema(entry, ("task_sha256", "package_sha256"), field="registry entry")
+            for name, sha in entry.items():
+                require_sha256(sha, name)
+            sha = entry["package_sha256"]
+            if sha not in packages or packages[sha].restore().task_profile.task_id != task_id:
+                raise ValueError("registry task/package identity mismatch")
+            normalized[task_id] = dict(entry)
+        if set(shas) != {entry["package_sha256"] for entry in normalized.values()}:
+            raise ValueError("registry envelope contains unreferenced packages")
+        object.__setattr__(self, "entries", _freeze_json_value(normalized))
+        object.__setattr__(self, "package_sha256s", shas)
+        object.__setattr__(self, "packages", MappingProxyType(packages))
+
+    def restore(self, tasks):
+        from .adapters import _restore_registry
+        return _restore_registry(self, tasks)
+
+
+@dataclass(frozen=True, slots=True)
+class NumericalSourceOutcomeV2(_CanonicalContract):
+    source_sha256: str
+    task_id: str
+    status: Literal["passed", "invalid"]
+    forecast: tuple[float, ...]
+    failure_category: str | None
+
+    def __post_init__(self):
+        require_sha256(self.source_sha256, "source_sha256")
+        _text(self.task_id, "task_id")
+        _require_choice(self.status, "status", frozenset({"passed", "invalid"}))
+        values = _sequence(self.forecast, "forecast")
+        if any(type(value) is not float or not math.isfinite(value) for value in values):
+            raise ValueError("source outcome forecast must be finite")
+        if self.status == "passed":
+            if not values or self.failure_category is not None:
+                raise ValueError("passed source outcome requires forecast and no failure")
+        elif values or self.failure_category not in TRAIN_DIAGNOSTIC_CATEGORIES:
+            raise ValueError("invalid source outcome requires a closed failure category")
+        object.__setattr__(self, "forecast", values)
