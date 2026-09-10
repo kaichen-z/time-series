@@ -5,6 +5,7 @@ from .contracts import (
     ConstraintReportV2,
     MorphologyCellV2,
     MutationOperatorStatsV2,
+    MutationStateV2,
     NumericalEvaluationV2,
     NumericalGenomeV2,
     NumericalInventoryV2,
@@ -13,14 +14,32 @@ from .contracts import (
     NumericalObjectiveVectorV2,
     NumericalProposerPromptV2,
     NumericalQDEntryV2,
+    TrainMutationFeedbackV2,
 )
 from .descriptors import DescriptorPolicyV2, describe_history
+from .mutation import MutationProposalV2, MutationResultV2, apply_mutation, record_train_outcome
+from .proposers import (
+    DeterministicProposalProvider, HybridProposalProvider, LLMProposalProvider,
+    NormalizedProposalBatchV2, ProviderAttemptV2, primitive_proposer_request,
+)
 
 __all__ = [
     "ConstraintReportV2",
     "DescriptorPolicyV2",
     "MorphologyCellV2",
     "MutationOperatorStatsV2",
+    "MutationStateV2",
+    "MutationProposalV2",
+    "MutationResultV2",
+    "NormalizedProposalBatchV2",
+    "ProviderAttemptV2",
+    "TrainMutationFeedbackV2",
+    "DeterministicProposalProvider",
+    "HybridProposalProvider",
+    "LLMProposalProvider",
+    "apply_mutation",
+    "primitive_proposer_request",
+    "record_train_outcome",
     "NumericalEvaluationV2",
     "NumericalGenomeV2",
     "NumericalInventoryV2",

@@ -304,6 +304,61 @@ class NumericalProposerPromptV2(_CanonicalContract):
 
 
 @dataclass(frozen=True, slots=True)
+class MutationStateV2(_CanonicalContract):
+    """Closed transition aggregate; artifact authority remains with its components."""
+
+    inventory: NumericalInventoryV2
+    mutation_policy: NumericalMutationPolicyV2
+    proposer_prompt: NumericalProposerPromptV2
+    declared_cells: tuple[str, ...]
+    max_parents_per_child: int
+    max_inventory_size: int
+
+    def __post_init__(self):
+        for name, cls in (("inventory", NumericalInventoryV2),
+                          ("mutation_policy", NumericalMutationPolicyV2),
+                          ("proposer_prompt", NumericalProposerPromptV2)):
+            object.__setattr__(self, name, _nested(getattr(self, name), cls))
+        object.__setattr__(self, "declared_cells", _sorted_strings(
+            self.declared_cells, "declared_cells", sha=True, nonempty=True
+        ))
+        for name in ("max_parents_per_child", "max_inventory_size"):
+            if _nonnegative_int(getattr(self, name), name) == 0:
+                raise ValueError(f"{name} must be positive")
+        if len(self.inventory.members) > self.max_inventory_size:
+            raise ValueError("inventory exceeds capacity")
+        for member in self.inventory.members:
+            if len(member.parent_ids) > self.max_parents_per_child:
+                raise ValueError("member exceeds parent limit")
+            if not set(member.applicability_cells) <= set(self.declared_cells):
+                raise ValueError("member uses undeclared cell")
+
+
+@dataclass(frozen=True, slots=True)
+class TrainMutationFeedbackV2(_CanonicalContract):
+    """Only Host-observed Train outcomes can feed proposal credit."""
+
+    split: Literal["train"]
+    operator: str
+    feasible: bool
+    promoted: bool
+    inserted: bool
+    diagnostic_categories: tuple[str, ...]
+
+    def __post_init__(self):
+        _require_choice(self.split, "split", frozenset({"train"}))
+        _require_choice(self.operator, "operator", MUTATION_OPERATORS)
+        for name in ("feasible", "promoted", "inserted"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} must be boolean")
+        if (self.promoted or self.inserted) and not self.feasible:
+            raise ValueError("promotion/insertion requires Train feasibility")
+        object.__setattr__(self, "diagnostic_categories", _sorted_strings(
+            self.diagnostic_categories, "diagnostic_categories", choices=TRAIN_DIAGNOSTIC_CATEGORIES
+        ))
+
+
+@dataclass(frozen=True, slots=True)
 class NumericalQDEntryV2(_CanonicalContract):
     """One candidate's objectives on one cell's committed Train tasks."""
 

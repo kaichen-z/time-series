@@ -1,0 +1,368 @@
+"""Primitive-only proposal boundary, Host source normalization, charged fallback."""
+from __future__ import annotations
+
+import ast
+import hashlib
+import time
+from dataclasses import dataclass
+from itertools import combinations
+
+from common.llm import LLMClient
+from common.payload import strict_json_loads
+from common.sandbox import check_code
+from numerical_agent.evolution.module import parse_method
+
+from ..budget import BudgetLedger, ResourceUse
+from ..contracts import _require_exact_schema, _strict_json_value, canonical_v2_bytes, fingerprint_payload
+from .contracts import (
+    MUTATION_OPERATORS, MutationStateV2, NumericalGenomeV2, TrainMutationFeedbackV2,
+    _sorted_strings,
+)
+from .mutation import MutationProposalV2, _identifier, apply_mutation
+
+REQUEST_KEYS = frozenset({
+    "parent_genome", "parent_state", "selected_cells", "train_feedback",
+    "remaining_budget", "allowed_mutation_operators", "counter_draw",
+    "max_proposals", "max_response_bytes",
+})
+FAILURE_REASONS = frozenset({"unavailable", "timeout", "malformed", "empty", "budget_exhausted"})
+
+
+def primitive_proposer_request(**payload) -> dict:
+    """Reject unknown data at every depth before any provider can receive it.
+
+    Inputs are payloads, never live artifacts, paths, Store/Kernel handles or
+    callbacks. Free-form evaluation text/forecasts are deliberately absent.
+    """
+    values = _require_exact_schema(payload, REQUEST_KEYS, field="proposer request")
+    values = _strict_json_value(values)
+    state = MutationStateV2.from_payload(values["parent_state"])
+    genome = NumericalGenomeV2.from_payload(values["parent_genome"])
+    for name, actual in (("inventory_sha256", state.inventory.fingerprint()),
+                         ("mutation_policy_sha256", state.mutation_policy.fingerprint()),
+                         ("proposer_prompt_sha256", state.proposer_prompt.fingerprint())):
+        if getattr(genome, name) != actual:
+            raise ValueError(f"Parent genome {name} mismatch")
+    allowed = _sorted_strings(values["allowed_mutation_operators"], "allowed_mutation_operators",
+        choices=MUTATION_OPERATORS, nonempty=True)
+    if not set(allowed) <= (set(state.mutation_policy.operators) & set(state.proposer_prompt.allowed_mutation_operators)):
+        raise ValueError("request expands Parent mutation authority")
+    for name in ("counter_draw", "max_proposals", "max_response_bytes"):
+        value = values[name]
+        if type(value) is not int or value < (0 if name == "counter_draw" else 1):
+            raise ValueError(f"{name} must be a bounded integer")
+    if values["max_response_bytes"] > 1_048_576:
+        raise ValueError("response cap exceeds artifact bound")
+    ResourceUse.from_payload(values["remaining_budget"])
+    members = {member.member_id for member in state.inventory.members}
+    for member in state.inventory.members:
+        _identifier(member.member_id)
+        for parent in member.parent_ids:
+            _identifier(parent)
+    if type(values["selected_cells"]) is not list:
+        raise ValueError("selected_cells must be a list")
+    cells = []
+    for entry in values["selected_cells"]:
+        row = _require_exact_schema(entry, {"cell_sha256", "member_ids"}, field="selected cell")
+        if row["cell_sha256"] not in state.declared_cells:
+            raise ValueError("selected cell is undeclared")
+        ids = _sorted_strings(row["member_ids"], "member_ids")
+        if not set(ids) <= members:
+            raise ValueError("cell summary contains unknown member")
+        cells.append(row["cell_sha256"])
+    if cells != sorted(set(cells)):
+        raise ValueError("selected cells must be sorted and unique")
+    if type(values["train_feedback"]) is not list:
+        raise ValueError("train_feedback must be a list")
+    for feedback in values["train_feedback"]:
+        TrainMutationFeedbackV2.from_payload(feedback)
+    return values
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderAttemptV2:
+    provider: str
+    resource_use: ResourceUse
+    failure_reason: str | None
+
+    def __post_init__(self):
+        if self.provider not in {"llm", "deterministic"}:
+            raise ValueError("unknown attempt provider")
+        if type(self.resource_use) is not ResourceUse:
+            raise ValueError("resource_use must be ResourceUse")
+        if self.failure_reason is not None and self.failure_reason not in FAILURE_REASONS:
+            raise ValueError("unknown failure reason")
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedProposalBatchV2:
+    proposals: tuple[MutationProposalV2, ...]
+    source_artifacts: tuple[tuple[str, bytes], ...]
+    resource_use: ResourceUse
+    provider: str
+    failure_reason: str | None
+    attempts: tuple[ProviderAttemptV2, ...]
+
+    def __post_init__(self):
+        proposals = tuple(self.proposals)
+        artifacts = tuple(tuple(item) for item in self.source_artifacts)
+        attempts = tuple(self.attempts)
+        if any(type(item) is not MutationProposalV2 for item in proposals):
+            raise ValueError("batch requires typed proposals")
+        if any(len(item) != 2 or type(item[1]) is not bytes
+               or hashlib.sha256(item[1]).hexdigest() != item[0] for item in artifacts):
+            raise ValueError("source artifacts must be immutable digest-bound bytes")
+        if [item[0] for item in artifacts] != sorted({item[0] for item in artifacts}):
+            raise ValueError("source artifacts must be sorted and unique")
+        if self.provider not in {"llm", "deterministic", "hybrid"}:
+            raise ValueError("unknown provider")
+        if self.failure_reason is not None and self.failure_reason not in FAILURE_REASONS:
+            raise ValueError("unknown failure reason")
+        if self.failure_reason is not None and (proposals or artifacts):
+            raise ValueError("failed batch must be empty")
+        total = ResourceUse()
+        for attempt in attempts:
+            if type(attempt) is not ProviderAttemptV2:
+                raise ValueError("attempts must be typed")
+            total = total + attempt.resource_use
+        if type(self.resource_use) is not ResourceUse or total != self.resource_use:
+            raise ValueError("batch resources must equal closed attempts")
+        object.__setattr__(self, "proposals", proposals)
+        object.__setattr__(self, "source_artifacts", artifacts)
+        object.__setattr__(self, "attempts", attempts)
+
+
+def _batch(provider, proposals=(), artifacts=(), use=ResourceUse(), reason=None):
+    return NormalizedProposalBatchV2(tuple(proposals), tuple(artifacts), use, provider, reason,
+        (ProviderAttemptV2(provider, use, reason),))
+
+
+def _normalize_sources(response, request):
+    raw = _require_exact_schema(response, {"source_candidates", "proposals"}, field="LLM response")
+    if type(raw["source_candidates"]) is not list or type(raw["proposals"]) is not list:
+        raise ValueError("response arrays required")
+    if len(raw["proposals"]) > request["max_proposals"]:
+        raise ValueError("too many proposals")
+    if len(raw["source_candidates"]) > len(raw["proposals"]):
+        raise ValueError("unowned source candidate")
+    sources = {}
+    for candidate in raw["source_candidates"]:
+        row = _require_exact_schema(candidate, {"local_id", "code"}, field="source candidate")
+        identity = _identifier(row["local_id"])
+        if identity in sources or (len(identity) == 64 and all(c in "0123456789abcdef" for c in identity)):
+            raise ValueError("source IDs must be unique request-local names, not digests")
+        code = row["code"]
+        if type(code) is not str or not code.strip():
+            raise ValueError("source code required")
+        code = code.replace("\r\n", "\n").replace("\r", "\n").strip("\n") + "\n"
+        # parse_method validates the forecasting signature/docstring. It permits
+        # unrelated module statements, so close that gap before the shared gate.
+        tree = ast.parse(code)
+        if len(tree.body) != 1 or not isinstance(tree.body[0], ast.FunctionDef):
+            raise ValueError("source must contain exactly one forecast method")
+        parse_method(code)
+        check_code(code)
+        source_bytes = code.encode("utf-8")
+        sources[identity] = (hashlib.sha256(source_bytes).hexdigest(), source_bytes)
+    state = MutationStateV2.from_payload(request["parent_state"])
+    proposals, used, owned = [], set(), set()
+    for payload in raw["proposals"]:
+        value = _strict_json_value(payload)
+        if not isinstance(value, dict):
+            raise ValueError("proposal must be an object")
+        for key in ("member", "child", "replacement"):
+            if key in value:
+                member = value[key]
+                if not isinstance(member, dict):
+                    raise ValueError("member must be an object")
+                local_id = member.get("source_sha256")
+                if type(local_id) is not str or local_id not in sources or local_id in used:
+                    raise ValueError("source reference must have one request-local owner")
+                used.add(local_id)
+                member["source_sha256"] = sources[local_id][0]
+        proposal = MutationProposalV2.from_payload(value)
+        if proposal.operator not in request["allowed_mutation_operators"]:
+            raise ValueError("operator not allowed in this request")
+        apply_mutation(state, proposal)
+        target = value.get("member_id")
+        children = [value[key]["member_id"] for key in ("member", "child", "replacement") if key in value]
+        targets = set(children + ([target] if target is not None else []))
+        if proposal.operator == "policy_tune":
+            targets.add("__prompt__")
+        if targets & owned:
+            raise ValueError("batch has duplicate mutation ownership")
+        owned.update(targets)
+        proposals.append(proposal)
+    if used != set(sources):
+        raise ValueError("unowned source candidate")
+    artifacts = tuple(sorted(set(sources.values())))
+    return tuple(proposals), artifacts
+
+
+class DeterministicProposalProvider:
+    """Select one legal action from a canonical sorted list with the supplied draw.
+
+    Structural children reuse verified Parent source identities and commit
+    their typed structure to a canonical policy identity. Source changes go
+    through the LLM/Host parser gate.
+    """
+
+    def propose(self, request) -> NormalizedProposalBatchV2:
+        request = primitive_proposer_request(**request)
+        if request["remaining_budget"]["wall_seconds"] <= 0:
+            return _batch("deterministic", reason="budget_exhausted")
+        state = MutationStateV2.from_payload(request["parent_state"])
+        allowed = set(request["allowed_mutation_operators"])
+        candidates = []
+        members = sorted(state.inventory.members, key=lambda item: item.member_id)
+        for member in members:
+            candidates.append(_structural_candidate("repair", [member], member.applicability_cells))
+            for op in ("remove", "quarantine"):
+                candidates.append(dict(operator=op, reason="Train inventory maintenance", member_id=member.member_id))
+            for cell in member.applicability_cells:
+                candidates.append(dict(operator="specialize", reason="Train cell specialization", member_id=member.member_id,
+                    applicability_cells=[cell]))
+                if len(member.applicability_cells) > 1:
+                    candidates.append(_structural_candidate("fork", [member], [cell]))
+        for parents in combinations(members, 2):
+            if parents[0].family != parents[1].family or any(m.status == "quarantined" for m in parents):
+                continue
+            cells = sorted(set(parents[0].applicability_cells) | set(parents[1].applicability_cells))
+            for op in ("combine", "route"):
+                candidates.append(_structural_candidate(op, parents, cells))
+        prompt = state.proposer_prompt.to_payload() | dict(
+            parent_prompt_sha256=state.proposer_prompt.fingerprint(),
+            template="Propose a bounded mutation using only Train feasibility and declared cells.")
+        candidates.append(dict(operator="policy_tune", reason="Train prompt variant", prompt=prompt, credit_delta={}))
+        preferred = min(allowed, key=lambda op: (-state.mutation_policy.operators[op].credit, op))
+        credit_prompt = prompt | dict(template=f"Propose a bounded Train mutation. Prefer {preferred} using recorded Train insertion credit.")
+        candidates.append(dict(operator="policy_tune", reason="Recorded Train credit preference", prompt=credit_prompt, credit_delta={}))
+        feasible = []
+        for candidate in candidates:
+            if candidate["operator"] not in allowed:
+                continue
+            try:
+                proposal = MutationProposalV2.from_payload(candidate)
+                apply_mutation(state, proposal)
+            except ValueError:
+                continue
+            feasible.append(proposal)
+        feasible.sort(key=lambda proposal: (proposal.operator, proposal.canonical_bytes()))
+        if not feasible:
+            return _batch("deterministic", reason="empty")
+        return _batch("deterministic", [feasible[request["counter_draw"] % len(feasible)]])
+
+
+def _structural_candidate(operator, parents, cells):
+    """Policy digest binds the reusable source, lineage, and typed structure.
+
+    Task 8 can reconstruct this policy payload from the Parent and proposal;
+    this provider performs no source or policy persistence.
+    """
+    cells = list(cells)
+    policy = dict(schema_version=1, operator=operator,
+        parents=[parent.to_payload() for parent in parents], applicability_cells=cells)
+    digest = fingerprint_payload(policy)
+    child = parents[0].to_payload() | dict(member_id=f"{operator}_{digest[:24]}",
+        policy_sha256=digest, parent_ids=[parent.member_id for parent in parents],
+        family="combined" if operator in {"combine", "route"} else parents[0].family,
+        applicability_cells=cells, status="active")
+    if operator in {"repair", "fork"}:
+        return dict(operator=operator, reason="Train structural mutation", member_id=parents[0].member_id,
+            **{"replacement" if operator == "repair" else "child": child})
+    return dict(operator=operator, reason="Train structural mutation", parent_ids=child["parent_ids"], child=child)
+
+
+def _llm_limits(request):
+    state = MutationStateV2.from_payload(request["parent_state"])
+    remaining = ResourceUse.from_payload(request["remaining_budget"])
+    encoded = canonical_v2_bytes(request).decode("utf-8")
+    system = state.proposer_prompt.template
+    cap = min(request["max_response_bytes"], state.proposer_prompt.max_response_bytes, remaining.output_tokens)
+    # LLMClient exposes text only: UTF-8 byte counts conservatively bound tokens.
+    input_bound = len(encoded.encode()) + len(system.encode())
+    return remaining, encoded, system, cap, input_bound
+
+
+class LLMProposalProvider:
+    def __init__(self, client: LLMClient | None, *, monotonic=time.monotonic):
+        self.client = client
+        self.monotonic = monotonic
+
+    def propose(self, request) -> NormalizedProposalBatchV2:
+        request = primitive_proposer_request(**request)
+        remaining, encoded, system, cap, input_bound = _llm_limits(request)
+        if remaining.llm_calls < 1 or remaining.wall_seconds <= 0 or remaining.input_tokens < input_bound or cap < 1:
+            return _batch("llm", reason="budget_exhausted")
+        started = self.monotonic()
+        proposals, artifacts, reason, output_bytes = (), (), None, 0
+        try:
+            if self.client is None:
+                reason = "unavailable"
+            else:
+                response = self.client.complete(system=system, messages=[{"role": "user", "content": encoded}], temperature=0.0)
+                if type(response.text) is not str:
+                    raise ValueError("response text required")
+                output_bytes = len(response.text.encode("utf-8"))
+                if output_bytes > cap:
+                    raise ValueError("response byte limit exceeded")
+                parsed = strict_json_loads(response.text, context="Numerical mutation batch")
+                proposals, artifacts = _normalize_sources(parsed, request)
+                if not proposals:
+                    reason = "empty"
+        except TimeoutError:
+            reason = "timeout"
+        except (ValueError, TypeError, SyntaxError, RecursionError):
+            reason = "malformed"
+        except Exception:
+            reason = "unavailable"
+        use = ResourceUse(wall_seconds=max(0.0, float(self.monotonic() - started)), llm_calls=1,
+            input_tokens=input_bound if self.client is not None else 0, output_tokens=output_bytes)
+        return _batch("llm", proposals if reason is None else (), artifacts if reason is None else (), use, reason)
+
+
+class HybridProposalProvider:
+    """Budget ledger stays with the Host; only primitives cross propose()."""
+
+    def __init__(self, llm: LLMProposalProvider, deterministic: DeterministicProposalProvider, ledger: BudgetLedger):
+        self.llm = llm
+        self.deterministic = deterministic
+        self.ledger = ledger
+
+    def propose(self, request) -> NormalizedProposalBatchV2:
+        request = primitive_proposer_request(**request)
+        remaining, _, _, cap, input_bound = _llm_limits(request)
+        stage = "numerical-proposal-" + fingerprint_payload(request)
+        attempts = []
+        estimate = ResourceUse(wall_seconds=remaining.wall_seconds, llm_calls=1,
+            input_tokens=input_bound, output_tokens=cap)
+        permit = self.ledger.reserve_stage(stage + "-llm", estimate)
+        if permit.allowed:
+            result = self.llm.propose(request)
+            closed = self.ledger.close_stage(permit, result.resource_use)
+            attempts.extend(result.attempts)
+            if not closed.allowed:
+                return self._result(attempts, reason="budget_exhausted")
+            if result.proposals:
+                return self._result(attempts, result.proposals, result.source_artifacts)
+            available = {
+                name: max(0.0 if type(value) is float else 0, value - getattr(result.resource_use, name))
+                for name, value in request["remaining_budget"].items()
+            }
+            request = primitive_proposer_request(**(request | {"remaining_budget": available}))
+        if request["remaining_budget"]["wall_seconds"] <= 0:
+            return self._result(attempts, reason="budget_exhausted")
+        fallback = self.ledger.reserve_stage(stage + "-deterministic", ResourceUse())
+        if not fallback.allowed:
+            return self._result(attempts, reason="budget_exhausted")
+        result = self.deterministic.propose(request)
+        self.ledger.close_stage(fallback, result.resource_use)
+        attempts.extend(result.attempts)
+        return self._result(attempts, result.proposals, result.source_artifacts, result.failure_reason)
+
+    @staticmethod
+    def _result(attempts, proposals=(), artifacts=(), reason=None):
+        use = ResourceUse()
+        for attempt in attempts:
+            use = use + attempt.resource_use
+        return NormalizedProposalBatchV2(tuple(proposals), tuple(artifacts), use, "hybrid", reason, tuple(attempts))
