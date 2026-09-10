@@ -501,3 +501,101 @@ def test_single_task_evaluation_satisfies_existing_hyperband_cache_boundary(worl
     assert result.task_ids == (task.task_id,) and result.task_subset_sha256 == task.fingerprint()
     assert _task_evaluation(result, child.genome.fingerprint(), task, "6" * 64,
         descriptor_policy().fingerprint(), child.genome.runtime_fingerprints, adapter.fingerprint) == result
+
+
+def test_one_genome_cannot_accept_two_executable_members_or_cache_forecasts(world):
+    from evolving_loop.v2.numerical_qd.hyperband import _task_evaluation
+    child = materialize(world)
+    task = train_manifest(world[0]).tasks[0]
+    result = evaluate_numerical_child(world[0], child, task, descriptor_policy=descriptor_policy(),
+        metric_policy_sha256="6" * 64, bracket="explore", rung=0)
+    assert _task_evaluation(result, child.genome.fingerprint(), task, "6" * 64,
+        descriptor_policy().fingerprint(), child.genome.runtime_fingerprints, world[0].fingerprint) == result
+    with pytest.raises(ValueError, match="canonical member"):
+        materialize(world, member_id="backup")
+    with pytest.raises(ValueError, match="canonical member"):
+        replace(child, member=world[3].inventory.members[1])
+    repeated = materialize(world)
+    assert repeated.candidate.registry.fingerprint == child.candidate.registry.fingerprint
+
+
+def test_verified_source_bytes_override_independent_store_in_fit_and_materialization(world):
+    original, release, registry, state, rows = world
+    source = SOURCE.replace("+ 1.0", "+ 9000.0")
+    sha = hashlib.sha256(source.encode()).hexdigest()
+    altered = replace(state, inventory=NumericalInventoryV2(1, tuple(
+        replace(member, source_sha256=sha) for member in state.inventory.members)))
+    adapter = LegacyNumericalAdapter(materializer=original.materializer, tasks=original.tasks,
+        fold_manifest=original.fold_manifest, sources={sha: source})
+    child = materialize((adapter, release, registry, altered, rows))
+    task = adapter.tasks[0]
+    actual = next(item.forecast for item in child.candidate.registry.package_for(task).ranked_alternatives
+                  if item.name == child.fit.recipe.name)
+    assert actual == (task.numeric.history_values[-1] + 9000.0,) * task.numeric.prediction_length
+    assert child.member.source_sha256 == sha
+    assert child.genome.fingerprint() != genome(state).fingerprint()
+    # Caller-held cached fitting forecasts must not alter a committed recipe's fit.
+    poisoned = tuple(replace(row, forecast=(900000.0,) * row.profile.horizon) for row in rows)
+    again = materialize((adapter, release, registry, altered, poisoned))
+    assert again.fit == child.fit
+    assert again.candidate.registry.fingerprint == child.candidate.registry.fingerprint
+
+
+@pytest.mark.parametrize("statement", [
+    "import numpy as np\n    np.savetxt(PATH, [1.0])",
+    "import numpy as np\n    np.save(PATH, [1.0])",
+    "import numpy as np\n    np.savez(PATH, data=[1.0])",
+    "import numpy as np\n    np.savez_compressed(PATH, data=[1.0])",
+    "import numpy as np\n    np.array([1.0]).tofile(PATH)",
+    "import numpy as np\n    np.memmap(PATH, mode='w+', shape=(1,))",
+    "import numpy as np\n    np.load(PATH)",
+    "import numpy as np\n    np.loadtxt(PATH)",
+    "import numpy as np\n    np.genfromtxt(PATH)",
+    "import numpy as np\n    np.fromfile(PATH)",
+    "from numpy import savetxt as writer\n    writer(PATH, [1.0])",
+    "import numpy as np\n    writer = np.savetxt\n    writer(PATH, [1.0])",
+    "import numpy as np\n    getattr(np, 'save' + 'txt')(PATH, [1.0])",
+    "from numpy.lib.format import open_memmap\n    open_memmap(PATH, mode='w+', shape=(1,))",
+    "import pandas as pd\n    pd.DataFrame([1.0]).to_csv(PATH)",
+    "import numpy as np\n    np.ctypeslib.load_library('evil', PATH)",
+])
+def test_library_io_surfaces_rejected_before_execution(world, tmp_path, statement):
+    target = tmp_path / "must-not-exist"
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon",
+        statement.replace("PATH", repr(str(target))) + "\n    return [1.0] * horizon")
+    with pytest.raises(ValueError):
+        world[0].validate_source(source)
+    assert not target.exists()
+
+
+def test_library_gate_rejects_builtin_namespace_escape(world):
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon",
+        "__builtins__['open']('/tmp/qd-escape', 'w')\n    return [1.0] * horizon")
+    with pytest.raises(ValueError):
+        world[0].validate_source(source)
+
+
+def test_closed_library_gate_preserves_finite_numpy_forecasting(world):
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon",
+        "import numpy as np\n    return np.full(horizon, np.mean(np.asarray(history))).tolist()")
+    outcome = world[0].forecast_source(source, "seasonal_naive", world[0].tasks[0])
+    assert outcome.status == "passed" and outcome.forecast == (3.5, 3.5)
+
+
+def test_conflicting_source_names_fail_before_train_row_access(world):
+    original, release, registry, state, rows = world
+    other = SOURCE.replace("+ 1.0", "+ 9000.0")
+    sha = hashlib.sha256(other.encode()).hexdigest()
+    state = replace(state, inventory=NumericalInventoryV2(1, (state.inventory.members[0],
+        replace(state.inventory.members[1], source_sha256=sha))))
+    proposal = MutationProposalV2.from_payload(_structural_candidate("combine",
+        sorted(state.inventory.members, key=lambda member: member.member_id), state.declared_cells))
+    evolved = apply_mutation(state, proposal).state
+    adapter = LegacyNumericalAdapter(materializer=original.materializer, tasks=original.tasks,
+        fold_manifest=original.fold_manifest, sources={SOURCE_SHA: SOURCE, sha: other})
+    class UntouchedRows:
+        def __iter__(self):
+            raise AssertionError("ambiguous source reached Train data")
+    with pytest.raises(ValueError, match="ambiguous executable source"):
+        materialize((adapter, release, registry, state, UntouchedRows()), evolved,
+            member_id=proposal.payload["child"]["member_id"], parent_state=state, proposal=proposal)

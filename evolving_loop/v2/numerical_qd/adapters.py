@@ -5,11 +5,13 @@ evaluation emits the closed V2 aggregate. No legacy source or release is edited.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import math
 import statistics
 import tempfile
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -29,7 +31,8 @@ from evolving_loop.package_numerical_supply import (
 )
 from evolving_loop.package_registry import FrozenNumericalPackageRegistry, task_registry_fingerprint
 from numerical_agent.evolution.champion import ChampionRecipe, parse_champion_recipe, parse_champion_release
-from numerical_agent.evolution.execution import IsolatedForecastRuntime, MethodForecastError
+from numerical_agent.evolution.champion_evidence import ChampionTaskRow
+from numerical_agent.evolution.execution import IsolatedForecastRuntime, MethodForecastError, Task as RuntimeTask
 from numerical_agent.evolution.module import EVOLUTION_IMPORTS, EVOLUTION_DUNDERS, MODULE_HEADER, MethodModule, parse_module
 from numerical_agent.evolution.morphology import (
     AssumptionGrounding, MorphologyCard, MorphologyObservation, MorphologyToolCall,
@@ -41,7 +44,7 @@ from numerical_agent.evolution.numerical_package import (
 from numerical_agent.evolution.numerical_selector import (
     CandidateDiagnostics, HindcastFold, SelectionArithmetic, SelectionDecision,
 )
-from numerical_agent.evolution.screening import TaskProfile
+from numerical_agent.evolution.screening import TaskProfile, profile_task
 from numerical_agent.evolution.task_local_evolution import GroupFoldManifest
 
 from ..budget import ResourceUse
@@ -66,6 +69,54 @@ _PACKAGE_TYPES = {cls.__name__: cls for cls in (
     SelectionDecision, SelectionArithmetic, AssumptionGrounding, MorphologyCard,
     MorphologyToolCall, MorphologyObservation,
 )}
+
+# The legacy parser is necessary but not an OS sandbox. V2 additionally limits
+# imported capabilities and attribute access to a closed, numerical-only surface.
+# Checking references (not just calls) also rejects aliases/callbacks to file IO.
+_SOURCE_IMPORTS = frozenset({"math", "statistics", "itertools", "functools", "collections",
+                              "numpy", "numpy.linalg", "numpy.fft"})
+_SOURCE_ATTRIBUTES = frozenset("""
+    abs absolute accumulate acos acosh add all allclose amax amin angle any append
+    arange arccos arccosh arcsin arcsinh arctan arctan2 arctanh argmax argmin argsort
+    around array array_equal asarray asin asinh astype atan atan2 atanh average
+    bincount bool_ broadcast_to cbrt ceil chain clip column_stack combinations comb
+    concatenate conj conjugate convolve copy corrcoef cos cosh count count_nonzero
+    Counter cov cumprod cumsum cycle degrees deque diagonal diff digitize divmod dot
+    dtype e eig eigh eigvals eigvalsh einsum empty empty_like enumerate erf erfc exp
+    exp2 expand_dims expm1 fabs factorial fft fftfreq fftshift fill finfo flat flatten
+    float32 float64 floor fmax fmean fmin fmod frexp fromiter fromkeys fsum full
+    full_like gamma gcd geomspace get gradient groupby harmonic_mean hstack hypot
+    identity ifft ifftshift imag inf inner int32 int64 interp inv irfft isclose
+    isfinite isinf isnan islice items keys ldexp lgamma linalg linspace log log10
+    log1p log2 logaddexp logical_and logical_not logical_or logspace lstsq matmul
+    max maximum mean median min minimum mod mode moveaxis nan nan_to_num nanargmax
+    nanargmin nanmax nanmean nanmedian nanmin nanpercentile nanquantile nanstd nansum
+    nanvar ndim negative newaxis nextafter norm ones ones_like outer pad partition
+    percentile permutations pi pinv polyfit polyval power prod product pstdev pvariance
+    quantile quantiles radians ravel real reciprocal reduce repeat reshape resize
+    rfft rfftfreq roll round row_stack searchsorted shape sign sin sinh size solve
+    sort split sqrt square squeeze stack starmap std stdev subtract sum svd swapaxes
+    take tan tanh tau tensordot tile tolist trace transpose trapz trapezoid tri tril
+    triu trunc tuple unique values var variance vdot vstack where zip_longest zeros
+    zeros_like T
+""".split())
+_SOURCE_REFLECTION = frozenset({"getattr", "setattr", "delattr", "hasattr", "vars", "globals", "locals",
+                                 "dir", "type", "object", "super", "memoryview", "help", "print"})
+
+
+def _check_numerical_capabilities(source):
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            if any(alias.name not in _SOURCE_IMPORTS for alias in node.names):
+                raise ValueError("source import is outside the closed numerical capabilities")
+        elif isinstance(node, ast.ImportFrom):
+            if (node.level or node.module not in _SOURCE_IMPORTS
+                    or any(alias.name not in _SOURCE_ATTRIBUTES for alias in node.names)):
+                raise ValueError("source import is outside the closed numerical capabilities")
+        elif isinstance(node, ast.Attribute) and node.attr not in _SOURCE_ATTRIBUTES:
+            raise ValueError("source attribute is outside the closed numerical capabilities")
+        elif isinstance(node, ast.Name) and (node.id in _SOURCE_REFLECTION or node.id.startswith("__")):
+            raise ValueError("source reflection is not a numerical capability")
 
 
 def _encode(value):
@@ -200,6 +251,8 @@ class MaterializedNumericalChildV2:
                 raise ValueError(f"child requires exact {name}")
         if self.genome.inventory_sha256 != self.state.inventory.fingerprint() or self.member not in self.state.inventory.members:
             raise ValueError("child inventory binding mismatch")
+        if self.member != _canonical_member(self.state):
+            raise ValueError("child must bind the canonical member")
         NumericalCoordinateCandidate.__post_init__(self.candidate)
         NumericalRecipeFit.__post_init__(self.fit)
         require_sha256(self.descriptor_policy_sha256, "descriptor_policy_sha256")
@@ -221,6 +274,104 @@ class FrozenNumericalArtifactsV2:
     def __post_init__(self):
         if self.release.fingerprint != self.registry.release_sha256 or self.envelope.registry_sha256 != self.registry.fingerprint:
             raise ValueError("frozen Numerical artifacts disagree")
+
+
+def _canonical_member(state):
+    """One executable per committed inventory: specialization, ancestry, order.
+
+    Inventory order is itself hashed. Prefer a specialized member, then a
+    structural child with more parents, breaking ties by that committed order.
+    No caller choice, score, task, or uncommitted policy affects this selection.
+    """
+    eligible = tuple(member for member in state.inventory.members if member.status != "quarantined")
+    if not eligible:
+        raise ValueError("inventory has no canonical member")
+    return min(eligible, key=lambda member: (member.status != "specialized", -len(member.parent_ids)))
+
+
+class _VerifiedForecastStore:
+    """Execute selected source bytes; only the protected legacy anchor delegates."""
+
+    def __init__(self, directory, sources, anchor_names, trusted_store):
+        self.methods, self.runtimes, self.cache = {}, {}, {}
+        self.anchor_names, self.trusted_store = set(anchor_names), trusted_store
+        for sha, source in sorted(sources.items()):
+            if hashlib.sha256(source.encode()).hexdigest() != sha:
+                raise ValueError("executable source SHA mismatch")
+            for name in LegacyNumericalAdapter.validate_source(source).names():
+                if name in self.methods or name in self.anchor_names:
+                    raise ValueError("ambiguous executable source or protected anchor identity")
+                self.methods[name] = sha
+        self.paths = {}
+        for sha, source in sorted(sources.items()):
+            path = Path(directory) / f"{sha}.py"
+            path.write_text(MODULE_HEADER + "\n" + source, encoding="utf-8")
+            self.paths[sha] = path
+
+    def forecast(self, name, history, horizon, frequency):
+        key = (name, tuple(history), horizon, frequency)
+        if key not in self.cache:
+            if name in self.methods:
+                sha = self.methods[name]
+                if sha not in self.runtimes:
+                    self.runtimes[sha] = IsolatedForecastRuntime(self.paths[sha])
+                value = self.runtimes[sha].forecast(name, history, horizon, frequency)
+            elif name in self.anchor_names:
+                value = self.trusted_store.forecast(name, history, horizon, frequency)
+            else:
+                raise MethodForecastError("method is outside the verified executable source closure")
+            self.cache[key] = tuple(value)
+        return self.cache[key]
+
+    def close(self):
+        for runtime in self.runtimes.values():
+            runtime.close()
+
+
+@contextmanager
+def _source_bound_materializer(materializer, sources, anchor):
+    if type(materializer) is not NumericalPackageMaterializer:
+        raise ValueError("source binding requires an exact NumericalPackageMaterializer")
+    with tempfile.TemporaryDirectory(prefix="numerical-qd-materialize-") as directory:
+        store = _VerifiedForecastStore(directory, sources, anchor.policy.recipe.parents, materializer.forecast_store)
+        try:
+            # Reuse the legacy materializer without mutating the injected instance.
+            # Old cached diagnostics may refer to different source bytes: recompute.
+            bound = NumericalPackageMaterializer(forecast_store=store,
+                screening_policy=materializer.screening_policy, fold_manifest=materializer.fold_manifest,
+                original_tasks=materializer.original_tasks, source_fingerprints=materializer.source_fingerprints,
+                runtime_fingerprints=materializer.runtime_fingerprints, combined_policies=materializer.combined_policies,
+                atlas_release=materializer.atlas_release, decision_policy=materializer.decision_policy,
+                hindcast_config=materializer.hindcast_config, diagnostics_registry=None)
+            yield bound
+        finally:
+            store.close()
+
+
+def _verified_build_rows(rows, tasks, manifest, recipe, anchor, store):
+    hosts = {task.numeric.task_id: task.numeric for task in tasks
+             if task.numeric.task_id in manifest.task_fold_map}
+    supplied = tuple(rows)
+    if not supplied or any(type(row) is not ChampionTaskRow for row in supplied):
+        raise ValueError("fitting requires exact host Train rows")
+    if {row.task_id for row in supplied} != set(hosts):
+        raise ValueError("fitting requires the exact Train task universe")
+    profiles = {name: profile_task(RuntimeTask(name, task.history_values, task.prediction_length,
+                                               task.frequency, ())) for name, task in hosts.items()}
+    for row in supplied:
+        task = hosts[row.task_id]
+        if (row.split != "build" or row.fold != manifest.task_fold_map[row.task_id]
+                or row.truth != task.future_values or row.history != task.history_values
+                or row.profile != profiles[row.task_id]):
+            raise ValueError("fitting row does not match its trusted Train task")
+    # Forecasts and diagnostics are not caller authority. Rebuild fitting rows
+    # from the SAME byte-bound store used for full materialization below.
+    names = sorted(set(recipe.parents) | set(anchor.policy.recipe.parents))
+    return tuple(ChampionTaskRow(task_id=name, candidate_name=candidate, profile=profiles[name],
+        truth=task.future_values, forecast=store.forecast(candidate, task.history_values,
+            task.prediction_length, task.frequency), fold=manifest.task_fold_map[name],
+        split="build", history=task.history_values)
+        for name, task in sorted(hosts.items()) for candidate in names)
 
 
 def _sources(sources):
@@ -299,7 +450,9 @@ class LegacyNumericalAdapter:
         if type(source) is not str or not source or len(source.encode()) > 1_048_576:
             raise ValueError("source must be bounded nonempty text")
         check_code(source, EVOLUTION_IMPORTS, EVOLUTION_DUNDERS)
-        return parse_module(source)
+        module = parse_module(source)
+        _check_numerical_capabilities(source)
+        return module
 
     def forecast_source(self, source, method_name, task):
         self.validate_source(source)
@@ -388,15 +541,19 @@ class LegacyNumericalAdapter:
             raise ValueError("structural reconstruction requires Parent and proposal")
         if proposal is not None and apply_mutation(parent_state, proposal).state != state:
             raise ValueError("state does not match Parent plus typed proposal")
-        member = next((m for m in state.inventory.members if m.member_id == member_id), None)
-        if member is None or member.status == "quarantined":
-            raise ValueError("materialization requires an eligible owned member")
+        member = _canonical_member(state)
+        if member.member_id != member_id:
+            raise ValueError("materialization requires the canonical member for this genome")
         source_dependencies = set()
         recipe = self._recipe(member, policies, parent_state, proposal, _source_dependencies=source_dependencies)
-        fit = fit_numerical_recipe(recipe, tuple(build_rows), self.fold_manifest,
-            parse_champion_release(parent_release.to_payload()["anchor_release_payload"]))
-        candidate = self.materializer.materialize(parent_release, fit, self.candidate_tasks,
-            version=version, generation=genome.generation)
+        anchor = parse_champion_release(parent_release.to_payload()["anchor_release_payload"])
+        with _source_bound_materializer(self.materializer,
+                {sha: self.sources[sha] for sha in source_dependencies}, anchor) as materializer:
+            rows = _verified_build_rows(build_rows, self.tasks, self.fold_manifest, recipe, anchor,
+                                        materializer.forecast_store)
+            fit = fit_numerical_recipe(recipe, rows, self.fold_manifest, anchor)
+            candidate = materializer.materialize(parent_release, fit, self.candidate_tasks,
+                version=version, generation=genome.generation)
         if type(candidate) is not NumericalCoordinateCandidate or candidate.invalid_reason is not None:
             raise ValueError("materializer did not return a valid typed candidate")
         if candidate.registry.task_ids != tuple(task.numeric.task_id for task in self.tasks):
