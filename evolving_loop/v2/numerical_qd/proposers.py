@@ -15,10 +15,10 @@ from numerical_agent.evolution.module import parse_method
 from ..budget import BudgetLedger, ResourceUse
 from ..contracts import _require_exact_schema, _strict_json_value, canonical_v2_bytes, fingerprint_payload
 from .contracts import (
-    MUTATION_OPERATORS, MutationStateV2, NumericalGenomeV2, TrainMutationFeedbackV2,
+    MEMBER_FAMILIES, MUTATION_OPERATORS, MutationStateV2, NumericalGenomeV2, TrainMutationFeedbackV2,
     _sorted_strings,
 )
-from .mutation import MutationProposalV2, _identifier, apply_mutation
+from .mutation import OPERATION_KEYS, MutationProposalV2, _identifier, apply_mutation
 
 REQUEST_KEYS = frozenset({
     "parent_genome", "parent_state", "selected_cells", "train_feedback",
@@ -26,6 +26,25 @@ REQUEST_KEYS = frozenset({
     "max_proposals", "max_response_bytes",
 })
 FAILURE_REASONS = frozenset({"unavailable", "timeout", "malformed", "empty", "budget_exhausted"})
+
+
+def _reject_provider_paths(value):
+    """The accepted metadata language excludes POSIX/Windows path separators.
+
+    Check keys as well as values: runtime fingerprint labels and prompt text
+    otherwise admit arbitrary paths despite satisfying their artifact schemas.
+    This applies only to provider input, never candidate source or Host schema.
+    """
+    if type(value) is str:
+        if "/" in value or "\\" in value:
+            raise ValueError("provider metadata must not contain filesystem paths")
+    elif type(value) is dict:
+        for key, item in value.items():
+            _reject_provider_paths(key)
+            _reject_provider_paths(item)
+    elif type(value) is list:
+        for item in value:
+            _reject_provider_paths(item)
 
 
 def primitive_proposer_request(**payload) -> dict:
@@ -36,8 +55,11 @@ def primitive_proposer_request(**payload) -> dict:
     """
     values = _require_exact_schema(payload, REQUEST_KEYS, field="proposer request")
     values = _strict_json_value(values)
+    _reject_provider_paths(values)
     state = MutationStateV2.from_payload(values["parent_state"])
     genome = NumericalGenomeV2.from_payload(values["parent_genome"])
+    for label in genome.runtime_fingerprints:
+        _identifier(label)
     for name, actual in (("inventory_sha256", state.inventory.fingerprint()),
                          ("mutation_policy_sha256", state.mutation_policy.fingerprint()),
                          ("proposer_prompt_sha256", state.proposer_prompt.fingerprint())):
@@ -207,10 +229,14 @@ class DeterministicProposalProvider:
     through the LLM/Host parser gate.
     """
 
+    def __init__(self, *, monotonic=time.monotonic):
+        self.monotonic = monotonic
+
     def propose(self, request) -> NormalizedProposalBatchV2:
         request = primitive_proposer_request(**request)
         if request["remaining_budget"]["wall_seconds"] <= 0:
             return _batch("deterministic", reason="budget_exhausted")
+        started = self.monotonic()
         state = MutationStateV2.from_payload(request["parent_state"])
         allowed = set(request["allowed_mutation_operators"])
         candidates = []
@@ -248,9 +274,12 @@ class DeterministicProposalProvider:
                 continue
             feasible.append(proposal)
         feasible.sort(key=lambda proposal: (proposal.operator, proposal.canonical_bytes()))
+        use = ResourceUse(wall_seconds=max(0.0, float(self.monotonic() - started)))
+        if use.wall_seconds >= request["remaining_budget"]["wall_seconds"]:
+            return _batch("deterministic", use=use, reason="budget_exhausted")
         if not feasible:
-            return _batch("deterministic", reason="empty")
-        return _batch("deterministic", [feasible[request["counter_draw"] % len(feasible)]])
+            return _batch("deterministic", use=use, reason="empty")
+        return _batch("deterministic", [feasible[request["counter_draw"] % len(feasible)]], use=use)
 
 
 def _structural_candidate(operator, parents, cells):
@@ -273,10 +302,73 @@ def _structural_candidate(operator, parents, cells):
     return dict(operator=operator, reason="Train structural mutation", parent_ids=child["parent_ids"], child=child)
 
 
+def _closed_object_schema(properties):
+    return dict(type="object", properties=properties,
+        required=sorted(properties), additionalProperties=False)
+
+
+def _response_schema(request, state):
+    """Host-owned wire grammar; prompt evolution cannot change its authority.
+
+    Exact operation keys come from the same tagged parser. Contextual lineage,
+    source ownership, canonical ordering, byte limits, and atomic feasibility
+    are still enforced by normalization, not delegated to the model.
+    """
+    identity = dict(type="string", minLength=1, maxLength=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+    local_id = identity | {"not": {"pattern": "^[0-9a-f]{64}$"}}
+    sha = dict(type="string", pattern="^[0-9a-f]{64}$")
+    cells = dict(type="array", uniqueItems=True, items={"enum": list(state.declared_cells)},
+        description="Sorted declared cell identities only.")
+    member_ids = [member.member_id for member in state.inventory.members]
+    parents = dict(type="array", uniqueItems=True, maxItems=state.max_parents_per_child,
+        items={"enum": sorted(member_ids)}, description="Sorted exact owned parent IDs.")
+    member = _closed_object_schema(dict(
+        member_id=identity | {"not": {"enum": sorted(member_ids)}},
+        family={"enum": sorted(MEMBER_FAMILIES)},
+        source_sha256=local_id | {"description": "Reference one source_candidates.local_id from this response; never a source SHA or a path."},
+        policy_sha256=sha, parent_ids=parents, applicability_cells=cells,
+        status={"const": "active"}))
+    prompt = _closed_object_schema(dict(
+        schema_version={"const": 1},
+        template=dict(type="string", minLength=1, maxLength=65536,
+            description="Bounded prompt text, at most 65536 UTF-8 bytes; no filesystem paths."),
+        response_schema={"const": state.proposer_prompt.response_schema},
+        max_response_bytes=dict(type="integer", minimum=1, maximum=state.proposer_prompt.max_response_bytes),
+        allowed_mutation_operators=dict(type="array", minItems=1, uniqueItems=True,
+            items={"enum": list(state.proposer_prompt.allowed_mutation_operators)}),
+        parent_prompt_sha256={"const": state.proposer_prompt.fingerprint()}))
+    fields = dict(
+        reason=dict(type="string", minLength=1, maxLength=2048,
+            description="Nonempty metadata reason, at most 2048 UTF-8 bytes; no executable source."),
+        member={"$ref": "#/$defs/member"}, child={"$ref": "#/$defs/member"},
+        replacement={"$ref": "#/$defs/member"}, member_id={"enum": sorted(member_ids)},
+        parent_ids=parents | {"minItems": 2}, applicability_cells=cells | {"minItems": 1},
+        prompt={"$ref": "#/$defs/prompt"},
+        credit_delta=dict(type="object", maxProperties=0, additionalProperties=False,
+            description="Exactly {}. Only the Host records Train credit."))
+    operations = []
+    for operator in request["allowed_mutation_operators"]:
+        properties = {name: fields[name] for name in sorted(OPERATION_KEYS[operator] - {"operator"})}
+        properties["operator"] = {"const": operator}
+        if operator == "crossover":
+            properties["parent_ids"] = parents | {"minItems": 2, "maxItems": min(2, state.max_parents_per_child)}
+        operations.append(_closed_object_schema(properties))
+    source_candidate = _closed_object_schema(dict(local_id=local_id,
+        code=dict(type="string", minLength=1, description=
+            "One top-level Python function taking exactly (history, horizon, frequency), with an applicability docstring. Imports belong inside the function and must pass the Host sandbox gate.")))
+    envelope = _closed_object_schema(dict(
+        source_candidates=dict(type="array", maxItems=request["max_proposals"],
+            items={"$ref": "#/$defs/source_candidate"}),
+        proposals=dict(type="array", maxItems=request["max_proposals"], items={"oneOf": operations})))
+    return envelope | {"$defs": dict(source_candidate=source_candidate, member=member, prompt=prompt)}
+
+
 def _llm_limits(request):
     state = MutationStateV2.from_payload(request["parent_state"])
     remaining = ResourceUse.from_payload(request["remaining_budget"])
-    encoded = canonical_v2_bytes(request).decode("utf-8")
+    encoded = canonical_v2_bytes(dict(request=request,
+        allowed_mutation_response_schema=_response_schema(request, state))).decode("utf-8")
     system = state.proposer_prompt.template
     cap = min(request["max_response_bytes"], state.proposer_prompt.max_response_bytes, remaining.output_tokens)
     # LLMClient exposes text only: UTF-8 byte counts conservatively bound tokens.
@@ -318,6 +410,9 @@ class LLMProposalProvider:
             reason = "unavailable"
         use = ResourceUse(wall_seconds=max(0.0, float(self.monotonic() - started)), llm_calls=1,
             input_tokens=input_bound if self.client is not None else 0, output_tokens=output_bytes)
+        if use.wall_seconds >= remaining.wall_seconds or any(
+                getattr(use, name) > getattr(remaining, name) for name in ResourceUse.field_names()):
+            reason = "budget_exhausted"
         return _batch("llm", proposals if reason is None else (), artifacts if reason is None else (), use, reason)
 
 
@@ -341,7 +436,7 @@ class HybridProposalProvider:
             result = self.llm.propose(request)
             closed = self.ledger.close_stage(permit, result.resource_use)
             attempts.extend(result.attempts)
-            if not closed.allowed:
+            if not closed.allowed or not self.ledger.can_open_stage(ResourceUse()).allowed:
                 return self._result(attempts, reason="budget_exhausted")
             if result.proposals:
                 return self._result(attempts, result.proposals, result.source_artifacts)
@@ -352,12 +447,15 @@ class HybridProposalProvider:
             request = primitive_proposer_request(**(request | {"remaining_budget": available}))
         if request["remaining_budget"]["wall_seconds"] <= 0:
             return self._result(attempts, reason="budget_exhausted")
-        fallback = self.ledger.reserve_stage(stage + "-deterministic", ResourceUse())
+        fallback = self.ledger.reserve_stage(stage + "-deterministic",
+            ResourceUse(wall_seconds=request["remaining_budget"]["wall_seconds"]))
         if not fallback.allowed:
             return self._result(attempts, reason="budget_exhausted")
         result = self.deterministic.propose(request)
-        self.ledger.close_stage(fallback, result.resource_use)
+        closed = self.ledger.close_stage(fallback, result.resource_use)
         attempts.extend(result.attempts)
+        if not closed.allowed or not self.ledger.can_open_stage(ResourceUse()).allowed:
+            return self._result(attempts, reason="budget_exhausted")
         return self._result(attempts, result.proposals, result.source_artifacts, result.failure_reason)
 
     @staticmethod

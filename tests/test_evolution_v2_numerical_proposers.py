@@ -8,6 +8,7 @@ import pytest
 from common.llm import LLMResponse
 from evolving_loop.v2.budget import BudgetLedger, BudgetPlan, ResourceUse
 from evolving_loop.v2.contracts import canonical_v2_bytes
+from evolving_loop.v2.numerical_qd.contracts import MutationStateV2
 from evolving_loop.v2.numerical_qd.proposers import (
     DeterministicProposalProvider, HybridProposalProvider, LLMProposalProvider,
     primitive_proposer_request,
@@ -92,7 +93,11 @@ def test_actual_provider_boundary_is_closed_primitive_request(provider_kind):
     for proposal in result.proposals:
         apply_mutation(parent_state(), proposal)
     if client.calls:
-        assert client.calls[0]["messages"] == [{"role": "user", "content": canonical_v2_bytes(payload).decode()}]
+        message = client.calls[0]["messages"][0]
+        wire = json.loads(message["content"])
+        assert message["role"] == "user"
+        assert wire["request"] == payload
+        assert message["content"] == canonical_v2_bytes(wire).decode()
         assert client.calls[0]["system"] == parent_state().proposer_prompt.template
 
 
@@ -207,7 +212,7 @@ def test_deterministic_selection_is_stable_feasible_and_uses_counter_draw():
     first = provider.propose(request(counter_draw=0))
     second = provider.propose(request(counter_draw=1))
     assert first.proposals != second.proposals
-    assert first == provider.propose(request(counter_draw=0))
+    assert first.proposals == provider.propose(request(counter_draw=0)).proposals
     for proposal in first.proposals + second.proposals:
         apply_mutation(parent_state(), proposal)
     assert first.resource_use.llm_calls == 0
@@ -312,3 +317,173 @@ def test_deterministic_policy_sha_commits_distinct_typed_structures():
         payload = proposal.to_payload()
         policies.append(payload.get("child", payload.get("replacement"))["policy_sha256"])
     assert len(set(policies)) == 4
+
+
+def test_deterministic_attempt_measures_wall_consumption():
+    times = iter([0.0, 3.0])
+    provider = DeterministicProposalProvider()
+    provider.monotonic = lambda: next(times)
+    result = provider.propose(request())
+    assert result.proposals
+    assert result.resource_use.wall_seconds == 3.0
+    assert result.attempts[0].resource_use.wall_seconds == 3.0
+
+
+@pytest.mark.parametrize("elapsed", [10.0, 11.0])
+def test_deterministic_discards_work_when_request_wall_budget_exhausted(elapsed):
+    times = iter([0.0, elapsed])
+    provider = DeterministicProposalProvider()
+    provider.monotonic = lambda: next(times)
+    result = provider.propose(request())
+    assert result.failure_reason == "budget_exhausted"
+    assert result.proposals == result.source_artifacts == ()
+    assert result.resource_use.wall_seconds == elapsed
+    assert result.attempts[0].failure_reason == "budget_exhausted"
+
+
+def test_hybrid_fallback_reserves_and_charges_bounded_wall_work():
+    now = [0.0]
+    budget = ledger(lambda: now[0])
+    reservations = []
+    def clock():
+        if not reservations:
+            reservations.extend(budget.checkpoint()["open_reservations"])
+            return 0.0
+        now[0] = 2.0
+        return 2.0
+    deterministic = DeterministicProposalProvider()
+    deterministic.monotonic = clock
+    result = HybridProposalProvider(LLMProposalProvider(None, monotonic=lambda: now[0]),
+        deterministic, budget).propose(request())
+    assert result.proposals
+    assert len(reservations) == 1
+    assert reservations[0]["stage_id"].endswith("-deterministic")
+    assert reservations[0]["estimate"]["wall_seconds"] == 10.0
+    assert result.resource_use.wall_seconds == budget.charged_use.wall_seconds == 2.0
+    assert result.attempts[-1].resource_use.wall_seconds == 2.0
+    assert budget.checkpoint()["open_reservations"] == []
+
+
+@pytest.mark.parametrize("denial", ["elapsed_deadline", "close_overrun"])
+def test_hybrid_discards_fallback_when_ledger_forbids_completion(denial):
+    now = [0.0]
+    budget = ledger(lambda: now[0])
+    calls = []
+    def clock():
+        calls.append(True)
+        if len(calls) == 1:
+            return 0.0
+        if denial == "elapsed_deadline":
+            now[0] = 81.0
+        else:
+            budget.charge(ResourceUse(wall_seconds=79.0))
+        return 2.0
+    deterministic = DeterministicProposalProvider()
+    deterministic.monotonic = clock
+    result = HybridProposalProvider(LLMProposalProvider(None, monotonic=lambda: 0.0),
+        deterministic, budget).propose(request())
+    assert result.failure_reason == "budget_exhausted"
+    assert result.proposals == result.source_artifacts == ()
+    assert result.resource_use.wall_seconds == 2.0
+    assert budget.charged_use.wall_seconds == (2.0 if denial == "elapsed_deadline" else 81.0)
+    assert budget.checkpoint()["open_reservations"] == []
+
+
+def test_standalone_llm_rejects_late_valid_response_but_keeps_charge():
+    now = [0.0]
+    class LateClient(ScriptedClient):
+        def complete(self, **kwargs):
+            now[0] = 11.0
+            return super().complete(**kwargs)
+    client = LateClient(json.dumps(raw_response()))
+    result = LLMProposalProvider(client, monotonic=lambda: now[0]).propose(request())
+    assert result.failure_reason == "budget_exhausted"
+    assert result.proposals == result.source_artifacts == ()
+    assert result.resource_use.wall_seconds == 11.0
+    assert result.resource_use.llm_calls == 1
+    assert result.resource_use.output_tokens == len(client.result.encode())
+    assert result.attempts[0].failure_reason == "budget_exhausted"
+    assert len(client.calls) == 1
+
+
+@pytest.mark.parametrize("sentinel", ["/tmp/UNIQUE_PATH", "../UNIQUE_PATH", "~/UNIQUE_PATH",
+    "models/UNIQUE_PATH", r"C:\tmp\UNIQUE_PATH", "file:///tmp/UNIQUE_PATH"])
+@pytest.mark.parametrize("location", ["runtime_label", "prompt_template"])
+def test_schema_valid_nested_paths_rejected_before_provider_execution(sentinel, location):
+    args = request_args()
+    if location == "runtime_label":
+        args["parent_genome"]["runtime_fingerprints"] = {sentinel: SHA}
+    else:
+        args["parent_state"]["proposer_prompt"]["template"] = f"Use this reference: {sentinel}"
+        state = MutationStateV2.from_payload(args["parent_state"])
+        args["parent_genome"]["proposer_prompt_sha256"] = state.proposer_prompt.fingerprint()
+    client = ScriptedClient(json.dumps(raw_response()))
+    with pytest.raises(ValueError):
+        LLMProposalProvider(client).propose(primitive_proposer_request(**args))
+    assert client.calls == []
+
+
+def test_schema_valid_nested_path_rejected_on_direct_provider_entry():
+    payload = request()
+    payload["parent_genome"]["runtime_fingerprints"] = {"/tmp/UNIQUE_PATH": SHA}
+    client = ScriptedClient(json.dumps(raw_response()))
+    for provider in (DeterministicProposalProvider(), LLMProposalProvider(client),
+                     HybridProposalProvider(LLMProposalProvider(client), DeterministicProposalProvider(), ledger())):
+        with pytest.raises(ValueError):
+            provider.propose(payload)
+    assert client.calls == []
+
+
+def test_real_llm_transport_contains_exact_allowed_response_schema_across_prompt_evolution():
+    expected_keys = {
+        "add": {"operator", "reason", "member"},
+        "repair": {"operator", "reason", "member_id", "replacement"},
+        "fork": {"operator", "reason", "member_id", "child"},
+        "combine": {"operator", "reason", "parent_ids", "child"},
+        "route": {"operator", "reason", "parent_ids", "child"},
+        "specialize": {"operator", "reason", "member_id", "applicability_cells"},
+        "crossover": {"operator", "reason", "parent_ids", "child"},
+        "remove": {"operator", "reason", "member_id"},
+        "quarantine": {"operator", "reason", "member_id"},
+        "policy_tune": {"operator", "reason", "prompt", "credit_delta"},
+    }
+    for state in (parent_state(), record_train_outcome(parent_state(), feedback())):
+        args = request_args(parent_state=state.to_payload())
+        args["parent_genome"].update(mutation_policy_sha256=state.mutation_policy.fingerprint(),
+            proposer_prompt_sha256=state.proposer_prompt.fingerprint())
+        payload = primitive_proposer_request(**args)
+        client = ScriptedClient(json.dumps(raw_response()))
+        result = LLMProposalProvider(client).propose(payload)
+        assert result.proposals
+        call = client.calls[0]
+        wire = json.loads(call["messages"][0]["content"])
+        assert set(wire) == {"request", "allowed_mutation_response_schema"}
+        assert call["messages"][0]["content"] == canonical_v2_bytes(wire).decode()
+        assert call["system"] == state.proposer_prompt.template
+        assert wire["request"] == payload
+        assert result.resource_use.input_tokens == len(call["system"].encode()) + len(call["messages"][0]["content"].encode())
+        schema = wire["allowed_mutation_response_schema"]
+        assert set(schema["required"]) == {"source_candidates", "proposals"}
+        assert schema["additionalProperties"] is False
+        assert schema["$defs"]["prompt"]["properties"]["parent_prompt_sha256"]["const"] == state.proposer_prompt.fingerprint()
+        assert set(schema["$defs"]["source_candidate"]["required"]) == {"local_id", "code"}
+        member_schema = schema["$defs"]["member"]
+        assert "local_id" in member_schema["properties"]["source_sha256"]["description"]
+        union = schema["properties"]["proposals"]["items"]["oneOf"]
+        by_op = {item["properties"]["operator"]["const"]: item for item in union}
+        assert set(by_op) == set(expected_keys)
+        for op, keys in expected_keys.items():
+            assert set(by_op[op]["required"]) == set(by_op[op]["properties"]) == keys
+            assert by_op[op]["additionalProperties"] is False
+        assert by_op["policy_tune"]["properties"]["credit_delta"]["maxProperties"] == 0
+
+
+def test_real_llm_schema_limits_mutations_to_request_authority():
+    payload = request(allowed_mutation_operators=["remove"])
+    raw = raw_response(source_candidates=[], proposals=[dict(operator="remove", reason="redundant", member_id="a")])
+    client = ScriptedClient(json.dumps(raw))
+    result = LLMProposalProvider(client).propose(payload)
+    assert result.proposals
+    wire = json.loads(client.calls[0]["messages"][0]["content"])
+    union = wire["allowed_mutation_response_schema"]["properties"]["proposals"]["items"]["oneOf"]
+    assert [item["properties"]["operator"]["const"] for item in union] == ["remove"]
