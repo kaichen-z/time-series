@@ -719,7 +719,8 @@ class LegacyNumericalAdapter:
         if type(self.materializer) is NumericalPackageMaterializer:
             if dict(genome.runtime_fingerprints) != self.materializer.runtime_fingerprints:
                 raise ValueError("genome/runtime fingerprint mismatch")
-            if genome.screening_policy_sha256 != self.materializer.screening_policy.fingerprint():
+            from numerical_agent.evolution.screening import _policy_payload
+            if genome.screening_policy_sha256 != fingerprint_payload(_policy_payload(self.materializer.screening_policy)):
                 raise ValueError("genome/screening policy fingerprint mismatch")
             combined_sha = fingerprint_payload({"policies": [policy.to_payload() for policy in self.materializer.combined_policies]})
             if genome.combined_policy_sha256 != combined_sha:

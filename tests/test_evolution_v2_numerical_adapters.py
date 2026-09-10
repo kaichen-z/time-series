@@ -112,8 +112,9 @@ def world():
 
 
 def genome(state, generation=1, operator="repair"):
+    from numerical_agent.evolution.screening import _policy_payload
     return NumericalGenomeV2(1, generation, (), operator, state.inventory.fingerprint(),
-        screening_policy().fingerprint(), fingerprint_payload({"policies": []}), state.mutation_policy.fingerprint(), state.proposer_prompt.fingerprint(),
+        fingerprint_payload(_policy_payload(screening_policy())), fingerprint_payload({"policies": []}), state.mutation_policy.fingerprint(), state.proposer_prompt.fingerprint(),
         {"materializer": "3" * 64}, "4" * 64)
 
 
@@ -151,6 +152,27 @@ def test_seed_import_and_strict_registry_roundtrip_do_not_rewrite_inputs(world, 
     for task in adapter.tasks:
         assert resumed.package_for(task) == registry.package_for(task)
     assert snapshots(paths) == before
+
+
+def test_v2_persisted_screening_identity_drives_real_materialization(world, tmp_path):
+    from numerical_agent.evolution.screening import _policy_payload
+    from evolving_loop.v2.numerical_qd.persistence import NumericalQDRunStore
+    from evolving_loop.v2.budget import BudgetLedger, BudgetPlan, ResourceUse
+    from evolving_loop.v2.kernel import EvolutionKernel
+    from evolving_loop.v2.store import V2RunStore
+    from tests.test_evolution_v2_kernel import seed, protocol
+    adapter, release, _, state, rows = world
+    EvolutionKernel(V2RunStore.create(tmp_path / "run"), protocol(),
+        BudgetLedger(BudgetPlan(100, 0.2, ResourceUse()), monotonic=lambda: 0.0), seed=seed())
+    store = NumericalQDRunStore.create(tmp_path / "run")
+    payload = _policy_payload(adapter.materializer.screening_policy)
+    identity = fingerprint_payload(payload)
+    store.write_object(identity, payload)
+    candidate = replace(genome(state), screening_policy_sha256=identity)
+    child = adapter.materialize_child(release, candidate, state, member_id="seasonal",
+        policies={fingerprint_payload(recipe.to_payload()): recipe for recipe in (_recipe(), _recipe("lagged"))},
+        build_rows=rows, descriptor_policy=descriptor_policy(), version="n001")
+    assert child.genome.screening_policy_sha256 == identity
 
 
 def test_registry_envelope_rejects_extra_fields_tampering_missing_and_changed_tasks(world):
