@@ -8,6 +8,13 @@ from .bundle import (
     principal_fingerprints,
     validate_child_scope,
 )
+from .budget import (
+    BudgetContractError,
+    BudgetLedger,
+    BudgetPlan,
+    ResourceUse,
+    StagePermit,
+)
 from .contracts import (
     EvolutionArtifact,
     EvolutionV2Config,
@@ -20,13 +27,18 @@ from .contracts import (
 )
 
 __all__ = [
+    "BudgetContractError",
+    "BudgetLedger",
+    "BudgetPlan",
     "BundleContractError",
     "EvolutionArtifact",
     "EvolutionBundleV2",
     "EvolutionV2Config",
     "KernelProtocolCommitment",
     "MutationTarget",
+    "ResourceUse",
     "SanitizedEvolutionFeedback",
+    "StagePermit",
     "canonical_v2_bytes",
     "changed_scopes",
     "fingerprint_payload",
