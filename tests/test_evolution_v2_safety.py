@@ -16,6 +16,7 @@ from evolving_loop.v2.bundle import BundleContractError, EvolutionBundleV2
 from evolving_loop.v2.cli import main
 from evolving_loop.v2.contracts import canonical_v2_bytes
 from evolving_loop.v2.fakes import fake_seed_bundle, run_fake_kernel, smoke_config
+from evolving_loop.v2 import fakes
 from evolving_loop.v2.kernel import EvolutionKernel, KernelAuthorityError
 from evolving_loop.v2.store import StoreContractError, V2RunStore
 
@@ -255,27 +256,36 @@ def assert_primitives(value):
         assert "/" not in value and "\\" not in value
 
 
-def test_actual_fake_proposal_boundary_contains_only_canonical_primitives(
+def test_actual_fake_proposer_request_contains_only_canonical_primitives(
     tmp_path, monkeypatch
 ):
     """Observe before serialization, so JSON cannot conceal a leaked live object."""
-    proposals = []
-    write_candidate = V2RunStore.write_candidate
+    requests = []
+    generate = fakes._child
 
-    def inspect(store, identity, payload):
-        assert_primitives(payload)
-        encoded = canonical_v2_bytes(payload)
-        assert json.loads(encoded) == payload
+    def inspect(request, *args):
+        assert_primitives(request)
+        assert not args, "proposer must receive only the primitive request"
+        assert set(request) == {"parent", "seed", "stage_id"}
+        encoded = canonical_v2_bytes(request)
+        assert json.loads(encoded) == request
+        requests.append(json.loads(encoded))
+        candidate = generate(request)
+        assert_primitives(candidate)
         assert (
-            EvolutionBundleV2.from_payload(payload["candidate"]).fingerprint()
-            == identity
+            candidate["parent_bundle_sha256"]
+            == EvolutionBundleV2.from_payload(request["parent"]).fingerprint()
         )
-        proposals.append(encoded)
-        return write_candidate(store, identity, payload)
+        return candidate
 
-    monkeypatch.setattr(V2RunStore, "write_candidate", inspect)
+    monkeypatch.setattr(fakes, "_child", inspect)
     result = run_fake_kernel(tmp_path / "run", smoke_config())
-    assert len(proposals) == 2
+    assert [request["stage_id"] for request in requests] == [
+        "fake-numerical",
+        "fake-retrieval",
+    ]
+    assert [request["parent"]["generation"] for request in requests] == [0, 1]
+    assert requests[1]["parent"] == result.accepted_bundle.to_payload()
     assert result.accepted_steps == result.rejected_steps == 1
 
 
@@ -378,8 +388,8 @@ def test_fake_next_proposal_and_checkpoints_do_not_receive_dev_sentinel(
 ):
     sentinel = "FAKE_DEV_ONLY_c7805e2"
     close_evaluation = EvolutionKernel.close_evaluation
-    write_candidate = V2RunStore.write_candidate
-    proposals = []
+    generate = fakes._child
+    requests = []
 
     def evaluator(kernel, parent, child, **kwargs):
         comparison = kwargs["dev_comparison"]
@@ -388,19 +398,26 @@ def test_fake_next_proposal_and_checkpoints_do_not_receive_dev_sentinel(
         }
         return close_evaluation(kernel, parent, child, **kwargs)
 
-    def proposer_boundary(store, identity, payload):
-        assert_primitives(payload)
-        encoded = canonical_v2_bytes(payload)
+    def proposer_boundary(request, *args):
+        assert_primitives(request)
+        assert not args, "proposer must receive only the primitive request"
+        encoded = canonical_v2_bytes(request)
         assert sentinel.encode() not in encoded
-        proposals.append(encoded)
-        return write_candidate(store, identity, payload)
+        if requests:
+            assert any(
+                sentinel in path.read_text()
+                for path in (root / "acceptance").glob("*.json")
+            )
+            assert request["parent"]["generation"] == 1
+        requests.append(encoded)
+        return generate(request)
 
     monkeypatch.setattr(EvolutionKernel, "close_evaluation", evaluator)
-    monkeypatch.setattr(V2RunStore, "write_candidate", proposer_boundary)
+    monkeypatch.setattr(fakes, "_child", proposer_boundary)
     root = tmp_path / "run"
     result = run_fake_kernel(root, smoke_config())
     assert result.accepted_steps == result.rejected_steps == 1
-    assert len(proposals) == 2
+    assert len(requests) == 2
     containing = []
     for relative, (raw, _mtime) in snapshot(root).items():
         if sentinel.encode() in raw:

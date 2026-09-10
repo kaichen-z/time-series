@@ -24,20 +24,20 @@ def test_v2_import_and_smoke_preserve_legacy_cli_defaults(tmp_path):
         """
 import sys
 from pathlib import Path
-from evolving_loop.cli import build_parser
+import evolving_loop.cli as legacy_cli
 
 forms = (["evolve"], ["--evolution", "genome"])
-before = [vars(build_parser().parse_args(args)) for args in forms]
+before = [vars(legacy_cli.build_parser().parse_args(args)) for args in forms]
 assert before[0]["evolution_mode"] == "genome"
 assert before[0]["meta_harness_v2"] is False
 assert before[0]["evolve_target"] == "auto"
 assert "evolving_loop.v2" not in sys.modules
 import evolving_loop.v2
 from evolving_loop.v2.fakes import run_fake_kernel, smoke_config
-assert [vars(build_parser().parse_args(args)) for args in forms] == before
+assert [vars(legacy_cli.build_parser().parse_args(args)) for args in forms] == before
 result = run_fake_kernel(Path(sys.argv[1]) / "v2", smoke_config())
 assert result.accepted_steps == result.rejected_steps == 1
-assert [vars(build_parser().parse_args(args)) for args in forms] == before
+assert [vars(legacy_cli.build_parser().parse_args(args)) for args in forms] == before
 """,
         tmp_path,
     )
@@ -49,21 +49,21 @@ def test_legacy_frozen_package_parse_identity_survives_v2_import_and_run(tmp_pat
 import json
 import sys
 from pathlib import Path
-from evolving_loop.evaluate_frozen_package_bundle import _bundle_from_payload
+import evolving_loop.evaluate_frozen_package_bundle as legacy_frozen
 from tests.test_package_coordinate_evolution import _bundle
 
 root = Path(sys.argv[1])
 _, state = _bundle(root / "legacy")
 payload = json.loads(state.bundle.canonical_bytes())
-before = _bundle_from_payload(payload).canonical_bytes()
+before = legacy_frozen._bundle_from_payload(payload).canonical_bytes()
 assert before == state.bundle.canonical_bytes()
 release_before = state.registry.release_sha256
 assert "evolving_loop.v2" not in sys.modules
 import evolving_loop.v2
 from evolving_loop.v2.fakes import run_fake_kernel, smoke_config
-assert _bundle_from_payload(payload).canonical_bytes() == before
+assert legacy_frozen._bundle_from_payload(payload).canonical_bytes() == before
 run_fake_kernel(root / "v2", smoke_config())
-assert _bundle_from_payload(payload).canonical_bytes() == before
+assert legacy_frozen._bundle_from_payload(payload).canonical_bytes() == before
 assert state.registry.release_sha256 == release_before
 """,
         tmp_path,

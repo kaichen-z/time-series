@@ -16,6 +16,7 @@ from .bundle import EvolutionBundleV2
 from .contracts import (
     EvolutionV2Config,
     KernelProtocolCommitment,
+    _require_exact_schema,
     canonical_v2_bytes,
     fingerprint_payload,
 )
@@ -98,7 +99,24 @@ class FakeRunResult:
     runner: str = "deterministic_fake"
 
 
-def _child(parent, seed, stage):
+def _request(parent, seed, stage):
+    """Host builds detached data before entering candidate generation.
+
+    No evaluator feedback or live Host capability crosses this seam. The fake
+    proposer remains in-process; OS source isolation belongs to Project 4.
+    """
+    return {"parent": parent.to_payload(), "seed": seed, "stage_id": stage}
+
+
+def _child(request):
+    """Consume only a primitive request and return a primitive Bundle proposal."""
+    request = _require_exact_schema(
+        request, ("parent", "seed", "stage_id"), field="fake proposer request"
+    )
+    parent = EvolutionBundleV2.from_payload(request["parent"])
+    seed, stage = request["seed"], request["stage_id"]
+    if type(seed) is not int or stage not in STAGES:
+        raise ValueError("fake proposer requires an integer seed and known stage")
     target = stage.removeprefix("fake-")
     changes = {
         target: (
@@ -110,7 +128,7 @@ def _child(parent, seed, stage):
             else fake_sha256(seed, "retrieval-child-release")
         )
     }
-    return parent.provisional_child(target, changes)
+    return parent.provisional_child(target, changes).to_payload()
 
 
 def _proposal(parent, child, stage):
@@ -198,7 +216,9 @@ def _verify_run(kernel, config, seed, checkpoint, authority):
     )
     transitions, parent, expected_progress = {}, seed, []
     for stage in stages:
-        child = _child(parent, config.seed, stage)
+        child = EvolutionBundleV2.from_payload(
+            _child(_request(parent, config.seed, stage))
+        )
         identity = child.fingerprint()
         ref = authority["completed_transitions"].get(identity)
         if ref is None or ref["decision"] != (
@@ -354,7 +374,9 @@ def run_fake_kernel(
         kernel.store.write_checkpoint(checkpoint)
     for stage in STAGES[len(stages) :]:
         parent = kernel.active_bundle()
-        child = _child(parent, config.seed, stage)
+        child = EvolutionBundleV2.from_payload(
+            _child(_request(parent, config.seed, stage))
+        )
         permit = kernel.reserve_evaluation(child, _STAGE_USE)
         if not permit.allowed:
             raise ValueError(f"fake budget denied stage: {permit.reason}")
