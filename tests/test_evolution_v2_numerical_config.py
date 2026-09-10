@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import replace
+from decimal import Decimal
 import hashlib
 import json
 import math
@@ -197,6 +198,72 @@ def test_direct_dataclass_replacement_cannot_bypass_validation_or_freezing():
     )
     with pytest.raises(TypeError):
         changed.map_elites["sampling_weights"]["elites"] = 100
+
+
+@pytest.mark.parametrize("value", [Decimal(40), 40.0])
+def test_sampling_weights_require_exact_json_integers_from_payload(value):
+    payload = valid_config_payload()
+    payload["map_elites"]["sampling_weights"]["underexplored"] = value
+    with pytest.raises((TypeError, ValueError), match="sampling_weights"):
+        NumericalQDConfigV2.from_payload(payload)
+
+
+@pytest.mark.parametrize("value", [Decimal(8), 8.0])
+def test_hyperband_rungs_require_exact_json_integers_from_payload(value):
+    payload = valid_config_payload()
+    payload["hyperband"]["brackets"]["explore"][0] = value
+    with pytest.raises((TypeError, ValueError), match="hyperband|brackets"):
+        NumericalQDConfigV2.from_payload(payload)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        (
+            "map_elites",
+            {
+                "cell_capacity": 4,
+                "sampling_weights": {
+                    "underexplored": Decimal(40),
+                    "elites": 30,
+                    "failure_matched": 20,
+                    "stepping_stones": 10,
+                },
+            },
+        ),
+        (
+            "hyperband",
+            {
+                "brackets": {
+                    "explore": [8.0, 32, 80],
+                    "confirm": [32, 80],
+                    "replay": [80],
+                },
+                "reduction_factor": 2,
+            },
+        ),
+    ],
+)
+def test_direct_config_construction_rejects_non_json_or_noninteger_nested_values(
+    field, value
+):
+    config = NumericalQDConfigV2.from_payload(valid_config_payload())
+    with pytest.raises((TypeError, ValueError)):
+        replace(config, **{field: value})
+
+
+@pytest.mark.parametrize("capacity", [1, 4])
+def test_map_elites_accepts_supported_cell_capacity_bounds(capacity):
+    payload = valid_config_payload()
+    payload["map_elites"]["cell_capacity"] = capacity
+    assert NumericalQDConfigV2.from_payload(payload).map_elites["cell_capacity"] == capacity
+
+
+def test_map_elites_rejects_cell_capacity_above_four():
+    payload = valid_config_payload()
+    payload["map_elites"]["cell_capacity"] = 5
+    with pytest.raises(ValueError, match="cell_capacity"):
+        NumericalQDConfigV2.from_payload(payload)
 
 
 @pytest.mark.parametrize(

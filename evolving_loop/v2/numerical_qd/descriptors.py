@@ -162,18 +162,29 @@ def _history_values(history: object) -> tuple[float, ...]:
 
 
 def _autocorrelation(values: Sequence[float], lag: int) -> float | None:
-    left = values[:-lag]
-    right = values[lag:]
+    left_raw = values[:-lag]
+    right_raw = values[lag:]
+    value_scale = max(abs(value) for value in values)
+    if value_scale == 0.0:
+        return None
+    left = tuple(value / value_scale for value in left_raw)
+    right = tuple(value / value_scale for value in right_raw)
     left_mean = mean(left)
     right_mean = mean(right)
-    left_energy = sum((value - left_mean) ** 2 for value in left)
-    right_energy = sum((value - right_mean) ** 2 for value in right)
-    denominator = math.sqrt(left_energy * right_energy)
-    if denominator == 0.0:
+    left_centered = tuple(value - left_mean for value in left)
+    right_centered = tuple(value - right_mean for value in right)
+    left_scale = max(abs(value) for value in left_centered)
+    right_scale = max(abs(value) for value in right_centered)
+    if left_scale == 0.0 or right_scale == 0.0:
         return None
+    left_centered = tuple(value / left_scale for value in left_centered)
+    right_centered = tuple(value / right_scale for value in right_centered)
+    left_energy = sum(value * value for value in left_centered)
+    right_energy = sum(value * value for value in right_centered)
+    denominator = math.sqrt(left_energy * right_energy)
     result = sum(
-        (left_value - left_mean) * (right_value - right_mean)
-        for left_value, right_value in zip(left, right)
+        left_value * right_value
+        for left_value, right_value in zip(left_centered, right_centered)
     ) / denominator
     return result if math.isfinite(result) else None
 

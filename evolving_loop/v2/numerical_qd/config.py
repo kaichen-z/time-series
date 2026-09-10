@@ -72,7 +72,8 @@ def _positive_int(value: object, field: str) -> int:
 
 
 def _exact_mapping(value: object, fields: tuple[str, ...], name: str) -> dict[str, object]:
-    return _require_exact_schema(value, fields, field=name)
+    strict = _strict_json_value(value, field=name)
+    return _require_exact_schema(strict, fields, field=name)
 
 
 def _validate_runtime_fingerprints(value: object) -> Mapping[str, str]:
@@ -144,13 +145,16 @@ def _validate_mutation(value: object) -> Mapping[str, object]:
 
 def _validate_map_elites(value: object) -> Mapping[str, object]:
     payload = _exact_mapping(value, _MAP_ELITES_FIELDS, "map_elites")
+    capacity = _positive_int(payload["cell_capacity"], "map_elites.cell_capacity")
+    if capacity > 4:
+        raise ValueError("map_elites.cell_capacity must be in [1, 4]")
     weights = _exact_mapping(
         payload["sampling_weights"], tuple(_SAMPLING_WEIGHTS), "map_elites.sampling_weights"
     )
-    if weights != _SAMPLING_WEIGHTS:
+    if any(type(value) is not int for value in weights.values()) or weights != _SAMPLING_WEIGHTS:
         raise ValueError("map_elites.sampling_weights must be exactly 40/30/20/10")
     result = {
-        "cell_capacity": _positive_int(payload["cell_capacity"], "map_elites.cell_capacity"),
+        "cell_capacity": capacity,
         "sampling_weights": dict(weights),
     }
     return _freeze_json_value(result)  # type: ignore[return-value]
@@ -161,7 +165,11 @@ def _validate_hyperband(value: object) -> Mapping[str, object]:
     brackets = _exact_mapping(payload["brackets"], tuple(_BRACKETS), "hyperband.brackets")
     for name, expected in _BRACKETS.items():
         configured = brackets[name]
-        if not isinstance(configured, (list, tuple)) or tuple(configured) != expected:
+        if (
+            not isinstance(configured, (list, tuple))
+            or any(type(resource) is not int for resource in configured)
+            or tuple(configured) != expected
+        ):
             raise ValueError(f"hyperband.brackets.{name} must be exactly {list(expected)}")
     result = {
         "brackets": {name: resources for name, resources in _BRACKETS.items()},

@@ -122,6 +122,12 @@ def test_configured_seasonal_lags_cover_none_short_and_long():
     assert describe_history(long, 4, "X", "program", policy()).seasonality == "none"
 
 
+@pytest.mark.parametrize("amplitude", [1.0, 1e100, 1e-100, 1e160])
+def test_seasonality_is_invariant_to_finite_amplitude_scaling(amplitude):
+    history = [value * amplitude for value in [0.0, 1.0, 0.0, -1.0] * 4]
+    assert describe_history(history, 4, "Q", "program", policy()).seasonality == "short"
+
+
 def test_seasonal_lag_requires_two_complete_repeats():
     almost_two_periods = [float(value) for value in range(59)]
     assert describe_history(almost_two_periods, 4, "D", "program", policy()).seasonality != "long"
