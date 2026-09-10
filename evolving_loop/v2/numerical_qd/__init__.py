@@ -3,6 +3,13 @@
 from .config import NumericalQDConfigV2, load_numerical_qd_config
 from .contracts import (
     ConstraintReportV2,
+    HyperbandAdvanceV2,
+    HyperbandBracketV2,
+    HyperbandBudgetOutcomeV2,
+    HyperbandExecutionV2,
+    HyperbandRungV2,
+    HyperbandStateV2,
+    HyperbandTaskResultV2,
     MorphologyCellV2,
     MutationOperatorStatsV2,
     MutationStateV2,
@@ -14,9 +21,16 @@ from .contracts import (
     NumericalObjectiveVectorV2,
     NumericalProposerPromptV2,
     NumericalQDEntryV2,
+    RungManifestV2,
+    TaskCacheRowV2,
+    TrainTaskV2,
     TrainMutationFeedbackV2,
 )
 from .descriptors import DescriptorPolicyV2, describe_history
+from .hyperband import (
+    advance_hyperband, choose_bracket, evaluation_cache_key,
+    execute_hyperband_rung, fixed_rung_manifest,
+)
 from .map_elites import ArchiveInsertionV2, CounterRandom, NumericalQDArchive
 from .mutation import MutationProposalV2, MutationResultV2, apply_mutation, record_train_outcome
 from .nsga2 import (
@@ -28,6 +42,21 @@ from .proposers import (
 )
 
 __all__ = [
+    "HyperbandAdvanceV2",
+    "HyperbandBracketV2",
+    "HyperbandBudgetOutcomeV2",
+    "HyperbandExecutionV2",
+    "HyperbandRungV2",
+    "HyperbandStateV2",
+    "HyperbandTaskResultV2",
+    "RungManifestV2",
+    "TaskCacheRowV2",
+    "TrainTaskV2",
+    "advance_hyperband",
+    "choose_bracket",
+    "evaluation_cache_key",
+    "execute_hyperband_rung",
+    "fixed_rung_manifest",
     "ArchiveInsertionV2",
     "CounterRandom",
     "NumericalQDArchive",

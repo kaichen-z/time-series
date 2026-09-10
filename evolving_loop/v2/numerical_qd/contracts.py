@@ -446,3 +446,298 @@ class NumericalEvaluationV2(_CanonicalContract):
         ))
         use = ResourceUse.from_payload(self.resource_use)
         object.__setattr__(self, "resource_use", _freeze_json_value(use.to_payload()))
+
+
+_HYPERBAND_BRACKETS = {"explore": (8, 32, 80), "confirm": (32, 80), "replay": (80,)}
+
+
+@dataclass(frozen=True, slots=True)
+class HyperbandBracketV2(_CanonicalContract):
+    name: str
+    resources: tuple[int, ...]
+
+    def __post_init__(self):
+        _require_choice(self.name, "bracket name", frozenset(_HYPERBAND_BRACKETS))
+        resources = _sequence(self.resources, "resources")
+        if any(type(item) is not int for item in resources) or resources != _HYPERBAND_BRACKETS[self.name]:
+            raise ValueError("resources must exactly match the registered bracket")
+        object.__setattr__(self, "resources", resources)
+
+    @classmethod
+    def registered(cls, name):
+        _require_choice(name, "bracket name", frozenset(_HYPERBAND_BRACKETS))
+        return cls(name, _HYPERBAND_BRACKETS[name])
+
+
+@dataclass(frozen=True, slots=True)
+class TrainTaskV2(_CanonicalContract):
+    """Committed metadata only; task bytes remain behind the Host callback."""
+
+    task_id: str
+    entity_id: str
+    task_sha256: str
+    split: Literal["train"]
+    split_sha256: str
+    protocol_sha256: str
+
+    def __post_init__(self):
+        _text(self.task_id, "task_id")
+        _text(self.entity_id, "entity_id")
+        _require_choice(self.split, "split", frozenset({"train"}))
+        for name in ("task_sha256", "split_sha256", "protocol_sha256"):
+            require_sha256(getattr(self, name), name)
+
+
+@dataclass(frozen=True, slots=True)
+class RungManifestV2(_CanonicalContract):
+    """A fixed prefix of whole entities in a committed Train universe.
+
+    The complete universe is retained so deserialization can verify grouping,
+    nesting, and task-byte identity without opening Train data. An exact boundary
+    inside an entity is rejected, never rounded or silently underfilled.
+    """
+
+    resource: int
+    split_sha256: str
+    protocol_sha256: str
+    task_groups: Mapping[str, tuple[TrainTaskV2, ...]]
+
+    def __post_init__(self):
+        if type(self.resource) is not int or self.resource not in (8, 32, 80):
+            raise ValueError("resource must be a registered Train resource")
+        require_sha256(self.split_sha256, "split_sha256")
+        require_sha256(self.protocol_sha256, "protocol_sha256")
+        groups = self.task_groups
+        if not isinstance(groups, Mapping) or any(type(key) is not str for key in groups):
+            raise ValueError("task_groups must be an entity mapping")
+        normalized = {}
+        identities = set()
+        boundaries = set()
+        for entity, values in sorted(groups.items()):
+            _text(entity, "entity_id")
+            tasks = tuple(_nested(value, TrainTaskV2) for value in _sequence(values, "entity tasks"))
+            if not tasks:
+                raise ValueError("entity groups must not be empty")
+            for task in tasks:
+                if task.entity_id != entity:
+                    raise ValueError("task entity does not match its group")
+                if (task.split_sha256, task.protocol_sha256) != (self.split_sha256, self.protocol_sha256):
+                    raise ValueError("task split/protocol does not match manifest")
+                if task.task_id in identities:
+                    raise ValueError("task IDs must be unique across the Train universe")
+                identities.add(task.task_id)
+            normalized[entity] = tuple(sorted(tasks, key=lambda item: item.task_id))
+            boundaries.add(len(identities))
+        if self.resource > len(identities):
+            raise ValueError("resource exceeds the committed Train universe")
+        if self.resource not in boundaries:
+            raise ValueError("resource would split a partial entity group")
+        object.__setattr__(self, "task_groups", MappingProxyType(normalized))
+
+    @property
+    def tasks(self):
+        return tuple(task for tasks in self.task_groups.values() for task in tasks)[:self.resource]
+
+    @property
+    def task_ids(self):
+        return tuple(sorted(task.task_id for task in self.tasks))
+
+
+@dataclass(frozen=True, slots=True)
+class HyperbandBudgetOutcomeV2(_CanonicalContract):
+    """Closed work accounting plus the caller-owned ledger checkpoint identity."""
+
+    status: Literal["completed", "blocked", "failed"]
+    reason: str | None
+    reservation_sha256: str | None
+    resource_use: Mapping[str, int | float]
+    ledger_checkpoint_sha256: str
+
+    def __post_init__(self):
+        _require_choice(self.status, "budget status", frozenset({"completed", "blocked", "failed"}))
+        if self.status == "completed":
+            if self.reason is not None:
+                raise ValueError("completed budget outcome must not have a failure reason")
+        else:
+            _text(self.reason, "budget reason")
+        if self.status != "blocked" or self.reservation_sha256 is not None:
+            require_sha256(self.reservation_sha256, "reservation_sha256")
+        require_sha256(self.ledger_checkpoint_sha256, "ledger_checkpoint_sha256")
+        use = ResourceUse.from_payload(self.resource_use)
+        if self.status == "blocked" and use != ResourceUse():
+            raise ValueError("blocked work cannot carry a charge")
+        object.__setattr__(self, "resource_use", _freeze_json_value(use.to_payload()))
+
+
+def _hyperband_survivor_count(bracket, initial_count, index, count, reduction):
+    if index == len(bracket.resources) - 1:
+        return 1
+    if initial_count == 3 and bracket.name == "explore":
+        return (2, 1)[index]
+    return max(1, count // reduction)
+
+
+@dataclass(frozen=True, slots=True)
+class HyperbandRungV2(_CanonicalContract):
+    index: int
+    manifest: RungManifestV2
+    evaluations: tuple[NumericalEvaluationV2, ...]
+    survivor_sha256s: tuple[str, ...]
+    budget_outcome: HyperbandBudgetOutcomeV2
+
+    def __post_init__(self):
+        _nonnegative_int(self.index, "rung index")
+        object.__setattr__(self, "manifest", _nested(self.manifest, RungManifestV2))
+        evaluations = tuple(_nested(value, NumericalEvaluationV2)
+                            for value in _sequence(self.evaluations, "evaluations"))
+        if not evaluations or len({value.genome_sha256 for value in evaluations}) != len(evaluations):
+            raise ValueError("completed rung requires unique candidate evaluations")
+        for value in evaluations:
+            if (value.rung != self.index or value.task_ids != self.manifest.task_ids
+                    or value.task_subset_sha256 != self.manifest.fingerprint()
+                    or value.split_sha256 != self.manifest.split_sha256
+                    or value.protocol_fingerprint != self.manifest.protocol_sha256):
+                raise ValueError("evaluation does not match the completed rung manifest")
+        object.__setattr__(self, "evaluations", tuple(sorted(evaluations, key=lambda value: value.genome_sha256)))
+        object.__setattr__(self, "survivor_sha256s", _sorted_strings(
+            self.survivor_sha256s, "survivor_sha256s", sha=True, nonempty=True
+        ))
+        outcome = _nested(self.budget_outcome, HyperbandBudgetOutcomeV2)
+        if outcome.status != "completed":
+            raise ValueError("only completed closed rungs may be checkpointed")
+        object.__setattr__(self, "budget_outcome", outcome)
+
+
+@dataclass(frozen=True, slots=True)
+class HyperbandStateV2(_CanonicalContract):
+    bracket: HyperbandBracketV2
+    candidate_sha256s: tuple[str, ...]
+    reduction_factor: int
+    split_sha256: str
+    protocol_sha256: str
+    rungs: tuple[HyperbandRungV2, ...]
+
+    def __post_init__(self):
+        object.__setattr__(self, "bracket", _nested(self.bracket, HyperbandBracketV2))
+        candidates = _sorted_strings(self.candidate_sha256s, "candidate_sha256s", sha=True, nonempty=True)
+        object.__setattr__(self, "candidate_sha256s", candidates)
+        if _nonnegative_int(self.reduction_factor, "reduction_factor") == 0:
+            raise ValueError("reduction_factor must be positive")
+        require_sha256(self.split_sha256, "split_sha256")
+        require_sha256(self.protocol_sha256, "protocol_sha256")
+        rungs = tuple(_nested(value, HyperbandRungV2) for value in _sequence(self.rungs, "rungs"))
+        if len(rungs) > len(self.bracket.resources):
+            raise ValueError("too many rungs for bracket")
+        for index, rung in enumerate(rungs):
+            if rung.index != index or rung.manifest.resource != self.bracket.resources[index]:
+                raise ValueError("rungs must form a completed contiguous bracket prefix")
+            if (rung.manifest.split_sha256, rung.manifest.protocol_sha256) != (self.split_sha256, self.protocol_sha256):
+                raise ValueError("rung split/protocol does not match state")
+            if index and rung.manifest.task_groups != rungs[0].manifest.task_groups:
+                raise ValueError("rungs must share the same committed Train universe")
+            if tuple(value.genome_sha256 for value in rung.evaluations) != candidates:
+                raise ValueError("partial rung or mismatched candidate evaluations")
+            if any(value.bracket != self.bracket.name for value in rung.evaluations):
+                raise ValueError("evaluation bracket does not match state")
+            expected = _hyperband_survivor_count(self.bracket, len(self.candidate_sha256s), index,
+                                                len(candidates), self.reduction_factor)
+            if len(rung.survivor_sha256s) != expected or not set(rung.survivor_sha256s) <= set(candidates):
+                raise ValueError("rung survivors do not match the promotion schedule")
+            candidates = rung.survivor_sha256s
+        object.__setattr__(self, "rungs", rungs)
+
+    @property
+    def active_candidates(self):
+        return self.rungs[-1].survivor_sha256s if self.rungs else self.candidate_sha256s
+
+    @property
+    def complete(self):
+        return len(self.rungs) == len(self.bracket.resources)
+
+
+@dataclass(frozen=True, slots=True)
+class HyperbandAdvanceV2(_CanonicalContract):
+    state: HyperbandStateV2
+    evaluations: tuple[NumericalEvaluationV2, ...]
+
+    def __post_init__(self):
+        object.__setattr__(self, "state", _nested(self.state, HyperbandStateV2))
+        object.__setattr__(self, "evaluations", tuple(_nested(value, NumericalEvaluationV2)
+                           for value in _sequence(self.evaluations, "evaluations")))
+
+
+def _cache_identity(candidate, task, split, metric, descriptor, runtime, protocol, adapter):
+    values = dict(candidate=candidate, task=task, split=split, metric=metric,
+                  descriptor=descriptor, protocol=protocol, adapter=adapter)
+    for name, value in values.items():
+        require_sha256(value, name)
+    values["runtime"] = (require_sha256(runtime, "runtime") if type(runtime) is str
+                         else fingerprint_payload(dict(_runtime(runtime))))
+    return fingerprint_payload(values)
+
+
+@dataclass(frozen=True, slots=True)
+class TaskCacheRowV2(_CanonicalContract):
+    """An exact successful single-task evaluation, reusable across rungs."""
+
+    cache_key: str
+    task_sha256: str
+    evaluation: NumericalEvaluationV2
+
+    def __post_init__(self):
+        require_sha256(self.cache_key, "cache_key")
+        require_sha256(self.task_sha256, "task_sha256")
+        value = _nested(self.evaluation, NumericalEvaluationV2)
+        if len(value.task_ids) != 1 or tuple(value.task_statuses.values()) != ("passed",) or not value.constraints.feasible:
+            raise ValueError("cache rows require one successful feasible task")
+        key = _cache_identity(value.genome_sha256, self.task_sha256, value.split_sha256,
+                              value.metric_policy_sha256, value.descriptor_policy_sha256,
+                              value.runtime_fingerprints, value.protocol_fingerprint,
+                              value.execution_adapter_sha256)
+        if key != self.cache_key:
+            raise ValueError("cache identity mismatch")
+        object.__setattr__(self, "evaluation", value)
+
+
+@dataclass(frozen=True, slots=True)
+class HyperbandTaskResultV2(_CanonicalContract):
+    candidate_sha256: str
+    task_id: str
+    cache_key: str
+    status: Literal["passed", "failed", "invalid"]
+    evaluation: NumericalEvaluationV2 | None
+    cache_hit: bool
+    failure_category: str | None
+
+    def __post_init__(self):
+        require_sha256(self.candidate_sha256, "candidate_sha256")
+        require_sha256(self.cache_key, "cache_key")
+        _text(self.task_id, "task_id")
+        _require_choice(self.status, "task status", frozenset({"passed", "failed", "invalid"}))
+        if type(self.cache_hit) is not bool:
+            raise ValueError("cache_hit must be boolean")
+        if self.evaluation is None:
+            if self.status != "invalid" or self.cache_hit:
+                raise ValueError("missing evaluation must be invalid and uncached")
+            _require_choice(self.failure_category, "failure_category", TRAIN_DIAGNOSTIC_CATEGORIES)
+        else:
+            value = _nested(self.evaluation, NumericalEvaluationV2)
+            if (value.genome_sha256 != self.candidate_sha256 or value.task_ids != (self.task_id,)
+                    or value.task_statuses[self.task_id] != self.status):
+                raise ValueError("task result does not match its evaluation")
+            if self.failure_category is not None or (self.cache_hit and (self.status != "passed" or not value.constraints.feasible)):
+                raise ValueError("invalid cache hit or task failure category")
+            object.__setattr__(self, "evaluation", value)
+
+
+@dataclass(frozen=True, slots=True)
+class HyperbandExecutionV2(_CanonicalContract):
+    task_results: tuple[HyperbandTaskResultV2, ...]
+    cache_rows: tuple[TaskCacheRowV2, ...]
+    budget_outcome: HyperbandBudgetOutcomeV2
+
+    def __post_init__(self):
+        for name, cls in (("task_results", HyperbandTaskResultV2), ("cache_rows", TaskCacheRowV2)):
+            object.__setattr__(self, name, tuple(_nested(value, cls)
+                               for value in _sequence(getattr(self, name), name)))
+        object.__setattr__(self, "budget_outcome", _nested(self.budget_outcome, HyperbandBudgetOutcomeV2))
