@@ -1,8 +1,13 @@
 """Durable QD authority rejects changed bytes and incomplete operations."""
 from dataclasses import replace
+import builtins
 import hashlib
 import json
+import os
 from pathlib import Path
+import socket
+import stat
+import tempfile
 
 import pytest
 
@@ -868,3 +873,129 @@ def test_r3_completion_cannot_claim_unaccounted_llm_calls(world):
     store.write_proposal_attempt(fingerprint_payload(payload), payload)
     finalized_state(world)
     with pytest.raises(ValueError): store.write_completion({"status": "numerical_qd_complete"})
+
+
+def forbid_content_io(monkeypatch):
+    """Fail immediately instead of ever opening a FIFO/device in a regression."""
+    attempted = []
+    def forbidden(path, *args, **kwargs):
+        attempted.append(str(path))
+        raise AssertionError(f"content I/O before filesystem rejection: {path}")
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    monkeypatch.setattr(Path, "open", forbidden)
+    monkeypatch.setattr(builtins, "open", forbidden)
+    monkeypatch.setattr(os, "open", forbidden)
+    return attempted
+
+
+def replace_with_nonregular(path, kind, tmp_path, monkeypatch):
+    if kind in {"character_device", "block_device"}:
+        # Creating device nodes requires privileges. Emulate only their lstat
+        # type bits; every production check and all other metadata stay real.
+        original_lstat = Path.lstat
+        mode = stat.S_IFCHR if kind == "character_device" else stat.S_IFBLK
+        def device_lstat(candidate, *args, **kwargs):
+            value = original_lstat(candidate, *args, **kwargs)
+            if candidate == path:
+                return os.stat_result((mode | stat.S_IMODE(value.st_mode), *tuple(value)[1:]))
+            return value
+        monkeypatch.setattr(Path, "lstat", device_lstat)
+        return
+    original = tmp_path / "external-original"
+    path.rename(original)
+    if kind == "fifo":
+        os.mkfifo(path)
+    elif kind == "socket":
+        # Bind at a short path to respect macOS AF_UNIX pathname limits, then
+        # move the actual socket inode into the authority location.
+        with tempfile.TemporaryDirectory(prefix="qd-socket-") as directory:
+            bound = Path(directory) / "s"
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                listener.bind(str(bound))
+                bound.rename(path)
+    elif kind == "directory":
+        path.mkdir()
+    elif kind == "symlink":
+        path.symlink_to(original)
+    else:
+        raise AssertionError(kind)
+
+
+@pytest.mark.parametrize("operation", ["write_state", "resume", "write_completion"])
+@pytest.mark.parametrize("name", ["checkpoint.json", "numerical_qd/checkpoint.json"])
+@pytest.mark.parametrize("kind", ["fifo", "socket", "character_device", "block_device", "directory", "symlink"])
+def test_r2_preflight_rejects_nonregular_checkpoints_before_any_content_io(
+        world, tmp_path, monkeypatch, operation, name, kind):
+    store, *_ = world
+    args, _ = finalized_state(world)
+    replace_with_nonregular(store.root / name, kind, tmp_path, monkeypatch)
+    attempted = forbid_content_io(monkeypatch)
+    with pytest.raises(api.NumericalQDStoreError):
+        if operation == "write_state": store.write_state(**args)
+        elif operation == "resume": resume(store, args)
+        else: store.write_completion({"status": "numerical_qd_complete"})
+    assert attempted == []
+
+
+@pytest.mark.parametrize("operation", ["create", "write_object", "write_source", "verify_candidate",
+    "write_proposal_attempt", "write_task_result", "write_rung", "append_qd_entry"])
+@pytest.mark.parametrize("name", ["checkpoint.json", "numerical_qd/checkpoint.json"])
+def test_r2_preflight_guards_every_public_artifact_entry_point(
+        world, tmp_path, monkeypatch, operation, name):
+    store, *_ = world
+    args, rung, entry = add_rung(world)
+    store.write_state(**args)
+    task = rung.manifest.tasks[0]
+    result = HyperbandTaskResultV2.from_payload(json.loads((store.directory /
+        f"results/{args['active_genome_sha256']}/{task.task_sha256}.json").read_bytes()))
+    object_payload = {"retry": "same bytes"}
+    object_sha = persist(store, object_payload)
+    proposal = dict(provider="deterministic", resource_use=ResourceUse().to_payload(), failure_reason=None,
+        proposals=[], source_sha256s=[SOURCE_SHA], attempts=[])
+    calls = {
+        "create": lambda: api.NumericalQDRunStore.create(store.root),
+        "write_object": lambda: store.write_object(object_sha, object_payload),
+        "write_source": lambda: store.write_source(SOURCE_SHA, SOURCE),
+        "verify_candidate": lambda: store.verify_candidate(args["active_genome_sha256"]),
+        "write_proposal_attempt": lambda: store.write_proposal_attempt(fingerprint_payload(proposal), proposal),
+        "write_task_result": lambda: store.write_task_result(task.task_sha256, result),
+        "write_rung": lambda: store.write_rung(rung),
+        "append_qd_entry": lambda: store.append_qd_entry(entry),
+    }
+    replace_with_nonregular(store.root / name, "fifo", tmp_path, monkeypatch)
+    attempted = forbid_content_io(monkeypatch)
+    with pytest.raises(api.NumericalQDStoreError): calls[operation]()
+    assert attempted == []
+
+
+@pytest.mark.parametrize("name", ["run_manifest.json", "accepted_bundle.json", "archive/index.jsonl",
+    "numerical_qd/manifest.json", "numerical_qd/objects", "numerical_qd/sources"])
+@pytest.mark.parametrize("kind", ["fifo", "symlink"])
+def test_r2_preflight_rejects_unsafe_authority_and_ancestors_before_reading_checkpoint(
+        world, tmp_path, monkeypatch, name, kind):
+    store, args, *_ = world
+    store.write_state(**args)
+    replace_with_nonregular(store.root / name, kind, tmp_path, monkeypatch)
+    attempted = forbid_content_io(monkeypatch)
+    with pytest.raises(api.NumericalQDStoreError): resume(store, args)
+    assert attempted == []
+
+
+@pytest.mark.parametrize("operation", ["resume", "write_completion"])
+def test_r2_preflight_requires_runner_checkpoint_when_reopening(world, monkeypatch, operation):
+    store, args, *_ = world
+    assert not (store.directory / "checkpoint.json").exists()
+    attempted = forbid_content_io(monkeypatch)
+    with pytest.raises(api.NumericalQDStoreError):
+        if operation == "resume": resume(store, args)
+        else: store.write_completion({"status": "numerical_qd_complete"})
+    assert attempted == []
+
+
+def test_r2_preflight_allows_only_initial_phase_absence(kernel):
+    assert not (kernel.store.root / "numerical_qd").exists()
+    store = api.NumericalQDRunStore.create(kernel.store.root)
+    assert not (store.directory / "checkpoint.json").exists()
+    payload = {"phase": "before first runner checkpoint"}
+    identity = persist(store, payload)
+    assert json.loads((store.directory / f"objects/{identity}.json").read_bytes()) == payload

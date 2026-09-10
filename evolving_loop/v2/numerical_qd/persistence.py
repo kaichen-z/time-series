@@ -80,17 +80,15 @@ class NumericalQDRunStore:
     def create(cls, root):
         """Create the Numerical subtree after Project 1 initializes the V2 run."""
         result = cls(root)
+        result._verify_root_paths(creating=True)
         repository = Path(__file__).resolve().parents[3]
         protected = ("common", "evolving_loop", "numerical_agent", "retrieval_agent",
                      "decision_agent", "tests", "runs/frozen_two_stage")
         resolved = result.root.resolve()
         if any(resolved.is_relative_to(repository / name) for name in protected):
             raise NumericalQDStoreError("output cannot be created in source or legacy paths")
-        result._verify_root_paths()
         durable.V2RunStore._require_v2_manifest(result.root)
-        if not result._safe(result.root / "checkpoint.json").is_file():
-            raise NumericalQDStoreError("initialize the Kernel before the Numerical QD store")
-        if result.directory.exists() and any(result.directory.iterdir()):
+        if result.directory.exists():
             if result._read("manifest.json") != _MANIFEST:
                 raise NumericalQDStoreError("Numerical QD manifest mismatch")
             result._catalog()
@@ -113,23 +111,50 @@ class NumericalQDRunStore:
             raise NumericalQDStoreError("invalid Numerical QD artifact path")
         return self._safe(self.directory / relative)
 
-    def _verify_root_paths(self):
-        """Check path ownership before the Kernel's readers can follow links."""
+    def _verify_root_paths(self, *, creating=False, require_checkpoint=False):
+        """Metadata-only preflight; never open an artifact before this passes.
+
+        Kernel authority is always required. Only create may start without the
+        Numerical subtree, and only pre-publication APIs may lack its checkpoint.
+        Traversal uses lstat before descending, so no symlink or special file is
+        followed even when the bad node is unrelated to the first content read.
+        """
         required_files = ("run_manifest.json", "budget_plan.json", "checkpoint.json",
                           "accepted_bundle.json", "promotion_history.jsonl", "archive/index.jsonl")
         try:
-            for name in ("", *durable._LAYOUT):
-                if not self._safe(self.root / name).is_dir():
-                    raise NumericalQDStoreError("missing real V2 authority directory")
+            for path in (*reversed(self.root.parents), self.root):
+                if not stat.S_ISDIR(path.lstat().st_mode):
+                    raise NumericalQDStoreError("V2 root and ancestors must be real directories")
+            modes, pending = {self.root: stat.S_IFDIR}, [self.root]
+            while pending:
+                for path in pending.pop().iterdir():
+                    mode = path.lstat().st_mode
+                    if stat.S_ISDIR(mode):
+                        pending.append(path)
+                    elif not stat.S_ISREG(mode):
+                        raise NumericalQDStoreError("V2 authority requires real files and directories")
+                    modes[path] = mode
+
+            def require(path, predicate, *, optional=False):
+                mode = modes.get(path)
+                if mode is None and optional:
+                    return
+                if mode is None or not predicate(mode):
+                    raise NumericalQDStoreError(f"missing or wrong authority path type: {path}")
+
+            for name in durable._LAYOUT:
+                require(self.root / name, stat.S_ISDIR)
             for name in required_files:
-                if not self._safe(self.root / name).is_file():
-                    raise NumericalQDStoreError("missing real V2 authority file")
-            # Includes closure/evidence/candidate/Bundle paths subsequently
-            # discovered by Kernel replay, as well as all their ancestors.
-            for path in self.root.rglob("*"):
-                mode = self._safe(path).lstat().st_mode
-                if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
-                    raise NumericalQDStoreError("V2 authority requires real files and directories")
+                require(self.root / name, stat.S_ISREG)
+            require(self.root / "evaluation_complete.json", stat.S_ISREG, optional=True)
+            if creating and self.directory not in modes:
+                return
+            require(self.directory, stat.S_ISDIR)
+            for name in _LAYOUT:
+                require(self.directory / name, stat.S_ISDIR)
+            require(self.directory / "manifest.json", stat.S_ISREG)
+            require(self.directory / "checkpoint.json", stat.S_ISREG, optional=not require_checkpoint)
+            require(self.directory / "archive/entries.jsonl", stat.S_ISREG, optional=True)
         except OSError as error:
             raise NumericalQDStoreError("cannot verify V2 authority paths") from error
 
@@ -148,6 +173,7 @@ class NumericalQDRunStore:
         return path
 
     def write_object(self, sha256, payload):
+        self._verify_root_paths()
         require_sha256(sha256, "object SHA")
         payload = _payload(payload)
         if _identity(payload) != sha256:
@@ -162,6 +188,7 @@ class NumericalQDRunStore:
         return payload
 
     def write_source(self, sha256, source):
+        self._verify_root_paths()
         require_sha256(sha256, "source SHA")
         if type(source) is not bytes or hashlib.sha256(source).hexdigest() != sha256:
             raise NumericalQDStoreError("source must be exact SHA-bound bytes")
@@ -197,6 +224,7 @@ class NumericalQDRunStore:
 
     def verify_candidate(self, genome_sha256):
         """Return reread genome plus exact source/policy ancestry for the adapter."""
+        self._verify_root_paths()
         from .adapters import LegacyNumericalAdapter
         from numerical_agent.evolution.champion import parse_champion_recipe
 
@@ -268,6 +296,7 @@ class NumericalQDRunStore:
             value["provider"], value["failure_reason"], tuple(attempts))
 
     def write_proposal_attempt(self, attempt_sha256, payload):
+        self._verify_root_paths()
         require_sha256(attempt_sha256, "attempt SHA")
         payload = _payload(payload)
         self._proposal(payload)
@@ -276,6 +305,7 @@ class NumericalQDRunStore:
         return self._write(f"proposals/{attempt_sha256}.json", payload)
 
     def write_task_result(self, task_sha256, result):
+        self._verify_root_paths()
         require_sha256(task_sha256, "task SHA")
         result = HyperbandTaskResultV2.from_payload(_payload(result))
         self.verify_candidate(result.candidate_sha256)
@@ -310,6 +340,7 @@ class NumericalQDRunStore:
                     raise NumericalQDStoreError("rung task result identity mismatch")
 
     def write_rung(self, rung):
+        self._verify_root_paths()
         rung = HyperbandRungV2.from_payload(_payload(rung))
         self._verify_rung(rung)
         # This is the captured Task 6 payload; never ask a live clock/ledger for it.
@@ -344,6 +375,7 @@ class NumericalQDRunStore:
         return tuple(records)
 
     def append_qd_entry(self, entry):
+        self._verify_root_paths()
         entry = NumericalQDEntryV2.from_payload(_payload(entry))
         existing = self._entries()
         path = self._path("archive/entries.jsonl")
@@ -414,7 +446,6 @@ class NumericalQDRunStore:
         return payload
 
     def _verify_state(self, checkpoint):
-        self._verify_root_paths()
         if self._read("manifest.json") != _MANIFEST:
             raise NumericalQDStoreError("Numerical QD manifest mismatch")
         durable.V2RunStore._require_v2_manifest(self.root)
@@ -512,6 +543,7 @@ class NumericalQDRunStore:
 
     def write_state(self, **state):
         """Seal a complete inventory, then atomically publish its runner pointer."""
+        self._verify_root_paths()
         if self._safe(self.root / "evaluation_complete.json").exists():
             raise NumericalQDStoreError("completed run cannot publish another state")
         previous_path = self._path("checkpoint.json")
@@ -564,6 +596,7 @@ class NumericalQDRunStore:
         return checkpoint
 
     def resume(self, config_sha256, input_sha256s, kernel_checkpoint_sha256, budget_checkpoint_sha256):
+        self._verify_root_paths(require_checkpoint=True)
         checkpoint = NumericalQDCheckpointV2.from_payload(self._read("checkpoint.json"))
         for name, expected in (("config_sha256", config_sha256), ("input_sha256s", input_sha256s),
                                ("kernel_checkpoint_sha256", kernel_checkpoint_sha256),
@@ -646,6 +679,7 @@ class NumericalQDRunStore:
 
     def write_completion(self, payload):
         """Accept status-only convenience or the exact derived closed envelope."""
+        self._verify_root_paths(require_checkpoint=True)
         checkpoint = NumericalQDCheckpointV2.from_payload(self._read("checkpoint.json"))
         self.resume(checkpoint.config_sha256, dict(checkpoint.input_sha256s),
                     checkpoint.kernel_checkpoint_sha256, checkpoint.budget_checkpoint_sha256)
