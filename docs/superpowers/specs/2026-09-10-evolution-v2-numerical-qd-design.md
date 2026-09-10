@@ -87,6 +87,7 @@ evolving_loop/v2/numerical_qd/
   map_elites.py
   hyperband.py
   adapters.py
+  persistence.py
   runner.py
 ```
 
@@ -406,8 +407,11 @@ The config is a new exact `NumericalQDConfigV2` envelope, rather than silently
 adding fields to the Project 1 config schema. It contains the V2 protocol and
 budget profile plus descriptor policy, mutation limits, QD capacity, parent
 sampling weights, objective/constraint policy, Hyperband brackets, proposal
-budget, and provider settings. Operator-supplied inputs are hashed into the run
-manifest before output creation.
+budget, provider settings, and fixed seed Retrieval/Decision/Harness/scheduler
+identities. The adapter materializes the seed Numerical registry, then constructs
+the complete generation-zero V2 Bundle from those fixed identities and the
+Supply/registry pair. Operator-supplied inputs are hashed into the run manifest
+before output creation.
 
 Profiles:
 
@@ -419,6 +423,9 @@ Profiles:
 Completion status is `numerical_qd_complete`. It explicitly reports whether an
 LLM provider was used, occupied-cell count, frozen Supply/registry/Bundle
 identities, Train/Dev access state, budget use, and `public_test_accessed:false`.
+The completion is the V2 run's root `evaluation_complete.json`; the
+`numerical_qd/` subtree has its own manifest and checkpoint but no competing
+completion authority.
 The existing full `evolve` production path remains unavailable until Project 3
 connects Retrieval and Decision.
 
