@@ -34,7 +34,7 @@ from .contracts import (
     fingerprint_payload,
     require_sha256,
 )
-from .store import V2RunStore
+from .store import V2RunStore, write_atomic_json
 
 
 class KernelAuthorityError(ValueError):
@@ -484,18 +484,34 @@ class EvolutionKernel:
         "checkpoint_sha256",
     )
 
-    def _configure(self, store, protocol, budget, seed):
+    def _configure(self, store, protocol, budget, seed, checkpoint_path=None):
         if type(protocol) is not KernelProtocolCommitment:
             raise KernelAuthorityError("kernel requires the full protocol commitment")
         if seed.generation != 0 or seed.protocol_fingerprint != protocol.fingerprint():
             raise KernelAuthorityError("seed protocol commitment mismatch")
         self.store, self.protocol, self.budget = store, protocol, budget
+        self.checkpoint_path = self._resolve_checkpoint_path(store, checkpoint_path)
         self._seed_sha, self._runtimes = seed.fingerprint(), seed.runtime_fingerprints
         self._closed, self._permits, self._closures, self._transitions = {}, {}, {}, {}
         self._unpersisted_closures = {}
         self._active_sha = self._committed_event_sha = self._pending_event = None
         self._terminal = self._last_checkpoint_sha = None
         self.promotion_host = PromotionHost(self)
+
+    @staticmethod
+    def _resolve_checkpoint_path(store, checkpoint_path):
+        path = (
+            Path(checkpoint_path)
+            if checkpoint_path is not None
+            else store.root / "checkpoint.json"
+        )
+        if path.name != "checkpoint.json" or not path.resolve().is_relative_to(
+            store.root.resolve()
+        ):
+            raise KernelAuthorityError(
+                "checkpoint path must be checkpoint.json within the run"
+            )
+        return path
 
     def __init__(
         self,
@@ -504,6 +520,7 @@ class EvolutionKernel:
         budget: BudgetLedger,
         *,
         seed: EvolutionBundleV2,
+        checkpoint_path: str | Path | None = None,
     ):
         # A constructor never adopts or repairs an established/partial run.
         if any(path.is_file() for path in store.root.rglob("*")):
@@ -515,7 +532,7 @@ class EvolutionKernel:
             or budget.checkpoint()["open_reservations"]
         ):
             raise KernelAuthorityError("fresh kernel requires an unused budget ledger")
-        self._configure(store, protocol, budget, seed)
+        self._configure(store, protocol, budget, seed, checkpoint_path)
         store.write_run_manifest(self._manifest())
         store.write_budget_plan(budget.plan.to_payload())
         self.archive = EvolutionArchive(store.root / "archive")
@@ -536,12 +553,17 @@ class EvolutionKernel:
 
     @classmethod
     def resume(
-        cls, store: V2RunStore, plan: BudgetPlan, *, monotonic: Callable[[], float]
+        cls,
+        store: V2RunStore,
+        plan: BudgetPlan,
+        *,
+        monotonic: Callable[[], float],
+        checkpoint_path: str | Path | None = None,
     ):
         try:
             manifest = _read(store.root / "run_manifest.json")
             _read(store.root / "budget_plan.json", plan.fingerprint())
-            checkpoint = _read(store.root / "checkpoint.json")
+            checkpoint = _read(cls._resolve_checkpoint_path(store, checkpoint_path))
             _require_exact_schema(
                 checkpoint, cls._CHECKPOINT_FIELDS, field="kernel checkpoint"
             )
@@ -572,7 +594,7 @@ class EvolutionKernel:
                     "open reservation cannot be resumed or reissued; recover in a new epoch"
                 )
             kernel = cls.__new__(cls)
-            kernel._configure(store, protocol, budget, seed)
+            kernel._configure(store, protocol, budget, seed, checkpoint_path)
             if any(manifest.get(k) != v for k, v in kernel._manifest().items()):
                 raise ValueError("manifest protocol/authority mismatch")
             kernel._closures = dict(checkpoint["budget_closures"])
@@ -1111,6 +1133,16 @@ class EvolutionKernel:
     def active_bundle(self) -> EvolutionBundleV2:
         return self.promotion_host.reconcile()
 
+    def finalize(self) -> None:
+        """Seal finalization only after all live evaluations have closed cleanly."""
+        self._require_mutable()
+        self._verify_checkpoint_state()
+        self.active_bundle()
+        if self.budget.checkpoint()["open_reservations"]:
+            raise KernelAuthorityError("cannot finalize with open evaluations")
+        self.budget.begin_finalization()
+        self._checkpoint()
+
     def _verify_checkpoint_state(self):
         self.promotion_host._publication_state()
         prefix, snapshots = hashlib.sha256(), set()
@@ -1198,7 +1230,7 @@ class EvolutionKernel:
         if self._pending_event != pending:
             raise KernelAuthorityError("pending publication changed before persistence")
         self._checkpoint()
-        durable = _read(self.store.root / "checkpoint.json")
+        durable = _read(self.checkpoint_path)
         digest = fingerprint_payload(
             {key: value for key, value in durable.items() if key != "checkpoint_sha256"}
         )
@@ -1221,7 +1253,7 @@ class EvolutionKernel:
             raise KernelAuthorityError("run manifest protocol/authority mismatch")
         _read(self.store.root / "budget_plan.json", self.budget.plan.fingerprint())
         if self._last_checkpoint_sha is not None:
-            existing = _read(self.store.root / "checkpoint.json")
+            existing = _read(self.checkpoint_path)
             if existing.get("checkpoint_sha256") != self._last_checkpoint_sha:
                 raise KernelAuthorityError("checkpoint changed outside the kernel")
         checkpoint = {
@@ -1236,7 +1268,10 @@ class EvolutionKernel:
             "terminal_recovery": self._terminal,
         }
         checkpoint["checkpoint_sha256"] = fingerprint_payload(checkpoint)
-        self.store.write_checkpoint(checkpoint)
+        if self.checkpoint_path == self.store.root / "checkpoint.json":
+            self.store.write_checkpoint(checkpoint)
+        else:
+            write_atomic_json(self.checkpoint_path, checkpoint)
         self._last_checkpoint_sha = checkpoint["checkpoint_sha256"]
 
 
