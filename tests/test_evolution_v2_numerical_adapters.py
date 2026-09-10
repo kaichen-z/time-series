@@ -599,3 +599,130 @@ def test_conflicting_source_names_fail_before_train_row_access(world):
     with pytest.raises(ValueError, match="ambiguous executable source"):
         materialize((adapter, release, registry, state, UntouchedRows()), evolved,
             member_id=proposal.payload["child"]["member_id"], parent_state=state, proposal=proposal)
+
+
+@pytest.mark.parametrize("name", ["hash", "id", "license", "help", "credits", "copyright",
+    "breakpoint", "input", "repr", "str", "format", "print", "set", "frozenset"])
+@pytest.mark.parametrize("use", ["{name}(frequency)", "callback = {name}", "map({name}, [frequency])"])
+def test_unbound_builtins_rejected_as_calls_references_and_callbacks(world, name, use):
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon",
+        use.format(name=name) + "\n    return [1.0] * horizon")
+    with pytest.raises(ValueError):
+        world[0].validate_source(source)
+
+
+@pytest.mark.parametrize("statement", [
+    "import numpy as np\n    values = np.empty(horizon)",
+    "import numpy as np\n    values = np.empty_like(history)",
+    "values = {'short', 'long'}",
+    "values = {frequency for value in history}",
+    "import numpy as np\n    np.pi += 1.0",
+    "global license\n    license()",
+])
+def test_process_dependent_or_shared_runtime_surfaces_reject(world, statement):
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon",
+        statement + "\n    return [1.0] * horizon")
+    with pytest.raises(ValueError):
+        world[0].validate_source(source)
+
+
+@pytest.mark.parametrize("binding", [
+    "def helper():\n        license = sum\n    license()",
+    "values = [license for license in (sum,)]\n    license()",
+])
+def test_inner_scope_binding_cannot_authorize_outer_builtin(world, binding):
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon",
+        binding + "\n    return [1.0] * horizon")
+    with pytest.raises(ValueError):
+        world[0].validate_source(source)
+
+
+def test_other_function_binding_cannot_authorize_builtin(world):
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon",
+        "license()\n    return [1.0] * horizon").replace(
+        "return [float(history[-1]) + 2.0] * horizon", "license = sum\n    return [1.0] * horizon")
+    with pytest.raises(ValueError):
+        world[0].validate_source(source)
+
+
+def test_pure_locals_import_aliases_and_callbacks_survive_closed_names(world):
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon", '''import math as math_ops
+    from numpy import asarray as array, mean as average
+    license = sum
+    values = list(map(abs, history))
+    def center(items):
+        return [value - min(items) for value in items]
+    callback = lambda item: math_ops.fabs(item)
+    value = average(array(center(values))) + license([callback(0.0)])
+    return [float(value)] * horizon''')
+    outcome = world[0].forecast_source(source, "seasonal_naive", world[0].tasks[0])
+    assert outcome.status == "passed" and outcome.forecast == (3.5, 3.5)
+
+
+def test_accepted_forecasts_match_across_fresh_hash_randomized_interpreters():
+    import os
+    import subprocess
+    import sys
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon", '''import math as math_ops
+    import numpy as np
+    values = [math_ops.fabs(value) for index, value in enumerate(history) if index >= 0]
+    total = sum(map(float, values))
+    return np.full(horizon, total / max(1, len(values))).tolist()''')
+    command = '''import json, sys
+from evolving_loop.v2.numerical_qd.adapters import LegacyNumericalAdapter
+from tests.test_package_numerical_evolution import _evolution_tasks
+adapter = object.__new__(LegacyNumericalAdapter)
+outcome = adapter.forecast_source(sys.stdin.read(), "seasonal_naive", _evolution_tasks()[0])
+print(json.dumps(outcome.to_payload(), sort_keys=True))
+'''
+    outcomes = []
+    for seed in ("1", "2", "314159"):
+        result = subprocess.run([sys.executable, "-c", command], input=source, text=True,
+            capture_output=True, check=True, timeout=30, cwd=ROOT,
+            env=dict(os.environ, PYTHONHASHSEED=seed))
+        outcomes.append(json.loads(result.stdout))
+    assert all(result["status"] == "passed" and result["forecast"] == [3.5, 3.5] for result in outcomes)
+    assert outcomes[0] == outcomes[1] == outcomes[2]
+
+
+def test_hash_forecast_and_unknown_site_injected_name_fail_closed(world):
+    for expression in ("float(hash(frequency))", "future_site_hook(frequency)"):
+        source = SOURCE.replace("float(history[-1]) + 1.0", expression)
+        with pytest.raises(ValueError, match="closed deterministic capabilities"):
+            world[0].validate_source(source)
+
+
+@pytest.mark.parametrize("initialization", [
+    "license()\nfrom math import fsum as license\n",
+    "counter = 0\n",
+])
+def test_module_initialization_cannot_fall_back_to_builtin_or_keep_state(world, initialization):
+    with pytest.raises(ValueError, match="module initialization"):
+        world[0].validate_source(initialization + SOURCE)
+
+
+@pytest.mark.parametrize("signature", [
+    "history=license(), horizon=2, frequency='D'",
+    "history: license(), horizon, frequency",
+])
+def test_definition_time_expression_cannot_use_a_later_safe_alias(world, signature):
+    source = SOURCE.replace("history, horizon, frequency", signature, 1)
+    source += "\nfrom math import fsum as license\n"
+    with pytest.raises(ValueError, match="at import"):
+        world[0].validate_source(source)
+
+
+def test_existing_method_header_and_module_import_alias_remain_accepted(world):
+    from numerical_agent.evolution.module import MODULE_HEADER
+    source = MODULE_HEADER + "\nfrom math import fsum as total\n" + SOURCE.replace(
+        "float(history[-1]) + 1.0", "total(history) / len(history)")
+    outcome = world[0].forecast_source(source, "seasonal_naive", world[0].tasks[0])
+    assert outcome.status == "passed" and outcome.forecast == (3.5, 3.5)
+
+
+@pytest.mark.parametrize("statement", ["nonlocal missing_binding", "value = 1\n    global value"])
+def test_invalid_lexical_binding_is_a_source_validation_error(world, statement):
+    source = SOURCE.replace("return [float(history[-1]) + 1.0] * horizon",
+        statement + "\n    return [1.0] * horizon")
+    with pytest.raises(ValueError):
+        world[0].validate_source(source)

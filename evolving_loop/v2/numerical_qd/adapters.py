@@ -9,6 +9,7 @@ import ast
 import hashlib
 import math
 import statistics
+import symtable
 import tempfile
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -82,7 +83,7 @@ _SOURCE_ATTRIBUTES = frozenset("""
     bincount bool_ broadcast_to cbrt ceil chain clip column_stack combinations comb
     concatenate conj conjugate convolve copy corrcoef cos cosh count count_nonzero
     Counter cov cumprod cumsum cycle degrees deque diagonal diff digitize divmod dot
-    dtype e eig eigh eigvals eigvalsh einsum empty empty_like enumerate erf erfc exp
+    dtype e eig eigh eigvals eigvalsh einsum enumerate erf erfc exp
     exp2 expand_dims expm1 fabs factorial fft fftfreq fftshift fill finfo flat flatten
     float32 float64 floor fmax fmean fmin fmod frexp fromiter fromkeys fsum full
     full_like gamma gcd geomspace get gradient groupby harmonic_mean hstack hypot
@@ -100,12 +101,56 @@ _SOURCE_ATTRIBUTES = frozenset("""
     triu trunc tuple unique values var variance vdot vstack where zip_longest zeros
     zeros_like T
 """.split())
-_SOURCE_REFLECTION = frozenset({"getattr", "setattr", "delattr", "hasattr", "vars", "globals", "locals",
-                                 "dir", "type", "object", "super", "memoryview", "help", "print"})
+_SOURCE_BUILTINS = frozenset("""
+    abs all any bool dict divmod enumerate filter float int iter len list map max
+    min next pow range reversed round slice sorted sum tuple zip
+    ArithmeticError Exception OverflowError TypeError ValueError ZeroDivisionError
+""".split())
+_NOT_APPLICABLE_CLASS = ast.dump(ast.parse(MODULE_HEADER).body[-1])
+
+
+def _check_source_names(source, tree):
+    # Restrict module initialization so a later binding cannot authorize a builtin
+    # call before that binding exists. Actual method bodies execute after import.
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            if (node.decorator_list or node.args.defaults or any(node.args.kw_defaults)
+                    or node.returns is not None or any(argument.annotation is not None
+                    for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs))):
+                raise ValueError("source methods cannot execute decorators/defaults/annotations at import")
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and type(node.value.value) is str:
+            continue
+        elif isinstance(node, ast.ClassDef) and ast.dump(node) == _NOT_APPLICABLE_CLASS:
+            continue
+        else:
+            raise ValueError("source module initialization is outside the closed language")
+    # Use Python's own lexical scope analysis: locals, closures, comprehension
+    # targets, parameters, and import aliases must not leak into unrelated scopes.
+    try:
+        table = symtable.symtable(source, "<verified-numerical-source>", "exec")
+    except SyntaxError as error:
+        raise ValueError("source has invalid lexical bindings") from error
+    globals_allowed = _SOURCE_BUILTINS | {"NotApplicable"} | {
+        symbol.get_name() for symbol in table.get_symbols()
+        if symbol.is_imported() or symbol.is_namespace()
+    }
+    pending = [table]
+    while pending:
+        scope = pending.pop()
+        for symbol in scope.get_symbols():
+            name = symbol.get_name()
+            if (name.startswith("__") or symbol.is_referenced() and symbol.is_global()
+                    and name not in globals_allowed):
+                raise ValueError(f"source name is outside the closed deterministic capabilities: {name}")
+        pending.extend(scope.get_children())
 
 
 def _check_numerical_capabilities(source):
-    for node in ast.walk(ast.parse(source)):
+    tree = ast.parse(source)
+    _check_source_names(source, tree)
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             if any(alias.name not in _SOURCE_IMPORTS for alias in node.names):
                 raise ValueError("source import is outside the closed numerical capabilities")
@@ -113,10 +158,13 @@ def _check_numerical_capabilities(source):
             if (node.level or node.module not in _SOURCE_IMPORTS
                     or any(alias.name not in _SOURCE_ATTRIBUTES for alias in node.names)):
                 raise ValueError("source import is outside the closed numerical capabilities")
-        elif isinstance(node, ast.Attribute) and node.attr not in _SOURCE_ATTRIBUTES:
-            raise ValueError("source attribute is outside the closed numerical capabilities")
-        elif isinstance(node, ast.Name) and (node.id in _SOURCE_REFLECTION or node.id.startswith("__")):
-            raise ValueError("source reflection is not a numerical capability")
+        elif isinstance(node, ast.Attribute):
+            if node.attr not in _SOURCE_ATTRIBUTES or not isinstance(node.ctx, ast.Load):
+                raise ValueError("source attribute is outside the closed numerical capabilities")
+        elif isinstance(node, (ast.Set, ast.SetComp, ast.Global, ast.Nonlocal)):
+            raise ValueError("source cannot depend on unordered or shared runtime state")
+        elif isinstance(node, ast.ClassDef) and ast.dump(node) != _NOT_APPLICABLE_CLASS:
+            raise ValueError("source classes are outside the closed numerical capabilities")
 
 
 def _encode(value):
