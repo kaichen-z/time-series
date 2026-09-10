@@ -236,6 +236,34 @@ def test_public_rejects_source_output_containment(tmp_path, overlap):
 
 
 @pytest.mark.parametrize(
+    "overlap", ["child", "deep_child", "existing_child", "same", "ancestor"]
+)
+def test_public_rejects_case_alias_by_filesystem_identity(tmp_path, capsys, overlap):
+    root = tmp_path / "case-sensitive-run"
+    run_fake_kernel(root, smoke_config())
+    alias = root.with_name(root.name.upper())
+    if not alias.exists() or not alias.samefile(root):
+        pytest.skip("requires a filesystem that aliases case variants")
+    if overlap == "child":
+        output = alias / "public"
+    elif overlap == "deep_child":
+        output = alias / "missing-parent" / "public"
+    elif overlap == "existing_child":
+        (root / "existing").mkdir()
+        output = alias / "existing" / "public"
+    elif overlap == "same":
+        output = alias
+    else:
+        output = tmp_path.with_name(tmp_path.name.upper())
+    before = snapshot(root)
+    directories = {str(path.relative_to(root)) for path in root.rglob("*")}
+    assert public(root / "accepted_bundle.json", output) == 2
+    assert "must not overlap" in capsys.readouterr().err
+    assert snapshot(root) == before
+    assert {str(path.relative_to(root)) for path in root.rglob("*")} == directories
+
+
+@pytest.mark.parametrize(
     "damage",
     [
         "unsealed",

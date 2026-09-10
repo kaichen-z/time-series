@@ -69,16 +69,29 @@ def _evolve(config_path: Path, output: Path) -> dict[str, object]:
     return _read_canonical(result.completion_path)
 
 
+def _filesystem_contains(root: Path, path: Path) -> bool:
+    """Compare existing ancestors by identity, including case aliases.
+
+    A new output can have several nonexistent parents. Continue past them to
+    find any existing ancestor that aliases the source directory. The reverse
+    check covers an existing output that contains or aliases the source.
+    """
+    if not root.exists():
+        return False
+    return any(
+        ancestor.exists() and root.samefile(ancestor)
+        for ancestor in (path, *path.parents)
+    )
+
+
 def _public_evaluate(bundle_path: Path, output: Path) -> dict[str, object]:
     source_path = bundle_path.resolve(strict=True)
     if source_path.name != "accepted_bundle.json":
         raise ValueError("bundle must be a source V2 run's accepted_bundle.json")
     source = source_path.parent
     destination = output.resolve()
-    if (
-        destination == source
-        or source in destination.parents
-        or destination in source.parents
+    if _filesystem_contains(source, destination) or _filesystem_contains(
+        destination, source
     ):
         raise ValueError(
             "Public output and source run must not overlap in either direction"
