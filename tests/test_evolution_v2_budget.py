@@ -166,6 +166,20 @@ def test_pending_reservations_count_against_every_ceiling():
         assert denial.reason == f"{field}_exhausted"
 
 
+def test_charge_counts_pending_reservations_and_checkpoints_exhaustion():
+    ledger = BudgetLedger(plan(task_executions=3), monotonic=FakeClock())
+    assert ledger.reserve_stage("pending", ResourceUse(task_executions=3)).allowed
+
+    result = ledger.charge(ResourceUse(task_executions=1))
+
+    assert result.allowed is False
+    assert result.reason == "task_executions_exhausted"
+    resumed = BudgetLedger.resume(
+        ledger.plan, ledger.checkpoint(), monotonic=FakeClock()
+    )
+    assert resumed.can_open_stage(ResourceUse()).reason == "task_executions_exhausted"
+
+
 def test_stage_can_end_exactly_at_deadline_but_cannot_open_at_deadline():
     clock = FakeClock()
     ledger = BudgetLedger(plan(), monotonic=clock)
@@ -224,6 +238,20 @@ def test_double_close_is_a_typed_closed_stage_denial():
     assert ledger.close_stage(reservation, ResourceUse(task_executions=1)).allowed
 
     denial = ledger.close_stage(reservation, ResourceUse())
+
+    assert denial.allowed is False
+    assert denial.reason == "stage_closed"
+
+
+def test_double_close_remains_typed_after_checkpoint_resume():
+    ledger = BudgetLedger(plan(), monotonic=FakeClock())
+    reservation = ledger.reserve_stage("once", ResourceUse(task_executions=1))
+    assert ledger.close_stage(reservation, ResourceUse(task_executions=1)).allowed
+
+    resumed = BudgetLedger.resume(
+        ledger.plan, ledger.checkpoint(), monotonic=FakeClock()
+    )
+    denial = resumed.close_stage(reservation, ResourceUse())
 
     assert denial.allowed is False
     assert denial.reason == "stage_closed"
@@ -327,4 +355,16 @@ def test_checkpoint_rejects_a_tampered_open_reservation_even_with_new_checksum()
     checkpoint["checkpoint_sha256"] = BudgetLedger.checkpoint_sha256(checkpoint)
 
     with pytest.raises(BudgetContractError, match="reservation SHA"):
+        BudgetLedger.resume(ledger.plan, checkpoint, monotonic=FakeClock())
+
+
+def test_checkpoint_validates_closed_reservation_hashes():
+    ledger = BudgetLedger(plan(), monotonic=FakeClock())
+    reservation = ledger.reserve_stage("closed", ResourceUse())
+    assert ledger.close_stage(reservation, ResourceUse()).allowed
+    checkpoint = ledger.checkpoint()
+    checkpoint["closed_reservation_sha256s"][0] = "not-a-sha"
+    checkpoint["checkpoint_sha256"] = BudgetLedger.checkpoint_sha256(checkpoint)
+
+    with pytest.raises(BudgetContractError, match="closed reservation SHA"):
         BudgetLedger.resume(ledger.plan, checkpoint, monotonic=FakeClock())

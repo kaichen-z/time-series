@@ -41,6 +41,7 @@ _CHECKPOINT_FIELDS = frozenset(
         "charged_use",
         "open_reservations",
         "closed_stage_ids",
+        "closed_reservation_sha256s",
         "finalization_started",
         "exhausted_reason",
         "checkpoint_sha256",
@@ -374,8 +375,9 @@ class BudgetLedger:
     def charge(self, actual: ResourceUse | Mapping[str, object]) -> StagePermit:
         consumed = _coerce_resource_use(actual, "actual")
         self._charged_use = self._charged_use + consumed
+        committed = self._charged_use + self._pending_use()
         for name in _RESOURCE_FIELDS:
-            if getattr(self._charged_use, name) > getattr(self.plan.ceilings, name):
+            if getattr(committed, name) > getattr(self.plan.ceilings, name):
                 self._exhausted_reason = f"{name}_exhausted"
                 return StagePermit(False, self._exhausted_reason, None)
         return StagePermit(True, None, None)
@@ -394,6 +396,7 @@ class BudgetLedger:
                 for stage_id in sorted(self._open_by_stage)
             ],
             "closed_stage_ids": sorted(self._closed_stage_ids),
+            "closed_reservation_sha256s": sorted(self._closed_reservation_sha256s),
             "finalization_started": self._finalization_started,
             "exhausted_reason": self._exhausted_reason,
         }
@@ -462,6 +465,23 @@ class BudgetLedger:
             raise BudgetContractError("closed_stage_ids must be unique")
         closed = set(closed_value)
 
+        closed_reservation_value = values["closed_reservation_sha256s"]
+        if not isinstance(closed_reservation_value, list):
+            raise BudgetContractError("closed_reservation_sha256s must be a list")
+        closed_reservations: set[str] = set()
+        for index, item in enumerate(closed_reservation_value):
+            try:
+                identity = require_sha256(item, f"closed reservation SHA {index}")
+            except ValueError as error:
+                raise BudgetContractError(str(error)) from error
+            if identity in closed_reservations:
+                raise BudgetContractError("closed_reservation_sha256s must be unique")
+            closed_reservations.add(identity)
+        if len(closed_reservations) > len(closed):
+            raise BudgetContractError(
+                "closed reservations cannot outnumber closed stage IDs"
+            )
+
         open_value = values["open_reservations"]
         if not isinstance(open_value, list):
             raise BudgetContractError("open_reservations must be a list")
@@ -493,6 +513,10 @@ class BudgetLedger:
             )
             if reservation_sha != expected_sha:
                 raise BudgetContractError("reservation SHA mismatch")
+            if reservation_sha in closed_reservations:
+                raise BudgetContractError(
+                    "open and closed reservation SHAs must be disjoint"
+                )
             seen_open.add(stage_id)
             open_reservations.append(
                 _OpenReservation(stage_id, estimate, reservation_sha)
@@ -502,6 +526,7 @@ class BudgetLedger:
         ledger._prior_elapsed_wall_seconds = prior_elapsed
         ledger._charged_use = charged
         ledger._closed_stage_ids = closed
+        ledger._closed_reservation_sha256s = closed_reservations
         ledger._finalization_started = finalization
         ledger._exhausted_reason = exhausted_reason  # type: ignore[assignment]
         for reservation in open_reservations:
