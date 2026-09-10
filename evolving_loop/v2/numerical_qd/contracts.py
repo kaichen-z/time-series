@@ -865,3 +865,64 @@ class NumericalSourceOutcomeV2(_CanonicalContract):
         elif values or self.failure_category not in TRAIN_DIAGNOSTIC_CATEGORIES:
             raise ValueError("invalid source outcome requires a closed failure category")
         object.__setattr__(self, "forecast", values)
+
+
+@dataclass(frozen=True, slots=True)
+class NumericalQDCheckpointV2(_CanonicalContract):
+    """Runner authority over an exact immutable, completed file inventory.
+
+    Operation keys are relative to numerical_qd/. Their values hash full file
+    bytes, including the hash-chain log. Checkpoint identities hash the body
+    excluding checkpoint_sha256, as in the Kernel and Budget contracts.
+    """
+
+    schema_version: int
+    config_sha256: str
+    input_sha256s: Mapping[str, str]
+    active_bundle_sha256: str
+    active_genome_sha256: str
+    qd_snapshot_sha256: str
+    mutation_policy_sha256: str
+    proposer_prompt_sha256: str
+    hyperband_state_sha256: str
+    counter: Mapping[str, object]
+    completed_operation_sha256s: Mapping[str, str]
+    budget_checkpoint_sha256: str
+    kernel_checkpoint_sha256: str
+    checkpoint_sha256: str
+
+    def __post_init__(self):
+        from pathlib import PurePosixPath
+
+        _schema_version(self.schema_version)
+        for item in fields(self):
+            if item.name.endswith("_sha256"):
+                require_sha256(getattr(self, item.name), item.name)
+        inputs = _require_mapping(self.input_sha256s, "input_sha256s")
+        for name, digest in inputs.items():
+            _text(name, "input name")
+            require_sha256(digest, name)
+        operations = _require_mapping(self.completed_operation_sha256s, "completed_operation_sha256s")
+        for name, digest in operations.items():
+            path = PurePosixPath(name)
+            if (not name or path.is_absolute() or str(path) != name
+                    or any(part in {".", ".."} or part.startswith(".") for part in path.parts)
+                    or "\\" in name or name == "checkpoint.json"):
+                raise ValueError("completed operation must have a safe relative path")
+            require_sha256(digest, "completed operation byte SHA")
+        counter = _require_exact_schema(self.counter, ("seed", "stream", "counter"), field="counter")
+        if type(counter["seed"]) is not int:
+            raise ValueError("counter seed must be an integer")
+        _text(counter["stream"], "counter stream")
+        _nonnegative_int(counter["counter"], "counter")
+        for name, value in (("input_sha256s", inputs), ("counter", counter),
+                            ("completed_operation_sha256s", operations)):
+            object.__setattr__(self, name, _freeze_json_value(value))
+        body = self.to_payload()
+        body.pop("checkpoint_sha256")
+        if fingerprint_payload(body) != self.checkpoint_sha256:
+            raise ValueError("Numerical QD checkpoint body SHA mismatch")
+
+    @classmethod
+    def seal(cls, **body):
+        return cls.from_payload(body | {"checkpoint_sha256": fingerprint_payload(body)})

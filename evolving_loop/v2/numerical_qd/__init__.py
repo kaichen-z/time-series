@@ -29,6 +29,7 @@ from .contracts import (
     NumericalObjectiveVectorV2,
     NumericalProposerPromptV2,
     NumericalQDEntryV2,
+    NumericalQDCheckpointV2,
     RungManifestV2,
     TaskCacheRowV2,
     TrainTaskV2,
@@ -40,6 +41,7 @@ from .hyperband import (
     execute_hyperband_rung, fixed_rung_manifest,
 )
 from .map_elites import ArchiveInsertionV2, CounterRandom, NumericalQDArchive
+from .persistence import NumericalQDRunStore, NumericalQDStoreError
 from .mutation import MutationProposalV2, MutationResultV2, apply_mutation, record_train_outcome
 from .nsga2 import (
     constraint_compare, crowding_distances, non_dominated_fronts, select_survivors,
@@ -107,6 +109,9 @@ __all__ = [
     "NumericalProposerPromptV2",
     "NumericalQDConfigV2",
     "NumericalQDEntryV2",
+    "NumericalQDCheckpointV2",
+    "NumericalQDRunStore",
+    "NumericalQDStoreError",
     "describe_history",
     "load_numerical_qd_config",
 ]
