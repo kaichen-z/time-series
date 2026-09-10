@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "profile": "pilot",
+  "seed": 7,
+  "scheduler": "ucb",
+  "enabled_mutation_scopes": [
+    "numerical",
+    "retrieval",
+    "decision",
+    "joint"
+  ],
+  "archive_capacities": {
+    "numerical": 4,
+    "retrieval": 4,
+    "decision": 4,
+    "source": 4
+  },
+  "hyperband": {
+    "resource_levels": [
+      8
+    ],
+    "dev_tasks": 2,
+    "children_per_enabled_arm": null,
+    "arms_per_epoch": null,
+    "generations": 1,
+    "children_per_generation": [
+      4,
+      8
+    ],
+    "reduction_factor": 3,
+    "implementation": "requires_project_2_plus_adapters"
+  },
+  "hard_limit_seconds": 7200,
+  "finalization_reserve_fraction": 0.2,
+  "runner": "production",
+  "kernel_protocol": {
+    "task_materializer": "f2ccee6b2984ee5f266dfd11b7951f8b590b45348d58fee01959f35e68a8fd34",
+    "split_manifest": "c5458c3d132d44bd3b824bc11205df79bbdb0cf9a7711fc6731484ebf7ae97be",
+    "metric_policy": "ef3ad4ca23791af1f7d4344d2e215cc1af9d3e8057e72b0317913b77d25ee77e",
+    "label_firewall": "c700f3a94564113a2f28a24d5b0c7f9b9bea36a559deef40f02e3d700f6f0023",
+    "artifact_validator": "62af43bf682662a8b673f31312750e99ad20e1eb29209648134c1480b3e2a2cc",
+    "sandbox_policy": "9f2c358d08ef5eb097e1af8636b216b5ccd29faa2d68babe9b0a6250443e5162",
+    "promotion_policy": "624c24adeb538a57549cfdf70e61c8501d66d532978d9e5dab784a7b6d79cc15"
+  },
+  "runtime_fingerprints": {
+    "runtime_config": "deb7ca0d4fcfdb358b5dd17496c3ef35ae758814c2112032035ecf4b96b4b63a"
+  }
+}

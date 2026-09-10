@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "profile": "smoke",
+  "seed": 7,
+  "scheduler": "ucb",
+  "enabled_mutation_scopes": [
+    "numerical",
+    "retrieval"
+  ],
+  "archive_capacities": {
+    "numerical": 4,
+    "retrieval": 4,
+    "decision": 4,
+    "source": 4
+  },
+  "hyperband": {
+    "resource_levels": [
+      8
+    ],
+    "dev_tasks": 2,
+    "children_per_enabled_arm": 1,
+    "arms_per_epoch": null,
+    "generations": 1,
+    "children_per_generation": null,
+    "reduction_factor": 3,
+    "implementation": "deterministic_fake_fixed_stages"
+  },
+  "hard_limit_seconds": 600,
+  "finalization_reserve_fraction": 0.2,
+  "runner": "deterministic_fake",
+  "kernel_protocol": {
+    "task_materializer": "9503330ad1c36ef84750e5dae17df010f544537bc6221428ce1daae82d4a44bd",
+    "split_manifest": "6701b401a55539c69ced0f27854ed730f928877fbd33dfbb93631aa7f13a9868",
+    "metric_policy": "a47d6d7ae30eca3d18fa77a39a26cd501e070d23cd2eaa0c77ae5f09b9423610",
+    "label_firewall": "43edb5e9637cc78bf871eb6c0358cae886bdd5efa0aaaef5c519803092e195d9",
+    "artifact_validator": "40b30035964faec97df10f0eaec540c349c443ea85007da8a0b5865886cf3f7e",
+    "sandbox_policy": "72a84171bf775dc2f7009feba975448b12419b3a99fc753d4413526adf083372",
+    "promotion_policy": "038c714fe95322255321bd01fe0e479a99ac5cdf54d51b5c051e5d940f18961d"
+  },
+  "runtime_fingerprints": {
+    "runtime_config": "24f31801da41d00d514258892f0fd61e40cd849011b30d6c4b3dccd4d7b5e507"
+  }
+}
