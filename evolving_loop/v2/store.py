@@ -225,7 +225,9 @@ class V2RunStore:
         self, candidate_sha256: str, payload: Mapping[str, object]
     ) -> Path:
         identity = _sha256(candidate_sha256, "candidate_sha256")
-        return write_once_json(self.root / "candidates" / f"{identity}.json", payload)
+        return write_once_json(
+            self.root / "candidates" / identity / "proposal.json", payload
+        )
 
     def write_evaluation(
         self,
@@ -256,7 +258,7 @@ class V2RunStore:
         return write_once_json(self.root / "canary" / f"{identity}.json", payload)
 
     def write_completion(self, payload: Mapping[str, object]) -> Path:
-        return write_once_json(self.root / "completion.json", payload)
+        return write_once_json(self.root / "evaluation_complete.json", payload)
 
 
 __all__ = [

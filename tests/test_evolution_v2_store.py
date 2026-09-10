@@ -97,8 +97,12 @@ def test_store_uses_nested_candidate_evaluation_paths_and_validates_components(t
     source = sha256_for("source")
 
     assert store.write_candidate(candidate, {"kind": "candidate"}) == (
-        store.root / "candidates" / f"{candidate}.json"
+        store.root / "candidates" / candidate / "proposal.json"
     )
+    store.write_candidate(candidate, {"kind": "candidate"})
+    with pytest.raises(StoreContractError, match="immutable"):
+        store.write_candidate(candidate, {"kind": "changed"})
+    assert not (store.root / "candidates" / f"{candidate}.json").exists()
     assert store.write_evaluation(candidate, "train_full", {"status": "passed"}) == (
         store.root / "evaluations" / candidate / "train_full.json"
     )
@@ -115,6 +119,17 @@ def test_store_uses_nested_candidate_evaluation_paths_and_validates_components(t
     for invalid_stage in ("", ".", "..", "../dev", "train/dev"):
         with pytest.raises(StoreContractError, match="stage"):
             store.write_evaluation(candidate, invalid_stage, {})
+
+
+def test_completion_uses_exact_write_once_evaluation_complete_path(tmp_path):
+    store = V2RunStore.create(tmp_path / "run")
+    completion = {"status": "complete"}
+
+    assert store.write_completion(completion) == store.root / "evaluation_complete.json"
+    store.write_completion({"status": "complete"})
+    with pytest.raises(StoreContractError, match="immutable"):
+        store.write_completion({"status": "incomplete"})
+    assert not (store.root / "completion.json").exists()
 
 
 def test_store_rejects_non_finite_values_before_any_write(tmp_path):
@@ -223,6 +238,36 @@ def test_atomic_publication_fsyncs_new_directories_and_destination_parent_in_ord
     )
 
     store.write_evaluation(candidate, "train", {"status": "passed"})
+
+    candidate_directory = destination.parent
+    assert ("fsync_directory", candidate_directory.parent) in events
+    assert events[-2:] == [
+        ("replace", destination),
+        ("fsync_directory", candidate_directory),
+    ]
+
+
+def test_candidate_proposal_durably_publishes_new_candidate_directory(
+    tmp_path, monkeypatch
+):
+    store = V2RunStore.create(tmp_path / "run")
+    candidate = sha256_for("durable-candidate")
+    destination = store.root / "candidates" / candidate / "proposal.json"
+    events: list[tuple[str, Path]] = []
+    real_replace = store_module.os.replace
+
+    def observed_replace(source, target):
+        real_replace(source, target)
+        events.append(("replace", Path(target)))
+
+    monkeypatch.setattr(store_module.os, "replace", observed_replace)
+    monkeypatch.setattr(
+        store_module,
+        "_fsync_directory",
+        lambda path: events.append(("fsync_directory", Path(path))),
+    )
+
+    store.write_candidate(candidate, {"kind": "candidate"})
 
     candidate_directory = destination.parent
     assert ("fsync_directory", candidate_directory.parent) in events
