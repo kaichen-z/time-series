@@ -620,6 +620,51 @@ def test_authentic_evaluation_is_accounted_once_across_early_failures(kernel, fa
         assert not kernel.budget.checkpoint()["open_reservations"]
 
 
+def test_resume_rejects_legacy_raw_dev_record_from_early_failure(kernel):
+    parent = kernel.active_bundle()
+    candidate = child(parent)
+    result, permit = evaluation(kernel, parent, candidate)
+    with pytest.raises(api.KernelAuthorityError, match="permit"):
+        kernel.evaluate_transition(
+            parent,
+            candidate,
+            target="retrieval",
+            evaluation=result,
+            permit=None,
+        )
+
+    assert not list((kernel.store.root / "acceptance").glob("*.json"))
+    closed_path = (
+        kernel.store.root / "evaluations" / candidate.fingerprint() / "closed.json"
+    )
+    legacy_record = result.to_payload()
+    assert "dev_comparison" in legacy_record
+    closed_path.write_bytes(canonical_v2_bytes(legacy_record))
+
+    closure_path = closed_path.with_name("budget_closure.json")
+    closure = json.loads(closure_path.read_text())
+    closure["evaluation_sha256"] = fingerprint_payload(legacy_record)
+    closure_path.write_bytes(canonical_v2_bytes(closure))
+
+    checkpoint = json.loads(kernel.checkpoint_path.read_text())
+    checkpoint["budget_closures"][permit.reservation_sha256]["closure_sha256"] = (
+        fingerprint_payload(closure)
+    )
+    rehash_checkpoint(checkpoint)
+    kernel.checkpoint_path.write_bytes(canonical_v2_bytes(checkpoint))
+    before = {p: p.read_bytes() for p in kernel.store.root.rglob("*") if p.is_file()}
+
+    with pytest.raises(
+        api.KernelAuthorityError, match="closed evaluation record schema"
+    ):
+        api.EvolutionKernel.resume(
+            kernel.store, kernel.budget.plan, monotonic=FakeClock()
+        )
+    assert {
+        p: p.read_bytes() for p in kernel.store.root.rglob("*") if p.is_file()
+    } == before
+
+
 def test_completed_activation_pointer_drift_is_not_recovered_as_pending(kernel):
     parent, _, _ = transition(kernel)
     kernel.store.publish_active_bundle(parent.to_payload())

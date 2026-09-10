@@ -142,17 +142,40 @@ class ClosedEvaluation(_CanonicalContract):
         return payload
 
     @classmethod
-    def from_record_payload(cls, payload, *, dev_comparison):
-        """Reconstruct evaluator aggregates only from digest-bound decision evidence."""
+    def _validated_record_payload(cls, payload):
+        """Validate a durable record without requiring access to raw Dev values."""
+        plain = _require_mapping(payload, "closed evaluation record")
+        if (
+            type(plain.get("schema_version")) is not int
+            or plain.get("schema_version") != 2
+        ):
+            raise KernelAuthorityError("closed evaluation record schema must be 2")
         record = _require_exact_schema(
-            payload,
+            plain,
             tuple(f.name for f in fields(cls) if f.name != "dev_comparison")
             + ("dev_comparison_sha256",),
             field="closed evaluation record",
         )
-        if type(record["schema_version"]) is not int or record["schema_version"] != 2:
-            raise KernelAuthorityError("closed evaluation record schema must be 2")
-        digest = require_sha256(record.pop("dev_comparison_sha256"), "Dev digest")
+        for name in (
+            "parent_bundle_sha256",
+            "candidate_bundle_sha256",
+            "protocol_fingerprint",
+            "reservation_sha256",
+            "train_evaluation_sha256",
+            "dev_comparison_sha256",
+        ):
+            require_sha256(record[name], name)
+        if record["status"] not in ("passed", "failed", "invalid"):
+            raise KernelAuthorityError("closed evaluation requires a terminal status")
+        _runtime(record["runtime_fingerprints"])
+        ResourceUse.from_payload(record["resource_use"])
+        return record
+
+    @classmethod
+    def from_record_payload(cls, payload, *, dev_comparison):
+        """Reconstruct evaluator aggregates only from digest-bound decision evidence."""
+        record = cls._validated_record_payload(payload)
+        digest = record.pop("dev_comparison_sha256")
         if digest != fingerprint_payload(dev_comparison):
             raise KernelAuthorityError("closed evaluation Dev digest mismatch")
         record["schema_version"] = 1
@@ -840,6 +863,23 @@ class EvolutionKernel:
             or closure["stage_id"] != f"evaluation:{ref['candidate_bundle_sha256']}"
         ):
             raise KernelAuthorityError("candidate-specific budget closure mismatch")
+        closed_record = ClosedEvaluation._validated_record_payload(
+            _read(
+                self.store.root
+                / "evaluations"
+                / ref["candidate_bundle_sha256"]
+                / "closed.json",
+                closure["evaluation_sha256"],
+            )
+        )
+        if (
+            closed_record["candidate_bundle_sha256"]
+            != closure["candidate_bundle_sha256"]
+            or closed_record["parent_bundle_sha256"] != closure["parent_bundle_sha256"]
+            or closed_record["reservation_sha256"] != closure["reservation_sha256"]
+            or closed_record["resource_use"] != closure["resource_use"]
+        ):
+            raise KernelAuthorityError("budget closure closed-record binding mismatch")
         replay = BudgetLedger.resume(
             self.budget.plan, closure["budget_before"], monotonic=lambda: 0.0
         )
