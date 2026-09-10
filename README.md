@@ -2,6 +2,16 @@
 
 Repository: <https://github.com/kaichen-z/time-series>
 
+## Evolution V2 kernel (parallel / experimental)
+
+The separate `python -m evolving_loop.v2` entrypoint provides the Project 1 kernel,
+deterministic fake smoke/resume, and validation-only Public boundary. Production
+evolution and Public scoring are not implemented by this project. See the
+[operator guide](docs/evolution-v2-kernel.md),
+[master design](docs/superpowers/specs/2026-09-10-unified-evolution-v2-design.md), and
+[Project 1 implementation plan](docs/superpowers/plans/2026-09-10-evolution-v2-kernel-contracts.md).
+The existing usage below remains supported.
+
 ## New canonical evolving-agent implementation
 
 The collaborator's top-level [`evolving_loop/`](evolving_loop/) package is now the base for the
