@@ -607,3 +607,159 @@ def test_wrong_issued_permit_cannot_redirect_actual_accounting(kernel):
     assert kernel.budget.charged_use.task_executions == 2
     open_stages = kernel.budget.checkpoint()["open_reservations"]
     assert [stage["stage_id"] for stage in open_stages] == [kernel.stage_id(first)]
+
+
+@pytest.mark.parametrize("failed_stage", ["train", "closed", "budget_closure"])
+def test_accounting_retries_persist_original_closure_after_artifact_failure(
+    kernel, monkeypatch, failed_stage
+):
+    parent = kernel.active_bundle()
+    candidate = child(parent)
+    result, permit = evaluation(kernel, parent, candidate)
+    write = kernel.store.write_evaluation
+    failed = False
+
+    def fail_once(identity, stage, payload):
+        nonlocal failed
+        if stage == failed_stage and not failed:
+            failed = True
+            raise OSError("one-shot evaluation artifact failure")
+        return write(identity, stage, payload)
+
+    monkeypatch.setattr(kernel.store, "write_evaluation", fail_once)
+    with pytest.raises(OSError, match="one-shot"):
+        kernel.evaluate_transition(
+            parent, candidate, target="retrieval", evaluation=result, permit=permit
+        )
+    closure_path = (
+        kernel.store.root
+        / "evaluations"
+        / candidate.fingerprint()
+        / "budget_closure.json"
+    )
+    closure_bytes = closure_path.read_bytes()
+    closure = json.loads(closure_bytes)
+    assert closure["allowed"] is True
+    assert closure["reason"] is None
+    assert (
+        closure["budget_before"]["open_reservations"][0]["reservation_sha256"]
+        == permit.reservation_sha256
+    )
+    assert closure["budget_after"]["charged_use"]["task_executions"] == 1
+    with pytest.raises(api.KernelAuthorityError, match="permit"):
+        kernel.evaluate_transition(
+            parent, candidate, target="retrieval", evaluation=result, permit=permit
+        )
+    assert closure_path.read_bytes() == closure_bytes
+    resumed = api.EvolutionKernel.resume(
+        kernel.store, kernel.budget.plan, monotonic=lambda: 0.0
+    )
+    assert resumed.budget.charged_use.task_executions == 1
+    assert resumed.active_bundle() == parent
+
+
+def test_unpersisted_accounting_closure_leaves_durable_open_reservation(
+    kernel, monkeypatch
+):
+    parent = kernel.active_bundle()
+    candidate = child(parent)
+    result, permit = evaluation(kernel, parent, candidate)
+
+    def fail(*args):
+        raise OSError("persistent artifact failure")
+
+    monkeypatch.setattr(kernel.store, "write_evaluation", fail)
+    with pytest.raises(OSError):
+        kernel.evaluate_transition(
+            parent, candidate, target="retrieval", evaluation=result, permit=permit
+        )
+    assert kernel.budget.charged_use.task_executions == 1
+    checkpoint = json.loads((kernel.store.root / "checkpoint.json").read_text())
+    assert (
+        checkpoint["budget"]["open_reservations"][0]["reservation_sha256"]
+        == permit.reservation_sha256
+    )
+    with pytest.raises(api.KernelAuthorityError, match="open reservation"):
+        api.EvolutionKernel.resume(
+            kernel.store, kernel.budget.plan, monotonic=lambda: 0.0
+        )
+
+
+@pytest.mark.parametrize("boundary", ["history", "pointer"])
+def test_pending_checkpoint_failure_retry_is_durable_before_publication_and_resume(
+    kernel, monkeypatch, boundary
+):
+    parent = kernel.active_bundle()
+    write_checkpoint = kernel.store.write_checkpoint
+    failed = False
+
+    def fail_pending_once(payload):
+        nonlocal failed
+        if payload["pending_publication"] is not None and not failed:
+            failed = True
+            raise OSError("intent checkpoint failure")
+        return write_checkpoint(payload)
+
+    monkeypatch.setattr(kernel.store, "write_checkpoint", fail_pending_once)
+    with pytest.raises(OSError, match="intent checkpoint"):
+        transition(kernel)
+    checkpoint_path = kernel.store.root / "checkpoint.json"
+    assert json.loads(checkpoint_path.read_text())["pending_publication"] is None
+    assert len(kernel.promotion_host.history()) == 1
+    append = kernel.store.append_promotion
+    publish = kernel.store.publish_active_bundle
+
+    def append_at_boundary(event):
+        checkpoint = json.loads(checkpoint_path.read_text())
+        assert checkpoint["pending_publication"] == event
+        result = append(event)
+        if boundary == "history":
+            raise OSError("simulated crash after history")
+        return result
+
+    def publish_at_boundary(payload):
+        checkpoint = json.loads(checkpoint_path.read_text())
+        assert checkpoint["pending_publication"][
+            "bundle_sha256"
+        ] == fingerprint_payload(payload)
+        raise OSError("simulated crash before pointer")
+
+    monkeypatch.setattr(kernel.store, "append_promotion", append_at_boundary)
+    monkeypatch.setattr(kernel.store, "publish_active_bundle", publish_at_boundary)
+    with pytest.raises(OSError, match="simulated crash"):
+        kernel.active_bundle()
+    assert (
+        json.loads((kernel.store.root / "accepted_bundle.json").read_text())
+        == parent.to_payload()
+    )
+    monkeypatch.setattr(kernel.store, "append_promotion", append)
+    monkeypatch.setattr(kernel.store, "publish_active_bundle", publish)
+    resumed = api.EvolutionKernel.resume(
+        kernel.store, kernel.budget.plan, monotonic=lambda: 0.0
+    )
+    assert resumed.active_bundle().generation == 1
+    assert len(resumed.promotion_host.history()) == 2
+
+
+def test_repeated_intent_checkpoint_failure_never_advances_publication(
+    kernel, monkeypatch
+):
+    parent = kernel.active_bundle()
+    write = kernel.store.write_checkpoint
+
+    def fail_pending(payload):
+        if payload["pending_publication"] is not None:
+            raise OSError("intent persistence unavailable")
+        return write(payload)
+
+    monkeypatch.setattr(kernel.store, "write_checkpoint", fail_pending)
+    with pytest.raises(OSError):
+        transition(kernel)
+    for _ in range(2):
+        with pytest.raises(OSError):
+            kernel.active_bundle()
+        assert len(kernel.promotion_host.history()) == 1
+        assert (
+            json.loads((kernel.store.root / "accepted_bundle.json").read_text())
+            == parent.to_payload()
+        )

@@ -383,7 +383,9 @@ class PromotionHost:
                 "active pointer drift from explicit pending publication"
             )
         if not appended:
+            kernel._persist_pending_intent(pending)
             kernel.store.append_promotion(pending)
+        kernel._persist_pending_intent(pending)
         kernel.store.publish_active_bundle(bundle.to_payload())
         kernel._committed_event_sha = pending["event_sha256"]
         kernel._active_sha = bundle.fingerprint()
@@ -490,6 +492,7 @@ class EvolutionKernel:
         self.store, self.protocol, self.budget = store, protocol, budget
         self._seed_sha, self._runtimes = seed.fingerprint(), seed.runtime_fingerprints
         self._closed, self._permits, self._closures, self._transitions = {}, {}, {}, {}
+        self._unpersisted_closures = {}
         self._active_sha = self._committed_event_sha = self._pending_event = None
         self._terminal = self._last_checkpoint_sha = None
         self.promotion_host = PromotionHost(self)
@@ -695,25 +698,34 @@ class EvolutionKernel:
     def _account(self, issued):
         evaluation, train, permit = issued
         reservation = evaluation.reservation_sha256
-        if reservation in self._closures:
+        if (
+            reservation in self._closures
+            and reservation not in self._unpersisted_closures
+        ):
             return self._load_closure(reservation)
-        before = self.budget.checkpoint()
-        outcome = self.budget.close_stage(
-            permit, ResourceUse.from_payload(evaluation.resource_use)
-        )
-        closure = {
-            "schema_version": 1,
-            "candidate_bundle_sha256": evaluation.candidate_bundle_sha256,
-            "parent_bundle_sha256": evaluation.parent_bundle_sha256,
-            "reservation_sha256": reservation,
-            "stage_id": f"evaluation:{evaluation.candidate_bundle_sha256}",
-            "evaluation_sha256": evaluation.fingerprint(),
-            "resource_use": dict(evaluation.resource_use),
-            "allowed": outcome.allowed,
-            "reason": outcome.reason,
-            "budget_before": before,
-            "budget_after": self.budget.checkpoint(),
-        }
+        if reservation not in self._unpersisted_closures:
+            before = self.budget.checkpoint()
+            outcome = self.budget.close_stage(
+                permit, ResourceUse.from_payload(evaluation.resource_use)
+            )
+            self._unpersisted_closures[reservation] = _freeze_json_value(
+                {
+                    "schema_version": 1,
+                    "candidate_bundle_sha256": evaluation.candidate_bundle_sha256,
+                    "parent_bundle_sha256": evaluation.parent_bundle_sha256,
+                    "reservation_sha256": reservation,
+                    "stage_id": f"evaluation:{evaluation.candidate_bundle_sha256}",
+                    "evaluation_sha256": evaluation.fingerprint(),
+                    "resource_use": dict(evaluation.resource_use),
+                    "allowed": outcome.allowed,
+                    "reason": outcome.reason,
+                    "budget_before": before,
+                    "budget_after": self.budget.checkpoint(),
+                }
+            )
+        # Preserve the original accounting result before any artifact write;
+        # finally/retries must never close this reservation a second time.
+        closure = self._unpersisted_closures[reservation]
         # Actual use is already charged even if one of these writes fails.
         self.store.write_evaluation(evaluation.candidate_bundle_sha256, "train", train)
         self.store.write_evaluation(
@@ -727,6 +739,7 @@ class EvolutionKernel:
             "closure_sha256": fingerprint_payload(closure),
         }
         self._checkpoint()
+        del self._unpersisted_closures[reservation]
         return closure
 
     def _load_closure(self, reservation):
@@ -1179,6 +1192,26 @@ class EvolutionKernel:
             or self._archive_snapshot != value["archive_snapshot_sha256"]
         ):
             raise KernelAuthorityError("terminal destination lineage/index mismatch")
+
+    def _persist_pending_intent(self, pending):
+        """Re-establish and verify durability at each publication write boundary."""
+        if self._pending_event != pending:
+            raise KernelAuthorityError("pending publication changed before persistence")
+        self._checkpoint()
+        durable = _read(self.store.root / "checkpoint.json")
+        digest = fingerprint_payload(
+            {key: value for key, value in durable.items() if key != "checkpoint_sha256"}
+        )
+        if (
+            digest != self._last_checkpoint_sha
+            or durable.get("checkpoint_sha256") != digest
+            or durable.get("pending_publication") != pending
+            or durable.get("committed_event_sha256") != self._committed_event_sha
+            or durable.get("active_bundle_sha256") != self._active_sha
+        ):
+            raise KernelAuthorityError(
+                "pending publication checkpoint failed durable verification"
+            )
 
     def _checkpoint(self):
         # Never derive authority from the active pointer: it may be the failure
