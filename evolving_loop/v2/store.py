@@ -53,9 +53,16 @@ def _ensure_directory(directory: Path) -> None:
             break
         current = parent
     directory.mkdir(parents=True, exist_ok=True)
+    fsynced: set[Path] = set()
     for created in missing:
-        _fsync_directory(created)
-        _fsync_directory(created.parent)
+        for target in (created, created.parent):
+            if target not in fsynced:
+                _fsync_directory(target)
+                fsynced.add(target)
+    for target in (directory, directory.parent):
+        if target not in fsynced:
+            _fsync_directory(target)
+            fsynced.add(target)
 
 
 def _canonical_bytes(payload: Mapping[str, object]) -> bytes:
@@ -97,6 +104,7 @@ def write_once_json(path: str | Path, payload: Mapping[str, object]) -> Path:
         except OSError as error:
             raise StoreContractError(f"cannot read immutable file {destination}") from error
         if existing == data:
+            _ensure_directory(destination.parent)
             return destination
         raise StoreContractError(f"immutable file already exists: {destination}")
     _atomic_write(destination, data)

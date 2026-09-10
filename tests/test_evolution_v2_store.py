@@ -147,7 +147,8 @@ def test_jsonl_progress_and_promotion_history_append_canonical_fsynced_records(
         {"action": "activate", "bundle": sha256_for("bundle")}
     )
     assert len(fsynced) == 3
-    assert fsynced_directories == [store.root, store.root]
+    assert store.root in fsynced_directories
+    assert store.root.parent in fsynced_directories
 
 
 def test_create_accepts_empty_or_v2_run_but_refuses_legacy_non_empty_directory(
@@ -248,8 +249,28 @@ def test_new_jsonl_filename_is_directory_durable_after_file_fsync(
 
     store.append_progress({"step": 1})
 
-    assert events[0][0] == "file"
-    assert events[1:] == [("directory", store.root)]
+    file_fsync = next(
+        index for index, event in enumerate(events) if event[0] == "file"
+    )
+    assert ("directory", store.root) in events[:file_fsync]
+    assert ("directory", store.root.parent) in events[:file_fsync]
+    assert events[file_fsync + 1 :] == [("directory", store.root)]
+
+
+def test_existing_jsonl_append_republishes_existing_directory_entry(
+    tmp_path, monkeypatch
+):
+    store = V2RunStore.create(tmp_path / "run")
+    store.append_progress({"step": 1})
+    fsynced_directories: list[Path] = []
+    monkeypatch.setattr(
+        store_module, "_fsync_directory", fsynced_directories.append
+    )
+
+    store.append_progress({"step": 2})
+
+    assert store.root in fsynced_directories
+    assert store.root.parent in fsynced_directories
 
 
 def test_directory_fsync_failures_are_not_swallowed(tmp_path, monkeypatch):
