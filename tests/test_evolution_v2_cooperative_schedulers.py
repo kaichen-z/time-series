@@ -68,6 +68,38 @@ def test_thompson_resume_repeats_the_same_next_draw():
     assert select_arm(restored) == select_arm(state)
 
 
+def test_ucb_uses_the_specified_total_plus_one_exploration_formula():
+    state = CooperativeSchedulerStateV2(
+        1,
+        "ucb",
+        3,
+        0,
+        5,
+        0.9,
+        {
+            "numerical": SchedulerArmStateV2(1, 0, 0.0, 0.0),
+            "retrieval": SchedulerArmStateV2(4, 0, 4.68, 1.0),
+        },
+    )
+    assert select_arm(state) == "numerical"
+
+
+def test_ucb_breaks_an_exact_post_warmup_tie_by_canonical_arm_order():
+    state = CooperativeSchedulerStateV2(
+        1,
+        "ucb",
+        3,
+        0,
+        2,
+        0.9,
+        {
+            "retrieval": SchedulerArmStateV2(1, 0, 0.25, 0.1),
+            "decision": SchedulerArmStateV2(1, 0, 0.25, 0.1),
+        },
+    )
+    assert select_arm(state) == "retrieval"
+
+
 def test_record_outcome_discounts_every_arm_and_updates_only_selected_counts():
     state = CooperativeSchedulerStateV2(
         1,

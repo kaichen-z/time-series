@@ -217,12 +217,18 @@ class SchedulerArmStateV2(_CanonicalContract):
     def __post_init__(self) -> None:
         attempts = _nonnegative_int(self.attempts, "attempts")
         acceptances = _nonnegative_int(self.acceptances, "acceptances")
-        if acceptances > attempts:
-            raise ValueError("acceptances must not exceed attempts")
         _finite_float(self.discounted_reward_sum, "discounted_reward_sum")
         cost = _finite_float(self.discounted_cost_sum, "discounted_cost_sum")
         if cost < 0.0:
             raise ValueError("discounted_cost_sum must be non-negative")
+        if attempts == 0 and (
+            acceptances != 0
+            or self.discounted_reward_sum != 0.0
+            or cost != 0.0
+        ):
+            raise ValueError("untried arm statistics must be zero")
+        if acceptances > attempts:
+            raise ValueError("acceptances must not exceed attempts")
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +266,13 @@ class CooperativeSchedulerStateV2(_CanonicalContract):
             )
             for name, value in self.arms.items()
         }
+        if sum(arm.attempts for arm in parsed.values()) != self.completed_step:
+            raise ValueError("sum of arm attempts must equal completed_step")
+        if self.mode == "thompson":
+            if self.draw_counter != self.completed_step:
+                raise ValueError("Thompson draw_counter must equal completed_step")
+        elif self.draw_counter != 0:
+            raise ValueError("UCB draw_counter must be zero")
         object.__setattr__(self, "arms", _freeze_json_value(parsed))
 
     @classmethod
@@ -325,6 +338,8 @@ class CooperativeCheckpointV2(_CanonicalContract):
         if state.fingerprint() != self.scheduler_state_sha256:
             raise ValueError("scheduler state SHA mismatch")
         next_step = _nonnegative_int(self.next_step, "next_step")
+        if state.completed_step != next_step:
+            raise ValueError("scheduler completed_step must equal next_step")
         accepted = _nonnegative_int(self.accepted_steps, "accepted_steps")
         rejected = _nonnegative_int(self.rejected_steps, "rejected_steps")
         if accepted + rejected != next_step:

@@ -189,6 +189,47 @@ def test_scheduler_arms_must_use_canonical_scope_order():
         CooperativeSchedulerStateV2.from_payload(payload)
 
 
+def test_scheduler_attempts_must_equal_completed_step():
+    payload = scheduler_state().to_payload()
+    payload["completed_step"] = 1
+    with pytest.raises(ValueError, match="attempts must equal completed_step"):
+        CooperativeSchedulerStateV2.from_payload(payload)
+
+
+@pytest.mark.parametrize(
+    "mode,draw_counter,completed_step,match",
+    [
+        ("ucb", 1, 0, "UCB draw_counter must be zero"),
+        ("thompson", 0, 1, "Thompson draw_counter must equal completed_step"),
+    ],
+)
+def test_scheduler_draw_counter_must_match_its_mode(
+    mode, draw_counter, completed_step, match
+):
+    payload = scheduler_state().to_payload()
+    payload["mode"] = mode
+    payload["draw_counter"] = draw_counter
+    payload["completed_step"] = completed_step
+    payload["arms"]["numerical"]["attempts"] = completed_step
+    with pytest.raises(ValueError, match=match):
+        CooperativeSchedulerStateV2.from_payload(payload)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("acceptances", 1),
+        ("discounted_reward_sum", 0.25),
+        ("discounted_cost_sum", 0.25),
+    ],
+)
+def test_untried_arm_cannot_carry_outcome_statistics(field, value):
+    payload = scheduler_state().to_payload()
+    payload["arms"]["numerical"][field] = value
+    with pytest.raises(ValueError, match="untried arm statistics must be zero"):
+        CooperativeSchedulerStateV2.from_payload(payload)
+
+
 def test_checkpoint_binds_scheduler_and_its_own_body():
     payload = payloads()[CooperativeCheckpointV2]
     payload["scheduler_state_sha256"] = OTHER_SHA
@@ -196,4 +237,21 @@ def test_checkpoint_binds_scheduler_and_its_own_body():
     body.pop("checkpoint_sha256")
     payload["checkpoint_sha256"] = fingerprint_payload(body)
     with pytest.raises(ValueError, match="scheduler state SHA mismatch"):
+        CooperativeCheckpointV2.from_payload(payload)
+
+
+def test_checkpoint_next_step_must_match_scheduler_completed_step():
+    payload = payloads()[CooperativeCheckpointV2]
+    state_payload = scheduler_state().to_payload()
+    state_payload["completed_step"] = 1
+    state_payload["arms"]["numerical"]["attempts"] = 1
+    payload["scheduler_state"] = state_payload
+    payload["scheduler_state_sha256"] = fingerprint_payload(state_payload)
+    payload["accepted_steps"] = 1
+    payload["next_step"] = 2
+    payload["rejected_steps"] = 1
+    body = dict(payload)
+    body.pop("checkpoint_sha256")
+    payload["checkpoint_sha256"] = fingerprint_payload(body)
+    with pytest.raises(ValueError, match="scheduler completed_step must equal next_step"):
         CooperativeCheckpointV2.from_payload(payload)
