@@ -46,7 +46,8 @@ def material_sizes(root, catalog):
             if path.is_relative_to(root) and kind in MATERIAL_KINDS]
 
 
-def fixture(seed=7, *, task_budget=1840, provider="deterministic", clock=None, raw_seed=False, reverse_entities=False):
+def fixture(seed=7, *, task_budget=1840, provider="deterministic", clock=None,
+            raw_seed=False, reverse_entities=False, operator_input_sha256s=None):
     tasks = []
     for i, task in enumerate(_evolution_tasks()):
         history = (float(i),) * 20 if i < 40 else task.numeric.history_values
@@ -63,7 +64,8 @@ def fixture(seed=7, *, task_budget=1840, provider="deterministic", clock=None, r
         fold_manifest=folds, original_tasks=tasks, source_fingerprints={"dictionary": source_sha},
         runtime_fingerprints={"materializer": "3" * 64})
     adapter = LegacyNumericalAdapter(materializer=materializer, tasks=tasks,
-        fold_manifest=folds, sources={source_sha: source})
+        fold_manifest=folds, sources={source_sha: source},
+        operator_input_sha256s=operator_input_sha256s)
     adapter.monotonic = clock or FakeClock()
     payload = valid_config_payload()
     payload.update(profile="smoke", seed=seed, runtime_fingerprints={"materializer": "3" * 64})
@@ -84,8 +86,38 @@ def files(root):
 
 
 def run_fixture(root, **kwargs):
-    options = {key: kwargs.pop(key) for key in tuple(kwargs) if key in {"seed", "task_budget", "provider", "clock"}}
+    options = {key: kwargs.pop(key) for key in tuple(kwargs) if key in {
+        "seed", "task_budget", "provider", "clock", "operator_input_sha256s"
+    }}
     return run_numerical_qd(root, *fixture(**options), **kwargs)
+
+
+def test_operator_input_raw_identity_is_checkpointed_and_rejects_resume(tmp_path):
+    committed = {
+        "config": "1" * 64,
+        "seed_supply": "2" * 64,
+        "task_manifest": "3" * 64,
+    }
+    config, supply, manifest, adapter = fixture(
+        task_budget=0, operator_input_sha256s=committed
+    )
+    root = tmp_path / "run"
+    run_numerical_qd(root, config, supply, manifest, adapter)
+    before = files(root)
+    checkpoint = json.loads((root / "numerical_qd/checkpoint.json").read_bytes())
+    assert {
+        key.removeprefix("operator_"): value
+        for key, value in checkpoint["input_sha256s"].items()
+        if key.startswith("operator_")
+    } == committed
+
+    _config, _supply, _manifest, changed = fixture(
+        task_budget=0,
+        operator_input_sha256s=committed | {"task_manifest": "4" * 64},
+    )
+    with pytest.raises(ValueError, match="input_sha256s mismatch"):
+        run_numerical_qd(root, config, supply, manifest, changed, resume=True)
+    assert files(root) == before
 
 
 @pytest.mark.parametrize("ancestor", [False, True])

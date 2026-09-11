@@ -545,6 +545,8 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         raise ValueError("stop_after must be a positive generation count")
     if not resume:
         NumericalQDRunStore.preflight_fresh(output_dir)
+    adapter_fingerprint = adapter.fingerprint
+    operator_input_sha256s = dict(adapter.operator_input_sha256s)
     adapter = copy.copy(adapter)
     adapter.preflight_resources()
     if any(task.numeric.prediction_length > config.adapter["max_forecast_values"] for task in adapter.tasks):
@@ -560,8 +562,12 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
     task_commitments = {task.numeric.task_id: task_registry_fingerprint(task) for task in adapter.tasks}
     inputs = {"seed_supply": fingerprint_payload(release.to_payload()),
         "task_manifest": fingerprint_payload({"folds": manifest_payload, "tasks": task_commitments}),
-        "adapter": adapter.fingerprint, "sources": fingerprint_payload(dict(adapter.sources)),
+        "adapter": adapter_fingerprint, "sources": fingerprint_payload(dict(adapter.sources)),
         "config": config.fingerprint(), "runtimes": fingerprint_payload(dict(config.runtime_fingerprints))}
+    inputs.update({f"operator_{name}": identity
+                   for name, identity in operator_input_sha256s.items()})
+    if adapter.fingerprint != adapter_fingerprint:
+        raise ValueError("adapter identity changed after operator input binding")
     if imported:
         inputs["seed_registry"] = imported.envelope.fingerprint()
     root = Path(output_dir)

@@ -648,6 +648,44 @@ def test_host_evaluator_identity_changes_execution_cache_identity(world):
     assert left.fingerprint != right.fingerprint
 
 
+def test_operator_input_hashes_are_exact_immutable_and_bound_to_adapter(world):
+    original = world[0]
+    kwargs = dict(
+        materializer=original.materializer,
+        tasks=original.tasks,
+        fold_manifest=original.fold_manifest,
+        sources=original.sources,
+    )
+    committed = {
+        "config": "1" * 64,
+        "seed_supply": "2" * 64,
+        "task_manifest": "3" * 64,
+    }
+    adapter = LegacyNumericalAdapter(
+        **kwargs, operator_input_sha256s=committed
+    )
+    assert dict(adapter.operator_input_sha256s) == committed
+    with pytest.raises(TypeError):
+        adapter.operator_input_sha256s["config"] = "4" * 64
+    with pytest.raises(AttributeError):
+        adapter.operator_input_sha256s = committed
+    changed = LegacyNumericalAdapter(
+        **kwargs,
+        operator_input_sha256s=committed | {"task_manifest": "4" * 64},
+    )
+    assert changed.fingerprint != adapter.fingerprint
+    for malformed in (
+        {},
+        committed | {"extra": "4" * 64},
+        {"config": "1" * 64, "seed_supply": "2" * 64},
+        committed | {"config": "not-a-sha"},
+    ):
+        with pytest.raises(ValueError, match="operator input"):
+            LegacyNumericalAdapter(
+                **kwargs, operator_input_sha256s=malformed
+            )
+
+
 def test_single_task_evaluation_satisfies_existing_hyperband_cache_boundary(world):
     from evolving_loop.v2.numerical_qd.hyperband import _task_evaluation
     child = materialize(world)

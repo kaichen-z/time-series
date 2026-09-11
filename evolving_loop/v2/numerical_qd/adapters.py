@@ -660,7 +660,22 @@ class LegacyNumericalAdapter:
 
     def __init__(self, *, materializer, tasks, fold_manifest, sources, proposer=None,
                  host_evaluator=None, host_evaluator_sha256=None, resource_kinds=(),
-                 resource_reporter=None, resource_reporter_sha256=None):
+                 resource_reporter=None, resource_reporter_sha256=None,
+                 operator_input_sha256s=None):
+        if operator_input_sha256s is None:
+            operator_inputs = {}
+        elif not isinstance(operator_input_sha256s, Mapping) or set(
+            operator_input_sha256s
+        ) != {"config", "seed_supply", "task_manifest"}:
+            raise ValueError("operator input identities require the exact schema")
+        else:
+            operator_inputs = {
+                name: require_sha256(
+                    operator_input_sha256s[name], f"operator input {name}"
+                )
+                for name in ("config", "seed_supply", "task_manifest")
+            }
+        self._operator_input_sha256s = MappingProxyType(operator_inputs)
         self.tasks = _tasks(tasks)
         if len(self.tasks) != 100 or type(fold_manifest) is not GroupFoldManifest or fold_manifest.fold_count != 5:
             raise ValueError("adapter requires exactly 80 grouped Train plus 20 Dev tasks")
@@ -747,6 +762,10 @@ class LegacyNumericalAdapter:
                 account_work(used, begun=True)
 
     @property
+    def operator_input_sha256s(self):
+        return self._operator_input_sha256s
+
+    @property
     def candidate_tasks(self):
         return tuple(_sanitized_context_task(task) for task in self.tasks)
 
@@ -754,7 +773,8 @@ class LegacyNumericalAdapter:
     def fingerprint(self):
         return fingerprint_payload({"implementation": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "host_evaluator": self.host_evaluator_sha256, "resource_reporter": self.resource_reporter_sha256,
-            "resource_kinds": list(self.declared_resource_kinds())})
+            "resource_kinds": list(self.declared_resource_kinds()),
+            "operator_input_sha256s": dict(self.operator_input_sha256s)})
 
     def propose_legacy(self, release, registry, feedback, *, generation, task_evidence=None):
         """Retain the existing proposer, Train fitting, and three-child contract."""
