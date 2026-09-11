@@ -347,6 +347,7 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
     if store is not None:
         store.accounting.external = account_material
         store.accounting.external_permit = permit
+    succeeded = False
     try:
         if failure:
             raise ArtifactBytesExhausted("fixed manifest admission denied")
@@ -410,6 +411,7 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
             if store is not None:
                 for aggregate in aggregates:
                     _persist(store, aggregate)
+            succeeded = True
     except ArtifactBytesExhausted:
         failure = "artifact_bytes_exhausted"
     finally:
@@ -417,7 +419,7 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
             store.accounting.external = None
             store.accounting.external_permit = None
         actual = reported + ResourceUse(task_executions=executed, wall_seconds=float(started), artifact_bytes=artifact_bytes)
-        closed = work.close_stage(permit, actual, status="failed" if failure else "passed")
+        closed = work.close_stage(permit, actual, status="passed" if succeeded and failure is None else "failed")
     if not closed.allowed:
         failure = closed.reason
     if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
@@ -747,17 +749,19 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         artifact_paths = [store.directory / f"sources/{sha}.py" for sha, _ in batch.source_artifacts]
         artifact_paths.append(store.directory / f"proposals/{batch_sha}.json")
         new_paths = [path for path in artifact_paths if not path.exists()]
+        succeeded = False
         try:
             store.accounting.external = lambda size, begun: None
             store.accounting.external_permit = artifact_permit
             for sha, source in batch.source_artifacts:
                 store.write_source(sha, source)
             store.write_proposal_attempt(batch_sha, attempt_payload)
+            succeeded = True
         finally:
             store.accounting.external = None
             store.accounting.external_permit = None
             work.close_stage(artifact_permit, ResourceUse(artifact_bytes=sum(
-                path.stat().st_size for path in new_paths if path.is_file())))
+                path.stat().st_size for path in new_paths if path.is_file())), status="passed" if succeeded else "failed")
         batch = store._proposal(store._read(f"proposals/{batch_sha}.json"))
         children, child_states, attempted, budget_blocked = {}, {}, [], False
         for proposal in batch.proposals:

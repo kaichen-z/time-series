@@ -263,6 +263,62 @@ def test_timed_out_rung_keeps_completed_rows_under_closed_partial_authority(tmp_
     assert files(tmp_path / "run") == before
 
 
+@pytest.mark.parametrize("stage,error", [("proposal", OSError), ("rung", RuntimeError)])
+def test_external_material_after_write_failure_keeps_failed_closure(tmp_path, monkeypatch, stage, error):
+    from evolving_loop.v2.numerical_qd import runner
+    from evolving_loop.v2.numerical_qd.persistence import NumericalQDRunStore
+    config, supply, manifest, adapter = fixture(task_budget=920)
+    original_evaluate, dispatches, captured = runner.evaluate_numerical_child, [], {}
+    def evaluate(*args, **kwargs):
+        dispatches.append(args[2].task_id)
+        value = original_evaluate(*args, **kwargs)
+        adapter.monotonic.advance(0.001)
+        return value
+    monkeypatch.setattr(runner, "evaluate_numerical_child", evaluate)
+    method = "write_proposal_attempt" if stage == "proposal" else "write_task_result"
+    original_write = getattr(NumericalQDRunStore, method)
+    def write(store, *args, **kwargs):
+        path = original_write(store, *args, **kwargs)
+        raw = path.read_bytes()
+        receipt = {"relative_path": path.relative_to(store.directory).as_posix(),
+            "kind": "proposal_attempt" if stage == "proposal" else "task_result",
+            "content_sha256": hashlib.sha256(raw).hexdigest(), "size_bytes": len(raw)}
+        # Exercise the real writer, exact readback, and Kernel registration before
+        # the injected Host exception; no evaluation/closure decision is mocked.
+        store.accounting.kernel.verify_existing_material(**receipt)
+        captured.update(receipt=receipt, reservation=store.accounting.external_permit.reservation_sha256,
+            before=store.accounting.kernel.budget.checkpoint(), raw=raw)
+        raise error("after registered external material")
+    monkeypatch.setattr(NumericalQDRunStore, method, write)
+    root = tmp_path / "run"
+    with pytest.raises(error, match="after registered external material"):
+        run_numerical_qd(root, config, supply, manifest, adapter, stop_after=1)
+    checkpoint = json.loads((root / "checkpoint.json").read_bytes())
+    ref = checkpoint["budget_closures"][captured["reservation"]]
+    folder = root / "evaluations" / ref["candidate_bundle_sha256"]
+    train = json.loads((folder / "train.json").read_bytes())
+    closed = json.loads((folder / "closed.json").read_bytes())
+    closure = json.loads((folder / "budget_closure.json").read_bytes())
+    assert train["status"] == closed["status"] == "failed"
+    expected = ResourceUse(task_executions=int(stage == "rung"),
+        wall_seconds=0.001 if stage == "rung" else 0.0,
+        artifact_bytes=len(captured["raw"])).to_payload()
+    assert train["resource_use"] == closed["resource_use"] == closure["resource_use"] == expected
+    assert train["train_objectives"]["material_receipts"] == [captured["receipt"]]
+    assert (root / "numerical_qd" / captured["receipt"]["relative_path"]).read_bytes() == captured["raw"]
+    assert len(dispatches) == int(stage == "rung")
+    assert not checkpoint["budget"]["open_reservations"]
+    assert set(checkpoint["budget_closures"]) == set(captured["before"]["closed_reservation_sha256s"]) | {captured["reservation"]}
+    assert not list((root / "numerical_qd/rungs").glob("*.json"))
+    entries = root / "numerical_qd/archive/entries.jsonl"
+    assert not entries.exists() or entries.read_bytes() == b""
+    assert not (root / "evaluation_complete.json").exists()
+    resumed = EvolutionKernel.resume(V2RunStore(root), config.budget, monotonic=lambda: 0.0)
+    assert resumed.active_bundle().generation == 0
+    assert resumed.active_bundle().numerical_release_sha256 == supply.release.fingerprint
+    assert resumed.budget.checkpoint()["charged_use"] == checkpoint["budget"]["charged_use"]
+
+
 def test_rung_manifest_is_paid_before_dispatch_and_partial_references_it(tmp_path, monkeypatch):
     from evolving_loop.v2.numerical_qd import runner
     from evolving_loop.v2.numerical_qd.artifacts import ArtifactKindV2
