@@ -103,14 +103,18 @@ callbacks, paths, labels, or forecast arrays.
 
 ```text
 schema_version = 1
-release_payload
+source_release_sha256
+genome_payload
+skills_payload
 ```
 
-`release_payload` is the exact data-only Retrieval release already accepted by
-`HarnessPolicy`: `genome`, `round1_prompt`, `round2_prompt`, `skills`, and
-`manifest`. Construction validates it by creating a `HarnessPolicy` mirror and
-requires the embedded `RetrievalGenome` and prompts to agree. The artifact
-fingerprint becomes `EvolutionBundleV2.retrieval_release_sha256`.
+`source_release_sha256` binds the imported legacy release bytes.
+`genome_payload` parses as a real `RetrievalGenome`, and `skills_payload`
+contains its unchanged Skill snapshot. Project 3 may mutate the Genome but not
+the Skills; active Skill IDs must agree with the supplied verified runtime
+library. This small V2 envelope avoids rewriting a legacy release manifest
+merely to evaluate a candidate. The envelope fingerprint becomes
+`EvolutionBundleV2.retrieval_release_sha256`.
 
 ### `DecisionModuleV2`
 
@@ -197,7 +201,9 @@ arm is executable. A pilot may point at several Project 2 outputs.
 ### Retrieval Coordinate Adapter
 
 The Retrieval adapter parses `RetrievalModuleV2` into a real
-`RetrievalGenome` plus a read-only `RetrievalSkillLibrary`. Its deterministic
+`RetrievalGenome` plus a read-only `RetrievalSkillLibrary`. The smoke artifact
+has no active Skills; a pilot with active Skills must inject the verified
+read-only source library matching `skills_payload`. Its deterministic
 proposal operator changes one legal typed field: round-one strategy,
 round-two strategy, trigger, or one bounded evidence budget. It never weakens
 the three Host verification booleans and never creates or promotes Skills.
@@ -436,4 +442,3 @@ Project 3 is complete when:
   commands remain compatible; and
 - the fast blocking gate finishes without Public access or a production-scale
   data run.
-
