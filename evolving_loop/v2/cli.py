@@ -29,7 +29,12 @@ from numerical_agent.evolution.screening import (
 from numerical_agent.evolution.task_local_evolution import build_group_fold_manifest
 
 from .bundle import EvolutionBundleV2
-from .contracts import KernelProtocolCommitment, canonical_v2_bytes, load_v2_config
+from .contracts import (
+    KernelProtocolCommitment,
+    canonical_v2_bytes,
+    load_v2_config,
+    require_sha256,
+)
 from .fakes import run_fake_kernel
 from .numerical_qd.adapters import LegacyNumericalAdapter
 from .numerical_qd.config import NumericalQDConfigV2
@@ -150,6 +155,8 @@ def _regular_canonical_input(
     before traversal.  The same leaf descriptor supplies bytes, identity and
     canonical digest input; no path read occurs after admission.
     """
+    if ".." in path.parts:
+        raise ValueError(f"input path must not contain '..' components: {path}")
     absolute = physical_system_tmp_path(path.absolute())
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
     if hasattr(os, "O_CLOEXEC"):
@@ -330,6 +337,9 @@ def _parse_task_manifest(payload: Mapping[str, object]):
 class _DeterministicForecastStore:
     """CPU-only Host store used when no external runtime is configured."""
 
+    identity_hash = hashlib.sha256(
+        b"evolution-v2-numerical-qd-smoke-forecast-store-v1"
+    ).hexdigest()
     resource_kinds: tuple[str, ...] = ()
 
     def forecast(self, name, history, horizon, frequency):
@@ -369,6 +379,10 @@ def _build_numerical_adapter(
         forecast_store = getattr(host_runtime, "forecast_store", None)
         if not callable(getattr(forecast_store, "forecast", None)):
             raise ValueError("pilot/formal requires a configured Host forecast runtime")
+        require_sha256(
+            getattr(forecast_store, "identity_hash", None),
+            "Host forecast store identity",
+        )
         resource_reporter = getattr(host_runtime, "resource_reporter", None)
         resource_reporter_sha256 = getattr(host_runtime, "resource_reporter_sha256", None)
         resource_kinds = tuple(getattr(host_runtime, "resource_kinds", ()))

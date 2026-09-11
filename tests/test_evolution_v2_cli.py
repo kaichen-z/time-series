@@ -96,8 +96,8 @@ def test_v2_cli_never_dispatches_to_legacy_cli(monkeypatch, tmp_path, capsys):
 @pytest.mark.parametrize(
     "profile,runner,message",
     [
-        ("pilot", "production", "production evolution requires Project 2+ adapters"),
-        ("formal", "production", "production evolution requires Project 2+ adapters"),
+        ("pilot", "production", "production evolution requires Project 3 adapters"),
+        ("formal", "production", "production evolution requires Project 3 adapters"),
         ("pilot", "deterministic_fake", "smoke"),
         ("public", "deterministic_fake", "public-evaluate"),
     ],

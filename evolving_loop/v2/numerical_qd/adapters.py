@@ -653,12 +653,15 @@ def _sources(sources):
 def _implementation_identity(value):
     """Stable executable identity for a trusted Host boundary object."""
     cls = value if isinstance(value, type) else type(value)
-    source = inspect.getsourcefile(cls)
+    try:
+        source = inspect.getsourcefile(cls)
+    except (OSError, TypeError):
+        source = None
     source_sha256 = None
     if source is not None:
         try:
             source_sha256 = hashlib.sha256(Path(source).read_bytes()).hexdigest()
-        except OSError:
+        except (OSError, TypeError):
             # Extension-backed Host integrations still retain their fully
             # qualified implementation type and their explicit resource ID.
             source_sha256 = None
@@ -671,7 +674,14 @@ def _implementation_identity(value):
 def _resource_identity(value):
     """Bind a Host store to executable code and its committed runtime identity."""
     identity = {"implementation": _implementation_identity(value)}
-    for name in ("identity_hash", "screening_hash", "cache_only"):
+    explicit_identity = getattr(value, "identity_hash", None)
+    if explicit_identity is not None:
+        identity["identity_sha256"] = require_sha256(
+            explicit_identity, "Host forecast store identity"
+        )
+    elif identity["implementation"]["source_sha256"] is None:
+        raise ValueError("Host resource source unavailable requires explicit Host identity")
+    for name in ("screening_hash", "cache_only"):
         item = getattr(value, name, None)
         if item is not None:
             identity[name] = item

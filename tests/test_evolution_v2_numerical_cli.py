@@ -211,6 +211,22 @@ def test_regular_input_rejects_caller_controlled_symlink_ancestor(tmp_path):
         cli()._regular_canonical_input(alias / "config.json")
 
 
+def test_raw_parent_component_rejects_before_output_overlap_checks(tmp_path, capsys):
+    """Descriptor traversal must not turn caller text ``marker/..`` into a safe path."""
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    (inputs / "marker").mkdir()
+    config = inputs / "config.json"
+    config.write_bytes((PROFILES / "smoke.json").read_bytes())
+    seed, tasks = build_fixture(tmp_path / "fixtures")
+    raw_config = inputs / "marker" / ".." / "config.json"
+    output = inputs / "out"
+
+    assert numerical(raw_config, seed, tasks, output) == 2
+    assert "must not contain '..'" in capsys.readouterr().err
+    assert not output.exists()
+
+
 def test_numerical_evolve_parses_config_from_verified_input_bytes_once(
     tmp_path, monkeypatch
 ):
@@ -279,6 +295,11 @@ class _HostForecastStore:
         return (float(history[-1]),) * horizon
 
 
+class _AnonymousHostForecastStore(_HostForecastStore):
+    def __init__(self):
+        self.calls = []
+
+
 def test_pilot_keeps_configured_host_runtime_and_hybrid_llm_seam(
     tmp_path, monkeypatch
 ):
@@ -323,6 +344,41 @@ def test_pilot_never_substitutes_the_deterministic_forecast_fixture(tmp_path, mo
 
     assert numerical(PROFILES / "pilot.json", seed, tasks, output) == 2
     assert not output.exists()
+
+
+@pytest.mark.parametrize("identity", [None, "not-a-sha"])
+def test_pilot_requires_explicit_sha_host_forecast_identity(tmp_path, identity):
+    """Class/source names cannot stand in for a pilot's executable runtime identity."""
+    _seed, tasks = build_fixture(tmp_path / "fixtures")
+    parsed_tasks, folds = cli()._parse_task_manifest(json.loads(tasks.read_bytes()))
+    store = _AnonymousHostForecastStore()
+    if identity is not None:
+        store.identity_hash = identity
+    with pytest.raises(ValueError, match="Host forecast store identity"):
+        cli()._build_numerical_adapter(
+            load_numerical_qd_config(PROFILES / "pilot.json"),
+            parsed_tasks,
+            folds,
+            {"config": "0" * 64, "seed_supply": "1" * 64, "task_manifest": "2" * 64},
+            host_runtime=SimpleNamespace(forecast_store=store),
+        )
+
+
+@pytest.mark.parametrize("error", [OSError, TypeError])
+def test_source_discovery_requires_explicit_identity_when_unavailable(monkeypatch, error):
+    """Extension/dynamic Host stores need a declared SHA when source lookup fails."""
+    from evolving_loop.v2.numerical_qd import adapters
+
+    monkeypatch.setattr(
+        adapters.inspect,
+        "getsourcefile",
+        lambda _value: (_ for _ in ()).throw(error("source unavailable")),
+    )
+    with pytest.raises(ValueError, match="explicit Host identity"):
+        adapters._resource_identity(_AnonymousHostForecastStore())
+    assert adapters._resource_identity(_HostForecastStore("f" * 64))["identity_sha256"] == (
+        "f" * 64
+    )
 
 
 def test_adapter_fingerprint_binds_host_forecast_store_identity(tmp_path):
