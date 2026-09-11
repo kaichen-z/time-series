@@ -2,9 +2,11 @@
 
 from .adapters import (
     CooperativeArtifactCatalog,
+    CooperativePipelineAdapter,
     DecisionCoordinateAdapter,
     NumericalCoordinateAdapter,
     RetrievalCoordinateAdapter,
+    sanitize_train_feedback,
 )
 from .contracts import (
     ARM_ORDER,
@@ -17,11 +19,13 @@ from .contracts import (
     SchedulerArmStateV2,
 )
 from .schedulers import record_outcome, select_arm
+from .proposals import propose_bundle_candidate
 
 __all__ = [
     "ARM_ORDER",
     "BundleCandidateV2",
     "CooperativeArtifactCatalog",
+    "CooperativePipelineAdapter",
     "CooperativeCheckpointV2",
     "CooperativeRunResultV2",
     "CooperativeSchedulerStateV2",
@@ -32,5 +36,7 @@ __all__ = [
     "RetrievalCoordinateAdapter",
     "SchedulerArmStateV2",
     "record_outcome",
+    "propose_bundle_candidate",
+    "sanitize_train_feedback",
     "select_arm",
 ]

@@ -1,14 +1,25 @@
 """Typed coordinate adapters for cooperative Evolution V2."""
 from __future__ import annotations
 
+import hashlib
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
+from pathlib import Path
 from types import MappingProxyType
 
+from evolving_loop.decision_agent.agent import DecisionAgent
+from evolving_loop.data import ContextTask
 from evolving_loop.package_numerical_supply import NumericalSupplyRelease
+from evolving_loop.package_metrics import PackageEvaluation
+from evolving_loop.package_pipeline_evaluator import PackagePipelineEvaluator
 from evolving_loop.package_registry import FrozenNumericalPackageRegistry, _digest
+from evolving_loop.retrieval_agent.policy import RetrievalGenome
+from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
+from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 
-from ..contracts import fingerprint_payload, require_sha256
+from ..bundle import EvolutionBundleV2
+from ..contracts import SanitizedEvolutionFeedback, fingerprint_payload, require_sha256
 from ..numerical_qd.adapters import FrozenNumericalArtifactsV2
 from ..numerical_qd.contracts import FrozenNumericalRegistryEnvelopeV2
 from .contracts import DecisionModuleV2, RetrievalModuleV2
@@ -260,11 +271,153 @@ class DecisionCoordinateAdapter:
         return None if prompt == parent.prompt else replace(parent, prompt=prompt)
 
 
+class CooperativePipelineAdapter:
+    """Resolve one Bundle and execute the existing complete package pipeline."""
+
+    def __init__(
+        self,
+        catalog: CooperativeArtifactCatalog,
+        retrieval_factory: Callable[
+            [RetrievalGenome, RetrievalSkillLibrary], TwoStageRetrievalAgent
+        ],
+        decision_factory: Callable[[DecisionModuleV2], DecisionAgent],
+        *,
+        metric_cap: float = 5.0,
+        retrieval_skill_library: RetrievalSkillLibrary | None = None,
+        empty_skill_path: str | Path = "unused-cooperative-retrieval-skills.json",
+    ) -> None:
+        if type(catalog) is not CooperativeArtifactCatalog:
+            raise TypeError("pipeline catalog must be CooperativeArtifactCatalog")
+        if not callable(retrieval_factory) or not callable(decision_factory):
+            raise ValueError("pipeline agent factories must be callable")
+        if (
+            isinstance(metric_cap, bool)
+            or not isinstance(metric_cap, (int, float))
+            or not math.isfinite(metric_cap)
+            or metric_cap <= 0.0
+        ):
+            raise ValueError("pipeline metric_cap must be positive and finite")
+        if retrieval_skill_library is not None and type(
+            retrieval_skill_library
+        ) is not RetrievalSkillLibrary:
+            raise TypeError("runtime Skill library must be RetrievalSkillLibrary")
+        self.catalog = catalog
+        self.retrieval_factory = retrieval_factory
+        self.decision_factory = decision_factory
+        self.metric_cap = float(metric_cap)
+        self.retrieval_skill_library = retrieval_skill_library
+        self.empty_skill_path = Path(empty_skill_path)
+
+    def _skills_for(self, module: RetrievalModuleV2) -> RetrievalSkillLibrary:
+        source = self.retrieval_skill_library
+        if module.skills_payload and source is None:
+            raise ValueError(
+                "nonempty Retrieval Skills require a verified Retrieval Skill library"
+            )
+        if source is None:
+            return RetrievalSkillLibrary(
+                self.empty_skill_path, persist=False
+            ).clone(read_only=True)
+
+        snapshot = source.frozen_execution_snapshot()
+        payloads = tuple(skill.to_payload() for skill in snapshot.all())
+        if payloads != tuple(dict(row) for row in module.skills_payload):
+            raise ValueError(
+                "verified Retrieval Skill library does not match module skills_payload"
+            )
+        if tuple(skill.skill_id for skill in snapshot.active_skills()) != tuple(
+            module.genome.active_skill_ids
+        ):
+            raise ValueError(
+                "verified Retrieval Skill library active IDs do not match module Genome"
+            )
+        return snapshot
+
+    def evaluate(
+        self,
+        bundle: EvolutionBundleV2,
+        tasks: Sequence[ContextTask],
+        stage: str,
+    ) -> PackageEvaluation:
+        if type(bundle) is not EvolutionBundleV2:
+            raise TypeError("pipeline Bundle must be EvolutionBundleV2")
+        numerical = self.catalog.resolve_numerical(
+            bundle.numerical_release_sha256,
+            bundle.numerical_registry_sha256,
+        )
+        retrieval = self.catalog.resolve_retrieval(bundle.retrieval_release_sha256)
+        decision = self.catalog.resolve_decision(bundle.decision_policy_sha256)
+        skills = self._skills_for(retrieval)
+
+        return PackagePipelineEvaluator._evaluate_components(
+            candidate_sha256=bundle.fingerprint(),
+            registry=numerical.registry,
+            tasks=tuple(tasks),
+            stage=stage,
+            retrieval_factory=lambda: self.retrieval_factory(
+                retrieval.genome, skills
+            ),
+            decision_factory=lambda: self.decision_factory(decision),
+            metric_cap=self.metric_cap,
+            expected_retrieval_sha256=retrieval.genome.fingerprint(),
+            expected_decision_prompt_sha256=hashlib.sha256(
+                decision.prompt.encode("utf-8")
+            ).hexdigest(),
+        )
+
+
+def sanitize_train_feedback(
+    parent_eval: PackageEvaluation,
+    child_eval: PackageEvaluation,
+    normalized_cost: float,
+) -> SanitizedEvolutionFeedback:
+    """Reduce complete Train results to aggregate proposer-visible feedback."""
+    if type(parent_eval) is not PackageEvaluation or type(
+        child_eval
+    ) is not PackageEvaluation:
+        raise TypeError("Train feedback requires PackageEvaluation values")
+    if parent_eval.public_test_accessed or child_eval.public_test_accessed:
+        raise ValueError("Train feedback cannot contain Public evaluation")
+    if parent_eval.expected_task_ids != child_eval.expected_task_ids:
+        raise ValueError("Train feedback evaluations must cover the same task universe")
+    if (
+        isinstance(normalized_cost, bool)
+        or not isinstance(normalized_cost, (int, float))
+        or not math.isfinite(normalized_cost)
+        or normalized_cost < 0.0
+    ):
+        raise ValueError("normalized_cost must be finite and non-negative")
+
+    denominator = max(abs(parent_eval.mean_joint), 1e-12)
+    improvement = (parent_eval.mean_joint - child_eval.mean_joint) / denominator
+    counts = {
+        "catastrophic_count": child_eval.catastrophic_count,
+        "fallback_count": child_eval.fallback_count,
+        "invalid_count": child_eval.invalid_count,
+    }
+    categories = tuple(
+        name.removesuffix("_count") for name, count in counts.items() if count > 0
+    )
+    return SanitizedEvolutionFeedback(
+        parent_sha256=parent_eval.candidate_sha256,
+        train_evaluation_sha256=child_eval.fingerprint,
+        train_objectives={
+            "normalized_cost": float(normalized_cost),
+            "relative_joint_improvement": float(improvement),
+        },
+        train_behavior_descriptors=counts,
+        failure_categories=categories,
+        remaining_proposal_budget={},
+    )
+
+
 __all__ = [
     "CooperativeArtifactCatalog",
     "DecisionCoordinateAdapter",
+    "CooperativePipelineAdapter",
     "NumericalCoordinateAdapter",
     "RetrievalCoordinateAdapter",
     "ROUND1_NEXT",
     "ROUND2_NEXT",
+    "sanitize_train_feedback",
 ]
