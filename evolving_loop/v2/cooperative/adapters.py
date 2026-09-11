@@ -1,30 +1,43 @@
 """Typed coordinate adapters for cooperative Evolution V2."""
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
+from types import MappingProxyType
+
+from evolving_loop.package_numerical_supply import NumericalSupplyRelease
+from evolving_loop.package_registry import FrozenNumericalPackageRegistry, _digest
 
 from ..contracts import fingerprint_payload, require_sha256
 from ..numerical_qd.adapters import FrozenNumericalArtifactsV2
+from ..numerical_qd.contracts import FrozenNumericalRegistryEnvelopeV2
 from .contracts import DecisionModuleV2, RetrievalModuleV2
 
 
-ROUND1_NEXT = {
+ROUND1_NEXT = MappingProxyType({
     "timeline_first": "entity_first",
     "entity_first": "contrastive",
     "contrastive": "timeline_first",
-}
-ROUND2_NEXT = {
+})
+ROUND2_NEXT = MappingProxyType({
     "counterevidence_first": "gap_first",
     "gap_first": "causal_chain_first",
     "causal_chain_first": "counterevidence_first",
-}
-TRIGGER_NEXT = {
+})
+TRIGGER_NEXT = MappingProxyType({
     "on_named_gap": "on_incomplete_chain",
     "on_incomplete_chain": "always",
     "always": "never",
     "never": "on_named_gap",
-}
+})
+
+
+def _plain_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _plain_json(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_plain_json(item) for item in value]
+    return value
 
 
 class CooperativeArtifactCatalog:
@@ -43,21 +56,43 @@ class CooperativeArtifactCatalog:
     ) -> tuple[str, str]:
         if type(artifacts) is not FrozenNumericalArtifactsV2:
             raise ValueError("Numerical artifact must be a frozen pair")
+        if (
+            type(artifacts.release) is not NumericalSupplyRelease
+            or type(artifacts.registry) is not FrozenNumericalPackageRegistry
+            or type(artifacts.envelope) is not FrozenNumericalRegistryEnvelopeV2
+        ):
+            raise ValueError("exact Numerical release, registry, and envelope required")
+        selected = artifacts.selected_genome_sha256s
+        if type(selected) is not tuple or selected != tuple(sorted(set(selected))):
+            raise ValueError("exact Numerical selected Genome SHA tuple required")
+        for identity in selected:
+            require_sha256(identity, "selected Numerical Genome SHA")
         release_sha = artifacts.release.fingerprint
         registry_sha = artifacts.registry.fingerprint
         if release_sha != artifacts.registry.release_sha256:
             raise ValueError("Numerical release/registry mismatch")
+        if artifacts.envelope.release_sha256 != release_sha:
+            raise ValueError("Numerical release/envelope mismatch")
         if registry_sha != artifacts.envelope.registry_sha256:
             raise ValueError("Numerical registry/envelope mismatch")
-        if fingerprint_payload(artifacts.registry.manifest) != registry_sha:
+        registry_payload = _plain_json(artifacts.registry.manifest)
+        if _digest(registry_payload) != registry_sha:
             raise ValueError("Numerical registry content mismatch")
+        key = (release_sha, registry_sha)
+        existing = self._numerical.get(key)
+        if existing is not None and (
+            existing.envelope.fingerprint() != artifacts.envelope.fingerprint()
+            or existing.selected_genome_sha256s != selected
+        ):
+            raise ValueError("conflicting Numerical artifact pair")
         release_payload = artifacts.release.to_payload()
         self._write_object(fingerprint_payload(release_payload), release_payload)
-        self._write_object(registry_sha, artifacts.registry.manifest)
+        self._write_object(fingerprint_payload(registry_payload), registry_payload)
         self._write_object(
             artifacts.envelope.fingerprint(), artifacts.envelope.to_payload()
         )
-        self._numerical[(release_sha, registry_sha)] = artifacts
+        if existing is None:
+            self._numerical[key] = artifacts
         return release_sha, registry_sha
 
     def add_retrieval(self, artifact: RetrievalModuleV2) -> str:
