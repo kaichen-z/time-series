@@ -35,6 +35,19 @@ _FILES = re.compile(rf"(?:manifest\.json|archive/entries\.jsonl|"
 _TEMP = re.compile(r"\..+\.[^.]+\.tmp\Z")
 
 
+def _system_tmp_alias(path: Path, mode: int | None = None) -> bool:
+    """Accept only the OS-provided macOS /tmp -> /private/tmp alias."""
+    try:
+        mode = path.lstat().st_mode if mode is None else mode
+        return (
+            path == Path("/tmp")
+            and stat.S_ISLNK(mode)
+            and stat.S_ISDIR(path.resolve(strict=True).lstat().st_mode)
+        )
+    except OSError:
+        return False
+
+
 class NumericalQDStoreError(durable.StoreContractError):
     """Incomplete or conflicting durable Numerical QD state."""
 
@@ -104,6 +117,11 @@ class NumericalQDRunStore:
                 except FileNotFoundError:
                     continue
                 if not stat.S_ISDIR(mode):
+                    # The system /tmp alias is physical /private/tmp on macOS.
+                    # Permit that one platform root while rejecting every other
+                    # output or ancestor symlink before any write or task access.
+                    if _system_tmp_alias(path, mode):
+                        continue
                     raise NumericalQDStoreError("fresh output and ancestors must be real directories")
             _verify_output_location(result.root)
             if result.root.exists() and any(result.root.iterdir()):
@@ -132,7 +150,7 @@ class NumericalQDRunStore:
         if not path.is_relative_to(self.root):
             raise NumericalQDStoreError("path escapes V2 run")
         for parent in (path, *path.parents):
-            if parent.is_symlink():
+            if parent.is_symlink() and not _system_tmp_alias(parent):
                 raise NumericalQDStoreError("symlink is not a durable run path")
         return path
 
@@ -153,7 +171,8 @@ class NumericalQDRunStore:
                           "accepted_bundle.json", "promotion_history.jsonl", "archive/index.jsonl")
         try:
             for path in (*reversed(self.root.parents), self.root):
-                if not stat.S_ISDIR(path.lstat().st_mode):
+                mode = path.lstat().st_mode
+                if not stat.S_ISDIR(mode) and not _system_tmp_alias(path, mode):
                     raise NumericalQDStoreError("V2 root and ancestors must be real directories")
             _verify_output_location(self.root)
             modes, pending = {self.root: stat.S_IFDIR}, [self.root]
