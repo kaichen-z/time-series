@@ -16,7 +16,7 @@ def _run_isolated(script: str, tmp_path: Path) -> None:
         cwd=ROOT,
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=300,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
@@ -60,6 +60,13 @@ subprocess.run(
     capture_output=True,
     text=True,
 )
+task_manifest_path = inputs / "task_manifest.json"
+config_path = inputs / "smoke.json"
+config = json.loads(
+    (root / "configs/evolution_v2/numerical_qd/smoke.json").read_bytes()
+)
+config["budget"]["ceilings"]["task_executions"] = 800
+config_path.write_bytes(canonical_v2_bytes(config))
 
 persisted = work / "persisted-legacy"
 persisted.mkdir()
@@ -155,20 +162,23 @@ command = [
     "evolving_loop.v2",
     "numerical-evolve",
     "--config",
-    str(root / "configs/evolution_v2/numerical_qd/smoke.json"),
+    str(config_path),
     "--seed-supply",
     str(persisted / "supply.json"),
     "--task-manifest",
-    str(inputs / "task_manifest.json"),
+    str(task_manifest_path),
     "--output-dir",
     str(run),
 ]
 completed = subprocess.run(
-    command, cwd=root, capture_output=True, text=True, timeout=120
+    command, cwd=root, capture_output=True, text=True, timeout=180
 )
 assert completed.returncode == 0, completed.stdout + completed.stderr
 completion = json.loads((run / "evaluation_complete.json").read_bytes())
 assert completion["status"] == "numerical_qd_complete"
+bootstrap = json.loads((run / "seed_bootstrap_receipt.json").read_bytes())
+assert bootstrap["status"] == "passed"
+assert bootstrap["resource_use"]["task_executions"] == 800
 
 run_before_resume = {
     str(path.relative_to(run)): (path.read_bytes(), path.stat().st_mtime_ns)
@@ -176,7 +186,7 @@ run_before_resume = {
     if path.is_file()
 }
 resumed = subprocess.run(
-    command, cwd=root, capture_output=True, text=True, timeout=60
+    command, cwd=root, capture_output=True, text=True, timeout=180
 )
 assert resumed.returncode == 0, resumed.stdout + resumed.stderr
 assert {
