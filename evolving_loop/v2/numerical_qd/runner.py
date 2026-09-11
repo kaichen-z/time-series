@@ -152,6 +152,7 @@ class _MaterialAccounting:
 
     def __init__(self, store, kernel):
         self.store, self.kernel, self.external = store, kernel, None
+        self.external_receipts = []
         store.material_writer = self.write
 
     def write(self, relative, data, dispatch, *, kind):
@@ -159,10 +160,19 @@ class _MaterialAccounting:
         path = self.store.directory / relative
         if path.exists() or not spec.billable:
             return dispatch()
+        def written():
+            result = dispatch()
+            if not path.is_file() or path.read_bytes() != data:
+                raise NumericalQDStoreError("material write must match its exact admitted bytes")
+            receipt = {"kind": ArtifactKind(kind).value, "relative_path": relative,
+                "content_sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data)}
+            return result, receipt
         if self.external is not None:
             self.external(len(data), False)
             try:
-                return dispatch()
+                result, receipt = written()
+                self.external_receipts.append(receipt)
+                return result
             finally:
                 if path.is_file():
                     self.external(path.stat().st_size, True)
@@ -171,12 +181,14 @@ class _MaterialAccounting:
         if not permit.allowed:
             error = ArtifactBytesExhausted if permit.reason == "artifact_bytes_exhausted" else NumericalQDStoreError
             raise error("material persistence admission denied: " + permit.reason)
+        receipts = []
         try:
-            return dispatch()
+            result, receipt = written()
+            receipts.append(receipt)
+            return result
         finally:
             work.close_stage(permit, ResourceUse(artifact_bytes=path.stat().st_size if path.is_file() else 0),
-                objectives=({"material_kind": "rung_manifest", "material_sha256": hashlib.sha256(data).hexdigest()}
-                            if kind == ArtifactKind.RUNG_MANIFEST else None))
+                objectives={"material_receipts": receipts})
 
 
 def _bootstrap(config, release, adapter):
@@ -328,6 +340,7 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
             artifact_bytes += size
     if store is not None:
         store.accounting.external = account_material
+        store.accounting.external_receipts = []
     try:
         if failure:
             raise ArtifactBytesExhausted("fixed manifest admission denied")
@@ -360,8 +373,17 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
                     failure = "budget_overrun"
                 if duration >= config.adapter["task_timeout_seconds"]:
                     failure = failure or "timeout"
-            results.append((task, HyperbandTaskResultV2(candidate, task.task_id, key,
-                value.task_statuses[task.task_id], value, hit is not None, None)))
+            result = HyperbandTaskResultV2(candidate, task.task_id, key,
+                value.task_statuses[task.task_id], value, hit is not None, None)
+            if hit is not None and store is not None:
+                # A cache hit reuses the original paid bytes, including its
+                # original cache_hit flag; execution accounting stays above.
+                result = HyperbandTaskResultV2.from_payload(store._read(
+                    f"results/{candidate}/{task.task_sha256}.json"))
+                if (result.candidate_sha256 != candidate or result.task_id != task.task_id
+                        or result.cache_key != key or result.evaluation != value):
+                    raise NumericalQDStoreError("cache row differs from its exact paid result")
+            results.append((task, result))
             if store is not None and hit is None:
                 try:
                     store.write_task_result(task.task_sha256, results[-1][1])
@@ -388,7 +410,8 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
         if store is not None:
             store.accounting.external = None
         actual = reported + ResourceUse(task_executions=executed, wall_seconds=float(started), artifact_bytes=artifact_bytes)
-        closed = work.close_stage(permit, actual, status="failed" if failure else "passed")
+        closed = work.close_stage(permit, actual, status="failed" if failure else "passed",
+            objectives={"material_receipts": store.accounting.external_receipts} if store is not None else None)
     if not closed.allowed:
         failure = closed.reason
     if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
@@ -448,6 +471,7 @@ def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry
     before = adapter.monotonic()
     result, reason = None, "freeze_failed"
     store.accounting.external = lambda size, begun: None  # This stage bills its new material files in finally.
+    store.accounting.external_receipts = []
     try:
         occupied = {archive.entries[sha].genome_sha256 for cell in archive.cells for sha in cell.entry_sha256s} | {winner}
         verified_children = {}
@@ -491,7 +515,8 @@ def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry
         produced = set(objects.glob("*.json")) - existing
         closed = work.close_stage(permit, ResourceUse(
             artifact_bytes=sum(path.stat().st_size for path in produced if path.is_file()),
-            wall_seconds=float(adapter.monotonic() - before)), status="passed" if result else "failed")
+            wall_seconds=float(adapter.monotonic() - before)), status="passed" if result else "failed",
+            objectives={"material_receipts": store.accounting.external_receipts})
     if not closed.allowed:
         return None, closed.reason
     return result, None if result else reason
@@ -718,13 +743,15 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         new_paths = [path for path in artifact_paths if not path.exists()]
         try:
             store.accounting.external = lambda size, begun: None
+            store.accounting.external_receipts = []
             for sha, source in batch.source_artifacts:
                 store.write_source(sha, source)
             store.write_proposal_attempt(batch_sha, attempt_payload)
         finally:
             store.accounting.external = None
             work.close_stage(artifact_permit, ResourceUse(artifact_bytes=sum(
-                path.stat().st_size for path in new_paths if path.is_file())))
+                path.stat().st_size for path in new_paths if path.is_file())),
+                objectives={"material_receipts": store.accounting.external_receipts})
         batch = store._proposal(store._read(f"proposals/{batch_sha}.json"))
         children, child_states, attempted, budget_blocked = {}, {}, [], False
         for proposal in batch.proposals:

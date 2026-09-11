@@ -132,3 +132,89 @@ def test_bootstrap_real_write_and_resume_paths_use_every_registered_kind(tmp_pat
     assert receipt["resource_use"] == ResourceUse().to_payload() and receipt["status"] == "passed"
     assert {"bootstrap_preflight", "bootstrap_admission", "bootstrap_closure", "bootstrap_replay",
             "bootstrap_receipt", "bootstrap_forecast"} <= seen
+
+
+@pytest.mark.parametrize("reason", [{"payload": "RECEIPT_REASON_SENTINEL"}, ["RECEIPT_REASON_SENTINEL"], "", 1])
+def test_bootstrap_close_rejects_nonprimitive_reason_before_publication(tmp_path, monkeypatch, reason):
+    from evolving_loop.v2.kernel import SeedBootstrapAuthority
+    from evolving_loop.v2.budget import BudgetLedger
+    authority, config, adapter = bootstrap_fixture(tmp_path)
+    authority.forecast(SimpleNamespace(forecast_trusted=lambda *args, **kwargs: [0.0]), 0)
+    root = authority.store.root
+    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    with pytest.raises(ValueError):
+        authority.close("interrupted", reason)
+    assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    assert all(b"RECEIPT_REASON_SENTINEL" not in raw for raw in before.values())
+    monkeypatch.setattr(BudgetLedger, "reserve_stage", lambda *args, **kwargs: pytest.fail("invalid receipt opened resume permit"))
+    with pytest.raises(ValueError):
+        SeedBootstrapAuthority.resume(authority.store, config.kernel_protocol, config.budget,
+            authority.preflight["input_sha256s"], monotonic=adapter.monotonic)
+
+
+RECEIPT_INVALID_FIELDS = [
+    ("schema_version", 2.0), ("status", "unknown"), ("status", {"payload": "RECEIPT_SCHEMA_SENTINEL"}),
+    ("preflight_sha256", "bad"), ("reservation_sha256", "bad"), ("chain_sha256", "a" * 64),
+    ("allowed", 1), ("closure_reason", ""), ("closure_reason", {"payload": "RECEIPT_SCHEMA_SENTINEL"}),
+    ("reason", {"payload": "RECEIPT_SCHEMA_SENTINEL"}), ("events", {}), ("events", ["bad"]),
+    ("events", ["a" * 64, "a" * 64]), ("segment_index", True), ("segment_index", -1),
+    ("previous_receipt_sha256", "bad"), ("previous_receipt_sha256", "a" * 64),
+    ("replay_total", True), ("replay_total", -1), ("replay_consumed", 1),
+    ("budget_before.schema_version", 1.0), ("budget_before.prior_elapsed_wall_seconds", 0),
+    ("budget_before.finalization_started", 0), ("budget_before.exhausted_reason", {}),
+    ("budget_before.closed_stage_ids", [1]), ("budget_before.closed_reservation_sha256s", ["bad"]),
+    ("budget_after.open_reservations", {}), ("budget_after.charged_use.task_executions", 2),
+]
+
+
+@pytest.mark.parametrize("field,bad", RECEIPT_INVALID_FIELDS)
+def test_bootstrap_receipt_real_writer_rejects_invalid_semantics_before_write(tmp_path, field, bad):
+    from evolving_loop.v2.budget import BudgetLedger
+    authority, _, _ = bootstrap_fixture(tmp_path)
+    authority.forecast(SimpleNamespace(forecast_trusted=lambda *args, **kwargs: [0.0]), 0)
+    value = json.loads(json.dumps(authority.close("interrupted", "process_interrupted")))
+    target = value
+    names = field.split(".")
+    for name in names[:-1]:
+        target = target[name]
+    target[names[-1]] = bad
+    if names[0].startswith("budget_"):
+        value[names[0]]["checkpoint_sha256"] = BudgetLedger.checkpoint_sha256(value[names[0]])
+    root = authority.store.root
+    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    with pytest.raises(ValueError):
+        authority._write_artifact(root / "seed_bootstrap_receipt.json", value)
+    assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("reason", [{"payload": "RECEIPT_REASON_SENTINEL"}, [], "", False])
+def test_bootstrap_resume_rejects_hash_consistent_invalid_receipt_reason_before_permit(tmp_path, monkeypatch, reason):
+    from evolving_loop.v2.kernel import SeedBootstrapAuthority
+    from evolving_loop.v2.budget import BudgetLedger
+    from evolving_loop.v2.contracts import fingerprint_payload
+    from evolving_loop.v2.store import write_once_json
+    authority, config, adapter = bootstrap_fixture(tmp_path)
+    authority.forecast(SimpleNamespace(forecast_trusted=lambda *args, **kwargs: [0.0]), 0)
+    receipt = authority.close("interrupted", "process_interrupted")
+    directory = authority.store.root / "seed_bootstrap_segments"
+    (directory / f"{fingerprint_payload(receipt)}.json").unlink()
+    forged = receipt | {"reason": reason}
+    write_once_json(directory / f"{fingerprint_payload(forged)}.json", forged)
+    root = authority.store.root
+    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    monkeypatch.setattr(BudgetLedger, "reserve_stage", lambda *args, **kwargs: pytest.fail("invalid receipt opened resume permit"))
+    with pytest.raises(ValueError):
+        SeedBootstrapAuthority.resume(authority.store, config.kernel_protocol, config.budget,
+            authority.preflight["input_sha256s"], monotonic=adapter.monotonic)
+    assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+def test_bootstrap_close_verifies_event_graph_before_publishing_receipt(tmp_path):
+    authority, _, _ = bootstrap_fixture(tmp_path)
+    authority.forecast(SimpleNamespace(forecast_trusted=lambda *args, **kwargs: [0.0]), 0)
+    authority.event({"kind": "closed_forecast", "cache_sha256": "a" * 64})
+    root = authority.store.root
+    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    with pytest.raises(ValueError):
+        authority.close("interrupted", "process_interrupted")
+    assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}

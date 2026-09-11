@@ -23,7 +23,8 @@ from .contracts import (
 from .hyperband import evaluation_cache_key
 from .map_elites import NumericalQDArchive
 from .config import NumericalQDConfigV2
-from .artifacts import ArtifactKindV2 as ArtifactKind, artifact_kind, validate_artifact, validate_unpersisted_task
+from .artifacts import (ArtifactKindV2 as ArtifactKind, artifact_kind, validate_artifact,
+    validate_material_receipts, validate_unpersisted_task)
 
 
 _MANIFEST = {"schema_version": 1, "system": "numerical_qd"}
@@ -595,8 +596,6 @@ class NumericalQDRunStore:
                     for row in partial["task_results"]:
                         result = HyperbandTaskResultV2.from_payload(row["result"])
                         name = f"results/{result.candidate_sha256}/{row['task_sha256']}.json"
-                        if self._read(name) != result.to_payload():
-                            raise NumericalQDStoreError("closed partial immutable result mismatch")
                         task_paths.add(name)
         for path in catalog:
             if path.startswith("proposals/"):
@@ -679,6 +678,17 @@ class NumericalQDRunStore:
                 raise NumericalQDStoreError("closed partial task membership mismatch")
             self.verify_candidate(result.candidate_sha256)
             self._verify_task_key(row["task_sha256"], result)
+            name = f"results/{result.candidate_sha256}/{row['task_sha256']}.json"
+            path = self._path(name)
+            try:
+                if not stat.S_ISREG(path.lstat().st_mode):
+                    raise NumericalQDStoreError("closed partial result must be a regular material file")
+                persisted = HyperbandTaskResultV2.from_payload(self._read(name))
+                if persisted != result or path.read_bytes() != canonical_v2_bytes(result.to_payload()):
+                    raise NumericalQDStoreError("closed partial immutable result mismatch")
+            except OSError as error:
+                raise NumericalQDStoreError("closed partial result material is missing") from error
+            self._paid_material(ArtifactKind.TASK_RESULT, name, canonical_v2_bytes(result.to_payload()), current_budget)
             seen.add(key)
         for row in value["unpersisted_task_results"]:
             use = validate_unpersisted_task(row)
@@ -697,26 +707,33 @@ class NumericalQDRunStore:
 
     def _paid_manifest(self, sha, current_budget):
         manifest = RungManifestV2.from_payload(self._object(sha))
-        use = ResourceUse(artifact_bytes=len(manifest.canonical_bytes())).to_payload()
+        self._paid_material(ArtifactKind.RUNG_MANIFEST, f"objects/{sha}.json", manifest.canonical_bytes(), current_budget)
+        return manifest
+
+    def _paid_material(self, kind, relative, raw, current_budget):
+        expected = {"kind": kind.value, "relative_path": relative,
+            "content_sha256": hashlib.sha256(raw).hexdigest(), "size_bytes": len(raw)}
         checkpoint = _payload(self._safe(self.root / "checkpoint.json").read_bytes())
         for reservation, ref in checkpoint["budget_closures"].items():
             if reservation not in current_budget["closed_reservation_sha256s"]:
                 continue
             directory = self.root / "evaluations" / ref["candidate_bundle_sha256"]
             train = _payload(self._safe(directory / "train.json").read_bytes())
-            if train["train_objectives"] != {"material_kind": "rung_manifest", "material_sha256": sha}:
+            receipts = validate_material_receipts(train["train_objectives"].get("material_receipts", []))
+            if expected not in receipts:
                 continue
             closure = _payload(self._safe(directory / "budget_closure.json").read_bytes())
             closed = _payload(self._safe(directory / "closed.json").read_bytes())
             if (fingerprint_payload(closure) != ref["closure_sha256"]
                     or fingerprint_payload(closed) != closure["evaluation_sha256"]
                     or fingerprint_payload(train) != closed["train_evaluation_sha256"]
-                    or closure["reservation_sha256"] != reservation or not closure["allowed"]
-                    or closed["status"] != "passed" or train["status"] != "passed"
-                    or closure["resource_use"] != use or train["resource_use"] != use or closed["resource_use"] != use):
-                raise NumericalQDStoreError("fixed manifest material closure mismatch")
-            return manifest
-        raise NumericalQDStoreError("fixed manifest lacks an exact paid material closure")
+                    or closure["reservation_sha256"] != reservation or closed["status"] != train["status"]
+                    or closure["resource_use"] != train["resource_use"] or closure["resource_use"] != closed["resource_use"]
+                    or sum(row["size_bytes"] for row in receipts) > closure["resource_use"]["artifact_bytes"]
+                    or (kind is ArtifactKind.RUNG_MANIFEST and (not closure["allowed"] or closed["status"] != "passed"))):
+                raise NumericalQDStoreError("paid material closure mismatch")
+            return
+        raise NumericalQDStoreError("material lacks an exact paid Kernel receipt")
 
     def write_state(self, **state):
         """Seal a complete inventory, then atomically publish its runner pointer."""

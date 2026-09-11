@@ -221,6 +221,7 @@ class SeedBootstrapAuthority:
             "allowed": outcome.allowed, "closure_reason": outcome.reason,
             "budget_before": before, "budget_after": self.budget.checkpoint()}
         identity = fingerprint_payload(self.receipt)
+        self._verify_receipt(self.store, self.budget.plan, self.identity, self.receipt)
         self._write_artifact(self.store.root / "seed_bootstrap_segments" / f"{identity}.json", self.receipt)
         if status != "interrupted":
             self._write_artifact(self.store.root / "seed_bootstrap_receipt.json", self.receipt)
@@ -229,14 +230,19 @@ class SeedBootstrapAuthority:
 
     @staticmethod
     def verify(store, plan, preflight_sha, receipt_sha, *, terminal=True):
-        preflight = SeedBootstrapAuthority._read_artifact(store.root / "seed_bootstrap_preflight.json", preflight_sha)
         receipt = SeedBootstrapAuthority._read_artifact(store.root / "seed_bootstrap_segments" / f"{receipt_sha}.json", receipt_sha)
         if terminal and SeedBootstrapAuthority._read_artifact(store.root / "seed_bootstrap_receipt.json", receipt_sha) != receipt:
             raise KernelAuthorityError("seed bootstrap final receipt mismatch")
-        _require_exact_schema(receipt, ("schema_version", "preflight_sha256", "status", "reason", "events",
-            "chain_sha256", "resource_use", "reservation_sha256", "allowed", "closure_reason",
-            "budget_before", "budget_after", "segment_index", "previous_receipt_sha256",
-            "replay_total", "replay_consumed"), field="seed bootstrap receipt")
+        SeedBootstrapAuthority._verify_receipt(store, plan, preflight_sha, receipt)
+        if terminal:
+            SeedBootstrapAuthority.verify_inventory(store, receipt_sha)
+        return receipt
+
+    @staticmethod
+    def _verify_receipt(store, plan, preflight_sha, receipt):
+        """Same semantic/graph checks before publication and on every resume."""
+        SeedBootstrapAuthority._validate_artifact(store.root / "seed_bootstrap_receipt.json", receipt)
+        preflight = SeedBootstrapAuthority._read_artifact(store.root / "seed_bootstrap_preflight.json", preflight_sha)
         if (receipt["schema_version"] != 2 or receipt["preflight_sha256"] != preflight_sha
                 or receipt["status"] not in {"passed", "failed", "stopped", "interrupted"}
                 or preflight["budget_plan_sha256"] != plan.fingerprint()):
@@ -300,8 +306,6 @@ class SeedBootstrapAuthority:
             raise KernelAuthorityError("seed bootstrap requires closed forecast admissions")
         if len(admissions) != receipt["resource_use"]["task_executions"]:
             raise KernelAuthorityError("seed bootstrap dispatch accounting mismatch")
-        if terminal:
-            SeedBootstrapAuthority.verify_inventory(store, receipt_sha)
         return receipt
 
     @staticmethod
@@ -1126,6 +1130,7 @@ class EvolutionKernel:
             "resource_use": resource_use.to_payload(),
         }
         _reject_reserved_feedback_keys(train, field="train evaluation")
+        self._validate_material_feedback(train)
         result = ClosedEvaluation(
             1,
             parent.fingerprint(),
@@ -1146,6 +1151,14 @@ class EvolutionKernel:
             del self._closed[reservation]
             del self._permits[reservation]
         return result
+
+    @staticmethod
+    def _validate_material_feedback(train):
+        if "material_receipts" in train["train_objectives"]:
+            from .numerical_qd.artifacts import validate_material_receipts
+            receipts = validate_material_receipts(train["train_objectives"]["material_receipts"])
+            if sum(row["size_bytes"] for row in receipts) > ResourceUse.from_payload(train["resource_use"]).artifact_bytes:
+                raise KernelAuthorityError("material receipts exceed the exact closed byte charge")
 
     def _numerical_release_references(self, bundle, train):
         """Resolve an explicitly typed Numerical pair; old fake records stay empty."""
@@ -1737,6 +1750,7 @@ class EvolutionKernel:
             folder = self.store.root / "evaluations" / closure["candidate_bundle_sha256"]
             record = _read(folder / "closed.json", closure["evaluation_sha256"])
             train = _read(folder / "train.json", record["train_evaluation_sha256"])
+            self._validate_material_feedback(train)
             bootstrap_sha = train["train_behavior_descriptors"].get("seed_bootstrap_preflight_sha256")
             if bootstrap_sha is not None:
                 bootstrap_refs.append(bootstrap_sha)

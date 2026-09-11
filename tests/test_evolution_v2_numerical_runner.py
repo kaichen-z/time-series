@@ -281,7 +281,9 @@ def test_rung_manifest_is_paid_before_dispatch_and_partial_references_it(tmp_pat
         for ref in checkpoint["budget_closures"].values():
             folder = tmp_path / f"run/evaluations/{ref['candidate_bundle_sha256']}"
             train = json.loads((folder / "train.json").read_bytes())
-            if train["train_objectives"].get("material_sha256") == fixed.fingerprint():
+            expected = {"kind": "rung_manifest", "relative_path": f"objects/{fixed.fingerprint()}.json",
+                "content_sha256": fixed.fingerprint(), "size_bytes": path.stat().st_size}
+            if expected in train["train_objectives"].get("material_receipts", []):
                 charges.append(json.loads((folder / "budget_closure.json").read_bytes()))
         assert len(charges) == 1 and charges[0]["allowed"]
         assert charges[0]["resource_use"] == ResourceUse(artifact_bytes=path.stat().st_size).to_payload()
@@ -411,6 +413,13 @@ def test_rung_artifact_denial_closes_partial_without_persisting_denied_payload(t
         "status": "persistence_denied", "resource_use": dict(denied["result"].evaluation.resource_use)}]
     assert record["budget_outcome"]["resource_use"]["task_executions"] == 2
     assert record["budget_outcome"]["resource_use"]["artifact_bytes"] == len(canonical_v2_bytes(written[0][1].to_payload()))
+    checkpoint = json.loads((tmp_path / "run/checkpoint.json").read_bytes())
+    reference = checkpoint["budget_closures"][record["budget_outcome"]["reservation_sha256"]]
+    train = json.loads((tmp_path / f"run/evaluations/{reference['candidate_bundle_sha256']}/train.json").read_bytes())
+    assert train["train_objectives"]["material_receipts"] == [{"kind": "task_result",
+        "relative_path": f"results/{written[0][1].candidate_sha256}/{written[0][0]}.json",
+        "content_sha256": fingerprint_payload(written[0][1].to_payload()),
+        "size_bytes": len(canonical_v2_bytes(written[0][1].to_payload()))}]
     assert record["budget_outcome"]["status"] == "failed"
     assert not list((root / "rungs").glob("*.json"))
     assert not (root / f"results/{denied['result'].candidate_sha256}/{denied['task_sha256']}.json").exists()
@@ -430,6 +439,16 @@ def test_all_evolvable_material_bytes_are_charged_once_but_authority_is_excluded
     assert {"source", "config", "genome", "inventory", "screening_policy", "combined_policy", "recipe_policy",
         "mutation_policy", "prompt", "proposer_request", "proposal_attempt", "executable_child", "evaluation",
         "rung_manifest", "task_result", "qd_entry", "cell_subset", "frozen_pair"} <= set(material_catalog.values())
+    from tests.test_evolution_v2_numerical_artifacts import MATERIAL_KINDS
+    checkpoint = json.loads((tmp_path / "run/checkpoint.json").read_bytes())
+    receipts = []
+    for ref in checkpoint["budget_closures"].values():
+        folder = tmp_path / f"run/evaluations/{ref['candidate_bundle_sha256']}"
+        receipts.extend(json.loads((folder / "train.json").read_bytes())["train_objectives"].get("material_receipts", []))
+    expected = [{"kind": kind, "relative_path": path.relative_to(root).as_posix(),
+        "content_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "size_bytes": path.stat().st_size} for path, kind in material_catalog.items() if kind in MATERIAL_KINDS]
+    assert sorted(receipts, key=lambda row: row["relative_path"]) == sorted(expected, key=lambda row: row["relative_path"])
     before = files(tmp_path / "run")
     resumed = run_fixture(tmp_path / "run", task_budget=920, resume=True, stop_after=1)
     assert resumed.budget == result.budget
@@ -917,6 +936,44 @@ def test_complete_explore_has_exact_cumulative_charges_and_a_frozen_winner(tmp_p
              for path in (tmp_path / "run/numerical_qd/objects").glob("*.json")
              if "numerical_qd_step" in json.loads(path.read_bytes())]
     assert steps[0]["winner_genome_sha256"] in selected
+
+
+def test_cached_partial_rows_reuse_exact_original_paid_results(tmp_path, monkeypatch):
+    from evolving_loop.v2.numerical_qd import runner
+    config, supply, manifest, adapter = fixture(task_budget=2560, provider="hybrid")
+    payload = config.to_payload()
+    payload["mutation"]["operators"] = ["add"]
+    config = NumericalQDConfigV2.from_payload(payload)
+    original, calls = runner.evaluate_numerical_child, 0
+    def evaluate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        value = original(*args, **kwargs)
+        if calls == 25:
+            adapter.monotonic.advance(config.adapter["task_timeout_seconds"])
+        return value
+    monkeypatch.setattr(runner, "evaluate_numerical_child", evaluate)
+    result = run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter, ThreeChildren("legal"), stop_after=1)
+    root = tmp_path / "run"
+    assert calls == 25 and result.budget["charged_use"]["task_executions"] == 2425
+    partial = next(json.loads(path.read_bytes())["closed_partial_rung"] for path in (root / "numerical_qd/objects").glob("*.json")
+                   if "closed_partial_rung" in json.loads(path.read_bytes()))
+    assert partial["reason"] == "timeout" and len(partial["task_results"]) == 9
+    checkpoint = json.loads((root / "checkpoint.json").read_bytes())
+    receipts = []
+    for ref in checkpoint["budget_closures"].values():
+        folder = root / f"evaluations/{ref['candidate_bundle_sha256']}"
+        receipts.extend(json.loads((folder / "train.json").read_bytes())["train_objectives"].get("material_receipts", []))
+    for row in partial["task_results"]:
+        name = f"results/{row['result']['candidate_sha256']}/{row['task_sha256']}.json"
+        raw = (root / "numerical_qd" / name).read_bytes()
+        assert json.loads(raw) == row["result"]
+        matching = [receipt for receipt in receipts if receipt["relative_path"] == name]
+        assert matching == [{"kind": "task_result", "relative_path": name,
+            "content_sha256": hashlib.sha256(raw).hexdigest(), "size_bytes": len(raw)}]
+    before = files(root)
+    run_numerical_qd(root, config, supply, manifest, adapter, ThreeChildren("legal"), resume=True, stop_after=1)
+    assert files(root) == before
 
 
 def test_task_timeout_closes_actual_partial_work_without_a_rung(tmp_path, monkeypatch):

@@ -99,6 +99,84 @@ def test_live_partial_writer_rejects_unpaid_unpersisted_content(tmp_path, fault)
     assert all(b"NEVER_STORE_UNPAID_PAYLOAD" not in data for data in files(store.root).values())
 
 
+@pytest.mark.parametrize("fault", ["missing", "unpaid", "mismatch", "noncanonical", "directory", "symlink", "paid"])
+def test_live_partial_requires_exact_prepaid_task_result(tmp_path, fault):
+    from evolving_loop.v2.numerical_qd.runner import _MaterialAccounting, _KernelWork, _persist
+    from evolving_loop.v2.numerical_qd.artifacts import ArtifactKindV2
+    from tests.test_evolution_v2_kernel import protocol, seed
+    from evolving_loop.v2.budget import BudgetPlan
+    plan = BudgetPlan(1000, 0.2, ResourceUse(wall_seconds=800.0, task_executions=100, artifact_bytes=1000000))
+    kernel = EvolutionKernel(core_store.V2RunStore.create(tmp_path / "run"), protocol(),
+        BudgetLedger(plan, monotonic=lambda: 0.0), seed=seed())
+    store, args, kernel, _, state = world.__wrapped__(kernel)
+    _MaterialAccounting(store, kernel)
+    fixed = manifest()
+    _persist(store, fixed)
+    task = fixed.tasks[0]
+    evaluated = evaluation(args["active_genome_sha256"], (task.task_id,), subset=task.fingerprint())
+    key = evaluation_cache_key(evaluated.genome_sha256, task.task_sha256, SPLIT,
+        METRIC, DESCRIPTOR, RUNTIME, PROTOCOL, ADAPTER)
+    result = HyperbandTaskResultV2(evaluated.genome_sha256, task.task_id, key, "passed", evaluated, False, None)
+    path = store.directory / f"results/{result.candidate_sha256}/{task.task_sha256}.json"
+    if fault == "unpaid":
+        core_store.write_once_json(path, result.to_payload())
+    elif fault != "missing":
+        store.write_task_result(task.task_sha256, result)
+    if fault == "mismatch":
+        result = replace(result, evaluation=replace(evaluated,
+            objectives=replace(evaluated.objectives, mean_raw_joint_error=987654321.125)))
+    elif fault == "noncanonical":
+        path.write_text(json.dumps(result.to_payload(), indent=2))
+    elif fault in {"directory", "symlink"}:
+        path.unlink()
+        if fault == "directory":
+            path.mkdir()
+        else:
+            path.symlink_to(store.directory / f"objects/{fixed.fingerprint()}.json")
+    work = _KernelWork(kernel, kernel.active_bundle(), 1)
+    permit = work.reserve_stage("partial-exact-result", ResourceUse(task_executions=1))
+    work.close_stage(permit, ResourceUse(task_executions=1), status="failed")
+    checkpoint = json.loads(kernel.checkpoint_path.read_bytes())
+    budget = checkpoint["budget"]
+    outcome = HyperbandBudgetOutcomeV2("failed", "timeout", permit.reservation_sha256,
+        ResourceUse(task_executions=1).to_payload(), budget["checkpoint_sha256"], budget)
+    value = {"closed_partial_rung": {"state": state.to_payload(), "manifest_sha256": fixed.fingerprint(),
+        "reason": "timeout", "task_results": [{"task_sha256": task.task_sha256, "result": result.to_payload()}],
+        "unpersisted_task_results": [], "budget_outcome": outcome.to_payload()}}
+    before = files(store.root)
+    if fault == "paid":
+        _persist(store, value, kind=ArtifactKindV2.PARTIAL_RUNG)
+        assert json.loads(path.read_bytes()) == result.to_payload()
+        _persist(store, checkpoint, kind=ArtifactKindV2.KERNEL_CHECKPOINT)
+        _persist(store, budget, kind=ArtifactKindV2.BUDGET_CHECKPOINT)
+        updated = args | {"kernel_checkpoint_sha256": checkpoint["checkpoint_sha256"],
+                          "budget_checkpoint_sha256": budget["checkpoint_sha256"]}
+        store.write_state(**updated)
+        closed = files(store.root)
+        resume(store, updated)
+        assert files(store.root) == closed
+    else:
+        with pytest.raises(ValueError):
+            _persist(store, value, kind=ArtifactKindV2.PARTIAL_RUNG)
+        assert files(store.root) == before
+        assert all(b"987654321.125" not in data for data in files(store.root).values())
+
+
+def test_kernel_material_receipt_rejects_payload_before_control_publication(kernel):
+    parent = kernel.active_bundle()
+    child = parent.provisional_child("numerical", {"numerical": ("a" * 64, "b" * 64)})
+    permit = kernel.reserve_evaluation(child, ResourceUse())
+    before = files(kernel.store.root)
+    with pytest.raises(ValueError):
+        kernel.close_evaluation(parent, child, permit=permit, status="passed",
+            train_objectives={"material_receipts": [{"kind": "task_result", "relative_path": "results/result.json",
+                "content_sha256": "a" * 64, "size_bytes": 1, "payload": "MATERIAL_RECEIPT_SENTINEL"}]},
+            train_behavior_descriptors={}, dev_comparison={"passed": False, "parent_metrics": {}, "candidate_metrics": {}},
+            resource_use=ResourceUse(), account_only=True)
+    assert files(kernel.store.root) == before
+    assert all(b"MATERIAL_RECEIPT_SENTINEL" not in raw for raw in files(kernel.store.root).values())
+
+
 @pytest.fixture
 def world(kernel):
     store = api.NumericalQDRunStore.create(kernel.store.root)

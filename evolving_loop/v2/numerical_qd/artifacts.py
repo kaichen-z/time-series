@@ -8,11 +8,12 @@ verified immutable graph; they cannot authorize new executable material.
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
+from pathlib import PurePosixPath
 
 from common.payload import strict_json_loads
-from ..budget import ResourceUse, _CHECKPOINT_FIELDS as BUDGET_FIELDS
+from ..budget import BudgetLedger, ResourceUse, _CHECKPOINT_FIELDS as BUDGET_FIELDS
 from ..bundle import EvolutionBundleV2
-from ..contracts import _require_exact_schema, canonical_v2_bytes, require_sha256
+from ..contracts import _require_exact_schema, canonical_v2_bytes, fingerprint_payload, require_sha256
 from .config import NumericalQDConfigV2
 from .contracts import (HyperbandRungV2, HyperbandStateV2, HyperbandTaskResultV2,
     NumericalEvaluationV2, NumericalGenomeV2, NumericalInventoryV2, NumericalMutationPolicyV2,
@@ -128,6 +129,120 @@ def validate_unpersisted_task(row):
     return ResourceUse.from_payload(row["resource_use"])
 
 
+def validate_material_receipts(rows):
+    """Metadata only: a Host-successful material write, never its payload."""
+    if type(rows) is not list:
+        raise ValueError("material receipts must be a list")
+    paths = set()
+    for row in rows:
+        _require_exact_schema(row, ("kind", "relative_path", "content_sha256", "size_bytes"), field="material receipt")
+        if not ARTIFACT_KINDS[ArtifactKindV2(row["kind"])].billable:
+            raise ValueError("material receipt must reference a billable kind")
+        path = row["relative_path"]
+        if (type(path) is not str or not path or PurePosixPath(path).is_absolute()
+                or PurePosixPath(path).as_posix() != path or ".." in PurePosixPath(path).parts or path in paths):
+            raise ValueError("material receipt requires a unique canonical relative path")
+        require_sha256(row["content_sha256"], "material content SHA")
+        if type(row["size_bytes"]) is not int or row["size_bytes"] <= 0:
+            raise ValueError("material receipt size must be a positive integer")
+        paths.add(path)
+    return rows
+
+
+def _optional_reason(value):
+    if value is not None and (type(value) is not str or not value):
+        raise ValueError("receipt reason must be None or a nonempty string")
+
+
+def _bootstrap_budget(value):
+    budget = _require_exact_schema(value, BUDGET_FIELDS, field="bootstrap budget checkpoint")
+    if type(budget["schema_version"]) is not int or budget["schema_version"] != 1:
+        raise ValueError("bootstrap budget schema mismatch")
+    for field in ("plan_sha256", "checkpoint_sha256"):
+        require_sha256(budget[field], field)
+    if BudgetLedger.checkpoint_sha256(budget) != budget["checkpoint_sha256"]:
+        raise ValueError("bootstrap budget SHA mismatch")
+    elapsed = budget["prior_elapsed_wall_seconds"]
+    if type(elapsed) is not float or elapsed < 0.0 or type(budget["finalization_started"]) is not bool:
+        raise ValueError("bootstrap budget clock/finalization mismatch")
+    _optional_reason(budget["exhausted_reason"])
+    ResourceUse.from_payload(budget["charged_use"])
+    for field in ("closed_stage_ids", "closed_reservation_sha256s"):
+        rows = budget[field]
+        if (type(rows) is not list or any(type(row) is not str or not row for row in rows)
+                or rows != sorted(set(rows))):
+            raise ValueError("bootstrap closed identities must be sorted unique strings")
+    for sha in budget["closed_reservation_sha256s"]:
+        require_sha256(sha, "closed reservation SHA")
+    if len(budget["closed_reservation_sha256s"]) > len(budget["closed_stage_ids"]):
+        raise ValueError("bootstrap closed reservation count mismatch")
+    if type(budget["open_reservations"]) is not list:
+        raise ValueError("bootstrap open reservations must be a list")
+    stages = []
+    for reservation in budget["open_reservations"]:
+        _require_exact_schema(reservation, ("stage_id", "estimate", "reservation_sha256"), field="bootstrap reservation")
+        stage = reservation["stage_id"]
+        if type(stage) is not str or not stage or stage in budget["closed_stage_ids"]:
+            raise ValueError("bootstrap reservation stage mismatch")
+        ResourceUse.from_payload(reservation["estimate"])
+        sha = require_sha256(reservation["reservation_sha256"], "bootstrap reservation SHA")
+        if (sha in budget["closed_reservation_sha256s"] or sha != fingerprint_payload({"schema_version": 1,
+                "plan_sha256": budget["plan_sha256"], "stage_id": stage, "estimate": reservation["estimate"]})):
+            raise ValueError("bootstrap reservation identity mismatch")
+        stages.append(stage)
+    if stages != sorted(set(stages)):
+        raise ValueError("bootstrap open stages must be sorted and unique")
+    return budget
+
+
+def _bootstrap_receipt(payload):
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 2:
+        raise ValueError("bootstrap receipt schema mismatch")
+    if type(payload["status"]) is not str or payload["status"] not in {"passed", "failed", "stopped", "interrupted"}:
+        raise ValueError("bootstrap receipt status mismatch")
+    for field in ("reason", "closure_reason"):
+        _optional_reason(payload[field])
+    if (type(payload["allowed"]) is not bool
+            or payload["allowed"] != (payload["closure_reason"] is None)):
+        raise ValueError("bootstrap receipt closure decision mismatch")
+    for field in ("preflight_sha256", "reservation_sha256", "chain_sha256"):
+        require_sha256(payload[field], field)
+    for field in ("segment_index", "replay_total", "replay_consumed"):
+        if type(payload[field]) is not int or payload[field] < 0:
+            raise ValueError("bootstrap receipt counters must be nonnegative integers")
+    previous = payload["previous_receipt_sha256"]
+    if previous is not None:
+        require_sha256(previous, "bootstrap previous receipt SHA")
+    if ((payload["segment_index"] == 0) != (previous is None)
+            or payload["replay_consumed"] > payload["replay_total"]
+            or (previous is None and payload["replay_total"] != 0)
+            or (payload["status"] == "passed" and payload["replay_consumed"] != payload["replay_total"])):
+        raise ValueError("bootstrap receipt replay prefix counters mismatch")
+    events = payload["events"]
+    if type(events) is not list:
+        raise ValueError("bootstrap events must be a list")
+    for sha in events:
+        require_sha256(sha, "bootstrap event SHA")
+    if payload["replay_consumed"] > len(events):
+        raise ValueError("bootstrap receipt replay event count mismatch")
+    if (len(events) != len(set(events))
+            or payload["chain_sha256"] != (events[-1] if events else previous or payload["preflight_sha256"])):
+        raise ValueError("bootstrap receipt event chain mismatch")
+    use = ResourceUse.from_payload(payload["resource_use"])
+    before, after = (_bootstrap_budget(payload[field]) for field in ("budget_before", "budget_after"))
+    stage = "seed_bootstrap:" + payload["preflight_sha256"] + (f":{payload['segment_index']}" if previous else "")
+    opened = before["open_reservations"]
+    if (len(opened) != 1 or opened[0]["stage_id"] != stage
+            or opened[0]["reservation_sha256"] != payload["reservation_sha256"] or after["open_reservations"]
+            or before["plan_sha256"] != after["plan_sha256"]
+            or before["finalization_started"] != after["finalization_started"]
+            or after["prior_elapsed_wall_seconds"] < before["prior_elapsed_wall_seconds"]
+            or ResourceUse.from_payload(before["charged_use"]) + use != ResourceUse.from_payload(after["charged_use"])
+            or after["closed_stage_ids"] != sorted([*before["closed_stage_ids"], stage])
+            or after["closed_reservation_sha256s"] != sorted([*before["closed_reservation_sha256s"], payload["reservation_sha256"]])):
+        raise ValueError("bootstrap receipt exact closure mismatch")
+
+
 def validate_artifact(kind, raw):
     kind = ArtifactKindV2(kind)
     spec = ARTIFACT_KINDS[kind]
@@ -170,13 +285,7 @@ def validate_artifact(kind, raw):
         if kind is K.BOOTSTRAP_REPLAY and (type(payload["replay_index"]) is not int or payload["replay_index"] < 0):
             raise ValueError("bootstrap replay counter must be a nonnegative integer")
     elif kind is K.BOOTSTRAP_RECEIPT:
-        ResourceUse.from_payload(payload["resource_use"])
-        for field in ("budget_before", "budget_after"):
-            budget = _require_exact_schema(payload[field], BUDGET_FIELDS, field="bootstrap budget checkpoint")
-            ResourceUse.from_payload(budget["charged_use"])
-            for reservation in budget["open_reservations"]:
-                _require_exact_schema(reservation, ("stage_id", "estimate", "reservation_sha256"), field="bootstrap reservation")
-                ResourceUse.from_payload(reservation["estimate"])
+        _bootstrap_receipt(payload)
     elif kind is K.KERNEL_CHECKPOINT:
         from ..kernel import EvolutionKernel
         _require_exact_schema(payload, EvolutionKernel._CHECKPOINT_FIELDS, field=kind.value)
