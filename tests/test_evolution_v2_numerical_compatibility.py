@@ -29,6 +29,7 @@ def test_real_numerical_cli_preserves_persisted_legacy_artifacts_and_defaults(
     _run_isolated(
         r'''
 import json
+import hashlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -39,7 +40,10 @@ sys.path.insert(0, str(root / "tests"))
 work = Path(sys.argv[1])
 
 import evolving_loop.cli as legacy_cli
-from evolving_loop.package_numerical_supply import canonical_json_bytes
+from evolving_loop.package_numerical_supply import (
+    canonical_json_bytes,
+    parse_numerical_supply_release,
+)
 from evolving_loop.v2.contracts import canonical_v2_bytes
 from tests.test_package_coordinate_evolution import _bundle
 
@@ -73,12 +77,22 @@ def plain(value):
     canonical_json_bytes(plain(state.registry.manifest))
 )
 for source, name in (
-    (root / "numerical_agent/dictionaries/statistical_base_methods_v000.json", "method-source.json"),
+    (root / "numerical_agent/dictionaries/statistical_base_methods_v000.json", "method-catalog.json"),
     (root / "numerical_agent/tsfm/runtime_manifests.json", "runtime-manifest.json"),
 ):
     (persisted / name).write_bytes(
         canonical_json_bytes(json.loads(source.read_bytes()))
     )
+method_source = persisted / "method-source.py"
+method_source.write_bytes(
+    b'def legacy_seasonal_naive(history, horizon, frequency):\n'
+    b'    """Forecast the last finite observation for a bounded horizon."""\n'
+    b'    del frequency\n'
+    b'    return [float(history[-1])] * horizon\n'
+)
+release = parse_numerical_supply_release(
+    plain(state.bundle.numerical_release_payload)
+)
 shutil.copytree(
     root / "evolving_loop/retrieval_agent/releases/v000",
     persisted / "retrieval-v000",
@@ -119,6 +133,20 @@ forms = (["evolve"], ["--evolution", "genome"])
 defaults_before = [vars(legacy_cli.build_parser().parse_args(args)) for args in forms]
 files_before = files()
 assert "evolving_loop.v2.numerical_qd" not in sys.modules
+
+from evolving_loop.v2.numerical_qd.adapters import import_numerical_seed
+
+imported = import_numerical_seed(
+    release,
+    state.registry,
+    tasks=(_task,),
+    source_paths=(method_source,),
+)
+method_sha256 = hashlib.sha256(method_source.read_bytes()).hexdigest()
+assert imported.sources == {method_sha256: method_source.read_text()}
+namespace = {}
+exec(compile(imported.sources[method_sha256], str(method_source), "exec"), namespace)
+assert namespace["legacy_seasonal_naive"]((1.0, 2.0), 2, "D") == [2.0, 2.0]
 
 run = work / "run"
 command = [

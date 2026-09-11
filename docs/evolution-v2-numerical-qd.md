@@ -122,15 +122,17 @@ completion must report `public_test_accessed: false`.
 
 ### LLM configuration boundary
 
-The Python construction seam accepts a Host runtime whose `forecast_store`
-implements `forecast(...)`; it may also provide a resource reporter, its bound
-identity and resource kinds, and an existing `llm_client`. An explicit
-`llm_client` argument takes precedence. The LLM provider sends one strict
-JSON-schema request, applies call/token/byte limits, and records a closed
-attempt. Unconfigured, unavailable, timed-out, malformed, empty, or over-budget
-LLM attempts do not relax validation. If budget remains, `hybrid` continues
-with the deterministic provider. Secrets configure the external client and
-never belong in config or run artifacts.
+The public Python seam
+`evolving_loop.v2.cli.numerical_evolve(config_path, seed_path,
+task_manifest_path, output, *, host_runtime=..., llm_client=...)` accepts a Host
+runtime whose `forecast_store` implements `forecast(...)`; it may also provide
+a resource reporter, its bound identity and resource kinds, and an existing
+`llm_client`. An explicit `llm_client` argument takes precedence. The LLM
+provider sends one strict JSON-schema request, applies call/token/byte limits,
+and records a closed attempt. Unconfigured, unavailable, timed-out, malformed,
+empty, or over-budget LLM attempts do not relax validation. If budget remains,
+`hybrid` continues with the deterministic provider. Secrets configure the
+external client and never belong in config or run artifacts.
 
 The current `python -m evolving_loop.v2 numerical-evolve` CLI intentionally has
 no model, API-key, provider-client, or forecast-runtime flags. It is therefore
