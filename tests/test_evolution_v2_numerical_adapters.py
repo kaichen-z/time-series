@@ -449,6 +449,57 @@ def test_projection_coverage_precedes_rank_and_keeps_at_most_one_of_each_legacy_
     assert frozen.envelope.canonical_bytes() == again.envelope.canonical_bytes()
 
 
+def test_projection_must_include_exact_train_winner_even_when_coverage_prefers_peer(world):
+    base = materialize(world)
+    broad, winner = (projection_child(world, base, index) for index in range(2))
+    cells = tuple(MorphologyCellV2(trend, "none", "low", "stable", "short", "statistical")
+                  for trend in ("low", "medium", "high"))
+    archive = NumericalQDArchive().insert([
+        *(projection_entry(broad, cell, (9,) * 5) for cell in cells),
+        projection_entry(winner, cells[0], (0.1,) * 5)])
+    frozen = freeze_qd_supply(world[0], world[1], world[2], archive, (broad, winner),
+        descriptor_policy=descriptor_policy(), version="n002", required_genome_sha256=winner.genome.fingerprint())
+    assert winner.genome.fingerprint() in frozen.selected_genome_sha256s
+    assert all(any(row.name == winner.fit.recipe.name for row in frozen.registry.package_for(task).ranked_alternatives)
+               for task in world[0].tasks)
+
+
+def test_projection_includes_evaluated_train_winner_evicted_by_historical_occupant(world):
+    base = materialize(world)
+    historical, winner = (projection_child(world, base, index) for index in range(2))
+    cell = MorphologyCellV2("low", "none", "low", "stable", "short", "statistical")
+    archive = NumericalQDArchive(capacity=1).insert((projection_entry(historical, cell, (0.1,) * 5),))
+    archive = archive.insert((projection_entry(winner, cell, (1,) * 5),))
+    assert {archive.entries[sha].genome_sha256 for state in archive.cells for sha in state.entry_sha256s} == {historical.genome.fingerprint()}
+    frozen = freeze_qd_supply(world[0], world[1], world[2], archive, (historical, winner),
+        descriptor_policy=descriptor_policy(), version="n003", required_genome_sha256=winner.genome.fingerprint())
+    assert winner.genome.fingerprint() in frozen.selected_genome_sha256s
+    assert all(any(row.name == winner.fit.recipe.name for row in frozen.registry.package_for(task).ranked_alternatives)
+               for task in world[0].tasks)
+
+
+def test_add_mutation_selects_new_executable_from_persisted_inventory_order(world):
+    from evolving_loop.v2.numerical_qd.adapters import _canonical_member
+    state = world[3]
+    member = replace(state.inventory.members[1], member_id="new_added")
+    proposal = MutationProposalV2.from_payload({"operator": "add", "member": member.to_payload(), "reason": "new executable"})
+    evolved = apply_mutation(state, proposal).state
+    assert _canonical_member(evolved) == member
+    child = materialize(world, evolved, member_id=member.member_id, parent_state=state, proposal=proposal)
+    assert child.fit.recipe.parents == ("lagged",)
+
+
+def test_materialized_executable_envelope_restores_exact_registry_and_fit(world):
+    from evolving_loop.v2.numerical_qd.adapters import MaterializedNumericalChildV2
+    child = materialize(world)
+    payload = child.to_payload(world[0].tasks)
+    restored = MaterializedNumericalChildV2.from_payload(payload, world[0].tasks)
+    assert restored.genome == child.genome
+    assert restored.fit == child.fit
+    assert restored.candidate.registry.fingerprint == child.candidate.registry.fingerprint
+    assert restored.to_payload(world[0].tasks) == payload
+
+
 @pytest.mark.parametrize("scores, winners", [
     (((3, 3, 3, 3, 3), (1, 1, 1, 1, 1), (2, 2, 2, 2, 2)), (1,)),
     (((0, 2, 1, 1, 1), (1, 1, 1, 1, 1), (2, 0, 1, 1, 1)), (0, 2)),
@@ -489,7 +540,7 @@ def test_structural_policy_can_resume_and_evolve_for_a_second_generation(world, 
     parent = state.inventory.members[0]
     first = MutationProposalV2.from_payload(_structural_candidate("fork", (parent,), state.declared_cells[:1]))
     evolved = apply_mutation(state, first).state
-    first_member = evolved.inventory.members[-1]
+    first_member = next(member for member in evolved.inventory.members if member.member_id == first.payload["child"]["member_id"])
     policies = {fingerprint_payload(recipe.to_payload()): recipe for recipe in (_recipe(), _recipe("lagged"))}
     if primitive_recipes:
         policies = {sha: recipe.to_payload() for sha, recipe in policies.items()}

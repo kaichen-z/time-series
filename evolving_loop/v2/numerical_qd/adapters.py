@@ -31,7 +31,7 @@ from evolving_loop.package_numerical_supply import (
     parse_numerical_supply_release,
 )
 from evolving_loop.package_registry import FrozenNumericalPackageRegistry, task_registry_fingerprint
-from numerical_agent.evolution.champion import ChampionRecipe, parse_champion_recipe, parse_champion_release
+from numerical_agent.evolution.champion import ChampionRecipe, parse_champion_recipe, parse_champion_release, _parse_fitted_policy
 from numerical_agent.evolution.champion_evidence import ChampionTaskRow
 from numerical_agent.evolution.execution import IsolatedForecastRuntime, MethodForecastError, Task as RuntimeTask
 from numerical_agent.evolution.module import EVOLUTION_IMPORTS, EVOLUTION_DUNDERS, MODULE_HEADER, MethodModule, parse_module
@@ -450,6 +450,41 @@ class MaterializedNumericalChildV2:
         if self.member.source_sha256 not in self.source_sha256s:
             raise ValueError("source dependencies must include the selected member source")
 
+    def to_payload(self, tasks):
+        fit = self.fit
+        return {"materialized_numerical_child": {"schema_version": 1,
+            "genome": self.genome.to_payload(), "state": self.state.to_payload(), "member": self.member.to_payload(),
+            "supply": self.candidate.release.to_payload(), "registry": _envelope(self.candidate.registry, tasks).to_payload(),
+            "proposal_sha256": self.candidate.proposal_sha256, "descriptor_policy_sha256": self.descriptor_policy_sha256,
+            "source_sha256s": list(self.source_sha256s), "fit": {
+                "recipe": fit.recipe.to_payload(), "full_build_policy": fit.full_build_policy.to_payload(),
+                "build_fold_policies": [[fold, policy.to_payload()] for fold, policy in fit.build_fold_policies],
+                "full_build_task_ids": list(fit.full_build_task_ids),
+                "fold_training_task_ids": [[fold, list(ids)] for fold, ids in fit.fold_training_task_ids],
+                "parent_sha256": fit.parent_sha256, "fold_manifest_sha256": fit.fold_manifest_sha256,
+                "numerical_score_sha256": fit.numerical_score_sha256}}}
+
+    @classmethod
+    def from_payload(cls, payload, tasks):
+        outer = _require_exact_schema(payload, ("materialized_numerical_child",), field="executable envelope")
+        value = _require_exact_schema(outer["materialized_numerical_child"], ("schema_version", "genome", "state", "member",
+            "supply", "registry", "proposal_sha256", "descriptor_policy_sha256", "source_sha256s", "fit"), field="executable envelope")
+        if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+            raise ValueError("executable envelope schema mismatch")
+        fit = _require_exact_schema(value["fit"], tuple(field.name for field in fields(NumericalRecipeFit)), field="recipe fit")
+        fit = NumericalRecipeFit(parse_champion_recipe(fit["recipe"]), _parse_fitted_policy(fit["full_build_policy"]),
+            tuple((fold, _parse_fitted_policy(policy)) for fold, policy in fit["build_fold_policies"]),
+            tuple(fit["full_build_task_ids"]), tuple((fold, tuple(ids)) for fold, ids in fit["fold_training_task_ids"]),
+            fit["parent_sha256"], fit["fold_manifest_sha256"], fit["numerical_score_sha256"])
+        release = parse_numerical_supply_release(value["supply"])
+        registry = FrozenNumericalRegistryEnvelopeV2.from_payload(value["registry"]).restore(tasks)
+        result = cls(NumericalGenomeV2.from_payload(value["genome"]), MutationStateV2.from_payload(value["state"]),
+            NumericalMemberV2.from_payload(value["member"]), NumericalCoordinateCandidate(release, registry, value["proposal_sha256"]),
+            fit, value["descriptor_policy_sha256"], tuple(value["source_sha256s"]))
+        if result.to_payload(tasks) != payload:
+            raise ValueError("executable envelope canonical binding mismatch")
+        return result
+
 
 @dataclass(frozen=True)
 class FrozenNumericalArtifactsV2:
@@ -464,16 +499,11 @@ class FrozenNumericalArtifactsV2:
 
 
 def _canonical_member(state):
-    """One executable per committed inventory: specialization, ancestry, order.
-
-    Inventory order is itself hashed. Prefer a specialized member, then a
-    structural child with more parents, breaking ties by that committed order.
-    No caller choice, score, task, or uncommitted policy affects this selection.
-    """
+    """The first eligible inventory slot is the persisted executable identity."""
     eligible = tuple(member for member in state.inventory.members if member.status != "quarantined")
     if not eligible:
         raise ValueError("inventory has no canonical member")
-    return min(eligible, key=lambda member: (member.status != "specialized", -len(member.parent_ids)))
+    return eligible[0]
 
 
 class NumericalWorkStopped(BaseException):
@@ -951,7 +981,8 @@ def evaluate_numerical_child(adapter, child, manifest, *, descriptor_policy: Des
 
 
 def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children, *,
-                     descriptor_policy: DescriptorPolicyV2, version) -> FrozenNumericalArtifactsV2:
+                     descriptor_policy: DescriptorPolicyV2, version,
+                     required_genome_sha256=None) -> FrozenNumericalArtifactsV2:
     """Greedy occupied-cell coverage, then constrained rank/crowding/cost/SHA."""
     if type(archive) is not NumericalQDArchive:
         raise ValueError("projection requires an exact QD archive")
@@ -972,8 +1003,10 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
         if child.candidate.release.anchor_release_payload != parent_release.anchor_release_payload:
             raise ValueError("projection must retain the exact safe anchor")
         by_genome[sha] = child
-    entries = {sha: archive.entries[sha] for cell in archive.cells for sha in cell.entry_sha256s
-               if archive.entries[sha].genome_sha256 in by_genome and archive.entries[sha].constraints.feasible}
+    occupied_shas = {sha for cell in archive.cells for sha in cell.entry_sha256s}
+    entries = {sha: entry for sha, entry in archive.entries.items()
+               if (sha in occupied_shas or entry.genome_sha256 == required_genome_sha256)
+               and entry.genome_sha256 in by_genome and entry.constraints.feasible}
     rankings = {}
     for rank, front in enumerate(non_dominated_fronts(entries.values())):
         distances = crowding_distances(front)
@@ -991,6 +1024,13 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
         choices[genome_sha] = (child, specs[0], {row.cell.fingerprint() for row in rows},
             min(rankings[row.fingerprint()] for row in rows))
     selected, covered, families = [], set(), set()
+    if required_genome_sha256 is not None:
+        if required_genome_sha256 not in choices:
+            raise ValueError("projection is missing the exact Train winner")
+        child, spec, cells, _ = choices.pop(required_genome_sha256)
+        selected.append((required_genome_sha256, child, spec))
+        covered.update(cells)
+        families.add(spec.family)
     while len(selected) < 4:
         eligible = [sha for sha, (_, spec, _, _) in choices.items() if spec.family not in families]
         if not eligible:
@@ -1013,6 +1053,8 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
         "selected_sources": commitment(sha for _, child, _ in selected for sha in child.source_sha256s),
         "selected_member_policies": commitment(child.member.policy_sha256 for _, child, _ in selected),
     }
+    if required_genome_sha256 is not None:
+        sources["train_winner"] = required_genome_sha256
     release = replace(parent_release, version=version, parent_sha256=parent_release.fingerprint,
         alternatives=tuple(spec for _, _, spec in selected), source_fingerprints=sources,
         anchor_release_payload=parent_release.to_payload()["anchor_release_payload"])
@@ -1024,6 +1066,8 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
             if package.protected_baseline.forecast != source.protected_baseline.forecast:
                 raise ValueError("projection changed the safe anchor forecast")
             available.update({item.name: item for item in package.ranked_alternatives if item.name == spec.candidate_id})
+            if child.genome.fingerprint() == required_genome_sha256 and spec.candidate_id not in available:
+                raise ValueError("projection package is missing the exact Train winner member")
         return bound_numerical_package(source, supplied, available, history=task.numeric.history_values,
             task_fold=adapter.fold_manifest.task_fold_map.get(task.numeric.task_id))
     registry = build_package_registry(adapter.tasks, release, builder)

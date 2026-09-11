@@ -31,10 +31,10 @@ from numerical_agent.evolution.screening import _policy_payload, profile_task
 from ..budget import BudgetLedger, ResourceUse, StagePermit
 from ..bundle import EvolutionBundleV2
 from ..contracts import canonical_v2_bytes, fingerprint_payload
-from ..kernel import EvolutionKernel
+from ..kernel import EvolutionKernel, SeedBootstrapAuthority, SeedBootstrapStopped
 from ..store import V2RunStore, write_once_json
 from .adapters import (
-    ImportedNumericalSeedV2, LegacyNumericalAdapter, NumericalWorkStopped, _canonical_member,
+    ImportedNumericalSeedV2, LegacyNumericalAdapter, MaterializedNumericalChildV2, NumericalWorkStopped, _canonical_member,
     evaluate_numerical_child, freeze_qd_supply, import_numerical_seed,
 )
 from .config import NumericalQDConfigV2
@@ -62,15 +62,6 @@ from .proposers import (
 
 
 _NO_DEV = {"passed": False, "parent_metrics": {}, "candidate_metrics": {}}
-
-
-class _SeedBootstrapClock:
-    """Bootstrap-only deferred admission; every subsequent stage sees real time."""
-    def __init__(self, monotonic):
-        self.monotonic, self.start, self.active = monotonic, monotonic(), False
-
-    def __call__(self):
-        return self.monotonic() if self.active else self.start
 
 
 @dataclass(frozen=True)
@@ -149,6 +140,52 @@ class _UnavailableProvider:
             (ProviderAttemptV2("llm", ResourceUse(), "unavailable"),))
 
 
+class _MaterialAccounting:
+    """Bill immutable evolvable bytes; exclude only authority/control records.
+
+    Forecasts/results, requests, sources, genomes, inventories, recipes,
+    structural policies, prompts, QD entries/subsets and all release envelopes
+    are material. Checkpoints, archive indices/snapshots, rung/partial closure
+    records, run manifests and generation status records are control.
+    """
+
+    def __init__(self, store, kernel):
+        self.store, self.kernel, self.external = store, kernel, None
+        store.material_writer = self.write
+
+    @staticmethod
+    def is_material(relative, data):
+        if relative.startswith(("sources/", "proposals/", "results/")):
+            return True
+        if not relative.startswith("objects/"):
+            return False
+        value = strict_json_loads(data.decode(), context="material object")
+        return not ("checkpoint_sha256" in value or "numerical_qd_step" in value
+            or "closed_partial_rung" in value or ("candidate_sha256s" in value and "rungs" in value)
+            or ("cells" in value and "insertion_log" in value)
+            or ("archive_snapshot_sha256" in value and "numerical_release_sha256" in value))
+
+    def write(self, relative, data, dispatch):
+        path = self.store.directory / relative
+        if path.exists() or not self.is_material(relative, data):
+            return dispatch()
+        if self.external is not None:
+            self.external(len(data), False)
+            try:
+                return dispatch()
+            finally:
+                if path.is_file():
+                    self.external(path.stat().st_size, True)
+        work = _KernelWork(self.kernel, self.kernel.active_bundle(), 0)
+        permit = work.reserve_stage("material-" + relative, ResourceUse(artifact_bytes=len(data)))
+        if not permit.allowed:
+            raise NumericalQDStoreError("material persistence admission denied: " + permit.reason)
+        try:
+            return dispatch()
+        finally:
+            work.close_stage(permit, ResourceUse(artifact_bytes=path.stat().st_size if path.is_file() else 0))
+
+
 def _bootstrap(config, release, adapter):
     """Build immutable policy metadata; never score Dev or execute proposal code."""
     train = tuple(t for t in adapter.tasks if t.numeric.task_id in adapter.fold_manifest.task_fold_map)
@@ -186,9 +223,11 @@ def _bootstrap(config, release, adapter):
     return state, genome, policies, screen, combined
 
 
-def _seed_registry(release, adapter, *, account_work=None):
+def _seed_registry(release, adapter, *, account_work=None, bootstrap_authority=None):
     anchor = parse_champion_release(release.to_payload()["anchor_release_payload"])
     def forecast(*args):
+        if bootstrap_authority is not None:
+            return bootstrap_authority.forecast(adapter, *args)
         if account_work is not None:
             account_work(ResourceUse(task_executions=1))
         return adapter.forecast_trusted(*args, account_work=account_work)
@@ -251,6 +290,8 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
     """Task 6 pure advancement around explicit real Kernel reservations."""
     started, executed = 0.0, 0
     reported = ResourceUse()
+    artifact_bytes, aggregates = 0, ()
+    store = getattr(work, "store", None)
     pending, results = [], []
     for candidate in state.active_candidates:
         for task in manifest.tasks:
@@ -266,6 +307,14 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
     permit = work.reserve_stage("rung-" + state.fingerprint() + "-" + manifest.fingerprint(), estimate)
     if not permit.allowed:
         return None, (), permit.reason
+    def account_material(size, begun):
+        nonlocal artifact_bytes
+        if not begun and artifact_bytes + size > estimate.artifact_bytes:
+            raise NumericalQDStoreError("rung material artifact budget exhausted")
+        if begun:
+            artifact_bytes += size
+    if store is not None:
+        store.accounting.external = account_material
     failure = None
     try:
         for candidate, task, key, hit in pending:
@@ -292,31 +341,44 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
                     reported += extra
                     duration = adapter.monotonic() - before
                     started += duration
+                value = replace(value, resource_use=(ResourceUse.from_payload(value.resource_use) + extra).to_payload())
                 if any(getattr(reported, name) > getattr(estimate, name) for name in ResourceUse.field_names()):
                     failure = "budget_overrun"
-                    break
                 if duration >= config.adapter["task_timeout_seconds"]:
-                    failure = "timeout"
-                    break
-                value = replace(value, resource_use=(ResourceUse.from_payload(value.resource_use) + extra).to_payload())
+                    failure = failure or "timeout"
                 if value.constraints.feasible and value.task_statuses[task.task_id] == "passed":
                     cache[key] = TaskCacheRowV2(key, task.task_sha256, value)
             results.append((task, HyperbandTaskResultV2(candidate, task.task_id, key,
                 value.task_statuses[task.task_id], value, hit is not None, None)))
+            if store is not None and hit is None:
+                store.write_task_result(task.task_sha256, results[-1][1])
+            if failure:
+                break
+        if failure is None:
+            aggregates = tuple(_aggregate([result.evaluation for _, result in results if result.candidate_sha256 == candidate],
+                manifest, state.bracket.name, len(state.rungs)) for candidate in state.active_candidates)
+            if store is not None:
+                _persist(store, manifest)
+                for aggregate in aggregates:
+                    _persist(store, aggregate)
     finally:
-        actual = reported + ResourceUse(task_executions=executed, wall_seconds=float(started))
+        if store is not None:
+            store.accounting.external = None
+        actual = reported + ResourceUse(task_executions=executed, wall_seconds=float(started), artifact_bytes=artifact_bytes)
         closed = work.close_stage(permit, actual, status="failed" if failure else "passed")
     if not closed.allowed:
         failure = closed.reason
     if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
         failure = failure or "finalization_reserve"
-    if failure:
-        return None, (), failure
     captured = _read(kernel.checkpoint_path)["budget"]
+    if failure:
+        work.partial_rung = {"state": state.to_payload(), "manifest": manifest.to_payload(), "reason": failure,
+            "task_results": [{"task_sha256": task.task_sha256, "result": result.to_payload()} for task, result in results],
+            "budget_outcome": HyperbandBudgetOutcomeV2("failed", failure, permit.reservation_sha256,
+                actual.to_payload(), captured["checkpoint_sha256"], captured).to_payload()}
+        return None, tuple(results), failure
     outcome = HyperbandBudgetOutcomeV2("completed", None, permit.reservation_sha256,
         actual.to_payload(), captured["checkpoint_sha256"], captured)
-    aggregates = tuple(_aggregate([result.evaluation for _, result in results if result.candidate_sha256 == candidate],
-        manifest, state.bracket.name, len(state.rungs)) for candidate in state.active_candidates)
     return advance_hyperband(state, manifest, aggregates, outcome).state, tuple(results), None
 
 
@@ -334,8 +396,10 @@ def _dev_compare(parent_registry, child_registry, parent_name, child_name, adapt
             count += 1
             package = registry.package_for(task)
             member_name = (parent_name, child_name)[index]
-            forecast = next((item.forecast for item in package.ranked_alternatives
-                             if item.name == member_name), package.protected_baseline.forecast)
+            matches = tuple(item for item in package.ranked_alternatives if item.name == member_name)
+            if len(matches) != 1:
+                raise ValueError("Dev package is missing one exact evaluated member")
+            forecast = matches[0].forecast
             scores[index].append(drcik_point_metrics(task.numeric.future_values, forecast, cap=5.0))
     metrics = [{"mean_smae": float(statistics.fmean(row["smae"] for row in values)),
                 "mean_srmse": float(statistics.fmean(row["srmse"] for row in values))} for values in scores]
@@ -359,9 +423,32 @@ def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry
     existing = set(objects.glob("*.json"))
     before = adapter.monotonic()
     result, reason = None, "freeze_failed"
+    store.accounting.external = lambda size, begun: None  # This stage bills its new material files in finally.
     try:
+        occupied = {archive.entries[sha].genome_sha256 for cell in archive.cells for sha in cell.entry_sha256s} | {winner}
+        verified_children = {}
+        for path in sorted(objects.glob("*.json")):
+            payload = store._object(path.stem)
+            if "materialized_numerical_child" not in payload:
+                continue
+            envelope = payload["materialized_numerical_child"]
+            genome_sha = fingerprint_payload(envelope["genome"])
+            if genome_sha not in occupied:
+                continue
+            genome, sources, policies = store.verify_candidate(genome_sha)
+            adapter.sources = dict(adapter.sources) | {sha: source.decode() for sha, source in sources.items()}
+            child = MaterializedNumericalChildV2.from_payload(payload, adapter.tasks)
+            if (child.genome != genome or adapter._recipe(child.member, policies, None, None) != child.fit.recipe
+                    or child.descriptor_policy_sha256 != config.descriptor_policy.fingerprint()):
+                raise ValueError("archive executable policy binding mismatch")
+            if genome_sha in verified_children:
+                raise ValueError("archive has conflicting executable envelopes")
+            verified_children[genome_sha] = child
+        if occupied != set(verified_children):
+            raise ValueError("archive projection lacks a verified executable envelope")
         frozen = freeze_qd_supply(adapter, parent_release, parent_registry, archive,
-            tuple(children.values()), descriptor_policy=config.descriptor_policy, version=f"n{generation:03d}")
+            tuple(verified_children.values()), descriptor_policy=config.descriptor_policy, version=f"n{generation:03d}",
+            required_genome_sha256=winner)
         payload = {"supply": frozen.release.to_payload(), "registry": frozen.envelope.to_payload()}
         if len(canonical_v2_bytes(payload)) > estimate.artifact_bytes:
             reason = "artifact_bytes_exhausted"
@@ -374,6 +461,7 @@ def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry
     except (ValueError, TypeError, TimeoutError, MethodForecastError):
         reason = "freeze_failed"
     finally:
+        store.accounting.external = None
         # The single typed pair embeds all package envelopes. Count each new
         # material file once, including a completed write followed by failure.
         produced = set(objects.glob("*.json")) - existing
@@ -398,6 +486,8 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         raise TypeError("runner requires the typed LegacyNumericalAdapter boundary")
     if stop_after is not None and (type(stop_after) is not int or stop_after < 1):
         raise ValueError("stop_after must be a positive generation count")
+    if not resume:
+        NumericalQDRunStore.preflight_fresh(output_dir)
     adapter = copy.copy(adapter)
     adapter.preflight_resources()
     if any(task.numeric.prediction_length > config.adapter["max_forecast_values"] for task in adapter.tasks):
@@ -413,10 +503,17 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
     task_commitments = {task.numeric.task_id: task_registry_fingerprint(task) for task in adapter.tasks}
     inputs = {"seed_supply": fingerprint_payload(release.to_payload()),
         "task_manifest": fingerprint_payload({"folds": manifest_payload, "tasks": task_commitments}),
-        "adapter": adapter.fingerprint, "sources": fingerprint_payload(dict(adapter.sources))}
+        "adapter": adapter.fingerprint, "sources": fingerprint_payload(dict(adapter.sources)),
+        "config": config.fingerprint(), "runtimes": fingerprint_payload(dict(config.runtime_fingerprints))}
     if imported:
         inputs["seed_registry"] = imported.envelope.fingerprint()
     root = Path(output_dir)
+    bootstrap_resume = None
+    if resume and (root / "seed_bootstrap_preflight.json").exists() and not (root / "run_manifest.json").exists():
+        NumericalQDRunStore(root)._verify_root_paths(bootstrap=True)
+        bootstrap_resume = SeedBootstrapAuthority.resume(V2RunStore(root), config.kernel_protocol, config.budget,
+            inputs, monotonic=adapter.monotonic)
+        resume = False
     if resume:
         store = NumericalQDRunStore(root)
         # Store preflight precedes the Kernel read, including finished no-op runs.
@@ -446,51 +543,47 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         parent_release = parse_numerical_supply_release(pair["supply"])
         parent_registry = FrozenNumericalRegistryEnvelopeV2.from_payload(pair["registry"]).restore(adapter.tasks)
     else:
-        if root.exists() and any(root.iterdir()):
-            raise ValueError("fresh numerical run requires an empty output directory")
-        kernel_store = V2RunStore.create(root)
-        bootstrap_sha, bootstrap_use, bridge = None, ResourceUse(), None
+        if bootstrap_resume is None:
+            NumericalQDRunStore.preflight_fresh(root)
+            kernel_store = V2RunStore.create(root)
+        else:
+            kernel_store = bootstrap_resume.store
+        bootstrap = bootstrap_resume
         if imported:
             registry = imported.envelope.restore(adapter.tasks)
             ledger = BudgetLedger(config.budget, monotonic=adapter.monotonic)
         else:
-            bridge = _SeedBootstrapClock(adapter.monotonic)
-            ledger = BudgetLedger(config.budget, monotonic=bridge)
             bootstrap_estimate = replace(config.budget.ceilings,
                 wall_seconds=min(config.budget.ceilings.wall_seconds, config.budget.search_deadline_seconds / 2.0),
                 artifact_bytes=config.budget.ceilings.artifact_bytes)
-            if (bootstrap_estimate.task_executions == 0 or bootstrap_estimate.wall_seconds == 0.0
-                    or not ledger.can_open_stage(bootstrap_estimate).allowed):
-                raise ValueError("seed bootstrap preflight budget denied")
             preflight = {"schema_version": 1, "stage": "seed_bootstrap", "seed_supply_sha256": release.fingerprint,
                 "protocol_sha256": config.kernel_protocol.fingerprint(), "budget_plan_sha256": config.budget.fingerprint(),
                 "input_sha256s": inputs, "estimate": bootstrap_estimate.to_payload()}
-            bootstrap_sha = fingerprint_payload(preflight)
-            preflight_path = write_once_json(root / "seed_bootstrap_preflight.json", preflight)
-            if _read(preflight_path) != preflight:
-                raise ValueError("seed bootstrap preflight readback mismatch")
-            def account_bootstrap(use, *, begun=False):
-                nonlocal bootstrap_use
-                bootstrap_use += use
-            registry = _seed_registry(release, adapter, account_work=account_bootstrap)
-            bootstrap_use = replace(bootstrap_use, wall_seconds=float(adapter.monotonic() - bridge.start),
-                                    artifact_bytes=preflight_path.stat().st_size)
+            if bootstrap is None:
+                bootstrap = SeedBootstrapAuthority(kernel_store, config.kernel_protocol, config.budget,
+                    preflight, monotonic=adapter.monotonic)
+            status, failure = "failed", None
+            try:
+                registry = _seed_registry(release, adapter, bootstrap_authority=bootstrap)
+                status = "passed"
+            except (SeedBootstrapStopped, NumericalWorkStopped):
+                status, failure = "stopped", "resource_or_host_stop"
+            except KeyboardInterrupt:
+                status, failure = "interrupted", "process_interrupted"
+            except (ValueError, TypeError, TimeoutError, MethodForecastError):
+                failure = "materialization_failed"
+            finally:
+                bootstrap.close(status, failure)
+            if status != "passed":
+                raise ValueError("seed bootstrap stopped before a complete registry")
+            ledger = bootstrap.budget
         active = EvolutionBundleV2(2, 0, None, release.fingerprint, registry.fingerprint,
             **dict(config.fixed_bundle_components), protocol_fingerprint=config.kernel_protocol.fingerprint(),
             runtime_fingerprints=config.runtime_fingerprints, acceptance_evidence_sha256=None)
         kernel = EvolutionKernel(kernel_store, config.kernel_protocol, ledger, seed=active,
-                                 bootstrap_preflight_sha256=bootstrap_sha)
-        if bridge is not None:
-            candidate = active.provisional_child("numerical", {"numerical": (bootstrap_sha,
-                fingerprint_payload({"seed_bootstrap": bootstrap_sha}))})
-            permit = kernel.reserve_evaluation(candidate, bootstrap_estimate)
-            bridge.active = True  # Never pause/rebase any search stage's clock.
-            if not permit.allowed:
-                raise ValueError("seed bootstrap differs from its committed admission")
-            kernel.close_evaluation(active, candidate, permit=permit, status="passed", train_objectives={},
-                train_behavior_descriptors={"seed_bootstrap_preflight_sha256": bootstrap_sha},
-                dev_comparison=_NO_DEV, resource_use=bootstrap_use, account_only=True)
+                                 bootstrap_authority=bootstrap)
         store = NumericalQDRunStore.create(root)
+        store.accounting = _MaterialAccounting(store, kernel)
         for sha, source in adapter.sources.items():
             store.write_source(sha, source.encode())
         for payload in (config, screen, combined, *seed_policies.values()):
@@ -505,6 +598,9 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         random, generation = CounterRandom(config.seed, "numerical"), 0
         previous_feedback = None
         parent_release, parent_registry = release, registry
+
+    if not hasattr(store, "accounting"):
+        store.accounting = _MaterialAccounting(store, kernel)
 
     def checkpoint_state():
         current = _read(kernel.checkpoint_path)
@@ -564,6 +660,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             max_proposals=config.proposer["max_proposals_per_generation"], max_response_bytes=config.proposer["max_response_bytes"])
         request_sha = _persist(store, request)
         work = _KernelWork(kernel, active, generation)
+        work.store = store
         artifact_permit = work.reserve_stage("proposal-artifacts-" + request_sha, ResourceUse(artifact_bytes=
             2 * max(config.proposer["max_response_bytes"], len(parent_state.canonical_bytes())) + 4096))
         if not artifact_permit.allowed:
@@ -593,10 +690,12 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         artifact_paths.append(store.directory / f"proposals/{batch_sha}.json")
         new_paths = [path for path in artifact_paths if not path.exists()]
         try:
+            store.accounting.external = lambda size, begun: None
             for sha, source in batch.source_artifacts:
                 store.write_source(sha, source)
             store.write_proposal_attempt(batch_sha, attempt_payload)
         finally:
+            store.accounting.external = None
             work.close_stage(artifact_permit, ResourceUse(artifact_bytes=sum(
                 path.stat().st_size for path in new_paths if path.is_file())))
         batch = store._proposal(store._read(f"proposals/{batch_sha}.json"))
@@ -675,6 +774,8 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 closed = work.close_stage(permit, replace(actual, wall_seconds=float(adapter.monotonic() - before)),
                     status="failed" if failure else "passed")
             if child is not None and closed.allowed:
+                child = MaterializedNumericalChildV2.from_payload(
+                    store._object(_persist(store, child.to_payload(adapter.tasks))), adapter.tasks)
                 children[genome.fingerprint()] = child
                 child_states[genome.fingerprint()] = candidate_state
                 attempted[-1] = (proposal.operator, genome.fingerprint())
@@ -695,6 +796,9 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                         config.kernel_protocol.split_manifest, config.kernel_protocol.fingerprint())
                     advanced, task_results, reason = _rung(kernel, work, hyperband, manifest, children, adapter, config, cache)
                     if advanced is None:
+                        if hasattr(work, "partial_rung"):
+                            _persist(store, {"closed_partial_rung": work.partial_rung})
+                            del work.partial_rung
                         budget_blocked = reason not in {"invalid_response", "timeout"}
                         break
                     _persist(store, manifest)
@@ -715,20 +819,40 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 task_rows = [row.evaluation for row in cache.values() if row.evaluation.genome_sha256 == evaluation.genome_sha256
                              and cell in row.evaluation.cells]
                 cell_eval = _aggregate(task_rows, hyperband.rungs[-1].manifest, hyperband.bracket.name, len(hyperband.rungs) - 1)
-                entries.append(NumericalQDEntryV2(1, evaluation.genome_sha256, evaluation.fingerprint(), cell,
+                subset = {"schema_version": 1, "kind": "cell_subset", "cell": cell.to_payload(),
+                    "parent_manifest_sha256": hyperband.rungs[-1].manifest.fingerprint(),
+                    "split_sha256": evaluation.split_sha256, "protocol_sha256": evaluation.protocol_fingerprint,
+                    "task_ids": list(cell_eval.task_ids), "tasks": [task.to_payload() for task in
+                        sorted(hyperband.rungs[-1].manifest.tasks, key=lambda task: task.task_id)
+                        if task.task_id in cell_eval.task_ids]}
+                cell_eval = replace(cell_eval, task_subset_sha256=_persist(store, subset), cells=(cell,))
+                _persist(store, cell_eval)
+                entries.append(NumericalQDEntryV2(1, evaluation.genome_sha256, cell_eval.fingerprint(), cell,
                     cell_eval.task_ids, cell_eval.objectives, cell_eval.constraints, evaluation.train_diagnostic_categories))
         if entries:
             archive = archive.insert(entries)
             for entry in sorted(entries, key=lambda item: item.fingerprint()):
                 store.append_qd_entry(entry)
         for operator, genome_sha in attempted:
-            feasible = any(e.genome_sha256 == genome_sha and e.constraints.feasible for e in evaluations)
+            feasible = any(e.genome_sha256 == genome_sha and e.constraints.feasible
+                for rung in hyperband.rungs for e in rung.evaluations)
+            promoted = any(genome_sha in rung.survivor_sha256s
+                and any(e.genome_sha256 == genome_sha and e.constraints.feasible for e in rung.evaluations)
+                for rung in hyperband.rungs)
             inserted = any(e.genome_sha256 == genome_sha for e in entries)
             feedback = TrainMutationFeedbackV2("train", operator,
-                feasible, feasible, inserted, ())
-            state = record_train_outcome(state, feedback.to_payload())
-            _persist(store, state.mutation_policy)
-            _persist(store, state.proposer_prompt)
+                feasible, promoted, inserted, ())
+            updated = record_train_outcome(state, feedback.to_payload())
+            credit_bytes = sum(len(value.canonical_bytes()) for value in (updated.mutation_policy, updated.proposer_prompt)
+                if not (store.directory / f"objects/{value.fingerprint()}.json").exists())
+            if kernel.budget.can_open_stage(ResourceUse(artifact_bytes=credit_bytes)).allowed:
+                _persist(store, updated.mutation_policy)
+                _persist(store, updated.proposer_prompt)
+                state = updated
+            else:
+                # Train feedback remains in the closed generation record. A new
+                # evolvable policy cannot be produced after its admission limit.
+                budget_blocked = True
         _persist(store, archive)
         checkpoint_state()
         candidates = tuple(NumericalQDEntryV2(1, value.genome_sha256, value.fingerprint(), value.cells[0],
@@ -758,7 +882,16 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                     parent_genome, parent_sources, parent_policies = store.verify_candidate(active_genome.fingerprint())
                     adapter.sources = dict(adapter.sources) | {sha: data.decode() for sha, data in parent_sources.items()}
                     active_state = _state_for(store, parent_genome, config, seed_state.declared_cells)
-                    parent_name = adapter._recipe(_canonical_member(active_state), parent_policies, None, None).name
+                    if active.generation == 0:
+                        # The imported seed Bundle executes its protected
+                        # anchor. Its proposal inventory is not an accepted
+                        # Child and cannot redefine the active Parent forecast.
+                        names = {parent_registry.package_for(task).protected_baseline.name for task in adapter.tasks}
+                        if len(names) != 1:
+                            raise ValueError("seed Parent has no unique exact anchor execution")
+                        parent_name = names.pop()
+                    else:
+                        parent_name = adapter._recipe(_canonical_member(active_state), parent_policies, None, None).name
                     comparison = _dev_compare(parent_registry, frozen_registry, parent_name,
                         children[winner].fit.recipe.name, adapter, kernel, account_dev)
                 except (ValueError, TypeError, TimeoutError, MethodForecastError):
@@ -767,7 +900,11 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                     evaluation = next(value for value in evaluations if value.genome_sha256 == winner)
                     closed = kernel.close_evaluation(active, candidate, permit=permit, status="passed" if count == 40 else "failed",
                         train_objectives=evaluation.objectives.to_payload(),
-                        train_behavior_descriptors={"numerical_artifacts_sha256": pair_sha}, dev_comparison=comparison,
+                        train_behavior_descriptors={"numerical_artifacts_sha256": pair_sha,
+                            "numerical_winner_genome_sha256": winner,
+                            "numerical_train_evaluation_sha256": evaluation.fingerprint(),
+                            "numerical_winner_materialized_sha256": fingerprint_payload(children[winner].to_payload(adapter.tasks))},
+                        dev_comparison=comparison,
                         resource_use=ResourceUse(task_executions=count, wall_seconds=float(adapter.monotonic() - before)))
                     previous = active
                     active = kernel.evaluate_transition(previous, candidate, target="numerical", evaluation=closed, permit=permit)

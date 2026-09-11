@@ -22,13 +22,13 @@ from tests.test_package_numerical_evolution import _evolution_tasks, _supply_par
 from tests.test_evolution_v2_kernel import kernel, child
 
 
-def fixture(seed=7, *, task_budget=1840, provider="deterministic", clock=None, raw_seed=False):
+def fixture(seed=7, *, task_budget=1840, provider="deterministic", clock=None, raw_seed=False, reverse_entities=False):
     tasks = []
     for i, task in enumerate(_evolution_tasks()):
         history = (float(i),) * 20 if i < 40 else task.numeric.history_values
         tasks.append(replace(task, numeric=replace(task.numeric,
             history_values=history, future_values=(history[-1] + 1.0,) * 2,
-            entity_name=f"entity-{i // 2:03d}")))
+            entity_name=f"entity-{(99 - i) // 2 if reverse_entities else i // 2:03d}")))
     tasks = tuple(tasks)
     folds = build_group_fold_manifest(tuple(t.numeric for t in tasks[:80]), seed=20260903)
     screen = screening_policy()
@@ -62,6 +62,264 @@ def files(root):
 def run_fixture(root, **kwargs):
     options = {key: kwargs.pop(key) for key in tuple(kwargs) if key in {"seed", "task_budget", "provider", "clock"}}
     return run_numerical_qd(root, *fixture(**options), **kwargs)
+
+
+@pytest.mark.parametrize("ancestor", [False, True])
+def test_fresh_run_rejects_symlink_without_external_writes(tmp_path, ancestor):
+    config, supply, manifest, adapter = fixture(raw_seed=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(outside, target_is_directory=True)
+    output = link / "child" if ancestor else link
+    before = files(outside)
+    with pytest.raises(ValueError):
+        run_numerical_qd(output, config, supply, manifest, adapter)
+    assert files(outside) == before
+    assert not tuple(outside.iterdir())
+
+
+def test_fresh_source_overlap_is_rejected_before_output_creation(tmp_path, monkeypatch):
+    from evolving_loop.v2.numerical_qd import persistence
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    monkeypatch.setattr(persistence, "__file__", str(repository / "evolving_loop/v2/numerical_qd/persistence.py"))
+    config, supply, manifest, adapter = fixture(raw_seed=True)
+    output = repository / "numerical_agent/new-run"
+    with pytest.raises(ValueError):
+        run_numerical_qd(output, config, supply, manifest, adapter)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("boundary", ["tasks", "deadline", "reporter", "failure"])
+def test_raw_bootstrap_stops_before_next_dispatch_and_closes_receipt(tmp_path, boundary):
+    from evolving_loop.v2.numerical_qd.adapters import NumericalWorkStopped
+    config, supply, manifest, adapter = fixture(task_budget=1 if boundary == "tasks" else 5000, raw_seed=True)
+    calls = 0
+    class LimitedStore(CheapStore):
+        def forecast(self, *args):
+            nonlocal calls
+            calls += 1
+            if boundary == "deadline":
+                adapter.monotonic.advance(config.budget.search_deadline_seconds + 1.0)
+            if boundary == "failure":
+                raise NumericalWorkStopped("trusted execution stopped")
+            return super().forecast(*args)
+    adapter.materializer.forecast_store = LimitedStore()
+    if boundary == "reporter":
+        adapter.resource_kinds = ("gpu_seconds",)
+        adapter.resource_reporter_sha256 = "9" * 64
+        adapter.resource_reporter = lambda: ResourceUse(gpu_seconds=float(calls) * (config.budget.ceilings.gpu_seconds + 1.0))
+    with pytest.raises(ValueError, match="bootstrap"):
+        run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter)
+    assert calls == 1
+    receipt = json.loads((tmp_path / "run/seed_bootstrap_receipt.json").read_bytes())
+    assert receipt["resource_use"]["task_executions"] == 1
+    assert receipt["budget_after"]["open_reservations"] == []
+    assert len(receipt["budget_after"]["closed_reservation_sha256s"]) == 1
+    assert receipt["status"] in {"stopped", "failed"}
+    assert not (tmp_path / "run/evaluation_complete.json").exists()
+    assert not (tmp_path / "run/numerical_qd").exists()
+
+
+def test_dev_missing_exact_member_fails_closed_instead_of_anchor_substitution(tmp_path):
+    from evolving_loop.v2.numerical_qd.runner import _dev_compare
+    from types import SimpleNamespace
+    config, supply, _, adapter = fixture()
+    registry = supply.envelope.restore(adapter.tasks)
+    kernel = SimpleNamespace(budget=SimpleNamespace(elapsed_wall_seconds=0.0, plan=config.budget))
+    with pytest.raises(ValueError, match="exact.*member"):
+        _dev_compare(registry, registry, "missing_parent", "missing_winner", adapter, kernel, lambda: None)
+
+
+@pytest.mark.parametrize("reverse_entities", [False, True])
+def test_cell_entry_binds_its_exact_persisted_subset_evaluation(tmp_path, reverse_entities):
+    run_numerical_qd(tmp_path / "run", *fixture(task_budget=920, reverse_entities=reverse_entities), stop_after=1)
+    root = tmp_path / "run/numerical_qd"
+    entries = [json.loads(line)["entry"] for line in (root / "archive/entries.jsonl").read_bytes().splitlines()]
+    assert len(entries) >= 2
+    for entry in entries:
+        evaluation = json.loads((root / f"objects/{entry['evaluation_sha256']}.json").read_bytes())
+        assert evaluation["task_ids"] == entry["task_ids"]
+        assert evaluation["objectives"] == entry["objectives"]
+        assert evaluation["cells"] == [entry["cell"]]
+        subset = json.loads((root / f"objects/{evaluation['task_subset_sha256']}.json").read_bytes())
+        assert subset["task_ids"] == entry["task_ids"]
+
+
+def test_freeze_rehydrates_all_occupied_archive_genomes_across_generations(tmp_path, monkeypatch):
+    from evolving_loop.v2.numerical_qd import runner
+    original = runner.freeze_qd_supply
+    generations = []
+    def freeze(adapter, release, registry, archive, children, **kwargs):
+        children = tuple(children)
+        required = {archive.entries[sha].genome_sha256 for cell in archive.cells for sha in cell.entry_sha256s}
+        assert required <= {child.genome.fingerprint() for child in children}
+        generations.append({child.genome.generation for child in children})
+        return original(adapter, release, registry, archive, children, **kwargs)
+    monkeypatch.setattr(runner, "freeze_qd_supply", freeze)
+    run_fixture(tmp_path / "run", stop_after=1)
+    run_fixture(tmp_path / "run", resume=True)
+    assert any(1 in generations_ and 2 in generations_ for generations_ in generations)
+
+
+def test_train_credit_uses_completed_early_rungs_and_actual_survivors(tmp_path):
+    config, supply, manifest, adapter = fixture(task_budget=2472, provider="hybrid")
+    payload = config.to_payload()
+    payload["mutation"]["operators"] = ["add"]
+    config = NumericalQDConfigV2.from_payload(payload)
+    result = run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter, ThreeChildren("legal"), stop_after=1)
+    policy = json.loads((tmp_path / f"run/numerical_qd/objects/{result.mutation_policy_sha256}.json").read_bytes())
+    assert policy["operators"]["add"]["attempts"] == 3
+    assert policy["operators"]["add"]["feasible"] == 3
+    assert policy["operators"]["add"]["promotions"] == 2
+    assert policy["operators"]["add"]["insertions"] == 0
+
+
+def test_timed_out_rung_keeps_completed_rows_under_closed_partial_authority(tmp_path, monkeypatch):
+    from evolving_loop.v2.numerical_qd import runner
+    config, supply, manifest, adapter = fixture(task_budget=920)
+    original = runner.evaluate_numerical_child
+    calls = 0
+    def evaluate(*args, **kwargs):
+        nonlocal calls
+        value = original(*args, **kwargs)
+        calls += 1
+        if calls == 2:
+            adapter.monotonic.advance(config.adapter["task_timeout_seconds"])
+        return value
+    monkeypatch.setattr(runner, "evaluate_numerical_child", evaluate)
+    result = run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter, stop_after=1)
+    root = tmp_path / "run/numerical_qd"
+    partial = [json.loads(path.read_bytes())["closed_partial_rung"] for path in (root / "objects").glob("*.json")
+               if "closed_partial_rung" in json.loads(path.read_bytes())]
+    assert len(partial) == 1
+    assert len(partial[0]["task_results"]) == 2
+    assert partial[0]["reason"] == "timeout"
+    assert not list((root / "rungs").glob("*.json"))
+    assert result.accepted_steps == result.occupied_cells == 0
+    before = files(tmp_path / "run")
+    run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter, resume=True, stop_after=1)
+    assert files(tmp_path / "run") == before
+
+
+def test_all_evolvable_material_bytes_are_charged_once_but_authority_is_excluded(tmp_path):
+    result = run_fixture(tmp_path / "run", task_budget=920, stop_after=1)
+    root = tmp_path / "run/numerical_qd"
+    material = list((root / "sources").glob("*.py")) + list((root / "proposals").glob("*.json"))
+    for path in (root / "objects").glob("*.json"):
+        value = json.loads(path.read_bytes())
+        if ("checkpoint_sha256" in value or "numerical_qd_step" in value
+                or "closed_partial_rung" in value
+                or ("candidate_sha256s" in value and "rungs" in value)
+                or ("cells" in value and "insertion_log" in value)
+                or ("archive_snapshot_sha256" in value and "numerical_release_sha256" in value)):
+            continue
+        material.append(path)
+    material.extend((root / "results").rglob("*.json"))
+    assert result.budget["charged_use"]["artifact_bytes"] == sum(path.stat().st_size for path in material)
+    before = files(tmp_path / "run")
+    resumed = run_fixture(tmp_path / "run", task_budget=920, resume=True, stop_after=1)
+    assert resumed.budget == result.budget
+    assert files(tmp_path / "run") == before
+
+
+def test_interrupted_bootstrap_resumes_closed_forecast_cache_without_recharging(tmp_path, monkeypatch):
+    from evolving_loop.v2.kernel import SeedBootstrapAuthority
+    config, supply, manifest, adapter = fixture(task_budget=5000, raw_seed=True)
+    original = SeedBootstrapAuthority.forecast
+    calls = 0
+    class CountedStore(CheapStore):
+        def forecast(self, *args):
+            nonlocal calls
+            calls += 1
+            return super().forecast(*args)
+    adapter.materializer.forecast_store = CountedStore()
+    def interrupted(authority, *args):
+        result = original(authority, *args)
+        if calls == 3:
+            raise KeyboardInterrupt("process stopped between closed forecasts")
+        return result
+    monkeypatch.setattr(SeedBootstrapAuthority, "forecast", interrupted)
+    with pytest.raises((ValueError, KeyboardInterrupt)):
+        run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter, stop_after=1)
+    assert calls == 3
+    assert not (tmp_path / "run/seed_bootstrap_receipt.json").exists()
+    monkeypatch.setattr(SeedBootstrapAuthority, "forecast", original)
+    result = run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter, resume=True, stop_after=1)
+    assert calls == 1200  # 800 bootstrap + 400 protected-anchor child dispatches; no replayed 3.
+    assert result.budget["charged_use"]["task_executions"] == 1720
+    assert result.accepted_steps == 1
+    assert not result.budget["open_reservations"]
+
+
+def test_bootstrap_resume_rejects_cache_symlink_before_reading_it(tmp_path, monkeypatch):
+    from pathlib import Path
+    config, supply, manifest, adapter = fixture(task_budget=1, raw_seed=True)
+    with pytest.raises(ValueError, match="bootstrap"):
+        run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter)
+    cached = next((tmp_path / "run/seed_bootstrap_cache").glob("*.json"))
+    outside = tmp_path / "outside.json"
+    cached.replace(outside)
+    cached.symlink_to(outside)
+    original = Path.read_bytes
+    opened = []
+    def read(path):
+        if path == cached:
+            opened.append(path)
+        return original(path)
+    monkeypatch.setattr(Path, "read_bytes", read)
+    with pytest.raises(ValueError):
+        run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter, resume=True)
+    assert opened == []
+
+
+@pytest.mark.parametrize("mismatch", [False, True])
+def test_kernel_typed_promotion_binds_full_train_evaluation_and_exact_winner(tmp_path, mismatch):
+    result = run_fixture(tmp_path / "run", task_budget=920, stop_after=1)
+    assert result.accepted_steps == 1
+    root = tmp_path / "run"
+    records = [json.loads(path.read_bytes()) for path in (root / "evaluations").glob("*/train.json")]
+    train = next(row for row in records if "numerical_artifacts_sha256" in row["train_behavior_descriptors"])
+    bindings = train["train_behavior_descriptors"]
+    if mismatch:
+        kernel = EvolutionKernel.resume(V2RunStore(root), fixture(task_budget=920)[0].budget, monotonic=lambda: 0.0)
+        changed = train | {"train_behavior_descriptors": bindings | {"numerical_winner_genome_sha256": "f" * 64}}
+        with pytest.raises(KernelAuthorityError, match="winner"):
+            kernel._numerical_release_references(result.active_bundle, changed)
+        return
+    pair = json.loads((root / f"numerical_qd/objects/{bindings['numerical_artifacts_sha256']}.json").read_bytes())
+    winner = bindings.get("numerical_winner_genome_sha256")
+    assert winner is not None
+    assert pair["supply"]["source_fingerprints"]["train_winner"] == winner
+    evaluation = json.loads((root / f"numerical_qd/objects/{bindings['numerical_train_evaluation_sha256']}.json").read_bytes())
+    assert evaluation["genome_sha256"] == winner
+    assert len(evaluation["task_ids"]) == 80
+    assert evaluation["objectives"] == train["train_objectives"]
+
+
+def test_bootstrap_resume_rejects_unclosed_dispatch_after_last_closed_segment(tmp_path, monkeypatch):
+    from evolving_loop.v2.numerical_qd import runner
+    from evolving_loop.v2.contracts import fingerprint_payload
+    from evolving_loop.v2.store import write_once_json
+    config, supply, manifest, adapter = fixture(task_budget=5000, raw_seed=True)
+    original = runner.SeedBootstrapAuthority.forecast
+    def interrupted(authority, *args):
+        value = original(authority, *args)
+        raise KeyboardInterrupt("closed forecast then process pause")
+    monkeypatch.setattr(runner.SeedBootstrapAuthority, "forecast", interrupted)
+    with pytest.raises((ValueError, KeyboardInterrupt)):
+        run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter)
+    segment = next((tmp_path / "run/seed_bootstrap_segments").glob("*.json"))
+    orphan = {"kind": "admission", "sequence": 0, "previous_sha256": segment.stem,
+              "arguments": ["seasonal_naive", [1.0], 2, "D"], "charged_use": ResourceUse(task_executions=1).to_payload()}
+    write_once_json(tmp_path / f"run/seed_bootstrap/{fingerprint_payload(orphan)}.json", orphan)
+    before = files(tmp_path / "run")
+    preflight = json.loads((tmp_path / "run/seed_bootstrap_preflight.json").read_bytes())
+    with pytest.raises(ValueError, match="bootstrap.*(open|unclosed|unreferenced)"):
+        runner.SeedBootstrapAuthority.resume(V2RunStore(tmp_path / "run"), config.kernel_protocol, config.budget,
+            preflight["input_sha256s"], monotonic=adapter.monotonic)
+    assert files(tmp_path / "run") == before
 
 
 def test_qd_runner_evolves_supply_policy_and_prompt(tmp_path):
@@ -313,7 +571,11 @@ def test_task_timeout_closes_actual_partial_work_without_a_rung(tmp_path, monkey
     assert result.budget["charged_use"]["task_executions"] == 801
     assert result.budget["charged_use"]["wall_seconds"] == 0.02
     assert not list((tmp_path / "run/numerical_qd/rungs").glob("*.json"))
-    assert not list((tmp_path / "run/numerical_qd/results").rglob("*.json"))
+    assert len(list((tmp_path / "run/numerical_qd/results").rglob("*.json"))) == 1
+    partial = [json.loads(path.read_bytes())["closed_partial_rung"] for path in
+               (tmp_path / "run/numerical_qd/objects").glob("*.json")
+               if "closed_partial_rung" in json.loads(path.read_bytes())]
+    assert len(partial) == 1 and len(partial[0]["task_results"]) == 1
     assert result.occupied_cells == result.accepted_steps == 0
     assert not result.budget["open_reservations"]
 
@@ -323,18 +585,46 @@ def test_finalization_reserve_before_proposal_never_opens_work(tmp_path, monkeyp
     config, supply, manifest, adapter = fixture(task_budget=920)
     original = NumericalQDRunStore.write_state
     count = 0
+    initial, material_sizes = {}, []
     def checkpoint(*args, **kwargs):
         nonlocal count
         value = original(*args, **kwargs)
         count += 1
         if count == 1:
+            initial.update(json.loads((tmp_path / "run/checkpoint.json").read_bytes()))
+            root = tmp_path / "run/numerical_qd"
+            material_sizes.extend(path.stat().st_size for path in (root / "sources").glob("*.py"))
+            for path in (root / "objects").glob("*.json"):
+                payload = json.loads(path.read_bytes())
+                if ("checkpoint_sha256" in payload or "numerical_qd_step" in payload
+                        or "closed_partial_rung" in payload
+                        or ("candidate_sha256s" in payload and "rungs" in payload)
+                        or ("cells" in payload and "insertion_log" in payload)
+                        or ("archive_snapshot_sha256" in payload and "numerical_release_sha256" in payload)):
+                    continue
+                material_sizes.append(path.stat().st_size)
             adapter.monotonic.advance(config.budget.search_deadline_seconds)
         return value
     monkeypatch.setattr(NumericalQDRunStore, "write_state", checkpoint)
     result = run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter)
-    assert result.budget["charged_use"] == ResourceUse().to_payload()
-    assert result.budget["closed_reservation_sha256s"] == []
+    assert material_sizes and result.budget["charged_use"] == ResourceUse(artifact_bytes=sum(material_sizes)).to_payload()
+    final = json.loads((tmp_path / "run/checkpoint.json").read_bytes())
+    assert final["budget_closures"] == initial["budget_closures"]
+    assert result.budget["closed_reservation_sha256s"] == initial["budget"]["closed_reservation_sha256s"]
+    assert set(final["budget_closures"]) == set(result.budget["closed_reservation_sha256s"])
+    assert not result.budget["open_reservations"]
+    actual_sizes = []
+    for reservation, reference in final["budget_closures"].items():
+        closure = json.loads((tmp_path / f"run/evaluations/{reference['candidate_bundle_sha256']}/budget_closure.json").read_bytes())
+        assert closure["reservation_sha256"] == reservation and closure["allowed"]
+        size = closure["resource_use"]["artifact_bytes"]
+        assert closure["resource_use"] == ResourceUse(artifact_bytes=size).to_payload()
+        actual_sizes.append(size)
+    assert sorted(actual_sizes) == sorted(material_sizes)
     assert not list((tmp_path / "run/numerical_qd/proposals").glob("*.json"))
+    assert not list((tmp_path / "run/numerical_qd/rungs").glob("*.json"))
+    assert not list((tmp_path / "run/numerical_qd/results").rglob("*.json"))
+    assert not final["completed_transitions"]
 
 
 def test_sources_policy_and_proposal_are_persisted_before_atomic_mutation(tmp_path, monkeypatch):
@@ -475,11 +765,16 @@ def test_successful_materialization_exact_dispatch_charge(tmp_path):
 
 
 def freeze_material_bytes(root, seed_sha):
-    total = sum(path.stat().st_size for path in (root / "numerical_qd/proposals").glob("*.json"))
+    total = sum(path.stat().st_size for folder in ("proposals", "sources", "results")
+                for path in (root / "numerical_qd" / folder).rglob("*") if path.is_file())
     for path in (root / "numerical_qd/objects").glob("*.json"):
         payload = json.loads(path.read_bytes())
-        if set(payload) == {"supply", "registry"} and payload["registry"]["release_sha256"] != seed_sha:
-            total += path.stat().st_size
+        if ("checkpoint_sha256" in payload or "numerical_qd_step" in payload or "closed_partial_rung" in payload
+                or ("candidate_sha256s" in payload and "rungs" in payload)
+                or ("cells" in payload and "insertion_log" in payload)
+                or ("archive_snapshot_sha256" in payload and "numerical_release_sha256" in payload)):
+            continue
+        total += path.stat().st_size
     return total
 
 
@@ -566,6 +861,23 @@ def test_raw_seed_bootstrap_is_precommitted_charged_and_never_replayed(tmp_path,
         adapter.materializer.forecast_store = CheapStore()
         return result
     monkeypatch.setattr(runner, "_seed_registry", seed_registry)
+    if mode != "success":
+        with pytest.raises(ValueError, match="bootstrap"):
+            run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter, stop_after=1)
+        assert calls == 1
+        receipt = json.loads((tmp_path / "run/seed_bootstrap_receipt.json").read_bytes())
+        assert receipt["resource_use"]["task_executions"] == 1
+        assert receipt["resource_use"]["wall_seconds"] == (config.budget.search_deadline_seconds + 1.0 if mode == "deadline" else 0.0)
+        assert not receipt["budget_after"]["open_reservations"]
+        assert not (tmp_path / "run/accepted_bundle.json").exists()
+        assert not (tmp_path / "run/run_manifest.json").exists()
+        assert not (tmp_path / "run/evaluation_complete.json").exists()
+        before = files(tmp_path / "run")
+        with pytest.raises(ValueError, match="bootstrap"):
+            run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter, resume=True)
+        assert calls == 1
+        assert files(tmp_path / "run") == before
+        return
     result = run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter, stop_after=1)
     assert calls > 0
     assert result.budget["charged_use"]["task_executions"] == calls + (920 if mode == "success" else 0)
@@ -610,7 +922,7 @@ def test_raw_seed_preflight_zero_budget_never_opens_a_forecast(tmp_path):
 
 def test_bootstrap_authority_cannot_be_removed_from_the_kernel_manifest(tmp_path):
     from evolving_loop.v2.contracts import canonical_v2_bytes
-    config, supply, manifest, adapter = fixture(task_budget=1, raw_seed=True)
+    config, supply, manifest, adapter = fixture(task_budget=800, raw_seed=True)
     run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter)
     path = tmp_path / "run/run_manifest.json"
     payload = json.loads(path.read_bytes())

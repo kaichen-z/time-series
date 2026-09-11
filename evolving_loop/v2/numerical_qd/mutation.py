@@ -155,9 +155,10 @@ def apply_mutation(parent: MutationStateV2, proposal: MutationProposalV2) -> Mut
         if child.status != "active":
             raise ValueError("new child must be active")
         if op == "repair":
-            members[members.index(by_id[values["member_id"]])] = child
-        else:
-            members.append(child)
+            members.remove(by_id[values["member_id"]])
+        # Inventory order is part of the genome commitment. The mutated
+        # executable owns the first slot, so add/fork can never score a Parent.
+        members.insert(0, child)
     else:
         target = by_id[values["member_id"]]
         index = members.index(target)
@@ -169,7 +170,8 @@ def apply_mutation(parent: MutationStateV2, proposal: MutationProposalV2) -> Mut
             cells = tuple(values["applicability_cells"])
             if not set(cells) < set(target.applicability_cells):
                 raise ValueError("specialize must strictly narrow applicability")
-            members[index] = replace(target, status="specialized", applicability_cells=cells)
+            members.pop(index)
+            members.insert(0, replace(target, status="specialized", applicability_cells=cells))
     inventory = NumericalInventoryV2(1, members)
     # Preserve every previously executable cell, not just the active-member count.
     covered_before = {cell for m in parent.inventory.members if m.status != "quarantined" for cell in m.applicability_cells}

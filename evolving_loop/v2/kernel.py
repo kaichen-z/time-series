@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 
 from common.payload import strict_json_loads
@@ -34,11 +34,231 @@ from .contracts import (
     fingerprint_payload,
     require_sha256,
 )
-from .store import V2RunStore, write_atomic_json
+from .store import V2RunStore, write_atomic_json, write_once_json
 
 
 class KernelAuthorityError(ValueError):
     """A transition or durable authority binding failed verification."""
+
+
+class SeedBootstrapStopped(BaseException):
+    """A Host-only pre-seed stop, outside legacy forecast error recovery."""
+
+
+class SeedBootstrapAuthority:
+    """First-class pre-seed issuer; no Bundle/acceptance authority is available.
+
+    Admissions and forecast outputs are immutable hash-linked records. One
+    reservation is closed in finally even when no seed registry can be built.
+    Only this exact live issuer can transfer its closed initial charge to Kernel.
+    """
+
+    def __init__(self, store, protocol, plan, preflight, *, monotonic):
+        self.store, self.protocol = store, protocol
+        self.budget = BudgetLedger(plan, monotonic=monotonic)
+        self.preflight = preflight
+        self.identity = fingerprint_payload(preflight)
+        self.estimate = ResourceUse.from_payload(preflight["estimate"])
+        if self.estimate.task_executions == 0 or not self.budget.can_open_stage(self.estimate).allowed:
+            raise KernelAuthorityError("seed bootstrap preflight budget denied")
+        self.permit = self.budget.reserve_stage("seed_bootstrap:" + self.identity, self.estimate)
+        write_once_json(store.root / "seed_bootstrap_preflight.json", preflight)
+        self.actual = ResourceUse(artifact_bytes=len(canonical_v2_bytes(preflight)))
+        self.events, self.head, self.receipt = [], self.identity, None
+        self.previous_receipt_sha256, self.segment_index = None, 0
+        self.replay, self.replay_index, self.start_elapsed = [], 0, 0.0
+        self.adopted = False
+
+    @classmethod
+    def resume(cls, store, protocol, plan, inputs, *, monotonic):
+        preflight = _read(store.root / "seed_bootstrap_preflight.json")
+        identity = fingerprint_payload(preflight)
+        if preflight["input_sha256s"] != inputs or preflight["protocol_sha256"] != protocol.fingerprint():
+            raise KernelAuthorityError("seed bootstrap resume identity mismatch")
+        segments = {_read(path)["segment_index"]: path for path in (store.root / "seed_bootstrap_segments").glob("*.json")}
+        if not segments:
+            raise KernelAuthorityError("seed bootstrap has an open interrupted dispatch; terminal new epoch required")
+        last_path = segments[max(segments)]
+        last = cls.verify(store, plan, identity, last_path.stem, terminal=False)
+        cls.verify_inventory(store, last_path.stem)
+        if (store.root / "seed_bootstrap_receipt.json").exists():
+            final = _read(store.root / "seed_bootstrap_receipt.json")
+            cls.verify(store, plan, identity, fingerprint_payload(final))
+            raise KernelAuthorityError("seed bootstrap is terminal without a complete registry")
+        if last["status"] != "interrupted" or not last["allowed"]:
+            raise KernelAuthorityError("seed bootstrap cannot resume terminal work")
+        result = cls.__new__(cls)
+        result.store, result.protocol, result.preflight, result.identity = store, protocol, preflight, identity
+        result.budget = BudgetLedger.resume(plan, last["budget_after"], monotonic=monotonic)
+        result.start_elapsed = result.budget.elapsed_wall_seconds
+        remaining = {name: max(0.0 if type(limit) is float else 0, limit - getattr(result.budget.charged_use, name))
+                     for name, limit in plan.ceilings.to_payload().items()}
+        remaining["wall_seconds"] = min(remaining["wall_seconds"], max(0.0, plan.search_deadline_seconds - result.start_elapsed) / 2.0)
+        result.estimate = ResourceUse.from_payload(remaining)
+        if result.estimate.task_executions == 0 or not result.budget.can_open_stage(result.estimate).allowed:
+            raise KernelAuthorityError("seed bootstrap remaining budget exhausted")
+        result.segment_index, result.previous_receipt_sha256 = last["segment_index"] + 1, last_path.stem
+        result.events, result.head, result.receipt = [], last_path.stem, None
+        result.actual, result.adopted = ResourceUse(), False
+        result.replay, result.replay_index = [], 0
+        for index in range(result.segment_index):
+            segment = _read(segments[index])
+            admissions = {}
+            for sha in segment["events"]:
+                event = _read(store.root / "seed_bootstrap" / f"{sha}.json", sha)
+                if event["kind"] == "admission":
+                    admissions[sha] = event["arguments"]
+                else:
+                    cached = _read(store.root / "seed_bootstrap_cache" / f"{event['cache_sha256']}.json", event["cache_sha256"])
+                    if cached["status"] != "passed":
+                        raise KernelAuthorityError("seed bootstrap failed dispatch is terminal")
+                    result.replay.append((admissions[cached["admission_sha256"]], cached["forecast"]))
+        # Verify every immutable record before opening this new segment.
+        result.permit = result.budget.reserve_stage("seed_bootstrap:" + identity + f":{result.segment_index}", result.estimate)
+        return result
+
+    def account(self, use, *, begun=False):
+        next_use = self.actual + use
+        if begun:
+            self.actual = next_use
+        if (self.budget.elapsed_wall_seconds >= self.budget.plan.search_deadline_seconds
+                or self.budget.elapsed_wall_seconds - self.start_elapsed >= self.estimate.wall_seconds
+                or any(getattr(next_use, name) > getattr(self.estimate, name) for name in ResourceUse.field_names())):
+            raise SeedBootstrapStopped("seed bootstrap resource boundary")
+        self.actual = next_use
+
+    def event(self, payload):
+        value = {"sequence": len(self.events), "previous_sha256": self.head, **payload}
+        sha = fingerprint_payload(value)
+        write_once_json(self.store.root / "seed_bootstrap" / f"{sha}.json", value)
+        self.events.append(sha)
+        self.head = sha
+        return sha
+
+    def forecast(self, adapter, *args):
+        # Admission is published before crossing the task boundary. Forecast
+        # payloads are billable material; admission/receipt records are control.
+        if self.replay_index < len(self.replay):
+            expected, forecast = self.replay[self.replay_index]
+            if canonical_v2_bytes({"arguments": list(args)}) != canonical_v2_bytes({"arguments": expected}):
+                raise SeedBootstrapStopped("seed bootstrap replay dispatch binding mismatch")
+            self.replay_index += 1
+            return list(forecast)
+        self.account(ResourceUse(task_executions=1))
+        admission = self.event({"kind": "admission", "arguments": list(args),
+                                "charged_use": self.actual.to_payload()})
+        result, status = None, "failed"
+        try:
+            result = list(adapter.forecast_trusted(*args, account_work=self.account))
+            status = "passed"
+            return result
+        finally:
+            value = {"admission_sha256": admission, "status": status, "forecast": result}
+            sha = fingerprint_payload(value)
+            path = write_once_json(self.store.root / "seed_bootstrap_cache" / f"{sha}.json", value)
+            self.event({"kind": "closed_forecast", "cache_sha256": sha})
+            self.account(ResourceUse(artifact_bytes=path.stat().st_size), begun=True)
+
+    def close(self, status, reason=None):
+        if self.receipt is not None:
+            raise KernelAuthorityError("seed bootstrap is already closed")
+        self.actual = replace(self.actual, wall_seconds=self.budget.elapsed_wall_seconds - self.start_elapsed)
+        before = self.budget.checkpoint()
+        outcome = self.budget.close_stage(self.permit, self.actual)
+        self.receipt = {"schema_version": 1, "preflight_sha256": self.identity,
+            "segment_index": self.segment_index, "previous_receipt_sha256": self.previous_receipt_sha256,
+            "status": status, "reason": reason, "events": self.events, "chain_sha256": self.head,
+            "resource_use": self.actual.to_payload(), "reservation_sha256": self.permit.reservation_sha256,
+            "allowed": outcome.allowed, "closure_reason": outcome.reason,
+            "budget_before": before, "budget_after": self.budget.checkpoint()}
+        identity = fingerprint_payload(self.receipt)
+        write_once_json(self.store.root / "seed_bootstrap_segments" / f"{identity}.json", self.receipt)
+        if status != "interrupted":
+            write_once_json(self.store.root / "seed_bootstrap_receipt.json", self.receipt)
+        self.verify(self.store, self.budget.plan, self.identity, identity, terminal=status != "interrupted")
+        return self.receipt
+
+    @staticmethod
+    def verify(store, plan, preflight_sha, receipt_sha, *, terminal=True):
+        preflight = _read(store.root / "seed_bootstrap_preflight.json", preflight_sha)
+        receipt = _read(store.root / "seed_bootstrap_segments" / f"{receipt_sha}.json", receipt_sha)
+        if terminal and _read(store.root / "seed_bootstrap_receipt.json", receipt_sha) != receipt:
+            raise KernelAuthorityError("seed bootstrap final receipt mismatch")
+        _require_exact_schema(receipt, ("schema_version", "preflight_sha256", "status", "reason", "events",
+            "chain_sha256", "resource_use", "reservation_sha256", "allowed", "closure_reason",
+            "budget_before", "budget_after", "segment_index", "previous_receipt_sha256"), field="seed bootstrap receipt")
+        if (receipt["schema_version"] != 1 or receipt["preflight_sha256"] != preflight_sha
+                or receipt["status"] not in {"passed", "failed", "stopped", "interrupted"}
+                or preflight["budget_plan_sha256"] != plan.fingerprint()):
+            raise KernelAuthorityError("seed bootstrap receipt identity mismatch")
+        replay = BudgetLedger.resume(plan, receipt["budget_before"], monotonic=lambda: 0.0)
+        segment_index = receipt["segment_index"]
+        if type(segment_index) is not int or segment_index < 0:
+            raise KernelAuthorityError("bootstrap segment index mismatch")
+        if segment_index:
+            previous = SeedBootstrapAuthority.verify(store, plan, preflight_sha, receipt["previous_receipt_sha256"], terminal=False)
+            if (previous["segment_index"] != segment_index - 1 or previous["status"] != "interrupted"
+                    or previous["budget_after"]["charged_use"] != receipt["budget_before"]["charged_use"]
+                    or previous["budget_after"]["closed_reservation_sha256s"] != receipt["budget_before"]["closed_reservation_sha256s"]):
+                raise KernelAuthorityError("bootstrap ordered initial-charge chain mismatch")
+        elif receipt["previous_receipt_sha256"] is not None or replay.charged_use != ResourceUse():
+            raise KernelAuthorityError("bootstrap initial segment is not unused")
+        opened = replay.checkpoint()["open_reservations"]
+        stage = "seed_bootstrap:" + preflight_sha + (f":{segment_index}" if segment_index else "")
+        if (len(opened) != 1 or opened[0]["stage_id"] != stage
+                or (not segment_index and opened[0]["estimate"] != preflight["estimate"])):
+            raise KernelAuthorityError("seed bootstrap reservation mismatch")
+        outcome = replay.close_stage(receipt["reservation_sha256"], ResourceUse.from_payload(receipt["resource_use"]))
+        if (outcome.allowed, outcome.reason) != (receipt["allowed"], receipt["closure_reason"]):
+            raise KernelAuthorityError("seed bootstrap closure mismatch")
+        after = BudgetLedger.resume(plan, receipt["budget_after"], monotonic=lambda: 0.0).checkpoint()
+        if any(value != after[key] for key, value in replay.checkpoint().items()
+               if key not in {"prior_elapsed_wall_seconds", "checkpoint_sha256"}):
+            raise KernelAuthorityError("seed bootstrap initial charge mismatch")
+        head, admissions, closed = receipt["previous_receipt_sha256"] or preflight_sha, set(), set()
+        for index, sha in enumerate(receipt["events"]):
+            event = _read(store.root / "seed_bootstrap" / f"{sha}.json", sha)
+            if event["sequence"] != index or event["previous_sha256"] != head:
+                raise KernelAuthorityError("seed bootstrap hash chain mismatch")
+            if event["kind"] == "admission":
+                admissions.add(sha)
+            elif event["kind"] == "closed_forecast":
+                cached = _read(store.root / "seed_bootstrap_cache" / f"{event['cache_sha256']}.json", event["cache_sha256"])
+                if cached["admission_sha256"] not in admissions or cached["admission_sha256"] in closed:
+                    raise KernelAuthorityError("seed bootstrap cache/admission mismatch")
+                closed.add(cached["admission_sha256"])
+            else:
+                raise KernelAuthorityError("unknown bootstrap event")
+            head = sha
+        if head != receipt["chain_sha256"] or closed != admissions:
+            raise KernelAuthorityError("seed bootstrap requires closed forecast admissions")
+        if len(admissions) != receipt["resource_use"]["task_executions"]:
+            raise KernelAuthorityError("seed bootstrap dispatch accounting mismatch")
+        if terminal:
+            SeedBootstrapAuthority.verify_inventory(store, receipt_sha)
+        return receipt
+
+    @staticmethod
+    def verify_inventory(store, latest_sha):
+        """No unclosed dispatch or unreferenced bytes may hide past a receipt."""
+        segments, events, caches = set(), set(), set()
+        current = latest_sha
+        while current is not None:
+            if current in segments:
+                raise KernelAuthorityError("cyclic bootstrap receipt chain")
+            segment = _read(store.root / "seed_bootstrap_segments" / f"{current}.json", current)
+            segments.add(current)
+            for sha in segment["events"]:
+                if sha in events:
+                    raise KernelAuthorityError("reused bootstrap admission event")
+                events.add(sha)
+                event = _read(store.root / "seed_bootstrap" / f"{sha}.json", sha)
+                if event["kind"] == "closed_forecast":
+                    caches.add(event["cache_sha256"])
+            current = segment["previous_receipt_sha256"]
+        for name, expected in (("seed_bootstrap_segments", segments), ("seed_bootstrap", events), ("seed_bootstrap_cache", caches)):
+            if {path.stem for path in (store.root / name).glob("*.json")} != expected:
+                raise KernelAuthorityError("seed bootstrap has open or unreferenced immutable work; new epoch required")
 
 
 def _read(path: Path, identity: str | None = None) -> dict[str, object]:
@@ -547,6 +767,7 @@ class EvolutionKernel:
         self._active_sha = self._committed_event_sha = self._pending_event = None
         self._terminal = self._last_checkpoint_sha = None
         self._bootstrap_preflight_sha = None
+        self._bootstrap_receipt_sha = None
         self.promotion_host = PromotionHost(self)
 
     @staticmethod
@@ -573,21 +794,38 @@ class EvolutionKernel:
         seed: EvolutionBundleV2,
         checkpoint_path: str | Path | None = None,
         bootstrap_preflight_sha256: str | None = None,
+        bootstrap_authority: SeedBootstrapAuthority | None = None,
     ):
         # A constructor never adopts or repairs an established/partial run.
         preflight_path = store.root / "seed_bootstrap_preflight.json"
-        if any(path.is_file() and not (bootstrap_preflight_sha256 is not None and path == preflight_path)
+        bootstrap_paths = set()
+        if bootstrap_authority is not None:
+            if (type(bootstrap_authority) is not SeedBootstrapAuthority or bootstrap_authority.adopted
+                    or bootstrap_authority.budget is not budget or bootstrap_authority.store is not store
+                    or bootstrap_authority.protocol != protocol or bootstrap_authority.receipt is None
+                    or bootstrap_authority.receipt["status"] != "passed"):
+                raise KernelAuthorityError("requires exact closed successful pre-seed issuer")
+            bootstrap_preflight_sha256 = bootstrap_authority.identity
+            bootstrap_paths = {store.root / "seed_bootstrap_receipt.json", preflight_path}
+            bootstrap_paths.update((store.root / "seed_bootstrap").glob("*.json"))
+            bootstrap_paths.update((store.root / "seed_bootstrap_cache").glob("*.json"))
+            bootstrap_paths.update((store.root / "seed_bootstrap_segments").glob("*.json"))
+        if any(path.is_file() and path not in bootstrap_paths
+               and not (bootstrap_preflight_sha256 is not None and path == preflight_path)
                for path in store.root.rglob("*")):
             raise KernelAuthorityError(
                 "constructor requires a fresh run; use resume for established authority"
             )
         if (
-            budget.charged_use != ResourceUse()
+            (bootstrap_authority is None and budget.charged_use != ResourceUse())
             or budget.checkpoint()["open_reservations"]
         ):
             raise KernelAuthorityError("fresh kernel requires an unused budget ledger")
         self._configure(store, protocol, budget, seed, checkpoint_path)
         self._bootstrap_preflight_sha = bootstrap_preflight_sha256
+        if bootstrap_authority is not None:
+            self._bootstrap_receipt_sha = fingerprint_payload(bootstrap_authority.receipt)
+            bootstrap_authority.adopted = True
         if bootstrap_preflight_sha256 is not None:
             self._verify_bootstrap_preflight(seed)
         store.write_run_manifest(self._manifest())
@@ -609,6 +847,8 @@ class EvolutionKernel:
         }
         if self._bootstrap_preflight_sha is not None:
             result["seed_bootstrap_preflight_sha256"] = self._bootstrap_preflight_sha
+        if self._bootstrap_receipt_sha is not None:
+            result["seed_bootstrap_receipt_sha256"] = self._bootstrap_receipt_sha
         return result
 
     def _verify_bootstrap_preflight(self, seed):
@@ -625,6 +865,10 @@ class EvolutionKernel:
         for sha in value["input_sha256s"].values():
             require_sha256(sha, "bootstrap input SHA")
         ResourceUse.from_payload(value["estimate"])
+        if self._bootstrap_receipt_sha is not None:
+            receipt = SeedBootstrapAuthority.verify(self.store, self.budget.plan, identity, self._bootstrap_receipt_sha)
+            if receipt["status"] != "passed":
+                raise KernelAuthorityError("incomplete bootstrap cannot mint a seed Bundle")
         return value
 
     @classmethod
@@ -672,6 +916,9 @@ class EvolutionKernel:
             kernel = cls.__new__(cls)
             kernel._configure(store, protocol, budget, seed, checkpoint_path)
             kernel._bootstrap_preflight_sha = manifest.get("seed_bootstrap_preflight_sha256")
+            kernel._bootstrap_receipt_sha = manifest.get("seed_bootstrap_receipt_sha256")
+            if (store.root / "seed_bootstrap_receipt.json").exists() and kernel._bootstrap_receipt_sha is None:
+                raise KernelAuthorityError("seed bootstrap receipt authority missing")
             if kernel._bootstrap_preflight_sha is not None:
                 kernel._verify_bootstrap_preflight(seed)
             if any(manifest.get(k) != v for k, v in kernel._manifest().items()):
@@ -809,7 +1056,7 @@ class EvolutionKernel:
         if identity is None:
             return ()
         require_sha256(identity, "numerical artifacts SHA")
-        from .numerical_qd.contracts import FrozenNumericalRegistryEnvelopeV2
+        from .numerical_qd.contracts import FrozenNumericalRegistryEnvelopeV2, NumericalEvaluationV2, NumericalGenomeV2
         from evolving_loop.package_numerical_supply import parse_numerical_supply_release
 
         payload = _read(self.store.root / "numerical_qd" / "objects" / f"{identity}.json", identity)
@@ -820,6 +1067,30 @@ class EvolutionKernel:
                 or registry.release_sha256 != release.fingerprint
                 or registry.registry_sha256 != bundle.numerical_registry_sha256):
             raise KernelAuthorityError("typed Numerical release/registry mismatch")
+        descriptors = train["train_behavior_descriptors"]
+        winner = descriptors.get("numerical_winner_genome_sha256")
+        if winner is None or release.source_fingerprints.get("train_winner") != winner:
+            raise KernelAuthorityError("typed Numerical winner commitment mismatch")
+        try:
+            evaluation_sha = require_sha256(descriptors.get("numerical_train_evaluation_sha256"), "winner Train evaluation")
+            executable_sha = require_sha256(descriptors.get("numerical_winner_materialized_sha256"), "winner executable")
+            objects = self.store.root / "numerical_qd" / "objects"
+            evaluation = NumericalEvaluationV2.from_payload(_read(objects / f"{evaluation_sha}.json", evaluation_sha))
+            executable = _read(objects / f"{executable_sha}.json", executable_sha)["materialized_numerical_child"]
+            genome = NumericalGenomeV2.from_payload(executable["genome"])
+            child_release = parse_numerical_supply_release(executable["supply"])
+            child_registry = FrozenNumericalRegistryEnvelopeV2.from_payload(executable["registry"])
+            if (genome.fingerprint() != winner or evaluation.genome_sha256 != winner
+                    or evaluation.supply_sha256 != child_release.fingerprint
+                    or evaluation.registry_sha256 != child_registry.registry_sha256
+                    or child_release.source_fingerprints.get("genome") != winner
+                    or evaluation.objectives.to_payload() != train["train_objectives"]
+                    or len(evaluation.task_ids) != 80 or not evaluation.constraints.feasible
+                    or dict(evaluation.runtime_fingerprints) != dict(bundle.runtime_fingerprints)
+                    or evaluation.protocol_fingerprint != bundle.protocol_fingerprint):
+                raise KernelAuthorityError("typed Numerical winner Train/executable binding mismatch")
+        except (KeyError, TypeError, ValueError) as error:
+            raise KernelAuthorityError(f"typed Numerical winner authority mismatch: {error}") from error
         return tuple(sorted((release.fingerprint, registry.registry_sha256)))
 
     def _issued_evaluation(self, evaluation, permit):
@@ -1304,7 +1575,13 @@ class EvolutionKernel:
             raise KernelAuthorityError(
                 "checkpoint archive snapshot is not a verified prefix"
             )
+        initial_reservations = set()
         total = ResourceUse()
+        if self._bootstrap_receipt_sha is not None:
+            receipt = SeedBootstrapAuthority.verify(self.store, self.budget.plan,
+                self._bootstrap_preflight_sha, self._bootstrap_receipt_sha)
+            total = ResourceUse.from_payload(receipt["budget_after"]["charged_use"])
+            initial_reservations.update(receipt["budget_after"]["closed_reservation_sha256s"])
         if prior_elapsed_wall_seconds is None:
             prior_elapsed_wall_seconds = self.budget.elapsed_wall_seconds
         # Canonical JSON sorts reservation keys. Floating-point accumulation
@@ -1330,15 +1607,16 @@ class EvolutionKernel:
                 if record["dev_comparison_sha256"] != fingerprint_payload({
                         "passed": False, "parent_metrics": {}, "candidate_metrics": {}}):
                     raise KernelAuthorityError("seed bootstrap cannot carry Dev comparison")
-        if total != self.budget.charged_use or set(self._closures) != set(
+        if total != self.budget.charged_use or (set(self._closures) | initial_reservations) != set(
             self.budget.checkpoint()["closed_reservation_sha256s"]
         ):
             raise KernelAuthorityError(
                 "checkpoint budget closures do not account for the ledger"
             )
-        if bootstrap_refs != ([] if self._bootstrap_preflight_sha is None else [self._bootstrap_preflight_sha]):
+        if bootstrap_refs != ([] if self._bootstrap_preflight_sha is None or self._bootstrap_receipt_sha is not None
+                              else [self._bootstrap_preflight_sha]):
             raise KernelAuthorityError("seed bootstrap manifest/closure commitment mismatch")
-        if self._bootstrap_preflight_sha is not None:
+        if self._bootstrap_preflight_sha is not None and self._bootstrap_receipt_sha is None:
             seed = self._verified_bundle(self._seed_sha)
             preflight = self._verify_bootstrap_preflight(seed)
             expected = seed.provisional_child("numerical", {"numerical": (self._bootstrap_preflight_sha,

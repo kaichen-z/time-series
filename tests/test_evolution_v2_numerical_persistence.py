@@ -149,6 +149,20 @@ def test_exact_layout_and_completed_resume_are_read_only(world):
     assert (store.root / "numerical_qd/archive/entries.jsonl").read_bytes() == before_log
 
 
+@pytest.mark.parametrize("change", ["tasks", "objectives", "cell"])
+def test_qd_entry_rejects_evidence_not_equal_to_committed_cell_evaluation(world, change):
+    store, *_ = world
+    _, _, entry = add_rung(world)
+    if change == "tasks":
+        bad = replace(entry, task_ids=entry.task_ids[:1])
+    elif change == "objectives":
+        bad = replace(entry, objectives=replace(entry.objectives, mean_capped_smae=0.0))
+    else:
+        bad = replace(entry, cell=replace(entry.cell, trend="high"))
+    with pytest.raises(ValueError, match="evaluation"):
+        store.append_qd_entry(bad)
+
+
 @pytest.mark.parametrize("value", ["../escape", "/tmp/escape", "a" * 63, "A" * 64])
 def test_write_rejects_path_traversal_and_invalid_sha(world, value):
     store, *_ = world
@@ -248,7 +262,11 @@ def test_partial_rung_and_extra_uncommitted_task_cannot_be_checkpointed(world):
 def test_hash_chain_rejects_prefix_reordering_and_torn_append(world):
     store, args, *_ = world
     args, _, entry = add_rung(world)
-    second = replace(entry, cell=replace(CELL, trend="high"))
+    from evolving_loop.v2.numerical_qd.contracts import NumericalEvaluationV2
+    original = NumericalEvaluationV2.from_payload(store._object(entry.evaluation_sha256))
+    changed = replace(original, cells=(replace(CELL, trend="high"),))
+    persist(store, changed)
+    second = replace(entry, evaluation_sha256=changed.fingerprint(), cell=changed.cells[0])
     store.append_qd_entry(second)
     path = store.root / "numerical_qd/archive/entries.jsonl"
     lines = path.read_bytes().splitlines(keepends=True)

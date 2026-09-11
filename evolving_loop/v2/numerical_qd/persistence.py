@@ -15,7 +15,7 @@ from ..bundle import EvolutionBundleV2
 from ..contracts import canonical_v2_bytes, fingerprint_payload, require_sha256, _require_exact_schema
 from ..kernel import EvolutionKernel
 from .contracts import (
-    HyperbandRungV2, HyperbandStateV2, HyperbandTaskResultV2,
+    HyperbandBudgetOutcomeV2, HyperbandRungV2, HyperbandStateV2, HyperbandTaskResultV2, RungManifestV2, TrainTaskV2,
     NumericalEvaluationV2, NumericalGenomeV2, NumericalInventoryV2,
     NumericalMemberV2, NumericalMutationPolicyV2, NumericalProposerPromptV2,
     NumericalQDCheckpointV2, NumericalQDEntryV2,
@@ -77,6 +77,31 @@ class NumericalQDRunStore:
         self.directory = self.root / "numerical_qd"
 
     @classmethod
+    def preflight_fresh(cls, root):
+        """Read-only admission before any output creation or task access."""
+        result = cls(root)
+        try:
+            for path in (*reversed(result.root.parents), result.root):
+                try:
+                    mode = path.lstat().st_mode
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISDIR(mode):
+                    raise NumericalQDStoreError("fresh output and ancestors must be real directories")
+            repository = Path(__file__).resolve().parents[3]
+            protected = ("common", "evolving_loop", "numerical_agent", "retrieval_agent",
+                         "decision_agent", "tests", "runs/frozen_two_stage")
+            resolved = result.root.resolve()
+            if any(resolved.is_relative_to(repository / name)
+                   or (repository / name).is_relative_to(resolved) for name in protected):
+                raise NumericalQDStoreError("output overlaps source or legacy paths")
+            if result.root.exists() and any(result.root.iterdir()):
+                raise NumericalQDStoreError("fresh numerical run requires an empty output directory")
+        except OSError as error:
+            raise NumericalQDStoreError("cannot preflight fresh output") from error
+        return result.root
+
+    @classmethod
     def create(cls, root):
         """Create the Numerical subtree after Project 1 initializes the V2 run."""
         result = cls(root)
@@ -111,7 +136,7 @@ class NumericalQDRunStore:
             raise NumericalQDStoreError("invalid Numerical QD artifact path")
         return self._safe(self.directory / relative)
 
-    def _verify_root_paths(self, *, creating=False, require_checkpoint=False):
+    def _verify_root_paths(self, *, creating=False, require_checkpoint=False, bootstrap=False):
         """Metadata-only preflight; never open an artifact before this passes.
 
         Kernel authority is always required. Only create may start without the
@@ -142,6 +167,10 @@ class NumericalQDRunStore:
                 if mode is None or not predicate(mode):
                     raise NumericalQDStoreError(f"missing or wrong authority path type: {path}")
 
+            if bootstrap:
+                require(self.root / "seed_bootstrap_preflight.json", stat.S_ISREG)
+                return
+
             for name in durable._LAYOUT:
                 require(self.root / name, stat.S_ISDIR)
             for name in required_files:
@@ -167,7 +196,11 @@ class NumericalQDRunStore:
     def _write(self, relative, payload):
         payload = _payload(payload)
         path = self._path(relative)
-        durable.write_once_json(path, payload)
+        writer = getattr(self, "material_writer", None)
+        if writer is not None:
+            writer(relative, canonical_v2_bytes(payload), lambda: durable.write_once_json(path, payload))
+        else:
+            durable.write_once_json(path, payload)
         if self._read(relative) != payload:
             raise NumericalQDStoreError("immutable write failed canonical readback")
         return path
@@ -198,7 +231,11 @@ class NumericalQDRunStore:
                 raise NumericalQDStoreError("conflicting immutable source retry")
             durable._ensure_directory(path.parent)
         else:
-            durable._atomic_write(path, source)
+            writer = getattr(self, "material_writer", None)
+            if writer is not None:
+                writer(f"sources/{sha256}.py", source, lambda: durable._atomic_write(path, source))
+            else:
+                durable._atomic_write(path, source)
         if self._source(sha256) != source:
             raise NumericalQDStoreError("source readback mismatch")
         return path
@@ -393,14 +430,37 @@ class NumericalQDRunStore:
                 raise NumericalQDStoreError("QD JSONL prefix/hash chain corruption")
             if self._object(entry.fingerprint()) != entry.to_payload():
                 raise NumericalQDStoreError("QD entry immutable bytes mismatch")
-            evaluation = NumericalEvaluationV2.from_payload(self._object(entry.evaluation_sha256))
-            if evaluation.genome_sha256 != entry.genome_sha256 or not set(entry.task_ids) <= set(evaluation.task_ids):
-                raise NumericalQDStoreError("QD entry evaluation binding mismatch")
+            self._verify_entry_evaluation(entry)
             self.verify_candidate(entry.genome_sha256)
             seen.add(entry.fingerprint())
             records.append(entry)
             previous = row["record_sha256"]
         return tuple(records)
+
+    def _verify_entry_evaluation(self, entry):
+        evaluation = NumericalEvaluationV2.from_payload(self._object(entry.evaluation_sha256))
+        if (evaluation.genome_sha256 != entry.genome_sha256 or entry.task_ids != evaluation.task_ids
+                or evaluation.cells != (entry.cell,) or evaluation.objectives != entry.objectives
+                or evaluation.constraints != entry.constraints
+                or evaluation.train_diagnostic_categories != entry.train_diagnostic_categories):
+            raise NumericalQDStoreError("QD entry must equal its exact cell evaluation")
+        subset = self._object(evaluation.task_subset_sha256)
+        if subset.get("kind") == "cell_subset":
+            _require_exact_schema(subset, ("schema_version", "kind", "cell", "parent_manifest_sha256",
+                "split_sha256", "protocol_sha256", "task_ids", "tasks"), field="cell evaluation subset")
+            parent = RungManifestV2.from_payload(self._object(subset["parent_manifest_sha256"]))
+            tasks = tuple(TrainTaskV2.from_payload(task) for task in subset["tasks"])
+            if (subset["schema_version"] != 1 or subset["cell"] != entry.cell.to_payload()
+                    or tuple(subset["task_ids"]) != entry.task_ids
+                    or tuple(task.task_id for task in tasks) != entry.task_ids
+                    or not set(tasks) <= set(parent.tasks)
+                    or subset["split_sha256"] != evaluation.split_sha256
+                    or subset["protocol_sha256"] != evaluation.protocol_fingerprint):
+                raise NumericalQDStoreError("cell evaluation subset commitment mismatch")
+        else:
+            manifest = RungManifestV2.from_payload(subset)
+            if manifest.task_ids != entry.task_ids:
+                raise NumericalQDStoreError("cell evaluation full-rung subset mismatch")
 
     def append_qd_entry(self, entry):
         self._verify_root_paths()
@@ -410,9 +470,7 @@ class NumericalQDRunStore:
         if any(value.fingerprint() == entry.fingerprint() for value in existing):
             return path
         self.verify_candidate(entry.genome_sha256)
-        evaluation = NumericalEvaluationV2.from_payload(self._object(entry.evaluation_sha256))
-        if evaluation.genome_sha256 != entry.genome_sha256 or not set(entry.task_ids) <= set(evaluation.task_ids):
-            raise NumericalQDStoreError("QD entry evaluation binding mismatch")
+        self._verify_entry_evaluation(entry)
         self.write_object(entry.fingerprint(), entry)
         previous = None
         if existing:
@@ -519,6 +577,17 @@ class NumericalQDRunStore:
         catalog = checkpoint.completed_operation_sha256s
         all_rungs, manifest_shas, task_paths = {}, set(), set()
         for path in catalog:
+            if path.startswith("objects/"):
+                partial = self._read(path).get("closed_partial_rung")
+                if partial is not None:
+                    self._verify_partial_rung(partial, budget)
+                    for row in partial["task_results"]:
+                        result = HyperbandTaskResultV2.from_payload(row["result"])
+                        name = f"results/{result.candidate_sha256}/{row['task_sha256']}.json"
+                        if self._read(name) != result.to_payload():
+                            raise NumericalQDStoreError("closed partial immutable result mismatch")
+                        task_paths.add(name)
+        for path in catalog:
             if path.startswith("proposals/"):
                 self._proposal(self._read(path))
             if not path.startswith("rungs/"):
@@ -568,6 +637,29 @@ class NumericalQDRunStore:
         ordered = tuple(sha for batch in archive.insertion_log for sha in batch.entry_sha256s)
         if tuple(value.fingerprint() for value in entries) != ordered:
             raise NumericalQDStoreError("QD snapshot insertion order mismatch")
+
+    def _verify_partial_rung(self, value, current_budget):
+        _require_exact_schema(value, ("state", "manifest", "reason", "task_results", "budget_outcome"), field="closed partial rung")
+        state = HyperbandStateV2.from_payload(value["state"])
+        manifest = RungManifestV2.from_payload(value["manifest"])
+        outcome = HyperbandBudgetOutcomeV2.from_payload(value["budget_outcome"])
+        if (outcome.status != "failed" or value["reason"] != outcome.reason or state.complete
+                or manifest.resource != state.bracket.resources[len(state.rungs)]
+                or manifest.split_sha256 != state.split_sha256 or manifest.protocol_sha256 != state.protocol_sha256
+                or not set(outcome.ledger_checkpoint["closed_reservation_sha256s"]) <= set(current_budget["closed_reservation_sha256s"])):
+            raise NumericalQDStoreError("closed partial rung authority mismatch")
+        seen, tasks = set(), {task.task_sha256: task for task in manifest.tasks}
+        for row in value["task_results"]:
+            _require_exact_schema(row, ("task_sha256", "result"), field="partial task result")
+            result = HyperbandTaskResultV2.from_payload(row["result"])
+            task = tasks.get(row["task_sha256"])
+            key = (result.candidate_sha256, row["task_sha256"])
+            if (task is None or task.task_id != result.task_id or key in seen
+                    or result.candidate_sha256 not in state.active_candidates):
+                raise NumericalQDStoreError("closed partial task membership mismatch")
+            self.verify_candidate(result.candidate_sha256)
+            self._verify_task_key(row["task_sha256"], result)
+            seen.add(key)
 
     def write_state(self, **state):
         """Seal a complete inventory, then atomically publish its runner pointer."""
