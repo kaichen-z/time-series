@@ -38,6 +38,7 @@ from .adapters import (
     evaluate_numerical_child, freeze_qd_supply, import_numerical_seed,
 )
 from .config import NumericalQDConfigV2
+from .artifacts import ArtifactKindV2 as ArtifactKind, validate_artifact
 from .contracts import (
     ConstraintReportV2, FrozenNumericalRegistryEnvelopeV2,
     HyperbandBracketV2, HyperbandBudgetOutcomeV2, HyperbandStateV2,
@@ -54,7 +55,7 @@ from .hyperband import (
 from .map_elites import CounterRandom, NumericalQDArchive
 from .mutation import MutationProposalV2, apply_mutation, record_train_outcome
 from .nsga2 import select_survivors
-from .persistence import NumericalQDRunStore, NumericalQDStoreError
+from .persistence import ArtifactBytesExhausted, NumericalQDRunStore, NumericalQDStoreError
 from .proposers import (
     DeterministicProposalProvider, HybridProposalProvider, LLMProposalProvider,
     NormalizedProposalBatchV2, ProviderAttemptV2, primitive_proposer_request,
@@ -87,10 +88,10 @@ def _read(path):
     return value
 
 
-def _persist(store, value):
+def _persist(store, value, *, kind=None):
     payload = value.to_payload() if hasattr(value, "to_payload") else value
     identity = payload.get("checkpoint_sha256", fingerprint_payload(payload))
-    store.write_object(identity, payload)
+    store.write_object(identity, value, kind=kind)
     return identity
 
 
@@ -153,21 +154,10 @@ class _MaterialAccounting:
         self.store, self.kernel, self.external = store, kernel, None
         store.material_writer = self.write
 
-    @staticmethod
-    def is_material(relative, data):
-        if relative.startswith(("sources/", "proposals/", "results/")):
-            return True
-        if not relative.startswith("objects/"):
-            return False
-        value = strict_json_loads(data.decode(), context="material object")
-        return not ("checkpoint_sha256" in value or "numerical_qd_step" in value
-            or "closed_partial_rung" in value or ("candidate_sha256s" in value and "rungs" in value)
-            or ("cells" in value and "insertion_log" in value)
-            or ("archive_snapshot_sha256" in value and "numerical_release_sha256" in value))
-
-    def write(self, relative, data, dispatch):
+    def write(self, relative, data, dispatch, *, kind):
+        spec = validate_artifact(kind, data)
         path = self.store.directory / relative
-        if path.exists() or not self.is_material(relative, data):
+        if path.exists() or not spec.billable:
             return dispatch()
         if self.external is not None:
             self.external(len(data), False)
@@ -292,7 +282,7 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
     reported = ResourceUse()
     artifact_bytes, aggregates = 0, ()
     store = getattr(work, "store", None)
-    pending, results = [], []
+    pending, results, unpersisted = [], [], []
     for candidate in state.active_candidates:
         for task in manifest.tasks:
             key = evaluation_cache_key(candidate, task.task_sha256, manifest.split_sha256,
@@ -310,7 +300,7 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
     def account_material(size, begun):
         nonlocal artifact_bytes
         if not begun and artifact_bytes + size > estimate.artifact_bytes:
-            raise NumericalQDStoreError("rung material artifact budget exhausted")
+            raise ArtifactBytesExhausted("rung material artifact budget exhausted")
         if begun:
             artifact_bytes += size
     if store is not None:
@@ -346,12 +336,20 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
                     failure = "budget_overrun"
                 if duration >= config.adapter["task_timeout_seconds"]:
                     failure = failure or "timeout"
-                if value.constraints.feasible and value.task_statuses[task.task_id] == "passed":
-                    cache[key] = TaskCacheRowV2(key, task.task_sha256, value)
             results.append((task, HyperbandTaskResultV2(candidate, task.task_id, key,
                 value.task_statuses[task.task_id], value, hit is not None, None)))
             if store is not None and hit is None:
-                store.write_task_result(task.task_sha256, results[-1][1])
+                try:
+                    store.write_task_result(task.task_sha256, results[-1][1])
+                except ArtifactBytesExhausted:
+                    _, denied = results.pop()
+                    unpersisted.append({"task_sha256": task.task_sha256, "task_id": task.task_id,
+                        "candidate_sha256": candidate, "cache_key": key,
+                        "result_sha256": fingerprint_payload(denied.to_payload()), "status": "persistence_denied",
+                        "resource_use": dict(value.resource_use)})
+                    raise
+            if value.constraints.feasible and value.task_statuses[task.task_id] == "passed":
+                cache[key] = TaskCacheRowV2(key, task.task_sha256, value)
             if failure:
                 break
         if failure is None:
@@ -361,6 +359,8 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
                 _persist(store, manifest)
                 for aggregate in aggregates:
                     _persist(store, aggregate)
+    except ArtifactBytesExhausted:
+        failure = "artifact_bytes_exhausted"
     finally:
         if store is not None:
             store.accounting.external = None
@@ -374,6 +374,7 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
     if failure:
         work.partial_rung = {"state": state.to_payload(), "manifest": manifest.to_payload(), "reason": failure,
             "task_results": [{"task_sha256": task.task_sha256, "result": result.to_payload()} for task, result in results],
+            "unpersisted_task_results": unpersisted,
             "budget_outcome": HyperbandBudgetOutcomeV2("failed", failure, permit.reservation_sha256,
                 actual.to_payload(), captured["checkpoint_sha256"], captured).to_payload()}
         return None, tuple(results), failure
@@ -453,7 +454,7 @@ def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry
         if len(canonical_v2_bytes(payload)) > estimate.artifact_bytes:
             reason = "artifact_bytes_exhausted"
         else:
-            pair_sha = _persist(store, payload)
+            pair_sha = _persist(store, payload, kind=ArtifactKind.FROZEN_PAIR)
             pair = store._object(pair_sha)
             release = parse_numerical_supply_release(pair["supply"])
             registry = FrozenNumericalRegistryEnvelopeV2.from_payload(pair["registry"]).restore(adapter.tasks)
@@ -573,7 +574,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             except (ValueError, TypeError, TimeoutError, MethodForecastError):
                 failure = "materialization_failed"
             finally:
-                bootstrap.close(status, failure)
+                status = bootstrap.close(status, failure)["status"]
             if status != "passed":
                 raise ValueError("seed bootstrap stopped before a complete registry")
             ledger = bootstrap.budget
@@ -586,11 +587,14 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         store.accounting = _MaterialAccounting(store, kernel)
         for sha, source in adapter.sources.items():
             store.write_source(sha, source.encode())
-        for payload in (config, screen, combined, *seed_policies.values()):
-            _persist(store, payload)
+        _persist(store, config)
+        _persist(store, screen, kind=ArtifactKind.SCREENING_POLICY)
+        _persist(store, combined, kind=ArtifactKind.COMBINED_POLICY)
+        for payload in seed_policies.values():
+            _persist(store, payload, kind=ArtifactKind.RECIPE_POLICY)
         _persist_state(store, seed_state, seed_genome)
         imported_seed = import_numerical_seed(release, registry, tasks=adapter.tasks)
-        _persist(store, {"supply": release.to_payload(), "registry": imported_seed.envelope.to_payload()})
+        _persist(store, {"supply": release.to_payload(), "registry": imported_seed.envelope.to_payload()}, kind=ArtifactKind.FROZEN_PAIR)
         state, active_genome = seed_state, seed_genome
         archive = NumericalQDArchive(capacity=config.map_elites["cell_capacity"])
         hyperband = HyperbandStateV2(HyperbandBracketV2.registered("explore"), (seed_genome.fingerprint(),),
@@ -608,7 +612,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             active_bundle_sha256=_persist(store, active), active_genome_sha256=active_genome.fingerprint(),
             qd_snapshot_sha256=_persist(store, archive), mutation_policy_sha256=_persist(store, state.mutation_policy),
             proposer_prompt_sha256=_persist(store, state.proposer_prompt), hyperband_state_sha256=_persist(store, hyperband),
-            counter=random.to_payload(), budget_checkpoint_sha256=_persist(store, current["budget"]),
+            counter=random.to_payload(), budget_checkpoint_sha256=_persist(store, current["budget"], kind=ArtifactKind.BUDGET_CHECKPOINT),
             kernel_checkpoint_sha256=current["checkpoint_sha256"])
 
     def result(status):
@@ -658,7 +662,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             train_feedback=[feedback.to_payload()], remaining_budget=proposal_budget.to_payload(),
             allowed_mutation_operators=sorted(config.mutation["operators"]), counter_draw=draw,
             max_proposals=config.proposer["max_proposals_per_generation"], max_response_bytes=config.proposer["max_response_bytes"])
-        request_sha = _persist(store, request)
+        request_sha = _persist(store, request, kind=ArtifactKind.PROPOSER_REQUEST)
         work = _KernelWork(kernel, active, generation)
         work.store = store
         artifact_permit = work.reserve_stage("proposal-artifacts-" + request_sha, ResourceUse(artifact_bytes=
@@ -718,7 +722,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                         policy_ready = False
                         break
                 else:
-                    _persist(store, structural)
+                    _persist(store, structural, kind=ArtifactKind.STRUCTURAL_POLICY)
                 # Exact policy/source readback precedes the atomic transition.
                 store._object(member.policy_sha256)
                 store._source(member.source_sha256)
@@ -775,7 +779,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                     status="failed" if failure else "passed")
             if child is not None and closed.allowed:
                 child = MaterializedNumericalChildV2.from_payload(
-                    store._object(_persist(store, child.to_payload(adapter.tasks))), adapter.tasks)
+                    store._object(_persist(store, child.to_payload(adapter.tasks), kind=ArtifactKind.EXECUTABLE_CHILD)), adapter.tasks)
                 children[genome.fingerprint()] = child
                 child_states[genome.fingerprint()] = candidate_state
                 attempted[-1] = (proposal.operator, genome.fingerprint())
@@ -797,7 +801,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                     advanced, task_results, reason = _rung(kernel, work, hyperband, manifest, children, adapter, config, cache)
                     if advanced is None:
                         if hasattr(work, "partial_rung"):
-                            _persist(store, {"closed_partial_rung": work.partial_rung})
+                            _persist(store, {"closed_partial_rung": work.partial_rung}, kind=ArtifactKind.PARTIAL_RUNG)
                             del work.partial_rung
                         budget_blocked = reason not in {"invalid_response", "timeout"}
                         break
@@ -825,7 +829,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                     "task_ids": list(cell_eval.task_ids), "tasks": [task.to_payload() for task in
                         sorted(hyperband.rungs[-1].manifest.tasks, key=lambda task: task.task_id)
                         if task.task_id in cell_eval.task_ids]}
-                cell_eval = replace(cell_eval, task_subset_sha256=_persist(store, subset), cells=(cell,))
+                cell_eval = replace(cell_eval, task_subset_sha256=_persist(store, subset, kind=ArtifactKind.CELL_SUBSET), cells=(cell,))
                 _persist(store, cell_eval)
                 entries.append(NumericalQDEntryV2(1, evaluation.genome_sha256, cell_eval.fingerprint(), cell,
                     cell_eval.task_ids, cell_eval.objectives, cell_eval.constraints, evaluation.train_diagnostic_categories))
@@ -838,7 +842,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 for rung in hyperband.rungs for e in rung.evaluations)
             promoted = any(genome_sha in rung.survivor_sha256s
                 and any(e.genome_sha256 == genome_sha and e.constraints.feasible for e in rung.evaluations)
-                for rung in hyperband.rungs)
+                for index, rung in enumerate(hyperband.rungs) if index < len(hyperband.bracket.resources) - 1)
             inserted = any(e.genome_sha256 == genome_sha for e in entries)
             feedback = TrainMutationFeedbackV2("train", operator,
                 feasible, promoted, inserted, ())
@@ -918,7 +922,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 reason = permit.reason
         _persist(store, {"numerical_qd_step": {"generation": generation, "status": reason,
             "active_bundle_sha256": active.fingerprint(), "winner_genome_sha256": winner,
-            "proposal_attempt_sha256": batch_sha, "train_feedback": feedback.to_payload()}})
+            "proposal_attempt_sha256": batch_sha, "train_feedback": feedback.to_payload()}}, kind=ArtifactKind.GENERATION_STATUS)
         checkpoint_state()
         if budget_blocked:
             break

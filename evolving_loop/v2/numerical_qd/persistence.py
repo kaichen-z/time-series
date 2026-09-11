@@ -23,6 +23,7 @@ from .contracts import (
 from .hyperband import evaluation_cache_key
 from .map_elites import NumericalQDArchive
 from .config import NumericalQDConfigV2
+from .artifacts import ArtifactKindV2 as ArtifactKind, artifact_kind
 
 
 _MANIFEST = {"schema_version": 1, "system": "numerical_qd"}
@@ -35,6 +36,10 @@ _TEMP = re.compile(r"\..+\.[^.]+\.tmp\Z")
 
 class NumericalQDStoreError(durable.StoreContractError):
     """Incomplete or conflicting durable Numerical QD state."""
+
+
+class ArtifactBytesExhausted(NumericalQDStoreError):
+    """A material write was denied before producing its bytes."""
 
 
 def _payload(value):
@@ -64,6 +69,17 @@ def _identity(payload):
     return fingerprint_payload(payload)
 
 
+def _verify_output_location(root):
+    """One bidirectional input/output exclusion and in-repository allowlist."""
+    repository = Path(__file__).resolve().parents[3]
+    resolved = root.resolve()
+    allowed = repository / "runs/evolution_v2"
+    if (repository.is_relative_to(resolved)
+            or (resolved.is_relative_to(repository)
+                and (resolved == allowed or not resolved.is_relative_to(allowed)))):
+        raise NumericalQDStoreError("output must not overlap inputs; repository outputs require runs/evolution_v2/<run>")
+
+
 class NumericalQDRunStore:
     """All paths are rooted in an isolated V2 run; only checkpoint is mutable.
 
@@ -88,13 +104,7 @@ class NumericalQDRunStore:
                     continue
                 if not stat.S_ISDIR(mode):
                     raise NumericalQDStoreError("fresh output and ancestors must be real directories")
-            repository = Path(__file__).resolve().parents[3]
-            protected = ("common", "evolving_loop", "numerical_agent", "retrieval_agent",
-                         "decision_agent", "tests", "runs/frozen_two_stage")
-            resolved = result.root.resolve()
-            if any(resolved.is_relative_to(repository / name)
-                   or (repository / name).is_relative_to(resolved) for name in protected):
-                raise NumericalQDStoreError("output overlaps source or legacy paths")
+            _verify_output_location(result.root)
             if result.root.exists() and any(result.root.iterdir()):
                 raise NumericalQDStoreError("fresh numerical run requires an empty output directory")
         except OSError as error:
@@ -106,12 +116,6 @@ class NumericalQDRunStore:
         """Create the Numerical subtree after Project 1 initializes the V2 run."""
         result = cls(root)
         result._verify_root_paths(creating=True)
-        repository = Path(__file__).resolve().parents[3]
-        protected = ("common", "evolving_loop", "numerical_agent", "retrieval_agent",
-                     "decision_agent", "tests", "runs/frozen_two_stage")
-        resolved = result.root.resolve()
-        if any(resolved.is_relative_to(repository / name) for name in protected):
-            raise NumericalQDStoreError("output cannot be created in source or legacy paths")
         durable.V2RunStore._require_v2_manifest(result.root)
         if result.directory.exists():
             if result._read("manifest.json") != _MANIFEST:
@@ -150,6 +154,7 @@ class NumericalQDRunStore:
             for path in (*reversed(self.root.parents), self.root):
                 if not stat.S_ISDIR(path.lstat().st_mode):
                     raise NumericalQDStoreError("V2 root and ancestors must be real directories")
+            _verify_output_location(self.root)
             modes, pending = {self.root: stat.S_IFDIR}, [self.root]
             while pending:
                 for path in pending.pop().iterdir():
@@ -193,25 +198,26 @@ class NumericalQDRunStore:
         except OSError as error:
             raise NumericalQDStoreError(f"missing immutable artifact: {relative}") from error
 
-    def _write(self, relative, payload):
+    def _write(self, relative, payload, *, kind=None):
+        typed = payload
         payload = _payload(payload)
         path = self._path(relative)
         writer = getattr(self, "material_writer", None)
         if writer is not None:
-            writer(relative, canonical_v2_bytes(payload), lambda: durable.write_once_json(path, payload))
+            writer(relative, canonical_v2_bytes(payload), lambda: durable.write_once_json(path, payload),
+                   kind=kind if kind is not None else artifact_kind(typed))
         else:
             durable.write_once_json(path, payload)
         if self._read(relative) != payload:
             raise NumericalQDStoreError("immutable write failed canonical readback")
         return path
 
-    def write_object(self, sha256, payload):
+    def write_object(self, sha256, payload, *, kind=None):
         self._verify_root_paths()
         require_sha256(sha256, "object SHA")
-        payload = _payload(payload)
-        if _identity(payload) != sha256:
+        if _identity(_payload(payload)) != sha256:
             raise NumericalQDStoreError("object content SHA mismatch")
-        return self._write(f"objects/{sha256}.json", payload)
+        return self._write(f"objects/{sha256}.json", payload, kind=kind)
 
     def _object(self, sha256):
         require_sha256(sha256, "object SHA")
@@ -233,7 +239,7 @@ class NumericalQDRunStore:
         else:
             writer = getattr(self, "material_writer", None)
             if writer is not None:
-                writer(f"sources/{sha256}.py", source, lambda: durable._atomic_write(path, source))
+                writer(f"sources/{sha256}.py", source, lambda: durable._atomic_write(path, source), kind=ArtifactKind.SOURCE)
             else:
                 durable._atomic_write(path, source)
         if self._source(sha256) != source:
@@ -367,7 +373,7 @@ class NumericalQDRunStore:
                 existing = self._read(f"proposals/{path.name}")
                 if existing.get("context") == payload["context"] and existing != payload:
                     raise NumericalQDStoreError("one proposal context cannot have conflicting completed batches")
-        return self._write(f"proposals/{attempt_sha256}.json", payload)
+        return self._write(f"proposals/{attempt_sha256}.json", payload, kind=ArtifactKind.PROPOSAL_ATTEMPT)
 
     def write_task_result(self, task_sha256, result):
         self._verify_root_paths()
@@ -410,7 +416,7 @@ class NumericalQDRunStore:
         self._verify_rung(rung)
         # This is the captured Task 6 payload; never ask a live clock/ledger for it.
         self.write_object(rung.budget_outcome.ledger_checkpoint_sha256,
-                          rung.budget_outcome.to_payload()["ledger_checkpoint"])
+                          rung.budget_outcome.to_payload()["ledger_checkpoint"], kind=ArtifactKind.BUDGET_CHECKPOINT)
         for evaluation in rung.evaluations:
             self.write_object(evaluation.fingerprint(), evaluation)
         return self._write(f"rungs/{rung.fingerprint()}.json", rung)
@@ -639,7 +645,7 @@ class NumericalQDRunStore:
             raise NumericalQDStoreError("QD snapshot insertion order mismatch")
 
     def _verify_partial_rung(self, value, current_budget):
-        _require_exact_schema(value, ("state", "manifest", "reason", "task_results", "budget_outcome"), field="closed partial rung")
+        _require_exact_schema(value, ("state", "manifest", "reason", "task_results", "unpersisted_task_results", "budget_outcome"), field="closed partial rung")
         state = HyperbandStateV2.from_payload(value["state"])
         manifest = RungManifestV2.from_payload(value["manifest"])
         outcome = HyperbandBudgetOutcomeV2.from_payload(value["budget_outcome"])
@@ -659,6 +665,24 @@ class NumericalQDRunStore:
                 raise NumericalQDStoreError("closed partial task membership mismatch")
             self.verify_candidate(result.candidate_sha256)
             self._verify_task_key(row["task_sha256"], result)
+            seen.add(key)
+        for row in value["unpersisted_task_results"]:
+            _require_exact_schema(row, ("task_sha256", "task_id", "candidate_sha256", "cache_key", "result_sha256",
+                "status", "resource_use"), field="unpersisted partial task")
+            for field in ("task_sha256", "candidate_sha256", "cache_key", "result_sha256"):
+                require_sha256(row[field], field)
+            task = tasks.get(row["task_sha256"])
+            key = (row["candidate_sha256"], row["task_sha256"])
+            if (value["reason"] != "artifact_bytes_exhausted" or row["status"] != "persistence_denied"
+                    or task is None or row["task_id"] != task.task_id or key in seen
+                    or row["candidate_sha256"] not in state.active_candidates):
+                raise NumericalQDStoreError("unpersisted partial task membership mismatch")
+            use = ResourceUse.from_payload(row["resource_use"])
+            if any(getattr(use, name) > outcome.resource_use[name] for name in ResourceUse.field_names()):
+                raise NumericalQDStoreError("unpersisted task exceeds closed actual work")
+            if self._path(f"results/{row['candidate_sha256']}/{row['task_sha256']}.json").exists():
+                raise NumericalQDStoreError("unpersisted partial task unexpectedly contains material")
+            self.verify_candidate(row["candidate_sha256"])
             seen.add(key)
 
     def write_state(self, **state):
@@ -692,7 +716,7 @@ class NumericalQDRunStore:
                 if hashlib.sha256(self._path(name).read_bytes()).hexdigest() != expected:
                     raise NumericalQDStoreError("immutable operation prefix changed")
         kernel = self._kernel(state["kernel_checkpoint_sha256"])
-        self.write_object(state["kernel_checkpoint_sha256"], kernel)
+        self.write_object(state["kernel_checkpoint_sha256"], kernel, kind=ArtifactKind.KERNEL_CHECKPOINT)
         catalog = self._catalog()
         published = set(previous.completed_operation_sha256s) if previous else set()
         if previous is not None:

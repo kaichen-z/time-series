@@ -45,6 +45,17 @@ def persist(store, value):
     return identity
 
 
+def test_create_uses_the_same_repo_output_allowlist(kernel, monkeypatch):
+    # Treat the already valid Kernel root as a repository root. A Numerical
+    # subtree must not be created there, even though all Kernel files are valid.
+    monkeypatch.setattr(api, "__file__", str(kernel.store.root / "evolving_loop/v2/numerical_qd/persistence.py"))
+    before = files(kernel.store.root)
+    with pytest.raises(ValueError):
+        api.NumericalQDRunStore.create(kernel.store.root)
+    assert files(kernel.store.root) == before
+    assert not (kernel.store.root / "numerical_qd").exists()
+
+
 @pytest.fixture
 def world(kernel):
     store = api.NumericalQDRunStore.create(kernel.store.root)
