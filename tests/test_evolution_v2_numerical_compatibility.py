@@ -16,20 +16,22 @@ def _run_isolated(script: str, tmp_path: Path) -> None:
         cwd=ROOT,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=180,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
-def test_numerical_qd_import_and_proposal_preserve_legacy_artifacts_and_defaults(
+def test_real_numerical_cli_preserves_persisted_legacy_artifacts_and_defaults(
     tmp_path,
 ):
-    """Import side effects or writes to legacy authorities fail byte-for-byte."""
+    """A fresh-process Numerical run cannot rewrite any legacy authority."""
 
     _run_isolated(
         r'''
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 
 root = Path.cwd()
@@ -38,9 +40,61 @@ work = Path(sys.argv[1])
 
 import evolving_loop.cli as legacy_cli
 from evolving_loop.package_numerical_supply import canonical_json_bytes
+from evolving_loop.v2.contracts import canonical_v2_bytes
 from tests.test_package_coordinate_evolution import _bundle
 
-legacy_paths = (
+inputs = work / "inputs"
+subprocess.run(
+    [
+        sys.executable,
+        str(root / "tests/build_evolution_v2_numerical_fixture.py"),
+        "--output-dir",
+        str(inputs),
+    ],
+    cwd=root,
+    check=True,
+    capture_output=True,
+    text=True,
+)
+
+persisted = work / "persisted-legacy"
+persisted.mkdir()
+shutil.copy2(inputs / "seed_supply.json", persisted / "supply.json")
+_task, state = _bundle(work / "legacy-source")
+
+def plain(value):
+    if isinstance(value, dict) or hasattr(value, "items"):
+        return {key: plain(member) for key, member in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [plain(member) for member in value]
+    return value
+
+(persisted / "registry.json").write_bytes(
+    canonical_json_bytes(plain(state.registry.manifest))
+)
+for source, name in (
+    (root / "numerical_agent/dictionaries/statistical_base_methods_v000.json", "method-source.json"),
+    (root / "numerical_agent/tsfm/runtime_manifests.json", "runtime-manifest.json"),
+):
+    (persisted / name).write_bytes(
+        canonical_json_bytes(json.loads(source.read_bytes()))
+    )
+shutil.copytree(
+    root / "evolving_loop/retrieval_agent/releases/v000",
+    persisted / "retrieval-v000",
+    copy_function=shutil.copy2,
+)
+assert (persisted / "supply.json").read_bytes() == canonical_v2_bytes(
+    json.loads((persisted / "supply.json").read_bytes())
+)
+for artifact in persisted.rglob("*.json"):
+    if artifact.name == "supply.json":
+        continue
+    assert artifact.read_bytes() == canonical_json_bytes(
+        json.loads(artifact.read_bytes())
+    )
+
+source_authorities = (
     root / "evolving_loop/package_numerical_supply.py",
     root / "evolving_loop/package_registry.py",
     root / "numerical_agent/dictionaries/statistical_base_methods_v000.json",
@@ -49,13 +103,16 @@ legacy_paths = (
 retrieval = root / "evolving_loop/retrieval_agent/releases/v000"
 
 def files():
-    paths = (*legacy_paths, *(path for path in retrieval.rglob("*") if path.is_file()))
+    paths = (
+        *source_authorities,
+        *(path for path in retrieval.rglob("*") if path.is_file()),
+        *(path for path in persisted.rglob("*") if path.is_file()),
+    )
     return {
-        str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mtime_ns)
+        str(path): (path.read_bytes(), path.stat().st_mtime_ns)
         for path in paths
     }
 
-task, state = _bundle(work / "legacy")
 supply_before = canonical_json_bytes(state.bundle.numerical_release_payload)
 registry_before = (state.registry.fingerprint, state.registry.release_sha256, state.registry.task_ids)
 forms = (["evolve"], ["--evolution", "genome"])
@@ -63,11 +120,45 @@ defaults_before = [vars(legacy_cli.build_parser().parse_args(args)) for args in 
 files_before = files()
 assert "evolving_loop.v2.numerical_qd" not in sys.modules
 
-from evolving_loop.v2.numerical_qd.proposers import DeterministicProposalProvider
-from tests.test_evolution_v2_numerical_proposers import request
+run = work / "run"
+command = [
+    sys.executable,
+    "-m",
+    "evolving_loop.v2",
+    "numerical-evolve",
+    "--config",
+    str(root / "configs/evolution_v2/numerical_qd/smoke.json"),
+    "--seed-supply",
+    str(persisted / "supply.json"),
+    "--task-manifest",
+    str(inputs / "task_manifest.json"),
+    "--output-dir",
+    str(run),
+]
+completed = subprocess.run(
+    command, cwd=root, capture_output=True, text=True, timeout=120
+)
+assert completed.returncode == 0, completed.stdout + completed.stderr
+completion = json.loads((run / "evaluation_complete.json").read_bytes())
+assert completion["status"] == "numerical_qd_complete"
 
-batch = DeterministicProposalProvider(monotonic=lambda: 0.0).propose(request())
-assert batch.proposals and batch.resource_use.llm_calls == 0
+run_before_resume = {
+    str(path.relative_to(run)): (path.read_bytes(), path.stat().st_mtime_ns)
+    for path in run.rglob("*")
+    if path.is_file()
+}
+resumed = subprocess.run(
+    command, cwd=root, capture_output=True, text=True, timeout=60
+)
+assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+assert {
+    str(path.relative_to(run)): (path.read_bytes(), path.stat().st_mtime_ns)
+    for path in run.rglob("*")
+    if path.is_file()
+} == run_before_resume
+
+import evolving_loop.v2.numerical_qd
+
 assert canonical_json_bytes(state.bundle.numerical_release_payload) == supply_before
 assert (state.registry.fingerprint, state.registry.release_sha256, state.registry.task_ids) == registry_before
 assert [vars(legacy_cli.build_parser().parse_args(args)) for args in forms] == defaults_before

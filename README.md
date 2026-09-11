@@ -30,11 +30,13 @@ python -m evolving_loop.v2 numerical-evolve \
 
 Re-run the exact command to verify and resume the same directory. The shipped
 smoke profile is offline and deterministic. The current CLI has no LLM-client
-configuration flags; hybrid profiles close an unavailable LLM attempt and use
-the deterministic fallback unless an identified client is injected through the
-Python Host API. This command never opens Public data. Retrieval, Decision and
-joint evolution, full production `evolve`, Public scoring, DGM source evolution,
-and L1 protocol migration are not available in Project 2. See the
+or forecast-runtime configuration flags, so `pilot` and `formal` fail closed at
+this CLI and must be constructed through the Python Host seam with a forecast
+runtime (and an optional identified LLM client). Hybrid LLM failure may then use
+the deterministic proposer fallback within its committed budget. This command
+never opens Public data. Retrieval, Decision and joint evolution, full
+production `evolve`, Public scoring, DGM source evolution, and L1 protocol
+migration are not available in Project 2. See the
 [Numerical QD operator guide](docs/evolution-v2-numerical-qd.md) for exact input,
 algorithm, artifact, resume, failure, and Project 3 handoff contracts.
 

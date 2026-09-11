@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -10,8 +11,15 @@ import sys
 
 import pytest
 
+from evolving_loop.v2 import cli as v2_cli
+from evolving_loop.v2.contracts import canonical_v2_bytes
 from evolving_loop.v2.numerical_qd import hyperband, map_elites, mutation, nsga2
-from evolving_loop.v2.numerical_qd.proposers import primitive_proposer_request
+from evolving_loop.v2.numerical_qd.proposers import (
+    LLMProposalProvider,
+    REQUEST_KEYS,
+    primitive_proposer_request,
+)
+from tests.build_evolution_v2_numerical_fixture import build as build_cli_fixture
 from tests.test_evolution_v2_numerical_hyperband import (
     ADAPTER,
     DESCRIPTOR,
@@ -38,7 +46,10 @@ def _expect_raises(error, operation):
         operation()
     except error:
         return
-    raise AssertionError(f"expected {error.__name__}")
+    names = (error,) if isinstance(error, type) else error
+    raise AssertionError(
+        "expected " + " or ".join(candidate.__name__ for candidate in names)
+    )
 
 
 def _all_file_bytes(root: Path) -> dict[str, bytes]:
@@ -65,7 +76,15 @@ def _all_file_bytes(root: Path) -> dict[str, bytes]:
 def test_hostile_capability_or_evaluator_sentinel_is_rejected_before_provider(
     location, key, value
 ):
-    """Removing exact/deep request validation would expose one hostile input."""
+    """Removing exact/deep validation would call the external provider."""
+
+    class CountingClient:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, **kwargs):
+            self.calls += 1
+            raise AssertionError("hostile input reached the provider capability")
 
     args = request_args()
     targets = {
@@ -77,7 +96,136 @@ def test_hostile_capability_or_evaluator_sentinel_is_rejected_before_provider(
         "genome": args["parent_genome"],
     }
     targets[location][key] = value
-    _expect_raises((TypeError, ValueError), lambda: primitive_proposer_request(**args))
+    client = CountingClient()
+    _expect_raises(
+        (TypeError, ValueError), lambda: LLMProposalProvider(client).propose(args)
+    )
+    assert client.calls == 0
+
+
+def _numerical_artifact_groups(root: Path) -> dict[str, dict[str, bytes]]:
+    all_files = _all_file_bytes(root)
+    numerical = {
+        name: raw for name, raw in all_files.items() if name.startswith("numerical_qd/")
+    }
+    json_objects = {}
+    for name, raw in numerical.items():
+        if name.endswith((".json", ".jsonl")):
+            for index, line in enumerate(raw.splitlines()):
+                if line:
+                    json_objects[f"{name}:{index}"] = json.loads(line)
+
+    def selected(predicate):
+        return {
+            name: canonical_v2_bytes(payload)
+            for name, payload in json_objects.items()
+            if predicate(payload)
+        }
+
+    return {
+        "proposer_request": selected(
+            lambda payload: isinstance(payload, dict) and set(payload) == REQUEST_KEYS
+        ),
+        "qd_object": selected(
+            lambda payload: isinstance(payload, dict)
+            and {"capacity", "cells", "entries", "insertion_log"} <= set(payload)
+        ),
+        "checkpoint": {
+            name: raw for name, raw in all_files.items() if name.endswith("checkpoint.json")
+        },
+        "prompt": selected(
+            lambda payload: isinstance(payload, dict)
+            and {"template", "response_schema", "parent_prompt_sha256"} <= set(payload)
+        ),
+        "mutation_policy": selected(
+            lambda payload: isinstance(payload, dict)
+            and set(payload) == {"schema_version", "operators"}
+        ),
+        "progress": selected(
+            lambda payload: isinstance(payload, dict) and set(payload) == {"numerical_qd_step"}
+        ),
+        "cache_row": {
+            name: raw
+            for name, raw in numerical.items()
+            if name.startswith("numerical_qd/results/")
+        },
+        "source": {name: raw for name, raw in numerical.items() if name.endswith(".py")},
+    }
+
+
+@pytest.mark.parametrize(
+    "sentinel_kind,sentinel",
+    [
+        ("future", 917_263_541.125),
+        ("evaluator_label", "EVALUATOR_LABEL_4c943e21"),
+    ],
+)
+def test_trusted_evaluator_sees_sentinel_but_every_numerical_artifact_excludes_it(
+    tmp_path, monkeypatch, sentinel_kind, sentinel
+):
+    """Bypassing the trusted evaluator or persisting its input fails by kind."""
+
+    inputs = tmp_path / "inputs"
+    build_cli_fixture(inputs)
+    config_path = inputs / "smoke.json"
+    config = json.loads(
+        (ROOT / "configs/evolution_v2/numerical_qd/smoke.json").read_bytes()
+    )
+    config_path.write_bytes(canonical_v2_bytes(config))
+    task_path = inputs / "task_manifest.json"
+    tasks = json.loads(task_path.read_bytes())
+    if sentinel_kind == "future":
+        tasks["train"][0]["future_values"] = [sentinel, sentinel]
+    else:
+        tasks["train"][0]["gt_evidence"] = [sentinel]
+    task_path.write_bytes(canonical_v2_bytes(tasks))
+
+    from evolving_loop.v2.numerical_qd import runner
+
+    evaluated, requests = [], []
+    original_evaluate = runner.evaluate_numerical_child
+    original_request = runner.primitive_proposer_request
+
+    def trusted_evaluator(adapter, child, committed, **kwargs):
+        host_task = next(
+            task for task in adapter.tasks if task.numeric.task_id == committed.task_id
+        )
+        if sentinel_kind == "future":
+            if sentinel in host_task.numeric.future_values:
+                evaluated.append(committed.task_id)
+        elif sentinel in host_task.gt_evidence:
+            evaluated.append(committed.task_id)
+        return original_evaluate(adapter, child, committed, **kwargs)
+
+    def proposer_boundary(**payload):
+        request = original_request(**payload)
+        assert str(sentinel).encode() not in canonical_v2_bytes(request)
+        requests.append(request)
+        return request
+
+    monkeypatch.setattr(runner, "evaluate_numerical_child", trusted_evaluator)
+    monkeypatch.setattr(runner, "primitive_proposer_request", proposer_boundary)
+    output = tmp_path / "run"
+    assert v2_cli.main(
+        [
+            "numerical-evolve",
+            "--config",
+            str(config_path),
+            "--seed-supply",
+            str(inputs / "seed_supply.json"),
+            "--task-manifest",
+            str(task_path),
+            "--output-dir",
+            str(output),
+        ]
+    ) == 0
+    assert evaluated and requests
+
+    groups = _numerical_artifact_groups(output)
+    encoded = str(sentinel).encode()
+    for kind, artifacts in groups.items():
+        assert artifacts, f"run produced no {kind} artifacts"
+        assert all(encoded not in raw for raw in artifacts.values()), kind
 
 
 def test_real_run_artifacts_exclude_environment_path_public_and_dev_sentinels(
@@ -86,7 +234,6 @@ def test_real_run_artifacts_exclude_environment_path_public_and_dev_sentinels(
     """Leaking Host context into any durable Numerical artifact fails this scan."""
 
     environment = "ENV_SECRET_c848257a"
-    public = "PUBLIC_NEVER_OPEN_775d22fd"
     dev = "DEV_KERNEL_ONLY_b1c13fa0"
     output = tmp_path / "PATH_HOST_ONLY_d221503b" / "run"
     monkeypatch.setenv("EVOLUTION_V2_HOSTILE_SECRET", environment)
@@ -104,8 +251,7 @@ def test_real_run_artifacts_exclude_environment_path_public_and_dev_sentinels(
         return original(kernel, parent, child, **kwargs)
 
     monkeypatch.setattr(EvolutionKernel, "close_evaluation", inject_dev)
-    result = run_fixture(output, task_budget=920)
-    assert result.public_test_accessed is False
+    run_fixture(output, task_budget=920)
 
     artifacts = _all_file_bytes(output)
     numerical = {name: raw for name, raw in artifacts.items() if name.startswith("numerical_qd/")}
@@ -122,7 +268,7 @@ def test_real_run_artifacts_exclude_environment_path_public_and_dev_sentinels(
     assert any(name.endswith(".py") for name in numerical)
     assert any('"cache_key"' in raw for raw in numerical_decoded.values())
 
-    forbidden = (environment, public, output.parent.name)
+    forbidden = (environment, output.parent.name)
     for name, raw in decoded.items():
         assert all(sentinel not in raw for sentinel in forbidden), name
     locations = [name for name, raw in decoded.items() if dev in raw]

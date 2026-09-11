@@ -65,8 +65,8 @@ The shipped profiles are:
 | Profile | hard limit | reserve | proposer | purpose |
 |---|---:|---:|---|---|
 | `smoke` | 600 s | 20% | deterministic | offline reproducible wiring and algorithm exercise |
-| `pilot` | 7,200 s | 20% | hybrid | bounded real-adapter pilot |
-| `formal` | 14,400 s | exactly 20% | hybrid | formal Numerical-only run |
+| `pilot` | 7,200 s | 20% | hybrid | Python Host integration profile; requires a forecast runtime |
+| `formal` | 14,400 s | exactly 20% | hybrid | Python Host integration profile; requires a forecast runtime |
 
 The config is closed. It binds the Kernel protocol, runtime fingerprints,
 resource ceilings, fixed Retrieval/Decision/Harness/archive/scheduler
@@ -122,19 +122,24 @@ completion must report `public_test_accessed: false`.
 
 ### LLM configuration boundary
 
-`run_numerical_qd(..., llm_client=...)` accepts a Host-injected existing
-`LLMClient` seam. The LLM provider sends one strict JSON-schema request, applies
-call/token/byte limits, and records a closed attempt. Unconfigured,
-unavailable, timed-out, malformed, empty, or over-budget LLM attempts do not
-relax validation. If budget remains, `hybrid` continues with the deterministic
-provider.
+The Python construction seam accepts a Host runtime whose `forecast_store`
+implements `forecast(...)`; it may also provide a resource reporter, its bound
+identity and resource kinds, and an existing `llm_client`. An explicit
+`llm_client` argument takes precedence. The LLM provider sends one strict
+JSON-schema request, applies call/token/byte limits, and records a closed
+attempt. Unconfigured, unavailable, timed-out, malformed, empty, or over-budget
+LLM attempts do not relax validation. If budget remains, `hybrid` continues
+with the deterministic provider. Secrets configure the external client and
+never belong in config or run artifacts.
 
 The current `python -m evolving_loop.v2 numerical-evolve` CLI intentionally has
-no model, API-key, or provider-client flags and passes no LLM client. Therefore
-the shipped `pilot` and `formal` hybrid profiles record an unavailable LLM
-attempt and use deterministic fallback unless an identified client is injected
-through the Python Host API. Secrets are configuration of the external client,
-not config or run artifacts.
+no model, API-key, provider-client, or forecast-runtime flags. It is therefore
+an operational entrypoint for the shipped deterministic `smoke` profile only.
+Supplying `pilot.json` or `formal.json` directly to that CLI fails closed with a
+missing Host forecast-runtime error. Those profiles are integration contracts
+for a Python Host that calls the Numerical construction seam with the required
+runtime (and, optionally, the identified LLM client); Project 2 does not ship a
+standalone real-adapter CLI launcher.
 
 ## Descriptors, ranking, and scheduling
 
