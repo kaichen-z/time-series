@@ -14,6 +14,7 @@ from ..budget import BudgetLedger, BudgetPlan, ResourceUse
 from ..bundle import EvolutionBundleV2
 from ..contracts import canonical_v2_bytes, fingerprint_payload, require_sha256, _require_exact_schema
 from ..kernel import EvolutionKernel
+from ..path_safety import _system_tmp_alias
 from .contracts import (
     HyperbandBudgetOutcomeV2, HyperbandRungV2, HyperbandStateV2, HyperbandTaskResultV2, RungManifestV2, TrainTaskV2,
     NumericalEvaluationV2, NumericalGenomeV2, NumericalInventoryV2,
@@ -33,19 +34,6 @@ _SHA = r"[a-f0-9]{64}"
 _FILES = re.compile(rf"(?:manifest\.json|archive/entries\.jsonl|"
     rf"(?:objects|proposals|rungs)/{_SHA}\.json|sources/{_SHA}\.py|results/{_SHA}/{_SHA}\.json)\Z")
 _TEMP = re.compile(r"\..+\.[^.]+\.tmp\Z")
-
-
-def _system_tmp_alias(path: Path, mode: int | None = None) -> bool:
-    """Accept only the OS-provided macOS /tmp -> /private/tmp alias."""
-    try:
-        mode = path.lstat().st_mode if mode is None else mode
-        return (
-            path == Path("/tmp")
-            and stat.S_ISLNK(mode)
-            and stat.S_ISDIR(path.resolve(strict=True).lstat().st_mode)
-        )
-    except OSError:
-        return False
 
 
 class NumericalQDStoreError(durable.StoreContractError):

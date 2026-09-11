@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import inspect
 import math
 import statistics
 import symtable
@@ -45,7 +46,12 @@ from numerical_agent.evolution.numerical_package import (
 from numerical_agent.evolution.numerical_selector import (
     CandidateDiagnostics, HindcastFold, SelectionArithmetic, SelectionDecision,
 )
-from numerical_agent.evolution.screening import TaskProfile, profile_task
+from numerical_agent.evolution.screening import (
+    ScreeningPolicy,
+    TaskProfile,
+    _policy_payload,
+    profile_task,
+)
 from numerical_agent.evolution.task_local_evolution import GroupFoldManifest
 
 from ..budget import ResourceUse
@@ -644,6 +650,71 @@ def _sources(sources):
     return MappingProxyType(values)
 
 
+def _implementation_identity(value):
+    """Stable executable identity for a trusted Host boundary object."""
+    cls = value if isinstance(value, type) else type(value)
+    source = inspect.getsourcefile(cls)
+    source_sha256 = None
+    if source is not None:
+        try:
+            source_sha256 = hashlib.sha256(Path(source).read_bytes()).hexdigest()
+        except OSError:
+            # Extension-backed Host integrations still retain their fully
+            # qualified implementation type and their explicit resource ID.
+            source_sha256 = None
+    return {
+        "type": f"{cls.__module__}.{cls.__qualname__}",
+        "source_sha256": source_sha256,
+    }
+
+
+def _resource_identity(value):
+    """Bind a Host store to executable code and its committed runtime identity."""
+    identity = {"implementation": _implementation_identity(value)}
+    for name in ("identity_hash", "screening_hash", "cache_only"):
+        item = getattr(value, name, None)
+        if item is not None:
+            identity[name] = item
+    kinds = getattr(value, "resource_kinds", ())
+    if isinstance(kinds, (tuple, list)) and all(type(item) is str for item in kinds):
+        identity["resource_kinds"] = sorted(kinds)
+    return identity
+
+
+def _materializer_identity(materializer):
+    """Resume identity for the Host materialization/runtime boundary."""
+    screening = getattr(materializer, "screening_policy", None)
+    if type(screening) is not ScreeningPolicy:
+        raise ValueError("adapter materializer requires an exact screening policy")
+    combined = getattr(materializer, "combined_policies", ())
+    if not isinstance(combined, (tuple, list)) or not all(
+        callable(getattr(item, "to_payload", None)) for item in combined
+    ):
+        raise ValueError("adapter materializer combined policies are not canonical")
+    source_fingerprints = getattr(materializer, "source_fingerprints", {})
+    runtime_fingerprints = getattr(materializer, "runtime_fingerprints", {})
+    if not isinstance(source_fingerprints, Mapping) or not isinstance(
+        runtime_fingerprints, Mapping
+    ):
+        raise ValueError("adapter materializer fingerprints are not mappings")
+    fold_manifest = getattr(materializer, "fold_manifest", None)
+    if not callable(getattr(fold_manifest, "to_payload", None)):
+        raise ValueError("adapter materializer requires a canonical fold manifest")
+    return {
+        "implementation": _implementation_identity(materializer),
+        "forecast_store": _resource_identity(
+            getattr(materializer, "forecast_store", None)
+        ),
+        "screening_policy_sha256": fingerprint_payload(_policy_payload(screening)),
+        "fold_manifest_sha256": fingerprint_payload(fold_manifest.to_payload()),
+        "source_fingerprints": dict(source_fingerprints),
+        "runtime_fingerprints": dict(runtime_fingerprints),
+        "combined_policy_sha256": fingerprint_payload(
+            {"policies": [item.to_payload() for item in combined]}
+        ),
+    }
+
+
 def import_numerical_seed(release, registry, *, tasks, source_paths=()) -> ImportedNumericalSeedV2:
     if type(release) is not NumericalSupplyRelease:
         raise ValueError("exact NumericalSupplyRelease required")
@@ -774,6 +845,7 @@ class LegacyNumericalAdapter:
         return fingerprint_payload({"implementation": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "host_evaluator": self.host_evaluator_sha256, "resource_reporter": self.resource_reporter_sha256,
             "resource_kinds": list(self.declared_resource_kinds()),
+            "materializer": _materializer_identity(self.materializer),
             "operator_input_sha256s": dict(self.operator_input_sha256s)})
 
     def propose_legacy(self, release, registry, feedback, *, generation, task_evidence=None):

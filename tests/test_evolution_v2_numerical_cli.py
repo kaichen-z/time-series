@@ -6,14 +6,21 @@ import os
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
 
 from evolving_loop.package_numerical_supply import parse_numerical_supply_release
+from evolving_loop.v2.bundle import EvolutionBundleV2
 from evolving_loop.v2.contracts import canonical_v2_bytes
 from evolving_loop.v2.kernel import SeedBootstrapAuthority, _material_bytes
+from evolving_loop.v2.numerical_qd.contracts import (
+    NumericalMutationPolicyV2,
+    NumericalProposerPromptV2,
+)
 from evolving_loop.v2.numerical_qd.config import load_numerical_qd_config
+from evolving_loop.v2.numerical_qd.map_elites import NumericalQDArchive
 from evolving_loop.v2.store import V2RunStore
 
 
@@ -191,6 +198,158 @@ def test_invalid_canonical_inputs_fail_before_output(tmp_path, damage):
     assert not output.exists()
 
 
+def test_regular_input_rejects_caller_controlled_symlink_ancestor(tmp_path):
+    """A leaf lstat must not silently follow an attacker-owned parent link."""
+    source = tmp_path / "real"
+    source.mkdir()
+    config = source / "config.json"
+    config.write_bytes((PROFILES / "smoke.json").read_bytes())
+    alias = tmp_path / "alias"
+    alias.symlink_to(source, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink"):
+        cli()._regular_canonical_input(alias / "config.json")
+
+
+def test_numerical_evolve_parses_config_from_verified_input_bytes_once(
+    tmp_path, monkeypatch
+):
+    """The hashed config bytes, not a later path read, are runner authority."""
+    seed, tasks = build_fixture(tmp_path / "fixtures")
+    output = tmp_path / "run"
+    observed = {}
+    config_path = PROFILES / "smoke.json"
+    admitted_config = False
+    regular_input = cli()._regular_canonical_input
+    path_read_bytes = Path.read_bytes
+
+    def admitted_input(path):
+        nonlocal admitted_config
+        value = regular_input(path)
+        admitted_config = admitted_config or Path(path) == config_path
+        return value
+
+    def guarded_read_bytes(path):
+        if admitted_config and path == config_path:
+            pytest.fail("CLI reread unhashed config path")
+        return path_read_bytes(path)
+
+    monkeypatch.setattr(cli(), "_regular_canonical_input", admitted_input)
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+    monkeypatch.setattr(
+        cli(),
+        "_build_numerical_adapter",
+        lambda config, *_args, **_kwargs: observed.setdefault("config", config) or object(),
+    )
+
+    def fake_runner(root, _config, _seed, _folds, _adapter, **_kwargs):
+        root.mkdir()
+        (root / "evaluation_complete.json").write_bytes(
+            canonical_v2_bytes({"status": "fake"})
+        )
+
+    monkeypatch.setattr(cli(), "run_numerical_qd", fake_runner)
+    assert cli()._numerical_evolve(config_path, seed, tasks, output) == {
+        "status": "fake"
+    }
+    assert observed["config"].profile == "smoke"
+
+
+def test_manifest_document_id_requires_an_exact_string(tmp_path):
+    """Document's permissive constructor must not coerce caller identity."""
+    _seed, tasks = build_fixture(tmp_path / "fixtures")
+    payload = json.loads(tasks.read_bytes())
+    payload["train"][0]["documents"][0]["document_id"] = 7
+
+    with pytest.raises(ValueError, match="documents require string identity"):
+        cli()._parse_task_manifest(payload)
+
+
+class _HostForecastStore:
+    """A no-network Host boundary whose call log makes dispatch observable."""
+
+    resource_kinds = ()
+
+    def __init__(self, identity_hash: str):
+        self.identity_hash = identity_hash
+        self.calls = []
+
+    def forecast(self, name, history, horizon, frequency):
+        self.calls.append((name, tuple(history), horizon, frequency))
+        return (float(history[-1]),) * horizon
+
+
+def test_pilot_keeps_configured_host_runtime_and_hybrid_llm_seam(
+    tmp_path, monkeypatch
+):
+    """Pilot must dispatch through Host forecast runtime; only proposals may fall back."""
+    seed, tasks = build_fixture(tmp_path / "fixtures")
+    output = tmp_path / "run"
+    host_store = _HostForecastStore("1" * 64)
+    host_runtime = SimpleNamespace(forecast_store=host_store, llm_client=None)
+    observed = {}
+
+    def fake_runner(root, config, _seed, _folds, adapter, **kwargs):
+        observed["config"] = config
+        observed["adapter"] = adapter
+        observed["llm_client"] = kwargs["llm_client"]
+        assert adapter.materializer.forecast_store.forecast(
+            "toto_2_0", (1.0, 2.0), 2, "D"
+        ) == (2.0, 2.0)
+        root.mkdir()
+        (root / "evaluation_complete.json").write_bytes(
+            canonical_v2_bytes({"status": "fake"})
+        )
+
+    monkeypatch.setattr(cli(), "run_numerical_qd", fake_runner)
+    assert cli().numerical_evolve(
+        PROFILES / "pilot.json", seed, tasks, output, host_runtime=host_runtime
+    ) == {"status": "fake"}
+    assert observed["config"].proposer["provider"] == "hybrid"
+    assert observed["adapter"].materializer.forecast_store is host_store
+    assert observed["llm_client"] is None
+    assert host_store.calls == [("toto_2_0", (1.0, 2.0), 2, "D")]
+
+
+def test_pilot_never_substitutes_the_deterministic_forecast_fixture(tmp_path, monkeypatch):
+    """An unavailable Host runtime is an admission error, not a fake forecast run."""
+    seed, tasks = build_fixture(tmp_path / "fixtures")
+    output = tmp_path / "run"
+    monkeypatch.setattr(
+        cli(),
+        "run_numerical_qd",
+        lambda *_args, **_kwargs: pytest.fail("pilot reached runner without Host runtime"),
+    )
+
+    assert numerical(PROFILES / "pilot.json", seed, tasks, output) == 2
+    assert not output.exists()
+
+
+def test_adapter_fingerprint_binds_host_forecast_store_identity(tmp_path):
+    """Changing the configured Host executable/cache identity invalidates resume."""
+    seed, tasks = build_fixture(tmp_path / "fixtures")
+    task_payload = json.loads(tasks.read_bytes())
+    parsed_tasks, folds = cli()._parse_task_manifest(task_payload)
+    config = load_numerical_qd_config(PROFILES / "pilot.json")
+    operator_inputs = {"config": "0" * 64, "seed_supply": "1" * 64, "task_manifest": "2" * 64}
+    first = cli()._build_numerical_adapter(
+        config,
+        parsed_tasks,
+        folds,
+        operator_inputs,
+        host_runtime=SimpleNamespace(forecast_store=_HostForecastStore("3" * 64)),
+    )
+    second = cli()._build_numerical_adapter(
+        config,
+        parsed_tasks,
+        folds,
+        operator_inputs,
+        host_runtime=SimpleNamespace(forecast_store=_HostForecastStore("4" * 64)),
+    )
+
+    assert first.fingerprint != second.fingerprint
+
+
 @pytest.mark.parametrize("kind", ["input_symlink", "output_child", "output_parent", "output_symlink"])
 def test_filesystem_identity_overlap_and_links_fail_before_adapter_access(
     tmp_path, monkeypatch, kind
@@ -323,6 +482,40 @@ def test_smoke_executes_real_runner_and_writes_truthful_completion(completed_smo
     }
     assert not forbidden.intersection(completion) and not forbidden.intersection(summary)
 
+    checkpoint = json.loads((output / "numerical_qd" / "checkpoint.json").read_bytes())
+    kernel = json.loads((output / "checkpoint.json").read_bytes())
+    read_object = lambda sha: json.loads(
+        (output / "numerical_qd" / "objects" / f"{sha}.json").read_bytes()
+    )
+    bundle = EvolutionBundleV2.from_payload(read_object(checkpoint["active_bundle_sha256"]))
+    archive = NumericalQDArchive.from_payload(read_object(checkpoint["qd_snapshot_sha256"]))
+    policy = NumericalMutationPolicyV2.from_payload(
+        read_object(checkpoint["mutation_policy_sha256"])
+    )
+    prompt = NumericalProposerPromptV2.from_payload(
+        read_object(checkpoint["proposer_prompt_sha256"])
+    )
+    assert completion["runner_checkpoint_sha256"] == checkpoint["checkpoint_sha256"]
+    assert completion["kernel_checkpoint_sha256"] == checkpoint["kernel_checkpoint_sha256"]
+    assert completion["budget_checkpoint_sha256"] == checkpoint["budget_checkpoint_sha256"]
+    assert completion["active_bundle_sha256"] == bundle.fingerprint()
+    assert completion["active_genome_sha256"] == checkpoint["active_genome_sha256"]
+    assert completion["qd_snapshot_sha256"] == archive.fingerprint()
+    assert summary["supply_sha256"] == bundle.numerical_release_sha256
+    assert summary["registry_sha256"] == bundle.numerical_registry_sha256
+    assert summary["bundle_sha256"] == bundle.fingerprint()
+    assert summary["qd_snapshot_sha256"] == archive.fingerprint()
+    assert summary["mutation_policy_sha256"] == policy.fingerprint()
+    assert summary["proposer_prompt_sha256"] == prompt.fingerprint()
+    transitions = tuple(kernel["completed_transitions"].values())
+    assert summary["accepted_count"] == sum(
+        transition["decision"] == "accept" for transition in transitions
+    )
+    assert summary["rejected_count"] == sum(
+        transition["decision"] == "reject" for transition in transitions
+    )
+    assert summary["budget"] == kernel["budget"]
+
 
 def test_completed_resume_is_verified_mtime_noop(completed_smoke, capsys):
     _root, seed, tasks, output, _inputs_before = completed_smoke
@@ -366,6 +559,18 @@ def test_project_one_cli_commands_keep_their_existing_behavior(tmp_path, capsys)
         str(public),
     ]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "validated_only_no_public_evaluator"
+
+
+def test_production_evolve_names_the_project_three_adapter_boundary(tmp_path, capsys):
+    from evolving_loop.v2.fakes import smoke_config
+
+    payload = smoke_config().to_payload()
+    payload["runner"] = "production"
+    config = tmp_path / "production.json"
+    config.write_bytes(canonical_v2_bytes(payload))
+
+    assert cli().main(["evolve", "--config", str(config), "--output-dir", str(tmp_path / "run")]) == 2
+    assert "Project 3 adapters" in capsys.readouterr().err
 
 
 def test_module_entrypoint_runs_numerical_evolve(completed_smoke, tmp_path):

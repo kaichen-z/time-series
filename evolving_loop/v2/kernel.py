@@ -37,6 +37,7 @@ from .contracts import (
     require_sha256,
 )
 from .store import V2RunStore, write_atomic_json, write_once_json, _LAYOUT as _STORE_LAYOUT
+from .path_safety import _system_tmp_alias, physical_system_tmp_path
 
 
 class KernelAuthorityError(ValueError):
@@ -63,24 +64,7 @@ def _material_bytes(root, receipt, *, absent=False):
     from .numerical_qd.artifacts import validate_artifact, validate_material_receipts
     validate_material_receipts([receipt])
     relative = PurePosixPath(receipt["relative_path"])
-    root_path = Path(root).absolute()
-    # macOS supplies /tmp as the fixed system link to /private/tmp.  The
-    # operator boundary permits that one alias; start descriptor traversal at
-    # its physical directory so O_NOFOLLOW continues to guard every
-    # caller-controlled component below it.
-    tmp_alias = Path("/tmp")
-    try:
-        under_system_tmp = root_path.is_relative_to(tmp_alias)
-        tmp_mode = tmp_alias.lstat().st_mode
-    except OSError:
-        under_system_tmp = False
-        tmp_mode = 0
-    if (
-        under_system_tmp
-        and stat.S_ISLNK(tmp_mode)
-        and stat.S_ISDIR(tmp_alias.resolve(strict=True).lstat().st_mode)
-    ):
-        root_path = tmp_alias.resolve(strict=True) / root_path.relative_to(tmp_alias)
+    root_path = physical_system_tmp_path(Path(root).absolute())
     target = root_path / "numerical_qd" / relative
     descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -393,14 +377,7 @@ class SeedBootstrapAuthority:
         try:
             for path in (*reversed(root.parents), root):
                 mode = path.lstat().st_mode
-                # macOS mounts the physical temporary directory through the
-                # fixed system alias /tmp -> /private/tmp.  It is the sole
-                # ancestor symlink accepted by the operator preflight.
-                if not stat.S_ISDIR(mode) and not (
-                    path == Path("/tmp")
-                    and stat.S_ISLNK(mode)
-                    and stat.S_ISDIR(path.resolve(strict=True).lstat().st_mode)
-                ):
+                if not stat.S_ISDIR(mode) and not _system_tmp_alias(path, mode):
                     raise KernelAuthorityError("bootstrap root and ancestors must be real directories")
             pending = [root]
             while pending:

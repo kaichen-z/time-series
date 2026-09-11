@@ -1,12 +1,8 @@
-"""Parallel Project 1 CLI; Public is a validation-only, non-learning boundary.
+"""Evolution V2 command-line entrypoints and trusted input boundaries.
 
-Shipped profile digests commit configuration intent, not installed adapters.
-For each kernel_protocol or runtime_fingerprints key `component`, its preimage
-is canonical_v2_bytes({"binding_kind": "config_intent", "component": component,
-"configuration": base}), where base is the complete config payload with
-kernel_protocol and runtime_fingerprints omitted. This fully specified recipe
-avoids placeholder identities; production adapters must supply real executable
-bindings in later projects. Hyperband and scheduler settings are intent only.
+The Project 1 fake and validation-only Public commands remain closed to live
+adapters.  ``numerical-evolve`` owns its separate, canonical Numerical Supply
+inputs and delegates execution to the Project 2 runner.
 """
 
 from __future__ import annotations
@@ -14,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import math
+import os
 import stat
 import sys
 from collections.abc import Mapping
@@ -35,9 +32,10 @@ from .bundle import EvolutionBundleV2
 from .contracts import KernelProtocolCommitment, canonical_v2_bytes, load_v2_config
 from .fakes import run_fake_kernel
 from .numerical_qd.adapters import LegacyNumericalAdapter
-from .numerical_qd.config import load_numerical_qd_config
+from .numerical_qd.config import NumericalQDConfigV2
 from .numerical_qd.persistence import NumericalQDRunStore
 from .numerical_qd.runner import run_numerical_qd
+from .path_safety import _system_tmp_alias, physical_system_tmp_path
 from .store import write_once_json
 
 
@@ -103,7 +101,7 @@ def _evolve(config_path: Path, output: Path) -> dict[str, object]:
     if config.profile == "public":
         raise ValueError("public profile requires public-evaluate")
     if config.runner == "production":
-        raise ValueError("production evolution requires Project 2+ adapters")
+        raise ValueError("production evolution requires Project 3 adapters")
     if config.profile != "smoke" or set(config.enabled_mutation_scopes) != {
         "numerical",
         "retrieval",
@@ -141,23 +139,68 @@ def _exact_fields(value: object, fields: tuple[str, ...], name: str) -> dict:
     return value
 
 
-def _regular_canonical_input(path: Path) -> tuple[dict[str, object], bytes, Path]:
+def _regular_canonical_input(
+    path: Path,
+) -> tuple[dict[str, object], bytes, Path, tuple[int, int], str]:
+    """Read one canonical input through a no-follow descriptor chain.
+
+    Every caller-controlled component is opened as a directory with
+    ``O_NOFOLLOW``.  The sole exception is the operating system's fixed macOS
+    ``/tmp -> /private/tmp`` alias, which is converted to its physical path
+    before traversal.  The same leaf descriptor supplies bytes, identity and
+    canonical digest input; no path read occurs after admission.
+    """
+    absolute = physical_system_tmp_path(path.absolute())
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
     try:
-        mode = path.lstat().st_mode
+        for part in absolute.parts[1:-1]:
+            next_descriptor = os.open(
+                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+        leaf = os.open(absolute.name, flags, dir_fd=descriptor)
+        try:
+            before = os.fstat(leaf)
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError(f"input must be a non-symlink regular file: {path}")
+            chunks = []
+            while True:
+                chunk = os.read(leaf, 131_072)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            after = os.fstat(leaf)
+        finally:
+            os.close(leaf)
+    except ValueError:
+        raise
     except OSError as error:
-        raise ValueError(f"input must be an existing regular file: {path}") from error
-    if not stat.S_ISREG(mode):
-        raise ValueError(f"input must be a non-symlink regular file: {path}")
-    resolved = path.resolve(strict=True)
-    raw = path.read_bytes()
+        raise ValueError(
+            f"input path must use real directories and a non-symlink regular file: {path}"
+        ) from error
+    finally:
+        os.close(descriptor)
+    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        raise ValueError(f"input changed while being read: {path}")
+    raw = b"".join(chunks)
+    sha256 = hashlib.sha256(raw).hexdigest()
     payload = strict_json_loads(raw.decode("utf-8"), context=str(path))
     if type(payload) is not dict or raw != canonical_v2_bytes(payload):
         raise ValueError(f"expected canonical V2 JSON object: {path}")
-    return payload, raw, resolved
+    return payload, raw, absolute, (before.st_dev, before.st_ino), sha256
 
 
-def _preflight_numerical_paths(inputs: tuple[Path, ...], output: Path) -> bool:
-    if len({(path.stat().st_dev, path.stat().st_ino) for path in inputs}) != len(inputs):
+def _preflight_numerical_paths(
+    inputs: tuple[Path, ...], output: Path, *, input_identities: tuple[tuple[int, int], ...] | None = None
+) -> bool:
+    identities = input_identities or tuple(
+        (path.stat().st_dev, path.stat().st_ino) for path in inputs
+    )
+    if len(set(identities)) != len(inputs):
         raise ValueError("Numerical input files must have distinct filesystem identities")
     absolute = output.absolute()
     for ancestor in (*reversed(absolute.parents), absolute):
@@ -166,13 +209,8 @@ def _preflight_numerical_paths(inputs: tuple[Path, ...], output: Path) -> bool:
         except FileNotFoundError:
             continue
         if not stat.S_ISDIR(mode):
-            # macOS exposes the operating system's physical temporary directory
-            # through /tmp -> /private/tmp. Accept only that root-owned alias;
-            # all caller-controlled output symlinks still fail before creation.
-            if ancestor == Path("/tmp") and stat.S_ISLNK(mode):
-                resolved_tmp = ancestor.resolve(strict=True)
-                if stat.S_ISDIR(resolved_tmp.lstat().st_mode):
-                    continue
+            if _system_tmp_alias(ancestor, mode):
+                continue
             raise ValueError("Numerical output and ancestors must be real directories")
     resolved_output = absolute.resolve(strict=False)
     for source in inputs:
@@ -230,15 +268,20 @@ def _parse_numerical_task(value: object) -> ContextTask:
     raw_documents = task["documents"]
     if type(raw_documents) is not list:
         raise ValueError("Numerical task documents must be a list")
-    documents = tuple(
-        Document(
-            _exact_fields(item, _DOCUMENT_FIELDS, "Numerical document")["document_id"],
-            item["content"],
-        )
+    document_payloads = tuple(
+        _exact_fields(item, _DOCUMENT_FIELDS, "Numerical document")
         for item in raw_documents
     )
-    if any(not document.document_id or type(document.content) is not str for document in documents):
+    if any(
+        type(item["document_id"]) is not str
+        or not item["document_id"]
+        or type(item["content"]) is not str
+        for item in document_payloads
+    ):
         raise ValueError("Numerical documents require string identity and content")
+    documents = tuple(
+        Document(item["document_id"], item["content"]) for item in document_payloads
+    )
     evidence = _strings(task["gt_evidence"], "gt_evidence")
     return ContextTask(
         numeric=Task(
@@ -304,7 +347,9 @@ class _DeterministicForecastStore:
         return (float(history[-1]) + offset,) * horizon
 
 
-def _build_numerical_adapter(config, tasks, folds, operator_input_sha256s):
+def _build_numerical_adapter(
+    config, tasks, folds, operator_input_sha256s, *, host_runtime=None
+):
     screening = ScreeningPolicy(
         tuple(
             ScreeningEntry(name, family, "keep", ApplicabilityPolicy(), "reviewed")
@@ -315,8 +360,20 @@ def _build_numerical_adapter(config, tasks, folds, operator_input_sha256s):
         ),
         ("toto_2_0",),
     )
+    if config.profile == "smoke":
+        forecast_store = _DeterministicForecastStore()
+        resource_reporter = None
+        resource_reporter_sha256 = None
+        resource_kinds = ()
+    else:
+        forecast_store = getattr(host_runtime, "forecast_store", None)
+        if not callable(getattr(forecast_store, "forecast", None)):
+            raise ValueError("pilot/formal requires a configured Host forecast runtime")
+        resource_reporter = getattr(host_runtime, "resource_reporter", None)
+        resource_reporter_sha256 = getattr(host_runtime, "resource_reporter_sha256", None)
+        resource_kinds = tuple(getattr(host_runtime, "resource_kinds", ()))
     materializer = NumericalPackageMaterializer(
-        forecast_store=_DeterministicForecastStore(),
+        forecast_store=forecast_store,
         screening_policy=screening,
         fold_manifest=folds,
         original_tasks=tasks,
@@ -329,40 +386,72 @@ def _build_numerical_adapter(config, tasks, folds, operator_input_sha256s):
         fold_manifest=folds,
         sources={_NUMERICAL_SOURCE_SHA256: _NUMERICAL_METHOD_SOURCE},
         operator_input_sha256s=operator_input_sha256s,
+        resource_kinds=resource_kinds,
+        resource_reporter=resource_reporter,
+        resource_reporter_sha256=resource_reporter_sha256,
     )
 
 
 def _numerical_evolve(
-    config_path: Path, seed_path: Path, task_manifest_path: Path, output: Path
+    config_path: Path, seed_path: Path, task_manifest_path: Path, output: Path,
+    *, host_runtime=None, llm_client=None,
 ) -> dict[str, object]:
     loaded = tuple(
         _regular_canonical_input(path)
         for path in (config_path, seed_path, task_manifest_path)
     )
     payloads = tuple(item[0] for item in loaded)
-    raw = tuple(item[1] for item in loaded)
     resolved = tuple(item[2] for item in loaded)
-    resume = _preflight_numerical_paths(resolved, output)
-    config = load_numerical_qd_config(config_path)
+    identities = tuple(item[3] for item in loaded)
+    resume = _preflight_numerical_paths(resolved, output, input_identities=identities)
+    config = NumericalQDConfigV2.from_payload(payloads[0])
     seed = parse_numerical_supply_release(payloads[1])
     tasks, folds = _parse_task_manifest(payloads[2])
-    input_sha256s = {
-        name: hashlib.sha256(data).hexdigest()
-        for name, data in zip(
-            ("config", "seed_supply", "task_manifest"), raw, strict=True
+    input_sha256s = dict(
+        zip(
+            ("config", "seed_supply", "task_manifest"),
+            (item[4] for item in loaded),
+            strict=True,
         )
-    }
-    adapter = _build_numerical_adapter(config, tasks, folds, input_sha256s)
+    )
+    adapter = _build_numerical_adapter(
+        config, tasks, folds, input_sha256s, host_runtime=host_runtime
+    )
     run_numerical_qd(
         output,
         config,
         seed,
         folds,
         adapter,
-        llm_client=None,
+        llm_client=llm_client if llm_client is not None else getattr(host_runtime, "llm_client", None),
         resume=resume,
     )
     return _read_canonical(output / "evaluation_complete.json")
+
+
+def numerical_evolve(
+    config_path: Path,
+    seed_path: Path,
+    task_manifest_path: Path,
+    output: Path,
+    *,
+    host_runtime=None,
+    llm_client=None,
+) -> dict[str, object]:
+    """Run Numerical QD with an explicitly configured trusted Host runtime.
+
+    Smoke intentionally owns its fixture store.  Pilot/formal callers supply
+    their existing forecast/runtime boundary here; an absent LLM remains a
+    proposer-only hybrid fallback inside the runner.
+    """
+    return _numerical_evolve(
+        config_path,
+        seed_path,
+        task_manifest_path,
+        output,
+        host_runtime=host_runtime,
+        llm_client=llm_client,
+    )
 
 
 def _public_evaluate(bundle_path: Path, output: Path) -> dict[str, object]:
@@ -432,7 +521,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "public-evaluate":
             summary = _public_evaluate(args.bundle, args.output_dir)
         else:
-            summary = _numerical_evolve(
+            summary = numerical_evolve(
                 args.config,
                 args.seed_supply,
                 args.task_manifest,
@@ -445,4 +534,4 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["build_parser", "main"]
+__all__ = ["build_parser", "main", "numerical_evolve"]
