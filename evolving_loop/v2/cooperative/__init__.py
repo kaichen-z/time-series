@@ -20,6 +20,7 @@ from .contracts import (
 )
 from .schedulers import record_outcome, select_arm
 from .proposals import propose_bundle_candidate
+from .runner import dev_passed, run_cooperative_evolution, train_eligible
 
 __all__ = [
     "ARM_ORDER",
@@ -36,7 +37,10 @@ __all__ = [
     "RetrievalCoordinateAdapter",
     "SchedulerArmStateV2",
     "record_outcome",
+    "run_cooperative_evolution",
     "propose_bundle_candidate",
     "sanitize_train_feedback",
     "select_arm",
+    "train_eligible",
+    "dev_passed",
 ]

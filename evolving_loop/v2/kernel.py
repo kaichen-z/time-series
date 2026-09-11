@@ -23,6 +23,7 @@ from .bundle import (
     EvolutionBundleV2,
     MutationTarget,
     _seal_acceptance,
+    changed_scopes,
     validate_child_scope,
 )
 from .contracts import (
@@ -1544,6 +1545,7 @@ class EvolutionKernel:
         target: MutationTarget,
         evaluation: ClosedEvaluation,
         permit: StagePermit | None = None,
+        host_scheduler_state_sha256: str | None = None,
     ) -> EvolutionBundleV2:
         issued = self._issued_evaluation(evaluation, permit)
         trusted, train, _ = issued
@@ -1554,6 +1556,13 @@ class EvolutionKernel:
                 raise KernelAuthorityError("transition Parent is not active")
             self._permit(child, permit)
             validate_child_scope(parent, child, target)
+            scheduler_state_sha256 = (
+                parent.scheduler_state_sha256
+                if host_scheduler_state_sha256 is None
+                else require_sha256(
+                    host_scheduler_state_sha256, "host scheduler state SHA"
+                )
+            )
             if (
                 parent.protocol_fingerprint != self.protocol.fingerprint()
                 or child.protocol_fingerprint != self.protocol.fingerprint()
@@ -1568,8 +1577,11 @@ class EvolutionKernel:
                 raise KernelAuthorityError(
                     "closed evaluation authority or Bundle binding mismatch"
                 )
-            release_references = (self._numerical_release_references(child, train)
-                                  if target == "numerical" else ())
+            release_references = (
+                self._numerical_release_references(child, train)
+                if "numerical" in changed_scopes(parent, child)
+                else ()
+            )
             closure = self._account(issued)
             self.archive.append(
                 _BundleArtifact(child, "bundle"),
@@ -1596,7 +1608,7 @@ class EvolutionKernel:
                 closure["allowed"],
                 decision,
                 self._archive_snapshot,
-                parent.scheduler_state_sha256,
+                scheduler_state_sha256,
             )
             self.store.write_acceptance(evidence.fingerprint(), evidence.to_payload())
             self._transitions[child.fingerprint()] = {
@@ -1625,7 +1637,7 @@ class EvolutionKernel:
                 target,
                 evidence,
                 self._archive_snapshot,
-                parent.scheduler_state_sha256,
+                scheduler_state_sha256,
             )
             self.archive.append(
                 _BundleArtifact(sealed, "acceptance_seal"),
@@ -1815,8 +1827,11 @@ class EvolutionKernel:
                 raise ValueError("sealed Bundle differs from acceptance evidence")
             train = _read(self.store.root / "evaluations" / provisional.fingerprint() / "train.json",
                           evidence.train_evaluation_sha256)
-            release_references = (self._numerical_release_references(bundle, train)
-                                  if evidence.target == "numerical" else ())
+            release_references = (
+                self._numerical_release_references(bundle, train)
+                if "numerical" in changed_scopes(parent, provisional)
+                else ()
+            )
             expected_record = _record(bundle, "acceptance_seal", (provisional.fingerprint(),),
                                       train, release_references).to_payload()
             for line in (

@@ -582,6 +582,77 @@ def test_kernel_accepts_each_declared_mutation_scope(kernel, target, changes):
     assert kernel.load_acceptance(accepted.acceptance_evidence_sha256).target == target
 
 
+def test_kernel_seals_host_scheduler_state_without_granting_candidate_ownership(kernel):
+    parent = kernel.active_bundle()
+    candidate = child(parent)
+    result, permit = evaluation(kernel, parent, candidate)
+    scheduler_sha = "9" * 64
+
+    accepted = kernel.evaluate_transition(
+        parent,
+        candidate,
+        target="retrieval",
+        evaluation=result,
+        permit=permit,
+        host_scheduler_state_sha256=scheduler_sha,
+    )
+
+    evidence = kernel.load_acceptance(accepted.acceptance_evidence_sha256)
+    assert accepted.scheduler_state_sha256 == scheduler_sha
+    assert evidence.scheduler_state_sha256 == scheduler_sha
+
+
+def test_joint_numerical_transition_validates_and_archives_the_release_pair(
+    kernel, monkeypatch
+):
+    parent = kernel.active_bundle()
+    candidate = parent.provisional_child(
+        "joint",
+        {
+            "numerical": ("c" * 64, "d" * 64),
+            "retrieval": "e" * 64,
+        },
+    )
+    result, permit = evaluation(kernel, parent, candidate)
+    release_pair = tuple(
+        sorted(
+            (
+                candidate.numerical_release_sha256,
+                candidate.numerical_registry_sha256,
+            )
+        )
+    )
+
+    validated = []
+
+    def validate_release_pair(bundle, train):
+        validated.append(bundle)
+        assert bundle.numerical_release_sha256 == candidate.numerical_release_sha256
+        assert bundle.numerical_registry_sha256 == candidate.numerical_registry_sha256
+        assert train["candidate_bundle_sha256"] == candidate.fingerprint()
+        return release_pair
+
+    monkeypatch.setattr(kernel, "_numerical_release_references", validate_release_pair)
+    accepted = kernel.evaluate_transition(
+        parent,
+        candidate,
+        target="joint",
+        evaluation=result,
+        permit=permit,
+    )
+
+    records = [
+        json.loads(line)["record"]
+        for line in kernel.archive.index.read_text().splitlines()
+    ]
+    accepted_record = next(
+        row for row in records if row["artifact_sha256"] == accepted.fingerprint()
+    )
+    assert validated[0] == candidate
+    assert accepted in validated[1:]
+    assert accepted_record["accepted_release_sha256s"] == list(release_pair)
+
+
 def test_budget_overrun_cannot_be_resealed_as_allowed_by_self_hash(kernel):
     transition(kernel, actual=3)
     (path,) = (kernel.store.root / "acceptance").glob("*.json")

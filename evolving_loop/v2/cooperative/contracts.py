@@ -287,6 +287,8 @@ class CooperativeSchedulerStateV2(_CanonicalContract):
         arms = values["arms"]
         if not isinstance(arms, Mapping):
             raise ValueError("arms must be an object")
+        if any(name not in _ARM_SET for name in arms):
+            raise ValueError("arms contains an unknown scheduler arm")
         return cls(
             schema_version=values["schema_version"],  # type: ignore[arg-type]
             mode=values["mode"],  # type: ignore[arg-type]
@@ -366,10 +368,19 @@ class CooperativeCheckpointV2(_CanonicalContract):
             tuple(field.name for field in fields(cls)),
             field="CooperativeCheckpointV2",
         )
+        scheduler_payload = dict(values["scheduler_state"])  # type: ignore[arg-type]
+        scheduler_arms = scheduler_payload.get("arms")
+        if not isinstance(scheduler_arms, Mapping):
+            raise ValueError("checkpoint scheduler arms must be an object")
+        if any(name not in _ARM_SET for name in scheduler_arms):
+            raise ValueError("checkpoint scheduler arms contains an unknown arm")
+        scheduler_payload["arms"] = {
+            name: scheduler_arms[name] for name in ARM_ORDER if name in scheduler_arms
+        }
         return cls(
             **(values | {
                 "scheduler_state": CooperativeSchedulerStateV2.from_payload(
-                    values["scheduler_state"]  # type: ignore[arg-type]
+                    scheduler_payload
                 )
             })
         )  # type: ignore[arg-type]
