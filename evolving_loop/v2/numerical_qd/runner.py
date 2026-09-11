@@ -152,43 +152,49 @@ class _MaterialAccounting:
 
     def __init__(self, store, kernel):
         self.store, self.kernel, self.external = store, kernel, None
-        self.external_receipts = []
+        self.external_permit = None
         store.material_writer = self.write
 
     def write(self, relative, data, dispatch, *, kind):
         spec = validate_artifact(kind, data)
         path = self.store.directory / relative
-        if path.exists() or not spec.billable:
+        if not spec.billable:
             return dispatch()
-        def written():
-            result = dispatch()
-            if not path.is_file() or path.read_bytes() != data:
-                raise NumericalQDStoreError("material write must match its exact admitted bytes")
-            receipt = {"kind": ArtifactKind(kind).value, "relative_path": relative,
-                "content_sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data)}
-            return result, receipt
+        metadata = {"relative_path": relative, "kind": kind,
+                    "content_sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data)}
+        if path.exists() or path.is_symlink():
+            self.kernel.verify_existing_material(**metadata)
+            return dispatch()
+        written_bytes = 0
+        def written(permit):
+            nonlocal written_bytes
+            capability = self.kernel.prepare_material_write(permit, **metadata)
+            try:
+                return dispatch()
+            finally:
+                if path.exists() or path.is_symlink():
+                    self.kernel.register_material_write(permit, capability)
+                    written_bytes = len(data)
+                else:
+                    self.kernel.abort_material_write(permit, capability)
         if self.external is not None:
             self.external(len(data), False)
             try:
-                result, receipt = written()
-                self.external_receipts.append(receipt)
-                return result
+                return written(self.external_permit)
             finally:
-                if path.is_file():
-                    self.external(path.stat().st_size, True)
+                self.external(written_bytes, True)
         work = _KernelWork(self.kernel, self.kernel.active_bundle(), 0)
         permit = work.reserve_stage("material-" + relative, ResourceUse(artifact_bytes=len(data)))
         if not permit.allowed:
             error = ArtifactBytesExhausted if permit.reason == "artifact_bytes_exhausted" else NumericalQDStoreError
             raise error("material persistence admission denied: " + permit.reason)
-        receipts = []
+        succeeded = False
         try:
-            result, receipt = written()
-            receipts.append(receipt)
+            result = written(permit)
+            succeeded = True
             return result
         finally:
-            work.close_stage(permit, ResourceUse(artifact_bytes=path.stat().st_size if path.is_file() else 0),
-                objectives={"material_receipts": receipts})
+            work.close_stage(permit, ResourceUse(artifact_bytes=written_bytes), status="passed" if succeeded else "failed")
 
 
 def _bootstrap(config, release, adapter):
@@ -340,7 +346,7 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
             artifact_bytes += size
     if store is not None:
         store.accounting.external = account_material
-        store.accounting.external_receipts = []
+        store.accounting.external_permit = permit
     try:
         if failure:
             raise ArtifactBytesExhausted("fixed manifest admission denied")
@@ -409,9 +415,9 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
     finally:
         if store is not None:
             store.accounting.external = None
+            store.accounting.external_permit = None
         actual = reported + ResourceUse(task_executions=executed, wall_seconds=float(started), artifact_bytes=artifact_bytes)
-        closed = work.close_stage(permit, actual, status="failed" if failure else "passed",
-            objectives={"material_receipts": store.accounting.external_receipts} if store is not None else None)
+        closed = work.close_stage(permit, actual, status="failed" if failure else "passed")
     if not closed.allowed:
         failure = closed.reason
     if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
@@ -471,7 +477,7 @@ def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry
     before = adapter.monotonic()
     result, reason = None, "freeze_failed"
     store.accounting.external = lambda size, begun: None  # This stage bills its new material files in finally.
-    store.accounting.external_receipts = []
+    store.accounting.external_permit = permit
     try:
         occupied = {archive.entries[sha].genome_sha256 for cell in archive.cells for sha in cell.entry_sha256s} | {winner}
         verified_children = {}
@@ -510,13 +516,13 @@ def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry
         reason = "freeze_failed"
     finally:
         store.accounting.external = None
+        store.accounting.external_permit = None
         # The single typed pair embeds all package envelopes. Count each new
         # material file once, including a completed write followed by failure.
         produced = set(objects.glob("*.json")) - existing
         closed = work.close_stage(permit, ResourceUse(
             artifact_bytes=sum(path.stat().st_size for path in produced if path.is_file()),
-            wall_seconds=float(adapter.monotonic() - before)), status="passed" if result else "failed",
-            objectives={"material_receipts": store.accounting.external_receipts})
+            wall_seconds=float(adapter.monotonic() - before)), status="passed" if result else "failed")
     if not closed.allowed:
         return None, closed.reason
     return result, None if result else reason
@@ -743,15 +749,15 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         new_paths = [path for path in artifact_paths if not path.exists()]
         try:
             store.accounting.external = lambda size, begun: None
-            store.accounting.external_receipts = []
+            store.accounting.external_permit = artifact_permit
             for sha, source in batch.source_artifacts:
                 store.write_source(sha, source)
             store.write_proposal_attempt(batch_sha, attempt_payload)
         finally:
             store.accounting.external = None
+            store.accounting.external_permit = None
             work.close_stage(artifact_permit, ResourceUse(artifact_bytes=sum(
-                path.stat().st_size for path in new_paths if path.is_file())),
-                objectives={"material_receipts": store.accounting.external_receipts})
+                path.stat().st_size for path in new_paths if path.is_file())))
         batch = store._proposal(store._read(f"proposals/{batch_sha}.json"))
         children, child_states, attempted, budget_blocked = {}, {}, [], False
         for proposal in batch.proposals:

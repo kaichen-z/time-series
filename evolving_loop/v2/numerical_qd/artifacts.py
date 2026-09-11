@@ -205,6 +205,12 @@ def _bootstrap_receipt(payload):
     if (type(payload["allowed"]) is not bool
             or payload["allowed"] != (payload["closure_reason"] is None)):
         raise ValueError("bootstrap receipt closure decision mismatch")
+    status, reason, allowed = payload["status"], payload["reason"], payload["allowed"]
+    if ((status == "passed" and (not allowed or reason is not None))
+            or (status != "passed" and reason is None)
+            or (status == "interrupted" and not allowed)
+            or (not allowed and reason != payload["closure_reason"])):
+        raise ValueError("bootstrap receipt status/outcome mismatch")
     for field in ("preflight_sha256", "reservation_sha256", "chain_sha256"):
         require_sha256(payload[field], field)
     for field in ("segment_index", "replay_total", "replay_consumed"):

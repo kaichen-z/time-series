@@ -99,7 +99,7 @@ def test_live_partial_writer_rejects_unpaid_unpersisted_content(tmp_path, fault)
     assert all(b"NEVER_STORE_UNPAID_PAYLOAD" not in data for data in files(store.root).values())
 
 
-@pytest.mark.parametrize("fault", ["missing", "unpaid", "mismatch", "noncanonical", "directory", "symlink", "paid"])
+@pytest.mark.parametrize("fault", ["missing", "unpaid", "mismatch", "noncanonical", "directory", "symlink", "paid", "late_payment", "rewritten_snapshot"])
 def test_live_partial_requires_exact_prepaid_task_result(tmp_path, fault):
     from evolving_loop.v2.numerical_qd.runner import _MaterialAccounting, _KernelWork, _persist
     from evolving_loop.v2.numerical_qd.artifacts import ArtifactKindV2
@@ -120,7 +120,7 @@ def test_live_partial_requires_exact_prepaid_task_result(tmp_path, fault):
     path = store.directory / f"results/{result.candidate_sha256}/{task.task_sha256}.json"
     if fault == "unpaid":
         core_store.write_once_json(path, result.to_payload())
-    elif fault != "missing":
+    elif fault not in {"missing", "late_payment", "rewritten_snapshot"}:
         store.write_task_result(task.task_sha256, result)
     if fault == "mismatch":
         result = replace(result, evaluation=replace(evaluated,
@@ -140,6 +140,11 @@ def test_live_partial_requires_exact_prepaid_task_result(tmp_path, fault):
     budget = checkpoint["budget"]
     outcome = HyperbandBudgetOutcomeV2("failed", "timeout", permit.reservation_sha256,
         ResourceUse(task_executions=1).to_payload(), budget["checkpoint_sha256"], budget)
+    if fault in {"late_payment", "rewritten_snapshot"}:
+        store.write_task_result(task.task_sha256, result)
+        if fault == "rewritten_snapshot":
+            later = json.loads(kernel.checkpoint_path.read_bytes())["budget"]
+            outcome = replace(outcome, ledger_checkpoint_sha256=later["checkpoint_sha256"], ledger_checkpoint=later)
     value = {"closed_partial_rung": {"state": state.to_payload(), "manifest_sha256": fixed.fingerprint(),
         "reason": "timeout", "task_results": [{"task_sha256": task.task_sha256, "result": result.to_payload()}],
         "unpersisted_task_results": [], "budget_outcome": outcome.to_payload()}}

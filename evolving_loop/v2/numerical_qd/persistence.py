@@ -658,12 +658,25 @@ class NumericalQDRunStore:
         if outcome.status == "blocked" and (outcome.reservation_sha256 is not None
                 or value["task_results"] or value["unpersisted_task_results"]):
             raise NumericalQDStoreError("blocked partial cannot carry task work or a reservation")
+        if outcome.status == "failed":
+            checkpoint = _payload(self._safe(self.root / "checkpoint.json").read_bytes())
+            ref = checkpoint["budget_closures"].get(outcome.reservation_sha256)
+            if ref is None:
+                raise NumericalQDStoreError("partial lacks its closed Kernel reservation")
+            closure = _payload(self._safe(self.root / "evaluations" / ref["candidate_bundle_sha256"] /
+                                         "budget_closure.json").read_bytes())
+            if (fingerprint_payload(closure) != ref["closure_sha256"]
+                    or closure["reservation_sha256"] != outcome.reservation_sha256
+                    or closure["resource_use"] != dict(outcome.resource_use)
+                    or any(outcome.to_payload()["ledger_checkpoint"][field] != closure["budget_after"][field]
+                           for field in ("charged_use", "closed_reservation_sha256s", "closed_stage_ids"))):
+                raise NumericalQDStoreError("partial historical snapshot differs from its Kernel closure")
         if value["manifest_sha256"] is None:
             if (value["reason"] != "artifact_bytes_exhausted" or value["task_results"] or value["unpersisted_task_results"]
                     or ResourceUse.from_payload(outcome.resource_use) != ResourceUse()):
                 raise NumericalQDStoreError("unpaid manifest cannot authorize partial task work")
             return
-        manifest = self._paid_manifest(value["manifest_sha256"], current_budget)
+        manifest = self._paid_manifest(value["manifest_sha256"], outcome.ledger_checkpoint)
         if (manifest.resource != state.bracket.resources[len(state.rungs)]
                 or manifest.split_sha256 != state.split_sha256 or manifest.protocol_sha256 != state.protocol_sha256):
             raise NumericalQDStoreError("closed partial manifest binding mismatch")
@@ -688,7 +701,7 @@ class NumericalQDRunStore:
                     raise NumericalQDStoreError("closed partial immutable result mismatch")
             except OSError as error:
                 raise NumericalQDStoreError("closed partial result material is missing") from error
-            self._paid_material(ArtifactKind.TASK_RESULT, name, canonical_v2_bytes(result.to_payload()), current_budget)
+            self._paid_material(ArtifactKind.TASK_RESULT, name, canonical_v2_bytes(result.to_payload()), outcome.ledger_checkpoint)
             seen.add(key)
         for row in value["unpersisted_task_results"]:
             use = validate_unpersisted_task(row)
@@ -711,6 +724,7 @@ class NumericalQDRunStore:
         return manifest
 
     def _paid_material(self, kind, relative, raw, current_budget):
+        from ..kernel import _material_bytes
         expected = {"kind": kind.value, "relative_path": relative,
             "content_sha256": hashlib.sha256(raw).hexdigest(), "size_bytes": len(raw)}
         checkpoint = _payload(self._safe(self.root / "checkpoint.json").read_bytes())
@@ -732,6 +746,8 @@ class NumericalQDRunStore:
                     or sum(row["size_bytes"] for row in receipts) > closure["resource_use"]["artifact_bytes"]
                     or (kind is ArtifactKind.RUNG_MANIFEST and (not closure["allowed"] or closed["status"] != "passed"))):
                 raise NumericalQDStoreError("paid material closure mismatch")
+            if _material_bytes(self.root, expected) != raw:
+                raise NumericalQDStoreError("paid material exact bytes mismatch")
             return
         raise NumericalQDStoreError("material lacks an exact paid Kernel receipt")
 

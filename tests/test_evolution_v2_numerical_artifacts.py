@@ -218,3 +218,49 @@ def test_bootstrap_close_verifies_event_graph_before_publishing_receipt(tmp_path
     with pytest.raises(ValueError):
         authority.close("interrupted", "process_interrupted")
     assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("status,reason,overrun", [
+    ("passed", "unexpected_reason", False), ("failed", None, False), ("stopped", None, False),
+    ("interrupted", None, False), ("passed", None, True), ("interrupted", "process_interrupted", True),
+])
+def test_bootstrap_close_rejects_illegal_outcome_combination_before_receipt(tmp_path, status, reason, overrun):
+    authority, _, adapter = bootstrap_fixture(tmp_path)
+    authority.forecast(SimpleNamespace(forecast_trusted=lambda *args, **kwargs: [0.0]), 0)
+    if overrun:
+        adapter.monotonic.advance(2.0)  # The committed bootstrap estimate is one second.
+    root = authority.store.root
+    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    with pytest.raises(ValueError):
+        authority.close(status, reason)
+    assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    assert not (root / "seed_bootstrap_receipt.json").exists()
+    assert not (root / "run_manifest.json").exists()
+
+
+def test_kernel_cannot_adopt_disallowed_bootstrap_passed_receipt(tmp_path):
+    from evolving_loop.v2.kernel import EvolutionKernel
+    from evolving_loop.v2.bundle import EvolutionBundleV2
+    from evolving_loop.v2.contracts import fingerprint_payload
+    from evolving_loop.v2.store import write_once_json
+    authority, config, adapter = bootstrap_fixture(tmp_path)
+    authority.forecast(SimpleNamespace(forecast_trusted=lambda *args, **kwargs: [0.0]), 0)
+    adapter.monotonic.advance(2.0)
+    receipt = authority.close("failed", "budget_overrun")
+    assert receipt["allowed"] is False
+    forged = receipt | {"status": "passed", "reason": None}
+    # Simulate an invalid imported issuer and immutable receipt, not a mocked decision.
+    authority.receipt = forged
+    root = authority.store.root
+    (root / "seed_bootstrap_receipt.json").unlink()
+    (root / f"seed_bootstrap_segments/{fingerprint_payload(receipt)}.json").unlink()
+    write_once_json(root / "seed_bootstrap_receipt.json", forged)
+    write_once_json(root / f"seed_bootstrap_segments/{fingerprint_payload(forged)}.json", forged)
+    seed = EvolutionBundleV2(2, 0, None, authority.preflight["seed_supply_sha256"], "f" * 64,
+        **dict(config.fixed_bundle_components), protocol_fingerprint=config.kernel_protocol.fingerprint(),
+        runtime_fingerprints=config.runtime_fingerprints, acceptance_evidence_sha256=None)
+    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    with pytest.raises(ValueError):
+        EvolutionKernel(authority.store, config.kernel_protocol, authority.budget, seed=seed, bootstrap_authority=authority)
+    assert authority.adopted is False
+    assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}

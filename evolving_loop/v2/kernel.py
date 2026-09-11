@@ -9,10 +9,11 @@ once with its live resource reservation.
 from __future__ import annotations
 
 import hashlib
+import os
 import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from common.payload import strict_json_loads
 
@@ -40,6 +41,60 @@ from .store import V2RunStore, write_atomic_json, write_once_json, _LAYOUT as _S
 
 class KernelAuthorityError(ValueError):
     """A transition or durable authority binding failed verification."""
+
+
+@dataclass(frozen=True, eq=False)
+class _MaterialWriteCapability:
+    """Live issuer identity, not a serializable receipt or caller assertion."""
+
+    reservation: str
+    kind: str
+    relative_path: str
+    content_sha256: str
+    size_bytes: int
+
+    def receipt(self):
+        return {"kind": self.kind, "relative_path": self.relative_path,
+                "content_sha256": self.content_sha256, "size_bytes": self.size_bytes}
+
+
+def _material_bytes(root, receipt, *, absent=False):
+    """Shared live/resume verifier: descriptor-relative, no-follow safe reads."""
+    from .numerical_qd.artifacts import validate_artifact, validate_material_receipts
+    validate_material_receipts([receipt])
+    relative = PurePosixPath(receipt["relative_path"])
+    target = Path(root).absolute() / "numerical_qd" / relative
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in target.parts[1:-1]:
+            try:
+                next_descriptor = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                          dir_fd=descriptor)
+            except FileNotFoundError:
+                if absent:
+                    return
+                raise
+            os.close(descriptor)
+            descriptor = next_descriptor
+        if absent:
+            try:
+                os.stat(target.name, dir_fd=descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                return
+            raise KernelAuthorityError("material capability requires a new absent path")
+        leaf = os.open(target.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
+        with os.fdopen(leaf, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise KernelAuthorityError("material receipt requires regular bytes")
+            raw = stream.read(receipt["size_bytes"] + 1)
+        if len(raw) != receipt["size_bytes"] or hashlib.sha256(raw).hexdigest() != receipt["content_sha256"]:
+            raise KernelAuthorityError("material receipt exact bytes mismatch")
+        validate_artifact(receipt["kind"], raw)
+        return raw
+    except OSError as error:
+        raise KernelAuthorityError("material receipt requires a safe regular path") from error
+    finally:
+        os.close(descriptor)
 
 
 class SeedBootstrapStopped(BaseException):
@@ -213,6 +268,8 @@ class SeedBootstrapAuthority:
         self.actual = replace(self.actual, wall_seconds=self.budget.elapsed_wall_seconds - self.start_elapsed)
         before = self.budget.checkpoint()
         outcome = self.budget.close_stage(self.permit, self.actual)
+        if not outcome.allowed and status in {"failed", "stopped"} and type(reason) is str and reason:
+            reason = outcome.reason
         self.receipt = {"schema_version": 2, "preflight_sha256": self.identity,
             "segment_index": self.segment_index, "previous_receipt_sha256": self.previous_receipt_sha256,
             "replay_total": len(self.replay), "replay_consumed": self.replay_index,
@@ -864,6 +921,7 @@ class EvolutionKernel:
         self._seed_sha, self._runtimes = seed.fingerprint(), seed.runtime_fingerprints
         self._closed, self._permits, self._closures, self._transitions = {}, {}, {}, {}
         self._unpersisted_closures = {}
+        self._material_capabilities, self._material_paths, self._material_receipts = {}, {}, {}
         self._active_sha = self._committed_event_sha = self._pending_event = None
         self._terminal = self._last_checkpoint_sha = None
         self._bootstrap_preflight_sha = None
@@ -906,6 +964,8 @@ class EvolutionKernel:
                     or bootstrap_authority.receipt["status"] != "passed"):
                 raise KernelAuthorityError("requires exact closed successful pre-seed issuer")
             SeedBootstrapAuthority.verify_preseed_paths(store)
+            SeedBootstrapAuthority.verify(store, budget.plan, bootstrap_authority.identity,
+                fingerprint_payload(bootstrap_authority.receipt))
             bootstrap_preflight_sha256 = bootstrap_authority.identity
             bootstrap_paths = {store.root / "seed_bootstrap_receipt.json", preflight_path}
             bootstrap_paths.update((store.root / "seed_bootstrap").glob("*.json"))
@@ -926,9 +986,10 @@ class EvolutionKernel:
         self._bootstrap_preflight_sha = bootstrap_preflight_sha256
         if bootstrap_authority is not None:
             self._bootstrap_receipt_sha = fingerprint_payload(bootstrap_authority.receipt)
-            bootstrap_authority.adopted = True
         if bootstrap_preflight_sha256 is not None:
             self._verify_bootstrap_preflight(seed)
+        if bootstrap_authority is not None:
+            bootstrap_authority.adopted = True
         store.write_run_manifest(self._manifest())
         store.write_budget_plan(budget.plan.to_payload())
         self.archive = EvolutionArchive(store.root / "archive")
@@ -1116,6 +1177,20 @@ class EvolutionKernel:
         reservation = self._permit(child, permit)
         if reservation in self._closed:
             raise KernelAuthorityError("stage already has a closed evaluation")
+        objectives = _require_mapping(train_objectives, "train_objectives")
+        if "material_receipts" in objectives:
+            raise KernelAuthorityError("material receipts are Kernel-issued, never caller feedback")
+        receipts = []
+        for capability, state in self._material_capabilities.items():
+            if capability.reservation != reservation or state == "aborted":
+                continue
+            if state != "registered":
+                raise KernelAuthorityError("stage has an open material capability")
+            receipt = capability.receipt()
+            _material_bytes(self.store.root, receipt)
+            receipts.append(receipt)
+        if receipts:
+            objectives["material_receipts"] = sorted(receipts, key=lambda row: row["relative_path"])
         train = {
             "schema_version": 1,
             "parent_bundle_sha256": parent.fingerprint(),
@@ -1123,7 +1198,7 @@ class EvolutionKernel:
             "status": status,
             "protocol_fingerprint": self.protocol.fingerprint(),
             "runtime_fingerprints": dict(self._runtimes),
-            "train_objectives": _require_mapping(train_objectives, "train_objectives"),
+            "train_objectives": objectives,
             "train_behavior_descriptors": _require_mapping(
                 train_behavior_descriptors, "train_behavior_descriptors"
             ),
@@ -1152,13 +1227,73 @@ class EvolutionKernel:
             del self._permits[reservation]
         return result
 
-    @staticmethod
-    def _validate_material_feedback(train):
+    def _validate_material_feedback(self, train):
         if "material_receipts" in train["train_objectives"]:
             from .numerical_qd.artifacts import validate_material_receipts
             receipts = validate_material_receipts(train["train_objectives"]["material_receipts"])
             if sum(row["size_bytes"] for row in receipts) > ResourceUse.from_payload(train["resource_use"]).artifact_bytes:
                 raise KernelAuthorityError("material receipts exceed the exact closed byte charge")
+            for receipt in receipts:
+                _material_bytes(self.store.root, receipt)
+
+    def _material_permit(self, permit):
+        self._require_mutable()
+        if (type(permit) is not StagePermit or self._permits.get(permit.reservation_sha256) is not permit
+                or permit.reservation_sha256 in self._closed):
+            raise KernelAuthorityError("material write requires the live Kernel-issued permit")
+        opened = [row for row in self.budget.checkpoint()["open_reservations"]
+                  if row["reservation_sha256"] == permit.reservation_sha256]
+        if len(opened) != 1:
+            raise KernelAuthorityError("material write requires an open reservation")
+        return opened[0]
+
+    def prepare_material_write(self, permit, *, relative_path, kind, content_sha256, size_bytes):
+        """Admit new material before Host dispatch; an existing file cannot enroll."""
+        from .numerical_qd.artifacts import ArtifactKindV2
+        opened = self._material_permit(permit)
+        capability = _MaterialWriteCapability(permit.reservation_sha256, ArtifactKindV2(kind).value,
+            relative_path, content_sha256, size_bytes)
+        _material_bytes(self.store.root, capability.receipt(), absent=True)
+        if relative_path in self._material_paths:
+            raise KernelAuthorityError("material path already belongs to a capability or closed receipt")
+        committed = sum(cap.size_bytes for cap, state in self._material_capabilities.items()
+                        if cap.reservation == permit.reservation_sha256 and state != "aborted")
+        if committed + size_bytes > opened["estimate"]["artifact_bytes"]:
+            from .numerical_qd.persistence import ArtifactBytesExhausted
+            raise ArtifactBytesExhausted("material capability exceeds admitted artifact bytes")
+        self._material_capabilities[capability] = "prepared"
+        self._material_paths[relative_path] = permit.reservation_sha256
+        return capability
+
+    def _material_capability(self, permit, capability):
+        self._material_permit(permit)
+        if (type(capability) is not _MaterialWriteCapability
+                or self._material_capabilities.get(capability) != "prepared"
+                or capability.reservation != permit.reservation_sha256):
+            raise KernelAuthorityError("requires the exact unused permit-bound material capability")
+
+    def register_material_write(self, permit, capability):
+        """Read back exact typed bytes in Kernel and consume the capability once."""
+        self._material_capability(permit, capability)
+        _material_bytes(self.store.root, capability.receipt())
+        self._material_capabilities[capability] = "registered"
+        self._material_receipts[capability.relative_path] = capability.receipt()
+
+    def verify_existing_material(self, *, relative_path, kind, content_sha256, size_bytes):
+        """Reuse only exact previously registered material; never enroll old files."""
+        from .numerical_qd.artifacts import ArtifactKindV2
+        receipt = {"kind": ArtifactKindV2(kind).value, "relative_path": relative_path,
+                   "content_sha256": content_sha256, "size_bytes": size_bytes}
+        if self._material_receipts.get(relative_path) != receipt:
+            raise KernelAuthorityError("existing material has no matching Kernel-issued receipt")
+        _material_bytes(self.store.root, receipt)
+
+    def abort_material_write(self, permit, capability):
+        """Only an explicitly failed, still-absent write may close at zero bytes."""
+        self._material_capability(permit, capability)
+        _material_bytes(self.store.root, capability.receipt(), absent=True)
+        self._material_capabilities[capability] = "aborted"
+        del self._material_paths[capability.relative_path]
 
     def _numerical_release_references(self, bundle, train):
         """Resolve an explicitly typed Numerical pair; old fake records stay empty."""
@@ -1738,6 +1873,7 @@ class EvolutionKernel:
         closures = sorted((self._load_closure(reservation) for reservation in self._closures),
             key=lambda closure: len(closure["budget_before"]["closed_reservation_sha256s"]))
         bootstrap_refs = []
+        material_paths = {}
         for closure in closures:
             if (
                 prior_elapsed_wall_seconds
@@ -1751,6 +1887,12 @@ class EvolutionKernel:
             record = _read(folder / "closed.json", closure["evaluation_sha256"])
             train = _read(folder / "train.json", record["train_evaluation_sha256"])
             self._validate_material_feedback(train)
+            for receipt in train["train_objectives"].get("material_receipts", []):
+                path = receipt["relative_path"]
+                if path in material_paths:
+                    raise KernelAuthorityError("material receipt reused across closed reservations")
+                material_paths[path] = closure["reservation_sha256"]
+                self._material_receipts[path] = receipt
             bootstrap_sha = train["train_behavior_descriptors"].get("seed_bootstrap_preflight_sha256")
             if bootstrap_sha is not None:
                 bootstrap_refs.append(bootstrap_sha)
@@ -1763,6 +1905,7 @@ class EvolutionKernel:
             raise KernelAuthorityError(
                 "checkpoint budget closures do not account for the ledger"
             )
+        self._material_paths.update(material_paths)
         if bootstrap_refs != ([] if self._bootstrap_preflight_sha is None or self._bootstrap_receipt_sha is not None
                               else [self._bootstrap_preflight_sha]):
             raise KernelAuthorityError("seed bootstrap manifest/closure commitment mismatch")
