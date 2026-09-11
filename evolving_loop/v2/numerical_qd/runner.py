@@ -169,11 +169,14 @@ class _MaterialAccounting:
         work = _KernelWork(self.kernel, self.kernel.active_bundle(), 0)
         permit = work.reserve_stage("material-" + relative, ResourceUse(artifact_bytes=len(data)))
         if not permit.allowed:
-            raise NumericalQDStoreError("material persistence admission denied: " + permit.reason)
+            error = ArtifactBytesExhausted if permit.reason == "artifact_bytes_exhausted" else NumericalQDStoreError
+            raise error("material persistence admission denied: " + permit.reason)
         try:
             return dispatch()
         finally:
-            work.close_stage(permit, ResourceUse(artifact_bytes=path.stat().st_size if path.is_file() else 0))
+            work.close_stage(permit, ResourceUse(artifact_bytes=path.stat().st_size if path.is_file() else 0),
+                objectives=({"material_kind": "rung_manifest", "material_sha256": hashlib.sha256(data).hexdigest()}
+                            if kind == ArtifactKind.RUNG_MANIFEST else None))
 
 
 def _bootstrap(config, release, adapter):
@@ -294,9 +297,29 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
     missing = sum(hit is None for _, _, _, hit in pending)
     estimate = replace(_available(kernel), task_executions=missing,
                        wall_seconds=float(missing * config.adapter["task_timeout_seconds"]))
-    permit = work.reserve_stage("rung-" + state.fingerprint() + "-" + manifest.fingerprint(), estimate)
+    admission = work.can_open_stage(estimate)
+    if not admission.allowed:
+        return None, (), admission.reason
+    failure, manifest_sha = None, None
+    if store is not None:
+        try:
+            manifest_sha = _persist(store, manifest)
+        except ArtifactBytesExhausted:
+            failure = "artifact_bytes_exhausted"
+    estimate = (ResourceUse() if failure else replace(_available(kernel), task_executions=missing,
+                wall_seconds=float(missing * config.adapter["task_timeout_seconds"])))
+    admission = work.can_open_stage(estimate)
+    permit = (work.reserve_stage("rung-" + state.fingerprint() + "-" + manifest.fingerprint(), estimate)
+              if admission.allowed else admission)
     if not permit.allowed:
-        return None, (), permit.reason
+        reason = failure or permit.reason
+        if store is not None:
+            captured = _read(kernel.checkpoint_path)["budget"]
+            work.partial_rung = {"state": state.to_payload(), "manifest_sha256": manifest_sha,
+                "reason": reason, "task_results": [], "unpersisted_task_results": [],
+                "budget_outcome": HyperbandBudgetOutcomeV2("blocked", reason, None,
+                    ResourceUse().to_payload(), captured["checkpoint_sha256"], captured).to_payload()}
+        return None, (), reason
     def account_material(size, begun):
         nonlocal artifact_bytes
         if not begun and artifact_bytes + size > estimate.artifact_bytes:
@@ -305,8 +328,9 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
             artifact_bytes += size
     if store is not None:
         store.accounting.external = account_material
-    failure = None
     try:
+        if failure:
+            raise ArtifactBytesExhausted("fixed manifest admission denied")
         for candidate, task, key, hit in pending:
             if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
                 failure = "finalization_reserve"
@@ -356,7 +380,6 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
             aggregates = tuple(_aggregate([result.evaluation for _, result in results if result.candidate_sha256 == candidate],
                 manifest, state.bracket.name, len(state.rungs)) for candidate in state.active_candidates)
             if store is not None:
-                _persist(store, manifest)
                 for aggregate in aggregates:
                     _persist(store, aggregate)
     except ArtifactBytesExhausted:
@@ -372,7 +395,7 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
         failure = failure or "finalization_reserve"
     captured = _read(kernel.checkpoint_path)["budget"]
     if failure:
-        work.partial_rung = {"state": state.to_payload(), "manifest": manifest.to_payload(), "reason": failure,
+        work.partial_rung = {"state": state.to_payload(), "manifest_sha256": manifest_sha, "reason": failure,
             "task_results": [{"task_sha256": task.task_sha256, "result": result.to_payload()} for task, result in results],
             "unpersisted_task_results": unpersisted,
             "budget_outcome": HyperbandBudgetOutcomeV2("failed", failure, permit.reservation_sha256,

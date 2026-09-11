@@ -23,7 +23,7 @@ from .contracts import (
 from .hyperband import evaluation_cache_key
 from .map_elites import NumericalQDArchive
 from .config import NumericalQDConfigV2
-from .artifacts import ArtifactKindV2 as ArtifactKind, artifact_kind
+from .artifacts import ArtifactKindV2 as ArtifactKind, artifact_kind, validate_artifact, validate_unpersisted_task
 
 
 _MANIFEST = {"schema_version": 1, "system": "numerical_qd"}
@@ -202,6 +202,9 @@ class NumericalQDRunStore:
         typed = payload
         payload = _payload(payload)
         path = self._path(relative)
+        if kind == ArtifactKind.PARTIAL_RUNG:
+            current = _payload(self._safe(self.root / "checkpoint.json").read_bytes())
+            self._verify_partial_rung(payload["closed_partial_rung"], self._kernel(_identity(current))["budget"])
         writer = getattr(self, "material_writer", None)
         if writer is not None:
             writer(relative, canonical_v2_bytes(payload), lambda: durable.write_once_json(path, payload),
@@ -587,6 +590,8 @@ class NumericalQDRunStore:
                 partial = self._read(path).get("closed_partial_rung")
                 if partial is not None:
                     self._verify_partial_rung(partial, budget)
+                    if partial["manifest_sha256"] is not None:
+                        manifest_shas.add(partial["manifest_sha256"])
                     for row in partial["task_results"]:
                         result = HyperbandTaskResultV2.from_payload(row["result"])
                         name = f"results/{result.candidate_sha256}/{row['task_sha256']}.json"
@@ -645,15 +650,24 @@ class NumericalQDRunStore:
             raise NumericalQDStoreError("QD snapshot insertion order mismatch")
 
     def _verify_partial_rung(self, value, current_budget):
-        _require_exact_schema(value, ("state", "manifest", "reason", "task_results", "unpersisted_task_results", "budget_outcome"), field="closed partial rung")
+        validate_artifact(ArtifactKind.PARTIAL_RUNG, canonical_v2_bytes({"closed_partial_rung": value}))
         state = HyperbandStateV2.from_payload(value["state"])
-        manifest = RungManifestV2.from_payload(value["manifest"])
         outcome = HyperbandBudgetOutcomeV2.from_payload(value["budget_outcome"])
-        if (outcome.status != "failed" or value["reason"] != outcome.reason or state.complete
-                or manifest.resource != state.bracket.resources[len(state.rungs)]
-                or manifest.split_sha256 != state.split_sha256 or manifest.protocol_sha256 != state.protocol_sha256
+        if (outcome.status not in {"failed", "blocked"} or value["reason"] != outcome.reason or state.complete
                 or not set(outcome.ledger_checkpoint["closed_reservation_sha256s"]) <= set(current_budget["closed_reservation_sha256s"])):
             raise NumericalQDStoreError("closed partial rung authority mismatch")
+        if outcome.status == "blocked" and (outcome.reservation_sha256 is not None
+                or value["task_results"] or value["unpersisted_task_results"]):
+            raise NumericalQDStoreError("blocked partial cannot carry task work or a reservation")
+        if value["manifest_sha256"] is None:
+            if (value["reason"] != "artifact_bytes_exhausted" or value["task_results"] or value["unpersisted_task_results"]
+                    or ResourceUse.from_payload(outcome.resource_use) != ResourceUse()):
+                raise NumericalQDStoreError("unpaid manifest cannot authorize partial task work")
+            return
+        manifest = self._paid_manifest(value["manifest_sha256"], current_budget)
+        if (manifest.resource != state.bracket.resources[len(state.rungs)]
+                or manifest.split_sha256 != state.split_sha256 or manifest.protocol_sha256 != state.protocol_sha256):
+            raise NumericalQDStoreError("closed partial manifest binding mismatch")
         seen, tasks = set(), {task.task_sha256: task for task in manifest.tasks}
         for row in value["task_results"]:
             _require_exact_schema(row, ("task_sha256", "result"), field="partial task result")
@@ -667,23 +681,42 @@ class NumericalQDRunStore:
             self._verify_task_key(row["task_sha256"], result)
             seen.add(key)
         for row in value["unpersisted_task_results"]:
-            _require_exact_schema(row, ("task_sha256", "task_id", "candidate_sha256", "cache_key", "result_sha256",
-                "status", "resource_use"), field="unpersisted partial task")
-            for field in ("task_sha256", "candidate_sha256", "cache_key", "result_sha256"):
-                require_sha256(row[field], field)
+            use = validate_unpersisted_task(row)
             task = tasks.get(row["task_sha256"])
             key = (row["candidate_sha256"], row["task_sha256"])
             if (value["reason"] != "artifact_bytes_exhausted" or row["status"] != "persistence_denied"
                     or task is None or row["task_id"] != task.task_id or key in seen
                     or row["candidate_sha256"] not in state.active_candidates):
                 raise NumericalQDStoreError("unpersisted partial task membership mismatch")
-            use = ResourceUse.from_payload(row["resource_use"])
             if any(getattr(use, name) > outcome.resource_use[name] for name in ResourceUse.field_names()):
                 raise NumericalQDStoreError("unpersisted task exceeds closed actual work")
             if self._path(f"results/{row['candidate_sha256']}/{row['task_sha256']}.json").exists():
                 raise NumericalQDStoreError("unpersisted partial task unexpectedly contains material")
             self.verify_candidate(row["candidate_sha256"])
             seen.add(key)
+
+    def _paid_manifest(self, sha, current_budget):
+        manifest = RungManifestV2.from_payload(self._object(sha))
+        use = ResourceUse(artifact_bytes=len(manifest.canonical_bytes())).to_payload()
+        checkpoint = _payload(self._safe(self.root / "checkpoint.json").read_bytes())
+        for reservation, ref in checkpoint["budget_closures"].items():
+            if reservation not in current_budget["closed_reservation_sha256s"]:
+                continue
+            directory = self.root / "evaluations" / ref["candidate_bundle_sha256"]
+            train = _payload(self._safe(directory / "train.json").read_bytes())
+            if train["train_objectives"] != {"material_kind": "rung_manifest", "material_sha256": sha}:
+                continue
+            closure = _payload(self._safe(directory / "budget_closure.json").read_bytes())
+            closed = _payload(self._safe(directory / "closed.json").read_bytes())
+            if (fingerprint_payload(closure) != ref["closure_sha256"]
+                    or fingerprint_payload(closed) != closure["evaluation_sha256"]
+                    or fingerprint_payload(train) != closed["train_evaluation_sha256"]
+                    or closure["reservation_sha256"] != reservation or not closure["allowed"]
+                    or closed["status"] != "passed" or train["status"] != "passed"
+                    or closure["resource_use"] != use or train["resource_use"] != use or closed["resource_use"] != use):
+                raise NumericalQDStoreError("fixed manifest material closure mismatch")
+            return manifest
+        raise NumericalQDStoreError("fixed manifest lacks an exact paid material closure")
 
     def write_state(self, **state):
         """Seal a complete inventory, then atomically publish its runner pointer."""

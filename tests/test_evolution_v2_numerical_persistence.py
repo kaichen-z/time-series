@@ -56,6 +56,49 @@ def test_create_uses_the_same_repo_output_allowlist(kernel, monkeypatch):
     assert not (kernel.store.root / "numerical_qd").exists()
 
 
+@pytest.mark.parametrize("fault", ["payload", "resource_payload", "invalid_sha", "passed_status", "task_payload"])
+def test_live_partial_writer_rejects_unpaid_unpersisted_content(tmp_path, fault):
+    from evolving_loop.v2.numerical_qd.runner import _MaterialAccounting, _KernelWork, _persist
+    from evolving_loop.v2.numerical_qd.artifacts import ArtifactKindV2
+    from tests.test_evolution_v2_kernel import protocol, seed
+    from evolving_loop.v2.budget import BudgetPlan
+    plan = BudgetPlan(1000, 0.2, ResourceUse(wall_seconds=800.0, task_executions=100, artifact_bytes=1000000))
+    kernel = EvolutionKernel(core_store.V2RunStore.create(tmp_path / "run"), protocol(),
+        BudgetLedger(plan, monotonic=lambda: 0.0), seed=seed())
+    store, args, kernel, _, state = world.__wrapped__(kernel)
+    _MaterialAccounting(store, kernel)
+    fixed = manifest()
+    _persist(store, fixed)
+    work = _KernelWork(kernel, kernel.active_bundle(), 1)
+    permit = work.reserve_stage("partial-test", ResourceUse(task_executions=1))
+    work.close_stage(permit, ResourceUse(task_executions=1), status="failed")
+    budget = json.loads(kernel.checkpoint_path.read_bytes())["budget"]
+    outcome = HyperbandBudgetOutcomeV2("failed", "artifact_bytes_exhausted", permit.reservation_sha256,
+        ResourceUse(task_executions=1).to_payload(), budget["checkpoint_sha256"], budget)
+    task = fixed.tasks[0]
+    row = {"task_sha256": task.task_sha256, "task_id": task.task_id,
+        "candidate_sha256": args["active_genome_sha256"], "cache_key": "a" * 64, "result_sha256": "b" * 64,
+        "status": "persistence_denied", "resource_use": ResourceUse(task_executions=1).to_payload()}
+    if fault == "payload":
+        row["payload"] = "NEVER_STORE_UNPAID_PAYLOAD"
+    elif fault == "resource_payload":
+        row["resource_use"]["payload"] = "NEVER_STORE_UNPAID_PAYLOAD"
+    elif fault == "invalid_sha":
+        row["result_sha256"] = "NEVER_STORE_UNPAID_PAYLOAD"
+    elif fault == "passed_status":
+        row["status"] = "passed"
+    else:
+        row["task_id"] = {"payload": "NEVER_STORE_UNPAID_PAYLOAD"}
+    value = {"closed_partial_rung": {"state": state.to_payload(), "manifest_sha256": fixed.fingerprint(),
+        "reason": "artifact_bytes_exhausted", "task_results": [], "unpersisted_task_results": [row],
+        "budget_outcome": outcome.to_payload()}}
+    before = files(store.root)
+    with pytest.raises(ValueError):
+        store.write_object(fingerprint_payload(value), value, kind=ArtifactKindV2.PARTIAL_RUNG)
+    assert files(store.root) == before
+    assert all(b"NEVER_STORE_UNPAID_PAYLOAD" not in data for data in files(store.root).values())
+
+
 @pytest.fixture
 def world(kernel):
     store = api.NumericalQDRunStore.create(kernel.store.root)

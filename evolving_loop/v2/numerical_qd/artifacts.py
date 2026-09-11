@@ -10,9 +10,9 @@ from enum import Enum
 from types import MappingProxyType
 
 from common.payload import strict_json_loads
-from ..budget import _CHECKPOINT_FIELDS as BUDGET_FIELDS
+from ..budget import ResourceUse, _CHECKPOINT_FIELDS as BUDGET_FIELDS
 from ..bundle import EvolutionBundleV2
-from ..contracts import _require_exact_schema, canonical_v2_bytes
+from ..contracts import _require_exact_schema, canonical_v2_bytes, require_sha256
 from .config import NumericalQDConfigV2
 from .contracts import (HyperbandRungV2, HyperbandStateV2, HyperbandTaskResultV2,
     NumericalEvaluationV2, NumericalGenomeV2, NumericalInventoryV2, NumericalMutationPolicyV2,
@@ -118,6 +118,16 @@ def artifact_kind(value):
         raise ValueError("artifact writer requires an explicit registered kind") from error
 
 
+def validate_unpersisted_task(row):
+    _require_exact_schema(row, ("task_sha256", "task_id", "candidate_sha256", "cache_key", "result_sha256",
+        "status", "resource_use"), field="unpersisted partial task")
+    for field in ("task_sha256", "candidate_sha256", "cache_key", "result_sha256"):
+        require_sha256(row[field], field)
+    if type(row["task_id"]) is not str or not row["task_id"] or row["status"] != "persistence_denied":
+        raise ValueError("unpersisted partial task requires primitive identity and persistence_denied status")
+    return ResourceUse.from_payload(row["resource_use"])
+
+
 def validate_artifact(kind, raw):
     kind = ArtifactKindV2(kind)
     spec = ARTIFACT_KINDS[kind]
@@ -136,6 +146,37 @@ def validate_artifact(kind, raw):
     if kind is K.PROPOSER_REQUEST:
         from .proposers import primitive_proposer_request
         primitive_proposer_request(**payload)
+    elif kind is K.BOOTSTRAP_PREFLIGHT:
+        if type(payload["schema_version"]) is not int or payload["schema_version"] != 1 or payload["stage"] != "seed_bootstrap":
+            raise ValueError("bootstrap preflight schema mismatch")
+        for field in ("seed_supply_sha256", "protocol_sha256", "budget_plan_sha256"):
+            require_sha256(payload[field], field)
+        if type(payload["input_sha256s"]) is not dict or not payload["input_sha256s"]:
+            raise ValueError("bootstrap inputs must be committed identities")
+        for digest in payload["input_sha256s"].values():
+            require_sha256(digest, "bootstrap input identity")
+        ResourceUse.from_payload(payload["estimate"])
+    elif kind in (K.BOOTSTRAP_ADMISSION, K.BOOTSTRAP_CLOSURE, K.BOOTSTRAP_REPLAY):
+        expected = {K.BOOTSTRAP_ADMISSION: "admission", K.BOOTSTRAP_CLOSURE: "closed_forecast", K.BOOTSTRAP_REPLAY: "replayed_forecast"}
+        if payload["kind"] != expected[kind] or type(payload["sequence"]) is not int or payload["sequence"] < 0:
+            raise ValueError("bootstrap event identity mismatch")
+        require_sha256(payload["previous_sha256"], "bootstrap previous event SHA")
+        if kind is K.BOOTSTRAP_ADMISSION:
+            if type(payload["arguments"]) is not list:
+                raise ValueError("bootstrap dispatch arguments must be a list")
+            ResourceUse.from_payload(payload["charged_use"])
+        else:
+            require_sha256(payload["cache_sha256"], "bootstrap cache SHA")
+        if kind is K.BOOTSTRAP_REPLAY and (type(payload["replay_index"]) is not int or payload["replay_index"] < 0):
+            raise ValueError("bootstrap replay counter must be a nonnegative integer")
+    elif kind is K.BOOTSTRAP_RECEIPT:
+        ResourceUse.from_payload(payload["resource_use"])
+        for field in ("budget_before", "budget_after"):
+            budget = _require_exact_schema(payload[field], BUDGET_FIELDS, field="bootstrap budget checkpoint")
+            ResourceUse.from_payload(budget["charged_use"])
+            for reservation in budget["open_reservations"]:
+                _require_exact_schema(reservation, ("stage_id", "estimate", "reservation_sha256"), field="bootstrap reservation")
+                ResourceUse.from_payload(reservation["estimate"])
     elif kind is K.KERNEL_CHECKPOINT:
         from ..kernel import EvolutionKernel
         _require_exact_schema(payload, EvolutionKernel._CHECKPOINT_FIELDS, field=kind.value)
@@ -148,14 +189,19 @@ def validate_artifact(kind, raw):
             raise ValueError("generation control requires primitive status")
     elif kind is K.PARTIAL_RUNG:
         from .contracts import HyperbandBudgetOutcomeV2
-        row = _require_exact_schema(payload["closed_partial_rung"], ("state", "manifest", "reason", "task_results",
+        row = _require_exact_schema(payload["closed_partial_rung"], ("state", "manifest_sha256", "reason", "task_results",
             "unpersisted_task_results", "budget_outcome"), field=kind.value)
         HyperbandStateV2.from_payload(row["state"])
-        RungManifestV2.from_payload(row["manifest"])
+        if row["manifest_sha256"] is not None:
+            require_sha256(row["manifest_sha256"], "partial manifest SHA")
         HyperbandBudgetOutcomeV2.from_payload(row["budget_outcome"])
         for item in row["task_results"]:
             _require_exact_schema(item, ("task_sha256", "result"), field="partial task reference")
             HyperbandTaskResultV2.from_payload(item["result"])
+        if type(row["unpersisted_task_results"]) is not list:
+            raise ValueError("unpersisted partial tasks must be a list")
+        for item in row["unpersisted_task_results"]:
+            validate_unpersisted_task(item)
     return spec
 
 

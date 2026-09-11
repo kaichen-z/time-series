@@ -55,6 +55,7 @@ class SeedBootstrapAuthority:
     """
 
     def __init__(self, store, protocol, plan, preflight, *, monotonic):
+        self._validate_artifact(store.root / "seed_bootstrap_preflight.json", preflight)
         self.store, self.protocol = store, protocol
         self.budget = BudgetLedger(plan, monotonic=monotonic)
         self.preflight = preflight
@@ -63,28 +64,60 @@ class SeedBootstrapAuthority:
         if self.estimate.task_executions == 0 or not self.budget.can_open_stage(self.estimate).allowed:
             raise KernelAuthorityError("seed bootstrap preflight budget denied")
         self.permit = self.budget.reserve_stage("seed_bootstrap:" + self.identity, self.estimate)
-        write_once_json(store.root / "seed_bootstrap_preflight.json", preflight)
+        self._write_artifact(store.root / "seed_bootstrap_preflight.json", preflight)
         self.actual = ResourceUse()  # Preflight/admission/receipt are control, not material.
         self.events, self.head, self.receipt = [], self.identity, None
         self.previous_receipt_sha256, self.segment_index = None, 0
         self.replay, self.replay_index, self.start_elapsed = [], 0, 0.0
         self.adopted = False
 
+    @staticmethod
+    def _validate_artifact(path, value):
+        from .numerical_qd.artifacts import ArtifactKindV2 as K, validate_artifact
+        if path.name == "seed_bootstrap_preflight.json":
+            kind = K.BOOTSTRAP_PREFLIGHT
+        elif path.name == "seed_bootstrap_receipt.json" or path.parent.name == "seed_bootstrap_segments":
+            kind = K.BOOTSTRAP_RECEIPT
+        elif path.parent.name == "seed_bootstrap_cache":
+            kind = K.BOOTSTRAP_FORECAST
+        elif path.parent.name == "seed_bootstrap":
+            kind = {"admission": K.BOOTSTRAP_ADMISSION, "closed_forecast": K.BOOTSTRAP_CLOSURE,
+                    "replayed_forecast": K.BOOTSTRAP_REPLAY}.get(value.get("kind"))
+        else:
+            kind = None
+        try:
+            validate_artifact(kind, canonical_v2_bytes(value))
+        except (TypeError, ValueError) as error:
+            raise KernelAuthorityError(f"invalid typed bootstrap artifact: {error}") from error
+
+    @classmethod
+    def _read_artifact(cls, path, identity=None):
+        value = _read(path, identity)
+        cls._validate_artifact(path, value)
+        return value
+
+    @classmethod
+    def _write_artifact(cls, path, value):
+        cls._validate_artifact(path, value)
+        result = write_once_json(path, value)
+        cls._read_artifact(path, fingerprint_payload(value))
+        return result
+
     @classmethod
     def resume(cls, store, protocol, plan, inputs, *, monotonic):
         cls.verify_preseed_paths(store)
-        preflight = _read(store.root / "seed_bootstrap_preflight.json")
+        preflight = cls._read_artifact(store.root / "seed_bootstrap_preflight.json")
         identity = fingerprint_payload(preflight)
         if preflight["input_sha256s"] != inputs or preflight["protocol_sha256"] != protocol.fingerprint():
             raise KernelAuthorityError("seed bootstrap resume identity mismatch")
-        segments = {_read(path)["segment_index"]: path for path in (store.root / "seed_bootstrap_segments").glob("*.json")}
+        segments = {cls._read_artifact(path)["segment_index"]: path for path in (store.root / "seed_bootstrap_segments").glob("*.json")}
         if not segments:
             raise KernelAuthorityError("seed bootstrap has an open interrupted dispatch; terminal new epoch required")
         last_path = segments[max(segments)]
         last = cls.verify(store, plan, identity, last_path.stem, terminal=False)
         cls.verify_inventory(store, last_path.stem)
         if (store.root / "seed_bootstrap_receipt.json").exists():
-            final = _read(store.root / "seed_bootstrap_receipt.json")
+            final = cls._read_artifact(store.root / "seed_bootstrap_receipt.json")
             cls.verify(store, plan, identity, fingerprint_payload(final))
             raise KernelAuthorityError("seed bootstrap is terminal without a complete registry")
         if last["status"] != "interrupted" or not last["allowed"]:
@@ -111,17 +144,17 @@ class SeedBootstrapAuthority:
     def forecast_prefix(store, receipt_sha):
         segments, result = [], []
         while receipt_sha is not None:
-            segment = _read(store.root / "seed_bootstrap_segments" / f"{receipt_sha}.json", receipt_sha)
+            segment = SeedBootstrapAuthority._read_artifact(store.root / "seed_bootstrap_segments" / f"{receipt_sha}.json", receipt_sha)
             segments.append(segment)
             receipt_sha = segment["previous_receipt_sha256"]
         for segment in reversed(segments):
             admissions = {}
             for sha in segment["events"]:
-                event = _read(store.root / "seed_bootstrap" / f"{sha}.json", sha)
+                event = SeedBootstrapAuthority._read_artifact(store.root / "seed_bootstrap" / f"{sha}.json", sha)
                 if event["kind"] == "admission":
                     admissions[sha] = event["arguments"]
                 elif event["kind"] == "closed_forecast":
-                    cached = _read(store.root / "seed_bootstrap_cache" / f"{event['cache_sha256']}.json", event["cache_sha256"])
+                    cached = SeedBootstrapAuthority._read_artifact(store.root / "seed_bootstrap_cache" / f"{event['cache_sha256']}.json", event["cache_sha256"])
                     if cached["status"] != "passed":
                         raise KernelAuthorityError("seed bootstrap failed dispatch is terminal")
                     result.append((admissions[cached["admission_sha256"]], cached["forecast"], event["cache_sha256"]))
@@ -140,7 +173,7 @@ class SeedBootstrapAuthority:
     def event(self, payload):
         value = {"sequence": len(self.events), "previous_sha256": self.head, **payload}
         sha = fingerprint_payload(value)
-        write_once_json(self.store.root / "seed_bootstrap" / f"{sha}.json", value)
+        self._write_artifact(self.store.root / "seed_bootstrap" / f"{sha}.json", value)
         self.events.append(sha)
         self.head = sha
         return sha
@@ -168,7 +201,7 @@ class SeedBootstrapAuthority:
             from .numerical_qd.artifacts import ArtifactKindV2, billable_size
             material_bytes = billable_size(ArtifactKindV2.BOOTSTRAP_FORECAST, canonical_v2_bytes(value))
             sha = fingerprint_payload(value)
-            path = write_once_json(self.store.root / "seed_bootstrap_cache" / f"{sha}.json", value)
+            self._write_artifact(self.store.root / "seed_bootstrap_cache" / f"{sha}.json", value)
             self.event({"kind": "closed_forecast", "cache_sha256": sha})
             self.account(ResourceUse(artifact_bytes=material_bytes), begun=True)
 
@@ -188,17 +221,17 @@ class SeedBootstrapAuthority:
             "allowed": outcome.allowed, "closure_reason": outcome.reason,
             "budget_before": before, "budget_after": self.budget.checkpoint()}
         identity = fingerprint_payload(self.receipt)
-        write_once_json(self.store.root / "seed_bootstrap_segments" / f"{identity}.json", self.receipt)
+        self._write_artifact(self.store.root / "seed_bootstrap_segments" / f"{identity}.json", self.receipt)
         if status != "interrupted":
-            write_once_json(self.store.root / "seed_bootstrap_receipt.json", self.receipt)
+            self._write_artifact(self.store.root / "seed_bootstrap_receipt.json", self.receipt)
         self.verify(self.store, self.budget.plan, self.identity, identity, terminal=status != "interrupted")
         return self.receipt
 
     @staticmethod
     def verify(store, plan, preflight_sha, receipt_sha, *, terminal=True):
-        preflight = _read(store.root / "seed_bootstrap_preflight.json", preflight_sha)
-        receipt = _read(store.root / "seed_bootstrap_segments" / f"{receipt_sha}.json", receipt_sha)
-        if terminal and _read(store.root / "seed_bootstrap_receipt.json", receipt_sha) != receipt:
+        preflight = SeedBootstrapAuthority._read_artifact(store.root / "seed_bootstrap_preflight.json", preflight_sha)
+        receipt = SeedBootstrapAuthority._read_artifact(store.root / "seed_bootstrap_segments" / f"{receipt_sha}.json", receipt_sha)
+        if terminal and SeedBootstrapAuthority._read_artifact(store.root / "seed_bootstrap_receipt.json", receipt_sha) != receipt:
             raise KernelAuthorityError("seed bootstrap final receipt mismatch")
         _require_exact_schema(receipt, ("schema_version", "preflight_sha256", "status", "reason", "events",
             "chain_sha256", "resource_use", "reservation_sha256", "allowed", "closure_reason",
@@ -241,7 +274,7 @@ class SeedBootstrapAuthority:
         head, admissions, closed = receipt["previous_receipt_sha256"] or preflight_sha, set(), set()
         consumed = 0
         for index, sha in enumerate(receipt["events"]):
-            event = _read(store.root / "seed_bootstrap" / f"{sha}.json", sha)
+            event = SeedBootstrapAuthority._read_artifact(store.root / "seed_bootstrap" / f"{sha}.json", sha)
             if event["sequence"] != index or event["previous_sha256"] != head:
                 raise KernelAuthorityError("seed bootstrap hash chain mismatch")
             if event["kind"] == "admission":
@@ -254,7 +287,7 @@ class SeedBootstrapAuthority:
                     raise KernelAuthorityError("bootstrap replay hash-chain mismatch")
                 consumed += 1
             elif event["kind"] == "closed_forecast":
-                cached = _read(store.root / "seed_bootstrap_cache" / f"{event['cache_sha256']}.json", event["cache_sha256"])
+                cached = SeedBootstrapAuthority._read_artifact(store.root / "seed_bootstrap_cache" / f"{event['cache_sha256']}.json", event["cache_sha256"])
                 if cached["admission_sha256"] not in admissions or cached["admission_sha256"] in closed:
                     raise KernelAuthorityError("seed bootstrap cache/admission mismatch")
                 closed.add(cached["admission_sha256"])
@@ -309,13 +342,13 @@ class SeedBootstrapAuthority:
         while current is not None:
             if current in segments:
                 raise KernelAuthorityError("cyclic bootstrap receipt chain")
-            segment = _read(store.root / "seed_bootstrap_segments" / f"{current}.json", current)
+            segment = SeedBootstrapAuthority._read_artifact(store.root / "seed_bootstrap_segments" / f"{current}.json", current)
             segments.add(current)
             for sha in segment["events"]:
                 if sha in events:
                     raise KernelAuthorityError("reused bootstrap admission event")
                 events.add(sha)
-                event = _read(store.root / "seed_bootstrap" / f"{sha}.json", sha)
+                event = SeedBootstrapAuthority._read_artifact(store.root / "seed_bootstrap" / f"{sha}.json", sha)
                 if event["kind"] == "closed_forecast":
                     caches.add(event["cache_sha256"])
             current = segment["previous_receipt_sha256"]
@@ -917,7 +950,7 @@ class EvolutionKernel:
 
     def _verify_bootstrap_preflight(self, seed):
         identity = require_sha256(self._bootstrap_preflight_sha, "bootstrap preflight SHA")
-        value = _read(self.store.root / "seed_bootstrap_preflight.json", identity)
+        value = SeedBootstrapAuthority._read_artifact(self.store.root / "seed_bootstrap_preflight.json", identity)
         _require_exact_schema(value, ("schema_version", "stage", "seed_supply_sha256", "protocol_sha256",
             "budget_plan_sha256", "input_sha256s", "estimate"), field="seed bootstrap preflight")
         if (type(value["schema_version"]) is not int or value["schema_version"] != 1

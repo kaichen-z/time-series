@@ -263,6 +263,114 @@ def test_timed_out_rung_keeps_completed_rows_under_closed_partial_authority(tmp_
     assert files(tmp_path / "run") == before
 
 
+def test_rung_manifest_is_paid_before_dispatch_and_partial_references_it(tmp_path, monkeypatch):
+    from evolving_loop.v2.numerical_qd import runner
+    from evolving_loop.v2.numerical_qd.artifacts import ArtifactKindV2
+    from evolving_loop.v2.contracts import fingerprint_payload
+    config, supply, manifest, adapter = fixture(task_budget=920)
+    rung, evaluate, current = runner._rung, runner.evaluate_numerical_child, {}
+    def run_rung(*args, **kwargs):
+        current["manifest"] = args[3]
+        return rung(*args, **kwargs)
+    def evaluate_task(*args, **kwargs):
+        fixed = current["manifest"]
+        path = tmp_path / f"run/numerical_qd/objects/{fixed.fingerprint()}.json"
+        assert path.is_file(), "dispatched before persisting fixed manifest"
+        checkpoint = json.loads((tmp_path / "run/checkpoint.json").read_bytes())
+        charges = []
+        for ref in checkpoint["budget_closures"].values():
+            folder = tmp_path / f"run/evaluations/{ref['candidate_bundle_sha256']}"
+            train = json.loads((folder / "train.json").read_bytes())
+            if train["train_objectives"].get("material_sha256") == fixed.fingerprint():
+                charges.append(json.loads((folder / "budget_closure.json").read_bytes()))
+        assert len(charges) == 1 and charges[0]["allowed"]
+        assert charges[0]["resource_use"] == ResourceUse(artifact_bytes=path.stat().st_size).to_payload()
+        value = evaluate(*args, **kwargs)
+        adapter.monotonic.advance(config.adapter["task_timeout_seconds"])
+        return value
+    monkeypatch.setattr(runner, "_rung", run_rung)
+    monkeypatch.setattr(runner, "evaluate_numerical_child", evaluate_task)
+    run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter, stop_after=1)
+    store = runner.NumericalQDRunStore(tmp_path / "run")
+    record = next(json.loads(path.read_bytes()) for path in (store.directory / "objects").glob("*.json")
+                  if "closed_partial_rung" in json.loads(path.read_bytes()))
+    partial = record["closed_partial_rung"]
+    assert "manifest" not in partial and partial["manifest_sha256"] == current["manifest"].fingerprint()
+    paid = store.directory / f"objects/{partial['manifest_sha256']}.json"
+    paid.unlink()
+    before = files(store.root)
+    with pytest.raises(ValueError, match="manifest|missing"):
+        store.write_object(fingerprint_payload(record), record, kind=ArtifactKindV2.PARTIAL_RUNG)
+    assert files(store.root) == before
+    with pytest.raises(ValueError):
+        run_numerical_qd(store.root, config, supply, manifest, adapter, resume=True, stop_after=1)
+    assert files(store.root) == before
+
+
+def test_manifest_admission_denial_closes_zero_task_partial_without_free_manifest(tmp_path, monkeypatch):
+    from evolving_loop.v2.numerical_qd import runner
+    original, target = runner._rung, {}
+    reserve = runner._KernelWork.reserve_stage
+    def run_rung(*args, **kwargs):
+        target["sha"] = args[3].fingerprint()
+        return original(*args, **kwargs)
+    def reserve_stage(work, stage, estimate):
+        if stage == f"material-objects/{target.get('sha')}.json":
+            estimate = replace(estimate, artifact_bytes=work.kernel.budget.plan.ceilings.artifact_bytes + 1)
+        return reserve(work, stage, estimate)
+    monkeypatch.setattr(runner, "_rung", run_rung)
+    monkeypatch.setattr(runner._KernelWork, "reserve_stage", reserve_stage)
+    monkeypatch.setattr(runner, "evaluate_numerical_child", lambda *args, **kwargs: pytest.fail("task dispatched before manifest admission"))
+    result = run_fixture(tmp_path / "run", task_budget=920, stop_after=1)
+    objects = tmp_path / "run/numerical_qd/objects"
+    assert not (objects / f"{target['sha']}.json").exists()
+    partial = next(json.loads(path.read_bytes())["closed_partial_rung"] for path in objects.glob("*.json")
+                   if "closed_partial_rung" in json.loads(path.read_bytes()))
+    assert "manifest" not in partial and partial["manifest_sha256"] is None
+    assert partial["reason"] == "artifact_bytes_exhausted"
+    assert partial["task_results"] == partial["unpersisted_task_results"] == []
+    assert partial["budget_outcome"]["resource_use"] == ResourceUse().to_payload()
+    assert not result.budget["open_reservations"]
+    before = files(tmp_path / "run")
+    run_fixture(tmp_path / "run", task_budget=920, resume=True, stop_after=1)
+    assert files(tmp_path / "run") == before
+
+
+def test_paid_manifest_deadline_boundary_publishes_only_blocked_control(tmp_path, monkeypatch, material_catalog):
+    from evolving_loop.v2.numerical_qd import runner
+    from evolving_loop.v2.numerical_qd.artifacts import ArtifactKindV2
+    config, supply, manifest, adapter = fixture(task_budget=920)
+    original, paid = runner._MaterialAccounting.write, {}
+    def write(accounting, relative, data, dispatch, *, kind):
+        result = original(accounting, relative, data, dispatch, kind=kind)
+        if kind is ArtifactKindV2.RUNG_MANIFEST:
+            assert adapter.monotonic() < config.budget.search_deadline_seconds
+            paid.update(json.loads((tmp_path / "run/checkpoint.json").read_bytes()))
+            assert paid["budget"]["open_reservations"] == []
+            adapter.monotonic.advance(config.budget.search_deadline_seconds)
+        return result
+    monkeypatch.setattr(runner._MaterialAccounting, "write", write)
+    monkeypatch.setattr(runner, "evaluate_numerical_child", lambda *args, **kwargs: pytest.fail("deadline task dispatch"))
+    result = run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter, stop_after=1)
+    root = tmp_path / "run"
+    final = json.loads((root / "checkpoint.json").read_bytes())
+    assert final["budget_closures"] == paid["budget_closures"]
+    assert result.budget["closed_reservation_sha256s"] == paid["budget"]["closed_reservation_sha256s"]
+    assert result.budget["closed_stage_ids"] == paid["budget"]["closed_stage_ids"]
+    partial = next(json.loads(path.read_bytes())["closed_partial_rung"] for path in (root / "numerical_qd/objects").glob("*.json")
+                   if "closed_partial_rung" in json.loads(path.read_bytes()))
+    assert partial["manifest_sha256"] is not None and "manifest" not in partial
+    assert partial["reason"] == "finalization_reserve" and partial["budget_outcome"]["status"] == "blocked"
+    assert partial["task_results"] == partial["unpersisted_task_results"] == []
+    assert partial["budget_outcome"]["reservation_sha256"] is None
+    assert partial["budget_outcome"]["resource_use"] == ResourceUse().to_payload()
+    assert result.budget["charged_use"]["artifact_bytes"] == sum(material_sizes(root, material_catalog))
+    assert "partial_rung" in material_catalog.values()
+    before = files(root)
+    run_numerical_qd(root, config, supply, manifest, adapter, resume=True, stop_after=1)
+    assert files(root) == before
+
+
 def test_rung_artifact_denial_closes_partial_without_persisting_denied_payload(tmp_path, monkeypatch):
     from evolving_loop.v2.numerical_qd import runner
     from evolving_loop.v2.numerical_qd.persistence import NumericalQDRunStore
@@ -363,9 +471,10 @@ def test_bootstrap_passed_receipt_requires_hash_linked_complete_replay(tmp_path,
     from evolving_loop.v2.contracts import fingerprint_payload
     from evolving_loop.v2.store import write_once_json
     from types import SimpleNamespace
-    config, _, _, adapter = fixture(raw_seed=True)
+    config, seed, _, adapter = fixture(raw_seed=True)
     store = V2RunStore.create(tmp_path / "run")
-    preflight = {"schema_version": 1, "stage": "seed_bootstrap", "input_sha256s": {"test": "1" * 64},
+    preflight = {"schema_version": 1, "stage": "seed_bootstrap", "seed_supply_sha256": seed.fingerprint,
+        "input_sha256s": {"test": "1" * 64},
         "protocol_sha256": config.kernel_protocol.fingerprint(), "budget_plan_sha256": config.budget.fingerprint(),
         "estimate": replace(config.budget.ceilings, wall_seconds=1.0).to_payload()}
     authority = SeedBootstrapAuthority(store, config.kernel_protocol, config.budget, preflight, monotonic=adapter.monotonic)
