@@ -12,6 +12,32 @@ evolution and Public scoring are not implemented by this project. See the
 [Project 1 implementation plan](docs/superpowers/plans/2026-09-10-evolution-v2-kernel-contracts.md).
 The existing usage below remains supported.
 
+### Evolution V2 Numerical QD (Project 2)
+
+The separate V2 entrypoint now includes an explicit, resumable Numerical Supply
+self-evolution command with typed mutations, deterministic/hybrid proposals,
+history-only MAP-Elites, constrained NSGA-II, fixed-rung Hyperband, legacy
+Numerical execution adapters, frozen Supply/registry export, and atomic Kernel
+promotion:
+
+```bash
+python -m evolving_loop.v2 numerical-evolve \
+  --config configs/evolution_v2/numerical_qd/smoke.json \
+  --seed-supply /path/to/seed_supply.json \
+  --task-manifest /path/to/train80-dev20.json \
+  --output-dir /tmp/numerical-qd-run
+```
+
+Re-run the exact command to verify and resume the same directory. The shipped
+smoke profile is offline and deterministic. The current CLI has no LLM-client
+configuration flags; hybrid profiles close an unavailable LLM attempt and use
+the deterministic fallback unless an identified client is injected through the
+Python Host API. This command never opens Public data. Retrieval, Decision and
+joint evolution, full production `evolve`, Public scoring, DGM source evolution,
+and L1 protocol migration are not available in Project 2. See the
+[Numerical QD operator guide](docs/evolution-v2-numerical-qd.md) for exact input,
+algorithm, artifact, resume, failure, and Project 3 handoff contracts.
+
 ## New canonical evolving-agent implementation
 
 The collaborator's top-level [`evolving_loop/`](evolving_loop/) package is now the base for the
