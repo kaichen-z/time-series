@@ -50,6 +50,7 @@ from numerical_agent.evolution.screening import (
     ScreeningPolicy,
     TaskProfile,
     _policy_payload,
+    materialize_active_dictionary,
     profile_task,
 )
 from numerical_agent.evolution.task_local_evolution import GroupFoldManifest
@@ -952,9 +953,19 @@ class LegacyNumericalAdapter:
         diagnostics = local_diagnostics_from_payload(payload, names=shortlist.candidate_names, families=families)
         numeric = task.numeric
         profile = profile_task(RuntimeTask(numeric.task_id, numeric.history_values, numeric.prediction_length, numeric.frequency, ()))
+        active_names = {
+            candidate.name
+            for candidate in materialize_active_dictionary(
+                self.materializer.screening_policy, profile
+            ).active
+        }
         for name in shortlist.candidate_names:
             entry = self.materializer.screening_policy.get(name)
-            if entry is None or entry.status not in {"keep", "specialized"} or entry.applicability.match(profile) is None:
+            if (
+                entry is None
+                or entry.status not in {"keep", "specialized"}
+                or name not in active_names
+            ):
                 raise ValueError("sealed shortlist candidate is not eligible in the Host Dictionary")
         specs = {spec.candidate_id: spec for spec in release.alternatives}
         derived = {name for name in shortlist.candidate_names if name in specs and

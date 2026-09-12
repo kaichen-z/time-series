@@ -265,3 +265,28 @@ python -m pytest -q \
 Canonical-manifest/source provenance verification, focused `compileall`, and
 `git diff --check` also exited zero.  No live run or billable LLM call was
 launched, and the existing live run artifacts were left untouched.
+
+### Live P2 task-local fallback eligibility fix
+
+The next live pre-LLM failure exposed divergent producer/consumer eligibility
+semantics.  `build_task_candidate_shortlist` admits candidates from
+`materialize_active_dictionary`, including reviewed fallbacks used to restore
+minimum/family coverage, while `materialize_local_package` rechecked raw
+applicability and rejected those same sealed candidates.
+
+Task-local materialization now reconstructs the exact active Dictionary for
+the task profile and validates shortlist membership against that result.  It
+retains the explicit `keep`/`specialized` status check and all existing catalog
+and protected-Anchor checks.  A focused regression verifies both sides: a
+specialized candidate admitted only as a reviewed fallback materializes, and a
+truly `quarantine` candidate remains rejected.
+
+```text
+python -m pytest -q \
+  tests/test_evolution_v2_shortlist_runtime.py \
+  tests/test_evolution_v2_numerical_adapters.py
+545 passed in 209.50s
+```
+
+No live run or billable call was launched, and live artifacts were not
+modified.

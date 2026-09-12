@@ -16,6 +16,12 @@ from numerical_agent.evolution.filtering import FilterDictionary, FilterEntry
 from numerical_agent.evolution.task_shortlist import TaskCandidateShortlistV1, TaskShortlistPolicyV1, _dictionary_hash
 from numerical_agent.run_task_local_ensemble_evolution import task_input_sha256
 from numerical_agent.evolution.execution import Task
+from numerical_agent.evolution.screening import (
+    ApplicabilityClause,
+    ApplicabilityPolicy,
+    ScreeningEntry,
+    ScreeningPolicy,
+)
 from tests.test_evolution_v2_numerical_runner import fixture
 from tests.test_package_numerical_supply import _alternative, _policy
 from tests.test_task_local_ensemble import _diagnostic
@@ -146,6 +152,97 @@ def test_failed_shortlisted_specialist_keeps_exact_anchor_and_reloads(tmp_path):
         assert package.selection_decision.selected == ("toto_2_0",)
         assert package.selection_decision.rejected["seasonal_naive"] == "shortlisted_runtime_failure"
         assert "seasonal_naive" not in {item.name for item in package.ranked_alternatives}
+
+
+def test_local_materialization_uses_fallback_aware_active_dictionary(tmp_path, monkeypatch):
+    """Catches rechecking a producer-admitted fallback with raw applicability."""
+    _config, seed, _folds, adapter, store, _expected, _raw = production_world(
+        tmp_path
+    )
+    task = adapter.tasks[0]
+    original_shortlist, original_payload, _shortlist_sha, _diagnostic_sha = (
+        adapter.local_evidence_for(task)
+    )
+    selected = ("toto_2_0", "seasonal_naive", "method_00")
+    shortlist = replace(
+        original_shortlist,
+        candidate_names=selected,
+        exclusion_reasons=(),
+        shortlist_underfilled=True,
+    )
+    payload = dict(original_payload)
+    payload["rows"] = [
+        row for row in original_payload["rows"] if row["candidate_name"] in selected
+    ]
+    impossible = ApplicabilityPolicy(
+        (ApplicabilityClause(("integer_valued", "continuous_valued")),)
+    )
+    adapter.materializer.screening_policy = ScreeningPolicy(
+        (
+            ScreeningEntry(
+                "toto_2_0", "tsfm", "keep", ApplicabilityPolicy(), "anchor"
+            ),
+            ScreeningEntry(
+                "seasonal_naive",
+                "statistical",
+                "specialized",
+                impossible,
+                "reviewed fallback",
+            ),
+            ScreeningEntry(
+                "method_00",
+                "statistical",
+                "keep",
+                ApplicabilityPolicy(),
+                "active",
+            ),
+            ScreeningEntry(
+                "method_01",
+                "statistical",
+                "quarantine",
+                ApplicabilityPolicy(),
+                "inactive",
+            ),
+        ),
+        ("toto_2_0", "seasonal_naive"),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "local_evidence_for",
+        lambda _task: (
+            shortlist,
+            payload,
+            "1" * 64,
+            hashlib.sha256(canonical_json_bytes(payload)).hexdigest(),
+        ),
+    )
+
+    package = adapter.materialize_local_package(task, seed, store.forecast)
+
+    assert "seasonal_naive" in {
+        candidate.name for candidate in package.ranked_alternatives
+    }
+
+    inactive_names = ("toto_2_0", "method_00", "method_01")
+    inactive_shortlist = replace(shortlist, candidate_names=inactive_names)
+    inactive_payload = dict(original_payload)
+    inactive_payload["rows"] = [
+        row
+        for row in original_payload["rows"]
+        if row["candidate_name"] in inactive_names
+    ]
+    monkeypatch.setattr(
+        adapter,
+        "local_evidence_for",
+        lambda _task: (
+            inactive_shortlist,
+            inactive_payload,
+            "3" * 64,
+            "4" * 64,
+        ),
+    )
+    with pytest.raises(ValueError, match="not eligible in the Host Dictionary"):
+        adapter.materialize_local_package(task, seed, store.forecast)
 
 
 def test_production_seed_child_and_nonempty_freeze_keep_shortlist_result(tmp_path, monkeypatch):
