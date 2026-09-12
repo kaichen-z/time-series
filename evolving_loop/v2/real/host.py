@@ -71,6 +71,16 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _git_blob_sha1(path: Path) -> str:
+    """Return Git's SHA-1 object identity for one Hugging Face CAS blob."""
+    digest = hashlib.sha1(usedforsecurity=False)
+    digest.update(f"blob {path.stat().st_size}\0".encode("ascii"))
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def _require_kind(path: Path, kind: str, role: str) -> Path:
     try:
         resolved = path.resolve(strict=True)
@@ -109,7 +119,7 @@ def _directory_content_identity(path: Path, role: str) -> str:
 
 
 def _model_cache_identity(path: Path) -> str:
-    """Fingerprint Hugging Face CAS metadata without rereading model weights."""
+    """Authenticate Hugging Face Git-SHA1 and LFS-SHA256 CAS objects."""
     root = _require_kind(path, "directory", "model_cache")
     entries = []
     for child in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
@@ -136,11 +146,21 @@ def _model_cache_identity(path: Path) -> str:
             entries.append({"path": relative, "kind": "directory"})
         elif stat.S_ISREG(mode):
             parts = child.relative_to(root).parts
-            is_cas_blob = "blobs" in parts and all(
-                character in "0123456789abcdef" for character in child.name
-            ) and len(child.name) in {40, 64}
             entry = {"path": relative, "kind": "file", "size": child.stat().st_size}
-            if is_cas_blob:
+            if "blobs" in parts:
+                if len(child.name) not in {40, 64} or any(
+                    character not in "0123456789abcdef" for character in child.name
+                ):
+                    raise ValueError("real Host model_cache has a malformed CAS blob name")
+                actual = (
+                    _git_blob_sha1(child)
+                    if len(child.name) == 40
+                    else _sha256_file(child)
+                )
+                if actual != child.name:
+                    raise ValueError(
+                        "real Host model_cache CAS blob content digest mismatch"
+                    )
                 entry["cas_digest"] = child.name
             else:
                 entry["sha256"] = _sha256_file(child)

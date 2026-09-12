@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -300,6 +301,47 @@ def _bind_real_manifest_identities(root, payload):
             row["role"], root / row["relative_path"]
         )
     return RealEvolutionManifestV2.from_payload(payload)
+
+
+@pytest.mark.parametrize("digest_kind", ("git-sha1", "lfs-sha256"))
+def test_model_cache_accepts_verified_hugging_face_cas_blobs(
+    tmp_path, digest_kind
+):
+    from evolving_loop.v2.real.host import resolve_real_runtime_identity
+
+    content = f"verified-{digest_kind}".encode("utf-8")
+    if digest_kind == "git-sha1":
+        framed = f"blob {len(content)}\0".encode("ascii") + content
+        digest = hashlib.sha1(framed).hexdigest()
+    else:
+        digest = hashlib.sha256(content).hexdigest()
+    blob = tmp_path / "models--owner--model/blobs" / digest
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(content)
+
+    identity = resolve_real_runtime_identity("model_cache", tmp_path)
+
+    assert len(identity) == 64
+
+
+def test_model_cache_rejects_same_size_cas_replacement_or_malformed_name(tmp_path):
+    from evolving_loop.v2.real.host import resolve_real_runtime_identity
+
+    original = b"original"
+    digest = hashlib.sha256(original).hexdigest()
+    blob = tmp_path / "models--owner--model/blobs" / digest
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(original)
+    assert len(resolve_real_runtime_identity("model_cache", tmp_path)) == 64
+
+    blob.write_bytes(b"mutated!")
+    with pytest.raises(ValueError, match="CAS blob content digest mismatch"):
+        resolve_real_runtime_identity("model_cache", tmp_path)
+
+    blob.unlink()
+    (blob.parent / "not-a-cas-digest").write_bytes(b"metadata")
+    with pytest.raises(ValueError, match="malformed CAS blob name"):
+        resolve_real_runtime_identity("model_cache", tmp_path)
 
 
 @pytest.mark.parametrize(
