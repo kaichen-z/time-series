@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from common.payload import canonical_json_bytes
+from common.metrics import drcik_point_metrics, joint_scaled_error, linear_quantile
 
 from .filtering import FAMILIES, FilterDictionary
 from .screening import ScreeningPolicy, TaskProfile, materialize_active_dictionary, profile_tags
@@ -49,6 +50,75 @@ def _number(value: object, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{field} must be numeric")
     return _finite(value, field)
+
+
+def fit_candidate_priors(
+    rows: Sequence[object], *, task_ids: Sequence[str],
+    morphology_keys: Mapping[str, str], candidate_names: Sequence[str],
+) -> tuple["CandidatePriorV1", ...]:
+    """Fit deterministic candidate priors from labeled Train task rows only."""
+    from .task_local_evolution import TaskLocalTaskRow
+
+    ids = tuple(task_ids)
+    if not ids or any(type(value) is not str or not value for value in ids) or len(ids) != len(set(ids)):
+        raise ValueError("prior fitting requires unique nonempty task IDs")
+    if set(morphology_keys) != set(ids):
+        raise ValueError("prior fitting requires one morphology key per task")
+    keys = {}
+    for task_id in ids:
+        value = morphology_keys[task_id]
+        normalized = _name(value, "morphology key")
+        if normalized != value:
+            raise ValueError("morphology keys must be canonical lowercase NFKC")
+        keys[task_id] = value
+    names = tuple(_name(value, "candidate name") for value in candidate_names)
+    if not names or len(names) != len(set(names)):
+        raise ValueError("candidate names must be unique canonical IDs")
+    by_task: dict[str, dict[str, object]] = {task_id: {} for task_id in ids}
+    families: dict[str, str] = {}
+    for row in rows:
+        if type(row) is not TaskLocalTaskRow:
+            raise ValueError("prior fitting requires exact task-local rows")
+        if row.split != "train":
+            continue
+        if row.task_id not in by_task:
+            continue
+        if row.candidate_name in by_task[row.task_id]:
+            raise ValueError("prior fitting rows contain duplicate candidate/task keys")
+        prior_family = families.setdefault(row.candidate_name, row.family)
+        if prior_family != row.family:
+            raise ValueError("candidate family is inconsistent")
+        by_task[row.task_id][row.candidate_name] = row
+    if any(name not in families for name in names):
+        raise ValueError("prior fitting requires candidate family evidence")
+
+    fitted: list[CandidatePriorV1] = []
+    for name in sorted(names):
+        task_scores: list[tuple[str, float]] = []
+        successes = 0
+        for task_id in ids:
+            row = by_task[task_id].get(name)
+            if row is None or row.forecast is None:
+                score = 5.0
+            else:
+                point = drcik_point_metrics(row.truth, row.forecast)
+                score = float(joint_scaled_error(float(point["smae"]), float(point["srmse"])))
+                if not math.isfinite(score):
+                    score = 5.0
+                else:
+                    successes += 1
+            task_scores.append((task_id, score))
+        values = [score for _task_id, score in task_scores]
+        morphology_scores = tuple(
+            (key, sum(score for task_id, score in task_scores if keys[task_id] == key) /
+             sum(1 for task_id in ids if keys[task_id] == key))
+            for key in sorted(set(keys.values()))
+        )
+        fitted.append(CandidatePriorV1(
+            name, families[name], successes / len(ids), sum(values) / len(values),
+            float(linear_quantile(values, 0.9)), morphology_scores,
+        ))
+    return tuple(fitted)
 
 
 @dataclass(frozen=True)

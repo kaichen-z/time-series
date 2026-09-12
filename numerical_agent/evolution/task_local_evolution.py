@@ -38,6 +38,7 @@ from .task_local_ensemble import (
     execute_task_local_ensemble,
     task_local_fingerprint,
 )
+from .task_shortlist import CandidatePriorV1, fit_candidate_priors
 
 
 _GROUPING_SCHEMA = 1
@@ -356,6 +357,32 @@ class TaskLocalTaskRow:
             raise ValueError("task-local diagnostic identity mismatch")
         if type(self.split) is not str or self.split not in {"train", "dev", "public"}:
             raise ValueError("task-local row split is unsupported")
+
+
+def fit_oof_shortlist_priors(
+    rows: Sequence[TaskLocalTaskRow], manifest: GroupFoldManifest, *,
+    candidate_names: Sequence[str],
+) -> tuple[Mapping[int, tuple[CandidatePriorV1, ...]], tuple[CandidatePriorV1, ...]]:
+    """Fit fold priors from complementary Train IDs and final priors from all Train IDs."""
+    if type(manifest) is not GroupFoldManifest:
+        raise ValueError("OOF prior fitting requires an exact group fold manifest")
+    task_ids = tuple(sorted(manifest.task_fold_map))
+    morphology: dict[str, str] = {}
+    for row in rows:
+        if type(row) is not TaskLocalTaskRow or row.split != "train" or row.task_id not in manifest.task_fold_map:
+            continue
+        key = task_morphology_key(row.profile)
+        if row.task_id in morphology and morphology[row.task_id] != key:
+            raise ValueError("morphology key is inconsistent for task")
+        morphology[row.task_id] = key
+    if set(morphology) != set(task_ids):
+        raise ValueError("OOF prior fitting requires every manifest task in Train rows")
+    folds: dict[int, tuple[CandidatePriorV1, ...]] = {}
+    for fold in range(manifest.fold_count):
+        fit_ids = tuple(task_id for task_id in task_ids if manifest.task_fold_map[task_id] != fold)
+        folds[fold] = fit_candidate_priors(rows, task_ids=fit_ids, morphology_keys={task_id: morphology[task_id] for task_id in fit_ids}, candidate_names=candidate_names)
+    final = fit_candidate_priors(rows, task_ids=task_ids, morphology_keys=morphology, candidate_names=candidate_names)
+    return folds, final
 
 
 @dataclass(frozen=True)

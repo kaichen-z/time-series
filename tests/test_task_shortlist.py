@@ -14,7 +14,9 @@ from numerical_agent.evolution.task_shortlist import (
     TaskCandidateShortlistV1,
     TaskShortlistPolicyV1,
     build_task_candidate_shortlist,
+    fit_candidate_priors,
 )
+from numerical_agent.evolution.task_local_evolution import TaskLocalTaskRow, GroupFoldManifest, fit_oof_shortlist_priors
 
 
 def test_shortlist_contract_is_canonical_and_anchor_first():
@@ -98,6 +100,32 @@ def test_profile_applicability_changes_shortlist_and_all_reasons_are_canonical()
         task_input_sha256="1" * 64, anchor_name="anchor", available_names=names, priors=priors, policy=TaskShortlistPolicyV1())
     assert result.candidate_names[:2] == ("anchor", "r1")
     assert result.exclusion_reasons[:3] == (("unsafe", "unsafe_status"), ("special", "not_applicable"), ("missing", "unavailable"))
+
+
+def _prior_row(task_id, name, family, truth=(1.0, 2.0), forecast=(1.0, 2.0), morphology="m"):
+    profile = _profile(task_id=task_id, history_length=4, horizon=2)
+    return TaskLocalTaskRow(task_id, name, family, profile, (0.0,) * 4, truth, forecast, None, "train", None if forecast else "failed")
+
+
+def test_fit_candidate_priors_uses_train_forecasts_and_is_canonical():
+    rows = (_prior_row("b", "z", "tsfm", forecast=None), _prior_row("a", "a", "statistical", forecast=(1.0, 2.0)), _prior_row("b", "a", "statistical", truth=(1.0, 2.0), forecast=(2.0, 4.0)))
+    result = fit_candidate_priors(rows, task_ids=("b", "a"), morphology_keys={"a": "flat", "b": "flat"}, candidate_names=("z", "a"))
+    assert tuple(p.candidate_name for p in result) == ("a", "z")
+    assert result[1].success_rate == 0.0
+    assert result[1].mean_joint == result[1].p90_joint == 5.0
+    assert result[0].morphology_scores[0][0] == "flat"
+
+
+def test_fit_oof_shortlist_priors_uses_complements_only():
+    groups = tuple((f"{i:064x}", (task,), i) for i, task in enumerate(("a", "b")))
+    manifest = GroupFoldManifest(1, 1, 2, groups, __import__("numerical_agent.evolution.task_local_evolution", fromlist=["_GROUPING_IMPLEMENTATION"])._GROUPING_IMPLEMENTATION)
+    rows = tuple(_prior_row(task, "a", "statistical", truth=(float(i), 1.0), forecast=(0.0, 1.0)) for i, task in enumerate(("a", "b")))
+    first, final = fit_oof_shortlist_priors(rows, manifest, candidate_names=("a",))
+    changed = (rows[0], _prior_row("b", "a", "statistical", truth=(99.0, 1.0), forecast=(0.0, 1.0)))
+    changed_first, _ = fit_oof_shortlist_priors(changed, manifest, candidate_names=("a",))
+    assert first[0] != changed_first[0]
+    assert first[1] == changed_first[1]
+    assert final != first[0]
 
 
 def test_builder_requires_screening_and_selects_exact_target_with_dynamic_family_ties():
