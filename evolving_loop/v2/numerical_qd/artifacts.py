@@ -42,6 +42,9 @@ class ArtifactKindV2(str, Enum):
     CELL_SUBSET = "cell_subset"
     FROZEN_PAIR = "frozen_pair"
     BOOTSTRAP_FORECAST = "bootstrap_forecast"
+    TASK_SHORTLIST = "task_shortlist"
+    SHORTLIST_POLICY = "shortlist_policy"
+    SHORTLIST_INDEX = "shortlist_index"
     BUNDLE = "bundle"
     QD_ARCHIVE = "qd_archive"
     HYPERBAND_STATE = "hyperband_state"
@@ -89,6 +92,13 @@ ARTIFACT_KINDS = MappingProxyType({
         "split_sha256", "protocol_sha256", "task_ids", "tasks")),
     K.FROZEN_PAIR: ArtifactSpecV2(True, payload_fields=("supply", "registry")),
     K.BOOTSTRAP_FORECAST: ArtifactSpecV2(True, payload_fields=("admission_sha256", "status", "forecast")),
+    K.TASK_SHORTLIST: ArtifactSpecV2(True, payload_fields=("schema_version", "task_input_sha256",
+        "dictionary_sha256", "policy_sha256", "candidate_names", "exclusion_reasons",
+        "shortlist_underfilled", "public_test_accessed")),
+    K.SHORTLIST_POLICY: ArtifactSpecV2(True, payload_fields=("schema_version", "minimum_candidates",
+        "target_candidates", "maximum_candidates")),
+    K.SHORTLIST_INDEX: ArtifactSpecV2(True, payload_fields=("schema_version", "policy_sha256",
+        "entries", "public_test_accessed")),
     K.BUNDLE: ArtifactSpecV2(False, EvolutionBundleV2),
     K.QD_ARCHIVE: ArtifactSpecV2(False, NumericalQDArchive),
     K.HYPERBAND_STATE: ArtifactSpecV2(False, HyperbandStateV2),

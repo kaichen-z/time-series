@@ -40,6 +40,10 @@ from numerical_agent.evolution.numerical_package import (
     valid_forecast,
 )
 from numerical_agent.evolution.numerical_selector import DecisionPolicy, SelectionDecision
+from numerical_agent.evolution.task_shortlist import (
+    TaskCandidateShortlistV1,
+    TaskShortlistPolicyV1,
+)
 
 
 NumericalSupplyFamily = Literal[
@@ -632,14 +636,24 @@ def bound_numerical_package(
     task_fold: int | None = None,
     decision_policy: DecisionPolicy | None = None,
     min_successful_folds: int | None = None,
+    shortlist: TaskCandidateShortlistV1 | None = None,
 ) -> NumericalForecastPackage:
-    """Bind a v1 bounded family projection or the complete ordered v2 catalog."""
+    """Bind a legacy projection or a verified schema-v2 task-local shortlist."""
     if not isinstance(source, NumericalForecastPackage):
         _fail("source must be a NumericalForecastPackage")
     if not isinstance(release, NumericalSupplyRelease):
         _fail("release must be a NumericalSupplyRelease")
     if not isinstance(materialized, Mapping):
         _fail("materialized forecasts must be a mapping")
+    if shortlist is not None:
+        if type(shortlist) is not TaskCandidateShortlistV1:
+            _fail("shortlist must be an exact TaskCandidateShortlistV1")
+        if release.schema_version != 2:
+            _fail("task shortlists are only valid for schema-v2 supplies")
+        if shortlist.dictionary_sha256 != release.source_fingerprints.get("dictionary"):
+            _fail("task shortlist Dictionary identity does not match supply")
+        if source.protected_baseline.name not in shortlist.candidate_names:
+            _fail("task shortlist must retain the protected anchor")
     _validate_champion_provenance(source, release)
     if source.protected_baseline.name == "atlas_70_30":
         _fail("fixed Atlas blend cannot be the protected source anchor")
@@ -658,6 +672,13 @@ def bound_numerical_package(
     retained_names = {anchor.name}
     retained_vectors = {_forecast_sha256(anchor.forecast)}
     specifications = (
+        tuple(
+            item for name in shortlist.candidate_names
+            for item in release.alternatives
+            if item.candidate_id == name
+        )
+        if shortlist is not None
+        else
         tuple(
             item
             for family in _FAMILIES
@@ -715,6 +736,21 @@ def bound_numerical_package(
             canonical_json_bytes(dict(release.runtime_fingerprints))
         ).hexdigest(),
     }
+    if shortlist is not None:
+        policy = TaskShortlistPolicyV1()
+        if shortlist.policy_sha256 != policy.fingerprint():
+            _fail("task shortlist policy identity is not the canonical policy")
+        diagnostics_identity = {
+            item.name: repr(item.diagnostics) for item in ranked
+        }
+        component_fingerprints.update({
+            "task_shortlist": shortlist.fingerprint(),
+            "shortlist_policy": shortlist.policy_sha256,
+            "dictionary": shortlist.dictionary_sha256,
+            "hindcast_diagnostics": hashlib.sha256(
+                canonical_json_bytes(diagnostics_identity)
+            ).hexdigest(),
+        })
     morphology_card, accepted, rejected, handoff = _verified_assumption_projection(
         source,
         release,

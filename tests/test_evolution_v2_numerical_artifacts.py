@@ -9,8 +9,20 @@ MATERIAL_KINDS = {
     "source", "config", "genome", "inventory", "screening_policy", "combined_policy", "recipe_policy",
     "structural_policy", "mutation_policy", "prompt", "proposer_request", "proposal_attempt",
     "executable_child", "evaluation", "rung_manifest", "task_result", "qd_entry", "cell_subset",
-    "frozen_pair", "bootstrap_forecast",
+    "frozen_pair", "bootstrap_forecast", "task_shortlist", "shortlist_policy", "shortlist_index",
 }
+
+
+def test_shortlist_artifacts_have_closed_payload_contracts():
+    from evolving_loop.v2.numerical_qd.artifacts import ARTIFACT_KINDS, ArtifactKindV2
+
+    assert ARTIFACT_KINDS[ArtifactKindV2.TASK_SHORTLIST].payload_fields == (
+        "schema_version", "task_input_sha256", "dictionary_sha256", "policy_sha256",
+        "candidate_names", "exclusion_reasons", "shortlist_underfilled", "public_test_accessed",
+    )
+    assert ARTIFACT_KINDS[ArtifactKindV2.SHORTLIST_POLICY].payload_fields == (
+        "schema_version", "minimum_candidates", "target_candidates", "maximum_candidates",
+    )
 CONTROL_KINDS = {
     "bundle", "qd_archive", "hyperband_state", "rung_record", "budget_checkpoint", "kernel_checkpoint",
     "runner_checkpoint", "manifest", "generation_status", "partial_rung", "bootstrap_preflight",

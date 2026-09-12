@@ -431,6 +431,52 @@ def test_schema_v2_binds_repeated_family_duplicate_vectors_in_release_order() ->
     )
 
 
+def test_schema_v2_package_uses_verified_task_shortlist_not_full_supply() -> None:
+    """The frozen supply remains complete while a task package is local-only."""
+    from numerical_agent.evolution.task_shortlist import (
+        TaskCandidateShortlistV1,
+        TaskShortlistPolicyV1,
+    )
+
+    source = _wide_package()
+    release = NumericalSupplyRelease(
+        schema_version=2,
+        version="n001",
+        parent_sha256="2" * 64,
+        anchor_release_payload=_anchor_release().to_payload(),
+        alternatives=(
+            _alternative("seasonal_naive", "statistical"),
+            _alternative("drift", "statistical"),
+            _alternative("weighted_pair", "combined"),
+        ),
+        atlas_release_sha256=None,
+        source_fingerprints={"dictionary": "4" * 64},
+        runtime_fingerprints={"materializer": "5" * 64},
+    )
+    policy = TaskShortlistPolicyV1()
+    shortlist = TaskCandidateShortlistV1(
+        1, "1" * 64, "4" * 64, policy.fingerprint(),
+        ("safe_anchor", "drift"), (), True, False,
+    )
+    materialized = {
+        "safe_anchor": _ranked("safe_anchor", "tsfm", (9.0, 9.0)),
+        "seasonal_naive": _ranked("seasonal_naive", "statistical", (2.0, 2.0)),
+        "drift": _ranked("drift", "statistical", (3.0, 3.0)),
+        "weighted_pair": _ranked("weighted_pair", "combined", (4.0, 4.0)),
+    }
+
+    package = bound_numerical_package(source, release, materialized, shortlist=shortlist)
+
+    assert tuple(item.candidate_id for item in release.alternatives) == (
+        "seasonal_naive", "drift", "weighted_pair",
+    )
+    assert package.active_candidate_names == ("safe_anchor", "drift")
+    assert set(package.candidate_diagnostics) == {"safe_anchor", "drift"}
+    assert package.component_fingerprints["task_shortlist"] == shortlist.fingerprint()
+    assert package.component_fingerprints["shortlist_policy"] == policy.fingerprint()
+    assert package.component_fingerprints["dictionary"] == "4" * 64
+
+
 def test_bounded_package_projects_verified_alternative_assumption_to_safe_handoff():
     source = _wide_package()
     release = _supply_release(
