@@ -1,6 +1,7 @@
 """Deterministic single-coordinate and joint cooperative proposals."""
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 
 from ..bundle import EvolutionBundleV2
@@ -15,6 +16,31 @@ from .contracts import BundleCandidateV2
 
 
 _SINGLE_ARMS = ("numerical", "retrieval", "decision")
+_SENSITIVE_KEY_FRAGMENTS = (
+    "dev",
+    "public",
+    "future",
+    "holdout",
+    "evaluator",
+    "label",
+    "taskid",
+    "forecast",
+    "document",
+    "pertask",
+    "residual",
+)
+
+
+def _reject_sensitive_feedback_keys(value: object, *, field: str) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            compact = re.sub(r"[^a-z0-9]", "", str(key).casefold())
+            if any(fragment in compact for fragment in _SENSITIVE_KEY_FRAGMENTS):
+                raise ValueError(f"{field} contains sensitive evaluator key {key}")
+            _reject_sensitive_feedback_keys(item, field=f"{field}.{key}")
+    elif isinstance(value, (tuple, list)):
+        for index, item in enumerate(value):
+            _reject_sensitive_feedback_keys(item, field=f"{field}[{index}]")
 
 
 def _validated_feedback(
@@ -26,6 +52,7 @@ def _validated_feedback(
     # Reparse at the proposal boundary so even a tampered frozen instance cannot
     # smuggle evaluator-only data into a coordinate provider.
     payload = feedback.to_payload()
+    _reject_sensitive_feedback_keys(payload, field="feedback")
     SanitizedEvolutionFeedback.from_payload(payload)
     canonical_v2_bytes(payload)
     if feedback.parent_sha256 != parent.fingerprint():
@@ -78,6 +105,18 @@ def _one_change(
         proposed = adapter.propose(current, step)
         if proposed is None:
             return None
+        if (
+            proposed.prompt == current.prompt
+            or proposed.skills != current.skills
+            or proposed.enable_evidence_adjustments
+            != current.enable_evidence_adjustments
+            or proposed.max_evidence_adjustments
+            != current.max_evidence_adjustments
+            or proposed.aggregation != current.aggregation
+        ):
+            raise ValueError(
+                "cooperative Decision proposal must be prompt-only"
+            )
         identity = catalog.add_decision(proposed)
         return None if identity == parent.decision_policy_sha256 else (arm, identity)
 
@@ -92,7 +131,11 @@ def propose_bundle_candidate(
     feedback: SanitizedEvolutionFeedback,
     step: int,
 ) -> BundleCandidateV2 | None:
-    """Build one typed Child using only sanitized Train feedback."""
+    """Build one typed Child using only sanitized Train feedback.
+
+    The Project 3 prototype admits Decision prompt mutations only. Decision
+    Skills and execution settings remain immutable under their full module SHA.
+    """
     if type(parent) is not EvolutionBundleV2:
         raise TypeError("proposal Parent must be EvolutionBundleV2")
     if type(catalog) is not CooperativeArtifactCatalog:

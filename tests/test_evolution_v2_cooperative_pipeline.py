@@ -97,6 +97,15 @@ def _pipeline_package(task, release):
     )
 
 
+def _marked(evaluation, stage):
+    return type(evaluation).from_rows(
+        evaluation.candidate_sha256,
+        evaluation.task_rows,
+        evaluation.expected_task_ids,
+        {f"cooperative_stage_{stage}": 1.0},
+    )
+
+
 @pytest.fixture
 def pipeline_case(tmp_path):
     tasks = _train_tasks()
@@ -131,7 +140,7 @@ def pipeline_case(tmp_path):
     decision_clients: list[FakeLLMClient] = []
 
     def retrieval_factory(genome, skills):
-        task_id = tasks[len(retrieval_clients)].numeric.task_id
+        task_id = tasks[len(retrieval_clients) % len(tasks)].numeric.task_id
         trace.append((task_id, "numerical"))
         client = FakeLLMClient([_round1_response()])
         retrieval_clients.append(client)
@@ -184,6 +193,33 @@ def test_pipeline_adapter_runs_all_three_agents_and_binds_module_identities(
         for task in tasks
     }
     assert {row.numerical_package_sha256 for row in result.task_rows} == expected_package_ids
+    assert result.secondary_diagnostics["cooperative_stage_train"] == 1.0
+
+
+def test_pipeline_stage_marker_binds_train_and_dev_evaluation_fingerprints(
+    pipeline_case,
+):
+    train = pipeline_case["pipeline"].evaluate(
+        pipeline_case["bundle"], pipeline_case["tasks"], stage="train"
+    )
+    dev = pipeline_case["pipeline"].evaluate(
+        pipeline_case["bundle"], pipeline_case["tasks"], stage="dev"
+    )
+
+    assert train.task_rows == dev.task_rows
+    assert train.fingerprint != dev.fingerprint
+    assert train.secondary_diagnostics["cooperative_stage_train"] == 1.0
+    assert dev.secondary_diagnostics["cooperative_stage_dev"] == 1.0
+
+
+@pytest.mark.parametrize("stage", ("public", "test", "TRAIN", ""))
+def test_pipeline_rejects_every_stage_except_exact_train_or_dev(
+    pipeline_case, stage
+):
+    with pytest.raises(ValueError, match="train or dev"):
+        pipeline_case["pipeline"].evaluate(
+            pipeline_case["bundle"], pipeline_case["tasks"], stage=stage
+        )
 
 
 def test_pipeline_rejects_a_factory_that_changes_the_bound_retrieval_module(
@@ -262,8 +298,14 @@ def test_pipeline_requires_a_verified_runtime_library_for_nonempty_skills(
 
 
 def test_train_feedback_contains_only_aggregate_train_values():
-    parent = _evaluation("1" * 64, ("private-task-a", "private-task-b"), 2.0)
-    child = _evaluation("2" * 64, ("private-task-a", "private-task-b"), 1.5)
+    parent = _marked(
+        _evaluation("1" * 64, ("private-task-a", "private-task-b"), 2.0),
+        "train",
+    )
+    child = _marked(
+        _evaluation("2" * 64, ("private-task-a", "private-task-b"), 1.5),
+        "train",
+    )
 
     feedback = sanitize_train_feedback(parent, child, normalized_cost=0.25)
     wire = canonical_v2_bytes(feedback.to_payload()).decode("utf-8").lower()
@@ -284,10 +326,18 @@ def test_train_feedback_contains_only_aggregate_train_values():
     assert "forecast" not in wire
 
 
+def test_train_feedback_rejects_dev_marked_evaluations():
+    parent = _marked(_evaluation("1" * 64, ("task",), 2.0), "train")
+    child = _marked(_evaluation("2" * 64, ("task",), 1.0), "dev")
+
+    with pytest.raises(ValueError, match="Train-marked"):
+        sanitize_train_feedback(parent, child, normalized_cost=0.25)
+
+
 @pytest.mark.parametrize("normalized_cost", [-0.1, float("inf"), True])
 def test_train_feedback_rejects_invalid_normalized_cost(normalized_cost):
-    parent = _evaluation("1" * 64, ("task",), 2.0)
-    child = _evaluation("2" * 64, ("task",), 1.0)
+    parent = _marked(_evaluation("1" * 64, ("task",), 2.0), "train")
+    child = _marked(_evaluation("2" * 64, ("task",), 1.0), "train")
 
     with pytest.raises(ValueError, match="normalized_cost"):
         sanitize_train_feedback(parent, child, normalized_cost=normalized_cost)

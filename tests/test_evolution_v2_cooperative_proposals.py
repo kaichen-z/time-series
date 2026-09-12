@@ -139,6 +139,40 @@ def test_joint_returns_none_when_fewer_than_two_coordinates_can_change(
     assert propose_bundle_candidate(arm="joint", **proposal_context) is None
 
 
+def test_decision_candidate_is_prompt_only_even_when_settings_adapter_is_supplied(
+    proposal_context,
+):
+    proposal_context["adapters"]["decision"] = DecisionCoordinateAdapter(
+        (), settings_cycle=True
+    )
+
+    with pytest.raises(ValueError, match="prompt-only"):
+        propose_bundle_candidate(arm="decision", **proposal_context)
+
+
+def test_decision_candidate_preserves_every_non_prompt_setting(proposal_context):
+    candidate = propose_bundle_candidate(arm="decision", **proposal_context)
+    child = candidate.to_child(proposal_context["parent"])
+    parent_module = proposal_context["catalog"].resolve_decision(
+        proposal_context["parent"].decision_policy_sha256
+    )
+    child_module = proposal_context["catalog"].resolve_decision(
+        child.decision_policy_sha256
+    )
+
+    assert child_module.prompt == "changed prompt"
+    assert child_module.skills == parent_module.skills
+    assert (
+        child_module.enable_evidence_adjustments
+        == parent_module.enable_evidence_adjustments
+    )
+    assert (
+        child_module.max_evidence_adjustments
+        == parent_module.max_evidence_adjustments
+    )
+    assert child_module.aggregation == parent_module.aggregation
+
+
 def test_proposal_rejects_plain_or_tampered_feedback(proposal_context):
     with pytest.raises(TypeError, match="SanitizedEvolutionFeedback"):
         propose_bundle_candidate(
@@ -149,7 +183,39 @@ def test_proposal_rejects_plain_or_tampered_feedback(proposal_context):
     object.__setattr__(
         tampered, "train_objectives", {"nested": {"future_values": [1.0]}}
     )
-    with pytest.raises(ValueError, match="reserved evaluator-only key"):
+    with pytest.raises(ValueError, match="sensitive evaluator key"):
+        propose_bundle_candidate(
+            **(proposal_context | {"arm": "retrieval", "feedback": tampered})
+        )
+
+
+@pytest.mark.parametrize(
+    "sensitive_key",
+    (
+        "DeVMetrics",
+        "myPublicScore",
+        "future-window",
+        "holdoutScore",
+        "evaluatorOutput",
+        "privateLabels",
+        "TaskID",
+        "forecastVector",
+        "sourceDocumentText",
+        "perTaskErrors",
+        "normalizedResiduals",
+    ),
+)
+def test_proposal_recursively_rejects_casefolded_sensitive_key_tokens(
+    proposal_context, sensitive_key
+):
+    tampered = copy.copy(proposal_context["feedback"])
+    object.__setattr__(
+        tampered,
+        "train_objectives",
+        {"apparently_safe": [{"nested": {sensitive_key: 0.25}}]},
+    )
+
+    with pytest.raises(ValueError, match="sensitive evaluator key"):
         propose_bundle_candidate(
             **(proposal_context | {"arm": "retrieval", "feedback": tampered})
         )

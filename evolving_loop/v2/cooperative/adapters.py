@@ -41,6 +41,8 @@ TRIGGER_NEXT = MappingProxyType({
     "always": "never",
     "never": "on_named_gap",
 })
+_COOPERATIVE_STAGE_PREFIX = "cooperative_stage_"
+_COOPERATIVE_STAGES = frozenset({"train", "dev"})
 
 
 def _plain_json(value: object) -> object:
@@ -341,6 +343,8 @@ class CooperativePipelineAdapter:
     ) -> PackageEvaluation:
         if type(bundle) is not EvolutionBundleV2:
             raise TypeError("pipeline Bundle must be EvolutionBundleV2")
+        if type(stage) is not str or stage not in _COOPERATIVE_STAGES:
+            raise ValueError("cooperative pipeline stage must be exactly train or dev")
         numerical = self.catalog.resolve_numerical(
             bundle.numerical_release_sha256,
             bundle.numerical_registry_sha256,
@@ -349,7 +353,7 @@ class CooperativePipelineAdapter:
         decision = self.catalog.resolve_decision(bundle.decision_policy_sha256)
         skills = self._skills_for(retrieval)
 
-        return PackagePipelineEvaluator._evaluate_components(
+        evaluation = PackagePipelineEvaluator._evaluate_components(
             candidate_sha256=bundle.fingerprint(),
             registry=numerical.registry,
             tasks=tuple(tasks),
@@ -363,6 +367,16 @@ class CooperativePipelineAdapter:
             expected_decision_prompt_sha256=hashlib.sha256(
                 decision.prompt.encode("utf-8")
             ).hexdigest(),
+        )
+        diagnostics = dict(evaluation.secondary_diagnostics)
+        if any(name.startswith(_COOPERATIVE_STAGE_PREFIX) for name in diagnostics):
+            raise ValueError("package evaluator returned a reserved stage marker")
+        diagnostics[f"{_COOPERATIVE_STAGE_PREFIX}{stage}"] = 1.0
+        return PackageEvaluation.from_rows(
+            evaluation.candidate_sha256,
+            evaluation.task_rows,
+            evaluation.expected_task_ids,
+            diagnostics,
         )
 
 
@@ -378,6 +392,14 @@ def sanitize_train_feedback(
         raise TypeError("Train feedback requires PackageEvaluation values")
     if parent_eval.public_test_accessed or child_eval.public_test_accessed:
         raise ValueError("Train feedback cannot contain Public evaluation")
+    for evaluation in (parent_eval, child_eval):
+        stage_markers = {
+            name: value
+            for name, value in evaluation.secondary_diagnostics.items()
+            if name.startswith(_COOPERATIVE_STAGE_PREFIX)
+        }
+        if stage_markers != {"cooperative_stage_train": 1.0}:
+            raise ValueError("Train feedback requires exact Train-marked evaluations")
     if parent_eval.expected_task_ids != child_eval.expected_task_ids:
         raise ValueError("Train feedback evaluations must cover the same task universe")
     if (
