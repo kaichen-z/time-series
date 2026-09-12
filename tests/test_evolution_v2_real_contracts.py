@@ -112,3 +112,13 @@ def test_arbitrary_schedule_and_checkpoint_result_schemas_are_rejected():
 def test_nested_payload_values_must_be_json_values():
     with pytest.raises((TypeError, ValueError)):
         RealEvolutionManifestV2.from_payload(manifest_payload() | {"l0_fingerprints": {"bad": {1, 2}}})
+
+
+def test_runtime_roles_are_known_and_canonically_ordered():
+    base = {"role": "python", "relative_path": "runs/runtime", "identity_sha256": "c" * 64}
+    unknown_a = base | {"role": "unknown-a", "relative_path": "runs/a"}
+    unknown_b = base | {"role": "unknown-b", "relative_path": "runs/b"}
+    with pytest.raises(ValueError, match="known"):
+        RealEvolutionManifestV2.from_payload(manifest_payload() | {"runtime_locations": [unknown_a, unknown_b]})
+    with pytest.raises(ValueError, match="canonical"):
+        RealEvolutionManifestV2.from_payload(manifest_payload() | {"runtime_locations": [{"role": "codex_cli", "relative_path": "runs/cli", "identity_sha256": "d" * 64}, base]})

@@ -18,6 +18,7 @@ _PROFILE_ALLOCATIONS = {
     "real-1h": {"p2": 1680, "p3": 720, "p4": 240, "p5": 240, "finalization": 720},
 }
 _ROLE_ORDER = ("split", "tasks", "numerical_seed", "forecast_cache", "retrieval_seed", "source_seed")
+_RUNTIME_ROLE_ORDER = ("python", "runtime", "task_loader", "forecast_store", "model_cache", "codex_cli")
 
 
 def _contract_payload(value: object, cls):
@@ -82,7 +83,10 @@ def _rows(value, cls, field):
         raise ValueError(f"{field} roles must be known")
     if len(roles) != len(set(roles)):
         raise ValueError(f"{field} roles must be unique")
-    order = {name: i for i, name in enumerate(_ROLE_ORDER)}
+    role_order = _ROLE_ORDER if cls is RealInputFileV2 else _RUNTIME_ROLE_ORDER
+    if cls is RealRuntimeLocationV2 and any(role not in role_order for role in roles):
+        raise ValueError(f"{field} roles must be known")
+    order = {name: i for i, name in enumerate(role_order)}
     if roles != tuple(sorted(roles, key=lambda r: order.get(r, len(order)))):
         raise ValueError(f"{field} must use canonical role order")
     return result
