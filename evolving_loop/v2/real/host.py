@@ -20,6 +20,7 @@ from numerical_agent.run_selector_evolution import _forecast_runtime_identity
 
 from ..budget import ResourceUse
 from ..contracts import fingerprint_payload
+from ..numerical_qd.adapters import FrozenNumericalArtifactsV2
 from .contracts import RealEvolutionManifestV2
 
 # The split validator is the existing fixed 80/20/99 Host admission boundary.
@@ -231,8 +232,18 @@ class RealHostRuntimeV2:
     retrieval_skill_library: RetrievalSkillLibrary
     source_repo: Path
     resource_reporter_sha256: str
+    numerical_alternatives: tuple[FrozenNumericalArtifactsV2, ...] = ()
     resource_kinds: tuple[str, ...] = ()
     _closed: bool = field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if type(self.numerical_alternatives) is not tuple or any(
+            type(pair) is not FrozenNumericalArtifactsV2
+            for pair in self.numerical_alternatives
+        ):
+            raise TypeError(
+                "real Host numerical_alternatives must be frozen Numerical pairs"
+            )
 
     def retrieval_factory(self, genome, skills=None) -> TwoStageRetrievalAgent:
         library = self.retrieval_skill_library if skills is None else skills
