@@ -702,9 +702,7 @@ def _cache_identity(candidate, task, split, metric, descriptor, runtime, protoco
         require_sha256(value, name)
     values["runtime"] = (require_sha256(runtime, "runtime") if type(runtime) is str
                          else fingerprint_payload(dict(_runtime(runtime))))
-    if local_evidence_sha256 is None:
-        values["cache_identity_version"] = 1
-    else:
+    if local_evidence_sha256 is not None:
         values["cache_identity_version"] = 2
         values["local_evidence_sha256"] = require_sha256(
             local_evidence_sha256, "local_evidence_sha256"

@@ -25,6 +25,9 @@ def sha(label):
 SPLIT, PROTOCOL = sha("train split"), sha("protocol")
 METRIC, DESCRIPTOR, ADAPTER = sha("metric"), sha("descriptor"), sha("adapter")
 RUNTIME = {"python": sha("python")}
+# Literal key from the pre-evidence implementation at 54cb948.  Keep this
+# independent of the production helper so compatibility cannot silently drift.
+LEGACY_CACHE_KEY_FIXTURE = "8a5e2c8caec5a2d8f1724e11e1ba44f1a35d39bc4b1281775d5c66199e299074"
 CELL = MorphologyCellV2("low", "none", "low", "stable", "short", "statistical")
 CONFIG = {"brackets": {"explore": [8, 32, 80], "confirm": [32, 80], "replay": [80]},
           "reduction_factor": 3}
@@ -185,6 +188,13 @@ def test_cache_identity_binds_every_dependency_independently(field):
     assert len(original) == 64
 
 
+def test_no_evidence_cache_identity_preserves_literal_legacy_key():
+    assert evaluation_cache_key(
+        sha("candidate"), b"task bytes", SPLIT, METRIC, DESCRIPTOR,
+        RUNTIME, PROTOCOL, ADAPTER,
+    ) == LEGACY_CACHE_KEY_FIXTURE
+
+
 def test_evidence_bound_cache_contract_rejects_missing_or_mutated_evidence():
     current, committed = state(count=1), manifest()
     candidate, task = current.active_candidates[0], committed.tasks[0]
@@ -228,6 +238,9 @@ def test_exact_legacy_cache_payloads_parse_to_explicit_v1_evidence_state():
     del partial["cache_identity_version"]
     with pytest.raises(ValueError):
         TaskCacheRowV2.from_payload(partial)
+    mixed = dict(legacy_row, local_evidence_sha256=sha("mixed evidence"))
+    with pytest.raises(ValueError):
+        TaskCacheRowV2.from_payload(mixed)
 
 
 def test_legacy_cache_row_resumes_only_the_explicit_v1_branch():
@@ -244,6 +257,24 @@ def test_legacy_cache_row_resumes_only_the_explicit_v1_branch():
     result = run(current, committed, budget, host(clock, budget), cache={key: row})
     assert sum(item.cache_hit for item in result.task_results) == 1
     assert budget.charged_use.task_executions == 7
+
+
+def test_legacy_cache_row_is_a_miss_when_v2_evidence_is_required():
+    clock = FakeClock()
+    budget = ledger(clock)
+    current, committed = state(count=1), manifest()
+    candidate, task = current.active_candidates[0], committed.tasks[0]
+    key = evaluation_cache_key(candidate, task.task_sha256, SPLIT, METRIC, DESCRIPTOR,
+                               RUNTIME, PROTOCOL, ADAPTER)
+    legacy = TaskCacheRowV2(
+        key, task.task_sha256,
+        evaluation(candidate, (task.task_id,), subset=task.fingerprint()),
+    ).to_payload()
+    evidence = sha("sealed shortlist evidence")
+    result = run(current, committed, budget, host(clock, budget), cache={key: legacy},
+                 local_evidence_sha256_for=lambda _candidate, _task: evidence)
+    assert budget.charged_use.task_executions == 8
+    assert not any(item.cache_hit for item in result.task_results)
 
 
 def test_changed_evidence_makes_a_stale_task_cache_row_a_paid_miss():
