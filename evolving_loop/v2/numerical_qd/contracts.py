@@ -693,13 +693,22 @@ class HyperbandAdvanceV2(_CanonicalContract):
                            for value in _sequence(self.evaluations, "evaluations")))
 
 
-def _cache_identity(candidate, task, split, metric, descriptor, runtime, protocol, adapter):
+def _cache_identity(candidate, task, split, metric, descriptor, runtime, protocol, adapter,
+                    local_evidence_sha256=None):
+    """Version cache keys at the evidence boundary; no evidence is explicit legacy."""
     values = dict(candidate=candidate, task=task, split=split, metric=metric,
                   descriptor=descriptor, protocol=protocol, adapter=adapter)
     for name, value in values.items():
         require_sha256(value, name)
     values["runtime"] = (require_sha256(runtime, "runtime") if type(runtime) is str
                          else fingerprint_payload(dict(_runtime(runtime))))
+    if local_evidence_sha256 is None:
+        values["cache_identity_version"] = 1
+    else:
+        values["cache_identity_version"] = 2
+        values["local_evidence_sha256"] = require_sha256(
+            local_evidence_sha256, "local_evidence_sha256"
+        )
     return fingerprint_payload(values)
 
 
@@ -710,17 +719,24 @@ class TaskCacheRowV2(_CanonicalContract):
     cache_key: str
     task_sha256: str
     evaluation: NumericalEvaluationV2
+    local_evidence_sha256: str | None = None
+    cache_identity_version: int = 1
 
     def __post_init__(self):
         require_sha256(self.cache_key, "cache_key")
         require_sha256(self.task_sha256, "task_sha256")
+        if self.local_evidence_sha256 is not None:
+            require_sha256(self.local_evidence_sha256, "local_evidence_sha256")
+        expected_version = 2 if self.local_evidence_sha256 is not None else 1
+        if type(self.cache_identity_version) is not int or self.cache_identity_version != expected_version:
+            raise ValueError("cache identity version does not match local evidence")
         value = _nested(self.evaluation, NumericalEvaluationV2)
         if len(value.task_ids) != 1 or tuple(value.task_statuses.values()) != ("passed",) or not value.constraints.feasible:
             raise ValueError("cache rows require one successful feasible task")
         key = _cache_identity(value.genome_sha256, self.task_sha256, value.split_sha256,
                               value.metric_policy_sha256, value.descriptor_policy_sha256,
                               value.runtime_fingerprints, value.protocol_fingerprint,
-                              value.execution_adapter_sha256)
+                              value.execution_adapter_sha256, self.local_evidence_sha256)
         if key != self.cache_key:
             raise ValueError("cache identity mismatch")
         object.__setattr__(self, "evaluation", value)
@@ -735,10 +751,17 @@ class HyperbandTaskResultV2(_CanonicalContract):
     evaluation: NumericalEvaluationV2 | None
     cache_hit: bool
     failure_category: str | None
+    local_evidence_sha256: str | None = None
+    cache_identity_version: int = 1
 
     def __post_init__(self):
         require_sha256(self.candidate_sha256, "candidate_sha256")
         require_sha256(self.cache_key, "cache_key")
+        if self.local_evidence_sha256 is not None:
+            require_sha256(self.local_evidence_sha256, "local_evidence_sha256")
+        expected_version = 2 if self.local_evidence_sha256 is not None else 1
+        if type(self.cache_identity_version) is not int or self.cache_identity_version != expected_version:
+            raise ValueError("cache identity version does not match local evidence")
         _text(self.task_id, "task_id")
         _require_choice(self.status, "task status", frozenset({"passed", "failed", "invalid"}))
         if type(self.cache_hit) is not bool:

@@ -173,16 +173,54 @@ def test_manifest_rejects_duplicate_task_ids_and_nontrain_tasks():
 
 
 @pytest.mark.parametrize("field", ["candidate", "task", "split", "metric", "descriptor",
-                                    "runtime", "protocol", "adapter"])
+                                    "runtime", "protocol", "adapter", "local_evidence"])
 def test_cache_identity_binds_every_dependency_independently(field):
     identity = dict(candidate=sha("candidate"), task=b"task bytes", split=SPLIT,
                     metric=METRIC, descriptor=DESCRIPTOR, runtime=RUNTIME,
-                    protocol=PROTOCOL, adapter=ADAPTER)
+                    protocol=PROTOCOL, adapter=ADAPTER, local_evidence_sha256=sha("evidence"))
     original = evaluation_cache_key(**identity)
-    identity[field] = (b"changed task bytes" if field == "task" else
+    identity["local_evidence_sha256" if field == "local_evidence" else field] = (b"changed task bytes" if field == "task" else
                        {"python": sha("changed")} if field == "runtime" else sha("changed"))
     assert evaluation_cache_key(**identity) != original
     assert len(original) == 64
+
+
+def test_evidence_bound_cache_contract_rejects_missing_or_mutated_evidence():
+    current, committed = state(count=1), manifest()
+    candidate, task = current.active_candidates[0], committed.tasks[0]
+    evidence = sha("sealed shortlist evidence")
+    key = evaluation_cache_key(candidate, task.task_sha256, SPLIT, METRIC, DESCRIPTOR,
+                               RUNTIME, PROTOCOL, ADAPTER, evidence)
+    row = TaskCacheRowV2(key, task.task_sha256,
+                         evaluation(candidate, (task.task_id,), subset=task.fingerprint()),
+                         evidence, 2)
+    assert row.local_evidence_sha256 == evidence
+    assert row.cache_identity_version == 2
+    missing = row.to_payload()
+    del missing["local_evidence_sha256"]
+    with pytest.raises(ValueError):
+        TaskCacheRowV2.from_payload(missing)
+    with pytest.raises(ValueError, match="cache identity"):
+        TaskCacheRowV2(key, task.task_sha256, row.evaluation, sha("mutated evidence"), 2)
+
+
+def test_changed_evidence_makes_a_stale_task_cache_row_a_paid_miss():
+    clock = FakeClock()
+    budget = ledger(clock)
+    current, committed = state(count=1), manifest()
+    candidate, task = current.active_candidates[0], committed.tasks[0]
+    old_evidence, new_evidence = sha("old shortlist"), sha("new shortlist")
+    old_key = evaluation_cache_key(candidate, task.task_sha256, SPLIT, METRIC, DESCRIPTOR,
+                                   RUNTIME, PROTOCOL, ADAPTER, old_evidence)
+    stale = TaskCacheRowV2(old_key, task.task_sha256,
+                           evaluation(candidate, (task.task_id,), subset=task.fingerprint()),
+                           old_evidence, 2).to_payload()
+    new_key = evaluation_cache_key(candidate, task.task_sha256, SPLIT, METRIC, DESCRIPTOR,
+                                   RUNTIME, PROTOCOL, ADAPTER, new_evidence)
+    result = run(current, committed, budget, host(clock, budget), cache={new_key: stale},
+                 local_evidence_sha256_for=lambda _candidate, _task: new_evidence)
+    assert budget.charged_use.task_executions == 8
+    assert not any(item.cache_hit for item in result.task_results)
 
 
 @pytest.mark.parametrize("count,coverage,remaining,want", [

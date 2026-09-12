@@ -28,11 +28,13 @@ def fixed_rung_manifest(task_groups, resource, split_sha256, protocol_sha256) ->
     return RungManifestV2(resource, split_sha256, protocol_sha256, task_groups)
 
 
-def evaluation_cache_key(candidate, task, split, metric, descriptor, runtime, protocol, adapter) -> str:
+def evaluation_cache_key(candidate, task, split, metric, descriptor, runtime, protocol, adapter,
+                         local_evidence_sha256=None) -> str:
     """Bind independent SHA identities; task may be exact bytes or their SHA256."""
 
     task_sha = hashlib.sha256(task).hexdigest() if type(task) is bytes else task
-    return _cache_identity(candidate, task_sha, split, metric, descriptor, runtime, protocol, adapter)
+    return _cache_identity(candidate, task_sha, split, metric, descriptor, runtime, protocol, adapter,
+                           local_evidence_sha256)
 
 
 def choose_bracket(candidate_count, cache_coverage, remaining_budget, config) -> HyperbandBracketV2:
@@ -129,13 +131,15 @@ def _task_evaluation(value, candidate, task, metric, descriptor, runtime, adapte
     return value
 
 
-def _read_cache(cache, key, candidate, task, metric, descriptor, runtime, adapter):
+def _read_cache(cache, key, candidate, task, metric, descriptor, runtime, adapter,
+                local_evidence_sha256=None):
     payload = cache.get(key)
     if payload is None:
         return None
     try:
         row = TaskCacheRowV2.from_payload(payload.to_payload() if type(payload) is TaskCacheRowV2 else payload)
-        if row.cache_key != key or row.task_sha256 != task.task_sha256:
+        if (row.cache_key != key or row.task_sha256 != task.task_sha256
+                or row.local_evidence_sha256 != local_evidence_sha256):
             return None
         _task_evaluation(row.evaluation, candidate, task, metric, descriptor, runtime, adapter)
         return row
@@ -146,6 +150,7 @@ def _read_cache(cache, key, candidate, task, metric, descriptor, runtime, adapte
 def execute_hyperband_rung(
     state, manifest, ledger, evaluate_task, *, metric_sha256, descriptor_sha256,
     runtime_fingerprints, adapter_sha256, estimate_per_task, cache=None,
+    local_evidence_sha256_for=None,
 ) -> HyperbandExecutionV2:
     """Execute missing exact tasks under one real BudgetLedger reservation.
 
@@ -173,6 +178,8 @@ def execute_hyperband_rung(
         raise ValueError("per-task estimate must include one task and positive wall time")
     if not callable(evaluate_task):
         raise TypeError("evaluate_task must be callable")
+    if local_evidence_sha256_for is not None and not callable(local_evidence_sha256_for):
+        raise TypeError("local_evidence_sha256_for must be callable")
     cache = {} if cache is None else cache
     if not isinstance(cache, Mapping):
         raise TypeError("cache must be a mapping")
@@ -192,13 +199,16 @@ def execute_hyperband_rung(
     work = []
     for candidate in state.active_candidates:
         for task in manifest.tasks:
+            local_evidence_sha256 = (None if local_evidence_sha256_for is None
+                                     else local_evidence_sha256_for(candidate, task))
             key = evaluation_cache_key(candidate, task.task_sha256, manifest.split_sha256,
                                        metric_sha256, descriptor_sha256, runtime_fingerprints,
-                                       manifest.protocol_sha256, adapter_sha256)
+                                       manifest.protocol_sha256, adapter_sha256, local_evidence_sha256)
             cached = _read_cache(cache, key, candidate, task, metric_sha256,
-                                 descriptor_sha256, runtime_fingerprints, adapter_sha256)
-            work.append((candidate, task, key, cached))
-    missing = sum(cached is None for _, _, _, cached in work)
+                                 descriptor_sha256, runtime_fingerprints, adapter_sha256,
+                                 local_evidence_sha256)
+            work.append((candidate, task, key, cached, local_evidence_sha256))
+    missing = sum(cached is None for _, _, _, cached, _ in work)
     estimate = _scale_use(estimate_per_task, missing)
     stage_id = f"hyperband:{state.fingerprint()}:{manifest.fingerprint()}"
     reservation = ledger.reserve_stage(stage_id, estimate)
@@ -220,7 +230,7 @@ def execute_hyperband_rung(
         auxiliary = auxiliary + use
 
     try:
-        for candidate, task, key, cached in work:
+        for candidate, task, key, cached, local_evidence_sha256 in work:
             if ledger.finalization_started or ledger.elapsed_wall_seconds >= ledger.plan.search_deadline_seconds:
                 failure = "finalization_reserve"
                 break
@@ -234,7 +244,8 @@ def execute_hyperband_rung(
                     value = evaluate_task(candidate, task, account)
                 except Exception:
                     failure = "execution_failure"
-                    results.append(HyperbandTaskResultV2(candidate, task.task_id, key, "invalid", None, False, failure))
+                    results.append(HyperbandTaskResultV2(candidate, task.task_id, key, "invalid", None, False, failure,
+                                                         local_evidence_sha256, 2 if local_evidence_sha256 is not None else 1))
                     break
                 finally:
                     callback_wall_seconds += ledger.elapsed_wall_seconds - callback_started
@@ -243,13 +254,16 @@ def execute_hyperband_rung(
                                              descriptor_sha256, runtime_fingerprints, adapter_sha256)
                 except (ValueError, TypeError):
                     failure = "invalid_response"
-                    results.append(HyperbandTaskResultV2(candidate, task.task_id, key, "invalid", None, False, failure))
+                    results.append(HyperbandTaskResultV2(candidate, task.task_id, key, "invalid", None, False, failure,
+                                                         local_evidence_sha256, 2 if local_evidence_sha256 is not None else 1))
                     break
                 if value.task_statuses[task.task_id] == "passed" and value.constraints.feasible:
-                    rows.append(TaskCacheRowV2(key, task.task_sha256, value))
+                    rows.append(TaskCacheRowV2(key, task.task_sha256, value, local_evidence_sha256,
+                                                2 if local_evidence_sha256 is not None else 1))
             results.append(HyperbandTaskResultV2(candidate, task.task_id, key,
                                                 value.task_statuses[task.task_id], value,
-                                                cached is not None, None))
+                                                cached is not None, None, local_evidence_sha256,
+                                                2 if local_evidence_sha256 is not None else 1))
             consumed = auxiliary + ResourceUse(task_executions=tasks_started,
                                                wall_seconds=callback_wall_seconds)
             if any(getattr(consumed, name) > getattr(estimate, name) for name in ResourceUse.field_names()):

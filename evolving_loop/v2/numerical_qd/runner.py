@@ -306,13 +306,16 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
     pending, results, unpersisted = [], [], []
     for candidate in state.active_candidates:
         for task in manifest.tasks:
+            local_evidence_sha256 = adapter.local_evidence_sha256_for(candidate, task)
             key = evaluation_cache_key(candidate, task.task_sha256, manifest.split_sha256,
                 config.kernel_protocol.metric_policy, config.descriptor_policy.fingerprint(),
-                config.runtime_fingerprints, manifest.protocol_sha256, adapter.fingerprint)
+                config.runtime_fingerprints, manifest.protocol_sha256, adapter.fingerprint,
+                local_evidence_sha256)
             hit = _read_cache(cache, key, candidate, task, config.kernel_protocol.metric_policy,
-                config.descriptor_policy.fingerprint(), config.runtime_fingerprints, adapter.fingerprint)
-            pending.append((candidate, task, key, hit))
-    missing = sum(hit is None for _, _, _, hit in pending)
+                config.descriptor_policy.fingerprint(), config.runtime_fingerprints, adapter.fingerprint,
+                local_evidence_sha256)
+            pending.append((candidate, task, key, hit, local_evidence_sha256))
+    missing = sum(hit is None for _, _, _, hit, _ in pending)
     estimate = replace(_available(kernel), task_executions=missing,
                        wall_seconds=float(missing * config.adapter["task_timeout_seconds"]))
     admission = work.can_open_stage(estimate)
@@ -351,7 +354,7 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
     try:
         if failure:
             raise ArtifactBytesExhausted("fixed manifest admission denied")
-        for candidate, task, key, hit in pending:
+        for candidate, task, key, hit, local_evidence_sha256 in pending:
             if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
                 failure = "finalization_reserve"
                 break
@@ -381,14 +384,16 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
                 if duration >= config.adapter["task_timeout_seconds"]:
                     failure = failure or "timeout"
             result = HyperbandTaskResultV2(candidate, task.task_id, key,
-                value.task_statuses[task.task_id], value, hit is not None, None)
+                value.task_statuses[task.task_id], value, hit is not None, None,
+                local_evidence_sha256, 2 if local_evidence_sha256 is not None else 1)
             if hit is not None and store is not None:
                 # A cache hit reuses the original paid bytes, including its
                 # original cache_hit flag; execution accounting stays above.
                 result = HyperbandTaskResultV2.from_payload(store._read(
                     f"results/{candidate}/{task.task_sha256}.json"))
                 if (result.candidate_sha256 != candidate or result.task_id != task.task_id
-                        or result.cache_key != key or result.evaluation != value):
+                        or result.cache_key != key or result.evaluation != value
+                        or result.local_evidence_sha256 != local_evidence_sha256):
                     raise NumericalQDStoreError("cache row differs from its exact paid result")
             results.append((task, result))
             if store is not None and hit is None:
@@ -402,7 +407,9 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
                         "resource_use": dict(value.resource_use)})
                     raise
             if value.constraints.feasible and value.task_statuses[task.task_id] == "passed":
-                cache[key] = TaskCacheRowV2(key, task.task_sha256, value)
+                cache[key] = TaskCacheRowV2(key, task.task_sha256, value,
+                                             local_evidence_sha256,
+                                             2 if local_evidence_sha256 is not None else 1)
             if failure:
                 break
         if failure is None:

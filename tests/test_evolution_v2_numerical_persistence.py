@@ -219,6 +219,22 @@ def world(kernel):
     return store, args, kernel, archive, hyperband
 
 
+def test_task_result_persistence_rejects_mutated_local_evidence_identity(world):
+    store, args, _kernel, _archive, _state = world
+    task = manifest().tasks[0]
+    value = evaluation(args["active_genome_sha256"], (task.task_id,), subset=task.fingerprint())
+    evidence = sha("sealed shortlist evidence")
+    key = evaluation_cache_key(value.genome_sha256, task.task_sha256, SPLIT,
+        METRIC, DESCRIPTOR, RUNTIME, PROTOCOL, ADAPTER, evidence)
+    result = HyperbandTaskResultV2(value.genome_sha256, task.task_id, key,
+                                   "passed", value, False, None, evidence, 2)
+    store.write_task_result(task.task_sha256, result)
+    with pytest.raises(api.NumericalQDStoreError, match="cache identity"):
+        store.write_task_result(task.task_sha256, replace(
+            result, local_evidence_sha256=sha("mutated shortlist evidence")
+        ))
+
+
 def resume(store, args):
     return store.resume(**{key: args[key] for key in (
         "config_sha256", "input_sha256s", "kernel_checkpoint_sha256", "budget_checkpoint_sha256")})

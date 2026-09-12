@@ -2,6 +2,7 @@
 from dataclasses import replace
 import hashlib
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -90,6 +91,55 @@ def run_fixture(root, **kwargs):
         "seed", "task_budget", "provider", "clock", "operator_input_sha256s"
     }}
     return run_numerical_qd(root, *fixture(**options), **kwargs)
+
+
+def test_rung_binds_adapter_local_evidence_before_task_evaluation(monkeypatch):
+    from tests.test_evolution_v2_numerical_hyperband import (
+        ADAPTER, DESCRIPTOR, METRIC, PROTOCOL, RUNTIME, evaluation, ledger, manifest,
+        sha, state,
+    )
+    from evolving_loop.v2.numerical_qd import runner
+    candidate, committed = state(count=1).active_candidates[0], manifest()
+    clock = FakeClock()
+    budget = ledger(clock)
+    evidence_sha256 = sha("runner shortlist evidence")
+    seen = set()
+
+    adapter = SimpleNamespace(
+        fingerprint=ADAPTER,
+        local_evidence_sha256_for=lambda candidate_sha256, task: seen.add(
+            (candidate_sha256, task.task_sha256)
+        ) or evidence_sha256,
+        monotonic=clock,
+        resource_snapshot=lambda: None,
+        resource_delta=lambda snapshot: ResourceUse(),
+    )
+    config = SimpleNamespace(
+        kernel_protocol=SimpleNamespace(metric_policy=METRIC),
+        descriptor_policy=SimpleNamespace(fingerprint=lambda: DESCRIPTOR),
+        runtime_fingerprints=RUNTIME,
+        adapter={"task_timeout_seconds": 1.0},
+    )
+    child = SimpleNamespace(genome=SimpleNamespace(fingerprint=lambda: candidate))
+    work = SimpleNamespace(
+        can_open_stage=budget.can_open_stage,
+        reserve_stage=budget.reserve_stage,
+        close_stage=lambda permit, actual, **kwargs: budget.close_stage(permit, actual),
+    )
+    kernel = SimpleNamespace(budget=budget, checkpoint_path="checkpoint.json")
+
+    def evaluate_after_evidence(_adapter, _child, task, **kwargs):
+        assert (candidate, task.task_sha256) in seen
+        return evaluation(candidate, (task.task_id,), subset=task.fingerprint())
+
+    monkeypatch.setattr(runner, "evaluate_numerical_child", evaluate_after_evidence)
+    monkeypatch.setattr(runner, "_read", lambda _path: {"budget": budget.checkpoint()})
+    advanced, results, reason = runner._rung(
+        kernel, work, state(count=1), committed, {candidate: child}, adapter, config, {}
+    )
+    assert reason is None and advanced is not None
+    assert all(result.local_evidence_sha256 == evidence_sha256
+               and result.cache_identity_version == 2 for _, result in results)
 
 
 def test_operator_input_raw_identity_is_checkpointed_and_rejects_resume(tmp_path):

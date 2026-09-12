@@ -405,7 +405,8 @@ class NumericalQDRunStore:
             value = result.evaluation
             key = evaluation_cache_key(value.genome_sha256, task_sha, value.split_sha256,
                 value.metric_policy_sha256, value.descriptor_policy_sha256,
-                value.runtime_fingerprints, value.protocol_fingerprint, value.execution_adapter_sha256)
+                value.runtime_fingerprints, value.protocol_fingerprint, value.execution_adapter_sha256,
+                result.local_evidence_sha256)
             if result.cache_key != key:
                 raise NumericalQDStoreError("task result cache identity mismatch")
 
@@ -422,7 +423,8 @@ class NumericalQDRunStore:
                     raise NumericalQDStoreError("partial or mismatched rung task result")
                 expected = evaluation_cache_key(evaluation.genome_sha256, task.task_sha256,
                     evaluation.split_sha256, evaluation.metric_policy_sha256, evaluation.descriptor_policy_sha256,
-                    evaluation.runtime_fingerprints, evaluation.protocol_fingerprint, evaluation.execution_adapter_sha256)
+                    evaluation.runtime_fingerprints, evaluation.protocol_fingerprint, evaluation.execution_adapter_sha256,
+                    result.local_evidence_sha256)
                 if result.cache_key != expected:
                     raise NumericalQDStoreError("rung task result identity mismatch")
 
