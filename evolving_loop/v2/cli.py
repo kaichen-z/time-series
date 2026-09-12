@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from common.data import Task
-from common.llm import FakeLLMClient
+from common.llm import FakeLLMClient, LLMClient
 from common.payload import strict_json_loads
 from evolving_loop.decision_agent.agent import DecisionAgent
 from evolving_loop.data import ContextTask, Document
@@ -308,6 +308,20 @@ def _preflight_numerical_paths(
             "Numerical input files must have distinct filesystem identities"
         )
     absolute = output.absolute()
+    resolved_output = absolute.resolve(strict=False)
+    for source in inputs:
+        if source.is_relative_to(resolved_output) or resolved_output.is_relative_to(
+            source.parent
+        ):
+            raise ValueError(
+                "Numerical output and inputs must not overlap in either direction"
+            )
+    return _preflight_numerical_output(absolute)
+
+
+def _preflight_numerical_output(output: Path) -> bool:
+    """Admit a fresh/resumable output when inputs are verified payloads."""
+    absolute = output.absolute()
     for ancestor in (*reversed(absolute.parents), absolute):
         try:
             mode = ancestor.lstat().st_mode
@@ -317,14 +331,6 @@ def _preflight_numerical_paths(
             if _system_tmp_alias(ancestor, mode):
                 continue
             raise ValueError("Numerical output and ancestors must be real directories")
-    resolved_output = absolute.resolve(strict=False)
-    for source in inputs:
-        if source.is_relative_to(resolved_output) or resolved_output.is_relative_to(
-            source.parent
-        ):
-            raise ValueError(
-                "Numerical output and inputs must not overlap in either direction"
-            )
     if absolute.exists():
         if not absolute.is_dir():
             raise ValueError(
@@ -563,9 +569,6 @@ def _numerical_evolve(
     resolved = tuple(item[2] for item in loaded)
     identities = tuple(item[3] for item in loaded)
     resume = _preflight_numerical_paths(resolved, output, input_identities=identities)
-    config = NumericalQDConfigV2.from_payload(payloads[0])
-    seed = parse_numerical_supply_release(payloads[1])
-    tasks, folds = _parse_task_manifest(payloads[2])
     input_sha256s = dict(
         zip(
             ("config", "seed_supply", "task_manifest"),
@@ -573,6 +576,34 @@ def _numerical_evolve(
             strict=True,
         )
     )
+    return _run_numerical_payloads(
+        payloads[0], payloads[1], payloads[2], output,
+        input_sha256s=input_sha256s, host_runtime=host_runtime,
+        llm_client=llm_client, resume=resume,
+    )
+
+
+def _run_numerical_payloads(
+    config_payload: Mapping[str, object],
+    seed_payload: Mapping[str, object],
+    task_manifest_payload: Mapping[str, object],
+    output: Path,
+    *,
+    input_sha256s: Mapping[str, str],
+    host_runtime: object,
+    llm_client: LLMClient | None,
+    resume: bool,
+) -> dict[str, object]:
+    """Shared typed parsing and adapter construction for both input seams."""
+    config = NumericalQDConfigV2.from_payload(config_payload)
+    # Detach derived configuration from caller-owned mappings before execution.
+    config = NumericalQDConfigV2.from_payload(config.to_payload())
+    seed = parse_numerical_supply_release(seed_payload)
+    task_manifest = strict_json_loads(
+        canonical_v2_bytes(task_manifest_payload).decode("utf-8"),
+        context="Numerical task manifest payload",
+    )
+    tasks, folds = _parse_task_manifest(task_manifest)
     adapter = _build_numerical_adapter(
         config, tasks, folds, input_sha256s, host_runtime=host_runtime
     )
@@ -590,6 +621,30 @@ def _numerical_evolve(
         resume=resume,
     )
     return _read_canonical(output / "evaluation_complete.json")
+
+
+def numerical_evolve_payload(
+    config_payload: Mapping[str, object],
+    seed_payload: Mapping[str, object],
+    task_manifest_payload: Mapping[str, object],
+    output: Path,
+    *,
+    input_sha256s: Mapping[str, str],
+    host_runtime: object,
+    llm_client: LLMClient,
+) -> dict[str, object]:
+    """Run Numerical QD from Host-verified payloads without path overlap rules."""
+    resume = _preflight_numerical_output(Path(output))
+    return _run_numerical_payloads(
+        config_payload,
+        seed_payload,
+        task_manifest_payload,
+        Path(output),
+        input_sha256s=input_sha256s,
+        host_runtime=host_runtime,
+        llm_client=llm_client,
+        resume=resume,
+    )
 
 
 def numerical_evolve(

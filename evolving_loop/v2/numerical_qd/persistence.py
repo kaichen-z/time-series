@@ -4,8 +4,9 @@ from __future__ import annotations
 import hashlib
 import re
 import stat
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from common.payload import strict_json_loads
 
@@ -26,6 +27,10 @@ from .map_elites import NumericalQDArchive
 from .config import NumericalQDConfigV2
 from .artifacts import (ArtifactKindV2 as ArtifactKind, artifact_kind, validate_artifact,
     validate_material_receipts, validate_unpersisted_task)
+
+if TYPE_CHECKING:
+    from evolving_loop.data import ContextTask
+    from .adapters import FrozenNumericalArtifactsV2
 
 
 _MANIFEST = {"schema_version": 1, "system": "numerical_qd"}
@@ -908,6 +913,94 @@ class NumericalQDRunStore:
         durable.write_once_json(path, expected)
         self._verify_completion(_payload(path.read_bytes()), expected)
         return path
+
+    def load_active_frozen_pair(
+        self, *, tasks: Sequence[ContextTask]
+    ) -> tuple[FrozenNumericalArtifactsV2, str]:
+        """Restore the one completed frozen pair selected by the active Bundle."""
+        from evolving_loop.package_numerical_supply import (
+            parse_numerical_supply_release,
+        )
+        from .adapters import FrozenNumericalArtifactsV2
+        from .contracts import FrozenNumericalRegistryEnvelopeV2
+
+        self._verify_root_paths(require_checkpoint=True)
+        checkpoint = NumericalQDCheckpointV2.from_payload(
+            self._read("checkpoint.json")
+        )
+        if self._object(checkpoint.checkpoint_sha256) != checkpoint.to_payload():
+            raise NumericalQDStoreError("runner checkpoint immutable bytes mismatch")
+        expected_catalog = dict(checkpoint.completed_operation_sha256s)
+        expected_catalog[f"objects/{checkpoint.checkpoint_sha256}.json"] = (
+            hashlib.sha256(checkpoint.canonical_bytes()).hexdigest()
+        )
+        if self._catalog(expected_catalog) != expected_catalog:
+            raise NumericalQDStoreError(
+                "missing, changed, or partial immutable operations"
+            )
+        self._verify_state(checkpoint)
+
+        completion_path = self._safe(self.root / "evaluation_complete.json")
+        try:
+            completion = _payload(completion_path.read_bytes())
+        except OSError as error:
+            raise NumericalQDStoreError(
+                "active frozen pair requires a completed numerical run"
+            ) from error
+        self._verify_completion(completion, self._completion_payload(checkpoint))
+
+        bundle = EvolutionBundleV2.from_payload(
+            self._object(checkpoint.active_bundle_sha256)
+        )
+        try:
+            accepted = EvolutionBundleV2.from_payload(
+                _payload(
+                    self._safe(self.root / "accepted_bundle.json").read_bytes()
+                )
+            )
+        except (OSError, TypeError, ValueError) as error:
+            raise NumericalQDStoreError("completed active Bundle is invalid") from error
+        if accepted != bundle or completion["active_bundle_sha256"] != bundle.fingerprint():
+            raise NumericalQDStoreError("completed active Bundle mismatch")
+
+        matches = []
+        try:
+            for name in checkpoint.completed_operation_sha256s:
+                if not name.startswith("objects/"):
+                    continue
+                payload = self._read(name)
+                if not {"supply", "registry"} <= set(payload):
+                    continue
+                validate_artifact(
+                    ArtifactKind.FROZEN_PAIR, canonical_v2_bytes(payload)
+                )
+                release = parse_numerical_supply_release(payload["supply"])
+                envelope = FrozenNumericalRegistryEnvelopeV2.from_payload(
+                    payload["registry"]
+                )
+                if (
+                    release.fingerprint == bundle.numerical_release_sha256
+                    and envelope.release_sha256 == bundle.numerical_release_sha256
+                    and envelope.registry_sha256 == bundle.numerical_registry_sha256
+                ):
+                    matches.append((Path(name).stem, release, envelope))
+        except (TypeError, ValueError) as error:
+            raise NumericalQDStoreError("invalid frozen-pair artifact") from error
+        if len(matches) != 1:
+            raise NumericalQDStoreError(
+                "completed active Bundle requires exactly one frozen pair"
+            )
+        pair_sha256, release, envelope = matches[0]
+        try:
+            registry = envelope.restore(tasks)
+            frozen = FrozenNumericalArtifactsV2(
+                release, registry, envelope, ()
+            )
+        except (TypeError, ValueError) as error:
+            raise NumericalQDStoreError(
+                "active frozen pair does not bind the committed task universe"
+            ) from error
+        return frozen, pair_sha256
 
 
 __all__ = ["NumericalQDRunStore", "NumericalQDStoreError"]
