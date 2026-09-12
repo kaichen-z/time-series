@@ -10,6 +10,7 @@ import pytest
 from evolving_loop.v2.contracts import canonical_v2_bytes, fingerprint_payload
 from evolving_loop.v2.real.contracts import RealEvolutionManifestV2
 from evolving_loop.v2.real.runner import (
+    RealStageContextV2,
     RealStagePorts,
     SealedStageV2,
     run_real_evolution,
@@ -144,6 +145,7 @@ def test_base_grants_and_call_order(case: RunnerCase):
     assert case.grants == {"p2": 840, "p3": 360, "p4": 120, "p5": 120}
     assert case.order == [
         "run_p2", "seal_p2", "run_p3", "seal_p3", "run_p4", "seal_p4", "run_p5", "seal_p5",
+        "seal_p2", "seal_p3", "seal_p4", "seal_p5",
     ]
 
 
@@ -275,6 +277,36 @@ def test_completed_resume_is_read_only_and_returns_identical_result(case: Runner
     assert second.canonical_bytes() == first.canonical_bytes()
     assert after == before
     assert case.calls == Counter({"p2": 1, "p3": 1, "p4": 1, "p5": 1})
+
+
+def test_completed_resume_reauthenticates_native_stage_seals(case: RunnerCase):
+    case.run()
+    case.seal_failure_stage = "p3"
+
+    with pytest.raises(SimulatedSealFailure):
+        case.resume()
+
+    assert case.calls == Counter({"p2": 1, "p3": 1, "p4": 1, "p5": 1})
+
+
+def test_stage_context_reports_only_unconsumed_grant(case: RunnerCase):
+    context = RealStageContextV2(
+        "p2",
+        case.output / "p2",
+        840,
+        case.manifest,
+        case.manifest.fingerprint(),
+        case.manifest.model.fingerprint(),
+        {},
+        deadline_monotonic=840.0,
+        monotonic=case.clock,
+    )
+
+    case.clock.advance(311)
+
+    assert context.remaining_seconds() == 529
+    case.clock.advance(530)
+    assert context.remaining_seconds() == 0
 
 
 def test_completed_resume_rejects_a_result_with_tampered_bound_fields(case: RunnerCase):

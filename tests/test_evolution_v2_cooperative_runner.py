@@ -160,6 +160,7 @@ def run_case(tmp_path):
             decision_prompt: str = "changed prompt",
             reject_dev: bool = False,
             real_clock: bool = False,
+            resource_reporter=None,
         ):
             clock = time.monotonic if real_clock else FakeClock()
             pipeline = _Pipeline(
@@ -175,9 +176,24 @@ def run_case(tmp_path):
                 "pipeline": pipeline,
                 "monotonic": clock,
             }
+            config = _Config(_control(scheduler))
+            if resource_reporter is not None:
+                adapters["resource_reporter"] = resource_reporter
+                config = _Config(
+                    _control(scheduler),
+                    resource_ceilings=ResourceUse(
+                        wall_seconds=100.0,
+                        task_executions=100,
+                        llm_calls=100,
+                        input_tokens=10000,
+                        output_tokens=10000,
+                        subprocesses=100,
+                        artifact_bytes=1_000_000,
+                    ),
+                )
             return run_cooperative_evolution(
                 tmp_path / directory,
-                _Config(_control(scheduler)),
+                config,
                 seed_artifacts,
                 tasks,
                 adapters,
@@ -221,6 +237,31 @@ def test_runner_executes_four_arms_and_preserves_rejected_parent(run_case):
     rejected = [row for row in run_case.progress() if row["decision"] == "reject"]
     assert len(rejected) == 3
     assert all(row["active_before"] == row["active_after"] for row in rejected)
+
+
+def test_runner_charges_cumulative_host_llm_usage(run_case):
+    def report():
+        calls = len(run_case.pipelines["accounted"].calls)
+        return ResourceUse(
+            llm_calls=calls,
+            input_tokens=100 * calls,
+            output_tokens=20 * calls,
+            subprocesses=calls,
+        )
+
+    run_case.run(
+        scheduler="ucb",
+        directory="accounted",
+        stop_after=1,
+        resource_reporter=report,
+    )
+
+    checkpoint = json.loads(run_case.read("accounted/checkpoint.json"))
+    charged = checkpoint["budget"]["charged_use"]
+    assert charged["llm_calls"] == 4
+    assert charged["input_tokens"] == 400
+    assert charged["output_tokens"] == 80
+    assert charged["subprocesses"] == 4
 
 
 def test_runner_uses_train_aggregate_cache_and_opens_dev_only_after_train_gate(

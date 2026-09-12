@@ -173,6 +173,13 @@ def test_real_source_seed_binds_derived_p3_protocol():
         _derived_cooperative_config(context, host)
     )
     assert seed.protocol_fingerprint == config.control.kernel_protocol.fingerprint()
+    ceilings = config.resource_ceilings
+    assert ceilings.llm_calls > 0
+    assert ceilings.input_tokens > 0
+    assert ceilings.output_tokens > 0
+    assert ceilings.subprocesses > 0
+    source = (root / "evolving_loop/v2/real/runner.py").read_text(encoding="utf-8")
+    assert "cooperative/smoke-ucb.json" not in source
 
 
 def test_real_p2_reads_sha_bound_noncanonical_champion(tmp_path: Path):
@@ -205,6 +212,7 @@ def test_production_ports_prepare_and_run_real_p2(tmp_path: Path, monkeypatch):
             "l0_fingerprints": {},
         }
     )
+    now = [100.0]
     context = RealStageContextV2(
         "p2",
         tmp_path / "root/p2",
@@ -213,6 +221,8 @@ def test_production_ports_prepare_and_run_real_p2(tmp_path: Path, monkeypatch):
         manifest.fingerprint(),
         manifest.model.fingerprint(),
         {},
+        deadline_monotonic=940.0,
+        monotonic=lambda: now[0],
     )
     host = SimpleNamespace(llm_client=object())
     prepared = SimpleNamespace(
@@ -224,12 +234,13 @@ def test_production_ports_prepare_and_run_real_p2(tmp_path: Path, monkeypatch):
         dictionary=object(),
     )
     observed = {}
-    monkeypatch.setattr(
-        runner,
-        "prepare_real_p2_inputs",
-        lambda *_args, **_kwargs: prepared,
-        raising=False,
-    )
+    def prepare(*_args, **kwargs):
+        assert kwargs["remaining_seconds"]() == 840
+        now[0] += 275
+        assert kwargs["remaining_seconds"]() == 565
+        return prepared
+
+    monkeypatch.setattr(runner, "prepare_real_p2_inputs", prepare, raising=False)
 
     def run_real_numerical(context_value, host_value, **kwargs):
         observed.update(context=context_value, host=host_value, **kwargs)
@@ -252,6 +263,60 @@ def test_production_ports_prepare_and_run_real_p2(tmp_path: Path, monkeypatch):
         "task_local_evidence_path": prepared.evidence_path,
         "task_local_dictionary": prepared.dictionary,
     }
+
+
+def test_production_p2_finishes_incomplete_when_preparation_consumes_grant(
+    tmp_path: Path, monkeypatch
+):
+    from evolving_loop.v2.real import bridges, runner
+
+    manifest = RealEvolutionManifestV2.from_payload(
+        {
+            "schema_version": 1,
+            "profile": "real-30m",
+            "model": {
+                "schema_version": 1,
+                "name": "gpt-5.6-luna",
+                "reasoning_effort": "medium",
+            },
+            "files": [],
+            "runtime_locations": [],
+            "l0_fingerprints": {},
+        }
+    )
+    now = [100.0]
+    context = RealStageContextV2(
+        "p2",
+        tmp_path / "root/p2",
+        10,
+        manifest,
+        manifest.fingerprint(),
+        manifest.model.fingerprint(),
+        {},
+        deadline_monotonic=110.0,
+        monotonic=lambda: now[0],
+    )
+
+    def exhausted(*_args, **kwargs):
+        now[0] = 111.0
+        assert kwargs["remaining_seconds"]() == 0
+        raise runner._RealStageBudgetExhausted("consumed")
+
+    monkeypatch.setattr(runner, "prepare_real_p2_inputs", exhausted)
+    monkeypatch.setattr(
+        bridges,
+        "run_real_numerical",
+        lambda *_args, **_kwargs: pytest.fail("numerical child must not start"),
+    )
+    ports = runner.build_real_stage_ports(
+        SimpleNamespace(llm_client=object()), manifest=manifest, repo_root=tmp_path
+    )
+
+    result = ports.run_p2(context)
+    sealed = ports.seal_p2(context, result)
+
+    assert sealed.summary["status"] == "incomplete"
+    assert sealed.handoff_payload["reason"] == "p2_preparation_budget_exhausted"
 
 
 def test_production_ports_complete_root_and_resume_byte_identically(
@@ -304,7 +369,7 @@ def test_production_ports_complete_root_and_resume_byte_identically(
 
     host = SimpleNamespace(
         tasks=(), train_tasks=(), dev_tasks=(), llm_client=object(),
-        resource_reporter_sha256="8866a3c2e2563eb49bddd9cf5a4d2adba77ad4bebae64ed0d0ef0aa987b4336e",
+        resource_reporter_sha256="fe7b77cd6c787e175ecabaaae0b6269c08fc5fdd24d818752e04fa1f3ebd0796",
     )
     release = SimpleNamespace(fingerprint="b" * 64)
     registry = SimpleNamespace(fingerprint="c" * 64)
@@ -420,6 +485,13 @@ def test_production_ports_complete_root_and_resume_byte_identically(
     assert first_bytes == (output / "evaluation_complete.json").read_bytes()
     assert [record.stage for record in first.stage_records] == ["p2", "p3", "p4", "p5"]
     assert all((output / stage / "root_stage_completion.json").is_file() for stage in ("p2", "p3", "p4", "p5"))
+
+    native = output / "p5/completion.json"
+    tampered = json.loads(native.read_text(encoding="utf-8"))
+    tampered["active_protocol_sha256"] = "9" * 64
+    native.write_bytes(canonical_v2_bytes(tampered))
+    with pytest.raises(ValueError):
+        runner.run_real_evolution(output, manifest, ports)
 
 
 def test_production_p5_port_seals_missing_second_bundle_as_incomplete(tmp_path: Path):

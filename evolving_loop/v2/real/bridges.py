@@ -290,6 +290,7 @@ def run_real_cooperative(
         "retrieval": RetrievalCoordinateAdapter(),
         "decision": DecisionCoordinateAdapter(_DECISION_PROMPTS),
         "pipeline": pipeline,
+        "resource_reporter": host.resource_reporter,
     }
     monotonic = getattr(host, "monotonic", None)
     if monotonic is not None:

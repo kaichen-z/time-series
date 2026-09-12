@@ -4,6 +4,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import math
 import os
 import re
 import socket
@@ -193,6 +194,30 @@ class CodexCLIClient:
         self._subprocess_environment = dict(source_environment)
         self.calls = 0
         self.cache_hits = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.subprocesses = 0
+        self._deadline_monotonic: float | None = None
+        self._monotonic = time.monotonic
+
+    def bind_deadline(self, deadline_monotonic: float, *, monotonic=time.monotonic) -> None:
+        """Limit every subsequent model subprocess to one enclosing stage deadline."""
+        if type(deadline_monotonic) not in (int, float) or isinstance(deadline_monotonic, bool):
+            raise ValueError("stage deadline must be a finite number")
+        deadline = float(deadline_monotonic)
+        if not math.isfinite(deadline) or not callable(monotonic):
+            raise ValueError("stage deadline and monotonic clock must be valid")
+        self._deadline_monotonic = deadline
+        self._monotonic = monotonic
+
+    def _subprocess_timeout(self) -> int:
+        timeout = int(self.config.timeout_seconds)
+        if self._deadline_monotonic is None:
+            return timeout
+        remaining = math.floor(self._deadline_monotonic - float(self._monotonic()))
+        if remaining <= 0:
+            raise TransientLLMError("Codex CLI stage deadline is exhausted")
+        return min(timeout, remaining)
 
     def complete(self, *, system: str, messages: list[dict], temperature: float = 0.0) -> LLMResponse:
         del temperature  # Codex CLI does not expose sampling temperature.
@@ -245,13 +270,16 @@ class CodexCLIClient:
             command.append("-")
             retries = max(int(self.config.transport_retries), 0)
             for attempt in range(retries + 1):
+                timeout = self._subprocess_timeout()
+                self.subprocesses += 1
+                self.input_tokens += len(prompt.encode("utf-8"))
                 try:
                     completed = subprocess.run(
                         command,
                         input=prompt,
                         capture_output=True,
                         text=True,
-                        timeout=self.config.timeout_seconds,
+                        timeout=timeout,
                         check=False,
                         env=dict(self._subprocess_environment),
                     )
@@ -263,7 +291,7 @@ class CodexCLIClient:
                         self._transport_backoff(attempt)
                         continue
                     raise TransientLLMError(
-                        f"Codex CLI timed out after {self.config.timeout_seconds} seconds"
+                        f"Codex CLI timed out after {timeout} seconds"
                     ) from exc
                 except OSError as exc:
                     self.calls += 1
@@ -296,6 +324,7 @@ class CodexCLIClient:
             if not result_path.exists():
                 raise RuntimeError("Codex CLI completed without writing its final response")
             text = result_path.read_text(encoding="utf-8").strip()
+            self.output_tokens += len(text.encode("utf-8"))
         return text
 
     def _transport_backoff(self, attempt: int) -> None:

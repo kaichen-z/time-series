@@ -304,11 +304,14 @@ class RealHostRuntimeV2:
             raise ValueError("real Decision factory requires a nonempty prompt")
         return DecisionAgent(self.llm_client, None, prompt=prompt)
 
-    @staticmethod
-    def resource_reporter() -> ResourceUse:
-        # Cache hits are local and task/wall accounting is owned by each stage.
-        # Cache misses raise CacheMissError before any ungoverned model work.
-        return ResourceUse()
+    def resource_reporter(self) -> ResourceUse:
+        # UTF-8 byte counts are the V2 token-budget proxy used by the proposers.
+        return ResourceUse(
+            llm_calls=int(getattr(self.llm_client, "calls", 0)),
+            input_tokens=int(getattr(self.llm_client, "input_tokens", 0)),
+            output_tokens=int(getattr(self.llm_client, "output_tokens", 0)),
+            subprocesses=int(getattr(self.llm_client, "subprocesses", 0)),
+        )
 
     def close(self) -> None:
         """Close all owned numerical runtimes once, attempting every closure."""
@@ -430,6 +433,10 @@ def build_real_host(
                     row.role: row.identity_sha256
                     for row in manifest.runtime_locations
                 },
+                "resource_kinds": [
+                    "input_tokens", "llm_calls", "output_tokens", "subprocesses"
+                ],
+                "llm_accounting": "codex_utf8_bytes_v1",
             }
         )
         return RealHostRuntimeV2(
@@ -444,6 +451,9 @@ def build_real_host(
             source_repo=source_repo,
             resource_reporter_sha256=reporter_sha,
             sources=sources,
+            resource_kinds=(
+                "input_tokens", "llm_calls", "output_tokens", "subprocesses"
+            ),
         )
     except BaseException:
         if forecast_store is not None:

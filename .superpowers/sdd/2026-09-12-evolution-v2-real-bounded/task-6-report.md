@@ -111,3 +111,46 @@ which loaded exactly 100 tasks and 93 SHA-addressed method sources.
   has no distinct second Bundle.  No Bundle is fabricated to force completion.
 
 Commit message: `feat(real): expose bounded evolution CLI`.
+
+## Independent-review follow-up
+
+Three bounded-production findings were addressed with focused red/green tests:
+
+- each fresh root stage now receives an absolute monotonic deadline; P2
+  preparation is included in that interval, derives the Numerical child config
+  from only the remaining seconds, and seals an honest incomplete result if
+  preparation consumes its grant;
+- the shared Codex client caps every subprocess attempt at the remaining stage
+  time and exposes cumulative call, UTF-8 input/output byte-budget, and
+  subprocess counters;
+- P3 now derives from the independent canonical
+  `cooperative/real-luna-medium.json` config, whose LLM, input, output, and
+  subprocess ceilings are all nonzero and bounded, and the Cooperative runner
+  charges the Host counter delta for every evaluated candidate;
+- completed and sealed-prefix resume re-invokes each stage's read-only native
+  seal and compares the reconstructed closure exactly with the root handoff,
+  so tampering with a native completion, frozen pair, Bundle closure, Source
+  authority/archive, or Protocol handoff is rejected without rerunning a
+  child.
+
+The Host reporter identity changed to bind these accounting semantics, and the
+checked Source seed and both real manifests were updated transitively.  Their
+canonical bytes and SHA bindings were reverified.
+
+Focused follow-up gate:
+
+```text
+python -m pytest -q \
+  tests/test_evolution_v2_real_contracts.py \
+  tests/test_evolution_v2_real_runner.py \
+  tests/test_evolution_v2_real_numerical.py \
+  tests/test_evolution_v2_real_cooperative.py \
+  tests/test_evolution_v2_real_source_bridge.py \
+  tests/test_evolution_v2_real_protocol_bridge.py \
+  tests/test_evolution_v2_real_cli.py \
+  tests/test_codex_cli_client.py \
+  tests/test_evolution_v2_cooperative_runner.py
+87 passed in 32.88s
+```
+
+No billable live run was launched during this follow-up.

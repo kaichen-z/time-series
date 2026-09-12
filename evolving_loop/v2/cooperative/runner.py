@@ -408,6 +408,31 @@ def _available_estimate(kernel, task_executions, remaining_steps):
     return ResourceUse.from_payload(values)
 
 
+def _host_resource_snapshot(adapters) -> ResourceUse:
+    reporter = adapters.get("resource_reporter")
+    if reporter is None:
+        return ResourceUse()
+    if not callable(reporter):
+        raise TypeError("cooperative Host resource reporter must be callable")
+    value = reporter()
+    if type(value) is not ResourceUse:
+        raise TypeError("cooperative Host resource reporter must return ResourceUse")
+    if value.wall_seconds or value.task_executions or value.artifact_bytes:
+        raise ValueError("cooperative Host reporter may only report external resources")
+    return value
+
+
+def _host_resource_delta(adapters, before: ResourceUse) -> ResourceUse:
+    after = _host_resource_snapshot(adapters)
+    values = {
+        name: getattr(after, name) - getattr(before, name)
+        for name in ResourceUse.field_names()
+    }
+    if any(value < 0 for value in values.values()):
+        raise ValueError("cooperative Host resource counters moved backwards")
+    return ResourceUse.from_payload(values)
+
+
 def _completed_result(root, checkpoint, rows):
     payload = _read(root / "evaluation_complete.json")
     result = CooperativeRunResultV2.from_payload(payload)
@@ -600,6 +625,7 @@ def run_cooperative_evolution(
                 raise KernelAuthorityError(f"cooperative evaluation denied: {permit.reason}")
             store.write_candidate(candidate_sha, candidate.to_payload())
             started = clock()
+            host_before = _host_resource_snapshot(adapters)
             parent_train, parent_tasks, parent_bytes = _evaluate_cached(
                 root, cache, pipeline, parent, train, "train", train_universe
             )
@@ -654,7 +680,7 @@ def run_cooperative_evolution(
                 wall_seconds=elapsed,
                 task_executions=train_tasks + dev_tasks,
                 artifact_bytes=parent_bytes + child_bytes + dev_bytes,
-            )
+            ) + _host_resource_delta(adapters, host_before)
             closed = kernel.close_evaluation(
                 parent,
                 child,

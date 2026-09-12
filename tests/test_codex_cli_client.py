@@ -6,6 +6,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from common.llm import (
     CodexCLIClient,
     CodexCLIConfig,
@@ -62,6 +64,43 @@ def test_codex_cli_client_passes_only_the_explicit_subprocess_environment() -> N
         )
 
     assert parse_json_object(response.text) == {"answer": 13}
+
+
+def test_codex_cli_client_limits_each_subprocess_to_stage_deadline() -> None:
+    now = [100.0]
+    client = CodexCLIClient(
+        CodexCLIConfig(cache_dir=None, timeout_seconds=900, transport_retries=0)
+    )
+    client.bind_deadline(137.8, monotonic=lambda: now[0])
+
+    def fake_run(command, **kwargs):
+        assert kwargs["timeout"] == 37
+        output = Path(command[command.index("--output-last-message") + 1])
+        output.write_text('{"answer": 13}')
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    with patch("common.llm.subprocess.run", side_effect=fake_run):
+        response = client.complete(
+            system="Return JSON.", messages=[{"role": "user", "content": "x"}]
+        )
+
+    assert parse_json_object(response.text) == {"answer": 13}
+    assert client.subprocesses == 1
+    assert client.input_tokens > 0
+    assert client.output_tokens > 0
+
+
+def test_codex_cli_client_rejects_call_after_stage_deadline() -> None:
+    client = CodexCLIClient(CodexCLIConfig(cache_dir=None))
+    client.bind_deadline(100.0, monotonic=lambda: 100.0)
+
+    with patch("common.llm.subprocess.run") as mocked:
+        with pytest.raises(TransientLLMError, match="stage deadline"):
+            client.complete(
+                system="Return JSON.", messages=[{"role": "user", "content": "x"}]
+            )
+
+    mocked.assert_not_called()
 
 
 def test_codex_cli_client_fails_closed_without_retrying_malformed_json() -> None:

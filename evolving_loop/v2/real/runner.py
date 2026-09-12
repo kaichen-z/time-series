@@ -36,6 +36,10 @@ class RealRunnerError(ValueError):
     """Raised when a root real-run artifact cannot be safely adopted."""
 
 
+class _RealStageBudgetExhausted(RuntimeError):
+    """Internal signal that bounded preparation consumed the child grant."""
+
+
 def _json_mapping(value: object, *, field: str) -> Mapping[str, object]:
     if hasattr(value, "to_payload"):
         value = value.to_payload()  # type: ignore[union-attr]
@@ -78,6 +82,8 @@ class RealStageContextV2:
     manifest_sha256: str
     model_binding_sha256: str
     handoffs: Mapping[str, str]
+    deadline_monotonic: float | None = None
+    monotonic: Callable[[], float] = time.monotonic
 
     def __post_init__(self) -> None:
         if self.stage not in _STAGES:
@@ -91,6 +97,22 @@ class RealStageContextV2:
                 raise ValueError("handoffs must use real stage names")
             require_sha256(digest, f"handoffs.{stage}")
         object.__setattr__(self, "handoffs", MappingProxyType(dict(self.handoffs)))
+        if self.deadline_monotonic is not None and (
+            type(self.deadline_monotonic) not in (int, float)
+            or isinstance(self.deadline_monotonic, bool)
+            or not math.isfinite(float(self.deadline_monotonic))
+        ):
+            raise ValueError("deadline_monotonic must be a finite number or None")
+        if not callable(self.monotonic):
+            raise ValueError("monotonic must be callable")
+
+    def remaining_seconds(self) -> int:
+        if self.deadline_monotonic is None:
+            return self.grant_seconds
+        now = float(self.monotonic())
+        if not math.isfinite(now):
+            raise RealRunnerError("stage monotonic clock is invalid")
+        return max(0, math.floor(float(self.deadline_monotonic) - now))
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +356,7 @@ def prepare_real_p2_inputs(
     repo_root: Path,
     output_dir: Path,
     grant_seconds: int,
+    remaining_seconds: Callable[[], int] | None = None,
 ) -> PreparedRealP2InputsV2:
     """Build and seal the schema-2 Dictionary/shortlist P2 authority once."""
     from evolving_loop.run_package_coevolution import _initial_supply_release
@@ -471,8 +494,11 @@ def prepare_real_p2_inputs(
         "train": [_context_task_payload(task) for task in host.train_tasks],
         "dev": [_context_task_payload(task) for task in host.dev_tasks],
     }
+    remaining = grant_seconds if remaining_seconds is None else remaining_seconds()
+    if type(remaining) is not int or remaining <= 0:
+        raise _RealStageBudgetExhausted("P2 preparation consumed its bounded grant")
     config = _derived_numerical_config(
-        grant_seconds=grant_seconds,
+        grant_seconds=remaining,
         runtime_fingerprints=runtime_fingerprints,
     )
     dictionary_payload = _dictionary_payload(dictionary)
@@ -518,7 +544,9 @@ def _stage_wrapper(
 
 def _derived_cooperative_config(context: RealStageContextV2, host: object) -> dict[str, object]:
     code_root = Path(__file__).resolve().parents[3]
-    payload = _read_canonical(code_root / "configs/evolution_v2/cooperative/smoke-ucb.json")
+    payload = _read_canonical(
+        code_root / "configs/evolution_v2/cooperative/real-luna-medium.json"
+    )
     control = dict(payload["control"])
     control["profile"] = "pilot"
     control["hard_limit_seconds"] = context.grant_seconds
@@ -526,7 +554,6 @@ def _derived_cooperative_config(context: RealStageContextV2, host: object) -> di
     payload["control"] = control
     ceilings = dict(payload["resource_ceilings"])
     ceilings["wall_seconds"] = float(context.grant_seconds)
-    ceilings["llm_calls"] = max(4, int(ceilings["llm_calls"]))
     payload["resource_ceilings"] = ceilings
     from ..cooperative import CooperativeConfigV2
 
@@ -542,16 +569,30 @@ def build_real_stage_ports(
     """Assemble authenticated production P2→P5 child runs and seals."""
     authority = Path(repo_root).resolve()
 
+    def bind_deadline(context: RealStageContextV2) -> None:
+        binder = getattr(getattr(host, "llm_client", None), "bind_deadline", None)
+        if callable(binder) and context.deadline_monotonic is not None:
+            binder(context.deadline_monotonic, monotonic=context.monotonic)
+
     def run_p2(context: RealStageContextV2) -> object:
         from .bridges import run_real_numerical
 
-        prepared = prepare_real_p2_inputs(
-            host,
-            manifest=manifest,
-            repo_root=authority,
-            output_dir=context.output_dir.parent / "prepared/p2",
-            grant_seconds=context.grant_seconds,
-        )
+        bind_deadline(context)
+        try:
+            prepared = prepare_real_p2_inputs(
+                host,
+                manifest=manifest,
+                repo_root=authority,
+                output_dir=context.output_dir.parent / "prepared/p2",
+                grant_seconds=context.grant_seconds,
+                remaining_seconds=context.remaining_seconds,
+            )
+        except _RealStageBudgetExhausted:
+            return {
+                "schema_version": 1,
+                "status": "p2_preparation_budget_exhausted",
+                "public_test_accessed": False,
+            }
         return run_real_numerical(
             context,
             host,
@@ -565,6 +606,24 @@ def build_real_stage_ports(
 
     def seal_p2(context: RealStageContextV2, _result: object) -> SealedStageV2:
         from ..numerical_qd.persistence import NumericalQDRunStore
+
+        if (
+            isinstance(_result, Mapping)
+            and _result.get("status") == "p2_preparation_budget_exhausted"
+        ):
+            wrapper, wrapper_sha = _stage_wrapper(
+                context,
+                status="incomplete",
+                native_completion_sha256=None,
+                bindings={"reason": "p2_preparation_budget_exhausted"},
+                public_test_accessed=False,
+            )
+            return SealedStageV2(
+                wrapper_sha,
+                {"reason": "p2_preparation_budget_exhausted"},
+                {"status": "incomplete", "root_completion": wrapper},
+                False,
+            )
 
         completion = _read_canonical(context.output_dir / "evaluation_complete.json")
         if completion.get("status") != "numerical_qd_complete":
@@ -610,6 +669,7 @@ def build_real_stage_ports(
     def run_p3(context: RealStageContextV2) -> object:
         from .bridges import run_real_cooperative
 
+        bind_deadline(context)
         return run_real_cooperative(
             p2=_p2_pair(context),
             host=host,
@@ -673,6 +733,7 @@ def build_real_stage_ports(
         from ..budget import ResourceUse
         from ..source import SourceConfigV2, build_source_case_from_p3, run_source_evolution
 
+        bind_deadline(context)
         closure = _p3_closure(context)
         seed, input_digest = _source_seed(context, closure)
         case = build_source_case_from_p3(
@@ -746,6 +807,7 @@ def build_real_stage_ports(
     def run_p5(context: RealStageContextV2) -> object:
         from ..protocol import build_protocol_case_from_p3
 
+        bind_deadline(context)
         case = build_protocol_case_from_p3(
             _p3_closure(context), host, hard_limit_seconds=context.grant_seconds
         )
@@ -983,11 +1045,16 @@ def _sealed_handoff_payload(stage: str, sealed: SealedStageV2) -> dict[str, obje
 
 
 def _validate_sealed_records(
-    root: Path, records: list[RealStageRecordV2], handoffs: Mapping[str, str]
+    root: Path,
+    records: list[RealStageRecordV2],
+    handoffs: Mapping[str, str],
+    manifest: RealEvolutionManifestV2,
+    ports: RealStagePorts,
 ) -> bool:
     if tuple(record.stage for record in records) != _STAGES[: len(records)]:
         raise RealRunnerError("root stage records are not a sealed prefix")
     public_accessed = False
+    authenticated_handoffs: dict[str, str] = {}
     for record in records:
         if record.status != "complete" or record.completion_sha256 is None:
             raise RealRunnerError("only complete sealed records can be revalidated")
@@ -1002,7 +1069,23 @@ def _validate_sealed_records(
         public = handoff.get("public_test_accessed")
         if type(public) is not bool:
             raise RealRunnerError(f"{record.stage} public access evidence is missing")
+        result = _read_run_result(root, record.stage)
+        if result is None:
+            raise RealRunnerError(f"{record.stage} sealed result is missing")
+        context = _context(
+            root,
+            record.stage,
+            record.grant_seconds,
+            manifest,
+            authenticated_handoffs,
+        )
+        sealed = getattr(ports, f"seal_{record.stage}")(context, result)
+        if not isinstance(sealed, SealedStageV2) or _stage_status(sealed) != "complete":
+            raise RealRunnerError(f"{record.stage} native closure is not complete")
+        if _sealed_handoff_payload(record.stage, sealed) != handoff:
+            raise RealRunnerError(f"{record.stage} native closure differs from root handoff")
         _stage_output(root, record.stage, record.completion_sha256, public)
+        authenticated_handoffs[record.stage] = claimed
         public_accessed = public_accessed or public
     return public_accessed
 
@@ -1026,6 +1109,9 @@ def _context(
     grant_seconds: int,
     manifest: RealEvolutionManifestV2,
     handoffs: Mapping[str, str],
+    *,
+    deadline_monotonic: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> RealStageContextV2:
     child_root = root / stage
     child_root.mkdir(parents=True, exist_ok=True)
@@ -1037,6 +1123,8 @@ def _context(
         manifest.fingerprint(),
         manifest.model.fingerprint(),
         handoffs,
+        deadline_monotonic,
+        monotonic,
     )
 
 
@@ -1131,7 +1219,7 @@ def run_real_evolution(
     if checkpoint is not None and checkpoint.phase == "COMPLETE":
         if checkpoint.completion_sha256 is None or checkpoint.active_stage is not None:
             raise RealRunnerError("completed root checkpoint is malformed")
-        public = _validate_sealed_records(root, records, handoffs)
+        public = _validate_sealed_records(root, records, handoffs, manifest, ports)
         if public or len(records) != len(_STAGES) or not ledger.finalization_started:
             raise RealRunnerError("completed root violates its sealed finalization boundary")
         result = RealRunResultV2.from_payload(_read_canonical(root / "evaluation_complete.json"))
@@ -1205,7 +1293,7 @@ def run_real_evolution(
                     carry_seconds=carry, handoff_sha256s=handoffs, completion_sha256=None)
 
     if records:
-        public = _validate_sealed_records(root, records, handoffs)
+        public = _validate_sealed_records(root, records, handoffs, manifest, ports)
         if public:
             _checkpoint(store, ledger, phase="FAILED", records=records, active_stage=None, carry_seconds=carry,
                         handoff_sha256s=handoffs, completion_sha256=None)
@@ -1224,8 +1312,18 @@ def run_real_evolution(
             return _result("incomplete", manifest, records)
         _checkpoint(store, ledger, phase=_PHASES[stage][0], records=records, active_stage=stage,
                     carry_seconds=carry, handoff_sha256s=handoffs, completion_sha256=None)
-        context = _context(root, stage, grant_seconds, manifest, handoffs)
         start = float(monotonic())
+        if not math.isfinite(start):
+            raise RealRunnerError("stage monotonic interval is invalid")
+        context = _context(
+            root,
+            stage,
+            grant_seconds,
+            manifest,
+            handoffs,
+            deadline_monotonic=start + grant_seconds,
+            monotonic=monotonic,
+        )
         result = getattr(ports, f"run_{stage}")(context)
         end = float(monotonic())
         if not math.isfinite(start) or not math.isfinite(end) or end < start:
@@ -1277,7 +1375,7 @@ def run_real_evolution(
                 handoff_sha256s=handoffs, completion_sha256=None)
     if ports.begin_finalization is not None:
         ports.begin_finalization()
-    public = _validate_sealed_records(root, records, handoffs)
+    public = _validate_sealed_records(root, records, handoffs, manifest, ports)
     if public:
         _checkpoint(store, ledger, phase="FAILED", records=records, active_stage=None, carry_seconds=carry,
                     handoff_sha256s=handoffs, completion_sha256=None)
