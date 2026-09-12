@@ -101,6 +101,10 @@ class SourceVariantV2:
             require_sha256(self.parent_source_sha256, "parent_source_sha256")
         if type(self.operator) is not str or not self.operator.strip():
             raise ValueError("operator must be a non-empty string")
+        if self.operator == "seed" and self.parent_source_sha256 is not None:
+            raise ValueError("seed source must not have a parent_source_sha256")
+        if self.operator != "seed" and self.parent_source_sha256 is None:
+            raise ValueError("non-seed source must have a parent_source_sha256")
         object.__setattr__(self, "files", _source_files(self.files))
         require_sha256(self.protocol_fingerprint, "protocol_fingerprint")
         require_sha256(self.runtime_fingerprint, "runtime_fingerprint")

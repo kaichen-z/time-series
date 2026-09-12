@@ -45,6 +45,24 @@ def test_child_copies_commitments_and_binds_actual_parent() -> None:
     assert child.runtime_fingerprint == parent.runtime_fingerprint
 
 
+@pytest.mark.parametrize(
+    ("parent_source_sha256", "operator"),
+    [("a" * 64, "seed"), (None, "mutation")],
+)
+def test_lineage_requires_seed_and_parent_to_bind_each_other(
+    parent_source_sha256: str | None, operator: str
+) -> None:
+    with pytest.raises(ValueError):
+        SourceVariantV2(
+            1,
+            parent_source_sha256,
+            operator,
+            {"policy.py": 'def choose_arm(request):\n    return "decision"\n'},
+            "a" * 64,
+            "b" * 64,
+        )
+
+
 def test_kernel_path_edit_is_rejected() -> None:
     payload = _variant('def choose_arm(request):\n    return "decision"\n').to_payload()
     payload["files"]["../kernel.py"] = "changed = True\n"  # type: ignore[index]
