@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Literal
@@ -39,7 +40,8 @@ from numerical_agent.evolution.numerical_package import (
     RankedNumericalForecast,
     valid_forecast,
 )
-from numerical_agent.evolution.numerical_selector import DecisionPolicy, SelectionDecision
+from numerical_agent.evolution.numerical_selector import CandidateDiagnostics, HindcastFold, DecisionPolicy, SelectionDecision
+from numerical_agent.evolution.task_local_ensemble import TaskLocalTournamentPolicy, execute_task_local_ensemble
 from numerical_agent.evolution.task_shortlist import (
     TaskCandidateShortlistV1,
     TaskShortlistPolicyV1,
@@ -627,6 +629,44 @@ def _verified_assumption_projection(
     return (card, *safe_retrieval_projection(consistency.accepted, consistency.rejected))
 
 
+def local_diagnostics_from_payload(payload, *, names, families):
+    """Decode sealed diagnostics; missing observations become ineligible markers."""
+    from numerical_agent.run_task_local_ensemble_evolution import parse_diagnostics_payload
+    value = parse_diagnostics_payload(json.loads(canonical_json_bytes(dict(payload))))
+    def decode(item):
+        if isinstance(item, dict):
+            if item == {"status": "positive_infinity", "value": None}:
+                return math.inf
+            if item == {"status": "negative_infinity", "value": None}:
+                return -math.inf
+            return {key: decode(child) for key, child in item.items()}
+        if isinstance(item, list):
+            return tuple(decode(child) for child in item)
+        return item
+    result = {}
+    for row in value["rows"]:
+        if row["diagnostic"] is not None:
+            data = decode(row["diagnostic"])
+            data["folds"] = tuple(HindcastFold(**fold) for fold in data["folds"])
+            if data["long_horizon_fold"] is not None:
+                data["long_horizon_fold"] = HindcastFold(**data["long_horizon_fold"])
+            result[row["candidate_name"]] = CandidateDiagnostics(**data)
+    if not set(result) <= set(names):
+        _fail("sealed diagnostics contain non-shortlisted candidates")
+    for name in names:
+        if name not in result:
+            result[name] = CandidateDiagnostics.synthetic(name=name, family=families[name],
+                median_mase=math.inf, eligible=False)
+        if result[name].family != families[name]:
+            _fail("sealed diagnostic family does not match the catalog")
+    return result
+
+
+def task_local_result_sha256(selection, diagnostics_sha256, fallback_reason):
+    return hashlib.sha256(canonical_json_bytes({"selection": asdict(replace(selection, rejected=dict(selection.rejected))),
+        "hindcast_diagnostics": diagnostics_sha256, "fallback_reason": fallback_reason})).hexdigest()
+
+
 def bound_numerical_package(
     source: NumericalForecastPackage,
     release: NumericalSupplyRelease,
@@ -638,6 +678,7 @@ def bound_numerical_package(
     min_successful_folds: int | None = None,
     shortlist: TaskCandidateShortlistV1 | None = None,
     hindcast_diagnostics_sha256: str | None = None,
+    hindcast_diagnostics: Mapping[str, object] | None = None,
 ) -> NumericalForecastPackage:
     """Bind a legacy projection or a verified schema-v2 task-local shortlist."""
     if not isinstance(source, NumericalForecastPackage):
@@ -657,6 +698,8 @@ def bound_numerical_package(
             _fail("task shortlist must retain the protected anchor")
         if hindcast_diagnostics_sha256 is None or not _SHA256.fullmatch(hindcast_diagnostics_sha256):
             _fail("task shortlist requires canonical hindcast diagnostics identity")
+        if hindcast_diagnostics is None:
+            _fail("task shortlist requires sealed hindcast diagnostic content")
     _validate_champion_provenance(source, release)
     if source.protected_baseline.name == "atlas_70_30":
         _fail("fixed Atlas blend cannot be the protected source anchor")
@@ -722,6 +765,7 @@ def bound_numerical_package(
         for index, item in enumerate(retained, start=1)
     )
     anchor = ranked[0]
+    fallback_reason = source.fallback_reason
     selection = SelectionDecision(
         mode="single",
         selected=(anchor.name,),
@@ -751,6 +795,26 @@ def bound_numerical_package(
             "dictionary": shortlist.dictionary_sha256,
             "hindcast_diagnostics": hindcast_diagnostics_sha256,
         })
+        if hindcast_diagnostics is not None:
+            if hashlib.sha256(canonical_json_bytes(dict(hindcast_diagnostics))).hexdigest() != hindcast_diagnostics_sha256:
+                _fail("sealed diagnostic content fingerprint mismatch")
+            if (hindcast_diagnostics["task_id"] != source.task_profile.task_id
+                    or hindcast_diagnostics["task_input_sha256"] != shortlist.task_input_sha256):
+                _fail("sealed diagnostic task binding mismatch")
+            diagnostics = local_diagnostics_from_payload(hindcast_diagnostics,
+                names=shortlist.candidate_names, families={v.name: v.family for v in ranked})
+            if any(diagnostics[v.name] != v.diagnostics for v in ranked):
+                _fail("package diagnostics differ from sealed diagnostic content")
+            result = execute_task_local_ensemble(TaskLocalTournamentPolicy(anchor_name=anchor.name),
+                candidate_names=shortlist.candidate_names,
+                forecasts={v.name: v.forecast for v in ranked}, diagnostics=diagnostics,
+                horizon=source.task_profile.horizon)
+            selection = replace(selection, mode="ensemble" if result.activated else "single",
+                selected=result.selected_names, weights=result.weights, forecast=result.forecast,
+                reason_codes=("task_local_ensemble",))
+            fallback_reason = result.fallback_reason
+            component_fingerprints["task_local_result"] = task_local_result_sha256(
+                selection, hindcast_diagnostics_sha256, fallback_reason)
     morphology_card, accepted, rejected, handoff = _verified_assumption_projection(
         source,
         release,
@@ -766,6 +830,9 @@ def bound_numerical_package(
         if morphology_card is not None
         else hashlib.sha256(b'{"enabled":false}').hexdigest()
     )
+    if len(selection.selected) > 1:
+        morphology_card, accepted, rejected, handoff = None, (), {}, ()
+        component_fingerprints["morphology_card"] = hashlib.sha256(b'{"enabled":false}').hexdigest()
     return NumericalForecastPackage(
         task_profile=source.task_profile,
         active_candidate_names=tuple(item.name for item in ranked),
@@ -774,12 +841,12 @@ def bound_numerical_package(
         accepted_assumptions=accepted,
         rejected_assumptions=rejected,
         selection_decision=selection,
-        final_forecast=anchor.forecast,
+        final_forecast=selection.forecast,
         protected_baseline=anchor,
         ranked_alternatives=ranked,
         retrieval_handoff=handoff,
         component_fingerprints=component_fingerprints,
-        fallback_reason=source.fallback_reason,
+        fallback_reason=fallback_reason,
     )
 
 

@@ -164,6 +164,9 @@ def build_parser() -> argparse.ArgumentParser:
     numerical.add_argument("--seed-supply", required=True, type=Path)
     numerical.add_argument("--task-manifest", required=True, type=Path)
     numerical.add_argument("--output-dir", required=True, type=Path)
+    numerical.add_argument("--task-local-evidence", type=Path)
+    numerical.add_argument("--task-local-dictionary", type=Path)
+    numerical.add_argument("--legacy-bootstrap", action="store_true")
     add_protocol_parsers(commands)
     return parser
 
@@ -502,8 +505,20 @@ class _DeterministicForecastStore:
 
 
 def _build_numerical_adapter(
-    config, tasks, folds, operator_input_sha256s, *, host_runtime=None
+    config, tasks, folds, operator_input_sha256s, *, host_runtime=None,
+    seed_release=None, task_local_evidence_path=None, task_local_dictionary=None,
+    legacy_bootstrap=False,
 ):
+    from numerical_agent.evolution.filtering import FilterDictionary, parse_filter_source
+    from numerical_agent.evolution.screening import ApplicabilityClause
+    from numerical_agent.evolution.task_shortlist import _dictionary_hash
+    from numerical_agent.run_task_local_ensemble_evolution import load_task_local_evidence_bundle
+    task_local_evidence_path = task_local_evidence_path or getattr(host_runtime, "task_local_evidence_path", None)
+    task_local_dictionary = task_local_dictionary or getattr(host_runtime, "task_local_dictionary", None)
+    if seed_release is not None and seed_release.schema_version == 2 and not legacy_bootstrap and task_local_evidence_path is None:
+        raise ValueError("schema-2 production requires Task 4 evidence; legacy/bootstrap must be explicit")
+    evidence = None
+    dictionary_sha = _NUMERICAL_SOURCE_SHA256
     screening = ScreeningPolicy(
         tuple(
             ScreeningEntry(name, family, "keep", ApplicabilityPolicy(), "reviewed")
@@ -514,6 +529,21 @@ def _build_numerical_adapter(
         ),
         ("toto_2_0",),
     )
+    if task_local_evidence_path is not None:
+        if isinstance(task_local_dictionary, (str, Path)):
+            task_local_dictionary = parse_filter_source(Path(task_local_dictionary).read_text(encoding="utf-8"))
+        if type(task_local_dictionary) is not FilterDictionary:
+            raise ValueError("Task 4 evidence requires the actual reviewed Dictionary")
+        dictionary_sha = _dictionary_hash(task_local_dictionary)
+        if seed_release is None or seed_release.schema_version != 2 or seed_release.source_fingerprints.get("dictionary") != dictionary_sha:
+            raise ValueError("Task 4 Dictionary differs from schema-2 supply identity")
+        evidence = load_task_local_evidence_bundle(Path(task_local_evidence_path), dictionary_sha256=dictionary_sha)
+        anchor_names = {value[0].candidate_names[0] for value in evidence.by_task.values()}
+        if len(anchor_names) != 1:
+            raise ValueError("Task 4 evidence requires one protected Anchor")
+        screening = ScreeningPolicy(tuple(ScreeningEntry(entry.name, entry.family, entry.status,
+            ApplicabilityPolicy((ApplicabilityClause(entry.applicability),)) if entry.applicability else ApplicabilityPolicy(),
+            entry.reason) for entry in task_local_dictionary.entries), tuple(anchor_names))
     if config.profile == "smoke":
         forecast_store = _DeterministicForecastStore()
         resource_reporter = None
@@ -537,14 +567,16 @@ def _build_numerical_adapter(
         screening_policy=screening,
         fold_manifest=folds,
         original_tasks=tasks,
-        source_fingerprints={"dictionary": _NUMERICAL_SOURCE_SHA256},
+        source_fingerprints={"dictionary": dictionary_sha},
         runtime_fingerprints=dict(config.runtime_fingerprints),
     )
     return LegacyNumericalAdapter(
         materializer=materializer,
         tasks=tasks,
         fold_manifest=folds,
-        sources={_NUMERICAL_SOURCE_SHA256: _NUMERICAL_METHOD_SOURCE},
+        sources=getattr(host_runtime, "sources", {_NUMERICAL_SOURCE_SHA256: _NUMERICAL_METHOD_SOURCE}),
+        task_local_evidence=evidence,
+        legacy_bootstrap=legacy_bootstrap,
         operator_input_sha256s=operator_input_sha256s,
         resource_kinds=resource_kinds,
         resource_reporter=resource_reporter,
@@ -560,6 +592,7 @@ def _numerical_evolve(
     *,
     host_runtime=None,
     llm_client=None,
+    task_local_evidence_path=None, task_local_dictionary=None, legacy_bootstrap=False,
 ) -> dict[str, object]:
     loaded = tuple(
         _regular_canonical_input(path)
@@ -580,6 +613,8 @@ def _numerical_evolve(
         payloads[0], payloads[1], payloads[2], output,
         input_sha256s=input_sha256s, host_runtime=host_runtime,
         llm_client=llm_client, resume=resume,
+        task_local_evidence_path=task_local_evidence_path, task_local_dictionary=task_local_dictionary,
+        legacy_bootstrap=legacy_bootstrap,
     )
 
 
@@ -593,6 +628,7 @@ def _run_numerical_payloads(
     host_runtime: object,
     llm_client: LLMClient | None,
     resume: bool,
+    task_local_evidence_path=None, task_local_dictionary=None, legacy_bootstrap=False,
 ) -> dict[str, object]:
     """Shared typed parsing and adapter construction for both input seams."""
     config = NumericalQDConfigV2.from_payload(config_payload)
@@ -605,7 +641,9 @@ def _run_numerical_payloads(
     )
     tasks, folds = _parse_task_manifest(task_manifest)
     adapter = _build_numerical_adapter(
-        config, tasks, folds, input_sha256s, host_runtime=host_runtime
+        config, tasks, folds, input_sha256s, host_runtime=host_runtime, seed_release=seed,
+        task_local_evidence_path=task_local_evidence_path, task_local_dictionary=task_local_dictionary,
+        legacy_bootstrap=legacy_bootstrap,
     )
     run_numerical_qd(
         output,
@@ -632,6 +670,7 @@ def numerical_evolve_payload(
     input_sha256s: Mapping[str, str],
     host_runtime: object,
     llm_client: LLMClient,
+    task_local_evidence_path=None, task_local_dictionary=None, legacy_bootstrap=False,
 ) -> dict[str, object]:
     """Run Numerical QD from Host-verified payloads without path overlap rules."""
     resume = _preflight_numerical_output(Path(output))
@@ -644,6 +683,8 @@ def numerical_evolve_payload(
         host_runtime=host_runtime,
         llm_client=llm_client,
         resume=resume,
+        task_local_evidence_path=task_local_evidence_path, task_local_dictionary=task_local_dictionary,
+        legacy_bootstrap=legacy_bootstrap,
     )
 
 
@@ -655,6 +696,7 @@ def numerical_evolve(
     *,
     host_runtime=None,
     llm_client=None,
+    task_local_evidence_path=None, task_local_dictionary=None, legacy_bootstrap=False,
 ) -> dict[str, object]:
     """Run Numerical QD with an explicitly configured trusted Host runtime.
 
@@ -669,6 +711,8 @@ def numerical_evolve(
         output,
         host_runtime=host_runtime,
         llm_client=llm_client,
+        task_local_evidence_path=task_local_evidence_path, task_local_dictionary=task_local_dictionary,
+        legacy_bootstrap=legacy_bootstrap,
     )
 
 
@@ -1036,6 +1080,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.seed_supply,
                 args.task_manifest,
                 args.output_dir,
+                task_local_evidence_path=args.task_local_evidence,
+                task_local_dictionary=args.task_local_dictionary, legacy_bootstrap=args.legacy_bootstrap,
             )
     except (OSError, UnicodeError, ValueError) as error:
         print(f"Evolution V2: {error}", file=sys.stderr)

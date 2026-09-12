@@ -35,6 +35,15 @@ def cli():
     return module
 
 
+def test_production_constructor_requires_evidence_for_schema_two():
+    from tests.test_evolution_v2_frozen_shortlist import evidence_fixture
+    config, release, folds, adapter = evidence_fixture()
+    with pytest.raises(ValueError, match="Task 4 evidence"):
+        cli()._build_numerical_adapter(config, adapter.tasks, folds,
+            {"config": "0" * 64, "seed_supply": "1" * 64, "task_manifest": "2" * 64},
+            seed_release=release)
+
+
 def snapshot(root: Path) -> dict[str, tuple[str, int]]:
     if not root.exists():
         return {}

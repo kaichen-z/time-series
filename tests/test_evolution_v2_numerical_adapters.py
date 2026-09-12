@@ -167,6 +167,25 @@ def test_qd_materialization_refits_and_preserves_v2_seed_catalog(world):
     assert tuple(item.candidate_id for item in child.candidate.release.alternatives)[0] == "seasonal_naive"
 
 
+def test_v2_projection_keeps_parent_anchor_when_child_diagnostic_cache_differs(world):
+    adapter, parent, registry, state, rows = world
+    parent = replace(parent, schema_version=2, anchor_release_payload=parent.to_payload()["anchor_release_payload"])
+    parent_registry = build_package_registry(adapter.tasks, parent,
+        lambda task, supplied: bound_numerical_package(registry.package_for(task), supplied,
+            {item.name: item for item in registry.package_for(task).ranked_alternatives}))
+    child = adapter.materialize_child(parent, genome(state), state, member_id="seasonal",
+        policies={fingerprint_payload(_recipe().to_payload()): _recipe()}, build_rows=rows,
+        descriptor_policy=descriptor_policy(), version="n001")
+    task = adapter.tasks[0]
+    assert child.candidate.registry.package_for(task).protected_baseline.diagnostics.cache_key != parent_registry.package_for(task).protected_baseline.diagnostics.cache_key
+    entry = NumericalQDEntryV2(1, child.genome.fingerprint(), "7" * 64,
+        describe_history(task.numeric.history_values, 2, "D", "statistical", descriptor_policy()),
+        (task.numeric.task_id,), NumericalObjectiveVectorV2(1., 1., 1., 1., 1.), ConstraintReportV2(True, ()), ())
+    frozen = freeze_qd_supply(adapter, parent, parent_registry, NumericalQDArchive().insert((entry,)), (child,),
+        descriptor_policy=descriptor_policy(), version="n002")
+    assert frozen.registry.package_for(task).protected_baseline == parent_registry.package_for(task).protected_baseline
+
+
 def test_verified_store_accounts_uncached_dispatches_and_real_worker_starts(tmp_path):
     from evolving_loop.v2.budget import ResourceUse
     from evolving_loop.v2.numerical_qd.adapters import _VerifiedForecastStore

@@ -93,6 +93,14 @@ def run_fixture(root, **kwargs):
     return run_numerical_qd(root, *fixture(**options), **kwargs)
 
 
+def test_schema_two_host_run_requires_evidence_or_explicit_bootstrap(tmp_path):
+    config, release, folds, adapter = fixture(raw_seed=True, task_budget=1)
+    release = replace(release, schema_version=2, anchor_release_payload=release.to_payload()["anchor_release_payload"])
+    with pytest.raises(ValueError, match="Task 4 evidence"):
+        run_numerical_qd(tmp_path / "run", config, release, folds, adapter)
+    assert not (tmp_path / "run").exists()
+
+
 def test_rung_binds_adapter_local_evidence_before_task_evaluation(monkeypatch):
     from tests.test_evolution_v2_numerical_hyperband import (
         ADAPTER, DESCRIPTOR, METRIC, PROTOCOL, RUNTIME, evaluation, ledger, manifest,

@@ -475,8 +475,15 @@ def test_schema_v2_package_uses_verified_task_shortlist_not_full_supply() -> Non
         "weighted_pair": _ranked("weighted_pair", "combined", (4.0, 4.0)),
     }
 
+    from dataclasses import asdict
+    from common.payload import canonical_json_bytes
+    diagnostics = {"schema_version": 1, "task_id": source.task_profile.task_id,
+        "task_input_sha256": shortlist.task_input_sha256, "public_test_accessed": False,
+        "rows": [{"candidate_name": name, "failure_reason": None, "diagnostic": asdict(materialized[name].diagnostics)}
+                 for name in sorted(shortlist.candidate_names)]}
+    diagnostics_sha = hashlib.sha256(canonical_json_bytes(diagnostics)).hexdigest()
     package = bound_numerical_package(source, release, materialized, shortlist=shortlist,
-                                      hindcast_diagnostics_sha256="5" * 64)
+                                      hindcast_diagnostics_sha256=diagnostics_sha, hindcast_diagnostics=diagnostics)
 
     assert tuple(item.candidate_id for item in release.alternatives) == (
         "seasonal_naive", "drift", "weighted_pair",
@@ -486,7 +493,40 @@ def test_schema_v2_package_uses_verified_task_shortlist_not_full_supply() -> Non
     assert package.component_fingerprints["task_shortlist"] == shortlist.fingerprint()
     assert package.component_fingerprints["shortlist_policy"] == policy.fingerprint()
     assert package.component_fingerprints["dictionary"] == "4" * 64
-    assert package.component_fingerprints["hindcast_diagnostics"] == "5" * 64
+    assert package.component_fingerprints["hindcast_diagnostics"] == diagnostics_sha
+
+
+def test_shortlist_binding_keeps_successful_tournament_and_exact_diagnostics():
+    from dataclasses import asdict
+    from common.payload import canonical_json_bytes
+    from numerical_agent.evolution.task_shortlist import TaskCandidateShortlistV1, TaskShortlistPolicyV1
+    from tests.test_task_local_ensemble import _diagnostic
+    source = _wide_package()
+    anchor = replace(source.protected_baseline, forecast=(14.0, 14.0),
+        diagnostics=_diagnostic("safe_anchor", ((14.0, 14.0),) * 3, family="tsfm"))
+    specialist = replace(_ranked("drift", "statistical", (10.0, 10.0)), rank=2,
+        diagnostics=_diagnostic("drift", ((10.0, 10.0),) * 3, family="statistical"))
+    source = replace(source, protected_baseline=anchor, ranked_alternatives=(anchor, specialist),
+        active_candidate_names=(anchor.name, specialist.name),
+        candidate_diagnostics={v.name: v.diagnostics for v in (anchor, specialist)},
+        selection_decision=replace(source.selection_decision, forecast=anchor.forecast,
+                                  considered_candidates=(anchor.name, specialist.name)), final_forecast=anchor.forecast)
+    release = replace(_supply_release(alternatives=(_alternative("drift", "statistical"),)), schema_version=2,
+        anchor_release_payload=_anchor_release().to_payload())
+    shortlist = TaskCandidateShortlistV1(1, "1" * 64, "4" * 64, TaskShortlistPolicyV1().fingerprint(),
+        ("safe_anchor", "drift"), (), True, False)
+    diagnostics = {"schema_version": 1, "task_id": "supply-runtime", "task_input_sha256": "1" * 64,
+        "rows": [{"candidate_name": v.name, "failure_reason": None, "diagnostic": asdict(v.diagnostics)}
+                 for v in (specialist, anchor)], "public_test_accessed": False}
+    sha = hashlib.sha256(canonical_json_bytes(diagnostics)).hexdigest()
+    package = bound_numerical_package(source, release, {v.name: v for v in (anchor, specialist)},
+        shortlist=shortlist, hindcast_diagnostics_sha256=sha, hindcast_diagnostics=diagnostics)
+    assert package.selection_decision.selected == ("safe_anchor", "drift")
+    assert package.selection_decision.weights == (0.5, 0.5)
+    assert package.final_forecast == (12.0, 12.0)
+    assert package.candidate_diagnostics == source.candidate_diagnostics
+    assert package.fallback_reason is None
+    assert "task_local_result" in package.component_fingerprints
 
 
 def test_bounded_package_projects_verified_alternative_assumption_to_safe_handoff():

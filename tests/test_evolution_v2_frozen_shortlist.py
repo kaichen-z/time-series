@@ -66,6 +66,43 @@ def frozen_fixture():
     return imported, adapter, raw
 
 
+def test_seed_execution_never_visits_nonshortlisted_catalog_candidates(monkeypatch):
+    from evolving_loop.v2.numerical_qd.runner import _seed_registry
+    config, release, folds, adapter = evidence_fixture()
+    calls = []
+    original = adapter.materializer.forecast_store.forecast
+    def forecast(name, *args):
+        calls.append(name)
+        assert name in {"toto_2_0", "seasonal_naive"}
+        return original(name, *args)
+    adapter.materializer.forecast_store.forecast = forecast
+    from numerical_agent.evolution.screening import ScreeningEntry, ApplicabilityPolicy
+    screen = adapter.materializer.screening_policy
+    adapter.materializer.screening_policy = replace(screen, entries=screen.entries + tuple(
+        ScreeningEntry(f"extra_{i}", "statistical", "keep", ApplicabilityPolicy(), "reviewed") for i in range(12)))
+    registry = _seed_registry(release, adapter)
+    assert calls == [name for _ in adapter.tasks for name in ("toto_2_0", "seasonal_naive")]
+    assert registry.package_for(adapter.tasks[0]).fallback_reason == "anchor_diagnostics_unavailable"
+
+
+def test_resealed_package_diagnostics_cannot_disagree_with_evidence():
+    from evolving_loop.v2.numerical_qd.adapters import _envelope, validate_frozen_local_evidence
+    from evolving_loop.package_numerical_supply import build_package_registry
+    imported, adapter, raw = frozen_fixture()
+    restored = imported.envelope.restore(adapter.tasks)
+    def corrupt(task, release):
+        package = restored.package_for(task)
+        diagnostics = dict(package.candidate_diagnostics)
+        anchor = package.protected_baseline.name
+        diagnostics[anchor] = replace(diagnostics[anchor], cache_key="resealed-different-content")
+        return replace(package, candidate_diagnostics=diagnostics,
+            protected_baseline=replace(package.protected_baseline, diagnostics=diagnostics[anchor]))
+    registry = build_package_registry(adapter.tasks, imported.release, corrupt)
+    envelope = _envelope(registry, adapter.tasks, evidence=adapter.task_local_evidence)
+    with pytest.raises(ValueError, match="diagnostic content"):
+        validate_frozen_local_evidence(imported.release, envelope, artifact_bytes_by_sha=raw)
+
+
 def test_v2_roundtrip_and_cache_only_closure(monkeypatch):
     from evolving_loop.v2.numerical_qd import adapters
     imported, adapter, raw = frozen_fixture()
@@ -219,7 +256,7 @@ def test_kernel_accepts_v2_closure_from_bytes_and_rejects_changed_evidence(froze
         pair["registry"]["package_sha256s"] = sorted(pair["registry"]["packages"])
         (objects / f"{fingerprint_payload(pair)}.json").write_bytes(canonical_v2_bytes(pair))
         train["train_behavior_descriptors"]["numerical_artifacts_sha256"] = fingerprint_payload(pair)
-        expected_error = "registry identity"
+        expected_error = "local evidence|registry identity"
     with pytest.raises(KernelAuthorityError, match=expected_error):
         EvolutionKernel._numerical_release_references(host, bundle, train)
 

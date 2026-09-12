@@ -259,6 +259,8 @@ def _seed_registry(release, adapter, *, account_work=None, bootstrap_authority=N
             account_work(ResourceUse(task_executions=1))
         return adapter.forecast_trusted(*args, account_work=account_work)
     def build(task, supplied):
+        if adapter.local_evidence_for(task) is not None:
+            return adapter.materialize_local_package(task, supplied, forecast)
         source = run_numerical_loop(RuntimeTask(task.numeric.task_id, task.numeric.history_values,
             task.numeric.prediction_length, task.numeric.frequency, ()),
             screening_policy=adapter.materializer.screening_policy,
@@ -584,6 +586,8 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
     imported = seed_supply if type(seed_supply) is ImportedNumericalSeedV2 else None
     release = imported.release if imported else (seed_supply if type(seed_supply) is NumericalSupplyRelease
                                                 else parse_numerical_supply_release(seed_supply))
+    if release.schema_version == 2 and adapter.task_local_evidence is None and not adapter.legacy_bootstrap:
+        raise ValueError("schema-2 production requires Task 4 evidence or explicit legacy/bootstrap mode")
     seed_state, seed_genome, seed_policies, screen, combined = _bootstrap(config, release, adapter)
     task_commitments = {task.numeric.task_id: task_registry_fingerprint(task) for task in adapter.tasks}
     inputs = {"seed_supply": fingerprint_payload(release.to_payload()),
