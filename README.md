@@ -12,6 +12,14 @@ evolution and Public scoring are not implemented by this project. See the
 [Project 1 implementation plan](docs/superpowers/plans/2026-09-10-evolution-v2-kernel-contracts.md).
 The existing usage below remains supported.
 
+### Evolution V2 Cooperative Bundle (Project 3)
+
+Project 3 is the bounded four-step cooperative prototype over a frozen Project
+2 Numerical Supply plus Retrieval and Decision modules. Its deterministic UCB
+and Thompson 4/1 smoke commands, resume artifacts, acceptance boundary, and
+optional-pilot scope are documented in the
+[Cooperative Bundle operator guide](docs/evolution-v2-cooperative-bundle.md).
+
 ### Evolution V2 Numerical QD (Project 2)
 
 The separate V2 entrypoint now includes an explicit, resumable Numerical Supply
