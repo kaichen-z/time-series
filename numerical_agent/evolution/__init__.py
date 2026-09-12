@@ -42,6 +42,14 @@ from .numerical_package import NumericalForecastPackage, RankedNumericalForecast
 
 MODULE_NAME = "methods.py"
 
+# Canonical task-local shortlist contracts.
+from .task_shortlist import (  # noqa: E402,F401
+    CandidatePriorV1,
+    TaskCandidateShortlistV1,
+    TaskShortlistPolicyV1,
+    build_task_candidate_shortlist,
+)
+
 
 @dataclass(frozen=True)
 class Generation:
