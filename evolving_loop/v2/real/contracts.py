@@ -30,7 +30,11 @@ class _Canonical:
     @classmethod
     def from_payload(cls, payload):
         values = _require_exact_schema(payload, tuple(f.name for f in fields(cls)), field=cls.__name__)
-        return cls(**values)
+        # Admit only JSON-compatible primitives before constructing contracts;
+        # this also prevents callers from smuggling mutable/non-JSON objects in.
+        normalized = _strict_json_value(values, field=cls.__name__)
+        assert isinstance(normalized, dict)
+        return cls(**normalized)
 
     def to_payload(self):
         return _strict_json_value({f.name: _plain(getattr(self, f.name)) for f in fields(self)})
@@ -60,6 +64,9 @@ def _version(value):
 def _path(value, field):
     if type(value) is not str or not value or value.startswith("/"):
         raise ValueError(f"{field} must be a relative path")
+    raw_parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in raw_parts):
+        raise ValueError(f"{field} must be a confined relative path")
     path = PurePosixPath(value)
     if path.is_absolute() or ".." in path.parts or "." in path.parts:
         raise ValueError(f"{field} must be a confined relative path")
@@ -71,6 +78,8 @@ def _rows(value, cls, field):
         raise ValueError(f"{field} must be a list")
     result = tuple(_contract_payload(v, cls) for v in value)
     roles = tuple(getattr(v, "role") for v in result)
+    if cls is RealInputFileV2 and any(role not in _ROLE_ORDER for role in roles):
+        raise ValueError(f"{field} roles must be known")
     if len(roles) != len(set(roles)):
         raise ValueError(f"{field} roles must be unique")
     order = {name: i for i, name in enumerate(_ROLE_ORDER)}

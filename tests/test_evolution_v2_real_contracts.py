@@ -6,8 +6,12 @@ from common.payload import strict_json_loads
 from evolving_loop.v2.contracts import canonical_v2_bytes
 from evolving_loop.v2.real.contracts import (
     PROFILE_SCHEDULES,
+    RealEvolutionCheckpointV2,
     RealEvolutionManifestV2,
+    RealInputFileV2,
     RealModelBindingV2,
+    RealRunResultV2,
+    RealStageRecordV2,
 )
 
 
@@ -69,3 +73,42 @@ def test_profiles_are_canonical_json():
         path = __import__("pathlib").Path("configs/evolution_v2/real") / f"{name}.json"
         payload = strict_json_loads(path.read_text(), context=str(path))
         assert canonical_v2_bytes(payload) == schedule.canonical_bytes()
+        assert path.read_bytes() == schedule.canonical_bytes()
+
+
+def test_input_roles_are_known_ordered_and_unique():
+    row = {"role": "split", "relative_path": "splits/a.json", "sha256": "a" * 64}
+    with pytest.raises(ValueError, match="known"):
+        RealEvolutionManifestV2.from_payload(manifest_payload() | {"files": [row | {"role": "unknown"}]})
+    with pytest.raises(ValueError, match="canonical"):
+        RealEvolutionManifestV2.from_payload(manifest_payload() | {"files": [manifest_payload()["files"][1], row]})
+    with pytest.raises(ValueError, match="unique"):
+        RealEvolutionManifestV2.from_payload(manifest_payload() | {"files": [row, row]})
+
+
+def test_raw_path_components_and_identities_are_strict():
+    for path in ("dir/./file", "dir/../file"):
+        with pytest.raises(ValueError, match="relative"):
+            RealInputFileV2.from_payload({"role": "split", "relative_path": path, "sha256": "a" * 64})
+    with pytest.raises(ValueError, match="SHA-256"):
+        RealInputFileV2.from_payload({"role": "split", "relative_path": "a", "sha256": "A" * 64})
+    with pytest.raises(ValueError, match="SHA-256"):
+        RealEvolutionManifestV2.from_payload(manifest_payload() | {"runtime_locations": [{"role": "python", "relative_path": "runs/x", "identity_sha256": "bad"}]})
+
+
+def test_arbitrary_schedule_and_checkpoint_result_schemas_are_rejected():
+    schedule = PROFILE_SCHEDULES["real-30m"].to_payload() | {"total_seconds": 1}
+    with pytest.raises(ValueError):
+        type(PROFILE_SCHEDULES["real-30m"]).from_payload(schedule)
+    stage = RealStageRecordV2("p2", 1, 1, "complete", "a" * 64, None)
+    checkpoint = RealEvolutionCheckpointV2("P2_SEALED", (stage,), None, 0, {}, {}, None)
+    assert RealEvolutionCheckpointV2.from_payload(checkpoint.to_payload()) == checkpoint
+    result = RealRunResultV2("complete", "a" * 64, "b" * 64, (stage,), "c" * 64, False)
+    assert RealRunResultV2.from_payload(result.to_payload()) == result
+    with pytest.raises(ValueError):
+        RealRunResultV2.from_payload(result.to_payload() | {"unexpected": 1})
+
+
+def test_nested_payload_values_must_be_json_values():
+    with pytest.raises((TypeError, ValueError)):
+        RealEvolutionManifestV2.from_payload(manifest_payload() | {"l0_fingerprints": {"bad": {1, 2}}})
