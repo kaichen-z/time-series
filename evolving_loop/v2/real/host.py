@@ -1,6 +1,8 @@
 """Fixed Host runtime for bounded real Evolution V2 stages."""
 from __future__ import annotations
 
+import hashlib
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -40,9 +42,151 @@ _RUNTIME_ROLES = {
     "model_cache",
     "codex_cli",
 }
+_INPUT_KINDS = {
+    "split": "file",
+    "tasks": "directory",
+    "numerical_seed": "file",
+    "forecast_cache": "directory",
+    "retrieval_seed": "directory",
+    "source_seed": "file",
+}
+_RUNTIME_KINDS = {
+    "python": "file",
+    "runtime": "file",
+    "task_loader": "file",
+    "forecast_store": "file",
+    "model_cache": "model_cache",
+    "codex_cli": "file",
+}
 EXPECTED_REAL_FORECAST_STORE_IDENTITY = (
     "90a281166723e9ea43e58e9468c286675dbe1dab430a5a7d3e6b38526a4313c2"
 )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _require_kind(path: Path, kind: str, role: str) -> Path:
+    try:
+        resolved = path.resolve(strict=True)
+        mode = resolved.stat().st_mode
+    except OSError as error:
+        raise ValueError(f"real Host {role} identity target is unavailable") from error
+    expected = stat.S_ISREG(mode) if kind == "file" else stat.S_ISDIR(mode)
+    if not expected:
+        raise ValueError(f"real Host {role} identity target has wrong kind")
+    return resolved
+
+
+def _directory_content_identity(path: Path, role: str) -> str:
+    root = _require_kind(path, "directory", role)
+    entries = []
+    for child in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        relative = child.relative_to(root).as_posix()
+        mode = child.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            raise ValueError(f"real Host {role} directory contains a symlink")
+        if stat.S_ISDIR(mode):
+            entries.append({"path": relative, "kind": "directory"})
+        elif stat.S_ISREG(mode):
+            entries.append(
+                {"path": relative, "kind": "file", "sha256": _sha256_file(child)}
+            )
+        else:
+            raise ValueError(f"real Host {role} directory has a special entry")
+    return fingerprint_payload(
+        {
+            "schema_version": 1,
+            "kind": "real_directory_content_identity",
+            "entries": entries,
+        }
+    )
+
+
+def _model_cache_identity(path: Path) -> str:
+    """Fingerprint Hugging Face CAS metadata without rereading model weights."""
+    root = _require_kind(path, "directory", "model_cache")
+    entries = []
+    for child in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        relative = child.relative_to(root).as_posix()
+        mode = child.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            try:
+                target = child.resolve(strict=True)
+            except OSError as error:
+                raise ValueError("real Host model_cache has a broken link") from error
+            if not target.is_relative_to(root):
+                raise ValueError("real Host model_cache link escapes its root")
+            if not stat.S_ISREG(target.stat().st_mode):
+                raise ValueError("real Host model_cache link target is not a file")
+            entries.append(
+                {
+                    "path": relative,
+                    "kind": "link",
+                    "target": target.relative_to(root).as_posix(),
+                    "size": target.stat().st_size,
+                }
+            )
+        elif stat.S_ISDIR(mode):
+            entries.append({"path": relative, "kind": "directory"})
+        elif stat.S_ISREG(mode):
+            parts = child.relative_to(root).parts
+            is_cas_blob = "blobs" in parts and all(
+                character in "0123456789abcdef" for character in child.name
+            ) and len(child.name) in {40, 64}
+            entry = {"path": relative, "kind": "file", "size": child.stat().st_size}
+            if is_cas_blob:
+                entry["cas_digest"] = child.name
+            else:
+                entry["sha256"] = _sha256_file(child)
+            entries.append(entry)
+        else:
+            raise ValueError("real Host model_cache has a special entry")
+    return fingerprint_payload(
+        {
+            "schema_version": 1,
+            "kind": "huggingface_model_cache_semantic_identity",
+            "entries": entries,
+        }
+    )
+
+
+def resolve_real_input_identity(role: str, path: Path) -> str:
+    """Return raw-file or closed-tree SHA-256 for one declared input role."""
+    kind = _INPUT_KINDS.get(role)
+    if kind is None:
+        raise ValueError(f"unknown real Host input role: {role}")
+    resolved = _require_kind(Path(path), kind, role)
+    return _sha256_file(resolved) if kind == "file" else _directory_content_identity(
+        resolved, role
+    )
+
+
+def resolve_real_runtime_identity(role: str, path: Path) -> str:
+    """Return executable/source bytes or the model-cache CAS semantic identity."""
+    kind = _RUNTIME_KINDS.get(role)
+    if kind is None:
+        raise ValueError(f"unknown real Host runtime role: {role}")
+    if kind == "model_cache":
+        return _model_cache_identity(Path(path))
+    return _sha256_file(_require_kind(Path(path), kind, role))
+
+
+def _verify_manifest_identities(manifest, files, locations) -> None:
+    for row in manifest.files:
+        if resolve_real_input_identity(row.role, files[row.role]) != row.sha256:
+            raise ValueError(f"real Host input identity mismatch for {row.role}")
+    for row in manifest.runtime_locations:
+        if (
+            resolve_real_runtime_identity(row.role, locations[row.role])
+            != row.identity_sha256
+        ):
+            raise ValueError(f"real Host runtime identity mismatch for {row.role}")
 
 
 def _confined(root: Path, relative: str) -> Path:
@@ -127,6 +271,7 @@ def build_real_host(
     }
     if set(files) != _FILE_ROLES or set(locations) != _RUNTIME_ROLES:
         raise ValueError("real Host manifest requires every file and runtime role")
+    _verify_manifest_identities(manifest, files, locations)
 
     _split, train_ids, dev_ids = _validated_split(
         files["split"], allow_label_informed_regression_split=True
@@ -213,4 +358,6 @@ __all__ = [
     "EXPECTED_REAL_FORECAST_STORE_IDENTITY",
     "RealHostRuntimeV2",
     "build_real_host",
+    "resolve_real_input_identity",
+    "resolve_real_runtime_identity",
 ]

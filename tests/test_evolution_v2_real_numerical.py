@@ -198,6 +198,31 @@ def test_payload_entrypoint_runs_from_root_derived_payload_without_path_overlap(
     assert observed["resume"] is False
 
 
+def test_real_numerical_bridge_cannot_override_host_llm(tmp_path, monkeypatch):
+    from evolving_loop.v2.real import bridges
+
+    observed = {}
+
+    def numerical_payload(*_args, **kwargs):
+        observed.update(kwargs)
+        return {"status": "complete"}
+
+    monkeypatch.setattr(bridges, "numerical_evolve_payload", numerical_payload)
+    host_llm = object()
+    arguments = {
+        "context": SimpleNamespace(output_dir=tmp_path / "p2"),
+        "host": SimpleNamespace(llm_client=host_llm),
+        "config_payload": {},
+        "seed_payload": {},
+        "task_manifest_payload": {},
+        "input_sha256s": {},
+    }
+    assert bridges.run_real_numerical(**arguments) == {"status": "complete"}
+    assert observed["llm_client"] is host_llm
+    with pytest.raises(TypeError):
+        bridges.run_real_numerical(**arguments, llm_client=object())
+
+
 def _real_manifest_payload():
     return {
         "schema_version": 1,
@@ -242,6 +267,67 @@ def _real_manifest_payload():
     }
 
 
+def _materialize_real_manifest_paths(root, payload):
+    directories = {
+        ("files", "tasks"),
+        ("files", "forecast_cache"),
+        ("files", "retrieval_seed"),
+        ("runtime_locations", "model_cache"),
+    }
+    for collection in ("files", "runtime_locations"):
+        for row in payload[collection]:
+            path = root / row["relative_path"]
+            if (collection, row["role"]) in directories:
+                path.mkdir(parents=True, exist_ok=True)
+                (path / "identity.txt").write_text(row["role"], encoding="utf-8")
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(row["role"], encoding="utf-8")
+
+
+def _bind_real_manifest_identities(root, payload):
+    from evolving_loop.v2.real.host import (
+        resolve_real_input_identity,
+        resolve_real_runtime_identity,
+    )
+
+    for row in payload["files"]:
+        row["sha256"] = resolve_real_input_identity(
+            row["role"], root / row["relative_path"]
+        )
+    for row in payload["runtime_locations"]:
+        row["identity_sha256"] = resolve_real_runtime_identity(
+            row["role"], root / row["relative_path"]
+        )
+    return RealEvolutionManifestV2.from_payload(payload)
+
+
+@pytest.mark.parametrize(
+    ("collection", "role"),
+    (("files", "split"), ("runtime_locations", "runtime")),
+)
+def test_real_host_rejects_file_and_runtime_identity_drift(
+    tmp_path, monkeypatch, collection, role
+):
+    from evolving_loop.v2.real import host as module
+
+    payload = _real_manifest_payload()
+    _materialize_real_manifest_paths(tmp_path, payload)
+    manifest = _bind_real_manifest_identities(tmp_path, payload)
+    row = next(item for item in payload[collection] if item["role"] == role)
+    (tmp_path / row["relative_path"]).write_text("drift", encoding="utf-8")
+    monkeypatch.setattr(
+        module,
+        "_validated_split",
+        lambda *_args, **_kwargs: pytest.fail("drift admitted before loading"),
+    )
+
+    with pytest.raises(ValueError, match=role):
+        module.build_real_host(
+            manifest, repo_root=tmp_path, output_dir=tmp_path / "output"
+        )
+
+
 def test_real_host_owns_exact_tasks_cache_agents_and_resource_cleanup(
     tmp_path, monkeypatch
 ):
@@ -250,14 +336,8 @@ def test_real_host_owns_exact_tasks_cache_agents_and_resource_cleanup(
     from numerical_agent.evolution.portfolio import PolicyPortfolio
     from numerical_agent.providers import RuntimeRegistry
 
-    manifest = RealEvolutionManifestV2.from_payload(_real_manifest_payload())
-    for row in (*manifest.files, *manifest.runtime_locations):
-        path = tmp_path / row.relative_path
-        if path.suffix:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.touch()
-        else:
-            path.mkdir(parents=True, exist_ok=True)
+    manifest_payload = _real_manifest_payload()
+    _materialize_real_manifest_paths(tmp_path, manifest_payload)
     source = tmp_path / "runs/method_evolution/v001"
     source.mkdir(parents=True)
     (source / "methods.py").write_text(
@@ -269,6 +349,7 @@ def test_real_host_owns_exact_tasks_cache_agents_and_resource_cleanup(
     (source / "skills.py").write_text("", encoding="utf-8")
     worker = tmp_path / "tmp/toto2_worker_smoke.json"
     worker.write_text("{}", encoding="utf-8")
+    manifest = _bind_real_manifest_identities(tmp_path, manifest_payload)
 
     requested = {}
     fixture_payload = json.loads(

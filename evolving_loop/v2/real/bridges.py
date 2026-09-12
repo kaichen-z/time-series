@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from common.llm import LLMClient
-
 from ..cli import numerical_evolve_payload
 from .host import RealHostRuntimeV2
 
@@ -17,7 +15,6 @@ def run_real_numerical(
     seed_payload: Mapping[str, object],
     task_manifest_payload: Mapping[str, object],
     input_sha256s: Mapping[str, str],
-    llm_client: LLMClient | None = None,
 ) -> dict[str, object]:
     """Invoke P2 through the payload seam using a root stage context."""
     output_dir = getattr(context, "output_dir", None)
@@ -30,7 +27,7 @@ def run_real_numerical(
         output_dir,
         input_sha256s=input_sha256s,
         host_runtime=host,
-        llm_client=host.llm_client if llm_client is None else llm_client,
+        llm_client=host.llm_client,
     )
 
 
