@@ -306,6 +306,10 @@ def test_train_credit_uses_completed_early_rungs_and_actual_survivors(tmp_path):
     config, supply, manifest, adapter = fixture(task_budget=2472, provider="hybrid")
     payload = config.to_payload()
     payload["mutation"]["operators"] = ["add"]
+    # This tests credit at the FakeClock/task-count boundary, not real worker
+    # scheduling latency. A 10 ms IPC timeout can discard a valid child under
+    # broad-suite load before it ever reaches the completed-rung credit check.
+    payload["adapter"]["task_timeout_seconds"] = 1.0
     config = NumericalQDConfigV2.from_payload(payload)
     result = run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter, ThreeChildren("legal"), stop_after=1)
     policy = json.loads((tmp_path / f"run/numerical_qd/objects/{result.mutation_policy_sha256}.json").read_bytes())
