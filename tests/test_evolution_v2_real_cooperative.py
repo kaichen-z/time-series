@@ -16,6 +16,11 @@ from evolving_loop.v2.numerical_qd.adapters import (
     import_numerical_seed,
 )
 from evolving_loop.v2.real.host import RealHostRuntimeV2
+from numerical_agent.evolution.screening import (
+    ApplicabilityPolicy,
+    ScreeningEntry,
+    ScreeningPolicy,
+)
 from tests.test_evolution_v2_cooperative_cli import _payload as cooperative_payload
 from tests.test_package_numerical_supply import (
     _package_for_task,
@@ -71,6 +76,18 @@ def _host(
             ROOT / "unused-real-skills.json", persist=False
         ).clone(persist=False, read_only=True),
         source_repo=ROOT,
+        screening_policy=ScreeningPolicy(
+            (
+                ScreeningEntry(
+                    "safe_anchor",
+                    "statistical",
+                    "keep",
+                    ApplicabilityPolicy(),
+                    "reviewed",
+                ),
+            ),
+            ("safe_anchor",),
+        ),
         resource_reporter_sha256="9" * 64,
         numerical_alternatives=numerical_alternatives,
     )

@@ -19,6 +19,7 @@ from numerical_agent.evolution.portfolio import read_policy_file
 from numerical_agent.main import _runtime_registry
 from numerical_agent.run_champion_evolution import _load_screening_policy
 from numerical_agent.run_selector_evolution import _forecast_runtime_identity
+from numerical_agent.evolution.screening import ScreeningPolicy
 
 from ..budget import ResourceUse
 from ..contracts import fingerprint_payload
@@ -289,6 +290,7 @@ class RealHostRuntimeV2:
     llm_client: CodexCLIClient
     retrieval_skill_library: RetrievalSkillLibrary
     source_repo: Path
+    screening_policy: ScreeningPolicy
     resource_reporter_sha256: str
     sources: Mapping[str, str] = field(default_factory=dict)
     numerical_alternatives: tuple[FrozenNumericalArtifactsV2, ...] = ()
@@ -296,6 +298,8 @@ class RealHostRuntimeV2:
     _closed: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if type(self.screening_policy) is not ScreeningPolicy:
+            raise TypeError("real Host requires an exact ScreeningPolicy")
         sources = dict(self.sources)
         if any(
             type(identity) is not str
@@ -475,6 +479,7 @@ def build_real_host(
             llm_client=llm,
             retrieval_skill_library=library,
             source_repo=source_repo,
+            screening_policy=screening,
             resource_reporter_sha256=reporter_sha,
             sources=sources,
             resource_kinds=(

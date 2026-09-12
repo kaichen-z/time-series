@@ -441,6 +441,43 @@ def test_real_numerical_source_seed_is_strict_and_matches_historical_naive_last(
         assert manifest.l0_fingerprints["numerical_source_origin"] == origin_sha
 
 
+def test_real_screening_keeps_task_114_timesfm_from_nonfirst_clause():
+    from evolving_loop.data import load_context_tasks_by_ids
+    from numerical_agent.evolution.execution import Task
+    from numerical_agent.evolution.screening import (
+        materialize_active_dictionary,
+        profile_task,
+    )
+    from numerical_agent.run_champion_evolution import _load_screening_policy
+
+    screening = _load_screening_policy(
+        AUTHORITY_ROOT / "runs/method_evolution/v001/dictionary.py"
+    )
+    context = load_context_tasks_by_ids(
+        AUTHORITY_ROOT / "external/Dr-CiK/full-download/Dr-CiK_public/tasks",
+        ("task_114",),
+    )[0]
+    numeric = context.numeric
+    profile = profile_task(
+        Task(
+            numeric.task_id,
+            numeric.history_values,
+            numeric.prediction_length,
+            numeric.frequency,
+            (),
+        )
+    )
+
+    entry = screening.get("timesfm_2_5")
+    active = materialize_active_dictionary(screening, profile)
+
+    assert entry is not None
+    assert entry.status == "specialized"
+    assert "timesfm_2_5" in screening.fallback_names
+    assert entry.applicability.match(profile) == 1
+    assert "timesfm_2_5" in {candidate.name for candidate in active.active}
+
+
 def _real_manifest_payload():
     return {
         "schema_version": 1,
@@ -607,6 +644,11 @@ def test_real_host_owns_exact_tasks_cache_agents_and_resource_cleanup(
     from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
     from evolving_loop.v2.real import host as module
     from numerical_agent.evolution.portfolio import PolicyPortfolio
+    from numerical_agent.evolution.screening import (
+        ApplicabilityPolicy,
+        ScreeningEntry,
+        ScreeningPolicy,
+    )
     from numerical_agent.providers import RuntimeRegistry
 
     manifest_payload = _real_manifest_payload()
@@ -672,11 +714,19 @@ def test_real_host_owns_exact_tasks_cache_agents_and_resource_cleanup(
     monkeypatch.setattr(
         module, "read_policy_file", lambda _path: PolicyPortfolio.flagship5()
     )
-    monkeypatch.setattr(
-        module,
-        "_load_screening_policy",
-        lambda _path: SimpleNamespace(fingerprint=lambda: "e" * 64),
+    screening = ScreeningPolicy(
+        (
+            ScreeningEntry(
+                "naive_last",
+                "statistical",
+                "keep",
+                ApplicabilityPolicy(),
+                "reviewed",
+            ),
+        ),
+        ("naive_last",),
     )
+    monkeypatch.setattr(module, "_load_screening_policy", lambda _path: screening)
     runtimes = RuntimeRegistry()
     closed = {"runtime": 0}
     original_close = runtimes.close
@@ -734,6 +784,7 @@ def test_real_host_owns_exact_tasks_cache_agents_and_resource_cleanup(
     assert getattr(host.retrieval_skill_library, "_read_only", False) is True
     assert callable(host.retrieval_factory)
     assert callable(host.decision_factory)
+    assert host.screening_policy is screening
     assert dict(host.sources) == {
         numerical_source_seed_sha256: numerical_source_seed.read_text(
             encoding="utf-8"

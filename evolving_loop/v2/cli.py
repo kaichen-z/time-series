@@ -86,7 +86,7 @@ from .store import write_once_json
 from .protocol.cli import add_protocol_parsers, dispatch_protocol
 from .real.contracts import RealEvolutionManifestV2
 from .real.host import build_real_host
-from .real.runner import build_real_stage_ports, run_real_evolution
+from .real.runner import _semantic_dictionary, build_real_stage_ports, run_real_evolution
 
 
 _NUMERICAL_METHOD_SOURCE = '''def seasonal_naive(history, horizon, frequency):
@@ -609,9 +609,20 @@ def _build_numerical_adapter(
         anchor_names = {value[0].candidate_names[0] for value in evidence.by_task.values()}
         if len(anchor_names) != 1:
             raise ValueError("Task 4 evidence requires one protected Anchor")
-        screening = ScreeningPolicy(tuple(ScreeningEntry(entry.name, entry.family, entry.status,
-            ApplicabilityPolicy((ApplicabilityClause(entry.applicability),)) if entry.applicability else ApplicabilityPolicy(),
-            entry.reason) for entry in task_local_dictionary.entries), tuple(anchor_names))
+        host_screening = getattr(host_runtime, "screening_policy", None)
+        if host_screening is None:
+            screening = ScreeningPolicy(tuple(ScreeningEntry(entry.name, entry.family, entry.status,
+                ApplicabilityPolicy((ApplicabilityClause(entry.applicability),)) if entry.applicability else ApplicabilityPolicy(),
+                entry.reason) for entry in task_local_dictionary.entries), tuple(anchor_names))
+        else:
+            if type(host_screening) is not ScreeningPolicy:
+                raise ValueError("production Host screening policy must be exact")
+            projected = _semantic_dictionary(host_screening)
+            if projected != task_local_dictionary or _dictionary_hash(projected) != dictionary_sha:
+                raise ValueError(
+                    "Host screening policy differs from the sealed Task 4 Dictionary"
+                )
+            screening = host_screening
     if config.profile == "smoke":
         forecast_store = _DeterministicForecastStore()
         resource_reporter = None

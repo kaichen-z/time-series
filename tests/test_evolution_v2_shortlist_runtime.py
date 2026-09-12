@@ -38,10 +38,10 @@ class CatalogStore:
         return (14.0 if name == "toto_2_0" else 10.0,) * horizon
 
 
-def production_world(tmp_path):
+def production_world(tmp_path, *, dictionary=None, host_screening=None):
     config, seed, folds, original = fixture(raw_seed=True)
     names = ("seasonal_naive", "select_seasonal_naive") + tuple(f"method_{i:02d}" for i in range(12))
-    dictionary = FilterDictionary((FilterEntry("toto_2_0", "tsfm", "keep", (), "reviewed"),) + tuple(
+    dictionary = dictionary or FilterDictionary((FilterEntry("toto_2_0", "tsfm", "keep", (), "reviewed"),) + tuple(
         FilterEntry(name, "statistical", "keep", (), "reviewed") for name in names))
     dictionary_sha = _dictionary_hash(dictionary)
     alternatives = tuple(_alternative(name, "statistical") for name in names)
@@ -99,12 +99,97 @@ def production_world(tmp_path):
     store = CatalogStore()
     config = replace(config, profile="pilot")
     host = SimpleNamespace(forecast_store=store, sources=original.sources)
+    if host_screening is not None:
+        host.screening_policy = host_screening
     adapter = cli._build_numerical_adapter(config, original.tasks, folds,
         {"config": "0" * 64, "seed_supply": "1" * 64, "task_manifest": "2" * 64}, host_runtime=host,
         seed_release=seed, task_local_evidence_path=tmp_path, task_local_dictionary=dictionary)
     index = dict(adapter.task_local_evidence.index)
     raw[fingerprint_payload(index)] = canonical_v2_bytes(index)
     return config, seed, folds, adapter, store, expected, raw
+
+
+def test_schema_two_adapter_uses_exact_host_screening_and_rejects_mismatch(
+    tmp_path
+):
+    """Catches flattening rich Host any-of applicability into one clause."""
+    names = ("seasonal_naive", "select_seasonal_naive") + tuple(
+        f"method_{index:02d}" for index in range(12)
+    )
+    dictionary = FilterDictionary(
+        (FilterEntry("toto_2_0", "tsfm", "keep", (), "reviewed"),)
+        + tuple(
+            FilterEntry(
+                name,
+                "statistical",
+                "specialized" if name == "seasonal_naive" else "keep",
+                ("frequency:1 second",) if name == "seasonal_naive" else (),
+                "reviewed",
+            )
+            for name in names
+        )
+    )
+    screening = ScreeningPolicy(
+        (
+            ScreeningEntry(
+                "toto_2_0", "tsfm", "keep", ApplicabilityPolicy(), "reviewed"
+            ),
+        )
+        + tuple(
+            ScreeningEntry(
+                name,
+                "statistical",
+                "specialized" if name == "seasonal_naive" else "keep",
+                ApplicabilityPolicy(
+                    (
+                        ApplicabilityClause(("frequency:1 second",)),
+                        ApplicabilityClause(("frequency:D",)),
+                    )
+                )
+                if name == "seasonal_naive"
+                else ApplicabilityPolicy(),
+                "reviewed",
+            )
+            for name in names
+        ),
+        ("toto_2_0",),
+    )
+    config, seed, folds, adapter, store, _expected, _raw = production_world(
+        tmp_path, dictionary=dictionary, host_screening=screening
+    )
+
+    assert adapter.materializer.screening_policy is screening
+    registry = _seed_registry(seed, adapter)
+    assert len(registry.task_ids) == 100
+
+    mismatched = ScreeningPolicy(
+        tuple(
+            replace(entry, reason="changed provenance")
+            if entry.name == "seasonal_naive"
+            else entry
+            for entry in screening.entries
+        ),
+        screening.fallback_names,
+    )
+    with pytest.raises(ValueError, match="Host screening policy differs"):
+        cli._build_numerical_adapter(
+            config,
+            adapter.tasks,
+            folds,
+            {
+                "config": "0" * 64,
+                "seed_supply": "1" * 64,
+                "task_manifest": "2" * 64,
+            },
+            host_runtime=SimpleNamespace(
+                forecast_store=store,
+                sources=adapter.sources,
+                screening_policy=mismatched,
+            ),
+            seed_release=seed,
+            task_local_evidence_path=tmp_path,
+            task_local_dictionary=dictionary,
+        )
 
 
 def test_same_id_policy_change_requires_new_evidence_before_child_execution(tmp_path, monkeypatch):

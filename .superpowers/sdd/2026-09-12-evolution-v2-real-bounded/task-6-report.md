@@ -290,3 +290,37 @@ python -m pytest -q \
 
 No live run or billable call was launched, and live artifacts were not
 modified.
+
+### Live P2 exact ScreeningPolicy propagation fix
+
+The read-only canary differential confirmed the fallback-aware consumer was
+correct with the original rich ScreeningPolicy.  The remaining mismatch came
+from `_build_numerical_adapter`, which reconstructed each Filter Dictionary
+entry as a single applicability clause and therefore discarded the original
+`any_of` clauses and fallback ordering.
+
+`RealHostRuntimeV2` now owns the exact verified ScreeningPolicy loaded from the
+authenticated historical `dictionary.py`.  For schema-2 evidence, the
+Numerical adapter uses that exact immutable object only after verifying that
+its semantic Filter Dictionary projection equals the sealed Task-4 Dictionary
+and has the committed Dictionary SHA.  A Host without an explicit policy keeps
+the existing fixture/legacy reconstruction path; a wrong-type or semantically
+mismatched Host policy fails closed.
+
+Regression coverage proves a second `any_of` clause survives through the real
+adapter boundary, rejects a tampered Host policy, and characterizes the actual
+`task_114`: `timesfm_2_5` is a reviewed fallback candidate whose matching
+clause is index 1 and is present in the active Dictionary.
+
+```text
+python -m pytest -q \
+  tests/test_evolution_v2_real_numerical.py \
+  tests/test_evolution_v2_real_cooperative.py \
+  tests/test_evolution_v2_shortlist_runtime.py::test_schema_two_adapter_uses_exact_host_screening_and_rejects_mismatch \
+  tests/test_evolution_v2_shortlist_runtime.py::test_local_materialization_uses_fallback_aware_active_dictionary \
+  tests/test_evolution_v2_shortlist_runtime.py::test_production_seed_child_and_nonempty_freeze_keep_shortlist_result
+29 passed in 73.10s
+```
+
+No live run or billable call was launched, and live artifacts were not
+modified.
