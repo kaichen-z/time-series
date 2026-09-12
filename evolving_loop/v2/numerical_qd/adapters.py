@@ -976,6 +976,7 @@ class LegacyNumericalAdapter:
                 trusted_forecast=self.forecast_trusted) as materializer:
             rows = _verified_build_rows(build_rows, self.tasks, self.fold_manifest, recipe, anchor,
                                         materializer.forecast_store)
+            materializer.build_rows = rows
             fit = fit_numerical_recipe(recipe, rows, self.fold_manifest, anchor)
             candidate = materializer.materialize(parent_release, fit, self.candidate_tasks,
                 version=version, generation=genome.generation)

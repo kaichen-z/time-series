@@ -10,7 +10,7 @@ import pytest
 
 from evolving_loop.package_numerical_evolution import NumericalPackageMaterializer
 from evolving_loop.package_numerical_evolution import NumericalCoordinateCandidate
-from evolving_loop.package_numerical_supply import NumericalAlternativeSpec, build_package_registry, bound_numerical_package
+from evolving_loop.package_numerical_supply import NumericalAlternativeSpec, NumericalSupplyRelease, build_package_registry, bound_numerical_package
 from evolving_loop.package_registry import task_registry_fingerprint
 from evolving_loop.v2.contracts import fingerprint_payload
 from evolving_loop.v2.numerical_qd.adapters import (
@@ -35,7 +35,7 @@ from tests.test_evolution_v2_numerical_mutation import parent_state
 from tests.test_package_numerical_evolution import (
     _evolution_tasks, _build_rows, _recipe, _supply_parent,
 )
-from tests.test_package_numerical_supply import _ranked
+from tests.test_package_numerical_supply import _policy, _ranked
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -124,6 +124,47 @@ def materialize(world, state=None, **kwargs):
     return adapter.materialize_child(release, genome(state), state, member_id=kwargs.pop("member_id", "seasonal"),
         policies=kwargs.pop("policies", {fingerprint_payload(recipe.to_payload()): recipe for recipe in (_recipe(), _recipe("lagged"))}), build_rows=rows,
         descriptor_policy=descriptor_policy(), version="n001", **kwargs)
+
+
+def test_qd_materialization_refits_and_preserves_v2_seed_catalog(world):
+    adapter, release, _registry, state, rows = world
+    seed_policy = _policy("seasonal_naive")
+    seed = NumericalAlternativeSpec(
+        candidate_id="seasonal_naive",
+        family="statistical",
+        materializer_kind="dictionary",
+        recipe_payload=seed_policy.recipe.to_payload(),
+        full_build_policy_payload=seed_policy.to_payload(),
+        build_fold_policy_payloads=tuple(
+            (fold, seed_policy.to_payload()) for fold in range(5)
+        ),
+        assumption_ids=("seasonal_naive_ready",),
+        failure_conditions=("The candidate no longer matches the history.",),
+    )
+    v2_seed = NumericalSupplyRelease(
+        schema_version=2,
+        version=release.version,
+        parent_sha256=release.parent_sha256,
+        anchor_release_payload=release.to_payload()["anchor_release_payload"],
+        alternatives=(seed,),
+        atlas_release_sha256=release.atlas_release_sha256,
+        source_fingerprints=release.source_fingerprints,
+        runtime_fingerprints=release.runtime_fingerprints,
+    )
+
+    child = adapter.materialize_child(
+        v2_seed,
+        genome(state),
+        state,
+        member_id="seasonal",
+        policies={fingerprint_payload(_recipe().to_payload()): _recipe()},
+        build_rows=rows,
+        descriptor_policy=descriptor_policy(),
+        version="n001",
+    )
+
+    assert child.candidate.release.schema_version == 2
+    assert tuple(item.candidate_id for item in child.candidate.release.alternatives)[0] == "seasonal_naive"
 
 
 def test_verified_store_accounts_uncached_dispatches_and_real_worker_starts(tmp_path):
