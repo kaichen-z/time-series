@@ -117,3 +117,14 @@ def test_proposals_are_distinct_audited_policies_for_enabled_arms() -> None:
     assert all(child.source != parent.source for child in children)
     assert all(child.operator.startswith("seed-template:") for child in children)
     assert all(run_policy(child, request) in request.enabled_arms for child in children)
+
+
+def test_proposal_limit_never_exceeds_the_two_child_epoch_cap() -> None:
+    """A caller cannot bypass the fixed per-epoch source proposal budget."""
+    parent = SourceVariantV2.seed(
+        'def choose_arm(request):\n    return "numerical"\n', "a" * 64, "b" * 64
+    )
+
+    assert propose_sources(parent, draw_counter=0, limit=0) == ()
+    with pytest.raises(ValueError, match="at most 2"):
+        propose_sources(parent, draw_counter=0, limit=3)
