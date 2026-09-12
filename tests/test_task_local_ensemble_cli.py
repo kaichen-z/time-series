@@ -126,7 +126,8 @@ def test_v3_oof_materializes_only_each_fold_prior_shortlist(monkeypatch: pytest.
     screening = ScreeningPolicy(tuple(ScreeningEntry(name, families[name], "keep", ApplicabilityPolicy(), "safe") for name in names), ("toto_2_0",))
     implementation = __import__("numerical_agent.evolution.task_local_evolution", fromlist=["_GROUPING_IMPLEMENTATION"])._GROUPING_IMPLEMENTATION
     manifest = GroupFoldManifest(1, 1, 2, (("0" * 64, ("late",), 1), ("1" * 64, ("early",), 0)), implementation)
-    tasks = tuple(DataTask(task_id, tuple(float(i) for i in range(20)), (1.0,), 1, "D", None, task_id) for task_id in ("late", "early"))
+    tasks = (DataTask("late", tuple(float(i) for i in range(100, 120)), (1.0,), 1, "D", None, "late"),
+             DataTask("early", tuple(float(i) for i in range(20)), (1.0,), 1, "D", None, "early"))
     def priors(chosen: tuple[str, ...]) -> tuple[CandidatePriorV1, ...]:
         return tuple(CandidatePriorV1(name, families[name], 1.0, 0.0 if name in chosen else 9.0, 0.0 if name in chosen else 9.0, ()) for name in sorted(names))
     expected = {0: ("toto_2_0", *(f"m{index:02d}" for index in range(7))), 1: ("toto_2_0", *(f"m{index:02d}" for index in range(7, 14)))}
@@ -144,9 +145,22 @@ def test_v3_oof_materializes_only_each_fold_prior_shortlist(monkeypatch: pytest.
     assert shortlists["late"].candidate_names == expected[1]
     assert {name.removeprefix("diagnose:") for task, name in calls if task == "early"} == set(expected[0])
     assert {name.removeprefix("diagnose:") for task, name in calls if task == "late"} == set(expected[1])
+    assert {name for marker, name in calls if marker == 0.0} == set(expected[0])
+    assert {name for marker, name in calls if marker == 100.0} == set(expected[1])
     index = _shortlist_index(tasks, shortlists, _rows)
     assert [entry["task_id"] for entry in index["entries"]] == ["early", "late"]
     assert {entry["task_id"]: entry["task_input_sha256"] for entry in index["entries"]} == {task_id: shortlists[task_id].task_input_sha256 for task_id in shortlists}
+
+
+@pytest.mark.parametrize("terminal", ["accepted", "oof_rejected"])
+def test_terminal_index_binding_writes_matching_manifest(tmp_path: Path, terminal: str) -> None:
+    from numerical_agent.run_task_local_ensemble_evolution import _bind_shortlist_index
+    index = {"schema_version": 1, "entries": [{"task_id": "a", "task_input_sha256": "1" * 64, "shortlist_sha256": "2" * 64, "diagnostics_sha256": "3" * 64}]}
+    manifest: dict[str, object] = {"terminal": terminal}
+    output = tmp_path / terminal
+    _bind_shortlist_index(output, manifest, index)
+    assert read_json_object(output / "run_manifest.json")["shortlist_index_fingerprint"] == __import__("hashlib").sha256(__import__("common.payload", fromlist=["canonical_json_bytes"]).canonical_json_bytes(index)).hexdigest()
+    assert read_json_object(output / "task_shortlist_index.json") == index
 
 
 def test_failed_dev_publishes_no_task_local_release(tmp_path: Path) -> None:

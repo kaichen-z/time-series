@@ -502,6 +502,12 @@ def _shortlist_index(tasks: Iterable[DataTask], shortlists: Mapping[str, TaskCan
     return {"schema_version": 1, "entries": entries}
 
 
+def _bind_shortlist_index(output: Path, run_manifest: dict[str, object], shortlist_index: dict[str, object]) -> None:
+    _write_once(output / "task_shortlist_index.json", shortlist_index)
+    run_manifest["shortlist_index_fingerprint"] = hashlib.sha256(canonical_json_bytes(shortlist_index)).hexdigest()
+    _write_once(output / "run_manifest.json", run_manifest)
+
+
 def _formal_main(args: argparse.Namespace, output: Path) -> int:
     required = {
         "repo": args.repo,
@@ -608,22 +614,8 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
         _write_once(output / "group_folds.json", manifest.to_payload())
         _write_once(output / "oof_report.json", _report_payload(oof))
         if not oof.accepted:
-            shortlist_index = {
-                "schema_version": 1,
-                "entries": [
-                    {"task_id": source.task_id, "task_input_sha256": shortlist.task_input_sha256,
-                     "shortlist_sha256": shortlist.fingerprint(), "diagnostics_sha256": hashlib.sha256(canonical_json_bytes([
-                        {"candidate_name": row.candidate_name, "failure_reason": row.failure_reason,
-                         "diagnostic": asdict(row.diagnostic) if row.diagnostic is not None else None}
-                        for row in train_shortlist_rows if row.task_id == source.task_id
-                     ])).hexdigest()}
-                    for source in train for shortlist in (train_shortlists[source.task_id],)
-                ],
-            }
-            shortlist_index["entries"].sort(key=lambda item: (item["task_id"], item["task_input_sha256"]))
-            _write_once(output / "task_shortlist_index.json", shortlist_index)
-            run_manifest["shortlist_index_fingerprint"] = hashlib.sha256(canonical_json_bytes(shortlist_index)).hexdigest()
-            _write_once(output / "run_manifest.json", run_manifest)
+            shortlist_index = _shortlist_index(train, train_shortlists, train_shortlist_rows)
+            _bind_shortlist_index(output, run_manifest, shortlist_index)
             _write_once(
                 output / "evaluation_complete.json",
                 {
@@ -645,25 +637,10 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
             priors=priors, anchor_name=release.anchor_name, policy=release.shortlist_policy,
             split="dev", hindcast_config=_CONFIDENCE_HINDCAST_CONFIG, output=output,
         )
-        shortlist_index = {
-            "schema_version": 1,
-            "entries": [
-                {"task_id": source.task_id, "task_input_sha256": shortlist.task_input_sha256,
-                 "shortlist_sha256": shortlist.fingerprint(), "diagnostics_sha256": hashlib.sha256(canonical_json_bytes([
-                     {"candidate_name": row.candidate_name, "failure_reason": row.failure_reason,
-                      "diagnostic": asdict(row.diagnostic) if row.diagnostic is not None else None}
-                     for row in train_shortlist_rows + dev_rows if row.task_id == source.task_id
-                 ])).hexdigest()}
-                for source, shortlist in (
-                    *((source, train_shortlists[source.task_id]) for source in train),
-                    *zip(dev, shortlists, strict=True),
-                )
-            ],
-        }
-        shortlist_index["entries"].sort(key=lambda item: (item["task_id"], item["task_input_sha256"]))
-        _write_once(output / "task_shortlist_index.json", shortlist_index)
-        run_manifest["shortlist_index_fingerprint"] = hashlib.sha256(canonical_json_bytes(shortlist_index)).hexdigest()
-        _write_once(output / "run_manifest.json", run_manifest)
+        all_shortlists = dict(train_shortlists)
+        all_shortlists.update({task.task_id: shortlist for task, shortlist in zip(dev, shortlists, strict=True)})
+        shortlist_index = _shortlist_index(train + dev, all_shortlists, train_shortlist_rows + dev_rows)
+        _bind_shortlist_index(output, run_manifest, shortlist_index)
         dev_report = evaluate_task_local_release(
             release, dev_rows, task_ids=dev_ids, split="dev"
         )
