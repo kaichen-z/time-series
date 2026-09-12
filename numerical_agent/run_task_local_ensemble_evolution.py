@@ -7,7 +7,7 @@ import hashlib
 import json
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from common.data import Task as DataTask, load_tasks_by_id
 from common.evolution_core.contracts import METRIC_POLICY_FINGERPRINT
@@ -483,6 +483,23 @@ def _v3_oof_rows(
         rows.extend(fold_rows)
         shortlists.update({task.task_id: shortlist for task, shortlist in zip(held_out, fold_shortlists, strict=True)})
     return tuple(rows), shortlists
+
+
+def _shortlist_index(tasks: Iterable[DataTask], shortlists: Mapping[str, TaskCandidateShortlistV1], rows: Iterable[TaskLocalTaskRow]) -> dict[str, object]:
+    rows_by_task: dict[str, list[TaskLocalTaskRow]] = {}
+    for row in rows:
+        rows_by_task.setdefault(row.task_id, []).append(row)
+    entries = []
+    for task in tasks:
+        shortlist = shortlists[task.task_id]
+        entries.append({"task_id": task.task_id, "task_input_sha256": shortlist.task_input_sha256,
+            "shortlist_sha256": shortlist.fingerprint(), "diagnostics_sha256": hashlib.sha256(canonical_json_bytes([
+                {"candidate_name": row.candidate_name, "failure_reason": row.failure_reason,
+                 "diagnostic": asdict(row.diagnostic) if row.diagnostic is not None else None}
+                for row in rows_by_task.get(task.task_id, [])
+            ])).hexdigest()})
+    entries.sort(key=lambda item: (item["task_id"], item["task_input_sha256"]))
+    return {"schema_version": 1, "entries": entries}
 
 
 def _formal_main(args: argparse.Namespace, output: Path) -> int:
