@@ -110,3 +110,24 @@ def test_builder_requires_screening_and_selects_exact_target_with_dynamic_family
         task_input_sha256="1" * 64, anchor_name="anchor", available_names=names, priors=priors, policy=TaskShortlistPolicyV1())
     assert len(result.candidate_names) == 8
     assert len(set(next(e.family for e in dictionary.entries if e.name == n) for n in result.candidate_names[:4])) == 3
+
+
+def test_ranked_out_is_emitted_with_other_exclusion_reasons():
+    names = ("anchor", "unsafe", "special", "missing") + tuple(f"r{i}" for i in range(10))
+    dictionary = FilterDictionary(tuple(FilterEntry(n, "statistical", "quarantine" if n == "unsafe" else "keep", (), "safe") for n in names if n != "missing"))
+    screening = ScreeningPolicy(tuple(ScreeningEntry(n, "statistical", "specialized" if n == "special" else "keep", ApplicabilityPolicy((ApplicabilityClause(("signed",)),)) if n == "special" else ApplicabilityPolicy(), "safe") for n in names if n not in {"unsafe", "missing"}), ("anchor",))
+    priors = tuple(CandidatePriorV1(n, "statistical", .9, 1, 1, ()) for n in names if n != "missing")
+    result = build_task_candidate_shortlist(dictionary=dictionary, profile=_profile(), screening=screening, task_input_sha256="1" * 64, anchor_name="anchor", available_names=names, priors=priors, policy=TaskShortlistPolicyV1())
+    assert {reason for _, reason in result.exclusion_reasons} == {"unsafe_status", "not_applicable", "unavailable", "ranked_out"}
+
+
+def test_from_payload_rejects_json_type_coercion_and_malformed_rows():
+    prior = CandidatePriorV1("a", "statistical", .5, 1, 1, ()).to_payload()
+    with pytest.raises(ValueError): CandidatePriorV1.from_payload({**prior, "success_rate": "0.5"})
+    with pytest.raises(ValueError): CandidatePriorV1.from_payload({**prior, "candidate_name": 3})
+    policy = TaskShortlistPolicyV1().to_payload()
+    with pytest.raises(ValueError): TaskShortlistPolicyV1.from_payload({**policy, "schema_version": True})
+    value = TaskCandidateShortlistV1(1, "1" * 64, "2" * 64, "3" * 64, ("anchor",), (), False, False).to_payload()
+    with pytest.raises(ValueError): TaskCandidateShortlistV1.from_payload({**value, "candidate_names": ("anchor",)})
+    with pytest.raises(ValueError): TaskCandidateShortlistV1.from_payload({**value, "task_input_sha256": 3})
+    with pytest.raises(ValueError): TaskCandidateShortlistV1.from_payload({**value, "exclusion_reasons": [["x"]]})

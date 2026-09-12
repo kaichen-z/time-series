@@ -40,6 +40,16 @@ def _fields(payload: Mapping[str, object], expected: set[str], name: str) -> Non
     if set(payload) != expected:
         raise ValueError(f"{name} fields mismatch")
 
+def _text(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be a non-empty string")
+    return value
+
+def _number(value: object, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be numeric")
+    return _finite(value, field)
+
 
 @dataclass(frozen=True)
 class CandidatePriorV1:
@@ -80,11 +90,15 @@ class CandidatePriorV1:
         scores = payload.get("morphology_scores", ())
         if not isinstance(scores, Sequence) or isinstance(scores, (str, bytes)):
             raise ValueError("morphology_scores must be a list")
-        return cls(str(payload["candidate_name"]), str(payload["family"]),
-                   _finite(payload["success_rate"], "success_rate"),
-                   _finite(payload["mean_joint"], "mean_joint"),
-                   _finite(payload["p90_joint"], "p90_joint"),
-                   tuple((_name(item[0], "morphology key"), _finite(item[1], "morphology score")) for item in scores))
+        if not isinstance(scores, list):
+            raise ValueError("morphology_scores must be a JSON array")
+        rows = []
+        for item in scores:
+            if not isinstance(item, list) or len(item) != 2:
+                raise ValueError("morphology score rows must be [name, score]")
+            rows.append((_text(item[0], "morphology key"), _number(item[1], "morphology score")))
+        return cls(_text(payload["candidate_name"], "candidate_name"), _text(payload["family"], "family"),
+                   _number(payload["success_rate"], "success_rate"), _number(payload["mean_joint"], "mean_joint"), _number(payload["p90_joint"], "p90_joint"), tuple(rows))
 
     def canonical_bytes(self) -> bytes:
         return canonical_json_bytes(self.to_payload())
@@ -112,7 +126,10 @@ class TaskShortlistPolicyV1:
         if not isinstance(payload, Mapping):
             raise ValueError("shortlist policy payload must be an object")
         _fields(payload, {"schema_version", "minimum_candidates", "target_candidates", "maximum_candidates"}, "TaskShortlistPolicyV1")
-        return cls(int(payload["schema_version"]), int(payload["minimum_candidates"]), int(payload["target_candidates"]), int(payload["maximum_candidates"]))
+        values = [payload[key] for key in ("schema_version", "minimum_candidates", "target_candidates", "maximum_candidates")]
+        if any(type(value) is not int for value in values):
+            raise ValueError("shortlist policy numeric fields must be integers")
+        return cls(*values)
 
     def canonical_bytes(self) -> bytes:
         return canonical_json_bytes(self.to_payload())
@@ -163,8 +180,22 @@ class TaskCandidateShortlistV1:
         if not isinstance(payload, Mapping):
             raise ValueError("shortlist payload must be an object")
         _fields(payload, {"schema_version", "task_input_sha256", "dictionary_sha256", "policy_sha256", "candidate_names", "exclusion_reasons", "shortlist_underfilled", "public_test_accessed"}, "TaskCandidateShortlistV1")
-        return cls(int(payload["schema_version"]), str(payload["task_input_sha256"]), str(payload["dictionary_sha256"]), str(payload["policy_sha256"]),
-                   tuple(payload["candidate_names"]), tuple(tuple(x) for x in payload["exclusion_reasons"]), payload["shortlist_underfilled"], payload["public_test_accessed"])
+        if type(payload["schema_version"]) is not int or type(payload["shortlist_underfilled"]) is not bool or type(payload["public_test_accessed"]) is not bool:
+            raise ValueError("shortlist schema and flags have invalid JSON types")
+        for key in ("task_input_sha256", "dictionary_sha256", "policy_sha256"):
+            if not isinstance(payload[key], str):
+                raise ValueError(f"{key} must be a string")
+        names = payload["candidate_names"]; exclusions = payload["exclusion_reasons"]
+        if not isinstance(names, list) or not all(isinstance(x, str) for x in names):
+            raise ValueError("candidate_names must be a JSON array of strings")
+        if not isinstance(exclusions, list):
+            raise ValueError("exclusion_reasons must be a JSON array")
+        rows = []
+        for item in exclusions:
+            if not isinstance(item, list) or len(item) != 2 or not all(isinstance(x, str) for x in item):
+                raise ValueError("exclusion rows must be [name, reason] strings")
+            rows.append(tuple(item))
+        return cls(payload["schema_version"], payload["task_input_sha256"], payload["dictionary_sha256"], payload["policy_sha256"], tuple(names), tuple(rows), payload["shortlist_underfilled"], payload["public_test_accessed"])
 
     def canonical_bytes(self) -> bytes:
         return canonical_json_bytes(self.to_payload())
