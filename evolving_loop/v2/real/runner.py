@@ -84,6 +84,7 @@ class RealStageContextV2:
     handoffs: Mapping[str, str]
     deadline_monotonic: float | None = None
     monotonic: Callable[[], float] = time.monotonic
+    read_only: bool = False
 
     def __post_init__(self) -> None:
         if self.stage not in _STAGES:
@@ -105,6 +106,8 @@ class RealStageContextV2:
             raise ValueError("deadline_monotonic must be a finite number or None")
         if not callable(self.monotonic):
             raise ValueError("monotonic must be callable")
+        if type(self.read_only) is not bool:
+            raise ValueError("read_only must be a boolean")
 
     def remaining_seconds(self) -> int:
         if self.deadline_monotonic is None:
@@ -128,6 +131,7 @@ class RealStagePorts:
     run_p5: Callable[[RealStageContextV2], object]
     seal_p5: Callable[[RealStageContextV2, object], SealedStageV2]
     begin_finalization: Callable[[], None] | None = None
+    requires_stage_wrappers: bool = False
 
     def __post_init__(self) -> None:
         for name in (
@@ -137,6 +141,8 @@ class RealStagePorts:
                 raise ValueError(f"{name} must be callable")
         if self.begin_finalization is not None and not callable(self.begin_finalization):
             raise ValueError("begin_finalization must be callable or None")
+        if type(self.requires_stage_wrappers) is not bool:
+            raise ValueError("requires_stage_wrappers must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,7 +228,12 @@ def _dictionary_from_payload(payload: Mapping[str, object]):
         raise RealRunnerError("prepared real Dictionary is invalid") from error
 
 
-def _initial_prior_rows(host: object, candidates: tuple[tuple[str, str], ...]):
+def _initial_prior_rows(
+    host: object,
+    candidates: tuple[tuple[str, str], ...],
+    *,
+    check_deadline: Callable[[], None] | None = None,
+):
     """Read full-horizon Train rows from the shared cache without hindcasting."""
     from numerical_agent.evolution.execution import Task as RuntimeTask
     from numerical_agent.evolution.forecast_store import CacheMissError
@@ -241,6 +252,8 @@ def _initial_prior_rows(host: object, candidates: tuple[tuple[str, str], ...]):
         )
         profile = profile_task(runtime_task)
         for name, family in candidates:
+            if check_deadline is not None:
+                check_deadline()
             forecast = None
             failure = None
             try:
@@ -389,6 +402,15 @@ def prepare_real_p2_inputs(
         raise RealRunnerError("unsealed prepared P2 inputs cannot be resumed")
     prepared.mkdir(parents=True, exist_ok=True)
 
+    def check_deadline() -> None:
+        if remaining_seconds is None:
+            return
+        remaining = remaining_seconds()
+        if type(remaining) is not int or remaining <= 0:
+            raise _RealStageBudgetExhausted(
+                "P2 preparation consumed its bounded grant"
+            )
+
     file_rows = {row.role: row for row in manifest.files}
     champion_row = file_rows.get("numerical_seed")
     if champion_row is None:
@@ -422,7 +444,11 @@ def prepare_real_p2_inputs(
     train_numeric = tuple(task.numeric for task in host.train_tasks)
     dev_numeric = tuple(task.numeric for task in host.dev_tasks)
     folds = build_group_fold_manifest(train_numeric, seed=20260903)
-    prior_rows = _initial_prior_rows(host, candidates)
+    check_deadline()
+    prior_rows = _initial_prior_rows(
+        host, candidates, check_deadline=check_deadline
+    )
+    check_deadline()
     fold_priors, priors = fit_oof_shortlist_priors(
         prior_rows, folds, candidate_names=tuple(name for name, _ in candidates)
     )
@@ -440,7 +466,9 @@ def prepare_real_p2_inputs(
         hindcast_config=_CONFIDENCE_HINDCAST_CONFIG,
         output=prepared,
         fold_priors=dict(fold_priors),
+        check_deadline=check_deadline,
     )
+    check_deadline()
     dev_rows, dev_shortlists = _shortlist_rows_for_tasks(
         host.forecast_store,
         dev_numeric,
@@ -453,7 +481,9 @@ def prepare_real_p2_inputs(
         split="dev",
         hindcast_config=_CONFIDENCE_HINDCAST_CONFIG,
         output=prepared,
+        check_deadline=check_deadline,
     )
+    check_deadline()
     shortlists = dict(train_shortlists)
     shortlists.update(
         {
@@ -538,7 +568,12 @@ def _stage_wrapper(
         "bindings": dict(bindings),
         "public_test_accessed": public_test_accessed,
     }
-    write_once_json(context.output_dir / "root_stage_completion.json", payload)
+    path = context.output_dir / "root_stage_completion.json"
+    if context.read_only:
+        if _read_canonical(path) != payload:
+            raise RealRunnerError("root stage wrapper differs from native closure")
+    else:
+        write_once_json(path, payload)
     return payload, fingerprint_payload(payload)
 
 
@@ -863,6 +898,7 @@ def build_real_stage_ports(
         run_p3=run_p3, seal_p3=seal_p3,
         run_p4=run_p4, seal_p4=seal_p4,
         run_p5=run_p5, seal_p5=seal_p5,
+        requires_stage_wrappers=True,
     )
 
 
@@ -1044,6 +1080,42 @@ def _sealed_handoff_payload(stage: str, sealed: SealedStageV2) -> dict[str, obje
     }
 
 
+def _require_read_only_stage_closure(root: Path, stage: str) -> None:
+    required_files = {
+        "p2": ("root_stage_completion.json", "evaluation_complete.json"),
+        "p3": ("root_stage_completion.json", "evaluation_complete.json"),
+        "p4": (
+            "root_stage_completion.json",
+            "evaluation_complete.json",
+            "authority/active_source.json",
+            "source_archive/events.jsonl",
+        ),
+        "p5": (
+            "root_stage_completion.json",
+            "completion.json",
+            "frozen_protocol_handoff.json",
+        ),
+    }[stage]
+    for relative in required_files:
+        if not (root / stage / relative).is_file():
+            label = (
+                "root stage wrapper"
+                if relative == "root_stage_completion.json"
+                else "native stage artifact"
+            )
+            raise RealRunnerError(f"missing {label} for {stage}: {relative}")
+    if stage == "p4":
+        for relative in (
+            "authority/sealed",
+            "source_archive",
+            "source_archive/objects",
+        ):
+            if not (root / stage / relative).is_dir():
+                raise RealRunnerError(
+                    f"missing native stage artifact for p4: {relative}"
+                )
+
+
 def _validate_sealed_records(
     root: Path,
     records: list[RealStageRecordV2],
@@ -1069,6 +1141,8 @@ def _validate_sealed_records(
         public = handoff.get("public_test_accessed")
         if type(public) is not bool:
             raise RealRunnerError(f"{record.stage} public access evidence is missing")
+        if ports.requires_stage_wrappers:
+            _require_read_only_stage_closure(root, record.stage)
         result = _read_run_result(root, record.stage)
         if result is None:
             raise RealRunnerError(f"{record.stage} sealed result is missing")
@@ -1078,6 +1152,7 @@ def _validate_sealed_records(
             record.grant_seconds,
             manifest,
             authenticated_handoffs,
+            read_only=True,
         )
         sealed = getattr(ports, f"seal_{record.stage}")(context, result)
         if not isinstance(sealed, SealedStageV2) or _stage_status(sealed) != "complete":
@@ -1112,9 +1187,14 @@ def _context(
     *,
     deadline_monotonic: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    read_only: bool = False,
 ) -> RealStageContextV2:
     child_root = root / stage
-    child_root.mkdir(parents=True, exist_ok=True)
+    if read_only:
+        if not child_root.is_dir():
+            raise RealRunnerError(f"missing sealed stage directory: {stage}")
+    else:
+        child_root.mkdir(parents=True, exist_ok=True)
     return RealStageContextV2(
         stage,
         child_root,
@@ -1125,6 +1205,7 @@ def _context(
         handoffs,
         deadline_monotonic,
         monotonic,
+        read_only,
     )
 
 

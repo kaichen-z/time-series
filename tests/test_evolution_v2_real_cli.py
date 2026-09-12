@@ -154,6 +154,47 @@ def test_real_p2_initial_priors_fail_closed_on_corrupt_cache():
         _initial_prior_rows(host, (("naive_last", "statistical"),))
 
 
+def test_real_p2_initial_priors_check_deadline_before_each_cache_read():
+    from evolving_loop.v2.real.runner import _initial_prior_rows
+
+    numeric = SimpleNamespace(
+        task_id="task_1",
+        entity_name="entity",
+        history_values=(1.0, 2.0, 3.0),
+        future_values=(4.0,),
+        prediction_length=1,
+        frequency="1 day",
+        seasonal_period=1,
+    )
+    calls = []
+
+    class Store:
+        not_applicable = type("NotApplicable", (Exception,), {})
+
+        def forecast(self, name, *_args):
+            calls.append(name)
+            return (4.0,)
+
+    checks = [None, RuntimeError("deadline")]
+
+    def check_deadline():
+        result = checks.pop(0)
+        if result is not None:
+            raise result
+
+    host = SimpleNamespace(
+        train_tasks=(SimpleNamespace(numeric=numeric),), forecast_store=Store()
+    )
+    with pytest.raises(RuntimeError, match="deadline"):
+        _initial_prior_rows(
+            host,
+            (("naive_last", "statistical"), ("naive_mean", "statistical")),
+            check_deadline=check_deadline,
+        )
+
+    assert calls == ["naive_last"]
+
+
 def test_real_source_seed_binds_derived_p3_protocol():
     from evolving_loop.v2.cooperative import CooperativeConfigV2
     from evolving_loop.v2.real.runner import _derived_cooperative_config
@@ -435,6 +476,12 @@ def test_production_ports_complete_root_and_resume_byte_identically(
 
     def source_run(output, *_args, **_kwargs):
         output.mkdir(parents=True, exist_ok=True)
+        (output / "authority/sealed").mkdir(parents=True)
+        (output / "authority/active_source.json").write_bytes(
+            canonical_v2_bytes({"active": "3" * 64})
+        )
+        (output / "source_archive/objects").mkdir(parents=True)
+        (output / "source_archive/events.jsonl").write_text("", encoding="utf-8")
         (output / "evaluation_complete.json").write_bytes(source_result.canonical_bytes())
         return source_result
 
@@ -485,6 +532,29 @@ def test_production_ports_complete_root_and_resume_byte_identically(
     assert first_bytes == (output / "evaluation_complete.json").read_bytes()
     assert [record.stage for record in first.stage_records] == ["p2", "p3", "p4", "p5"]
     assert all((output / stage / "root_stage_completion.json").is_file() for stage in ("p2", "p3", "p4", "p5"))
+
+    wrapper = output / "p3/root_stage_completion.json"
+    wrapper_bytes = wrapper.read_bytes()
+    wrapper.unlink()
+    with pytest.raises(ValueError, match="root stage wrapper"):
+        runner.run_real_evolution(output, manifest, ports)
+    assert not wrapper.exists()
+    wrapper.write_bytes(wrapper_bytes)
+
+    active_source = output / "p4/authority/active_source.json"
+    active_source_bytes = active_source.read_bytes()
+    active_source.unlink()
+    with pytest.raises(ValueError):
+        runner.run_real_evolution(output, manifest, ports)
+    assert not active_source.exists()
+    active_source.write_bytes(active_source_bytes)
+
+    native_bytes = (output / "p5/completion.json").read_bytes()
+    (output / "p5/completion.json").unlink()
+    with pytest.raises(ValueError):
+        runner.run_real_evolution(output, manifest, ports)
+    assert not (output / "p5/completion.json").exists()
+    (output / "p5/completion.json").write_bytes(native_bytes)
 
     native = output / "p5/completion.json"
     tampered = json.loads(native.read_text(encoding="utf-8"))

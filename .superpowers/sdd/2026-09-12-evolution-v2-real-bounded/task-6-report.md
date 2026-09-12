@@ -154,3 +154,28 @@ python -m pytest -q \
 ```
 
 No billable live run was launched during this follow-up.
+
+### Read-only/deadline re-review
+
+The second review round added deadline checks before every initial-prior cache
+read, every Train/Dev shortlist task and candidate, every OOF fold, and every
+hindcast/long-horizon cache call.  Expiration propagates as the existing
+bounded P2 incomplete result instead of being downgraded to diagnostic failure.
+
+Production resume contexts are now explicitly read-only.  Before any native
+seal constructor runs, validation requires each root wrapper and native
+completion plus P4's active Source/archive directories or P5's frozen handoff.
+The wrapper verifier only rereads exact bytes in read-only mode, and a missing
+stage directory is never created.  Focused tests deleted the P3 wrapper, P4
+active Source, and P5 native completion and verified each stayed absent after
+the rejected resume; P5 content tampering remained rejected.
+
+```text
+python -m pytest -q \
+  tests/test_evolution_v2_real_runner.py \
+  tests/test_evolution_v2_real_cli.py \
+  tests/test_task_local_ensemble_cli.py \
+  tests/test_evolution_numerical_selector.py \
+  tests/test_numerical_selector_script.py
+175 passed in 2.36s
+```

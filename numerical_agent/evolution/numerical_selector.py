@@ -1189,6 +1189,7 @@ def diagnose_candidate(
     *,
     screening_policy_hash: str = "",
     runtime_settings: Mapping[str, object] | None = None,
+    check_deadline: Callable[[], None] | None = None,
 ) -> CandidateDiagnostics:
     """Diagnose one candidate using only earlier prefixes of ``task.history``."""
     history = tuple(float(value) for value in task.history)
@@ -1202,6 +1203,8 @@ def diagnose_candidate(
     ends = tuple(first_end + index * fold_horizon for index in range(config.folds))
     folds: list[HindcastFold] = []
     for validation_end in ends:
+        if check_deadline is not None:
+            check_deadline()
         train_end = validation_end - fold_horizon
         prefix = history[:train_end]
         truth = history[train_end:validation_end]
@@ -1223,6 +1226,8 @@ def diagnose_candidate(
     long_horizon_fold = None
     long_horizon_coverage = 0.0
     if config.long_horizon_audit:
+        if check_deadline is not None:
+            check_deadline()
         long_horizon_fold, long_horizon_coverage = _long_horizon_audit_fold(
             task, name, runner, history, tuple(folds)
         )

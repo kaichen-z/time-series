@@ -91,6 +91,42 @@ def test_shortlist_materializer_never_executes_excluded_candidates(monkeypatch: 
     assert not {name for name in calls if name.startswith("method")}
 
 
+def test_shortlist_materializer_checks_deadline_between_candidates() -> None:
+    calls: list[str] = []
+
+    class Store:
+        identity_hash = "store"
+
+        def forecast(self, name, _history, horizon, _frequency):
+            calls.append(name)
+            return (1.0,) * horizon
+
+    shortlist = TaskCandidateShortlistV1(
+        1, "a" * 64, "b" * 64, "c" * 64,
+        ("toto_2_0", "naive_last"), (), True, False,
+    )
+    checks = 0
+
+    def check_deadline():
+        nonlocal checks
+        checks += 1
+        if checks >= 2:
+            raise RuntimeError("deadline")
+
+    with pytest.raises(RuntimeError, match="deadline"):
+        materialize_task_shortlist_rows(
+            Store(),
+            RuntimeTask("task", (1.0, 2.0, 3.0, 4.0), 1, "D", (5.0,)),
+            shortlist,
+            {"toto_2_0": "tsfm", "naive_last": "statistical"},
+            split="dev",
+            hindcast_config=_CONFIDENCE_HINDCAST_CONFIG,
+            check_deadline=check_deadline,
+        )
+
+    assert calls and set(calls) == {"toto_2_0"}
+
+
 def test_forecast_exception_materializes_failure_rows_in_both_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -10,7 +10,7 @@ import types
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Iterable, Mapping, get_args, get_origin, get_type_hints
+from typing import Callable, Iterable, Mapping, get_args, get_origin, get_type_hints
 
 from common.data import Task as DataTask, load_tasks_by_id
 from common.evolution_core.contracts import METRIC_POLICY_FINGERPRINT
@@ -538,13 +538,17 @@ def materialize_task_shortlist_rows(
     *,
     split: str,
     hindcast_config: HindcastConfig,
+    check_deadline: Callable[[], None] | None = None,
 ) -> tuple[TaskLocalTaskRow, ...]:
     """Phase B only: materialize the closed, history-only shortlist in order."""
     if type(shortlist) is not TaskCandidateShortlistV1:
         raise TypeError("shortlist materialization requires an exact shortlist")
     profile = profile_task(task)
     rows: list[TaskLocalTaskRow] = []
+
     for name in shortlist.candidate_names:
+        if check_deadline is not None:
+            check_deadline()
         family = families.get(name)
         if family is None:
             raise ValueError(f"shortlisted candidate has no family: {name}")
@@ -560,8 +564,11 @@ def materialize_task_shortlist_rows(
                 task, name, family, store.forecast,
                 _adaptive_hindcast_config(task, hindcast_config),
                 runtime_settings={"forecast_store": store.identity_hash},
+                check_deadline=check_deadline,
             )
         except Exception as error:
+            if check_deadline is not None:
+                check_deadline()
             diagnostic = None
         rows.append(TaskLocalTaskRow(
             task_id=task.task_id, candidate_name=name, family=family, profile=profile,
@@ -584,6 +591,7 @@ def _shortlist_rows_for_tasks(
     split: str,
     hindcast_config: HindcastConfig,
     output: Path | None = None,
+    check_deadline: Callable[[], None] | None = None,
 ) -> tuple[tuple[TaskLocalTaskRow, ...], tuple[TaskCandidateShortlistV1, ...]]:
     """Close each history-only shortlist before touching its forecast runtime."""
     from .evolution.filtering import FilterDictionary
@@ -593,6 +601,8 @@ def _shortlist_rows_for_tasks(
     rows: list[TaskLocalTaskRow] = []
     shortlists: list[TaskCandidateShortlistV1] = []
     for source in tasks:
+        if check_deadline is not None:
+            check_deadline()
         task = RuntimeTask(source.task_id, tuple(source.history_values), source.prediction_length,
                            source.frequency, tuple(source.future_values))
         shortlist = build_task_candidate_shortlist(
@@ -605,7 +615,10 @@ def _shortlist_rows_for_tasks(
         if output is not None:
             _write_once(output / "task_shortlists" / f"{shortlist.task_input_sha256}.json", shortlist.canonical_bytes())
         shortlists.append(shortlist)
-        rows.extend(materialize_task_shortlist_rows(store, task, shortlist, families, split=split, hindcast_config=hindcast_config))
+        rows.extend(materialize_task_shortlist_rows(
+            store, task, shortlist, families, split=split,
+            hindcast_config=hindcast_config, check_deadline=check_deadline,
+        ))
     return tuple(rows), tuple(shortlists)
 
 
@@ -614,6 +627,7 @@ def _v3_oof_rows(
     dictionary: object, screening: ScreeningPolicy, families: dict[str, str],
     anchor_name: str, policy: TaskShortlistPolicyV1, hindcast_config: HindcastConfig,
     output: Path, fold_priors: dict[int, tuple[CandidatePriorV1, ...]],
+    check_deadline: Callable[[], None] | None = None,
 ) -> tuple[tuple[TaskLocalTaskRow, ...], dict[str, TaskCandidateShortlistV1]]:
     """Use the exact Task 3 complement-prior tuple for each held-out fold."""
     from .evolution.task_local_evolution import GroupFoldManifest
@@ -624,11 +638,14 @@ def _v3_oof_rows(
     shortlists: dict[str, TaskCandidateShortlistV1] = {}
     folds = dict(manifest.task_fold_map)
     for fold in range(manifest.fold_count):
+        if check_deadline is not None:
+            check_deadline()
         held_out = tuple(by_id[task_id] for task_id in sorted(folds) if folds[task_id] == fold)
         fold_rows, fold_shortlists = _shortlist_rows_for_tasks(
             store, held_out, dictionary=dictionary, screening=screening, families=families,
             priors=fold_priors[fold], anchor_name=anchor_name, policy=policy,
             split="train", hindcast_config=hindcast_config, output=output,
+            check_deadline=check_deadline,
         )
         rows.extend(fold_rows)
         shortlists.update({task.task_id: shortlist for task, shortlist in zip(held_out, fold_shortlists, strict=True)})
