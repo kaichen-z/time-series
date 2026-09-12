@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections import Counter
 from pathlib import Path
 
@@ -23,6 +24,10 @@ class SimulatedCrash(RuntimeError):
     pass
 
 
+class SimulatedSealFailure(RuntimeError):
+    pass
+
+
 class FakeClock:
     def __init__(self) -> None:
         self.now = 0.0
@@ -41,6 +46,9 @@ class RunnerCase:
         self.stage_durations = {"p2": 840, "p3": 360, "p4": 120, "p5": 120}
         self.stage_statuses = {stage: "complete" for stage in self.stage_durations}
         self.public_flags = {stage: False for stage in self.stage_durations}
+        self.completion_public_flags = {stage: False for stage in self.stage_durations}
+        self.omit_completion_public_flag: set[str] = set()
+        self.seal_failure_stage: str | None = None
         self.grants: dict[str, int] = {}
         self.calls: Counter[str] = Counter()
         self.order: list[str] = []
@@ -77,11 +85,15 @@ class RunnerCase:
         if self.crashing_stage == stage:
             raise SimulatedCrash(stage)
         payload = {"stage": stage, "status": self.stage_statuses[stage]}
+        if stage not in self.omit_completion_public_flag:
+            payload["public_test_accessed"] = self.completion_public_flags[stage]
         (context.output_dir / "evaluation_complete.json").write_bytes(canonical_v2_bytes(payload))
         return payload
 
     def _seal(self, stage: str, context, result):
         self.order.append(f"seal_{stage}")
+        if self.seal_failure_stage == stage:
+            raise SimulatedSealFailure(stage)
         payload = {"stage": stage, "completion": fingerprint_payload(result)}
         return SealedStageV2(
             completion_sha256=fingerprint_payload(result),
@@ -140,10 +152,19 @@ def test_unused_time_rolls_forward_without_touching_reserve(case: RunnerCase):
 
     result = case.run()
 
-    assert case.grants == {"p2": 840, "p3": 600, "p4": 320, "p5": 240}
+    assert case.grants == {"p2": 840, "p3": 600, "p4": 320, "p5": 340}
     assert result.status == "complete"
     assert case.finalization_started_at is not None
     assert case.finalization_started_at <= 1440
+
+
+def test_carry_accumulates_across_p2_and_p3(case: RunnerCase):
+    case.stage_durations.update(p2=600, p3=100, p4=100, p5=100)
+
+    result = case.run()
+
+    assert result.status == "complete"
+    assert case.grants == {"p2": 840, "p3": 600, "p4": 620, "p5": 640}
 
 
 def test_finalization_reserve_is_not_borrowed(case: RunnerCase):
@@ -180,11 +201,55 @@ def test_stopped_child_returns_incomplete(case: RunnerCase):
 def test_public_evidence_blocks_completion(case: RunnerCase):
     case.public_flags["p4"] = True
 
-    result = case.run()
+    with pytest.raises(ValueError):
+        case.run()
 
-    assert result.status == "failed"
+    checkpoint = json.loads((case.output / "checkpoint.json").read_text())
+    assert checkpoint["phase"] == "FAILED"
     assert not (case.output / "evaluation_complete.json").exists()
     assert case.calls == Counter({"p2": 1, "p3": 1, "p4": 1})
+
+
+@pytest.mark.parametrize(
+    "completion_public, sealed_public, omit_completion_public",
+    [
+        (True, False, False),
+        (False, True, False),
+        (False, False, True),
+    ],
+)
+def test_child_completion_public_evidence_must_be_false_and_match_seal(
+    case: RunnerCase,
+    completion_public: bool,
+    sealed_public: bool,
+    omit_completion_public: bool,
+):
+    case.completion_public_flags["p2"] = completion_public
+    case.public_flags["p2"] = sealed_public
+    if omit_completion_public:
+        case.omit_completion_public_flag.add("p2")
+
+    with pytest.raises(ValueError):
+        case.run()
+
+    checkpoint = json.loads((case.output / "checkpoint.json").read_text())
+    assert checkpoint["phase"] == "FAILED"
+    assert checkpoint["active_stage"] is None
+    assert checkpoint["stage_records"][0]["status"] == "failed"
+    assert case.calls == Counter({"p2": 1})
+
+
+def test_seal_failure_closes_the_active_stage_as_failed(case: RunnerCase):
+    case.seal_failure_stage = "p2"
+
+    with pytest.raises(SimulatedSealFailure):
+        case.run()
+
+    checkpoint = json.loads((case.output / "checkpoint.json").read_text())
+    assert checkpoint["phase"] == "FAILED"
+    assert checkpoint["active_stage"] is None
+    assert checkpoint["stage_records"][0]["status"] == "failed"
+    assert case.calls == Counter({"p2": 1})
 
 
 def test_unknown_inflight_work_is_fully_charged_and_not_replayed(case: RunnerCase):
@@ -209,3 +274,14 @@ def test_completed_resume_is_read_only_and_returns_identical_result(case: Runner
     assert second.canonical_bytes() == first.canonical_bytes()
     assert after == before
     assert case.calls == Counter({"p2": 1, "p3": 1, "p4": 1, "p5": 1})
+
+
+def test_completed_resume_rejects_a_result_with_tampered_bound_fields(case: RunnerCase):
+    case.run()
+    completion_path = case.output / "evaluation_complete.json"
+    payload = json.loads(completion_path.read_text())
+    payload["model_binding_sha256"] = digest("tampered-model")
+    completion_path.write_bytes(canonical_v2_bytes(payload))
+
+    with pytest.raises(ValueError, match="completed root result"):
+        case.resume()

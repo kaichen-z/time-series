@@ -248,10 +248,20 @@ def _stage_status(sealed: SealedStageV2) -> str:
     return value
 
 
-def _stage_output(root: Path, stage: str, completion_sha256: str) -> None:
+def _stage_output(
+    root: Path,
+    stage: str,
+    completion_sha256: str,
+    sealed_public_test_accessed: bool,
+) -> None:
     completion = _read_canonical(root / stage / "evaluation_complete.json")
     if fingerprint_payload(completion) != completion_sha256:
         raise RealRunnerError(f"{stage} completion digest does not match its sealed boundary")
+    completion_public = completion.get("public_test_accessed")
+    if type(completion_public) is not bool:
+        raise RealRunnerError(f"{stage} completion public access evidence is missing")
+    if completion_public or sealed_public_test_accessed or completion_public != sealed_public_test_accessed:
+        raise RealRunnerError(f"{stage} completion public access evidence must be false and match its seal")
 
 
 def _sealed_handoff_payload(stage: str, sealed: SealedStageV2) -> dict[str, object]:
@@ -274,7 +284,6 @@ def _validate_sealed_records(
     for record in records:
         if record.status != "complete" or record.completion_sha256 is None:
             raise RealRunnerError("only complete sealed records can be revalidated")
-        _stage_output(root, record.stage, record.completion_sha256)
         claimed = handoffs.get(record.stage)
         if claimed is None:
             raise RealRunnerError(f"missing root handoff for {record.stage}")
@@ -286,6 +295,7 @@ def _validate_sealed_records(
         public = handoff.get("public_test_accessed")
         if type(public) is not bool:
             raise RealRunnerError(f"{record.stage} public access evidence is missing")
+        _stage_output(root, record.stage, record.completion_sha256, public)
         public_accessed = public_accessed or public
     return public_accessed
 
@@ -336,6 +346,59 @@ def _grant(
     return int(min(base + carry_seconds, search_remaining - later_base))
 
 
+def _terminal_active_failure(
+    *,
+    root: Path,
+    store: V2RunStore,
+    ledger: BudgetLedger,
+    reservation: object,
+    stage: str,
+    grant_seconds: int,
+    records: list[RealStageRecordV2],
+    handoffs: Mapping[str, str],
+) -> None:
+    """Conservatively close a returned-but-unverifiable child as failed."""
+    ledger.close_stage(reservation, ResourceUse(wall_seconds=float(grant_seconds)))
+    records.append(
+        RealStageRecordV2(
+            stage,
+            grant_seconds,
+            grant_seconds,
+            "failed",
+            None,
+            _previous_progress_sha(root),
+        )
+    )
+    _checkpoint(
+        store,
+        ledger,
+        phase="FAILED",
+        records=records,
+        active_stage=None,
+        carry_seconds=0,
+        handoff_sha256s=handoffs,
+        completion_sha256=None,
+    )
+
+
+def _summary(
+    manifest: RealEvolutionManifestV2,
+    plan: BudgetPlan,
+    records: list[RealStageRecordV2],
+    handoffs: Mapping[str, str],
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "status": "complete",
+        "manifest_sha256": manifest.fingerprint(),
+        "model_binding_sha256": manifest.model.fingerprint(),
+        "budget_plan_sha256": plan.fingerprint(),
+        "stage_records": [record.to_payload() for record in records],
+        "handoff_sha256s": dict(handoffs),
+        "public_test_accessed": False,
+    }
+
+
 def run_real_evolution(
     output_dir: str | Path,
     manifest: RealEvolutionManifestV2,
@@ -365,9 +428,12 @@ def run_real_evolution(
         if public or len(records) != len(_STAGES) or not ledger.finalization_started:
             raise RealRunnerError("completed root violates its sealed finalization boundary")
         result = RealRunResultV2.from_payload(_read_canonical(root / "evaluation_complete.json"))
-        if result.status != "complete" or result.completion_sha256 != checkpoint.completion_sha256:
+        expected_result = _result("complete", manifest, records, checkpoint.completion_sha256)
+        if result != expected_result:
             raise RealRunnerError("completed root result does not match checkpoint")
         summary = _read_canonical(root / "result_summary.json")
+        if summary != _summary(manifest, plan, records, handoffs):
+            raise RealRunnerError("completed root summary does not match its checkpointed bindings")
         if fingerprint_payload(summary) != checkpoint.completion_sha256:
             raise RealRunnerError("completed root summary digest does not match checkpoint")
         return result
@@ -396,10 +462,18 @@ def run_real_evolution(
                         carry_seconds=0, handoff_sha256s=handoffs, completion_sha256=None)
             return _result("incomplete", manifest, records)
         seal = getattr(ports, f"seal_{stage}")
-        sealed = seal(context, prior_result)
-        if not isinstance(sealed, SealedStageV2):
-            raise RealRunnerError("stage seal must return SealedStageV2")
-        _stage_output(root, stage, sealed.completion_sha256)
+        try:
+            sealed = seal(context, prior_result)
+            if not isinstance(sealed, SealedStageV2):
+                raise RealRunnerError("stage seal must return SealedStageV2")
+            _stage_status(sealed)
+            _stage_output(root, stage, sealed.completion_sha256, sealed.public_test_accessed)
+        except Exception:
+            _terminal_active_failure(
+                root=root, store=store, ledger=ledger, reservation=active["reservation_sha256"],
+                stage=stage, grant_seconds=grant_seconds, records=records, handoffs=handoffs,
+            )
+            raise
         closure = ledger.close_stage(active["reservation_sha256"], estimate)
         if not closure.allowed:
             records.append(RealStageRecordV2(stage, grant_seconds, grant_seconds, "failed", sealed.completion_sha256, _previous_progress_sha(root)))
@@ -451,12 +525,19 @@ def run_real_evolution(
             raise RealRunnerError("stage monotonic interval is invalid")
         charged_seconds = math.ceil(end - start)
         _persist_run_result(root, stage, result)
-        sealed = getattr(ports, f"seal_{stage}")(context, result)
-        if not isinstance(sealed, SealedStageV2):
-            raise RealRunnerError("stage seal must return SealedStageV2")
-        _stage_output(root, stage, sealed.completion_sha256)
-        closure = ledger.close_stage(permit, ResourceUse(wall_seconds=float(charged_seconds)))
-        stage_status = _stage_status(sealed)
+        try:
+            sealed = getattr(ports, f"seal_{stage}")(context, result)
+            if not isinstance(sealed, SealedStageV2):
+                raise RealRunnerError("stage seal must return SealedStageV2")
+            stage_status = _stage_status(sealed)
+            _stage_output(root, stage, sealed.completion_sha256, sealed.public_test_accessed)
+            closure = ledger.close_stage(permit, ResourceUse(wall_seconds=float(charged_seconds)))
+        except Exception:
+            _terminal_active_failure(
+                root=root, store=store, ledger=ledger, reservation=permit,
+                stage=stage, grant_seconds=grant_seconds, records=records, handoffs=handoffs,
+            )
+            raise
         if not closure.allowed:
             stage_status = "failed"
         handoff_payload = _sealed_handoff_payload(stage, sealed)
@@ -471,10 +552,7 @@ def run_real_evolution(
             {"schema_version": 1, "stage": stage, "stage_record_sha256": record.fingerprint(),
              "completion_sha256": sealed.completion_sha256, "handoff_sha256": handoff_sha, "status": stage_status},
         )
-        # Carry is bounded by the sealed stage's own base allocation.  This is
-        # the profile's forward-only carry rule (and keeps the final reserve out
-        # of P5 even after a very short P4).
-        carry = min(PROFILE_SCHEDULES[manifest.profile].allocations[stage], max(0, grant_seconds - charged_seconds))
+        carry = max(0, grant_seconds - charged_seconds)
         phase = _PHASES[stage][1] if stage_status == "complete" else ("INCOMPLETE" if stage_status == "incomplete" else "FAILED")
         _checkpoint(store, ledger, phase=phase, records=records, active_stage=None, carry_seconds=carry,
                     handoff_sha256s=handoffs, completion_sha256=None)
@@ -497,16 +575,7 @@ def run_real_evolution(
         _checkpoint(store, ledger, phase="FAILED", records=records, active_stage=None, carry_seconds=carry,
                     handoff_sha256s=handoffs, completion_sha256=None)
         return _result("failed", manifest, records)
-    summary = {
-        "schema_version": 1,
-        "status": "complete",
-        "manifest_sha256": manifest.fingerprint(),
-        "model_binding_sha256": manifest.model.fingerprint(),
-        "budget_plan_sha256": plan.fingerprint(),
-        "stage_records": [record.to_payload() for record in records],
-        "handoff_sha256s": handoffs,
-        "public_test_accessed": False,
-    }
+    summary = _summary(manifest, plan, records, handoffs)
     completion_sha = fingerprint_payload(summary)
     write_once_json(root / "result_summary.json", summary)
     result = _result("complete", manifest, records, completion_sha)
