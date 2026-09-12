@@ -5,6 +5,7 @@ from dataclasses import replace
 import pytest
 
 from evolving_loop.package_metrics import PackageEvaluation
+from evolving_loop.v2.source.contracts import SourceVariantV2
 from tests.build_evolution_v2_source_fixture import build_source_case
 
 
@@ -74,3 +75,37 @@ def test_replay_and_canary_bind_deterministic_execution(tmp_path):
     canary = case.evaluator.canary(case.seed_source, case.improving_source, epoch_seed=17)
     assert canary.passed
     assert canary.commitment_sha256
+
+
+def test_finalist_bundle_is_selected_by_all_train_evaluations_before_dev(tmp_path):
+    """Removing full-Train comparison of either fold child must fail this test."""
+    case = build_source_case(tmp_path)
+    selected_by_step = SourceVariantV2.child(
+        case.seed_source,
+        "def choose_arm(request):\n"
+        "    return 'numerical' if request['step'] == 0 else 'decision'\n",
+        "split_fold_arms",
+    )
+    original_factory = case.pipeline_factory
+    full_train: list[tuple[str, float]] = []
+
+    def recording_factory(catalog):
+        pipeline = original_factory(catalog)
+        original_evaluate = pipeline.evaluate
+
+        def evaluate(bundle, tasks, stage):
+            result = original_evaluate(bundle, tasks, stage)
+            if stage == "train" and tuple(tasks) == case.train_tasks:
+                full_train.append((bundle.fingerprint(), result.mean_joint))
+            return result
+
+        pipeline.evaluate = evaluate
+        return pipeline
+
+    case.pipeline_factory = recording_factory
+    case.evaluator.train(selected_by_step)
+
+    assert len(full_train) == 2
+    expected = min(full_train, key=lambda item: (item[1], item[0]))[0]
+    episode = case.evaluator._episodes[(selected_by_step.fingerprint(), 0)]
+    assert episode.selected_bundle.fingerprint() == expected

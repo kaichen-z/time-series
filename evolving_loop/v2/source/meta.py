@@ -228,16 +228,24 @@ class SourceMetaEvaluatorV2:
             children.append(child)
             outcomes.append(child_eval)
             pipelines.append(pipeline)
-        # The child is selected using Train-only evidence.  Its fingerprint is a
-        # deterministic final tie-breaker when folds produced different children.
-        selected_index = min(range(len(children)), key=lambda index: (outcomes[index].mean_joint, children[index].fingerprint()))
-        # Seal the selected Bundle against the complete Train universe before
-        # any Dev call.  This is also the aggregate reported to the Host.
-        sealed_eval, cost = self._evaluate(
-            pipelines[selected_index], children[selected_index], self.train_tasks,
-            "train", split="seal-all-train", seed=epoch_seed,
+        # Every fold child is first sealed on the same complete Train universe.
+        # This full-Train comparison, rather than either held-out fold result,
+        # decides which Bundle may proceed to Dev.
+        sealed_outcomes: list[PackageEvaluation] = []
+        for index, child in enumerate(children):
+            sealed_eval, cost = self._evaluate(
+                pipelines[index], child, self.train_tasks,
+                "train", split="seal-all-train", seed=epoch_seed,
+            )
+            total_cost += cost
+            sealed_outcomes.append(sealed_eval)
+        selected_index = min(
+            range(len(children)),
+            key=lambda index: (
+                sealed_outcomes[index].mean_joint, children[index].fingerprint()
+            ),
         )
-        total_cost += cost
+        sealed_eval = sealed_outcomes[selected_index]
         result = SourceTrainResultV2(
             variant.fingerprint(), tuple(fold_gains), sum(fold_gains) / len(fold_gains),
             sealed_eval.mean_smae, sealed_eval.mean_srmse,
@@ -245,11 +253,11 @@ class SourceMetaEvaluatorV2:
             total_cost, feasible,
             fingerprint_payload({"source": variant.fingerprint(), "epoch_seed": epoch_seed, "fold_gains": fold_gains,
                 "children": [child.fingerprint() for child in children], "evaluations": [value.fingerprint for value in outcomes],
-                "sealed_evaluation": sealed_eval.fingerprint,
+                "sealed_evaluations": [value.fingerprint for value in sealed_outcomes],
                 "case": self._task_identity(self.train_tasks, split="train", seed=epoch_seed)}),
         )
         episode = _TrainingEpisode(
-            result, children[selected_index], (*outcomes, sealed_eval), pipelines[selected_index]
+            result, children[selected_index], (*outcomes, *sealed_outcomes), pipelines[selected_index]
         )
         self._episodes[cache_key] = episode
         return episode
