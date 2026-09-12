@@ -270,7 +270,14 @@ def test_production_ports_prepare_and_run_real_p2(tmp_path: Path, monkeypatch):
         config_payload={"config": True},
         seed_payload={"seed": True},
         task_manifest_payload={"tasks": True},
-        input_sha256s={"prepared": "1" * 64},
+        input_sha256s={
+            "config": "1" * 64,
+            "seed_supply": "2" * 64,
+            "task_manifest": "3" * 64,
+            "champion_release": "4" * 64,
+            "dictionary": "5" * 64,
+            "task_local_evidence": "6" * 64,
+        },
         evidence_path=tmp_path / "root/prepared/p2",
         dictionary=object(),
     )
@@ -300,7 +307,11 @@ def test_production_ports_prepare_and_run_real_p2(tmp_path: Path, monkeypatch):
         "config_payload": prepared.config_payload,
         "seed_payload": prepared.seed_payload,
         "task_manifest_payload": prepared.task_manifest_payload,
-        "input_sha256s": prepared.input_sha256s,
+        "input_sha256s": {
+            "config": "1" * 64,
+            "seed_supply": "2" * 64,
+            "task_manifest": "3" * 64,
+        },
         "task_local_evidence_path": prepared.evidence_path,
         "task_local_dictionary": prepared.dictionary,
     }

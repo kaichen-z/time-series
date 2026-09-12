@@ -200,3 +200,23 @@ python -m pytest -q \
 
 No run artifacts were modified and no live or billable call was launched by
 this fix.
+
+### Live P2 operator-identity seam fix
+
+The next pre-LLM live failure showed that P2 forwarded all six prepared
+provenance identities to `LegacyNumericalAdapter`, whose operator contract
+intentionally accepts exactly config, seed Supply, and task manifest.  The
+production P2 port now projects precisely those three keys at the Numerical
+bridge while the prepared closure retains Champion, Dictionary, and local
+evidence identities for `seal_p2` provenance.
+
+The focused regression crosses the real `numerical_evolve_payload` adapter
+constructor rather than mocking its schema check.
+
+```text
+python -m pytest -q \
+  tests/test_evolution_v2_real_numerical.py \
+  tests/test_evolution_v2_real_cli.py \
+  tests/test_evolution_v2_real_runner.py
+41 passed in 14.12s
+```

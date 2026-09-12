@@ -634,7 +634,10 @@ def build_real_stage_ports(
             config_payload=prepared.config_payload,
             seed_payload=prepared.seed_payload,
             task_manifest_payload=prepared.task_manifest_payload,
-            input_sha256s=prepared.input_sha256s,
+            input_sha256s={
+                name: prepared.input_sha256s[name]
+                for name in ("config", "seed_supply", "task_manifest")
+            },
             task_local_evidence_path=prepared.evidence_path,
             task_local_dictionary=prepared.dictionary,
         )

@@ -224,6 +224,69 @@ def test_real_numerical_bridge_cannot_override_host_llm(tmp_path, monkeypatch):
         bridges.run_real_numerical(**arguments, llm_client=object())
 
 
+def test_real_numerical_bridge_projects_prepared_provenance_at_adapter_boundary(
+    completed_p2, tmp_path, monkeypatch
+):
+    from common.llm import FakeLLMClient
+    from evolving_loop.v2 import cli
+    from evolving_loop.v2.real import runner
+
+    completed_output, _tasks, _completion, _seed = completed_p2
+    fixtures = completed_output.parent / "fixtures"
+    config = json.loads(SMOKE_CONFIG.read_bytes())
+    seed = json.loads((fixtures / "seed_supply.json").read_bytes())
+    task_manifest = json.loads((fixtures / "task_manifest.json").read_bytes())
+    operator_inputs = {
+        "config": "1" * 64,
+        "seed_supply": "2" * 64,
+        "task_manifest": "3" * 64,
+    }
+    prepared_provenance = operator_inputs | {
+        "champion_release": "4" * 64,
+        "dictionary": "5" * 64,
+        "task_local_evidence": "6" * 64,
+    }
+    observed = {}
+
+    def fake_runner(output, _config, _seed, _folds, adapter, **_kwargs):
+        observed["operator_inputs"] = dict(adapter.operator_input_sha256s)
+        output.mkdir(parents=True)
+        (output / "evaluation_complete.json").write_bytes(
+            canonical_v2_bytes({"status": "parsed"})
+        )
+
+    monkeypatch.setattr(cli, "run_numerical_qd", fake_runner)
+    llm = FakeLLMClient([])
+    manifest = RealEvolutionManifestV2.from_payload(_real_manifest_payload())
+    context = runner.RealStageContextV2(
+        "p2",
+        tmp_path / "p2",
+        840,
+        manifest,
+        manifest.fingerprint(),
+        manifest.model.fingerprint(),
+        {},
+    )
+    prepared = SimpleNamespace(
+        config_payload=config,
+        seed_payload=seed,
+        task_manifest_payload=task_manifest,
+        input_sha256s=prepared_provenance,
+        evidence_path=None,
+        dictionary=None,
+    )
+    monkeypatch.setattr(
+        runner, "prepare_real_p2_inputs", lambda *_args, **_kwargs: prepared
+    )
+    ports = runner.build_real_stage_ports(
+        SimpleNamespace(llm_client=llm), manifest=manifest, repo_root=tmp_path
+    )
+    result = ports.run_p2(context)
+
+    assert result == {"status": "parsed"}
+    assert observed["operator_inputs"] == operator_inputs
+
+
 def test_loaded_prepared_payloads_cross_strict_real_numerical_parser(
     tmp_path, monkeypatch
 ):
