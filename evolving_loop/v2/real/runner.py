@@ -149,9 +149,9 @@ class RealStagePorts:
 class PreparedRealP2InputsV2:
     """Closed current-epoch P2 inputs derived from the admitted Champion."""
 
-    config_payload: Mapping[str, object]
-    seed_payload: Mapping[str, object]
-    task_manifest_payload: Mapping[str, object]
+    config_payload: dict[str, object]
+    seed_payload: dict[str, object]
+    task_manifest_payload: dict[str, object]
     input_sha256s: Mapping[str, str]
     evidence_path: Path
     dictionary: object
@@ -357,7 +357,7 @@ def _load_prepared_real_p2(
     if len(task_ids) != 100 or set(evidence.by_task) != task_ids:
         raise RealRunnerError("prepared P2 evidence does not close Train80/Dev20")
     return PreparedRealP2InputsV2(
-        MappingProxyType(config), MappingProxyType(seed), MappingProxyType(tasks),
+        config, seed, tasks,
         MappingProxyType(identities), prepared, dictionary,
     )
 

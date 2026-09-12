@@ -179,3 +179,24 @@ python -m pytest -q \
   tests/test_numerical_selector_script.py
 175 passed in 2.36s
 ```
+
+### Live P2 parser-seam fix
+
+The first authorized live attempt exposed a pre-LLM container mismatch: the
+authenticated prepared loader returned read-only mapping proxies while the
+Numerical payload parsers intentionally require exact dictionaries.  The
+loader now returns its already detached canonical JSON dictionaries for the
+config, seed Supply, and task manifest while retaining a read-only identity
+map.  A focused test loads a fully sealed prepared value and passes all three
+payloads through the real bridge's strict parsing seam.
+
+```text
+python -m pytest -q \
+  tests/test_evolution_v2_real_numerical.py \
+  tests/test_evolution_v2_real_cli.py \
+  tests/test_evolution_v2_real_runner.py
+40 passed in 14.12s
+```
+
+No run artifacts were modified and no live or billable call was launched by
+this fix.

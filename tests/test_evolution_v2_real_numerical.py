@@ -224,6 +224,88 @@ def test_real_numerical_bridge_cannot_override_host_llm(tmp_path, monkeypatch):
         bridges.run_real_numerical(**arguments, llm_client=object())
 
 
+def test_loaded_prepared_payloads_cross_strict_real_numerical_parser(
+    tmp_path, monkeypatch
+):
+    from evolving_loop.package_numerical_supply import parse_numerical_supply_release
+    from evolving_loop.v2.real import bridges, runner
+    from numerical_agent.evolution import task_shortlist
+    from numerical_agent import run_task_local_ensemble_evolution as task_local
+    from tests.test_package_numerical_supply import _supply_release
+
+    manifest = RealEvolutionManifestV2.from_payload(_real_manifest_payload())
+    champion_sha = next(
+        row.sha256 for row in manifest.files if row.role == "numerical_seed"
+    )
+    config = {"schema_version": 1, "kind": "test_config"}
+    seed_release = _supply_release()
+    seed = seed_release.to_payload()
+    tasks = {
+        "train": [{"task_id": f"train-{index}"} for index in range(80)],
+        "dev": [{"task_id": f"dev-{index}"} for index in range(20)],
+    }
+    dictionary = object()
+    dictionary_sha = "d" * 64
+    evidence_index = {"schema_version": 1, "evidence": "closed"}
+    evidence_sha = fingerprint_payload(evidence_index)
+    seal = {
+        "schema_version": 1,
+        "kind": "real_p2_prepared_inputs",
+        "manifest_sha256": manifest.fingerprint(),
+        "champion_sha256": champion_sha,
+        "dictionary_sha256": dictionary_sha,
+        "config_sha256": fingerprint_payload(config),
+        "seed_supply_sha256": fingerprint_payload(seed),
+        "task_manifest_sha256": fingerprint_payload(tasks),
+        "task_local_evidence_sha256": evidence_sha,
+    }
+    payloads = {
+        "prepared_inputs.json": seal,
+        "numerical_config.json": config,
+        "seed_supply.json": seed,
+        "task_manifest.json": tasks,
+        "dictionary.json": {"schema_version": 1, "entries": []},
+    }
+    monkeypatch.setattr(
+        runner, "_read_canonical", lambda path: payloads[Path(path).name]
+    )
+    monkeypatch.setattr(runner, "_dictionary_from_payload", lambda _value: dictionary)
+    monkeypatch.setattr(task_shortlist, "_dictionary_hash", lambda _value: dictionary_sha)
+    monkeypatch.setattr(
+        task_local,
+        "load_task_local_evidence_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            index=evidence_index,
+            by_task={row["task_id"]: object() for split in ("train", "dev") for row in tasks[split]},
+        ),
+    )
+    prepared = runner._load_prepared_real_p2(tmp_path, manifest=manifest)
+
+    def strict_payload_seam(config_payload, seed_payload, task_payload, *_args, **_kwargs):
+        assert type(config_payload) is dict
+        assert type(seed_payload) is dict
+        assert type(task_payload) is dict
+        assert (
+            parse_numerical_supply_release(seed_payload).fingerprint
+            == seed_release.fingerprint
+        )
+        return {"status": "parsed"}
+
+    monkeypatch.setattr(bridges, "numerical_evolve_payload", strict_payload_seam)
+    result = bridges.run_real_numerical(
+        SimpleNamespace(output_dir=tmp_path / "p2"),
+        SimpleNamespace(llm_client=object()),
+        config_payload=prepared.config_payload,
+        seed_payload=prepared.seed_payload,
+        task_manifest_payload=prepared.task_manifest_payload,
+        input_sha256s=prepared.input_sha256s,
+        task_local_evidence_path=prepared.evidence_path,
+        task_local_dictionary=prepared.dictionary,
+    )
+
+    assert result == {"status": "parsed"}
+
+
 def _real_manifest_payload():
     return {
         "schema_version": 1,
