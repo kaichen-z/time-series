@@ -18,6 +18,7 @@ from .contracts import (
     RetrievalModuleV2,
     SchedulerArmStateV2,
 )
+from .config import CooperativeConfigV2, load_cooperative_config
 from .schedulers import record_outcome, select_arm
 from .proposals import propose_bundle_candidate
 from .runner import dev_passed, run_cooperative_evolution, train_eligible
@@ -28,6 +29,7 @@ __all__ = [
     "CooperativeArtifactCatalog",
     "CooperativePipelineAdapter",
     "CooperativeCheckpointV2",
+    "CooperativeConfigV2",
     "CooperativeRunResultV2",
     "CooperativeSchedulerStateV2",
     "DecisionModuleV2",
@@ -37,6 +39,7 @@ __all__ = [
     "RetrievalCoordinateAdapter",
     "SchedulerArmStateV2",
     "record_outcome",
+    "load_cooperative_config",
     "run_cooperative_evolution",
     "propose_bundle_candidate",
     "sanitize_train_feedback",

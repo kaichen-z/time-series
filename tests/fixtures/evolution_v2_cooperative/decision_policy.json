@@ -1,0 +1,1 @@
+{"aggregation":"last","enable_evidence_adjustments":true,"max_evidence_adjustments":2,"prompt":"Select the safest valid numerical candidate using only retrieved context.","schema_version":1,"skills":[]}

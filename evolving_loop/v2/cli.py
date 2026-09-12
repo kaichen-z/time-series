@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import math
 import os
 import stat
@@ -17,26 +18,64 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from common.data import Task
+from common.llm import FakeLLMClient
 from common.payload import strict_json_loads
+from evolving_loop.decision_agent.agent import DecisionAgent
 from evolving_loop.data import ContextTask, Document
 from evolving_loop.package_numerical_evolution import NumericalPackageMaterializer
-from evolving_loop.package_numerical_supply import parse_numerical_supply_release
+from evolving_loop.package_numerical_supply import (
+    bound_numerical_package,
+    build_package_registry,
+    parse_numerical_supply_release,
+)
+from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 from numerical_agent.evolution.screening import (
     ApplicabilityPolicy,
     ScreeningEntry,
     ScreeningPolicy,
 )
+from numerical_agent.evolution.champion import (
+    champion_fingerprint,
+    parse_champion_release,
+)
+from numerical_agent.evolution.execution import Task as RuntimeTask
+from numerical_agent.evolution.numerical_handoff import task_input_fingerprint
+from numerical_agent.evolution.numerical_package import (
+    NumericalForecastPackage,
+    RankedNumericalForecast,
+)
+from numerical_agent.evolution.numerical_selector import (
+    CandidateDiagnostics,
+    SelectionDecision,
+)
+from numerical_agent.evolution.screening import profile_task
 from numerical_agent.evolution.task_local_evolution import build_group_fold_manifest
 
 from .bundle import EvolutionBundleV2
 from .contracts import (
+    EvolutionV2Config,
     KernelProtocolCommitment,
     canonical_v2_bytes,
     load_v2_config,
     require_sha256,
 )
+from .cooperative import (
+    CooperativeArtifactCatalog,
+    CooperativeConfigV2,
+    CooperativePipelineAdapter,
+    DecisionCoordinateAdapter,
+    DecisionModuleV2,
+    NumericalCoordinateAdapter,
+    RetrievalCoordinateAdapter,
+    RetrievalModuleV2,
+    run_cooperative_evolution,
+)
 from .fakes import run_fake_kernel
-from .numerical_qd.adapters import LegacyNumericalAdapter
+from .numerical_qd.adapters import (
+    FrozenNumericalArtifactsV2,
+    LegacyNumericalAdapter,
+    import_numerical_seed,
+)
 from .numerical_qd.config import NumericalQDConfigV2
 from .numerical_qd.persistence import NumericalQDRunStore
 from .numerical_qd.runner import run_numerical_qd
@@ -68,6 +107,36 @@ _TASK_FIELDS = (
     "gt_evidence",
 )
 _DOCUMENT_FIELDS = ("document_id", "content")
+_COOPERATIVE_TASK_MANIFEST_FIELDS = ("schema_version", "train", "dev")
+_EVOLUTION_CONFIG_FIELDS = frozenset(
+    {
+        "schema_version",
+        "profile",
+        "seed",
+        "scheduler",
+        "enabled_mutation_scopes",
+        "archive_capacities",
+        "hyperband",
+        "runtime_fingerprints",
+        "kernel_protocol",
+        "hard_limit_seconds",
+        "finalization_reserve_fraction",
+        "runner",
+    }
+)
+_COOPERATIVE_CONFIG_FIELDS = frozenset(
+    {
+        "schema_version",
+        "control",
+        "max_steps",
+        "children_per_step",
+        "discount",
+        "task_cost_weight",
+        "metric_cap",
+        "acceptance_tolerance",
+        "resource_ceilings",
+    }
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -77,6 +146,10 @@ def build_parser() -> argparse.ArgumentParser:
         "evolve", help="execute or resume deterministic fake evolution"
     )
     evolve.add_argument("--config", required=True, type=Path)
+    evolve.add_argument("--seed-supply", type=Path)
+    evolve.add_argument("--task-manifest", type=Path)
+    evolve.add_argument("--retrieval-release", type=Path)
+    evolve.add_argument("--decision-policy", type=Path)
     evolve.add_argument("--output-dir", required=True, type=Path)
     public = commands.add_parser(
         "public-evaluate", help="validate a frozen accepted Bundle; no Public evaluator"
@@ -101,8 +174,26 @@ def _read_canonical(path: Path) -> dict[str, object]:
     return payload
 
 
-def _evolve(config_path: Path, output: Path) -> dict[str, object]:
-    config = load_v2_config(config_path)
+def _read_evolve_config(path: Path) -> tuple[dict[str, object], bool]:
+    """Read dispatch config once while preserving the legacy formatted profile."""
+    raw = path.read_bytes()
+    payload = strict_json_loads(raw.decode("utf-8"), context=str(path))
+    if type(payload) is not dict:
+        raise ValueError(f"Evolution V2 config must be a JSON object: {path}")
+    return payload, raw == canonical_v2_bytes(payload)
+
+
+def _evolve(
+    config_path: Path,
+    output: Path,
+    *,
+    config_payload: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    config = (
+        load_v2_config(config_path)
+        if config_payload is None
+        else EvolutionV2Config.from_payload(config_payload)
+    )
     if config.profile == "public":
         raise ValueError("public profile requires public-evaluate")
     if config.runner == "production":
@@ -202,13 +293,18 @@ def _regular_canonical_input(
 
 
 def _preflight_numerical_paths(
-    inputs: tuple[Path, ...], output: Path, *, input_identities: tuple[tuple[int, int], ...] | None = None
+    inputs: tuple[Path, ...],
+    output: Path,
+    *,
+    input_identities: tuple[tuple[int, int], ...] | None = None,
 ) -> bool:
     identities = input_identities or tuple(
         (path.stat().st_dev, path.stat().st_ino) for path in inputs
     )
     if len(set(identities)) != len(inputs):
-        raise ValueError("Numerical input files must have distinct filesystem identities")
+        raise ValueError(
+            "Numerical input files must have distinct filesystem identities"
+        )
     absolute = output.absolute()
     for ancestor in (*reversed(absolute.parents), absolute):
         try:
@@ -221,14 +317,17 @@ def _preflight_numerical_paths(
             raise ValueError("Numerical output and ancestors must be real directories")
     resolved_output = absolute.resolve(strict=False)
     for source in inputs:
-        if (
-            source.is_relative_to(resolved_output)
-            or resolved_output.is_relative_to(source.parent)
+        if source.is_relative_to(resolved_output) or resolved_output.is_relative_to(
+            source.parent
         ):
-            raise ValueError("Numerical output and inputs must not overlap in either direction")
+            raise ValueError(
+                "Numerical output and inputs must not overlap in either direction"
+            )
     if absolute.exists():
         if not absolute.is_dir():
-            raise ValueError("Numerical output must be a new directory or exact resumable run")
+            raise ValueError(
+                "Numerical output must be a new directory or exact resumable run"
+            )
         resume = any(absolute.iterdir())
     else:
         resume = False
@@ -255,7 +354,13 @@ def _strings(value: object, field: str) -> tuple[str, ...]:
 
 def _parse_numerical_task(value: object) -> ContextTask:
     task = _exact_fields(value, _TASK_FIELDS, "Numerical task")
-    for field in ("task_id", "entity_name", "frequency", "target_name", "target_description"):
+    for field in (
+        "task_id",
+        "entity_name",
+        "frequency",
+        "target_name",
+        "target_description",
+    ):
         if type(task[field]) is not str or not task[field]:
             raise ValueError(f"Numerical task {field} must be a nonempty string")
     horizon = task["prediction_length"]
@@ -324,14 +429,45 @@ def _parse_task_manifest(payload: Mapping[str, object]):
     if len(ids) != len(set(ids)):
         raise ValueError("Numerical task manifest task identities must be unique")
     fold_payload = manifest["fold_manifest"]
-    if not isinstance(fold_payload, Mapping) or type(fold_payload.get("seed")) is not int:
+    if (
+        not isinstance(fold_payload, Mapping)
+        or type(fold_payload.get("seed")) is not int
+    ):
         raise ValueError("Numerical task manifest requires an exact fold manifest")
     folds = build_group_fold_manifest(
         tuple(task.numeric for task in train), seed=fold_payload["seed"]
     )
     if folds.to_payload() != fold_payload:
-        raise ValueError("Numerical task fold manifest does not bind exact Train80 groups")
+        raise ValueError(
+            "Numerical task fold manifest does not bind exact Train80 groups"
+        )
     return (*train, *dev), folds
+
+
+def _parse_cooperative_task_manifest(
+    payload: Mapping[str, object],
+) -> dict[str, tuple[ContextTask, ...]]:
+    """Parse only the compact 4/1 cooperative task schema.
+
+    This is intentionally separate from the Project 2 Train80/Dev20 parser.
+    """
+    manifest = _exact_fields(
+        payload,
+        _COOPERATIVE_TASK_MANIFEST_FIELDS,
+        "Cooperative task manifest",
+    )
+    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1:
+        raise ValueError("Cooperative task manifest schema_version must be exactly 1")
+    if type(manifest["train"]) is not list or type(manifest["dev"]) is not list:
+        raise ValueError("Cooperative task manifest train/dev must be lists")
+    train = tuple(_parse_numerical_task(value) for value in manifest["train"])
+    dev = tuple(_parse_numerical_task(value) for value in manifest["dev"])
+    if len(train) != 4 or len(dev) != 1:
+        raise ValueError("Cooperative task manifest requires exactly Train4 and Dev1")
+    ids = tuple(task.numeric.task_id for task in (*train, *dev))
+    if len(ids) != len(set(ids)):
+        raise ValueError("Cooperative task identities must be unique")
+    return {"train": train, "dev": dev}
 
 
 class _DeterministicForecastStore:
@@ -384,7 +520,9 @@ def _build_numerical_adapter(
             "Host forecast store identity",
         )
         resource_reporter = getattr(host_runtime, "resource_reporter", None)
-        resource_reporter_sha256 = getattr(host_runtime, "resource_reporter_sha256", None)
+        resource_reporter_sha256 = getattr(
+            host_runtime, "resource_reporter_sha256", None
+        )
         resource_kinds = tuple(getattr(host_runtime, "resource_kinds", ()))
     materializer = NumericalPackageMaterializer(
         forecast_store=forecast_store,
@@ -407,8 +545,13 @@ def _build_numerical_adapter(
 
 
 def _numerical_evolve(
-    config_path: Path, seed_path: Path, task_manifest_path: Path, output: Path,
-    *, host_runtime=None, llm_client=None,
+    config_path: Path,
+    seed_path: Path,
+    task_manifest_path: Path,
+    output: Path,
+    *,
+    host_runtime=None,
+    llm_client=None,
 ) -> dict[str, object]:
     loaded = tuple(
         _regular_canonical_input(path)
@@ -437,7 +580,11 @@ def _numerical_evolve(
         seed,
         folds,
         adapter,
-        llm_client=llm_client if llm_client is not None else getattr(host_runtime, "llm_client", None),
+        llm_client=(
+            llm_client
+            if llm_client is not None
+            else getattr(host_runtime, "llm_client", None)
+        ),
         resume=resume,
     )
     return _read_canonical(output / "evaluation_complete.json")
@@ -466,6 +613,296 @@ def numerical_evolve(
         host_runtime=host_runtime,
         llm_client=llm_client,
     )
+
+
+def _cooperative_ranked(
+    rank: int, name: str, family: str, forecast: tuple[float, ...]
+) -> RankedNumericalForecast:
+    diagnostics = CandidateDiagnostics.synthetic(
+        name=name,
+        family=family,
+        median_mase=0.1,
+        fold_forecasts=(forecast,) * 3,
+        fold_truths=(forecast,) * 3,
+        median_smae=0.1,
+        recent_smae=0.1,
+        worst_smae=0.1,
+        median_srmse=0.1,
+        recent_srmse=0.1,
+        worst_srmse=0.1,
+        worst_smae_raw=0.1,
+        worst_srmse_raw=0.1,
+    )
+    return RankedNumericalForecast(rank, name, family, forecast, diagnostics)
+
+
+def _cooperative_package(task, release, *, anchor_offset):
+    horizon = task.numeric.prediction_length
+    anchor_values = (float(task.numeric.history_values[-1]) + anchor_offset,) * horizon
+    alternative_values = (float(task.numeric.history_values[-1]) + 1.0,) * horizon
+    anchor = _cooperative_ranked(1, "safe_anchor", "tsfm", anchor_values)
+    alternative = _cooperative_ranked(
+        2, "seasonal_naive", "statistical", alternative_values
+    )
+    champion = parse_champion_release(release.to_payload()["anchor_release_payload"])
+    task_profile = profile_task(
+        RuntimeTask(
+            task.numeric.task_id,
+            task.numeric.history_values,
+            task.numeric.prediction_length,
+            task.numeric.frequency,
+            (),
+        )
+    )
+    source = NumericalForecastPackage(
+        task_profile=task_profile,
+        active_candidate_names=(anchor.name, alternative.name),
+        candidate_diagnostics={
+            anchor.name: anchor.diagnostics,
+            alternative.name: alternative.diagnostics,
+        },
+        morphology_card=None,
+        accepted_assumptions=(),
+        rejected_assumptions={},
+        selection_decision=SelectionDecision(
+            mode="single",
+            selected=(anchor.name,),
+            weights=(1.0,),
+            forecast=anchor.forecast,
+            confidence=0.0,
+            reason_codes=("cooperative_smoke_anchor",),
+            rejected={},
+            baseline_name=anchor.name,
+            considered_candidates=(anchor.name, alternative.name),
+        ),
+        final_forecast=anchor.forecast,
+        protected_baseline=anchor,
+        ranked_alternatives=(anchor, alternative),
+        retrieval_handoff=(),
+        component_fingerprints={
+            "task_input": task_input_fingerprint(
+                task_id=task.numeric.task_id,
+                history=task.numeric.history_values,
+                frequency=task.numeric.frequency,
+                horizon=task.numeric.prediction_length,
+            ),
+            "champion_release": champion_fingerprint(champion),
+            "champion_recipe": champion_fingerprint(champion.policy.recipe),
+            "champion_assumptions": champion_fingerprint(
+                champion.policy.recipe.assumptions
+            ),
+        },
+    )
+    return bound_numerical_package(
+        source,
+        release,
+        {anchor.name: anchor, alternative.name: alternative},
+    )
+
+
+def _cooperative_numerical_pair(release, tasks, *, anchor_offset):
+    registry = build_package_registry(
+        tasks,
+        release,
+        lambda task, supplied: _cooperative_package(
+            task, supplied, anchor_offset=anchor_offset
+        ),
+    )
+    envelope = import_numerical_seed(release, registry, tasks=tasks).envelope
+    return FrozenNumericalArtifactsV2(release, registry, envelope, ())
+
+
+def _round1_smoke_response() -> str:
+    return json.dumps(
+        {
+            "evidence_chains": [],
+            "counterevidence": [],
+            "missing_information": [],
+            "sufficient": True,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _decision_smoke_response() -> str:
+    return json.dumps(
+        {
+            "selected_candidate_id": "safe_anchor",
+            "supporting_document_ids": [],
+            "rationale": "Use the deterministic safe anchor.",
+            "request_more_retrieval": False,
+            "gaps": [],
+            "used_skill_names": [],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _cooperative_runtime(config, release, retrieval, decision, tasks, host_runtime):
+    all_tasks = (*tasks["train"], *tasks["dev"])
+    if host_runtime is None:
+        if config.control.profile != "smoke":
+            raise ValueError("cooperative pilot requires an injected Host runtime")
+        seed_numerical = _cooperative_numerical_pair(
+            release, all_tasks, anchor_offset=0.0
+        )
+        alternate_payload = release.to_payload()
+        alternate_payload["version"] = "n002"
+        alternate_payload["parent_sha256"] = release.fingerprint
+        alternate_release = parse_numerical_supply_release(alternate_payload)
+        alternatives = (
+            _cooperative_numerical_pair(
+                alternate_release, all_tasks, anchor_offset=1.0
+            ),
+        )
+
+        def retrieval_factory(genome, skills):
+            return TwoStageRetrievalAgent(
+                FakeLLMClient([_round1_smoke_response()]), genome, skills
+            )
+
+        def decision_factory(module):
+            return DecisionAgent(
+                FakeLLMClient([_decision_smoke_response(), _decision_smoke_response()]),
+                prompt=module.prompt,
+            )
+
+        retrieval_library = None
+        monotonic = None
+    else:
+        seed_numerical = getattr(host_runtime, "seed_numerical", None)
+        alternatives = tuple(getattr(host_runtime, "numerical_alternatives", ()))
+        retrieval_factory = getattr(host_runtime, "retrieval_factory", None)
+        decision_factory = getattr(host_runtime, "decision_factory", None)
+        retrieval_library = getattr(host_runtime, "retrieval_skill_library", None)
+        monotonic = getattr(host_runtime, "monotonic", None)
+        if type(seed_numerical) is not FrozenNumericalArtifactsV2:
+            raise ValueError("Host runtime requires a frozen seed_numerical pair")
+        if seed_numerical.release.fingerprint != release.fingerprint:
+            raise ValueError("Host seed Numerical release does not match seed input")
+        if any(type(item) is not FrozenNumericalArtifactsV2 for item in alternatives):
+            raise ValueError("Host Numerical alternatives must be frozen pairs")
+        if not callable(retrieval_factory) or not callable(decision_factory):
+            raise ValueError("Host runtime requires Retrieval and Decision factories")
+
+    pipeline = CooperativePipelineAdapter(
+        CooperativeArtifactCatalog(lambda _identity, _payload: None),
+        retrieval_factory,
+        decision_factory,
+        metric_cap=config.metric_cap,
+        retrieval_skill_library=retrieval_library,
+    )
+    adapters = {
+        "numerical": NumericalCoordinateAdapter(alternatives),
+        "retrieval": RetrievalCoordinateAdapter(),
+        "decision": DecisionCoordinateAdapter(
+            ("Prefer the lowest finite complete-pipeline error.",)
+        ),
+        "pipeline": pipeline,
+    }
+    if monotonic is not None:
+        adapters["monotonic"] = monotonic
+    return seed_numerical, adapters
+
+
+def _cooperative_evolve(
+    config_path: Path,
+    seed_supply_path: Path,
+    task_manifest_path: Path,
+    retrieval_release_path: Path,
+    decision_policy_path: Path,
+    output: Path,
+    *,
+    host_runtime=None,
+    config_payload: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    config_data = (
+        _read_canonical(config_path) if config_payload is None else dict(config_payload)
+    )
+    config = CooperativeConfigV2.from_payload(config_data)
+    seed_data, task_data, retrieval_data, decision_data = (
+        _read_canonical(path)
+        for path in (
+            seed_supply_path,
+            task_manifest_path,
+            retrieval_release_path,
+            decision_policy_path,
+        )
+    )
+    release = parse_numerical_supply_release(seed_data)
+    tasks = _parse_cooperative_task_manifest(task_data)
+    retrieval = RetrievalModuleV2.from_payload(retrieval_data)
+    decision = DecisionModuleV2.from_payload(decision_data)
+    seed_numerical, adapters = _cooperative_runtime(
+        config, release, retrieval, decision, tasks, host_runtime
+    )
+    if output.exists() and not output.is_dir():
+        raise ValueError("cooperative output must be a directory")
+    resume = output.is_dir() and any(output.iterdir())
+    result = run_cooperative_evolution(
+        output,
+        config,
+        {
+            "numerical": seed_numerical,
+            "retrieval": retrieval,
+            "decision": decision,
+        },
+        tasks,
+        adapters,
+        resume=resume,
+    )
+    return result.to_payload()
+
+
+def cooperative_evolve(
+    config_path: Path,
+    seed_supply_path: Path,
+    task_manifest_path: Path,
+    retrieval_release_path: Path,
+    decision_policy_path: Path,
+    output: Path,
+    *,
+    host_runtime=None,
+) -> dict[str, object]:
+    """Run the cooperative prototype through an explicit Host seam."""
+    return _cooperative_evolve(
+        config_path,
+        seed_supply_path,
+        task_manifest_path,
+        retrieval_release_path,
+        decision_policy_path,
+        output,
+        host_runtime=host_runtime,
+    )
+
+
+def _dispatch_evolve(args) -> dict[str, object]:
+    payload, canonical = _read_evolve_config(args.config)
+    keys = frozenset(payload)
+    cooperative_paths = (
+        args.seed_supply,
+        args.task_manifest,
+        args.retrieval_release,
+        args.decision_policy,
+    )
+    if keys == _EVOLUTION_CONFIG_FIELDS:
+        if any(path is not None for path in cooperative_paths):
+            raise ValueError("cooperative seed flags require a cooperative config")
+        return _evolve(args.config, args.output_dir, config_payload=payload)
+    if keys == _COOPERATIVE_CONFIG_FIELDS:
+        if not canonical:
+            raise ValueError("cooperative config must use canonical V2 JSON")
+        if any(path is None for path in cooperative_paths):
+            raise ValueError("cooperative config requires all four seed input flags")
+        return _cooperative_evolve(
+            args.config,
+            *cooperative_paths,
+            args.output_dir,
+            config_payload=payload,
+        )
+    raise ValueError("evolve config does not match an exact supported schema")
 
 
 def _public_evaluate(bundle_path: Path, output: Path) -> dict[str, object]:
@@ -531,7 +968,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "evolve":
-            summary = _evolve(args.config, args.output_dir)
+            summary = _dispatch_evolve(args)
         elif args.command == "public-evaluate":
             summary = _public_evaluate(args.bundle, args.output_dir)
         else:
@@ -548,4 +985,4 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["build_parser", "main", "numerical_evolve"]
+__all__ = ["build_parser", "cooperative_evolve", "main", "numerical_evolve"]
