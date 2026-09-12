@@ -45,6 +45,7 @@ class ArtifactKindV2(str, Enum):
     TASK_SHORTLIST = "task_shortlist"
     SHORTLIST_POLICY = "shortlist_policy"
     SHORTLIST_INDEX = "shortlist_index"
+    HINDCAST_DIAGNOSTICS = "hindcast_diagnostics"
     BUNDLE = "bundle"
     QD_ARCHIVE = "qd_archive"
     HYPERBAND_STATE = "hyperband_state"
@@ -99,6 +100,8 @@ ARTIFACT_KINDS = MappingProxyType({
         "target_candidates", "maximum_candidates")),
     K.SHORTLIST_INDEX: ArtifactSpecV2(True, payload_fields=("schema_version", "policy_sha256",
         "entries", "public_test_accessed")),
+    K.HINDCAST_DIAGNOSTICS: ArtifactSpecV2(True, payload_fields=("schema_version", "task_id",
+        "rows", "public_test_accessed")),
     K.BUNDLE: ArtifactSpecV2(False, EvolutionBundleV2),
     K.QD_ARCHIVE: ArtifactSpecV2(False, NumericalQDArchive),
     K.HYPERBAND_STATE: ArtifactSpecV2(False, HyperbandStateV2),

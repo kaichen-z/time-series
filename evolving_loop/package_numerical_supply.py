@@ -637,6 +637,7 @@ def bound_numerical_package(
     decision_policy: DecisionPolicy | None = None,
     min_successful_folds: int | None = None,
     shortlist: TaskCandidateShortlistV1 | None = None,
+    hindcast_diagnostics_sha256: str | None = None,
 ) -> NumericalForecastPackage:
     """Bind a legacy projection or a verified schema-v2 task-local shortlist."""
     if not isinstance(source, NumericalForecastPackage):
@@ -654,6 +655,8 @@ def bound_numerical_package(
             _fail("task shortlist Dictionary identity does not match supply")
         if source.protected_baseline.name not in shortlist.candidate_names:
             _fail("task shortlist must retain the protected anchor")
+        if hindcast_diagnostics_sha256 is None or not _SHA256.fullmatch(hindcast_diagnostics_sha256):
+            _fail("task shortlist requires canonical hindcast diagnostics identity")
     _validate_champion_provenance(source, release)
     if source.protected_baseline.name == "atlas_70_30":
         _fail("fixed Atlas blend cannot be the protected source anchor")
@@ -705,6 +708,8 @@ def bound_numerical_package(
         retained.append(candidate)
         retained_names.add(candidate.name)
         retained_vectors.add(vector_sha256)
+    if shortlist is not None and tuple(item.name for item in retained) != shortlist.candidate_names:
+        _fail("every ordered shortlist identity must be present in release and materialized forecasts")
 
     ranked = tuple(
         RankedNumericalForecast(
@@ -740,16 +745,11 @@ def bound_numerical_package(
         policy = TaskShortlistPolicyV1()
         if shortlist.policy_sha256 != policy.fingerprint():
             _fail("task shortlist policy identity is not the canonical policy")
-        diagnostics_identity = {
-            item.name: repr(item.diagnostics) for item in ranked
-        }
         component_fingerprints.update({
             "task_shortlist": shortlist.fingerprint(),
             "shortlist_policy": shortlist.policy_sha256,
             "dictionary": shortlist.dictionary_sha256,
-            "hindcast_diagnostics": hashlib.sha256(
-                canonical_json_bytes(diagnostics_identity)
-            ).hexdigest(),
+            "hindcast_diagnostics": hindcast_diagnostics_sha256,
         })
     morphology_card, accepted, rejected, handoff = _verified_assumption_projection(
         source,

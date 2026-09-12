@@ -465,7 +465,8 @@ def test_schema_v2_package_uses_verified_task_shortlist_not_full_supply() -> Non
         "weighted_pair": _ranked("weighted_pair", "combined", (4.0, 4.0)),
     }
 
-    package = bound_numerical_package(source, release, materialized, shortlist=shortlist)
+    package = bound_numerical_package(source, release, materialized, shortlist=shortlist,
+                                      hindcast_diagnostics_sha256="5" * 64)
 
     assert tuple(item.candidate_id for item in release.alternatives) == (
         "seasonal_naive", "drift", "weighted_pair",
@@ -475,6 +476,7 @@ def test_schema_v2_package_uses_verified_task_shortlist_not_full_supply() -> Non
     assert package.component_fingerprints["task_shortlist"] == shortlist.fingerprint()
     assert package.component_fingerprints["shortlist_policy"] == policy.fingerprint()
     assert package.component_fingerprints["dictionary"] == "4" * 64
+    assert package.component_fingerprints["hindcast_diagnostics"] == "5" * 64
 
 
 def test_bounded_package_projects_verified_alternative_assumption_to_safe_handoff():

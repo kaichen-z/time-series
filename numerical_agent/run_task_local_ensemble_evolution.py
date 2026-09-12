@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Iterable, Mapping
 
@@ -104,6 +104,59 @@ def _task_input_sha(task: RuntimeTask) -> str:
         "task_id": task.task_id, "history": list(task.history), "horizon": task.horizon,
         "frequency": task.frequency,
     })).hexdigest()
+
+
+@dataclass(frozen=True)
+class TaskLocalEvidenceBundleV1:
+    """Read-only Task 4 evidence passed to P2; never a forecast capability."""
+
+    policy: TaskShortlistPolicyV1
+    dictionary_sha256: str
+    index: Mapping[str, object]
+    by_task: Mapping[str, tuple[TaskCandidateShortlistV1, Mapping[str, object], str, str]]
+
+    def __post_init__(self) -> None:
+        if type(self.policy) is not TaskShortlistPolicyV1 or not isinstance(self.dictionary_sha256, str):
+            raise ValueError("task-local evidence requires canonical policy and Dictionary SHA")
+        if len(self.dictionary_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in self.dictionary_sha256):
+            raise ValueError("task-local evidence Dictionary SHA is invalid")
+        index = dict(self.index)
+        if set(index) != {"schema_version", "policy_sha256", "entries", "public_test_accessed"} or index["schema_version"] != 1 or index["policy_sha256"] != self.policy.fingerprint() or index["public_test_accessed"] is not False:
+            raise ValueError("task-local evidence index is not canonical")
+        entries = index["entries"]
+        if type(entries) is not list:
+            raise ValueError("task-local evidence index entries must be a list")
+        ids = []
+        for entry in entries:
+            if type(entry) is not dict or set(entry) != {"task_id", "task_input_sha256", "shortlist_sha256", "diagnostics_sha256"}:
+                raise ValueError("task-local evidence index entry is malformed")
+            ids.append(entry["task_id"])
+        if ids != sorted(ids) or len(ids) != len(set(ids)) or set(ids) != set(self.by_task):
+            raise ValueError("task-local evidence index task IDs are not canonical")
+        for entry in entries:
+            shortlist, diagnostics, shortlist_sha, diagnostics_sha = self.by_task[entry["task_id"]]
+            if (type(shortlist) is not TaskCandidateShortlistV1 or shortlist.policy_sha256 != self.policy.fingerprint()
+                    or shortlist.dictionary_sha256 != self.dictionary_sha256
+                    or shortlist.fingerprint() != shortlist_sha
+                    or hashlib.sha256(canonical_json_bytes(dict(diagnostics))).hexdigest() != diagnostics_sha
+                    or (entry["task_input_sha256"], entry["shortlist_sha256"], entry["diagnostics_sha256"])
+                    != (shortlist.task_input_sha256, shortlist_sha, diagnostics_sha)):
+                raise ValueError("task-local evidence task binding mismatch")
+
+
+def load_task_local_evidence_bundle(output: Path, *, dictionary_sha256: str) -> TaskLocalEvidenceBundleV1:
+    """Load the immutable Task 4 artifacts without materializing any forecast."""
+    try:
+        index = json.loads((output / "task_shortlist_index.json").read_text(encoding="utf-8"))
+        policy = TaskShortlistPolicyV1.from_payload(json.loads((output / "task_shortlist_policy.json").read_text(encoding="utf-8")))
+        by_task = {}
+        for entry in index["entries"]:
+            shortlist = TaskCandidateShortlistV1.from_payload(json.loads((output / "task_shortlists" / f"{entry['task_input_sha256']}.json").read_text(encoding="utf-8")))
+            diagnostics = json.loads((output / "task_diagnostics" / f"{entry['task_input_sha256']}.json").read_text(encoding="utf-8"))
+            by_task[entry["task_id"]] = (shortlist, diagnostics, entry["shortlist_sha256"], entry["diagnostics_sha256"])
+        return TaskLocalEvidenceBundleV1(policy, dictionary_sha256, index, by_task)
+    except (OSError, TypeError, ValueError, KeyError) as error:
+        raise ValueError("task-local evidence bundle is malformed") from error
 
 
 def _load_candidate_priors_bundle(
@@ -485,7 +538,7 @@ def _v3_oof_rows(
     return tuple(rows), shortlists
 
 
-def _shortlist_index(tasks: Iterable[DataTask], shortlists: Mapping[str, TaskCandidateShortlistV1], rows: Iterable[TaskLocalTaskRow]) -> dict[str, object]:
+def _shortlist_index(tasks: Iterable[DataTask], shortlists: Mapping[str, TaskCandidateShortlistV1], rows: Iterable[TaskLocalTaskRow], *, policy: TaskShortlistPolicyV1 | None = None) -> dict[str, object]:
     rows_by_task: dict[str, list[TaskLocalTaskRow]] = {}
     for row in rows:
         rows_by_task.setdefault(row.task_id, []).append(row)
@@ -499,10 +552,16 @@ def _shortlist_index(tasks: Iterable[DataTask], shortlists: Mapping[str, TaskCan
                 for row in rows_by_task.get(task.task_id, [])
             ])).hexdigest()})
     entries.sort(key=lambda item: (item["task_id"], item["task_input_sha256"]))
-    return {"schema_version": 1, "entries": entries}
+    policy = policy or TaskShortlistPolicyV1()
+    return {"schema_version": 1, "policy_sha256": policy.fingerprint(), "entries": entries,
+            "public_test_accessed": False}
 
 
 def _bind_shortlist_index(output: Path, run_manifest: dict[str, object], shortlist_index: dict[str, object]) -> None:
+    policy = TaskShortlistPolicyV1()
+    if shortlist_index.get("policy_sha256") != policy.fingerprint():
+        raise ValueError("shortlist index policy mismatch")
+    _write_once(output / "task_shortlist_policy.json", policy.canonical_bytes())
     _write_once(output / "task_shortlist_index.json", shortlist_index)
     run_manifest["shortlist_index_fingerprint"] = hashlib.sha256(canonical_json_bytes(shortlist_index)).hexdigest()
     _write_once(output / "run_manifest.json", run_manifest)

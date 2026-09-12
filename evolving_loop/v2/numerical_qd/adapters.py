@@ -53,6 +53,7 @@ from numerical_agent.evolution.screening import (
     profile_task,
 )
 from numerical_agent.evolution.task_local_evolution import GroupFoldManifest
+from numerical_agent.run_task_local_ensemble_evolution import TaskLocalEvidenceBundleV1
 
 from ..budget import ResourceUse
 from ..contracts import _require_exact_schema, canonical_v2_bytes, fingerprint_payload, require_sha256
@@ -742,7 +743,7 @@ class LegacyNumericalAdapter:
     def __init__(self, *, materializer, tasks, fold_manifest, sources, proposer=None,
                  host_evaluator=None, host_evaluator_sha256=None, resource_kinds=(),
                  resource_reporter=None, resource_reporter_sha256=None,
-                 operator_input_sha256s=None):
+                 operator_input_sha256s=None, task_local_evidence=None):
         if operator_input_sha256s is None:
             operator_inputs = {}
         elif not isinstance(operator_input_sha256s, Mapping) or set(
@@ -782,9 +783,34 @@ class LegacyNumericalAdapter:
         self.host_evaluator = host_evaluator
         self.host_evaluator_sha256 = host_evaluator_sha256
         self.sources = _sources(sources)
+        if task_local_evidence is not None and type(task_local_evidence) is not TaskLocalEvidenceBundleV1:
+            raise ValueError("task-local evidence must be an exact immutable bundle")
+        self.task_local_evidence = task_local_evidence
         self.resource_kinds = tuple(resource_kinds)
         self.resource_reporter, self.resource_reporter_sha256 = resource_reporter, resource_reporter_sha256
         self.preflight_resources()
+
+    def local_evidence_for(self, task):
+        """Return pre-sealed local evidence only; this cannot execute a model."""
+        if self.task_local_evidence is None:
+            return None
+        task_id = task.numeric.task_id if type(task) is ContextTask else task.task_id
+        try:
+            return self.task_local_evidence.by_task[task_id]
+        except KeyError as error:
+            raise ValueError("task has no sealed local evidence") from error
+
+    def local_evidence_sha256_for(self, candidate_sha, task):
+        require_sha256(candidate_sha, "candidate SHA")
+        evidence = self.local_evidence_for(task)
+        if evidence is None:
+            return None
+        shortlist, _diagnostics, shortlist_sha, diagnostics_sha = evidence
+        task_sha = task_registry_fingerprint(task) if type(task) is ContextTask else shortlist.task_input_sha256
+        return fingerprint_payload({"candidate": candidate_sha, "task": task_sha,
+            "shortlist": shortlist_sha, "diagnostics": diagnostics_sha,
+            "policy": self.task_local_evidence.policy.fingerprint(),
+            "dictionary": self.task_local_evidence.dictionary_sha256})
 
     def declared_resource_kinds(self):
         """Explicit model/store declarations; live legacy inference is not CPU-only by default."""

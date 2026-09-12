@@ -9,7 +9,7 @@ MATERIAL_KINDS = {
     "source", "config", "genome", "inventory", "screening_policy", "combined_policy", "recipe_policy",
     "structural_policy", "mutation_policy", "prompt", "proposer_request", "proposal_attempt",
     "executable_child", "evaluation", "rung_manifest", "task_result", "qd_entry", "cell_subset",
-    "frozen_pair", "bootstrap_forecast", "task_shortlist", "shortlist_policy", "shortlist_index",
+    "frozen_pair", "bootstrap_forecast", "task_shortlist", "shortlist_policy", "shortlist_index", "hindcast_diagnostics",
 }
 
 
