@@ -619,7 +619,7 @@ class NumericalPackageMaterializer:
         retained = [
             item
             for item in parent.alternatives
-            if item.family != family and item.candidate_id != alternative.candidate_id
+            if item.candidate_id != alternative.candidate_id
             and any(
                 policy != item.full_build_policy_payload
                 for _fold, policy in item.build_fold_policy_payloads
@@ -627,7 +627,9 @@ class NumericalPackageMaterializer:
         ]
         retained.append(alternative)
         if self.atlas_release is not None:
-            retained = [item for item in retained if item.family != "atlas_overlay"]
+            retained = [
+                item for item in retained if item.candidate_id != "atlas_70_30"
+            ]
             retained.append(
                 NumericalAlternativeSpec(
                     candidate_id="atlas_70_30",
@@ -647,11 +649,10 @@ class NumericalPackageMaterializer:
                     ),
                 )
             )
-        order = {"statistical": 0, "tsfm": 1, "combined": 2, "atlas_overlay": 3}
-        alternatives = tuple(sorted(retained, key=lambda item: order[item.family]))
+        alternatives = tuple(retained)
         try:
             return NumericalSupplyRelease(
-                schema_version=1,
+                schema_version=2,
                 version=version,
                 parent_sha256=parent.fingerprint,
                 anchor_release_payload=cast(

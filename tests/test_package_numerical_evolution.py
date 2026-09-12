@@ -1194,6 +1194,64 @@ def test_materializer_rematerializes_every_retained_parent_alternative() -> None
     }
 
 
+def test_materializer_emits_v2_without_collapsing_repeated_family_parent_catalog() -> None:
+    build_tasks = _tasks()
+    manifest = build_group_fold_manifest(build_tasks, seed=20260903)
+    fit = fit_numerical_recipe(_recipe(), _build_rows(build_tasks), manifest, _parent())
+    retained = _retained_combined_spec()
+    retained_payload = retained.to_payload()
+    repeated_family = NumericalAlternativeSpec(
+        candidate_id="retained_weighted_2",
+        family="combined",
+        materializer_kind="champion",
+        recipe_payload=retained_payload["recipe_payload"],
+        full_build_policy_payload=retained_payload["full_build_policy_payload"],
+        build_fold_policy_payloads=tuple(
+            (fold, policy)
+            for fold, policy in retained_payload["build_fold_policy_payloads"]
+        ),
+        assumption_ids=retained.assumption_ids,
+        failure_conditions=retained.failure_conditions,
+    )
+    parent = NumericalSupplyRelease(
+        schema_version=2,
+        version="n000",
+        parent_sha256=None,
+        anchor_release_payload=_parent().to_payload(),
+        alternatives=(retained, repeated_family),
+        atlas_release_sha256=None,
+        source_fingerprints={"dictionary": "2" * 64},
+        runtime_fingerprints={"materializer": "3" * 64},
+    )
+    original_tasks = _evolution_tasks()
+    materializer = NumericalPackageMaterializer(
+        forecast_store=_FixtureForecastStore(),
+        screening_policy=_screening(),
+        fold_manifest=manifest,
+        original_tasks=original_tasks,
+        source_fingerprints={"dictionary": "2" * 64},
+        runtime_fingerprints={"materializer": "3" * 64},
+        diagnostics_registry=FrozenNumericalDiagnosticsRegistry.build(
+            original_tasks, _history_diagnostics(original_tasks), HindcastConfig()
+        ),
+    )
+
+    candidate = materializer.materialize(
+        parent,
+        fit,
+        _label_free(original_tasks),
+        version="n001",
+        generation=0,
+    )
+
+    assert candidate.release.schema_version == 2
+    assert tuple(item.candidate_id for item in candidate.release.alternatives) == (
+        "retained_weighted",
+        "retained_weighted_2",
+        _recipe().name,
+    )
+
+
 def test_materializer_drops_seed_only_retained_alternative_from_nonseed_release() -> None:
     build_tasks = _tasks()
     manifest = build_group_fold_manifest(build_tasks, seed=20260903)

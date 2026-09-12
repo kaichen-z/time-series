@@ -15,6 +15,7 @@ from evolving_loop.package_numerical_supply import (
     NumericalSupplyRelease,
     bound_numerical_package,
     build_package_registry,
+    parse_numerical_supply_release,
 )
 from evolving_loop.package_registry import (
     FrozenNumericalPackageRegistry,
@@ -288,6 +289,46 @@ def test_supply_release_rejects_five_additional_alternatives():
                 for index in range(5)
             )
         )
+
+
+def test_schema_v1_supply_rejects_repeated_family_before_catalog_migration() -> None:
+    with pytest.raises(NumericalSupplyError, match="one alternative per family"):
+        _supply_release(
+            alternatives=(
+                _alternative("seasonal_naive", "statistical"),
+                _alternative("drift", "statistical"),
+            )
+        )
+
+
+def test_schema_v2_supply_round_trips_complete_ordered_repeated_family_catalog() -> None:
+    families = (
+        "statistical",
+        "tsfm",
+        "combined",
+        "atlas_overlay",
+    )
+    alternatives = tuple(
+        _alternative(f"candidate_{index:02d}", families[index % len(families)])
+        for index in range(12)
+    )
+    release = NumericalSupplyRelease(
+        schema_version=2,
+        version="n001",
+        parent_sha256="2" * 64,
+        anchor_release_payload=_anchor_release().to_payload(),
+        alternatives=alternatives,
+        atlas_release_sha256="3" * 64,
+        source_fingerprints={"dictionary": "4" * 64},
+        runtime_fingerprints={"materializer": "5" * 64},
+    )
+
+    parsed = parse_numerical_supply_release(release.to_payload())
+
+    assert parsed.to_payload() == release.to_payload()
+    assert tuple(item.candidate_id for item in parsed.alternatives) == tuple(
+        f"candidate_{index:02d}" for index in range(12)
+    )
 
 
 def test_non_seed_supply_rejects_full_build_policy_reused_for_every_fold():

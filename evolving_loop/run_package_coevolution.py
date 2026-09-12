@@ -690,11 +690,10 @@ def _initial_supply_release(
         )
 
     selected: list[NumericalAlternativeSpec] = []
-    seen_families: set[str] = set()
     for candidate_id, family in candidates:
         if family not in {"statistical", "tsfm", "combined"}:
             continue
-        if candidate_id in protected_names or family in seen_families:
+        if candidate_id in protected_names:
             continue
         candidate_policy = seed_policy(candidate_id)
         selected.append(
@@ -717,7 +716,6 @@ def _initial_supply_release(
                 ),
             )
         )
-        seen_families.add(family)
     if atlas is not None:
         candidate_policy = seed_policy("atlas_70_30")
         selected.append(
@@ -741,7 +739,7 @@ def _initial_supply_release(
             )
         )
     return NumericalSupplyRelease(
-        schema_version=1,
+        schema_version=2,
         version="n000",
         parent_sha256=None,
         anchor_release_payload=champion.to_payload(),
@@ -1123,12 +1121,29 @@ class _SmokeNumericalProposer:
                 item.failure_condition for item in recipe.assumptions
             ),
         )
-        by_family = {item.family: item for item in release.alternatives}
-        by_family[alternative.family] = alternative
-        alternatives = tuple(
-            by_family[family]
-            for family in ("statistical", "tsfm", "combined", "atlas_overlay")
-            if family in by_family
+        retained = tuple(
+            item
+            for item in release.alternatives
+            if (
+                item.family != alternative.family
+                if release.schema_version == 1
+                else item.candidate_id != alternative.candidate_id
+            )
+        )
+        alternatives = (
+            tuple(
+                sorted(
+                    (*retained, alternative),
+                    key=lambda item: (
+                        "statistical",
+                        "tsfm",
+                        "combined",
+                        "atlas_overlay",
+                    ).index(item.family),
+                )
+            )
+            if release.schema_version == 1
+            else (*retained, alternative)
         )
         child_release = NumericalSupplyRelease(
             schema_version=1,

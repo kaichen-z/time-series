@@ -286,8 +286,8 @@ class NumericalSupplyRelease:
     runtime_fingerprints: Mapping[str, str]
 
     def __post_init__(self) -> None:
-        if type(self.schema_version) is not int or self.schema_version != 1:
-            _fail("Numerical supply schema_version must be 1")
+        if type(self.schema_version) is not int or self.schema_version not in {1, 2}:
+            _fail("Numerical supply schema_version must be 1 or 2")
         if type(self.version) is not str or _VERSION.fullmatch(self.version) is None:
             _fail("Numerical supply version must use nNNN format")
         if self.version == "n000":
@@ -305,14 +305,19 @@ class NumericalSupplyRelease:
         alternatives = tuple(self.alternatives)
         if any(not isinstance(item, NumericalAlternativeSpec) for item in alternatives):
             _fail("alternatives must contain NumericalAlternativeSpec values")
-        if len(alternatives) > 4:
-            _fail("Numerical supply permits at most four additional alternatives")
-        candidate_ids = tuple(item.candidate_id for item in alternatives)
-        if len(candidate_ids) != len(set(candidate_ids)):
-            _fail("Numerical supply candidate IDs must be unique")
-        families = tuple(item.family for item in alternatives)
-        if len(families) != len(set(families)):
-            _fail("Numerical supply permits one alternative per family")
+        if self.schema_version == 1:
+            if len(alternatives) > 4:
+                _fail("Numerical supply permits at most four additional alternatives")
+            candidate_ids = tuple(item.candidate_id for item in alternatives)
+            if len(candidate_ids) != len(set(candidate_ids)):
+                _fail("Numerical supply candidate IDs must be unique")
+            families = tuple(item.family for item in alternatives)
+            if len(families) != len(set(families)):
+                _fail("Numerical supply permits one alternative per family")
+        else:
+            candidate_ids = tuple(item.candidate_id for item in alternatives)
+            if len(candidate_ids) != len(set(candidate_ids)):
+                _fail("Numerical supply candidate IDs must be unique")
         if self.version != "n000":
             for item in alternatives:
                 if all(
@@ -652,15 +657,23 @@ def bound_numerical_package(
     retained = [anchor]
     retained_names = {anchor.name}
     retained_vectors = {_forecast_sha256(anchor.forecast)}
-    by_family = {item.family: item for item in release.alternatives}
-    for family in _FAMILIES:
-        specification = by_family.get(family)
-        if specification is None or specification.candidate_id in retained_names:
+    specifications = (
+        tuple(
+            item
+            for family in _FAMILIES
+            for item in release.alternatives
+            if item.family == family
+        )
+        if release.schema_version == 1
+        else release.alternatives
+    )
+    for specification in specifications:
+        if specification.candidate_id in retained_names:
             continue
         candidate = _materialized_item(
             materialized,
             candidate_id=specification.candidate_id,
-            family=family,
+            family=specification.family,
             horizon=source.task_profile.horizon,
         )
         if candidate is None:
