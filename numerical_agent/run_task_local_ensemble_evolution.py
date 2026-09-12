@@ -497,7 +497,7 @@ def _materialize_rows(
             else:
                 try:
                     forecast = store.forecast(name, task.history, task.horizon, task.frequency)
-                except Exception as error:
+                except Exception:
                     failure = f"{type(error).__name__}: {error}"[:10000]
                 try:
                     task_hindcast_config = _adaptive_hindcast_config(
@@ -512,9 +512,7 @@ def _materialize_rows(
                         runtime_settings={"forecast_store": store.identity_hash},
                     )
                 except Exception as error:
-                    if failure is None:
-                        forecast = None
-                        failure = f"HistoryDiagnosticUnavailable: {type(error).__name__}"[:10000]
+                    diagnostic = None
             rows.append(
                 TaskLocalTaskRow(
                     task_id=task.task_id,
@@ -555,7 +553,7 @@ def materialize_task_shortlist_rows(
         failure: str | None = None
         try:
             forecast = store.forecast(name, task.history, task.horizon, task.frequency)
-        except Exception as error:
+        except Exception:
             failure = f"shortlisted_runtime_failure: {type(error).__name__}: {error}"[:10000]
         try:
             diagnostic = diagnose_candidate(
@@ -564,9 +562,7 @@ def materialize_task_shortlist_rows(
                 runtime_settings={"forecast_store": store.identity_hash},
             )
         except Exception as error:
-            if failure is None:
-                forecast = None
-                failure = f"shortlisted_runtime_failure: HistoryDiagnosticUnavailable: {type(error).__name__}"[:10000]
+            diagnostic = None
         rows.append(TaskLocalTaskRow(
             task_id=task.task_id, candidate_name=name, family=family, profile=profile,
             history=tuple(task.history), truth=tuple(task.future), forecast=forecast,

@@ -40,7 +40,7 @@ from .task_local_ensemble import (
     execute_task_local_ensemble,
     task_local_fingerprint,
 )
-from .task_shortlist import CandidatePriorV1, fit_candidate_priors
+from .task_shortlist import CandidatePriorV1, fit_candidate_priors, task_morphology_key
 
 
 _GROUPING_SCHEMA = 1
@@ -168,42 +168,6 @@ def _task_profile(task: DataTask) -> TaskProfile:
             (),
         )
     )
-
-
-def task_morphology_key(profile: TaskProfile) -> str:
-    """Return a stable task-identity-free morphology bucket."""
-    if type(profile) is not TaskProfile:
-        raise TypeError("morphology grouping requires an exact TaskProfile")
-    history_bucket = (
-        "short" if profile.history_length < 64 else
-        "medium" if profile.history_length < 256 else
-        "long"
-    )
-    ratio = profile.horizon / profile.history_length
-    horizon_bucket = "short" if ratio <= 0.1 else "medium" if ratio <= 0.3 else "long"
-    trend = (
-        profile.trend_direction
-        if profile.trend_strength >= 0.35 and profile.trend_direction != "flat"
-        else "flat"
-    )
-    payload = {
-        "frequency": _canonical_identity(profile.frequency),
-        "history": history_bucket,
-        "horizon": horizon_bucket,
-        "trend": trend,
-        "periodic": bool(
-            profile.periodicity_periods and profile.periodicity_confidence >= 0.5
-        ),
-        "intermittent": bool(
-            profile.zero_fraction >= 0.5 or profile.intermittency_adi >= 1.32
-        ),
-        "recent_regime": bool(
-            profile.recent_regime_start is not None
-            and profile.recent_regime_confidence >= 0.5
-        ),
-        "signed": profile.signed,
-    }
-    return _sha256(payload)
 
 
 def build_group_fold_manifest(

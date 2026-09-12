@@ -15,6 +15,7 @@ from numerical_agent.evolution.task_shortlist import (
     TaskShortlistPolicyV1,
     build_task_candidate_shortlist,
     fit_candidate_priors,
+    task_morphology_key,
 )
 from numerical_agent.evolution.task_local_evolution import (
     TaskLocalTaskRow, GroupFoldManifest, fit_oof_shortlist_priors,
@@ -45,6 +46,25 @@ def test_policy_has_exact_bounds_and_prior_rejects_nonfinite():
     assert TaskShortlistPolicyV1().canonical_bytes()
     assert len(TaskShortlistPolicyV1().fingerprint()) == 64
     assert len(CandidatePriorV1("a", "statistical", .5, 1, 1, ()).fingerprint()) == 64
+
+
+@pytest.mark.parametrize(
+    ("candidate_names", "exclusions", "underfilled"),
+    (
+        ((), (), True),
+        (tuple(f"c{index}" for index in range(11)), (), False),
+        (("anchor",), (("anchor", "ranked_out"),), True),
+        (("anchor",), (), False),
+    ),
+)
+def test_shortlist_contract_rejects_invalid_cardinality_overlap_and_underfill(
+    candidate_names, exclusions, underfilled,
+):
+    with pytest.raises(ValueError):
+        TaskCandidateShortlistV1(
+            1, "1" * 64, "2" * 64, "3" * 64,
+            candidate_names, exclusions, underfilled, False,
+        )
 
 
 def _profile(**changes):
@@ -167,6 +187,31 @@ def test_builder_requires_screening_and_selects_exact_target_with_dynamic_family
     assert len(set(next(e.family for e in dictionary.entries if e.name == n) for n in result.candidate_names[:4])) == 3
 
 
+def test_morphology_priors_change_shortlist_for_history_buckets_with_tied_globals():
+    names = ("anchor", *(f"core{index}" for index in range(6)), "alpha", "beta")
+    dictionary = _dictionary(names)
+    screening = _screening(names)
+    short_profile = _profile(history_length=32)
+    long_profile = _profile(history_length=100)
+    short_key = task_morphology_key(short_profile)
+    long_key = task_morphology_key(long_profile)
+    assert short_key != long_key
+    priors = (
+        CandidatePriorV1("anchor", "statistical", .9, 1, 1, ()),
+        *(CandidatePriorV1(name, "statistical", .9, 1, 1, ((short_key, -1.0), (long_key, -1.0)))
+          for name in names[1:7]),
+        CandidatePriorV1("alpha", "statistical", .9, 1, 1, ((short_key, 0.0), (long_key, 2.0))),
+        CandidatePriorV1("beta", "statistical", .9, 1, 1, ((short_key, 2.0), (long_key, 0.0))),
+    )
+    common = dict(dictionary=dictionary, screening=screening, task_input_sha256="1" * 64,
+                  anchor_name="anchor", available_names=names, priors=priors,
+                  policy=TaskShortlistPolicyV1())
+    short = build_task_candidate_shortlist(profile=short_profile, **common)
+    long = build_task_candidate_shortlist(profile=long_profile, **common)
+    assert set(short.candidate_names) - set(long.candidate_names) == {"alpha"}
+    assert set(long.candidate_names) - set(short.candidate_names) == {"beta"}
+
+
 def test_ranked_out_is_emitted_with_other_exclusion_reasons():
     names = ("anchor", "unsafe", "special", "missing") + tuple(f"r{i}" for i in range(10))
     dictionary = FilterDictionary(tuple(FilterEntry(n, "statistical", "quarantine" if n == "unsafe" else "keep", (), "safe") for n in names if n != "missing"))
@@ -182,7 +227,7 @@ def test_from_payload_rejects_json_type_coercion_and_malformed_rows():
     with pytest.raises(ValueError): CandidatePriorV1.from_payload({**prior, "candidate_name": 3})
     policy = TaskShortlistPolicyV1().to_payload()
     with pytest.raises(ValueError): TaskShortlistPolicyV1.from_payload({**policy, "schema_version": True})
-    value = TaskCandidateShortlistV1(1, "1" * 64, "2" * 64, "3" * 64, ("anchor",), (), False, False).to_payload()
+    value = TaskCandidateShortlistV1(1, "1" * 64, "2" * 64, "3" * 64, ("anchor",), (), True, False).to_payload()
     with pytest.raises(ValueError): TaskCandidateShortlistV1.from_payload({**value, "candidate_names": ("anchor",)})
     with pytest.raises(ValueError): TaskCandidateShortlistV1.from_payload({**value, "task_input_sha256": 3})
     with pytest.raises(ValueError): TaskCandidateShortlistV1.from_payload({**value, "exclusion_reasons": [["x"]]})

@@ -25,6 +25,10 @@ from numerical_agent.evolution.task_shortlist import CandidatePriorV1, TaskShort
 from numerical_agent.evolution.filtering import FilterDictionary, FilterEntry
 from numerical_agent.evolution.screening import ApplicabilityPolicy, ScreeningEntry, ScreeningPolicy
 from numerical_agent.evolution.task_local_evolution import GroupFoldManifest
+from numerical_agent.evolution.task_local_ensemble import (
+    TaskLocalTournamentPolicy,
+    execute_task_local_ensemble,
+)
 from common.data import Task as DataTask
 
 
@@ -85,6 +89,50 @@ def test_shortlist_materializer_never_executes_excluded_candidates(monkeypatch: 
     assert calls == [item for name in selected for item in (name, f"diagnose:{name}")]
     assert {row.candidate_name for row in rows} == set(selected)
     assert not {name for name in calls if name.startswith("method")}
+
+
+def test_diagnostic_failure_preserves_forecast_and_tournament_records_anchor_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Store:
+        identity_hash = "store"
+
+        def forecast(self, name: str, history, horizon: int, frequency: str):
+            return (1.0,) * horizon if name == "toto_2_0" else (9.0,) * horizon
+
+    def diagnose(task, name, family, forecast, config, **_kwargs):
+        if name == "specialist":
+            raise RuntimeError("diagnostics unavailable")
+        return CandidateDiagnostics.synthetic(
+            name=name, family=family, median_mase=1.0,
+            fold_forecasts=((1.0,),) * 3, fold_truths=((1.0,),) * 3,
+            median_smae=1.0, median_srmse=1.0,
+        )
+
+    monkeypatch.setattr("numerical_agent.run_task_local_ensemble_evolution.diagnose_candidate", diagnose)
+    shortlist = TaskCandidateShortlistV1(
+        1, "a" * 64, "b" * 64, "c" * 64,
+        ("toto_2_0", "specialist"), (), True, False,
+    )
+    rows = materialize_task_shortlist_rows(
+        Store(), RuntimeTask("task", (1.0, 2.0, 3.0, 4.0), 1, "D", (5.0,)),
+        shortlist, {"toto_2_0": "tsfm", "specialist": "statistical"}, split="dev",
+        hindcast_config=_CONFIDENCE_HINDCAST_CONFIG,
+    )
+    by_name = {row.candidate_name: row for row in rows}
+    assert by_name["specialist"].forecast == (9.0,)
+    assert by_name["specialist"].diagnostic is None
+    assert by_name["specialist"].failure_reason is None
+    result = execute_task_local_ensemble(
+        TaskLocalTournamentPolicy(), candidate_names=shortlist.candidate_names,
+        forecasts={name: row.forecast for name, row in by_name.items() if row.forecast is not None},
+        diagnostics={name: row.diagnostic for name, row in by_name.items() if row.diagnostic is not None},
+        horizon=1,
+    )
+    assert result.forecast == (1.0,)
+    assert result.selected_names == ("toto_2_0",)
+    assert result.activated is False
+    assert result.fallback_reason == "no_eligible_specialist"
 
 
 def test_prior_bundle_requires_exact_complement_and_final_prior_authority(tmp_path: Path) -> None:

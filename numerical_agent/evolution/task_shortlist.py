@@ -11,7 +11,11 @@ from common.payload import canonical_json_bytes
 from common.metrics import drcik_point_metrics, joint_scaled_error, linear_quantile
 
 from .filtering import FAMILIES, FilterDictionary
-from .screening import ScreeningPolicy, TaskProfile, materialize_active_dictionary, profile_tags
+from .screening import ScreeningPolicy, TaskProfile, materialize_active_dictionary
+
+
+_SHORTLIST_MINIMUM_CANDIDATES = 6
+_SHORTLIST_MAXIMUM_CANDIDATES = 10
 
 
 def _name(value: object, field: str = "name") -> str:
@@ -50,6 +54,58 @@ def _number(value: object, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{field} must be numeric")
     return _finite(value, field)
+
+
+def task_morphology_key(profile: TaskProfile) -> str:
+    """Return the sole stable, history-only bucket used for priors and ranking."""
+    if type(profile) is not TaskProfile:
+        raise TypeError("morphology grouping requires an exact TaskProfile")
+    history_bucket = (
+        "short" if profile.history_length < 64 else
+        "medium" if profile.history_length < 256 else
+        "long"
+    )
+    ratio = profile.horizon / profile.history_length
+    horizon_bucket = "short" if ratio <= 0.1 else "medium" if ratio <= 0.3 else "long"
+    trend = (
+        profile.trend_direction
+        if profile.trend_strength >= 0.35 and profile.trend_direction != "flat"
+        else "flat"
+    )
+    payload = {
+        "frequency": unicodedata.normalize("NFKC", profile.frequency).casefold().strip(),
+        "history": history_bucket,
+        "horizon": horizon_bucket,
+        "trend": trend,
+        "periodic": bool(
+            profile.periodicity_periods and profile.periodicity_confidence >= 0.5
+        ),
+        "intermittent": bool(
+            profile.zero_fraction >= 0.5 or profile.intermittency_adi >= 1.32
+        ),
+        "recent_regime": bool(
+            profile.recent_regime_start is not None
+            and profile.recent_regime_confidence >= 0.5
+        ),
+        "signed": profile.signed,
+    }
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
+def validate_task_candidate_shortlist(
+    candidate_names: Sequence[str],
+    exclusion_reasons: Sequence[tuple[str, str]],
+    shortlist_underfilled: bool,
+) -> None:
+    """Validate cardinality and membership invariants reusable by artifact readers."""
+    if not candidate_names:
+        raise ValueError("shortlist requires at least one selected candidate")
+    if len(candidate_names) > _SHORTLIST_MAXIMUM_CANDIDATES:
+        raise ValueError("shortlist exceeds the fixed maximum candidate count")
+    if set(candidate_names).intersection(name for name, _reason in exclusion_reasons):
+        raise ValueError("selected and excluded candidate names must be disjoint")
+    if shortlist_underfilled != (len(candidate_names) < _SHORTLIST_MINIMUM_CANDIDATES):
+        raise ValueError("shortlist underfilled flag disagrees with the fixed minimum")
 
 
 def fit_candidate_priors(
@@ -186,11 +242,11 @@ class TaskShortlistPolicyV1:
     maximum_candidates: int = 10
 
     def __post_init__(self) -> None:
-        if (self.schema_version, self.minimum_candidates, self.target_candidates, self.maximum_candidates) != (1, 6, 8, 10):
+        if (self.schema_version, self.minimum_candidates, self.target_candidates, self.maximum_candidates) != (1, _SHORTLIST_MINIMUM_CANDIDATES, 8, _SHORTLIST_MAXIMUM_CANDIDATES):
             raise ValueError("TaskShortlistPolicyV1 bounds are exactly 1/6/8/10")
 
     def to_payload(self) -> dict[str, object]:
-        return {"schema_version": 1, "minimum_candidates": 6, "target_candidates": 8, "maximum_candidates": 10}
+        return {"schema_version": 1, "minimum_candidates": _SHORTLIST_MINIMUM_CANDIDATES, "target_candidates": 8, "maximum_candidates": _SHORTLIST_MAXIMUM_CANDIDATES}
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> "TaskShortlistPolicyV1":
@@ -237,6 +293,9 @@ class TaskCandidateShortlistV1:
             raise ValueError("exclusions must be ordered and unique canonical IDs")
         if not isinstance(self.shortlist_underfilled, bool) or not isinstance(self.public_test_accessed, bool):
             raise ValueError("shortlist flags must be booleans")
+        validate_task_candidate_shortlist(
+            self.candidate_names, self.exclusion_reasons, self.shortlist_underfilled,
+        )
         if self.public_test_accessed:
             raise ValueError("Public Test access is forbidden")
 
@@ -300,7 +359,6 @@ def build_task_candidate_shortlist(*, dictionary: FilterDictionary, profile: Tas
         raise TypeError("screening must be an exact ScreeningPolicy")
     active = materialize_active_dictionary(screening, profile)
     active_names = {_name(item.name) for item in active.active}
-    tags = profile_tags(profile)
     eligible: list[tuple[str, CandidatePriorV1]] = []
     excluded: list[tuple[str, str]] = []
     for candidate in names:
@@ -321,7 +379,9 @@ def build_task_candidate_shortlist(*, dictionary: FilterDictionary, profile: Tas
     def rank(item: tuple[str, CandidatePriorV1]) -> tuple[float, float, float, float, int, str]:
         candidate, prior = item
         scores = dict(prior.morphology_scores)
-        morphology = min((scores[tag] for tag in tags if tag in scores), default=scores.get("default", math.inf))
+        morphology = scores.get(
+            task_morphology_key(profile), scores.get("default", math.inf)
+        )
         return (morphology, -prior.success_rate, prior.mean_joint, prior.p90_joint, family_counts.get(prior.family, 0), candidate)
     for _ in range(max(0, policy.target_candidates - 1)):
         if not remaining:
