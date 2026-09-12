@@ -33,7 +33,7 @@ from evolving_loop.decision_agent.agent import DecisionAgent
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 
 
-def _protocol(*, loader="canonical_json", diagnostic="forecast_spread"):
+def _protocol(*, loader="canonical_json", diagnostic="forecast_spread", migration="identity_envelope"):
     return InfrastructureProtocolV2(
         1,
         1,
@@ -44,7 +44,7 @@ def _protocol(*, loader="canonical_json", diagnostic="forecast_spread"):
             ProtocolComponentV2("loader", loader, 1, 1),
             ProtocolComponentV2("verifier_strategy", "exact_support", 1, 1),
             ProtocolComponentV2("diagnostic_metric", diagnostic, 1, 1),
-            ProtocolComponentV2("schema_migration", "identity_envelope", 1, 1),
+            ProtocolComponentV2("schema_migration", migration, 1, 2 if migration == "envelope_v2" else 1),
         ),
     )
 
@@ -128,6 +128,7 @@ def compatibility_case(tmp_path):
             for task in tasks
         },
         evaluation_cache=cache,
+        bundle_acceptance_evidence={fingerprint_payload({"schema_version": 1, "accepted": True}): {"schema_version": 1, "accepted": True}},
     )
 
     class Case:
@@ -254,3 +255,29 @@ def test_bad_verifier_fixture_rejects_before_train(compatibility_case, tmp_path)
     assert evidence.checks["verifier"] is False
     assert evidence.checks["train"] is False
     assert "verifier_failure" in decide_protocol(evidence).reason_codes
+
+
+def test_migration_mapping_preserves_original_embedded_bundle_identity(compatibility_case, tmp_path):
+    """A v1-to-v2 migration changes only its wrapper and keeps archive bytes intact."""
+    case = compatibility_case
+    original = {key: dict(value) for key, value in case.inputs.artifact_envelopes.items()}
+    evidence = check_compatibility(_protocol(), _protocol(migration="envelope_v2"), case.corpus, ProtocolRuntimeRegistry(), host_inputs=case.inputs, sealed_store=tmp_path / "sealed")
+    assert evidence.checks["artifacts"] is True
+    assert all(item["old_envelope_sha256"] != item["new_envelope_sha256"] for item in evidence.migration_mapping)
+    assert case.inputs.artifact_envelopes == original
+
+
+def test_dev_regression_rejects_after_train(monkeypatch, compatibility_case, tmp_path):
+    """A compatibility proposal cannot be accepted when its sealed Dev gate regresses."""
+    import evolving_loop.v2.protocol.compatibility as compatibility
+    calls = 0
+    original = compatibility.nonregressing
+    def gate(old, new):
+        nonlocal calls
+        calls += 1
+        return calls <= 2 and original(old, new)
+    monkeypatch.setattr(compatibility, "nonregressing", gate)
+    evidence = check_compatibility(_protocol(), _protocol(diagnostic="absolute_movement"), compatibility_case.corpus, ProtocolRuntimeRegistry(), host_inputs=compatibility_case.inputs, sealed_store=tmp_path / "sealed")
+    assert evidence.checks["train"] is True
+    assert evidence.checks["dev"] is False
+    assert "dev_regression" in decide_protocol(evidence).reason_codes

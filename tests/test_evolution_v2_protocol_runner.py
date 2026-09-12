@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 
 import pytest
+import evolving_loop.v2.protocol.runner as protocol_runner
+from evolving_loop.v2.contracts import canonical_v2_bytes, fingerprint_payload
 
 from evolving_loop.v2.protocol import (
     ProtocolComponentV2,
@@ -99,3 +101,66 @@ def test_handoff_rejects_bundle_other_than_release_binding(compatibility_case):
     )
     with pytest.raises(ValueError, match="frozen Bundle"):
         freeze_protocol_handoff(release, case.bundles[1], resolve=lambda _sha: {})
+
+
+def test_completed_resume_rejects_tampered_active_pointer(compatibility_case, tmp_path):
+    """Read-only completion still validates publication linkage before returning."""
+    case = compatibility_case
+    result = run_protocol_evolution(tmp_path, _config(), _manifest(case), ProtocolRuntimeRegistry(), host_inputs=case.inputs)
+    (tmp_path / "active_protocol.json").write_bytes(b"{}\n")
+    with pytest.raises(ValueError, match="pointer"):
+        run_protocol_evolution(tmp_path, _config(), _manifest(case), ProtocolRuntimeRegistry(), host_inputs=case.inputs)
+    assert result["status"] == "protocol_evolution_complete"
+
+
+def test_checkpoint_records_measured_elapsed_budget_use(compatibility_case, tmp_path, monkeypatch):
+    """Budget checkpoints record real monotonic elapsed proposal work, not a constant."""
+    ticks = iter((0.0, 0.0, 0.0, 2.5, 2.5, 2.5, 2.5))
+    monkeypatch.setattr(protocol_runner.time, "monotonic", lambda: next(ticks))
+    run_protocol_evolution(tmp_path, _config(), _manifest(compatibility_case), ProtocolRuntimeRegistry(), host_inputs=compatibility_case.inputs, stop_after=1)
+    checkpoint = json.loads((tmp_path / "protocol_checkpoint.json").read_text())
+    assert checkpoint["budget_ledger"]["charged_use"]["wall_seconds"] == 2.5
+
+
+def test_elapsed_deadline_survives_resume_with_injected_clock(compatibility_case, tmp_path):
+    """A real elapsed checkpoint prevents a later resume from opening work."""
+    config = {**_config(), "hard_limit_seconds": 10}
+    first_ticks = iter((0.0, 0.0, 0.0, 5.0, 5.0))
+    partial = run_protocol_evolution(
+        tmp_path, config, _manifest(compatibility_case), ProtocolRuntimeRegistry(),
+        host_inputs=compatibility_case.inputs, stop_after=1, monotonic=lambda: next(first_ticks),
+    )
+    assert partial["status"] == "protocol_evolution_incomplete"
+    checkpoint = json.loads((tmp_path / "protocol_checkpoint.json").read_text())
+    assert checkpoint["budget_ledger"]["prior_elapsed_wall_seconds"] == 5.0
+    resumed_ticks = iter((100.0, 106.0))
+    with pytest.raises(ValueError, match="budget denied"):
+        run_protocol_evolution(
+            tmp_path, config, _manifest(compatibility_case), ProtocolRuntimeRegistry(),
+            host_inputs=compatibility_case.inputs, monotonic=lambda: next(resumed_ticks),
+        )
+
+
+@pytest.mark.parametrize("field, value", (("active_release_sha256", "0" * 64), ("frozen_handoff_sha256", "1" * 64), ("accepted", 99), ("completed_proposal_sha256s", [])))
+def test_completed_resume_rejects_tampered_completion_projection(compatibility_case, tmp_path, field, value):
+    """Completion is a sealed semantic projection, not an unchecked receipt."""
+    run_protocol_evolution(tmp_path, _config(), _manifest(compatibility_case), ProtocolRuntimeRegistry(), host_inputs=compatibility_case.inputs)
+    path = tmp_path / "completion.json"
+    payload = json.loads(path.read_text())
+    payload[field] = value
+    path.write_bytes(canonical_v2_bytes(payload))
+    with pytest.raises(ValueError, match="completed handoff or semantic completion"):
+        run_protocol_evolution(tmp_path, _config(), _manifest(compatibility_case), ProtocolRuntimeRegistry(), host_inputs=compatibility_case.inputs)
+
+
+def test_handoff_requires_exact_host_bundle_evidence(compatibility_case, tmp_path):
+    """Finalization cannot invent or substitute a Bundle acceptance-evidence object."""
+    case = compatibility_case
+    evidence_sha = case.bundles[0].acceptance_evidence_sha256
+    assert evidence_sha is not None
+    missing = __import__("dataclasses").replace(case.inputs, bundle_acceptance_evidence={})
+    with pytest.raises(ValueError, match="missing frozen Bundle acceptance evidence|does not close"):
+        run_protocol_evolution(tmp_path / "missing", _config(), _manifest(case), ProtocolRuntimeRegistry(), host_inputs=missing)
+    wrong = __import__("dataclasses").replace(case.inputs, bundle_acceptance_evidence={evidence_sha: {"schema_version": 1, "accepted": False}})
+    with pytest.raises(ValueError, match="does not match"):
+        run_protocol_evolution(tmp_path / "wrong", _config(), _manifest(case), ProtocolRuntimeRegistry(), host_inputs=wrong)

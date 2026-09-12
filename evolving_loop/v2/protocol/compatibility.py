@@ -186,6 +186,7 @@ class CompatibilityHostInputsV2:
     runtime_fingerprint: str
     inference_projections: Mapping[str, Mapping[str, object]]
     evaluation_cache: MutableMapping[tuple[str, str, str, str, str], PackageEvaluation] | None = None
+    bundle_acceptance_evidence: Mapping[str, Mapping[str, object]] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.runtime_inputs, ProtocolHostInputs):
@@ -195,6 +196,8 @@ class CompatibilityHostInputsV2:
             raise ValueError("compatibility Host inputs require four verifier fixtures")
         if not isinstance(self.inference_projections, Mapping):
             raise ValueError("compatibility Host inputs require inference projections")
+        if self.bundle_acceptance_evidence is not None and not isinstance(self.bundle_acceptance_evidence, Mapping):
+            raise ValueError("bundle acceptance evidence must be a mapping")
 
 
 def nonregressing(old: PackageEvaluation, new: PackageEvaluation) -> bool:

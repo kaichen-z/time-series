@@ -11,7 +11,7 @@ from evolving_loop.v2.store import write_once_json
 from .contracts import ProtocolComponentV2
 from .runner import run_protocol_evolution
 from .runtime import ProtocolRuntimeRegistry
-from .smoke import build_smoke_case, smoke_host_payloads
+from .smoke import _build_smoke_case, build_smoke_case, smoke_host_payloads
 
 
 def add_protocol_parsers(subparsers) -> None:
@@ -23,7 +23,7 @@ def add_protocol_parsers(subparsers) -> None:
     evolve.add_argument("--output-dir", required=True, type=Path)
 
 
-def _manifest(case) -> dict[str, object]:
+def _manifest(case, files: dict[str, dict[str, object]]) -> dict[str, object]:
     replacements = (
         ProtocolComponentV2("backbone", "history_mean", 1, 1),
         ProtocolComponentV2("loader", "alternate_history_json", 1, 1),
@@ -34,14 +34,15 @@ def _manifest(case) -> dict[str, object]:
     )
     return {
         "schema_version": 1,
-        "l0_commitment": "a" * 64,
-        "runtime_fingerprint": "d" * 64,
+        "l0_commitment": case.corpus.l0_commitment_sha256,
+        "runtime_fingerprint": case.inputs.runtime_fingerprint,
         "corpus": case.corpus.to_payload(),
         "seed_protocol": case.seed_protocol.to_payload(),
         "host_input_files": [[role, path, hashlib.sha256(canonical_v2_bytes(payload)).hexdigest()] for role, path, payload in (
-            ("tasks", "host_tasks.json", smoke_host_payloads()["host_tasks.json"]),
-            ("catalog", "host_catalog.json", smoke_host_payloads()["host_catalog.json"]),
-            ("runtime", "host_runtime.json", smoke_host_payloads()["host_runtime.json"]),
+            ("tasks", "host_tasks.json", files["host_tasks.json"]),
+            ("catalog", "host_catalog.json", files["host_catalog.json"]),
+            ("runtime", "host_runtime.json", files["host_runtime.json"]),
+            ("closure", "host_closure.json", files["host_closure.json"]),
         )],
         "frozen_bundle_sha256": case.bundles[0].fingerprint(),
         "replacement_templates": [component.to_payload() for component in replacements],
@@ -53,10 +54,20 @@ def make_smoke_inputs(output_dir: Path) -> Path:
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
     files = smoke_host_payloads()
+    bootstrap = _build_smoke_case(files, allow_bootstrap=True)
+    files["host_closure.json"] = {
+        "schema_version": 1,
+        "corpus": bootstrap.corpus.to_payload(),
+        "archive_bundles": [bundle.to_payload() for bundle in bootstrap.bundles],
+        "artifact_envelopes": dict(bootstrap.inputs.artifact_envelopes),
+        "bundle_acceptance_evidence": dict(bootstrap.inputs.bundle_acceptance_evidence or {}),
+        "split_metadata": {key: list(value) for key, value in bootstrap.inputs.split_manifest.items()},
+        "frozen_bundle_sha256": bootstrap.bundles[0].fingerprint(),
+    }
     case = build_smoke_case(files)
     for relative, payload in files.items():
         write_once_json(destination / relative, payload)
-    manifest = _manifest(case)
+    manifest = _manifest(case, files)
     path = destination / "input_manifest.json"
     write_once_json(path, manifest)
     return path
@@ -89,9 +100,9 @@ def dispatch_protocol(args) -> dict:
             raise ValueError("host input file bytes do not match committed SHA")
         files[relative] = _read(path)
         roles.add(role)
-    if roles != {"tasks", "catalog", "runtime"} or set(files) != set(smoke_host_payloads()):
-        raise ValueError("host input files must cover exact tasks, catalog, and runtime inputs")
+    if roles != {"tasks", "catalog", "runtime", "closure"} or set(files) != {"host_tasks.json", "host_catalog.json", "host_runtime.json", "host_closure.json"}:
+        raise ValueError("host input files must cover exact tasks, catalog, runtime, and authority closure inputs")
     case = build_smoke_case(files)
-    if canonical_v2_bytes(manifest) != canonical_v2_bytes(_manifest(case)):
+    if canonical_v2_bytes(manifest) != canonical_v2_bytes(_manifest(case, files)):
         raise ValueError("input manifest does not match verified protocol smoke inputs")
     return run_protocol_evolution(args.output_dir, config, manifest, ProtocolRuntimeRegistry(), host_inputs=case.inputs)

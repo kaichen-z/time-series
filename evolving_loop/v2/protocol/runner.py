@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
@@ -55,8 +56,6 @@ def _budget_plan(config: Mapping[str, object]) -> BudgetPlan:
         0.0,
         ResourceUse(
             wall_seconds=float(config["hard_limit_seconds"]),
-            task_executions=int(config["max_proposals"]),
-            artifact_bytes=1_000_000,
         ),
     )
 
@@ -118,6 +117,64 @@ def _validate_closed_prefix(root: Path, checkpoint: Mapping[str, object], seed_s
             raise ValueError("progress row is not canonical or continuous")
 
 
+def _handoff_resolver(root: Path, release: ProtocolReleaseV2, bundle: EvolutionBundleV2, host_inputs: CompatibilityHostInputsV2) -> Callable[[str], dict]:
+    """Return the exact closed authority set needed by the frozen handoff."""
+    evidence_map = {path.stem: _read(path) for path in (root / "evidence").glob("*.json")}
+    protocol_map = {path.stem: _read(path) for path in (root / "protocols").glob("*.json")}
+    bundle_map = {bundle.fingerprint(): bundle.to_payload(), release.fingerprint(): release.to_payload()}
+    if bundle.acceptance_evidence_sha256 is None or host_inputs.bundle_acceptance_evidence is None:
+        raise ValueError("Host input is missing frozen Bundle acceptance evidence")
+    try:
+        bundle_evidence = host_inputs.bundle_acceptance_evidence[bundle.acceptance_evidence_sha256]
+    except KeyError as error:
+        raise ValueError("Host input does not close frozen Bundle acceptance evidence") from error
+    if fingerprint_payload(bundle_evidence) != bundle.acceptance_evidence_sha256:
+        raise ValueError("Host Bundle acceptance evidence does not match committed SHA")
+    bundle_map[bundle.acceptance_evidence_sha256] = dict(bundle_evidence)
+
+    def resolve(identity: str) -> dict:
+        if identity in bundle_map:
+            return bundle_map[identity]
+        if identity in evidence_map:
+            return evidence_map[identity]
+        if identity in protocol_map:
+            return protocol_map[identity]
+        raise ValueError("unresolved handoff reference")
+    return resolve
+
+
+def _validate_completed_run(root: Path, checkpoint: Mapping[str, object], *, host_inputs: CompatibilityHostInputsV2, seed_bundle_sha: str) -> dict[str, object]:
+    """Read-only completion must still prove the final publication linkage."""
+    completion = _read(root / "completion.json")
+    active_sha = require_sha256(checkpoint.get("active_protocol_sha256"), "active protocol")
+    active = InfrastructureProtocolV2.from_payload(_read(root / "protocols" / f"{active_sha}.json"))
+    if active.fingerprint() != active_sha or (root / "active_protocol.json").read_bytes() != canonical_v2_bytes(active.to_payload()):
+        raise ValueError("active protocol pointer does not match completed checkpoint")
+    release_sha = require_sha256(checkpoint.get("active_release_sha256"), "active release")
+    release = ProtocolReleaseV2.from_payload(_read(root / "releases" / f"{release_sha}.json"))
+    evidence = CompatibilityEvidenceV2.from_payload(_read(root / "evidence" / f"{release.evidence_sha256}.json"))
+    if release.fingerprint() != release_sha or release.protocol_sha256 != active_sha or evidence.fingerprint() != release.evidence_sha256 or evidence.proposed_protocol_sha256 != active_sha:
+        raise ValueError("completed release/evidence/protocol linkage is invalid")
+    if release.l0_commitment_sha256 != active.l0_commitment_sha256 or release.runtime_fingerprint != host_inputs.runtime_fingerprint or release.frozen_bundle_sha256 != seed_bundle_sha:
+        raise ValueError("completed release runtime/L0/Bundle binding is invalid")
+    bundle = host_inputs.archive_bundles.get(seed_bundle_sha)
+    if bundle is None:
+        raise ValueError("completed frozen Bundle is unavailable from Host")
+    expected_handoff = freeze_protocol_handoff(release, bundle, resolve=_handoff_resolver(root, release, bundle, host_inputs))
+    handoff = _read(root / "frozen_protocol_handoff.json")
+    handoff_sha = fingerprint_payload(handoff)
+    completed = checkpoint["completed"]
+    expected = {
+        "schema_version": 1, "status": "protocol_evolution_complete", "active_protocol_sha256": active_sha,
+        "active_release_sha256": release_sha, "accepted": checkpoint["accepted"], "rejected": checkpoint["rejected"],
+        "completed_proposal_sha256s": [item["proposal_sha256"] for item in completed], "frozen_handoff_sha256": handoff_sha,
+        "public_test_accessed": False,
+    }
+    if completion != expected or handoff != expected_handoff:
+        raise ValueError("completed handoff or semantic completion is invalid")
+    return completion
+
+
 def freeze_protocol_handoff(release: ProtocolReleaseV2, bundle: EvolutionBundleV2, *, resolve: Callable[[str], dict]) -> dict[str, object]:
     """Resolve an accepted release and Bundle into a no-Public frozen handoff."""
     if not isinstance(release, ProtocolReleaseV2) or not isinstance(bundle, EvolutionBundleV2):
@@ -157,7 +214,7 @@ def freeze_protocol_handoff(release: ProtocolReleaseV2, bundle: EvolutionBundleV
     }
 
 
-def run_protocol_evolution(output_dir: Path, config: dict, input_manifest: dict, registry: ProtocolRuntimeRegistry, *, host_inputs: CompatibilityHostInputsV2, stop_after: int | None = None) -> dict:
+def run_protocol_evolution(output_dir: Path, config: dict, input_manifest: dict, registry: ProtocolRuntimeRegistry, *, host_inputs: CompatibilityHostInputsV2, stop_after: int | None = None, monotonic: Callable[[], float] | None = None) -> dict:
     """Evaluate precommitted replacements and resume only sealed closed steps."""
     _validate_config(config)
     _validate_manifest(input_manifest)
@@ -165,6 +222,7 @@ def run_protocol_evolution(output_dir: Path, config: dict, input_manifest: dict,
         raise TypeError("protocol evolution requires Host runtime authorities")
     if stop_after is not None and (type(stop_after) is not int or stop_after < 0):
         raise ValueError("stop_after must be a non-negative closed-step count")
+    clock = time.monotonic if monotonic is None else monotonic
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
     config_sha, manifest_sha = fingerprint_payload(config), fingerprint_payload(input_manifest)
@@ -187,15 +245,15 @@ def run_protocol_evolution(output_dir: Path, config: dict, input_manifest: dict,
             raise ValueError("resume input/config/runtime commitments do not match")
     else:
         write_once_json(manifest_path, run_manifest)
+    checkpoint_path = root / "protocol_checkpoint.json"
+    plan = _budget_plan(config)
     completion_path = root / "completion.json"
     if completion_path.exists():
         checkpoint = _read(root / "protocol_checkpoint.json")
-        if checkpoint.get("config_sha256") != config_sha or checkpoint.get("input_manifest_sha256") != manifest_sha or checkpoint.get("progress_prefix_sha256") != _progress_fingerprint(root):
+        if checkpoint.get("config_sha256") != config_sha or checkpoint.get("input_manifest_sha256") != manifest_sha or checkpoint.get("progress_prefix_sha256") != _progress_fingerprint(root) or checkpoint.get("budget_plan_sha256") != plan.fingerprint():
             raise ValueError("completed run commitments do not match")
         _validate_closed_prefix(root, checkpoint, active.fingerprint())
-        return _read(completion_path)
-    checkpoint_path = root / "protocol_checkpoint.json"
-    plan = _budget_plan(config)
+        return _validate_completed_run(root, checkpoint, host_inputs=host_inputs, seed_bundle_sha=seed_bundle_sha)
     seed_sha = active.fingerprint()
     if checkpoint_path.exists():
         checkpoint = _read(checkpoint_path)
@@ -213,10 +271,10 @@ def run_protocol_evolution(output_dir: Path, config: dict, input_manifest: dict,
         accepted, rejected = checkpoint["accepted"], checkpoint["rejected"]
         completed = list(checkpoint["completed"])
         active_release_sha = checkpoint.get("active_release_sha256")
-        ledger = BudgetLedger.resume(plan, checkpoint["budget_ledger"], monotonic=lambda: 0.0)
+        ledger = BudgetLedger.resume(plan, checkpoint["budget_ledger"], monotonic=clock)
     else:
         next_index, accepted, rejected, completed, active_release_sha = 0, 0, 0, [], None
-        ledger = BudgetLedger(plan, monotonic=lambda: 0.0)
+        ledger = BudgetLedger(plan, monotonic=clock)
         write_once_json(root / "protocols" / f"{active.fingerprint()}.json", active.to_payload())
         _write_mutable(root / "active_protocol.json", active.to_payload())
     for index in range(next_index, len(templates)):
@@ -226,9 +284,11 @@ def run_protocol_evolution(output_dir: Path, config: dict, input_manifest: dict,
         proposal = ProtocolProposalV2(1, active.fingerprint(), replacement.kind, replacement, corpus.fingerprint())
         child = proposal.to_child(active)
         proposal_sha, child_sha = proposal.fingerprint(), child.fingerprint()
-        permit = ledger.reserve_stage(proposal_sha, ResourceUse(wall_seconds=1.0, task_executions=1, artifact_bytes=1))
+        estimate = ResourceUse(wall_seconds=float(config["hard_limit_seconds"]) / int(config["max_proposals"]))
+        permit = ledger.reserve_stage(proposal_sha, estimate)
         if not permit.allowed:
             raise ValueError(f"protocol budget denied proposal: {permit.reason}")
+        started = clock()
         write_once_json(root / "proposals" / f"{proposal_sha}.json", proposal.to_payload())
         write_once_json(root / "protocols" / f"{child_sha}.json", child.to_payload())
         evidence = check_compatibility(active, child, corpus, registry, host_inputs=host_inputs, sealed_store=root)
@@ -252,7 +312,10 @@ def run_protocol_evolution(output_dir: Path, config: dict, input_manifest: dict,
             rejected += 1
         row = {"schema_version": 1, "index": index, "proposal_sha256": proposal_sha, "before_protocol_sha256": before_sha, "after_protocol_sha256": active.fingerprint(), "decision": decision.decision, "reason_codes": list(decision.reason_codes)}
         append_jsonl(root / "progress.jsonl", row)
-        closed = ledger.close_stage(permit, ResourceUse(wall_seconds=1.0, task_executions=1, artifact_bytes=1))
+        elapsed = clock() - started
+        if elapsed < 0.0:
+            raise ValueError("monotonic clock moved backwards during protocol proposal")
+        closed = ledger.close_stage(permit, ResourceUse(wall_seconds=elapsed))
         if not closed.allowed:
             raise ValueError(f"protocol budget close failed: {closed.reason}")
         completed.append({"index": index, "proposal_sha256": proposal_sha, "child_protocol_sha256": child_sha, "evidence_sha256": evidence_sha, "decision_sha256": decision_sha, "release_sha256": active_release_sha if decision.decision == "accept" else None, "sealed_dev_sha256": evidence.sealed_dev_sha256, "before_protocol_sha256": before_sha, "after_protocol_sha256": active.fingerprint()})
@@ -264,24 +327,8 @@ def run_protocol_evolution(output_dir: Path, config: dict, input_manifest: dict,
     if active_release_sha is None:
         raise ValueError("protocol evolution completed without an accepted release")
     release = ProtocolReleaseV2.from_payload(_read(root / "releases" / f"{active_release_sha}.json"))
-    evidence_map = {path.stem: _read(path) for path in (root / "evidence").glob("*.json")}
-    release_map = {release.fingerprint(): release.to_payload()}
-    protocol_map = {path.stem: _read(path) for path in (root / "protocols").glob("*.json")}
     bundle = host_inputs.archive_bundles[seed_bundle_sha]
-    bundle_map = {bundle.fingerprint(): bundle.to_payload()}
-    if bundle.acceptance_evidence_sha256 is not None:
-        bundle_map[bundle.acceptance_evidence_sha256] = {"schema_version": 1, "accepted": True}
-    def resolve(identity: str) -> dict:
-        if identity in release_map:
-            return release_map[identity]
-        if identity in evidence_map:
-            return evidence_map[identity]
-        if identity in protocol_map:
-            return protocol_map[identity]
-        if identity in bundle_map:
-            return bundle_map[identity]
-        raise ValueError("unresolved handoff reference")
-    handoff = freeze_protocol_handoff(release, bundle, resolve=resolve)
+    handoff = freeze_protocol_handoff(release, bundle, resolve=_handoff_resolver(root, release, bundle, host_inputs))
     handoff_sha = fingerprint_payload(handoff)
     write_once_json(root / "frozen_protocol_handoff.json", handoff)
     completion = {"schema_version": 1, "status": "protocol_evolution_complete", "active_protocol_sha256": active.fingerprint(), "active_release_sha256": active_release_sha, "accepted": accepted, "rejected": rejected, "completed_proposal_sha256s": [item["proposal_sha256"] for item in completed], "frozen_handoff_sha256": handoff_sha, "public_test_accessed": False}
