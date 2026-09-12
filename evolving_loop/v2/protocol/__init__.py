@@ -7,6 +7,12 @@ from .contracts import (
     ProtocolProposalV2,
     ProtocolReleaseV2,
 )
+from .runtime import (
+    ProtocolHostInputs,
+    ProtocolRuntime,
+    ProtocolRuntimeRegistry,
+    migrate_envelope,
+)
 
 __all__ = [
     "KINDS",
@@ -14,4 +20,8 @@ __all__ = [
     "ProtocolComponentV2",
     "ProtocolProposalV2",
     "ProtocolReleaseV2",
+    "ProtocolHostInputs",
+    "ProtocolRuntime",
+    "ProtocolRuntimeRegistry",
+    "migrate_envelope",
 ]
