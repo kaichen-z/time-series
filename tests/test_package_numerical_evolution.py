@@ -1252,12 +1252,12 @@ def test_materializer_emits_v2_without_collapsing_repeated_family_parent_catalog
     )
 
 
-def test_materializer_drops_seed_only_retained_alternative_from_nonseed_release() -> None:
+def test_materializer_refits_and_preserves_v2_seed_catalog_in_first_child() -> None:
     build_tasks = _tasks()
     manifest = build_group_fold_manifest(build_tasks, seed=20260903)
     fit = fit_numerical_recipe(_recipe(), _build_rows(build_tasks), manifest, _parent())
     parent = NumericalSupplyRelease(
-        schema_version=1,
+        schema_version=2,
         version="n000",
         parent_sha256=None,
         anchor_release_payload=_parent().to_payload(),
@@ -1274,6 +1274,7 @@ def test_materializer_drops_seed_only_retained_alternative_from_nonseed_release(
         original_tasks=original_tasks,
         source_fingerprints={"dictionary": "2" * 64},
         runtime_fingerprints={"materializer": "3" * 64},
+        build_rows=_build_rows(build_tasks),
         diagnostics_registry=FrozenNumericalDiagnosticsRegistry.build(
             original_tasks, _history_diagnostics(original_tasks), HindcastConfig()
         ),
@@ -1288,6 +1289,7 @@ def test_materializer_drops_seed_only_retained_alternative_from_nonseed_release(
     )
 
     assert tuple(item.candidate_id for item in candidate.release.alternatives) == (
+        "retained_weighted",
         _recipe().name,
     )
 

@@ -633,7 +633,7 @@ def bound_numerical_package(
     decision_policy: DecisionPolicy | None = None,
     min_successful_folds: int | None = None,
 ) -> NumericalForecastPackage:
-    """Project a source package onto a bounded, diverse supply release."""
+    """Bind a v1 bounded family projection or the complete ordered v2 catalog."""
     if not isinstance(source, NumericalForecastPackage):
         _fail("source must be a NumericalForecastPackage")
     if not isinstance(release, NumericalSupplyRelease):
@@ -679,7 +679,7 @@ def bound_numerical_package(
         if candidate is None:
             continue
         vector_sha256 = _forecast_sha256(candidate.forecast)
-        if vector_sha256 in retained_vectors:
+        if release.schema_version == 1 and vector_sha256 in retained_vectors:
             continue
         retained.append(candidate)
         retained_names.add(candidate.name)

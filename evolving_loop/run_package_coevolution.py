@@ -660,6 +660,7 @@ def _initial_supply_release(
     champion: object,
     candidates: Sequence[tuple[str, str]],
     *,
+    schema_version: int,
     source_fingerprints: Mapping[str, str],
     runtime_fingerprints: Mapping[str, str],
     atlas: AtlasRelease | None,
@@ -690,10 +691,13 @@ def _initial_supply_release(
         )
 
     selected: list[NumericalAlternativeSpec] = []
+    seen_families: set[str] = set()
     for candidate_id, family in candidates:
         if family not in {"statistical", "tsfm", "combined"}:
             continue
-        if candidate_id in protected_names:
+        if candidate_id in protected_names or (
+            schema_version == 1 and family in seen_families
+        ):
             continue
         candidate_policy = seed_policy(candidate_id)
         selected.append(
@@ -716,6 +720,7 @@ def _initial_supply_release(
                 ),
             )
         )
+        seen_families.add(family)
     if atlas is not None:
         candidate_policy = seed_policy("atlas_70_30")
         selected.append(
@@ -739,7 +744,7 @@ def _initial_supply_release(
             )
         )
     return NumericalSupplyRelease(
-        schema_version=2,
+        schema_version=schema_version,
         version="n000",
         parent_sha256=None,
         anchor_release_payload=champion.to_payload(),
@@ -2410,6 +2415,7 @@ def _execute_run(
                 "forecast_store": store.identity_hash,
                 "model_runtime": runtime_fingerprints["model_runtime"],
             },
+            build_rows=build_rows,
             combined_policies=portfolio.combined,
             atlas_release=atlas if not (args.smoke or args.interaction_smoke) else None,
             decision_policy=DecisionPolicy(),
@@ -2418,6 +2424,7 @@ def _execute_run(
         supply = _initial_supply_release(
             champion,
             candidates,
+            schema_version=1 if args.smoke or args.interaction_smoke else 2,
             source_fingerprints={
                 **source_fingerprints,
                 "champion_release": _file_sha256(champion_path),

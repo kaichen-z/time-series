@@ -508,6 +508,7 @@ class NumericalPackageMaterializer:
         original_tasks: Sequence[ContextTask],
         source_fingerprints: Mapping[str, str],
         runtime_fingerprints: Mapping[str, str],
+        build_rows: Sequence[ChampionTaskRow] = (),
         combined_policies: Sequence[CombinedPolicy] = (),
         atlas_release: AtlasRelease | None = None,
         decision_policy: DecisionPolicy = DecisionPolicy(),
@@ -578,6 +579,10 @@ class NumericalPackageMaterializer:
         self.runtime_fingerprints = _fingerprints(
             runtime_fingerprints, "runtime_fingerprints"
         )
+        rows = tuple(build_rows)
+        if any(type(row) is not ChampionTaskRow for row in rows):
+            _fail("Numerical materializer Build rows must be exact ChampionTaskRow values")
+        self.build_rows = rows
         self.combined_policies = policies
         self.atlas_release = atlas_release
         self.decision_policy = decision_policy
@@ -600,6 +605,7 @@ class NumericalPackageMaterializer:
         fit: NumericalRecipeFit,
         *,
         version: str,
+        anchor: ChampionRelease,
     ) -> NumericalSupplyRelease:
         family = self._family(fit.recipe)
         alternative = NumericalAlternativeSpec(
@@ -616,15 +622,49 @@ class NumericalPackageMaterializer:
                 item.failure_condition for item in fit.recipe.assumptions
             ),
         )
-        retained = [
-            item
-            for item in parent.alternatives
-            if item.candidate_id != alternative.candidate_id
-            and any(
-                policy != item.full_build_policy_payload
+        retained: list[NumericalAlternativeSpec] = []
+        for item in parent.alternatives:
+            if item.candidate_id == alternative.candidate_id:
+                continue
+            seed_only = all(
+                policy == item.full_build_policy_payload
                 for _fold, policy in item.build_fold_policy_payloads
             )
-        ]
+            if seed_only and parent.schema_version == 1:
+                continue
+            if seed_only:
+                if not self.build_rows:
+                    _fail("v2 seed catalog requires Build rows for cross-fit rebinding")
+                policy = _parse_fitted_policy(_plain(item.full_build_policy_payload))
+                full = fit_champion_recipe(policy.recipe, self.build_rows, anchor)
+                folds = tuple(
+                    (
+                        fold,
+                        fit_champion_recipe(
+                            policy.recipe,
+                            tuple(
+                                row
+                                for row in self.build_rows
+                                if self.fold_manifest.task_fold_map[row.task_id] != fold
+                            ),
+                            anchor,
+                        ),
+                    )
+                    for fold in range(5)
+                )
+                item = NumericalAlternativeSpec(
+                    candidate_id=item.candidate_id,
+                    family=item.family,
+                    materializer_kind=item.materializer_kind,
+                    recipe_payload=policy.recipe.to_payload(),
+                    full_build_policy_payload=full.to_payload(),
+                    build_fold_policy_payloads=tuple(
+                        (fold, fitted.to_payload()) for fold, fitted in folds
+                    ),
+                    assumption_ids=item.assumption_ids,
+                    failure_conditions=item.failure_conditions,
+                )
+            retained.append(item)
         retained.append(alternative)
         if self.atlas_release is not None:
             retained = [
@@ -962,7 +1002,9 @@ class NumericalPackageMaterializer:
                 _fail("Numerical materialization label-free task content drifted")
 
         anchor_release = self._validated_fit_binding(parent_release, fit)
-        release = self._release(parent_release, fit, version=version)
+        release = self._release(
+            parent_release, fit, version=version, anchor=anchor_release
+        )
 
         def package_builder(
             original: ContextTask,

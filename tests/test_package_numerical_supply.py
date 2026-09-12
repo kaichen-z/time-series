@@ -401,6 +401,36 @@ def test_bounded_package_keeps_anchor_plus_one_per_family_and_deduplicates_vecto
     assert len(package.ranked_alternatives) <= 5
 
 
+def test_schema_v2_binds_repeated_family_duplicate_vectors_in_release_order() -> None:
+    source = _wide_package()
+    release = NumericalSupplyRelease(
+        schema_version=2,
+        version="n001",
+        parent_sha256="2" * 64,
+        anchor_release_payload=_anchor_release().to_payload(),
+        alternatives=(
+            _alternative("seasonal_naive", "statistical"),
+            _alternative("drift", "statistical"),
+        ),
+        atlas_release_sha256=None,
+        source_fingerprints={"dictionary": "4" * 64},
+        runtime_fingerprints={"materializer": "5" * 64},
+    )
+    materialized = {
+        "safe_anchor": _ranked("safe_anchor", "tsfm", (9.0, 9.0)),
+        "seasonal_naive": _ranked("seasonal_naive", "statistical", (2.0, 2.0)),
+        "drift": _ranked("drift", "statistical", (2.0, 2.0)),
+    }
+
+    package = bound_numerical_package(source, release, materialized)
+
+    assert tuple(item.name for item in package.ranked_alternatives) == (
+        "safe_anchor",
+        "seasonal_naive",
+        "drift",
+    )
+
+
 def test_bounded_package_projects_verified_alternative_assumption_to_safe_handoff():
     source = _wide_package()
     release = _supply_release(

@@ -136,10 +136,13 @@ def test_initial_supply_gives_each_seed_its_own_executable_assumption(tmp_path) 
     release = _initial_supply_release(
         champion,
         (("naive_last", "statistical"), ("timesfm_2_5", "tsfm")),
+        schema_version=1,
         source_fingerprints={"dictionary": "4" * 64},
         runtime_fingerprints={"materializer": "5" * 64},
         atlas=None,
     )
+
+    assert release.schema_version == 1
 
     for specification in release.alternatives:
         recipe = parse_champion_recipe(
