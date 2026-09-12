@@ -28,6 +28,11 @@ def test_closed_validation_resume_matches_full_result(tmp_path):
         entry["evaluation"]["expected_task_ids"]
         for entry in validation_checkpoint["evaluator_cache"]["aggregates"]
     ]
+    cached_memberships.extend(
+        evaluation["expected_task_ids"]
+        for episode in validation_checkpoint["evaluator_cache"]["episodes"]
+        for evaluation in episode["selected_evaluations"]
+    )
     assert cached_memberships
     assert all("cooperative-04" not in membership for membership in cached_memberships)
     resumed = run_source_evolution(
@@ -44,8 +49,9 @@ def test_closed_validation_resume_matches_full_result(tmp_path):
 def test_closed_candidate_resume_matches_full_result(tmp_path):
     config = dataclasses.replace(
         SourceConfigV2.smoke(seed=17),
+        max_candidates=1,
         resource_ceilings=ResourceUse(
-            task_executions=144, subprocesses=1000, wall_seconds=120.0,
+            task_executions=144, subprocesses=8, wall_seconds=120.0,
         ),
     )
     full = run_source_evolution(
@@ -55,9 +61,9 @@ def test_closed_candidate_resume_matches_full_result(tmp_path):
         tmp_path / "resumed", config,
         build_source_case(tmp_path / "partial-inputs"), stop_after="candidate:1",
     )
+    resume_case = build_source_case(tmp_path / "fresh-resume-inputs")
     resumed = run_source_evolution(
-        tmp_path / "resumed", config,
-        build_source_case(tmp_path / "fresh-resume-inputs"), resume=True,
+        tmp_path / "resumed", config, resume_case, resume=True,
     )
     assert resumed.canonical_bytes() == full.canonical_bytes()
     assert ((tmp_path / "resumed" / "authority" / "active_source.json").read_bytes()
@@ -66,8 +72,12 @@ def test_closed_candidate_resume_matches_full_result(tmp_path):
             == (tmp_path / "full" / "source_archive" / "events.jsonl").read_bytes())
     full_checkpoint = json.loads((tmp_path / "full" / "checkpoint.json").read_bytes())
     resumed_checkpoint = json.loads((tmp_path / "resumed" / "checkpoint.json").read_bytes())
-    assert full_checkpoint["budget_checkpoint"]["charged_use"]["task_executions"] == 108
-    assert resumed_checkpoint["budget_checkpoint"]["charged_use"]["task_executions"] == 108
+    assert full_checkpoint["budget_checkpoint"]["charged_use"] == resumed_checkpoint["budget_checkpoint"]["charged_use"]
+    assert resumed_checkpoint["budget_checkpoint"]["charged_use"]["task_executions"] == 92
+    assert resumed_checkpoint["budget_checkpoint"]["charged_use"]["subprocesses"] == 8
+    assert [request["seed"] for request in resume_case.policy_requests] == [
+        0, 1, 18, 19, 18, 19,
+    ]
 
 
 def test_failed_validation_preserves_parent(tmp_path, monkeypatch):

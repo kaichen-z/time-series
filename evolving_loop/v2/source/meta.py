@@ -14,7 +14,11 @@ from typing import Any
 from evolving_loop.data import ContextTask
 from evolving_loop.package_metrics import PackageEvaluation, PackageTaskScore
 from evolving_loop.v2.bundle import EvolutionBundleV2
-from evolving_loop.v2.contracts import canonical_v2_bytes, fingerprint_payload
+from evolving_loop.v2.contracts import (
+    SanitizedEvolutionFeedback,
+    canonical_v2_bytes,
+    fingerprint_payload,
+)
 from evolving_loop.v2.cooperative.adapters import (
     CooperativeArtifactCatalog,
     CooperativePipelineAdapter,
@@ -29,10 +33,41 @@ from .runtime import run_policy
 
 _TOLERANCE = 1e-12
 _FOLDS = ((0, 1), (2, 3))
-_CACHE_FIELDS = frozenset({"schema_version", "aggregates", "cache_sha256"})
+_CACHE_FIELDS = frozenset(
+    {"schema_version", "aggregates", "episodes", "cache_sha256"}
+)
 _CACHE_ENTRY_FIELDS = frozenset({"key", "evaluation"})
+_CACHE_EPISODE_FIELDS = frozenset(
+    {
+        "source_sha256",
+        "epoch_seed",
+        "result",
+        "selected_bundle",
+        "selected_evaluations",
+        "selected_arm",
+        "selected_step",
+        "selected_feedback",
+    }
+)
 _EVALUATION_FIELDS = frozenset(PackageEvaluation.__dataclass_fields__) | {"schema_version"}
 _TASK_SCORE_FIELDS = frozenset(PackageTaskScore.__dataclass_fields__)
+_TRAIN_RESULT_FIELDS = frozenset(
+    {
+        "source_sha256",
+        "fold_gains",
+        "mean_gain",
+        "mean_capped_smae",
+        "mean_capped_srmse",
+        "invalid_count",
+        "catastrophic_count",
+        "task_cost",
+        "source_invocations",
+        "actual_task_cost",
+        "actual_source_invocations",
+        "feasible",
+        "execution_fingerprint",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +110,9 @@ class _TrainingEpisode:
     selected_bundle: EvolutionBundleV2
     selected_evaluations: tuple[PackageEvaluation, ...]
     selected_pipeline: CooperativePipelineAdapter
+    selected_arm: str
+    selected_step: int
+    selected_feedback: SanitizedEvolutionFeedback
 
 
 class SourceMetaEvaluatorV2:
@@ -132,15 +170,225 @@ class SourceMetaEvaluatorV2:
             raise ValueError("source evaluator cache evaluation mismatch")
         return evaluation
 
+    @staticmethod
+    def _train_result_payload(result: SourceTrainResultV2) -> dict[str, object]:
+        return {
+            "source_sha256": result.source_sha256,
+            "fold_gains": list(result.fold_gains),
+            "mean_gain": result.mean_gain,
+            "mean_capped_smae": result.mean_capped_smae,
+            "mean_capped_srmse": result.mean_capped_srmse,
+            "invalid_count": result.invalid_count,
+            "catastrophic_count": result.catastrophic_count,
+            "task_cost": result.task_cost,
+            "source_invocations": result.source_invocations,
+            "actual_task_cost": result.actual_task_cost,
+            "actual_source_invocations": result.actual_source_invocations,
+            "feasible": result.feasible,
+            "execution_fingerprint": result.execution_fingerprint,
+        }
+
     @classmethod
-    def _verified_cache(cls, checkpoint: object) -> dict[str, PackageEvaluation]:
+    def _cached_train_result(cls, payload: object) -> SourceTrainResultV2:
+        if not isinstance(payload, Mapping) or set(payload) != _TRAIN_RESULT_FIELDS:
+            raise ValueError("source evaluator cache train result schema mismatch")
+        fold_gains = payload["fold_gains"]
+        if (
+            not isinstance(fold_gains, list)
+            or len(fold_gains) != len(_FOLDS)
+            or any(type(value) is not float or not math.isfinite(value) for value in fold_gains)
+        ):
+            raise ValueError("source evaluator cache fold gains are invalid")
+        for field in ("source_sha256", "execution_fingerprint"):
+            value = payload[field]
+            if (
+                type(value) is not str
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError(f"source evaluator cache {field} is invalid")
+        for field in (
+            "mean_gain",
+            "mean_capped_smae",
+            "mean_capped_srmse",
+        ):
+            value = payload[field]
+            if type(value) is not float or not math.isfinite(value):
+                raise ValueError(f"source evaluator cache {field} is invalid")
+        for field in (
+            "invalid_count",
+            "catastrophic_count",
+            "task_cost",
+            "source_invocations",
+            "actual_task_cost",
+            "actual_source_invocations",
+        ):
+            value = payload[field]
+            if type(value) is not int or value < 0:
+                raise ValueError(f"source evaluator cache {field} is invalid")
+        if type(payload["feasible"]) is not bool:
+            raise ValueError("source evaluator cache feasible marker is invalid")
+        result = SourceTrainResultV2(
+            payload["source_sha256"],
+            tuple(fold_gains),
+            payload["mean_gain"],
+            payload["mean_capped_smae"],
+            payload["mean_capped_srmse"],
+            payload["invalid_count"],
+            payload["catastrophic_count"],
+            payload["task_cost"],
+            payload["source_invocations"],
+            payload["actual_task_cost"],
+            payload["actual_source_invocations"],
+            payload["feasible"],
+            payload["execution_fingerprint"],
+        )
+        if canonical_v2_bytes(cls._train_result_payload(result)) != canonical_v2_bytes(payload):
+            raise ValueError("source evaluator cache train result mismatch")
+        return result
+
+    def _require_train_evaluation(self, evaluation: PackageEvaluation) -> None:
+        task_entities = {
+            task.numeric.task_id: task.numeric.entity_name for task in self.train_tasks
+        }
+        if (
+            evaluation.public_test_accessed
+            or not set(evaluation.expected_task_ids) <= set(task_entities)
+            or not evaluation.expected_task_ids
+            or any(
+                task_entities.get(row.task_id) != row.entity_name
+                for row in evaluation.task_rows
+            )
+            or {
+                name: value
+                for name, value in evaluation.secondary_diagnostics.items()
+                if name.startswith("cooperative_stage_")
+            }
+            != {"cooperative_stage_train": 1.0}
+        ):
+            raise ValueError("source evaluator cache may contain only Train evaluations")
+
+    def _restore_episode(
+        self,
+        payload: object,
+        aggregates: Mapping[str, PackageEvaluation],
+    ) -> tuple[tuple[str, int], _TrainingEpisode]:
+        if not isinstance(payload, Mapping) or set(payload) != _CACHE_EPISODE_FIELDS:
+            raise ValueError("source evaluator cache episode schema mismatch")
+        source_sha256 = payload["source_sha256"]
+        epoch_seed = payload["epoch_seed"]
+        selected_arm = payload["selected_arm"]
+        selected_step = payload["selected_step"]
+        if (
+            type(source_sha256) is not str
+            or len(source_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in source_sha256)
+            or type(epoch_seed) is not int
+            or type(selected_arm) is not str
+            or selected_arm not in self.enabled_arms
+            or type(selected_step) is not int
+            or selected_step not in range(len(_FOLDS))
+        ):
+            raise ValueError("source evaluator cache episode identity is invalid")
+        result = self._cached_train_result(payload["result"])
+        if result.source_sha256 != source_sha256:
+            raise ValueError("source evaluator cache episode result mismatch")
+        if not isinstance(payload["selected_bundle"], Mapping):
+            raise ValueError("source evaluator cache selected Bundle is invalid")
+        selected_bundle = EvolutionBundleV2.from_payload(payload["selected_bundle"])
+        evaluations_payload = payload["selected_evaluations"]
+        if not isinstance(evaluations_payload, list) or len(evaluations_payload) != 2 * len(_FOLDS):
+            raise ValueError("source evaluator cache selected evaluations are invalid")
+        selected_evaluations = tuple(
+            self._cached_evaluation(value) for value in evaluations_payload
+        )
+        for evaluation in selected_evaluations:
+            self._require_train_evaluation(evaluation)
+        selected_seal = selected_evaluations[len(_FOLDS) + selected_step]
+        outcomes = selected_evaluations[:len(_FOLDS)]
+        sealed_outcomes = selected_evaluations[len(_FOLDS):]
+        expected_execution_fingerprint = fingerprint_payload(
+            {
+                "source": source_sha256,
+                "epoch_seed": epoch_seed,
+                "fold_gains": list(result.fold_gains),
+                "children": [value.candidate_sha256 for value in sealed_outcomes],
+                "evaluations": [value.fingerprint for value in outcomes],
+                "sealed_evaluations": [
+                    value.fingerprint for value in sealed_outcomes
+                ],
+                "case": self._task_identity(
+                    self.train_tasks, split="train", seed=epoch_seed
+                ),
+            }
+        )
+        if (
+            selected_seal.candidate_sha256 != selected_bundle.fingerprint()
+            or selected_seal.expected_task_ids
+            != tuple(sorted(task.numeric.task_id for task in self.train_tasks))
+            or selected_seal.mean_smae != result.mean_capped_smae
+            or selected_seal.mean_srmse != result.mean_capped_srmse
+            or selected_seal.invalid_count != result.invalid_count
+            or selected_seal.catastrophic_count != result.catastrophic_count
+            or result.mean_gain != sum(result.fold_gains) / len(result.fold_gains)
+            or result.execution_fingerprint != expected_execution_fingerprint
+        ):
+            raise ValueError("source evaluator cache selected Train closure mismatch")
+        if not isinstance(payload["selected_feedback"], Mapping):
+            raise ValueError("source evaluator cache selected feedback is invalid")
+        selected_feedback = SanitizedEvolutionFeedback.from_payload(
+            payload["selected_feedback"]
+        )
+        aggregate_fingerprints = {
+            evaluation.fingerprint for evaluation in aggregates.values()
+        }
+        if (
+            selected_feedback.train_evaluation_sha256
+            not in aggregate_fingerprints
+            or any(
+                evaluation.fingerprint not in aggregate_fingerprints
+                for evaluation in selected_evaluations
+            )
+        ):
+            raise ValueError("source evaluator cache episode is detached from Train cache")
+        catalog, seed, adapters, pipeline = self._fresh_runtime()
+        if selected_feedback.parent_sha256 != seed.fingerprint():
+            raise ValueError("source evaluator cache feedback Parent mismatch")
+        candidate = propose_bundle_candidate(
+            seed,
+            selected_arm,
+            catalog,
+            adapters,
+            selected_feedback,
+            selected_step,
+        )
+        reconstructed = seed if candidate is None else candidate.to_child(seed)
+        if reconstructed.canonical_bytes() != selected_bundle.canonical_bytes():
+            raise ValueError("source evaluator cache selected pipeline mismatch")
+        return (source_sha256, epoch_seed), _TrainingEpisode(
+            result,
+            selected_bundle,
+            selected_evaluations,
+            pipeline,
+            selected_arm,
+            selected_step,
+            selected_feedback,
+        )
+
+    def _verified_cache(
+        self, checkpoint: object
+    ) -> tuple[dict[str, PackageEvaluation], dict[tuple[str, int], _TrainingEpisode]]:
         if not isinstance(checkpoint, Mapping) or set(checkpoint) != _CACHE_FIELDS:
             raise ValueError("source evaluator cache checkpoint schema mismatch")
         body = dict(checkpoint)
         claimed = body.pop("cache_sha256")
         if claimed != fingerprint_payload(body):
             raise ValueError("source evaluator cache checkpoint digest mismatch")
-        if body["schema_version"] != 1 or not isinstance(body["aggregates"], list):
+        if (
+            body["schema_version"] != 2
+            or not isinstance(body["aggregates"], list)
+            or not isinstance(body["episodes"], list)
+        ):
             raise ValueError("source evaluator cache checkpoint is invalid")
         restored: dict[str, PackageEvaluation] = {}
         for item in body["aggregates"]:
@@ -151,29 +399,53 @@ class SourceMetaEvaluatorV2:
                 raise ValueError("source evaluator cache key is invalid")
             if key in restored:
                 raise ValueError("source evaluator cache keys must be unique")
-            restored[key] = cls._cached_evaluation(item["evaluation"])
+            evaluation = self._cached_evaluation(item["evaluation"])
+            self._require_train_evaluation(evaluation)
+            restored[key] = evaluation
         if list(restored) != sorted(restored):
             raise ValueError("source evaluator cache keys must be sorted")
-        return restored
+        episodes: dict[tuple[str, int], _TrainingEpisode] = {}
+        for item in body["episodes"]:
+            key, episode = self._restore_episode(item, restored)
+            if key in episodes:
+                raise ValueError("source evaluator cache episode keys must be unique")
+            episodes[key] = episode
+        if list(episodes) != sorted(episodes):
+            raise ValueError("source evaluator cache episode keys must be sorted")
+        return restored, episodes
 
     def cache_checkpoint(self) -> dict[str, object]:
         body: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "aggregates": [
                 {"key": key, "evaluation": self._aggregate_cache[key].to_payload()}
                 for key in sorted(self._durable_train_cache_keys)
+            ],
+            "episodes": [
+                {
+                    "source_sha256": source_sha256,
+                    "epoch_seed": epoch_seed,
+                    "result": self._train_result_payload(episode.result),
+                    "selected_bundle": episode.selected_bundle.to_payload(),
+                    "selected_evaluations": [
+                        evaluation.to_payload()
+                        for evaluation in episode.selected_evaluations
+                    ],
+                    "selected_arm": episode.selected_arm,
+                    "selected_step": episode.selected_step,
+                    "selected_feedback": episode.selected_feedback.to_payload(),
+                }
+                for (source_sha256, epoch_seed), episode in sorted(self._episodes.items())
             ],
         }
         body["cache_sha256"] = fingerprint_payload(body)
         return body
 
     def restore_cache(self, checkpoint: object) -> None:
-        restored = self._verified_cache(checkpoint)
-        self._aggregate_cache = restored
-        self._durable_train_cache_keys = set(restored)
-        # Episode objects retain process-local pipelines. Rebuild them lazily
-        # from the durable aggregate authority after every supported resume.
-        self._episodes = {}
+        aggregates, episodes = self._verified_cache(checkpoint)
+        self._aggregate_cache = aggregates
+        self._durable_train_cache_keys = set(aggregates)
+        self._episodes = episodes
 
     def _task_identity(self, tasks: Sequence[ContextTask], *, split: str, seed: int) -> str:
         return fingerprint_payload({
@@ -184,6 +456,33 @@ class SourceMetaEvaluatorV2:
             "bundle_protocol": self.seed_bundle.protocol_fingerprint,
             "bundle_runtime": dict(self.seed_bundle.runtime_fingerprints),
         })
+
+    @staticmethod
+    def _require_evaluation_binding(
+        evaluation: PackageEvaluation,
+        bundle: EvolutionBundleV2,
+        tasks: Sequence[ContextTask],
+        stage: str,
+    ) -> None:
+        task_entities = {
+            task.numeric.task_id: task.numeric.entity_name for task in tasks
+        }
+        if (
+            evaluation.candidate_sha256 != bundle.fingerprint()
+            or evaluation.expected_task_ids != tuple(sorted(task_entities))
+            or any(
+                task_entities.get(row.task_id) != row.entity_name
+                for row in evaluation.task_rows
+            )
+            or evaluation.public_test_accessed
+            or {
+                name: value
+                for name, value in evaluation.secondary_diagnostics.items()
+                if name.startswith("cooperative_stage_")
+            }
+            != {f"cooperative_stage_{stage}": 1.0}
+        ):
+            raise ValueError("source evaluator aggregate does not bind requested evaluation")
 
     def _evaluate(
         self, pipeline: CooperativePipelineAdapter, bundle: EvolutionBundleV2,
@@ -196,14 +495,10 @@ class SourceMetaEvaluatorV2:
         })
         cached = self._aggregate_cache.get(key)
         if cached is not None:
-            if cached.candidate_sha256 != bundle.fingerprint() or cached.public_test_accessed:
-                raise ValueError("source evaluator cache does not bind requested evaluation")
+            self._require_evaluation_binding(cached, bundle, tasks, stage)
             return cached, 0
         evaluation = pipeline.evaluate(bundle, tasks, stage)
-        if evaluation.candidate_sha256 != bundle.fingerprint():
-            raise ValueError("pipeline aggregate does not bind evaluated Bundle")
-        if evaluation.public_test_accessed:
-            raise ValueError("Public evaluation is forbidden in source meta evaluation")
+        self._require_evaluation_binding(evaluation, bundle, tasks, stage)
         self._aggregate_cache[key] = evaluation
         if stage == "train":
             self._durable_train_cache_keys.add(key)
@@ -264,6 +559,8 @@ class SourceMetaEvaluatorV2:
         children: list[EvolutionBundleV2] = []
         outcomes: list[PackageEvaluation] = []
         pipelines: list[CooperativePipelineAdapter] = []
+        selected_arms: list[str] = []
+        selected_feedbacks: list[SanitizedEvolutionFeedback] = []
         logical_task_cost = 0
         actual_task_cost = 0
         feasible = True
@@ -314,6 +611,8 @@ class SourceMetaEvaluatorV2:
             children.append(child)
             outcomes.append(child_eval)
             pipelines.append(pipeline)
+            selected_arms.append(selected)
+            selected_feedbacks.append(proposal_feedback[selected])
         # Every fold child is first sealed on the same complete Train universe.
         # This full-Train comparison, rather than either held-out fold result,
         # decides which Bundle may proceed to Dev.
@@ -344,7 +643,13 @@ class SourceMetaEvaluatorV2:
                 "case": self._task_identity(self.train_tasks, split="train", seed=epoch_seed)}),
         )
         episode = _TrainingEpisode(
-            result, children[selected_index], (*outcomes, *sealed_outcomes), pipelines[selected_index]
+            result,
+            children[selected_index],
+            (*outcomes, *sealed_outcomes),
+            pipelines[selected_index],
+            selected_arms[selected_index],
+            selected_index,
+            selected_feedbacks[selected_index],
         )
         self._episodes[cache_key] = episode
         return episode
