@@ -7,6 +7,7 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Iterable, Mapping
 
 from common.data import Task as DataTask, load_tasks_by_id
@@ -135,6 +136,7 @@ class TaskLocalEvidenceBundleV1:
             raise ValueError("task-local evidence index task IDs are not canonical")
         for entry in entries:
             shortlist, diagnostics, shortlist_sha, diagnostics_sha = self.by_task[entry["task_id"]]
+            diagnostics = _parse_diagnostics_payload(diagnostics, shortlist)
             if (type(shortlist) is not TaskCandidateShortlistV1 or shortlist.policy_sha256 != self.policy.fingerprint()
                     or shortlist.dictionary_sha256 != self.dictionary_sha256
                     or shortlist.fingerprint() != shortlist_sha
@@ -142,6 +144,23 @@ class TaskLocalEvidenceBundleV1:
                     or (entry["task_input_sha256"], entry["shortlist_sha256"], entry["diagnostics_sha256"])
                     != (shortlist.task_input_sha256, shortlist_sha, diagnostics_sha)):
                 raise ValueError("task-local evidence task binding mismatch")
+        object.__setattr__(self, "index", MappingProxyType(dict(index)))
+        object.__setattr__(self, "by_task", MappingProxyType({task_id: (shortlist, MappingProxyType(dict(_parse_diagnostics_payload(diagnostics, shortlist))), shortlist_sha, diagnostics_sha)
+            for task_id, (shortlist, diagnostics, shortlist_sha, diagnostics_sha) in self.by_task.items()}))
+
+
+def _parse_diagnostics_payload(payload: Mapping[str, object], shortlist: TaskCandidateShortlistV1) -> dict[str, object]:
+    value = dict(payload)
+    if set(value) != {"schema_version", "task_id", "task_input_sha256", "rows", "public_test_accessed"} or value["schema_version"] != 1 or value["task_input_sha256"] != shortlist.task_input_sha256 or value["public_test_accessed"] is not False or type(value["rows"]) is not list:
+        raise ValueError("task-local diagnostics payload is malformed")
+    names = []
+    for row in value["rows"]:
+        if type(row) is not dict or set(row) != {"candidate_name", "failure_reason", "diagnostic"} or type(row["candidate_name"]) is not str or row["failure_reason"] is not None and type(row["failure_reason"]) is not str:
+            raise ValueError("task-local diagnostics row is malformed")
+        names.append(row["candidate_name"])
+    if names != sorted(names) or len(names) != len(set(names)) or not set(names) <= set(shortlist.candidate_names):
+        raise ValueError("task-local diagnostics are not an ordered shortlist subset")
+    return value
 
 
 def load_task_local_evidence_bundle(output: Path, *, dictionary_sha256: str) -> TaskLocalEvidenceBundleV1:
@@ -545,23 +564,37 @@ def _shortlist_index(tasks: Iterable[DataTask], shortlists: Mapping[str, TaskCan
     entries = []
     for task in tasks:
         shortlist = shortlists[task.task_id]
+        payload = _diagnostics_payload(task.task_id, shortlist.task_input_sha256, rows_by_task.get(task.task_id, []))
         entries.append({"task_id": task.task_id, "task_input_sha256": shortlist.task_input_sha256,
-            "shortlist_sha256": shortlist.fingerprint(), "diagnostics_sha256": hashlib.sha256(canonical_json_bytes([
-                {"candidate_name": row.candidate_name, "failure_reason": row.failure_reason,
-                 "diagnostic": asdict(row.diagnostic) if row.diagnostic is not None else None}
-                for row in rows_by_task.get(task.task_id, [])
-            ])).hexdigest()})
+            "shortlist_sha256": shortlist.fingerprint(), "diagnostics_sha256": hashlib.sha256(canonical_json_bytes(payload)).hexdigest()})
     entries.sort(key=lambda item: (item["task_id"], item["task_input_sha256"]))
     policy = policy or TaskShortlistPolicyV1()
     return {"schema_version": 1, "policy_sha256": policy.fingerprint(), "entries": entries,
             "public_test_accessed": False}
 
 
-def _bind_shortlist_index(output: Path, run_manifest: dict[str, object], shortlist_index: dict[str, object]) -> None:
+def _diagnostics_payload(task_id: str, task_input_sha256: str, rows: Iterable[TaskLocalTaskRow]) -> dict[str, object]:
+    values = [{"candidate_name": row.candidate_name, "failure_reason": row.failure_reason,
+               "diagnostic": asdict(row.diagnostic) if row.diagnostic is not None else None}
+              for row in rows]
+    values.sort(key=lambda row: row["candidate_name"])
+    return {"schema_version": 1, "task_id": task_id, "task_input_sha256": task_input_sha256,
+            "rows": values, "public_test_accessed": False}
+
+
+def _bind_shortlist_index(output: Path, run_manifest: dict[str, object], shortlist_index: dict[str, object], *, rows: Iterable[TaskLocalTaskRow] = ()) -> None:
     policy = TaskShortlistPolicyV1()
     if shortlist_index.get("policy_sha256") != policy.fingerprint():
         raise ValueError("shortlist index policy mismatch")
     _write_once(output / "task_shortlist_policy.json", policy.canonical_bytes())
+    by_task: dict[str, list[TaskLocalTaskRow]] = {}
+    for row in rows:
+        by_task.setdefault(row.task_id, []).append(row)
+    for entry in shortlist_index["entries"]:
+        payload = _diagnostics_payload(entry["task_id"], entry["task_input_sha256"], by_task.get(entry["task_id"], []))
+        if hashlib.sha256(canonical_json_bytes(payload)).hexdigest() != entry["diagnostics_sha256"]:
+            raise ValueError("shortlist diagnostics index mismatch")
+        _write_once(output / "task_diagnostics" / f"{entry['task_input_sha256']}.json", payload)
     _write_once(output / "task_shortlist_index.json", shortlist_index)
     run_manifest["shortlist_index_fingerprint"] = hashlib.sha256(canonical_json_bytes(shortlist_index)).hexdigest()
     _write_once(output / "run_manifest.json", run_manifest)
@@ -674,7 +707,7 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
         _write_once(output / "oof_report.json", _report_payload(oof))
         if not oof.accepted:
             shortlist_index = _shortlist_index(train, train_shortlists, train_shortlist_rows)
-            _bind_shortlist_index(output, run_manifest, shortlist_index)
+            _bind_shortlist_index(output, run_manifest, shortlist_index, rows=train_shortlist_rows)
             _write_once(
                 output / "evaluation_complete.json",
                 {
@@ -699,7 +732,7 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
         all_shortlists = dict(train_shortlists)
         all_shortlists.update({task.task_id: shortlist for task, shortlist in zip(dev, shortlists, strict=True)})
         shortlist_index = _shortlist_index(train + dev, all_shortlists, train_shortlist_rows + dev_rows)
-        _bind_shortlist_index(output, run_manifest, shortlist_index)
+        _bind_shortlist_index(output, run_manifest, shortlist_index, rows=train_shortlist_rows + dev_rows)
         dev_report = evaluate_task_local_release(
             release, dev_rows, task_ids=dev_ids, split="dev"
         )

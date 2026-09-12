@@ -277,6 +277,21 @@ def validate_artifact(kind, raw):
         spec.contract.from_payload(payload)
     elif spec.payload_fields is not None:
         _require_exact_schema(payload, spec.payload_fields, field=kind.value)
+    if kind is K.TASK_SHORTLIST:
+        from numerical_agent.evolution.task_shortlist import TaskCandidateShortlistV1
+        TaskCandidateShortlistV1.from_payload(payload)
+    elif kind is K.SHORTLIST_POLICY:
+        from numerical_agent.evolution.task_shortlist import TaskShortlistPolicyV1
+        TaskShortlistPolicyV1.from_payload(payload)
+    elif kind is K.SHORTLIST_INDEX:
+        from numerical_agent.run_task_local_ensemble_evolution import TaskLocalEvidenceBundleV1
+        # The bundle performs the cross-object joins; this proves index syntax.
+        if payload["schema_version"] != 1 or payload["public_test_accessed"] is not False or type(payload["entries"]) is not list:
+            raise ValueError("shortlist index is malformed")
+    elif kind is K.HINDCAST_DIAGNOSTICS:
+        if (payload["schema_version"] != 1 or payload["public_test_accessed"] is not False
+                or type(payload["rows"]) is not list):
+            raise ValueError("hindcast diagnostics are malformed")
     if kind is K.PROPOSER_REQUEST:
         from .proposers import primitive_proposer_request
         primitive_proposer_request(**payload)

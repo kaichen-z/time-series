@@ -154,8 +154,12 @@ def test_v3_oof_materializes_only_each_fold_prior_shortlist(monkeypatch: pytest.
 
 @pytest.mark.parametrize("terminal", ["accepted", "oof_rejected"])
 def test_terminal_index_binding_writes_matching_manifest(tmp_path: Path, terminal: str) -> None:
-    from numerical_agent.run_task_local_ensemble_evolution import _bind_shortlist_index
-    index = {"schema_version": 1, "entries": [{"task_id": "a", "task_input_sha256": "1" * 64, "shortlist_sha256": "2" * 64, "diagnostics_sha256": "3" * 64}]}
+    from numerical_agent.run_task_local_ensemble_evolution import _bind_shortlist_index, _diagnostics_payload
+    from numerical_agent.evolution.task_shortlist import TaskShortlistPolicyV1
+    payload = _diagnostics_payload("a", "1" * 64, ())
+    index = {"schema_version": 1, "policy_sha256": TaskShortlistPolicyV1().fingerprint(), "public_test_accessed": False,
+             "entries": [{"task_id": "a", "task_input_sha256": "1" * 64, "shortlist_sha256": "2" * 64,
+                          "diagnostics_sha256": __import__("hashlib").sha256(__import__("common.payload", fromlist=["canonical_json_bytes"]).canonical_json_bytes(payload)).hexdigest()}]}
     manifest: dict[str, object] = {"terminal": terminal}
     output = tmp_path / terminal
     _bind_shortlist_index(output, manifest, index)
