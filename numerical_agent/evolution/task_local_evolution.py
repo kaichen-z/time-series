@@ -10,6 +10,7 @@ import unicodedata
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 
 from common.data import Task as DataTask
@@ -384,6 +385,36 @@ def fit_oof_shortlist_priors(
         folds[fold] = fit_candidate_priors(rows, task_ids=fit_ids, morphology_keys={task_id: morphology[task_id] for task_id in fit_ids}, candidate_names=candidate_names)
     final = fit_candidate_priors(rows, task_ids=task_ids, morphology_keys=morphology, candidate_names=candidate_names)
     return folds, final
+
+
+def build_candidate_priors_bundle(
+    rows: Sequence[TaskLocalTaskRow], manifest: GroupFoldManifest, *,
+    dictionary_sha256: str, candidate_names: Sequence[str],
+) -> dict[str, object]:
+    """Canonical Task 3 handoff consumed by formal task-local V3 execution."""
+    if type(dictionary_sha256) is not str or len(dictionary_sha256) != 64:
+        raise ValueError("candidate-priors bundle requires a dictionary SHA-256")
+    folds, final = fit_oof_shortlist_priors(rows, manifest, candidate_names=candidate_names)
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "grouping_fingerprint": manifest.grouping_fingerprint,
+        "dictionary_sha256": dictionary_sha256,
+        "fold_priors": {str(fold): [item.to_payload() for item in folds[fold]] for fold in sorted(folds)},
+        "final_priors": [item.to_payload() for item in final],
+    }
+    payload["payload_fingerprint"] = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+    return payload
+
+
+def write_candidate_priors_bundle(
+    path: Path, rows: Sequence[TaskLocalTaskRow], manifest: GroupFoldManifest, *,
+    dictionary_sha256: str, candidate_names: Sequence[str],
+) -> dict[str, object]:
+    payload = build_candidate_priors_bundle(
+        rows, manifest, dictionary_sha256=dictionary_sha256, candidate_names=candidate_names,
+    )
+    path.write_bytes(canonical_json_bytes(payload))
+    return payload
 
 
 @dataclass(frozen=True)

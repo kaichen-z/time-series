@@ -126,6 +126,7 @@ def test_shell_runner_dry_run_names_the_formal_train_dev_command() -> None:
         "TASK_LOCAL_TASKS_FILE": "/tmp/tasks.jsonl",
         "TASK_LOCAL_ANCHOR_RELEASE_DIR": "runs/champion_evolution/latest",
         "TASK_LOCAL_FORECAST_STORE": "runs/champion_forecasts/latest",
+        "TASK_LOCAL_CANDIDATE_PRIORS_FILE": "runs/task_local_priors/v001.json",
         "TASK_LOCAL_OUTPUT_DIR": "runs/task_local_ensemble/v001",
     }
     result = subprocess.run(
@@ -140,6 +141,7 @@ def test_shell_runner_dry_run_names_the_formal_train_dev_command() -> None:
     assert result.returncode == 0
     assert "run_task_local_ensemble_evolution" in result.stdout
     assert "--anchor-release-dir runs/champion_evolution/latest" in result.stdout
+    assert "--candidate-priors-file runs/task_local_priors/v001.json" in result.stdout
 
 
 def test_public99_runs_once_after_acceptance_and_compares_toto(tmp_path: Path) -> None:

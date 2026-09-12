@@ -16,7 +16,10 @@ from numerical_agent.evolution.task_shortlist import (
     build_task_candidate_shortlist,
     fit_candidate_priors,
 )
-from numerical_agent.evolution.task_local_evolution import TaskLocalTaskRow, GroupFoldManifest, fit_oof_shortlist_priors
+from numerical_agent.evolution.task_local_evolution import (
+    TaskLocalTaskRow, GroupFoldManifest, fit_oof_shortlist_priors,
+    build_candidate_priors_bundle,
+)
 
 
 def test_shortlist_contract_is_canonical_and_anchor_first():
@@ -136,6 +139,20 @@ def test_fit_oof_shortlist_priors_uses_complements_only():
     assert first[0] != changed_first[0]
     assert first[1] == changed_first[1]
     assert final != first[0]
+
+
+def test_task3_prior_bundle_round_trips_through_formal_loader(tmp_path):
+    from numerical_agent.run_task_local_ensemble_evolution import _load_candidate_priors_bundle
+    groups = tuple((f"{i:064x}", (task,), i) for i, task in enumerate(("a", "b")))
+    manifest = GroupFoldManifest(1, 1, 2, groups, __import__("numerical_agent.evolution.task_local_evolution", fromlist=["_GROUPING_IMPLEMENTATION"])._GROUPING_IMPLEMENTATION)
+    rows = tuple(_prior_row(task, "a", "statistical") for task in ("a", "b"))
+    payload = build_candidate_priors_bundle(rows, manifest, dictionary_sha256="d" * 64, candidate_names=("a",))
+    path = tmp_path / "priors.json"
+    path.write_bytes(canonical_json_bytes(payload))
+    folds, final = _load_candidate_priors_bundle(path, grouping_fingerprint=manifest.grouping_fingerprint,
+        dictionary_sha256="d" * 64, families={"a": "statistical"}, fold_count=2)
+    assert set(folds) == {0, 1}
+    assert final == tuple(__import__("numerical_agent.evolution.task_shortlist", fromlist=["CandidatePriorV1"]).CandidatePriorV1.from_payload(item) for item in payload["final_priors"])
 
 
 def test_builder_requires_screening_and_selects_exact_target_with_dynamic_family_ties():

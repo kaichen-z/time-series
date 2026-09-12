@@ -8,6 +8,7 @@ command=(
   --tasks-file "${TASK_LOCAL_TASKS_FILE:?}"
   --anchor-release-dir "${TASK_LOCAL_ANCHOR_RELEASE_DIR:?}"
   --forecast-store "${TASK_LOCAL_FORECAST_STORE:?}"
+  --candidate-priors-file "${TASK_LOCAL_CANDIDATE_PRIORS_FILE:?}"
   --output-dir "${TASK_LOCAL_OUTPUT_DIR:?}"
 )
 
