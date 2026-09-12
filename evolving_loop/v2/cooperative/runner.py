@@ -389,7 +389,9 @@ def _plan(control, ceilings):
     return BudgetPlan.from_config(control, ceilings=ceilings)
 
 
-def _available_estimate(kernel, task_executions):
+def _available_estimate(kernel, task_executions, remaining_steps):
+    if type(remaining_steps) is not int or remaining_steps < 1:
+        raise ValueError("remaining_steps must be a positive integer")
     charged = kernel.budget.charged_use
     ceilings = kernel.budget.plan.ceilings
     values = {
@@ -397,10 +399,11 @@ def _available_estimate(kernel, task_executions):
                   getattr(ceilings, name) - getattr(charged, name))
         for name in ResourceUse.field_names()
     }
-    values["wall_seconds"] = min(
+    remaining_wall_seconds = min(
         values["wall_seconds"],
         max(0.0, kernel.budget.plan.search_deadline_seconds - kernel.budget.elapsed_wall_seconds),
     )
+    values["wall_seconds"] = remaining_wall_seconds / (remaining_steps + 1)
     values["task_executions"] = task_executions
     return ResourceUse.from_payload(values)
 
@@ -550,6 +553,8 @@ def run_cooperative_evolution(
     dev_universe = inputs["dev_tasks"]
     _restore_cache_aliases(cache, rows, train_universe, dev_universe)
     for step in range(state.completed_step, max_steps):
+        if stop_after is not None and state.completed_step >= stop_after:
+            break
         parent = kernel.active_bundle()
         arm = select_arm(state)
         candidate = propose_bundle_candidate(
@@ -585,7 +590,11 @@ def run_cooperative_evolution(
             candidate_sha = child.fingerprint()
             permit = kernel.reserve_evaluation(
                 child,
-                _available_estimate(kernel, 2 * (len(train) + len(dev))),
+                _available_estimate(
+                    kernel,
+                    2 * (len(train) + len(dev)),
+                    max_steps - step,
+                ),
             )
             if not permit.allowed:
                 raise KernelAuthorityError(f"cooperative evaluation denied: {permit.reason}")
@@ -723,9 +732,6 @@ def run_cooperative_evolution(
         append_jsonl(root / "cooperative_progress.jsonl", row)
         rows.append(row)
         _checkpoint(root, config_sha, inputs, kernel, state, accepted, rejected, completed)
-        if stop_after is not None and state.completed_step >= stop_after:
-            break
-
     if state.completed_step == max_steps and stop_after is None:
         kernel.finalize()
         checkpoint = _checkpoint(

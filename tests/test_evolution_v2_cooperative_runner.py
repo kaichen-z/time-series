@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 
 import pytest
@@ -97,7 +98,7 @@ class _Config:
 
 class _Pipeline:
     def __init__(
-        self, alternate_release: str, clock: FakeClock, *, reject_dev: bool = False
+        self, alternate_release: str, clock, *, reject_dev: bool = False
     ):
         self.alternate_release = alternate_release
         self.clock = clock
@@ -106,7 +107,9 @@ class _Pipeline:
 
     def evaluate(self, bundle, tasks, stage) -> PackageEvaluation:
         self.calls.append((bundle.fingerprint(), stage))
-        self.clock.advance(1.0)
+        advance = getattr(self.clock, "advance", None)
+        if advance is not None:
+            advance(1.0)
         changed_module = (
             bundle.retrieval_release_sha256 != self.seed_retrieval_sha
             or bundle.decision_policy_sha256 != self.seed_decision_sha
@@ -156,8 +159,9 @@ def run_case(tmp_path):
             stop_after: int | None = None,
             decision_prompt: str = "changed prompt",
             reject_dev: bool = False,
+            real_clock: bool = False,
         ):
-            clock = FakeClock()
+            clock = time.monotonic if real_clock else FakeClock()
             pipeline = _Pipeline(
                 alternate_pair.release.fingerprint, clock, reject_dev=reject_dev
             )
@@ -317,3 +321,35 @@ def test_dev_rejection_does_not_update_train_only_scheduler_outcomes(
         arm["acceptances"]
         for arm in checkpoint["scheduler_state"]["arms"].values()
     ] == [1, 1, 1, 1]
+
+
+def test_real_clock_keeps_margin_for_the_first_stage_reservation(run_case):
+    result = run_case.run(
+        scheduler="ucb", directory="real-clock", stop_after=1, real_clock=True
+    )
+
+    assert result.attempted_arms == ("numerical",)
+    assert len(run_case.pipelines["real-clock"].calls) == 4
+
+
+def test_stop_after_zero_executes_no_scheduled_step(run_case):
+    result = run_case.run(scheduler="ucb", directory="stop-zero", stop_after=0)
+
+    assert result.attempted_arms == ()
+    assert result.accepted_steps == result.rejected_steps == 0
+    assert run_case.pipelines["stop-zero"].calls == []
+
+
+def test_resume_at_stop_boundary_executes_no_additional_step(run_case):
+    partial = run_case.run(
+        scheduler="ucb", directory="same-stop", stop_after=2
+    )
+    before = run_case.snapshot("same-stop")
+
+    resumed = run_case.run(
+        scheduler="ucb", directory="same-stop", resume=True, stop_after=2
+    )
+
+    assert resumed == partial
+    assert run_case.pipelines["same-stop"].calls == []
+    assert run_case.snapshot("same-stop") == before
