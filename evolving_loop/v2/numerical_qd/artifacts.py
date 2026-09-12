@@ -262,6 +262,24 @@ def _bootstrap_receipt(payload):
         raise ValueError("bootstrap receipt exact closure mismatch")
 
 
+_TASK4_KINDS = (K.TASK_SHORTLIST, K.SHORTLIST_POLICY, K.HINDCAST_DIAGNOSTICS)
+
+
+def task4_artifact_kind(payload):
+    """Only the three exact Task 4 schemas retain their original encoding."""
+    for kind in _TASK4_KINDS:
+        if set(payload) == set(ARTIFACT_KINDS[kind].payload_fields):
+            return kind
+    return None
+
+
+def artifact_bytes(kind, payload):
+    if kind is not None and ArtifactKindV2(kind) in _TASK4_KINDS:
+        from common.payload import canonical_json_bytes
+        return canonical_json_bytes(payload)
+    return canonical_v2_bytes(payload)
+
+
 def validate_artifact(kind, raw):
     kind = ArtifactKindV2(kind)
     spec = ARTIFACT_KINDS[kind]
@@ -271,7 +289,7 @@ def validate_artifact(kind, raw):
         raw.decode("utf-8")
         return spec
     payload = strict_json_loads(raw.decode("utf-8"), context="typed artifact")
-    if type(payload) is not dict or canonical_v2_bytes(payload) != raw:
+    if type(payload) is not dict or artifact_bytes(kind, payload) != raw:
         raise ValueError("artifact requires canonical JSON object bytes")
     if spec.contract is not None:
         spec.contract.from_payload(payload)
@@ -284,14 +302,11 @@ def validate_artifact(kind, raw):
         from numerical_agent.evolution.task_shortlist import TaskShortlistPolicyV1
         TaskShortlistPolicyV1.from_payload(payload)
     elif kind is K.SHORTLIST_INDEX:
-        from numerical_agent.run_task_local_ensemble_evolution import TaskLocalEvidenceBundleV1
-        # The bundle performs the cross-object joins; this proves index syntax.
-        if payload["schema_version"] != 1 or payload["public_test_accessed"] is not False or type(payload["entries"]) is not list:
-            raise ValueError("shortlist index is malformed")
+        from numerical_agent.run_task_local_ensemble_evolution import parse_shortlist_index
+        parse_shortlist_index(payload)
     elif kind is K.HINDCAST_DIAGNOSTICS:
-        if (payload["schema_version"] != 1 or payload["public_test_accessed"] is not False
-                or type(payload["rows"]) is not list):
-            raise ValueError("hindcast diagnostics are malformed")
+        from numerical_agent.run_task_local_ensemble_evolution import parse_diagnostics_payload
+        parse_diagnostics_payload(payload)
     if kind is K.PROPOSER_REQUEST:
         from .proposers import primitive_proposer_request
         primitive_proposer_request(**payload)

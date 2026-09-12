@@ -90,9 +90,25 @@ def _read(path):
 
 def _persist(store, value, *, kind=None):
     payload = value.to_payload() if hasattr(value, "to_payload") else value
-    identity = payload.get("checkpoint_sha256", fingerprint_payload(payload))
+    from .artifacts import artifact_bytes
+    identity = payload.get("checkpoint_sha256", hashlib.sha256(artifact_bytes(kind, payload)).hexdigest())
     store.write_object(identity, value, kind=kind)
     return identity
+
+
+def _persist_task_local_evidence(store, evidence):
+    """Copy sealed Task 4 objects with their original content identities."""
+    if evidence is None:
+        return
+    objects = [(ArtifactKind.SHORTLIST_POLICY, evidence.policy.to_payload(), evidence.policy.fingerprint()),
+        (ArtifactKind.SHORTLIST_INDEX, dict(evidence.index), fingerprint_payload(dict(evidence.index)))]
+    for task_id in sorted(evidence.by_task):
+        shortlist, diagnostics, shortlist_sha, diagnostics_sha = evidence.by_task[task_id]
+        objects.extend(((ArtifactKind.TASK_SHORTLIST, shortlist.to_payload(), shortlist_sha),
+            (ArtifactKind.HINDCAST_DIAGNOSTICS, dict(diagnostics), diagnostics_sha)))
+    for kind, payload, expected in objects:
+        if _persist(store, payload, kind=kind) != expected:
+            raise ValueError("persisted local evidence identity mismatch")
 
 
 def _available(kernel):
@@ -247,7 +263,9 @@ def _seed_registry(release, adapter, *, account_work=None, bootstrap_authority=N
             task.numeric.prediction_length, task.numeric.frequency, ()),
             screening_policy=adapter.materializer.screening_policy,
             candidate_runner=forecast, champion_release=anchor)
-        return bound_numerical_package(source, supplied, {item.name: item for item in source.ranked_alternatives})
+        evidence = adapter.local_evidence_for(task)
+        kwargs = {} if evidence is None else {"shortlist": evidence[0], "hindcast_diagnostics_sha256": evidence[3]}
+        return bound_numerical_package(source, supplied, {item.name: item for item in source.ranked_alternatives}, **kwargs)
     return build_package_registry(adapter.tasks, release, build)
 
 
@@ -516,6 +534,7 @@ def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry
         if len(canonical_v2_bytes(payload)) > estimate.artifact_bytes:
             reason = "artifact_bytes_exhausted"
         else:
+            _persist_task_local_evidence(store, adapter.task_local_evidence)
             pair_sha = _persist(store, payload, kind=ArtifactKind.FROZEN_PAIR)
             pair = store._object(pair_sha)
             release = parse_numerical_supply_release(pair["supply"])
@@ -662,7 +681,8 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         for payload in seed_policies.values():
             _persist(store, payload, kind=ArtifactKind.RECIPE_POLICY)
         _persist_state(store, seed_state, seed_genome)
-        imported_seed = import_numerical_seed(release, registry, tasks=adapter.tasks)
+        imported_seed = import_numerical_seed(release, registry, tasks=adapter.tasks, evidence=adapter.task_local_evidence)
+        _persist_task_local_evidence(store, adapter.task_local_evidence)
         _persist(store, {"supply": release.to_payload(), "registry": imported_seed.envelope.to_payload()}, kind=ArtifactKind.FROZEN_PAIR)
         state, active_genome = seed_state, seed_genome
         archive = NumericalQDArchive(capacity=config.map_elites["cell_capacity"])

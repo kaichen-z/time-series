@@ -53,7 +53,7 @@ from numerical_agent.evolution.screening import (
     profile_task,
 )
 from numerical_agent.evolution.task_local_evolution import GroupFoldManifest
-from numerical_agent.run_task_local_ensemble_evolution import TaskLocalEvidenceBundleV1
+from numerical_agent.run_task_local_ensemble_evolution import TaskLocalEvidenceBundleV1, task_input_sha256
 
 from ..budget import ResourceUse
 from ..contracts import _require_exact_schema, canonical_v2_bytes, fingerprint_payload, require_sha256
@@ -380,7 +380,13 @@ def _tasks(tasks):
     return tuple(sorted(values, key=lambda task: task.numeric.task_id))
 
 
-def _envelope(registry, tasks):
+def _task_history_sha(task):
+    numeric = task.numeric
+    return task_input_sha256(RuntimeTask(numeric.task_id, numeric.history_values,
+        numeric.prediction_length, numeric.frequency, ()))
+
+
+def _envelope(registry, tasks, evidence: TaskLocalEvidenceBundleV1 | None = None):
     if type(registry) is not FrozenNumericalPackageRegistry:
         raise ValueError("exact FrozenNumericalPackageRegistry required")
     tasks = _tasks(tasks)
@@ -393,8 +399,14 @@ def _envelope(registry, tasks):
         sha = artifact.fingerprint()
         packages[sha] = artifact
         entries[task.numeric.task_id] = {"task_sha256": task_registry_fingerprint(task), "package_sha256": sha}
-    return FrozenNumericalRegistryEnvelopeV2(1, registry.release_sha256, registry.fingerprint,
-        entries, tuple(sorted(packages)), packages)
+        if evidence is not None:
+            shortlist, _, shortlist_sha, diagnostics_sha = evidence.by_task[task.numeric.task_id]
+            entries[task.numeric.task_id].update(task_input_sha256=shortlist.task_input_sha256,
+                task_shortlist_sha256=shortlist_sha, hindcast_diagnostics_sha256=diagnostics_sha)
+    refs = {} if evidence is None else {"shortlist_policy_sha256": evidence.policy.fingerprint(),
+        "dictionary_sha256": evidence.dictionary_sha256, "shortlist_index_sha256": fingerprint_payload(dict(evidence.index))}
+    return FrozenNumericalRegistryEnvelopeV2(1 if evidence is None else 2, registry.release_sha256, registry.fingerprint,
+        entries, tuple(sorted(packages)), packages, **refs)
 
 
 def _restore_registry(envelope, tasks):
@@ -406,12 +418,93 @@ def _restore_registry(envelope, tasks):
         entry = envelope.entries[task.numeric.task_id]
         if task_registry_fingerprint(task) != entry["task_sha256"]:
             raise ValueError("restored host task SHA mismatch")
+        if envelope.schema_version == 2 and _task_history_sha(task) != entry["task_input_sha256"]:
+            raise ValueError("restored task history SHA mismatch")
         entries.append((task, envelope.packages[entry["package_sha256"]].restore()))
     registry = FrozenNumericalPackageRegistry(entries, release_sha256=envelope.release_sha256,
         expected_task_ids=tuple(envelope.entries))
     if registry.fingerprint != envelope.registry_sha256:
         raise ValueError("restored registry content SHA mismatch")
     return registry
+
+
+def frozen_local_evidence_references(envelope):
+    """The exact raw evidence objects required by a versioned registry."""
+    from .artifacts import ArtifactKindV2 as K
+    if envelope.schema_version == 1:
+        return {}
+    refs = {envelope.shortlist_policy_sha256: K.SHORTLIST_POLICY,
+        envelope.shortlist_index_sha256: K.SHORTLIST_INDEX}
+    for entry in envelope.entries.values():
+        for name, kind in (("task_shortlist_sha256", K.TASK_SHORTLIST),
+                           ("hindcast_diagnostics_sha256", K.HINDCAST_DIAGNOSTICS)):
+            sha = entry[name]
+            if sha in refs and refs[sha] != kind:
+                raise ValueError("local evidence reference has conflicting types")
+            refs[sha] = kind
+    return refs
+
+
+def validate_frozen_local_evidence(release, envelope, *, artifact_bytes_by_sha, tasks=()):
+    """Pure byte/type/closure verification; never forecasts or diagnoses."""
+    from common.payload import strict_json_loads
+    from numerical_agent.evolution.task_shortlist import TaskCandidateShortlistV1, TaskShortlistPolicyV1
+    from numerical_agent.run_task_local_ensemble_evolution import parse_shortlist_index, parse_diagnostics_payload
+    from .artifacts import validate_artifact
+    envelope = FrozenNumericalRegistryEnvelopeV2.from_payload(envelope.to_payload())
+    if envelope.release_sha256 != release.fingerprint:
+        raise ValueError("frozen release/registry mismatch")
+    if envelope.schema_version == 1:
+        return
+    if release.schema_version != 2 or envelope.dictionary_sha256 != release.source_fingerprints.get("dictionary"):
+        raise ValueError("frozen Dictionary identity mismatch")
+    payloads = {}
+    for sha, kind in frozen_local_evidence_references(envelope).items():
+        raw = artifact_bytes_by_sha.get(sha)
+        if type(raw) is not bytes or hashlib.sha256(raw).hexdigest() != sha:
+            raise ValueError("missing or changed frozen evidence bytes")
+        validate_artifact(kind, raw)
+        payloads[sha] = strict_json_loads(raw.decode(), context="frozen local evidence")
+    policy = TaskShortlistPolicyV1.from_payload(payloads[envelope.shortlist_policy_sha256])
+    index = parse_shortlist_index(payloads[envelope.shortlist_index_sha256])
+    if policy.fingerprint() != index["policy_sha256"] or index["policy_sha256"] != envelope.shortlist_policy_sha256 or [row["task_id"] for row in index["entries"]] != sorted(envelope.entries):
+        raise ValueError("frozen shortlist index identity mismatch")
+    for row in index["entries"]:
+        entry = envelope.entries[row["task_id"]]
+        if (row["task_input_sha256"], row["shortlist_sha256"], row["diagnostics_sha256"]) != (
+                entry["task_input_sha256"], entry["task_shortlist_sha256"], entry["hindcast_diagnostics_sha256"]):
+            raise ValueError("frozen index/entry reference mismatch")
+        shortlist = TaskCandidateShortlistV1.from_payload(payloads[row["shortlist_sha256"]])
+        diagnostics = parse_diagnostics_payload(payloads[row["diagnostics_sha256"]])
+        if (shortlist.policy_sha256 != envelope.shortlist_policy_sha256
+                or shortlist.dictionary_sha256 != envelope.dictionary_sha256
+                or shortlist.task_input_sha256 != entry["task_input_sha256"]
+                or diagnostics["task_id"] != row["task_id"]
+                or diagnostics["task_input_sha256"] != entry["task_input_sha256"]
+                or not {item["candidate_name"] for item in diagnostics["rows"]} <= set(shortlist.candidate_names)):
+            raise ValueError("frozen shortlist/diagnostics binding mismatch")
+        package = envelope.packages[entry["package_sha256"]].restore()
+        names = shortlist.candidate_names
+        anchor = package.protected_baseline
+        selection = package.selection_decision
+        if (names[0] != anchor.name or package.active_candidate_names != names
+                or tuple(item.name for item in package.ranked_alternatives) != names
+                or set(package.candidate_diagnostics) != set(names)
+                or not set(selection.considered_candidates) <= set(names)
+                or not set(selection.rejected) <= set(names)
+                or not set(selection.selected) <= set(names)
+                or anchor.name not in selection.selected or len(selection.selected) > 3
+                or len(selection.selected) != len(set(selection.selected))
+                or len(selection.weights) != len(selection.selected)
+                or any(type(weight) not in (float, int) or not math.isfinite(weight) or weight < 0 for weight in selection.weights)
+                or not math.isclose(sum(selection.weights), 1.0, abs_tol=1e-12)
+                or selection.weights[selection.selected.index(anchor.name)] < 0.5):
+            raise ValueError("frozen package shortlist/Anchor selection mismatch")
+        if package.fallback_reason is not None or selection.selected == (anchor.name,):
+            if selection.selected != (anchor.name,) or selection.weights != (1.0,) or canonical_v2_bytes({"forecast": package.final_forecast}) != canonical_v2_bytes({"forecast": anchor.forecast}):
+                raise ValueError("frozen fallback must be the exact Anchor forecast")
+    if tasks:
+        envelope.restore(tasks)
 
 
 @dataclass(frozen=True)
@@ -726,7 +819,7 @@ def _materializer_identity(materializer):
     }
 
 
-def import_numerical_seed(release, registry, *, tasks, source_paths=()) -> ImportedNumericalSeedV2:
+def import_numerical_seed(release, registry, *, tasks, source_paths=(), evidence: TaskLocalEvidenceBundleV1 | None = None) -> ImportedNumericalSeedV2:
     if type(release) is not NumericalSupplyRelease:
         raise ValueError("exact NumericalSupplyRelease required")
     release = parse_numerical_supply_release(release.to_payload())
@@ -734,7 +827,7 @@ def import_numerical_seed(release, registry, *, tasks, source_paths=()) -> Impor
     for path in source_paths:
         data = Path(path).read_bytes()
         sources[hashlib.sha256(data).hexdigest()] = data.decode("utf-8")
-    return ImportedNumericalSeedV2(release, _envelope(registry, tasks), sources)
+    return ImportedNumericalSeedV2(release, _envelope(registry, tasks, evidence=evidence), sources)
 
 
 class LegacyNumericalAdapter:
@@ -1226,4 +1319,4 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
             task_fold=adapter.fold_manifest.task_fold_map.get(task.numeric.task_id), shortlist=shortlist,
             hindcast_diagnostics_sha256=diagnostics_sha)
     registry = build_package_registry(adapter.tasks, release, builder)
-    return FrozenNumericalArtifactsV2(release, registry, _envelope(registry, adapter.tasks), tuple(sha for sha, _, _ in selected))
+    return FrozenNumericalArtifactsV2(release, registry, _envelope(registry, adapter.tasks, evidence=adapter.task_local_evidence), tuple(sha for sha, _, _ in selected))

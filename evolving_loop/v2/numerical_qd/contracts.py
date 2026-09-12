@@ -847,9 +847,30 @@ class FrozenNumericalRegistryEnvelopeV2(_CanonicalContract):
     entries: Mapping[str, Mapping[str, str]]
     package_sha256s: tuple[str, ...]
     packages: Mapping[str, FrozenNumericalPackageEnvelopeV2]
+    shortlist_policy_sha256: str | None = None
+    dictionary_sha256: str | None = None
+    shortlist_index_sha256: str | None = None
+
+    @classmethod
+    def from_payload(cls, payload):
+        if not isinstance(payload, Mapping) or type(payload.get("schema_version")) is not int or payload["schema_version"] not in (1, 2):
+            raise ValueError("registry envelope schema must be 1 or 2")
+        names = tuple(field.name for field in fields(cls))
+        values = _require_exact_schema(payload, names if payload["schema_version"] == 2 else names[:6], field="registry envelope")
+        return cls(**_strict_json_value(values))
+
+    def to_payload(self):
+        names = tuple(field.name for field in fields(self))
+        return {name: _plain(getattr(self, name)) for name in (names if self.schema_version == 2 else names[:6])}
 
     def __post_init__(self):
-        _schema_version(self.schema_version)
+        if type(self.schema_version) is not int or self.schema_version not in (1, 2):
+            raise ValueError("registry envelope schema must be 1 or 2")
+        for name in ("shortlist_policy_sha256", "dictionary_sha256", "shortlist_index_sha256"):
+            if self.schema_version == 2:
+                require_sha256(getattr(self, name), name)
+            elif getattr(self, name) is not None:
+                raise ValueError("legacy registry cannot carry v2 evidence")
         require_sha256(self.release_sha256, "release_sha256")
         require_sha256(self.registry_sha256, "registry_sha256")
         shas = _sorted_strings(self.package_sha256s, "package_sha256s", sha=True, nonempty=True)
@@ -868,12 +889,21 @@ class FrozenNumericalRegistryEnvelopeV2(_CanonicalContract):
         normalized = {}
         for task_id, entry in entries.items():
             _text(task_id, "task_id")
-            entry = _require_exact_schema(entry, ("task_sha256", "package_sha256"), field="registry entry")
+            entry_fields = ("task_sha256", "package_sha256") if self.schema_version == 1 else (
+                "task_sha256", "task_input_sha256", "task_shortlist_sha256", "hindcast_diagnostics_sha256", "package_sha256")
+            entry = _require_exact_schema(entry, entry_fields, field="registry entry")
             for name, sha in entry.items():
                 require_sha256(sha, name)
             sha = entry["package_sha256"]
             if sha not in packages or packages[sha].restore().task_profile.task_id != task_id:
                 raise ValueError("registry task/package identity mismatch")
+            if self.schema_version == 2:
+                components = packages[sha].restore().component_fingerprints
+                expected = {"task_shortlist": entry["task_shortlist_sha256"],
+                    "shortlist_policy": self.shortlist_policy_sha256, "dictionary": self.dictionary_sha256,
+                    "hindcast_diagnostics": entry["hindcast_diagnostics_sha256"]}
+                if any(components.get(name) != value for name, value in expected.items()):
+                    raise ValueError("registry package local evidence mismatch")
             normalized[task_id] = dict(entry)
         if set(shas) != {entry["package_sha256"] for entry in normalized.values()}:
             raise ValueError("registry envelope contains unreferenced packages")

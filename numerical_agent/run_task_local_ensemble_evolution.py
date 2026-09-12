@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from dataclasses import asdict, dataclass, replace
+import math
+import types
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, get_args, get_origin, get_type_hints
 
 from common.data import Task as DataTask, load_tasks_by_id
 from common.evolution_core.contracts import METRIC_POLICY_FINGERPRINT
@@ -18,7 +20,7 @@ from .evolution.champion import champion_fingerprint
 from .evolution.execution import Task as RuntimeTask
 from .evolution.forecast_store import ForecastStore
 from .evolution.module import read_module
-from .evolution.numerical_selector import HindcastConfig, diagnose_candidate
+from .evolution.numerical_selector import CandidateDiagnostics, HindcastFold, HindcastConfig, diagnose_candidate
 from .evolution.portfolio import read_policy_file
 from .evolution.screening import (
     ScreeningPolicy,
@@ -99,12 +101,38 @@ def _write_once(path: Path, payload: dict[str, object] | bytes) -> None:
         handle.flush()
 
 
-def _task_input_sha(task: RuntimeTask) -> str:
+def task_input_sha256(task: RuntimeTask) -> str:
     """Canonical history-only identity used by the persisted task shortlist."""
     return hashlib.sha256(canonical_json_bytes({
         "task_id": task.task_id, "history": list(task.history), "horizon": task.horizon,
         "frequency": task.frequency,
     })).hexdigest()
+
+
+_task_input_sha = task_input_sha256  # Explicit compatibility for Task 4 callers.
+
+
+def _evidence_sha(value):
+    if type(value) is not str or len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+        raise ValueError("task-local evidence requires a lowercase SHA-256")
+
+
+def parse_shortlist_index(payload):
+    if type(payload) is not dict or set(payload) != {"schema_version", "policy_sha256", "entries", "public_test_accessed"}:
+        raise ValueError("shortlist index fields are malformed")
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1 or payload["public_test_accessed"] is not False or type(payload["entries"]) is not list:
+        raise ValueError("shortlist index is malformed")
+    _evidence_sha(payload["policy_sha256"])
+    ids = []
+    for row in payload["entries"]:
+        if type(row) is not dict or set(row) != {"task_id", "task_input_sha256", "shortlist_sha256", "diagnostics_sha256"} or type(row["task_id"]) is not str or not row["task_id"].strip():
+            raise ValueError("shortlist index entry is malformed")
+        ids.append(row["task_id"])
+        for name in ("task_input_sha256", "shortlist_sha256", "diagnostics_sha256"):
+            _evidence_sha(row[name])
+    if ids != sorted(set(ids)):
+        raise ValueError("shortlist index task IDs must be sorted and unique")
+    return payload
 
 
 @dataclass(frozen=True)
@@ -121,7 +149,7 @@ class TaskLocalEvidenceBundleV1:
             raise ValueError("task-local evidence requires canonical policy and Dictionary SHA")
         if len(self.dictionary_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in self.dictionary_sha256):
             raise ValueError("task-local evidence Dictionary SHA is invalid")
-        index = dict(self.index)
+        index = parse_shortlist_index(json.loads(canonical_json_bytes(dict(self.index))))
         if set(index) != {"schema_version", "policy_sha256", "entries", "public_test_accessed"} or index["schema_version"] != 1 or index["policy_sha256"] != self.policy.fingerprint() or index["public_test_accessed"] is not False:
             raise ValueError("task-local evidence index is not canonical")
         entries = index["entries"]
@@ -157,17 +185,58 @@ def _freeze_json(value):
     return value
 
 
-def _parse_diagnostics_payload(payload: Mapping[str, object], shortlist: TaskCandidateShortlistV1, expected_task_id: str) -> dict[str, object]:
-    value = dict(payload)
-    if set(value) != {"schema_version", "task_id", "task_input_sha256", "rows", "public_test_accessed"} or value["schema_version"] != 1 or value["task_id"] != expected_task_id or value["task_input_sha256"] != shortlist.task_input_sha256 or value["public_test_accessed"] is not False or type(value["rows"]) is not list:
+def _validate_diagnostic_value(value, annotation):
+    """Validate the exact dataclass JSON schema, including typed infinities."""
+    if get_origin(annotation) is types.UnionType:
+        for option in get_args(annotation):
+            try:
+                _validate_diagnostic_value(value, option)
+                return
+            except ValueError:
+                pass
+        raise ValueError("invalid optional diagnostic field")
+    if annotation in (CandidateDiagnostics, HindcastFold):
+        if type(value) is not dict or set(value) != {field.name for field in fields(annotation)}:
+            raise ValueError("diagnostic fields are malformed")
+        for name, field_type in get_type_hints(annotation).items():
+            _validate_diagnostic_value(value[name], field_type)
+    elif get_origin(annotation) is tuple:
+        if type(value) is not list:
+            raise ValueError("diagnostic vector must be a list")
+        for item in value:
+            _validate_diagnostic_value(item, get_args(annotation)[0])
+    elif annotation is float:
+        if value in ({"status": "positive_infinity", "value": None}, {"status": "negative_infinity", "value": None}):
+            return
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError("diagnostic numeric field is malformed")
+    elif type(value) is not annotation:
+        raise ValueError("diagnostic primitive type is malformed")
+
+
+def parse_diagnostics_payload(payload):
+    value = payload
+    if type(value) is not dict or set(value) != {"schema_version", "task_id", "task_input_sha256", "rows", "public_test_accessed"} or type(value["schema_version"]) is not int or value["schema_version"] != 1 or type(value["task_id"]) is not str or not value["task_id"].strip() or value["public_test_accessed"] is not False or type(value["rows"]) is not list:
         raise ValueError("task-local diagnostics payload is malformed")
+    _evidence_sha(value["task_input_sha256"])
     names = []
     for row in value["rows"]:
-        if type(row) is not dict or set(row) != {"candidate_name", "failure_reason", "diagnostic"} or type(row["candidate_name"]) is not str or row["failure_reason"] is not None and type(row["failure_reason"]) is not str:
+        if type(row) is not dict or set(row) != {"candidate_name", "failure_reason", "diagnostic"} or type(row["candidate_name"]) is not str or not row["candidate_name"].strip() or row["failure_reason"] is not None and type(row["failure_reason"]) is not str:
             raise ValueError("task-local diagnostics row is malformed")
+        if row["diagnostic"] is not None:
+            _validate_diagnostic_value(row["diagnostic"], CandidateDiagnostics)
+            if row["diagnostic"]["name"] != row["candidate_name"]:
+                raise ValueError("diagnostic candidate identity mismatch")
         names.append(row["candidate_name"])
-    if names != sorted(names) or len(names) != len(set(names)) or not set(names) <= set(shortlist.candidate_names):
+    if names != sorted(set(names)):
         raise ValueError("task-local diagnostics are not an ordered shortlist subset")
+    return value
+
+
+def _parse_diagnostics_payload(payload: Mapping[str, object], shortlist: TaskCandidateShortlistV1, expected_task_id: str) -> dict[str, object]:
+    value = parse_diagnostics_payload(json.loads(canonical_json_bytes(dict(payload))))
+    if value["task_id"] != expected_task_id or value["task_input_sha256"] != shortlist.task_input_sha256 or not {row["candidate_name"] for row in value["rows"]} <= set(shortlist.candidate_names):
+        raise ValueError("task-local diagnostics shortlist binding mismatch")
     return value
 
 

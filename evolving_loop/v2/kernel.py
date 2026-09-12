@@ -1306,7 +1306,7 @@ class EvolutionKernel:
             return ()
         require_sha256(identity, "numerical artifacts SHA")
         from .numerical_qd.contracts import FrozenNumericalRegistryEnvelopeV2, NumericalEvaluationV2, NumericalGenomeV2
-        from .numerical_qd.adapters import _encode
+        from .numerical_qd.adapters import _encode, frozen_local_evidence_references, validate_frozen_local_evidence
         from evolving_loop.package_numerical_supply import parse_numerical_supply_release
         from evolving_loop.package_registry import _digest
 
@@ -1318,6 +1318,13 @@ class EvolutionKernel:
                 or registry.release_sha256 != release.fingerprint
                 or registry.registry_sha256 != bundle.numerical_registry_sha256):
             raise KernelAuthorityError("typed Numerical release/registry mismatch")
+        try:
+            objects = self.store.root / "numerical_qd" / "objects"
+            raw = {sha: (objects / f"{sha}.json").read_bytes()
+                for sha in frozen_local_evidence_references(registry)}
+            validate_frozen_local_evidence(release, registry, artifact_bytes_by_sha=raw)
+        except (OSError, TypeError, ValueError) as error:
+            raise KernelAuthorityError(f"typed Numerical local evidence mismatch: {error}") from error
         descriptors = train["train_behavior_descriptors"]
         winner = descriptors.get("numerical_winner_genome_sha256")
         if winner is None or release.source_fingerprints.get("train_winner") != winner:
@@ -1359,7 +1366,7 @@ class EvolutionKernel:
                         "package_sha256": envelope.packages[envelope.entries[task_id]["package_sha256"]].legacy_package_sha256,
                         "champion_release_sha256": values[task_id].component_fingerprints["champion_release"]}
                         for task_id in sorted(values)]}
-                if _digest(manifest) != envelope.registry_sha256:
+                if envelope.schema_version == 1 and _digest(manifest) != envelope.registry_sha256:
                     raise KernelAuthorityError("Numerical registry identity does not match its exact packages")
                 return values
 

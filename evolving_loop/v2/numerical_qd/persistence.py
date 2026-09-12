@@ -58,8 +58,12 @@ def _payload(value):
             value = strict_json_loads(raw.decode("utf-8"), context="Numerical QD artifact")
         except (UnicodeError, ValueError) as error:
             raise NumericalQDStoreError("artifact is not canonical JSON") from error
-        if not isinstance(value, dict) or canonical_v2_bytes(value) != raw:
+        from .artifacts import task4_artifact_kind, artifact_bytes
+        kind = task4_artifact_kind(value) if type(value) is dict else None
+        if not isinstance(value, dict) or artifact_bytes(kind, value) != raw:
             raise NumericalQDStoreError("artifact is not canonical JSON")
+        if kind is not None:
+            validate_artifact(kind, raw)
     if not isinstance(value, Mapping):
         raise NumericalQDStoreError("artifact must be a canonical JSON object")
     # Detach and validate values, including deeply frozen mappings.
@@ -215,15 +219,28 @@ class NumericalQDRunStore:
         typed = payload
         payload = _payload(payload)
         path = self._path(relative)
+        from .artifacts import artifact_bytes, task4_artifact_kind
+        raw = artifact_bytes(kind, payload)
+        if kind in (ArtifactKind.SHORTLIST_POLICY, ArtifactKind.TASK_SHORTLIST,
+                    ArtifactKind.SHORTLIST_INDEX, ArtifactKind.HINDCAST_DIAGNOSTICS):
+            validate_artifact(kind, raw)
+        def dispatch():
+            if task4_artifact_kind(payload) is None:
+                return durable.write_once_json(path, payload)
+            if path.exists():
+                if path.read_bytes() != raw:
+                    raise NumericalQDStoreError("conflicting immutable evidence retry")
+                return path
+            durable._atomic_write(path, raw)
+            return path
         if kind == ArtifactKind.PARTIAL_RUNG:
             current = _payload(self._safe(self.root / "checkpoint.json").read_bytes())
             self._verify_partial_rung(payload["closed_partial_rung"], self._kernel(_identity(current))["budget"])
         writer = getattr(self, "material_writer", None)
         if writer is not None:
-            writer(relative, canonical_v2_bytes(payload), lambda: durable.write_once_json(path, payload),
-                   kind=kind if kind is not None else artifact_kind(typed))
+            writer(relative, raw, dispatch, kind=kind if kind is not None else artifact_kind(typed))
         else:
-            durable.write_once_json(path, payload)
+            dispatch()
         if self._read(relative) != payload:
             raise NumericalQDStoreError("immutable write failed canonical readback")
         return path
@@ -231,14 +248,21 @@ class NumericalQDRunStore:
     def write_object(self, sha256, payload, *, kind=None):
         self._verify_root_paths()
         require_sha256(sha256, "object SHA")
-        if _identity(_payload(payload)) != sha256:
+        from .artifacts import artifact_bytes, task4_artifact_kind
+        value = _payload(payload)
+        evidence_kind = task4_artifact_kind(value)
+        identity = hashlib.sha256(artifact_bytes(evidence_kind, value)).hexdigest() if evidence_kind else _identity(value)
+        if identity != sha256:
             raise NumericalQDStoreError("object content SHA mismatch")
         return self._write(f"objects/{sha256}.json", payload, kind=kind)
 
     def _object(self, sha256):
         require_sha256(sha256, "object SHA")
         payload = self._read(f"objects/{sha256}.json")
-        if _identity(payload) != sha256:
+        from .artifacts import artifact_bytes, task4_artifact_kind
+        kind = task4_artifact_kind(payload)
+        identity = hashlib.sha256(artifact_bytes(kind, payload)).hexdigest() if kind else _identity(payload)
+        if identity != sha256:
             raise NumericalQDStoreError("immutable object SHA mismatch")
         return payload
 
@@ -529,7 +553,9 @@ class NumericalQDRunStore:
             data = path.read_bytes()
             if path.suffix == ".json":
                 payload = _payload(data)
-                if name.startswith(("objects/", "rungs/", "proposals/")) and _identity(payload) != path.stem:
+                from .artifacts import task4_artifact_kind
+                identity = hashlib.sha256(data).hexdigest() if task4_artifact_kind(payload) else _identity(payload)
+                if name.startswith(("objects/", "rungs/", "proposals/")) and identity != path.stem:
                     raise NumericalQDStoreError("content-addressed file SHA mismatch")
             elif path.suffix == ".py" and hashlib.sha256(data).hexdigest() != path.stem:
                 raise NumericalQDStoreError("source file SHA mismatch")
@@ -923,7 +949,7 @@ class NumericalQDRunStore:
         from evolving_loop.package_numerical_supply import (
             parse_numerical_supply_release,
         )
-        from .adapters import FrozenNumericalArtifactsV2
+        from .adapters import FrozenNumericalArtifactsV2, frozen_local_evidence_references, validate_frozen_local_evidence
         from .contracts import FrozenNumericalRegistryEnvelopeV2
 
         self._verify_root_paths(require_checkpoint=True)
@@ -994,11 +1020,14 @@ class NumericalQDRunStore:
             )
         pair_sha256, release, envelope = matches[0]
         try:
+            raw = {sha: self._path(f"objects/{sha}.json").read_bytes()
+                for sha in frozen_local_evidence_references(envelope)}
+            validate_frozen_local_evidence(release, envelope, artifact_bytes_by_sha=raw, tasks=tasks)
             registry = envelope.restore(tasks)
             frozen = FrozenNumericalArtifactsV2(
                 release, registry, envelope, ()
             )
-        except (TypeError, ValueError) as error:
+        except (OSError, TypeError, ValueError) as error:
             raise NumericalQDStoreError(
                 "active frozen pair does not bind the committed task universe"
             ) from error
