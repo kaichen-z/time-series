@@ -220,3 +220,48 @@ python -m pytest -q \
   tests/test_evolution_v2_real_runner.py
 41 passed in 14.12s
 ```
+
+### Live P2 executable-source seam fix
+
+The subsequent pre-LLM live failure showed that `host.sources` incorrectly
+treated all 93 historical Dictionary methods as candidate mutation code.  The
+strict Numerical adapter correctly rejected every historical source; those
+methods are instead the authenticated cache-only ForecastStore catalog used by
+the schema-2 Supply and per-task evidence.
+
+The real manifests now declare one versioned, validator-safe `naive_last`
+mutation seed.  It preserves the historical function's valid-domain forecast
+formula while replacing only the dynamic exception formatting that violates
+the closed language.  Host admission validates the source, requires it to
+define only `naive_last`, and binds both the new source SHA
+`668bb3f09880adeffcc342b18039ebf53310ed4963924edd6af7bc17887127cc`
+and historical origin-method SHA
+`6852de9f1108173780aaedabfa96faa171c0e1814df2f15a976f32a2dd130129`.
+Those identities are committed by both manifest L0 fingerprints, the derived
+schema-2 Supply, and the Host reporter.  The reporter identity is now
+`36fdec41981b25e148d6bad23cbf2cef4926f9a49d98035830d24a32f55c9bcc`;
+the P4 Source seed and both canonical manifest hashes were updated
+transitively.
+
+Because the real Dictionary classifies `naive_last` as a generic fallback,
+schema-2 bootstrap now excludes exactly the single protected Anchor sealed by
+Task-4 evidence (`toto_2_0`) rather than excluding every generic fallback.
+Legacy/no-evidence bootstrap retains its original all-fallback exclusion.  The
+strict validator was not weakened, and the complete Dictionary/Supply and
+100-task local-evidence paths remain cache-backed and untruncated.
+
+Focused verification:
+
+```text
+python -m pytest -q \
+  tests/test_evolution_v2_real_contracts.py \
+  tests/test_evolution_v2_real_numerical.py \
+  tests/test_evolution_v2_real_cli.py \
+  tests/test_evolution_v2_numerical_runner.py::test_schema_two_host_run_requires_evidence_or_explicit_bootstrap \
+  tests/test_evolution_v2_numerical_runner.py::test_schema_two_bootstrap_excludes_only_the_sealed_protected_anchor
+40 passed in 14.74s
+```
+
+Canonical-manifest/source provenance verification, focused `compileall`, and
+`git diff --check` also exited zero.  No live run or billable LLM call was
+launched, and the existing live run artifacts were left untouched.

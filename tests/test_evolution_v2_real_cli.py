@@ -421,7 +421,7 @@ def test_production_ports_complete_root_and_resume_byte_identically(
 
     host = SimpleNamespace(
         tasks=(), train_tasks=(), dev_tasks=(), llm_client=object(),
-        resource_reporter_sha256="fe7b77cd6c787e175ecabaaae0b6269c08fc5fdd24d818752e04fa1f3ebd0796",
+        resource_reporter_sha256="36fdec41981b25e148d6bad23cbf2cef4926f9a49d98035830d24a32f55c9bcc",
     )
     release = SimpleNamespace(fingerprint="b" * 64)
     registry = SimpleNamespace(fingerprint="c" * 64)

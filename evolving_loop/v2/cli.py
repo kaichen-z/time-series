@@ -270,7 +270,12 @@ def _real_evolve(manifest_path: Path, output: Path, *, authority_root: Path | No
         raise ValueError("authority root must be a real directory")
     destination = output.resolve()
     declared = [
-        (code_root if row.role == "source_seed" else authority) / row.relative_path
+        (
+            code_root
+            if row.role in {"numerical_source_seed", "source_seed"}
+            else authority
+        )
+        / row.relative_path
         for row in manifest.files
     ]
     for row in manifest.runtime_locations:

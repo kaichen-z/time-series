@@ -216,12 +216,24 @@ class _MaterialAccounting:
 def _bootstrap(config, release, adapter):
     """Build immutable policy metadata; never score Dev or execute proposal code."""
     train = tuple(t for t in adapter.tasks if t.numeric.task_id in adapter.fold_manifest.task_fold_map)
+    protected_names = set(adapter.materializer.screening_policy.fallback_names)
+    if adapter.task_local_evidence is not None:
+        anchor = parse_champion_release(
+            release.to_payload()["anchor_release_payload"]
+        ).policy.recipe.fallback_parent
+        sealed_anchors = {
+            value[0].candidate_names[0]
+            for value in adapter.task_local_evidence.by_task.values()
+        }
+        if sealed_anchors != {anchor}:
+            raise ValueError("Task 4 evidence differs from the protected Anchor")
+        protected_names = {anchor}
     members, policies, cells = [], {}, set()
     for sha, source in sorted(adapter.sources.items()):
         module = adapter.validate_source(source)
         for name in module.names():
             entry = adapter.materializer.screening_policy.get(name)
-            if entry is None or entry.status == "quarantined" or name in adapter.materializer.screening_policy.fallback_names:
+            if entry is None or entry.status == "quarantined" or name in protected_names:
                 continue
             family = entry.family if entry.family in {"statistical", "tsfm", "combined"} else "program"
             declared = tuple(sorted({describe_history(t.numeric.history_values,

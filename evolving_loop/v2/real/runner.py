@@ -432,6 +432,11 @@ def prepare_real_p2_inputs(
     } | {"real_host": host.resource_reporter_sha256}
     source_fingerprints = dict(champion.source_hashes)
     source_fingerprints["dictionary"] = dictionary_sha
+    for name in ("numerical_source_seed", "numerical_source_origin"):
+        identity = manifest.l0_fingerprints.get(name)
+        if identity is None:
+            raise RealRunnerError(f"real P2 requires {name} provenance")
+        source_fingerprints[name] = identity
     supply = _initial_supply_release(
         champion,
         candidates,

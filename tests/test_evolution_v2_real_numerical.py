@@ -23,6 +23,18 @@ from evolving_loop.v2.real.contracts import RealEvolutionManifestV2
 ROOT = Path(__file__).resolve().parents[1]
 BUILDER = ROOT / "tests/build_evolution_v2_numerical_fixture.py"
 SMOKE_CONFIG = ROOT / "configs/evolution_v2/numerical_qd/smoke.json"
+REAL_NUMERICAL_SOURCE_SEED = (
+    ROOT / "configs/evolution_v2/real/numerical-source-seed-v1.py"
+)
+AUTHORITY_ROOT = Path(
+    subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+).resolve().parent
 
 
 @pytest.fixture(scope="module")
@@ -343,6 +355,9 @@ def test_loaded_prepared_payloads_cross_strict_real_numerical_parser(
         ),
     )
     prepared = runner._load_prepared_real_p2(tmp_path, manifest=manifest)
+    assert prepared.seed_payload == seed
+    assert len(prepared.seed_payload["alternatives"]) == len(seed["alternatives"])
+    assert sum(len(prepared.task_manifest_payload[split]) for split in ("train", "dev")) == 100
 
     def strict_payload_seam(config_payload, seed_payload, task_payload, *_args, **_kwargs):
         assert type(config_payload) is dict
@@ -369,6 +384,63 @@ def test_loaded_prepared_payloads_cross_strict_real_numerical_parser(
     assert result == {"status": "parsed"}
 
 
+def test_real_numerical_source_seed_is_strict_and_matches_historical_naive_last(
+    tmp_path,
+):
+    """Catches exposing the unreviewed historical catalog as mutation code."""
+    from evolving_loop.v2.numerical_qd.adapters import LegacyNumericalAdapter
+    from numerical_agent.evolution.execution import IsolatedForecastRuntime
+    from numerical_agent.evolution.module import MODULE_HEADER, read_module
+
+    seed_source = REAL_NUMERICAL_SOURCE_SEED.read_text(encoding="utf-8")
+    seed_module = LegacyNumericalAdapter.validate_source(seed_source)
+    historical = read_module(
+        AUTHORITY_ROOT / "runs/method_evolution/v001/methods.py"
+    ).get("naive_last")
+    assert historical is not None
+    assert seed_module.names() == ("naive_last",)
+
+    paths = []
+    for name, source in (("seed", seed_source), ("historical", historical.source)):
+        path = tmp_path / f"{name}.py"
+        path.write_text(MODULE_HEADER + "\n" + source + "\n", encoding="utf-8")
+        paths.append(path)
+    runtimes = tuple(IsolatedForecastRuntime(path) for path in paths)
+    try:
+        for history, horizon, frequency in (
+            ((1.0,), 1, "D"),
+            ((-3.0, 2.5, 9.0), 4, "1 day"),
+            ((0.0, -0.0, 1.25), 3, "H"),
+        ):
+            assert runtimes[0].forecast(
+                "naive_last", history, horizon, frequency
+            ) == runtimes[1].forecast("naive_last", history, horizon, frequency)
+    finally:
+        for runtime in runtimes:
+            runtime.close()
+
+    seed_sha = hashlib.sha256(seed_source.encode("utf-8")).hexdigest()
+    origin_sha = hashlib.sha256(historical.source.encode("utf-8")).hexdigest()
+    for profile in ("real-30m", "real-1h"):
+        manifest = RealEvolutionManifestV2.from_payload(
+            json.loads(
+                (
+                    ROOT
+                    / f"configs/evolution_v2/real/{profile}-toto-balanced-v3.json"
+                ).read_bytes()
+            )
+        )
+        source_row = next(
+            row for row in manifest.files if row.role == "numerical_source_seed"
+        )
+        assert source_row.relative_path == (
+            "configs/evolution_v2/real/numerical-source-seed-v1.py"
+        )
+        assert source_row.sha256 == seed_sha
+        assert manifest.l0_fingerprints["numerical_source_seed"] == seed_sha
+        assert manifest.l0_fingerprints["numerical_source_origin"] == origin_sha
+
+
 def _real_manifest_payload():
     return {
         "schema_version": 1,
@@ -385,6 +457,10 @@ def _real_manifest_payload():
                     ("split", "split.json"),
                     ("tasks", "tasks"),
                     ("numerical_seed", "champion.json"),
+                    (
+                        "numerical_source_seed",
+                        "configs/evolution_v2/real/numerical-source-seed-v1.py",
+                    ),
                     ("forecast_cache", "forecast-cache"),
                     ("retrieval_seed", "retrieval-seed"),
                     ("source_seed", "source-seed.json"),
@@ -428,7 +504,13 @@ def _materialize_real_manifest_paths(root, payload):
                 (path / "identity.txt").write_text(row["role"], encoding="utf-8")
             else:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(row["role"], encoding="utf-8")
+                if row["role"] == "numerical_source_seed":
+                    path.write_text(
+                        REAL_NUMERICAL_SOURCE_SEED.read_text(encoding="utf-8"),
+                        encoding="utf-8",
+                    )
+                else:
+                    path.write_text(row["role"], encoding="utf-8")
 
 
 def _bind_real_manifest_identities(root, payload):
@@ -491,7 +573,11 @@ def test_model_cache_rejects_same_size_cas_replacement_or_malformed_name(tmp_pat
 
 @pytest.mark.parametrize(
     ("collection", "role"),
-    (("files", "split"), ("runtime_locations", "runtime")),
+    (
+        ("files", "split"),
+        ("files", "numerical_source_seed"),
+        ("runtime_locations", "runtime"),
+    ),
 )
 def test_real_host_rejects_file_and_runtime_identity_drift(
     tmp_path, monkeypatch, collection, role
@@ -527,15 +613,32 @@ def test_real_host_owns_exact_tasks_cache_agents_and_resource_cleanup(
     _materialize_real_manifest_paths(tmp_path, manifest_payload)
     source = tmp_path / "runs/method_evolution/v001"
     source.mkdir(parents=True)
-    (source / "methods.py").write_text(
-        'def safe_anchor(history, horizon, frequency):\n'
-        '    """Return the last observed value."""\n'
-        '    return [float(history[-1])] * horizon\n',
-        encoding="utf-8",
+    historical_source = (
+        "def naive_last(history, horizon, frequency):\n"
+        '    """Repeat the last observed value."""\n'
+        "    if len(history) < 1:\n"
+        '        raise NotApplicable(f"needs 1 point, got {len(history)}")\n'
+        "    return [float(history[-1])] * horizon\n"
     )
+    (source / "methods.py").write_text(historical_source, encoding="utf-8")
     (source / "skills.py").write_text("", encoding="utf-8")
     worker = tmp_path / "tmp/toto2_worker_smoke.json"
     worker.write_text("{}", encoding="utf-8")
+    numerical_source_seed = tmp_path / (
+        "configs/evolution_v2/real/numerical-source-seed-v1.py"
+    )
+    numerical_source_seed_sha256 = hashlib.sha256(
+        numerical_source_seed.read_bytes()
+    ).hexdigest()
+    numerical_source_origin_sha256 = hashlib.sha256(
+        historical_source.strip().encode("utf-8")
+    ).hexdigest()
+    manifest_payload["l0_fingerprints"].update(
+        {
+            "numerical_source_seed": numerical_source_seed_sha256,
+            "numerical_source_origin": numerical_source_origin_sha256,
+        }
+    )
     manifest = _bind_real_manifest_identities(tmp_path, manifest_payload)
 
     requested = {}
@@ -631,6 +734,31 @@ def test_real_host_owns_exact_tasks_cache_agents_and_resource_cleanup(
     assert getattr(host.retrieval_skill_library, "_read_only", False) is True
     assert callable(host.retrieval_factory)
     assert callable(host.decision_factory)
+    assert dict(host.sources) == {
+        numerical_source_seed_sha256: numerical_source_seed.read_text(
+            encoding="utf-8"
+        )
+    }
+    assert numerical_source_origin_sha256 not in host.sources
+    assert host.resource_reporter_sha256 == fingerprint_payload(
+        {
+            "schema_version": 1,
+            "kind": "cache_only_real_host_resource_reporter",
+            "forecast_store_identity": module.EXPECTED_REAL_FORECAST_STORE_IDENTITY,
+            "numerical_source_seed_sha256": numerical_source_seed_sha256,
+            "numerical_source_origin_sha256": numerical_source_origin_sha256,
+            "runtime_identity": {
+                row.role: row.identity_sha256 for row in manifest.runtime_locations
+            },
+            "resource_kinds": [
+                "input_tokens",
+                "llm_calls",
+                "output_tokens",
+                "subprocesses",
+            ],
+            "llm_accounting": "codex_utf8_bytes_v1",
+        }
+    )
     assert host.resource_reporter().to_payload() == {
         "wall_seconds": 0.0,
         "task_executions": 0,
@@ -647,3 +775,40 @@ def test_real_host_owns_exact_tasks_cache_agents_and_resource_cleanup(
     assert closed["runtime"] == 1
     host.close()
     assert closed["runtime"] == 1
+
+
+def test_real_host_rejects_numerical_source_origin_drift_before_task_loading(
+    tmp_path, monkeypatch
+):
+    from evolving_loop.v2.real import host as module
+
+    payload = _real_manifest_payload()
+    _materialize_real_manifest_paths(tmp_path, payload)
+    source_repo = tmp_path / "runs/method_evolution/v001"
+    source_repo.mkdir(parents=True)
+    (source_repo / "methods.py").write_text(
+        "def naive_last(history, horizon, frequency):\n"
+        '    """Repeat the last observation."""\n'
+        "    return [float(history[-1])] * horizon\n",
+        encoding="utf-8",
+    )
+    seed_path = tmp_path / "configs/evolution_v2/real/numerical-source-seed-v1.py"
+    payload["l0_fingerprints"].update(
+        {
+            "numerical_source_seed": hashlib.sha256(seed_path.read_bytes()).hexdigest(),
+            "numerical_source_origin": "0" * 64,
+        }
+    )
+    manifest = _bind_real_manifest_identities(tmp_path, payload)
+    monkeypatch.setattr(
+        module,
+        "_validated_split",
+        lambda *_args, **_kwargs: pytest.fail(
+            "source provenance drift admitted before task loading"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="source origin L0 identity mismatch"):
+        module.build_real_host(
+            manifest, repo_root=tmp_path, output_dir=tmp_path / "output"
+        )

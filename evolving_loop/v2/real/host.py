@@ -22,7 +22,7 @@ from numerical_agent.run_selector_evolution import _forecast_runtime_identity
 
 from ..budget import ResourceUse
 from ..contracts import fingerprint_payload
-from ..numerical_qd.adapters import FrozenNumericalArtifactsV2
+from ..numerical_qd.adapters import FrozenNumericalArtifactsV2, LegacyNumericalAdapter
 from .contracts import RealEvolutionManifestV2
 
 # The split validator is the existing fixed 80/20/99 Host admission boundary.
@@ -33,6 +33,7 @@ _FILE_ROLES = {
     "split",
     "tasks",
     "numerical_seed",
+    "numerical_source_seed",
     "forecast_cache",
     "retrieval_seed",
     "source_seed",
@@ -49,11 +50,12 @@ _INPUT_KINDS = {
     "split": "file",
     "tasks": "directory",
     "numerical_seed": "file",
+    "numerical_source_seed": "file",
     "forecast_cache": "directory",
     "retrieval_seed": "directory",
     "source_seed": "file",
 }
-_CODE_FILE_ROLES = frozenset({"source_seed"})
+_CODE_FILE_ROLES = frozenset({"numerical_source_seed", "source_seed"})
 _CODE_RUNTIME_ROLES = frozenset({"task_loader", "forecast_store"})
 _RUNTIME_KINDS = {
     "python": "file",
@@ -214,6 +216,31 @@ def _verify_manifest_identities(manifest, files, locations) -> None:
             raise ValueError(f"real Host runtime identity mismatch for {row.role}")
 
 
+def _numerical_evolution_sources(manifest, files, source_repo):
+    """Load the one declared mutation seed; the full catalog stays cache-backed."""
+    from numerical_agent.evolution.module import read_module
+
+    seed_path = files["numerical_source_seed"]
+    seed_sha256 = _sha256_file(seed_path)
+    if manifest.l0_fingerprints.get("numerical_source_seed") != seed_sha256:
+        raise ValueError("real Host numerical source seed L0 identity mismatch")
+    try:
+        seed_source = seed_path.read_text(encoding="utf-8")
+    except UnicodeError as error:
+        raise ValueError("real Host numerical source seed is not UTF-8") from error
+    seed_module = LegacyNumericalAdapter.validate_source(seed_source)
+    if seed_module.names() != ("naive_last",):
+        raise ValueError("real Host numerical source seed must define only naive_last")
+
+    historical = read_module(source_repo / "methods.py").get("naive_last")
+    if historical is None:
+        raise ValueError("real Host numerical source origin is unavailable")
+    origin_sha256 = hashlib.sha256(historical.source.encode("utf-8")).hexdigest()
+    if manifest.l0_fingerprints.get("numerical_source_origin") != origin_sha256:
+        raise ValueError("real Host numerical source origin L0 identity mismatch")
+    return {seed_sha256: seed_source}, seed_sha256, origin_sha256
+
+
 def _confined(root: Path, relative: str) -> Path:
     root = root.resolve()
     path = (root / relative).resolve()
@@ -357,16 +384,7 @@ def build_real_host(
         raise ValueError("real Host manifest requires every file and runtime role")
     _verify_manifest_identities(manifest, files, locations)
 
-    _split, train_ids, dev_ids = _validated_split(
-        files["split"], allow_label_informed_regression_split=True
-    )
-    tasks = load_context_tasks_by_ids(files["tasks"], (*train_ids, *dev_ids))
-    if tuple(task.numeric.task_id for task in tasks) != (*train_ids, *dev_ids):
-        raise ValueError("real Host tasks differ from frozen Train/Dev membership")
-
     source_repo = _confined(root, "runs/method_evolution/v001")
-    methods_path = source_repo / "methods.py"
-    skills_path = source_repo / "skills.py"
     for role, name in (
         ("methods", "methods.py"),
         ("policies", "policies.py"),
@@ -376,6 +394,19 @@ def build_real_host(
         expected = manifest.l0_fingerprints.get(role)
         if expected is not None and _sha256_file(source_repo / name) != expected:
             raise ValueError(f"real Host L0 source identity mismatch for {role}")
+    sources, numerical_source_seed_sha256, numerical_source_origin_sha256 = (
+        _numerical_evolution_sources(manifest, files, source_repo)
+    )
+
+    _split, train_ids, dev_ids = _validated_split(
+        files["split"], allow_label_informed_regression_split=True
+    )
+    tasks = load_context_tasks_by_ids(files["tasks"], (*train_ids, *dev_ids))
+    if tuple(task.numeric.task_id for task in tasks) != (*train_ids, *dev_ids):
+        raise ValueError("real Host tasks differ from frozen Train/Dev membership")
+
+    methods_path = source_repo / "methods.py"
+    skills_path = source_repo / "skills.py"
     portfolio = read_policy_file(source_repo / "policies.py")
     screening = _load_screening_policy(source_repo / "dictionary.py")
     runtime_args = SimpleNamespace(
@@ -417,18 +448,13 @@ def build_real_host(
         library = RetrievalSkillLibrary.from_release(
             files["retrieval_seed"]
         ).clone(persist=False, read_only=True)
-        from numerical_agent.evolution.module import read_module
-
-        module = read_module(methods_path)
-        sources = {
-            hashlib.sha256(method.source.encode("utf-8")).hexdigest(): method.source
-            for method in module.methods
-        }
         reporter_sha = fingerprint_payload(
             {
                 "schema_version": 1,
                 "kind": "cache_only_real_host_resource_reporter",
                 "forecast_store_identity": forecast_store.identity_hash,
+                "numerical_source_seed_sha256": numerical_source_seed_sha256,
+                "numerical_source_origin_sha256": numerical_source_origin_sha256,
                 "runtime_identity": {
                     row.role: row.identity_sha256
                     for row in manifest.runtime_locations

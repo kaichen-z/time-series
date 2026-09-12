@@ -101,6 +101,35 @@ def test_schema_two_host_run_requires_evidence_or_explicit_bootstrap(tmp_path):
     assert not (tmp_path / "run").exists()
 
 
+def test_schema_two_bootstrap_excludes_only_the_sealed_protected_anchor():
+    """Catches dropping a declared safe mutation seed merely because it is a fallback."""
+    from evolving_loop.v2.numerical_qd.runner import _bootstrap
+
+    config, release, _folds, adapter = fixture(raw_seed=True)
+    screening = adapter.materializer.screening_policy
+    adapter.materializer.screening_policy = ScreeningPolicy(
+        screening.entries, ("toto_2_0", "seasonal_naive")
+    )
+    adapter.task_local_evidence = SimpleNamespace(
+        by_task={
+            "sealed-task": (
+                SimpleNamespace(candidate_names=("toto_2_0",)),
+                {},
+                "1" * 64,
+                "2" * 64,
+            )
+        }
+    )
+
+    state, _genome, _policies, _screen, _combined = _bootstrap(
+        config, release, adapter
+    )
+
+    assert tuple(member.member_id for member in state.inventory.members) == (
+        "seasonal_naive",
+    )
+
+
 def test_rung_binds_adapter_local_evidence_before_task_evaluation(monkeypatch):
     from tests.test_evolution_v2_numerical_hyperband import (
         ADAPTER, DESCRIPTOR, METRIC, PROTOCOL, RUNTIME, evaluation, ledger, manifest,
