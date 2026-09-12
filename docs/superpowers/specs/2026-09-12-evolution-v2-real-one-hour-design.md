@@ -1,4 +1,4 @@
-# Evolution V2 Real One-Hour Orchestrator Design
+# Evolution V2 Real Bounded Orchestrator Design
 
 **Date:** 2026-09-12
 
@@ -7,7 +7,7 @@
 ## 1. Decision
 
 Add one resumable, Host-owned command that runs the four existing Evolution V2
-projects in a fixed causal order under one shared 3600-second deadline:
+projects in a fixed causal order under one shared profile deadline:
 
 ```text
 P2 numerical self-evolution
@@ -26,8 +26,8 @@ result only after validating every sealed child result.
 The production command is:
 
 ```bash
-python -m evolving_loop.v2 real1h-evolve \
-  --manifest configs/evolution_v2/real1h/toto-balanced-v3.json \
+python -m evolving_loop.v2 real-evolve \
+  --manifest configs/evolution_v2/real/real-30m-toto-balanced-v3.json \
   --output-dir runs/evolution_v2/<fresh-run-name>
 ```
 
@@ -39,7 +39,8 @@ output directory.
 
 The implementation must provide:
 
-1. A real, authenticated one-hour evolution run rather than a smoke fixture.
+1. Real, authenticated 30-minute and one-hour evolution profiles rather than a
+   smoke fixture. The 30-minute profile is the first live run.
 2. One aggregate wall-time authority covering P2 through root finalization.
 3. Numerical dictionary/supply self-evolution followed by three-agent bundle
    co-evolution, then source-policy and protocol evolution.
@@ -73,7 +74,7 @@ and validation boundaries.
 
 ## 4. Real Input Authority
 
-The initial real-one-hour profile uses the frozen Toto-balanced v3 authority:
+Both initial real profiles use the frozen Toto-balanced v3 authority:
 
 - split: `splits/drcik_public_80_20_99_v3.json`;
 - task corpus: `external/Dr-CiK/full-download/Dr-CiK_public/tasks/`;
@@ -126,35 +127,38 @@ completion artifacts must not serialize tokens, credential files, environment
 values, or authentication command output. A run may use an already authenticated
 Codex CLI session without inspecting or copying its credentials.
 
-## 6. Shared 3600-Second Budget
+## 6. Shared Profile Budget
 
-The root owns one `BudgetPlan` and `BudgetLedger`:
+The root owns one `BudgetPlan` and `BudgetLedger`. Two admitted profiles use the
+same 80% search / 20% finalization split:
 
-| Allocation | Base seconds |
-|---|---:|
-| P2 numerical | 1680 |
-| P3 cooperative | 720 |
-| P4 source | 240 |
-| P5 protocol | 240 |
-| Root finalization reserve | 720 |
-| **Total** | **3600** |
+| Allocation | `real-30m` | `real-1h` |
+|---|---:|---:|
+| P2 numerical | 840 | 1680 |
+| P3 cooperative | 360 | 720 |
+| P4 source | 120 | 240 |
+| P5 protocol | 120 | 240 |
+| Root finalization reserve | 360 | 720 |
+| **Total** | **1800** | **3600** |
 
-The first 2880 seconds are the search envelope. The final 720 seconds are
-reserved exclusively for readback, link validation, checkpointing, terminal
-summary creation, and immutable publication. They cannot be loaned to a new
-candidate evaluation.
+The first 80% of either profile is the search envelope. The final 20% is reserved
+exclusively for readback, link validation, checkpointing, terminal summary
+creation, and immutable publication. It cannot be loaned to a new candidate
+evaluation.
 
 Unused search time rolls forward only. Before stage `i`, let `elapsed` be the
 root ledger's charged wall time, `carry` be unused allocation from earlier
 sealed stages, and `later_base` be the sum of later stages' base allocations:
 
 ```text
-search_remaining = 3600 - 720 - elapsed
+search_remaining = profile_limit - finalization_reserve - elapsed
 grant_i = min(base_i + carry, search_remaining - later_base)
 ```
 
 The grant must be positive. P2 time may flow to P3, then P4, then P5; it never
-flows backward and never causes an earlier stage to rerun. Each child receives a
+flows backward and never causes an earlier stage to rerun. Profile name, total
+limit, all five allocations, and their exact sum are schema-validated constants;
+arbitrary user-supplied schedules are rejected. Each child receives a
 canonical derived config whose legal wall-time fields equal its grant. Child
 ledgers remain useful for their local resource accounting, but the root ledger
 is the aggregate authority.
@@ -302,7 +306,7 @@ No child output directory may be adopted without that root authority.
   its full grant, so unused carry is lost in that crash window.
 - An unsealed or unverifiable in-flight child is also charged its full grant and
   the root returns `INCOMPLETE`. It is not blindly replayed within the same
-  one-hour epoch.
+  current profile epoch.
 - An in-flight P4 authority canary remains non-resumable, matching its existing
   source authority contract.
 - Invalid input, changed identity, corrupted sealed artifacts, a terminal child
@@ -354,18 +358,20 @@ it does not imply that every stage promoted a new candidate.
 Add:
 
 ```text
-evolving_loop/v2/real1h/__init__.py
-evolving_loop/v2/real1h/contracts.py
-evolving_loop/v2/real1h/runner.py
-evolving_loop/v2/real1h/bridges.py
-configs/evolution_v2/real1h/pilot.json
-configs/evolution_v2/real1h/toto-balanced-v3.json
-tests/test_evolution_v2_real1h.py
+evolving_loop/v2/real/__init__.py
+evolving_loop/v2/real/contracts.py
+evolving_loop/v2/real/runner.py
+evolving_loop/v2/real/bridges.py
+configs/evolution_v2/real/real-30m.json
+configs/evolution_v2/real/real-1h.json
+configs/evolution_v2/real/real-30m-toto-balanced-v3.json
+configs/evolution_v2/real/real-1h-toto-balanced-v3.json
+tests/test_evolution_v2_real.py
 ```
 
 Modify only the necessary public seams:
 
-- register `real1h-evolve` in `evolving_loop/v2/cli.py`;
+- register `real-evolve` in `evolving_loop/v2/cli.py`;
 - expose a verified active-frozen-pair loader from numerical persistence;
 - add production P3-bundle case construction under `evolving_loop/v2/source/`;
 - add production P3-bundle Host-case construction under
@@ -403,15 +409,17 @@ candidate/generation limits. It must prove at least one real model request or
 explicitly report the existing fallback, produce all four sealed child results,
 show `public_test_accessed=false`, and pass resume validation.
 
-Only after the canary passes should the operator start the full 3600-second run.
-Starting the epoch is one operator action; evolution and promotion within that
-epoch require no human approval.
+Only after the canary passes should the operator start the approved 1800-second
+live run requested for this implementation. The 3600-second profile remains
+available for a later run. Starting an epoch is one operator action; evolution
+and promotion within that epoch require no human approval.
 
 ## 14. Acceptance Criteria
 
 The feature is complete when:
 
-- the canonical real manifest starts one fresh 3600-second epoch;
+- the canonical `real-30m` manifest starts one fresh 1800-second epoch and the
+  canonical `real-1h` manifest can start one fresh 3600-second epoch;
 - a single root ledger enforces the four stage grants and protected reserve;
 - P3 consumes the exact active frozen pair sealed by P2;
 - P4 consumes a real Host case derived from the exact P3 bundle;
@@ -422,5 +430,6 @@ The feature is complete when:
   honestly;
 - closed-boundary interruption and completed resume pass automated tests;
 - the real authenticated canary completes and resumes successfully;
-- the full-hour launcher is runnable from the documented module command without
-  modifying code or historical outputs.
+- the 30-minute launcher is exercised once with real inputs and the one-hour
+  launcher remains runnable from the documented module command without modifying
+  code or historical outputs.
