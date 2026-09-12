@@ -200,11 +200,12 @@ def test_stopped_child_returns_incomplete(case: RunnerCase):
 
 def test_public_evidence_blocks_completion(case: RunnerCase):
     case.public_flags["p4"] = True
+    case.completion_public_flags["p4"] = True
 
-    with pytest.raises(ValueError):
-        case.run()
+    result = case.run()
 
     checkpoint = json.loads((case.output / "checkpoint.json").read_text())
+    assert result.status == "failed"
     assert checkpoint["phase"] == "FAILED"
     assert not (case.output / "evaluation_complete.json").exists()
     assert case.calls == Counter({"p2": 1, "p3": 1, "p4": 1})

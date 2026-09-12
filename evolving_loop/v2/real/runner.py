@@ -260,8 +260,8 @@ def _stage_output(
     completion_public = completion.get("public_test_accessed")
     if type(completion_public) is not bool:
         raise RealRunnerError(f"{stage} completion public access evidence is missing")
-    if completion_public or sealed_public_test_accessed or completion_public != sealed_public_test_accessed:
-        raise RealRunnerError(f"{stage} completion public access evidence must be false and match its seal")
+    if completion_public != sealed_public_test_accessed:
+        raise RealRunnerError(f"{stage} completion public access evidence must match its seal")
 
 
 def _sealed_handoff_payload(stage: str, sealed: SealedStageV2) -> dict[str, object]:
