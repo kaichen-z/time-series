@@ -8,7 +8,7 @@ from pathlib import Path
 
 from common.payload import strict_json_loads
 
-from ..contracts import canonical_v2_bytes, fingerprint_payload
+from ..contracts import canonical_v2_bytes, fingerprint_payload, require_sha256
 from ..store import _atomic_write, append_jsonl, write_atomic_json, write_once_json
 from .contracts import SourceVariantV2
 from .meta import SourceValidationV2
@@ -39,6 +39,41 @@ def _evidence_payload(stage: str, evidence: SourceValidationV2) -> dict[str, obj
         "replay_fingerprint": evidence.replay_fingerprint,
         "evaluation_fingerprints": list(evidence.evaluation_fingerprints),
     }
+
+
+_EVIDENCE_FIELDS = frozenset({
+    "schema_version", "stage", "parent_source_sha256", "finalist_source_sha256",
+    "passed", "reason", "commitment_sha256", "replay_fingerprint",
+    "evaluation_fingerprints",
+})
+
+
+def _verified_validation(path: Path, identity: object, parent_sha: object, candidate_sha: object) -> None:
+    try:
+        evidence_identity = require_sha256(identity, "validation evidence identity")
+        expected_parent = require_sha256(parent_sha, "pending parent source")
+        expected_candidate = require_sha256(candidate_sha, "pending candidate source")
+    except ValueError as error:
+        raise SourceAuthorityError("validation evidence identity is invalid") from error
+    payload = _read_json(path / f"{evidence_identity}.json")
+    if set(payload) != _EVIDENCE_FIELDS or fingerprint_payload(payload) != evidence_identity:
+        raise SourceAuthorityError("validation evidence digest mismatch")
+    fingerprints = payload["evaluation_fingerprints"]
+    try:
+        require_sha256(payload["commitment_sha256"], "validation commitment")
+        require_sha256(payload["replay_fingerprint"], "validation replay")
+        if not isinstance(fingerprints, list) or len(fingerprints) != 2:
+            raise ValueError("validation evaluation fingerprints are invalid")
+        for value in fingerprints:
+            require_sha256(value, "validation evaluation fingerprint")
+    except ValueError as error:
+        raise SourceAuthorityError("validation evidence schema is invalid") from error
+    if (type(payload["schema_version"]) is not int or payload["schema_version"] != 1
+            or payload["stage"] != "validation" or payload["passed"] is not True
+            or type(payload["reason"]) is not str or not payload["reason"]
+            or payload["parent_source_sha256"] != expected_parent
+            or payload["finalist_source_sha256"] != expected_candidate):
+        raise SourceAuthorityError("validation evidence does not bind pending canary")
 
 
 class SourceAuthorityV2:
@@ -108,9 +143,9 @@ class SourceAuthorityV2:
         write_once_json(self.sealed / f"{evidence_sha}.json", payload)
         prior = base64.b64decode(str(checkpoint["prior_pointer_b64"]).encode("ascii"), validate=True)
         if result.passed:
-            candidate_payload = _read_json(self.sealed / f"{checkpoint['validation_evidence_sha256']}.json")
-            if candidate_payload.get("finalist_source_sha256") != candidate_sha:
-                raise SourceAuthorityError("validation evidence pointer mismatch")
+            _verified_validation(self.sealed, checkpoint["validation_evidence_sha256"], parent_sha, candidate_sha)
+            if self.active_path.read_bytes() != prior or self.active_source().fingerprint() != parent_sha:
+                raise SourceAuthorityError("active source pointer drifted during canary")
             # The Runner owns the source object; its pending candidate is reconstructed
             # from the caller's validated result identity in a companion source file.
             source_payload_path = self.root / "pending_source.json"

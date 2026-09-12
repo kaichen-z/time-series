@@ -24,7 +24,7 @@ from evolving_loop.v2.cooperative.adapters import (
 )
 from evolving_loop.v2.cooperative.contracts import DecisionModuleV2, RetrievalModuleV2
 from evolving_loop.v2.source.contracts import SourceVariantV2
-from evolving_loop.v2.contracts import canonical_v2_bytes
+from evolving_loop.v2.contracts import canonical_v2_bytes, fingerprint_payload
 from tests.build_evolution_v2_cooperative_fixture import _seed_supply, _task
 
 
@@ -54,12 +54,18 @@ class SourceCase:
     adapters_factory: object
     pipeline_factory: object
     evaluator: object | None = None
+    input_digest: str | None = None
 
 
-def build_source_case(root: Path, *, failed_held_out: bool = False) -> SourceCase:
+def build_source_case(
+    root: Path, *, failed_held_out: bool = False,
+    task_manifest_payload: dict[str, object] | None = None,
+    seed_source_payload: dict[str, object] | None = None,
+) -> SourceCase:
     """Build real P3 inputs; source policies choose real typed candidates only."""
     del failed_held_out
     manifest = _parse_cooperative_task_manifest(
+        task_manifest_payload or
         {"schema_version": 1, "train": [_task(index) for index in range(4)], "dev": [_task(4)]}
     )
     train_tasks, dev_tasks = manifest["train"], manifest["dev"]
@@ -110,7 +116,13 @@ def build_source_case(root: Path, *, failed_held_out: bool = False) -> SourceCas
     catalog, seed_bundle = catalog_factory()
     del catalog
     protocol, runtime = _digest("source-protocol"), _digest("source-runtime")
-    seed_source = SourceVariantV2.seed("def choose_arm(request):\n    return 'retrieval'\n", protocol, runtime)
+    seed_source = (
+        SourceVariantV2.from_payload(seed_source_payload)
+        if seed_source_payload is not None else
+        SourceVariantV2.seed("def choose_arm(request):\n    return 'retrieval'\n", protocol, runtime)
+    )
+    if seed_source.protocol_fingerprint != protocol or seed_source.runtime_fingerprint != runtime:
+        raise ValueError("frozen seed source commitments do not match fixture")
     improving_source = SourceVariantV2.child(seed_source, "def choose_arm(request):\n    return 'numerical'\n", "select_numerical")
     neutral_source = SourceVariantV2.child(seed_source, "def choose_arm(request):\n    return 'retrieval'\n", "select_retrieval")
     case = SourceCase(seed_source, improving_source, neutral_source, seed_bundle, train_tasks, dev_tasks,
@@ -129,8 +141,9 @@ def export_source_manifest(root: Path) -> Path:
     frozen = {
         "seed_source.json": case.seed_source.to_payload(),
         "tasks.json": {
-            "train": [task.numeric.task_id for task in case.train_tasks],
-            "dev": [task.numeric.task_id for task in case.dev_tasks],
+            "schema_version": 1,
+            "train": [_task(index) for index in range(4)],
+            "dev": [_task(4)],
         },
     }
     files: dict[str, dict[str, str]] = {}
@@ -152,7 +165,7 @@ def export_source_manifest(root: Path) -> Path:
 
 
 def load_source_manifest(path: Path) -> SourceCase:
-    """Verify frozen bytes before rebuilding the deterministic fixture seam."""
+    """Verify and deserialize the frozen bytes used by the evaluator."""
     raw = path.read_bytes()
     manifest = json.loads(raw)
     if canonical_v2_bytes(manifest) != raw:
@@ -160,17 +173,41 @@ def load_source_manifest(path: Path) -> SourceCase:
     required = {"schema_version", "files", "train_task_ids", "dev_task_ids", "train_folds", "protocol_fingerprint", "runtime_fingerprint"}
     if set(manifest) != required or manifest["schema_version"] != 1 or not isinstance(manifest["files"], dict):
         raise ValueError("source manifest schema mismatch")
+    if set(manifest["files"]) != {"seed_source.json", "tasks.json"}:
+        raise ValueError("source manifest file set is invalid")
+    payloads: dict[str, dict[str, object]] = {}
+    admitted_sha256s: dict[str, str] = {}
     for name, entry in manifest["files"].items():
         if not isinstance(name, str) or not isinstance(entry, dict) or set(entry) != {"path", "sha256"} or entry["path"] != name:
             raise ValueError("source manifest file entry is invalid")
         target = path.parent / name
-        if target.parent != path.parent or not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != entry["sha256"]:
+        if target.parent != path.parent or not target.is_file():
             raise ValueError("source manifest file digest mismatch")
-    case = build_source_case(path.parent)
+        content = target.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        if digest != entry["sha256"]:
+            raise ValueError("source manifest file digest mismatch")
+        try:
+            payload = json.loads(content)
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError("source manifest file is not canonical JSON") from error
+        if not isinstance(payload, dict) or canonical_v2_bytes(payload) != content:
+            raise ValueError("source manifest file is not canonical JSON")
+        payloads[name] = payload
+        admitted_sha256s[name] = digest
+    case = build_source_case(
+        path.parent,
+        task_manifest_payload=payloads["tasks.json"],
+        seed_source_payload=payloads["seed_source.json"],
+    )
     if (manifest["train_task_ids"] != [task.numeric.task_id for task in case.train_tasks]
             or manifest["dev_task_ids"] != [task.numeric.task_id for task in case.dev_tasks]
             or manifest["train_folds"] != [[0, 1], [2, 3]]
             or manifest["protocol_fingerprint"] != case.seed_source.protocol_fingerprint
             or manifest["runtime_fingerprint"] != case.seed_source.runtime_fingerprint):
         raise ValueError("source manifest commitments do not match fixture")
+    case.input_digest = fingerprint_payload({
+        "manifest": manifest,
+        "admitted_file_sha256s": admitted_sha256s,
+    })
     return case

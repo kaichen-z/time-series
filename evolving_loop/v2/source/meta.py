@@ -41,6 +41,7 @@ class SourceTrainResultV2:
     invalid_count: int
     catastrophic_count: int
     task_cost: int
+    source_invocations: int
     feasible: bool
     execution_fingerprint: str
 
@@ -56,6 +57,8 @@ class SourceValidationV2:
     commitment_sha256: str
     replay_fingerprint: str
     evaluation_fingerprints: tuple[str, str]
+    task_cost: int = 0
+    source_invocations: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,7 +253,7 @@ class SourceMetaEvaluatorV2:
             variant.fingerprint(), tuple(fold_gains), sum(fold_gains) / len(fold_gains),
             sealed_eval.mean_smae, sealed_eval.mean_srmse,
             sealed_eval.invalid_count, sealed_eval.catastrophic_count,
-            total_cost, feasible,
+            total_cost, len(_FOLDS), feasible,
             fingerprint_payload({"source": variant.fingerprint(), "epoch_seed": epoch_seed, "fold_gains": fold_gains,
                 "children": [child.fingerprint() for child in children], "evaluations": [value.fingerprint for value in outcomes],
                 "sealed_evaluations": [value.fingerprint for value in sealed_outcomes],
@@ -278,7 +281,18 @@ class SourceMetaEvaluatorV2:
         reason = "accepted" if passed else ("held_out_not_strictly_better" if strict and not dev_better else "train_or_nonregression_gate_failed")
         replay = fingerprint_payload({"parent_train": parent_episode.result.execution_fingerprint, "finalist_train": finalist_episode.result.execution_fingerprint, "epoch_seed": epoch_seed})
         commitment = fingerprint_payload({"parent": parent_source.fingerprint(), "finalist": finalist_source.fingerprint(), "parent_bundle": parent_episode.selected_bundle.fingerprint(), "finalist_bundle": finalist_episode.selected_bundle.fingerprint(), "replay": replay, "evaluations": [parent_eval.fingerprint, finalist_eval.fingerprint]})
-        return SourceValidationV2(parent_source.fingerprint(), finalist_source.fingerprint(), passed, reason, parent_eval, finalist_eval, commitment, replay, (parent_eval.fingerprint, finalist_eval.fingerprint))
+        # Account the logical work of this stage, independent of in-process
+        # evaluator caches. Validation reuses the already charged finalist
+        # Train episode; a fresh-seed canary evaluates both sources.
+        trained = (parent_episode,) if strict else (parent_episode, finalist_episode)
+        task_cost = sum(episode.result.task_cost for episode in trained) + 2 * len(self.dev_tasks)
+        source_invocations = sum(episode.result.source_invocations for episode in trained)
+        return SourceValidationV2(
+            parent_source.fingerprint(), finalist_source.fingerprint(), passed, reason,
+            parent_eval, finalist_eval, commitment, replay,
+            (parent_eval.fingerprint, finalist_eval.fingerprint),
+            task_cost, source_invocations,
+        )
 
     def validate(self, parent_source: SourceVariantV2, finalist_source: SourceVariantV2) -> SourceValidationV2:
         return self._validate(parent_source, finalist_source, epoch_seed=0, strict=True)
