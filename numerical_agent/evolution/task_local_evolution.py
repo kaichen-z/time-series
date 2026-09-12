@@ -33,6 +33,7 @@ from .task_local_confidence import (
 from .task_local_ensemble import (
     GroupCandidateSupply,
     TaskLocalEnsembleRelease,
+    TaskLocalEnsembleReleaseV3,
     TaskLocalTournamentPolicy,
     execute_confidence_task_local_ensemble,
     execute_task_local_ensemble,
@@ -928,7 +929,7 @@ def fit_group_candidate_supply(
 
 
 def _evaluate_rows(
-    release: TaskLocalEnsembleRelease,
+    release: TaskLocalEnsembleRelease | TaskLocalEnsembleReleaseV3,
     rows: Sequence[TaskLocalTaskRow],
     task_ids: Sequence[str],
     *,
@@ -942,7 +943,11 @@ def _evaluate_rows(
         if anchor is None or anchor.forecast is None:
             raise ValueError("task-local anchor outcome is missing or failed")
         morphology_key = task_morphology_key(anchor.profile)
-        names = release.candidate_names(morphology_key)
+        names = (
+            release.candidate_names(morphology_key)
+            if type(release) is TaskLocalEnsembleRelease
+            else tuple(task_rows)
+        )
         forecasts = {
             name: row.forecast
             for name in names
@@ -953,7 +958,7 @@ def _evaluate_rows(
             for name in names
             if (row := task_rows.get(name)) is not None and row.diagnostic is not None
         }
-        if release.schema_version == 2:
+        if type(release) is TaskLocalEnsembleRelease and release.schema_version == 2:
             assert release.confidence_evidence is not None
             result = execute_confidence_task_local_ensemble(
                 release.policy,
@@ -970,7 +975,7 @@ def _evaluate_rows(
             )
         else:
             result = execute_task_local_ensemble(
-                release.policy,
+                release.policy if type(release) is TaskLocalEnsembleRelease else release.tournament_policy,
                 candidate_names=names,
                 forecasts=forecasts,
                 diagnostics=diagnostics,
@@ -1143,21 +1148,21 @@ def _report(
 
 
 def evaluate_task_local_release(
-    release: TaskLocalEnsembleRelease,
+    release: TaskLocalEnsembleRelease | TaskLocalEnsembleReleaseV3,
     rows: Sequence[TaskLocalTaskRow],
     *,
     task_ids: Sequence[str],
     split: str,
 ) -> ConditionalUpliftReport:
-    if type(release) is not TaskLocalEnsembleRelease:
-        raise TypeError("task-local evaluation requires an exact release")
+    if type(release) not in {TaskLocalEnsembleRelease, TaskLocalEnsembleReleaseV3}:
+        raise TypeError("task-local evaluation requires an exact recognized release")
     outcomes = _evaluate_rows(release, rows, task_ids)
     return _report(
         outcomes,
         split=split,
         oof_task_count=len(outcomes) if split == "oof" else 0,
         fit_leakage_count=0,
-        policy=release.policy,
+        policy=release.policy if type(release) is TaskLocalEnsembleRelease else release.tournament_policy,
     )
 
 

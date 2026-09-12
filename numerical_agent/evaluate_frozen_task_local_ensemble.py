@@ -18,10 +18,12 @@ from common.payload import (
 
 from .evolution.champion import champion_fingerprint
 from .evolution.forecast_store import ForecastStore
+from .evolution.filtering import parse_filter_source
 from .evolution.module import read_module
 from .evolution.portfolio import read_policy_file
 from .evolution.task_local_ensemble import (
     TaskLocalEnsembleRelease,
+    TaskLocalEnsembleReleaseV3,
     canonical_task_local_release_bytes,
     execute_confidence_task_local_ensemble,
     execute_task_local_ensemble,
@@ -39,6 +41,7 @@ from .run_selector_evolution import _forecast_runtime_identity
 from .run_task_local_ensemble_evolution import (
     _CONFIDENCE_HINDCAST_CONFIG,
     _materialize_rows,
+    _shortlist_rows_for_tasks,
     _reviewed_candidates,
     _smoke_rows,
 )
@@ -62,7 +65,7 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _load_release(release_dir: Path) -> TaskLocalEnsembleRelease:
+def _load_release(release_dir: Path) -> TaskLocalEnsembleRelease | TaskLocalEnsembleReleaseV3:
     complete = read_json_object(release_dir / "evaluation_complete.json")
     if complete.get("status") != "accepted":
         raise ValueError("Public regression requires an accepted task-local release")
@@ -99,7 +102,7 @@ def _rows_by_task(
 
 
 def _score_public_rows(
-    release: TaskLocalEnsembleRelease,
+    release: TaskLocalEnsembleRelease | TaskLocalEnsembleReleaseV3,
     rows: tuple[TaskLocalTaskRow, ...],
     task_ids: tuple[str, ...],
 ) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
@@ -124,7 +127,7 @@ def _score_public_rows(
             records.append({"task_id": task_id, "status": "anchor_failed"})
             continue
         group_key = task_morphology_key(anchor.profile)
-        names = release.candidate_names(group_key)
+        names = release.candidate_names(group_key) if type(release) is TaskLocalEnsembleRelease else tuple(task_rows)
         forecasts = {
             name: row.forecast
             for name in names
@@ -135,7 +138,7 @@ def _score_public_rows(
             for name in names
             if (row := task_rows.get(name)) is not None and row.diagnostic is not None
         }
-        if release.schema_version == 2:
+        if type(release) is TaskLocalEnsembleRelease and release.schema_version == 2:
             assert release.confidence_evidence is not None
             result = execute_confidence_task_local_ensemble(
                 release.policy,
@@ -157,7 +160,7 @@ def _score_public_rows(
                 regional_activations[region.region] += int(region.activated)
         else:
             result = execute_task_local_ensemble(
-                release.policy,
+                release.policy if type(release) is TaskLocalEnsembleRelease else release.tournament_policy,
                 candidate_names=names,
                 forecasts=forecasts,
                 diagnostics=diagnostics,
@@ -328,8 +331,11 @@ def _formal_main(args: argparse.Namespace, release_dir: Path, output: Path) -> i
         or run_manifest.get("source_hashes") != dict(source_hashes)
         or champion_fingerprint(anchor) != release.anchor_release_sha256
         or tuple(sorted(run_manifest.get("source_hashes", {}).items())) != release.source_hashes
-        or run_manifest.get("hindcast_config_fingerprint")
-        != task_local_fingerprint(_CONFIDENCE_HINDCAST_CONFIG)
+        or (
+            type(release) is TaskLocalEnsembleRelease
+            and run_manifest.get("hindcast_config_fingerprint")
+            != task_local_fingerprint(_CONFIDENCE_HINDCAST_CONFIG)
+        )
         or (
             release.schema_version == 2
             and release.confidence_evidence is not None
@@ -338,16 +344,34 @@ def _formal_main(args: argparse.Namespace, release_dir: Path, output: Path) -> i
         )
     ):
         raise ValueError("Public authority does not match the frozen evolution run")
+    if type(release) is TaskLocalEnsembleReleaseV3:
+        required_v3 = {
+            "dictionary_sha256": release.dictionary_sha256,
+            "shortlist_policy_fingerprint": release.shortlist_policy.fingerprint(),
+            "candidate_priors_fingerprint": hashlib.sha256(canonical_json_bytes(
+                [item.to_payload() for item in release.candidate_priors]
+            )).hexdigest(),
+        }
+        if any(run_manifest.get(key) != value for key, value in required_v3.items()):
+            raise ValueError("Public V3 shortlist authority does not match frozen evolution")
+        index_path = release_dir / "task_shortlist_index.json"
+        if not index_path.is_file() or run_manifest.get("shortlist_index_fingerprint") != hashlib.sha256(index_path.read_bytes()).hexdigest():
+            raise ValueError("Public V3 shortlist index does not match frozen evolution")
     module = read_module(repo / "methods.py")
     portfolio = read_policy_file(repo / "policies.py")
     portfolio.validate_namespace(module.names())
     screening = _load_screening_policy(repo / "dictionary.py")
+    dictionary = parse_filter_source((repo / "dictionary.py").read_text(encoding="utf-8"))
     candidates = _reviewed_candidates(module, portfolio, screening)
-    required_names = {
-        name
-        for supply in (release.default_candidate_names, *(item.candidate_names for item in release.group_supplies))
-        for name in supply
-    }
+    required_names = (
+        {item.candidate_name for item in release.candidate_priors}
+        if type(release) is TaskLocalEnsembleReleaseV3
+        else {
+            name
+            for supply in (release.default_candidate_names, *(item.candidate_names for item in release.group_supplies))
+            for name in supply
+        }
+    )
     candidates = tuple(item for item in candidates if item[0] in required_names)
     if {name for name, _family in candidates} != required_names:
         raise ValueError("Public runtime is missing a frozen release candidate")
@@ -371,14 +395,20 @@ def _formal_main(args: argparse.Namespace, release_dir: Path, output: Path) -> i
         if set(loaded) != set(task_ids):
             raise ValueError("Public regression is missing task bodies")
         tasks = tuple(loaded[task_id] for task_id in task_ids)
-        rows = _materialize_rows(
-            store,
-            tasks,
-            candidates,
-            screening,
-            split="public",
-            hindcast_config=_CONFIDENCE_HINDCAST_CONFIG,
-        )
+        if type(release) is TaskLocalEnsembleReleaseV3:
+            if run_manifest.get("dictionary_sha256") != release.dictionary_sha256:
+                raise ValueError("Public dictionary does not match frozen V3 release")
+            rows, _shortlists = _shortlist_rows_for_tasks(
+                store, tasks, dictionary=dictionary, screening=screening, families=dict(candidates),
+                priors=release.candidate_priors, anchor_name=release.anchor_name,
+                policy=release.shortlist_policy, split="public",
+                hindcast_config=_CONFIDENCE_HINDCAST_CONFIG,
+            )
+        else:
+            rows = _materialize_rows(
+                store, tasks, candidates, screening, split="public",
+                hindcast_config=_CONFIDENCE_HINDCAST_CONFIG,
+            )
         comparison, records = _score_public_rows(release, rows, task_ids)
         _publish(
             output,

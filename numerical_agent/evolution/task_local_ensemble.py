@@ -22,6 +22,7 @@ from .task_local_confidence import (
     parse_hierarchical_evidence,
     robust_effect_margin,
 )
+from .task_shortlist import CandidatePriorV1, TaskShortlistPolicyV1
 
 
 def _canonical_name(value: str) -> str:
@@ -292,6 +293,98 @@ class TaskLocalEnsembleRelease:
         return payload
 
 
+@dataclass(frozen=True)
+class TaskLocalEnsembleReleaseV3:
+    """Frozen v3 authority: complete priors plus per-task shortlist policy."""
+
+    schema_version: int
+    anchor_release_sha256: str
+    anchor_name: str
+    tournament_policy: TaskLocalTournamentPolicy
+    shortlist_policy: TaskShortlistPolicyV1
+    candidate_priors: tuple[CandidatePriorV1, ...]
+    dictionary_sha256: str
+    grouping_fingerprint: str
+    oof_report_sha256: str
+    source_hashes: tuple[tuple[str, str], ...]
+    metric_policy_fingerprint: str
+    lineage: tuple[str, ...]
+    confidence_evidence: HierarchicalEvidenceBank | None
+
+    def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != 3:
+            raise ValueError("task-local v3 release schema must be exactly three")
+        if type(self.tournament_policy) is not TaskLocalTournamentPolicy:
+            raise ValueError("task-local v3 requires an exact tournament policy")
+        if self.anchor_name != self.tournament_policy.anchor_name:
+            raise ValueError("task-local v3 anchor must match tournament policy")
+        if type(self.shortlist_policy) is not TaskShortlistPolicyV1:
+            raise ValueError("task-local v3 requires an exact shortlist policy")
+        if (
+            type(self.candidate_priors) is not tuple
+            or not self.candidate_priors
+            or any(type(item) is not CandidatePriorV1 for item in self.candidate_priors)
+            or tuple(item.candidate_name for item in self.candidate_priors)
+            != tuple(sorted(item.candidate_name for item in self.candidate_priors))
+            or len({item.candidate_name for item in self.candidate_priors})
+            != len(self.candidate_priors)
+        ):
+            raise ValueError("task-local v3 priors must be unique sorted exact priors")
+        anchor_prior = next((item for item in self.candidate_priors if item.candidate_name == self.anchor_name), None)
+        if anchor_prior is None:
+            raise ValueError("task-local v3 priors must include the anchor")
+        for label, value in (
+            ("anchor release", self.anchor_release_sha256),
+            ("dictionary", self.dictionary_sha256),
+            ("grouping", self.grouping_fingerprint),
+            ("OOF report", self.oof_report_sha256),
+            ("metric policy", self.metric_policy_fingerprint),
+        ):
+            _require_sha256(value, f"task-local {label} fingerprint")
+        if (
+            type(self.source_hashes) is not tuple
+            or not self.source_hashes
+            or tuple(name for name, _ in self.source_hashes) != tuple(sorted(name for name, _ in self.source_hashes))
+            or len({name for name, _ in self.source_hashes}) != len(self.source_hashes)
+            or any(type(name) is not str or not name.isidentifier() or _invalid_sha256(digest) for name, digest in self.source_hashes)
+        ):
+            raise ValueError("task-local v3 source hashes must be unique sorted identifiers")
+        if (
+            type(self.lineage) is not tuple or not self.lineage
+            or any(type(item) is not str or not item.isidentifier() for item in self.lineage)
+            or len(self.lineage) != len(set(self.lineage))
+            or self.lineage[-1] != "task_local_shortlist_v3"
+        ):
+            raise ValueError("task-local v3 lineage is noncanonical")
+        if self.confidence_evidence is not None:
+            if type(self.confidence_evidence) is not HierarchicalEvidenceBank:
+                raise ValueError("task-local v3 confidence evidence is malformed")
+            HierarchicalEvidenceBank.__post_init__(self.confidence_evidence)
+
+    def to_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "schema_version": 3,
+            "anchor_release_sha256": self.anchor_release_sha256,
+            "anchor_name": self.anchor_name,
+            "tournament_policy": asdict(self.tournament_policy),
+            "shortlist_policy": self.shortlist_policy.to_payload(),
+            "candidate_priors": [item.to_payload() for item in self.candidate_priors],
+            "dictionary_sha256": self.dictionary_sha256,
+            "grouping_fingerprint": self.grouping_fingerprint,
+            "oof_report_sha256": self.oof_report_sha256,
+            "source_hashes": dict(self.source_hashes),
+            "metric_policy_fingerprint": self.metric_policy_fingerprint,
+            "lineage": list(self.lineage),
+            "confidence_evidence": (
+                self.confidence_evidence.to_payload() if self.confidence_evidence is not None else None
+            ),
+        }
+        return payload
+
+    def canonical_bytes(self) -> bytes:
+        return canonical_json_bytes(self.to_payload())
+
+
 def _invalid_sha256(value: object) -> bool:
     try:
         _require_sha256(value, "value")
@@ -300,7 +393,25 @@ def _invalid_sha256(value: object) -> bool:
     return False
 
 
-def parse_task_local_release(payload: object) -> TaskLocalEnsembleRelease:
+def _parse_tournament_policy(payload: object) -> TaskLocalTournamentPolicy:
+    if type(payload) is not dict:
+        raise ValueError("task-local policy schema is malformed")
+    policy_fields = {
+        "schema_version", "anchor_name", "maximum_candidates", "maximum_specialists",
+        "minimum_successful_folds", "minimum_anchor_weight", "weight_step",
+        "minimum_joint_improvement", "maximum_worst_joint_regret", "maximum_raw_smae",
+        "maximum_raw_srmse", "minimum_activation_support", "minimum_activation_groups",
+        "minimum_activation_precision",
+    }
+    if set(payload) != policy_fields:
+        raise ValueError("task-local policy schema is malformed")
+    try:
+        return TaskLocalTournamentPolicy(**payload)
+    except (TypeError, ValueError) as error:
+        raise ValueError("task-local policy schema is malformed") from error
+
+
+def parse_task_local_release(payload: object) -> TaskLocalEnsembleRelease | TaskLocalEnsembleReleaseV3:
     """Parse the exact canonical v1 or confidence-routed v2 release schema."""
     base_fields = {
         "schema_version",
@@ -318,6 +429,41 @@ def parse_task_local_release(payload: object) -> TaskLocalEnsembleRelease:
     if type(payload) is not dict or type(payload.get("schema_version")) is not int:
         raise ValueError("task-local release schema is malformed")
     schema_version = payload["schema_version"]
+    if schema_version == 3:
+        v3_fields = {
+            "schema_version", "anchor_release_sha256", "anchor_name", "tournament_policy",
+            "shortlist_policy", "candidate_priors", "dictionary_sha256", "grouping_fingerprint",
+            "oof_report_sha256", "source_hashes", "metric_policy_fingerprint", "lineage",
+            "confidence_evidence",
+        }
+        if set(payload) != v3_fields:
+            raise ValueError("task-local release schema is malformed")
+        raw_priors = payload["candidate_priors"]
+        raw_lineage = payload["lineage"]
+        source_payload = payload["source_hashes"]
+        if type(raw_priors) is not list or type(raw_lineage) is not list or type(source_payload) is not dict:
+            raise ValueError("task-local release schema is malformed")
+        try:
+            return TaskLocalEnsembleReleaseV3(
+                schema_version=3,
+                anchor_release_sha256=payload["anchor_release_sha256"],
+                anchor_name=payload["anchor_name"],
+                tournament_policy=_parse_tournament_policy(payload["tournament_policy"]),
+                shortlist_policy=TaskShortlistPolicyV1.from_payload(payload["shortlist_policy"]),
+                candidate_priors=tuple(CandidatePriorV1.from_payload(item) for item in raw_priors),
+                dictionary_sha256=payload["dictionary_sha256"],
+                grouping_fingerprint=payload["grouping_fingerprint"],
+                oof_report_sha256=payload["oof_report_sha256"],
+                source_hashes=tuple(sorted(source_payload.items())),
+                metric_policy_fingerprint=payload["metric_policy_fingerprint"],
+                lineage=tuple(raw_lineage),
+                confidence_evidence=(
+                    parse_hierarchical_evidence(payload["confidence_evidence"])
+                    if payload["confidence_evidence"] is not None else None
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("task-local release schema is malformed") from error
     expected = (
         base_fields
         if schema_version == 1
@@ -328,24 +474,6 @@ def parse_task_local_release(payload: object) -> TaskLocalEnsembleRelease:
     if not expected or set(payload) != expected:
         raise ValueError("task-local release schema is malformed")
     policy_payload = payload["policy"]
-    policy_fields = {
-        "schema_version",
-        "anchor_name",
-        "maximum_candidates",
-        "maximum_specialists",
-        "minimum_successful_folds",
-        "minimum_anchor_weight",
-        "weight_step",
-        "minimum_joint_improvement",
-        "maximum_worst_joint_regret",
-        "maximum_raw_smae",
-        "maximum_raw_srmse",
-        "minimum_activation_support",
-        "minimum_activation_groups",
-        "minimum_activation_precision",
-    }
-    if type(policy_payload) is not dict or set(policy_payload) != policy_fields:
-        raise ValueError("task-local policy schema is malformed")
     raw_groups = payload["group_supplies"]
     if type(raw_groups) is not list:
         raise ValueError("task-local group supply schema is malformed")
@@ -369,7 +497,7 @@ def parse_task_local_release(payload: object) -> TaskLocalEnsembleRelease:
             schema_version=payload["schema_version"],
             anchor_release_sha256=payload["anchor_release_sha256"],
             anchor_name=payload["anchor_name"],
-            policy=TaskLocalTournamentPolicy(**policy_payload),
+            policy=_parse_tournament_policy(policy_payload),
             default_candidate_names=tuple(raw_default),
             group_supplies=tuple(groups),
             grouping_fingerprint=payload["grouping_fingerprint"],
@@ -387,9 +515,9 @@ def parse_task_local_release(payload: object) -> TaskLocalEnsembleRelease:
         raise ValueError("task-local release schema is malformed") from error
 
 
-def canonical_task_local_release_bytes(release: TaskLocalEnsembleRelease) -> bytes:
-    if type(release) is not TaskLocalEnsembleRelease:
-        raise TypeError("canonical release encoding requires an exact task-local release")
+def canonical_task_local_release_bytes(release: TaskLocalEnsembleRelease | TaskLocalEnsembleReleaseV3) -> bytes:
+    if type(release) not in {TaskLocalEnsembleRelease, TaskLocalEnsembleReleaseV3}:
+        raise TypeError("canonical release encoding requires an exact recognized task-local release")
     return canonical_json_bytes(release.to_payload())
 
 

@@ -23,10 +23,16 @@ from .evolution.screening import (
     materialize_active_dictionary,
     profile_task,
 )
+from .evolution.filtering import parse_filter_source
 from .evolution.task_local_ensemble import (
+    TaskLocalEnsembleReleaseV3,
     TaskLocalTournamentPolicy,
     canonical_task_local_release_bytes,
     task_local_fingerprint,
+)
+from .evolution.task_shortlist import (
+    TaskCandidateShortlistV1, TaskShortlistPolicyV1, build_task_candidate_shortlist,
+    fit_candidate_priors,
 )
 from .evolution.task_local_confidence import ConfidencePolicy
 from .evolution.task_local_evolution import (
@@ -35,6 +41,7 @@ from .evolution.task_local_evolution import (
     build_group_fold_manifest,
     evaluate_task_local_release,
     fit_oof_release,
+    task_morphology_key,
 )
 from .main import _add_tsfm_runtime_options, _runtime_registry
 from .run_champion_evolution import (
@@ -87,6 +94,14 @@ def _write_once(path: Path, payload: dict[str, object] | bytes) -> None:
     with path.open("xb") as handle:
         handle.write(data)
         handle.flush()
+
+
+def _task_input_sha(task: RuntimeTask) -> str:
+    """Canonical history-only identity used by the persisted task shortlist."""
+    return hashlib.sha256(canonical_json_bytes({
+        "task_id": task.task_id, "history": list(task.history), "horizon": task.horizon,
+        "frequency": task.frequency,
+    })).hexdigest()
 
 
 def _report_payload(report: ConditionalUpliftReport) -> dict[str, object]:
@@ -330,6 +345,87 @@ def _materialize_rows(
     return tuple(rows)
 
 
+def materialize_task_shortlist_rows(
+    store: ForecastStore,
+    task: RuntimeTask,
+    shortlist: TaskCandidateShortlistV1,
+    families: dict[str, str],
+    *,
+    split: str,
+    hindcast_config: HindcastConfig,
+) -> tuple[TaskLocalTaskRow, ...]:
+    """Phase B only: materialize the closed, history-only shortlist in order."""
+    if type(shortlist) is not TaskCandidateShortlistV1:
+        raise TypeError("shortlist materialization requires an exact shortlist")
+    profile = profile_task(task)
+    rows: list[TaskLocalTaskRow] = []
+    for name in shortlist.candidate_names:
+        family = families.get(name)
+        if family is None:
+            raise ValueError(f"shortlisted candidate has no family: {name}")
+        forecast = None
+        diagnostic = None
+        failure: str | None = None
+        try:
+            forecast = store.forecast(name, task.history, task.horizon, task.frequency)
+        except Exception as error:
+            failure = f"shortlisted_runtime_failure: {type(error).__name__}: {error}"[:10000]
+        try:
+            diagnostic = diagnose_candidate(
+                task, name, family, store.forecast,
+                _adaptive_hindcast_config(task, hindcast_config),
+                runtime_settings={"forecast_store": store.identity_hash},
+            )
+        except Exception as error:
+            if failure is None:
+                forecast = None
+                failure = f"shortlisted_runtime_failure: HistoryDiagnosticUnavailable: {type(error).__name__}"[:10000]
+        rows.append(TaskLocalTaskRow(
+            task_id=task.task_id, candidate_name=name, family=family, profile=profile,
+            history=tuple(task.history), truth=tuple(task.future), forecast=forecast,
+            diagnostic=diagnostic, split=split, failure_reason=failure,
+        ))
+    return tuple(rows)
+
+
+def _shortlist_rows_for_tasks(
+    store: ForecastStore,
+    tasks: Iterable[DataTask],
+    *,
+    dictionary: object,
+    screening: ScreeningPolicy,
+    families: dict[str, str],
+    priors: tuple[object, ...],
+    anchor_name: str,
+    policy: TaskShortlistPolicyV1,
+    split: str,
+    hindcast_config: HindcastConfig,
+    output: Path | None = None,
+) -> tuple[tuple[TaskLocalTaskRow, ...], tuple[TaskCandidateShortlistV1, ...]]:
+    """Close each history-only shortlist before touching its forecast runtime."""
+    from .evolution.filtering import FilterDictionary
+    from .evolution.task_shortlist import CandidatePriorV1
+    if type(dictionary) is not FilterDictionary or any(type(item) is not CandidatePriorV1 for item in priors):
+        raise TypeError("shortlist phase requires exact dictionary and candidate priors")
+    rows: list[TaskLocalTaskRow] = []
+    shortlists: list[TaskCandidateShortlistV1] = []
+    for source in tasks:
+        task = RuntimeTask(source.task_id, tuple(source.history_values), source.prediction_length,
+                           source.frequency, tuple(source.future_values))
+        shortlist = build_task_candidate_shortlist(
+            dictionary=dictionary, profile=profile_task(task), task_input_sha256=_task_input_sha(task),
+            anchor_name=anchor_name, available_names=tuple(families), priors=priors,
+            policy=policy, screening=screening,
+        )
+        if len(shortlist.candidate_names) > TaskLocalTournamentPolicy(anchor_name=anchor_name).maximum_candidates:
+            raise ValueError("shortlist exceeds the current tournament candidate limit")
+        if output is not None:
+            _write_once(output / "task_shortlists" / f"{shortlist.task_input_sha256}.json", shortlist.canonical_bytes())
+        shortlists.append(shortlist)
+        rows.extend(materialize_task_shortlist_rows(store, task, shortlist, families, split=split, hindcast_config=hindcast_config))
+    return tuple(rows), tuple(shortlists)
+
+
 def _formal_main(args: argparse.Namespace, output: Path) -> int:
     required = {
         "repo": args.repo,
@@ -358,6 +454,7 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
     portfolio = read_policy_file(repo / "policies.py")
     portfolio.validate_namespace(module.names())
     screening = _load_screening_policy(repo / "dictionary.py")
+    dictionary = parse_filter_source((repo / "dictionary.py").read_text(encoding="utf-8"))
     candidates = _reviewed_candidates(module, portfolio, screening)
     runtimes = _runtime_registry(args)
     store: ForecastStore | None = None
@@ -382,7 +479,7 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
         manifest = build_group_fold_manifest(
             train, seed=int(args.partition_seed)
         )
-        release, oof = fit_oof_release(
+        legacy_release, oof = fit_oof_release(
             train_rows,
             manifest,
             anchor_release_sha256=champion_fingerprint(anchor),
@@ -393,6 +490,41 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
             ),
             confidence_policy=ConfidencePolicy(),
         )
+        morphology = {
+            task_id: task_morphology_key(next(row.profile for row in train_rows if row.task_id == task_id))
+            for task_id in train_ids
+        }
+        priors = fit_candidate_priors(
+            train_rows, task_ids=train_ids, morphology_keys=morphology,
+            candidate_names=tuple(name for name, _family in candidates),
+        )
+        release = TaskLocalEnsembleReleaseV3(
+            schema_version=3,
+            anchor_release_sha256=champion_fingerprint(anchor),
+            anchor_name=anchor.policy.recipe.fallback_parent,
+            tournament_policy=legacy_release.policy,
+            shortlist_policy=TaskShortlistPolicyV1(),
+            candidate_priors=priors,
+            dictionary_sha256=hashlib.sha256(canonical_json_bytes({"entries": [
+                {"name": item.name, "family": item.family, "status": item.status,
+                 "applicability": list(item.applicability), "reason": item.reason}
+                for item in dictionary.entries
+            ]})).hexdigest(),
+            grouping_fingerprint=manifest.grouping_fingerprint,
+            oof_report_sha256=oof.report_fingerprint,
+            source_hashes=source_hashes,
+            metric_policy_fingerprint=legacy_release.metric_policy_fingerprint,
+            lineage=("task_local_shortlist_v3",),
+            confidence_evidence=None,
+        )
+        families = dict(candidates)
+        # Freeze Train task shortlists too; the legacy rows above exist only to fit
+        # Train priors and OOF acceptance, while this phase owns V3 diagnostics.
+        train_shortlist_rows, train_shortlists = _shortlist_rows_for_tasks(
+            store, train, dictionary=dictionary, screening=screening, families=families,
+            priors=priors, anchor_name=release.anchor_name, policy=release.shortlist_policy,
+            split="train", hindcast_config=_CONFIDENCE_HINDCAST_CONFIG, output=output,
+        )
         run_manifest = {
             "schema_version": 2,
             "split_sha256": _sha256(Path(args.split_file)),
@@ -400,12 +532,10 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
             "anchor_release_sha256": champion_fingerprint(anchor),
             "forecast_store_fingerprint": store.identity_hash,
             "grouping_fingerprint": manifest.grouping_fingerprint,
-            "tournament_policy_fingerprint": task_local_fingerprint(release.policy),
-            "confidence_policy_fingerprint": task_local_fingerprint(
-                release.confidence_evidence.policy
-                if release.confidence_evidence is not None
-                else {}
-            ),
+            "tournament_policy_fingerprint": task_local_fingerprint(release.tournament_policy),
+            "shortlist_policy_fingerprint": release.shortlist_policy.fingerprint(),
+            "candidate_priors_fingerprint": hashlib.sha256(canonical_json_bytes([item.to_payload() for item in priors])).hexdigest(),
+            "dictionary_sha256": release.dictionary_sha256,
             "hindcast_config_fingerprint": task_local_fingerprint(
                 {
                     "mode": "adaptive_three_to_five_origins",
@@ -415,7 +545,6 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
             "train_task_ids_sha256": hashlib.sha256("\n".join(train_ids).encode()).hexdigest(),
             "dev_task_ids_sha256": hashlib.sha256("\n".join(dev_ids).encode()).hexdigest(),
         }
-        _write_once(output / "run_manifest.json", run_manifest)
         _write_once(output / "group_folds.json", manifest.to_payload())
         _write_once(output / "oof_report.json", _report_payload(oof))
         if not oof.accepted:
@@ -435,14 +564,27 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
         if set(dev_by_id) != set(dev_ids):
             raise ValueError("formal task-local evolution is missing Dev tasks")
         dev = tuple(dev_by_id[task_id] for task_id in dev_ids)
-        dev_rows = _materialize_rows(
-            store,
-            dev,
-            candidates,
-            screening,
-            split="dev",
-            hindcast_config=_CONFIDENCE_HINDCAST_CONFIG,
+        dev_rows, shortlists = _shortlist_rows_for_tasks(
+            store, dev, dictionary=dictionary, screening=screening, families=families,
+            priors=priors, anchor_name=release.anchor_name, policy=release.shortlist_policy,
+            split="dev", hindcast_config=_CONFIDENCE_HINDCAST_CONFIG, output=output,
         )
+        shortlist_index = {
+            "schema_version": 1,
+            "entries": [
+                {"task_id": source.task_id, "task_input_sha256": shortlist.task_input_sha256,
+                 "shortlist_sha256": shortlist.fingerprint(), "diagnostics_sha256": hashlib.sha256(canonical_json_bytes([
+                     {"candidate_name": row.candidate_name, "failure_reason": row.failure_reason,
+                      "diagnostic": asdict(row.diagnostic) if row.diagnostic is not None else None}
+                     for row in train_shortlist_rows + dev_rows if row.task_id == source.task_id
+                 ])).hexdigest()}
+                for source, shortlist in zip(train + dev, train_shortlists + shortlists, strict=True)
+            ],
+        }
+        shortlist_index["entries"].sort(key=lambda item: (item["task_id"], item["task_input_sha256"]))
+        _write_once(output / "task_shortlist_index.json", shortlist_index)
+        run_manifest["shortlist_index_fingerprint"] = hashlib.sha256(canonical_json_bytes(shortlist_index)).hexdigest()
+        _write_once(output / "run_manifest.json", run_manifest)
         dev_report = evaluate_task_local_release(
             release, dev_rows, task_ids=dev_ids, split="dev"
         )

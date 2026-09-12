@@ -15,8 +15,11 @@ from numerical_agent.run_task_local_ensemble_evolution import main
 from numerical_agent.run_task_local_ensemble_evolution import (
     _CONFIDENCE_HINDCAST_CONFIG,
     _adaptive_hindcast_config,
+    materialize_task_shortlist_rows,
 )
 from numerical_agent.evolution.execution import Task as RuntimeTask
+from numerical_agent.evolution.numerical_selector import CandidateDiagnostics
+from numerical_agent.evolution.task_shortlist import TaskCandidateShortlistV1
 
 
 def test_smoke_runs_eight_train_two_dev_and_freezes_after_acceptance(
@@ -49,6 +52,31 @@ def test_confidence_hindcast_uses_three_origins_for_long_horizon_history() -> No
 
     assert config.folds == 3
     assert config.min_successful_folds == 3
+
+
+def test_shortlist_materializer_never_executes_excluded_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    class Store:
+        identity_hash = "store"
+        def forecast(self, name: str, history: tuple[float, ...], horizon: int, frequency: str) -> tuple[float, ...]:
+            calls.append(name)
+            if name == "bad":
+                raise RuntimeError("boom")
+            return (1.0,) * horizon
+    def diagnose(task: RuntimeTask, name: str, family: str, forecast, config, **_kwargs):
+        calls.append(f"diagnose:{name}")
+        return CandidateDiagnostics.synthetic(name=name, family=family, median_mase=1.0,
+            fold_forecasts=((1.0,),) * 3, fold_truths=((1.0,),) * 3,
+            median_smae=1.0, median_srmse=1.0)
+    monkeypatch.setattr("numerical_agent.run_task_local_ensemble_evolution.diagnose_candidate", diagnose)
+    shortlist = TaskCandidateShortlistV1(1, "a" * 64, "b" * 64, "c" * 64,
+        ("toto_2_0", "good", "bad"), (("excluded", "ranked_out"),), True, False)
+    rows = materialize_task_shortlist_rows(Store(), RuntimeTask("task", (1.0, 2.0, 3.0, 4.0), 1, "D", (5.0,)), shortlist,
+        {"toto_2_0": "tsfm", "good": "statistical", "bad": "combined"}, split="dev",
+        hindcast_config=_CONFIDENCE_HINDCAST_CONFIG)
+    assert calls == ["toto_2_0", "diagnose:toto_2_0", "good", "diagnose:good", "bad", "diagnose:bad"]
+    assert {row.candidate_name for row in rows} == {"toto_2_0", "good", "bad"}
+    assert next(row for row in rows if row.candidate_name == "bad").failure_reason.startswith("shortlisted_runtime_failure")
 
 
 def test_failed_dev_publishes_no_task_local_release(tmp_path: Path) -> None:

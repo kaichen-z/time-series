@@ -47,6 +47,7 @@ from .screening import (
 from .task_local_ensemble import (
     TaskLocalConfidenceResult,
     TaskLocalEnsembleRelease,
+    TaskLocalEnsembleReleaseV3,
     execute_confidence_task_local_ensemble,
     execute_task_local_ensemble,
     task_local_fingerprint,
@@ -122,6 +123,8 @@ def run_numerical_loop(
     if champion_release is not None and type(champion_release) is not ChampionRelease:
         raise TypeError("champion_release must be a ChampionRelease or None")
     if task_local_release is not None:
+        if type(task_local_release) is TaskLocalEnsembleReleaseV3:
+            raise ValueError("run_numerical_loop accepts legacy task-local releases only; V3 requires persisted per-task shortlist execution")
         if type(task_local_release) is not TaskLocalEnsembleRelease:
             raise TypeError("task_local_release must be a TaskLocalEnsembleRelease or None")
         if champion_release is None:

@@ -16,10 +16,41 @@ from numerical_agent.evolution.task_local_confidence import (
     beta_win_probability,
 )
 from numerical_agent.evolution.task_local_ensemble import (
+    TaskLocalEnsembleReleaseV3,
     TaskLocalTournamentPolicy,
+    canonical_task_local_release_bytes,
     execute_confidence_task_local_ensemble,
     execute_task_local_ensemble,
+    parse_task_local_release,
 )
+from numerical_agent.evolution.task_shortlist import CandidatePriorV1, TaskShortlistPolicyV1
+
+
+def test_v3_release_round_trips_and_rejects_legacy_supply_fields() -> None:
+    release = TaskLocalEnsembleReleaseV3(
+        schema_version=3,
+        anchor_release_sha256="a" * 64,
+        anchor_name="toto_2_0",
+        tournament_policy=_policy(),
+        shortlist_policy=TaskShortlistPolicyV1(),
+        candidate_priors=(
+            CandidatePriorV1("toto_2_0", "tsfm", 1.0, 0.1, 0.1, ()),
+        ),
+        dictionary_sha256="b" * 64,
+        grouping_fingerprint="c" * 64,
+        oof_report_sha256="d" * 64,
+        source_hashes=(("dictionary", "e" * 64),),
+        metric_policy_fingerprint="f" * 64,
+        lineage=("task_local_shortlist_v3",),
+        confidence_evidence=None,
+    )
+
+    payload = release.to_payload()
+    assert parse_task_local_release(payload) == release
+    assert canonical_task_local_release_bytes(release) == release.canonical_bytes()
+    payload["group_supplies"] = []
+    with pytest.raises(ValueError, match="malformed"):
+        parse_task_local_release(payload)
 
 
 TRUTHS = ((10.0, 10.0), (10.0, 10.0), (10.0, 10.0))
