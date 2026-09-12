@@ -185,8 +185,8 @@ def test_real_bridge_persists_canonical_proposal_space_and_loads_exact_closure(
         "Prefer the lowest finite complete-pipeline error.",
     )
     assert closure.decision_settings_cycle is False
-    assert closure.p5_handoff_available is False
-    assert closure.p5_handoff_reason == "p5_handoff_unavailable"
+    assert closure.p5_handoff_available is True
+    assert closure.p5_handoff_reason is None
 
     progress = [
         json.loads(line)
@@ -204,6 +204,21 @@ def test_real_bridge_persists_canonical_proposal_space_and_loads_exact_closure(
         bundle.fingerprint() for bundle in closure.closed_candidate_bundles
     ) == expected_candidates
     assert len(closure.acceptance_evidence) == len(expected_candidates)
+
+
+def test_p5_handoff_threshold_counts_seed_plus_one_closed_candidate(sealed_p3):
+    from evolving_loop.v2.real.bridges import _p5_handoff_available
+
+    output, tasks, host, _p2, _result = sealed_p3
+    from evolving_loop.v2.real.bridges import load_sealed_bundle_closure
+
+    closure = load_sealed_bundle_closure(output, tasks=tasks, host=host)
+    assert closure.active_bundle.generation == 0
+    assert closure.closed_candidate_bundles
+    assert _p5_handoff_available(
+        closure.active_bundle, (closure.closed_candidate_bundles[0],)
+    )
+    assert not _p5_handoff_available(closure.active_bundle, ())
 
 
 def test_closure_rejects_proposal_space_or_archive_drift(sealed_p3):

@@ -7,6 +7,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from common.payload import strict_json_loads
+from evolving_loop.data import ContextTask
 from evolving_loop.package_numerical_supply import parse_numerical_supply_release
 from evolving_loop.retrieval_agent.policy import RetrievalGenome
 
@@ -51,8 +52,8 @@ class P3BundleClosureV2:
     retrieval: RetrievalModuleV2
     decision: DecisionModuleV2
     catalog: CooperativeArtifactCatalog
-    train_tasks: tuple[object, ...]
-    dev_tasks: tuple[object, ...]
+    train_tasks: tuple[ContextTask, ...]
+    dev_tasks: tuple[ContextTask, ...]
     metric_cap: float
     config_sha256: str
     numerical_alternatives: tuple[FrozenNumericalArtifactsV2, ...]
@@ -115,7 +116,7 @@ def _read_canonical(path: Path, identity: str | None = None) -> dict[str, object
         ) from error
 
 
-def _task_payload(task: object) -> object:
+def _task_payload(task: ContextTask) -> object:
     if hasattr(task, "to_payload"):
         return task.to_payload()
     return asdict(task)
@@ -166,8 +167,8 @@ def _proposal_inputs(
     retrieval: RetrievalModuleV2,
     decision: DecisionModuleV2,
     alternatives: tuple[FrozenNumericalArtifactsV2, ...],
-    train: tuple[object, ...],
-    dev: tuple[object, ...],
+    train: tuple[ContextTask, ...],
+    dev: tuple[ContextTask, ...],
 ) -> dict[str, str]:
     pairs = [
         {
@@ -202,8 +203,8 @@ def _proposal_manifest(
     retrieval: RetrievalModuleV2,
     decision: DecisionModuleV2,
     alternatives: tuple[FrozenNumericalArtifactsV2, ...],
-    train: tuple[object, ...],
-    dev: tuple[object, ...],
+    train: tuple[ContextTask, ...],
+    dev: tuple[ContextTask, ...],
     runtime_identity: str,
     input_sha256s: Mapping[str, str],
     config: CooperativeConfigV2,
@@ -392,7 +393,7 @@ def _validate_progress_continuity(
 def _load_numerical_pair(
     root: Path,
     row: Mapping[str, object],
-    tasks: tuple[object, ...],
+    tasks: tuple[ContextTask, ...],
 ) -> FrozenNumericalArtifactsV2:
     release_payload = _read_canonical(
         root / "objects" / f"{row['release_object_sha256']}.json",
@@ -436,10 +437,17 @@ def _validate_manifest_shape(payload: Mapping[str, object]) -> None:
         raise KernelAuthorityError("invalid cooperative proposal-space manifest")
 
 
+def _p5_handoff_available(
+    active: EvolutionBundleV2, closed: tuple[EvolutionBundleV2, ...]
+) -> bool:
+    concrete = {active.fingerprint(), *(bundle.fingerprint() for bundle in closed)}
+    return len(concrete) >= 2
+
+
 def load_sealed_bundle_closure(
     root: Path,
     *,
-    tasks: tuple[object, ...],
+    tasks: tuple[ContextTask, ...],
     host: RealHostRuntimeV2,
 ) -> P3BundleClosureV2:
     """Authenticate a completed P3 store and restore its executable catalog."""
@@ -580,8 +588,7 @@ def load_sealed_bundle_closure(
         closed_bundles.append(candidate)
         evidence.append(evidence_value)
 
-    concrete = {active.fingerprint(), *(bundle.fingerprint() for bundle in closed_bundles)}
-    available = len(concrete) >= 2 and active.acceptance_evidence_sha256 is not None
+    available = _p5_handoff_available(active, tuple(closed_bundles))
     return P3BundleClosureV2(
         active_bundle=active,
         numerical=active_numerical,
