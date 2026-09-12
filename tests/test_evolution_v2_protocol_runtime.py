@@ -148,8 +148,36 @@ def test_alternate_loader_preserves_identity_and_changed_history_rejects(runtime
     assert tuple(task_registry_fingerprint(task) for task in canonical) == tuple(
         task_registry_fingerprint(task) for task in alternate
     )
+    with pytest.raises(ValueError, match="test/smoke"):
+        resolve(loader="changed_history_json")
+
+
+@pytest.mark.parametrize("fixture_scope", ("test", "smoke"))
+def test_changed_history_loader_is_resolvable_only_in_explicit_fixture_scopes(
+    runtime_case, fixture_scope
+):
+    """The incompatible history fixture cannot enter ordinary proposal resolution."""
+    resolve, _bundle, _tasks, _calls = runtime_case
+    ordinary = resolve()
+    changed_components = tuple(
+        ProtocolComponentV2(
+            component.kind,
+            "changed_history_json" if component.kind == "loader" else component.implementation_id,
+            component.implementation_version,
+            component.artifact_schema_version,
+        )
+        for component in ordinary.protocol.components
+    )
+    changed_protocol = InfrastructureProtocolV2(1, 1, None, "a" * 64, changed_components)
+
+    with pytest.raises(ValueError, match="test/smoke"):
+        ProtocolRuntimeRegistry().resolve(changed_protocol, ordinary.host_inputs)
+    fixture_runtime = ProtocolRuntimeRegistry().resolve(
+        changed_protocol, replace(ordinary.host_inputs, fixture_scope=fixture_scope)
+    )
+    assert fixture_runtime.implementations["loader"] == "changed_history_json"
     with pytest.raises(ValueError, match="changed history"):
-        resolve(loader="changed_history_json").load_tasks()
+        fixture_runtime.load_tasks()
 
 
 def test_verifier_runs_baseline_before_strategy_filtering(runtime_case):

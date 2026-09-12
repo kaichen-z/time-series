@@ -96,6 +96,7 @@ class ProtocolHostInputs:
     known_supports: Mapping[str, object]
     retrieval_skill_library: RetrievalSkillLibrary | None = None
     empty_skill_path: str | Path = "unused-protocol-retrieval-skills.json"
+    fixture_scope: str = "ordinary"
 
     def __post_init__(self) -> None:
         for field in ("raw_fixture_records", "canonical_records", "committed_task_metadata", "known_supports"):
@@ -120,6 +121,8 @@ class ProtocolHostInputs:
         if self.retrieval_skill_library is not None and type(self.retrieval_skill_library) is not RetrievalSkillLibrary:
             raise TypeError("retrieval_skill_library must be a RetrievalSkillLibrary")
         object.__setattr__(self, "empty_skill_path", Path(self.empty_skill_path))
+        if self.fixture_scope not in {"ordinary", "test", "smoke"}:
+            raise ValueError("fixture_scope must be ordinary, test, or smoke")
 
 
 class ProtocolRuntimeRegistry:
@@ -143,6 +146,13 @@ class ProtocolRuntimeRegistry:
                 or component.artifact_schema_version != _IMPLEMENTATION_ARTIFACT_SCHEMAS[key]
             ):
                 raise ValueError(f"unresolved protocol component: {key}")
+            if (
+                implementation == "changed_history_json"
+                and host_inputs.fixture_scope not in {"test", "smoke"}
+            ):
+                raise ValueError(
+                    "changed_history_json is restricted to test/smoke fixture scope"
+                )
             resolved[component.kind] = implementation
         if tuple(resolved) != KINDS:
             raise ValueError("protocol components are not a complete canonical map")
