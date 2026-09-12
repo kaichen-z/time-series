@@ -116,6 +116,16 @@ def test_fit_candidate_priors_uses_train_forecasts_and_is_canonical():
     assert result[0].morphology_scores[0][0] == "flat"
 
 
+def test_fit_candidate_priors_is_independent_of_task_id_order():
+    errors = tuple((index * 7919 % 10000) / 10000 for index in range(200))
+    rows = tuple(_prior_row(str(index), "a", "statistical", forecast=(1.0 + error, 1.0 + error)) for index, error in enumerate(errors))
+    keys = {str(index): "flat" for index in range(len(rows))}
+    forward = fit_candidate_priors(rows, task_ids=tuple(str(index) for index in range(len(rows))), morphology_keys=keys, candidate_names=("a",))
+    reverse = fit_candidate_priors(rows, task_ids=tuple(str(index) for index in reversed(range(len(rows)))), morphology_keys=keys, candidate_names=("a",))
+    assert forward[0].to_payload() == reverse[0].to_payload()
+    assert forward[0].fingerprint() == reverse[0].fingerprint()
+
+
 def test_fit_oof_shortlist_priors_uses_complements_only():
     groups = tuple((f"{i:064x}", (task,), i) for i, task in enumerate(("a", "b")))
     manifest = GroupFoldManifest(1, 1, 2, groups, __import__("numerical_agent.evolution.task_local_evolution", fromlist=["_GROUPING_IMPLEMENTATION"])._GROUPING_IMPLEMENTATION)

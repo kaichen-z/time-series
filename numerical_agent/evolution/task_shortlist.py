@@ -59,9 +59,10 @@ def fit_candidate_priors(
     """Fit deterministic candidate priors from labeled Train task rows only."""
     from .task_local_evolution import TaskLocalTaskRow
 
-    ids = tuple(task_ids)
-    if not ids or any(type(value) is not str or not value for value in ids) or len(ids) != len(set(ids)):
+    raw_ids = tuple(task_ids)
+    if not raw_ids or any(type(value) is not str or not value for value in raw_ids) or len(raw_ids) != len(set(raw_ids)):
         raise ValueError("prior fitting requires unique nonempty task IDs")
+    ids = tuple(sorted(raw_ids))
     if set(morphology_keys) != set(ids):
         raise ValueError("prior fitting requires one morphology key per task")
     keys = {}
