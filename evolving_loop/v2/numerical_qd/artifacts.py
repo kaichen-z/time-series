@@ -101,7 +101,7 @@ ARTIFACT_KINDS = MappingProxyType({
     K.SHORTLIST_INDEX: ArtifactSpecV2(True, payload_fields=("schema_version", "policy_sha256",
         "entries", "public_test_accessed")),
     K.HINDCAST_DIAGNOSTICS: ArtifactSpecV2(True, payload_fields=("schema_version", "task_id",
-        "rows", "public_test_accessed")),
+        "task_input_sha256", "rows", "public_test_accessed")),
     K.BUNDLE: ArtifactSpecV2(False, EvolutionBundleV2),
     K.QD_ARCHIVE: ArtifactSpecV2(False, NumericalQDArchive),
     K.HYPERBAND_STATE: ArtifactSpecV2(False, HyperbandStateV2),

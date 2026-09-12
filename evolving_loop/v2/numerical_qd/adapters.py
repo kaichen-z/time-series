@@ -1025,8 +1025,14 @@ class LegacyNumericalAdapter:
             available = {item.name: item for item in source.ranked_alternatives}
             if not _applicable(member, task, descriptor_policy):
                 available.pop(recipe.name, None)
+            evidence = self.local_evidence_for(task)
+            if evidence is None:
+                return bound_numerical_package(source, supplied, available, history=task.numeric.history_values,
+                    task_fold=self.fold_manifest.task_fold_map.get(task.numeric.task_id))
+            shortlist, _diagnostics, _shortlist_sha, diagnostics_sha = evidence
             return bound_numerical_package(source, supplied, available, history=task.numeric.history_values,
-                task_fold=self.fold_manifest.task_fold_map.get(task.numeric.task_id))
+                task_fold=self.fold_manifest.task_fold_map.get(task.numeric.task_id), shortlist=shortlist,
+                hindcast_diagnostics_sha256=diagnostics_sha)
         registry = build_package_registry(self.tasks, release, builder)
         result = NumericalCoordinateCandidate(release, registry, candidate.proposal_sha256)
         return MaterializedNumericalChildV2(genome, state, member, result, fit, descriptor_policy.fingerprint(),
@@ -1184,20 +1190,35 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
     }
     if required_genome_sha256 is not None:
         sources["train_winner"] = required_genome_sha256
+    complete_specs = {spec.candidate_id: spec for spec in parent_release.alternatives}
+    for _sha, _child, spec in selected:
+        existing = complete_specs.get(spec.candidate_id)
+        if existing is not None and canonical_v2_bytes(existing.to_payload()) != canonical_v2_bytes(spec.to_payload()):
+            raise ValueError("complete supply catalog has conflicting candidate identity")
+        complete_specs[spec.candidate_id] = spec
     release = replace(parent_release, version=version, parent_sha256=parent_release.fingerprint,
-        alternatives=tuple(spec for _, _, spec in selected), source_fingerprints=sources,
+        alternatives=tuple(complete_specs[name] for name in sorted(complete_specs)), source_fingerprints=sources,
         anchor_release_payload=parent_release.to_payload()["anchor_release_payload"])
     def builder(task, supplied):
         source = parent_registry.package_for(task)
-        available = {source.protected_baseline.name: source.protected_baseline}
+        available = {item.name: item for item in source.ranked_alternatives}
         for _, child, spec in selected:
             package = child.candidate.registry.package_for(task)
             if package.protected_baseline.forecast != source.protected_baseline.forecast:
                 raise ValueError("projection changed the safe anchor forecast")
-            available.update({item.name: item for item in package.ranked_alternatives if item.name == spec.candidate_id})
+            for item in package.ranked_alternatives:
+                if item.name in available and available[item.name] != item:
+                    raise ValueError("complete catalog has conflicting task materialization")
+                available[item.name] = item
             if child.genome.fingerprint() == required_genome_sha256 and spec.candidate_id not in available:
                 raise ValueError("projection package is missing the exact Train winner member")
+        evidence = adapter.local_evidence_for(task)
+        if evidence is None:
+            return bound_numerical_package(source, supplied, available, history=task.numeric.history_values,
+                task_fold=adapter.fold_manifest.task_fold_map.get(task.numeric.task_id))
+        shortlist, _diagnostics, _shortlist_sha, diagnostics_sha = evidence
         return bound_numerical_package(source, supplied, available, history=task.numeric.history_values,
-            task_fold=adapter.fold_manifest.task_fold_map.get(task.numeric.task_id))
+            task_fold=adapter.fold_manifest.task_fold_map.get(task.numeric.task_id), shortlist=shortlist,
+            hindcast_diagnostics_sha256=diagnostics_sha)
     registry = build_package_registry(adapter.tasks, release, builder)
     return FrozenNumericalArtifactsV2(release, registry, _envelope(registry, adapter.tasks), tuple(sha for sha, _, _ in selected))

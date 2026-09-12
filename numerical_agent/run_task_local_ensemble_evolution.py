@@ -136,7 +136,7 @@ class TaskLocalEvidenceBundleV1:
             raise ValueError("task-local evidence index task IDs are not canonical")
         for entry in entries:
             shortlist, diagnostics, shortlist_sha, diagnostics_sha = self.by_task[entry["task_id"]]
-            diagnostics = _parse_diagnostics_payload(diagnostics, shortlist)
+            diagnostics = _parse_diagnostics_payload(diagnostics, shortlist, task_id)
             if (type(shortlist) is not TaskCandidateShortlistV1 or shortlist.policy_sha256 != self.policy.fingerprint()
                     or shortlist.dictionary_sha256 != self.dictionary_sha256
                     or shortlist.fingerprint() != shortlist_sha
@@ -144,14 +144,22 @@ class TaskLocalEvidenceBundleV1:
                     or (entry["task_input_sha256"], entry["shortlist_sha256"], entry["diagnostics_sha256"])
                     != (shortlist.task_input_sha256, shortlist_sha, diagnostics_sha)):
                 raise ValueError("task-local evidence task binding mismatch")
-        object.__setattr__(self, "index", MappingProxyType(dict(index)))
-        object.__setattr__(self, "by_task", MappingProxyType({task_id: (shortlist, MappingProxyType(dict(_parse_diagnostics_payload(diagnostics, shortlist))), shortlist_sha, diagnostics_sha)
+        object.__setattr__(self, "index", _freeze_json(index))
+        object.__setattr__(self, "by_task", MappingProxyType({task_id: (shortlist, _freeze_json(_parse_diagnostics_payload(diagnostics, shortlist, task_id)), shortlist_sha, diagnostics_sha)
             for task_id, (shortlist, diagnostics, shortlist_sha, diagnostics_sha) in self.by_task.items()}))
 
 
-def _parse_diagnostics_payload(payload: Mapping[str, object], shortlist: TaskCandidateShortlistV1) -> dict[str, object]:
+def _freeze_json(value):
+    if type(value) is dict:
+        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+    if type(value) is list:
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+def _parse_diagnostics_payload(payload: Mapping[str, object], shortlist: TaskCandidateShortlistV1, expected_task_id: str) -> dict[str, object]:
     value = dict(payload)
-    if set(value) != {"schema_version", "task_id", "task_input_sha256", "rows", "public_test_accessed"} or value["schema_version"] != 1 or value["task_input_sha256"] != shortlist.task_input_sha256 or value["public_test_accessed"] is not False or type(value["rows"]) is not list:
+    if set(value) != {"schema_version", "task_id", "task_input_sha256", "rows", "public_test_accessed"} or value["schema_version"] != 1 or value["task_id"] != expected_task_id or value["task_input_sha256"] != shortlist.task_input_sha256 or value["public_test_accessed"] is not False or type(value["rows"]) is not list:
         raise ValueError("task-local diagnostics payload is malformed")
     names = []
     for row in value["rows"]:
@@ -171,7 +179,10 @@ def load_task_local_evidence_bundle(output: Path, *, dictionary_sha256: str) -> 
         by_task = {}
         for entry in index["entries"]:
             shortlist = TaskCandidateShortlistV1.from_payload(json.loads((output / "task_shortlists" / f"{entry['task_input_sha256']}.json").read_text(encoding="utf-8")))
-            diagnostics = json.loads((output / "task_diagnostics" / f"{entry['task_input_sha256']}.json").read_text(encoding="utf-8"))
+            raw = (output / "task_diagnostics" / f"{entry['task_input_sha256']}.json").read_bytes()
+            diagnostics = json.loads(raw)
+            if canonical_json_bytes(diagnostics) != raw:
+                raise ValueError("task-local diagnostics bytes are noncanonical")
             by_task[entry["task_id"]] = (shortlist, diagnostics, entry["shortlist_sha256"], entry["diagnostics_sha256"])
         return TaskLocalEvidenceBundleV1(policy, dictionary_sha256, index, by_task)
     except (OSError, TypeError, ValueError, KeyError) as error:
