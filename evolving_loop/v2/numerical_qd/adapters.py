@@ -1207,8 +1207,13 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
             if package.protected_baseline.forecast != source.protected_baseline.forecast:
                 raise ValueError("projection changed the safe anchor forecast")
             for item in package.ranked_alternatives:
-                if item.name in available and available[item.name] != item:
-                    raise ValueError("complete catalog has conflicting task materialization")
+                if item.name in available:
+                    # A local shortlist re-ranks the same immutable forecast.
+                    # Rank is projection-local, not materialization identity.
+                    existing = available[item.name]
+                    if replace(existing, rank=item.rank) != item:
+                        raise ValueError("complete catalog has conflicting task materialization")
+                    continue
                 available[item.name] = item
             if child.genome.fingerprint() == required_genome_sha256 and spec.candidate_id not in available:
                 raise ValueError("projection package is missing the exact Train winner member")

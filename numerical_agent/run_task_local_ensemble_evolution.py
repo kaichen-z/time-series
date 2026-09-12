@@ -136,7 +136,7 @@ class TaskLocalEvidenceBundleV1:
             raise ValueError("task-local evidence index task IDs are not canonical")
         for entry in entries:
             shortlist, diagnostics, shortlist_sha, diagnostics_sha = self.by_task[entry["task_id"]]
-            diagnostics = _parse_diagnostics_payload(diagnostics, shortlist, task_id)
+            diagnostics = _parse_diagnostics_payload(diagnostics, shortlist, entry["task_id"])
             if (type(shortlist) is not TaskCandidateShortlistV1 or shortlist.policy_sha256 != self.policy.fingerprint()
                     or shortlist.dictionary_sha256 != self.dictionary_sha256
                     or shortlist.fingerprint() != shortlist_sha
@@ -174,15 +174,17 @@ def _parse_diagnostics_payload(payload: Mapping[str, object], shortlist: TaskCan
 def load_task_local_evidence_bundle(output: Path, *, dictionary_sha256: str) -> TaskLocalEvidenceBundleV1:
     """Load the immutable Task 4 artifacts without materializing any forecast."""
     try:
-        index = json.loads((output / "task_shortlist_index.json").read_text(encoding="utf-8"))
-        policy = TaskShortlistPolicyV1.from_payload(json.loads((output / "task_shortlist_policy.json").read_text(encoding="utf-8")))
+        def canonical(path: Path):
+            raw = path.read_bytes(); payload = json.loads(raw)
+            if canonical_json_bytes(payload) != raw:
+                raise ValueError("task-local evidence bytes are noncanonical")
+            return payload
+        index = canonical(output / "task_shortlist_index.json")
+        policy = TaskShortlistPolicyV1.from_payload(canonical(output / "task_shortlist_policy.json"))
         by_task = {}
         for entry in index["entries"]:
-            shortlist = TaskCandidateShortlistV1.from_payload(json.loads((output / "task_shortlists" / f"{entry['task_input_sha256']}.json").read_text(encoding="utf-8")))
-            raw = (output / "task_diagnostics" / f"{entry['task_input_sha256']}.json").read_bytes()
-            diagnostics = json.loads(raw)
-            if canonical_json_bytes(diagnostics) != raw:
-                raise ValueError("task-local diagnostics bytes are noncanonical")
+            shortlist = TaskCandidateShortlistV1.from_payload(canonical(output / "task_shortlists" / f"{entry['task_input_sha256']}.json"))
+            diagnostics = canonical(output / "task_diagnostics" / f"{entry['task_input_sha256']}.json")
             by_task[entry["task_id"]] = (shortlist, diagnostics, entry["shortlist_sha256"], entry["diagnostics_sha256"])
         return TaskLocalEvidenceBundleV1(policy, dictionary_sha256, index, by_task)
     except (OSError, TypeError, ValueError, KeyError) as error:
