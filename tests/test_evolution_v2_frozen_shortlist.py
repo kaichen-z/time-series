@@ -156,7 +156,8 @@ def test_legacy_envelope_keeps_exact_six_fields_and_bytes():
         FrozenNumericalRegistryEnvelopeV2.from_payload(payload | {"shortlist_index_sha256": None})
 
 
-def test_kernel_accepts_v2_closure_from_bytes_and_rejects_changed_evidence(frozen_closure, tmp_path, monkeypatch):
+@pytest.mark.parametrize("corruption", ["evidence", "non_winner_package"])
+def test_kernel_accepts_v2_closure_from_bytes_and_rejects_changed_evidence(frozen_closure, tmp_path, monkeypatch, corruption):
     from types import SimpleNamespace
     from evolving_loop.v2.kernel import EvolutionKernel, KernelAuthorityError
     from evolving_loop.v2.numerical_qd import adapters
@@ -194,9 +195,32 @@ def test_kernel_accepts_v2_closure_from_bytes_and_rejects_changed_evidence(froze
     host = SimpleNamespace(store=SimpleNamespace(root=tmp_path))
     monkeypatch.setattr(adapters, "bound_numerical_package", lambda *args, **kwargs: pytest.fail("kernel ran numerical work"))
     assert EvolutionKernel._numerical_release_references(host, bundle, train) == tuple(sorted((release.fingerprint, registry.fingerprint)))
-    path = objects / f"{envelope.shortlist_index_sha256}.json"
-    path.write_bytes(path.read_bytes() + b" ")
-    with pytest.raises(KernelAuthorityError, match="local evidence"):
+    if corruption == "evidence":
+        path = objects / f"{envelope.shortlist_index_sha256}.json"
+        path.write_bytes(path.read_bytes() + b" ")
+        expected_error = "local evidence"
+    else:
+        from evolving_loop.numerical_two_stage import numerical_package_fingerprint
+        from evolving_loop.v2.numerical_qd.contracts import FrozenNumericalPackageEnvelopeV2
+        # Alter only the Anchor row; the winner row and all evidence joins stay
+        # valid. Reseal the package and pair while retaining the old registry SHA.
+        task = adapter.tasks[-1]
+        package = registry.package_for(task)
+        anchor = replace(package.protected_baseline,
+            forecast=tuple(value + 1.0 for value in package.protected_baseline.forecast))
+        changed = replace(package, protected_baseline=anchor, final_forecast=anchor.forecast,
+            selection_decision=replace(package.selection_decision, forecast=anchor.forecast),
+            ranked_alternatives=tuple(anchor if row.name == anchor.name else row for row in package.ranked_alternatives))
+        artifact = FrozenNumericalPackageEnvelopeV2(1, numerical_package_fingerprint(changed), adapters._encode(changed))
+        entry = pair["registry"]["entries"][task.numeric.task_id]
+        del pair["registry"]["packages"][entry["package_sha256"]]
+        entry["package_sha256"] = artifact.fingerprint()
+        pair["registry"]["packages"][artifact.fingerprint()] = artifact.to_payload()
+        pair["registry"]["package_sha256s"] = sorted(pair["registry"]["packages"])
+        (objects / f"{fingerprint_payload(pair)}.json").write_bytes(canonical_v2_bytes(pair))
+        train["train_behavior_descriptors"]["numerical_artifacts_sha256"] = fingerprint_payload(pair)
+        expected_error = "registry identity"
+    with pytest.raises(KernelAuthorityError, match=expected_error):
         EvolutionKernel._numerical_release_references(host, bundle, train)
 
 

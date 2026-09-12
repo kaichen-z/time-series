@@ -1366,7 +1366,7 @@ class EvolutionKernel:
                         "package_sha256": envelope.packages[envelope.entries[task_id]["package_sha256"]].legacy_package_sha256,
                         "champion_release_sha256": values[task_id].component_fingerprints["champion_release"]}
                         for task_id in sorted(values)]}
-                if envelope.schema_version == 1 and _digest(manifest) != envelope.registry_sha256:
+                if _digest(manifest) != envelope.registry_sha256:
                     raise KernelAuthorityError("Numerical registry identity does not match its exact packages")
                 return values
 
