@@ -9,7 +9,7 @@ import pytest
 from evolving_loop.v2.budget import BudgetLedger, BudgetPlan, ResourceUse
 from evolving_loop.v2.numerical_qd.contracts import (
     ConstraintReportV2, HyperbandBracketV2, HyperbandBudgetOutcomeV2, HyperbandExecutionV2,
-    HyperbandStateV2, MorphologyCellV2, NumericalEvaluationV2,
+    HyperbandStateV2, HyperbandTaskResultV2, MorphologyCellV2, NumericalEvaluationV2,
     NumericalObjectiveVectorV2, RungManifestV2, TaskCacheRowV2, TrainTaskV2,
 )
 from evolving_loop.v2.numerical_qd.hyperband import (
@@ -202,6 +202,48 @@ def test_evidence_bound_cache_contract_rejects_missing_or_mutated_evidence():
         TaskCacheRowV2.from_payload(missing)
     with pytest.raises(ValueError, match="cache identity"):
         TaskCacheRowV2(key, task.task_sha256, row.evaluation, sha("mutated evidence"), 2)
+
+
+def test_exact_legacy_cache_payloads_parse_to_explicit_v1_evidence_state():
+    current, committed = state(count=1), manifest()
+    candidate, task = current.active_candidates[0], committed.tasks[0]
+    key = evaluation_cache_key(candidate, task.task_sha256, SPLIT, METRIC, DESCRIPTOR,
+                               RUNTIME, PROTOCOL, ADAPTER)
+    row = TaskCacheRowV2(key, task.task_sha256,
+                         evaluation(candidate, (task.task_id,), subset=task.fingerprint()))
+    legacy_row = row.to_payload()
+    del legacy_row["local_evidence_sha256"]
+    del legacy_row["cache_identity_version"]
+    restored_row = TaskCacheRowV2.from_payload(legacy_row)
+    assert (restored_row.local_evidence_sha256, restored_row.cache_identity_version) == (None, 1)
+
+    result = HyperbandTaskResultV2(candidate, task.task_id, key, "passed", row.evaluation, False, None)
+    legacy_result = result.to_payload()
+    del legacy_result["local_evidence_sha256"]
+    del legacy_result["cache_identity_version"]
+    restored_result = HyperbandTaskResultV2.from_payload(legacy_result)
+    assert (restored_result.local_evidence_sha256, restored_result.cache_identity_version) == (None, 1)
+
+    partial = row.to_payload()
+    del partial["cache_identity_version"]
+    with pytest.raises(ValueError):
+        TaskCacheRowV2.from_payload(partial)
+
+
+def test_legacy_cache_row_resumes_only_the_explicit_v1_branch():
+    clock = FakeClock()
+    budget = ledger(clock)
+    current, committed = state(count=1), manifest()
+    candidate, task = current.active_candidates[0], committed.tasks[0]
+    key = evaluation_cache_key(candidate, task.task_sha256, SPLIT, METRIC, DESCRIPTOR,
+                               RUNTIME, PROTOCOL, ADAPTER)
+    row = TaskCacheRowV2(key, task.task_sha256,
+                         evaluation(candidate, (task.task_id,), subset=task.fingerprint())).to_payload()
+    del row["local_evidence_sha256"]
+    del row["cache_identity_version"]
+    result = run(current, committed, budget, host(clock, budget), cache={key: row})
+    assert sum(item.cache_hit for item in result.task_results) == 1
+    assert budget.charged_use.task_executions == 7
 
 
 def test_changed_evidence_makes_a_stale_task_cache_row_a_paid_miss():

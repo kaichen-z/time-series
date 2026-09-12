@@ -722,6 +722,15 @@ class TaskCacheRowV2(_CanonicalContract):
     local_evidence_sha256: str | None = None
     cache_identity_version: int = 1
 
+    @classmethod
+    def from_payload(cls, payload):
+        legacy = ("cache_key", "task_sha256", "evaluation")
+        if isinstance(payload, Mapping) and set(payload) == set(legacy):
+            values = _require_exact_schema(payload, legacy, field=cls.__name__)
+            return cls(**_strict_json_value(values), local_evidence_sha256=None,
+                       cache_identity_version=1)
+        return _CanonicalContract.from_payload.__func__(cls, payload)
+
     def __post_init__(self):
         require_sha256(self.cache_key, "cache_key")
         require_sha256(self.task_sha256, "task_sha256")
@@ -753,6 +762,16 @@ class HyperbandTaskResultV2(_CanonicalContract):
     failure_category: str | None
     local_evidence_sha256: str | None = None
     cache_identity_version: int = 1
+
+    @classmethod
+    def from_payload(cls, payload):
+        legacy = ("candidate_sha256", "task_id", "cache_key", "status", "evaluation",
+                  "cache_hit", "failure_category")
+        if isinstance(payload, Mapping) and set(payload) == set(legacy):
+            values = _require_exact_schema(payload, legacy, field=cls.__name__)
+            return cls(**_strict_json_value(values), local_evidence_sha256=None,
+                       cache_identity_version=1)
+        return _CanonicalContract.from_payload.__func__(cls, payload)
 
     def __post_init__(self):
         require_sha256(self.candidate_sha256, "candidate_sha256")
