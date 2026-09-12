@@ -1221,6 +1221,22 @@ multiply/add actions are now opt-in rather than the default.
 
 ## Tests
 
+### Bounded real Evolution V2
+
+Run the immutable Toto-balanced-v3 authority through the bounded P2→P5 root
+orchestrator (the default authority root is the shared checkout; use
+`--authority-root` when running code from an isolated worktree):
+
+```bash
+.venv/bin/python -m evolving_loop.v2 real-evolve \
+  --manifest configs/evolution_v2/real/real-30m-toto-balanced-v3.json \
+  --output-dir runs/evolution_v2/real-30m-luna-medium-20260912
+```
+
+The root result is emitted as canonical JSON and is persisted at
+`runs/evolution_v2/<run>/evaluation_complete.json`; sealed P2, P3, P4, and P5
+artifacts remain in their corresponding child directories.
+
 ```bash
 python3 -m unittest discover -s tests -v
 ```

@@ -1,10 +1,11 @@
 """Root-owned, resumable orchestration for bounded real V2 evolution."""
 from __future__ import annotations
 
+import hashlib
 import math
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import MappingProxyType
 
@@ -116,6 +117,693 @@ class RealStagePorts:
             raise ValueError("begin_finalization must be callable or None")
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedRealP2InputsV2:
+    """Closed current-epoch P2 inputs derived from the admitted Champion."""
+
+    config_payload: Mapping[str, object]
+    seed_payload: Mapping[str, object]
+    task_manifest_payload: Mapping[str, object]
+    input_sha256s: Mapping[str, str]
+    evidence_path: Path
+    dictionary: object
+
+
+def _context_task_payload(task: object) -> dict[str, object]:
+    numeric = getattr(task, "numeric")
+    return {
+        "task_id": numeric.task_id,
+        "entity_name": numeric.entity_name,
+        "history_values": list(numeric.history_values),
+        "future_values": list(numeric.future_values),
+        "prediction_length": numeric.prediction_length,
+        "frequency": numeric.frequency,
+        "seasonal_period": numeric.seasonal_period,
+        "target_name": getattr(task, "target_name"),
+        "target_description": getattr(task, "target_description"),
+        "history_timestamps": list(getattr(task, "history_timestamps")),
+        "future_timestamps": list(getattr(task, "future_timestamps")),
+        "documents": [
+            {"document_id": item.document_id, "content": item.content}
+            for item in getattr(task, "documents")
+        ],
+        "gt_evidence": list(getattr(task, "gt_evidence")),
+    }
+
+
+def _semantic_dictionary(screening: object):
+    """Project the admitted rich screening policy into the complete Dictionary."""
+    from numerical_agent.evolution.filtering import FilterDictionary, FilterEntry
+
+    entries = []
+    for item in screening.entries:
+        clauses = item.applicability.any_of
+        applicability = clauses[0].reason_codes() if clauses else ()
+        entries.append(
+            FilterEntry(
+                item.name,
+                item.family,
+                item.status,
+                tuple(applicability),
+                item.reason,
+            )
+        )
+    return FilterDictionary(tuple(entries))
+
+
+def _dictionary_payload(dictionary: object) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "entries": [asdict(entry) for entry in dictionary.entries],
+    }
+
+
+def _dictionary_from_payload(payload: Mapping[str, object]):
+    from numerical_agent.evolution.filtering import FilterDictionary, FilterEntry
+
+    if set(payload) != {"schema_version", "entries"} or payload["schema_version"] != 1:
+        raise RealRunnerError("prepared real Dictionary has an invalid schema")
+    rows = payload["entries"]
+    if type(rows) is not list:
+        raise RealRunnerError("prepared real Dictionary entries must be a list")
+    try:
+        return FilterDictionary(
+            tuple(
+                FilterEntry(
+                    row["name"], row["family"], row["status"],
+                    tuple(row["applicability"]), row["reason"],
+                )
+                for row in rows
+            )
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise RealRunnerError("prepared real Dictionary is invalid") from error
+
+
+def _initial_prior_rows(host: object, candidates: tuple[tuple[str, str], ...]):
+    """Read full-horizon Train rows from the shared cache without hindcasting."""
+    from numerical_agent.evolution.execution import Task as RuntimeTask
+    from numerical_agent.evolution.forecast_store import CacheMissError
+    from numerical_agent.evolution.screening import profile_task
+    from numerical_agent.evolution.task_local_evolution import TaskLocalTaskRow
+
+    rows = []
+    for context_task in host.train_tasks:
+        task = context_task.numeric
+        runtime_task = RuntimeTask(
+            task.task_id,
+            tuple(float(value) for value in task.history_values),
+            task.prediction_length,
+            task.frequency,
+            tuple(float(value) for value in task.future_values),
+        )
+        profile = profile_task(runtime_task)
+        for name, family in candidates:
+            forecast = None
+            failure = None
+            try:
+                forecast = tuple(
+                    float(value)
+                    for value in host.forecast_store.forecast(
+                        name,
+                        runtime_task.history,
+                        runtime_task.horizon,
+                        runtime_task.frequency,
+                    )
+                )
+            except (CacheMissError, host.forecast_store.not_applicable) as error:
+                failure = f"{type(error).__name__}: {error}"[:10000]
+            rows.append(
+                TaskLocalTaskRow(
+                    task_id=task.task_id,
+                    candidate_name=name,
+                    family=family,
+                    profile=profile,
+                    history=runtime_task.history,
+                    truth=runtime_task.future,
+                    forecast=forecast,
+                    diagnostic=None,
+                    split="train",
+                    failure_reason=failure,
+                )
+            )
+    return tuple(rows)
+
+
+def _derived_numerical_config(
+    *, grant_seconds: int, runtime_fingerprints: Mapping[str, str]
+) -> dict[str, object]:
+    code_root = Path(__file__).resolve().parents[3]
+    payload = _read_canonical(code_root / "configs/evolution_v2/numerical_qd/pilot.json")
+    payload["runtime_fingerprints"] = dict(runtime_fingerprints)
+    budget = dict(payload["budget"])
+    budget["hard_limit_seconds"] = grant_seconds
+    ceilings = dict(budget["ceilings"])
+    ceilings["wall_seconds"] = float(grant_seconds)
+    budget["ceilings"] = ceilings
+    payload["budget"] = budget
+    from ..numerical_qd.config import NumericalQDConfigV2
+
+    return NumericalQDConfigV2.from_payload(payload).to_payload()
+
+
+def _load_prepared_real_p2(
+    prepared: Path, *, manifest: RealEvolutionManifestV2
+) -> PreparedRealP2InputsV2:
+    from numerical_agent.evolution.task_shortlist import _dictionary_hash
+    from numerical_agent.run_task_local_ensemble_evolution import (
+        load_task_local_evidence_bundle,
+    )
+
+    seal = _read_canonical(prepared / "prepared_inputs.json")
+    if set(seal) != {
+        "schema_version", "kind", "manifest_sha256", "champion_sha256",
+        "dictionary_sha256", "config_sha256", "seed_supply_sha256",
+        "task_manifest_sha256", "task_local_evidence_sha256",
+    } or seal["schema_version"] != 1 or seal["kind"] != "real_p2_prepared_inputs":
+        raise RealRunnerError("prepared P2 seal has an invalid schema")
+    if seal["manifest_sha256"] != manifest.fingerprint():
+        raise RealRunnerError("prepared P2 manifest identity mismatch")
+    champion_row = next(
+        (row for row in manifest.files if row.role == "numerical_seed"), None
+    )
+    if champion_row is None or seal["champion_sha256"] != champion_row.sha256:
+        raise RealRunnerError("prepared P2 Champion identity mismatch")
+    config = _read_canonical(prepared / "numerical_config.json")
+    seed = _read_canonical(prepared / "seed_supply.json")
+    tasks = _read_canonical(prepared / "task_manifest.json")
+    dictionary = _dictionary_from_payload(_read_canonical(prepared / "dictionary.json"))
+    identities = {
+        "config": fingerprint_payload(config),
+        "seed_supply": fingerprint_payload(seed),
+        "task_manifest": fingerprint_payload(tasks),
+        "champion_release": seal["champion_sha256"],
+        "dictionary": _dictionary_hash(dictionary),
+        "task_local_evidence": seal["task_local_evidence_sha256"],
+    }
+    expected = {
+        "config_sha256": identities["config"],
+        "seed_supply_sha256": identities["seed_supply"],
+        "task_manifest_sha256": identities["task_manifest"],
+        "dictionary_sha256": identities["dictionary"],
+    }
+    if any(seal[name] != value for name, value in expected.items()):
+        raise RealRunnerError("prepared P2 content identity mismatch")
+    evidence = load_task_local_evidence_bundle(
+        prepared, dictionary_sha256=identities["dictionary"]
+    )
+    if fingerprint_payload(dict(evidence.index)) != seal["task_local_evidence_sha256"]:
+        raise RealRunnerError("prepared P2 task-local evidence identity mismatch")
+    task_ids = {
+        row["task_id"]
+        for split in ("train", "dev")
+        for row in tasks[split]
+    }
+    if len(task_ids) != 100 or set(evidence.by_task) != task_ids:
+        raise RealRunnerError("prepared P2 evidence does not close Train80/Dev20")
+    return PreparedRealP2InputsV2(
+        MappingProxyType(config), MappingProxyType(seed), MappingProxyType(tasks),
+        MappingProxyType(identities), prepared, dictionary,
+    )
+
+
+def prepare_real_p2_inputs(
+    host: object,
+    *,
+    manifest: RealEvolutionManifestV2,
+    repo_root: Path,
+    output_dir: Path,
+    grant_seconds: int,
+) -> PreparedRealP2InputsV2:
+    """Build and seal the schema-2 Dictionary/shortlist P2 authority once."""
+    from evolving_loop.run_package_coevolution import _initial_supply_release
+    from numerical_agent.evolution.champion import parse_champion_release
+    from numerical_agent.evolution.module import read_module
+    from numerical_agent.evolution.portfolio import read_policy_file
+    from numerical_agent.evolution.task_local_evolution import (
+        build_group_fold_manifest,
+        fit_oof_shortlist_priors,
+    )
+    from numerical_agent.evolution.task_shortlist import (
+        TaskShortlistPolicyV1,
+        _dictionary_hash,
+    )
+    from numerical_agent.run_champion_evolution import _load_screening_policy
+    from numerical_agent.run_task_local_ensemble_evolution import (
+        _CONFIDENCE_HINDCAST_CONFIG,
+        _bind_shortlist_index,
+        _reviewed_candidates,
+        _shortlist_index,
+        _shortlist_rows_for_tasks,
+        _v3_oof_rows,
+        load_task_local_evidence_bundle,
+    )
+
+    prepared = Path(output_dir)
+    if (prepared / "prepared_inputs.json").is_file():
+        return _load_prepared_real_p2(prepared, manifest=manifest)
+    if prepared.exists() and any(prepared.iterdir()):
+        raise RealRunnerError("unsealed prepared P2 inputs cannot be resumed")
+    prepared.mkdir(parents=True, exist_ok=True)
+
+    file_rows = {row.role: row for row in manifest.files}
+    champion_row = file_rows.get("numerical_seed")
+    if champion_row is None:
+        raise RealRunnerError("real P2 requires an admitted ChampionRelease")
+    champion_payload = _read_sha_bound_json(
+        Path(repo_root) / champion_row.relative_path, champion_row.sha256
+    )
+    champion = parse_champion_release(champion_payload)
+    source_repo = Path(host.source_repo)
+    module = read_module(source_repo / "methods.py")
+    portfolio = read_policy_file(source_repo / "policies.py")
+    portfolio.validate_namespace(module.names())
+    screening = _load_screening_policy(source_repo / "dictionary.py")
+    candidates = _reviewed_candidates(module, portfolio, screening)
+    dictionary = _semantic_dictionary(screening)
+    dictionary_sha = _dictionary_hash(dictionary)
+    runtime_fingerprints = {
+        row.role: row.identity_sha256 for row in manifest.runtime_locations
+    } | {"real_host": host.resource_reporter_sha256}
+    source_fingerprints = dict(champion.source_hashes)
+    source_fingerprints["dictionary"] = dictionary_sha
+    supply = _initial_supply_release(
+        champion,
+        candidates,
+        schema_version=2,
+        source_fingerprints=source_fingerprints,
+        runtime_fingerprints=runtime_fingerprints,
+        atlas=None,
+    )
+
+    train_numeric = tuple(task.numeric for task in host.train_tasks)
+    dev_numeric = tuple(task.numeric for task in host.dev_tasks)
+    folds = build_group_fold_manifest(train_numeric, seed=20260903)
+    prior_rows = _initial_prior_rows(host, candidates)
+    fold_priors, priors = fit_oof_shortlist_priors(
+        prior_rows, folds, candidate_names=tuple(name for name, _ in candidates)
+    )
+    policy = TaskShortlistPolicyV1()
+    families = dict(candidates)
+    train_rows, train_shortlists = _v3_oof_rows(
+        host.forecast_store,
+        train_numeric,
+        manifest=folds,
+        dictionary=dictionary,
+        screening=screening,
+        families=families,
+        anchor_name=champion.policy.recipe.fallback_parent,
+        policy=policy,
+        hindcast_config=_CONFIDENCE_HINDCAST_CONFIG,
+        output=prepared,
+        fold_priors=dict(fold_priors),
+    )
+    dev_rows, dev_shortlists = _shortlist_rows_for_tasks(
+        host.forecast_store,
+        dev_numeric,
+        dictionary=dictionary,
+        screening=screening,
+        families=families,
+        priors=priors,
+        anchor_name=champion.policy.recipe.fallback_parent,
+        policy=policy,
+        split="dev",
+        hindcast_config=_CONFIDENCE_HINDCAST_CONFIG,
+        output=prepared,
+    )
+    shortlists = dict(train_shortlists)
+    shortlists.update(
+        {
+            task.task_id: shortlist
+            for task, shortlist in zip(dev_numeric, dev_shortlists, strict=True)
+        }
+    )
+    index = _shortlist_index(
+        train_numeric + dev_numeric,
+        shortlists,
+        train_rows + dev_rows,
+        policy=policy,
+    )
+    evidence_run_manifest = {
+        "schema_version": 1,
+        "kind": "real_p2_task_local_evidence",
+        "manifest_sha256": manifest.fingerprint(),
+        "champion_sha256": champion_row.sha256,
+        "dictionary_sha256": dictionary_sha,
+        "candidate_priors_sha256": fingerprint_payload(
+            {"priors": [item.to_payload() for item in priors]}
+        ),
+        "public_test_accessed": False,
+    }
+    _bind_shortlist_index(
+        prepared, evidence_run_manifest, index, rows=train_rows + dev_rows
+    )
+    evidence = load_task_local_evidence_bundle(
+        prepared, dictionary_sha256=dictionary_sha
+    )
+    expected_ids = {task.numeric.task_id for task in host.tasks}
+    if set(evidence.by_task) != expected_ids or len(expected_ids) != 100:
+        raise RealRunnerError("prepared P2 evidence does not close Train80/Dev20")
+
+    task_manifest = {
+        "schema_version": 1,
+        "fold_manifest": folds.to_payload(),
+        "train": [_context_task_payload(task) for task in host.train_tasks],
+        "dev": [_context_task_payload(task) for task in host.dev_tasks],
+    }
+    config = _derived_numerical_config(
+        grant_seconds=grant_seconds,
+        runtime_fingerprints=runtime_fingerprints,
+    )
+    dictionary_payload = _dictionary_payload(dictionary)
+    write_once_json(prepared / "dictionary.json", dictionary_payload)
+    write_once_json(prepared / "numerical_config.json", config)
+    write_once_json(prepared / "seed_supply.json", supply.to_payload())
+    write_once_json(prepared / "task_manifest.json", task_manifest)
+    evidence_sha = fingerprint_payload(dict(evidence.index))
+    seal = {
+        "schema_version": 1,
+        "kind": "real_p2_prepared_inputs",
+        "manifest_sha256": manifest.fingerprint(),
+        "champion_sha256": champion_row.sha256,
+        "dictionary_sha256": dictionary_sha,
+        "config_sha256": fingerprint_payload(config),
+        "seed_supply_sha256": fingerprint_payload(supply.to_payload()),
+        "task_manifest_sha256": fingerprint_payload(task_manifest),
+        "task_local_evidence_sha256": evidence_sha,
+    }
+    write_once_json(prepared / "prepared_inputs.json", seal)
+    return _load_prepared_real_p2(prepared, manifest=manifest)
+
+
+def _stage_wrapper(
+    context: RealStageContextV2,
+    *,
+    status: str,
+    native_completion_sha256: str | None,
+    bindings: Mapping[str, object],
+    public_test_accessed: bool,
+) -> tuple[dict[str, object], str]:
+    payload = {
+        "schema_version": 1,
+        "stage": context.stage,
+        "status": status,
+        "native_completion_sha256": native_completion_sha256,
+        "bindings": dict(bindings),
+        "public_test_accessed": public_test_accessed,
+    }
+    write_once_json(context.output_dir / "root_stage_completion.json", payload)
+    return payload, fingerprint_payload(payload)
+
+
+def _derived_cooperative_config(context: RealStageContextV2, host: object) -> dict[str, object]:
+    code_root = Path(__file__).resolve().parents[3]
+    payload = _read_canonical(code_root / "configs/evolution_v2/cooperative/smoke-ucb.json")
+    control = dict(payload["control"])
+    control["profile"] = "pilot"
+    control["hard_limit_seconds"] = context.grant_seconds
+    control["runtime_fingerprints"] = {"real_host": host.resource_reporter_sha256}
+    payload["control"] = control
+    ceilings = dict(payload["resource_ceilings"])
+    ceilings["wall_seconds"] = float(context.grant_seconds)
+    ceilings["llm_calls"] = max(4, int(ceilings["llm_calls"]))
+    payload["resource_ceilings"] = ceilings
+    from ..cooperative import CooperativeConfigV2
+
+    return CooperativeConfigV2.from_payload(payload).to_payload()
+
+
+def build_real_stage_ports(
+    host: object,
+    *,
+    manifest: RealEvolutionManifestV2,
+    repo_root: Path,
+) -> RealStagePorts:
+    """Assemble authenticated production P2→P5 child runs and seals."""
+    authority = Path(repo_root).resolve()
+
+    def run_p2(context: RealStageContextV2) -> object:
+        from .bridges import run_real_numerical
+
+        prepared = prepare_real_p2_inputs(
+            host,
+            manifest=manifest,
+            repo_root=authority,
+            output_dir=context.output_dir.parent / "prepared/p2",
+            grant_seconds=context.grant_seconds,
+        )
+        return run_real_numerical(
+            context,
+            host,
+            config_payload=prepared.config_payload,
+            seed_payload=prepared.seed_payload,
+            task_manifest_payload=prepared.task_manifest_payload,
+            input_sha256s=prepared.input_sha256s,
+            task_local_evidence_path=prepared.evidence_path,
+            task_local_dictionary=prepared.dictionary,
+        )
+
+    def seal_p2(context: RealStageContextV2, _result: object) -> SealedStageV2:
+        from ..numerical_qd.persistence import NumericalQDRunStore
+
+        completion = _read_canonical(context.output_dir / "evaluation_complete.json")
+        if completion.get("status") != "numerical_qd_complete":
+            raise RealRunnerError("P2 did not produce a completed Numerical QD authority")
+        summary = completion.get("summary")
+        if not isinstance(summary, Mapping) or type(summary.get("public_test_accessed")) is not bool:
+            raise RealRunnerError("P2 completion lacks Public access evidence")
+        pair, pair_sha = NumericalQDRunStore(context.output_dir).load_active_frozen_pair(
+            tasks=host.tasks
+        )
+        prepared = _load_prepared_real_p2(
+            context.output_dir.parent / "prepared/p2", manifest=manifest
+        )
+        bindings = {
+            "pair_sha256": pair_sha,
+            "release_sha256": pair.release.fingerprint,
+            "registry_sha256": pair.registry.fingerprint,
+            "envelope_sha256": pair.envelope.fingerprint(),
+            "champion_sha256": prepared.input_sha256s["champion_release"],
+            "config_sha256": prepared.input_sha256s["config"],
+            "task_manifest_sha256": prepared.input_sha256s["task_manifest"],
+            "task_local_evidence_sha256": prepared.input_sha256s["task_local_evidence"],
+        }
+        _, wrapper_sha = _stage_wrapper(
+            context,
+            status="complete",
+            native_completion_sha256=fingerprint_payload(completion),
+            bindings=bindings,
+            public_test_accessed=summary["public_test_accessed"],
+        )
+        return SealedStageV2(
+            wrapper_sha, bindings, {"status": "complete", **bindings},
+            summary["public_test_accessed"],
+        )
+
+    def _p2_pair(context: RealStageContextV2):
+        from ..numerical_qd.persistence import NumericalQDRunStore
+
+        return NumericalQDRunStore(context.output_dir.parent / "p2").load_active_frozen_pair(
+            tasks=host.tasks
+        )[0]
+
+    def run_p3(context: RealStageContextV2) -> object:
+        from .bridges import run_real_cooperative
+
+        return run_real_cooperative(
+            p2=_p2_pair(context),
+            host=host,
+            config_payload=_derived_cooperative_config(context, host),
+            output_dir=context.output_dir,
+        )
+
+    def _p3_closure(context: RealStageContextV2):
+        from .bridges import load_sealed_bundle_closure
+
+        return load_sealed_bundle_closure(
+            context.output_dir.parent / "p3", tasks=tuple(host.tasks), host=host
+        )
+
+    def seal_p3(context: RealStageContextV2, _result: object) -> SealedStageV2:
+        completion = _read_canonical(context.output_dir / "evaluation_complete.json")
+        closure = _p3_closure(context)
+        public = completion.get("public_test_accessed")
+        if type(public) is not bool:
+            raise RealRunnerError("P3 completion lacks Public access evidence")
+        config_sha = fingerprint_payload(_derived_cooperative_config(context, host))
+        bindings = {
+            "active_bundle_sha256": closure.active_bundle.fingerprint(),
+            "completion_sha256": closure.completion_sha256,
+            "checkpoint_sha256": closure.checkpoint_sha256,
+            "proposal_space_sha256": closure.proposal_space_sha256,
+            "config_sha256": config_sha,
+            "p2_handoff_sha256": context.handoffs["p2"],
+            "p5_handoff_available": closure.p5_handoff_available,
+            "p5_handoff_reason": closure.p5_handoff_reason,
+        }
+        _, wrapper_sha = _stage_wrapper(
+            context,
+            status="complete",
+            native_completion_sha256=fingerprint_payload(completion),
+            bindings=bindings,
+            public_test_accessed=public,
+        )
+        return SealedStageV2(
+            wrapper_sha, bindings, {"status": "complete", **bindings}, public
+        )
+
+    def _source_seed(context: RealStageContextV2, closure: object):
+        from ..source import SourceVariantV2
+
+        row = next(item for item in manifest.files if item.role == "source_seed")
+        payload = _read_canonical(Path(__file__).resolve().parents[3] / row.relative_path)
+        admitted = SourceVariantV2.from_payload(payload)
+        rebound = SourceVariantV2.seed(
+            admitted.source,
+            closure.active_bundle.protocol_fingerprint,
+            host.resource_reporter_sha256,
+        )
+        if admitted != rebound:
+            raise RealRunnerError(
+                "admitted Source seed provenance does not match P3/Host commitments"
+            )
+        return rebound, row.sha256
+
+    def run_p4(context: RealStageContextV2) -> object:
+        from ..budget import ResourceUse
+        from ..source import SourceConfigV2, build_source_case_from_p3, run_source_evolution
+
+        closure = _p3_closure(context)
+        seed, input_digest = _source_seed(context, closure)
+        case = build_source_case_from_p3(
+            closure,
+            host,
+            source_seed=seed,
+            input_digest=input_digest,
+            empty_skill_path=context.output_dir.parent / "prepared/p4-empty-skills.json",
+        )
+        config = SourceConfigV2(
+            1, 0, 2, context.grant_seconds, 2,
+            closure.active_bundle.protocol_fingerprint,
+            host.resource_reporter_sha256,
+            ResourceUse(
+                wall_seconds=float(context.grant_seconds),
+                task_executions=1000,
+                llm_calls=100,
+                input_tokens=1_000_000,
+                output_tokens=100_000,
+                subprocesses=1000,
+                artifact_bytes=1_000_000_000,
+            ),
+        )
+        resume = (context.output_dir / "checkpoint.json").is_file()
+        return run_source_evolution(context.output_dir, config, case, resume=resume)
+
+    def seal_p4(context: RealStageContextV2, result: object) -> SealedStageV2:
+        from ..source import SourceRunResultV2
+        from ..source.archive import SourceArchiveV2
+        from ..source.authority import SourceAuthorityV2
+
+        payload = result.to_payload() if hasattr(result, "to_payload") else result
+        if not isinstance(payload, Mapping):
+            raise RealRunnerError("P4 returned a malformed result")
+        typed = SourceRunResultV2.from_payload(payload)
+        closure = _p3_closure(context)
+        seed, input_digest = _source_seed(context, closure)
+        archive = SourceArchiveV2(context.output_dir / "source_archive")
+        authority = SourceAuthorityV2(context.output_dir / "authority", seed)
+        if (
+            archive.snapshot_sha256() != typed.archive_snapshot_sha256
+            or authority.active_source().fingerprint() != typed.active_source_sha256
+        ):
+            raise RealRunnerError("P4 result does not bind its Source authority")
+        complete = typed.status == "source_evolution_complete"
+        native_sha = None
+        if complete:
+            native = _read_canonical(context.output_dir / "evaluation_complete.json")
+            if native != typed.to_payload():
+                raise RealRunnerError("P4 native completion differs from its result")
+            native_sha = fingerprint_payload(native)
+        bindings = {
+            "active_source_sha256": typed.active_source_sha256,
+            "archive_snapshot_sha256": typed.archive_snapshot_sha256,
+            "source_seed_input_sha256": input_digest,
+            "p3_handoff_sha256": context.handoffs["p3"],
+        }
+        status = "complete" if complete else "incomplete"
+        _, wrapper_sha = _stage_wrapper(
+            context,
+            status=status,
+            native_completion_sha256=native_sha,
+            bindings=bindings,
+            public_test_accessed=typed.public_test_accessed,
+        )
+        return SealedStageV2(
+            wrapper_sha, bindings, {"status": status, **bindings},
+            typed.public_test_accessed,
+        )
+
+    def run_p5(context: RealStageContextV2) -> object:
+        from ..protocol import build_protocol_case_from_p3
+
+        case = build_protocol_case_from_p3(
+            _p3_closure(context), host, hard_limit_seconds=context.grant_seconds
+        )
+        return case.run(context.output_dir)
+
+    def seal_p5(context: RealStageContextV2, result: object) -> SealedStageV2:
+        if not isinstance(result, Mapping):
+            raise RealRunnerError("P5 returned a malformed result")
+        payload = dict(result)
+        public = payload.get("public_test_accessed", False)
+        if type(public) is not bool:
+            raise RealRunnerError("P5 result lacks valid Public access evidence")
+        native_sha = None
+        status = "incomplete"
+        bindings: dict[str, object] = {
+            "p3_handoff_sha256": context.handoffs["p3"],
+            "p4_handoff_sha256": context.handoffs["p4"],
+        }
+        if payload.get("status") == "protocol_evolution_complete":
+            native = _read_canonical(context.output_dir / "completion.json")
+            if native != payload:
+                raise RealRunnerError("P5 native completion differs from its result")
+            handoff = _read_canonical(context.output_dir / "frozen_protocol_handoff.json")
+            handoff_sha = fingerprint_payload(handoff)
+            if handoff_sha != native.get("frozen_handoff_sha256"):
+                raise RealRunnerError("P5 frozen handoff identity mismatch")
+            native_sha = fingerprint_payload(native)
+            status = "complete"
+            bindings.update(
+                active_protocol_sha256=native["active_protocol_sha256"],
+                active_release_sha256=native["active_release_sha256"],
+                frozen_handoff_sha256=handoff_sha,
+            )
+        else:
+            bindings["reason"] = (
+                "p5_handoff_unavailable"
+                if payload.get("status") == "p5_handoff_unavailable"
+                else "protocol_evolution_incomplete"
+            )
+        _, wrapper_sha = _stage_wrapper(
+            context,
+            status=status,
+            native_completion_sha256=native_sha,
+            bindings=bindings,
+            public_test_accessed=public,
+        )
+        return SealedStageV2(
+            wrapper_sha, bindings, {"status": status, **bindings}, public
+        )
+
+    return RealStagePorts(
+        run_p2=run_p2, seal_p2=seal_p2,
+        run_p3=run_p3, seal_p3=seal_p3,
+        run_p4=run_p4, seal_p4=seal_p4,
+        run_p5=run_p5, seal_p5=seal_p5,
+    )
+
+
 def _read_canonical(path: Path) -> dict[str, object]:
     try:
         raw = path.read_bytes()
@@ -124,6 +812,22 @@ def _read_canonical(path: Path) -> dict[str, object]:
         raise RealRunnerError(f"missing or invalid canonical artifact: {path}") from error
     if type(value) is not dict or canonical_v2_bytes(value) != raw:
         raise RealRunnerError(f"artifact must be canonical JSON: {path}")
+    return value
+
+
+def _read_sha_bound_json(path: Path, expected_sha256: str) -> dict[str, object]:
+    """Read strict JSON whose admitted identity is its manifest-bound raw bytes."""
+    try:
+        raw = path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != expected_sha256:
+            raise RealRunnerError(f"artifact identity mismatch: {path}")
+        value = strict_json_loads(raw.decode("utf-8"), context=str(path))
+    except RealRunnerError:
+        raise
+    except (OSError, UnicodeError, ValueError) as error:
+        raise RealRunnerError(f"missing or invalid admitted artifact: {path}") from error
+    if type(value) is not dict:
+        raise RealRunnerError(f"admitted artifact must be a JSON object: {path}")
     return value
 
 
@@ -254,7 +958,10 @@ def _stage_output(
     completion_sha256: str,
     sealed_public_test_accessed: bool,
 ) -> None:
-    completion = _read_canonical(root / stage / "evaluation_complete.json")
+    wrapper = root / stage / "root_stage_completion.json"
+    completion = _read_canonical(
+        wrapper if wrapper.is_file() else root / stage / "evaluation_complete.json"
+    )
     if fingerprint_payload(completion) != completion_sha256:
         raise RealRunnerError(f"{stage} completion digest does not match its sealed boundary")
     completion_public = completion.get("public_test_accessed")
@@ -587,6 +1294,7 @@ def run_real_evolution(
 
 __all__ = [
     "RealRunnerError",
+    "build_real_stage_ports",
     "RealStageContextV2",
     "RealStagePorts",
     "SealedStageV2",

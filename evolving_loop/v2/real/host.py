@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 import stat
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
+from collections.abc import Mapping
 
 from common.llm import CodexCLIClient, CodexCLIConfig
 from evolving_loop.data import ContextTask, load_context_tasks_by_ids
@@ -51,6 +53,8 @@ _INPUT_KINDS = {
     "retrieval_seed": "directory",
     "source_seed": "file",
 }
+_CODE_FILE_ROLES = frozenset({"source_seed"})
+_CODE_RUNTIME_ROLES = frozenset({"task_loader", "forecast_store"})
 _RUNTIME_KINDS = {
     "python": "file",
     "runtime": "file",
@@ -218,6 +222,33 @@ def _confined(root: Path, relative: str) -> Path:
     return path
 
 
+def _runtime_location(root: Path, relative: str, role: str) -> Path:
+    """Resolve a manifest runtime target without relaxing input confinement.
+
+    Runtime entries name an executable from the repository namespace (for
+    example ``.venv/bin/python``).  That name is confined before resolution;
+    only its final executable target may live outside the checkout because a
+    virtualenv launcher is normally a symlink to the host interpreter.
+    """
+    if role == "codex_cli" and relative == "codex" and not (root / relative).exists():
+        found = shutil.which("codex")
+        if found is None:
+            raise ValueError("real Host codex_cli identity target is unavailable")
+        return Path(found).resolve(strict=True)
+    lexical = root / relative
+    if not lexical.absolute().is_relative_to(root.resolve()):
+        raise ValueError("real Host runtime path escapes repository root")
+    try:
+        return lexical.resolve(strict=True)
+    except OSError as error:
+        raise ValueError("real Host runtime identity target is unavailable") from error
+
+
+def _forecast_model_cache_root(location: Path) -> Path:
+    """Recover the historical HF_HOME from its authenticated ``hub`` tree."""
+    return location.parent if location.name == "hub" else location
+
+
 @dataclass(slots=True)
 class RealHostRuntimeV2:
     """One shared real task, numerical-cache, and agent runtime boundary."""
@@ -232,11 +263,23 @@ class RealHostRuntimeV2:
     retrieval_skill_library: RetrievalSkillLibrary
     source_repo: Path
     resource_reporter_sha256: str
+    sources: Mapping[str, str] = field(default_factory=dict)
     numerical_alternatives: tuple[FrozenNumericalArtifactsV2, ...] = ()
     resource_kinds: tuple[str, ...] = ()
     _closed: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        sources = dict(self.sources)
+        if any(
+            type(identity) is not str
+            or len(identity) != 64
+            or any(character not in "0123456789abcdef" for character in identity)
+            or type(source) is not str
+            or not source.strip()
+            for identity, source in sources.items()
+        ):
+            raise ValueError("real Host sources must be SHA-identified source text")
+        object.__setattr__(self, "sources", MappingProxyType(sources))
         if type(self.numerical_alternatives) is not tuple or any(
             type(pair) is not FrozenNumericalArtifactsV2
             for pair in self.numerical_alternatives
@@ -290,14 +333,21 @@ def build_real_host(
     *,
     repo_root: Path,
     output_dir: Path,
+    code_root: Path | None = None,
 ) -> RealHostRuntimeV2:
     """Build the fixed cache-only Host from one already verified manifest."""
     if type(manifest) is not RealEvolutionManifestV2:
         raise TypeError("real Host requires a RealEvolutionManifestV2")
     root = Path(repo_root).resolve()
-    files = {row.role: _confined(root, row.relative_path) for row in manifest.files}
+    code = root if code_root is None else Path(code_root).resolve()
+    files = {
+        row.role: _confined(code if row.role in _CODE_FILE_ROLES else root, row.relative_path)
+        for row in manifest.files
+    }
     locations = {
-        row.role: _confined(root, row.relative_path)
+        row.role: _runtime_location(
+            code if row.role in _CODE_RUNTIME_ROLES else root, row.relative_path, row.role
+        )
         for row in manifest.runtime_locations
     }
     if set(files) != _FILE_ROLES or set(locations) != _RUNTIME_ROLES:
@@ -314,12 +364,21 @@ def build_real_host(
     source_repo = _confined(root, "runs/method_evolution/v001")
     methods_path = source_repo / "methods.py"
     skills_path = source_repo / "skills.py"
+    for role, name in (
+        ("methods", "methods.py"),
+        ("policies", "policies.py"),
+        ("skills", "skills.py"),
+        ("dictionary", "dictionary.py"),
+    ):
+        expected = manifest.l0_fingerprints.get(role)
+        if expected is not None and _sha256_file(source_repo / name) != expected:
+            raise ValueError(f"real Host L0 source identity mismatch for {role}")
     portfolio = read_policy_file(source_repo / "policies.py")
     screening = _load_screening_policy(source_repo / "dictionary.py")
     runtime_args = SimpleNamespace(
         tsfm_runtimes="chronos,timesfm",
         chronos_device_map="cpu",
-        model_cache_dir=locations["model_cache"],
+        model_cache_dir=_forecast_model_cache_root(locations["model_cache"]),
         tsfm_workers_config=locations["runtime"],
         acknowledged_model_licenses="CC-BY-NC-4.0",
     )
@@ -355,6 +414,13 @@ def build_real_host(
         library = RetrievalSkillLibrary.from_release(
             files["retrieval_seed"]
         ).clone(persist=False, read_only=True)
+        from numerical_agent.evolution.module import read_module
+
+        module = read_module(methods_path)
+        sources = {
+            hashlib.sha256(method.source.encode("utf-8")).hexdigest(): method.source
+            for method in module.methods
+        }
         reporter_sha = fingerprint_payload(
             {
                 "schema_version": 1,
@@ -377,6 +443,7 @@ def build_real_host(
             retrieval_skill_library=library,
             source_repo=source_repo,
             resource_reporter_sha256=reporter_sha,
+            sources=sources,
         )
     except BaseException:
         if forecast_store is not None:

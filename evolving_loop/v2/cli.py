@@ -12,7 +12,9 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import stat
+import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -82,6 +84,9 @@ from .numerical_qd.runner import run_numerical_qd
 from .path_safety import _system_tmp_alias, physical_system_tmp_path
 from .store import write_once_json
 from .protocol.cli import add_protocol_parsers, dispatch_protocol
+from .real.contracts import RealEvolutionManifestV2
+from .real.host import build_real_host
+from .real.runner import build_real_stage_ports, run_real_evolution
 
 
 _NUMERICAL_METHOD_SOURCE = '''def seasonal_naive(history, horizon, frequency):
@@ -167,6 +172,15 @@ def build_parser() -> argparse.ArgumentParser:
     numerical.add_argument("--task-local-evidence", type=Path)
     numerical.add_argument("--task-local-dictionary", type=Path)
     numerical.add_argument("--legacy-bootstrap", action="store_true")
+    real = commands.add_parser(
+        "real-evolve", help="execute or resume the bounded real P2→P5 evolution"
+    )
+    real.add_argument("--manifest", required=True, type=Path)
+    real.add_argument("--output-dir", required=True, type=Path)
+    real.add_argument(
+        "--authority-root", type=Path,
+        help="read-only data authority root (defaults to the shared checkout)",
+    )
     add_protocol_parsers(commands)
     return parser
 
@@ -232,6 +246,55 @@ def _filesystem_contains(root: Path, path: Path) -> bool:
         ancestor.exists() and root.samefile(ancestor)
         for ancestor in (path, *path.parents)
     )
+
+
+def _default_authority_root(code_root: Path) -> Path:
+    """Locate the shared checkout without changing it or reading its state."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=code_root, check=True, capture_output=True, text=True,
+        )
+        common = Path(result.stdout.strip()).resolve(strict=True)
+        return common.parent
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ValueError("cannot locate the shared authority checkout") from error
+
+
+def _real_evolve(manifest_path: Path, output: Path, *, authority_root: Path | None) -> dict[str, object]:
+    """Build and close the real Host around one immutable root invocation."""
+    manifest = RealEvolutionManifestV2.from_payload(_read_canonical(manifest_path))
+    code_root = Path(__file__).resolve().parents[2]
+    authority = (authority_root if authority_root is not None else _default_authority_root(code_root)).resolve(strict=True)
+    if not authority.is_dir():
+        raise ValueError("authority root must be a real directory")
+    destination = output.resolve()
+    declared = [
+        (code_root if row.role == "source_seed" else authority) / row.relative_path
+        for row in manifest.files
+    ]
+    for row in manifest.runtime_locations:
+        if row.role == "codex_cli" and row.relative_path == "codex":
+            executable = shutil.which("codex")
+            if executable is None:
+                raise ValueError("real Host codex_cli identity target is unavailable")
+            declared.append(Path(executable).resolve())
+        else:
+            declared.append(
+                (code_root if row.role in {"task_loader", "forecast_store"} else authority)
+                / row.relative_path
+            )
+    if any(
+        _filesystem_contains(path, destination) or _filesystem_contains(destination, path)
+        for path in declared
+    ):
+        raise ValueError("real output must not overlap a declared input or runtime")
+    host = build_real_host(manifest, repo_root=authority, code_root=code_root, output_dir=destination)
+    try:
+        ports = build_real_stage_ports(host, manifest=manifest, repo_root=authority)
+        return run_real_evolution(destination, manifest, ports).to_payload()
+    finally:
+        host.close()
 
 
 def _exact_fields(value: object, fields: tuple[str, ...], name: str) -> dict:
@@ -1072,6 +1135,8 @@ def main(argv: list[str] | None = None) -> int:
             summary = _dispatch_evolve(args)
         elif args.command == "public-evaluate":
             summary = _public_evaluate(args.bundle, args.output_dir)
+        elif args.command == "real-evolve":
+            summary = _real_evolve(args.manifest, args.output_dir, authority_root=args.authority_root)
         elif args.command in {"protocol-evolve", "protocol-make-smoke-inputs"}:
             summary = dispatch_protocol(args)
         else:

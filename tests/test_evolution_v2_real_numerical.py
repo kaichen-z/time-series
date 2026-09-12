@@ -259,7 +259,7 @@ def _real_manifest_payload():
                     ("runtime", "tmp/toto2_worker_smoke.json"),
                     ("task_loader", "task-loader.py"),
                     ("forecast_store", "forecast-store.py"),
-                    ("model_cache", "model-cache"),
+                    ("model_cache", "model-cache/hub"),
                     ("codex_cli", "codex"),
                 )
             )

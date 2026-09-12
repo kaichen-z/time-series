@@ -85,6 +85,8 @@ def run_real_numerical(
     seed_payload: Mapping[str, object],
     task_manifest_payload: Mapping[str, object],
     input_sha256s: Mapping[str, str],
+    task_local_evidence_path: Path | None = None,
+    task_local_dictionary: object | None = None,
 ) -> dict[str, object]:
     """Invoke P2 through the payload seam using a root stage context."""
     output_dir = getattr(context, "output_dir", None)
@@ -98,6 +100,8 @@ def run_real_numerical(
         input_sha256s=input_sha256s,
         host_runtime=host,
         llm_client=host.llm_client,
+        task_local_evidence_path=task_local_evidence_path,
+        task_local_dictionary=task_local_dictionary,
     )
 
 

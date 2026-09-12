@@ -1,0 +1,1 @@
+{"files":{"policy.py":"def choose_arm(request):\n    return \"numerical\"\n"},"operator":"seed","parent_source_sha256":null,"protocol_fingerprint":"9691cd3607c9f7ceb6928086b3f0b91ae70a1d155926fe54aa5b14d74fc18d14","runtime_fingerprint":"8866a3c2e2563eb49bddd9cf5a4d2adba77ad4bebae64ed0d0ef0aa987b4336e","schema_version":1}
