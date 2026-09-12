@@ -10,6 +10,8 @@ evolution and Public scoring are not implemented by this project. See the
 [operator guide](docs/evolution-v2-kernel.md),
 [master design](docs/superpowers/specs/2026-09-10-unified-evolution-v2-design.md), and
 [Project 1 implementation plan](docs/superpowers/plans/2026-09-10-evolution-v2-kernel-contracts.md).
+The bounded offline source-policy research smoke is documented in the
+[DGM-lite source guide](docs/evolution-v2-dgm-lite.md).
 The existing usage below remains supported.
 
 ### Evolution V2 Cooperative Bundle (Project 3)

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from ..contracts import canonical_v2_bytes, fingerprint_payload, require_sha256
+from ..budget import ResourceUse
 
 
 ARM_ORDER = ("numerical", "retrieval", "decision", "joint")
@@ -28,6 +29,16 @@ _REQUEST_FIELDS = (
     "train_reward_by_arm",
 )
 _MAX_SOURCE_BYTES = 8192
+_CONFIG_FIELDS = (
+    "schema_version", "seed", "max_candidates", "hard_limit_seconds",
+    "subprocess_timeout_seconds", "protocol_fingerprint", "runtime_fingerprint",
+    "resource_ceilings",
+)
+_RESULT_FIELDS = (
+    "schema_version", "status", "active_source_sha256", "archive_snapshot_sha256",
+    "proposed", "eligible", "activated", "rolled_back", "completed_stage_ids",
+    "public_test_accessed",
+)
 
 
 def _exact_object(value: object, fields: tuple[str, ...], name: str) -> dict[str, object]:
@@ -211,3 +222,111 @@ class SourceRequestV2:
 
     def fingerprint(self) -> str:
         return fingerprint_payload(self.to_payload())
+
+
+@dataclass(frozen=True, slots=True)
+class SourceConfigV2:
+    """The bounded, reproducible source-evolution Host configuration."""
+
+    schema_version: int
+    seed: int
+    max_candidates: int
+    hard_limit_seconds: int
+    subprocess_timeout_seconds: int
+    protocol_fingerprint: str
+    runtime_fingerprint: str
+    resource_ceilings: ResourceUse
+
+    def __post_init__(self) -> None:
+        _schema_version(self.schema_version, "SourceConfigV2")
+        if type(self.seed) is not int:
+            raise ValueError("seed must be an integer")
+        if self.max_candidates not in (1, 2):
+            raise ValueError("max_candidates must be 1 or 2")
+        if type(self.hard_limit_seconds) is not int or self.hard_limit_seconds <= 0:
+            raise ValueError("hard_limit_seconds must be a positive integer")
+        if type(self.subprocess_timeout_seconds) is not int or not 0 < self.subprocess_timeout_seconds <= 2:
+            raise ValueError("subprocess_timeout_seconds must be an integer in 1..2")
+        require_sha256(self.protocol_fingerprint, "protocol_fingerprint")
+        require_sha256(self.runtime_fingerprint, "runtime_fingerprint")
+        if not isinstance(self.resource_ceilings, ResourceUse):
+            raise ValueError("resource_ceilings must be ResourceUse")
+
+    @classmethod
+    def smoke(cls, *, seed: int = 0) -> "SourceConfigV2":
+        if type(seed) is not int:
+            raise ValueError("seed must be an integer")
+        return cls(1, seed, 2, 120, 2, hashlib.sha256(b"source-protocol").hexdigest(),
+                   hashlib.sha256(b"source-runtime").hexdigest(),
+                   ResourceUse(task_executions=1000, subprocesses=1000, wall_seconds=120.0))
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> "SourceConfigV2":
+        values = _exact_object(payload, _CONFIG_FIELDS, "SourceConfigV2")
+        return cls(values["schema_version"], values["seed"], values["max_candidates"],
+                   values["hard_limit_seconds"], values["subprocess_timeout_seconds"],
+                   values["protocol_fingerprint"], values["runtime_fingerprint"],
+                   ResourceUse.from_payload(values["resource_ceilings"]))  # type: ignore[arg-type]
+
+    def to_payload(self) -> dict[str, object]:
+        return {"schema_version": self.schema_version, "seed": self.seed,
+                "max_candidates": self.max_candidates, "hard_limit_seconds": self.hard_limit_seconds,
+                "subprocess_timeout_seconds": self.subprocess_timeout_seconds,
+                "protocol_fingerprint": self.protocol_fingerprint,
+                "runtime_fingerprint": self.runtime_fingerprint,
+                "resource_ceilings": self.resource_ceilings.to_payload()}
+
+    def canonical_bytes(self) -> bytes:
+        return canonical_v2_bytes(self.to_payload())
+
+    def fingerprint(self) -> str:
+        return fingerprint_payload(self.to_payload())
+
+
+@dataclass(frozen=True, slots=True)
+class SourceRunResultV2:
+    """Semantic result; deliberately excludes elapsed wall-clock diagnostics."""
+
+    schema_version: int
+    status: str
+    active_source_sha256: str
+    archive_snapshot_sha256: str
+    proposed: int
+    eligible: int
+    activated: int
+    rolled_back: int
+    completed_stage_ids: tuple[str, ...]
+    public_test_accessed: bool
+
+    def __post_init__(self) -> None:
+        _schema_version(self.schema_version, "SourceRunResultV2")
+        if self.status not in {"source_evolution_checkpointed", "source_evolution_complete"}:
+            raise ValueError("invalid source result status")
+        require_sha256(self.active_source_sha256, "active_source_sha256")
+        require_sha256(self.archive_snapshot_sha256, "archive_snapshot_sha256")
+        if any(type(value) is not int or value < 0 for value in (self.proposed, self.eligible, self.activated, self.rolled_back)):
+            raise ValueError("source result counters must be non-negative integers")
+        if (not isinstance(self.completed_stage_ids, tuple) or any(type(value) is not str or not value for value in self.completed_stage_ids)
+                or len(set(self.completed_stage_ids)) != len(self.completed_stage_ids)):
+            raise ValueError("completed_stage_ids must be unique non-empty strings")
+        if type(self.public_test_accessed) is not bool or self.public_test_accessed:
+            raise ValueError("public_test_accessed must be exactly false")
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> "SourceRunResultV2":
+        values = _exact_object(payload, _RESULT_FIELDS, "SourceRunResultV2")
+        return cls(values["schema_version"], values["status"], values["active_source_sha256"],
+                   values["archive_snapshot_sha256"], values["proposed"], values["eligible"],
+                   values["activated"], values["rolled_back"], tuple(values["completed_stage_ids"]),
+                   values["public_test_accessed"])
+
+    def to_payload(self) -> dict[str, object]:
+        return {"schema_version": self.schema_version, "status": self.status,
+                "active_source_sha256": self.active_source_sha256,
+                "archive_snapshot_sha256": self.archive_snapshot_sha256,
+                "proposed": self.proposed, "eligible": self.eligible, "activated": self.activated,
+                "rolled_back": self.rolled_back, "completed_stage_ids": list(self.completed_stage_ids),
+                "public_test_accessed": self.public_test_accessed}
+
+    def canonical_bytes(self) -> bytes:
+        return canonical_v2_bytes(self.to_payload())

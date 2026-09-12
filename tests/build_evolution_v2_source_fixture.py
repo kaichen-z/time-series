@@ -24,6 +24,7 @@ from evolving_loop.v2.cooperative.adapters import (
 )
 from evolving_loop.v2.cooperative.contracts import DecisionModuleV2, RetrievalModuleV2
 from evolving_loop.v2.source.contracts import SourceVariantV2
+from evolving_loop.v2.contracts import canonical_v2_bytes
 from tests.build_evolution_v2_cooperative_fixture import _seed_supply, _task
 
 
@@ -116,4 +117,60 @@ def build_source_case(root: Path, *, failed_held_out: bool = False) -> SourceCas
         trace, requests, catalog_factory, adapters_factory, pipeline_factory)
     from evolving_loop.v2.source.meta import SourceMetaEvaluatorV2
     case.evaluator = SourceMetaEvaluatorV2(case)
+    return case
+
+
+def export_source_manifest(root: Path) -> Path:
+    """Materialize the tiny frozen Project-3-compatible offline input set."""
+    if root.exists() and any(root.iterdir()):
+        raise ValueError("smoke input destination must be empty")
+    root.mkdir(parents=True, exist_ok=True)
+    case = build_source_case(root)
+    frozen = {
+        "seed_source.json": case.seed_source.to_payload(),
+        "tasks.json": {
+            "train": [task.numeric.task_id for task in case.train_tasks],
+            "dev": [task.numeric.task_id for task in case.dev_tasks],
+        },
+    }
+    files: dict[str, dict[str, str]] = {}
+    for name, payload in frozen.items():
+        content = canonical_v2_bytes(payload)
+        (root / name).write_bytes(content)
+        files[name] = {"path": name, "sha256": hashlib.sha256(content).hexdigest()}
+    manifest = {
+        "schema_version": 1, "files": files,
+        "train_task_ids": [task.numeric.task_id for task in case.train_tasks],
+        "dev_task_ids": [task.numeric.task_id for task in case.dev_tasks],
+        "train_folds": [[0, 1], [2, 3]],
+        "protocol_fingerprint": case.seed_source.protocol_fingerprint,
+        "runtime_fingerprint": case.seed_source.runtime_fingerprint,
+    }
+    manifest_path = root / "manifest.json"
+    manifest_path.write_bytes(canonical_v2_bytes(manifest))
+    return manifest_path
+
+
+def load_source_manifest(path: Path) -> SourceCase:
+    """Verify frozen bytes before rebuilding the deterministic fixture seam."""
+    raw = path.read_bytes()
+    manifest = json.loads(raw)
+    if canonical_v2_bytes(manifest) != raw:
+        raise ValueError("source manifest must be canonical")
+    required = {"schema_version", "files", "train_task_ids", "dev_task_ids", "train_folds", "protocol_fingerprint", "runtime_fingerprint"}
+    if set(manifest) != required or manifest["schema_version"] != 1 or not isinstance(manifest["files"], dict):
+        raise ValueError("source manifest schema mismatch")
+    for name, entry in manifest["files"].items():
+        if not isinstance(name, str) or not isinstance(entry, dict) or set(entry) != {"path", "sha256"} or entry["path"] != name:
+            raise ValueError("source manifest file entry is invalid")
+        target = path.parent / name
+        if target.parent != path.parent or not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != entry["sha256"]:
+            raise ValueError("source manifest file digest mismatch")
+    case = build_source_case(path.parent)
+    if (manifest["train_task_ids"] != [task.numeric.task_id for task in case.train_tasks]
+            or manifest["dev_task_ids"] != [task.numeric.task_id for task in case.dev_tasks]
+            or manifest["train_folds"] != [[0, 1], [2, 3]]
+            or manifest["protocol_fingerprint"] != case.seed_source.protocol_fingerprint
+            or manifest["runtime_fingerprint"] != case.seed_source.runtime_fingerprint):
+        raise ValueError("source manifest commitments do not match fixture")
     return case
