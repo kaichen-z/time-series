@@ -91,6 +91,71 @@ def test_shortlist_materializer_never_executes_excluded_candidates(monkeypatch: 
     assert not {name for name in calls if name.startswith("method")}
 
 
+def test_forecast_exception_materializes_failure_rows_in_both_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from numerical_agent.run_task_local_ensemble_evolution import _materialize_rows
+
+    class Store:
+        identity_hash = "store"
+
+        def forecast(self, name: str, history, horizon: int, frequency: str):
+            raise RuntimeError("forecast failed")
+
+    def diagnose(task, name, family, forecast, config, **_kwargs):
+        return CandidateDiagnostics.synthetic(
+            name=name, family=family, median_mase=1.0,
+            fold_forecasts=((1.0,),) * 3, fold_truths=((1.0,),) * 3,
+            median_smae=1.0, median_srmse=1.0,
+        )
+
+    monkeypatch.setattr("numerical_agent.run_task_local_ensemble_evolution.diagnose_candidate", diagnose)
+    shortlist = TaskCandidateShortlistV1(
+        1, "a" * 64, "b" * 64, "c" * 64, ("toto_2_0",), (), True, False,
+    )
+    task = RuntimeTask("task", (1.0, 2.0, 3.0, 4.0), 1, "D", (5.0,))
+    shortlisted = materialize_task_shortlist_rows(
+        Store(), task, shortlist, {"toto_2_0": "tsfm"}, split="dev",
+        hindcast_config=_CONFIDENCE_HINDCAST_CONFIG,
+    )
+    full = _materialize_rows(
+        Store(), (DataTask("task", task.history, task.future, task.horizon, task.frequency, None, "entity"),),
+        (("toto_2_0", "tsfm"),),
+        ScreeningPolicy((ScreeningEntry("toto_2_0", "tsfm", "keep", ApplicabilityPolicy(), "safe"),), ("toto_2_0",)),
+        split="train", hindcast_config=_CONFIDENCE_HINDCAST_CONFIG,
+    )
+    assert shortlisted[0].forecast is None
+    assert shortlisted[0].failure_reason == "shortlisted_runtime_failure: RuntimeError: forecast failed"
+    assert full[0].forecast is None
+    assert full[0].failure_reason == "RuntimeError: forecast failed"
+
+
+def test_anchor_diagnostic_failure_preserves_its_full_forecast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Store:
+        identity_hash = "store"
+
+        def forecast(self, name: str, history, horizon: int, frequency: str):
+            return (1.0,) * horizon
+
+    def diagnose(*_args, **_kwargs):
+        raise RuntimeError("diagnostics unavailable")
+
+    monkeypatch.setattr("numerical_agent.run_task_local_ensemble_evolution.diagnose_candidate", diagnose)
+    shortlist = TaskCandidateShortlistV1(
+        1, "a" * 64, "b" * 64, "c" * 64, ("toto_2_0",), (), True, False,
+    )
+    row = materialize_task_shortlist_rows(
+        Store(), RuntimeTask("task", (1.0, 2.0, 3.0, 4.0), 1, "D", (5.0,)),
+        shortlist, {"toto_2_0": "tsfm"}, split="dev",
+        hindcast_config=_CONFIDENCE_HINDCAST_CONFIG,
+    )[0]
+    assert row.forecast == (1.0,)
+    assert row.diagnostic is None
+    assert row.failure_reason is None
+
+
 def test_diagnostic_failure_preserves_forecast_and_tournament_records_anchor_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

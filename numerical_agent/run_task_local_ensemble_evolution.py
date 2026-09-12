@@ -497,7 +497,7 @@ def _materialize_rows(
             else:
                 try:
                     forecast = store.forecast(name, task.history, task.horizon, task.frequency)
-                except Exception:
+                except Exception as error:
                     failure = f"{type(error).__name__}: {error}"[:10000]
                 try:
                     task_hindcast_config = _adaptive_hindcast_config(
@@ -553,7 +553,7 @@ def materialize_task_shortlist_rows(
         failure: str | None = None
         try:
             forecast = store.forecast(name, task.history, task.horizon, task.frequency)
-        except Exception:
+        except Exception as error:
             failure = f"shortlisted_runtime_failure: {type(error).__name__}: {error}"[:10000]
         try:
             diagnostic = diagnose_candidate(
