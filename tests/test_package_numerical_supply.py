@@ -301,6 +301,16 @@ def test_schema_v1_supply_rejects_repeated_family_before_catalog_migration() -> 
         )
 
 
+def test_schema_v1_supply_replay_preserves_legacy_payload_byte_for_byte() -> None:
+    release = _supply_release()
+    payload = release.to_payload()
+
+    parsed = parse_numerical_supply_release(payload)
+
+    assert payload["schema_version"] == 1
+    assert parsed.to_payload() == payload
+
+
 def test_schema_v2_supply_round_trips_complete_ordered_repeated_family_catalog() -> None:
     families = (
         "statistical",

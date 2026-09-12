@@ -141,6 +141,26 @@ For the formal 80/20 run, set `TASK_LOCAL_REPO`, `TASK_LOCAL_SPLIT_FILE`,
 numeric weight authority to an LLM; Python searches a frozen 0.1-grid with at most eight
 candidates, at most two specialists per recipe, and at least 0.5 anchor weight.
 
+The complete local-shortlist flow is:
+
+```text
+complete global Dictionary
+  -> task history-only shortlist (Anchor + 5--9, target total 8)
+  -> shortlist-only local hindcast
+  -> Anchor + zero/one/two specialists
+```
+
+The frozen artifacts are written to `task_local_release.json`,
+`task_shortlists/<task-input-sha256>.json`, `task_shortlists/index.json`, and
+`run_manifest.json`; OOF and Dev reports remain alongside the release reports. The fallback is
+encoded in each final selection/result record, so an ineligible or failed specialist preserves
+the Anchor forecast. Shortlist and evolution artifact boundaries set `public_test_accessed` to
+`false`; Public is opened only as a separate report-only comparison after freezing.
+
+Legacy schema migration is explicit: schema-v1/v2 supply and task-local payloads remain readable
+and replay byte-for-byte through their versioned parsers, while newly produced task-local
+shortlist releases use the current schema and retain the complete global Dictionary identity.
+
 After an accepted 80/20 release, run the required report-only Public-99 comparison separately:
 
 ```bash
