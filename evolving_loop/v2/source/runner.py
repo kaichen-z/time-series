@@ -48,7 +48,18 @@ def _case_sha(case: object) -> str:
             identities.append(dataclasses.asdict(task))
         except AttributeError as error:
             raise TypeError("source case task has no stable identity") from error
-    sources = {name: value.fingerprint() for name, value in vars(case).items() if isinstance(value, SourceVariantV2)}
+    try:
+        members = {
+            field.name: getattr(case, field.name)
+            for field in dataclasses.fields(case)
+        }
+    except (TypeError, AttributeError):
+        members = vars(case)
+    sources = {
+        name: value.fingerprint()
+        for name, value in members.items()
+        if isinstance(value, SourceVariantV2)
+    }
     bundle = getattr(case, "seed_bundle", None)
     bundle_sha = bundle.fingerprint() if callable(getattr(bundle, "fingerprint", None)) else None
     return fingerprint_payload({"seed": seed.fingerprint(), "sources": sources, "tasks": identities,

@@ -6,6 +6,7 @@ from .runtime import audit_source, run_policy
 from .meta import SourceMetaEvaluatorV2, SourceTrainResultV2, SourceValidationV2
 from .authority import SourceAuthorityError, SourceAuthorityV2
 from .runner import SourceRunnerError, run_source_evolution
+from .bridge import SourceBundleCaseV2, build_source_case_from_p3
 
 __all__ = [
     "SourceArchiveError",
@@ -24,4 +25,6 @@ __all__ = [
     "SourceTrainResultV2",
     "SourceValidationV2",
     "run_source_evolution",
+    "SourceBundleCaseV2",
+    "build_source_case_from_p3",
 ]

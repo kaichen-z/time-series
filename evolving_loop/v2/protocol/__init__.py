@@ -22,6 +22,7 @@ from .compatibility import (
     decide_protocol,
 )
 from .runner import freeze_protocol_handoff, run_protocol_evolution
+from .bridge import ProtocolRunCaseV2, build_protocol_case_from_p3
 
 __all__ = [
     "KINDS",
@@ -41,4 +42,6 @@ __all__ = [
     "decide_protocol",
     "freeze_protocol_handoff",
     "run_protocol_evolution",
+    "ProtocolRunCaseV2",
+    "build_protocol_case_from_p3",
 ]
