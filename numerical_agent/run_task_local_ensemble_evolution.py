@@ -79,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tasks-file")
     parser.add_argument("--anchor-release-dir")
     parser.add_argument("--forecast-store")
+    parser.add_argument("--candidate-priors-file")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--partition-seed", type=int, default=20260902)
     _add_tsfm_runtime_options(parser)
@@ -103,6 +104,37 @@ def _task_input_sha(task: RuntimeTask) -> str:
         "task_id": task.task_id, "history": list(task.history), "horizon": task.horizon,
         "frequency": task.frequency,
     })).hexdigest()
+
+
+def _load_candidate_priors_bundle(
+    path: Path, *, grouping_fingerprint: str, dictionary_sha256: str,
+    families: dict[str, str], fold_count: int,
+) -> tuple[dict[int, tuple[CandidatePriorV1, ...]], tuple[CandidatePriorV1, ...]]:
+    """Read the closed Task 3 prior artifact without accepting permissive variants."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError) as error:
+        raise ValueError("candidate priors artifact is malformed") from error
+    expected = {"schema_version", "grouping_fingerprint", "dictionary_sha256", "fold_priors", "final_priors", "payload_fingerprint"}
+    if type(payload) is not dict or set(payload) != expected or payload.get("schema_version") != 1:
+        raise ValueError("candidate priors artifact is malformed")
+    unsigned = {key: value for key, value in payload.items() if key != "payload_fingerprint"}
+    fingerprint = hashlib.sha256(canonical_json_bytes(unsigned)).hexdigest()
+    if payload["payload_fingerprint"] != fingerprint or payload["grouping_fingerprint"] != grouping_fingerprint or payload["dictionary_sha256"] != dictionary_sha256:
+        raise ValueError("candidate priors artifact authority mismatch")
+    raw_folds = payload["fold_priors"]
+    if type(raw_folds) is not dict or set(raw_folds) != {str(index) for index in range(fold_count)} or type(payload["final_priors"]) is not list:
+        raise ValueError("candidate priors artifact fold schema is malformed")
+    try:
+        folds = {int(key): tuple(CandidatePriorV1.from_payload(item) for item in raw_folds[key]) for key in sorted(raw_folds, key=int)}
+        final = tuple(CandidatePriorV1.from_payload(item) for item in payload["final_priors"])
+    except (TypeError, ValueError) as error:
+        raise ValueError("candidate priors artifact values are malformed") from error
+    expected_names = tuple(sorted(families))
+    for values in (*folds.values(), final):
+        if tuple(item.candidate_name for item in values) != expected_names or any(families[item.candidate_name] != item.family for item in values):
+            raise ValueError("candidate priors artifact namespace mismatch")
+    return folds, final
 
 
 def _report_payload(report: ConditionalUpliftReport) -> dict[str, object]:
@@ -427,37 +459,30 @@ def _shortlist_rows_for_tasks(
     return tuple(rows), tuple(shortlists)
 
 
-def _history_only_priors(tasks: Iterable[DataTask], families: dict[str, str]) -> tuple[CandidatePriorV1, ...]:
-    """A deterministic history-only baseline used before local materialization."""
-    profiles = [profile_task(RuntimeTask(task.task_id, tuple(task.history_values), task.prediction_length, task.frequency, ())) for task in tasks]
-    score = float(sum(profile.history_length for profile in profiles) / max(1, len(profiles)))
-    return tuple(CandidatePriorV1(name, family, 1.0, score, score, ()) for name, family in sorted(families.items()))
-
-
 def _v3_oof_rows(
     store: ForecastStore, tasks: tuple[DataTask, ...], *, manifest: object,
     dictionary: object, screening: ScreeningPolicy, families: dict[str, str],
     anchor_name: str, policy: TaskShortlistPolicyV1, hindcast_config: HindcastConfig,
-    output: Path,
-) -> tuple[tuple[TaskLocalTaskRow, ...], tuple[TaskCandidateShortlistV1, ...], tuple[CandidatePriorV1, ...]]:
-    """Use a complement history-only prior tuple for every held-out fold."""
+    output: Path, fold_priors: dict[int, tuple[CandidatePriorV1, ...]],
+) -> tuple[tuple[TaskLocalTaskRow, ...], dict[str, TaskCandidateShortlistV1]]:
+    """Use the exact Task 3 complement-prior tuple for each held-out fold."""
     from .evolution.task_local_evolution import GroupFoldManifest
     if type(manifest) is not GroupFoldManifest:
         raise TypeError("V3 OOF requires an exact group-fold manifest")
     by_id = {task.task_id: task for task in tasks}
     rows: list[TaskLocalTaskRow] = []
-    shortlists: list[TaskCandidateShortlistV1] = []
+    shortlists: dict[str, TaskCandidateShortlistV1] = {}
     folds = dict(manifest.task_fold_map)
     for fold in range(manifest.fold_count):
-        fit = tuple(by_id[task_id] for task_id in sorted(folds) if folds[task_id] != fold)
         held_out = tuple(by_id[task_id] for task_id in sorted(folds) if folds[task_id] == fold)
         fold_rows, fold_shortlists = _shortlist_rows_for_tasks(
             store, held_out, dictionary=dictionary, screening=screening, families=families,
-            priors=_history_only_priors(fit, families), anchor_name=anchor_name, policy=policy,
+            priors=fold_priors[fold], anchor_name=anchor_name, policy=policy,
             split="train", hindcast_config=hindcast_config, output=output,
         )
-        rows.extend(fold_rows); shortlists.extend(fold_shortlists)
-    return tuple(rows), tuple(shortlists), _history_only_priors(tasks, families)
+        rows.extend(fold_rows)
+        shortlists.update({task.task_id: shortlist for task, shortlist in zip(held_out, fold_shortlists, strict=True)})
+    return tuple(rows), shortlists
 
 
 def _formal_main(args: argparse.Namespace, output: Path) -> int:
@@ -467,6 +492,7 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
         "tasks_file": args.tasks_file,
         "anchor_release_dir": args.anchor_release_dir,
         "forecast_store": args.forecast_store,
+        "candidate_priors_file": args.candidate_priors_file,
     }
     missing = sorted(name for name, value in required.items() if not value)
     if missing:
@@ -490,6 +516,11 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
     screening = _load_screening_policy(repo / "dictionary.py")
     dictionary = parse_filter_source((repo / "dictionary.py").read_text(encoding="utf-8"))
     candidates = _reviewed_candidates(module, portfolio, screening)
+    dictionary_sha256 = hashlib.sha256(canonical_json_bytes({"entries": [
+        {"name": item.name, "family": item.family, "status": item.status,
+         "applicability": list(item.applicability), "reason": item.reason}
+        for item in dictionary.entries
+    ]})).hexdigest()
     runtimes = _runtime_registry(args)
     store: ForecastStore | None = None
     try:
@@ -508,10 +539,15 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
         families = dict(candidates)
         shortlist_policy = TaskShortlistPolicyV1()
         tournament_policy = TaskLocalTournamentPolicy(anchor_name=anchor.policy.recipe.fallback_parent)
-        train_shortlist_rows, train_shortlists, priors = _v3_oof_rows(
+        fold_priors, priors = _load_candidate_priors_bundle(
+            Path(args.candidate_priors_file), grouping_fingerprint=manifest.grouping_fingerprint,
+            dictionary_sha256=dictionary_sha256, families=families, fold_count=manifest.fold_count,
+        )
+        train_shortlist_rows, train_shortlists = _v3_oof_rows(
             store, train, manifest=manifest, dictionary=dictionary, screening=screening,
             families=families, anchor_name=anchor.policy.recipe.fallback_parent,
             policy=shortlist_policy, hindcast_config=_CONFIDENCE_HINDCAST_CONFIG, output=output,
+            fold_priors=fold_priors,
         )
         provisional = TaskLocalEnsembleReleaseV3(
             schema_version=3,
@@ -520,11 +556,7 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
             tournament_policy=tournament_policy,
             shortlist_policy=shortlist_policy,
             candidate_priors=priors,
-            dictionary_sha256=hashlib.sha256(canonical_json_bytes({"entries": [
-                {"name": item.name, "family": item.family, "status": item.status,
-                 "applicability": list(item.applicability), "reason": item.reason}
-                for item in dictionary.entries
-            ]})).hexdigest(),
+            dictionary_sha256=dictionary_sha256,
             grouping_fingerprint=manifest.grouping_fingerprint,
             oof_report_sha256="0" * 64,
             source_hashes=source_hashes,
@@ -568,7 +600,7 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
                          "diagnostic": asdict(row.diagnostic) if row.diagnostic is not None else None}
                         for row in train_shortlist_rows if row.task_id == source.task_id
                      ])).hexdigest()}
-                    for source, shortlist in zip(train, train_shortlists, strict=True)
+                    for source in train for shortlist in (train_shortlists[source.task_id],)
                 ],
             }
             shortlist_index["entries"].sort(key=lambda item: (item["task_id"], item["task_input_sha256"]))
@@ -605,7 +637,10 @@ def _formal_main(args: argparse.Namespace, output: Path) -> int:
                       "diagnostic": asdict(row.diagnostic) if row.diagnostic is not None else None}
                      for row in train_shortlist_rows + dev_rows if row.task_id == source.task_id
                  ])).hexdigest()}
-                for source, shortlist in zip(train + dev, train_shortlists + shortlists, strict=True)
+                for source, shortlist in (
+                    *((source, train_shortlists[source.task_id]) for source in train),
+                    *zip(dev, shortlists, strict=True),
+                )
             ],
         }
         shortlist_index["entries"].sort(key=lambda item: (item["task_id"], item["task_input_sha256"]))

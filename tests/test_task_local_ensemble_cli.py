@@ -16,6 +16,7 @@ from numerical_agent.run_task_local_ensemble_evolution import (
     _CONFIDENCE_HINDCAST_CONFIG,
     _adaptive_hindcast_config,
     materialize_task_shortlist_rows,
+    _load_candidate_priors_bundle,
 )
 from numerical_agent.evolution.execution import Task as RuntimeTask
 from numerical_agent.evolution.numerical_selector import CandidateDiagnostics
@@ -69,14 +70,32 @@ def test_shortlist_materializer_never_executes_excluded_candidates(monkeypatch: 
             fold_forecasts=((1.0,),) * 3, fold_truths=((1.0,),) * 3,
             median_smae=1.0, median_srmse=1.0)
     monkeypatch.setattr("numerical_agent.run_task_local_ensemble_evolution.diagnose_candidate", diagnose)
+    selected = ("toto_2_0", *(f"good{index}" for index in range(7)))
+    excluded = tuple((name, "ranked_out") for name in sorted(f"method{index}" for index in range(8, 20)))
     shortlist = TaskCandidateShortlistV1(1, "a" * 64, "b" * 64, "c" * 64,
-        ("toto_2_0", "good", "bad"), (("excluded", "ranked_out"),), True, False)
+        selected, excluded, False, False)
     rows = materialize_task_shortlist_rows(Store(), RuntimeTask("task", (1.0, 2.0, 3.0, 4.0), 1, "D", (5.0,)), shortlist,
-        {"toto_2_0": "tsfm", "good": "statistical", "bad": "combined"}, split="dev",
+        {"toto_2_0": "tsfm", **{name: "statistical" for name in selected[1:]}}, split="dev",
         hindcast_config=_CONFIDENCE_HINDCAST_CONFIG)
-    assert calls == ["toto_2_0", "diagnose:toto_2_0", "good", "diagnose:good", "bad", "diagnose:bad"]
-    assert {row.candidate_name for row in rows} == {"toto_2_0", "good", "bad"}
-    assert next(row for row in rows if row.candidate_name == "bad").failure_reason.startswith("shortlisted_runtime_failure")
+    assert calls == [item for name in selected for item in (name, f"diagnose:{name}")]
+    assert {row.candidate_name for row in rows} == set(selected)
+    assert not {name for name in calls if name.startswith("method")}
+
+
+def test_prior_bundle_requires_exact_complement_and_final_prior_authority(tmp_path: Path) -> None:
+    prior = {"candidate_name": "toto_2_0", "family": "tsfm", "success_rate": 1.0,
+             "mean_joint": 0.1, "p90_joint": 0.1, "morphology_scores": []}
+    unsigned = {"schema_version": 1, "grouping_fingerprint": "a" * 64,
+                "dictionary_sha256": "b" * 64, "fold_priors": {"0": [prior], "1": [prior]},
+                "final_priors": [prior]}
+    unsigned["payload_fingerprint"] = __import__("hashlib").sha256(
+        __import__("common.payload", fromlist=["canonical_json_bytes"]).canonical_json_bytes(unsigned)
+    ).hexdigest()
+    path = tmp_path / "priors.json"
+    path.write_text(__import__("json").dumps(unsigned), encoding="utf-8")
+    folds, final = _load_candidate_priors_bundle(path, grouping_fingerprint="a" * 64,
+        dictionary_sha256="b" * 64, families={"toto_2_0": "tsfm"}, fold_count=2)
+    assert folds[0] == final
 
 
 def test_failed_dev_publishes_no_task_local_release(tmp_path: Path) -> None:
