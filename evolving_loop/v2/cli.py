@@ -81,6 +81,7 @@ from .numerical_qd.persistence import NumericalQDRunStore
 from .numerical_qd.runner import run_numerical_qd
 from .path_safety import _system_tmp_alias, physical_system_tmp_path
 from .store import write_once_json
+from .protocol.cli import add_protocol_parsers, dispatch_protocol
 
 
 _NUMERICAL_METHOD_SOURCE = '''def seasonal_naive(history, horizon, frequency):
@@ -163,6 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
     numerical.add_argument("--seed-supply", required=True, type=Path)
     numerical.add_argument("--task-manifest", required=True, type=Path)
     numerical.add_argument("--output-dir", required=True, type=Path)
+    add_protocol_parsers(commands)
     return parser
 
 
@@ -971,6 +973,8 @@ def main(argv: list[str] | None = None) -> int:
             summary = _dispatch_evolve(args)
         elif args.command == "public-evaluate":
             summary = _public_evaluate(args.bundle, args.output_dir)
+        elif args.command in {"protocol-evolve", "protocol-make-smoke-inputs"}:
+            summary = dispatch_protocol(args)
         else:
             summary = numerical_evolve(
                 args.config,

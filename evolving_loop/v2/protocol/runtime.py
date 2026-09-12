@@ -260,9 +260,15 @@ class ProtocolRuntime:
             raise TypeError("bundle must be an EvolutionBundleV2")
         if type(stage) is not str or stage not in {"train", "dev"}:
             raise ValueError("protocol runtime stage must be exactly train or dev")
-        canonical_tasks = self.load_tasks()
-        if tuple(tasks) != canonical_tasks:
-            raise ValueError("runtime evaluation requires exactly canonical loaded tasks")
+        loaded_tasks = self.load_tasks()
+        canonical_by_id = {task.numeric.task_id: task for task in loaded_tasks}
+        canonical_tasks = tuple(tasks)
+        if not canonical_tasks or len(canonical_tasks) != len(
+            {task.numeric.task_id for task in canonical_tasks}
+        ):
+            raise ValueError("runtime evaluation requires a non-empty unique task selection")
+        if any(canonical_by_id.get(task.numeric.task_id) != task for task in canonical_tasks):
+            raise ValueError("runtime evaluation requires canonical loaded task selections")
         source = self.host_inputs.catalog.resolve_numerical(
             bundle.numerical_release_sha256, bundle.numerical_registry_sha256
         )

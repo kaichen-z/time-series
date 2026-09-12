@@ -12,6 +12,8 @@ evolution and Public scoring are not implemented by this project. See the
 [Project 1 implementation plan](docs/superpowers/plans/2026-09-10-evolution-v2-kernel-contracts.md).
 The bounded offline source-policy research smoke is documented in the
 [DGM-lite source guide](docs/evolution-v2-dgm-lite.md).
+The sealed, resumable offline L1 compatibility smoke is documented in the
+[Infrastructure Protocol guide](docs/evolution-v2-infrastructure-protocol.md).
 The existing usage below remains supported.
 
 ### Evolution V2 Cooperative Bundle (Project 3)
