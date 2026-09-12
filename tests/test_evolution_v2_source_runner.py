@@ -21,6 +21,15 @@ def test_closed_validation_resume_matches_full_result(tmp_path):
         tmp_path / "resumed", config,
         build_source_case(tmp_path / "partial-inputs"), stop_after="validation",
     )
+    validation_checkpoint = json.loads(
+        (tmp_path / "resumed" / "checkpoint.json").read_bytes()
+    )
+    cached_memberships = [
+        entry["evaluation"]["expected_task_ids"]
+        for entry in validation_checkpoint["evaluator_cache"]["aggregates"]
+    ]
+    assert cached_memberships
+    assert all("cooperative-04" not in membership for membership in cached_memberships)
     resumed = run_source_evolution(
         tmp_path / "resumed", config,
         build_source_case(tmp_path / "fresh-resume-inputs"), resume=True,
@@ -33,7 +42,12 @@ def test_closed_validation_resume_matches_full_result(tmp_path):
 
 
 def test_closed_candidate_resume_matches_full_result(tmp_path):
-    config = SourceConfigV2.smoke(seed=17)
+    config = dataclasses.replace(
+        SourceConfigV2.smoke(seed=17),
+        resource_ceilings=ResourceUse(
+            task_executions=144, subprocesses=1000, wall_seconds=120.0,
+        ),
+    )
     full = run_source_evolution(
         tmp_path / "full", config, build_source_case(tmp_path / "full-inputs")
     )
@@ -50,6 +64,10 @@ def test_closed_candidate_resume_matches_full_result(tmp_path):
             == (tmp_path / "full" / "authority" / "active_source.json").read_bytes())
     assert ((tmp_path / "resumed" / "source_archive" / "events.jsonl").read_bytes()
             == (tmp_path / "full" / "source_archive" / "events.jsonl").read_bytes())
+    full_checkpoint = json.loads((tmp_path / "full" / "checkpoint.json").read_bytes())
+    resumed_checkpoint = json.loads((tmp_path / "resumed" / "checkpoint.json").read_bytes())
+    assert full_checkpoint["budget_checkpoint"]["charged_use"]["task_executions"] == 108
+    assert resumed_checkpoint["budget_checkpoint"]["charged_use"]["task_executions"] == 108
 
 
 def test_failed_validation_preserves_parent(tmp_path, monkeypatch):

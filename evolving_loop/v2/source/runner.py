@@ -64,21 +64,45 @@ def _evidence(stage: str, value: SourceValidationV2) -> dict[str, object]:
             "evaluation_fingerprints": list(value.evaluation_fingerprints)}
 
 
-def _state(root: Path, state: dict[str, object], ledger: BudgetLedger) -> None:
+def _cache_checkpoint(evaluator: object) -> Mapping[str, object]:
+    method = getattr(evaluator, "cache_checkpoint", None)
+    if not callable(method):
+        raise SourceRunnerError("source evaluator does not expose durable cache authority")
+    checkpoint = method()
+    if not isinstance(checkpoint, Mapping):
+        raise SourceRunnerError("source evaluator cache checkpoint is invalid")
+    return checkpoint
+
+
+def _restore_cache(evaluator: object, checkpoint: object) -> None:
+    method = getattr(evaluator, "restore_cache", None)
+    if not callable(method):
+        raise SourceRunnerError("source evaluator does not expose durable cache authority")
+    try:
+        method(checkpoint)
+    except (TypeError, ValueError) as error:
+        raise SourceRunnerError("source evaluator cache checkpoint is invalid") from error
+
+
+def _state(root: Path, state: dict[str, object], ledger: BudgetLedger, evaluator: object) -> None:
     body = dict(state)
     body["budget_checkpoint"] = ledger.checkpoint()
+    body["evaluator_cache"] = _cache_checkpoint(evaluator)
     state["budget_checkpoint"] = body["budget_checkpoint"]
+    state["evaluator_cache"] = body["evaluator_cache"]
     body["checkpoint_sha256"] = fingerprint_payload(body)
     write_atomic_json(root / "checkpoint.json", body)
 
 
-def _new_state(config: SourceConfigV2, case_sha: str, seed: SourceVariantV2, ledger: BudgetLedger) -> dict[str, object]:
+def _new_state(config: SourceConfigV2, case_sha: str, seed: SourceVariantV2,
+               ledger: BudgetLedger, evaluator: object) -> dict[str, object]:
     return {"schema_version": 1, "config_sha256": config.fingerprint(), "case_sha256": case_sha,
             "phase": "search", "draw_counter": 0, "completed_stage_ids": [],
             "parent": None, "candidate_batch": [],
             "candidates": [], "finalist": None, "validation_passed": None, "validation_receipt": None,
             "proposed": 0, "eligible": 0, "activated": 0, "rolled_back": 0,
-            "seed_source_sha256": seed.fingerprint(), "budget_checkpoint": ledger.checkpoint()}
+            "seed_source_sha256": seed.fingerprint(), "budget_checkpoint": ledger.checkpoint(),
+            "evaluator_cache": _cache_checkpoint(evaluator)}
 
 
 def _verify_state(state: Mapping[str, object], config: SourceConfigV2, case_sha: str) -> dict[str, object]:
@@ -88,7 +112,8 @@ def _verify_state(state: Mapping[str, object], config: SourceConfigV2, case_sha:
         raise SourceRunnerError("source checkpoint digest mismatch")
     required = {"schema_version", "config_sha256", "case_sha256", "phase", "draw_counter", "completed_stage_ids",
                 "parent", "candidate_batch", "candidates", "finalist", "validation_passed", "validation_receipt",
-                "proposed", "eligible", "activated", "rolled_back", "seed_source_sha256", "budget_checkpoint"}
+                "proposed", "eligible", "activated", "rolled_back", "seed_source_sha256", "budget_checkpoint",
+                "evaluator_cache"}
     if set(values) != required or values["schema_version"] != 1:
         raise SourceRunnerError("source checkpoint schema mismatch")
     if values["config_sha256"] != config.fingerprint() or values["case_sha256"] != case_sha:
@@ -174,11 +199,11 @@ def _result(archive: SourceArchiveV2, authority: SourceAuthorityV2, state: Mappi
 
 
 def _finish(root: Path, archive: SourceArchiveV2, authority: SourceAuthorityV2,
-            state: dict[str, object], ledger: BudgetLedger) -> SourceRunResultV2:
+            state: dict[str, object], ledger: BudgetLedger, evaluator: object) -> SourceRunResultV2:
     state["phase"] = "complete"
     result = _result(archive, authority, state, complete=True)
     write_once_json(root / "evaluation_complete.json", result.to_payload())
-    _state(root, state, ledger)
+    _state(root, state, ledger, evaluator)
     return result
 
 
@@ -205,6 +230,7 @@ def run_source_evolution(output_dir: str | Path, config: SourceConfigV2, case: o
             raise SourceRunnerError("resume requires a source checkpoint")
         state = _verify_state(_read(checkpoint), config, case_sha)
         ledger = _resume_budget(plan, state["budget_checkpoint"])
+        _restore_cache(evaluator, state["evaluator_cache"])
         archive = SourceArchiveV2(root / "source_archive")
         authority = SourceAuthorityV2(root / "authority", seed)
         if authority.checkpoint_path.exists():
@@ -223,8 +249,8 @@ def run_source_evolution(output_dir: str | Path, config: SourceConfigV2, case: o
         archive.close(seed.fingerprint(), status="eligible")
         authority = SourceAuthorityV2(root / "authority", seed)
         ledger = BudgetLedger(plan, monotonic=time.monotonic)
-        state = _new_state(config, case_sha, seed, ledger)
-        _state(root, state, ledger)
+        state = _new_state(config, case_sha, seed, ledger, evaluator)
+        _state(root, state, ledger, evaluator)
 
     if state["phase"] == "search":
         if not state["candidate_batch"]:
@@ -232,7 +258,7 @@ def run_source_evolution(output_dir: str | Path, config: SourceConfigV2, case: o
             candidates = propose_sources(parent, draw_counter=int(state["draw_counter"]), limit=config.max_candidates)
             state["parent"] = parent.to_payload()
             state["candidate_batch"] = [candidate.to_payload() for candidate in candidates]
-            _state(root, state, ledger)
+            _state(root, state, ledger, evaluator)
         else:
             if not isinstance(state["parent"], Mapping):
                 raise SourceRunnerError("search checkpoint has no persisted parent")
@@ -247,7 +273,7 @@ def run_source_evolution(output_dir: str | Path, config: SourceConfigV2, case: o
             estimate = _stage_estimate(case, stage)
             permit = _reserve(ledger, stage, estimate)
             if permit is None:
-                _state(root, state, ledger)
+                _state(root, state, ledger, evaluator)
                 return _result(archive, authority, state, complete=False)
             archive.add(candidate)
             try:
@@ -266,16 +292,16 @@ def run_source_evolution(output_dir: str | Path, config: SourceConfigV2, case: o
             state["eligible"] = int(state["eligible"]) + int(entry["eligible"])
             state["draw_counter"] = int(state["draw_counter"]) + 1
             state["completed_stage_ids"].append(stage)
-            _state(root, state, ledger)
+            _state(root, state, ledger, evaluator)
             if stop_after == stage or not closed.allowed:
                 return _result(archive, authority, state, complete=False)
         viable = [entry for entry in state["candidates"] if entry["eligible"] and entry["gain"] > 1e-12]
         if not viable:
-            return _finish(root, archive, authority, state, ledger)
+            return _finish(root, archive, authority, state, ledger, evaluator)
         finalist = min(viable, key=lambda entry: (-entry["gain"], entry["cost"], SourceVariantV2.from_payload(entry["source"]).fingerprint()))
         state["finalist"] = finalist["source"]
         state["phase"] = "validation"
-        _state(root, state, ledger)
+        _state(root, state, ledger, evaluator)
 
     finalist_payload = state["finalist"]
     if not isinstance(finalist_payload, Mapping):
@@ -285,7 +311,7 @@ def run_source_evolution(output_dir: str | Path, config: SourceConfigV2, case: o
         estimate = _stage_estimate(case, "validation")
         permit = _reserve(ledger, "validation", estimate)
         if permit is None:
-            _state(root, state, ledger)
+            _state(root, state, ledger, evaluator)
             return _result(archive, authority, state, complete=False)
         validation = evaluator.validate(authority.active_source(), finalist)
         payload = _evidence("validation", validation)
@@ -295,11 +321,11 @@ def run_source_evolution(output_dir: str | Path, config: SourceConfigV2, case: o
         state["completed_stage_ids"].append("validation")
         state["phase"] = "canary_pending" if validation.passed else "complete"
         closed = ledger.close_stage(permit, _actual_use(validation))
-        _state(root, state, ledger)
+        _state(root, state, ledger, evaluator)
         if stop_after == "validation" or not closed.allowed:
             return _result(archive, authority, state, complete=False)
         if not validation.passed:
-            return _finish(root, archive, authority, state, ledger)
+            return _finish(root, archive, authority, state, ledger, evaluator)
 
     if state["phase"] == "canary_pending":
         receipt = state["validation_receipt"]
@@ -311,7 +337,7 @@ def run_source_evolution(output_dir: str | Path, config: SourceConfigV2, case: o
         estimate = _stage_estimate(case, "canary")
         permit = _reserve(ledger, "canary", estimate)
         if permit is None:
-            _state(root, state, ledger)
+            _state(root, state, ledger, evaluator)
             return _result(archive, authority, state, complete=False)
         authority.begin_canary(finalist, validation)
         canary = evaluator.canary(authority.active_source(), finalist, epoch_seed=config.seed + 1)
@@ -322,11 +348,11 @@ def run_source_evolution(output_dir: str | Path, config: SourceConfigV2, case: o
         else:
             state["rolled_back"] = int(state["rolled_back"]) + 1
         state["completed_stage_ids"].append("canary")
-        _state(root, state, ledger)
+        _state(root, state, ledger, evaluator)
         if not closed.allowed:
             return _result(archive, authority, state, complete=False)
-        return _finish(root, archive, authority, state, ledger)
-    return _finish(root, archive, authority, state, ledger)
+        return _finish(root, archive, authority, state, ledger, evaluator)
+    return _finish(root, archive, authority, state, ledger, evaluator)
 
 
 __all__ = ["SourceRunnerError", "run_source_evolution"]

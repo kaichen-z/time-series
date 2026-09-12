@@ -12,9 +12,9 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from evolving_loop.data import ContextTask
-from evolving_loop.package_metrics import PackageEvaluation
+from evolving_loop.package_metrics import PackageEvaluation, PackageTaskScore
 from evolving_loop.v2.bundle import EvolutionBundleV2
-from evolving_loop.v2.contracts import fingerprint_payload
+from evolving_loop.v2.contracts import canonical_v2_bytes, fingerprint_payload
 from evolving_loop.v2.cooperative.adapters import (
     CooperativeArtifactCatalog,
     CooperativePipelineAdapter,
@@ -29,6 +29,10 @@ from .runtime import run_policy
 
 _TOLERANCE = 1e-12
 _FOLDS = ((0, 1), (2, 3))
+_CACHE_FIELDS = frozenset({"schema_version", "aggregates", "cache_sha256"})
+_CACHE_ENTRY_FIELDS = frozenset({"key", "evaluation"})
+_EVALUATION_FIELDS = frozenset(PackageEvaluation.__dataclass_fields__) | {"schema_version"}
+_TASK_SCORE_FIELDS = frozenset(PackageTaskScore.__dataclass_fields__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +88,7 @@ class SourceMetaEvaluatorV2:
         self.enabled_arms = tuple(getattr(case, "enabled_arms", ARM_ORDER))
         self._episodes: dict[tuple[str, int], _TrainingEpisode] = {}
         self._aggregate_cache: dict[str, PackageEvaluation] = {}
+        self._durable_train_cache_keys: set[str] = set()
         if type(self.seed_bundle) is not EvolutionBundleV2:
             raise TypeError("source meta case requires an EvolutionBundleV2 seed_bundle")
         if self.enabled_arms != tuple(arm for arm in ARM_ORDER if arm in self.enabled_arms):
@@ -104,6 +109,71 @@ class SourceMetaEvaluatorV2:
             raise ValueError("source meta folds and Dev must have entity-disjoint tasks")
         if any("public" in value.casefold() for value in (*ids, *entities)):
             raise ValueError("Public task membership is forbidden in source meta evaluation")
+
+    @staticmethod
+    def _cached_evaluation(payload: object) -> PackageEvaluation:
+        if not isinstance(payload, Mapping) or set(payload) != _EVALUATION_FIELDS:
+            raise ValueError("source evaluator cache evaluation schema mismatch")
+        rows_payload = payload["task_rows"]
+        if not isinstance(rows_payload, list):
+            raise ValueError("source evaluator cache task rows are invalid")
+        rows = []
+        for item in rows_payload:
+            if not isinstance(item, Mapping) or set(item) != _TASK_SCORE_FIELDS:
+                raise ValueError("source evaluator cache task row schema mismatch")
+            rows.append(PackageTaskScore(**dict(item)))
+        evaluation = PackageEvaluation.from_rows(
+            payload["candidate_sha256"],
+            rows,
+            payload["expected_task_ids"],
+            payload["secondary_diagnostics"],
+        )
+        if canonical_v2_bytes(evaluation.to_payload()) != canonical_v2_bytes(payload):
+            raise ValueError("source evaluator cache evaluation mismatch")
+        return evaluation
+
+    @classmethod
+    def _verified_cache(cls, checkpoint: object) -> dict[str, PackageEvaluation]:
+        if not isinstance(checkpoint, Mapping) or set(checkpoint) != _CACHE_FIELDS:
+            raise ValueError("source evaluator cache checkpoint schema mismatch")
+        body = dict(checkpoint)
+        claimed = body.pop("cache_sha256")
+        if claimed != fingerprint_payload(body):
+            raise ValueError("source evaluator cache checkpoint digest mismatch")
+        if body["schema_version"] != 1 or not isinstance(body["aggregates"], list):
+            raise ValueError("source evaluator cache checkpoint is invalid")
+        restored: dict[str, PackageEvaluation] = {}
+        for item in body["aggregates"]:
+            if not isinstance(item, Mapping) or set(item) != _CACHE_ENTRY_FIELDS:
+                raise ValueError("source evaluator cache entry schema mismatch")
+            key = item["key"]
+            if type(key) is not str or len(key) != 64 or any(value not in "0123456789abcdef" for value in key):
+                raise ValueError("source evaluator cache key is invalid")
+            if key in restored:
+                raise ValueError("source evaluator cache keys must be unique")
+            restored[key] = cls._cached_evaluation(item["evaluation"])
+        if list(restored) != sorted(restored):
+            raise ValueError("source evaluator cache keys must be sorted")
+        return restored
+
+    def cache_checkpoint(self) -> dict[str, object]:
+        body: dict[str, object] = {
+            "schema_version": 1,
+            "aggregates": [
+                {"key": key, "evaluation": self._aggregate_cache[key].to_payload()}
+                for key in sorted(self._durable_train_cache_keys)
+            ],
+        }
+        body["cache_sha256"] = fingerprint_payload(body)
+        return body
+
+    def restore_cache(self, checkpoint: object) -> None:
+        restored = self._verified_cache(checkpoint)
+        self._aggregate_cache = restored
+        self._durable_train_cache_keys = set(restored)
+        # Episode objects retain process-local pipelines. Rebuild them lazily
+        # from the durable aggregate authority after every supported resume.
+        self._episodes = {}
 
     def _task_identity(self, tasks: Sequence[ContextTask], *, split: str, seed: int) -> str:
         return fingerprint_payload({
@@ -126,6 +196,8 @@ class SourceMetaEvaluatorV2:
         })
         cached = self._aggregate_cache.get(key)
         if cached is not None:
+            if cached.candidate_sha256 != bundle.fingerprint() or cached.public_test_accessed:
+                raise ValueError("source evaluator cache does not bind requested evaluation")
             return cached, 0
         evaluation = pipeline.evaluate(bundle, tasks, stage)
         if evaluation.candidate_sha256 != bundle.fingerprint():
@@ -133,6 +205,8 @@ class SourceMetaEvaluatorV2:
         if evaluation.public_test_accessed:
             raise ValueError("Public evaluation is forbidden in source meta evaluation")
         self._aggregate_cache[key] = evaluation
+        if stage == "train":
+            self._durable_train_cache_keys.add(key)
         return evaluation, len(tasks)
 
     @staticmethod
