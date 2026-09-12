@@ -164,3 +164,34 @@ def test_handoff_requires_exact_host_bundle_evidence(compatibility_case, tmp_pat
     wrong = __import__("dataclasses").replace(case.inputs, bundle_acceptance_evidence={evidence_sha: {"schema_version": 1, "accepted": False}})
     with pytest.raises(ValueError, match="does not match"):
         run_protocol_evolution(tmp_path / "wrong", _config(), _manifest(case), ProtocolRuntimeRegistry(), host_inputs=wrong)
+
+
+def test_resume_rejects_missing_migration_object(compatibility_case, tmp_path):
+    """A sealed migration mapping remains resolvable on resume."""
+    manifest = _manifest(compatibility_case)
+    run_protocol_evolution(tmp_path, _config(), manifest, ProtocolRuntimeRegistry(), host_inputs=compatibility_case.inputs, stop_after=5)
+    evidence = json.loads(next((tmp_path / "evidence").glob("*.json")).read_text())
+    # Locate the accepted schema-migration evidence rather than relying on file order.
+    for path in (tmp_path / "evidence").glob("*.json"):
+        candidate = json.loads(path.read_text())
+        if candidate["migration_mapping"] and any(item["old_envelope_sha256"] != item["new_envelope_sha256"] for item in candidate["migration_mapping"]):
+            evidence = candidate
+            break
+    target = evidence["migration_mapping"][0]["new_envelope_sha256"]
+    (tmp_path / "migrations" / f"{target}.json").unlink()
+    with pytest.raises(ValueError, match="incomplete writes"):
+        run_protocol_evolution(tmp_path, _config(), manifest, ProtocolRuntimeRegistry(), host_inputs=compatibility_case.inputs)
+
+
+def test_budget_overrun_does_not_publish_candidate(compatibility_case, tmp_path):
+    """Slow compatibility work cannot advance an active/release/progress publication."""
+    config = {**_config(), "hard_limit_seconds": 10}
+    ticks = iter((0.0, 0.0, 0.0, 6.0))
+    with pytest.raises(ValueError, match="budget close failed"):
+        run_protocol_evolution(
+            tmp_path, config, _manifest(compatibility_case), ProtocolRuntimeRegistry(),
+            host_inputs=compatibility_case.inputs, monotonic=lambda: next(ticks),
+        )
+    assert json.loads((tmp_path / "active_protocol.json").read_text()) == _protocol().to_payload()
+    assert not (tmp_path / "releases").exists()
+    assert not (tmp_path / "progress.jsonl").exists()

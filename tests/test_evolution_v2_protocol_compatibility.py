@@ -264,6 +264,12 @@ def test_migration_mapping_preserves_original_embedded_bundle_identity(compatibi
     evidence = check_compatibility(_protocol(), _protocol(migration="envelope_v2"), case.corpus, ProtocolRuntimeRegistry(), host_inputs=case.inputs, sealed_store=tmp_path / "sealed")
     assert evidence.checks["artifacts"] is True
     assert all(item["old_envelope_sha256"] != item["new_envelope_sha256"] for item in evidence.migration_mapping)
+    for mapping in evidence.migration_mapping:
+        migrated = (tmp_path / "sealed" / "migrations" / f"{mapping['new_envelope_sha256']}.json").read_bytes()
+        payload = __import__("json").loads(migrated)
+        assert fingerprint_payload(payload) == mapping["new_envelope_sha256"]
+        assert payload["content"] == original[mapping["old_envelope_sha256"]]["artifact"]
+        assert payload["content_sha256"] == original[mapping["old_envelope_sha256"]]["artifact_sha256"]
     assert case.inputs.artifact_envelopes == original
 
 

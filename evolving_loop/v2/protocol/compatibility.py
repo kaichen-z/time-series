@@ -321,7 +321,12 @@ def check_compatibility(old: InfrastructureProtocolV2, proposed: InfrastructureP
             new_migrated = proposed_runtime.migrate_envelope(dict(envelope), new_target)
             if _unwrap(old_migrated) != (original, digest) or _unwrap(new_migrated) != (original, digest) or proposed_runtime.migrate_envelope(new_migrated, new_target) != new_migrated:
                 raise ValueError("artifact migration mismatch")
-            mappings.append({"old_envelope_sha256": old_sha, "new_envelope_sha256": fingerprint_payload(new_migrated)})
+            migrated_sha = fingerprint_payload(new_migrated)
+            migrated_path = Path(sealed_store) / "migrations" / f"{migrated_sha}.json"
+            write_once_json(migrated_path, new_migrated)
+            if migrated_path.read_bytes() != canonical_v2_bytes(new_migrated):
+                raise ValueError("migrated envelope readback mismatch")
+            mappings.append({"old_envelope_sha256": old_sha, "new_envelope_sha256": migrated_sha})
     except ValueError:
         return _evidence(old, proposed, corpus, host_inputs, checks, mappings=mappings)
     checks["artifacts"] = True

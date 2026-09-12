@@ -69,7 +69,7 @@ def _validate_closed_prefix(root: Path, checkpoint: Mapping[str, object], seed_s
     completed = checkpoint.get("completed")
     if not isinstance(completed, list) or checkpoint.get("next_index") != len(completed):
         raise ValueError("checkpoint completed prefix is malformed")
-    expected = {"protocols": {seed_sha}, "proposals": set(), "evidence": set(), "decisions": set(), "releases": set(), "sealed": set()}
+    expected = {"protocols": {seed_sha}, "proposals": set(), "evidence": set(), "decisions": set(), "releases": set(), "sealed": set(), "migrations": set()}
     previous = seed_sha
     for index, item in enumerate(completed):
         if not isinstance(item, Mapping) or item.get("index") != index or item.get("before_protocol_sha256") != previous:
@@ -81,6 +81,9 @@ def _validate_closed_prefix(root: Path, checkpoint: Mapping[str, object], seed_s
             identity = item.get(field)
             if identity is not None:
                 expected[directory].add(require_sha256(identity, field))
+        evidence = CompatibilityEvidenceV2.from_payload(_read(root / "evidence" / f"{item['evidence_sha256']}.json"))
+        for mapping in evidence.migration_mapping:
+            expected["migrations"].add(require_sha256(mapping["new_envelope_sha256"], "new_envelope_sha256"))
         previous = require_sha256(item.get("after_protocol_sha256"), "after_protocol_sha256")
     if checkpoint.get("active_protocol_sha256") != previous:
         raise ValueError("checkpoint active protocol does not match progress")
@@ -107,6 +110,9 @@ def _validate_closed_prefix(root: Path, checkpoint: Mapping[str, object], seed_s
     for identity in expected["sealed"]:
         if fingerprint_payload(_read(root / "sealed" / f"{identity}.json")) != identity:
             raise ValueError("sealed Dev identity does not match checkpoint")
+    for identity in expected["migrations"]:
+        if fingerprint_payload(_read(root / "migrations" / f"{identity}.json")) != identity:
+            raise ValueError("migrated envelope identity does not match checkpoint")
     progress = root / "progress.jsonl"
     lines = progress.read_bytes().splitlines() if progress.exists() else []
     if len(lines) != len(completed):
@@ -300,6 +306,12 @@ def run_protocol_evolution(output_dir: Path, config: dict, input_manifest: dict,
         decision_sha = decision.fingerprint()
         write_once_json(root / "decisions" / f"{decision_sha}.json", decision.to_payload())
         before_sha = active.fingerprint()
+        elapsed = clock() - started
+        if elapsed < 0.0:
+            raise ValueError("monotonic clock moved backwards during protocol proposal")
+        closed = ledger.close_stage(permit, ResourceUse(wall_seconds=elapsed))
+        if not closed.allowed:
+            raise ValueError(f"protocol budget close failed: {closed.reason}")
         if decision.decision == "accept":
             release = ProtocolReleaseV2(1, child_sha, child.l0_commitment_sha256, evidence_sha, seed_bundle_sha, host_inputs.runtime_fingerprint)
             release_sha = release.fingerprint()
@@ -312,12 +324,6 @@ def run_protocol_evolution(output_dir: Path, config: dict, input_manifest: dict,
             rejected += 1
         row = {"schema_version": 1, "index": index, "proposal_sha256": proposal_sha, "before_protocol_sha256": before_sha, "after_protocol_sha256": active.fingerprint(), "decision": decision.decision, "reason_codes": list(decision.reason_codes)}
         append_jsonl(root / "progress.jsonl", row)
-        elapsed = clock() - started
-        if elapsed < 0.0:
-            raise ValueError("monotonic clock moved backwards during protocol proposal")
-        closed = ledger.close_stage(permit, ResourceUse(wall_seconds=elapsed))
-        if not closed.allowed:
-            raise ValueError(f"protocol budget close failed: {closed.reason}")
         completed.append({"index": index, "proposal_sha256": proposal_sha, "child_protocol_sha256": child_sha, "evidence_sha256": evidence_sha, "decision_sha256": decision_sha, "release_sha256": active_release_sha if decision.decision == "accept" else None, "sealed_dev_sha256": evidence.sealed_dev_sha256, "before_protocol_sha256": before_sha, "after_protocol_sha256": active.fingerprint()})
         next_index = index + 1
         checkpoint = {"schema_version": 1, "config_sha256": config_sha, "input_manifest_sha256": manifest_sha, "runtime_fingerprint": host_inputs.runtime_fingerprint, "l0_commitment_sha256": active.l0_commitment_sha256, "corpus_sha256": corpus.fingerprint(), "next_index": next_index, "active_protocol_sha256": active.fingerprint(), "active_release_sha256": active_release_sha, "accepted": accepted, "rejected": rejected, "completed": completed, "progress_prefix_sha256": _progress_fingerprint(root), "budget_plan_sha256": plan.fingerprint(), "budget_ledger": ledger.checkpoint()}
