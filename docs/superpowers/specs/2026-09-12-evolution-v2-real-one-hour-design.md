@@ -83,8 +83,9 @@ Both initial real profiles use the frozen Toto-balanced v3 authority:
 - forecast cache: the Host-owned records under
   `runs/champion_forecasts/gpt56sol_high_toto_balanced_v3_20260906/`;
 - retrieval seed: `runs/retrieval_releases/package_nrd_20260903/v000/`;
-- source seed: the versioned source files under
-  `runs/method_evolution/v001/`;
+- source seed: the canonical safe arm-selection policy in
+  `configs/evolution_v2/real/source-seed.json`, whose provenance is bound to the
+  versioned method sources under `runs/method_evolution/v001/`;
 - local runtime and model caches already configured by the repository.
 
 The manifest records every admitted file by role, repository-relative path, and
