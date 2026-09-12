@@ -700,6 +700,8 @@ def bound_numerical_package(
             _fail("task shortlist requires canonical hindcast diagnostics identity")
         if hindcast_diagnostics is None:
             _fail("task shortlist requires sealed hindcast diagnostic content")
+    runtime_failures = ({name: reason for name, reason in source.selection_decision.rejected.items()
+                        if reason == "shortlisted_runtime_failure"} if shortlist is not None else {})
     _validate_champion_provenance(source, release)
     if source.protected_baseline.name == "atlas_70_30":
         _fail("fixed Atlas blend cannot be the protected source anchor")
@@ -751,8 +753,10 @@ def bound_numerical_package(
         retained.append(candidate)
         retained_names.add(candidate.name)
         retained_vectors.add(vector_sha256)
-    if shortlist is not None and tuple(item.name for item in retained) != shortlist.candidate_names:
-        _fail("every ordered shortlist identity must be present in release and materialized forecasts")
+    if shortlist is not None:
+        if (not set(runtime_failures) <= set(shortlist.candidate_names) or anchor.name in runtime_failures
+                or tuple(item.name for item in retained) != tuple(name for name in shortlist.candidate_names if name not in runtime_failures)):
+            _fail("shortlist forecasts must be present or have a typed runtime failure")
 
     ranked = tuple(
         RankedNumericalForecast(
@@ -773,7 +777,7 @@ def bound_numerical_package(
         forecast=anchor.forecast,
         confidence=0.0,
         reason_codes=("package_safe_anchor",),
-        rejected={},
+        rejected=runtime_failures,
         baseline_name=anchor.name,
         considered_candidates=tuple(item.name for item in ranked),
     )
@@ -802,8 +806,9 @@ def bound_numerical_package(
                     or hindcast_diagnostics["task_input_sha256"] != shortlist.task_input_sha256):
                 _fail("sealed diagnostic task binding mismatch")
             diagnostics = local_diagnostics_from_payload(hindcast_diagnostics,
-                names=shortlist.candidate_names, families={v.name: v.family for v in ranked})
-            if any(diagnostics[v.name] != v.diagnostics for v in ranked):
+                names=shortlist.candidate_names, families={**{spec.candidate_id: spec.family for spec in release.alternatives}, anchor.name: anchor.family})
+            if any(diagnostics[v.name] != v.diagnostics for v in ranked) or any(
+                    diagnostics[name] != source.candidate_diagnostics.get(name) for name in runtime_failures):
                 _fail("package diagnostics differ from sealed diagnostic content")
             result = execute_task_local_ensemble(TaskLocalTournamentPolicy(anchor_name=anchor.name),
                 candidate_names=shortlist.candidate_names,
@@ -813,6 +818,10 @@ def bound_numerical_package(
                 selected=result.selected_names, weights=result.weights, forecast=result.forecast,
                 reason_codes=("task_local_ensemble",))
             fallback_reason = result.fallback_reason
+            if runtime_failures:
+                selection = replace(selection, mode="single", selected=(anchor.name,), weights=(1.0,),
+                    forecast=anchor.forecast, rejected=runtime_failures)
+                fallback_reason = "shortlisted_runtime_failure"
             component_fingerprints["task_local_result"] = task_local_result_sha256(
                 selection, hindcast_diagnostics_sha256, fallback_reason)
     morphology_card, accepted, rejected, handoff = _verified_assumption_projection(
@@ -835,8 +844,8 @@ def bound_numerical_package(
         component_fingerprints["morphology_card"] = hashlib.sha256(b'{"enabled":false}').hexdigest()
     return NumericalForecastPackage(
         task_profile=source.task_profile,
-        active_candidate_names=tuple(item.name for item in ranked),
-        candidate_diagnostics={item.name: item.diagnostics for item in ranked},
+        active_candidate_names=shortlist.candidate_names if shortlist is not None else tuple(item.name for item in ranked),
+        candidate_diagnostics=diagnostics if shortlist is not None else {item.name: item.diagnostics for item in ranked},
         morphology_card=morphology_card,
         accepted_assumptions=accepted,
         rejected_assumptions=rejected,

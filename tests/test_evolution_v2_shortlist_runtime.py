@@ -2,6 +2,7 @@
 import hashlib
 from dataclasses import asdict, replace
 from types import SimpleNamespace
+import pytest
 
 from common.payload import canonical_json_bytes
 from evolving_loop.v2 import cli
@@ -46,6 +47,20 @@ def production_world(tmp_path):
     seed = replace(seed, schema_version=2, alternatives=alternatives,
         source_fingerprints=dict(seed.source_fingerprints) | {"dictionary": dictionary_sha},
         anchor_release_payload=seed.to_payload()["anchor_release_payload"])
+    # Evidence authorizes the exact fitted policy which unchanged child replay
+    # will execute, including all five task-specific cross-fit policies.
+    from evolving_loop.package_numerical_evolution import fit_numerical_recipe
+    from evolving_loop.v2.numerical_qd.adapters import _verified_build_rows
+    from numerical_agent.evolution.champion import parse_champion_recipe, parse_champion_release
+    state, _, policies, _, _ = _bootstrap(config, seed, original)
+    recipe = parse_champion_recipe(policies[state.inventory.members[0].policy_sha256])
+    anchor = parse_champion_release(seed.to_payload()["anchor_release_payload"])
+    fitted = fit_numerical_recipe(recipe, _verified_build_rows(_train_rows(original), original.tasks,
+        folds, recipe, anchor, CatalogStore()), folds, anchor)
+    fitted_spec = next(spec for spec in original.materializer._release(seed, fitted, version="n001", anchor=anchor).alternatives
+                       if spec.candidate_id == recipe.name)
+    seed = replace(seed, alternatives=tuple(fitted_spec if spec.candidate_id == recipe.name else spec for spec in seed.alternatives),
+        anchor_release_payload=seed.to_payload()["anchor_release_payload"])
     policy = TaskShortlistPolicyV1()
     entries, raw, expected = [], {}, {}
     def write(relative, payload):
@@ -84,6 +99,53 @@ def production_world(tmp_path):
     index = dict(adapter.task_local_evidence.index)
     raw[fingerprint_payload(index)] = canonical_v2_bytes(index)
     return config, seed, folds, adapter, store, expected, raw
+
+
+def test_same_id_policy_change_requires_new_evidence_before_child_execution(tmp_path, monkeypatch):
+    config, seed, folds, adapter, store, expected, raw = production_world(tmp_path)
+    state, genome, policies, _, _ = _bootstrap(config, seed, adapter)
+    # Replacing the specialist's executable parent with the Anchor changes its
+    # forecast, while retaining its candidate ID and old successful folds.
+    spec = next(item for item in seed.alternatives if item.candidate_id == "select_seasonal_naive")
+    policy = adapter.materializer._stored_policy_for_task(spec, adapter.tasks[-1].numeric.task_id)
+    changed_recipe = replace(policy.recipe, parents=("toto_2_0",), fallback_parent="toto_2_0",
+        assumptions=tuple(replace(item, candidate_name="toto_2_0") for item in policy.recipe.assumptions))
+    changed_policy = replace(policy, recipe=changed_recipe)
+    changed = replace(spec, recipe_payload=changed_recipe.to_payload(),
+        full_build_policy_payload=changed_policy.to_payload(),
+        build_fold_policy_payloads=tuple((fold, replace(changed_policy,
+            thresholds=tuple((key, float(fold + 1)) for key, _ in changed_policy.thresholds)).to_payload()) for fold in range(5)))
+    original_release = type(adapter.materializer)._release
+    def changed_release(self, *args, **kwargs):
+        release = original_release(self, *args, **kwargs)
+        return replace(release, alternatives=tuple(changed if item.candidate_id == changed.candidate_id else item for item in release.alternatives),
+            anchor_release_payload=release.to_payload()["anchor_release_payload"])
+    monkeypatch.setattr(type(adapter.materializer), "_release", changed_release)
+    monkeypatch.setattr(adapter, "materialize_local_package", lambda *_args, **_kwargs: pytest.fail("changed policy reached old diagnostics"))
+    with pytest.raises(ValueError, match="refreshed Task 4 evidence"):
+        adapter.materialize_child(seed, genome, state, member_id=state.inventory.members[0].member_id,
+            policies=policies, build_rows=_train_rows(adapter), descriptor_policy=config.descriptor_policy, version="n001")
+
+
+def test_failed_shortlisted_specialist_keeps_exact_anchor_and_reloads(tmp_path):
+    config, seed, folds, adapter, store, expected, raw = production_world(tmp_path)
+    original = store.forecast
+    def fail_one(name, *args):
+        if name == "seasonal_naive":
+            raise RuntimeError("specialist unavailable")
+        return original(name, *args)
+    store.forecast = fail_one
+    registry = _seed_registry(seed, adapter)
+    from evolving_loop.v2.numerical_qd.adapters import import_numerical_seed
+    imported = import_numerical_seed(seed, registry, tasks=adapter.tasks, evidence=adapter.task_local_evidence)
+    validate_frozen_local_evidence(seed, imported.envelope, artifact_bytes_by_sha=raw)
+    restored = imported.envelope.restore(adapter.tasks)
+    for task in adapter.tasks:
+        package = restored.package_for(task)
+        assert package.final_forecast == package.protected_baseline.forecast == (14.0, 14.0)
+        assert package.selection_decision.selected == ("toto_2_0",)
+        assert package.selection_decision.rejected["seasonal_naive"] == "shortlisted_runtime_failure"
+        assert "seasonal_naive" not in {item.name for item in package.ranked_alternatives}
 
 
 def test_production_seed_child_and_nonempty_freeze_keep_shortlist_result(tmp_path, monkeypatch):

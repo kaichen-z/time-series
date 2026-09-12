@@ -486,7 +486,8 @@ def validate_frozen_local_evidence(release, envelope, *, artifact_bytes_by_sha, 
         package = envelope.packages[entry["package_sha256"]].restore()
         names = shortlist.candidate_names
         sealed_diagnostics = local_diagnostics_from_payload(diagnostics, names=names,
-            families={item.name: item.family for item in package.ranked_alternatives})
+            families={**{spec.candidate_id: spec.family for spec in release.alternatives},
+                      package.protected_baseline.name: package.protected_baseline.family})
         if sealed_diagnostics != dict(package.candidate_diagnostics):
             raise ValueError("frozen package diagnostic content differs from sealed evidence")
         if package.component_fingerprints.get("task_local_result") != task_local_result_sha256(
@@ -494,8 +495,10 @@ def validate_frozen_local_evidence(release, envelope, *, artifact_bytes_by_sha, 
             raise ValueError("frozen task-local result content identity mismatch")
         anchor = package.protected_baseline
         selection = package.selection_decision
+        failures = {name for name, reason in selection.rejected.items() if reason == "shortlisted_runtime_failure"}
         if (names[0] != anchor.name or package.active_candidate_names != names
-                or tuple(item.name for item in package.ranked_alternatives) != names
+                or tuple(item.name for item in package.ranked_alternatives) != tuple(name for name in names if name not in failures)
+                or failures and package.fallback_reason != "shortlisted_runtime_failure"
                 or set(package.candidate_diagnostics) != set(names)
                 or not set(selection.considered_candidates) <= set(names)
                 or not set(selection.rejected) <= set(names)
@@ -888,6 +891,7 @@ class LegacyNumericalAdapter:
         self.host_evaluator = host_evaluator
         self.host_evaluator_sha256 = host_evaluator_sha256
         self.sources = _sources(sources)
+        self._task_local_authorized_sources = self.sources
         if task_local_evidence is not None and type(task_local_evidence) is not TaskLocalEvidenceBundleV1:
             raise ValueError("task-local evidence must be an exact immutable bundle")
         self.task_local_evidence = task_local_evidence
@@ -912,6 +916,22 @@ class LegacyNumericalAdapter:
             return self.task_local_evidence.by_task[task_id]
         except KeyError as error:
             raise ValueError("task has no sealed local evidence") from error
+
+    def validate_local_catalog_revision(self, parent, child, source_sha256s):
+        """Old Task 4 folds authorize the exact parent policy and source bytes."""
+        if self.task_local_evidence is None:
+            return
+        if (not set(source_sha256s) <= set(self._task_local_authorized_sources)
+                or any(self.sources.get(sha) != self._task_local_authorized_sources[sha] for sha in source_sha256s)
+                or dict(child.runtime_fingerprints) != dict(parent.runtime_fingerprints)):
+            raise ValueError("changed executable requires refreshed Task 4 evidence")
+        authorized = {spec.candidate_id: spec for spec in parent.alternatives}
+        revisions = {spec.candidate_id: spec for spec in child.alternatives}
+        shortlisted = {name for value in self.task_local_evidence.by_task.values() for name in value[0].candidate_names[1:]}
+        for name in shortlisted:
+            if (name not in authorized or name not in revisions
+                    or canonical_v2_bytes(authorized[name].to_payload()) != canonical_v2_bytes(revisions[name].to_payload())):
+                raise ValueError("changed shortlisted policy requires refreshed Task 4 evidence")
 
     def materialize_local_package(self, task, release, forecast):
         """Resolve sealed membership before executing any task forecasts."""
@@ -939,27 +959,44 @@ class LegacyNumericalAdapter:
         specs = {spec.candidate_id: spec for spec in release.alternatives}
         derived = {name for name in shortlist.candidate_names if name in specs and
             specs[name].materializer_kind in {"champion", "bounded_overlay"}}
-        forecasts = {name: tuple(forecast(name, numeric.history_values, numeric.prediction_length, numeric.frequency))
-            for name in shortlist.candidate_names if name not in derived}
+        forecasts, failures = {}, {}
+        def checked(value):
+            value = tuple(float(item) for item in value)
+            if len(value) != numeric.prediction_length or not all(math.isfinite(item) for item in value):
+                raise ValueError("invalid task-local forecast")
+            return value
+        for name in shortlist.candidate_names:
+            if name in derived:
+                continue
+            try:
+                forecasts[name] = checked(forecast(name, numeric.history_values, numeric.prediction_length, numeric.frequency))
+            except Exception as error:
+                if name == anchor_name:
+                    raise ValueError("protected Anchor unavailable; a verified parent forecast is required") from error
+                failures[name] = "shortlisted_runtime_failure"
         from numerical_agent.evolution.champion_runtime import execute_champion
         while derived:
             progressed = False
             for name in sorted(derived):
-                policy = self.materializer._stored_policy_for_task(specs[name], numeric.task_id)
-                if not set(policy.recipe.parents) <= set(forecasts):
-                    continue
-                forecasts[name] = tuple(execute_champion(policy, forecasts, diagnostics, profile,
-                    numeric.history_values, numeric.prediction_length).forecast)
+                try:
+                    policy = self.materializer._stored_policy_for_task(specs[name], numeric.task_id)
+                    if not set(policy.recipe.parents) <= set(forecasts):
+                        continue
+                    forecasts[name] = checked(execute_champion(policy, forecasts, diagnostics, profile,
+                        numeric.history_values, numeric.prediction_length).forecast)
+                except Exception:
+                    failures[name] = "shortlisted_runtime_failure"
                 derived.remove(name)
                 progressed = True
             if not progressed:
-                raise ValueError("derived shortlisted candidates require shortlisted executable parents")
+                failures.update({name: "shortlisted_runtime_failure" for name in derived})
+                derived.clear()
         ranked = tuple(RankedNumericalForecast(index, name, families[name], forecasts[name], diagnostics[name])
-            for index, name in enumerate(shortlist.candidate_names, 1))
+            for index, name in enumerate((name for name in shortlist.candidate_names if name in forecasts), 1))
         protected = ranked[0]
         selection = SelectionDecision(mode="single", selected=(anchor_name,), weights=(1.0,),
             forecast=protected.forecast, confidence=0.0, reason_codes=("package_safe_anchor",),
-            rejected={}, baseline_name=anchor_name, considered_candidates=shortlist.candidate_names)
+            rejected=failures, baseline_name=anchor_name, considered_candidates=shortlist.candidate_names)
         source = NumericalForecastPackage(
             task_profile=profile,
             active_candidate_names=shortlist.candidate_names, candidate_diagnostics=diagnostics,
@@ -1187,6 +1224,7 @@ class LegacyNumericalAdapter:
                     version=version, generation=genome.generation)
             else:
                 local_release = materializer._release(parent_release, fit, version=version, anchor=anchor)
+                self.validate_local_catalog_revision(parent_release, local_release, source_dependencies)
                 # Complete catalog metadata is independent of the task execution view.
                 registry = build_package_registry(self.tasks, local_release,
                     lambda task, supplied: self.materialize_local_package(task, supplied, materializer.forecast_store.forecast))
@@ -1324,6 +1362,7 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
             raise ValueError("projection has unverified source dependencies")
         if child.candidate.release.anchor_release_payload != parent_release.anchor_release_payload:
             raise ValueError("projection must retain the exact safe anchor")
+        adapter.validate_local_catalog_revision(parent_release, child.candidate.release, child.source_sha256s)
         by_genome[sha] = child
     occupied_shas = {sha for cell in archive.cells for sha in cell.entry_sha256s}
     entries = {sha: entry for sha, entry in archive.entries.items()
@@ -1392,8 +1431,13 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
     def builder(task, supplied):
         source = parent_registry.package_for(task)
         available = {item.name: item for item in source.ranked_alternatives}
+        runtime_failures = {name: reason for name, reason in source.selection_decision.rejected.items()
+                            if reason == "shortlisted_runtime_failure"}
         for _, child, spec in selected:
             package = child.candidate.registry.package_for(task)
+            if adapter.task_local_evidence is not None:
+                runtime_failures.update({name: reason for name, reason in package.selection_decision.rejected.items()
+                                        if reason == "shortlisted_runtime_failure"})
             if package.protected_baseline.forecast != source.protected_baseline.forecast:
                 raise ValueError("projection changed the safe anchor forecast")
             for item in package.ranked_alternatives:
@@ -1419,6 +1463,8 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
                         raise ValueError("complete catalog has conflicting task materialization")
                     continue
                 available[item.name] = item
+            for name in runtime_failures:
+                available.pop(name, None)
             if child.genome.fingerprint() == required_genome_sha256 and spec.candidate_id not in available:
                 raise ValueError("projection package is missing the exact Train winner member")
         evidence = adapter.local_evidence_for(task)
@@ -1426,6 +1472,7 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
             return bound_numerical_package(source, supplied, available, history=task.numeric.history_values,
                 task_fold=adapter.fold_manifest.task_fold_map.get(task.numeric.task_id))
         shortlist, diagnostics, _shortlist_sha, diagnostics_sha = evidence
+        source = replace(source, selection_decision=replace(source.selection_decision, rejected=runtime_failures))
         return bound_numerical_package(source, supplied, available, history=task.numeric.history_values,
             task_fold=adapter.fold_manifest.task_fold_map.get(task.numeric.task_id), shortlist=shortlist,
             hindcast_diagnostics_sha256=diagnostics_sha, hindcast_diagnostics=diagnostics)
