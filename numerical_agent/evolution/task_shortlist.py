@@ -36,6 +36,10 @@ def _finite(value: object, field: str) -> float:
         raise ValueError(f"{field} must be finite")
     return result
 
+def _fields(payload: Mapping[str, object], expected: set[str], name: str) -> None:
+    if set(payload) != expected:
+        raise ValueError(f"{name} fields mismatch")
+
 
 @dataclass(frozen=True)
 class CandidatePriorV1:
@@ -70,6 +74,9 @@ class CandidatePriorV1:
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> "CandidatePriorV1":
+        if not isinstance(payload, Mapping):
+            raise ValueError("candidate prior payload must be an object")
+        _fields(payload, {"candidate_name", "family", "success_rate", "mean_joint", "p90_joint", "morphology_scores"}, "CandidatePriorV1")
         scores = payload.get("morphology_scores", ())
         if not isinstance(scores, Sequence) or isinstance(scores, (str, bytes)):
             raise ValueError("morphology_scores must be a list")
@@ -78,6 +85,12 @@ class CandidatePriorV1:
                    _finite(payload["mean_joint"], "mean_joint"),
                    _finite(payload["p90_joint"], "p90_joint"),
                    tuple((_name(item[0], "morphology key"), _finite(item[1], "morphology score")) for item in scores))
+
+    def canonical_bytes(self) -> bytes:
+        return canonical_json_bytes(self.to_payload())
+
+    def fingerprint(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -96,7 +109,16 @@ class TaskShortlistPolicyV1:
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> "TaskShortlistPolicyV1":
+        if not isinstance(payload, Mapping):
+            raise ValueError("shortlist policy payload must be an object")
+        _fields(payload, {"schema_version", "minimum_candidates", "target_candidates", "maximum_candidates"}, "TaskShortlistPolicyV1")
         return cls(int(payload["schema_version"]), int(payload["minimum_candidates"]), int(payload["target_candidates"]), int(payload["maximum_candidates"]))
+
+    def canonical_bytes(self) -> bytes:
+        return canonical_json_bytes(self.to_payload())
+
+    def fingerprint(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -118,6 +140,11 @@ class TaskCandidateShortlistV1:
         if names != self.candidate_names or len(names) != len(set(names)):
             raise ValueError("candidate names must be unique canonical IDs")
         exclusions = tuple((_name(k, "excluded candidate"), str(reason)) for k, reason in self.exclusion_reasons)
+        if any(reason not in {"unsafe_status", "not_applicable", "unavailable", "ranked_out"} for _, reason in exclusions):
+            raise ValueError("unknown exclusion reason")
+        order = {reason: index for index, reason in enumerate(("unsafe_status", "not_applicable", "unavailable", "ranked_out"))}
+        if tuple(sorted(exclusions, key=lambda item: (order[item[1]], item[0]))) != exclusions:
+            raise ValueError("exclusions must use canonical deterministic order")
         if exclusions != self.exclusion_reasons or len(exclusions) != len(set(k for k, _ in exclusions)):
             raise ValueError("exclusions must be ordered and unique canonical IDs")
         if not isinstance(self.shortlist_underfilled, bool) or not isinstance(self.public_test_accessed, bool):
@@ -135,11 +162,15 @@ class TaskCandidateShortlistV1:
     def from_payload(cls, payload: Mapping[str, object]) -> "TaskCandidateShortlistV1":
         if not isinstance(payload, Mapping):
             raise ValueError("shortlist payload must be an object")
+        _fields(payload, {"schema_version", "task_input_sha256", "dictionary_sha256", "policy_sha256", "candidate_names", "exclusion_reasons", "shortlist_underfilled", "public_test_accessed"}, "TaskCandidateShortlistV1")
         return cls(int(payload["schema_version"]), str(payload["task_input_sha256"]), str(payload["dictionary_sha256"]), str(payload["policy_sha256"]),
                    tuple(payload["candidate_names"]), tuple(tuple(x) for x in payload["exclusion_reasons"]), payload["shortlist_underfilled"], payload["public_test_accessed"])
 
     def canonical_bytes(self) -> bytes:
         return canonical_json_bytes(self.to_payload())
+
+    def fingerprint(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
 
 
 def _dictionary_hash(dictionary: FilterDictionary) -> str:
@@ -151,7 +182,7 @@ def _dictionary_hash(dictionary: FilterDictionary) -> str:
 def build_task_candidate_shortlist(*, dictionary: FilterDictionary, profile: TaskProfile,
     task_input_sha256: str, anchor_name: str, available_names: Sequence[str],
     priors: Sequence[CandidatePriorV1], policy: TaskShortlistPolicyV1,
-    screening: ScreeningPolicy | None = None) -> TaskCandidateShortlistV1:
+    screening: ScreeningPolicy) -> TaskCandidateShortlistV1:
     if type(dictionary) is not FilterDictionary or type(profile) is not TaskProfile:
         raise TypeError("dictionary and profile must be exact contract types")
     _sha(task_input_sha256, "task_input_sha256")
@@ -163,8 +194,10 @@ def build_task_candidate_shortlist(*, dictionary: FilterDictionary, profile: Tas
     if len(prior_map) != len(priors):
         raise ValueError("priors contain duplicate candidate names")
     entries = {_name(e.name): e for e in dictionary.entries}
-    active = materialize_active_dictionary(screening, profile) if screening is not None else None
-    active_names = {_name(item.name) for item in active.active} if active is not None else set(entries)
+    if type(screening) is not ScreeningPolicy:
+        raise TypeError("screening must be an exact ScreeningPolicy")
+    active = materialize_active_dictionary(screening, profile)
+    active_names = {_name(item.name) for item in active.active}
     tags = profile_tags(profile)
     eligible: list[tuple[str, CandidatePriorV1]] = []
     excluded: list[tuple[str, str]] = []
@@ -172,7 +205,8 @@ def build_task_candidate_shortlist(*, dictionary: FilterDictionary, profile: Tas
         entry = entries.get(candidate)
         if entry is None or candidate not in prior_map:
             excluded.append((candidate, "unavailable")); continue
-        if entry.status not in {"keep", "specialized"}:
+        screening_entry = screening.get(entry.name)
+        if entry.status not in {"keep", "specialized"} or (screening_entry is not None and screening_entry.status not in {"keep", "specialized"}):
             excluded.append((candidate, "unsafe_status")); continue
         if candidate not in active_names:
             excluded.append((candidate, "not_applicable")); continue
@@ -187,11 +221,15 @@ def build_task_candidate_shortlist(*, dictionary: FilterDictionary, profile: Tas
         scores = dict(prior.morphology_scores)
         morphology = min((scores[tag] for tag in tags if tag in scores), default=scores.get("default", math.inf))
         return (morphology, -prior.success_rate, prior.mean_joint, prior.p90_joint, family_counts.get(prior.family, 0), candidate)
-    remaining.sort(key=rank)
-    for candidate, prior in remaining[: max(0, policy.target_candidates - 1)]:
+    for _ in range(max(0, policy.target_candidates - 1)):
+        if not remaining:
+            break
+        remaining.sort(key=rank)
+        candidate, prior = remaining.pop(0)
         selected.append(candidate); family_counts[prior.family] = family_counts.get(prior.family, 0) + 1
     selected_set = set(selected)
     excluded.extend((candidate, "ranked_out") for candidate, _ in eligible if candidate not in selected_set)
+    excluded.sort(key=lambda item: ({"unsafe_status": 0, "not_applicable": 1, "unavailable": 2, "ranked_out": 3}[item[1]], item[0]))
     return TaskCandidateShortlistV1(1, task_input_sha256, _dictionary_hash(dictionary), policy_sha(policy), tuple(selected), tuple(excluded), len(selected) < policy.minimum_candidates, False)
 
 

@@ -1,10 +1,9 @@
-import hashlib
-
 import pytest
 
 from common.payload import canonical_json_bytes
 from numerical_agent.evolution.filtering import FilterDictionary, FilterEntry
 from numerical_agent.evolution.screening import (
+    ApplicabilityClause,
     ApplicabilityPolicy,
     ScreeningEntry,
     ScreeningPolicy,
@@ -26,6 +25,10 @@ def test_shortlist_contract_is_canonical_and_anchor_first():
     assert value.candidate_names[0] == "anchor"
     assert TaskCandidateShortlistV1.from_payload(value.to_payload()) == value
     assert value.canonical_bytes() == canonical_json_bytes(value.to_payload())
+    with pytest.raises(ValueError):
+        TaskCandidateShortlistV1.from_payload({**value.to_payload(), "extra": 1})
+    with pytest.raises(ValueError):
+        TaskCandidateShortlistV1.from_payload({**value.to_payload(), "public_test_accessed": True})
 
 
 def test_policy_has_exact_bounds_and_prior_rejects_nonfinite():
@@ -34,6 +37,9 @@ def test_policy_has_exact_bounds_and_prior_rejects_nonfinite():
         TaskShortlistPolicyV1(1, 5, 8, 10)
     with pytest.raises(ValueError):
         CandidatePriorV1("a", "statistical", float("nan"), 1.0, 1.0, ())
+    assert TaskShortlistPolicyV1().canonical_bytes()
+    assert len(TaskShortlistPolicyV1().fingerprint()) == 64
+    assert len(CandidatePriorV1("a", "statistical", .5, 1, 1, ()).fingerprint()) == 64
 
 
 def _profile(**changes):
@@ -77,3 +83,30 @@ def test_selection_is_history_conditioned_and_underfill_excludes_unsafe():
     assert result.candidate_names == ("anchor", "a", "b", "c", "d")
     assert result.shortlist_underfilled
     assert ("unsafe", "unsafe_status") in result.exclusion_reasons
+
+
+def test_profile_applicability_changes_shortlist_and_all_reasons_are_canonical():
+    names = ("anchor", "unsafe", "special", "missing", "r1", "r2", "r3", "r4", "r5", "r6")
+    dictionary = FilterDictionary(tuple(
+        FilterEntry(n, "statistical", "quarantine" if n == "unsafe" else "keep", (), "safe") for n in names if n != "missing"
+    ))
+    screening = ScreeningPolicy(tuple(
+        ScreeningEntry(n, "statistical", "specialized" if n == "special" else "keep", ApplicabilityPolicy((ApplicabilityClause(("signed",)),)) if n == "special" else ApplicabilityPolicy(), "safe") for n in names if n not in {"unsafe", "missing"}
+    ), ("anchor",))
+    priors = tuple(CandidatePriorV1(n, "statistical", .9, 1, 1, ()) for n in names if n != "missing")
+    result = build_task_candidate_shortlist(dictionary=dictionary, profile=_profile(), screening=screening,
+        task_input_sha256="1" * 64, anchor_name="anchor", available_names=names, priors=priors, policy=TaskShortlistPolicyV1())
+    assert result.candidate_names[:2] == ("anchor", "r1")
+    assert result.exclusion_reasons[:3] == (("unsafe", "unsafe_status"), ("special", "not_applicable"), ("missing", "unavailable"))
+
+
+def test_builder_requires_screening_and_selects_exact_target_with_dynamic_family_ties():
+    names = ("anchor",) + tuple(f"c{i}" for i in range(9))
+    families = ("statistical", "tsfm", "combined", "statistical", "tsfm", "combined", "statistical", "tsfm", "combined", "statistical")
+    dictionary = FilterDictionary(tuple(FilterEntry(n, f, "keep", (), "safe") for n, f in zip(names, families)))
+    screening = ScreeningPolicy(tuple(ScreeningEntry(n, f, "keep", ApplicabilityPolicy(), "safe") for n, f in zip(names, families)), ("anchor",))
+    priors = tuple(CandidatePriorV1(n, f, .9, 1, 1, ()) for n, f in zip(names, families))
+    result = build_task_candidate_shortlist(dictionary=dictionary, profile=_profile(), screening=screening,
+        task_input_sha256="1" * 64, anchor_name="anchor", available_names=names, priors=priors, policy=TaskShortlistPolicyV1())
+    assert len(result.candidate_names) == 8
+    assert len(set(next(e.family for e in dictionary.entries if e.name == n) for n in result.candidate_names[:4])) == 3
