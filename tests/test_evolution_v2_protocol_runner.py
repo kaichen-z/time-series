@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from evolving_loop.v2.protocol import (
     ProtocolComponentV2,
     ProtocolRuntimeRegistry,
     run_protocol_evolution,
+    freeze_protocol_handoff,
 )
 from tests.test_evolution_v2_protocol_compatibility import _protocol, compatibility_case
 
@@ -17,6 +20,7 @@ def _manifest(case):
         "runtime_fingerprint": "d" * 64,
         "corpus": case.corpus.to_payload(),
         "seed_protocol": _protocol().to_payload(),
+        "host_input_files": [],
         "frozen_bundle_sha256": case.bundles[0].fingerprint(),
         "replacement_templates": [
             ProtocolComponentV2("diagnostic_metric", "absolute_movement", 1, 1).to_payload(),
@@ -56,3 +60,42 @@ def test_frozen_handoff_has_no_public_execution(compatibility_case, tmp_path):
     handoff = json.loads((tmp_path / "frozen_protocol_handoff.json").read_text())
     assert result["public_test_accessed"] is False
     assert handoff["public_test_accessed"] is False
+    release = json.loads((tmp_path / "releases" / f"{result['active_release_sha256']}.json").read_text())
+    assert handoff["bundle_sha256"] == release["frozen_bundle_sha256"]
+    before = (tmp_path / "completion.json").read_bytes()
+    assert run_protocol_evolution(tmp_path, _config(), _manifest(case), ProtocolRuntimeRegistry(), host_inputs=case.inputs) == result
+    assert (tmp_path / "completion.json").read_bytes() == before
+
+
+def test_seed_protocol_replays_after_newer_activation(compatibility_case, tmp_path):
+    """Publication leaves the exact old protocol and its components runnable."""
+    case = compatibility_case
+    seed = _protocol()
+    runtime = ProtocolRuntimeRegistry().resolve(seed, case.inputs.runtime_inputs)
+    before = runtime.evaluate(case.bundles[0], runtime.load_tasks()[:4], "train")
+    run_protocol_evolution(tmp_path, _config(), _manifest(case), ProtocolRuntimeRegistry(), host_inputs=case.inputs)
+    after = ProtocolRuntimeRegistry().resolve(seed, case.inputs.runtime_inputs).evaluate(case.bundles[0], runtime.load_tasks()[:4], "train")
+    assert after.to_payload() == before.to_payload()
+
+
+def test_resume_rejects_changed_manifest_and_unsealed_evidence(compatibility_case, tmp_path):
+    """A resume may consume only the exact sealed input and object prefix."""
+    case = compatibility_case
+    manifest = _manifest(case)
+    run_protocol_evolution(tmp_path, _config(), manifest, ProtocolRuntimeRegistry(), host_inputs=case.inputs, stop_after=1)
+    changed = {**manifest, "runtime_fingerprint": "e" * 64}
+    with pytest.raises(ValueError, match="commitment"):
+        run_protocol_evolution(tmp_path, _config(), changed, ProtocolRuntimeRegistry(), host_inputs=case.inputs)
+    (tmp_path / "evidence" / ("f" * 64 + ".json")).write_text("{}")
+    with pytest.raises(ValueError, match="incomplete"):
+        run_protocol_evolution(tmp_path, _config(), manifest, ProtocolRuntimeRegistry(), host_inputs=case.inputs)
+
+
+def test_handoff_rejects_bundle_other_than_release_binding(compatibility_case):
+    """Matching L0 alone cannot substitute a different frozen Bundle."""
+    case = compatibility_case
+    release = __import__("evolving_loop.v2.protocol.contracts", fromlist=["ProtocolReleaseV2"]).ProtocolReleaseV2(
+        1, "a" * 64, "a" * 64, "b" * 64, case.bundles[0].fingerprint(), "d" * 64
+    )
+    with pytest.raises(ValueError, match="frozen Bundle"):
+        freeze_protocol_handoff(release, case.bundles[1], resolve=lambda _sha: {})

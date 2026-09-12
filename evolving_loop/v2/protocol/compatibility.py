@@ -158,6 +158,8 @@ class ProtocolDecisionV2:
     def __post_init__(self) -> None:
         if self.schema_version != 1 or self.decision not in {"accept", "reject"} or not self.reason_codes:
             raise ValueError("invalid protocol decision")
+        if len(self.reason_codes) != len(set(self.reason_codes)):
+            raise ValueError("protocol decision reason codes must be unique")
         if self.decision == "accept" and self.reason_codes != ("compatible",):
             raise ValueError("accepted decision must be compatible")
         if self.decision == "reject" and any(reason not in _REASONS for reason in self.reason_codes):
@@ -182,6 +184,7 @@ class CompatibilityHostInputsV2:
     artifact_envelopes: Mapping[str, Mapping[str, object]]
     verifier_fixtures: tuple[Mapping[str, object], ...]
     runtime_fingerprint: str
+    inference_projections: Mapping[str, Mapping[str, object]]
     evaluation_cache: MutableMapping[tuple[str, str, str, str, str], PackageEvaluation] | None = None
 
     def __post_init__(self) -> None:
@@ -190,6 +193,8 @@ class CompatibilityHostInputsV2:
         require_sha256(self.runtime_fingerprint, "runtime_fingerprint")
         if len(self.verifier_fixtures) != 4 or not all(isinstance(item, Mapping) for item in self.verifier_fixtures):
             raise ValueError("compatibility Host inputs require four verifier fixtures")
+        if not isinstance(self.inference_projections, Mapping):
+            raise ValueError("compatibility Host inputs require inference projections")
 
 
 def nonregressing(old: PackageEvaluation, new: PackageEvaluation) -> bool:
@@ -242,6 +247,31 @@ def _evidence(old: InfrastructureProtocolV2, proposed: InfrastructureProtocolV2,
     return CompatibilityEvidenceV2(1, old.fingerprint(), proposed.fingerprint(), corpus.fingerprint(), host.runtime_fingerprint, checks, tuple(rows), tuple(mappings), sealed)
 
 
+def _projection_is_safe(projection: Mapping[str, object], *, task_id: str) -> bool:
+    """Audit the exact agent-facing projection before Host scoring may begin."""
+    forbidden = {"future_values", "labels", "label", "labels_public", "gt_evidence", "ground_truth", "evaluator", "evaluator_only"}
+    if projection.get("task_id") != task_id:
+        return False
+    def walk(value: object) -> bool:
+        if isinstance(value, Mapping):
+            return not (set(value) & forbidden) and all(walk(item) for item in value.values())
+        if isinstance(value, (tuple, list)):
+            return all(walk(item) for item in value)
+        return True
+    return walk(projection)
+
+
+def _audit_firewall(tasks: tuple[object, ...], corpus: CompatibilityCorpusV2, projections: Mapping[str, Mapping[str, object]]) -> bool:
+    wanted = corpus.train_task_sha256s + corpus.dev_task_sha256s
+    if set(projections) != set(wanted):
+        return False
+    for task in tasks:
+        task_sha = task_registry_fingerprint(task)
+        if task_sha not in wanted or not _projection_is_safe(projections[task_sha], task_id=task.numeric.task_id):
+            return False
+    return True
+
+
 def check_compatibility(old: InfrastructureProtocolV2, proposed: InfrastructureProtocolV2, corpus: CompatibilityCorpusV2, registry: ProtocolRuntimeRegistry, *, host_inputs: CompatibilityHostInputsV2, sealed_store: Path) -> CompatibilityEvidenceV2:
     if not isinstance(old, InfrastructureProtocolV2) or not isinstance(proposed, InfrastructureProtocolV2):
         raise TypeError("compatibility requires infrastructure protocols")
@@ -272,7 +302,8 @@ def check_compatibility(old: InfrastructureProtocolV2, proposed: InfrastructureP
     except ValueError:
         return _evidence(old, proposed, corpus, host_inputs, checks)
     checks["tasks"] = True
-    # P3 agents receive their own projections; labels remain only in this Host scorer.
+    if not _audit_firewall(old_train + old_dev, corpus, host_inputs.inference_projections):
+        return _evidence(old, proposed, corpus, host_inputs, checks)
     checks["firewall"] = True
     mappings: list[dict[str, str]] = []
     try:

@@ -67,7 +67,7 @@ def compatibility_case(tmp_path):
     bundles = tuple(
         EvolutionBundleV2(
             2, 1, "b" * 64, *numerical_ids, retrieval_sha, decision_sha,
-            "5" * 64, "6" * 64, str(index) * 64, "a" * 64, {"python": "9" * 64}, "c" * 64,
+            "5" * 64, "6" * 64, str(index) * 64, "a" * 64, {"python": "9" * 64}, fingerprint_payload({"schema_version": 1, "accepted": True}),
         )
         for index in (1, 2)
     )
@@ -118,6 +118,15 @@ def compatibility_case(tmp_path):
             {"baseline": True, "document_id": "fabricated", "support_id": "support-1"},
         ),
         runtime_fingerprint="d" * 64,
+        inference_projections={
+            task_registry_fingerprint(task): {
+                "task_id": task.numeric.task_id,
+                "history_values": list(task.numeric.history_values),
+                "prediction_length": task.numeric.prediction_length,
+                "frequency": task.numeric.frequency,
+            }
+            for task in tasks
+        },
         evaluation_cache=cache,
     )
 
@@ -155,6 +164,7 @@ def compatibility_case(tmp_path):
         return CompatibilityHostInputsV2(
             host, {"train_task_sha256s": train_shas, "dev_task_sha256s": dev_shas, "public_task_sha256s": ("f" * 64,)},
             {bundle.fingerprint(): bundle for bundle in bundles}, envelopes, inputs.verifier_fixtures, "d" * 64,
+            inputs.inference_projections,
         )
     case.with_public_membership = lambda: type("PublicCase", (), {"check": lambda self, _change: check_compatibility(_protocol(), _protocol(), corpus, ProtocolRuntimeRegistry(), host_inputs=public_case(), sealed_store=tmp_path / "sealed")})()
     return case
@@ -182,3 +192,65 @@ def test_public_membership_rejected_before_resolving_runtime(compatibility_case)
     """Public membership is rejected at the split boundary, before adapters run."""
     with pytest.raises(ValueError, match="Public"):
         compatibility_case.with_public_membership().check("history_mean")
+
+
+def test_public_membership_does_not_resolve_runtime(compatibility_case, tmp_path):
+    """The split firewall fires before a resolver can materialize adapters."""
+    case = compatibility_case
+    public_inputs = replace(case.inputs, split_manifest={**case.inputs.split_manifest, "public_task_sha256s": ("f" * 64,)})
+    class SpyRegistry(ProtocolRuntimeRegistry):
+        calls = 0
+        def resolve(self, *args, **kwargs):
+            self.calls += 1
+            return super().resolve(*args, **kwargs)
+    registry = SpyRegistry()
+    with pytest.raises(ValueError, match="Public"):
+        check_compatibility(_protocol(), _protocol(), case.corpus, registry, host_inputs=public_inputs, sealed_store=tmp_path / "sealed")
+    assert registry.calls == 0
+
+
+def test_labelled_inference_projection_rejects_before_artifact_or_scoring(compatibility_case, tmp_path):
+    """A future label in an agent-facing projection is a hard firewall failure."""
+    case = compatibility_case
+    bad = dict(case.inputs.inference_projections)
+    first = next(iter(bad))
+    bad[first] = {**bad[first], "future_values": [1.0]}
+    evidence = check_compatibility(
+        _protocol(), _protocol(diagnostic="absolute_movement"), case.corpus,
+        ProtocolRuntimeRegistry(), host_inputs=replace(case.inputs, inference_projections=bad),
+        sealed_store=tmp_path / "sealed",
+    )
+    assert evidence.checks["firewall"] is False
+    assert evidence.checks["artifacts"] is False
+    assert evidence.checks["train"] is False
+    assert "label_boundary" in decide_protocol(evidence).reason_codes
+
+
+def test_tampered_archive_envelope_rejects_before_train(compatibility_case, tmp_path):
+    """Closure envelope hashes are revalidated before any pipeline replay."""
+    case = compatibility_case
+    envelope_sha, envelope = next(iter(case.inputs.artifact_envelopes.items()))
+    tampered = {**case.inputs.artifact_envelopes, envelope_sha: {**envelope, "artifact_sha256": "0" * 64}}
+    evidence = check_compatibility(
+        _protocol(), _protocol(diagnostic="absolute_movement"), case.corpus,
+        ProtocolRuntimeRegistry(), host_inputs=replace(case.inputs, artifact_envelopes=tampered),
+        sealed_store=tmp_path / "sealed",
+    )
+    assert evidence.checks["artifacts"] is False
+    assert evidence.checks["train"] is False
+    assert "artifact_migration" in decide_protocol(evidence).reason_codes
+
+
+def test_bad_verifier_fixture_rejects_before_train(compatibility_case, tmp_path):
+    """A proposed protocol cannot pass when Host verifier fixtures disagree."""
+    case = compatibility_case
+    fixtures = list(case.inputs.verifier_fixtures)
+    fixtures[0] = {"baseline": True, "document_id": "fabricated", "support_id": "support-1"}
+    evidence = check_compatibility(
+        _protocol(), _protocol(diagnostic="absolute_movement"), case.corpus,
+        ProtocolRuntimeRegistry(), host_inputs=replace(case.inputs, verifier_fixtures=tuple(fixtures)),
+        sealed_store=tmp_path / "sealed",
+    )
+    assert evidence.checks["verifier"] is False
+    assert evidence.checks["train"] is False
+    assert "verifier_failure" in decide_protocol(evidence).reason_codes
