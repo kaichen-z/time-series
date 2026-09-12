@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from evolving_loop.data import ContextTask
@@ -42,6 +42,8 @@ class SourceTrainResultV2:
     catastrophic_count: int
     task_cost: int
     source_invocations: int
+    actual_task_cost: int
+    actual_source_invocations: int
     feasible: bool
     execution_fingerprint: str
 
@@ -59,6 +61,8 @@ class SourceValidationV2:
     evaluation_fingerprints: tuple[str, str]
     task_cost: int = 0
     source_invocations: int = 0
+    actual_task_cost: int = 0
+    actual_source_invocations: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,14 +190,16 @@ class SourceMetaEvaluatorV2:
         children: list[EvolutionBundleV2] = []
         outcomes: list[PackageEvaluation] = []
         pipelines: list[CooperativePipelineAdapter] = []
-        total_cost = 0
+        logical_task_cost = 0
+        actual_task_cost = 0
         feasible = True
         for fold_index, held_indices in enumerate(_FOLDS):
             complement = tuple(task for index, task in enumerate(self.train_tasks) if index not in held_indices)
             held_out = tuple(self.train_tasks[index] for index in held_indices)
             catalog, seed, adapters, pipeline = self._fresh_runtime()
             parent_scan, cost = self._evaluate(pipeline, seed, complement, "train", split=f"scan-{fold_index}", seed=epoch_seed)
-            total_cost += cost
+            logical_task_cost += len(complement)
+            actual_task_cost += cost
             feedback_by_arm = {}
             proposal_feedback = {}
             for arm in self.enabled_arms:
@@ -210,7 +216,8 @@ class SourceMetaEvaluatorV2:
                     proposal_feedback[arm] = sanitize_train_feedback(parent_scan, parent_scan, 0.0)
                     continue
                 child_scan, cost = self._evaluate(pipeline, candidate.to_child(seed), complement, "train", split=f"scan-{fold_index}", seed=epoch_seed)
-                total_cost += cost
+                logical_task_cost += len(complement)
+                actual_task_cost += cost
                 proposal_feedback[arm] = sanitize_train_feedback(
                     parent_scan, child_scan, float(len(complement))
                 )
@@ -223,9 +230,11 @@ class SourceMetaEvaluatorV2:
             )
             child = seed if selected_candidate is None else selected_candidate.to_child(seed)
             parent, cost = self._evaluate(pipeline, seed, held_out, "train", split=f"held-{fold_index}", seed=epoch_seed)
-            total_cost += cost
+            logical_task_cost += len(held_out)
+            actual_task_cost += cost
             child_eval, cost = self._evaluate(pipeline, child, held_out, "train", split=f"held-{fold_index}", seed=epoch_seed)
-            total_cost += cost
+            logical_task_cost += len(held_out)
+            actual_task_cost += cost
             fold_gains.append(self._gain(parent, child_eval))
             feasible = feasible and self._fold_passes(parent, child_eval)
             children.append(child)
@@ -240,7 +249,8 @@ class SourceMetaEvaluatorV2:
                 pipelines[index], child, self.train_tasks,
                 "train", split="seal-all-train", seed=epoch_seed,
             )
-            total_cost += cost
+            logical_task_cost += len(self.train_tasks)
+            actual_task_cost += cost
             sealed_outcomes.append(sealed_eval)
         selected_index = min(
             range(len(children)),
@@ -253,7 +263,7 @@ class SourceMetaEvaluatorV2:
             variant.fingerprint(), tuple(fold_gains), sum(fold_gains) / len(fold_gains),
             sealed_eval.mean_smae, sealed_eval.mean_srmse,
             sealed_eval.invalid_count, sealed_eval.catastrophic_count,
-            total_cost, len(_FOLDS), feasible,
+            logical_task_cost, len(_FOLDS), actual_task_cost, len(_FOLDS), feasible,
             fingerprint_payload({"source": variant.fingerprint(), "epoch_seed": epoch_seed, "fold_gains": fold_gains,
                 "children": [child.fingerprint() for child in children], "evaluations": [value.fingerprint for value in outcomes],
                 "sealed_evaluations": [value.fingerprint for value in sealed_outcomes],
@@ -266,13 +276,18 @@ class SourceMetaEvaluatorV2:
         return episode
 
     def train(self, variant: SourceVariantV2) -> SourceTrainResultV2:
-        return self._train(variant, epoch_seed=0).result
+        cache_key = (variant.fingerprint(), 0)
+        was_cached = cache_key in self._episodes
+        result = self._train(variant, epoch_seed=0).result
+        return replace(result, actual_task_cost=0, actual_source_invocations=0) if was_cached else result
 
     def _validate(self, parent_source: SourceVariantV2, finalist_source: SourceVariantV2, *, epoch_seed: int, strict: bool) -> SourceValidationV2:
+        parent_cached = (parent_source.fingerprint(), epoch_seed) in self._episodes
         parent_episode = self._train(parent_source, epoch_seed=epoch_seed)
+        finalist_cached = (finalist_source.fingerprint(), epoch_seed) in self._episodes
         finalist_episode = self._train(finalist_source, epoch_seed=epoch_seed)
-        parent_eval, _ = self._evaluate(parent_episode.selected_pipeline, parent_episode.selected_bundle, self.dev_tasks, "dev", split="dev", seed=epoch_seed)
-        finalist_eval, _ = self._evaluate(finalist_episode.selected_pipeline, finalist_episode.selected_bundle, self.dev_tasks, "dev", split="dev", seed=epoch_seed)
+        parent_eval, parent_dev_cost = self._evaluate(parent_episode.selected_pipeline, parent_episode.selected_bundle, self.dev_tasks, "dev", split="dev", seed=epoch_seed)
+        finalist_eval, finalist_dev_cost = self._evaluate(finalist_episode.selected_pipeline, finalist_episode.selected_bundle, self.dev_tasks, "dev", split="dev", seed=epoch_seed)
         parent_joint = (parent_eval.mean_smae + parent_eval.mean_srmse) / 2.0
         finalist_joint = (finalist_eval.mean_smae + finalist_eval.mean_srmse) / 2.0
         train_better = finalist_episode.result.feasible and finalist_episode.result.mean_gain > _TOLERANCE and finalist_episode.result.mean_gain > parent_episode.result.mean_gain + _TOLERANCE
@@ -287,11 +302,17 @@ class SourceMetaEvaluatorV2:
         trained = (parent_episode,) if strict else (parent_episode, finalist_episode)
         task_cost = sum(episode.result.task_cost for episode in trained) + 2 * len(self.dev_tasks)
         source_invocations = sum(episode.result.source_invocations for episode in trained)
+        actual_task_cost = parent_dev_cost + finalist_dev_cost
+        actual_source_invocations = 0
+        for cached, episode in ((parent_cached, parent_episode), (finalist_cached, finalist_episode)):
+            if not cached:
+                actual_task_cost += episode.result.actual_task_cost
+                actual_source_invocations += episode.result.actual_source_invocations
         return SourceValidationV2(
             parent_source.fingerprint(), finalist_source.fingerprint(), passed, reason,
             parent_eval, finalist_eval, commitment, replay,
             (parent_eval.fingerprint, finalist_eval.fingerprint),
-            task_cost, source_invocations,
+            task_cost, source_invocations, actual_task_cost, actual_source_invocations,
         )
 
     def validate(self, parent_source: SourceVariantV2, finalist_source: SourceVariantV2) -> SourceValidationV2:

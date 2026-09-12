@@ -13,21 +13,43 @@ from tests.build_evolution_v2_source_fixture import build_source_case
 
 
 def test_closed_validation_resume_matches_full_result(tmp_path):
-    case = build_source_case(tmp_path / "inputs")
     config = SourceConfigV2.smoke(seed=17)
-    full = run_source_evolution(tmp_path / "full", config, case)
-    run_source_evolution(tmp_path / "resumed", config, case, stop_after="validation")
-    resumed = run_source_evolution(tmp_path / "resumed", config, case, resume=True)
+    full = run_source_evolution(
+        tmp_path / "full", config, build_source_case(tmp_path / "full-inputs")
+    )
+    run_source_evolution(
+        tmp_path / "resumed", config,
+        build_source_case(tmp_path / "partial-inputs"), stop_after="validation",
+    )
+    resumed = run_source_evolution(
+        tmp_path / "resumed", config,
+        build_source_case(tmp_path / "fresh-resume-inputs"), resume=True,
+    )
     assert resumed.canonical_bytes() == full.canonical_bytes()
+    assert ((tmp_path / "resumed" / "authority" / "active_source.json").read_bytes()
+            == (tmp_path / "full" / "authority" / "active_source.json").read_bytes())
+    assert ((tmp_path / "resumed" / "source_archive" / "events.jsonl").read_bytes()
+            == (tmp_path / "full" / "source_archive" / "events.jsonl").read_bytes())
 
 
 def test_closed_candidate_resume_matches_full_result(tmp_path):
-    case = build_source_case(tmp_path / "inputs")
     config = SourceConfigV2.smoke(seed=17)
-    full = run_source_evolution(tmp_path / "full", config, case)
-    run_source_evolution(tmp_path / "resumed", config, case, stop_after="candidate:1")
-    resumed = run_source_evolution(tmp_path / "resumed", config, case, resume=True)
+    full = run_source_evolution(
+        tmp_path / "full", config, build_source_case(tmp_path / "full-inputs")
+    )
+    run_source_evolution(
+        tmp_path / "resumed", config,
+        build_source_case(tmp_path / "partial-inputs"), stop_after="candidate:1",
+    )
+    resumed = run_source_evolution(
+        tmp_path / "resumed", config,
+        build_source_case(tmp_path / "fresh-resume-inputs"), resume=True,
+    )
     assert resumed.canonical_bytes() == full.canonical_bytes()
+    assert ((tmp_path / "resumed" / "authority" / "active_source.json").read_bytes()
+            == (tmp_path / "full" / "authority" / "active_source.json").read_bytes())
+    assert ((tmp_path / "resumed" / "source_archive" / "events.jsonl").read_bytes()
+            == (tmp_path / "full" / "source_archive" / "events.jsonl").read_bytes())
 
 
 def test_failed_validation_preserves_parent(tmp_path, monkeypatch):

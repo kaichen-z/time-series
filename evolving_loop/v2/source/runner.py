@@ -150,8 +150,8 @@ def _stage_estimate(case: object, stage: str) -> ResourceUse:
 
 
 def _actual_use(value: object) -> ResourceUse:
-    task_cost = getattr(value, "task_cost", None)
-    source_invocations = getattr(value, "source_invocations", None)
+    task_cost = getattr(value, "actual_task_cost", None)
+    source_invocations = getattr(value, "actual_source_invocations", None)
     if type(task_cost) is not int or task_cost < 0 or type(source_invocations) is not int or source_invocations < 0:
         raise SourceRunnerError("source evaluator did not report valid resource use")
     return ResourceUse(task_executions=task_cost, subprocesses=source_invocations)
