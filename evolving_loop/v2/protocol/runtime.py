@@ -34,6 +34,10 @@ _IMPLEMENTATIONS = MappingProxyType({
     ("schema_migration", "identity_envelope", 1): "identity_envelope",
     ("schema_migration", "envelope_v2", 1): "envelope_v2",
 })
+_IMPLEMENTATION_ARTIFACT_SCHEMAS = MappingProxyType({
+    key: 2 if key == ("schema_migration", "envelope_v2", 1) else 1
+    for key in _IMPLEMENTATIONS
+})
 
 
 def _freeze_mapping(value: Mapping[str, object], name: str) -> Mapping[str, object]:
@@ -134,7 +138,10 @@ class ProtocolRuntimeRegistry:
         for component in protocol.components:
             key = (component.kind, component.implementation_id, component.implementation_version)
             implementation = _IMPLEMENTATIONS.get(key)
-            if component.artifact_schema_version != 1 or implementation is None:
+            if (
+                implementation is None
+                or component.artifact_schema_version != _IMPLEMENTATION_ARTIFACT_SCHEMAS[key]
+            ):
                 raise ValueError(f"unresolved protocol component: {key}")
             resolved[component.kind] = implementation
         if tuple(resolved) != KINDS:
@@ -302,11 +309,27 @@ class ProtocolRuntime:
     def diagnostics(self, history: tuple[float, ...], forecast: tuple[float, ...]) -> dict[str, float]:
         return _diagnostic(self.implementations["diagnostic_metric"], history, forecast)
 
+    def migrate_envelope(self, payload: dict, target_version: int) -> dict:
+        """Apply this runtime's selected, versioned schema adapter."""
+        return _migrate_envelope(
+            payload, target_version, self.implementations["schema_migration"]
+        )
+
 
 def migrate_envelope(payload: dict, target_version: int) -> dict:
-    """Validate an embedded artifact identity before a pure v1→v2 adaptation."""
+    """Use the closed default adapter selected by the target envelope schema."""
+    implementation = "identity_envelope" if target_version == 1 else "envelope_v2"
+    return _migrate_envelope(payload, target_version, implementation)
+
+
+def _migrate_envelope(
+    payload: dict, target_version: int, implementation: str
+) -> dict:
+    """Validate an embedded artifact identity before a pure schema adaptation."""
     if type(payload) is not dict or type(target_version) is not int or target_version not in (1, 2):
         raise ValueError("payload and target_version must use supported exact schemas")
+    if implementation not in {"identity_envelope", "envelope_v2"}:
+        raise ValueError("schema migration implementation is not allowlisted")
     fields = set(payload)
     v1 = {"schema_version", "artifact", "artifact_sha256"}
     v2 = {"schema_version", "content", "content_sha256"}
@@ -314,10 +337,16 @@ def migrate_envelope(payload: dict, target_version: int) -> dict:
         artifact, digest = payload["artifact"], require_sha256(payload["artifact_sha256"], "artifact_sha256")
         if not isinstance(artifact, Mapping) or fingerprint_payload(artifact) != digest:
             raise ValueError("v1 artifact SHA does not match embedded content")
-        return {"schema_version": 1, "artifact": dict(artifact), "artifact_sha256": digest} if target_version == 1 else {"schema_version": 2, "content": dict(artifact), "content_sha256": digest}
+        if implementation == "identity_envelope":
+            if target_version != 1:
+                raise ValueError("identity_envelope cannot produce schema version 2")
+            return {"schema_version": 1, "artifact": dict(artifact), "artifact_sha256": digest}
+        if target_version != 2:
+            raise ValueError("envelope_v2 requires target schema version 2")
+        return {"schema_version": 2, "content": dict(artifact), "content_sha256": digest}
     if fields == v2 and payload.get("schema_version") == 2:
         content, digest = payload["content"], require_sha256(payload["content_sha256"], "content_sha256")
-        if target_version != 2:
+        if implementation != "envelope_v2" or target_version != 2:
             raise ValueError("v2 envelopes cannot migrate backwards")
         if not isinstance(content, Mapping) or fingerprint_payload(content) != digest:
             raise ValueError("v2 content SHA does not match embedded content")

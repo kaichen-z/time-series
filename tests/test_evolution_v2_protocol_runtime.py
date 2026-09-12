@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 
 from evolving_loop.v2.contracts import fingerprint_payload
+from evolving_loop.package_metrics import PackageEvaluation
 from evolving_loop.package_registry import task_registry_fingerprint
 from evolving_loop.v2.protocol import (
     InfrastructureProtocolV2,
@@ -179,3 +180,65 @@ def test_loader_rejects_a_raw_fixture_with_the_wrong_task_identity(runtime_case)
 
     with pytest.raises(ValueError, match="raw fixture task ID mismatch"):
         bad_runtime.load_tasks()
+
+
+def test_schema_two_envelope_adapter_resolves_and_controls_migration(runtime_case):
+    """The selected schema adapter, not a global default, authorizes conversion."""
+    resolve, _bundle, _tasks, _calls = runtime_case
+    identity = resolve()
+    components = tuple(
+        ProtocolComponentV2(
+            component.kind,
+            "envelope_v2" if component.kind == "schema_migration" else component.implementation_id,
+            1,
+            2 if component.kind == "schema_migration" else component.artifact_schema_version,
+        )
+        for component in identity.protocol.components
+    )
+    envelope_runtime = ProtocolRuntimeRegistry().resolve(
+        InfrastructureProtocolV2(1, 1, None, "a" * 64, components), identity.host_inputs
+    )
+    content = {"bundle": "f" * 64}
+    old = {"schema_version": 1, "artifact": content, "artifact_sha256": fingerprint_payload(content)}
+
+    assert envelope_runtime.migrate_envelope(old, 2) == {
+        "schema_version": 2,
+        "content": content,
+        "content_sha256": old["artifact_sha256"],
+    }
+    with pytest.raises(ValueError, match="identity_envelope"):
+        identity.migrate_envelope(old, 2)
+
+
+def test_diagnostic_augmentation_preserves_scoring_rows_and_primary_fields(runtime_case):
+    """A finite secondary diagnostic cannot rewrite the P3 scoring result."""
+    resolve, bundle, tasks, _calls = runtime_case
+    evaluation = resolve(diagnostic_metric="absolute_movement").evaluate(bundle, tasks, "train")
+    without_diagnostic = PackageEvaluation.from_rows(
+        evaluation.candidate_sha256,
+        evaluation.task_rows,
+        evaluation.expected_task_ids,
+        {},
+    )
+
+    assert evaluation.candidate_sha256 == without_diagnostic.candidate_sha256
+    assert evaluation.task_rows == without_diagnostic.task_rows
+    assert (
+        evaluation.task_count,
+        evaluation.coverage,
+        evaluation.mean_smae,
+        evaluation.mean_srmse,
+        evaluation.mean_joint,
+        evaluation.invalid_count,
+        evaluation.catastrophic_count,
+        evaluation.fallback_count,
+    ) == (
+        without_diagnostic.task_count,
+        without_diagnostic.coverage,
+        without_diagnostic.mean_smae,
+        without_diagnostic.mean_srmse,
+        without_diagnostic.mean_joint,
+        without_diagnostic.invalid_count,
+        without_diagnostic.catastrophic_count,
+        without_diagnostic.fallback_count,
+    )
