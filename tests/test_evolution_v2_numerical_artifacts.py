@@ -36,6 +36,26 @@ def test_explicit_artifact_registry_matches_independent_taxonomy():
     assert {kind.value for kind, spec in ARTIFACT_KINDS.items() if not spec.billable} == CONTROL_KINDS
 
 
+def test_generation_status_accepts_exact_legacy_record_without_diagnostics():
+    """Catches making already-persisted generation controls unreadable."""
+    from evolving_loop.v2.contracts import canonical_v2_bytes
+    from evolving_loop.v2.numerical_qd.artifacts import ArtifactKindV2, validate_artifact
+    from test_evolution_v2_numerical_mutation import feedback
+
+    legacy = {"numerical_qd_step": {
+        "generation": 1,
+        "status": "no_feasible_child",
+        "active_bundle_sha256": "a" * 64,
+        "winner_genome_sha256": None,
+        "proposal_attempt_sha256": "b" * 64,
+        "train_feedback": feedback(),
+    }}
+    spec = validate_artifact(
+        ArtifactKindV2.GENERATION_STATUS, canonical_v2_bytes(legacy)
+    )
+    assert spec.billable is False
+
+
 @pytest.mark.parametrize("kind", [None, "unregistered", "budget_checkpoint", "kernel_checkpoint", "partial_rung"])
 def test_material_cannot_gain_free_control_status_through_marker_keys(kind):
     from evolving_loop.v2.numerical_qd.artifacts import validate_artifact

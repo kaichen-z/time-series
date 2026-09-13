@@ -10,6 +10,7 @@ from itertools import combinations
 from common.llm import LLMClient
 from common.payload import strict_json_loads
 from common.sandbox import check_code
+from numerical_agent.evolution.champion import ChampionRecipe, EvolutionAssumption
 from numerical_agent.evolution.module import parse_method
 
 from ..budget import BudgetLedger, ResourceUse
@@ -159,6 +160,32 @@ def _batch(provider, proposals=(), artifacts=(), use=ResourceUse(), reason=None)
         (ProviderAttemptV2(provider, use, reason),))
 
 
+def host_source_recipe(source: str | bytes) -> ChampionRecipe:
+    """Derive the only executable recipe a newly supplied source can claim."""
+    if type(source) is bytes:
+        source = source.decode("utf-8")
+    if type(source) is not str:
+        raise TypeError("source recipe requires UTF-8 source text")
+    method = parse_method(source)
+    assumption = EvolutionAssumption(
+        method.name + "_history",
+        method.name,
+        "history_length",
+        "above",
+        "full",
+        "select",
+        "History supports the candidate.",
+        "History is unavailable.",
+    )
+    return ChampionRecipe(
+        "select_" + method.name,
+        "select",
+        (method.name,),
+        method.name,
+        (assumption,),
+    )
+
+
 def _normalize_sources(response, request):
     raw = _require_exact_schema(response, {"source_candidates", "proposals"}, field="LLM response")
     if type(raw["source_candidates"]) is not list or type(raw["proposals"]) is not list:
@@ -182,10 +209,12 @@ def _normalize_sources(response, request):
         tree = ast.parse(code)
         if len(tree.body) != 1 or not isinstance(tree.body[0], ast.FunctionDef):
             raise ValueError("source must contain exactly one forecast method")
-        parse_method(code)
+        recipe = host_source_recipe(code)
         check_code(code)
         source_bytes = code.encode("utf-8")
-        sources[identity] = (hashlib.sha256(source_bytes).hexdigest(), source_bytes)
+        sources[identity] = (
+            hashlib.sha256(source_bytes).hexdigest(), source_bytes, recipe
+        )
     state = MutationStateV2.from_payload(request["parent_state"])
     proposals, used, owned = [], set(), set()
     for payload in raw["proposals"]:
@@ -200,8 +229,13 @@ def _normalize_sources(response, request):
                 local_id = member.get("source_sha256")
                 if type(local_id) is not str or local_id not in sources or local_id in used:
                     raise ValueError("source reference must have one request-local owner")
+                if "policy_sha256" in member:
+                    raise ValueError("source policy identity is Host-derived")
                 used.add(local_id)
                 member["source_sha256"] = sources[local_id][0]
+                member["policy_sha256"] = fingerprint_payload(
+                    sources[local_id][2].to_payload()
+                )
         proposal = MutationProposalV2.from_payload(value)
         if proposal.operator not in request["allowed_mutation_operators"]:
             raise ValueError("operator not allowed in this request")
@@ -217,7 +251,7 @@ def _normalize_sources(response, request):
         proposals.append(proposal)
     if used != set(sources):
         raise ValueError("unowned source candidate")
-    artifacts = tuple(sorted(set(sources.values())))
+    artifacts = tuple(sorted({(value[0], value[1]) for value in sources.values()}))
     return tuple(proposals), artifacts
 
 
@@ -317,7 +351,6 @@ def _response_schema(request, state):
     identity = dict(type="string", minLength=1, maxLength=128,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
     local_id = identity | {"not": {"pattern": "^[0-9a-f]{64}$"}}
-    sha = dict(type="string", pattern="^[0-9a-f]{64}$")
     cells = dict(type="array", uniqueItems=True, items={"enum": list(state.declared_cells)},
         description="Sorted declared cell identities only.")
     member_ids = [member.member_id for member in state.inventory.members]
@@ -327,7 +360,7 @@ def _response_schema(request, state):
         member_id=identity | {"not": {"enum": sorted(member_ids)}},
         family={"enum": sorted(MEMBER_FAMILIES)},
         source_sha256=local_id | {"description": "Reference one source_candidates.local_id from this response; never a source SHA or a path."},
-        policy_sha256=sha, parent_ids=parents, applicability_cells=cells,
+        parent_ids=parents, applicability_cells=cells,
         status={"const": "active"}))
     prompt = _closed_object_schema(dict(
         schema_version={"const": 1},

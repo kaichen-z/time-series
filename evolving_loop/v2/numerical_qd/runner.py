@@ -58,7 +58,8 @@ from .nsga2 import select_survivors
 from .persistence import ArtifactBytesExhausted, NumericalQDRunStore, NumericalQDStoreError
 from .proposers import (
     DeterministicProposalProvider, HybridProposalProvider, LLMProposalProvider,
-    NormalizedProposalBatchV2, ProviderAttemptV2, primitive_proposer_request,
+    NormalizedProposalBatchV2, ProviderAttemptV2, host_source_recipe,
+    primitive_proposer_request,
 )
 
 
@@ -120,6 +121,23 @@ def _read(path):
     if type(value) is not dict or canonical_v2_bytes(value) != raw:
         raise ValueError("runner requires canonical persisted objects")
     return value
+
+
+def _materialization_failure(member_id, error):
+    """Keep one bounded, traceback-free diagnostic for the generation record."""
+    message = " ".join(str(error).split()) or "materialization failed"
+    encoded = message.encode("utf-8")[:512]
+    while True:
+        try:
+            message = encoded.decode("utf-8")
+            break
+        except UnicodeDecodeError:
+            encoded = encoded[:-1]
+    return {
+        "member_id": member_id,
+        "error_type": type(error).__name__,
+        "message": message,
+    }
 
 
 def _persist(store, value, *, kind=None):
@@ -846,8 +864,25 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             work.close_stage(artifact_permit, ResourceUse(artifact_bytes=sum(
                 path.stat().st_size for path in new_paths if path.is_file())), status="passed" if succeeded else "failed")
         batch = store._proposal(store._read(f"proposals/{batch_sha}.json"))
+        if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
+            _persist(store, {"numerical_qd_step": {
+                "generation": generation,
+                "status": "finalization_reserve",
+                "active_bundle_sha256": active.fingerprint(),
+                "winner_genome_sha256": None,
+                "proposal_attempt_sha256": batch_sha,
+                "train_feedback": feedback.to_payload(),
+                "materialization_failures": [],
+            }}, kind=ArtifactKind.GENERATION_STATUS)
+            checkpoint_state()
+            break
         children, child_states, attempted, budget_blocked = {}, {}, [], False
+        materialization_failures = []
+        generation_stop_reason = None
         for proposal in batch.proposals:
+            if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
+                generation_stop_reason, budget_blocked = "finalization_reserve", True
+                break
             attempted.append((proposal.operator, None))
             proposal_payload = proposal.to_payload()
             policy_ready = True
@@ -859,11 +894,15 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                     "parents": [m.to_payload() for name in member.parent_ids for m in parent_state.inventory.members if m.member_id == name],
                     "applicability_cells": list(member.applicability_cells)}
                 if fingerprint_payload(structural) != member.policy_sha256:
-                    # Source mutations may reuse a verified recipe, but cannot
-                    # introduce an unresolvable arbitrary policy commitment.
+                    # New source code receives one canonical Host-derived
+                    # select recipe. The proposer can commit its digest, but
+                    # only the Host constructs and persists the policy bytes.
                     if not (store.directory / f"objects/{member.policy_sha256}.json").exists():
-                        policy_ready = False
-                        break
+                        recipe = host_source_recipe(store._source(member.source_sha256))
+                        if fingerprint_payload(recipe.to_payload()) != member.policy_sha256:
+                            policy_ready = False
+                            break
+                        _persist(store, recipe, kind=ArtifactKind.RECIPE_POLICY)
                 else:
                     _persist(store, structural, kind=ArtifactKind.STRUCTURAL_POLICY)
                 # Exact policy/source readback precedes the atomic transition.
@@ -872,6 +911,9 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             if not policy_ready:
                 continue
             candidate_state = apply_mutation(parent_state, proposal).state
+            if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
+                generation_stop_reason, budget_blocked = "finalization_reserve", True
+                break
             genome = NumericalGenomeV2(1, generation, (selected.fingerprint(),), proposal.operator,
                 candidate_state.inventory.fingerprint(), selected.screening_policy_sha256, selected.combined_policy_sha256,
                 candidate_state.mutation_policy.fingerprint(), candidate_state.proposer_prompt.fingerprint(),
@@ -882,6 +924,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             except ValueError:
                 continue
             adapter.sources = dict(adapter.sources) | {sha: data.decode() for sha, data in sources.items()}
+            candidate_member = _canonical_member(candidate_state)
             remaining = _available(kernel)
             # Reserve an upper bound, then release unused capacity at closure.
             # Each uncached forecast/worker start checks this bound before work.
@@ -892,6 +935,8 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             permit = work.reserve_stage("materialize-" + genome.fingerprint(), estimate)
             if not permit.allowed:
                 budget_blocked = True
+                if permit.reason in {"finalization_reserve", "finalization_started"}:
+                    generation_stop_reason = "finalization_reserve"
                 break
             before = adapter.monotonic()
             child, failure = None, None
@@ -909,17 +954,26 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 actual = next_use
             try:
                 child = adapter.materialize_child(parent_release, genome, candidate_state,
-                    member_id=_canonical_member(candidate_state).member_id, policies=policies,
+                    member_id=candidate_member.member_id, policies=policies,
                     build_rows=_train_rows(adapter), descriptor_policy=config.descriptor_policy,
                     version=f"n{generation:03d}", parent_state=parent_state, proposal=proposal,
                     account_work=account_work, task_timeout_seconds=config.adapter["task_timeout_seconds"])
-            except NumericalWorkStopped:
+            except NumericalWorkStopped as error:
                 failure, budget_blocked = "materialization_budget", True
-            except (ValueError, TypeError, TimeoutError, MethodForecastError):
+                materialization_failures.append(
+                    _materialization_failure(candidate_member.member_id, error)
+                )
+            except (ValueError, TypeError, TimeoutError, MethodForecastError) as error:
                 failure = "materialization_failed"
+                materialization_failures.append(
+                    _materialization_failure(candidate_member.member_id, error)
+                )
             finally:
                 closed = work.close_stage(permit, replace(actual, wall_seconds=float(adapter.monotonic() - before)),
                     status="failed" if failure else "passed")
+            if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
+                child = None
+                generation_stop_reason, budget_blocked = "finalization_reserve", True
             if child is not None and closed.allowed:
                 child = MaterializedNumericalChildV2.from_payload(
                     store._object(_persist(store, child.to_payload(adapter.tasks), kind=ArtifactKind.EXECUTABLE_CHILD)), adapter.tasks)
@@ -928,7 +982,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 attempted[-1] = (proposal.operator, genome.fingerprint())
             if budget_blocked:
                 break
-        reason, evaluations = "no_feasible_child", ()
+        reason, evaluations = generation_stop_reason or "no_feasible_child", ()
         if children and _available(kernel).wall_seconds > 0:
             try:
                 bracket = choose_bracket(len(children), 0.0, _available(kernel).wall_seconds, config)
@@ -1065,7 +1119,8 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 reason = permit.reason
         _persist(store, {"numerical_qd_step": {"generation": generation, "status": reason,
             "active_bundle_sha256": active.fingerprint(), "winner_genome_sha256": winner,
-            "proposal_attempt_sha256": batch_sha, "train_feedback": feedback.to_payload()}}, kind=ArtifactKind.GENERATION_STATUS)
+            "proposal_attempt_sha256": batch_sha, "train_feedback": feedback.to_payload(),
+            "materialization_failures": materialization_failures}}, kind=ArtifactKind.GENERATION_STATUS)
         checkpoint_state()
         if budget_blocked:
             break

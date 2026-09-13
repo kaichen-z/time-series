@@ -609,6 +609,64 @@ def test_paid_manifest_deadline_boundary_publishes_only_blocked_control(tmp_path
     assert files(root) == before
 
 
+def test_deadline_after_proposal_persistence_finalizes_without_new_material(tmp_path, monkeypatch):
+    """Catches opening recipe/genome writes after the search deadline begins."""
+    from evolving_loop.v2.numerical_qd.persistence import NumericalQDRunStore
+
+    config, supply, manifest, adapter = fixture(task_budget=920)
+    original = NumericalQDRunStore.write_proposal_attempt
+
+    def write_attempt(store, *args, **kwargs):
+        result = original(store, *args, **kwargs)
+        adapter.monotonic.advance(config.budget.search_deadline_seconds)
+        return result
+
+    monkeypatch.setattr(NumericalQDRunStore, "write_proposal_attempt", write_attempt)
+    result = run_numerical_qd(
+        tmp_path / "run", config, supply, manifest, adapter, stop_after=1
+    )
+    assert result.status == "numerical_qd_complete"
+    assert (tmp_path / "run/evaluation_complete.json").is_file()
+    steps = [
+        json.loads(path.read_bytes())["numerical_qd_step"]
+        for path in (tmp_path / "run/numerical_qd/objects").glob("*.json")
+        if "numerical_qd_step" in json.loads(path.read_bytes())
+    ]
+    assert len(steps) == 1
+    assert steps[0]["status"] == "finalization_reserve"
+    assert steps[0]["materialization_failures"] == []
+
+
+def test_deadline_during_candidate_processing_closes_generation_without_new_material(tmp_path, monkeypatch):
+    """Catches a batch continuing material writes after candidate work uses its time."""
+    from evolving_loop.v2.numerical_qd import runner
+
+    config, supply, manifest, adapter = fixture(task_budget=2472, provider="hybrid")
+    payload = config.to_payload()
+    payload["mutation"]["operators"] = ["add"]
+    config = NumericalQDConfigV2.from_payload(payload)
+    original = runner.apply_mutation
+
+    def mutate(*args, **kwargs):
+        result = original(*args, **kwargs)
+        adapter.monotonic.advance(config.budget.search_deadline_seconds)
+        return result
+
+    monkeypatch.setattr(runner, "apply_mutation", mutate)
+    result = run_numerical_qd(
+        tmp_path / "run", config, supply, manifest, adapter,
+        ThreeChildren("legal"), stop_after=1,
+    )
+    assert result.status == "numerical_qd_complete"
+    step = next(
+        json.loads(path.read_bytes())["numerical_qd_step"]
+        for path in (tmp_path / "run/numerical_qd/objects").glob("*.json")
+        if "numerical_qd_step" in json.loads(path.read_bytes())
+    )
+    assert step["status"] == "finalization_reserve"
+    assert step["winner_genome_sha256"] is None
+
+
 def test_rung_artifact_denial_closes_partial_without_persisting_denied_payload(tmp_path, monkeypatch):
     from evolving_loop.v2.numerical_qd import runner
     from evolving_loop.v2.numerical_qd.persistence import NumericalQDRunStore
@@ -996,6 +1054,7 @@ class Client:
             member = state["inventory"]["members"][0]
             replacement = member | {"member_id": f'fresh_{request["counter_draw"]}',
                 "source_sha256": "code", "parent_ids": [member["member_id"]]}
+            replacement.pop("policy_sha256")
             response = {"source_candidates": [{"local_id": "code", "code": SOURCE.split("\ndef lagged")[0]}],
                 "proposals": [{"operator": "repair", "reason": "Train repair", "member_id": member["member_id"], "replacement": replacement}]}
             return LLMResponse(json.dumps(response))
@@ -1066,6 +1125,56 @@ def test_no_feasible_child_closes_work_preserves_parent_and_never_scores_dev(tmp
     assert not result.budget["open_reservations"]
 
 
+def test_materialization_failure_reason_is_persisted_in_generation_status(tmp_path, monkeypatch):
+    """Catches collapsing an actionable execution error into no_feasible_child."""
+    config, supply, manifest, adapter = fixture(task_budget=920)
+
+    def fail_materialization(*args, **kwargs):
+        raise ValueError("recipe executable is absent from the verified member source")
+
+    monkeypatch.setattr(adapter, "materialize_child", fail_materialization)
+    run_numerical_qd(
+        tmp_path / "run", config, supply, manifest, adapter, stop_after=1
+    )
+    steps = [
+        json.loads(path.read_bytes())["numerical_qd_step"]
+        for path in (tmp_path / "run/numerical_qd/objects").glob("*.json")
+        if "numerical_qd_step" in json.loads(path.read_bytes())
+    ]
+    assert len(steps) == 1
+    assert steps[0]["materialization_failures"] == [{
+        "member_id": steps[0]["materialization_failures"][0]["member_id"],
+        "error_type": "ValueError",
+        "message": "recipe executable is absent from the verified member source",
+    }]
+
+
+def test_policy_only_materialization_failure_is_attributed_to_candidate_member(tmp_path, monkeypatch):
+    """Catches diagnostics reading a missing/stale source-mutation member."""
+    config, supply, manifest, adapter = fixture(task_budget=920)
+    payload = config.to_payload()
+    payload["mutation"]["operators"] = ["policy_tune"]
+    config = NumericalQDConfigV2.from_payload(payload)
+
+    def fail_materialization(*args, **kwargs):
+        raise ValueError("policy-only candidate failed")
+
+    monkeypatch.setattr(adapter, "materialize_child", fail_materialization)
+    run_numerical_qd(
+        tmp_path / "run", config, supply, manifest, adapter, stop_after=1
+    )
+    step = next(
+        json.loads(path.read_bytes())["numerical_qd_step"]
+        for path in (tmp_path / "run/numerical_qd/objects").glob("*.json")
+        if "numerical_qd_step" in json.loads(path.read_bytes())
+    )
+    assert step["materialization_failures"] == [{
+        "member_id": "seasonal_naive",
+        "error_type": "ValueError",
+        "message": "policy-only candidate failed",
+    }]
+
+
 def test_completed_but_infeasible_train_rung_records_closed_no_improvement(tmp_path, monkeypatch):
     from evolving_loop.v2.numerical_qd import runner
     from evolving_loop.v2.numerical_qd.contracts import ConstraintReportV2
@@ -1088,9 +1197,10 @@ class ThreeChildren(Client):
     def complete(self, **kwargs):
         request = json.loads(kwargs["messages"][0]["content"])["request"]
         member = request["parent_state"]["inventory"]["members"][0]
+        proposed = {key: value for key, value in member.items() if key != "policy_sha256"}
         return LLMResponse(json.dumps({"source_candidates": [
             {"local_id": f"source_{i}", "code": SOURCE.split("\ndef lagged")[0]} for i in range(3)],
-            "proposals": [{"operator": "add", "reason": "Train alternative", "member": member | {
+            "proposals": [{"operator": "add", "reason": "Train alternative", "member": proposed | {
                 "member_id": f"new_{i}", "source_sha256": f"source_{i}", "parent_ids": []}} for i in range(3)]}))
 
 
@@ -1287,19 +1397,54 @@ def test_sources_policy_and_proposal_are_persisted_before_atomic_mutation(tmp_pa
     run_fixture(tmp_path / "run", task_budget=920)
 
 
-def test_unresolved_source_policy_is_rejected_before_atomic_mutation(tmp_path, monkeypatch):
+def test_llm_source_recipe_is_persisted_before_atomic_mutation(tmp_path, monkeypatch):
+    """Catches dropping the Host-derived recipe between proposal and execution."""
     from evolving_loop.v2.numerical_qd import runner
+
+    class NewSource(Client):
+        def complete(self, **kwargs):
+            response = json.loads(super().complete(**kwargs).text)
+            response["source_candidates"][0]["code"] = response["source_candidates"][0]["code"].replace(
+                "seasonal_naive", "evolved_forecast"
+            )
+            return LLMResponse(json.dumps(response))
+
+    original = runner.apply_mutation
+    crossed = []
+
+    def mutate(state, proposal):
+        member = proposal.to_payload()["replacement"]
+        policy_path = tmp_path / f'run/numerical_qd/objects/{member["policy_sha256"]}.json'
+        policy = json.loads(policy_path.read_bytes())
+        assert policy["name"] == "select_evolved_forecast"
+        assert policy["parents"] == ["evolved_forecast"]
+        crossed.append(member["member_id"])
+        return original(state, proposal)
+
+    monkeypatch.setattr(runner, "apply_mutation", mutate)
+    run_fixture(
+        tmp_path / "run", task_budget=1, provider="hybrid",
+        llm_client=NewSource("legal"), stop_after=1,
+    )
+    assert len(crossed) == 1
+
+
+def test_model_authored_source_policy_is_rejected_before_safe_fallback(tmp_path):
     class UnknownPolicy(Client):
         def complete(self, **kwargs):
             response = json.loads(super().complete(**kwargs).text)
             response["proposals"][0]["replacement"]["policy_sha256"] = "f" * 64
             return LLMResponse(json.dumps(response))
-    def forbidden_mutation(*args, **kwargs):
-        raise AssertionError("unresolved policy crossed atomic mutation boundary")
-    monkeypatch.setattr(runner, "apply_mutation", forbidden_mutation)
     result = run_fixture(tmp_path / "run", task_budget=1, provider="hybrid",
                          llm_client=UnknownPolicy("legal"), stop_after=1)
-    assert result.budget["charged_use"]["task_executions"] == 0
+    attempts = [
+        json.loads(path.read_bytes())["batch"]
+        for path in (tmp_path / "run/numerical_qd/proposals").glob("*.json")
+    ]
+    assert attempts[0]["attempts"][0]["failure_reason"] == "malformed"
+    assert attempts[0]["attempts"][-1]["provider"] == "deterministic"
+    assert not (tmp_path / f"run/numerical_qd/objects/{'f' * 64}.json").exists()
+    assert result.budget["charged_use"]["task_executions"] == 1
     assert result.accepted_steps == 0
 
 
@@ -1484,7 +1629,8 @@ def test_raw_seed_bootstrap_is_precommitted_charged_and_never_replayed(tmp_path,
             if mode == "deadline" and calls == 1:
                 adapter.monotonic.advance(config.budget.search_deadline_seconds + 1.0)
             return super().forecast(*args)
-    adapter.materializer.forecast_store = BootstrapStore()
+    bootstrap_store = BootstrapStore()
+    adapter.materializer.forecast_store = bootstrap_store
     original = runner._seed_registry
     def seed_registry(*args, **kwargs):
         assert (tmp_path / "run/seed_bootstrap_preflight.json").is_file()
@@ -1520,6 +1666,9 @@ def test_raw_seed_bootstrap_is_precommitted_charged_and_never_replayed(tmp_path,
         assert result.status == "numerical_qd_complete"
         assert not list((tmp_path / "run/numerical_qd/proposals").glob("*.json"))
     before = files(tmp_path / "run")
+    # Resume binds the original operator input identity. Restoring this store
+    # also makes any accidental replay fail its pre-manifest assertion above.
+    adapter.materializer.forecast_store = bootstrap_store
     resumed = run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter, resume=True, stop_after=1)
     assert resumed.budget == result.budget
     assert files(tmp_path / "run") == before

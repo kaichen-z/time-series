@@ -7,7 +7,7 @@ import pytest
 
 from common.llm import LLMResponse
 from evolving_loop.v2.budget import BudgetLedger, BudgetPlan, ResourceUse
-from evolving_loop.v2.contracts import canonical_v2_bytes
+from evolving_loop.v2.contracts import canonical_v2_bytes, fingerprint_payload
 from evolving_loop.v2.numerical_qd.contracts import MutationStateV2
 from evolving_loop.v2.numerical_qd.proposers import (
     DeterministicProposalProvider, HybridProposalProvider, LLMProposalProvider,
@@ -53,9 +53,11 @@ class ScriptedClient:
 
 
 def raw_response(**updates):
+    proposed = member("c") | {"source_sha256": "candidate_1"}
+    proposed.pop("policy_sha256")
     return dict(source_candidates=[dict(local_id="candidate_1", code=CODE)],
         proposals=[dict(operator="add", reason="Train baseline",
-            member=(member("c") | {"source_sha256": "candidate_1"}))]) | updates
+            member=proposed)]) | updates
 
 
 def assert_primitives(value):
@@ -142,6 +144,31 @@ def test_llm_normalizes_only_local_sources_and_returns_immutable_artifacts():
     assert len(client.calls) == 1
     with pytest.raises((AttributeError, TypeError)):
         result.source_artifacts += ((SHA, b"bad"),)
+
+
+def test_llm_source_member_gets_host_derived_executable_recipe_identity():
+    """Catches trusting a model-authored policy digest for new source code."""
+    result = LLMProposalProvider(
+        ScriptedClient(json.dumps(raw_response())), monotonic=lambda: 0.0
+    ).propose(request())
+    expected_recipe = {
+        "name": "select_forecast",
+        "kind": "select",
+        "parents": ["forecast"],
+        "fallback_parent": "forecast",
+        "assumptions": [{
+            "assumption_id": "forecast_history",
+            "candidate_name": "forecast",
+            "feature": "history_length",
+            "direction": "above",
+            "horizon_region": "full",
+            "operator": "select",
+            "rationale": "History supports the candidate.",
+            "failure_condition": "History is unavailable.",
+        }],
+    }
+    assert result.failure_reason is None
+    assert result.proposals[0].to_payload()["member"]["policy_sha256"] == fingerprint_payload(expected_recipe)
 
 
 @pytest.mark.parametrize("bad", [
@@ -469,6 +496,7 @@ def test_real_llm_transport_contains_exact_allowed_response_schema_across_prompt
         assert set(schema["$defs"]["source_candidate"]["required"]) == {"local_id", "code"}
         member_schema = schema["$defs"]["member"]
         assert "local_id" in member_schema["properties"]["source_sha256"]["description"]
+        assert "policy_sha256" not in member_schema["properties"]
         union = schema["properties"]["proposals"]["items"]["oneOf"]
         by_op = {item["properties"]["operator"]["const"]: item for item in union}
         assert set(by_op) == set(expected_keys)

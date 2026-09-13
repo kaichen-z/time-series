@@ -340,11 +340,27 @@ def validate_artifact(kind, raw):
         _require_exact_schema(payload, EvolutionKernel._CHECKPOINT_FIELDS, field=kind.value)
     elif kind is K.GENERATION_STATUS:
         from .contracts import TrainMutationFeedbackV2
-        row = _require_exact_schema(payload["numerical_qd_step"], ("generation", "status", "active_bundle_sha256",
-            "winner_genome_sha256", "proposal_attempt_sha256", "train_feedback"), field=kind.value)
+        legacy_fields = ("generation", "status", "active_bundle_sha256",
+            "winner_genome_sha256", "proposal_attempt_sha256", "train_feedback")
+        raw_row = payload["numerical_qd_step"]
+        fields = legacy_fields if isinstance(raw_row, dict) and set(raw_row) == set(legacy_fields) else (
+            *legacy_fields, "materialization_failures")
+        row = _require_exact_schema(raw_row, fields, field=kind.value)
         TrainMutationFeedbackV2.from_payload(row["train_feedback"])
         if type(row["generation"]) is not int or type(row["status"]) is not str:
             raise ValueError("generation control requires primitive status")
+        failures = row.get("materialization_failures", [])
+        if type(failures) is not list:
+            raise ValueError("materialization failures must be a list")
+        for failure in failures:
+            failure = _require_exact_schema(
+                failure, ("member_id", "error_type", "message"),
+                field="materialization failure",
+            )
+            if (any(type(failure[name]) is not str or not failure[name]
+                    for name in ("member_id", "error_type", "message"))
+                    or len(failure["message"].encode("utf-8")) > 512):
+                raise ValueError("materialization failure fields must be bounded text")
     elif kind is K.PARTIAL_RUNG:
         from .contracts import HyperbandBudgetOutcomeV2
         row = _require_exact_schema(payload["closed_partial_rung"], ("state", "manifest_sha256", "reason", "task_results",
