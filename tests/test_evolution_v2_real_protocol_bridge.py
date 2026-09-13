@@ -17,9 +17,9 @@ from tests.test_evolution_v2_real_cooperative import (
 from tests.test_package_stage_runner import _evaluation
 
 
-@pytest.fixture
-def sealed_p3(tmp_path, monkeypatch):
-    tasks = _tasks_100()
+@pytest.fixture(params=[False, True], ids=["unique-entities", "conflicting-entities"])
+def sealed_p3(tmp_path, monkeypatch, request):
+    tasks = _tasks_100(entity_conflicts=request.param)
     host = _host(tasks, object())
     p2 = _p2_pair(tasks)
 
@@ -96,6 +96,15 @@ def test_protocol_bridge_returns_stable_unavailable_handoff(sealed_p3):
     assert case.status == "p5_handoff_unavailable"
     assert case.config is None
     assert case.input_manifest is None
+
+
+def test_protocol_bridge_rejects_changed_projection(sealed_p3):
+    from evolving_loop.v2.protocol.bridge import build_protocol_case_from_p3
+
+    closure, host = sealed_p3
+    changed = replace(closure, train_tasks=tuple(reversed(closure.train_tasks)))
+    with pytest.raises(ValueError, match="projection"):
+        build_protocol_case_from_p3(changed, host, hard_limit_seconds=120)
 
 
 def test_protocol_bridge_case_uses_the_generic_runner(sealed_p3, tmp_path):

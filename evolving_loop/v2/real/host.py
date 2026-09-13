@@ -277,6 +277,28 @@ def _forecast_model_cache_root(location: Path) -> Path:
     return location.parent if location.name == "hub" else location
 
 
+def select_real_task_projection(
+    train_tasks: tuple[ContextTask, ...], dev_tasks: tuple[ContextTask, ...]
+) -> tuple[tuple[ContextTask, ...], tuple[ContextTask, ...]]:
+    """Choose the first feasible entity-disjoint Train4/Dev1 in Host order.
+
+    Only entity identities participate in selection; task labels and metrics
+    remain outside this projection boundary. Return the original Host tasks.
+    """
+    for dev_task in dev_tasks:
+        seen_entities = {dev_task.numeric.entity_name}
+        selected = []
+        for train_task in train_tasks:
+            entity = train_task.numeric.entity_name
+            if entity in seen_entities:
+                continue
+            seen_entities.add(entity)
+            selected.append(train_task)
+            if len(selected) == 4:
+                return tuple(selected), (dev_task,)
+    raise ValueError("real projection requires entity-disjoint Train4/Dev1")
+
+
 @dataclass(slots=True)
 class RealHostRuntimeV2:
     """One shared real task, numerical-cache, and agent runtime boundary."""
@@ -494,6 +516,7 @@ def build_real_host(
 
 
 __all__ = [
+    "select_real_task_projection",
     "EXPECTED_REAL_FORECAST_STORE_IDENTITY",
     "RealHostRuntimeV2",
     "build_real_host",

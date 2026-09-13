@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,9 +34,9 @@ from tests.test_package_stage_runner import _evaluation
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _tasks_100():
+def _tasks_100(*, entity_conflicts=False):
     base = _registry_tasks()[0]
-    return tuple(
+    tasks = tuple(
         replace(
             base,
             numeric=replace(
@@ -46,6 +47,53 @@ def _tasks_100():
         )
         for index in range(100)
     )
+    if entity_conflicts:
+        entities = ("A", "A", "B", "C", "D") + ("A",) * 75 + ("A", "E") + ("F",) * 18
+        tasks = tuple(
+            replace(task, numeric=replace(task.numeric, entity_name=entity))
+            for task, entity in zip(tasks, entities, strict=True)
+        )
+    return tasks
+
+
+@pytest.mark.parametrize(
+    "train_entities,dev_entities,train_indices,dev_index",
+    [
+        (("A", "A", "B", "C", "D", "E"), ("A", "Z"), (2, 3, 4, 5), 0),
+        (("A", "A", "B", "C", "D"), ("A", "Z"), (0, 2, 3, 4), 1),
+        (("D", "C", "B", "A", "A"), ("Z", "A"), (0, 1, 2, 3), 0),
+    ],
+)
+def test_real_projection_uses_first_feasible_dev_and_host_order(
+    train_entities, dev_entities, train_indices, dev_index
+):
+    from evolving_loop.v2.real import host as module
+
+    # Deliberately expose only entity identity: selecting must not read labels/metrics.
+    train = tuple(SimpleNamespace(numeric=SimpleNamespace(entity_name=name)) for name in train_entities)
+    dev = tuple(SimpleNamespace(numeric=SimpleNamespace(entity_name=name)) for name in dev_entities)
+    select = getattr(module, "select_real_task_projection", None)
+    assert callable(select), "the real stages need a shared entity-disjoint selector"
+    expected = (tuple(train[index] for index in train_indices), (dev[dev_index],))
+    assert select(train, dev) == expected
+    assert select(train, dev) == expected
+    assert all(actual is original for actual, original in zip(select(train, dev)[0], expected[0]))
+
+
+@pytest.mark.parametrize("train_entities,dev_entities", [
+    (("A", "A", "B", "C"), ("Z",)),
+    (("A", "B", "C", "D"), ("A", "B")),
+    (("A", "B", "C", "D"), ()),
+])
+def test_real_projection_fails_closed_when_no_disjoint_4_1_exists(train_entities, dev_entities):
+    from evolving_loop.v2.real import host as module
+
+    train = tuple(SimpleNamespace(numeric=SimpleNamespace(entity_name=name)) for name in train_entities)
+    dev = tuple(SimpleNamespace(numeric=SimpleNamespace(entity_name=name)) for name in dev_entities)
+    select = getattr(module, "select_real_task_projection", None)
+    assert callable(select), "the real stages need a shared entity-disjoint selector"
+    with pytest.raises(ValueError, match="entity-disjoint Train4/Dev1"):
+        select(train, dev)
 
 
 def _p2_pair(tasks) -> FrozenNumericalArtifactsV2:
@@ -140,12 +188,12 @@ def test_real_bridge_projects_4_1_but_preserves_p2_100_task_registry(
         )
 
 
-@pytest.fixture
-def sealed_p3(tmp_path, monkeypatch):
+@pytest.fixture(params=[False, True], ids=["unique-entities", "conflicting-entities"])
+def sealed_p3(tmp_path, monkeypatch, request):
     from evolving_loop.v2.cooperative.adapters import CooperativePipelineAdapter
     from evolving_loop.v2.real.bridges import run_real_cooperative
 
-    tasks = _tasks_100()
+    tasks = _tasks_100(entity_conflicts=request.param)
     p2 = _p2_pair(tasks)
     host = _host(tasks, object())
 
@@ -193,8 +241,12 @@ def test_real_bridge_persists_canonical_proposal_space_and_loads_exact_closure(
         closure.active_bundle.decision_policy_sha256
     ) == closure.decision
     assert closure.runtime_identity == "9" * 64
-    assert closure.train_tasks == tasks[:4]
-    assert closure.dev_tasks == tasks[80:81]
+    if tasks[0].numeric.entity_name == "A":
+        assert closure.train_tasks == (tasks[0], tasks[2], tasks[3], tasks[4])
+        assert closure.dev_tasks == (tasks[81],)
+    else:
+        assert closure.train_tasks == tasks[:4]
+        assert closure.dev_tasks == tasks[80:81]
     assert closure.metric_cap == 5.0
     assert closure.config_sha256 == manifest["config_sha256"]
     assert closure.numerical_alternatives == ()

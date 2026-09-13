@@ -16,9 +16,9 @@ from tests.test_evolution_v2_real_cooperative import (
 from tests.test_package_stage_runner import _evaluation
 
 
-@pytest.fixture
-def sealed_p3(tmp_path, monkeypatch):
-    tasks = _tasks_100()
+@pytest.fixture(params=[False, True], ids=["unique-entities", "conflicting-entities"])
+def sealed_p3(tmp_path, monkeypatch, request):
+    tasks = _tasks_100(entity_conflicts=request.param)
     host = _host(tasks, object())
     p2 = _p2_pair(tasks)
 
@@ -91,3 +91,20 @@ def test_source_bridge_production_module_has_no_test_or_fake_imports():
         for alias in node.names
     ]
     assert not any(name.startswith("tests") or name == "FakeLLMClient" for name in imports)
+
+
+def test_source_bridge_rejects_changed_projection(sealed_p3, tmp_path):
+    from evolving_loop.v2.source.bridge import build_source_case_from_p3
+
+    closure, host = sealed_p3
+    source = SourceVariantV2.seed(
+        "def choose_arm(request):\n    return 'numerical'\n",
+        closure.active_bundle.protocol_fingerprint,
+        host.resource_reporter_sha256,
+    )
+    changed = replace(closure, train_tasks=tuple(reversed(closure.train_tasks)))
+    with pytest.raises(ValueError, match="projection"):
+        build_source_case_from_p3(
+            changed, host, source_seed=source, input_digest="b" * 64,
+            empty_skill_path=tmp_path / "empty-skills.json",
+        )

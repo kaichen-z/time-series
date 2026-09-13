@@ -7,7 +7,7 @@ from pathlib import Path
 from evolving_loop.package_registry import task_registry_fingerprint
 
 from ..contracts import fingerprint_payload
-from ..real.host import RealHostRuntimeV2
+from ..real.host import RealHostRuntimeV2, select_real_task_projection
 from .compatibility import CompatibilityCorpusV2, CompatibilityHostInputsV2
 from .contracts import InfrastructureProtocolV2, ProtocolComponentV2
 from .runtime import ProtocolHostInputs, ProtocolRuntimeRegistry
@@ -150,9 +150,8 @@ def build_protocol_case_from_p3(
         closure.catalog.resolve_retrieval(bundle.retrieval_release_sha256)
         closure.catalog.resolve_decision(bundle.decision_policy_sha256)
     tasks = tuple(closure.train_tasks) + tuple(closure.dev_tasks)
-    if len(tasks) != 5 or tuple(closure.train_tasks) != tuple(host.train_tasks[:4]) or tuple(
-        closure.dev_tasks
-    ) != tuple(host.dev_tasks[:1]):
+    train, dev = select_real_task_projection(host.train_tasks, host.dev_tasks)
+    if len(tasks) != 5 or tuple(closure.train_tasks) != train or tuple(closure.dev_tasks) != dev:
         raise ValueError("protocol bridge requires the sealed P3 Train4/Dev1 projection")
     task_shas = tuple(task_registry_fingerprint(task) for task in tasks)
     if len(set(task_shas)) != 5:

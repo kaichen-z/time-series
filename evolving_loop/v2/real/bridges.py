@@ -32,7 +32,7 @@ from ..kernel import AcceptanceEvidence, EvolutionKernel, KernelAuthorityError
 from ..numerical_qd.adapters import FrozenNumericalArtifactsV2
 from ..numerical_qd.contracts import FrozenNumericalRegistryEnvelopeV2
 from ..store import V2RunStore, write_once_json
-from .host import RealHostRuntimeV2
+from .host import RealHostRuntimeV2, select_real_task_projection
 
 
 _DECISION_SEED_PROMPT = (
@@ -256,10 +256,7 @@ def run_real_cooperative(
         or p2.release.fingerprint != p2.registry.release_sha256
     ):
         raise ValueError("real cooperative P2 registry does not bind all Host tasks")
-    train = tuple(host.train_tasks[:4])
-    dev = tuple(host.dev_tasks[:1])
-    if len(train) != 4 or len(dev) != 1:
-        raise ValueError("real cooperative projection requires Train4/Dev1")
+    train, dev = select_real_task_projection(host.train_tasks, host.dev_tasks)
 
     config = CooperativeConfigV2.from_payload(config_payload)
     if config.control.profile not in {"pilot", "formal"}:
@@ -461,9 +458,10 @@ def load_sealed_bundle_closure(
     _validate_manifest_shape(manifest)
     if manifest["runtime_identity"] != _host_runtime_identity(host):
         raise KernelAuthorityError("cooperative proposal-space runtime mismatch")
+    train, dev = select_real_task_projection(host.train_tasks, host.dev_tasks)
     expected_projection = {
-        "train_task_ids": [task.numeric.task_id for task in host.train_tasks[:4]],
-        "dev_task_ids": [task.numeric.task_id for task in host.dev_tasks[:1]],
+        "train_task_ids": [task.numeric.task_id for task in train],
+        "dev_task_ids": [task.numeric.task_id for task in dev],
     }
     if manifest["task_projection"] != expected_projection or tuple(tasks) != tuple(
         host.tasks
@@ -600,8 +598,8 @@ def load_sealed_bundle_closure(
         retrieval=active_retrieval,
         decision=active_decision,
         catalog=catalog,
-        train_tasks=tuple(host.train_tasks[:4]),
-        dev_tasks=tuple(host.dev_tasks[:1]),
+        train_tasks=train,
+        dev_tasks=dev,
         metric_cap=float(manifest["metric_cap"]),
         config_sha256=manifest["config_sha256"],
         numerical_alternatives=alternatives,

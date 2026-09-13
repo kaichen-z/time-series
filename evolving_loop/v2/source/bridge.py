@@ -13,7 +13,7 @@ from ..cooperative import (
     RetrievalCoordinateAdapter,
 )
 from ..real.bridges import P3BundleClosureV2
-from ..real.host import RealHostRuntimeV2
+from ..real.host import RealHostRuntimeV2, select_real_task_projection
 from .contracts import SourceVariantV2
 from .meta import SourceMetaEvaluatorV2
 
@@ -70,9 +70,8 @@ def build_source_case_from_p3(
         or closure.runtime_identity != host.resource_reporter_sha256
     ):
         raise ValueError("source seed commitments do not match the sealed P3 closure")
-    if tuple(closure.train_tasks) != tuple(host.train_tasks[:4]) or tuple(
-        closure.dev_tasks
-    ) != tuple(host.dev_tasks[:1]):
+    train, dev = select_real_task_projection(host.train_tasks, host.dev_tasks)
+    if tuple(closure.train_tasks) != train or tuple(closure.dev_tasks) != dev:
         raise ValueError("source bridge P3 task projection does not match Host")
 
     seed_bytes = closure.active_bundle.canonical_bytes()
