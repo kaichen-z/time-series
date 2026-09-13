@@ -637,6 +637,42 @@ def test_deadline_after_proposal_persistence_finalizes_without_new_material(tmp_
     assert steps[0]["materialization_failures"] == []
 
 
+def test_deadline_after_rng_checkpoint_stops_before_proposer_request(
+    tmp_path, monkeypatch
+):
+    """A slow durable RNG checkpoint must not open later proposal material."""
+    from evolving_loop.v2.numerical_qd.persistence import NumericalQDRunStore
+
+    config, supply, manifest, adapter = fixture(task_budget=920)
+    original = NumericalQDRunStore.write_state
+    writes = 0
+
+    def checkpoint(store, *args, **kwargs):
+        nonlocal writes
+        result = original(store, *args, **kwargs)
+        writes += 1
+        if writes == 2:
+            adapter.monotonic.advance(config.budget.search_deadline_seconds)
+        return result
+
+    monkeypatch.setattr(NumericalQDRunStore, "write_state", checkpoint)
+    result = run_numerical_qd(
+        tmp_path / "run", config, supply, manifest, adapter, stop_after=1
+    )
+
+    assert result.status == "numerical_qd_complete"
+    assert not list((tmp_path / "run/numerical_qd/proposals").glob("*.json"))
+    steps = [
+        json.loads(path.read_bytes())["numerical_qd_step"]
+        for path in (tmp_path / "run/numerical_qd/objects").glob("*.json")
+        if "numerical_qd_step" in json.loads(path.read_bytes())
+    ]
+    assert len(steps) == 1
+    assert steps[0]["status"] == "finalization_reserve"
+    assert steps[0]["proposal_attempt_sha256"] is None
+    assert result.budget["open_reservations"] == []
+
+
 def test_deadline_during_candidate_processing_closes_generation_without_new_material(tmp_path, monkeypatch):
     """Catches a batch continuing material writes after candidate work uses its time."""
     from evolving_loop.v2.numerical_qd import runner

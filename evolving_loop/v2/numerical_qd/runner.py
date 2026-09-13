@@ -811,6 +811,18 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         _persist_state(store, parent_state, selected)
         draw = random.randbelow(2 ** 32)
         checkpoint_state()  # RNG authority is durable before any provider call.
+        if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
+            _persist(store, {"numerical_qd_step": {
+                "generation": generation,
+                "status": "finalization_reserve",
+                "active_bundle_sha256": active.fingerprint(),
+                "winner_genome_sha256": None,
+                "proposal_attempt_sha256": None,
+                "train_feedback": feedback.to_payload(),
+                "materialization_failures": [],
+            }}, kind=ArtifactKind.GENERATION_STATUS)
+            checkpoint_state()
+            break
         proposal_budget = replace(_available(kernel), wall_seconds=min(
             config.adapter["task_timeout_seconds"], _available(kernel).wall_seconds))
         request = primitive_proposer_request(parent_genome=selected.to_payload(), parent_state=parent_state.to_payload(),
