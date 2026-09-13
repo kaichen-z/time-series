@@ -81,12 +81,26 @@ def _unavailable() -> ProtocolRunCaseV2:
     return ProtocolRunCaseV2(_P5_UNAVAILABLE, None, None, None, None, None, None)
 
 
-def _second_bundle(closure: P3BundleClosureV2):
+def _accepted_second_bundle(closure: P3BundleClosureV2):
+    """Select the accepted provisional candidate sealed as active."""
     active = closure.active_bundle
-    for bundle in closure.closed_candidate_bundles:
-        if bundle.fingerprint() != active.fingerprint():
-            return bundle
-    return None
+    active_evidence = active.acceptance_evidence_sha256
+    selected = None
+    for bundle, receipt in zip(
+        closure.closed_candidate_bundles,
+        closure.acceptance_evidence,
+        strict=True,
+    ):
+        candidate_sha = bundle.fingerprint()
+        if receipt.candidate_bundle_sha256 != candidate_sha:
+            raise ValueError("P3 closure acceptance evidence does not bind its Bundle")
+        if (
+            candidate_sha != active.fingerprint()
+            and receipt.decision == "accept"
+            and receipt.fingerprint() == active_evidence
+        ):
+            selected = bundle
+    return selected
 
 
 def _acceptance_evidence(closure: P3BundleClosureV2) -> dict[str, dict[str, object]]:
@@ -137,7 +151,7 @@ def build_protocol_case_from_p3(
         raise ValueError("protocol bridge hard_limit_seconds must be positive")
     if closure.runtime_identity != host.resource_reporter_sha256:
         raise ValueError("protocol bridge P3 runtime commitment does not match Host")
-    second = _second_bundle(closure)
+    second = _accepted_second_bundle(closure)
     if not closure.p5_handoff_available or second is None:
         return _unavailable()
     bundles = (closure.active_bundle, second)
@@ -246,14 +260,6 @@ def build_protocol_case_from_p3(
         "max_proposals": len(templates),
         "hard_limit_seconds": hard_limit_seconds,
     }
-    frozen_bundle = next(
-        (
-            bundle
-            for bundle in bundles
-            if bundle.acceptance_evidence_sha256 in evidence
-        ),
-        second,
-    )
     manifest = {
         "schema_version": 1,
         "l0_commitment": closure.active_bundle.protocol_fingerprint,
@@ -261,7 +267,7 @@ def build_protocol_case_from_p3(
         "corpus": corpus.to_payload(),
         "seed_protocol": seed.to_payload(),
         "host_input_files": [],
-        "frozen_bundle_sha256": frozen_bundle.fingerprint(),
+        "frozen_bundle_sha256": closure.active_bundle.fingerprint(),
         "replacement_templates": [template.to_payload() for template in templates],
     }
     return ProtocolRunCaseV2(
