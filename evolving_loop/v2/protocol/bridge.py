@@ -58,7 +58,7 @@ def _seed_protocol(l0_commitment: str) -> InfrastructureProtocolV2:
         None,
         l0_commitment,
         (
-            ProtocolComponentV2("backbone", "last_value", 1, 1),
+            ProtocolComponentV2("backbone", "frozen_numerical", 1, 1),
             ProtocolComponentV2("loader", "canonical_json", 1, 1),
             ProtocolComponentV2("verifier_strategy", "exact_support", 1, 1),
             ProtocolComponentV2("diagnostic_metric", "forecast_spread", 1, 1),

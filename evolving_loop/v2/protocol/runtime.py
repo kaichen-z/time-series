@@ -22,6 +22,7 @@ from .contracts import InfrastructureProtocolV2, KINDS
 
 
 _IMPLEMENTATIONS = MappingProxyType({
+    ("backbone", "frozen_numerical", 1): "frozen_numerical",
     ("backbone", "last_value", 1): "last_value",
     ("backbone", "history_mean", 1): "history_mean",
     ("loader", "canonical_json", 1): "canonical_json",
@@ -234,6 +235,19 @@ class ProtocolRuntime:
     ) -> FrozenNumericalPackageRegistry:
         entries = []
         backbone = self.implementations["backbone"]
+        if backbone == "frozen_numerical":
+            # Project the sealed authority, not its forecasts or evidence. A
+            # protocol-only change cannot authorize a new Numerical package.
+            return FrozenNumericalPackageRegistry(
+                [(task, source.registry.package_for(task)) for task in tasks],
+                release_sha256=source.release.fingerprint,
+                expected_task_ids=tuple(task.numeric.task_id for task in tasks),
+            )
+        if source.release.schema_version == 2:
+            raise ValueError(
+                "schema-2 Numerical authority requires frozen_numerical; "
+                "backbone replacement requires fresh Numerical evidence"
+            )
         for task in tasks:
             package = source.registry.package_for(task)
             forecast = _forecast(backbone, task.numeric.history_values, task.numeric.prediction_length)
