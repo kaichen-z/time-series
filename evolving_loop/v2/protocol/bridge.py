@@ -81,11 +81,12 @@ def _unavailable() -> ProtocolRunCaseV2:
     return ProtocolRunCaseV2(_P5_UNAVAILABLE, None, None, None, None, None, None)
 
 
-def _accepted_second_bundle(closure: P3BundleClosureV2):
-    """Select the accepted provisional candidate sealed as active."""
+def _second_bundle_for_compatibility(closure: P3BundleClosureV2):
+    """Select a distinct, authenticated P3 candidate for compatibility."""
     active = closure.active_bundle
     active_evidence = active.acceptance_evidence_sha256
-    selected = None
+    accepted = None
+    fallback = None
     for bundle, receipt in zip(
         closure.closed_candidate_bundles,
         closure.acceptance_evidence,
@@ -94,13 +95,15 @@ def _accepted_second_bundle(closure: P3BundleClosureV2):
         candidate_sha = bundle.fingerprint()
         if receipt.candidate_bundle_sha256 != candidate_sha:
             raise ValueError("P3 closure acceptance evidence does not bind its Bundle")
+        if candidate_sha != active.fingerprint() and fallback is None:
+            fallback = bundle
         if (
             candidate_sha != active.fingerprint()
             and receipt.decision == "accept"
             and receipt.fingerprint() == active_evidence
         ):
-            selected = bundle
-    return selected
+            accepted = bundle
+    return accepted or fallback
 
 
 def _acceptance_evidence(closure: P3BundleClosureV2) -> dict[str, dict[str, object]]:
@@ -151,7 +154,7 @@ def build_protocol_case_from_p3(
         raise ValueError("protocol bridge hard_limit_seconds must be positive")
     if closure.runtime_identity != host.resource_reporter_sha256:
         raise ValueError("protocol bridge P3 runtime commitment does not match Host")
-    second = _accepted_second_bundle(closure)
+    second = _second_bundle_for_compatibility(closure)
     if not closure.p5_handoff_available or second is None:
         return _unavailable()
     bundles = (closure.active_bundle, second)

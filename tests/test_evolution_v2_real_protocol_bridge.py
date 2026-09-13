@@ -126,9 +126,8 @@ def test_protocol_bridge_uses_the_accepted_candidate_bound_to_active_authority(
     )
 
 
-def test_protocol_bridge_does_not_run_with_only_rejected_p3_candidates(
+def test_protocol_bridge_uses_a_closed_rejected_candidate_for_compatibility(
     rejected_p3,
-    tmp_path,
 ):
     from evolving_loop.v2.protocol.bridge import build_protocol_case_from_p3
 
@@ -138,16 +137,26 @@ def test_protocol_bridge_does_not_run_with_only_rejected_p3_candidates(
     assert {receipt.decision for receipt in closure.acceptance_evidence} == {"reject"}
 
     case = build_protocol_case_from_p3(closure, host, hard_limit_seconds=120)
-    output_dir = tmp_path / "p5-must-not-run"
+    second_sha = case.corpus.archive_bundle_sha256s[1]
+    receipt = next(
+        receipt
+        for candidate, receipt in zip(
+            closure.closed_candidate_bundles,
+            closure.acceptance_evidence,
+            strict=True,
+        )
+        if candidate.fingerprint() == second_sha
+    )
 
-    assert case.status == "p5_handoff_unavailable"
-    assert case.config is None
-    assert case.input_manifest is None
-    assert case.run(output_dir) == {
-        "schema_version": 1,
-        "status": "p5_handoff_unavailable",
-    }
-    assert not output_dir.exists()
+    assert case.status == "protocol_case_ready"
+    assert len(set(case.corpus.archive_bundle_sha256s)) == 2
+    assert second_sha != closure.active_bundle.fingerprint()
+    assert receipt.decision == "reject"
+    assert receipt.candidate_bundle_sha256 == second_sha
+    assert (
+        case.input_manifest["frozen_bundle_sha256"]
+        == closure.active_bundle.fingerprint()
+    )
 
 
 def test_protocol_bridge_returns_stable_unavailable_handoff(sealed_p3):
