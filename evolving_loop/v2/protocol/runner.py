@@ -128,15 +128,20 @@ def _handoff_resolver(root: Path, release: ProtocolReleaseV2, bundle: EvolutionB
     evidence_map = {path.stem: _read(path) for path in (root / "evidence").glob("*.json")}
     protocol_map = {path.stem: _read(path) for path in (root / "protocols").glob("*.json")}
     bundle_map = {bundle.fingerprint(): bundle.to_payload(), release.fingerprint(): release.to_payload()}
-    if bundle.acceptance_evidence_sha256 is None or host_inputs.bundle_acceptance_evidence is None:
-        raise ValueError("Host input is missing frozen Bundle acceptance evidence")
-    try:
-        bundle_evidence = host_inputs.bundle_acceptance_evidence[bundle.acceptance_evidence_sha256]
-    except KeyError as error:
-        raise ValueError("Host input does not close frozen Bundle acceptance evidence") from error
-    if fingerprint_payload(bundle_evidence) != bundle.acceptance_evidence_sha256:
-        raise ValueError("Host Bundle acceptance evidence does not match committed SHA")
-    bundle_map[bundle.acceptance_evidence_sha256] = dict(bundle_evidence)
+    bundle_evidence_sha = bundle.acceptance_evidence_sha256
+    if bundle_evidence_sha is None:
+        if bundle.generation != 0:
+            raise ValueError("Host input is missing frozen Bundle acceptance evidence")
+    else:
+        if host_inputs.bundle_acceptance_evidence is None:
+            raise ValueError("Host input is missing frozen Bundle acceptance evidence")
+        try:
+            bundle_evidence = host_inputs.bundle_acceptance_evidence[bundle_evidence_sha]
+        except KeyError as error:
+            raise ValueError("Host input does not close frozen Bundle acceptance evidence") from error
+        if fingerprint_payload(bundle_evidence) != bundle_evidence_sha:
+            raise ValueError("Host Bundle acceptance evidence does not match committed SHA")
+        bundle_map[bundle_evidence_sha] = dict(bundle_evidence)
 
     def resolve(identity: str) -> dict:
         if identity in bundle_map:
@@ -199,11 +204,14 @@ def freeze_protocol_handoff(release: ProtocolReleaseV2, bundle: EvolutionBundleV
     resolved_bundle = EvolutionBundleV2.from_payload(resolve(bundle.fingerprint()))
     if resolved_bundle != bundle:
         raise ValueError("frozen Bundle resolution does not match Bundle SHA")
-    if bundle.acceptance_evidence_sha256 is None:
-        raise ValueError("frozen Bundle must have acceptance evidence")
-    bundle_evidence = resolve(bundle.acceptance_evidence_sha256)
-    if fingerprint_payload(bundle_evidence) != bundle.acceptance_evidence_sha256:
-        raise ValueError("Bundle acceptance evidence resolution does not match SHA")
+    bundle_evidence_sha = bundle.acceptance_evidence_sha256
+    if bundle_evidence_sha is None:
+        if bundle.generation != 0:
+            raise ValueError("frozen Bundle must have acceptance evidence")
+    else:
+        bundle_evidence = resolve(bundle_evidence_sha)
+        if fingerprint_payload(bundle_evidence) != bundle_evidence_sha:
+            raise ValueError("Bundle acceptance evidence resolution does not match SHA")
     if bundle.protocol_fingerprint != release.l0_commitment_sha256:
         raise ValueError("Bundle and release L0 commitments do not match")
     if release.protocol_sha256 != evidence.proposed_protocol_sha256:

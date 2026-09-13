@@ -128,6 +128,7 @@ def test_protocol_bridge_uses_the_accepted_candidate_bound_to_active_authority(
 
 def test_protocol_bridge_uses_a_closed_rejected_candidate_for_compatibility(
     rejected_p3,
+    tmp_path,
 ):
     from evolving_loop.v2.protocol.bridge import build_protocol_case_from_p3
 
@@ -157,6 +158,9 @@ def test_protocol_bridge_uses_a_closed_rejected_candidate_for_compatibility(
         case.input_manifest["frozen_bundle_sha256"]
         == closure.active_bundle.fingerprint()
     )
+    result = case.run(tmp_path / "p5-seed-only")
+    assert result["status"] == "protocol_evolution_complete"
+    assert (tmp_path / "p5-seed-only/completion.json").is_file()
 
 
 def test_protocol_bridge_returns_stable_unavailable_handoff(sealed_p3):
