@@ -399,3 +399,25 @@ python -m pytest -q \
 The existing r6 artifacts were inspected read-only to confirm the differential
 and were not edited, deleted, or committed.  No live run or billable call was
 launched.
+
+#### Host task ordering and hidden-label follow-up
+
+The Host recovery boundary now requires the Host task ID sequence to match the
+parsed Train80/Dev20 manifest sequence exactly before it compares records with
+`zip`; a reordered or cross-partition universe can no longer be silently
+restored through an ID lookup.  Manifest-safe projection fixes
+`labels_public=True`, matching the strict parser, because the Host value is
+unserialized metadata just like document role/subtype.  The original Host
+value—including `labels_public=False`—is retained in the frozen registry
+fingerprint after the safe projection passes.
+
+Focused TDD verification initially produced both expected failures, then:
+
+```text
+python -m pytest -q \
+  tests/test_evolution_v2_shortlist_runtime.py::test_production_adapter_keeps_hidden_host_identity_for_rungs_and_frozen_registry \
+  tests/test_evolution_v2_shortlist_runtime.py::test_production_host_task_order_cannot_cross_manifest_partitions
+2 passed in 5.11s
+```
+
+No run artifacts or billable services were touched.

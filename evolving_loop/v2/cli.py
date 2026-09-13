@@ -562,14 +562,12 @@ def _host_registry_tasks(tasks, host_runtime):
         or any(type(task) is not ContextTask for task in host_tasks)
     ):
         raise ValueError("production Host tasks must be exact ContextTask records")
-    host_by_id = {task.numeric.task_id: task for task in host_tasks}
-    if len(host_by_id) != len(host_tasks):
-        raise ValueError("production Host task identities must be unique")
+    parsed_ids = tuple(task.numeric.task_id for task in parsed)
+    host_ids = tuple(task.numeric.task_id for task in host_tasks)
+    if host_ids != parsed_ids:
+        raise ValueError("production Host task order differs from the manifest")
     restored = []
-    for manifest_task in parsed:
-        host_task = host_by_id.get(manifest_task.numeric.task_id)
-        if host_task is None:
-            raise ValueError("production Host task universe differs from the manifest")
+    for manifest_task, host_task in zip(parsed, host_tasks, strict=True):
         projection = ContextTask(
             numeric=host_task.numeric,
             target_name=host_task.target_name,
@@ -581,7 +579,7 @@ def _host_registry_tasks(tasks, host_runtime):
                 for document in host_task.documents
             ),
             gt_evidence=host_task.gt_evidence,
-            labels_public=host_task.labels_public,
+            labels_public=True,
         )
         if projection != manifest_task:
             raise ValueError(

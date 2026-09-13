@@ -199,7 +199,7 @@ def test_schema_two_adapter_uses_exact_host_screening_and_rejects_mismatch(
         )
 
 
-def test_production_adapter_keeps_host_context_identity_for_rungs_and_frozen_registry(
+def test_production_adapter_keeps_hidden_host_identity_for_rungs_and_frozen_registry(
     tmp_path,
 ):
     from evolving_loop.v2.numerical_qd.adapters import import_numerical_seed
@@ -236,6 +236,7 @@ def test_production_adapter_keeps_host_context_identity_for_rungs_and_frozen_reg
                 replace(document, role="relevant", subtype="direct")
                 for document in task.documents
             ),
+            labels_public=False,
         )
         for task in manifest_tasks
     )
@@ -289,6 +290,21 @@ def test_production_adapter_keeps_host_context_identity_for_rungs_and_frozen_reg
         for task in host_tasks
     )
     assert frozen.envelope.restore(host_tasks).fingerprint == registry.fingerprint
+
+
+def test_production_host_task_order_cannot_cross_manifest_partitions():
+    _config, _seed, _folds, baseline = fixture(raw_seed=True)
+    parsed = baseline.tasks
+    cross_partition_order = (
+        *parsed[80:],
+        *parsed[:80],
+    )
+
+    with pytest.raises(ValueError, match="order differs from the manifest"):
+        cli._host_registry_tasks(
+            parsed,
+            SimpleNamespace(tasks=cross_partition_order),
+        )
 
 
 def test_same_id_policy_change_requires_new_evidence_before_child_execution(tmp_path, monkeypatch):
