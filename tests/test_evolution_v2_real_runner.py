@@ -169,6 +169,31 @@ def test_carry_accumulates_across_p2_and_p3(case: RunnerCase):
     assert case.grants == {"p2": 840, "p3": 600, "p4": 620, "p5": 640}
 
 
+def test_elapsed_search_time_caps_carried_p5_grant(case: RunnerCase):
+    """Uncharged orchestration time must shrink, not deny, the final stage."""
+    case.stage_durations.update(p2=600, p3=100, p4=138, p5=491)
+    original_seal = case._seal
+    p4_overhead_applied = False
+
+    def seal_with_r7_overhead(stage, context, result):
+        nonlocal p4_overhead_applied
+        sealed = original_seal(stage, context, result)
+        if stage == "p4" and not p4_overhead_applied:
+            case.clock.advance(110.8)
+            p4_overhead_applied = True
+        return sealed
+
+    case._seal = seal_with_r7_overhead
+
+    result = case.run()
+
+    assert result.status == "complete"
+    assert case.grants == {"p2": 840, "p3": 600, "p4": 620, "p5": 491}
+    assert case.calls == Counter({"p2": 1, "p3": 1, "p4": 1, "p5": 1})
+    assert case.finalization_started_at == pytest.approx(1439.8)
+    assert case.finalization_started_at <= 1440
+
+
 def test_finalization_reserve_is_not_borrowed(case: RunnerCase):
     case.stage_durations["p2"] = 840
     case.stage_durations["p3"] = 360

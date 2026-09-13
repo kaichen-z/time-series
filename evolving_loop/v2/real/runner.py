@@ -1224,10 +1224,19 @@ def _grant(
     index = _STAGES.index(stage)
     base = schedule.allocations[stage]
     later_base = sum(schedule.allocations[name] for name in _STAGES[index + 1 :])
-    search_remaining = (
-        schedule.total_seconds - schedule.finalization_reserve_seconds - ledger.charged_use.wall_seconds
+    charged_remaining = (
+        ledger.plan.search_deadline_seconds - ledger.charged_use.wall_seconds
     )
-    return int(min(base + carry_seconds, search_remaining - later_base))
+    elapsed_remaining = (
+        ledger.plan.search_deadline_seconds - ledger.elapsed_wall_seconds
+    )
+    return int(
+        min(
+            base + carry_seconds,
+            charged_remaining - later_base,
+            elapsed_remaining - later_base,
+        )
+    )
 
 
 def _terminal_active_failure(
