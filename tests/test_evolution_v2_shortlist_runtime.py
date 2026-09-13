@@ -5,13 +5,20 @@ from types import SimpleNamespace
 import pytest
 
 from common.payload import canonical_json_bytes
+from evolving_loop.data import Document
+from evolving_loop.package_registry import task_registry_fingerprint
 from evolving_loop.v2 import cli
 from evolving_loop.v2.contracts import canonical_v2_bytes, fingerprint_payload
 from evolving_loop.v2.numerical_qd.adapters import freeze_qd_supply, validate_frozen_local_evidence
 from evolving_loop.v2.numerical_qd.contracts import ConstraintReportV2, NumericalQDEntryV2, NumericalObjectiveVectorV2
 from evolving_loop.v2.numerical_qd.descriptors import describe_history
 from evolving_loop.v2.numerical_qd.map_elites import NumericalQDArchive
-from evolving_loop.v2.numerical_qd.runner import _bootstrap, _seed_registry, _train_rows
+from evolving_loop.v2.numerical_qd.runner import (
+    _bootstrap,
+    _packed_train_task_groups,
+    _seed_registry,
+    _train_rows,
+)
 from numerical_agent.evolution.filtering import FilterDictionary, FilterEntry
 from numerical_agent.evolution.task_shortlist import TaskCandidateShortlistV1, TaskShortlistPolicyV1, _dictionary_hash
 from numerical_agent.run_task_local_ensemble_evolution import task_input_sha256
@@ -190,6 +197,98 @@ def test_schema_two_adapter_uses_exact_host_screening_and_rejects_mismatch(
             task_local_evidence_path=tmp_path,
             task_local_dictionary=dictionary,
         )
+
+
+def test_production_adapter_keeps_host_context_identity_for_rungs_and_frozen_registry(
+    tmp_path,
+):
+    from evolving_loop.v2.numerical_qd.adapters import import_numerical_seed
+
+    names = ("seasonal_naive", "select_seasonal_naive") + tuple(
+        f"method_{index:02d}" for index in range(12)
+    )
+    dictionary = FilterDictionary(
+        (FilterEntry("toto_2_0", "tsfm", "keep", (), "reviewed"),)
+        + tuple(
+            FilterEntry(name, "statistical", "keep", (), "reviewed")
+            for name in names
+        )
+    )
+    config, seed, folds, baseline, store, _expected, _raw = production_world(
+        tmp_path, dictionary=dictionary
+    )
+    manifest_tasks = tuple(
+        replace(
+            task,
+            documents=(
+                Document(
+                    f"registry-{task.numeric.task_id}",
+                    "Host-owned registry context",
+                ),
+            ),
+        )
+        for task in baseline.tasks
+    )
+    host_tasks = tuple(
+        replace(
+            task,
+            documents=tuple(
+                replace(document, role="relevant", subtype="direct")
+                for document in task.documents
+            ),
+        )
+        for task in manifest_tasks
+    )
+    host = SimpleNamespace(
+        forecast_store=store,
+        sources=baseline.sources,
+        tasks=host_tasks,
+    )
+    adapter = cli._build_numerical_adapter(
+        config,
+        manifest_tasks,
+        folds,
+        {
+            "config": "0" * 64,
+            "seed_supply": "1" * 64,
+            "task_manifest": "2" * 64,
+        },
+        host_runtime=host,
+        seed_release=seed,
+        task_local_evidence_path=tmp_path,
+        task_local_dictionary=dictionary,
+    )
+    commitments = {
+        task.numeric.task_id: task_registry_fingerprint(task)
+        for task in adapter.tasks
+    }
+    rung_groups = _packed_train_task_groups(
+        adapter, commitments, "3" * 64, "4" * 64
+    )
+
+    assert adapter.tasks == tuple(
+        sorted(host_tasks, key=lambda task: task.numeric.task_id)
+    )
+    assert all(entity.startswith("fold-group-") for entity in rung_groups)
+    host_by_id = {task.numeric.task_id: task for task in host_tasks}
+    assert all(
+        task.task_sha256 == task_registry_fingerprint(host_by_id[task.task_id])
+        for tasks in rung_groups.values()
+        for task in tasks
+    )
+    registry = _seed_registry(seed, adapter)
+    frozen = import_numerical_seed(
+        seed,
+        registry,
+        tasks=adapter.tasks,
+        evidence=adapter.task_local_evidence,
+    )
+    assert all(
+        frozen.envelope.entries[task.numeric.task_id]["task_sha256"]
+        == task_registry_fingerprint(task)
+        for task in host_tasks
+    )
+    assert frozen.envelope.restore(host_tasks).fingerprint == registry.fingerprint
 
 
 def test_same_id_policy_change_requires_new_evidence_before_child_execution(tmp_path, monkeypatch):

@@ -363,3 +363,39 @@ after 173.40 seconds; before the expected fixture-identity updates it had
 reached 560 passes and five raw-entity fixture failures.  All five affected
 cases are included in the focused green gate above.  No live run or billable
 call was launched, and live artifacts were not modified.
+
+### Live P2 Host registry-task identity fix
+
+The r6 run reached P2 completion and exposed a seal-only identity mismatch:
+all 100 task IDs and task-input SHA values matched, but all 100 full
+`task_registry_fingerprint` values differed.  The frozen pair was not polluted
+by anonymous Hyperband `TrainTaskV2` identities.  Instead, it was built from
+the CLI's manifest-reconstructed `ContextTask` values.  The prepared manifest
+intentionally carries only each document's ID and content, so reconstruction
+dropped the original Host document `role` and `subtype` fields that are part of
+the full registry fingerprint.
+
+The production adapter now recovers the exact `host.tasks` records only after
+verifying that stripping those evaluator-only document fields produces an
+exact match to every manifest task.  The restored Host records are then used
+by seed, child, and final frozen registries.  Hyperband continues to use the
+separate opaque rank-plus-group-SHA `TrainTaskV2.entity_id`, and its task SHA is
+derived from the same original Host ContextTask.  Hosts without an explicit
+task authority retain the existing smoke/fixture path.
+
+Focused TDD verification:
+
+```text
+python -m pytest -q \
+  tests/test_evolution_v2_shortlist_runtime.py::test_schema_two_adapter_uses_exact_host_screening_and_rejects_mismatch \
+  tests/test_evolution_v2_shortlist_runtime.py::test_production_adapter_keeps_host_context_identity_for_rungs_and_frozen_registry \
+  tests/test_evolution_v2_shortlist_runtime.py::test_production_seed_child_and_nonempty_freeze_keep_shortlist_result \
+  tests/test_evolution_v2_numerical_runner.py::test_authenticated_fold_groups_pack_into_nested_label_free_rungs \
+  tests/test_evolution_v2_numerical_adapters.py::test_single_task_evaluation_authenticates_opaque_fold_group_identity \
+  tests/test_evolution_v2_real_numerical.py::test_completed_store_loads_exact_active_frozen_pair
+6 passed in 77.22s
+```
+
+The existing r6 artifacts were inspected read-only to confirm the differential
+and were not edited, deleted, or committed.  No live run or billable call was
+launched.

@@ -549,6 +549,48 @@ def _parse_cooperative_task_manifest(
     return {"train": train, "dev": dev}
 
 
+def _host_registry_tasks(tasks, host_runtime):
+    """Recover full Host records after verifying the manifest-safe projection."""
+
+    parsed = tuple(tasks)
+    host_tasks = getattr(host_runtime, "tasks", None)
+    if host_tasks is None:
+        return parsed
+    if (
+        type(host_tasks) is not tuple
+        or len(host_tasks) != len(parsed)
+        or any(type(task) is not ContextTask for task in host_tasks)
+    ):
+        raise ValueError("production Host tasks must be exact ContextTask records")
+    host_by_id = {task.numeric.task_id: task for task in host_tasks}
+    if len(host_by_id) != len(host_tasks):
+        raise ValueError("production Host task identities must be unique")
+    restored = []
+    for manifest_task in parsed:
+        host_task = host_by_id.get(manifest_task.numeric.task_id)
+        if host_task is None:
+            raise ValueError("production Host task universe differs from the manifest")
+        projection = ContextTask(
+            numeric=host_task.numeric,
+            target_name=host_task.target_name,
+            target_description=host_task.target_description,
+            history_timestamps=host_task.history_timestamps,
+            future_timestamps=host_task.future_timestamps,
+            documents=tuple(
+                Document(document.document_id, document.content)
+                for document in host_task.documents
+            ),
+            gt_evidence=host_task.gt_evidence,
+            labels_public=host_task.labels_public,
+        )
+        if projection != manifest_task:
+            raise ValueError(
+                "production Host task projection differs from the manifest"
+            )
+        restored.append(host_task)
+    return tuple(restored)
+
+
 class _DeterministicForecastStore:
     """CPU-only Host store used when no external runtime is configured."""
 
@@ -583,6 +625,7 @@ def _build_numerical_adapter(
     from numerical_agent.run_task_local_ensemble_evolution import load_task_local_evidence_bundle
     task_local_evidence_path = task_local_evidence_path or getattr(host_runtime, "task_local_evidence_path", None)
     task_local_dictionary = task_local_dictionary or getattr(host_runtime, "task_local_dictionary", None)
+    tasks = _host_registry_tasks(tasks, host_runtime)
     if seed_release is not None and seed_release.schema_version == 2 and not legacy_bootstrap and task_local_evidence_path is None:
         raise ValueError("schema-2 production requires Task 4 evidence; legacy/bootstrap must be explicit")
     evidence = None
