@@ -8,6 +8,7 @@ import pytest
 
 from common.llm import LLMResponse
 from evolving_loop.package_numerical_evolution import NumericalPackageMaterializer
+from evolving_loop.package_registry import task_registry_fingerprint
 from evolving_loop.v2.budget import ResourceUse
 from evolving_loop.v2.fakes import FakeClock
 from evolving_loop.v2.kernel import EvolutionKernel, KernelAuthorityError
@@ -91,6 +92,62 @@ def run_fixture(root, **kwargs):
         "seed", "task_budget", "provider", "clock", "operator_input_sha256s"
     }}
     return run_numerical_qd(root, *fixture(**options), **kwargs)
+
+
+def test_authenticated_fold_groups_pack_into_nested_label_free_rungs():
+    from evolving_loop.v2.numerical_qd import hyperband
+    from evolving_loop.v2.numerical_qd import runner
+
+    config, _supply, folds, adapter = fixture()
+    commitments = {
+        task.numeric.task_id: task_registry_fingerprint(task)
+        for task in adapter.tasks
+    }
+    groups = runner._packed_train_task_groups(
+        adapter,
+        commitments,
+        config.kernel_protocol.split_manifest,
+        config.kernel_protocol.fingerprint(),
+    )
+    manifests = tuple(
+        hyperband.fixed_rung_manifest(
+            groups,
+            resource,
+            config.kernel_protocol.split_manifest,
+            config.kernel_protocol.fingerprint(),
+        )
+        for resource in (8, 32, 80)
+    )
+
+    expected_groups = {
+        frozenset(task_ids) for _group_sha, task_ids, _fold in folds.groups
+    }
+    actual_groups = {
+        frozenset(task.task_id for task in tasks) for tasks in groups.values()
+    }
+    assert actual_groups == expected_groups
+    assert all(
+        entity_id.startswith("fold-group-")
+        and not any(task.numeric.entity_name in entity_id for task in adapter.tasks)
+        and all(task.entity_id == entity_id for task in tasks)
+        for entity_id, tasks in groups.items()
+    )
+    assert tuple(len(manifest.tasks) for manifest in manifests) == (8, 32, 80)
+    assert set(manifests[0].task_ids) < set(manifests[1].task_ids) < set(manifests[2].task_ids)
+    for manifest in manifests:
+        selected = set(manifest.task_ids)
+        assert all(not (selected & group) or group <= selected for group in expected_groups)
+
+
+def test_group_packing_fails_when_a_registered_rung_cannot_keep_groups_whole():
+    from evolving_loop.v2.numerical_qd import hyperband
+
+    groups = (
+        ("1" * 64, tuple(f"task-{index:02d}" for index in range(9)), 0),
+        ("2" * 64, tuple(f"task-{index:02d}" for index in range(9, 80)), 1),
+    )
+    with pytest.raises(ValueError, match="cannot pack authenticated fold groups"):
+        hyperband.pack_fold_groups(groups)
 
 
 def test_schema_two_host_run_requires_evidence_or_explicit_bootstrap(tmp_path):

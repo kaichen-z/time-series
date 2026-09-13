@@ -478,6 +478,39 @@ def test_real_screening_keeps_task_114_timesfm_from_nonfirst_clause():
     assert "timesfm_2_5" in {candidate.name for candidate in active.active}
 
 
+def test_real_train_fold_groups_require_exact_nested_rung_packing():
+    from collections import Counter
+
+    from evolving_loop.data import load_context_tasks_by_ids
+    from evolving_loop.v2.numerical_qd.hyperband import pack_fold_groups
+    from numerical_agent.evolution.task_local_evolution import (
+        build_group_fold_manifest,
+    )
+
+    split = json.loads(
+        (AUTHORITY_ROOT / "splits/drcik_public_80_20_99_v3.json").read_bytes()
+    )
+    train_ids = tuple(split["partitions"]["train"]["task_ids"])
+    tasks = load_context_tasks_by_ids(
+        AUTHORITY_ROOT / "external/Dr-CiK/full-download/Dr-CiK_public/tasks",
+        train_ids,
+    )
+    folds = build_group_fold_manifest(
+        tuple(task.numeric for task in tasks), seed=20260903
+    )
+    sizes = tuple(len(task_ids) for _sha, task_ids, _fold in folds.groups)
+    packed = pack_fold_groups(folds.groups)
+
+    assert len(sizes) == 28
+    assert Counter(sizes) == Counter(
+        {1: 14, 2: 8, 3: 1, 4: 1, 5: 1, 9: 1, 14: 1, 15: 1}
+    )
+    assert {8, 32}.isdisjoint(__import__("itertools").accumulate(sizes))
+    assert tuple(
+        sum(len(task_ids) for _entity, task_ids in bin_) for bin_ in packed
+    ) == (8, 24, 48)
+
+
 def _real_manifest_payload():
     return {
         "schema_version": 1,

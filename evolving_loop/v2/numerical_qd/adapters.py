@@ -65,6 +65,7 @@ from .contracts import (
     RungManifestV2, TrainTaskV2,
 )
 from .descriptors import DescriptorPolicyV2, describe_history
+from .hyperband import pack_fold_groups
 from .map_elites import NumericalQDArchive
 from .mutation import MutationProposalV2, apply_mutation
 from .nsga2 import crowding_distances, non_dominated_fronts
@@ -1293,6 +1294,12 @@ def evaluate_numerical_child(adapter, child, manifest, *, descriptor_policy: Des
     if manifest.protocol_sha256 != child.genome.protocol_fingerprint:
         raise ValueError("evaluation protocol mismatch")
     hosts = {task.numeric.task_id: task for task in adapter.tasks}
+    packed_entity_ids = {
+        task_id: entity_id
+        for bin_rows in pack_fold_groups(adapter.fold_manifest.groups)
+        for entity_id, task_ids in bin_rows
+        for task_id in task_ids
+    }
     identities = manifest.tasks if type(manifest) is RungManifestV2 else (manifest,)
     task_ids = tuple(sorted(identity.task_id for identity in identities))
     scores, cells = [], {}
@@ -1300,7 +1307,8 @@ def evaluate_numerical_child(adapter, child, manifest, *, descriptor_policy: Des
         if identity.task_id not in adapter.fold_manifest.task_fold_map:
             raise ValueError("Dev tasks cannot enter Numerical QD evaluation")
         task = hosts[identity.task_id]
-        if task_registry_fingerprint(task) != identity.task_sha256 or task.numeric.entity_name != identity.entity_id:
+        if (task_registry_fingerprint(task) != identity.task_sha256
+                or packed_entity_ids.get(identity.task_id) != identity.entity_id):
             raise ValueError("Train task content or group mismatch")
         package = child.candidate.registry.package_for(task)
         target = next((item for item in package.ranked_alternatives if item.name == child.fit.recipe.name), package.protected_baseline)

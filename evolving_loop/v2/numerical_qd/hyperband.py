@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
+from functools import lru_cache
 import hashlib
 import math
 
@@ -26,6 +27,67 @@ def fixed_rung_manifest(task_groups, resource, split_sha256, protocol_sha256) ->
     """Commit an exact lexicographic prefix; reject a boundary inside an entity."""
 
     return RungManifestV2(resource, split_sha256, protocol_sha256, task_groups)
+
+
+def pack_fold_groups(groups):
+    """Partition authenticated whole groups into the fixed nested rung increments."""
+
+    rows = tuple(groups)
+    seen_tasks = set()
+    previous_sha = ""
+    for row in rows:
+        if type(row) is not tuple or len(row) != 3:
+            raise ValueError("authenticated fold groups must be exact triples")
+        group_sha, task_ids, fold = row
+        if (
+            type(group_sha) is not str
+            or len(group_sha) != 64
+            or group_sha <= previous_sha
+            or type(task_ids) is not tuple
+            or not task_ids
+            or tuple(sorted(task_ids)) != task_ids
+            or seen_tasks.intersection(task_ids)
+            or type(fold) is not int
+        ):
+            raise ValueError("invalid authenticated fold group")
+        previous_sha = group_sha
+        seen_tasks.update(task_ids)
+    capacities = (8, 24, 48)
+    if len(seen_tasks) != sum(capacities):
+        raise ValueError("cannot pack authenticated fold groups into fixed rungs")
+
+    @lru_cache(maxsize=None)
+    def assign(index, remaining):
+        if index == len(rows):
+            return () if remaining == (0, 0, 0) else None
+        size = len(rows[index][1])
+        for bin_index, available in enumerate(remaining):
+            if size > available:
+                continue
+            following = list(remaining)
+            following[bin_index] -= size
+            suffix = assign(index + 1, tuple(following))
+            if suffix is not None:
+                return (bin_index, *suffix)
+        return None
+
+    assignment = assign(0, capacities)
+    if assignment is None:
+        raise ValueError("cannot pack authenticated fold groups into fixed rungs")
+    rank = 0
+    packed = []
+    for bin_index in range(len(capacities)):
+        bin_rows = []
+        for (group_sha, task_ids, _fold), assigned_bin in zip(
+            rows, assignment, strict=True
+        ):
+            if assigned_bin != bin_index:
+                continue
+            entity_id = f"fold-group-{rank:03d}-{group_sha}"
+            bin_rows.append((entity_id, task_ids))
+            rank += 1
+        packed.append(tuple(bin_rows))
+    return tuple(packed)
 
 
 def evaluation_cache_key(candidate, task, split, metric, descriptor, runtime, protocol, adapter,

@@ -50,7 +50,7 @@ from .contracts import (
 from .descriptors import describe_history
 from .hyperband import (
     _read_cache, _task_evaluation, advance_hyperband, choose_bracket,
-    evaluation_cache_key, fixed_rung_manifest,
+    evaluation_cache_key, fixed_rung_manifest, pack_fold_groups,
 )
 from .map_elites import CounterRandom, NumericalQDArchive
 from .mutation import MutationProposalV2, apply_mutation, record_train_outcome
@@ -78,6 +78,40 @@ class NumericalQDRunResultV2:
     seed_proposer_prompt_sha256: str
     budget: dict
     public_test_accessed: bool = False
+
+
+def _packed_train_task_groups(
+    adapter, task_commitments, split_sha256, protocol_sha256
+):
+    """Bind Train tasks to a label-free whole-group ordering for 8/32/80."""
+
+    hosts = {
+        task.numeric.task_id: task
+        for task in adapter.tasks
+        if task.numeric.task_id in adapter.fold_manifest.task_fold_map
+    }
+    packed = pack_fold_groups(adapter.fold_manifest.groups)
+    packed_ids = {
+        task_id for bin_rows in packed for _entity_id, task_ids in bin_rows
+        for task_id in task_ids
+    }
+    if packed_ids != set(hosts):
+        raise ValueError("authenticated fold groups differ from the Train Host universe")
+    groups = {}
+    for bin_rows in packed:
+        for entity_id, task_ids in bin_rows:
+            groups[entity_id] = tuple(
+                TrainTaskV2(
+                    task_id,
+                    entity_id,
+                    task_commitments[task_id],
+                    "train",
+                    split_sha256,
+                    protocol_sha256,
+                )
+                for task_id in task_ids
+            )
+    return groups
 
 
 def _read(path):
@@ -732,12 +766,12 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         return result("numerical_qd_complete")
     if not resume:
         checkpoint_state()
-    groups = {}
-    for task in adapter.tasks:
-        if task.numeric.task_id in adapter.fold_manifest.task_fold_map:
-            groups.setdefault(task.numeric.entity_name, []).append(TrainTaskV2(task.numeric.task_id,
-                task.numeric.entity_name, task_commitments[task.numeric.task_id], "train",
-                config.kernel_protocol.split_manifest, config.kernel_protocol.fingerprint()))
+    groups = _packed_train_task_groups(
+        adapter,
+        task_commitments,
+        config.kernel_protocol.split_manifest,
+        config.kernel_protocol.fingerprint(),
+    )
     # Validate all registered boundaries before charged dispatch.
     for resource in (8, 32, 80):
         fixed_rung_manifest(groups, resource, config.kernel_protocol.split_manifest, config.kernel_protocol.fingerprint())

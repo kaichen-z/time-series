@@ -380,12 +380,7 @@ def test_real_materialization_has_exact_grouped_80_train_20_dev_and_future_free_
         assert package.protected_baseline.name == "toto_2_0"
         assert len(package.final_forecast) == task.numeric.prediction_length
         assert all(__import__('math').isfinite(v) for item in package.ranked_alternatives for v in item.forecast)
-    groups = {}
-    for task in adapter.tasks[:80]:
-        groups.setdefault(task.numeric.entity_name, []).append(TrainTaskV2(task_id=task.numeric.task_id,
-            entity_id=task.numeric.entity_name, split="train", task_sha256=task_registry_fingerprint(task),
-            split_sha256="5" * 64, protocol_sha256="4" * 64))
-    manifest = RungManifestV2(80, "5" * 64, "4" * 64, groups)
+    manifest = train_manifest(adapter, resource=80)
     evaluation = evaluate_numerical_child(adapter, child, manifest, descriptor_policy=descriptor_policy(),
         metric_policy_sha256="6" * 64, bracket="replay", rung=0, normalized_execution_cost=0.1)
     assert len(evaluation.task_ids) == 80 and set(evaluation.task_statuses.values()) == {"passed"}
@@ -622,12 +617,17 @@ def test_structural_policy_can_resume_and_evolve_for_a_second_generation(world, 
 
 
 def train_manifest(adapter, resource=8):
-    groups = {}
-    for task in adapter.tasks:
-        if task.numeric.task_id in adapter.fold_manifest.task_fold_map:
-            groups.setdefault(task.numeric.entity_name, []).append(TrainTaskV2(task_id=task.numeric.task_id,
-                entity_id=task.numeric.entity_name, split="train", task_sha256=task_registry_fingerprint(task),
-                split_sha256="5" * 64, protocol_sha256="4" * 64))
+    from evolving_loop.v2.numerical_qd.runner import _packed_train_task_groups
+
+    groups = _packed_train_task_groups(
+        adapter,
+        {
+            task.numeric.task_id: task_registry_fingerprint(task)
+            for task in adapter.tasks
+        },
+        "5" * 64,
+        "4" * 64,
+    )
     return RungManifestV2(resource, "5" * 64, "4" * 64, groups)
 
 
@@ -756,6 +756,40 @@ def test_single_task_evaluation_satisfies_existing_hyperband_cache_boundary(worl
     assert result.task_ids == (task.task_id,) and result.task_subset_sha256 == task.fingerprint()
     assert _task_evaluation(result, child.genome.fingerprint(), task, "6" * 64,
         descriptor_policy().fingerprint(), child.genome.runtime_fingerprints, adapter.fingerprint) == result
+
+
+def test_single_task_evaluation_authenticates_opaque_fold_group_identity(world):
+    from evolving_loop.v2.numerical_qd.runner import _packed_train_task_groups
+
+    adapter = world[0]
+    child = materialize(world)
+    commitments = {
+        task.numeric.task_id: task_registry_fingerprint(task)
+        for task in adapter.tasks
+    }
+    groups = _packed_train_task_groups(adapter, commitments, "5" * 64, "4" * 64)
+    task = RungManifestV2(8, "5" * 64, "4" * 64, groups).tasks[0]
+
+    result = evaluate_numerical_child(
+        adapter,
+        child,
+        task,
+        descriptor_policy=descriptor_policy(),
+        metric_policy_sha256="6" * 64,
+        bracket="explore",
+        rung=0,
+    )
+    assert result.task_ids == (task.task_id,)
+    with pytest.raises(ValueError, match="Train task content or group mismatch"):
+        evaluate_numerical_child(
+            adapter,
+            child,
+            replace(task, entity_id="fold-group-999-" + "f" * 64),
+            descriptor_policy=descriptor_policy(),
+            metric_policy_sha256="6" * 64,
+            bracket="explore",
+            rung=0,
+        )
 
 
 def test_one_genome_cannot_accept_two_executable_members_or_cache_forecasts(world):
@@ -1040,7 +1074,8 @@ print(json.dumps(dict(cache_key=key, evaluation=evaluation.to_payload()), sort_k
         results.append(json.loads(completed.stdout))
     assert results[0] == results[1]
     assert len(results[0]["cache_key"]) == 64
-    assert results[0]["evaluation"]["task_statuses"] == {"build_case_000": "passed"}
+    assert len(results[0]["evaluation"]["task_statuses"]) == 1
+    assert set(results[0]["evaluation"]["task_statuses"].values()) == {"passed"}
 
 
 @pytest.mark.parametrize("statement", [

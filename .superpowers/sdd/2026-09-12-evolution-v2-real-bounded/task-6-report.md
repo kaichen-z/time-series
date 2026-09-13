@@ -324,3 +324,42 @@ python -m pytest -q \
 
 No live run or billable call was launched, and live artifacts were not
 modified.
+
+### Live P2 whole-group Hyperband packing fix
+
+The next live pre-LLM failure showed that Hyperband grouped Train tasks by raw
+entity label even though the authenticated Task-4 fold manifest defines
+transitive indivisible groups over entity and identical history.  The actual
+Train80 manifest has 28 groups with sizes
+`1x14, 2x8, 3x1, 4x1, 5x1, 9x1, 14x1, 15x1`; its SHA order has neither an
+8-task nor a 32-task boundary.
+
+Numerical QD now deterministically solves an exact, label-free partition of
+the authenticated groups into rung increments of 8, 24, and 48 tasks.  The
+ordered groups receive opaque rank-plus-group-SHA identities, so the fixed
+RungManifest prefixes are exactly 8, 32, and 80 while no transitive group can
+be split.  If no exact partition exists, preparation fails before charged
+dispatch.  Single-task evaluation recomputes the same authenticated opaque
+identity, preserving task-byte and group tamper detection.
+
+Focused TDD verification:
+
+```text
+python -m pytest -q \
+  tests/test_evolution_v2_numerical_adapters.py::test_real_materialization_has_exact_grouped_80_train_20_dev_and_future_free_evaluation \
+  tests/test_evolution_v2_numerical_adapters.py::test_existing_package_evaluation_adapter_receives_trusted_train_only_and_emits_closed_aggregate \
+  tests/test_evolution_v2_numerical_adapters.py::test_single_task_evaluation_satisfies_existing_hyperband_cache_boundary \
+  tests/test_evolution_v2_numerical_adapters.py::test_single_task_evaluation_authenticates_opaque_fold_group_identity \
+  tests/test_evolution_v2_numerical_adapters.py::test_one_genome_cannot_accept_two_executable_members_or_cache_forecasts \
+  tests/test_evolution_v2_numerical_adapters.py::test_fresh_process_materialization_preserves_cache_identity_and_evaluation \
+  tests/test_evolution_v2_numerical_runner.py::test_authenticated_fold_groups_pack_into_nested_label_free_rungs \
+  tests/test_evolution_v2_numerical_runner.py::test_group_packing_fails_when_a_registered_rung_cannot_keep_groups_whole \
+  tests/test_evolution_v2_real_numerical.py::test_real_train_fold_groups_require_exact_nested_rung_packing
+9 passed in 14.36s
+```
+
+An accidentally started broad adapter/runner gate was interrupted on request
+after 173.40 seconds; before the expected fixture-identity updates it had
+reached 560 passes and five raw-entity fixture failures.  All five affected
+cases are included in the focused green gate above.  No live run or billable
+call was launched, and live artifacts were not modified.
