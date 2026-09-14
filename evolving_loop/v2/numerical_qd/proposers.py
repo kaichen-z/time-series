@@ -29,6 +29,10 @@ REQUEST_KEYS = frozenset({
 FAILURE_REASONS = frozenset({"unavailable", "timeout", "malformed", "empty", "budget_exhausted"})
 
 
+class HostSourceValidationError(ValueError):
+    """A syntactically valid proposal that the execution adapter cannot load."""
+
+
 def _reject_provider_paths(value):
     """The accepted metadata language excludes POSIX/Windows path separators.
 
@@ -187,6 +191,10 @@ def host_source_recipe(source: str | bytes) -> ChampionRecipe:
 
 
 def _normalize_sources(response, request):
+    # Import locally so the proposal boundary can use the exact execution gate
+    # without coupling the module import graph to the legacy adapter.
+    from .adapters import LegacyNumericalAdapter
+
     raw = _require_exact_schema(response, {"source_candidates", "proposals"}, field="LLM response")
     if type(raw["source_candidates"]) is not list or type(raw["proposals"]) is not list:
         raise ValueError("response arrays required")
@@ -211,6 +219,10 @@ def _normalize_sources(response, request):
             raise ValueError("source must contain exactly one forecast method")
         recipe = host_source_recipe(code)
         check_code(code)
+        try:
+            LegacyNumericalAdapter.validate_source(code)
+        except (TypeError, ValueError) as error:
+            raise HostSourceValidationError(str(error)) from error
         source_bytes = code.encode("utf-8")
         sources[identity] = (
             hashlib.sha256(source_bytes).hexdigest(), source_bytes, recipe
@@ -388,8 +400,19 @@ def _response_schema(request, state):
             properties["parent_ids"] = parents | {"minItems": 2, "maxItems": min(2, state.max_parents_per_child)}
         operations.append(_closed_object_schema(properties))
     source_candidate = _closed_object_schema(dict(local_id=local_id,
-        code=dict(type="string", minLength=1, description=
-            "One top-level Python function taking exactly (history, horizon, frequency), with an applicability docstring. Imports belong inside the function and must pass the Host sandbox gate.")))
+        code=dict(type="string", minLength=1, description=(
+            "One top-level Python function taking exactly (history, horizon, frequency), "
+            "with an applicability docstring. Imports belong inside the function and must "
+            "pass the Host sandbox gate. Never use `%` (including numeric remainder); use "
+            "`divmod` instead. Never mutate a collection through methods such as `.sort()`; "
+            "use `sorted(...)`. Avoid f-strings and percent formatting. A valid pattern is: "
+            "def recent_mean(history, horizon, frequency):\n"
+            "    \"\"\"Use a recent local level for short noisy series.\"\"\"\n"
+            "    if not history:\n"
+            "        return [0.0] * horizon\n"
+            "    window = history[-min(len(history), 8):]\n"
+            "    level = sum(window) / len(window)\n"
+            "    return [level] * horizon"))))
     envelope = _closed_object_schema(dict(
         source_candidates=dict(type="array", maxItems=request["max_proposals"],
             items={"$ref": "#/$defs/source_candidate"}),
@@ -420,29 +443,62 @@ class LLMProposalProvider:
         if remaining.llm_calls < 1 or remaining.wall_seconds <= 0 or remaining.input_tokens < input_bound or cap < 1:
             return _batch("llm", reason="budget_exhausted")
         started = self.monotonic()
-        proposals, artifacts, reason, output_bytes = (), (), None, 0
+        proposals, artifacts, reason = (), (), None
+        output_bytes = input_bytes = call_count = 0
         try:
             if self.client is None:
+                call_count = 1
                 reason = "unavailable"
             else:
-                response = self.client.complete(system=system, messages=[{"role": "user", "content": encoded}], temperature=0.0)
-                if type(response.text) is not str:
-                    raise ValueError("response text required")
-                output_bytes = len(response.text.encode("utf-8"))
-                if output_bytes > cap:
-                    raise ValueError("response byte limit exceeded")
-                parsed = strict_json_loads(response.text, context="Numerical mutation batch")
-                proposals, artifacts = _normalize_sources(parsed, request)
-                if not proposals:
-                    reason = "empty"
+                messages = [{"role": "user", "content": encoded}]
+                for attempt in range(2):
+                    call_input = len(system.encode()) + sum(
+                        len(message["content"].encode()) for message in messages
+                    )
+                    available_output = min(cap, remaining.output_tokens - output_bytes)
+                    if (call_count >= remaining.llm_calls
+                            or input_bytes + call_input > remaining.input_tokens
+                            or available_output < 1):
+                        reason = "budget_exhausted"
+                        break
+                    call_count += 1
+                    input_bytes += call_input
+                    response = self.client.complete(
+                        system=system, messages=messages, temperature=0.0
+                    )
+                    if type(response.text) is not str:
+                        raise ValueError("response text required")
+                    response_bytes = len(response.text.encode("utf-8"))
+                    output_bytes += response_bytes
+                    if response_bytes > available_output:
+                        raise ValueError("response byte limit exceeded")
+                    parsed = strict_json_loads(response.text, context="Numerical mutation batch")
+                    try:
+                        proposals, artifacts = _normalize_sources(parsed, request)
+                    except HostSourceValidationError as error:
+                        if attempt or remaining.llm_calls < 2:
+                            raise
+                        repair = canonical_v2_bytes({
+                            "instruction": "Return one complete corrected response using the same schema.",
+                            "host_source_validation_error": str(error)[:2048],
+                        }).decode("utf-8")
+                        messages = [
+                            *messages,
+                            {"role": "assistant", "content": response.text},
+                            {"role": "user", "content": "Host source validation failed. " + repair},
+                        ]
+                        continue
+                    if not proposals:
+                        reason = "empty"
+                    break
         except TimeoutError:
             reason = "timeout"
         except (ValueError, TypeError, SyntaxError, RecursionError):
             reason = "malformed"
         except Exception:
             reason = "unavailable"
-        use = ResourceUse(wall_seconds=max(0.0, float(self.monotonic() - started)), llm_calls=1,
-            input_tokens=input_bound if self.client is not None else 0, output_tokens=output_bytes)
+        use = ResourceUse(wall_seconds=max(0.0, float(self.monotonic() - started)), llm_calls=call_count,
+            input_tokens=input_bytes, output_tokens=output_bytes)
         if use.wall_seconds >= remaining.wall_seconds or any(
                 getattr(use, name) > getattr(remaining, name) for name in ResourceUse.field_names()):
             reason = "budget_exhausted"
@@ -462,8 +518,12 @@ class HybridProposalProvider:
         remaining, _, _, cap, input_bound = _llm_limits(request)
         stage = "numerical-proposal-" + fingerprint_payload(request)
         attempts = []
-        estimate = ResourceUse(wall_seconds=remaining.wall_seconds, llm_calls=1,
-            input_tokens=input_bound, output_tokens=cap)
+        estimate = ResourceUse(
+            wall_seconds=remaining.wall_seconds,
+            llm_calls=min(2, remaining.llm_calls),
+            input_tokens=remaining.input_tokens if remaining.llm_calls > 1 else input_bound,
+            output_tokens=remaining.output_tokens if remaining.llm_calls > 1 else cap,
+        )
         permit = self.ledger.reserve_stage(stage + "-llm", estimate)
         if permit.allowed:
             result = self.llm.propose(request)

@@ -219,6 +219,16 @@ class CodexCLIClient:
             raise TransientLLMError("Codex CLI stage deadline is exhausted")
         return min(timeout, remaining)
 
+    def preflight(self) -> None:
+        """Prove the configured Codex subprocess can complete a real JSON turn."""
+        response = self.complete(
+            system='Return exactly the JSON object {"ok":true}.',
+            messages=[{"role": "user", "content": "Check model readiness."}],
+            temperature=0.0,
+        )
+        if parse_json_object(response.text) != {"ok": True}:
+            raise RuntimeError("Codex CLI returned an invalid preflight response")
+
     def complete(self, *, system: str, messages: list[dict], temperature: float = 0.0) -> LLMResponse:
         del temperature  # Codex CLI does not expose sampling temperature.
         prompt = self._prompt(system, messages)

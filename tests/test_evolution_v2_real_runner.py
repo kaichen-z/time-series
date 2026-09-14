@@ -149,6 +149,19 @@ def test_base_grants_and_call_order(case: RunnerCase):
     ]
 
 
+def test_explicit_generation_target_expands_the_p2_grant(case: RunnerCase):
+    result = run_real_evolution(
+        case.output,
+        case.manifest,
+        case.ports,
+        monotonic=case.clock,
+        p2_generations=10,
+    )
+
+    assert result.status == "complete"
+    assert case.grant("p2") == 4200
+
+
 def test_unused_time_rolls_forward_without_touching_reserve(case: RunnerCase):
     case.stage_durations.update(p2=600, p3=400, p4=100, p5=100)
 

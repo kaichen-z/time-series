@@ -11,7 +11,7 @@ from evolving_loop.v2.contracts import canonical_v2_bytes, fingerprint_payload
 from evolving_loop.v2.numerical_qd.contracts import MutationStateV2
 from evolving_loop.v2.numerical_qd.proposers import (
     DeterministicProposalProvider, HybridProposalProvider, LLMProposalProvider,
-    primitive_proposer_request,
+    _response_schema, primitive_proposer_request,
 )
 from evolving_loop.v2.numerical_qd.mutation import apply_mutation, record_train_outcome
 from test_evolution_v2_numerical_mutation import CELL, SHA, feedback, member, parent_state
@@ -169,6 +169,87 @@ def test_llm_source_member_gets_host_derived_executable_recipe_identity():
     }
     assert result.failure_reason is None
     assert result.proposals[0].to_payload()["member"]["policy_sha256"] == fingerprint_payload(expected_recipe)
+
+
+def test_llm_rejects_source_that_the_execution_adapter_cannot_load():
+    """A proposal admitted here must not fail the stricter Host gate later."""
+    invalid = CODE.replace("return [history[-1]] * horizon", "return [history[-1] % 2] * horizon")
+    payload = raw_response(source_candidates=[dict(local_id="candidate_1", code=invalid)])
+
+    result = LLMProposalProvider(
+        ScriptedClient(json.dumps(payload)), monotonic=lambda: 0.0
+    ).propose(request())
+
+    assert result.failure_reason == "malformed"
+    assert result.proposals == ()
+    assert result.source_artifacts == ()
+
+
+def test_host_schema_teaches_the_model_the_executable_source_subset():
+    description = _response_schema(request(), parent_state())["$defs"][
+        "source_candidate"
+    ]["properties"]["code"]["description"]
+
+    assert "Never use `%`" in description
+    assert "use `divmod`" in description
+    assert "use `sorted(...)`" in description
+    assert "def recent_mean(history, horizon, frequency):" in description
+
+
+def test_llm_repairs_one_host_rejected_source_when_budget_allows():
+    invalid = CODE.replace("return [history[-1]] * horizon", "return [history[-1] % 2] * horizon")
+    responses = iter((
+        json.dumps(raw_response(source_candidates=[dict(local_id="candidate_1", code=invalid)])),
+        json.dumps(raw_response()),
+    ))
+
+    class RepairingClient:
+        def __init__(self):
+            self.calls = []
+
+        def complete(self, **kwargs):
+            self.calls.append(kwargs)
+            return LLMResponse(next(responses))
+
+    client = RepairingClient()
+    result = LLMProposalProvider(client, monotonic=lambda: 0.0).propose(request(
+        remaining_budget=ResourceUse(
+            wall_seconds=10.0, llm_calls=2, input_tokens=100000,
+            output_tokens=16000,
+        ).to_payload()
+    ))
+
+    assert result.failure_reason is None
+    assert result.proposals
+    assert result.resource_use.llm_calls == 2
+    assert len(client.calls) == 2
+    assert "Host source validation failed" in client.calls[1]["messages"][-1]["content"]
+
+
+def test_hybrid_reserves_and_keeps_a_successful_llm_repair():
+    invalid = CODE.replace("return [history[-1]] * horizon", "return [history[-1] % 2] * horizon")
+    responses = iter((
+        json.dumps(raw_response(source_candidates=[dict(local_id="candidate_1", code=invalid)])),
+        json.dumps(raw_response()),
+    ))
+
+    class RepairingClient:
+        def complete(self, **kwargs):
+            return LLMResponse(next(responses))
+
+    budget = ledger()
+    result = HybridProposalProvider(
+        LLMProposalProvider(RepairingClient(), monotonic=lambda: 0.0),
+        DeterministicProposalProvider(), budget,
+    ).propose(request(remaining_budget=ResourceUse(
+        wall_seconds=10.0, llm_calls=2, input_tokens=100000,
+        output_tokens=16000,
+    ).to_payload()))
+
+    assert result.failure_reason is None
+    assert result.proposals
+    assert result.resource_use.llm_calls == 2
+    assert budget.charged_use.llm_calls == 2
 
 
 @pytest.mark.parametrize("bad", [

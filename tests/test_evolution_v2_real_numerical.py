@@ -236,6 +236,29 @@ def test_real_numerical_bridge_cannot_override_host_llm(tmp_path, monkeypatch):
         bridges.run_real_numerical(**arguments, llm_client=object())
 
 
+def test_real_numerical_bridge_preflights_the_owned_llm(tmp_path, monkeypatch):
+    from evolving_loop.v2.real import bridges
+
+    calls = []
+
+    class ReadyLLM:
+        def preflight(self):
+            calls.append("preflight")
+
+    monkeypatch.setattr(
+        bridges, "numerical_evolve_payload", lambda *_args, **_kwargs: {"status": "complete"}
+    )
+    result = bridges.run_real_numerical(
+        SimpleNamespace(output_dir=tmp_path / "p2"),
+        SimpleNamespace(llm_client=ReadyLLM()),
+        config_payload={}, seed_payload={}, task_manifest_payload={},
+        input_sha256s={},
+    )
+
+    assert result == {"status": "complete"}
+    assert calls == ["preflight"]
+
+
 def test_real_numerical_bridge_projects_prepared_provenance_at_adapter_boundary(
     completed_p2, tmp_path, monkeypatch
 ):
@@ -262,6 +285,7 @@ def test_real_numerical_bridge_projects_prepared_provenance_at_adapter_boundary(
 
     def fake_runner(output, _config, _seed, _folds, adapter, **_kwargs):
         observed["operator_inputs"] = dict(adapter.operator_input_sha256s)
+        observed["finalize_after"] = _kwargs["finalize_after"]
         output.mkdir(parents=True)
         (output / "evaluation_complete.json").write_bytes(
             canonical_v2_bytes({"status": "parsed"})
@@ -291,12 +315,74 @@ def test_real_numerical_bridge_projects_prepared_provenance_at_adapter_boundary(
         runner, "prepare_real_p2_inputs", lambda *_args, **_kwargs: prepared
     )
     ports = runner.build_real_stage_ports(
-        SimpleNamespace(llm_client=llm), manifest=manifest, repo_root=tmp_path
+        SimpleNamespace(llm_client=llm),
+        manifest=manifest,
+        repo_root=tmp_path,
+        p2_generations=10,
     )
     result = ports.run_p2(context)
 
     assert result == {"status": "parsed"}
     assert observed["operator_inputs"] == operator_inputs
+    assert observed["finalize_after"] == 10
+
+
+def test_p2_publishes_nonactive_frozen_candidates_for_p3(tmp_path, monkeypatch):
+    from evolving_loop.v2.numerical_qd.persistence import NumericalQDRunStore
+    from evolving_loop.v2.real import runner
+
+    def pair(identity, selected):
+        return SimpleNamespace(
+            release=SimpleNamespace(fingerprint=f"release-{identity}"),
+            registry=SimpleNamespace(fingerprint=f"registry-{identity}"),
+            selected_genome_sha256s=selected,
+        )
+
+    seed = pair("seed", ())
+    active = pair("active", ("a" * 64,))
+    exploratory = pair("explore", ("b" * 64,))
+    monkeypatch.setattr(
+        NumericalQDRunStore, "load_active_frozen_pair",
+        lambda self, *, tasks: (active, "1" * 64),
+    )
+    monkeypatch.setattr(
+        NumericalQDRunStore, "load_frozen_pairs",
+        lambda self, *, tasks: ((seed, "2" * 64), (active, "3" * 64), (exploratory, "4" * 64)),
+    )
+    host = SimpleNamespace(tasks=(), numerical_alternatives=())
+
+    runner._publish_p2_numerical_alternatives(host, tmp_path / "p2")
+
+    assert host.numerical_alternatives == (exploratory,)
+
+
+def test_thirty_minute_p2_caps_llm_batch_and_task_timeout_for_a_real_rung():
+    from evolving_loop.v2.numerical_qd.config import NumericalQDConfigV2
+    from evolving_loop.v2.numerical_qd.hyperband import choose_bracket
+    from evolving_loop.v2.real.runner import _derived_numerical_config
+
+    config = _derived_numerical_config(
+        grant_seconds=840, runtime_fingerprints={"host": "a" * 64}
+    )
+
+    assert config["proposer"]["max_proposals_per_generation"] == 2
+    assert config["adapter"]["task_timeout_seconds"] == 5.0
+    assert choose_bracket(1, 0.0, 400.0, NumericalQDConfigV2.from_payload(config)).name == "replay"
+
+
+def test_one_hour_p2_keeps_task_timeout_small_enough_for_multiple_generations():
+    from evolving_loop.v2.numerical_qd.config import NumericalQDConfigV2
+    from evolving_loop.v2.numerical_qd.hyperband import choose_bracket
+    from evolving_loop.v2.real.runner import _derived_numerical_config
+
+    config = _derived_numerical_config(
+        grant_seconds=1680, runtime_fingerprints={"host": "a" * 64}
+    )
+
+    assert config["adapter"]["task_timeout_seconds"] == 5.0
+    assert choose_bracket(
+        1, 0.0, 1000.0, NumericalQDConfigV2.from_payload(config)
+    ).name in {"explore", "confirm", "replay"}
 
 
 def test_loaded_prepared_payloads_cross_strict_real_numerical_parser(

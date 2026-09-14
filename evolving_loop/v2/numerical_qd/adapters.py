@@ -47,6 +47,8 @@ from numerical_agent.evolution.numerical_selector import (
     CandidateDiagnostics, HindcastFold, SelectionArithmetic, SelectionDecision,
 )
 from numerical_agent.evolution.screening import (
+    ApplicabilityPolicy,
+    ScreeningEntry,
     ScreeningPolicy,
     TaskProfile,
     _policy_payload,
@@ -698,7 +700,8 @@ class _VerifiedForecastStore:
 
 @contextmanager
 def _source_bound_materializer(materializer, sources, anchor, *, account_work=None,
-                               task_timeout_seconds=20.0, trusted_forecast=None, catalog_names=()):
+                               task_timeout_seconds=20.0, trusted_forecast=None, catalog_names=(),
+                               screening_policy=None):
     if type(materializer) is not NumericalPackageMaterializer:
         raise ValueError("source binding requires an exact NumericalPackageMaterializer")
     with tempfile.TemporaryDirectory(prefix="numerical-qd-materialize-") as directory:
@@ -709,7 +712,8 @@ def _source_bound_materializer(materializer, sources, anchor, *, account_work=No
             # Reuse the legacy materializer without mutating the injected instance.
             # Old cached diagnostics may refer to different source bytes: recompute.
             bound = NumericalPackageMaterializer(forecast_store=store,
-                screening_policy=materializer.screening_policy, fold_manifest=materializer.fold_manifest,
+                screening_policy=screening_policy or materializer.screening_policy,
+                fold_manifest=materializer.fold_manifest,
                 original_tasks=materializer.original_tasks, source_fingerprints=materializer.source_fingerprints,
                 runtime_fingerprints=materializer.runtime_fingerprints, combined_policies=materializer.combined_policies,
                 atlas_release=materializer.atlas_release, decision_policy=materializer.decision_policy,
@@ -719,7 +723,30 @@ def _source_bound_materializer(materializer, sources, anchor, *, account_work=No
             store.close()
 
 
-def _verified_build_rows(rows, tasks, manifest, recipe, anchor, store):
+def _materialization_screening_policy(screening, recipe, member, source_names, *, anchor_names=(), restrict=False):
+    """Admit only recipe dependencies from Host-validated evolved source bytes."""
+    required = set(recipe.parents)
+    if not required <= set(source_names):
+        raise ValueError("evolved Dictionary entry is outside the verified source closure")
+    # ``program`` is the V2 morphology label for generated numerical code; the
+    # legacy Supply contract represents directly executable methods as statistical.
+    family = "statistical" if member.family == "program" else member.family
+    entries = list(screening.entries)
+    for name in sorted(required):
+        if screening.get(name) is None:
+            entries.append(ScreeningEntry(name, family, "keep", ApplicabilityPolicy(),
+                "Host-validated evolved executable"))
+    if not restrict:
+        return ScreeningPolicy(tuple(entries), screening.fallback_names)
+    allowed = required | set(anchor_names)
+    entries = tuple(entry for entry in entries if entry.name in allowed)
+    fallbacks = tuple(name for name in screening.fallback_names if name in allowed)
+    if not fallbacks:
+        fallbacks = tuple(name for name in anchor_names if any(entry.name == name for entry in entries))
+    return ScreeningPolicy(entries, fallbacks)
+
+
+def _verified_build_rows(rows, tasks, manifest, recipe, anchor, store, *, additional_names=()):
     hosts = {task.numeric.task_id: task.numeric for task in tasks
              if task.numeric.task_id in manifest.task_fold_map}
     supplied = tuple(rows)
@@ -737,7 +764,7 @@ def _verified_build_rows(rows, tasks, manifest, recipe, anchor, store):
             raise ValueError("fitting row does not match its trusted Train task")
     # Forecasts and diagnostics are not caller authority. Rebuild fitting rows
     # from the SAME byte-bound store used for full materialization below.
-    names = sorted(set(recipe.parents) | set(anchor.policy.recipe.parents))
+    names = sorted(set(recipe.parents) | set(anchor.policy.recipe.parents) | set(additional_names))
     return tuple(ChampionTaskRow(task_id=name, candidate_name=candidate, profile=profiles[name],
         truth=task.future_values, forecast=store.forecast(candidate, task.history_values,
             task.prediction_length, task.frequency), fold=manifest.task_fold_map[name],
@@ -920,19 +947,30 @@ class LegacyNumericalAdapter:
             raise ValueError("task has no sealed local evidence") from error
 
     def validate_local_catalog_revision(self, parent, child, source_sha256s):
-        """Old Task 4 folds authorize the exact parent policy and source bytes."""
+        """Keep sealed seed entries immutable while admitting verified extensions."""
         if self.task_local_evidence is None:
             return
-        if (not set(source_sha256s) <= set(self._task_local_authorized_sources)
-                or any(self.sources.get(sha) != self._task_local_authorized_sources[sha] for sha in source_sha256s)
-                or dict(child.runtime_fingerprints) != dict(parent.runtime_fingerprints)):
-            raise ValueError("changed executable requires refreshed Task 4 evidence")
+        for sha in source_sha256s:
+            source = self.sources.get(sha)
+            if type(source) is not str or hashlib.sha256(source.encode()).hexdigest() != sha:
+                raise ValueError("evolved executable source identity mismatch")
+            self.validate_source(source)
+        if dict(child.runtime_fingerprints) != dict(parent.runtime_fingerprints):
+            raise ValueError("changed runtime requires refreshed Task 4 evidence")
         authorized = {spec.candidate_id: spec for spec in parent.alternatives}
         revisions = {spec.candidate_id: spec for spec in child.alternatives}
         shortlisted = {name for value in self.task_local_evidence.by_task.values() for name in value[0].candidate_names[1:]}
         for name in shortlisted:
-            if (name not in authorized or name not in revisions
-                    or canonical_v2_bytes(authorized[name].to_payload()) != canonical_v2_bytes(revisions[name].to_payload())):
+            if name not in authorized or name not in revisions:
+                raise ValueError("changed shortlisted policy requires refreshed Task 4 evidence")
+            previous, revised = authorized[name], revisions[name]
+            seed_only = all(policy == previous.full_build_policy_payload
+                for _fold, policy in previous.build_fold_policy_payloads)
+            stable_fields = ("candidate_id", "family", "materializer_kind", "recipe_payload",
+                "assumption_ids", "failure_conditions")
+            if (not seed_only and canonical_v2_bytes(previous.to_payload()) != canonical_v2_bytes(revised.to_payload())) or any(
+                    getattr(previous, field) != getattr(revised, field)
+                    for field in stable_fields):
                 raise ValueError("changed shortlisted policy requires refreshed Task 4 evidence")
 
     def materialize_local_package(self, task, release, forecast):
@@ -1194,10 +1232,15 @@ class LegacyNumericalAdapter:
     def materialize_child(self, parent_release, genome, state, *, member_id, policies,
                           build_rows, descriptor_policy: DescriptorPolicyV2, version,
                           parent_state=None, proposal=None, account_work=None,
-                          task_timeout_seconds=20.0) -> MaterializedNumericalChildV2:
+                          task_timeout_seconds=20.0, parent_registry=None) -> MaterializedNumericalChildV2:
         self.preflight_resources()
         if type(genome) is not NumericalGenomeV2 or type(state) is not MutationStateV2:
             raise ValueError("typed genome and state required")
+        if parent_registry is not None and (
+                type(parent_registry) is not FrozenNumericalPackageRegistry
+                or parent_registry.release_sha256 != parent_release.fingerprint
+                or parent_registry.task_ids != tuple(task.numeric.task_id for task in self.tasks)):
+            raise ValueError("materialization Parent registry binding mismatch")
         if (genome.inventory_sha256 != state.inventory.fingerprint()
                 or genome.mutation_policy_sha256 != state.mutation_policy.fingerprint()
                 or genome.proposer_prompt_sha256 != state.proposer_prompt.fingerprint()):
@@ -1221,28 +1264,38 @@ class LegacyNumericalAdapter:
         source_dependencies = set()
         recipe = self._recipe(member, policies, parent_state, proposal, _source_dependencies=source_dependencies)
         anchor = parse_champion_release(parent_release.to_payload()["anchor_release_payload"])
+        seed_rebind_names = {
+            name
+            for spec in parent_release.alternatives
+            if spec.materializer_kind != "dictionary"
+            and all(policy == spec.full_build_policy_payload for _fold, policy in spec.build_fold_policy_payloads)
+            for name in parse_champion_recipe(spec.to_payload()["recipe_payload"]).parents
+        }
+        source_names = {
+            name
+            for sha in source_dependencies
+            for name in self.validate_source(self.sources[sha]).names()
+        }
+        effective_screening = _materialization_screening_policy(
+            self.materializer.screening_policy, recipe, member, source_names,
+            anchor_names=anchor.policy.recipe.parents,
+            restrict=self.task_local_evidence is not None,
+        )
         with _source_bound_materializer(self.materializer,
                 {sha: self.sources[sha] for sha in source_dependencies}, anchor,
                 account_work=account_work, task_timeout_seconds=task_timeout_seconds,
                 trusted_forecast=self.forecast_trusted,
-                catalog_names=tuple(spec.candidate_id for spec in parent_release.alternatives)
-                    if self.task_local_evidence is not None else ()) as materializer:
+                catalog_names=tuple(sorted(seed_rebind_names))
+                    if self.task_local_evidence is not None else (),
+                screening_policy=effective_screening) as materializer:
             rows = _verified_build_rows(build_rows, self.tasks, self.fold_manifest, recipe, anchor,
-                                        materializer.forecast_store)
+                                        materializer.forecast_store,
+                                        additional_names=seed_rebind_names)
             materializer.build_rows = rows
             fit = fit_numerical_recipe(recipe, rows, self.fold_manifest, anchor)
-            if self.task_local_evidence is None:
-                candidate = materializer.materialize(parent_release, fit, self.candidate_tasks,
-                    version=version, generation=genome.generation)
-            else:
-                local_release = materializer._release(parent_release, fit, version=version, anchor=anchor)
-                self.validate_local_catalog_revision(parent_release, local_release, source_dependencies)
-                # Complete catalog metadata is independent of the task execution view.
-                registry = build_package_registry(self.tasks, local_release,
-                    lambda task, supplied: self.materialize_local_package(task, supplied, materializer.forecast_store.forecast))
-                candidate = NumericalCoordinateCandidate(local_release, registry,
-                    fingerprint_payload({"parent": parent_release.fingerprint, "fit": fit.numerical_score_sha256,
-                        "version": version, "generation": genome.generation, "registry": registry.fingerprint}))
+            candidate = materializer.materialize(parent_release, fit, self.candidate_tasks,
+                version=version, generation=genome.generation)
+            self.validate_local_catalog_revision(parent_release, candidate.release, source_dependencies)
         if type(candidate) is not NumericalCoordinateCandidate or candidate.invalid_reason is not None:
             raise ValueError("materializer did not return a valid typed candidate")
         if candidate.registry.task_ids != tuple(task.numeric.task_id for task in self.tasks):
@@ -1258,12 +1311,17 @@ class LegacyNumericalAdapter:
         release = replace(candidate.release, source_fingerprints=sources,
             anchor_release_payload=candidate.release.to_payload()["anchor_release_payload"])
         def builder(task, supplied):
-            source = candidate.registry.package_for(task)
+            candidate_source = candidate.registry.package_for(task)
+            source = (candidate_source if parent_registry is None
+                      else parent_registry.package_for(task))
             available = {item.name: item for item in source.ranked_alternatives}
+            for item in candidate_source.ranked_alternatives:
+                if item.name != source.protected_baseline.name:
+                    available[item.name] = item
             if not _applicable(member, task, descriptor_policy):
                 available.pop(recipe.name, None)
             evidence = self.local_evidence_for(task)
-            if evidence is None:
+            if evidence is None or recipe.name not in evidence[0].candidate_names:
                 return bound_numerical_package(source, supplied, available, history=task.numeric.history_values,
                     task_fold=self.fold_manifest.task_fold_map.get(task.numeric.task_id))
             shortlist, diagnostics, _shortlist_sha, diagnostics_sha = evidence
@@ -1435,8 +1493,19 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
     }
     if required_genome_sha256 is not None:
         sources["train_winner"] = required_genome_sha256
-    complete_specs = ({spec.candidate_id: spec for spec in parent_release.alternatives}
-                      if parent_release.schema_version == 2 else {})
+    complete_specs = {}
+    if parent_release.schema_version == 2:
+        if not selected:
+            complete_specs.update({spec.candidate_id: spec for spec in parent_release.alternatives})
+        # Each verified child carries the deterministic cross-fit rebinding of
+        # seed-only catalog entries required by a non-seed schema-v2 release.
+        for _sha, child, _selected_spec in selected:
+            for spec in child.candidate.release.alternatives:
+                existing = complete_specs.get(spec.candidate_id)
+                if (existing is not None and
+                        canonical_v2_bytes(existing.to_payload()) != canonical_v2_bytes(spec.to_payload())):
+                    raise ValueError("selected children disagree on complete catalog identity")
+                complete_specs[spec.candidate_id] = spec
     for _sha, _child, spec in selected:
         existing = complete_specs.get(spec.candidate_id)
         if existing is not None and canonical_v2_bytes(existing.to_payload()) != canonical_v2_bytes(spec.to_payload()):
@@ -1447,6 +1516,7 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
         alternatives=(tuple(complete_specs[name] for name in sorted(complete_specs)) if parent_release.schema_version == 2
                       else tuple(spec for _, _, spec in selected)), source_fingerprints=sources,
         anchor_release_payload=parent_release.to_payload()["anchor_release_payload"])
+    selected_names = {spec.candidate_id for _, _, spec in selected}
     def builder(task, supplied):
         source = parent_registry.package_for(task)
         available = {item.name: item for item in source.ranked_alternatives}
@@ -1484,10 +1554,12 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
                 available[item.name] = item
             for name in runtime_failures:
                 available.pop(name, None)
-            if child.genome.fingerprint() == required_genome_sha256 and spec.candidate_id not in available:
+            if (child.genome.fingerprint() == required_genome_sha256
+                    and _applicable(child.member, task, descriptor_policy)
+                    and spec.candidate_id not in available):
                 raise ValueError("projection package is missing the exact Train winner member")
         evidence = adapter.local_evidence_for(task)
-        if evidence is None:
+        if evidence is None or not selected_names <= set(evidence[0].candidate_names):
             return bound_numerical_package(source, supplied, available, history=task.numeric.history_values,
                 task_fold=adapter.fold_manifest.task_fold_map.get(task.numeric.task_id))
         shortlist, diagnostics, _shortlist_sha, diagnostics_sha = evidence
@@ -1496,4 +1568,9 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
             task_fold=adapter.fold_manifest.task_fold_map.get(task.numeric.task_id), shortlist=shortlist,
             hindcast_diagnostics_sha256=diagnostics_sha, hindcast_diagnostics=diagnostics)
     registry = build_package_registry(adapter.tasks, release, builder)
-    return FrozenNumericalArtifactsV2(release, registry, _envelope(registry, adapter.tasks, evidence=adapter.task_local_evidence), tuple(sha for sha, _, _ in selected))
+    evidence = adapter.task_local_evidence
+    if evidence is not None and any(
+            not selected_names <= set(shortlist.candidate_names)
+            for shortlist, _diagnostics, _shortlist_sha, _diagnostics_sha in evidence.by_task.values()):
+        evidence = None
+    return FrozenNumericalArtifactsV2(release, registry, _envelope(registry, adapter.tasks, evidence=evidence), tuple(sha for sha, _, _ in selected))

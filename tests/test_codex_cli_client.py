@@ -12,6 +12,7 @@ from common.llm import (
     CodexCLIClient,
     CodexCLIConfig,
     JsonExtractionError,
+    LLMResponse,
     TransientLLMError,
     parse_json_object,
 )
@@ -39,6 +40,17 @@ def test_codex_cli_client_returns_and_caches_json() -> None:
     assert mocked.call_count == 1
     assert client.calls == 1
     assert client.cache_hits == 1
+
+
+def test_codex_cli_client_preflight_requires_exact_ready_response() -> None:
+    client = CodexCLIClient(CodexCLIConfig(cache_dir=None))
+
+    with patch.object(client, "complete", return_value=LLMResponse('{"ok": true}')):
+        client.preflight()
+
+    with patch.object(client, "complete", return_value=LLMResponse('{"ok": false}')):
+        with pytest.raises(RuntimeError, match="preflight response"):
+            client.preflight()
 
 
 def test_codex_cli_client_passes_only_the_explicit_subprocess_environment() -> None:

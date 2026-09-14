@@ -85,6 +85,68 @@ def test_seed_execution_never_visits_nonshortlisted_catalog_candidates(monkeypat
     assert registry.package_for(adapter.tasks[0]).fallback_reason == "anchor_diagnostics_unavailable"
 
 
+def test_evolved_source_is_scored_and_frozen_outside_the_immutable_seed_shortlist():
+    from evolving_loop.package_registry import task_registry_fingerprint
+    from evolving_loop.package_numerical_supply import parse_numerical_supply_release
+    from evolving_loop.v2.numerical_qd.adapters import evaluate_numerical_child, freeze_qd_supply
+    from evolving_loop.v2.numerical_qd.contracts import NumericalInventoryV2, NumericalMemberV2, NumericalQDEntryV2
+    from evolving_loop.v2.numerical_qd.map_elites import NumericalQDArchive
+    from evolving_loop.v2.numerical_qd.runner import _bootstrap, _packed_train_task_groups, _seed_registry
+    from evolving_loop.v2.numerical_qd.hyperband import fixed_rung_manifest
+    from tests.test_evolution_v2_numerical_adapters import _recipe, descriptor_policy
+    from tests.test_package_numerical_evolution import _build_rows
+
+    config, release, _folds, adapter = evidence_fixture()
+    release_payload = json.loads(canonical_v2_bytes(release.to_payload()))
+    seed_spec = release_payload["alternatives"][0]
+    seed_spec["build_fold_policy_payloads"] = [
+        [fold, seed_spec["full_build_policy_payload"]] for fold in range(5)
+    ]
+    release = parse_numerical_supply_release(release_payload)
+    parent_registry = _seed_registry(release, adapter)
+    state, seed_genome, policies, _screen, _combined = _bootstrap(config, release, adapter)
+    source = '''def evolved_forecast(history, horizon, frequency):
+    """Use a bounded recent level for finite time-series histories."""
+    width = min(8, len(history))
+    level = sum(float(value) for value in history[-width:]) / width
+    return [level] * horizon
+'''
+    source_sha = hashlib.sha256(source.encode()).hexdigest()
+    recipe = _recipe("evolved_forecast")
+    member = NumericalMemberV2("evolved_recent_mean", "statistical", source_sha,
+        fingerprint_payload(recipe.to_payload()), (), state.declared_cells, "active")
+    state = replace(state, inventory=NumericalInventoryV2(1, (member, *state.inventory.members)))
+    genome = replace(seed_genome, generation=1, mutation_operator="repair",
+        inventory_sha256=state.inventory.fingerprint())
+    adapter.sources = dict(adapter.sources) | {source_sha: source}
+    rows = _build_rows(tuple(task.numeric for task in adapter.tasks[:80]))
+
+    child = adapter.materialize_child(release, genome, state, member_id=member.member_id,
+        policies=policies | {member.policy_sha256: recipe}, build_rows=rows,
+        descriptor_policy=descriptor_policy(), version="n001")
+    commitments = {task.numeric.task_id: task_registry_fingerprint(task) for task in adapter.tasks}
+    groups = _packed_train_task_groups(adapter, commitments,
+        config.kernel_protocol.split_manifest, config.kernel_protocol.fingerprint())
+    manifest = fixed_rung_manifest(groups, 8,
+        config.kernel_protocol.split_manifest, config.kernel_protocol.fingerprint())
+    evaluation = evaluate_numerical_child(adapter, child, manifest,
+        descriptor_policy=descriptor_policy(),
+        metric_policy_sha256=config.kernel_protocol.metric_policy,
+        bracket="explore", rung=0)
+    entry = NumericalQDEntryV2(1, evaluation.genome_sha256, evaluation.fingerprint(),
+        evaluation.cells[0], evaluation.task_ids, evaluation.objectives,
+        evaluation.constraints, evaluation.train_diagnostic_categories)
+    archive = NumericalQDArchive().insert((entry,))
+    frozen = freeze_qd_supply(adapter, release, parent_registry, archive, (child,),
+        descriptor_policy=descriptor_policy(), version="n002",
+        required_genome_sha256=genome.fingerprint())
+
+    assert any(item.name == recipe.name for item in child.candidate.registry.package_for(adapter.tasks[0]).ranked_alternatives)
+    assert any(item.candidate_id == recipe.name for item in frozen.release.alternatives)
+    assert any(item.name == recipe.name for item in frozen.registry.package_for(adapter.tasks[0]).ranked_alternatives)
+    assert frozen.envelope.schema_version == 1
+
+
 def test_resealed_package_diagnostics_cannot_disagree_with_evidence():
     from evolving_loop.v2.numerical_qd.adapters import _envelope, validate_frozen_local_evidence
     from evolving_loop.package_numerical_supply import build_package_registry

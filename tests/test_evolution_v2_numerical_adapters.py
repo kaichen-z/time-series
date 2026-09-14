@@ -167,6 +167,73 @@ def test_qd_materialization_refits_and_preserves_v2_seed_catalog(world):
     assert tuple(item.candidate_id for item in child.candidate.release.alternatives)[0] == "seasonal_naive"
 
 
+def test_qd_materialization_inherits_each_exact_parent_anchor(world):
+    adapter, release, parent_registry, state, rows = world
+
+    child = adapter.materialize_child(
+        release,
+        genome(state),
+        state,
+        member_id="seasonal",
+        policies={fingerprint_payload(_recipe().to_payload()): _recipe()},
+        build_rows=rows,
+        descriptor_policy=descriptor_policy(),
+        version="n001",
+        parent_registry=parent_registry,
+    )
+
+    for task in adapter.tasks:
+        assert child.candidate.registry.package_for(task).protected_baseline == \
+            parent_registry.package_for(task).protected_baseline
+
+
+def test_materialization_admits_host_validated_evolved_source_into_ephemeral_dictionary(world):
+    adapter, release, _registry, state, rows = world
+    evolved_source = '''def evolved_forecast(history, horizon, frequency):
+    """Use a bounded recent level for finite time-series histories."""
+    width = min(8, len(history))
+    level = sum(float(value) for value in history[-width:]) / width
+    return [level] * horizon
+'''
+    source_sha = hashlib.sha256(evolved_source.encode()).hexdigest()
+    recipe = _recipe("evolved_forecast")
+    member = NumericalMemberV2(
+        "evolved_recent_mean",
+        "statistical",
+        source_sha,
+        fingerprint_payload(recipe.to_payload()),
+        (),
+        state.declared_cells,
+        "active",
+    )
+    evolved_state = replace(
+        state,
+        inventory=NumericalInventoryV2(
+            1, (member, *state.inventory.members)
+        ),
+    )
+    evolved_adapter = LegacyNumericalAdapter(
+        materializer=adapter.materializer,
+        tasks=adapter.tasks,
+        fold_manifest=adapter.fold_manifest,
+        sources={**dict(adapter.sources), source_sha: evolved_source},
+    )
+
+    child = evolved_adapter.materialize_child(
+        release,
+        genome(evolved_state),
+        evolved_state,
+        member_id=member.member_id,
+        policies={member.policy_sha256: recipe},
+        build_rows=rows,
+        descriptor_policy=descriptor_policy(),
+        version="n001",
+    )
+
+    assert child.fit.recipe.parents == ("evolved_forecast",)
+    assert child.member.source_sha256 == source_sha
+
+
 def test_v2_projection_keeps_parent_anchor_when_child_diagnostic_cache_differs(world):
     adapter, parent, registry, state, rows = world
     parent = replace(parent, schema_version=2, anchor_release_payload=parent.to_payload()["anchor_release_payload"])
@@ -517,6 +584,31 @@ def test_projection_must_include_exact_train_winner_even_when_coverage_prefers_p
     assert winner.genome.fingerprint() in frozen.selected_genome_sha256s
     assert all(any(row.name == winner.fit.recipe.name for row in frozen.registry.package_for(task).ranked_alternatives)
                for task in world[0].tasks)
+
+
+def test_projection_allows_train_winner_to_fall_back_outside_its_applicability_cells(world):
+    state = world[3]
+    target = replace(state.inventory.members[0], applicability_cells=(state.declared_cells[0],))
+    narrowed = replace(state, inventory=NumericalInventoryV2(
+        1, (target, state.inventory.members[1])))
+    winner = materialize(world, narrowed)
+    cell = next(describe_history(task.numeric.history_values, 2, "D", "statistical", descriptor_policy())
+                for task in world[0].tasks
+                if describe_history(task.numeric.history_values, 2, "D", "statistical", descriptor_policy()).fingerprint()
+                == target.applicability_cells[0])
+    archive = NumericalQDArchive().insert((projection_entry(winner, cell, (0.1,) * 5),))
+
+    frozen = freeze_qd_supply(world[0], world[1], world[2], archive, (winner,),
+        descriptor_policy=descriptor_policy(), version="n002",
+        required_genome_sha256=winner.genome.fingerprint())
+
+    member_name = winner.fit.recipe.name
+    for task in world[0].tasks:
+        package = frozen.registry.package_for(task)
+        present = any(row.name == member_name for row in package.ranked_alternatives)
+        applies = describe_history(task.numeric.history_values, 2, "D", winner.member.family,
+            descriptor_policy()).fingerprint() in winner.member.applicability_cells
+        assert present is applies
 
 
 def test_projection_includes_evaluated_train_winner_evicted_by_historical_occupant(world):

@@ -71,6 +71,46 @@ def test_real_evolve_dispatches_canonical_manifest_and_closes_host(tmp_path: Pat
     assert calls[0][2] == data_root.resolve()
 
 
+def test_real_evolve_forwards_explicit_p2_generation_target(
+    tmp_path: Path, monkeypatch, capsys
+):
+    from evolving_loop.v2 import cli
+
+    manifest_path = _manifest(tmp_path / "real.json")
+    data_root = tmp_path / "authority"
+    data_root.mkdir()
+    observed = {}
+
+    class Host:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cli, "build_real_host", lambda *_args, **_kwargs: Host())
+
+    def build_ports(_host, **kwargs):
+        observed.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(cli, "build_real_stage_ports", build_ports)
+    def run(_output, manifest, _ports, **kwargs):
+        observed.update({f"run_{key}": value for key, value in kwargs.items()})
+        return _result(manifest)
+
+    monkeypatch.setattr(cli, "run_real_evolution", run)
+
+    assert cli.main([
+        "real-evolve",
+        "--manifest", str(manifest_path),
+        "--authority-root", str(data_root),
+        "--output-dir", str(tmp_path / "output"),
+        "--p2-generations", "10",
+    ]) == 0
+
+    capsys.readouterr()
+    assert observed["p2_generations"] == 10
+    assert observed["run_p2_generations"] == 10
+
+
 def test_real_evolve_rejects_output_inside_data_root_before_host_creation(tmp_path: Path, monkeypatch, capsys):
     from evolving_loop.v2 import cli
 
@@ -289,6 +329,11 @@ def test_production_ports_prepare_and_run_real_p2(tmp_path: Path, monkeypatch):
         return prepared
 
     monkeypatch.setattr(runner, "prepare_real_p2_inputs", prepare, raising=False)
+    monkeypatch.setattr(
+        runner,
+        "_publish_p2_numerical_alternatives",
+        lambda *_args, **_kwargs: None,
+    )
 
     def run_real_numerical(context_value, host_value, **kwargs):
         observed.update(context=context_value, host=host_value, **kwargs)
@@ -426,7 +471,16 @@ def test_production_ports_complete_root_and_resume_byte_identically(
     release = SimpleNamespace(fingerprint="b" * 64)
     registry = SimpleNamespace(fingerprint="c" * 64)
     envelope = SimpleNamespace(fingerprint=lambda: "d" * 64)
-    pair = SimpleNamespace(release=release, registry=registry, envelope=envelope)
+    pair = SimpleNamespace(
+        release=release, registry=registry, envelope=envelope,
+        selected_genome_sha256s=(),
+    )
+    alternative = SimpleNamespace(
+        release=SimpleNamespace(fingerprint="8" * 64),
+        registry=SimpleNamespace(fingerprint="9" * 64),
+        envelope=SimpleNamespace(fingerprint=lambda: "a" * 64),
+        selected_genome_sha256s=("f" * 64,),
+    )
 
     class PairStore:
         def __init__(self, _root):
@@ -435,6 +489,10 @@ def test_production_ports_complete_root_and_resume_byte_identically(
         def load_active_frozen_pair(self, *, tasks):
             assert tasks == host.tasks
             return pair, "e" * 64
+
+        def load_frozen_pairs(self, *, tasks):
+            assert tasks == host.tasks
+            return ((pair, "e" * 64), (alternative, "f" * 64))
 
     monkeypatch.setattr(persistence, "NumericalQDRunStore", PairStore)
 
@@ -541,6 +599,7 @@ def test_production_ports_complete_root_and_resume_byte_identically(
 
     assert first.status == second.status == "complete"
     assert first_bytes == (output / "evaluation_complete.json").read_bytes()
+    assert host.numerical_alternatives == (alternative,)
     assert [record.stage for record in first.stage_records] == ["p2", "p3", "p4", "p5"]
     assert all((output / stage / "root_stage_completion.json").is_file() for stage in ("p2", "p3", "p4", "p5"))
 

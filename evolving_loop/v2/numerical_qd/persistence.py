@@ -215,6 +215,25 @@ class NumericalQDRunStore:
         except OSError as error:
             raise NumericalQDStoreError(f"missing immutable artifact: {relative}") from error
 
+    def _read_object_if_first_key(self, relative, first_key):
+        """Parse an object only when canonical bytes start with ``first_key``.
+
+        The catalog already authenticates every object's exact bytes.  This
+        discriminator avoids repeatedly decoding and deeply validating
+        unrelated multi-megabyte Task-4 evidence during state replay.
+        """
+        if not relative.startswith("objects/"):
+            return None
+        try:
+            raw = self._path(relative).read_bytes()
+        except OSError as error:
+            raise NumericalQDStoreError(
+                f"missing immutable artifact: {relative}"
+            ) from error
+        if not raw.startswith(f'{{"{first_key}":'.encode("ascii")):
+            return None
+        return _payload(raw)
+
     def _write(self, relative, payload, *, kind=None):
         typed = payload
         payload = _payload(payload)
@@ -551,15 +570,25 @@ class NumericalQDRunStore:
                 continue
             self._path(name)
             data = path.read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
             if path.suffix == ".json":
-                payload = _payload(data)
-                from .artifacts import task4_artifact_kind
-                identity = hashlib.sha256(data).hexdigest() if task4_artifact_kind(payload) else _identity(payload)
-                if name.startswith(("objects/", "rungs/", "proposals/")) and identity != path.stem:
-                    raise NumericalQDStoreError("content-addressed file SHA mismatch")
-            elif path.suffix == ".py" and hashlib.sha256(data).hexdigest() != path.stem:
+                # Writers validate and persist canonical bytes before cataloging.
+                # Checkpoints commit the raw digest, so subsequent audits only
+                # need a single byte hash for the large evidence objects whose
+                # filename already is that digest.  A few small control objects
+                # use a semantic identity (for example, a checkpoint identity
+                # excludes its self-hash), so retain the typed fallback for
+                # those instead of confusing the two identity schemes.
+                if name.startswith(("objects/", "rungs/", "proposals/")) and digest != path.stem:
+                    payload = _payload(data)
+                    from .artifacts import task4_artifact_kind
+                    kind = task4_artifact_kind(payload)
+                    identity = digest if kind is not None else _identity(payload)
+                    if identity != path.stem:
+                        raise NumericalQDStoreError("content-addressed file SHA mismatch")
+            elif path.suffix == ".py" and digest != path.stem:
                 raise NumericalQDStoreError("source file SHA mismatch")
-            result[name] = hashlib.sha256(data).hexdigest()
+            result[name] = digest
         operations = result if completed_operations is None else completed_operations
         expected_directories = set(_LAYOUT) | {
             str(Path(name).parent) for name in operations if name.startswith("results/")
@@ -628,7 +657,8 @@ class NumericalQDRunStore:
         all_rungs, manifest_shas, task_paths = {}, set(), set()
         for path in catalog:
             if path.startswith("objects/"):
-                partial = self._read(path).get("closed_partial_rung")
+                value = self._read_object_if_first_key(path, "closed_partial_rung")
+                partial = None if value is None else value.get("closed_partial_rung")
                 if partial is not None:
                     self._verify_partial_rung(partial, budget)
                     if partial["manifest_sha256"] is not None:
@@ -667,10 +697,12 @@ class NumericalQDRunStore:
             if path.startswith("results/") and path not in task_paths:
                 raise NumericalQDStoreError("partial uncommitted task result")
             if path.startswith("objects/"):
-                value = self._read(path)
-                if "task_groups" in value and Path(path).stem not in manifest_shas:
+                value = self._read_object_if_first_key(path, "protocol_sha256")
+                if (value is not None and "task_groups" in value
+                        and Path(path).stem not in manifest_shas):
                     raise NumericalQDStoreError("open or partial fixed rung manifest")
-                if "candidate_sha256s" in value and "rungs" in value:
+                value = self._read_object_if_first_key(path, "bracket")
+                if value is not None and "candidate_sha256s" in value and "rungs" in value:
                     persisted = HyperbandStateV2.from_payload(value)
                     represented_rungs.update(rung.fingerprint() for rung in persisted.rungs)
                     if (persisted.bracket == state.bracket and persisted.candidate_sha256s == state.candidate_sha256s
@@ -996,7 +1028,9 @@ class NumericalQDRunStore:
             for name in checkpoint.completed_operation_sha256s:
                 if not name.startswith("objects/"):
                     continue
-                payload = self._read(name)
+                payload = self._read_object_if_first_key(name, "registry")
+                if payload is None:
+                    continue
                 if not {"supply", "registry"} <= set(payload):
                     continue
                 validate_artifact(
@@ -1032,6 +1066,55 @@ class NumericalQDRunStore:
                 "active frozen pair does not bind the committed task universe"
             ) from error
         return frozen, pair_sha256
+
+    def load_frozen_pairs(
+        self, *, tasks: Sequence[ContextTask]
+    ) -> tuple[tuple[FrozenNumericalArtifactsV2, str], ...]:
+        """Restore every completed seed/candidate pair for downstream co-evolution."""
+        from evolving_loop.package_numerical_supply import parse_numerical_supply_release
+        from .adapters import (
+            FrozenNumericalArtifactsV2,
+            frozen_local_evidence_references,
+            validate_frozen_local_evidence,
+        )
+        from .contracts import FrozenNumericalRegistryEnvelopeV2
+
+        # Reuse the active loader's complete checkpoint/catalog/completion audit
+        # before exposing any exploratory pair.
+        self.load_active_frozen_pair(tasks=tasks)
+        checkpoint = NumericalQDCheckpointV2.from_payload(self._read("checkpoint.json"))
+        pairs = []
+        try:
+            for name in checkpoint.completed_operation_sha256s:
+                if not name.startswith("objects/"):
+                    continue
+                payload = self._read_object_if_first_key(name, "registry")
+                if payload is None:
+                    continue
+                if set(payload) != {"supply", "registry"}:
+                    continue
+                validate_artifact(ArtifactKind.FROZEN_PAIR, canonical_v2_bytes(payload))
+                release = parse_numerical_supply_release(payload["supply"])
+                envelope = FrozenNumericalRegistryEnvelopeV2.from_payload(payload["registry"])
+                raw = {
+                    sha: self._path(f"objects/{sha}.json").read_bytes()
+                    for sha in frozen_local_evidence_references(envelope)
+                }
+                validate_frozen_local_evidence(
+                    release, envelope, artifact_bytes_by_sha=raw, tasks=tasks
+                )
+                registry = envelope.restore(tasks)
+                winner = release.source_fingerprints.get("train_winner")
+                selected = () if winner is None else (winner,)
+                pairs.append((
+                    FrozenNumericalArtifactsV2(release, registry, envelope, selected),
+                    Path(name).stem,
+                ))
+        except (OSError, TypeError, ValueError) as error:
+            raise NumericalQDStoreError(
+                "completed frozen pair does not bind the committed task universe"
+            ) from error
+        return tuple(sorted(pairs, key=lambda item: item[1]))
 
 
 __all__ = ["NumericalQDRunStore", "NumericalQDStoreError"]

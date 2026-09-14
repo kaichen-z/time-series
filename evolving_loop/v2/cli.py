@@ -181,6 +181,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--authority-root", type=Path,
         help="read-only data authority root (defaults to the shared checkout)",
     )
+    real.add_argument(
+        "--p2-generations",
+        type=int,
+        help="formally finalize P2 after this many closed generations",
+    )
     add_protocol_parsers(commands)
     return parser
 
@@ -261,8 +266,16 @@ def _default_authority_root(code_root: Path) -> Path:
         raise ValueError("cannot locate the shared authority checkout") from error
 
 
-def _real_evolve(manifest_path: Path, output: Path, *, authority_root: Path | None) -> dict[str, object]:
+def _real_evolve(
+    manifest_path: Path,
+    output: Path,
+    *,
+    authority_root: Path | None,
+    p2_generations: int | None = None,
+) -> dict[str, object]:
     """Build and close the real Host around one immutable root invocation."""
+    if p2_generations is not None and p2_generations < 1:
+        raise ValueError("p2_generations must be a positive integer")
     manifest = RealEvolutionManifestV2.from_payload(_read_canonical(manifest_path))
     code_root = Path(__file__).resolve().parents[2]
     authority = (authority_root if authority_root is not None else _default_authority_root(code_root)).resolve(strict=True)
@@ -296,8 +309,18 @@ def _real_evolve(manifest_path: Path, output: Path, *, authority_root: Path | No
         raise ValueError("real output must not overlap a declared input or runtime")
     host = build_real_host(manifest, repo_root=authority, code_root=code_root, output_dir=destination)
     try:
-        ports = build_real_stage_ports(host, manifest=manifest, repo_root=authority)
-        return run_real_evolution(destination, manifest, ports).to_payload()
+        ports = build_real_stage_ports(
+            host,
+            manifest=manifest,
+            repo_root=authority,
+            p2_generations=p2_generations,
+        )
+        run_arguments = {}
+        if p2_generations is not None:
+            run_arguments["p2_generations"] = p2_generations
+        return run_real_evolution(
+            destination, manifest, ports, **run_arguments
+        ).to_payload()
     finally:
         host.close()
 
@@ -748,6 +771,7 @@ def _run_numerical_payloads(
     host_runtime: object,
     llm_client: LLMClient | None,
     resume: bool,
+    finalize_after: int | None = None,
     task_local_evidence_path=None, task_local_dictionary=None, legacy_bootstrap=False,
 ) -> dict[str, object]:
     """Shared typed parsing and adapter construction for both input seams."""
@@ -777,6 +801,7 @@ def _run_numerical_payloads(
             else getattr(host_runtime, "llm_client", None)
         ),
         resume=resume,
+        finalize_after=finalize_after,
     )
     return _read_canonical(output / "evaluation_complete.json")
 
@@ -790,6 +815,7 @@ def numerical_evolve_payload(
     input_sha256s: Mapping[str, str],
     host_runtime: object,
     llm_client: LLMClient,
+    finalize_after: int | None = None,
     task_local_evidence_path=None, task_local_dictionary=None, legacy_bootstrap=False,
 ) -> dict[str, object]:
     """Run Numerical QD from Host-verified payloads without path overlap rules."""
@@ -803,6 +829,7 @@ def numerical_evolve_payload(
         host_runtime=host_runtime,
         llm_client=llm_client,
         resume=resume,
+        finalize_after=finalize_after,
         task_local_evidence_path=task_local_evidence_path, task_local_dictionary=task_local_dictionary,
         legacy_bootstrap=legacy_bootstrap,
     )
@@ -1193,7 +1220,12 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "public-evaluate":
             summary = _public_evaluate(args.bundle, args.output_dir)
         elif args.command == "real-evolve":
-            summary = _real_evolve(args.manifest, args.output_dir, authority_root=args.authority_root)
+            summary = _real_evolve(
+                args.manifest,
+                args.output_dir,
+                authority_root=args.authority_root,
+                p2_generations=args.p2_generations,
+            )
         elif args.command in {"protocol-evolve", "protocol-make-smoke-inputs"}:
             summary = dispatch_protocol(args)
         else:

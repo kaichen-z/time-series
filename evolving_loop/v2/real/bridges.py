@@ -87,11 +87,15 @@ def run_real_numerical(
     input_sha256s: Mapping[str, str],
     task_local_evidence_path: Path | None = None,
     task_local_dictionary: object | None = None,
+    finalize_after: int | None = None,
 ) -> dict[str, object]:
     """Invoke P2 through the payload seam using a root stage context."""
     output_dir = getattr(context, "output_dir", None)
     if output_dir is None:
         raise TypeError("real numerical context requires output_dir")
+    preflight = getattr(host.llm_client, "preflight", None)
+    if callable(preflight):
+        preflight()
     return numerical_evolve_payload(
         config_payload,
         seed_payload,
@@ -100,6 +104,13 @@ def run_real_numerical(
         input_sha256s=input_sha256s,
         host_runtime=host,
         llm_client=host.llm_client,
+        # The 30-minute profile needs a closed end-to-end result, not an
+        # unbounded P2 search that consumes every second before P3/P4/P5.
+        finalize_after=(
+            finalize_after
+            if finalize_after is not None
+            else (1 if int(getattr(context, "grant_seconds", 0)) <= 840 else None)
+        ),
         task_local_evidence_path=task_local_evidence_path,
         task_local_dictionary=task_local_dictionary,
     )

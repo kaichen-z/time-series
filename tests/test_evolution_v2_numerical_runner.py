@@ -94,6 +94,15 @@ def run_fixture(root, **kwargs):
     return run_numerical_qd(root, *fixture(**options), **kwargs)
 
 
+def test_llm_proposal_budget_is_independent_of_numerical_task_timeout():
+    from evolving_loop.v2.numerical_qd.runner import _proposal_budget
+
+    available = ResourceUse(wall_seconds=500.0, llm_calls=2,
+        input_tokens=1000, output_tokens=1000)
+
+    assert _proposal_budget(available).wall_seconds == 60.0
+
+
 def test_authenticated_fold_groups_pack_into_nested_label_free_rungs():
     from evolving_loop.v2.numerical_qd import hyperband
     from evolving_loop.v2.numerical_qd import runner
@@ -357,6 +366,27 @@ def test_dev_missing_exact_member_fails_closed_instead_of_anchor_substitution(tm
         _dev_compare(registry, registry, "missing_parent", "missing_winner", adapter, kernel, lambda: None)
 
 
+def test_dev_uses_anchor_only_when_specialist_is_explicitly_not_applicable(monkeypatch):
+    from evolving_loop.v2.numerical_qd.contracts import NumericalMemberV2
+    from evolving_loop.v2.numerical_qd.runner import _dev_compare
+    from tests.test_evolution_v2_numerical_descriptors import policy
+    config, supply, _, adapter = fixture()
+    registry = supply.envelope.restore(adapter.tasks)
+    kernel = SimpleNamespace(budget=SimpleNamespace(elapsed_wall_seconds=0.0, plan=config.budget))
+    parent_name = registry.package_for(adapter.tasks[0]).protected_baseline.name
+    specialist = NumericalMemberV2("specialist", "statistical", "a" * 64,
+        "b" * 64, (), ("f" * 64,), "active")
+    monkeypatch.setattr(type(registry), "package_for",
+        lambda *_args: pytest.fail("Dev rehashed an already frozen package"))
+
+    comparison = _dev_compare(registry, registry, parent_name, "missing_winner",
+        adapter, kernel, lambda: None, child_member=specialist,
+        descriptor_policy=policy())
+
+    assert comparison["passed"] is False
+    assert comparison["parent_metrics"] == comparison["candidate_metrics"]
+
+
 @pytest.mark.parametrize("reverse_entities", [False, True])
 def test_cell_entry_binds_its_exact_persisted_subset_evaluation(tmp_path, reverse_entities):
     run_numerical_qd(tmp_path / "run", *fixture(task_budget=920, reverse_entities=reverse_entities), stop_after=1)
@@ -386,6 +416,26 @@ def test_freeze_rehydrates_all_occupied_archive_genomes_across_generations(tmp_p
     run_fixture(tmp_path / "run", stop_after=1)
     run_fixture(tmp_path / "run", resume=True)
     assert any(1 in generations_ and 2 in generations_ for generations_ in generations)
+
+
+def test_finalize_after_closes_a_bounded_generation_instead_of_pausing(tmp_path):
+    result = run_fixture(tmp_path / "run", task_budget=920, finalize_after=1)
+
+    assert result.status == "numerical_qd_complete"
+    assert (tmp_path / "run/evaluation_complete.json").is_file()
+    assert len(list((tmp_path / "run/numerical_qd/proposals").glob("*.json"))) == 1
+
+
+def test_finalize_after_runs_every_requested_generation(tmp_path):
+    result = run_fixture(
+        tmp_path / "run",
+        task_budget=2760,
+        finalize_after=3,
+    )
+
+    assert result.status == "numerical_qd_complete"
+    records = list((tmp_path / "run/numerical_qd/proposals").glob("*.json"))
+    assert len(records) == 3
 
 
 def test_train_credit_uses_completed_early_rungs_and_actual_survivors(tmp_path):
@@ -1062,6 +1112,13 @@ def test_acceptance_promotes_pair_and_rejection_keeps_exact_parent(tmp_path):
     assert accepted[0]["accepted_release_sha256s"] == sorted([
         first.active_bundle.numerical_release_sha256, first.active_bundle.numerical_registry_sha256])
     assert resumed.rejected_steps == 1
+    from evolving_loop.v2.numerical_qd.persistence import NumericalQDRunStore
+    pairs = NumericalQDRunStore(tmp_path / "run").load_frozen_pairs(
+        tasks=adapter.tasks
+    )
+    candidates = [pair for pair, _sha in pairs if pair.selected_genome_sha256s]
+    assert len(candidates) == 2
+    assert len({pair.release.fingerprint for pair in candidates}) == 2
 
 
 def test_stop_resume_is_byte_identical_and_completed_run_is_mtime_noop(tmp_path):
@@ -1182,6 +1239,36 @@ def test_materialization_failure_reason_is_persisted_in_generation_status(tmp_pa
         "member_id": steps[0]["materialization_failures"][0]["member_id"],
         "error_type": "ValueError",
         "message": "recipe executable is absent from the verified member source",
+    }]
+
+
+def test_candidate_verification_failure_is_persisted_in_generation_status(tmp_path, monkeypatch):
+    """A rejected candidate must not disappear behind no_feasible_child."""
+    from evolving_loop.v2.numerical_qd.persistence import NumericalQDRunStore
+
+    config, supply, manifest, adapter = fixture(task_budget=920)
+    original = NumericalQDRunStore.verify_candidate
+
+    def reject_child(store, genome_sha256):
+        payload = store._object(genome_sha256)
+        if payload.get("generation", 0) > 0:
+            raise ValueError("candidate source failed the executable Host gate")
+        return original(store, genome_sha256)
+
+    monkeypatch.setattr(NumericalQDRunStore, "verify_candidate", reject_child)
+    run_numerical_qd(
+        tmp_path / "run", config, supply, manifest, adapter, stop_after=1
+    )
+    step = next(
+        json.loads(path.read_bytes())["numerical_qd_step"]
+        for path in (tmp_path / "run/numerical_qd/objects").glob("*.json")
+        if "numerical_qd_step" in json.loads(path.read_bytes())
+    )
+
+    assert step["materialization_failures"] == [{
+        "member_id": step["materialization_failures"][0]["member_id"],
+        "error_type": "ValueError",
+        "message": "candidate source failed the executable Host gate",
     }]
 
 
@@ -1499,7 +1586,11 @@ def test_no_feasible_generation_continues_with_distinct_context_and_train_attemp
                     "float(history[-1]) + 1.0", "float('nan')")
                 return LLMResponse(json.dumps(payload))
             return response
-    result = run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter, OnceInvalid())
+    result = run_numerical_qd(
+        tmp_path / "run", config, supply, manifest, adapter, OnceInvalid(),
+        finalize_after=1,
+    )
+    assert result.status == "numerical_qd_complete"
     assert result.accepted_steps == 1
     assert result.budget["charged_use"]["task_executions"] == 921
     records = [json.loads(path.read_bytes()) for path in (tmp_path / "run/numerical_qd/proposals").glob("*.json")]
@@ -1600,6 +1691,29 @@ def test_freeze_material_output_is_exactly_billed_once(tmp_path, material_catalo
     resumed = run_numerical_qd(root, config, supply, manifest, adapter, resume=True)
     assert resumed.budget == result.budget
     assert files(root) == before
+
+
+def test_freeze_reserves_the_full_declared_task_timeout_envelope(tmp_path, monkeypatch):
+    from evolving_loop.v2.numerical_qd import runner
+
+    config, supply, manifest, adapter = fixture(task_budget=920)
+    payload = config.to_payload()
+    payload["budget"]["hard_limit_seconds"] = 2
+    payload["budget"]["ceilings"]["wall_seconds"] = 2.0
+    config = NumericalQDConfigV2.from_payload(payload)
+    original = runner._KernelWork.reserve_stage
+    observed = []
+
+    def reserve_stage(work, stage, estimate):
+        if stage.startswith("freeze-"):
+            observed.append(estimate.wall_seconds)
+        return original(work, stage, estimate)
+
+    monkeypatch.setattr(runner._KernelWork, "reserve_stage", reserve_stage)
+
+    run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter)
+
+    assert observed == [len(adapter.tasks) * config.adapter["task_timeout_seconds"]]
 
 
 @pytest.mark.parametrize("after_output", [False, True])

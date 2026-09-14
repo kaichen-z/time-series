@@ -341,12 +341,32 @@ def test_schema_v2_supply_round_trips_complete_ordered_repeated_family_catalog()
     )
 
 
-def test_non_seed_supply_rejects_full_build_policy_reused_for_every_fold():
+def test_non_seed_supply_allows_immutable_dictionary_policy_without_refitting():
     policy = _policy("seasonal_naive")
     repeated_policy = NumericalAlternativeSpec(
         candidate_id="seasonal_naive",
         family="statistical",
         materializer_kind="dictionary",
+        recipe_payload=policy.recipe.to_payload(),
+        full_build_policy_payload=policy.to_payload(),
+        build_fold_policy_payloads=tuple(
+            (fold, policy.to_payload()) for fold in range(5)
+        ),
+        assumption_ids=("seasonal_naive_ready",),
+        failure_conditions=("The candidate no longer matches the history.",),
+    )
+
+    release = _supply_release(alternatives=(repeated_policy,))
+
+    assert release.alternatives == (repeated_policy,)
+
+
+def test_non_seed_supply_rejects_non_dictionary_policy_reused_for_every_fold():
+    policy = _policy("seasonal_naive")
+    repeated_policy = NumericalAlternativeSpec(
+        candidate_id="seasonal_naive",
+        family="statistical",
+        materializer_kind="champion",
         recipe_payload=policy.recipe.to_payload(),
         full_build_policy_payload=policy.to_payload(),
         build_fold_policy_payloads=tuple(

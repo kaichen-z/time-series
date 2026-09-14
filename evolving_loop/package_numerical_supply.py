@@ -6,7 +6,7 @@ import json
 import math
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Literal
@@ -290,6 +290,7 @@ class NumericalSupplyRelease:
     atlas_release_sha256: str | None
     source_fingerprints: Mapping[str, str]
     runtime_fingerprints: Mapping[str, str]
+    _fingerprint: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int or self.schema_version not in {1, 2}:
@@ -326,7 +327,7 @@ class NumericalSupplyRelease:
                 _fail("Numerical supply candidate IDs must be unique")
         if self.version != "n000":
             for item in alternatives:
-                if all(
+                if item.materializer_kind != "dictionary" and all(
                     policy == item.full_build_policy_payload
                     for _fold, policy in item.build_fold_policy_payloads
                 ):
@@ -341,10 +342,15 @@ class NumericalSupplyRelease:
         object.__setattr__(self, "alternatives", alternatives)
         object.__setattr__(self, "source_fingerprints", source)
         object.__setattr__(self, "runtime_fingerprints", runtime)
+        object.__setattr__(
+            self,
+            "_fingerprint",
+            hashlib.sha256(canonical_json_bytes(self.to_payload())).hexdigest(),
+        )
 
     @property
     def fingerprint(self) -> str:
-        return hashlib.sha256(canonical_json_bytes(self.to_payload())).hexdigest()
+        return self._fingerprint
 
     def to_payload(self) -> dict[str, object]:
         return {

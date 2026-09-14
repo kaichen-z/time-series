@@ -24,6 +24,7 @@ from .contracts import (
 
 
 _STAGES = ("p2", "p3", "p4", "p5")
+_P2_SECONDS_PER_GENERATION = 420
 _PHASES = {
     "p2": ("P2_RUNNING", "P2_SEALED"),
     "p3": ("P3_RUNNING", "P3_SEALED"),
@@ -297,6 +298,18 @@ def _derived_numerical_config(
     ceilings["wall_seconds"] = float(grant_seconds)
     budget["ceilings"] = ceilings
     payload["budget"] = budget
+    proposer = dict(payload["proposer"])
+    proposer["max_proposals_per_generation"] = 2 if grant_seconds <= 840 else 4
+    payload["proposer"] = proposer
+    adapter = dict(payload["adapter"])
+    # Real workers are already externally bounded.  Leaving the pilot's
+    # conservative 300-second per-task estimate in longer profiles makes the
+    # Hyperband planner conclude that no rung fits, so an explicit multi-
+    # generation run silently closes after its first proposal.
+    adapter["task_timeout_seconds"] = min(
+        float(adapter["task_timeout_seconds"]), 5.0
+    )
+    payload["adapter"] = adapter
     from ..numerical_qd.config import NumericalQDConfigV2
 
     return NumericalQDConfigV2.from_payload(payload).to_payload()
@@ -600,13 +613,36 @@ def _derived_cooperative_config(context: RealStageContextV2, host: object) -> di
     return CooperativeConfigV2.from_payload(payload).to_payload()
 
 
+def _publish_p2_numerical_alternatives(host: object, output_dir: Path) -> None:
+    """Expose feasible, nonactive P2 pairs to the numerical P3 coordinate."""
+    from ..numerical_qd.persistence import NumericalQDRunStore
+
+    store = NumericalQDRunStore(output_dir)
+    active, _active_sha = store.load_active_frozen_pair(tasks=host.tasks)
+    active_identity = (active.release.fingerprint, active.registry.fingerprint)
+    alternatives = tuple(
+        pair for pair, _pair_sha in store.load_frozen_pairs(tasks=host.tasks)
+        if pair.selected_genome_sha256s
+        and (pair.release.fingerprint, pair.registry.fingerprint) != active_identity
+    )
+    host.numerical_alternatives = tuple(sorted(
+        alternatives,
+        key=lambda pair: (pair.release.fingerprint, pair.registry.fingerprint),
+    ))
+
+
 def build_real_stage_ports(
     host: object,
     *,
     manifest: RealEvolutionManifestV2,
     repo_root: Path,
+    p2_generations: int | None = None,
 ) -> RealStagePorts:
     """Assemble authenticated production P2→P5 child runs and seals."""
+    if p2_generations is not None and (
+        type(p2_generations) is not int or p2_generations < 1
+    ):
+        raise ValueError("p2_generations must be a positive integer")
     authority = Path(repo_root).resolve()
 
     def bind_deadline(context: RealStageContextV2) -> None:
@@ -633,19 +669,23 @@ def build_real_stage_ports(
                 "status": "p2_preparation_budget_exhausted",
                 "public_test_accessed": False,
             }
-        return run_real_numerical(
-            context,
-            host,
-            config_payload=prepared.config_payload,
-            seed_payload=prepared.seed_payload,
-            task_manifest_payload=prepared.task_manifest_payload,
-            input_sha256s={
+        arguments = {
+            "config_payload": prepared.config_payload,
+            "seed_payload": prepared.seed_payload,
+            "task_manifest_payload": prepared.task_manifest_payload,
+            "input_sha256s": {
                 name: prepared.input_sha256s[name]
                 for name in ("config", "seed_supply", "task_manifest")
             },
-            task_local_evidence_path=prepared.evidence_path,
-            task_local_dictionary=prepared.dictionary,
-        )
+            "task_local_evidence_path": prepared.evidence_path,
+            "task_local_dictionary": prepared.dictionary,
+        }
+        if p2_generations is not None:
+            arguments["finalize_after"] = p2_generations
+        result = run_real_numerical(context, host, **arguments)
+        if isinstance(result, Mapping) and result.get("status") == "numerical_qd_complete":
+            _publish_p2_numerical_alternatives(host, context.output_dir)
+        return result
 
     def seal_p2(context: RealStageContextV2, _result: object) -> SealedStageV2:
         from ..numerical_qd.persistence import NumericalQDRunStore
@@ -677,6 +717,13 @@ def build_real_stage_ports(
         pair, pair_sha = NumericalQDRunStore(context.output_dir).load_active_frozen_pair(
             tasks=host.tasks
         )
+        # A process may resume after the native P2 completion was written but
+        # before the root P2 seal.  In that path run_p2 is not called again, so
+        # rehydrate feasible nonactive pairs here before P3 builds its proposal
+        # space.  Without this, a real evolved Numerical specialist silently
+        # disappears from cooperative evolution after a perfectly valid resume.
+        if not getattr(host, "numerical_alternatives", ()):
+            _publish_p2_numerical_alternatives(host, context.output_dir)
         prepared = _load_prepared_real_p2(
             context.output_dir.parent / "prepared/p2", manifest=manifest
         )
@@ -937,16 +984,40 @@ def _read_sha_bound_json(path: Path, expected_sha256: str) -> dict[str, object]:
     return value
 
 
-def _plan(manifest: RealEvolutionManifestV2) -> BudgetPlan:
+def _effective_allocations(
+    manifest: RealEvolutionManifestV2, p2_generations: int | None
+) -> dict[str, int]:
     schedule = PROFILE_SCHEDULES[manifest.profile]
+    if p2_generations is not None and (
+        type(p2_generations) is not int or p2_generations < 1
+    ):
+        raise ValueError("p2_generations must be a positive integer")
+    allocations = dict(schedule.allocations)
+    if p2_generations is not None:
+        allocations["p2"] = max(
+            allocations["p2"], p2_generations * _P2_SECONDS_PER_GENERATION
+        )
+    return allocations
+
+
+def _plan(
+    manifest: RealEvolutionManifestV2, p2_generations: int | None = None
+) -> BudgetPlan:
+    schedule = PROFILE_SCHEDULES[manifest.profile]
+    allocations = _effective_allocations(manifest, p2_generations)
+    total_seconds = sum(allocations.values())
     return BudgetPlan(
-        schedule.total_seconds,
-        float(schedule.finalization_reserve_seconds / schedule.total_seconds),
-        ResourceUse(wall_seconds=float(schedule.total_seconds)),
+        total_seconds,
+        float(schedule.finalization_reserve_seconds / total_seconds),
+        ResourceUse(wall_seconds=float(total_seconds)),
     )
 
 
-def _root_manifest(manifest: RealEvolutionManifestV2, plan: BudgetPlan) -> dict[str, object]:
+def _root_manifest(
+    manifest: RealEvolutionManifestV2,
+    plan: BudgetPlan,
+    p2_generations: int | None,
+) -> dict[str, object]:
     return {
         "system": "evolution_v2",
         "schema_version": 1,
@@ -955,14 +1026,19 @@ def _root_manifest(manifest: RealEvolutionManifestV2, plan: BudgetPlan) -> dict[
         "real_manifest_sha256": manifest.fingerprint(),
         "model_binding_sha256": manifest.model.fingerprint(),
         "budget_plan_sha256": plan.fingerprint(),
+        "p2_generation_target": p2_generations,
     }
 
 
 def _load_state(
-    root: Path, manifest: RealEvolutionManifestV2, plan: BudgetPlan, monotonic: Callable[[], float]
+    root: Path,
+    manifest: RealEvolutionManifestV2,
+    plan: BudgetPlan,
+    monotonic: Callable[[], float],
+    p2_generations: int | None,
 ) -> tuple[V2RunStore, BudgetLedger, RealEvolutionCheckpointV2 | None]:
     store = V2RunStore.create(root)
-    expected_manifest = _root_manifest(manifest, plan)
+    expected_manifest = _root_manifest(manifest, plan, p2_generations)
     manifest_path = root / "run_manifest.json"
     if manifest_path.exists():
         if _read_canonical(manifest_path) != expected_manifest:
@@ -1218,12 +1294,14 @@ def _context(
 
 
 def _grant(
-    manifest: RealEvolutionManifestV2, ledger: BudgetLedger, stage: str, carry_seconds: int
+    allocations: Mapping[str, int],
+    ledger: BudgetLedger,
+    stage: str,
+    carry_seconds: int,
 ) -> int:
-    schedule = PROFILE_SCHEDULES[manifest.profile]
     index = _STAGES.index(stage)
-    base = schedule.allocations[stage]
-    later_base = sum(schedule.allocations[name] for name in _STAGES[index + 1 :])
+    base = allocations[stage]
+    later_base = sum(allocations[name] for name in _STAGES[index + 1 :])
     charged_remaining = (
         ledger.plan.search_deadline_seconds - ledger.charged_use.wall_seconds
     )
@@ -1298,6 +1376,7 @@ def run_real_evolution(
     ports: RealStagePorts,
     *,
     monotonic: Callable[[], float] = time.monotonic,
+    p2_generations: int | None = None,
 ) -> RealRunResultV2:
     """Run or safely resume one immutable real P2→P5 root epoch."""
     if not isinstance(manifest, RealEvolutionManifestV2):
@@ -1308,8 +1387,11 @@ def run_real_evolution(
         raise TypeError("monotonic must be callable")
 
     root = Path(output_dir)
-    plan = _plan(manifest)
-    store, ledger, checkpoint = _load_state(root, manifest, plan, monotonic)
+    allocations = _effective_allocations(manifest, p2_generations)
+    plan = _plan(manifest, p2_generations)
+    store, ledger, checkpoint = _load_state(
+        root, manifest, plan, monotonic, p2_generations
+    )
     records = list(checkpoint.stage_records) if checkpoint is not None else []
     handoffs = dict(checkpoint.handoff_sha256s) if checkpoint is not None else {}
     carry = checkpoint.carry_seconds if checkpoint is not None else 0
@@ -1398,7 +1480,7 @@ def run_real_evolution(
             return _result("failed", manifest, records)
 
     for stage in _STAGES[len(records) :]:
-        grant_seconds = _grant(manifest, ledger, stage, carry)
+        grant_seconds = _grant(allocations, ledger, stage, carry)
         if grant_seconds <= 0:
             _checkpoint(store, ledger, phase="INCOMPLETE", records=records, active_stage=None, carry_seconds=0,
                         handoff_sha256s=handoffs, completion_sha256=None)

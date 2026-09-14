@@ -632,6 +632,9 @@ class NumericalPackageMaterializer:
             )
             if seed_only and parent.schema_version == 1:
                 continue
+            if seed_only and item.materializer_kind == "dictionary":
+                retained.append(item)
+                continue
             if seed_only:
                 if not self.build_rows:
                     _fail("v2 seed catalog requires Build rows for cross-fit rebinding")

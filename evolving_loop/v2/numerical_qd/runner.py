@@ -35,7 +35,7 @@ from ..kernel import EvolutionKernel, SeedBootstrapAuthority, SeedBootstrapStopp
 from ..store import V2RunStore, write_once_json
 from .adapters import (
     ImportedNumericalSeedV2, LegacyNumericalAdapter, MaterializedNumericalChildV2, NumericalWorkStopped, _canonical_member,
-    evaluate_numerical_child, freeze_qd_supply, import_numerical_seed,
+    _applicable, evaluate_numerical_child, freeze_qd_supply, import_numerical_seed,
 )
 from .config import NumericalQDConfigV2
 from .artifacts import ArtifactKindV2 as ArtifactKind, validate_artifact
@@ -170,6 +170,13 @@ def _available(kernel):
     values["wall_seconds"] = min(values["wall_seconds"], max(0.0,
         kernel.budget.plan.search_deadline_seconds - kernel.budget.elapsed_wall_seconds))
     return ResourceUse.from_payload(values)
+
+
+def _proposal_budget(available):
+    """Give model generation its own bounded window, independent of task runtime."""
+    if type(available) is not ResourceUse:
+        raise TypeError("proposal budget requires exact ResourceUse")
+    return replace(available, wall_seconds=min(60.0, available.wall_seconds))
 
 
 class _KernelWork:
@@ -528,11 +535,20 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
     return advance_hyperband(state, manifest, aggregates, outcome).state, tuple(results), None
 
 
-def _dev_compare(parent_registry, child_registry, parent_name, child_name, adapter, kernel, account_work):
+def _dev_compare(parent_registry, child_registry, parent_name, child_name, adapter, kernel, account_work, *,
+                 parent_member=None, child_member=None, descriptor_policy=None):
     """Trusted Dev20 comparison. Only the caller's sealed evidence sees values."""
     scores = [[], []]
     count = 0
-    for task in sorted(adapter.tasks, key=lambda t: t.numeric.task_id):
+    ordered_tasks = tuple(sorted(adapter.tasks, key=lambda t: t.numeric.task_id))
+    expected_ids = tuple(task.numeric.task_id for task in ordered_tasks)
+    if any(registry.task_ids != expected_ids for registry in (parent_registry, child_registry)):
+        raise ValueError("Dev registry task universe mismatch")
+    # Both registries were fully fingerprint-verified when constructed/restored,
+    # and their package mappings are immutable. Avoid reserializing a multi-MB
+    # package on every one of the 40 Dev lookups.
+    package_maps = (parent_registry._packages, child_registry._packages)
+    for task in ordered_tasks:
         if task.numeric.task_id in adapter.fold_manifest.task_fold_map:
             continue
         for index, registry in enumerate((parent_registry, child_registry)):
@@ -540,12 +556,17 @@ def _dev_compare(parent_registry, child_registry, parent_name, child_name, adapt
                 return _NO_DEV
             account_work()
             count += 1
-            package = registry.package_for(task)
+            package = package_maps[index][task.numeric.task_id]
             member_name = (parent_name, child_name)[index]
             matches = tuple(item for item in package.ranked_alternatives if item.name == member_name)
-            if len(matches) != 1:
+            member = (parent_member, child_member)[index]
+            if not matches and member is not None and descriptor_policy is not None \
+                    and not _applicable(member, task, descriptor_policy):
+                forecast = package.protected_baseline.forecast
+            elif len(matches) != 1:
                 raise ValueError("Dev package is missing one exact evaluated member")
-            forecast = matches[0].forecast
+            else:
+                forecast = matches[0].forecast
             scores[index].append(drcik_point_metrics(task.numeric.future_values, forecast, cap=5.0))
     metrics = [{"mean_smae": float(statistics.fmean(row["smae"] for row in values)),
                 "mean_srmse": float(statistics.fmean(row["srmse"] for row in values))} for values in scores]
@@ -560,8 +581,12 @@ def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry
     available = _available(kernel)
     if available.artifact_bytes == 0:
         return None, "artifact_bytes_exhausted"
-    estimate = ResourceUse(artifact_bytes=available.artifact_bytes,
-        wall_seconds=min(available.wall_seconds / 2.0, len(adapter.tasks) * config.adapter["task_timeout_seconds"]))
+    estimate = ResourceUse(
+        artifact_bytes=available.artifact_bytes,
+        wall_seconds=float(
+            len(adapter.tasks) * config.adapter["task_timeout_seconds"]
+        ),
+    )
     permit = work.reserve_stage("freeze-" + winner, estimate)
     if not permit.allowed:
         return None, permit.reason
@@ -623,11 +648,13 @@ def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry
 
 
 def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, llm_client=None,
-                     resume=False, stop_after=None) -> NumericalQDRunResultV2:
+                     resume=False, stop_after=None, finalize_after=None) -> NumericalQDRunResultV2:
     """Run to the committed resource/deadline limit, or pause after N generations.
 
     Stops are closed generation boundaries. A crash within an unpublished
     operation fails closed through Task 8; no partial operation is replayed.
+    ``finalize_after`` is a minimum generation count and only closes early once
+    the archive contains a genuinely feasible evolved entry.
     """
     if type(config) is not NumericalQDConfigV2:
         config = NumericalQDConfigV2.from_payload(config)
@@ -635,6 +662,10 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         raise TypeError("runner requires the typed LegacyNumericalAdapter boundary")
     if stop_after is not None and (type(stop_after) is not int or stop_after < 1):
         raise ValueError("stop_after must be a positive generation count")
+    if finalize_after is not None and (
+        type(finalize_after) is not int or finalize_after < 1
+    ):
+        raise ValueError("finalize_after must be a positive generation count")
     if not resume:
         NumericalQDRunStore.preflight_fresh(output_dir)
     adapter_fingerprint = adapter.fingerprint
@@ -797,6 +828,9 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
     feedback = (TrainMutationFeedbackV2.from_payload(previous_feedback) if previous_feedback else
                 TrainMutationFeedbackV2("train", sorted(config.mutation["operators"])[0], False, False, False, ()))
     while not kernel.budget.finalization_started:
+        if (finalize_after is not None and generation >= finalize_after
+                and archive.entries):
+            break
         if stop_after is not None and generation >= stop_after:
             return result("numerical_qd_paused")
         if not kernel.budget.can_open_stage(ResourceUse(task_executions=1)).allowed:
@@ -823,8 +857,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             }}, kind=ArtifactKind.GENERATION_STATUS)
             checkpoint_state()
             break
-        proposal_budget = replace(_available(kernel), wall_seconds=min(
-            config.adapter["task_timeout_seconds"], _available(kernel).wall_seconds))
+        proposal_budget = _proposal_budget(_available(kernel))
         request = primitive_proposer_request(parent_genome=selected.to_payload(), parent_state=parent_state.to_payload(),
             selected_cells=[{"cell_sha256": cell, "member_ids": sorted(m.member_id for m in parent_state.inventory.members
                 if cell in m.applicability_cells)} for cell in parent_state.declared_cells],
@@ -930,13 +963,16 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 candidate_state.inventory.fingerprint(), selected.screening_policy_sha256, selected.combined_policy_sha256,
                 candidate_state.mutation_policy.fingerprint(), candidate_state.proposer_prompt.fingerprint(),
                 config.runtime_fingerprints, config.kernel_protocol.fingerprint())
+            candidate_member = _canonical_member(candidate_state)
             try:
                 _persist_state(store, candidate_state, genome)
                 genome, sources, policies = store.verify_candidate(genome.fingerprint())
-            except ValueError:
+            except ValueError as error:
+                materialization_failures.append(
+                    _materialization_failure(candidate_member.member_id, error)
+                )
                 continue
             adapter.sources = dict(adapter.sources) | {sha: data.decode() for sha, data in sources.items()}
-            candidate_member = _canonical_member(candidate_state)
             remaining = _available(kernel)
             # Reserve an upper bound, then release unused capacity at closure.
             # Each uncached forecast/worker start checks this bound before work.
@@ -969,7 +1005,8 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                     member_id=candidate_member.member_id, policies=policies,
                     build_rows=_train_rows(adapter), descriptor_policy=config.descriptor_policy,
                     version=f"n{generation:03d}", parent_state=parent_state, proposal=proposal,
-                    account_work=account_work, task_timeout_seconds=config.adapter["task_timeout_seconds"])
+                    account_work=account_work, task_timeout_seconds=config.adapter["task_timeout_seconds"],
+                    parent_registry=parent_registry)
             except NumericalWorkStopped as error:
                 failure, budget_blocked = "materialization_budget", True
                 materialization_failures.append(
@@ -1084,7 +1121,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             frozen_release, frozen_registry, pair_sha = frozen_pair
             candidate = active.provisional_child("numerical", {"numerical": (frozen_release.fingerprint, frozen_registry.fingerprint)})
             permit = kernel.reserve_evaluation(candidate, ResourceUse(task_executions=40,
-                wall_seconds=float(40 * config.adapter["task_timeout_seconds"])))
+                wall_seconds=min(10.0, float(40 * config.adapter["task_timeout_seconds"]))))
             if permit.allowed:
                 before = adapter.monotonic()
                 comparison, count = _NO_DEV, 0
@@ -1103,10 +1140,14 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                         if len(names) != 1:
                             raise ValueError("seed Parent has no unique exact anchor execution")
                         parent_name = names.pop()
+                        parent_member = None
                     else:
-                        parent_name = adapter._recipe(_canonical_member(active_state), parent_policies, None, None).name
+                        parent_member = _canonical_member(active_state)
+                        parent_name = adapter._recipe(parent_member, parent_policies, None, None).name
                     comparison = _dev_compare(parent_registry, frozen_registry, parent_name,
-                        children[winner].fit.recipe.name, adapter, kernel, account_dev)
+                        children[winner].fit.recipe.name, adapter, kernel, account_dev,
+                        parent_member=parent_member, child_member=children[winner].member,
+                        descriptor_policy=config.descriptor_policy)
                 except (ValueError, TypeError, TimeoutError, MethodForecastError):
                     comparison = _NO_DEV
                 finally:

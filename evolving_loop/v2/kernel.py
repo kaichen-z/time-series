@@ -1377,8 +1377,13 @@ class EvolutionKernel:
                 final_rows = tuple(row for row in final_packages[task_id].ranked_alternatives if row.name == name)
                 child_rows = tuple(row for row in child_packages[task_id].ranked_alternatives if row.name == name)
                 if (registry.entries[task_id]["task_sha256"] != child_registry.entries[task_id]["task_sha256"]
-                        or len(final_rows) != 1 or len(child_rows) != 1):
+                        or len(final_rows) != len(child_rows) or len(child_rows) > 1):
                     raise KernelAuthorityError("final Numerical registry lacks the exact task winner")
+                # A specialist can be intentionally absent outside its declared
+                # morphology cells.  Its materialized Child is the authority for
+                # that absence, and the final projection must preserve it exactly.
+                if not child_rows:
+                    continue
                 # Projection may move rank when other families join; executable
                 # identity, diagnostics and exact forecast bytes may not change.
                 normalized = replace(final_rows[0], rank=child_rows[0].rank)

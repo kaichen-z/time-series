@@ -878,7 +878,13 @@ class FrozenNumericalRegistryEnvelopeV2(_CanonicalContract):
             package = _nested(value, FrozenNumericalPackageEnvelopeV2)
             if package.fingerprint() != sha:
                 raise ValueError("package envelope content SHA mismatch")
-            if package.restore().component_fingerprints.get("numerical_supply_release") != self.release_sha256:
+            # FrozenNumericalPackageEnvelopeV2.__post_init__ has already fully
+            # decoded and fingerprint-checked this payload.  Read the now
+            # validated immutable fields directly instead of decoding every
+            # package again here and again for each registry entry.
+            fields_payload = package.payload["fields"]
+            components = fields_payload["component_fingerprints"]["items"]
+            if components.get("numerical_supply_release") != self.release_sha256:
                 raise ValueError("package envelope release mismatch")
             packages[sha] = package
         entries = _require_mapping(self.entries, "entries")
@@ -893,10 +899,11 @@ class FrozenNumericalRegistryEnvelopeV2(_CanonicalContract):
             for name, sha in entry.items():
                 require_sha256(sha, name)
             sha = entry["package_sha256"]
-            if sha not in packages or packages[sha].restore().task_profile.task_id != task_id:
+            if (sha not in packages
+                    or packages[sha].payload["fields"]["task_profile"]["fields"]["task_id"] != task_id):
                 raise ValueError("registry task/package identity mismatch")
             if self.schema_version == 2:
-                components = packages[sha].restore().component_fingerprints
+                components = packages[sha].payload["fields"]["component_fingerprints"]["items"]
                 expected = {"task_shortlist": entry["task_shortlist_sha256"],
                     "shortlist_policy": self.shortlist_policy_sha256, "dictionary": self.dictionary_sha256,
                     "hindcast_diagnostics": entry["hindcast_diagnostics_sha256"]}
