@@ -1,0 +1,1 @@
+{"assumptions":[{"assumption_id":"naive_last_history","candidate_name":"naive_last","direction":"above","failure_condition":"History is unavailable.","feature":"history_length","horizon_region":"full","operator":"select","rationale":"History supports the candidate."}],"fallback_parent":"naive_last","kind":"select","name":"select_naive_last","parents":["naive_last"]}

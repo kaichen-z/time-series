@@ -1,0 +1,6 @@
+{
+  "maximum_candidates": 10,
+  "minimum_candidates": 6,
+  "schema_version": 1,
+  "target_candidates": 8
+}

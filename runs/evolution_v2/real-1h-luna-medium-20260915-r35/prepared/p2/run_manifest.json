@@ -1,0 +1,10 @@
+{
+  "candidate_priors_sha256": "53cc2347742ff48c02032bd512498bca2b482e0c52faf7b0e426ab84eed29540",
+  "champion_sha256": "b4d92ad1d94c7fb3edfbdbf2d3e44ba950d4dec669ca76e4200a04df1cd8a61d",
+  "dictionary_sha256": "f7888ef6e8c16a22a0529a3e5c9429a7d3e3fd6af5f21c50d261839f8825070f",
+  "kind": "real_p2_task_local_evidence",
+  "manifest_sha256": "fe2eed5bb1cac2b2be674dcbe0bf89d4007364f0e13ae6e5be1a4ca0947d1916",
+  "public_test_accessed": false,
+  "schema_version": 1,
+  "shortlist_index_fingerprint": "0b473e1f708b124734b89dee577adb8fbf70f55b636112b00ece35ba9737e8f7"
+}

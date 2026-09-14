@@ -1,0 +1,1 @@
+{"ceilings":{"artifact_bytes":1000000000,"gpu_seconds":20000.0,"input_tokens":1000000,"llm_calls":100,"output_tokens":100000,"subprocesses":10000,"task_executions":10000,"wall_seconds":4187.0},"finalization_reserve_fraction":0.2,"hard_limit_seconds":4187,"schema_version":1,"search_deadline_seconds":3349.6000000000004}

@@ -1,0 +1,1 @@
+{"assumptions":[{"assumption_id":"damped_trend_history","candidate_name":"damped_trend","direction":"above","failure_condition":"History is unavailable.","feature":"history_length","horizon_region":"full","operator":"select","rationale":"History supports the candidate."}],"fallback_parent":"damped_trend","kind":"select","name":"select_damped_trend","parents":["damped_trend"]}

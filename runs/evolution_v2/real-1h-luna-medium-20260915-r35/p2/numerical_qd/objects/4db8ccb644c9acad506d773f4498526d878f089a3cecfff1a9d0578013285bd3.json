@@ -1,0 +1,1 @@
+{"assumptions":[{"assumption_id":"recent_mean_history","candidate_name":"recent_mean","direction":"above","failure_condition":"History is unavailable.","feature":"history_length","horizon_region":"full","operator":"select","rationale":"History supports the candidate."}],"fallback_parent":"recent_mean","kind":"select","name":"select_recent_mean","parents":["recent_mean"]}

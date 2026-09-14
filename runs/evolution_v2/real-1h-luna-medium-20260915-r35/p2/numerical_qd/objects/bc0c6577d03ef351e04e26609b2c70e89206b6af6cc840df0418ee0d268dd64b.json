@@ -1,0 +1,1862 @@
+{
+  "public_test_accessed": false,
+  "rows": [
+    {
+      "candidate_name": "auto_mfles",
+      "diagnostic": {
+        "amplitude_ratio": null,
+        "cache_key": "b79d8ed720d02a7e7db572dc42ff0894888494265b558973a204da657809b296",
+        "eligible": false,
+        "explosion": false,
+        "family": "statistical",
+        "fold_forecasts": [],
+        "fold_truths": [],
+        "folds": [
+          {
+            "amplitude_ratio": null,
+            "detail": "_HistoryOnlyNotApplicable: needs 48 points, got 12",
+            "forecast": [],
+            "mae": null,
+            "mase": null,
+            "mase_scale": null,
+            "normalized_bias": null,
+            "phase_error": null,
+            "rmsse": null,
+            "slope_error": null,
+            "smae": null,
+            "smae_clipped": null,
+            "smae_raw": null,
+            "smape": null,
+            "srmse": null,
+            "srmse_clipped": null,
+            "srmse_raw": null,
+            "status": "failed",
+            "train_end": 12,
+            "truth": [
+              115.0,
+              108.0,
+              342.0,
+              265.0,
+              203.0,
+              66.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "validation_end": 24
+          },
+          {
+            "amplitude_ratio": null,
+            "detail": "_HistoryOnlyNotApplicable: needs 48 points, got 24",
+            "forecast": [],
+            "mae": null,
+            "mase": null,
+            "mase_scale": null,
+            "normalized_bias": null,
+            "phase_error": null,
+            "rmsse": null,
+            "slope_error": null,
+            "smae": null,
+            "smae_clipped": null,
+            "smae_raw": null,
+            "smape": null,
+            "srmse": null,
+            "srmse_clipped": null,
+            "srmse_raw": null,
+            "status": "failed",
+            "train_end": 24,
+            "truth": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              85.0,
+              120.0,
+              270.0,
+              35.0,
+              307.0
+            ],
+            "validation_end": 36
+          },
+          {
+            "amplitude_ratio": null,
+            "detail": "_HistoryOnlyNotApplicable: needs 48 points, got 36",
+            "forecast": [],
+            "mae": null,
+            "mase": null,
+            "mase_scale": null,
+            "normalized_bias": null,
+            "phase_error": null,
+            "rmsse": null,
+            "slope_error": null,
+            "smae": null,
+            "smae_clipped": null,
+            "smae_raw": null,
+            "smape": null,
+            "srmse": null,
+            "srmse_clipped": null,
+            "srmse_raw": null,
+            "status": "failed",
+            "train_end": 36,
+            "truth": [
+              295.0,
+              251.0,
+              30.0,
+              264.0,
+              182.0,
+              3.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "validation_end": 48
+          }
+        ],
+        "long_horizon_coverage": 0.0,
+        "long_horizon_fold": null,
+        "mase_mad": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_joint_scaled_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_mae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_mase": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_rmsse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_smae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_smape": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_srmse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "name": "auto_mfles",
+        "normalized_bias": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "phase_error": null,
+        "reason_code": "insufficient_successful_folds",
+        "recent_joint_scaled_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "recent_mase": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "recent_smae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "recent_srmse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "slope_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "smae_mad": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "srmse_mad": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "successful_folds": 0,
+        "worst_joint_scaled_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_mase": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_smae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_smae_raw": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_srmse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_srmse_raw": {
+          "status": "positive_infinity",
+          "value": null
+        }
+      },
+      "failure_reason": null
+    },
+    {
+      "candidate_name": "holt_winters_additive",
+      "diagnostic": {
+        "amplitude_ratio": null,
+        "cache_key": "274e32e24b1b6a7778d27f6bcb781c2cea1b563a5bd9a2ab68a32533ad8639f7",
+        "eligible": false,
+        "explosion": false,
+        "family": "statistical",
+        "fold_forecasts": [],
+        "fold_truths": [],
+        "folds": [
+          {
+            "amplitude_ratio": null,
+            "detail": "_HistoryOnlyNotApplicable: needs 48 points, got 12",
+            "forecast": [],
+            "mae": null,
+            "mase": null,
+            "mase_scale": null,
+            "normalized_bias": null,
+            "phase_error": null,
+            "rmsse": null,
+            "slope_error": null,
+            "smae": null,
+            "smae_clipped": null,
+            "smae_raw": null,
+            "smape": null,
+            "srmse": null,
+            "srmse_clipped": null,
+            "srmse_raw": null,
+            "status": "failed",
+            "train_end": 12,
+            "truth": [
+              115.0,
+              108.0,
+              342.0,
+              265.0,
+              203.0,
+              66.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "validation_end": 24
+          },
+          {
+            "amplitude_ratio": null,
+            "detail": "_HistoryOnlyNotApplicable: needs 48 points, got 24",
+            "forecast": [],
+            "mae": null,
+            "mase": null,
+            "mase_scale": null,
+            "normalized_bias": null,
+            "phase_error": null,
+            "rmsse": null,
+            "slope_error": null,
+            "smae": null,
+            "smae_clipped": null,
+            "smae_raw": null,
+            "smape": null,
+            "srmse": null,
+            "srmse_clipped": null,
+            "srmse_raw": null,
+            "status": "failed",
+            "train_end": 24,
+            "truth": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              85.0,
+              120.0,
+              270.0,
+              35.0,
+              307.0
+            ],
+            "validation_end": 36
+          },
+          {
+            "amplitude_ratio": null,
+            "detail": "_HistoryOnlyNotApplicable: needs 48 points, got 36",
+            "forecast": [],
+            "mae": null,
+            "mase": null,
+            "mase_scale": null,
+            "normalized_bias": null,
+            "phase_error": null,
+            "rmsse": null,
+            "slope_error": null,
+            "smae": null,
+            "smae_clipped": null,
+            "smae_raw": null,
+            "smape": null,
+            "srmse": null,
+            "srmse_clipped": null,
+            "srmse_raw": null,
+            "status": "failed",
+            "train_end": 36,
+            "truth": [
+              295.0,
+              251.0,
+              30.0,
+              264.0,
+              182.0,
+              3.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "validation_end": 48
+          }
+        ],
+        "long_horizon_coverage": 0.0,
+        "long_horizon_fold": null,
+        "mase_mad": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_joint_scaled_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_mae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_mase": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_rmsse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_smae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_smape": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_srmse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "name": "holt_winters_additive",
+        "normalized_bias": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "phase_error": null,
+        "reason_code": "insufficient_successful_folds",
+        "recent_joint_scaled_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "recent_mase": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "recent_smae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "recent_srmse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "slope_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "smae_mad": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "srmse_mad": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "successful_folds": 0,
+        "worst_joint_scaled_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_mase": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_smae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_smae_raw": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_srmse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_srmse_raw": {
+          "status": "positive_infinity",
+          "value": null
+        }
+      },
+      "failure_reason": null
+    },
+    {
+      "candidate_name": "holt_winters_damped",
+      "diagnostic": {
+        "amplitude_ratio": null,
+        "cache_key": "8653d590c394e60ba85b7d16fb5e479d876c464b7db3412e9f9813c7702bb2db",
+        "eligible": false,
+        "explosion": false,
+        "family": "statistical",
+        "fold_forecasts": [],
+        "fold_truths": [],
+        "folds": [
+          {
+            "amplitude_ratio": null,
+            "detail": "_HistoryOnlyNotApplicable: needs 48 points, got 12",
+            "forecast": [],
+            "mae": null,
+            "mase": null,
+            "mase_scale": null,
+            "normalized_bias": null,
+            "phase_error": null,
+            "rmsse": null,
+            "slope_error": null,
+            "smae": null,
+            "smae_clipped": null,
+            "smae_raw": null,
+            "smape": null,
+            "srmse": null,
+            "srmse_clipped": null,
+            "srmse_raw": null,
+            "status": "failed",
+            "train_end": 12,
+            "truth": [
+              115.0,
+              108.0,
+              342.0,
+              265.0,
+              203.0,
+              66.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "validation_end": 24
+          },
+          {
+            "amplitude_ratio": null,
+            "detail": "_HistoryOnlyNotApplicable: needs 48 points, got 24",
+            "forecast": [],
+            "mae": null,
+            "mase": null,
+            "mase_scale": null,
+            "normalized_bias": null,
+            "phase_error": null,
+            "rmsse": null,
+            "slope_error": null,
+            "smae": null,
+            "smae_clipped": null,
+            "smae_raw": null,
+            "smape": null,
+            "srmse": null,
+            "srmse_clipped": null,
+            "srmse_raw": null,
+            "status": "failed",
+            "train_end": 24,
+            "truth": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              85.0,
+              120.0,
+              270.0,
+              35.0,
+              307.0
+            ],
+            "validation_end": 36
+          },
+          {
+            "amplitude_ratio": null,
+            "detail": "_HistoryOnlyNotApplicable: needs 48 points, got 36",
+            "forecast": [],
+            "mae": null,
+            "mase": null,
+            "mase_scale": null,
+            "normalized_bias": null,
+            "phase_error": null,
+            "rmsse": null,
+            "slope_error": null,
+            "smae": null,
+            "smae_clipped": null,
+            "smae_raw": null,
+            "smape": null,
+            "srmse": null,
+            "srmse_clipped": null,
+            "srmse_raw": null,
+            "status": "failed",
+            "train_end": 36,
+            "truth": [
+              295.0,
+              251.0,
+              30.0,
+              264.0,
+              182.0,
+              3.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "validation_end": 48
+          }
+        ],
+        "long_horizon_coverage": 0.0,
+        "long_horizon_fold": null,
+        "mase_mad": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_joint_scaled_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_mae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_mase": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_rmsse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_smae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_smape": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_srmse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "name": "holt_winters_damped",
+        "normalized_bias": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "phase_error": null,
+        "reason_code": "insufficient_successful_folds",
+        "recent_joint_scaled_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "recent_mase": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "recent_smae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "recent_srmse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "slope_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "smae_mad": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "srmse_mad": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "successful_folds": 0,
+        "worst_joint_scaled_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_mase": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_smae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_smae_raw": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_srmse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_srmse_raw": {
+          "status": "positive_infinity",
+          "value": null
+        }
+      },
+      "failure_reason": null
+    },
+    {
+      "candidate_name": "median_seasonal_profile_forecast",
+      "diagnostic": {
+        "amplitude_ratio": null,
+        "cache_key": "80ba7f760928279bcf111be89d1b90bb95dd0f4baa61eadb26893f149f567275",
+        "eligible": false,
+        "explosion": false,
+        "family": "statistical",
+        "fold_forecasts": [],
+        "fold_truths": [],
+        "folds": [
+          {
+            "amplitude_ratio": null,
+            "detail": "_HistoryOnlyNotApplicable: needs 48 points, got 12",
+            "forecast": [],
+            "mae": null,
+            "mase": null,
+            "mase_scale": null,
+            "normalized_bias": null,
+            "phase_error": null,
+            "rmsse": null,
+            "slope_error": null,
+            "smae": null,
+            "smae_clipped": null,
+            "smae_raw": null,
+            "smape": null,
+            "srmse": null,
+            "srmse_clipped": null,
+            "srmse_raw": null,
+            "status": "failed",
+            "train_end": 12,
+            "truth": [
+              115.0,
+              108.0,
+              342.0,
+              265.0,
+              203.0,
+              66.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "validation_end": 24
+          },
+          {
+            "amplitude_ratio": null,
+            "detail": "_HistoryOnlyNotApplicable: needs 48 points, got 24",
+            "forecast": [],
+            "mae": null,
+            "mase": null,
+            "mase_scale": null,
+            "normalized_bias": null,
+            "phase_error": null,
+            "rmsse": null,
+            "slope_error": null,
+            "smae": null,
+            "smae_clipped": null,
+            "smae_raw": null,
+            "smape": null,
+            "srmse": null,
+            "srmse_clipped": null,
+            "srmse_raw": null,
+            "status": "failed",
+            "train_end": 24,
+            "truth": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              85.0,
+              120.0,
+              270.0,
+              35.0,
+              307.0
+            ],
+            "validation_end": 36
+          },
+          {
+            "amplitude_ratio": null,
+            "detail": "_HistoryOnlyNotApplicable: needs 48 points, got 36",
+            "forecast": [],
+            "mae": null,
+            "mase": null,
+            "mase_scale": null,
+            "normalized_bias": null,
+            "phase_error": null,
+            "rmsse": null,
+            "slope_error": null,
+            "smae": null,
+            "smae_clipped": null,
+            "smae_raw": null,
+            "smape": null,
+            "srmse": null,
+            "srmse_clipped": null,
+            "srmse_raw": null,
+            "status": "failed",
+            "train_end": 36,
+            "truth": [
+              295.0,
+              251.0,
+              30.0,
+              264.0,
+              182.0,
+              3.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "validation_end": 48
+          }
+        ],
+        "long_horizon_coverage": 0.0,
+        "long_horizon_fold": null,
+        "mase_mad": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_joint_scaled_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_mae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_mase": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_rmsse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_smae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_smape": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_srmse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "name": "median_seasonal_profile_forecast",
+        "normalized_bias": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "phase_error": null,
+        "reason_code": "insufficient_successful_folds",
+        "recent_joint_scaled_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "recent_mase": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "recent_smae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "recent_srmse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "slope_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "smae_mad": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "srmse_mad": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "successful_folds": 0,
+        "worst_joint_scaled_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_mase": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_smae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_smae_raw": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_srmse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_srmse_raw": {
+          "status": "positive_infinity",
+          "value": null
+        }
+      },
+      "failure_reason": null
+    },
+    {
+      "candidate_name": "seasonal_window_average",
+      "diagnostic": {
+        "amplitude_ratio": null,
+        "cache_key": "7cfdd3e09826b5497bf58d77c2d29b70d572ec769ae08d52e3aa91141ef7029c",
+        "eligible": false,
+        "explosion": false,
+        "family": "statistical",
+        "fold_forecasts": [],
+        "fold_truths": [],
+        "folds": [
+          {
+            "amplitude_ratio": null,
+            "detail": "_HistoryOnlyNotApplicable: needs 48 points, got 12",
+            "forecast": [],
+            "mae": null,
+            "mase": null,
+            "mase_scale": null,
+            "normalized_bias": null,
+            "phase_error": null,
+            "rmsse": null,
+            "slope_error": null,
+            "smae": null,
+            "smae_clipped": null,
+            "smae_raw": null,
+            "smape": null,
+            "srmse": null,
+            "srmse_clipped": null,
+            "srmse_raw": null,
+            "status": "failed",
+            "train_end": 12,
+            "truth": [
+              115.0,
+              108.0,
+              342.0,
+              265.0,
+              203.0,
+              66.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "validation_end": 24
+          },
+          {
+            "amplitude_ratio": null,
+            "detail": "_HistoryOnlyNotApplicable: needs 48 points, got 24",
+            "forecast": [],
+            "mae": null,
+            "mase": null,
+            "mase_scale": null,
+            "normalized_bias": null,
+            "phase_error": null,
+            "rmsse": null,
+            "slope_error": null,
+            "smae": null,
+            "smae_clipped": null,
+            "smae_raw": null,
+            "smape": null,
+            "srmse": null,
+            "srmse_clipped": null,
+            "srmse_raw": null,
+            "status": "failed",
+            "train_end": 24,
+            "truth": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              85.0,
+              120.0,
+              270.0,
+              35.0,
+              307.0
+            ],
+            "validation_end": 36
+          },
+          {
+            "amplitude_ratio": null,
+            "detail": "_HistoryOnlyNotApplicable: needs 48 points, got 36",
+            "forecast": [],
+            "mae": null,
+            "mase": null,
+            "mase_scale": null,
+            "normalized_bias": null,
+            "phase_error": null,
+            "rmsse": null,
+            "slope_error": null,
+            "smae": null,
+            "smae_clipped": null,
+            "smae_raw": null,
+            "smape": null,
+            "srmse": null,
+            "srmse_clipped": null,
+            "srmse_raw": null,
+            "status": "failed",
+            "train_end": 36,
+            "truth": [
+              295.0,
+              251.0,
+              30.0,
+              264.0,
+              182.0,
+              3.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "validation_end": 48
+          }
+        ],
+        "long_horizon_coverage": 0.0,
+        "long_horizon_fold": null,
+        "mase_mad": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_joint_scaled_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_mae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_mase": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_rmsse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_smae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_smape": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_srmse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "name": "seasonal_window_average",
+        "normalized_bias": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "phase_error": null,
+        "reason_code": "insufficient_successful_folds",
+        "recent_joint_scaled_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "recent_mase": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "recent_smae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "recent_srmse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "slope_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "smae_mad": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "srmse_mad": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "successful_folds": 0,
+        "worst_joint_scaled_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_mase": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_smae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_smae_raw": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_srmse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_srmse_raw": {
+          "status": "positive_infinity",
+          "value": null
+        }
+      },
+      "failure_reason": null
+    },
+    {
+      "candidate_name": "structural_time_series_bsm",
+      "diagnostic": {
+        "amplitude_ratio": null,
+        "cache_key": "b019ed91985f5e88186ddd0b208b98ee40dba3f518770d2ce18c63d26dfe5f60",
+        "eligible": false,
+        "explosion": false,
+        "family": "statistical",
+        "fold_forecasts": [],
+        "fold_truths": [],
+        "folds": [
+          {
+            "amplitude_ratio": null,
+            "detail": "_HistoryOnlyNotApplicable: needs 48 points, got 12",
+            "forecast": [],
+            "mae": null,
+            "mase": null,
+            "mase_scale": null,
+            "normalized_bias": null,
+            "phase_error": null,
+            "rmsse": null,
+            "slope_error": null,
+            "smae": null,
+            "smae_clipped": null,
+            "smae_raw": null,
+            "smape": null,
+            "srmse": null,
+            "srmse_clipped": null,
+            "srmse_raw": null,
+            "status": "failed",
+            "train_end": 12,
+            "truth": [
+              115.0,
+              108.0,
+              342.0,
+              265.0,
+              203.0,
+              66.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "validation_end": 24
+          },
+          {
+            "amplitude_ratio": null,
+            "detail": "_HistoryOnlyNotApplicable: needs 48 points, got 24",
+            "forecast": [],
+            "mae": null,
+            "mase": null,
+            "mase_scale": null,
+            "normalized_bias": null,
+            "phase_error": null,
+            "rmsse": null,
+            "slope_error": null,
+            "smae": null,
+            "smae_clipped": null,
+            "smae_raw": null,
+            "smape": null,
+            "srmse": null,
+            "srmse_clipped": null,
+            "srmse_raw": null,
+            "status": "failed",
+            "train_end": 24,
+            "truth": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              85.0,
+              120.0,
+              270.0,
+              35.0,
+              307.0
+            ],
+            "validation_end": 36
+          },
+          {
+            "amplitude_ratio": null,
+            "detail": "_HistoryOnlyNotApplicable: needs 48 points, got 36",
+            "forecast": [],
+            "mae": null,
+            "mase": null,
+            "mase_scale": null,
+            "normalized_bias": null,
+            "phase_error": null,
+            "rmsse": null,
+            "slope_error": null,
+            "smae": null,
+            "smae_clipped": null,
+            "smae_raw": null,
+            "smape": null,
+            "srmse": null,
+            "srmse_clipped": null,
+            "srmse_raw": null,
+            "status": "failed",
+            "train_end": 36,
+            "truth": [
+              295.0,
+              251.0,
+              30.0,
+              264.0,
+              182.0,
+              3.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "validation_end": 48
+          }
+        ],
+        "long_horizon_coverage": 0.0,
+        "long_horizon_fold": null,
+        "mase_mad": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_joint_scaled_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_mae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_mase": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_rmsse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_smae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_smape": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "median_srmse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "name": "structural_time_series_bsm",
+        "normalized_bias": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "phase_error": null,
+        "reason_code": "insufficient_successful_folds",
+        "recent_joint_scaled_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "recent_mase": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "recent_smae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "recent_srmse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "slope_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "smae_mad": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "srmse_mad": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "successful_folds": 0,
+        "worst_joint_scaled_error": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_mase": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_smae": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_smae_raw": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_srmse": {
+          "status": "positive_infinity",
+          "value": null
+        },
+        "worst_srmse_raw": {
+          "status": "positive_infinity",
+          "value": null
+        }
+      },
+      "failure_reason": null
+    },
+    {
+      "candidate_name": "timesfm_2_5",
+      "diagnostic": {
+        "amplitude_ratio": 0.1745250415,
+        "cache_key": "0b604f3555b87a571d3ccf071bba847e356fcffaf63ab010b4ea83d20f4e9983",
+        "eligible": true,
+        "explosion": false,
+        "family": "tsfm",
+        "fold_forecasts": [
+          [
+            70.41509246826172,
+            73.13187408447266,
+            49.08585739135742,
+            24.91840934753418,
+            37.244937896728516,
+            31.562599182128906,
+            19.24666976928711,
+            25.463682174682617,
+            23.074148178100586,
+            28.83466911315918,
+            11.13654899597168,
+            8.684255599975586
+          ],
+          [
+            0.9520344734191895,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            4.436162948608398,
+            9.500673294067383,
+            10.663228034973145,
+            5.915421962738037,
+            5.696749687194824
+          ],
+          [
+            213.03665161132812,
+            215.2361297607422,
+            259.31573486328125,
+            225.78598022460938,
+            161.81637573242188,
+            89.59984588623047,
+            32.688934326171875,
+            0.0,
+            0.0,
+            1.0949119329452515,
+            0.0,
+            0.0
+          ]
+        ],
+        "fold_truths": [
+          [
+            115.0,
+            108.0,
+            342.0,
+            265.0,
+            203.0,
+            66.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            85.0,
+            120.0,
+            270.0,
+            35.0,
+            307.0
+          ],
+          [
+            295.0,
+            251.0,
+            30.0,
+            264.0,
+            182.0,
+            3.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        "folds": [
+          {
+            "amplitude_ratio": 0.1745250415,
+            "detail": "",
+            "forecast": [
+              70.41509246826172,
+              73.13187408447266,
+              49.08585739135742,
+              24.91840934753418,
+              37.244937896728516,
+              31.562599182128906,
+              19.24666976928711,
+              25.463682174682617,
+              23.074148178100586,
+              28.83466911315918,
+              11.13654899597168,
+              8.684255599975586
+            ],
+            "mae": 77.42343362172444,
+            "mase": 1.5317585788470662,
+            "mase_scale": 50.54545454545455,
+            "normalized_bias": -1.1478138210104523,
+            "phase_error": 3.0,
+            "rmsse": 1.3813968321745258,
+            "slope_error": 0.0958078473591976,
+            "smae": 0.8453878102463088,
+            "smae_clipped": false,
+            "smae_raw": 0.8453878102463088,
+            "smape": 150.88263064587633,
+            "srmse": 1.3294184456893003,
+            "srmse_clipped": false,
+            "srmse_raw": 1.3294184456893003,
+            "status": "success",
+            "train_end": 12,
+            "truth": [
+              115.0,
+              108.0,
+              342.0,
+              265.0,
+              203.0,
+              66.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "validation_end": 24
+          },
+          {
+            "amplitude_ratio": 0.036283107719809624,
+            "detail": "",
+            "forecast": [
+              0.9520344734191895,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              4.436162948608398,
+              9.500673294067383,
+              10.663228034973145,
+              5.915421962738037,
+              5.696749687194824
+            ],
+            "mae": 65.14498321215312,
+            "mase": 1.3143286086662471,
+            "mase_scale": 49.56521739130435,
+            "normalized_bias": -1.3111273231562117,
+            "phase_error": 3.0,
+            "rmsse": 1.4020458065824641,
+            "slope_error": 0.5543757216972217,
+            "smae": 0.9568418586852356,
+            "smae_clipped": false,
+            "smae_raw": 0.9568418586852356,
+            "smape": 89.20822470970442,
+            "srmse": 1.786790927223478,
+            "srmse_clipped": false,
+            "srmse_raw": 1.786790927223478,
+            "status": "success",
+            "train_end": 24,
+            "truth": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              85.0,
+              120.0,
+              270.0,
+              35.0,
+              307.0
+            ],
+            "validation_end": 36
+          },
+          {
+            "amplitude_ratio": 0.8689742427460622,
+            "detail": "",
+            "forecast": [
+              213.03665161132812,
+              215.2361297607422,
+              259.31573486328125,
+              225.78598022460938,
+              161.81637573242188,
+              89.59984588623047,
+              32.688934326171875,
+              0.0,
+              0.0,
+              1.0949119329452515,
+              0.0,
+              0.0
+            ],
+            "mae": 43.818690806627274,
+            "mase": 0.8000282619885001,
+            "mase_scale": 54.77142857142857,
+            "normalized_bias": 0.2640892780308018,
+            "phase_error": 1.0,
+            "rmsse": 0.7883277437605709,
+            "slope_error": 0.1360419781668096,
+            "smae": 0.5129993070044169,
+            "smae_clipped": false,
+            "smae_raw": 0.5129993070044169,
+            "smape": 68.3764482212411,
+            "srmse": 0.9006505027291529,
+            "srmse_clipped": false,
+            "srmse_raw": 0.9006505027291529,
+            "status": "success",
+            "train_end": 36,
+            "truth": [
+              295.0,
+              251.0,
+              30.0,
+              264.0,
+              182.0,
+              3.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "validation_end": 48
+          }
+        ],
+        "long_horizon_coverage": 0.0,
+        "long_horizon_fold": null,
+        "mase_mad": 0.2174299701808191,
+        "median_joint_scaled_error": 1.0874031279678045,
+        "median_mae": 65.14498321215312,
+        "median_mase": 1.3143286086662471,
+        "median_rmsse": 1.3813968321745258,
+        "median_smae": 0.8453878102463088,
+        "median_smape": 89.20822470970442,
+        "median_srmse": 1.3294184456893003,
+        "name": "timesfm_2_5",
+        "normalized_bias": -1.1478138210104523,
+        "phase_error": 3.0,
+        "reason_code": "ok",
+        "recent_joint_scaled_error": 0.706824904866785,
+        "recent_mase": 0.8000282619885001,
+        "recent_smae": 0.5129993070044169,
+        "recent_srmse": 0.9006505027291529,
+        "slope_error": 0.1360419781668096,
+        "smae_mad": 0.11145404843892681,
+        "srmse_mad": 0.4287679429601474,
+        "successful_folds": 3,
+        "worst_joint_scaled_error": 1.371816392954357,
+        "worst_mase": 1.5317585788470662,
+        "worst_smae": 0.9568418586852356,
+        "worst_smae_raw": 0.9568418586852356,
+        "worst_srmse": 1.786790927223478,
+        "worst_srmse_raw": 1.786790927223478
+      },
+      "failure_reason": null
+    },
+    {
+      "candidate_name": "toto_2_0",
+      "diagnostic": {
+        "amplitude_ratio": 0.05604079193247343,
+        "cache_key": "2e18dff133141fcad5729a63d50bd3a700681db2e2f40c23319b4a8a9f162aba",
+        "eligible": true,
+        "explosion": false,
+        "family": "tsfm",
+        "fold_forecasts": [
+          [
+            111.69441986083984,
+            111.48214721679688,
+            111.86563110351562,
+            115.12774658203125,
+            116.55282592773438,
+            119.79316711425781,
+            122.51048278808594,
+            127.28105163574219,
+            131.23497009277344,
+            126.83372497558594,
+            124.19762420654297,
+            119.81808471679688
+          ],
+          [
+            1.8019599914550781,
+            2.115375518798828,
+            2.2733840942382812,
+            2.5993309020996094,
+            2.8219985961914062,
+            3.0738487243652344,
+            2.9137649536132812,
+            3.2881431579589844,
+            3.417102813720703,
+            3.0337142944335938,
+            2.7998924255371094,
+            3.0230674743652344
+          ],
+          [
+            217.4449462890625,
+            225.27328491210938,
+            228.22219848632812,
+            163.074951171875,
+            81.63728332519531,
+            16.833450317382812,
+            7.793670654296875,
+            2.6955337524414062,
+            3.1976699829101562,
+            -0.7026443481445312,
+            -4.928932189941406,
+            -6.271202087402344
+          ]
+        ],
+        "fold_truths": [
+          [
+            115.0,
+            108.0,
+            342.0,
+            265.0,
+            203.0,
+            66.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            85.0,
+            120.0,
+            270.0,
+            35.0,
+            307.0
+          ],
+          [
+            295.0,
+            251.0,
+            30.0,
+            264.0,
+            182.0,
+            3.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        "folds": [
+          {
+            "amplitude_ratio": 0.05604079193247343,
+            "detail": "",
+            "forecast": [
+              111.69441986083984,
+              111.48214721679688,
+              111.86563110351562,
+              115.12774658203125,
+              116.55282592773438,
+              119.79316711425781,
+              122.51048278808594,
+              127.28105163574219,
+              131.23497009277344,
+              126.83372497558594,
+              124.19762420654297,
+              119.81808471679688
+            ],
+            "mae": 106.57588577270508,
+            "mase": 2.1085157257189855,
+            "mase_scale": 50.54545454545455,
+            "normalized_bias": 0.559548956598881,
+            "phase_error": 3.0,
+            "rmsse": 1.3900257029499374,
+            "slope_error": 0.22144544038841193,
+            "smae": 1.163703939283404,
+            "smae_clipped": false,
+            "smae_raw": 1.163703939283404,
+            "smape": 124.86378380196815,
+            "srmse": 1.337722634396787,
+            "srmse_clipped": false,
+            "srmse_raw": 1.337722634396787,
+            "status": "success",
+            "train_end": 12,
+            "truth": [
+              115.0,
+              108.0,
+              342.0,
+              265.0,
+              203.0,
+              66.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "validation_end": 24
+          },
+          {
+            "amplitude_ratio": 0.00438031258159414,
+            "detail": "",
+            "forecast": [
+              1.8019599914550781,
+              2.115375518798828,
+              2.2733840942382812,
+              2.5993309020996094,
+              2.8219985961914062,
+              3.0738487243652344,
+              2.9137649536132812,
+              3.2881431579589844,
+              3.417102813720703,
+              3.0337142944335938,
+              2.7998924255371094,
+              3.0230674743652344
+            ],
+            "mae": 68.25314521789551,
+            "mase": 1.3770371403610495,
+            "mase_scale": 49.56521739130435,
+            "normalized_bias": -1.3178569877356814,
+            "phase_error": 3.0,
+            "rmsse": 1.431102669616004,
+            "slope_error": 0.5608384790983306,
+            "smae": 1.0024941770070332,
+            "smae_clipped": false,
+            "smae_raw": 1.0024941770070332,
+            "smape": 194.67118576312848,
+            "srmse": 1.823821485710335,
+            "srmse_clipped": false,
+            "srmse_raw": 1.823821485710335,
+            "status": "success",
+            "train_end": 24,
+            "truth": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              85.0,
+              120.0,
+              270.0,
+              35.0,
+              307.0
+            ],
+            "validation_end": 36
+          },
+          {
+            "amplitude_ratio": 0.8174509757054617,
+            "detail": "",
+            "forecast": [
+              217.4449462890625,
+              225.27328491210938,
+              228.22219848632812,
+              163.074951171875,
+              81.63728332519531,
+              16.833450317382812,
+              7.793670654296875,
+              2.6955337524414062,
+              3.1976699829101562,
+              -0.7026443481445312,
+              -4.928932189941406,
+              -6.271202087402344
+            ],
+            "mae": 45.184569676717125,
+            "mase": 0.8249660608685965,
+            "mase_scale": 54.77142857142857,
+            "normalized_bias": -0.13804306384481113,
+            "phase_error": 1.0,
+            "rmsse": 0.7631800461041817,
+            "slope_error": 0.11831625204266748,
+            "smae": 0.528990084020103,
+            "smae_clipped": false,
+            "smae_raw": 0.528990084020103,
+            "smape": 138.12474062151477,
+            "srmse": 0.8719197029875838,
+            "srmse_clipped": false,
+            "srmse_raw": 0.8719197029875838,
+            "status": "success",
+            "train_end": 36,
+            "truth": [
+              295.0,
+              251.0,
+              30.0,
+              264.0,
+              182.0,
+              3.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "validation_end": 48
+          }
+        ],
+        "long_horizon_coverage": 0.0,
+        "long_horizon_fold": null,
+        "mase_mad": 0.552071079492453,
+        "median_joint_scaled_error": 1.2507132868400954,
+        "median_mae": 68.25314521789551,
+        "median_mase": 1.3770371403610495,
+        "median_rmsse": 1.3900257029499374,
+        "median_smae": 1.0024941770070332,
+        "median_smape": 138.12474062151477,
+        "median_srmse": 1.337722634396787,
+        "name": "toto_2_0",
+        "normalized_bias": -0.13804306384481113,
+        "phase_error": 3.0,
+        "reason_code": "ok",
+        "recent_joint_scaled_error": 0.7004548935038434,
+        "recent_mase": 0.8249660608685965,
+        "recent_smae": 0.528990084020103,
+        "recent_srmse": 0.8719197029875838,
+        "slope_error": 0.22144544038841193,
+        "smae_mad": 0.16120976227637085,
+        "srmse_mad": 0.46580293140920315,
+        "successful_folds": 3,
+        "worst_joint_scaled_error": 1.4131578313586841,
+        "worst_mase": 2.1085157257189855,
+        "worst_smae": 1.163703939283404,
+        "worst_smae_raw": 1.163703939283404,
+        "worst_srmse": 1.823821485710335,
+        "worst_srmse_raw": 1.823821485710335
+      },
+      "failure_reason": null
+    }
+  ],
+  "schema_version": 1,
+  "task_id": "task_114",
+  "task_input_sha256": "755bad1dcf42eda7bbaca2a3a2332e70573bef4dc255e656f90b5f829693af56"
+}
