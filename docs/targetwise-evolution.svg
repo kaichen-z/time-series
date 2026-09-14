@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">Target-wise forecasting-method evolution</title>
+  <desc id="desc">An evaluated parent portfolio produces independent repair, fork, and deletion children. Children pass a four-task screen, successive halving, full Train, mini-dev, and rebase checks before promotion. Rejected children leave the parent unchanged.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#25364a"/>
+    </marker>
+    <marker id="reject-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8f2d2d"/>
+    </marker>
+    <style>
+      .title { font: 700 27px Arial, sans-serif; fill: #172333; }
+      .subtitle { font: 400 14px Arial, sans-serif; fill: #40536b; }
+      .node-title { font: 700 16px Arial, sans-serif; fill: #172333; }
+      .node-text { font: 400 13px Arial, sans-serif; fill: #25364a; }
+      .small { font: 400 12px Arial, sans-serif; fill: #40536b; }
+      .phase { font: 700 12px Arial, sans-serif; letter-spacing: 1.1px; fill: #52657a; }
+      .flow { fill: none; stroke: #25364a; stroke-width: 2.2; marker-end: url(#arrow); }
+      .reject { fill: none; stroke: #8f2d2d; stroke-width: 2.2; stroke-dasharray: 7 6; marker-end: url(#reject-arrow); }
+      .reject-link { fill: none; stroke: #8f2d2d; stroke-width: 1.8; stroke-dasharray: 7 6; }
+      .gate { fill: #f7f9fb; stroke: #52657a; stroke-width: 1.7; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="760" fill="#ffffff"/>
+  <text x="48" y="48" class="title">Target-wise forecasting-method evolution</text>
+  <text x="48" y="74" class="subtitle">Independent children change the portfolio only after operation-aware Train and mini-dev evidence.</text>
+
+  <text x="48" y="116" class="phase">GENERATION INPUT</text>
+  <rect x="48" y="136" width="205" height="96" rx="12" fill="#dcecff" stroke="#245b8f" stroke-width="2"/>
+  <text x="150" y="169" text-anchor="middle" class="node-title">Evaluated Parent</text>
+  <text x="150" y="193" text-anchor="middle" class="node-text">methods + Train outcomes</text>
+  <text x="150" y="215" text-anchor="middle" class="small">immutable during proposals</text>
+
+  <path d="M253 184 H304" class="flow"/>
+  <rect x="306" y="136" width="210" height="96" rx="12" fill="#eef1f5" stroke="#52657a" stroke-width="2"/>
+  <text x="411" y="169" text-anchor="middle" class="node-title">Train-only selector</text>
+  <text x="411" y="193" text-anchor="middle" class="node-text">choose target + operation</text>
+  <text x="411" y="215" text-anchor="middle" class="small">generate independent children</text>
+
+  <text x="48" y="287" class="phase">CHILD OPERATIONS</text>
+  <path d="M411 232 V270 H174 V310" class="flow"/>
+  <path d="M411 232 V310" class="flow"/>
+  <path d="M411 232 V270 H648 V310" class="flow"/>
+
+  <rect x="64" y="312" width="220" height="122" rx="12" fill="#fff0d5" stroke="#9a6200" stroke-width="2"/>
+  <text x="174" y="343" text-anchor="middle" class="node-title">Fix · repair</text>
+  <text x="174" y="368" text-anchor="middle" class="node-text">same method identity</text>
+  <text x="174" y="390" text-anchor="middle" class="node-text">same control/data flow</text>
+  <text x="174" y="414" text-anchor="middle" class="small">must improve measured sMAE</text>
+
+  <path d="M316 312 L506 434 L506 312 Z" fill="#e5f4e9" stroke="#287a43" stroke-width="2"/>
+  <text x="411" y="343" text-anchor="middle" class="node-title">Fork</text>
+  <text x="411" y="369" text-anchor="middle" class="node-text">keep Parent method</text>
+  <text x="411" y="391" text-anchor="middle" class="node-text">add honest child identity</text>
+  <text x="411" y="414" text-anchor="middle" class="small">screen explores; final gates prove value</text>
+
+  <path d="M538 312 H758 V410 L648 434 L538 410 Z" fill="#f7e7ec" stroke="#8c3654" stroke-width="2"/>
+  <text x="648" y="343" text-anchor="middle" class="node-title">Delete</text>
+  <text x="648" y="368" text-anchor="middle" class="node-text">remove eligible method</text>
+  <text x="648" y="390" text-anchor="middle" class="node-text">retain applicable coverage evidence</text>
+  <text x="648" y="414" text-anchor="middle" class="small">accept when portfolio does not regress</text>
+
+  <text x="808" y="116" class="phase">EVIDENCE GATES</text>
+  <path d="M174 434 V474 H790" class="flow"/>
+  <path d="M411 434 V474 H790" class="flow"/>
+  <path d="M648 434 V474 H790" class="flow"/>
+
+  <rect x="792" y="136" width="180" height="68" rx="10" class="gate"/>
+  <text x="882" y="165" text-anchor="middle" class="node-title">Four-task screen</text>
+  <text x="882" y="187" text-anchor="middle" class="small">valid + non-regressing</text>
+  <path d="M882 474 V204" class="flow"/>
+
+  <rect x="792" y="232" width="180" height="68" rx="10" class="gate"/>
+  <text x="882" y="261" text-anchor="middle" class="node-title">Successive halving</text>
+  <text x="882" y="283" text-anchor="middle" class="small">rank screen survivors</text>
+  <path d="M882 204 V232" class="flow"/>
+
+  <rect x="792" y="328" width="180" height="68" rx="10" class="gate"/>
+  <text x="882" y="357" text-anchor="middle" class="node-title">Full Train</text>
+  <text x="882" y="379" text-anchor="middle" class="small">operation-aware evidence</text>
+  <path d="M882 300 V328" class="flow"/>
+
+  <rect x="792" y="424" width="180" height="68" rx="10" class="gate"/>
+  <text x="882" y="453" text-anchor="middle" class="node-title">Mini-dev</text>
+  <text x="882" y="475" text-anchor="middle" class="small">held-out confirmation</text>
+  <path d="M882 396 V424" class="flow"/>
+
+  <rect x="792" y="520" width="180" height="68" rx="10" class="gate"/>
+  <text x="882" y="549" text-anchor="middle" class="node-title">Rebase</text>
+  <text x="882" y="571" text-anchor="middle" class="small">recheck against current Parent</text>
+  <path d="M882 492 V520" class="flow"/>
+
+  <path d="M972 554 H1016" class="flow"/>
+  <rect x="1018" y="506" width="150" height="96" rx="12" fill="#dcecff" stroke="#245b8f" stroke-width="2"/>
+  <text x="1093" y="539" text-anchor="middle" class="node-title">Promote</text>
+  <text x="1093" y="563" text-anchor="middle" class="node-text">commit child</text>
+  <text x="1093" y="585" text-anchor="middle" class="small">next Parent</text>
+
+  <rect x="550" y="642" width="252" height="70" rx="10" fill="#fff5f5" stroke="#8f2d2d" stroke-width="1.8" stroke-dasharray="7 6"/>
+  <text x="676" y="671" text-anchor="middle" class="node-title">Reject child</text>
+  <text x="676" y="695" text-anchor="middle" class="node-text">Parent remains unchanged</text>
+  <path d="M792 170 H748 V625 H676 V642" class="reject"/>
+  <path d="M792 266 H748 M792 362 H748 M792 458 H748 M792 554 H748" class="reject-link"/>
+  <text x="733" y="609" text-anchor="end" class="small">failure at any gate</text>
+  <path d="M550 677 H150 V232" class="reject"/>
+
+  <line x1="48" y1="737" x2="78" y2="737" class="flow"/>
+  <text x="88" y="741" class="small">accepted path</text>
+  <line x1="218" y1="737" x2="248" y2="737" class="reject"/>
+  <text x="258" y="741" class="small">rejection leaves Parent unchanged</text>
+</svg>
