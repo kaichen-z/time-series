@@ -165,6 +165,7 @@ def test_runner_host_derives_and_inserts_policy_tune_prompt_child():
 
 
 def test_pending_proposal_requires_matching_terminal_status():
+    from evolving_loop.v2.contracts import fingerprint_payload
     from evolving_loop.v2.numerical_qd.runner import _pending_generations_unresolved
     request_sha = "a" * 64
     attempt = {"context": {"generation": 1, "request_sha256": request_sha}, "batch": {},}
