@@ -256,6 +256,13 @@ def test_legacy_parent_context_without_host_commitment_remains_readable():
     ]
 
 
+def test_true_old_request_shape_remains_readable():
+    legacy = request_args()
+    for key in ("curriculum_targets", "reusable_programs", "eligible_reusable_program_sha256s"):
+        del legacy[key]
+    assert primitive_proposer_request(**legacy)["parent_genome"] == legacy["parent_genome"]
+
+
 def test_context_fields_are_bounded():
     args = request_args(curriculum_targets=[
         CurriculumTargetV2(1, CONTEXT_CELL, "unoccupied", 0, ()).to_payload()

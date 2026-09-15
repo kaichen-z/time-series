@@ -19,3 +19,9 @@
 - RED: runner Host-child test failed because `_host_mutation_prompt_child` was absent; the initial focused run also caught an unreachable population return.
 - GREEN: Host derives a bounded `policy_tune` child with parent lineage; runner inserts it before selected-lineage Train credit, and persistence requires selected-prompt membership in the committed population.
 - Focused verification: `PYTHONDONTWRITEBYTECODE=1 pytest -q ...` selected runner/proposer checks: 2 passed, 237 deselected. An attempted mixed focused invocation reached unrelated legacy runner tests and exposed only the temporary helper placement regression, which was corrected.
+
+## Review-round 2 TDD evidence
+
+- RED: true pre-context request shape (without all three reusable/curriculum commitments) was rejected; crash-window resume had no durable pending-generation decision.
+- GREEN: oldest request schema is accepted; a `proposal_pending` generation marker records the exact request SHA and is checkpointed before provider dispatch; resume fails closed unless a completed attempt resolves it.
+- Focused verification: `PYTHONDONTWRITEBYTECODE=1 pytest -q tests/test_evolution_v2_numerical_proposers.py -k 'legacy or mutation_prompt_context'` — 2 passed, 129 deselected; runner Host/context checks — 2 passed, 107 deselected.

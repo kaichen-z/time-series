@@ -844,6 +844,10 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         attempts = [store._read(name) for name in checkpoint.completed_operation_sha256s if name.startswith("proposals/")]
         if any(attempt.get("context", {}).get("generation", 0) > generation for attempt in attempts):
             raise NumericalQDStoreError("unfinished generation cannot be resampled; resume requires a closed generation or a new epoch")
+        completed_generations = {attempt.get("context", {}).get("generation") for attempt in attempts}
+        if any(step.get("status") == "proposal_pending"
+               and step.get("generation") not in completed_generations for step in steps):
+            raise NumericalQDStoreError("unfinished generation cannot be resampled; resume requires a closed generation or a new epoch")
         previous_feedback = (max(steps, key=lambda step: step["generation"])["train_feedback"] if steps else None)
         pairs = [value for value in objects if set(value) == {"supply", "registry"}]
         pair = next(value for value in pairs if parse_numerical_supply_release(value["supply"]).fingerprint == active.numerical_release_sha256)
@@ -1012,6 +1016,14 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             allowed_mutation_operators=sorted(config.mutation["operators"]), counter_draw=draw,
             max_proposals=config.proposer["max_proposals_per_generation"], max_response_bytes=config.proposer["max_response_bytes"])
         request_sha = _persist(store, request, kind=ArtifactKind.PROPOSER_REQUEST)
+        _persist(store, {"numerical_qd_step": {
+            "generation": generation, "status": "proposal_pending",
+            "active_bundle_sha256": active.fingerprint(), "winner_genome_sha256": None,
+            "proposal_attempt_sha256": None, "train_feedback": feedback.to_payload(),
+            "materialization_failures": [], "mutation_prompt_population_sha256": population_sha,
+            "proposal_request_sha256": request_sha,
+        }}, kind=ArtifactKind.GENERATION_STATUS)
+        checkpoint_state()  # request and pending marker precede provider dispatch
         work = _KernelWork(kernel, active, generation)
         work.store = store
         artifact_permit = work.reserve_stage("proposal-artifacts-" + request_sha, ResourceUse(artifact_bytes=

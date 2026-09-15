@@ -349,6 +349,8 @@ def validate_artifact(kind, raw):
             fields = (*legacy_fields, "materialization_failures")
             if isinstance(raw_row, dict) and "mutation_prompt_population_sha256" in raw_row:
                 fields = (*fields, "mutation_prompt_population_sha256")
+            if isinstance(raw_row, dict) and "proposal_request_sha256" in raw_row:
+                fields = (*fields, "proposal_request_sha256")
         row = _require_exact_schema(raw_row, fields, field=kind.value)
         TrainMutationFeedbackV2.from_payload(row["train_feedback"])
         if type(row["generation"]) is not int or type(row["status"]) is not str:

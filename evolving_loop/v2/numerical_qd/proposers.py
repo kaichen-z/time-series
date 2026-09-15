@@ -36,7 +36,9 @@ LEGACY_CONTEXT_REQUEST_KEYS = REQUEST_KEYS - {
 LEGACY_CONTEXT_UNCOMMITTED_REQUEST_KEYS = LEGACY_CONTEXT_REQUEST_KEYS - {
     "eligible_reusable_program_sha256s",
 }
-LEGACY_REQUEST_KEYS = LEGACY_CONTEXT_REQUEST_KEYS - {"curriculum_targets", "reusable_programs"}
+LEGACY_REQUEST_KEYS = LEGACY_CONTEXT_REQUEST_KEYS - {
+    "curriculum_targets", "reusable_programs", "eligible_reusable_program_sha256s",
+}
 FAILURE_REASONS = frozenset({"unavailable", "timeout", "malformed", "empty", "budget_exhausted"})
 _MAX_CONTEXT_RECORDS = 32
 _CURRICULUM_REASON_ORDER = {
