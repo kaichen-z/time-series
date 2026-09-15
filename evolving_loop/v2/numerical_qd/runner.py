@@ -202,7 +202,7 @@ def _trusted_reusable_program_context(store, archive, targets, *, maximum_record
             continue
         eligible.add(entry.genome_sha256)
         for member in inventory.members:
-            if member.family != "program" or member.status == "quarantined":
+            if member.status == "quarantined":
                 continue
             source = sources.get(member.source_sha256)
             if source is None:
@@ -991,16 +991,9 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         selected = replace(selected, mutation_policy_sha256=state.mutation_policy.fingerprint(),
                            proposer_prompt_sha256=parent_state.proposer_prompt.fingerprint())
         _persist_state(store, parent_state, selected)
-        curriculum_cells = tuple({
-            describe_history(
-                task.numeric.history_values, task.numeric.prediction_length,
-                task.numeric.frequency, member.family, config.descriptor_policy,
-            )
-            for task in adapter.tasks
-            if task.numeric.task_id in adapter.fold_manifest.task_fold_map
-            for member in parent_state.inventory.members
-            if member.status != "quarantined"
-        })
+        # Declared cells are the authenticated complete morphology universe;
+        # never narrow it to whichever families happen to survive in a parent.
+        curriculum_cells = tuple(seed_state.declared_cells)
         targets = derive_curriculum_targets(
             tuple(sorted(curriculum_cells, key=lambda cell: cell.fingerprint())),
             archive, feedback, maximum_targets=8,

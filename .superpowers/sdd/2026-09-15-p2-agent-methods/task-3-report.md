@@ -32,6 +32,12 @@
 - GREEN: pending state now resolves only with a same-generation terminal status carrying both exact request and attempt commitments; otherwise resume fails closed.
 - Focused verification: pending/Host/legacy checks — 2 passed, 239 deselected.
 
+## Review-round 4 TDD evidence
+
+- RED: reusable context rejected a Host-verified feasible statistical-family source; curriculum derivation depended on surviving parent families.
+- GREEN: all non-quarantined verified members with executable source are eligible, and curriculum targeting consumes the fixed declared cell universe.
+- Focused verification: reusable-context tests — 2 passed, 112 deselected.
+
 ## Review-round 4/5 TDD evidence
 
 - RED: `test_resume_prompt_context_uses_terminal_generation_over_pending` failed in both enumeration orders because the terminal-only selector was absent (2 failed).

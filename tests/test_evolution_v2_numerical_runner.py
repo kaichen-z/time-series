@@ -149,6 +149,26 @@ def test_runner_reusable_context_requires_feasible_store_verified_programs():
     ) == ((), ())
 
 
+def test_runner_reusable_context_accepts_verified_non_program_family(monkeypatch):
+    from types import SimpleNamespace
+    from evolving_loop.v2.numerical_qd.agent_methods import CurriculumTargetV2
+    from evolving_loop.v2.numerical_qd.contracts import ConstraintReportV2, MorphologyCellV2, NumericalObjectiveVectorV2, NumericalQDEntryV2
+    from evolving_loop.v2.numerical_qd.map_elites import NumericalQDArchive
+    from evolving_loop.v2.numerical_qd.runner import _trusted_reusable_program_context
+    import evolving_loop.v2.numerical_qd.runner as runner
+    cell = MorphologyCellV2("low", "none", "low", "stable", "short", "program")
+    source_sha = hashlib.sha256(SOURCE.encode()).hexdigest()
+    entry = NumericalQDEntryV2(1, "a" * 64, "b" * 64, cell, ("task-a",), NumericalObjectiveVectorV2(*(1.0,) * 5), ConstraintReportV2(True, ()), (),)
+    member = SimpleNamespace(member_id="stat", family="statistical", status="active", source_sha256=source_sha, applicability_cells=(cell.fingerprint(),))
+    monkeypatch.setattr(runner.NumericalInventoryV2, "from_payload", lambda _payload: SimpleNamespace(members=(member,)))
+    class Store:
+        def verify_candidate(self, _sha):
+            return SimpleNamespace(inventory_sha256="d" * 64), {source_sha: SOURCE.encode()}, ()
+        def _object(self, _sha): return {}
+    values, shas = _trusted_reusable_program_context(Store(), NumericalQDArchive().insert((entry,)), (CurriculumTargetV2(1, cell, "least_visited", 1, ()),), maximum_records=4)
+    assert values and shas == (values[0].fingerprint(),)
+
+
 def test_runner_host_derives_and_inserts_policy_tune_prompt_child():
     from evolving_loop.v2.numerical_qd.runner import (
         _seed_prompt_population, _host_mutation_prompt_child,
@@ -1234,6 +1254,33 @@ def test_qd_runner_evolves_supply_policy_and_prompt(tmp_path, monkeypatch):
     assert result.public_test_accessed is False
     assert result.budget["charged_use"]["task_executions"] == 1840
     assert result.budget["open_reservations"] == []
+
+
+def test_train_feedback_updates_sampled_prompt_lineage(tmp_path, monkeypatch):
+    """Feedback must be applied to the genome selected for that generation."""
+    from evolving_loop.v2.numerical_qd import runner
+
+    force_dev_results(monkeypatch, True, False)
+    observed = []
+    original = runner.record_train_outcome
+
+    def record(state, feedback):
+        observed.append(state.proposer_prompt.fingerprint())
+        return original(state, feedback)
+
+    monkeypatch.setattr(runner, "record_train_outcome", record)
+    root = tmp_path / "run"
+    run_fixture(root)
+
+    requests = []
+    for path in sorted((root / "numerical_qd" / "proposals").glob("*.json")):
+        attempt = json.loads(path.read_bytes())
+        request_sha = attempt["context"]["request_sha256"]
+        request = json.loads((root / "numerical_qd" / "objects" / f"{request_sha}.json").read_bytes())
+        requests.append(request["parent_state"]["proposer_prompt"])
+    from evolving_loop.v2.numerical_qd.contracts import NumericalProposerPromptV2
+    assert observed == [NumericalProposerPromptV2.from_payload(prompt).fingerprint()
+                        for prompt in requests]
 
 
 def test_acceptance_promotes_pair_and_rejection_keeps_exact_parent(tmp_path, monkeypatch):
