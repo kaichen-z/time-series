@@ -15,7 +15,7 @@ from evolving_loop.package_registry import task_registry_fingerprint
 from evolving_loop.v2.contracts import fingerprint_payload
 from evolving_loop.v2.numerical_qd.adapters import (
     LegacyNumericalAdapter, import_numerical_seed, evaluate_numerical_child,
-    freeze_qd_supply,
+    freeze_qd_supply, materialize_dictionary_evidence,
 )
 from evolving_loop.v2.numerical_qd.contracts import (
     ConstraintReportV2, FrozenNumericalRegistryEnvelopeV2, MorphologyCellV2,
@@ -550,8 +550,27 @@ def projection_entry(child, cell, scores):
         cell, ("build_case_000",), NumericalObjectiveVectorV2(*map(float, scores)), ConstraintReportV2(True, ()), ())
 
 
-def test_projection_coverage_precedes_rank_and_keeps_at_most_one_of_each_legacy_family(world):
-    base = materialize(world)
+def test_projection_exports_every_feasible_archive_elite_including_same_family(world):
+    adapter, parent, registry, state, rows = world
+    parent = replace(
+        parent,
+        schema_version=2,
+        anchor_release_payload=parent.to_payload()["anchor_release_payload"],
+    )
+    registry = build_package_registry(
+        adapter.tasks,
+        parent,
+        lambda task, supplied: bound_numerical_package(
+            world[2].package_for(task),
+            supplied,
+            {
+                item.name: item
+                for item in world[2].package_for(task).ranked_alternatives
+            },
+        ),
+    )
+    schema2_world = (adapter, parent, registry, state, rows)
+    base = materialize(schema2_world)
     children = tuple(projection_child(world, base, i, family) for i, family in enumerate(
         ("statistical", "statistical", "tsfm", "tsfm", "combined", "atlas_overlay")))
     cells = tuple(MorphologyCellV2(trend, season, "low", "stable", "short", "statistical")
@@ -560,15 +579,79 @@ def test_projection_coverage_precedes_rank_and_keeps_at_most_one_of_each_legacy_
     rows += [projection_entry(children[1], cells[0], (0.1,) * 5)]
     rows += [projection_entry(child, cells[4], (1,) * 5) for child in children[2:]]
     archive = NumericalQDArchive().insert(rows)
-    frozen = freeze_qd_supply(world[0], world[1], world[2], archive, children,
+    frozen = freeze_qd_supply(adapter, parent, registry, archive, children,
         descriptor_policy=descriptor_policy(), version="n002")
     assert frozen.selected_genome_sha256s[0] == children[0].genome.fingerprint()
     assert {spec.family for spec in frozen.release.alternatives} == {"statistical", "tsfm", "combined", "atlas_overlay"}
-    assert len(frozen.release.alternatives) == 4
-    assert children[1].genome.fingerprint() not in frozen.selected_genome_sha256s
-    again = freeze_qd_supply(world[0], world[1], world[2], archive, reversed(children),
+    assert len(frozen.release.alternatives) == 6
+    assert set(frozen.selected_genome_sha256s) == {
+        child.genome.fingerprint() for child in children
+    }
+    again = freeze_qd_supply(adapter, parent, registry, archive, reversed(children),
         descriptor_policy=descriptor_policy(), version="n002")
     assert frozen.envelope.canonical_bytes() == again.envelope.canonical_bytes()
+
+
+def test_dictionary_export_materializes_previously_unshortlisted_catalog_member(world):
+    from evolving_loop.v2.budget import ResourceUse
+
+    adapter, parent, registry, _state, _rows = world
+    policy = _policy("lagged")
+    spec = NumericalAlternativeSpec(
+        candidate_id="lagged",
+        family="statistical",
+        materializer_kind="dictionary",
+        recipe_payload=policy.recipe.to_payload(),
+        full_build_policy_payload=policy.to_payload(),
+        build_fold_policy_payloads=tuple(
+            (fold, policy.to_payload()) for fold in range(5)
+        ),
+        assumption_ids=tuple(
+            assumption.assumption_id for assumption in policy.recipe.assumptions
+        ),
+        failure_conditions=tuple(
+            assumption.failure_condition for assumption in policy.recipe.assumptions
+        ),
+    )
+    release = replace(
+        parent,
+        schema_version=2,
+        alternatives=(spec,),
+        anchor_release_payload=parent.to_payload()["anchor_release_payload"],
+    )
+
+    def anchor_only(task, supplied):
+        source = registry.package_for(task)
+        anchor = source.protected_baseline
+        return bound_numerical_package(source, supplied, {anchor.name: anchor})
+
+    shortlisted = build_package_registry(adapter.tasks, release, anchor_only)
+    assert all(
+        "lagged" not in {
+            item.name for item in shortlisted.package_for(task).ranked_alternatives
+        }
+        for task in adapter.tasks
+    )
+    charges = []
+
+    exported = materialize_dictionary_evidence(
+        adapter,
+        release,
+        shortlisted,
+        account_work=charges.append,
+    )
+
+    assert all(
+        "lagged" in {
+            item.name for item in exported.package_for(task).ranked_alternatives
+        }
+        for task in adapter.tasks
+    )
+    assert all(
+        "lagged" in exported.package_for(task).candidate_diagnostics
+        for task in adapter.tasks
+    )
+    assert sum(charges, ResourceUse()).task_executions > 0
 
 
 def test_projection_must_include_exact_train_winner_even_when_coverage_prefers_peer(world):

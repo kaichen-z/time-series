@@ -14,11 +14,12 @@ import symtable
 import tempfile
 from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from types import MappingProxyType
 
 from common.metrics import drcik_point_metrics, joint_scaled_error, linear_quantile
+from common.payload import canonical_json_bytes
 from common.sandbox import check_code
 from evolving_loop.data import ContextTask
 from evolving_loop.numerical_two_stage import numerical_package_fingerprint
@@ -39,6 +40,7 @@ from numerical_agent.evolution.module import EVOLUTION_IMPORTS, EVOLUTION_DUNDER
 from numerical_agent.evolution.morphology import (
     AssumptionGrounding, MorphologyCard, MorphologyObservation, MorphologyToolCall,
 )
+from numerical_agent.evolution.numerical_loop import run_numerical_loop
 from numerical_agent.evolution.numerical_package import (
     NumericalForecastPackage, RankedNumericalForecast,
     _ChampionNumericalForecastPackage, _TaskLocalNumericalForecastPackage,
@@ -611,10 +613,22 @@ class FrozenNumericalArtifactsV2:
     registry: FrozenNumericalPackageRegistry
     envelope: FrozenNumericalRegistryEnvelopeV2
     selected_genome_sha256s: tuple[str, ...]
+    support_objects: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.release.fingerprint != self.registry.release_sha256 or self.envelope.registry_sha256 != self.registry.fingerprint:
             raise ValueError("frozen Numerical artifacts disagree")
+        if not isinstance(self.support_objects, Mapping):
+            raise ValueError("frozen Numerical support objects must be a mapping")
+        support = dict(self.support_objects)
+        for identity, payload in support.items():
+            require_sha256(identity, "frozen Numerical support object SHA")
+            legacy_identity = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+            if identity not in {fingerprint_payload(payload), legacy_identity}:
+                raise ValueError(
+                    f"frozen Numerical support object content mismatch: {identity}"
+                )
+        object.__setattr__(self, "support_objects", MappingProxyType(support))
 
 
 def _canonical_member(state):
@@ -874,6 +888,111 @@ def import_numerical_seed(release, registry, *, tasks, source_paths=(), evidence
         data = Path(path).read_bytes()
         sources[hashlib.sha256(data).hexdigest()] = data.decode("utf-8")
     return ImportedNumericalSeedV2(release, _envelope(registry, tasks, evidence=evidence), sources)
+
+
+def materialize_dictionary_evidence(
+    adapter,
+    release,
+    registry,
+    *,
+    account_work=None,
+):
+    """Build the complete history-only schema-2 catalog before P2 freezes it.
+
+    P2 task shortlists intentionally contain at most eight members.  This
+    export instead evaluates the complete eligible Dictionary so P3 receives
+    executable forecasts and diagnostics for candidates it may shortlist
+    later.  All uncached Host dispatch is reported through ``account_work``.
+    """
+    if not isinstance(adapter, LegacyNumericalAdapter):
+        raise TypeError("Dictionary evidence requires the typed legacy adapter")
+    if type(release) is not NumericalSupplyRelease or type(registry) is not FrozenNumericalPackageRegistry:
+        raise ValueError("Dictionary evidence requires an exact release/registry pair")
+    if registry.release_sha256 != release.fingerprint or registry.task_ids != tuple(
+        task.numeric.task_id for task in adapter.tasks
+    ):
+        raise ValueError("Dictionary evidence release/registry binding mismatch")
+    if release.schema_version != 2:
+        return registry
+    adapter.preflight_resources()
+    charge = account_work or (lambda _use, **_kwargs: None)
+    anchor_release = parse_champion_release(
+        release.to_payload()["anchor_release_payload"]
+    )
+    materializer = adapter.materializer
+    if type(materializer) is not NumericalPackageMaterializer:
+        raise ValueError("Dictionary evidence requires the verified Host materializer")
+    safe_by_id = {
+        task.numeric.task_id: task for task in adapter.candidate_tasks
+    }
+
+    def forecast(name, history, horizon, frequency):
+        charge(ResourceUse(task_executions=1))
+        return adapter.forecast_trusted(
+            name,
+            history,
+            horizon,
+            frequency,
+            account_work=charge,
+        )
+
+    def build(task, supplied):
+        safe = safe_by_id[task.numeric.task_id]
+        numeric = safe.numeric
+        source = run_numerical_loop(
+            RuntimeTask(
+                numeric.task_id,
+                numeric.history_values,
+                numeric.prediction_length,
+                numeric.frequency,
+                (),
+            ),
+            screening_policy=materializer.screening_policy,
+            candidate_runner=forecast,
+            combined_policies=materializer.combined_policies,
+            decision_policy=materializer.decision_policy,
+            hindcast_config=materializer.hindcast_config,
+            component_fingerprints={
+                **materializer.source_fingerprints,
+                **materializer.runtime_fingerprints,
+            },
+            champion_release=anchor_release,
+        )
+        original_anchor = registry.package_for(task).protected_baseline
+        if source.protected_baseline.name != original_anchor.name or source.protected_baseline.forecast != original_anchor.forecast:
+            raise ValueError("Dictionary evidence changed the protected Anchor")
+        materialized = {item.name: item for item in source.ranked_alternatives}
+        for specification in supplied.alternatives:
+            alternative = materializer._materialize_alternative(
+                source,
+                safe,
+                specification,
+            )
+            if alternative is not None:
+                materialized[alternative.name] = alternative
+        return bound_numerical_package(
+            source,
+            supplied,
+            materialized,
+            history=numeric.history_values,
+            task_fold=materializer.fold_manifest.task_fold_map.get(numeric.task_id),
+            decision_policy=materializer.decision_policy,
+            min_successful_folds=materializer.hindcast_config.min_successful_folds,
+        )
+
+    complete = build_package_registry(adapter.tasks, release, build)
+    expected = {spec.candidate_id for spec in release.alternatives}
+    for task in adapter.tasks:
+        package = complete.package_for(task)
+        available = {item.name for item in package.ranked_alternatives}
+        eligible = {
+            name
+            for name, diagnostic in package.candidate_diagnostics.items()
+            if diagnostic.eligible
+        }
+        if not ((expected & eligible) <= available):
+            raise ValueError("eligible Dictionary evidence lacks a forecast")
+    return complete
 
 
 class LegacyNumericalAdapter:
@@ -1566,23 +1685,28 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
             raise ValueError("materialized member lacks one exact legacy alternative")
         choices[genome_sha] = (child, specs[0], {row.cell.fingerprint() for row in rows},
             min(rankings[row.fingerprint()] for row in rows))
-    selected, covered, families = [], set(), set()
+    selected, covered = [], set()
     if required_genome_sha256 is not None:
         if required_genome_sha256 not in choices:
             raise ValueError("projection is missing the exact Train winner")
         child, spec, cells, _ = choices.pop(required_genome_sha256)
         selected.append((required_genome_sha256, child, spec))
         covered.update(cells)
-        families.add(spec.family)
-    while len(selected) < 4:
-        eligible = [sha for sha, (_, spec, _, _) in choices.items() if spec.family not in families]
-        if not eligible:
-            break
+    while choices:
+        eligible = tuple(choices)
+        if parent_release.schema_version == 1:
+            if len(selected) >= 4:
+                break
+            families = {spec.family for _sha, _child, spec in selected}
+            eligible = tuple(
+                sha for sha in choices if choices[sha][1].family not in families
+            )
+            if not eligible:
+                break
         sha = min(eligible, key=lambda sha: (-len(choices[sha][2] - covered), *choices[sha][3][:3], sha))
         child, spec, cells, _ = choices.pop(sha)
         selected.append((sha, child, spec))
         covered.update(cells)
-        families.add(spec.family)
     def commitment(values):
         return fingerprint_payload({"sha256s": sorted(set(values))})
     sources = dict(parent_release.source_fingerprints) | {

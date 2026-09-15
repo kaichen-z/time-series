@@ -19,8 +19,17 @@ from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 
 from ..bundle import EvolutionBundleV2
-from ..contracts import SanitizedEvolutionFeedback, fingerprint_payload, require_sha256
-from ..numerical_qd.adapters import FrozenNumericalArtifactsV2
+from ..contracts import (
+    SanitizedEvolutionFeedback,
+    fingerprint_payload,
+    require_sha256,
+)
+from ..numerical_qd.adapters import (
+    FrozenNumericalArtifactsV2,
+    frozen_local_evidence_references,
+    validate_frozen_local_evidence,
+)
+from ..numerical_qd.artifacts import artifact_bytes
 from ..numerical_qd.contracts import FrozenNumericalRegistryEnvelopeV2
 from .contracts import DecisionModuleV2, RetrievalModuleV2
 from .numerical_dictionary import (
@@ -62,10 +71,17 @@ def _plain_json(value: object) -> object:
 class CooperativeArtifactCatalog:
     """Keep exact runtime objects beside their canonical persisted payloads."""
 
-    def __init__(self, write_object: Callable[[str, object], object]) -> None:
-        if not callable(write_object):
-            raise ValueError("write_object must be callable")
+    def __init__(
+        self,
+        write_object: Callable[[str, object], object],
+        write_legacy_object: Callable[[str, object], object] | None = None,
+    ) -> None:
+        if not callable(write_object) or (
+            write_legacy_object is not None and not callable(write_legacy_object)
+        ):
+            raise ValueError("object writers must be callable")
         self._write_object = write_object
+        self._write_legacy_object = write_legacy_object or write_object
         self._numerical: dict[tuple[str, str], FrozenNumericalArtifactsV2] = {}
         self._retrieval: dict[str, RetrievalModuleV2] = {}
         self._decision: dict[str, DecisionModuleV2] = {}
@@ -97,6 +113,27 @@ class CooperativeArtifactCatalog:
         registry_payload = _plain_json(artifacts.registry.manifest)
         if _digest(registry_payload) != registry_sha:
             raise ValueError("Numerical registry content mismatch")
+        support = {
+            identity: _plain_json(payload)
+            for identity, payload in artifacts.support_objects.items()
+        }
+        if artifacts.envelope.schema_version == 2:
+            references = frozen_local_evidence_references(artifacts.envelope)
+            validate_frozen_local_evidence(
+                artifacts.release,
+                artifacts.envelope,
+                artifact_bytes_by_sha={
+                    identity: artifact_bytes(kind, support[identity])
+                    for identity, kind in references.items()
+                    if identity in support
+                },
+            )
+            for source_name in ("p3_dictionary", "p3_selector"):
+                identity = artifacts.release.source_fingerprints.get(source_name)
+                if identity is not None and identity not in support:
+                    raise ValueError(
+                        f"Numerical {source_name} support object is missing"
+                    )
         key = (release_sha, registry_sha)
         existing = self._numerical.get(key)
         if existing is not None and (
@@ -105,6 +142,14 @@ class CooperativeArtifactCatalog:
         ):
             raise ValueError("conflicting Numerical artifact pair")
         release_payload = artifacts.release.to_payload()
+        for identity in sorted(support):
+            payload = support[identity]
+            writer = (
+                self._write_object
+                if fingerprint_payload(payload) == identity
+                else self._write_legacy_object
+            )
+            writer(identity, payload)
         self._write_object(fingerprint_payload(release_payload), release_payload)
         self._write_object(fingerprint_payload(registry_payload), registry_payload)
         self._write_object(

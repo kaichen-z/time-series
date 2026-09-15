@@ -1,12 +1,13 @@
 """Bounded cooperative Bundle search over the Evolution V2 Kernel."""
 from __future__ import annotations
 
+import hashlib
 import time
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 
-from common.payload import strict_json_loads
+from common.payload import canonical_json_bytes, strict_json_loads
 
 from ..budget import BudgetLedger, BudgetPlan, ResourceUse
 from ..bundle import EvolutionBundleV2
@@ -220,6 +221,20 @@ def _write_object(root, identity, payload):
     if fingerprint_payload(payload) != identity:
         raise ValueError("cooperative object identity mismatch")
     return write_once_json(root / "objects" / f"{identity}.json", payload)
+
+
+def _write_legacy_object(root, identity, payload):
+    """Persist Task-4 evidence under its original canonical JSON identity."""
+    data = canonical_json_bytes(payload)
+    if hashlib.sha256(data).hexdigest() != identity:
+        raise ValueError("cooperative legacy object identity mismatch")
+    destination = root / "objects" / f"{identity}.json"
+    if destination.exists():
+        if destination.read_bytes() != data:
+            raise ValueError("cooperative legacy object content changed")
+        return destination
+    _atomic_write(destination, data)
+    return destination
 
 
 def _cache_key(bundle, stage, task_universe_sha256):
@@ -554,7 +569,8 @@ def run_cooperative_evolution(
         _checkpoint(root, config_sha, inputs, kernel, state, accepted, rejected, completed)
 
     catalog = CooperativeArtifactCatalog(
-        lambda identity, payload: _write_object(root, identity, payload)
+        lambda identity, payload: _write_object(root, identity, payload),
+        lambda identity, payload: _write_legacy_object(root, identity, payload),
     )
     cache = _load_catalog_and_cache(
         root, catalog, numerical, retrieval, decision, adapters

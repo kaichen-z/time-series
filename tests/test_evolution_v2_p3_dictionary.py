@@ -11,15 +11,21 @@ from evolving_loop.v2.cooperative.numerical_dictionary import (
     mutate_selector_genome,
     seed_selector_genome,
 )
-from evolving_loop.v2.cooperative.adapters import NumericalCoordinateAdapter
+from evolving_loop.v2.cooperative.adapters import (
+    CooperativeArtifactCatalog,
+    NumericalCoordinateAdapter,
+)
 from evolving_loop.package_numerical_supply import (
     build_package_registry,
     parse_numerical_supply_release,
 )
 from evolving_loop.v2.numerical_qd.adapters import (
     FrozenNumericalArtifactsV2,
+    frozen_local_evidence_references,
     import_numerical_seed,
+    validate_frozen_local_evidence,
 )
+from evolving_loop.v2.numerical_qd.artifacts import artifact_bytes
 from tests.test_package_numerical_supply import (
     _alternative,
     _package_for_task,
@@ -246,6 +252,34 @@ def test_materialized_selector_pair_obeys_anchor_and_cardinality_bounds():
         package.selection_decision.selected.index(anchor)
     ] >= 0.5
     assert pair.selected_genome_sha256s == (seed_selector_genome().fingerprint(),)
+
+
+def test_selector_pair_persists_schema2_dictionary_genome_and_local_evidence():
+    tasks = _registry_tasks()
+    closure = build_p3_numerical_dictionary((_wide_dictionary_pair(),), tasks)
+    selector = seed_selector_genome()
+
+    pair = materialize_selector_pair(closure, selector, tasks)
+
+    assert pair.envelope.schema_version == 2
+    assert closure.fingerprint() in pair.support_objects
+    assert selector.fingerprint() in pair.support_objects
+    evidence_refs = frozen_local_evidence_references(pair.envelope)
+    raw = {
+        sha: artifact_bytes(kind, pair.support_objects[sha])
+        for sha, kind in evidence_refs.items()
+    }
+    validate_frozen_local_evidence(
+        pair.release,
+        pair.envelope,
+        artifact_bytes_by_sha=raw,
+        tasks=tasks,
+    )
+
+    written = {}
+    catalog = CooperativeArtifactCatalog(written.setdefault)
+    catalog.add_numerical(pair)
+    assert set(pair.support_objects) <= set(written)
 
 
 def test_numerical_coordinate_evolves_selector_instead_of_p2_pair():

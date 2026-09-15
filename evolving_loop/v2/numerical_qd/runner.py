@@ -36,6 +36,7 @@ from ..store import V2RunStore, write_once_json
 from .adapters import (
     ImportedNumericalSeedV2, LegacyNumericalAdapter, MaterializedNumericalChildV2, NumericalWorkStopped, _canonical_member,
     evaluate_numerical_child, freeze_qd_supply, import_numerical_seed,
+    materialize_dictionary_evidence,
 )
 from .config import NumericalQDConfigV2
 from .artifacts import ArtifactKindV2 as ArtifactKind, validate_artifact
@@ -582,12 +583,10 @@ def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry
     available = _available(kernel)
     if available.artifact_bytes == 0:
         return None, "artifact_bytes_exhausted"
-    estimate = ResourceUse(
-        artifact_bytes=available.artifact_bytes,
-        wall_seconds=float(
-            len(adapter.tasks) * config.adapter["task_timeout_seconds"]
-        ),
-    )
+    # The P2-owned export may need to fill every previously-unshortlisted
+    # catalog member. Reserve the remaining governed capacity, then close with
+    # exact measured use so unused capacity is returned before Dev comparison.
+    estimate = available
     permit = work.reserve_stage("freeze-" + winner, estimate)
     if not permit.allowed:
         return None, permit.reason
@@ -595,6 +594,25 @@ def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry
     existing = set(objects.glob("*.json"))
     before = adapter.monotonic()
     result, reason = None, "freeze_failed"
+    actual = ResourceUse()
+
+    def account_work(use, *, begun=False):
+        nonlocal actual
+        next_use = actual + use
+        if begun:
+            actual = next_use
+        if (
+            kernel.budget.elapsed_wall_seconds
+            >= kernel.budget.plan.search_deadline_seconds
+            or adapter.monotonic() - before >= estimate.wall_seconds
+            or any(
+                getattr(next_use, name) > getattr(estimate, name)
+                for name in ResourceUse.field_names()
+            )
+        ):
+            raise NumericalWorkStopped("Dictionary evidence resource boundary")
+        actual = next_use
+
     store.accounting.external = lambda size, begun: None  # This stage bills its new material files in finally.
     store.accounting.external_permit = permit
     try:
@@ -619,7 +637,13 @@ def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry
             verified_children[genome_sha] = child
         if occupied != set(verified_children):
             raise ValueError("archive projection lacks a verified executable envelope")
-        frozen = freeze_qd_supply(adapter, parent_release, parent_registry, archive,
+        complete_parent_registry = materialize_dictionary_evidence(
+            adapter,
+            parent_release,
+            parent_registry,
+            account_work=account_work,
+        )
+        frozen = freeze_qd_supply(adapter, parent_release, complete_parent_registry, archive,
             tuple(verified_children.values()), descriptor_policy=config.descriptor_policy, version=f"n{generation:03d}",
             required_genome_sha256=winner)
         payload = {"supply": frozen.release.to_payload(), "registry": frozen.envelope.to_payload()}
@@ -632,6 +656,8 @@ def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry
             release = parse_numerical_supply_release(pair["supply"])
             registry = FrozenNumericalRegistryEnvelopeV2.from_payload(pair["registry"]).restore(adapter.tasks)
             result = release, registry, pair_sha
+    except NumericalWorkStopped:
+        reason = "materialization_budget"
     except (ValueError, TypeError, TimeoutError, MethodForecastError):
         reason = "freeze_failed"
     finally:
@@ -640,7 +666,7 @@ def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry
         # The single typed pair embeds all package envelopes. Count each new
         # material file once, including a completed write followed by failure.
         produced = set(objects.glob("*.json")) - existing
-        closed = work.close_stage(permit, ResourceUse(
+        closed = work.close_stage(permit, replace(actual,
             artifact_bytes=sum(path.stat().st_size for path in produced if path.is_file()),
             wall_seconds=float(adapter.monotonic() - before)), status="passed" if result else "failed")
     if not closed.allowed:

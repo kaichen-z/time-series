@@ -25,7 +25,10 @@ from numerical_agent.evolution.task_shortlist import (
     TaskCandidateShortlistV1,
     TaskShortlistPolicyV1,
 )
-from numerical_agent.run_task_local_ensemble_evolution import task_input_sha256
+from numerical_agent.run_task_local_ensemble_evolution import (
+    TaskLocalEvidenceBundleV1,
+    task_input_sha256,
+)
 
 from ..numerical_qd.adapters import FrozenNumericalArtifactsV2, import_numerical_seed
 
@@ -464,6 +467,7 @@ def materialize_selector_pair(
         raise ValueError("P3 Selector task universe differs from its Dictionary")
     release = _selector_release(dictionary, genome)
     policy = TaskShortlistPolicyV1()
+    by_task = {}
 
     def build(task: ContextTask, supplied: NumericalSupplyRelease) -> NumericalForecastPackage:
         inputs = dictionary.package_inputs_for(task)
@@ -493,6 +497,12 @@ def materialize_selector_pair(
         diagnostics_sha = __import__("hashlib").sha256(
             canonical_json_bytes(diagnostics)
         ).hexdigest()
+        by_task[task.numeric.task_id] = (
+            shortlist,
+            diagnostics,
+            shortlist.fingerprint(),
+            diagnostics_sha,
+        )
         return bound_numerical_package(
             dictionary.source_package_for(task),
             supplied,
@@ -504,12 +514,47 @@ def materialize_selector_pair(
         )
 
     registry = build_package_registry(resolved_tasks, release, build)
-    envelope = import_numerical_seed(release, registry, tasks=resolved_tasks).envelope
+    index = {
+        "schema_version": 1,
+        "policy_sha256": policy.fingerprint(),
+        "entries": [
+            {
+                "task_id": task_id,
+                "task_input_sha256": by_task[task_id][0].task_input_sha256,
+                "shortlist_sha256": by_task[task_id][2],
+                "diagnostics_sha256": by_task[task_id][3],
+            }
+            for task_id in sorted(by_task)
+        ],
+        "public_test_accessed": False,
+    }
+    evidence = TaskLocalEvidenceBundleV1(
+        policy,
+        dictionary.fingerprint(),
+        index,
+        by_task,
+    )
+    envelope = import_numerical_seed(
+        release,
+        registry,
+        tasks=resolved_tasks,
+        evidence=evidence,
+    ).envelope
+    support_objects = {
+        dictionary.fingerprint(): dictionary.to_payload(),
+        genome.fingerprint(): genome.to_payload(),
+        policy.fingerprint(): policy.to_payload(),
+        fingerprint_payload(index): index,
+    }
+    for shortlist, diagnostics, shortlist_sha, diagnostics_sha in by_task.values():
+        support_objects[shortlist_sha] = shortlist.to_payload()
+        support_objects[diagnostics_sha] = diagnostics
     return FrozenNumericalArtifactsV2(
         release,
         registry,
         envelope,
         (genome.fingerprint(),),
+        support_objects,
     )
 
 
