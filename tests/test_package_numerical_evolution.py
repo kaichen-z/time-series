@@ -1192,6 +1192,13 @@ def test_materializer_rematerializes_every_retained_parent_alternative() -> None
         "select_seasonal_naive",
         "retained_weighted",
     }
+    retained = next(
+        item
+        for item in candidate.registry.package_for(original_tasks[0]).ranked_alternatives
+        if item.name == "retained_weighted"
+    )
+    assert retained.diagnostics.reason_code != "frozen_package_recipe"
+    assert retained.diagnostics.successful_folds > 0
 
 
 def test_materializer_emits_v2_without_collapsing_repeated_family_parent_catalog() -> None:

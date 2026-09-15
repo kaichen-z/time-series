@@ -56,6 +56,11 @@ from numerical_agent.evolution.screening import (
     profile_task,
 )
 from numerical_agent.evolution.task_local_evolution import GroupFoldManifest
+from numerical_agent.evolution.task_local_ensemble import (
+    TaskLocalTournamentPolicy,
+    execute_task_local_ensemble,
+    task_local_fingerprint,
+)
 from numerical_agent.run_task_local_ensemble_evolution import TaskLocalEvidenceBundleV1, task_input_sha256
 
 from ..budget import ResourceUse
@@ -1310,6 +1315,15 @@ class LegacyNumericalAdapter:
         }
         release = replace(candidate.release, source_fingerprints=sources,
             anchor_release_payload=candidate.release.to_payload()["anchor_release_payload"])
+        parent_specs = {item.candidate_id: item for item in parent_release.alternatives}
+        child_specs = {item.candidate_id: item for item in release.alternatives}
+        unchanged_specs = {
+            name
+            for name, item in parent_specs.items()
+            if name in child_specs
+            and canonical_v2_bytes(item.to_payload())
+            == canonical_v2_bytes(child_specs[name].to_payload())
+        }
         def builder(task, supplied):
             candidate_source = candidate.registry.package_for(task)
             source = (candidate_source if parent_registry is None
@@ -1317,6 +1331,12 @@ class LegacyNumericalAdapter:
             available = {item.name: item for item in source.ranked_alternatives}
             for item in candidate_source.ranked_alternatives:
                 if item.name != source.protected_baseline.name:
+                    if (
+                        parent_registry is not None
+                        and item.name in unchanged_specs
+                        and item.name in available
+                    ):
+                        continue
                     available[item.name] = item
             if not _applicable(member, task, descriptor_policy):
                 available.pop(recipe.name, None)
@@ -1415,6 +1435,91 @@ def evaluate_numerical_child(adapter, child, manifest, *, descriptor_policy: Des
         ConstraintReportV2(not violations, tuple(sorted(violations))), tuple(cells[sha] for sha in sorted(cells)),
         tuple(sorted(violations)), (),
         (resource_use or ResourceUse()).to_payload())
+
+
+def _bind_evolved_task_local_bundle(source, release, available, evolved_names, *, history, task_fold):
+    """Re-run the local Anchor tournament after adding applicable P2 members."""
+    package = bound_numerical_package(
+        source,
+        release,
+        available,
+        history=history,
+        task_fold=task_fold,
+    )
+    ranked = {item.name: item for item in package.ranked_alternatives}
+    evolved = tuple(dict.fromkeys(name for name in evolved_names if name in ranked))
+    if not evolved:
+        # An inapplicable global Dictionary extension must not alter this task.
+        if set(source.selection_decision.selected) <= set(ranked):
+            return replace(
+                package,
+                morphology_card=source.morphology_card,
+                accepted_assumptions=source.accepted_assumptions,
+                rejected_assumptions=source.rejected_assumptions,
+                selection_decision=source.selection_decision,
+                final_forecast=source.final_forecast,
+                retrieval_handoff=source.retrieval_handoff,
+                fallback_reason=source.fallback_reason,
+            )
+        return package
+
+    anchor = package.protected_baseline.name
+    previous = (
+        source.selection_decision.considered_candidates
+        or source.active_candidate_names
+    )
+    old_names = tuple(
+        name
+        for name in previous
+        if name != anchor and name in ranked and name not in evolved
+    )
+    policy = TaskLocalTournamentPolicy(anchor_name=anchor)
+    room = policy.maximum_candidates - 1 - len(evolved)
+    candidate_names = (anchor, *evolved, *old_names[: max(0, room)])
+    result = execute_task_local_ensemble(
+        policy,
+        candidate_names=candidate_names,
+        forecasts={name: ranked[name].forecast for name in candidate_names},
+        diagnostics={name: ranked[name].diagnostics for name in candidate_names},
+        horizon=package.task_profile.horizon,
+    )
+    selection = SelectionDecision(
+        mode="ensemble" if result.activated else "single",
+        selected=result.selected_names,
+        weights=result.weights,
+        forecast=result.forecast,
+        confidence=0.0,
+        reason_codes=(
+            "p2_task_local_bundle",
+            "activated" if result.activated else "anchor_fallback",
+        ),
+        rejected={},
+        baseline_name=anchor,
+        considered_candidates=candidate_names,
+    )
+    fingerprints = dict(package.component_fingerprints) | {
+        "p2_task_local_policy": task_local_fingerprint(policy),
+        "p2_task_local_result": fingerprint_payload(
+            {
+                "candidate_names": candidate_names,
+                "selected_names": result.selected_names,
+                "weights": result.weights,
+                "forecast": result.forecast,
+                "fallback_reason": result.fallback_reason,
+            }
+        ),
+    }
+    return replace(
+        package,
+        morphology_card=None,
+        accepted_assumptions=(),
+        rejected_assumptions={},
+        selection_decision=selection,
+        final_forecast=result.forecast,
+        retrieval_handoff=(),
+        component_fingerprints=fingerprints,
+        fallback_reason=result.fallback_reason,
+    )
 
 
 def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children, *,
@@ -1520,6 +1625,7 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
     def builder(task, supplied):
         source = parent_registry.package_for(task)
         available = {item.name: item for item in source.ranked_alternatives}
+        applicable_evolved = []
         runtime_failures = {name: reason for name, reason in source.selection_decision.rejected.items()
                             if reason == "shortlisted_runtime_failure"}
         for _, child, spec in selected:
@@ -1558,10 +1664,21 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
                     and _applicable(child.member, task, descriptor_policy)
                     and spec.candidate_id not in available):
                 raise ValueError("projection package is missing the exact Train winner member")
+            if (
+                _applicable(child.member, task, descriptor_policy)
+                and spec.candidate_id in available
+            ):
+                applicable_evolved.append(spec.candidate_id)
         evidence = adapter.local_evidence_for(task)
         if evidence is None or not selected_names <= set(evidence[0].candidate_names):
-            return bound_numerical_package(source, supplied, available, history=task.numeric.history_values,
-                task_fold=adapter.fold_manifest.task_fold_map.get(task.numeric.task_id))
+            return _bind_evolved_task_local_bundle(
+                source,
+                supplied,
+                available,
+                applicable_evolved,
+                history=task.numeric.history_values,
+                task_fold=adapter.fold_manifest.task_fold_map.get(task.numeric.task_id),
+            )
         shortlist, diagnostics, _shortlist_sha, diagnostics_sha = evidence
         source = replace(source, selection_decision=replace(source.selection_decision, rejected=runtime_failures))
         return bound_numerical_package(source, supplied, available, history=task.numeric.history_values,

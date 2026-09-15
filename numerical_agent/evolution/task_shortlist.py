@@ -15,7 +15,7 @@ from .screening import ScreeningPolicy, TaskProfile, materialize_active_dictiona
 
 
 _SHORTLIST_MINIMUM_CANDIDATES = 6
-_SHORTLIST_MAXIMUM_CANDIDATES = 10
+_SHORTLIST_MAXIMUM_CANDIDATES = 8
 
 
 def _name(value: object, field: str = "name") -> str:
@@ -239,11 +239,11 @@ class TaskShortlistPolicyV1:
     schema_version: int = 1
     minimum_candidates: int = 6
     target_candidates: int = 8
-    maximum_candidates: int = 10
+    maximum_candidates: int = 8
 
     def __post_init__(self) -> None:
         if (self.schema_version, self.minimum_candidates, self.target_candidates, self.maximum_candidates) != (1, _SHORTLIST_MINIMUM_CANDIDATES, 8, _SHORTLIST_MAXIMUM_CANDIDATES):
-            raise ValueError("TaskShortlistPolicyV1 bounds are exactly 1/6/8/10")
+            raise ValueError("TaskShortlistPolicyV1 bounds are exactly 1/6/8/8")
 
     def to_payload(self) -> dict[str, object]:
         return {"schema_version": 1, "minimum_candidates": _SHORTLIST_MINIMUM_CANDIDATES, "target_candidates": 8, "maximum_candidates": _SHORTLIST_MAXIMUM_CANDIDATES}

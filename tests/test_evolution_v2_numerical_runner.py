@@ -94,6 +94,26 @@ def run_fixture(root, **kwargs):
     return run_numerical_qd(root, *fixture(**options), **kwargs)
 
 
+def force_dev_results(monkeypatch, *outcomes):
+    """Keep non-promotion tests focused on the authority behavior they cover."""
+    from evolving_loop.v2.numerical_qd import runner
+
+    remaining = iter(outcomes)
+    def compare(_parent, _child, _adapter, _kernel, account_work):
+        for _ in range(40):
+            account_work()
+        passed = next(remaining, False)
+        return {
+            "passed": passed,
+            "parent_metrics": {"mean_smae": 1.0, "mean_srmse": 1.0},
+            "candidate_metrics": {
+                "mean_smae": 0.5 if passed else 1.0,
+                "mean_srmse": 0.5 if passed else 1.0,
+            },
+        }
+    monkeypatch.setattr(runner, "_dev_compare", compare)
+
+
 def test_llm_proposal_budget_is_independent_of_numerical_task_timeout():
     from evolving_loop.v2.numerical_qd.runner import _proposal_budget
 
@@ -356,35 +376,73 @@ def test_raw_bootstrap_stops_before_next_dispatch_and_closes_receipt(tmp_path, b
     assert not (tmp_path / "run/numerical_qd").exists()
 
 
-def test_dev_missing_exact_member_fails_closed_instead_of_anchor_substitution(tmp_path):
+def test_dev_rejects_a_registry_with_a_different_task_universe():
     from evolving_loop.v2.numerical_qd.runner import _dev_compare
-    from types import SimpleNamespace
+
     config, supply, _, adapter = fixture()
     registry = supply.envelope.restore(adapter.tasks)
     kernel = SimpleNamespace(budget=SimpleNamespace(elapsed_wall_seconds=0.0, plan=config.budget))
-    with pytest.raises(ValueError, match="exact.*member"):
-        _dev_compare(registry, registry, "missing_parent", "missing_winner", adapter, kernel, lambda: None)
+    incomplete = SimpleNamespace(task_ids=registry.task_ids[:-1], _packages=registry._packages)
+    with pytest.raises(ValueError, match="task universe"):
+        _dev_compare(registry, incomplete, adapter, kernel, lambda: None)
 
 
-def test_dev_uses_anchor_only_when_specialist_is_explicitly_not_applicable(monkeypatch):
-    from evolving_loop.v2.numerical_qd.contracts import NumericalMemberV2
+def test_dev_reads_the_already_verified_frozen_package_map(monkeypatch):
     from evolving_loop.v2.numerical_qd.runner import _dev_compare
-    from tests.test_evolution_v2_numerical_descriptors import policy
+
     config, supply, _, adapter = fixture()
     registry = supply.envelope.restore(adapter.tasks)
     kernel = SimpleNamespace(budget=SimpleNamespace(elapsed_wall_seconds=0.0, plan=config.budget))
-    parent_name = registry.package_for(adapter.tasks[0]).protected_baseline.name
-    specialist = NumericalMemberV2("specialist", "statistical", "a" * 64,
-        "b" * 64, (), ("f" * 64,), "active")
     monkeypatch.setattr(type(registry), "package_for",
         lambda *_args: pytest.fail("Dev rehashed an already frozen package"))
 
-    comparison = _dev_compare(registry, registry, parent_name, "missing_winner",
-        adapter, kernel, lambda: None, child_member=specialist,
-        descriptor_policy=policy())
+    comparison = _dev_compare(registry, registry, adapter, kernel, lambda: None)
 
     assert comparison["passed"] is False
     assert comparison["parent_metrics"] == comparison["candidate_metrics"]
+
+
+def test_dev_promotion_scores_the_frozen_task_local_bundle_not_a_standalone_member():
+    from evolving_loop.v2.numerical_qd.runner import _dev_compare
+
+    config, _supply, _, adapter = fixture()
+    ordered = tuple(sorted(adapter.tasks, key=lambda task: task.numeric.task_id))
+    task_ids = tuple(task.numeric.task_id for task in ordered)
+    parent_packages = {}
+    child_packages = {}
+    for task in ordered:
+        truth = task.numeric.future_values
+        parent_forecast = tuple(value + 1.0 for value in truth)
+        standalone_child = tuple(value + 2.0 for value in truth)
+        parent_packages[task.numeric.task_id] = SimpleNamespace(
+            final_forecast=parent_forecast,
+            ranked_alternatives=(
+                SimpleNamespace(name="parent_member", forecast=parent_forecast),
+            ),
+        )
+        child_packages[task.numeric.task_id] = SimpleNamespace(
+            # The frozen local selector used Anchor + specialist successfully.
+            final_forecast=truth,
+            ranked_alternatives=(
+                SimpleNamespace(name="child_member", forecast=standalone_child),
+            ),
+        )
+    parent_registry = SimpleNamespace(task_ids=task_ids, _packages=parent_packages)
+    child_registry = SimpleNamespace(task_ids=task_ids, _packages=child_packages)
+    kernel = SimpleNamespace(
+        budget=SimpleNamespace(elapsed_wall_seconds=0.0, plan=config.budget)
+    )
+
+    comparison = _dev_compare(
+        parent_registry,
+        child_registry,
+        adapter,
+        kernel,
+        lambda: None,
+    )
+
+    assert comparison["passed"] is True
+    assert comparison["candidate_metrics"] == {"mean_smae": 0.0, "mean_srmse": 0.0}
 
 
 @pytest.mark.parametrize("reverse_entities", [False, True])
@@ -857,6 +915,7 @@ def test_interrupted_bootstrap_resumes_closed_forecast_cache_without_recharging(
     assert calls == 3
     assert not (tmp_path / "run/seed_bootstrap_receipt.json").exists()
     monkeypatch.setattr(SeedBootstrapAuthority, "forecast", original)
+    force_dev_results(monkeypatch, True)
     result = run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter, resume=True, stop_after=1)
     assert calls == 1200  # 800 bootstrap + 400 protected-anchor child dispatches; no replayed 3.
     assert result.budget["charged_use"]["task_executions"] == 1720
@@ -964,7 +1023,8 @@ def test_bootstrap_resume_rejects_root_orphans_before_any_new_dispatch(tmp_path,
 
 
 @pytest.mark.parametrize("mismatch", [False, True])
-def test_kernel_typed_promotion_binds_full_train_evaluation_and_exact_winner(tmp_path, mismatch):
+def test_kernel_typed_promotion_binds_full_train_evaluation_and_exact_winner(tmp_path, mismatch, monkeypatch):
+    force_dev_results(monkeypatch, True)
     result = run_fixture(tmp_path / "run", task_budget=920, stop_after=1)
     assert result.accepted_steps == 1
     root = tmp_path / "run"
@@ -987,7 +1047,7 @@ def test_kernel_typed_promotion_binds_full_train_evaluation_and_exact_winner(tmp
     assert evaluation["objectives"] == train["train_objectives"]
 
 
-def test_kernel_rejects_declared_winner_with_forged_final_supply_or_task_member(tmp_path):
+def test_kernel_rejects_declared_winner_with_forged_final_supply_or_task_member(tmp_path, monkeypatch):
     from common.payload import canonical_json_bytes
     from evolving_loop.package_registry import _digest
     from evolving_loop.package_numerical_supply import parse_numerical_supply_release, build_package_registry, bound_numerical_package
@@ -997,6 +1057,7 @@ def test_kernel_rejects_declared_winner_with_forged_final_supply_or_task_member(
     from evolving_loop.v2.store import write_once_json
     config, supply, manifest, adapter = fixture(task_budget=920)
     root = tmp_path / "run"
+    force_dev_results(monkeypatch, True)
     result = run_numerical_qd(root, config, supply, manifest, adapter, stop_after=1)
     kernel = EvolutionKernel.resume(V2RunStore(root), config.budget, monotonic=adapter.monotonic)
     train = next(json.loads(path.read_bytes()) for path in (root / "evaluations").glob("*/train.json")
@@ -1082,7 +1143,8 @@ def test_bootstrap_resume_rejects_unclosed_dispatch_after_last_closed_segment(tm
     assert files(tmp_path / "run") == before
 
 
-def test_qd_runner_evolves_supply_policy_and_prompt(tmp_path):
+def test_qd_runner_evolves_supply_policy_and_prompt(tmp_path, monkeypatch):
+    force_dev_results(monkeypatch, True, False)
     result = run_fixture(tmp_path / "run")
     assert result.status == "numerical_qd_complete"
     assert result.occupied_cells >= 2
@@ -1095,8 +1157,9 @@ def test_qd_runner_evolves_supply_policy_and_prompt(tmp_path):
     assert result.budget["open_reservations"] == []
 
 
-def test_acceptance_promotes_pair_and_rejection_keeps_exact_parent(tmp_path):
+def test_acceptance_promotes_pair_and_rejection_keeps_exact_parent(tmp_path, monkeypatch):
     config, supply, manifest, adapter = fixture()
+    force_dev_results(monkeypatch, True, False)
     first = run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter, stop_after=1)
     pointer = (tmp_path / "run/accepted_bundle.json").read_bytes()
     assert first.active_bundle.numerical_release_sha256 != supply.release.fingerprint
@@ -1156,7 +1219,8 @@ class Client:
 
 @pytest.mark.parametrize("response,reason,calls", [("{", "malformed", 1), (TimeoutError(), "timeout", 1),
                                                   (None, "unavailable", 0), ("legal", None, 1)])
-def test_provider_attempts_are_kernel_charged_and_fallback_is_deterministic(tmp_path, response, reason, calls):
+def test_provider_attempts_are_kernel_charged_and_fallback_is_deterministic(tmp_path, response, reason, calls, monkeypatch):
+    force_dev_results(monkeypatch, True)
     client = None if response is None else Client(response)
     result = run_fixture(tmp_path / "run", task_budget=920, provider="hybrid", llm_client=client)
     attempts = [json.loads(path.read_bytes())["batch"] for path in (tmp_path / "run/numerical_qd/proposals").glob("*.json")]

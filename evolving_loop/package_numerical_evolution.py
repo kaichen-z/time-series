@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import re
+import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from typing import cast
 
 from common.evolution_core.task_feedback import TaskEvidenceProjection
+from common.metrics import drcik_point_metrics
 from common.payload import canonical_json_bytes
 from evolving_loop.data import ContextTask
 from evolving_loop.package_candidate_proposal import (
@@ -45,7 +47,7 @@ from numerical_agent.evolution.champion_evidence import (
     ProposerEvidence,
     validate_proposer_evidence,
 )
-from numerical_agent.evolution.champion_runtime import execute_champion
+from numerical_agent.evolution.champion_runtime import execute_champion, robust_history_scale
 from numerical_agent.evolution.execution import Task as RuntimeTask
 from numerical_agent.evolution.forecast_store import ForecastStore
 from numerical_agent.evolution.numerical_loop import run_numerical_loop
@@ -782,15 +784,18 @@ class NumericalPackageMaterializer:
         family: str,
     ) -> RankedNumericalForecast | None:
         forecasts = {item.name: item.forecast for item in source.ranked_alternatives}
-        diagnostics = {
-            item.name: _history_diagnostic(item.diagnostics)
-            for item in source.ranked_alternatives
+        source_diagnostics = {
+            item.name: item.diagnostics for item in source.ranked_alternatives
+        }
+        execution_diagnostics = {
+            name: _history_diagnostic(diagnostic)
+            for name, diagnostic in source_diagnostics.items()
         }
         try:
             execution = execute_champion(
                 policy,
                 forecasts,
-                diagnostics,
+                execution_diagnostics,
                 source.task_profile,
                 task.numeric.history_values,
                 task.numeric.prediction_length,
@@ -799,22 +804,132 @@ class NumericalPackageMaterializer:
             return None
         if not valid_forecast(execution.forecast, task.numeric.prediction_length):
             return None
-        proxy = diagnostics.get(policy.recipe.fallback_parent)
+        # A one-parent recipe is the same task-local forecast under a new
+        # evolvable Dictionary identity.  Preserve that parent's real
+        # history-only hindcast evidence instead of assigning the Anchor's
+        # diagnostics to it. Multi-parent recipes combine the aligned parent
+        # folds below so they can also enter the task-local tournament.
+        diagnostic_parent = (
+            execution.selected_names[0]
+            if len(execution.selected_names) == 1
+            else policy.recipe.fallback_parent
+        )
+        proxy = source_diagnostics.get(diagnostic_parent)
         if proxy is None:
             return None
-        diagnostic = replace(
-            proxy,
-            name=candidate_id,
-            family=family,
-            folds=(),
-            successful_folds=0,
-            eligible=False,
-            reason_code="frozen_package_recipe",
-            fold_forecasts=(),
-            fold_truths=(),
-            cache_key="",
-            long_horizon_fold=None,
-        )
+        diagnostic = replace(proxy, name=candidate_id, family=family)
+        if len(execution.selected_names) != 1:
+            parent_diagnostics = tuple(
+                source_diagnostics.get(name) for name in policy.recipe.parents
+            )
+            aligned = min(
+                (
+                    len(item.fold_forecasts)
+                    for item in parent_diagnostics
+                    if item is not None
+                ),
+                default=0,
+            )
+            fold_forecasts = []
+            fold_truths = []
+            for index in range(aligned):
+                if any(item is None for item in parent_diagnostics):
+                    break
+                parents = {
+                    name: source_diagnostics[name].fold_forecasts[index]
+                    for name in policy.recipe.parents
+                }
+                truths = tuple(
+                    source_diagnostics[name].fold_truths[index]
+                    for name in policy.recipe.parents
+                )
+                if not truths or any(truth != truths[0] for truth in truths[1:]):
+                    continue
+                horizon = len(truths[0])
+                try:
+                    if execution.fallback_reason is not None:
+                        combined = parents[policy.recipe.fallback_parent]
+                    elif policy.recipe.kind == "weighted":
+                        left, right = (parents[name] for name in policy.recipe.parents)
+                        combined = tuple(
+                            policy.weights[0] * left[step]
+                            + policy.weights[1] * right[step]
+                            for step in range(horizon)
+                        )
+                    elif policy.recipe.kind == "median":
+                        left, right = (parents[name] for name in policy.recipe.parents)
+                        combined = tuple(
+                            left[step] / 2.0 + right[step] / 2.0
+                            for step in range(horizon)
+                        )
+                    elif policy.recipe.kind == "horizon_route":
+                        left, right = (parents[name] for name in policy.recipe.parents)
+                        split = int(horizon * policy.horizon_split)
+                        combined = left[:split] + right[split:]
+                    elif policy.recipe.kind == "bounded_overlay":
+                        specialist_name = next(
+                            name
+                            for name in policy.recipe.parents
+                            if name != policy.recipe.fallback_parent
+                        )
+                        baseline = parents[policy.recipe.fallback_parent]
+                        specialist = parents[specialist_name]
+                        limit = policy.correction_cap * robust_history_scale(
+                            task.numeric.history_values
+                        )
+                        combined = tuple(
+                            base
+                            + max(
+                                -limit,
+                                min(
+                                    limit,
+                                    policy.overlay_alpha * (candidate - base),
+                                ),
+                            )
+                            for base, candidate in zip(
+                                baseline, specialist, strict=True
+                            )
+                        )
+                    else:
+                        continue
+                except (ArithmeticError, KeyError, StopIteration, TypeError, ValueError):
+                    continue
+                if valid_forecast(combined, horizon):
+                    fold_forecasts.append(tuple(combined))
+                    fold_truths.append(tuple(truths[0]))
+            points = tuple(
+                drcik_point_metrics(truth, forecast)
+                for forecast, truth in zip(fold_forecasts, fold_truths, strict=True)
+            )
+            eligible = len(points) >= self.hindcast_config.min_successful_folds
+            diagnostic = CandidateDiagnostics.synthetic(
+                name=candidate_id,
+                family=family,
+                median_mase=(
+                    float(statistics.median(point["smae"] for point in points))
+                    if points
+                    else float("inf")
+                ),
+                eligible=eligible,
+                fold_forecasts=fold_forecasts,
+                fold_truths=fold_truths,
+                median_smae=(
+                    float(statistics.median(point["smae"] for point in points))
+                    if points
+                    else 5.0
+                ),
+                recent_smae=float(points[-1]["smae"]) if points else 5.0,
+                worst_smae=max((float(point["smae"]) for point in points), default=5.0),
+                median_srmse=(
+                    float(statistics.median(point["srmse"] for point in points))
+                    if points
+                    else 5.0
+                ),
+                recent_srmse=float(points[-1]["srmse"]) if points else 5.0,
+                worst_srmse=max((float(point["srmse"]) for point in points), default=5.0),
+                worst_smae_raw=max((float(point["smae_raw"]) for point in points), default=5.0),
+                worst_srmse_raw=max((float(point["srmse_raw"]) for point in points), default=5.0),
+            )
         return RankedNumericalForecast(
             rank=len(source.ranked_alternatives) + 1,
             name=candidate_id,

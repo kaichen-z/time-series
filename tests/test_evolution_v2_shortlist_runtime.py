@@ -465,12 +465,11 @@ def test_production_seed_child_and_nonempty_freeze_keep_shortlist_result(tmp_pat
         return original_materialize(task, release, traced)
     monkeypatch.setattr(adapter, "materialize_local_package", observe)
     child = adapter.materialize_child(seed, genome, state, member_id=state.inventory.members[0].member_id,
-        policies=policies, build_rows=_train_rows(adapter), descriptor_policy=config.descriptor_policy, version="n001")
-    # The separate Train fitting stage forecasts its two recipe inputs. Local package
-    # execution itself contains exactly the eight authorized names per task.
-    for task, offset in zip(adapter.tasks, range(0, 700, 7)):
-        assert tuple(package_calls[offset:offset + 7]) == tuple(
-            name for name in expected[task.numeric.task_id] if name != "select_seasonal_naive")
+        policies=policies, build_rows=_train_rows(adapter), descriptor_policy=config.descriptor_policy,
+        version="n001", parent_registry=registry)
+    # Exact unchanged Dictionary members retain their sealed Parent forecasts and
+    # diagnostics instead of being executed again under a new release identity.
+    assert package_calls == []
     cell = describe_history(adapter.tasks[0].numeric.history_values, 2, "D", "statistical", config.descriptor_policy)
     entry = NumericalQDEntryV2(1, genome.fingerprint(), "7" * 64, cell,
         (adapter.tasks[0].numeric.task_id,), NumericalObjectiveVectorV2(1., 1., 1., 1., 1.), ConstraintReportV2(True, ()), ())

@@ -51,7 +51,7 @@ class TaskShortlistPolicyV1:
     schema_version: int = 1
     minimum_candidates: int = 6
     target_candidates: int = 8
-    maximum_candidates: int = 10
+    maximum_candidates: int = 8
 
 @dataclass(frozen=True)
 class TaskCandidateShortlistV1:

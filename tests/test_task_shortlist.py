@@ -38,9 +38,9 @@ def test_shortlist_contract_is_canonical_and_anchor_first():
 
 
 def test_policy_has_exact_bounds_and_prior_rejects_nonfinite():
-    assert TaskShortlistPolicyV1() == TaskShortlistPolicyV1(1, 6, 8, 10)
+    assert TaskShortlistPolicyV1() == TaskShortlistPolicyV1(1, 6, 8, 8)
     with pytest.raises(ValueError):
-        TaskShortlistPolicyV1(1, 5, 8, 10)
+        TaskShortlistPolicyV1(1, 5, 8, 8)
     with pytest.raises(ValueError):
         CandidatePriorV1("a", "statistical", float("nan"), 1.0, 1.0, ())
     assert TaskShortlistPolicyV1().canonical_bytes()
@@ -52,7 +52,7 @@ def test_policy_has_exact_bounds_and_prior_rejects_nonfinite():
     ("candidate_names", "exclusions", "underfilled"),
     (
         ((), (), True),
-        (tuple(f"c{index}" for index in range(11)), (), False),
+        (tuple(f"c{index}" for index in range(9)), (), False),
         (("anchor",), (("anchor", "ranked_out"),), True),
         (("anchor",), (), False),
     ),
@@ -183,6 +183,7 @@ def test_builder_requires_screening_and_selects_exact_target_with_dynamic_family
     priors = tuple(CandidatePriorV1(n, f, .9, 1, 1, ()) for n, f in zip(names, families))
     result = build_task_candidate_shortlist(dictionary=dictionary, profile=_profile(), screening=screening,
         task_input_sha256="1" * 64, anchor_name="anchor", available_names=names, priors=priors, policy=TaskShortlistPolicyV1())
+    assert len(dictionary.entries) == 10
     assert len(result.candidate_names) == 8
     assert len(set(next(e.family for e in dictionary.entries if e.name == n) for n in result.candidate_names[:4])) == 3
 

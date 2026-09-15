@@ -2,6 +2,7 @@
 import json
 import hashlib
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -85,9 +86,10 @@ def test_seed_execution_never_visits_nonshortlisted_catalog_candidates(monkeypat
     assert registry.package_for(adapter.tasks[0]).fallback_reason == "anchor_diagnostics_unavailable"
 
 
-def test_evolved_source_is_scored_and_frozen_outside_the_immutable_seed_shortlist():
+def test_evolved_source_is_scored_and_frozen_outside_the_immutable_seed_shortlist(monkeypatch):
     from evolving_loop.package_registry import task_registry_fingerprint
     from evolving_loop.package_numerical_supply import parse_numerical_supply_release
+    from evolving_loop.v2.numerical_qd import adapters
     from evolving_loop.v2.numerical_qd.adapters import evaluate_numerical_child, freeze_qd_supply
     from evolving_loop.v2.numerical_qd.contracts import NumericalInventoryV2, NumericalMemberV2, NumericalQDEntryV2
     from evolving_loop.v2.numerical_qd.map_elites import NumericalQDArchive
@@ -124,6 +126,28 @@ def test_evolved_source_is_scored_and_frozen_outside_the_immutable_seed_shortlis
     child = adapter.materialize_child(release, genome, state, member_id=member.member_id,
         policies=policies | {member.policy_sha256: recipe}, build_rows=rows,
         descriptor_policy=descriptor_policy(), version="n001")
+    assert any(
+        item.name == recipe.name
+        and item.diagnostics.reason_code != "frozen_package_recipe"
+        and item.diagnostics.successful_folds > 0
+        for task in adapter.tasks
+        for item in child.candidate.registry.package_for(task).ranked_alternatives
+    )
+    local_calls = []
+    def select_local(policy, *, candidate_names, forecasts, diagnostics, horizon):
+        local_calls.append(candidate_names)
+        specialist = recipe.name
+        assert specialist in candidate_names
+        selected = (policy.anchor_name, specialist)
+        weights = (0.5, 0.5)
+        forecast = tuple(
+            weights[0] * forecasts[selected[0]][index]
+            + weights[1] * forecasts[selected[1]][index]
+            for index in range(horizon)
+        )
+        return SimpleNamespace(activated=True, selected_names=selected,
+            weights=weights, forecast=forecast, fallback_reason=None)
+    monkeypatch.setattr(adapters, "execute_task_local_ensemble", select_local)
     commitments = {task.numeric.task_id: task_registry_fingerprint(task) for task in adapter.tasks}
     groups = _packed_train_task_groups(adapter, commitments,
         config.kernel_protocol.split_manifest, config.kernel_protocol.fingerprint())
@@ -144,6 +168,10 @@ def test_evolved_source_is_scored_and_frozen_outside_the_immutable_seed_shortlis
     assert any(item.name == recipe.name for item in child.candidate.registry.package_for(adapter.tasks[0]).ranked_alternatives)
     assert any(item.candidate_id == recipe.name for item in frozen.release.alternatives)
     assert any(item.name == recipe.name for item in frozen.registry.package_for(adapter.tasks[0]).ranked_alternatives)
+    assert local_calls
+    assert any(recipe.name in names for names in local_calls)
+    assert any(recipe.name in frozen.registry.package_for(task).selection_decision.selected
+        for task in adapter.tasks)
     assert frozen.envelope.schema_version == 1
 
 

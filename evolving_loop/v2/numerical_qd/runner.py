@@ -35,7 +35,7 @@ from ..kernel import EvolutionKernel, SeedBootstrapAuthority, SeedBootstrapStopp
 from ..store import V2RunStore, write_once_json
 from .adapters import (
     ImportedNumericalSeedV2, LegacyNumericalAdapter, MaterializedNumericalChildV2, NumericalWorkStopped, _canonical_member,
-    _applicable, evaluate_numerical_child, freeze_qd_supply, import_numerical_seed,
+    evaluate_numerical_child, freeze_qd_supply, import_numerical_seed,
 )
 from .config import NumericalQDConfigV2
 from .artifacts import ArtifactKindV2 as ArtifactKind, validate_artifact
@@ -535,9 +535,14 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
     return advance_hyperband(state, manifest, aggregates, outcome).state, tuple(results), None
 
 
-def _dev_compare(parent_registry, child_registry, parent_name, child_name, adapter, kernel, account_work, *,
-                 parent_member=None, child_member=None, descriptor_policy=None):
-    """Trusted Dev20 comparison. Only the caller's sealed evidence sees values."""
+def _dev_compare(parent_registry, child_registry, adapter, kernel, account_work):
+    """Compare the frozen task-local bundles on Dev20.
+
+    Dictionary members are exploration units, not deployable global models.  The
+    package's protected selector has already used task-local hindcasts to choose
+    Anchor alone or Anchor plus specialists, so promotion must score that final
+    forecast rather than the newly proposed member in isolation.
+    """
     scores = [[], []]
     count = 0
     ordered_tasks = tuple(sorted(adapter.tasks, key=lambda t: t.numeric.task_id))
@@ -551,23 +556,19 @@ def _dev_compare(parent_registry, child_registry, parent_name, child_name, adapt
     for task in ordered_tasks:
         if task.numeric.task_id in adapter.fold_manifest.task_fold_map:
             continue
-        for index, registry in enumerate((parent_registry, child_registry)):
+        for index, _registry in enumerate((parent_registry, child_registry)):
             if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
                 return _NO_DEV
             account_work()
             count += 1
             package = package_maps[index][task.numeric.task_id]
-            member_name = (parent_name, child_name)[index]
-            matches = tuple(item for item in package.ranked_alternatives if item.name == member_name)
-            member = (parent_member, child_member)[index]
-            if not matches and member is not None and descriptor_policy is not None \
-                    and not _applicable(member, task, descriptor_policy):
-                forecast = package.protected_baseline.forecast
-            elif len(matches) != 1:
-                raise ValueError("Dev package is missing one exact evaluated member")
-            else:
-                forecast = matches[0].forecast
-            scores[index].append(drcik_point_metrics(task.numeric.future_values, forecast, cap=5.0))
+            scores[index].append(
+                drcik_point_metrics(
+                    task.numeric.future_values,
+                    package.final_forecast,
+                    cap=5.0,
+                )
+            )
     metrics = [{"mean_smae": float(statistics.fmean(row["smae"] for row in values)),
                 "mean_srmse": float(statistics.fmean(row["srmse"] for row in values))} for values in scores]
     passed = (count == 40 and metrics[1]["mean_smae"] < metrics[0]["mean_smae"]
@@ -1129,25 +1130,13 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                     nonlocal count
                     count += 1
                 try:
-                    parent_genome, parent_sources, parent_policies = store.verify_candidate(active_genome.fingerprint())
-                    adapter.sources = dict(adapter.sources) | {sha: data.decode() for sha, data in parent_sources.items()}
-                    active_state = _state_for(store, parent_genome, config, seed_state.declared_cells)
-                    if active.generation == 0:
-                        # The imported seed Bundle executes its protected
-                        # anchor. Its proposal inventory is not an accepted
-                        # Child and cannot redefine the active Parent forecast.
-                        names = {parent_registry.package_for(task).protected_baseline.name for task in adapter.tasks}
-                        if len(names) != 1:
-                            raise ValueError("seed Parent has no unique exact anchor execution")
-                        parent_name = names.pop()
-                        parent_member = None
-                    else:
-                        parent_member = _canonical_member(active_state)
-                        parent_name = adapter._recipe(parent_member, parent_policies, None, None).name
-                    comparison = _dev_compare(parent_registry, frozen_registry, parent_name,
-                        children[winner].fit.recipe.name, adapter, kernel, account_dev,
-                        parent_member=parent_member, child_member=children[winner].member,
-                        descriptor_policy=config.descriptor_policy)
+                    comparison = _dev_compare(
+                        parent_registry,
+                        frozen_registry,
+                        adapter,
+                        kernel,
+                        account_dev,
+                    )
                 except (ValueError, TypeError, TimeoutError, MethodForecastError):
                     comparison = _NO_DEV
                 finally:
