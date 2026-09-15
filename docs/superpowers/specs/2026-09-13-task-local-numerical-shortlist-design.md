@@ -1,4 +1,10 @@
-# Task-local Numerical Shortlist Design
+# Task-local Numerical Shortlist Design (legacy lower-half contract)
+
+The active architecture is now the schema-v2 Dictionary-only path described in
+`docs/superpowers/specs/2026-09-15-p3-dictionary-only-design.md`: P2 seals the
+complete executable Dictionary and P3 performs the task-local filter. This
+document remains useful for the shortlist and Anchor constraints; statements
+that assign shortlist authority to P2 are historical and superseded.
 
 ## Goal
 
@@ -7,7 +13,7 @@ Dictionary followed by a bounded, history-only shortlist for each task:
 
 ```text
 complete global Dictionary
-        -> per-task history-only shortlist (6--10, including Anchor)
+        -> per-task history-only shortlist (at most 8, including Anchor)
         -> task-local hindcast
         -> Anchor + zero, one, or two specialists
 ```
@@ -27,7 +33,7 @@ The repository already has most of the desired lower half:
 
 The upper half is incorrect for this design:
 
-- `NumericalSupplyRelease` permits at most four alternatives and at most one
+- the legacy `NumericalSupplyRelease` permits at most four alternatives and at most one
   per family.
 - `fit_group_candidate_supply` constructs a global or morphology-group list
   of at most eight candidates.
@@ -66,12 +72,12 @@ Dictionary using only information available before the future:
 - Train-fitted candidate priors and failure/coverage statistics;
 - deterministic family-diversity tie breaking.
 
-The shortlist contains 6--10 candidates including the Anchor. The target size
-is eight. It may contain fewer than six only when fewer than six candidates are
+The active P3 shortlist contains at most eight candidates including the Anchor.
+Its target size is eight. It may be underfilled when fewer safe candidates are
 eligible and executable; this is recorded as `shortlist_underfilled`, never
-filled with unsafe candidates. The Anchor is always first. Candidate identities
-are unique, and no future values, task labels, Dev outcomes, or Public evidence
-may influence selection.
+filled with unsafe candidates. The Anchor is always first. Candidate
+identities are unique, and no future values, task labels, Dev outcomes, or
+Public evidence may influence selection.
 
 The shortlist is task-specific. Morphology groups may provide Train-fitted
 priors, but they may not replace the final per-task selection step.
@@ -120,22 +126,26 @@ explicit legacy parser path; new releases use a new schema version and cannot
 silently downgrade to group selection.
 
 The P2 frozen numerical registry stores each task's shortlist identity,
-hindcast diagnostics, selected specialists, and final weights. P3 continues to
-consume the frozen registry and does not perform a second Numerical search.
+hindcast diagnostics, selected specialists, and final weights. P3 performs the
+sole active task-local filter from the complete Dictionary; legacy frozen
+registries remain readable for inspection only.
 
 ## Evolution boundary
 
-P2 may evolve:
+P3 may evolve over the complete P2 Dictionary:
 
-- Dictionary membership/status/applicability;
 - the history-only shortlist scoring policy;
 - Train-fitted ranking priors;
 - task-local tournament thresholds.
 
+P2 still evolves Dictionary membership, status, applicability, and reusable
+program provenance, but it does not emit a task-local shortlist as runtime
+selection authority.
+
 P2 may not evolve away:
 
 - the protected Anchor;
-- the 6--10 shortlist ceiling and maximum two specialists;
+- the at-most-eight shortlist ceiling and maximum two specialists;
 - history-only selection;
 - paired-hindcast comparability;
 - finite-output and regret gates;

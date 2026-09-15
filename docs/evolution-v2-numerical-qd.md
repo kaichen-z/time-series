@@ -2,13 +2,12 @@
 
 ## Status and boundary
 
-Project 2 implements resumable self-evolution of the Numerical Supply behind the
-Evolution V2 Kernel. It evolves executable Numerical members, their typed
-structure, the Train-credit mutation policy, the bounded proposer prompt, and a
-MAP-Elites archive. A successful generation freezes an existing
-`NumericalSupplyRelease` together with an exact
-`FrozenNumericalPackageRegistry`; the Kernel promotes those two identities
-atomically or retains the exact Parent bytes.
+Project 2 implements resumable self-evolution of the complete executable
+Numerical Dictionary behind the Evolution V2 Kernel. It evolves executable
+Numerical members, their typed structure, the Train-credit mutation policy,
+bounded PromptBreeder-style task/mutation prompt lineages, and a MAP-Elites
+archive. A successful generation seals the complete Dictionary and its
+provenance; P3 is the only active task-local selection authority.
 
 This is an intermediate Numerical-only command. It does **not** implement
 Retrieval evolution, Decision evolution, joint Bundle evolution, the full
@@ -75,6 +74,17 @@ sampling weights, exact Hyperband brackets, proposer limits, and adapter limits.
 Changing any committed input or identity is not a resume.
 
 ## What evolves
+
+The three integrated mechanisms are deliberately mechanism-level integrations,
+not faithful reproductions of AlphaEvolve, Voyager, or PromptBreeder. The
+AlphaEvolve-style path gives the proposer bounded context from verified parent
+programs and accepts edited source only through the existing Host parser and
+sandbox. The Voyager-style path derives a deterministic curriculum from
+history-only morphology cells, archive visits, and sanitized Train failures,
+and exposes only reusable methods with feasible Train evidence. The
+PromptBreeder-style path keeps task-prompt and mutation-prompt lineages as
+bounded, content-addressed artifacts; Host Train outcomes alone provide their
+credit and no proposer can expand authority or award credit.
 
 The typed mutation grammar contains `add`, `repair`, `fork`, `combine`, `route`,
 `specialize`, `crossover`, `remove`, `quarantine`, and `policy_tune`. Each tag
@@ -288,11 +298,13 @@ the accepted atomic Supply/registry pair becomes the next active Parent.
 
 ## Project handoff
 
-Project 3 consumes the exact frozen Numerical Supply/registry pair and active V2
-Bundle produced here. It adds cooperative and joint Numerical/Retrieval/Decision
-evolution and is the first project that may connect the full production
-`evolve` path. It must not reopen Project 2 Train/Dev evidence or infer a new
-Numerical registry from a mutable pointer.
+Project 3 consumes the complete sealed Dictionary and evolves a bounded,
+history-only Selector over it. For each task, P3 filters to at most eight safe
+Dictionary candidates, then materializes Anchor plus zero, one, or two
+specialists (Anchor weight at least 0.5). It adds cooperative and joint
+Numerical/Retrieval/Decision evolution and is the first project that may
+connect the full production `evolve` path. It must not reopen Project 2
+Train/Dev evidence or infer a Dictionary from a mutable pointer.
 
 Project 4 may add DGM evolution of proposer, scheduler, mutation-operator,
 Evolver, or Harness source only under a separate source archive and fixed L0

@@ -1,8 +1,10 @@
 # Evolution V2 Cooperative Bundle Prototype
 
-Project 3 evaluates one immutable Project 2 Numerical Supply together with
-mutable Retrieval and Decision modules as an Evolution V2 Bundle.  Each
-scheduled Child uses the complete Numerical -> Retrieval -> Decision pipeline;
+Project 3 evaluates the immutable complete Project 2 Numerical Dictionary
+together with mutable Retrieval and Decision modules as an Evolution V2 Bundle.
+Its Numerical Selector filters that Dictionary to at most eight history-only
+candidates per task, then materializes Anchor plus zero, one, or two
+specialists (Anchor weight at least 0.5). Each scheduled Child uses the complete Numerical -> Retrieval -> Decision pipeline;
 the Host evaluates Parent and Child on the same Train tasks, opens Dev only
 after the Train gate, and promotes only a Train-eligible Child with a strictly
 better Dev joint mean. Public tasks are rejected before a proposal is made.
@@ -39,6 +41,16 @@ aggregate-evaluation objects. Progress advances only at closed candidate
 boundaries.
 
 ## Scope and interpretation
+
+The active handoff is `P2 full executable Dictionary -> P3 Dictionary Selector
+and cooperative Bundle`. Older frozen-supply artifacts remain readable only as
+legacy inputs/reporting evidence. P2/P3 use schema-v2, history-only evidence:
+future values, labels, raw forecasts, and Public data stay behind the Host.
+The AlphaEvolve-style program context, Voyager-style curriculum/reuse, and
+PromptBreeder-style task/mutation prompt lineages are mechanism-level
+integrations, not faithful paper reproductions. Metrics, verifier, split
+manifests, runtime identities, budgets, artifact validation, and promotion
+authority remain fixed Host boundaries.
 
 UCB and seeded Thompson schedule the four mutation scopes: `numerical`,
 `retrieval`, `decision`, and `joint`. A joint Child atomically changes at least

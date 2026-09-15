@@ -9,8 +9,8 @@ production-hardening project on 2026-09-12. This addendum therefore keeps the
 scientific invariants that affect results and removes defenses and acceptance
 work that do not help the first cooperative-evolution experiment.
 
-Project 3 starts from the completed Project 1 Kernel contracts and the frozen
-Numerical Supply produced by Project 2. It adds a complete
+Project 3 starts from the completed Project 1 Kernel contracts and the complete
+schema-v2 Numerical Dictionary produced by Project 2. It adds a complete
 Numerical -> Retrieval -> Decision evaluation loop, adaptive coordinate
 scheduling, single-coordinate and joint Children, checkpoint resume, and the
 unified `evolve` command. It does not add DGM-lite source evolution, L1
@@ -20,7 +20,7 @@ protocol evolution, or Public evaluation.
 
 The prototype must answer one research question reproducibly:
 
-> Given one frozen Numerical Supply and mutable Retrieval and Decision
+> Given one complete schema-v2 Numerical Dictionary and mutable Retrieval and Decision
 > artifacts, can a seeded UCB or Thompson scheduler generate and evaluate
 > attributable module and joint Children through the real three-Agent pipeline,
 > preserve the better complete Bundle, and resume to byte-identical results?
@@ -186,13 +186,14 @@ aggregate evaluation closes.
 
 ### Numerical Coordinate Adapter
 
-The Numerical adapter consumes the current `FrozenNumericalArtifactsV2` and a
-small, Host-supplied tuple of already frozen Project 2 alternatives. It chooses
-the next alternative by canonical fingerprint and never runs Numerical
-self-evolution inside Project 3. This makes the boundary explicit:
+The Numerical adapter consumes the complete P2 Dictionary and applies the
+history-only P3 Selector. It filters to at most eight safe candidates per task,
+then selects Anchor plus zero, one, or two specialists with Anchor weight at
+least 0.5. It never runs Numerical self-evolution inside Project 3. This makes
+the active boundary explicit:
 
 ```text
-Project 2 self-evolve -> frozen Supply alternatives -> Project 3 co-evolve
+Project 2 self-evolve -> complete Dictionary -> Project 3 Selector/co-evolve
 ```
 
 The smoke fixture provides one alternate Supply/registry pair so the numerical
