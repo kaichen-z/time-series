@@ -450,6 +450,21 @@ def _persist_prompt_population(store, population):
         store.material_writer = writer
 
 
+def _pending_generations_unresolved(steps, attempts):
+    """Return pending generations lacking a matching terminal status."""
+    terminal = {
+        (step.get("generation"), step.get("proposal_attempt_sha256"), step.get("proposal_request_sha256"))
+        for step in steps if step.get("status") != "proposal_pending"
+    }
+    return tuple(sorted(step.get("generation") for step in steps
+        if step.get("status") == "proposal_pending" and not any(
+            (step.get("generation"), fingerprint_payload(attempt), step.get("proposal_request_sha256")) in terminal
+            for attempt in attempts
+            if attempt.get("context", {}).get("generation") == step.get("generation")
+            and attempt.get("context", {}).get("request_sha256") == step.get("proposal_request_sha256")
+        )))
+
+
 def _aggregate(values, manifest, bracket, index):
     ordered = sorted(values, key=lambda v: v.task_ids)
     fields = ("mean_capped_smae", "mean_capped_srmse", "mean_raw_joint_error", "normalized_execution_cost")
@@ -844,9 +859,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         attempts = [store._read(name) for name in checkpoint.completed_operation_sha256s if name.startswith("proposals/")]
         if any(attempt.get("context", {}).get("generation", 0) > generation for attempt in attempts):
             raise NumericalQDStoreError("unfinished generation cannot be resampled; resume requires a closed generation or a new epoch")
-        completed_generations = {attempt.get("context", {}).get("generation") for attempt in attempts}
-        if any(step.get("status") == "proposal_pending"
-               and step.get("generation") not in completed_generations for step in steps):
+        if _pending_generations_unresolved(steps, attempts):
             raise NumericalQDStoreError("unfinished generation cannot be resampled; resume requires a closed generation or a new epoch")
         previous_feedback = (max(steps, key=lambda step: step["generation"])["train_feedback"] if steps else None)
         pairs = [value for value in objects if set(value) == {"supply", "registry"}]
@@ -1079,6 +1092,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 "active_bundle_sha256": active.fingerprint(),
                 "winner_genome_sha256": None,
                 "proposal_attempt_sha256": batch_sha,
+                "proposal_request_sha256": request_sha,
                 "train_feedback": feedback.to_payload(),
                 "mutation_prompt_population_sha256": _persist_prompt_population(store, population),
                 "materialization_failures": [],
@@ -1337,6 +1351,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         _persist(store, {"numerical_qd_step": {"generation": generation, "status": reason,
             "active_bundle_sha256": active.fingerprint(), "winner_genome_sha256": winner,
             "proposal_attempt_sha256": batch_sha, "train_feedback": feedback.to_payload(),
+            "proposal_request_sha256": request_sha,
             "mutation_prompt_population_sha256": _persist_prompt_population(store, population),
             "materialization_failures": materialization_failures}}, kind=ArtifactKind.GENERATION_STATUS)
         checkpoint_state()

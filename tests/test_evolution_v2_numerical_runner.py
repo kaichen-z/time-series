@@ -164,6 +164,17 @@ def test_runner_host_derives_and_inserts_policy_tune_prompt_child():
     assert child.allowed_mutation_operators == ("policy_tune",)
 
 
+def test_pending_proposal_requires_matching_terminal_status():
+    from evolving_loop.v2.numerical_qd.runner import _pending_generations_unresolved
+    request_sha = "a" * 64
+    attempt = {"context": {"generation": 1, "request_sha256": request_sha}, "batch": {},}
+    pending = {"generation": 1, "status": "proposal_pending",
+               "proposal_request_sha256": request_sha}
+    assert _pending_generations_unresolved([pending], []) == (1,)
+    terminal = dict(pending, status="accepted", proposal_attempt_sha256=fingerprint_payload(attempt))
+    assert _pending_generations_unresolved([pending, terminal], [attempt]) == ()
+
+
 def test_authenticated_fold_groups_pack_into_nested_label_free_rungs():
     from evolving_loop.v2.numerical_qd import hyperband
     from evolving_loop.v2.numerical_qd import runner

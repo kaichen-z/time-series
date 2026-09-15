@@ -25,3 +25,9 @@
 - RED: true pre-context request shape (without all three reusable/curriculum commitments) was rejected; crash-window resume had no durable pending-generation decision.
 - GREEN: oldest request schema is accepted; a `proposal_pending` generation marker records the exact request SHA and is checkpointed before provider dispatch; resume fails closed unless a completed attempt resolves it.
 - Focused verification: `PYTHONDONTWRITEBYTECODE=1 pytest -q tests/test_evolution_v2_numerical_proposers.py -k 'legacy or mutation_prompt_context'` — 2 passed, 129 deselected; runner Host/context checks — 2 passed, 107 deselected.
+
+## Review-round 3 TDD evidence
+
+- RED: a proposal attempt alone incorrectly resolved `proposal_pending`, allowing resume to abandon a generation before terminal accounting.
+- GREEN: pending state now resolves only with a same-generation terminal status carrying both exact request and attempt commitments; otherwise resume fails closed.
+- Focused verification: pending/Host/legacy checks — 2 passed, 239 deselected.
