@@ -407,6 +407,12 @@ def _state_for(store, genome, config, declared_cells, policy=None, prompt=None):
         declared_cells, config.mutation["max_parents_per_child"], config.mutation["max_inventory_size"])
 
 
+def _prompt_for_genome(store, genome, prompt_overrides):
+    """Resolve the latest terminal Host-credited prompt for a sampled genome."""
+    prompt_sha = prompt_overrides.get(genome.fingerprint(), genome.proposer_prompt_sha256)
+    return NumericalProposerPromptV2.from_payload(store._object(prompt_sha))
+
+
 def _persist_state(store, state, genome):
     for value in (state.inventory, state.mutation_policy, state.proposer_prompt, genome):
         _persist(store, value)
@@ -450,18 +456,29 @@ def _persist_prompt_population(store, population):
         store.material_writer = writer
 
 
-def _declared_curriculum_cells(store, declared_cells):
-    """Resolve the authenticated declared-cell SHA universe to typed cells."""
-    if type(declared_cells) is not tuple:
-        raise TypeError("declared cells must be an immutable SHA tuple")
-    cells = []
-    for cell_sha in declared_cells:
-        require = store._object(cell_sha)
-        cell = MorphologyCellV2.from_payload(require)
-        if cell.fingerprint() != cell_sha:
-            raise ValueError("declared morphology cell identity mismatch")
-        cells.append(cell)
-    return tuple(cells)
+def _declared_curriculum_cells(seed_state, adapter, config):
+    """Rebuild the fixed authenticated seed-cell universe as typed cells."""
+    if type(seed_state) is not MutationStateV2:
+        raise TypeError("declared cells require a typed seed state")
+    train = tuple(
+        task for task in adapter.tasks
+        if task.numeric.task_id in adapter.fold_manifest.task_fold_map
+    )
+    families = tuple(sorted({member.family for member in seed_state.inventory.members}))
+    cells = {}
+    for family in families:
+        for task in train:
+            cell = describe_history(
+                task.numeric.history_values,
+                task.numeric.prediction_length,
+                task.numeric.frequency,
+                family,
+                config.descriptor_policy,
+            )
+            cells[cell.fingerprint()] = cell
+    if set(cells) != set(seed_state.declared_cells):
+        raise ValueError("reconstructed morphology cells differ from declared universe")
+    return tuple(cells[cell_sha] for cell_sha in seed_state.declared_cells)
 
 
 def _latest_terminal_generation(steps):
@@ -872,6 +889,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         if _pending_generations_unresolved(steps, attempts):
             raise NumericalQDStoreError("unfinished generation cannot be resampled; resume requires a closed generation or a new epoch")
         terminal = _latest_terminal_generation(steps)
+        prompt_overrides = dict(terminal.get("prompt_overrides", {})) if terminal else {}
         population_sha = (
             terminal.get("mutation_prompt_population_sha256") if terminal else None
         )
@@ -948,6 +966,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             config.hyperband["reduction_factor"], config.kernel_protocol.split_manifest, config.kernel_protocol.fingerprint(), ())
         random, generation = CounterRandom(config.seed, "numerical"), 0
         previous_feedback = None
+        prompt_overrides = {}
         parent_release, parent_registry = release, registry
 
     if not hasattr(store, "accounting"):
@@ -1000,14 +1019,14 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         sampled = archive.sample_parent(feedback, random).genome_sha256 if archive.entries else seed_genome.fingerprint()
         selected = store.verify_candidate(sampled)[0]
         parent_state = _state_for(store, selected, config, seed_state.declared_cells,
-            state.mutation_policy, None)
+            state.mutation_policy, _prompt_for_genome(store, selected, prompt_overrides))
         selected_prompt = select_prompt_lineage(population)
         selected = replace(selected, mutation_policy_sha256=state.mutation_policy.fingerprint(),
                            proposer_prompt_sha256=parent_state.proposer_prompt.fingerprint())
         _persist_state(store, parent_state, selected)
         # Declared cells are the authenticated complete morphology universe;
         # never narrow it to whichever families happen to survive in a parent.
-        curriculum_cells = _declared_curriculum_cells(store, seed_state.declared_cells)
+        curriculum_cells = _declared_curriculum_cells(seed_state, adapter, config)
         targets = derive_curriculum_targets(
             tuple(sorted(curriculum_cells, key=lambda cell: cell.fingerprint())),
             archive, feedback, maximum_targets=8,
@@ -1027,6 +1046,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 "proposal_attempt_sha256": None,
                 "train_feedback": feedback.to_payload(),
                 "mutation_prompt_population_sha256": _persist_prompt_population(store, population),
+                "prompt_overrides": dict(sorted(prompt_overrides.items())),
                 "materialization_failures": [],
             }}, kind=ArtifactKind.GENERATION_STATUS)
             checkpoint_state()
@@ -1110,11 +1130,13 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 "proposal_request_sha256": request_sha,
                 "train_feedback": feedback.to_payload(),
                 "mutation_prompt_population_sha256": _persist_prompt_population(store, population),
+                "prompt_overrides": dict(sorted(prompt_overrides.items())),
                 "materialization_failures": [],
             }}, kind=ArtifactKind.GENERATION_STATUS)
             checkpoint_state()
             break
         children, child_states, attempted, budget_blocked = {}, {}, [], False
+        generation_prompt_overrides = {}
         materialization_failures = []
         generation_stop_reason = None
         for proposal in batch.proposals:
@@ -1307,6 +1329,11 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 _persist(store, updated.mutation_policy)
                 _persist(store, updated.proposer_prompt)
                 state = updated
+                generation_prompt_overrides[sampled] = updated.proposer_prompt.fingerprint()
+                if inserted:
+                    # An inserted child is the sampled lineage's executable
+                    # descendant and is what MAP-Elites can sample next.
+                    generation_prompt_overrides[genome_sha] = updated.proposer_prompt.fingerprint()
             else:
                 # Train feedback remains in the closed generation record. A new
                 # evolvable policy cannot be produced after its admission limit.
@@ -1366,11 +1393,13 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                     reason = "rejected"
             else:
                 reason = permit.reason
+        prompt_overrides.update(generation_prompt_overrides)
         _persist(store, {"numerical_qd_step": {"generation": generation, "status": reason,
             "active_bundle_sha256": active.fingerprint(), "winner_genome_sha256": winner,
             "proposal_attempt_sha256": batch_sha, "train_feedback": feedback.to_payload(),
             "proposal_request_sha256": request_sha,
             "mutation_prompt_population_sha256": _persist_prompt_population(store, population),
+            "prompt_overrides": dict(sorted(prompt_overrides.items())),
             "materialization_failures": materialization_failures}}, kind=ArtifactKind.GENERATION_STATUS)
         checkpoint_state()
         if budget_blocked:

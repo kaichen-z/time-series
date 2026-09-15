@@ -351,6 +351,8 @@ def validate_artifact(kind, raw):
                 fields = (*fields, "mutation_prompt_population_sha256")
             if isinstance(raw_row, dict) and "proposal_request_sha256" in raw_row:
                 fields = (*fields, "proposal_request_sha256")
+            if isinstance(raw_row, dict) and "prompt_overrides" in raw_row:
+                fields = (*fields, "prompt_overrides")
         row = _require_exact_schema(raw_row, fields, field=kind.value)
         TrainMutationFeedbackV2.from_payload(row["train_feedback"])
         if type(row["generation"]) is not int or type(row["status"]) is not str:
@@ -367,6 +369,12 @@ def validate_artifact(kind, raw):
                     for name in ("member_id", "error_type", "message"))
                     or len(failure["message"].encode("utf-8")) > 512):
                 raise ValueError("materialization failure fields must be bounded text")
+        overrides = row.get("prompt_overrides", {})
+        if type(overrides) is not dict:
+            raise ValueError("prompt overrides must be an object")
+        for genome_sha, prompt_sha in overrides.items():
+            require_sha256(genome_sha, "prompt override genome SHA")
+            require_sha256(prompt_sha, "prompt override prompt SHA")
     elif kind is K.PARTIAL_RUNG:
         from .contracts import HyperbandBudgetOutcomeV2
         row = _require_exact_schema(payload["closed_partial_rung"], ("state", "manifest_sha256", "reason", "task_results",

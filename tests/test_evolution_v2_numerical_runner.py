@@ -170,15 +170,13 @@ def test_runner_reusable_context_accepts_verified_non_program_family(monkeypatch
 
 
 def test_declared_curriculum_sha_universe_resolves_typed_cells():
-    from evolving_loop.v2.numerical_qd.contracts import MorphologyCellV2
-    from evolving_loop.v2.numerical_qd.runner import _declared_curriculum_cells
-    cell = MorphologyCellV2("low", "none", "low", "stable", "short", "program")
-    class Store:
-        def _object(self, sha):
-            assert sha == cell.fingerprint()
-            return cell.to_payload()
-    resolved = _declared_curriculum_cells(Store(), (cell.fingerprint(),))
-    assert resolved == (cell,)
+    from evolving_loop.v2.numerical_qd.runner import _bootstrap, _declared_curriculum_cells
+
+    config, supply, _folds, adapter = fixture()
+    seed_state = _bootstrap(config, supply, adapter)[0]
+    resolved = _declared_curriculum_cells(seed_state, adapter, config)
+
+    assert tuple(cell.fingerprint() for cell in resolved) == seed_state.declared_cells
 
 
 def test_runner_host_derives_and_inserts_policy_tune_prompt_child():
@@ -1293,6 +1291,31 @@ def test_train_feedback_updates_sampled_prompt_lineage(tmp_path, monkeypatch):
     from evolving_loop.v2.numerical_qd.contracts import NumericalProposerPromptV2
     assert observed == [NumericalProposerPromptV2.from_payload(prompt).fingerprint()
                         for prompt in requests]
+
+
+def test_prompt_override_is_restored_across_stop_and_resume(tmp_path, monkeypatch):
+    """A terminal Host credit override is used by the resumed next sample."""
+    force_dev_results(monkeypatch, True, False)
+    root = tmp_path / "run"
+    run_fixture(root, stop_after=1)
+    statuses = [json.loads(path.read_bytes())["numerical_qd_step"]
+                for path in (root / "numerical_qd" / "objects").glob("*.json")
+                if "numerical_qd_step" in json.loads(path.read_bytes())]
+    terminal = max((row for row in statuses if row["status"] != "proposal_pending"),
+                   key=lambda row: row["generation"])
+    assert terminal["prompt_overrides"]
+    override = next(iter(terminal["prompt_overrides"].values()))
+    assert (root / "numerical_qd" / "objects" / f"{override}.json").is_file()
+
+    run_fixture(root, resume=True, stop_after=2)
+    attempts = [json.loads(path.read_bytes())
+                for path in (root / "numerical_qd" / "proposals").glob("*.json")]
+    second = next(attempt for attempt in attempts
+                  if attempt["context"]["generation"] == 2)
+    request_sha = second["context"]["request_sha256"]
+    request = json.loads((root / "numerical_qd" / "objects" / f"{request_sha}.json").read_bytes())
+    assert request["parent_state"]["proposer_prompt"] == json.loads(
+        (root / "numerical_qd" / "objects" / f"{override}.json").read_bytes())
 
 
 def test_acceptance_promotes_pair_and_rejection_keeps_exact_parent(tmp_path, monkeypatch):
