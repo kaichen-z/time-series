@@ -123,6 +123,32 @@ def test_llm_proposal_budget_is_independent_of_numerical_task_timeout():
     assert _proposal_budget(available).wall_seconds == 60.0
 
 
+def test_runner_reusable_context_requires_feasible_store_verified_programs():
+    from evolving_loop.v2.numerical_qd.agent_methods import CurriculumTargetV2
+    from evolving_loop.v2.numerical_qd.contracts import (
+        ConstraintReportV2, MorphologyCellV2, NumericalObjectiveVectorV2,
+        NumericalQDEntryV2, TrainMutationFeedbackV2,
+    )
+    from evolving_loop.v2.numerical_qd.map_elites import NumericalQDArchive
+    from evolving_loop.v2.numerical_qd.runner import _trusted_reusable_program_context
+
+    cell = MorphologyCellV2("low", "none", "low", "stable", "short", "program")
+    entry = NumericalQDEntryV2(
+        1, "a" * 64, "b" * 64, cell, ("task-a",),
+        NumericalObjectiveVectorV2(*(1.0,) * 5), ConstraintReportV2(True, ()), (),
+    )
+    archive = NumericalQDArchive().insert((entry,))
+    target = CurriculumTargetV2(1, cell, "least_visited", 1, ())
+
+    class ForgedStore:
+        def verify_candidate(self, _genome_sha):
+            raise ValueError("candidate is not Host-verifiable")
+
+    assert _trusted_reusable_program_context(
+        ForgedStore(), archive, (target,), maximum_records=4,
+    ) == ((), ())
+
+
 def test_authenticated_fold_groups_pack_into_nested_label_free_rungs():
     from evolving_loop.v2.numerical_qd import hyperband
     from evolving_loop.v2.numerical_qd import runner

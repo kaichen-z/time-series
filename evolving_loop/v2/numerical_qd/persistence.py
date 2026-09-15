@@ -388,14 +388,30 @@ class NumericalQDRunStore:
 
         if "context" in payload or "batch" in payload:
             envelope = _require_exact_schema(payload, ("context", "batch"), field="contextual proposal attempt")
-            context = _require_exact_schema(envelope["context"],
-                ("generation", "parent_genome_sha256", "request_sha256", "counter"), field="proposal context")
+            base_context = ("generation", "parent_genome_sha256", "request_sha256", "counter")
+            context_keys = set(envelope["context"]) if isinstance(envelope["context"], Mapping) else set()
+            added_context = ("mutation_prompt_sha256", "mutation_prompt_population_sha256",
+                             "curriculum_target_sha256s", "eligible_reusable_program_sha256s")
+            expected_context = base_context + added_context if set(base_context) < context_keys else base_context
+            context = _require_exact_schema(envelope["context"], expected_context, field="proposal context")
             generation = context["generation"]
             if type(generation) is not int or generation < 1:
                 raise NumericalQDStoreError("proposal context requires a positive generation")
             for name in ("parent_genome_sha256", "request_sha256"):
                 require_sha256(context[name], name)
             request = primitive_proposer_request(**self._object(context["request_sha256"]))
+            if expected_context != base_context:
+                require_sha256(context["mutation_prompt_sha256"], "mutation_prompt_sha256")
+                require_sha256(context["mutation_prompt_population_sha256"], "mutation_prompt_population_sha256")
+                self._object(context["mutation_prompt_population_sha256"])
+                if context["eligible_reusable_program_sha256s"] != request["eligible_reusable_program_sha256s"]:
+                    raise NumericalQDStoreError("proposal reusable-program commitment mismatch")
+                target_shas = tuple(
+                    fingerprint_payload(target["cell"])
+                    for target in request["curriculum_targets"]
+                )
+                if tuple(context["curriculum_target_sha256s"]) != target_shas:
+                    raise NumericalQDStoreError("proposal curriculum commitment mismatch")
             parent = self.verify_candidate(context["parent_genome_sha256"])[0]
             if parent.to_payload() != request["parent_genome"] or generation <= parent.generation:
                 raise NumericalQDStoreError("proposal request/Parent/generation mismatch")

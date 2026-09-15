@@ -38,6 +38,12 @@ from .adapters import (
     evaluate_numerical_child, freeze_qd_supply, import_numerical_seed,
     materialize_dictionary_evidence,
 )
+from .agent_methods import (
+    CurriculumTargetV2, MutationPromptPopulationV2, MutationPromptLineageV2,
+    VerifiedReusableProgramV2, apply_prompt_train_credit, derive_curriculum_targets,
+    select_prompt_lineage,
+    select_reusable_programs,
+)
 from .config import NumericalQDConfigV2
 from .artifacts import ArtifactKindV2 as ArtifactKind, validate_artifact
 from .contracts import (
@@ -178,6 +184,43 @@ def _proposal_budget(available):
     if type(available) is not ResourceUse:
         raise TypeError("proposal budget requires exact ResourceUse")
     return replace(available, wall_seconds=min(60.0, available.wall_seconds))
+
+
+def _trusted_reusable_program_context(store, archive, targets, *, maximum_records):
+    """Derive reusable source context solely from verified feasible archive entries."""
+    target_cells = tuple(target.cell.fingerprint() for target in targets)
+    records, eligible = [], set()
+    for entry in sorted(archive.entries.values(), key=lambda value: value.fingerprint()):
+        if not entry.constraints.feasible or entry.cell.fingerprint() not in set(target_cells):
+            continue
+        try:
+            genome, sources, _policies = store.verify_candidate(entry.genome_sha256)
+            inventory = NumericalInventoryV2.from_payload(
+                store._object(genome.inventory_sha256)
+            )
+        except (ValueError, TypeError, NumericalQDStoreError):
+            continue
+        eligible.add(entry.genome_sha256)
+        for member in inventory.members:
+            if member.family != "program" or member.status == "quarantined":
+                continue
+            source = sources.get(member.source_sha256)
+            if source is None:
+                continue
+            try:
+                records.append(VerifiedReusableProgramV2(
+                    1, member.member_id, entry.genome_sha256,
+                    member.applicability_cells, member.source_sha256,
+                    source.decode("utf-8"),
+                ))
+            except (UnicodeError, ValueError, TypeError):
+                continue
+    selected = select_reusable_programs(
+        tuple(records), eligible_genome_sha256s=tuple(sorted(eligible)),
+        target_cell_sha256s=tuple(sorted(set(target_cells))),
+        maximum_records=maximum_records,
+    ) if records and target_cells else ()
+    return tuple(selected), tuple(sorted(record.fingerprint() for record in selected))
 
 
 class _KernelWork:
@@ -368,6 +411,32 @@ def _persist_state(store, state, genome):
     for value in (state.inventory, state.mutation_policy, state.proposer_prompt, genome):
         _persist(store, value)
     return store.verify_candidate(genome.fingerprint())[0]
+
+
+def _seed_prompt_population(prompt):
+    mutation_prompt = NumericalProposerPromptV2(
+        1,
+        "Propose a bounded mutation-prompt variant using Train evidence only.",
+        "numerical_mutation_batch_v1",
+        prompt.max_response_bytes,
+        ("policy_tune",),
+        None,
+    )
+    return MutationPromptPopulationV2(
+        1, 4, (MutationPromptLineageV2(
+            1, mutation_prompt, MutationOperatorStatsV2(0, 0, 0, 0, 0)
+        ),)
+    )
+
+
+def _persist_prompt_population(store, population):
+    """Persist control-only prompt population without widening material taxonomy."""
+    writer = getattr(store, "material_writer", None)
+    store.material_writer = None
+    try:
+        return _persist(store, population)
+    finally:
+        store.material_writer = writer
 
 
 def _aggregate(values, manifest, bracket, index):
@@ -749,6 +818,18 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                    if name.startswith("objects/")]
         steps = [value["numerical_qd_step"] for value in objects if "numerical_qd_step" in value]
         generation = max((step["generation"] for step in steps), default=0)
+        population_sha = (
+            max(steps, key=lambda step: step["generation"])
+            .get("mutation_prompt_population_sha256") if steps else None
+        )
+        population = (
+            MutationPromptPopulationV2.from_payload(store._object(population_sha))
+            if population_sha else _seed_prompt_population(
+                NumericalProposerPromptV2.from_payload(
+                    store._object(seed_genome.proposer_prompt_sha256)
+                )
+            )
+        )
         attempts = [store._read(name) for name in checkpoint.completed_operation_sha256s if name.startswith("proposals/")]
         if any(attempt.get("context", {}).get("generation", 0) > generation for attempt in attempts):
             raise NumericalQDStoreError("unfinished generation cannot be resampled; resume requires a closed generation or a new epoch")
@@ -811,6 +892,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         _persist_task_local_evidence(store, adapter.task_local_evidence)
         _persist(store, {"supply": release.to_payload(), "registry": imported_seed.envelope.to_payload()}, kind=ArtifactKind.FROZEN_PAIR)
         state, active_genome = seed_state, seed_genome
+        population = _seed_prompt_population(seed_state.proposer_prompt)
         archive = NumericalQDArchive(capacity=config.map_elites["cell_capacity"])
         hyperband = HyperbandStateV2(HyperbandBracketV2.registered("explore"), (seed_genome.fingerprint(),),
             config.hyperband["reduction_factor"], config.kernel_protocol.split_manifest, config.kernel_protocol.fingerprint(), ())
@@ -823,6 +905,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
 
     def checkpoint_state():
         current = _read(kernel.checkpoint_path)
+        _persist_prompt_population(store, population)
         return store.write_state(config_sha256=config.fingerprint(), input_sha256s=inputs,
             active_bundle_sha256=_persist(store, active), active_genome_sha256=active_genome.fingerprint(),
             qd_snapshot_sha256=_persist(store, archive), mutation_policy_sha256=_persist(store, state.mutation_policy),
@@ -866,10 +949,29 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         counter_start = random.counter
         sampled = archive.sample_parent(feedback, random).genome_sha256 if archive.entries else seed_genome.fingerprint()
         selected = store.verify_candidate(sampled)[0]
-        parent_state = _state_for(store, selected, config, seed_state.declared_cells, state.mutation_policy, state.proposer_prompt)
+        parent_state = _state_for(store, selected, config, seed_state.declared_cells,
+            state.mutation_policy, None)
+        selected_prompt = select_prompt_lineage(population)
         selected = replace(selected, mutation_policy_sha256=state.mutation_policy.fingerprint(),
-                           proposer_prompt_sha256=state.proposer_prompt.fingerprint())
+                           proposer_prompt_sha256=parent_state.proposer_prompt.fingerprint())
         _persist_state(store, parent_state, selected)
+        curriculum_cells = tuple({
+            describe_history(
+                task.numeric.history_values, task.numeric.prediction_length,
+                task.numeric.frequency, member.family, config.descriptor_policy,
+            )
+            for task in adapter.tasks
+            if task.numeric.task_id in adapter.fold_manifest.task_fold_map
+            for member in parent_state.inventory.members
+            if member.status != "quarantined"
+        })
+        targets = derive_curriculum_targets(
+            tuple(sorted(curriculum_cells, key=lambda cell: cell.fingerprint())),
+            archive, feedback, maximum_targets=8,
+        ) if curriculum_cells else ()
+        reusable, reusable_shas = _trusted_reusable_program_context(
+            store, archive, targets, maximum_records=8,
+        )
         draw = random.randbelow(2 ** 32)
         checkpoint_state()  # RNG authority is durable before any provider call.
         if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
@@ -880,6 +982,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 "winner_genome_sha256": None,
                 "proposal_attempt_sha256": None,
                 "train_feedback": feedback.to_payload(),
+                "mutation_prompt_population_sha256": _persist_prompt_population(store, population),
                 "materialization_failures": [],
             }}, kind=ArtifactKind.GENERATION_STATUS)
             checkpoint_state()
@@ -889,6 +992,9 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             selected_cells=[{"cell_sha256": cell, "member_ids": sorted(m.member_id for m in parent_state.inventory.members
                 if cell in m.applicability_cells)} for cell in parent_state.declared_cells],
             train_feedback=[feedback.to_payload()], remaining_budget=proposal_budget.to_payload(),
+            curriculum_targets=[target.to_payload() for target in targets],
+            reusable_programs=[program.to_payload() for program in reusable],
+            eligible_reusable_program_sha256s=list(reusable_shas),
             allowed_mutation_operators=sorted(config.mutation["operators"]), counter_draw=draw,
             max_proposals=config.proposer["max_proposals_per_generation"], max_response_bytes=config.proposer["max_response_bytes"])
         request_sha = _persist(store, request, kind=ArtifactKind.PROPOSER_REQUEST)
@@ -916,6 +1022,10 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                           "failure_reason": attempt.failure_reason} for attempt in batch.attempts]}
         attempt_payload = {"context": {"generation": generation,
             "parent_genome_sha256": selected.fingerprint(), "request_sha256": request_sha,
+            "mutation_prompt_sha256": selected_prompt.mutation_prompt.fingerprint(),
+            "mutation_prompt_population_sha256": _persist_prompt_population(store, population),
+            "curriculum_target_sha256s": [target.cell.fingerprint() for target in targets],
+            "eligible_reusable_program_sha256s": list(reusable_shas),
             "counter": {"seed": random.seed, "stream": random.stream, "start": counter_start, "end": random.counter}},
             "batch": payload}
         batch_sha = fingerprint_payload(attempt_payload)
@@ -944,6 +1054,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 "winner_genome_sha256": None,
                 "proposal_attempt_sha256": batch_sha,
                 "train_feedback": feedback.to_payload(),
+                "mutation_prompt_population_sha256": _persist_prompt_population(store, population),
                 "materialization_failures": [],
             }}, kind=ArtifactKind.GENERATION_STATUS)
             checkpoint_state()
@@ -1120,6 +1231,10 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             feedback = TrainMutationFeedbackV2("train", operator,
                 feasible, promoted, inserted, ())
             updated = record_train_outcome(state, feedback.to_payload())
+            if operator == "policy_tune":
+                population = apply_prompt_train_credit(
+                    population, selected_prompt.mutation_prompt.fingerprint(), feedback,
+                )
             credit_bytes = sum(len(value.canonical_bytes()) for value in (updated.mutation_policy, updated.proposer_prompt)
                 if not (store.directory / f"objects/{value.fingerprint()}.json").exists())
             if kernel.budget.can_open_stage(ResourceUse(artifact_bytes=credit_bytes)).allowed:
@@ -1188,6 +1303,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         _persist(store, {"numerical_qd_step": {"generation": generation, "status": reason,
             "active_bundle_sha256": active.fingerprint(), "winner_genome_sha256": winner,
             "proposal_attempt_sha256": batch_sha, "train_feedback": feedback.to_payload(),
+            "mutation_prompt_population_sha256": _persist_prompt_population(store, population),
             "materialization_failures": materialization_failures}}, kind=ArtifactKind.GENERATION_STATUS)
         checkpoint_state()
         if budget_blocked:
