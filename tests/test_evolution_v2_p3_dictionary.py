@@ -127,6 +127,68 @@ def test_decision_dictionary_export_preserves_all_ten_methods():
     assert package.selection_decision.selected == ('safe_anchor',)
 
 
+def test_decision_dictionary_export_passes_real_pipeline_preflight(tmp_path):
+    from common.llm import FakeLLMClient
+    from evolving_loop.decision_agent.agent import DecisionAgent
+    from evolving_loop.numerical_two_stage import _validate_inputs
+    from evolving_loop.v2.cooperative.numerical_dictionary import materialize_decision_dictionary_pair
+    from tests.test_numerical_retrieval_handoff import _retrieval
+
+    tasks = _registry_tasks()
+    dictionary = build_p3_numerical_dictionary((_wide_dictionary_pair(),), tasks)
+    pair = materialize_decision_dictionary_pair(dictionary, tasks)
+    restored = pair.envelope.restore(tasks)
+    for task in tasks:
+        _validate_inputs(task, restored.package_for(task), _retrieval([], tmp_path),
+                         DecisionAgent(FakeLLMClient([])))
+
+
+@pytest.mark.parametrize('field', ['hindcast_config', 'active_dictionary', 'decision_policy'])
+def test_decision_dictionary_rejects_changed_execution_commitments(tmp_path, field):
+    from common.llm import FakeLLMClient
+    from evolving_loop.decision_agent.agent import DecisionAgent
+    from evolving_loop.numerical_two_stage import _validate_inputs
+    from evolving_loop.v2.cooperative.numerical_dictionary import materialize_decision_dictionary_pair
+    from tests.test_numerical_retrieval_handoff import _retrieval
+
+    tasks = _registry_tasks()
+    dictionary = build_p3_numerical_dictionary((_wide_dictionary_pair(),), tasks)
+    pair = materialize_decision_dictionary_pair(dictionary, tasks)
+    package = pair.registry.package_for(tasks[0])
+    tampered = replace(package, component_fingerprints={**package.component_fingerprints, field: '0' * 64})
+    with pytest.raises(ValueError, match='cache contract fingerprint mismatch'):
+        _validate_inputs(tasks[0], tampered, _retrieval([], tmp_path), DecisionAgent(FakeLLMClient([])))
+
+
+def test_exported_dictionary_reaches_decision_and_changes_forecast(tmp_path):
+    import json
+    from common.llm import LLMResponse
+    from evolving_loop.decision_agent.agent import DecisionAgent
+    from evolving_loop.numerical_two_stage import run_numerical_two_stage
+    from evolving_loop.v2.cooperative.numerical_dictionary import materialize_decision_dictionary_pair
+    from tests.test_numerical_retrieval_handoff import _retrieval, _round, _decision
+
+    tasks = _registry_tasks()
+    dictionary = build_p3_numerical_dictionary((_wide_dictionary_pair(),), tasks)
+    pair = materialize_decision_dictionary_pair(dictionary, tasks)
+    package = pair.envelope.restore(tasks).package_for(tasks[0])
+
+    class Client:
+        def complete(self, **kwargs):
+            payload = json.loads(kwargs['messages'][0]['content'])
+            if 'dictionary' in payload:
+                return LLMResponse(json.dumps({'evaluations': [{'method_ids': ['h_stat'], 'weights': [1.0]}]}))
+            if 'evaluated' in payload:
+                return LLMResponse(json.dumps({'selected_candidate_id': payload['evaluated'][0]['candidate_id']}))
+            return LLMResponse(_decision(payload['host_default_id']))
+
+    result = run_numerical_two_stage(tasks[0], package, _retrieval([_round()], tmp_path), DecisionAgent(Client()))
+    assert result.fallback_reason is None
+    assert result.forecast == (8.0, 8.0)
+    assert result.forecast != package.protected_baseline.forecast
+    assert 'decision_dictionary_execution' in result.fingerprints
+
+
 def test_selector_genome_rejects_unknown_fields():
     payload = seed_selector_genome().to_payload()
     payload["future_score"] = 0.1

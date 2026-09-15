@@ -8,11 +8,12 @@ import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 
-from common.llm import LLMClient, TransientLLMError, parse_json_object
+from common.llm import JsonExtractionError, LLMClient, TransientLLMError, parse_json_object
 from evolving_loop.data import ContextTask
 from evolving_loop.retrieval_agent.policy import RetrievalGenome
 from evolving_loop.retrieval_agent.schemas import (
     RetrievalAssumption,
+    RetrievalContractError,
     RetrievalGap,
     RetrievalRoundResult,
     build_round1_payload,
@@ -286,18 +287,28 @@ class TwoStageRetrievalAgent:
         *,
         stage: str,
     ) -> Mapping[str, object] | RetrievalRoundResult:
+        from evolving_loop.retrieval_agent.schemas import retrieval_response_contract
         try:
-            response = self.llm.complete(
-                system=prompt,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": json.dumps(payload, ensure_ascii=False),
-                    }
-                ],
-                temperature=0.0,
-            )
-            return parse_json_object(response.text)
+            messages = [{'role': 'user', 'content': json.dumps(
+                {**payload, 'response_contract': retrieval_response_contract()}, ensure_ascii=False)}]
+            for attempt in range(2):
+                response = self.llm.complete(
+                    system=prompt + '\nUse the exact response_contract supplied in the request.',
+                    messages=messages, temperature=0.0,
+                )
+                try:
+                    raw = parse_json_object(response.text)
+                    RetrievalRoundResult.from_payload(raw)
+                    return raw
+                except (JsonExtractionError, RetrievalContractError) as error:
+                    if attempt:
+                        raise
+                    messages.extend([
+                        {'role': 'assistant', 'content': response.text},
+                        {'role': 'user', 'content': 'Repair the JSON structure using response_contract. '
+                         'Do not invent evidence. Return empty_response if no valid chain can be supported. '
+                         'Parser error: ' + str(error)},
+                    ])
         except TransientLLMError:
             raise
         except Exception as error:

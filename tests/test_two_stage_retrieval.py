@@ -324,12 +324,12 @@ def test_two_stage_construction_fails_before_run_without_a_valid_provider() -> N
 
 def test_round1_parse_failure_falls_back_to_numeric_candidates() -> None:
     genome = replace(RetrievalGenome.seed(), second_round_trigger="on_incomplete_chain")
-    retrieval = _agent(["not json", _round(_chain())], genome=genome)
+    retrieval = _agent(["not json", "still not json"], genome=genome)
     harness = _harness(retrieval, [_decision(), _decision()])
 
     result = harness.run(_task())
 
-    assert len(retrieval.llm.calls) == 1
+    assert len(retrieval.llm.calls) == 2
     assert [item.candidate_id for item in result.candidates] == ["numeric"]
     assert result.retrieval.evidence == ()
     assert result.forecast == (21.0, 22.0)
@@ -364,7 +364,7 @@ def test_invalid_gap_does_not_invalidate_the_provisional_selection() -> None:
 
 
 def test_round2_failure_preserves_verified_round1_and_numeric_fallback() -> None:
-    retrieval = _agent([_round(_chain()), "not json"])
+    retrieval = _agent([_round(_chain()), "not json", "still not json"])
     harness = _harness(
         retrieval,
         [_decision(gaps=[_gap()], request=True), _decision()],
@@ -372,7 +372,7 @@ def test_round2_failure_preserves_verified_round1_and_numeric_fallback() -> None
 
     result = harness.run(_task())
 
-    assert len(retrieval.llm.calls) == 2
+    assert len(retrieval.llm.calls) == 3
     assert {item.candidate_id for item in result.candidates} >= {"numeric"}
     assert {item.document_id for item in result.retrieval.evidence} == {"doc_1"}
     assert "invalid_round2_response" in result.retrieval.rejected

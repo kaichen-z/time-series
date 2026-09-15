@@ -14,6 +14,40 @@ from common.metrics import drcik_point_metrics
 from evolving_loop.decision_agent.agent import DecisionCandidate
 
 
+def decision_dictionary_fingerprints(package, dictionary_sha):
+    """Bind cache-backed execution, not nonexistent legacy Selector configs.
+
+    The schema tag distinguishes these descriptors from fresh-fit policies.
+    Consumers recompute them from the frozen package before any agent call.
+    """
+    from common.evolution_core.contracts import METRIC_POLICY_FINGERPRINT
+
+    def digest(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
+                                        ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+
+    rows = [dict(name=m.name, family=m.family, forecast=list(m.forecast),
+                 eligible=m.diagnostics.eligible,
+                 fold_forecasts=[list(v) for v in m.diagnostics.fold_forecasts],
+                 fold_truths=[list(v) for v in m.diagnostics.fold_truths])
+            for m in package.ranked_alternatives]
+    schema = 'decision_dictionary_cache_v1'
+    return {
+        'decision_cache_contract': digest(schema),
+        'decision_dictionary': dictionary_sha,
+        'metric_policy_fingerprint': METRIC_POLICY_FINGERPRINT,
+        'task_profile': digest(package.task_profile.to_public_payload()),
+        'active_dictionary': digest({'schema': schema, 'dictionary': dictionary_sha,
+                                     'methods': [r['name'] for r in rows]}),
+        'screening_policy': digest({'schema': schema, 'selection': 'all_materialized_methods'}),
+        'combined_policies': digest({'schema': schema, 'combination': 'nonnegative_sum_one'}),
+        'decision_policy': digest({'schema': schema, 'owner': 'decision_agent',
+                                   'baseline': package.protected_baseline.name,
+                                   'max_evaluations_per_batch': 4}),
+        'hindcast_config': digest({'schema': schema, 'mode': 'frozen_fold_replay', 'rows': rows}),
+    }
+
+
 class DictionaryExecutionTool:
     def __init__(self, methods, *, history=(), frequency=None):
         methods = tuple(methods)

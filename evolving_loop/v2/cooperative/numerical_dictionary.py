@@ -471,12 +471,14 @@ def materialize_decision_dictionary_pair(dictionary, tasks):
     release = parse_numerical_supply_release(payload)
 
     def build(task, supplied):
+        from evolving_loop.decision_agent.dictionary_tools import decision_dictionary_fingerprints
         package = bound_numerical_package(
             dictionary.source_package_for(task), supplied,
             dictionary.package_inputs_for(task), history=task.numeric.history_values,
         )
         return replace(package, component_fingerprints={
-            **dict(package.component_fingerprints), 'decision_dictionary': dictionary.fingerprint(),
+            **dict(package.component_fingerprints),
+            **decision_dictionary_fingerprints(package, dictionary.fingerprint()),
         })
 
     registry = build_package_registry(tasks, release, build)

@@ -9,6 +9,39 @@ from evolving_loop.decision_agent.dictionary_tools import DictionaryExecutionToo
 from tests.test_package_numerical_supply import _ranked
 
 
+def test_real_retrieval_request_supplies_parseable_response_contract(tmp_path):
+    from evolving_loop.retrieval_agent.schemas import RetrievalRoundResult, EvidenceChain
+    from tests.test_numerical_retrieval_handoff import _context_task, _retrieval
+
+    class Client:
+        def complete(self, **kwargs):
+            payload = json.loads(kwargs['messages'][0]['content'])
+            contract = payload['response_contract']
+            EvidenceChain.from_payload(contract['chain_example'])
+            result = RetrievalRoundResult.from_payload(contract['empty_response'])
+            return LLMResponse(json.dumps(result.to_payload()))
+
+    retrieval = _retrieval([], tmp_path)
+    retrieval.llm = Client()
+    result = retrieval.run_round1(_context_task())
+    assert result.rejected == ()
+    assert result.chains == ()
+
+
+def test_retrieval_repairs_one_structurally_invalid_model_response(tmp_path):
+    from tests.test_numerical_retrieval_handoff import _context_task, _retrieval, _round
+    retrieval = _retrieval(['{"timeline": []}', _round()], tmp_path)
+    result = retrieval.run_round1(_context_task())
+    assert result.rejected == ()
+
+
+def test_retrieval_stops_after_one_failed_format_repair(tmp_path):
+    from tests.test_numerical_retrieval_handoff import _context_task, _retrieval, _round
+    retrieval = _retrieval(['{"timeline": []}', '{"timeline": []}', _round()], tmp_path)
+    result = retrieval.run_round1(_context_task())
+    assert result.rejected
+
+
 def test_tool_evaluates_more_than_eight_methods_and_arbitrary_ensemble():
     inputs = tuple(_ranked(f'm{i}', 'statistical', (float(i),) * 2) for i in range(10))
     tool = DictionaryExecutionTool(inputs)

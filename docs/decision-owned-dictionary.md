@@ -22,6 +22,19 @@ Missing or incompatible historical folds are rejected. Future evaluation labels
 are not accepted by the tool. This is a cache-backed implementation of the
 Decision execution interface, not a fresh-runtime forecasting backend.
 
+New exports bind a `decision_cache_contract` to the actual materialized catalog,
+cached forecasts/folds, convex-combination rule, and Decision batch policy. The
+pipeline recomputes these descriptors before agent execution, while retaining
+the task-input, metric, profile, and morphology checks. These are cache-mode
+descriptors, not claims that a legacy Selector or fresh-fit configuration ran.
+Earlier Decision-owned exports missing these bindings must be re-materialized
+from their frozen Dictionary; do not edit already sealed experiment artifacts.
+
+Retrieval requests include the wire-format examples and allowed enums expected
+by the parser. A structurally invalid returned object gets at most one format
+repair attempt with the parser error; quotes and evidence still undergo the
+same deterministic verification. This does not guarantee valid LLM output.
+
 The real bridge still uses the existing `p3_dictionary` mode. New releases and
 packages identify Decision ownership with `decision_dictionary`; old
 `p3_selector` closures remain readable. P4/P5 consume the same sealed bundle

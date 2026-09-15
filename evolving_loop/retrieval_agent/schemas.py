@@ -652,6 +652,33 @@ def _task_documents(task: ContextTask) -> list[dict[str, str]]:
     return result
 
 
+def retrieval_response_contract() -> dict[str, object]:
+    """Describe the actual wire contract to the model, without task labels."""
+    return {
+        'instructions': 'Return only the response object, not this contract. No extra fields. '
+        'Use chain_example fields for each evidence_chains/counterevidence item, replacing '
+        'all placeholders with document-supported content. Never copy example citations. '
+        'If no supported chains exist, use empty_response. Round 1 must omit gaps. '
+        'Use only supplied skill and assumption IDs; otherwise use empty lists. '
+        'Timestamps are paired inclusive ISO timestamps or both null. '
+        'For unknown/none magnitude use null; otherwise provide a finite number.',
+        'empty_response': {'evidence_chains': [], 'counterevidence': [],
+                           'missing_information': [], 'sufficient': False},
+        'chain_example': {
+            'chain_id': 'chain_example', 'claim': 'Replace with a supported claim',
+            'entity_match': True, 'target_match': True, 'temporal_relation': 'unknown',
+            'mechanism': 'irrelevant', 'direction': 'unknown', 'magnitude_kind': 'unknown',
+            'magnitude_value': None, 'start_timestamp': None, 'end_timestamp': None,
+            'citations': [{'document_id': 'example_document', 'exact_quote': 'Replace with an exact document quote'}],
+            'missing_links': [], 'used_skill_ids': [], 'addressed_assumption_ids': [],
+            'stance': 'neutral', 'numeric_eligible': False,
+        },
+        'enums': {'temporal_relation': sorted(_TEMPORAL_RELATIONS),
+                  'mechanism': sorted(_MECHANISMS), 'direction': sorted(_DIRECTIONS),
+                  'magnitude_kind': sorted(_MAGNITUDE_KINDS), 'stance': sorted(_STANCES)},
+    }
+
+
 def build_round1_payload(task: ContextTask, *, skills: Sequence[object] = ()) -> dict[str, object]:
     """Build the assumption-blind input visible to Round 1."""
     return {

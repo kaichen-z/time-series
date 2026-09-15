@@ -484,6 +484,14 @@ def _validate_inputs(
         raise ValueError("Numerical package TaskProfile does not match the ContextTask history")
 
     fingerprints = dict(numerical.component_fingerprints)
+    if 'decision_cache_contract' in fingerprints:
+        from evolving_loop.decision_agent.dictionary_tools import decision_dictionary_fingerprints
+        dictionary_sha = fingerprints.get('decision_dictionary', '')
+        if not _SHA256.fullmatch(dictionary_sha):
+            raise ValueError('Decision Dictionary identity is not canonical')
+        expected = decision_dictionary_fingerprints(numerical, dictionary_sha)
+        if any(fingerprints.get(key) != value for key, value in expected.items()):
+            raise ValueError('Decision Dictionary cache contract fingerprint mismatch')
     missing = _REQUIRED_NUMERICAL_FINGERPRINTS - set(fingerprints)
     if missing:
         raise ValueError(
