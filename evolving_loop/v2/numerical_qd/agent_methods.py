@@ -335,8 +335,6 @@ def apply_prompt_train_credit(
     if type(feedback) is not TrainMutationFeedbackV2:
         raise TypeError("feedback must be sanitized TrainMutationFeedbackV2")
     feedback = TrainMutationFeedbackV2.from_payload(feedback.to_payload())
-    if feedback.operator != "policy_tune":
-        raise ValueError("prompt credit requires policy_tune Train feedback")
     identities = {
         lineage.mutation_prompt.fingerprint() for lineage in population.lineages
     }

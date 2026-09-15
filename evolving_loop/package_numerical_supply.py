@@ -613,6 +613,11 @@ def _verified_assumption_projection(
     if not proposals:
         return None, (), {}, ()
 
+    # A schema-v2 release may retain the complete Dictionary. The morphology
+    # handoff is intentionally task-local and its public contract permits at
+    # most seven specialist assumptions (the protected anchor is separate).
+    proposals = proposals[:7]
+
     card = MorphologyCard(
         short_term="Host-generated history-only morphology for frozen alternatives.",
         long_term="Only host-validated candidate assumptions may reach Retrieval.",

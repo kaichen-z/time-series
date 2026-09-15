@@ -195,6 +195,9 @@ def run_numerical_two_stage(
     host_default = _safe_default(numerical, candidates)
 
     assumptions, handoff_failure = _validated_handoff(numerical)
+    if ('decision_dictionary' in numerical.component_fingerprints
+            and handoff_failure == 'empty_retrieval_handoff'):
+        handoff_failure = None
     assumption_targets = _assumption_candidate_targets(numerical, assumptions)
     execution_fingerprints = _execution_fingerprints(
         retrieval_task,
@@ -213,6 +216,21 @@ def run_numerical_two_stage(
     round1_card = merge_verified_rounds(round1, None)
     if handoff_failure is not None:
         round1_card = _record_rejection(round1_card, handoff_failure)
+    if 'decision_dictionary' in numerical.component_fingerprints and fallback_reason is None:
+        from evolving_loop.decision_agent.dictionary_tools import DictionaryExecutionTool
+        selected, tool_trace = execution_decision.select_dictionary(
+            DictionaryExecutionTool(numerical.ranked_alternatives,
+                                    history=retrieval_task.numeric.history_values,
+                                    frequency=retrieval_task.numeric.frequency),
+            round1_card.to_legacy_result(),
+        )
+        if selected is not None:
+            candidates = candidates + (selected,)
+            host_default = selected
+        execution_fingerprints = {
+            **dict(execution_fingerprints),
+            'decision_dictionary_execution': _fingerprint(tool_trace),
+        }
     provisional, provisional_failure = _run_decision(
         execution_decision,
         candidates,
@@ -288,6 +306,21 @@ def run_numerical_two_stage(
     if fallback_reason is not None:
         card = _record_rejection(card, fallback_reason)
     final_retrieval = card.to_legacy_result()
+    if ('decision_dictionary' in numerical.component_fingerprints
+            and round2 is not None and fallback_reason is None):
+        selected, tool_trace = execution_decision.select_dictionary(
+            DictionaryExecutionTool(numerical.ranked_alternatives,
+                                    history=retrieval_task.numeric.history_values,
+                                    frequency=retrieval_task.numeric.frequency),
+            final_retrieval,
+        )
+        if selected is not None:
+            candidates = tuple(c for c in candidates if c.candidate_id != selected.candidate_id) + (selected,)
+            host_default = selected
+        execution_fingerprints = {
+            **dict(execution_fingerprints),
+            'decision_dictionary_execution_round2': _fingerprint(tool_trace),
+        }
     final, final_failure = _run_decision(
         execution_decision,
         candidates,

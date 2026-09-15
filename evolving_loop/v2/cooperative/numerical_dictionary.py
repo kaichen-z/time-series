@@ -452,6 +452,40 @@ def _diagnostics_payload(
     }
 
 
+def materialize_decision_dictionary_pair(dictionary, tasks):
+    """Export the complete frozen catalog for Decision-owned tool selection."""
+    if type(dictionary) is not P3NumericalDictionaryV2:
+        raise TypeError('Expected P3NumericalDictionaryV2')
+    tasks = tuple(sorted(tasks, key=lambda task: task.numeric.task_id))
+    if tuple(task.numeric.task_id for task in tasks) != tuple(dictionary.task_sha256s):
+        raise ValueError('Dictionary task universe mismatch')
+    payload = dictionary.template_release.to_payload()
+    payload.update(schema_version=2, alternatives=[a.to_payload() for a in dictionary.alternatives])
+    payload['source_fingerprints'] = {
+        key: value for key, value in payload['source_fingerprints'].items()
+        if key != 'p3_selector'
+    }
+    payload['source_fingerprints'].update(
+        p3_dictionary=dictionary.fingerprint(), decision_dictionary=dictionary.fingerprint(),
+    )
+    release = parse_numerical_supply_release(payload)
+
+    def build(task, supplied):
+        package = bound_numerical_package(
+            dictionary.source_package_for(task), supplied,
+            dictionary.package_inputs_for(task), history=task.numeric.history_values,
+        )
+        return replace(package, component_fingerprints={
+            **dict(package.component_fingerprints), 'decision_dictionary': dictionary.fingerprint(),
+        })
+
+    registry = build_package_registry(tasks, release, build)
+    envelope = import_numerical_seed(release, registry, tasks=tasks).envelope
+    return FrozenNumericalArtifactsV2(release, registry, envelope, (), {
+        dictionary.fingerprint(): dictionary.to_payload(),
+    })
+
+
 def materialize_selector_pair(
     dictionary: P3NumericalDictionaryV2,
     genome: DictionarySelectorGenomeV2,

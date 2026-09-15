@@ -1,5 +1,10 @@
 # Evolution V2 Cooperative Bundle Prototype
 
+New real runs use [Decision-owned Dictionary execution](decision-owned-dictionary.md):
+P2 supplies the full frozen catalog, Retrieval supplies evidence, and Decision
+requests cached numerical evaluations and chooses methods and weights. The
+bounded Selector description below documents the older standalone path.
+
 Project 3 evaluates the immutable complete Project 2 Numerical Dictionary
 together with mutable Retrieval and Decision modules as an Evolution V2 Bundle.
 Its Numerical Selector filters that Dictionary to at most eight history-only

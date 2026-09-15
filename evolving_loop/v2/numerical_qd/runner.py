@@ -431,7 +431,11 @@ def _persist_state(store, state, genome):
 def _seed_prompt_population(prompt):
     mutation_prompt = NumericalProposerPromptV2(
         1,
-        "Propose a bounded mutation-prompt variant using Train evidence only.",
+        (
+            "Propose bounded numerical children using Train evidence only. "
+            "Prefer at least one executable inventory mutation; policy_tune may "
+            "only improve this mutation instruction."
+        ),
         "numerical_mutation_batch_v1",
         prompt.max_response_bytes,
         ("policy_tune",),
@@ -823,8 +827,8 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
 
     Stops are closed generation boundaries. A crash within an unpublished
     operation fails closed through Task 8; no partial operation is replayed.
-    ``finalize_after`` is a minimum generation count and only closes early once
-    the archive contains a genuinely feasible evolved entry.
+    ``finalize_after`` is a hard generation cap. It bounds real provider calls
+    even when every attempted child is infeasible.
     """
     if type(config) is not NumericalQDConfigV2:
         config = NumericalQDConfigV2.from_payload(config)
@@ -1016,8 +1020,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
     feedback = (TrainMutationFeedbackV2.from_payload(previous_feedback) if previous_feedback else
                 TrainMutationFeedbackV2("train", sorted(config.mutation["operators"])[0], False, False, False, ()))
     while not kernel.budget.finalization_started:
-        if (finalize_after is not None and generation >= finalize_after
-                and archive.entries):
+        if finalize_after is not None and generation >= finalize_after:
             break
         if stop_after is not None and generation >= stop_after:
             return result("numerical_qd_paused")
@@ -1152,7 +1155,6 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
                 generation_stop_reason, budget_blocked = "finalization_reserve", True
                 break
-            attempted.append((proposal.operator, None))
             proposal_payload = proposal.to_payload()
             policy_ready = True
             for key in ("member", "child", "replacement"):
@@ -1180,6 +1182,18 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             if not policy_ready:
                 continue
             candidate_state = apply_mutation(parent_state, proposal).state
+            if proposal.operator == "policy_tune":
+                mutation_child = _host_mutation_prompt_child(
+                    selected_prompt.mutation_prompt,
+                    candidate_state.proposer_prompt.template,
+                )
+                population = insert_prompt_child(
+                    population,
+                    selected_prompt.mutation_prompt.fingerprint(),
+                    mutation_child,
+                )
+                continue
+            attempted.append((proposal.operator, None))
             if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
                 generation_stop_reason, budget_blocked = "finalization_reserve", True
                 break
@@ -1317,24 +1331,15 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             inserted = any(e.genome_sha256 == genome_sha for e in entries)
             feedback = TrainMutationFeedbackV2("train", operator,
                 feasible, promoted, inserted, ())
-            if operator == "policy_tune" and genome_sha in child_states:
-                child_prompt = child_states[genome_sha].proposer_prompt
-                mutation_child = _host_mutation_prompt_child(
-                    selected_prompt.mutation_prompt, child_prompt.template,
-                )
-                population = insert_prompt_child(
-                    population, selected_prompt.mutation_prompt.fingerprint(), mutation_child,
-                )
             # Credit belongs to the sampled genome's prompt lineage.  The
             # shared policy state may supply operator authority, but must not
             # receive feedback for a different prompt ancestry.
             updated = record_train_outcome(
                 credited_parent_state, feedback.to_payload()
             )
-            if operator == "policy_tune":
-                population = apply_prompt_train_credit(
-                    population, selected_prompt.mutation_prompt.fingerprint(), feedback,
-                )
+            population = apply_prompt_train_credit(
+                population, selected_prompt.mutation_prompt.fingerprint(), feedback,
+            )
             credit_bytes = sum(len(value.canonical_bytes()) for value in (updated.mutation_policy, updated.proposer_prompt)
                 if not (store.directory / f"objects/{value.fingerprint()}.json").exists())
             if kernel.budget.can_open_stage(ResourceUse(artifact_bytes=credit_bytes)).allowed:

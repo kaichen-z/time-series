@@ -11,7 +11,7 @@ from evolving_loop.retrieval_agent.schemas import (
     RetrievalGap,
 )
 from evolving_loop.decision_agent.skill_library import DecisionSkillLibrary
-from common.llm import JsonExtractionError, LLMClient, parse_json_object
+from common.llm import JsonExtractionError, LLMClient, TransientLLMError, parse_json_object
 
 DECISION_PROMPT = """You are the Decision Agent in a time-series forecasting harness.
 Choose among candidates that were already executed and historically hindcast. You cannot write
@@ -122,6 +122,78 @@ class DecisionAgent:
         self.llm = llm
         self.library = library
         self.prompt = prompt
+
+    def select_dictionary(self, tool, retrieval):
+        """Keep provider failures on the protected-baseline path; allow retries."""
+        try:
+            return self._select_dictionary(tool, retrieval)
+        except TransientLLMError:
+            raise
+        except Exception as error:
+            return None, {
+                'evaluations': [],
+                'errors': [f'dictionary_provider_failure:{type(error).__name__}'],
+            }
+
+    def _select_dictionary(self, tool, retrieval):
+        """Choose tool evaluations, then choose an executed method or ensemble.
+
+        The batch bound limits tool work, not Dictionary or ensemble size.
+        The caller retains the protected baseline if no valid evaluation exists.
+        """
+        trace = {'evaluations': [], 'errors': []}
+        plan = self.llm.complete(
+            system=self.prompt + '\nPlan numerical tool evaluations over the complete Dictionary. '
+            'Return exactly {"evaluations":[{"method_ids":["name"],"weights":[1.0]}]}. '
+            'Request 1 to 4 evaluations. Each may use any number of distinct methods. '
+            'Weights must be finite, nonnegative and sum to one. Use verified evidence '
+            'and method descriptions; do not invent forecast values.',
+            messages=[{'role': 'user', 'content': json.dumps({
+                'dictionary': tool.catalog(),
+                'history': list(tool.history),
+                'frequency': tool.frequency,
+                'verified_evidence': [asdict(item) for item in retrieval.evidence],
+            }, ensure_ascii=False)}], temperature=0.0,
+        )
+        try:
+            payload = parse_json_object(plan.text)
+            requests = payload.get('evaluations')
+            if set(payload) != {'evaluations'} or type(requests) is not list or not 1 <= len(requests) <= 4:
+                raise ValueError('Expected 1 to 4 numerical evaluations')
+        except (JsonExtractionError, ValueError) as error:
+            trace['errors'].append(str(error))
+            return None, trace
+        evaluated = []
+        for request in requests:
+            try:
+                candidate = tool.evaluate(request)
+                evaluated.append(candidate)
+                trace['evaluations'].append({'request': request, 'result': asdict(candidate)})
+            except (TypeError, ValueError) as error:
+                trace['errors'].append(str(error))
+        if not evaluated:
+            return None, trace
+        choice = self.llm.complete(
+            system=self.prompt + '\nSelect one executed numerical tool result using its '
+            'history-only hindcast and verified evidence. Return exactly '
+            '{"selected_candidate_id":"id"}.',
+            messages=[{'role': 'user', 'content': json.dumps({
+                'evaluated': [asdict(item) for item in evaluated],
+                'verified_evidence': [asdict(item) for item in retrieval.evidence],
+            }, ensure_ascii=False)}], temperature=0.0,
+        )
+        try:
+            payload = parse_json_object(choice.text)
+            if set(payload) != {'selected_candidate_id'}:
+                raise ValueError('Invalid numerical selection response')
+            selected = next((c for c in evaluated if c.candidate_id == payload['selected_candidate_id']), None)
+            if selected is None:
+                raise ValueError('Unknown evaluated candidate')
+        except (JsonExtractionError, ValueError) as error:
+            trace['errors'].append(str(error))
+            selected = min(evaluated, key=lambda c: (c.hindcast_srmse, c.hindcast_smae, c.candidate_id))
+        trace['selected_candidate_id'] = selected.candidate_id
+        return selected, trace
 
     def run(
         self,

@@ -194,6 +194,17 @@ def test_runner_host_derives_and_inserts_policy_tune_prompt_child():
     assert child.allowed_mutation_operators == ("policy_tune",)
 
 
+def test_seed_mutation_prompt_requests_real_numerical_children():
+    from evolving_loop.v2.numerical_qd.runner import _bootstrap, _seed_prompt_population
+
+    config, supply, _folds, adapter = fixture()
+    prompt = _bootstrap(config, supply, adapter)[0].proposer_prompt
+    selected = _seed_prompt_population(prompt).lineages[0].mutation_prompt
+
+    assert "prompt variant" not in selected.template.lower()
+    assert "numerical child" in selected.template.lower()
+
+
 def test_policy_tune_descendant_retains_its_evolved_prompt():
     from evolving_loop.v2.numerical_qd.contracts import TrainMutationFeedbackV2
     from evolving_loop.v2.numerical_qd.mutation import record_train_outcome
@@ -1524,18 +1535,18 @@ def test_candidate_verification_failure_is_persisted_in_generation_status(tmp_pa
     }]
 
 
-def test_policy_only_materialization_failure_is_attributed_to_candidate_member(tmp_path, monkeypatch):
-    """Catches diagnostics reading a missing/stale source-mutation member."""
+def test_policy_tune_is_meta_only_and_never_materialized(tmp_path, monkeypatch):
+    """A prompt mutation must not masquerade as a forecast child."""
     config, supply, manifest, adapter = fixture(task_budget=920)
     payload = config.to_payload()
     payload["mutation"]["operators"] = ["policy_tune"]
     config = NumericalQDConfigV2.from_payload(payload)
 
     def fail_materialization(*args, **kwargs):
-        raise ValueError("policy-only candidate failed")
+        raise AssertionError("policy_tune reached numerical materialization")
 
     monkeypatch.setattr(adapter, "materialize_child", fail_materialization)
-    run_numerical_qd(
+    result = run_numerical_qd(
         tmp_path / "run", config, supply, manifest, adapter, stop_after=1
     )
     step = next(
@@ -1543,11 +1554,24 @@ def test_policy_only_materialization_failure_is_attributed_to_candidate_member(t
         for path in (tmp_path / "run/numerical_qd/objects").glob("*.json")
         if "numerical_qd_step" in json.loads(path.read_bytes())
     )
-    assert step["materialization_failures"] == [{
-        "member_id": "seasonal_naive",
-        "error_type": "ValueError",
-        "message": "policy-only candidate failed",
-    }]
+    assert result.status == "numerical_qd_paused"
+    assert step["materialization_failures"] == []
+
+
+def test_finalize_after_is_a_hard_cap_without_a_feasible_archive(tmp_path, monkeypatch):
+    config, supply, manifest, adapter = fixture(task_budget=1840)
+
+    def reject_materialization(*args, **kwargs):
+        raise ValueError("synthetic infeasible child")
+
+    monkeypatch.setattr(adapter, "materialize_child", reject_materialization)
+    result = run_numerical_qd(
+        tmp_path / "run", config, supply, manifest, adapter,
+        finalize_after=1, stop_after=2,
+    )
+
+    assert result.status == "numerical_qd_complete"
+    assert len(list((tmp_path / "run/numerical_qd/proposals").glob("*.json"))) == 1
 
 
 def test_completed_but_infeasible_train_rung_records_closed_no_improvement(tmp_path, monkeypatch):

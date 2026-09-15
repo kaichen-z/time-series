@@ -583,6 +583,47 @@ def test_bounded_package_projects_verified_alternative_assumption_to_safe_handof
     )
 
 
+def test_schema_v2_morphology_projection_caps_full_dictionary_at_seven_assumptions():
+    source = _wide_package()
+    alternatives = tuple(
+        _alternative(f"candidate_{index}", "statistical") for index in range(9)
+    )
+    seed = _supply_release(alternatives=())
+    seed_payload = seed.to_payload()
+    release = NumericalSupplyRelease(
+        schema_version=2,
+        version=seed.version,
+        parent_sha256=seed.parent_sha256,
+        anchor_release_payload=seed_payload["anchor_release_payload"],
+        alternatives=alternatives,
+        atlas_release_sha256=None,
+        source_fingerprints=seed_payload["source_fingerprints"],
+        runtime_fingerprints=seed_payload["runtime_fingerprints"],
+    )
+    materialized = {
+        "safe_anchor": source.protected_baseline,
+        **{
+            alternative.candidate_id: _ranked(
+                alternative.candidate_id, "statistical", (float(index),) * 2,
+            )
+            for index, alternative in enumerate(alternatives, start=1)
+        },
+    }
+
+    package = bound_numerical_package(
+        source, release, materialized,
+        history=(1.0, 2.0, 3.0) * 12,
+        task_fold=None,
+    )
+
+    assert package.morphology_card is not None
+    assert len(package.morphology_card.assumptions) == 7
+    assert tuple(
+        assumption.candidate_names[0]
+        for assumption in package.morphology_card.assumptions
+    ) == tuple(f"candidate_{index}" for index in range(7))
+
+
 def test_bounded_package_uses_release_policy_and_clears_stale_morphology_on_rejection():
     source = _wide_package()
     permissive = _supply_release(

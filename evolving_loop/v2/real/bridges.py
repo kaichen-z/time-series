@@ -8,6 +8,7 @@ from types import MappingProxyType
 
 from common.payload import strict_json_loads
 from evolving_loop.data import ContextTask
+from evolving_loop.decision_agent.agent import DECISION_PROMPT
 from evolving_loop.package_numerical_supply import parse_numerical_supply_release
 from evolving_loop.package_registry import task_registry_fingerprint
 from evolving_loop.retrieval_agent.policy import RetrievalGenome
@@ -38,6 +39,7 @@ from ..cooperative import (
     seed_selector_genome,
 )
 from ..cooperative.contracts import CooperativeCheckpointV2
+from ..cooperative.numerical_dictionary import materialize_decision_dictionary_pair
 from ..kernel import AcceptanceEvidence, EvolutionKernel, KernelAuthorityError
 from ..numerical_qd.adapters import (
     FrozenNumericalArtifactsV2,
@@ -51,10 +53,16 @@ from .contracts import P3_NUMERICAL_MODE, require_p3_numerical_mode
 from .host import RealHostRuntimeV2, select_real_task_projection
 
 
-_DECISION_SEED_PROMPT = (
-    "Select the safest valid numerical candidate using only retrieved context."
+_DECISION_SEED_PROMPT = DECISION_PROMPT + (
+    '\nFor Dictionary tool planning, compare individual methods before combining them. '
+    'Use history-only hindcast and verified evidence to select the final numerical result.'
 )
-_DECISION_PROMPTS = ("Prefer the lowest finite complete-pipeline error.",)
+_DECISION_PROMPTS = (
+    DECISION_PROMPT + '\nFor Dictionary tool planning, compare complementary method families '
+    'and convex ensembles. Choose weights using history-only hindcast.',
+    DECISION_PROMPT + '\nFor Dictionary tool planning, prioritize recent morphology and '
+    'verified events. Compare specialized methods with the protected baseline.',
+)
 _PROPOSAL_SPACE_FILE = "proposal_space_manifest.json"
 _P5_UNAVAILABLE = "p5_handoff_unavailable"
 
@@ -287,14 +295,8 @@ def run_real_cooperative(
         raise ValueError("real cooperative bridge requires a pilot/formal profile")
     retrieval = _seed_retrieval(host)
     decision = _seed_decision()
-    selector = seed_selector_genome()
-    numerical = materialize_selector_pair(dictionary, selector, tasks)
-    numerical_adapter = NumericalCoordinateAdapter.for_dictionary(
-        dictionary,
-        tasks,
-        selector,
-        max_steps=config.max_steps,
-    )
+    numerical = materialize_decision_dictionary_pair(dictionary, tasks)
+    numerical_adapter = NumericalCoordinateAdapter(())
     alternatives = numerical_adapter.proposal_pairs
 
     pipeline = CooperativePipelineAdapter(
@@ -448,9 +450,10 @@ def _load_numerical_pair(
         dictionary_sha = require_sha256(
             release.source_fingerprints["p3_dictionary"], "P3 Dictionary SHA"
         )
-        selector_sha = require_sha256(
-            release.source_fingerprints["p3_selector"], "P3 Selector SHA"
-        )
+        selector_sha = release.source_fingerprints.get('p3_selector')
+        decision_owned = release.source_fingerprints.get('decision_dictionary') == dictionary_sha
+        if selector_sha is None and not decision_owned:
+            raise ValueError('Missing P3 selection ownership')
         dictionary_payload = _read_canonical(
             root / "objects" / f"{dictionary_sha}.json", dictionary_sha
         )
@@ -496,12 +499,20 @@ def _load_numerical_pair(
             dictionary_value["anchor_release_sha256"],
             "P3 Dictionary Anchor SHA",
         )
-        selector_payload = _read_canonical(
-            root / "objects" / f"{selector_sha}.json", selector_sha
-        )
-        DictionarySelectorGenomeV2.from_payload(selector_payload)
         support[dictionary_sha] = dictionary_payload
-        support[selector_sha] = selector_payload
+        if selector_sha is not None:
+            require_sha256(selector_sha, 'P3 Selector SHA')
+            selector_payload = _read_canonical(
+                root / "objects" / f"{selector_sha}.json", selector_sha
+            )
+            DictionarySelectorGenomeV2.from_payload(selector_payload)
+            support[selector_sha] = selector_payload
+        if decision_owned:
+            restored_registry = envelope.restore(tasks)
+            for task in tasks:
+                package = restored_registry.package_for(task)
+                if package.component_fingerprints.get('decision_dictionary') != dictionary_sha:
+                    raise ValueError('Decision Dictionary package ownership mismatch')
     except (KeyError, OSError, UnicodeError, TypeError, ValueError) as error:
         raise KernelAuthorityError(
             "proposal-space Numerical support closure is invalid"

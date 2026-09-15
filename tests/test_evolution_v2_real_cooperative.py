@@ -170,10 +170,8 @@ def test_real_bridge_projects_4_1_but_preserves_p2_100_task_registry(
         assert seed["numerical"].release.source_fingerprints["p3_dictionary"] == (
             dictionary.fingerprint()
         )
-        assert seed["numerical"].release.source_fingerprints["p3_selector"] == (
-            seed_selector_genome().fingerprint()
-        )
-        assert adapters["numerical"].mode == "p3_dictionary"
+        assert seed["numerical"].release.source_fingerprints["decision_dictionary"] == dictionary.fingerprint()
+        assert not adapters["numerical"].proposal_pairs
         assert tuple(p2.envelope.entries) == tuple(
             sorted(task.numeric.task_id for task in tasks)
         )
@@ -246,9 +244,7 @@ def test_real_bridge_persists_canonical_proposal_space_and_loads_exact_closure(
     assert closure.numerical.release.source_fingerprints["p3_dictionary"] == (
         dictionary_sha
     )
-    assert closure.numerical.release.source_fingerprints["p3_selector"] == (
-        seed_selector_genome().fingerprint()
-    )
+    assert closure.numerical.release.source_fingerprints["decision_dictionary"] == dictionary_sha
     assert closure.catalog.resolve_retrieval(
         closure.active_bundle.retrieval_release_sha256
     ) == closure.retrieval
@@ -264,15 +260,14 @@ def test_real_bridge_persists_canonical_proposal_space_and_loads_exact_closure(
         assert closure.dev_tasks == tasks[80:81]
     assert closure.metric_cap == 5.0
     assert closure.config_sha256 == manifest["config_sha256"]
-    assert closure.numerical_alternatives
+    assert closure.numerical_alternatives == ()
     assert all(
         pair.release.source_fingerprints["p3_dictionary"]
         == dictionary_sha
         for pair in closure.numerical_alternatives
     )
-    assert closure.decision_prompts == (
-        "Prefer the lowest finite complete-pipeline error.",
-    )
+    from evolving_loop.v2.real.bridges import _DECISION_PROMPTS
+    assert closure.decision_prompts == _DECISION_PROMPTS
     assert closure.decision_settings_cycle is False
     assert closure.p5_handoff_available is True
     assert closure.p5_handoff_reason is None
@@ -339,7 +334,7 @@ def test_closure_rejects_proposal_space_or_archive_drift(sealed_p3):
         load_sealed_bundle_closure(output, tasks=tasks, host=host)
 
 
-def test_real_bridge_materializes_only_dictionary_selector_pairs_for_p3(
+def test_real_bridge_leaves_dictionary_fixed_for_decision_selection(
     tmp_path, monkeypatch
 ):
     from evolving_loop.v2.real import bridges
@@ -353,13 +348,8 @@ def test_real_bridge_materializes_only_dictionary_selector_pairs_for_p3(
         pass
 
     def observe(_output, config, seed, _projected, adapters, **_kwargs):
-        assert adapters["numerical"].mode == "p3_dictionary"
-        assert len(adapters["numerical"].materialized_pairs) >= config.max_steps
-        assert all(
-            pair.release.source_fingerprints["p3_dictionary"]
-            == dictionary.fingerprint()
-            for pair in adapters["numerical"].materialized_pairs
-        )
+        assert adapters["numerical"].proposal_pairs == ()
+        assert seed["numerical"].release.source_fingerprints['decision_dictionary'] == dictionary.fingerprint()
         assert seed["numerical"] not in (p2,)
         raise Observed
 

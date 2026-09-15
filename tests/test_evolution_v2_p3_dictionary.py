@@ -115,6 +115,18 @@ def test_selector_genome_round_trips_as_canonical_value():
     assert len(seed.fingerprint()) == 64
 
 
+def test_decision_dictionary_export_preserves_all_ten_methods():
+    from evolving_loop.v2.cooperative.numerical_dictionary import materialize_decision_dictionary_pair
+    tasks = _registry_tasks()
+    dictionary = build_p3_numerical_dictionary((_wide_dictionary_pair(),), tasks)
+    pair = materialize_decision_dictionary_pair(dictionary, tasks)
+    package = pair.registry.package_for(tasks[0])
+    assert len(package.ranked_alternatives) == 10
+    assert package.component_fingerprints['decision_dictionary'] == dictionary.fingerprint()
+    assert 'p3_selector' not in pair.release.source_fingerprints
+    assert package.selection_decision.selected == ('safe_anchor',)
+
+
 def test_selector_genome_rejects_unknown_fields():
     payload = seed_selector_genome().to_payload()
     payload["future_score"] = 0.1
@@ -409,8 +421,8 @@ def test_real_bridge_seeds_p3_from_dictionary_selector(tmp_path, monkeypatch):
     def observe(_output, _config, seed, _projected, adapters, **_kwargs):
         numerical = seed["numerical"]
         assert numerical.release.source_fingerprints["p3_dictionary"] == dictionary.fingerprint()
-        assert numerical.release.source_fingerprints["p3_selector"] == seed_selector_genome().fingerprint()
-        assert adapters["numerical"].mode == "p3_dictionary"
+        assert numerical.release.source_fingerprints['decision_dictionary'] == dictionary.fingerprint()
+        assert not adapters['numerical'].proposal_pairs
         raise Observed
 
     monkeypatch.setattr(bridges, "run_cooperative_evolution", observe)
