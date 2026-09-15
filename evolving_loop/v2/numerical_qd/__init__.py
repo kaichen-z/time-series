@@ -41,6 +41,12 @@ from .hyperband import (
     execute_hyperband_rung, fixed_rung_manifest,
 )
 from .map_elites import ArchiveInsertionV2, CounterRandom, NumericalQDArchive
+from .agent_methods import (
+    CurriculumTargetV2, MutationPromptLineageV2, MutationPromptPopulationV2,
+    VerifiedReusableProgramV2, apply_prompt_train_credit,
+    derive_curriculum_targets, insert_prompt_child, select_prompt_lineage,
+    select_reusable_programs,
+)
 from .persistence import NumericalQDRunStore, NumericalQDStoreError
 from .mutation import MutationProposalV2, MutationResultV2, apply_mutation, record_train_outcome
 from .nsga2 import (
@@ -83,6 +89,15 @@ __all__ = [
     "ArchiveInsertionV2",
     "CounterRandom",
     "NumericalQDArchive",
+    "CurriculumTargetV2",
+    "MutationPromptLineageV2",
+    "MutationPromptPopulationV2",
+    "VerifiedReusableProgramV2",
+    "apply_prompt_train_credit",
+    "derive_curriculum_targets",
+    "insert_prompt_child",
+    "select_prompt_lineage",
+    "select_reusable_programs",
     "ConstraintReportV2",
     "DescriptorPolicyV2",
     "MorphologyCellV2",
