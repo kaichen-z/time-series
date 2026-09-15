@@ -413,6 +413,15 @@ def _prompt_for_genome(store, genome, prompt_overrides):
     return NumericalProposerPromptV2.from_payload(store._object(prompt_sha))
 
 
+def _descendant_prompt_override(operator, updated_parent, child_state):
+    """Preserve policy-tuned child prompts; other children inherit credit."""
+    if operator == "policy_tune":
+        if type(child_state) is not MutationStateV2:
+            raise TypeError("policy-tune descendant requires its typed child state")
+        return child_state.proposer_prompt
+    return updated_parent.proposer_prompt
+
+
 def _persist_state(store, state, genome):
     for value in (state.inventory, state.mutation_policy, state.proposer_prompt, genome):
         _persist(store, value)
@@ -1298,6 +1307,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             archive = archive.insert(entries)
             for entry in sorted(entries, key=lambda item: item.fingerprint()):
                 store.append_qd_entry(entry)
+        credited_parent_state = parent_state
         for operator, genome_sha in attempted:
             feasible = any(e.genome_sha256 == genome_sha and e.constraints.feasible
                 for rung in hyperband.rungs for e in rung.evaluations)
@@ -1318,7 +1328,9 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             # Credit belongs to the sampled genome's prompt lineage.  The
             # shared policy state may supply operator authority, but must not
             # receive feedback for a different prompt ancestry.
-            updated = record_train_outcome(parent_state, feedback.to_payload())
+            updated = record_train_outcome(
+                credited_parent_state, feedback.to_payload()
+            )
             if operator == "policy_tune":
                 population = apply_prompt_train_credit(
                     population, selected_prompt.mutation_prompt.fingerprint(), feedback,
@@ -1329,11 +1341,16 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 _persist(store, updated.mutation_policy)
                 _persist(store, updated.proposer_prompt)
                 state = updated
+                credited_parent_state = updated
                 generation_prompt_overrides[sampled] = updated.proposer_prompt.fingerprint()
                 if inserted:
-                    # An inserted child is the sampled lineage's executable
-                    # descendant and is what MAP-Elites can sample next.
-                    generation_prompt_overrides[genome_sha] = updated.proposer_prompt.fingerprint()
+                    # Ordinary descendants inherit the credited sampled
+                    # lineage. A policy-tune child already owns a newly
+                    # evolved prompt and must retain that prompt identity.
+                    inherited_prompt = _descendant_prompt_override(
+                        operator, updated, child_states.get(genome_sha)
+                    )
+                    generation_prompt_overrides[genome_sha] = inherited_prompt.fingerprint()
             else:
                 # Train feedback remains in the closed generation record. A new
                 # evolvable policy cannot be produced after its admission limit.

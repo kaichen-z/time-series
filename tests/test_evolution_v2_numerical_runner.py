@@ -194,6 +194,33 @@ def test_runner_host_derives_and_inserts_policy_tune_prompt_child():
     assert child.allowed_mutation_operators == ("policy_tune",)
 
 
+def test_policy_tune_descendant_retains_its_evolved_prompt():
+    from evolving_loop.v2.numerical_qd.contracts import TrainMutationFeedbackV2
+    from evolving_loop.v2.numerical_qd.mutation import record_train_outcome
+    from evolving_loop.v2.numerical_qd.runner import (
+        _bootstrap, _descendant_prompt_override,
+    )
+
+    config, supply, _folds, adapter = fixture()
+    payload = config.to_payload()
+    payload["mutation"]["operators"] = ["policy_tune"]
+    config = NumericalQDConfigV2.from_payload(payload)
+    parent = _bootstrap(config, supply, adapter)[0]
+    child_prompt = replace(
+        parent.proposer_prompt,
+        template="Use the evolved child task prompt.",
+        parent_prompt_sha256=parent.proposer_prompt.fingerprint(),
+    )
+    child = replace(parent, proposer_prompt=child_prompt)
+    feedback = TrainMutationFeedbackV2(
+        "train", "policy_tune", True, False, True, (),
+    )
+    credited = record_train_outcome(parent, feedback.to_payload())
+
+    assert _descendant_prompt_override("policy_tune", credited, child) == child_prompt
+    assert _descendant_prompt_override("repair", credited, None) == credited.proposer_prompt
+
+
 def test_pending_proposal_requires_matching_terminal_status():
     from evolving_loop.v2.contracts import fingerprint_payload
     from evolving_loop.v2.numerical_qd.runner import _pending_generations_unresolved
