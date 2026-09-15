@@ -149,6 +149,21 @@ def test_runner_reusable_context_requires_feasible_store_verified_programs():
     ) == ((), ())
 
 
+def test_runner_host_derives_and_inserts_policy_tune_prompt_child():
+    from evolving_loop.v2.numerical_qd.runner import (
+        _seed_prompt_population, _host_mutation_prompt_child,
+    )
+    from evolving_loop.v2.numerical_qd.contracts import NumericalProposerPromptV2
+    parent = _seed_prompt_population(
+        NumericalProposerPromptV2(1, "task", "numerical_mutation_batch_v1", 4096,
+                                  ("policy_tune",), None)
+    )
+    selected = parent.lineages[0].mutation_prompt
+    child = _host_mutation_prompt_child(selected, "child task prompt")
+    assert child.parent_prompt_sha256 == selected.fingerprint()
+    assert child.allowed_mutation_operators == ("policy_tune",)
+
+
 def test_authenticated_fold_groups_pack_into_nested_label_free_rungs():
     from evolving_loop.v2.numerical_qd import hyperband
     from evolving_loop.v2.numerical_qd import runner

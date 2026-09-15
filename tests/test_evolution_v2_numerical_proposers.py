@@ -167,6 +167,22 @@ def test_llm_wire_contains_exact_verified_program_source_and_curriculum_context(
     assert client.calls[0]["messages"][0]["content"] == canonical_v2_bytes(wire).decode()
 
 
+def test_mutation_prompt_context_is_required_and_reaches_llm_wire():
+    args = request_args(
+        mutation_prompt=parent_state().proposer_prompt.to_payload() | {
+            "allowed_mutation_operators": ["policy_tune"],
+        },
+        mutation_prompt_population_sha256=SHA,
+    )
+    payload = primitive_proposer_request(**args)
+    client = ScriptedClient(json.dumps(raw_response()))
+    result = LLMProposalProvider(client, monotonic=lambda: 0.0).propose(payload)
+    assert result.proposals
+    wire = json.loads(client.calls[0]["messages"][0]["content"])
+    assert wire["request"]["mutation_prompt"] == args["mutation_prompt"]
+    assert wire["request"]["mutation_prompt_population_sha256"] == SHA
+
+
 def test_context_rejects_source_text_that_does_not_match_sha():
     changed = contextual_request_args()
     changed["reusable_programs"][0]["source_text"] += "# changed\n"

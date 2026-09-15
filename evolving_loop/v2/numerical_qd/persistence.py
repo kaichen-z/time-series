@@ -403,7 +403,15 @@ class NumericalQDRunStore:
             if expected_context != base_context:
                 require_sha256(context["mutation_prompt_sha256"], "mutation_prompt_sha256")
                 require_sha256(context["mutation_prompt_population_sha256"], "mutation_prompt_population_sha256")
-                self._object(context["mutation_prompt_population_sha256"])
+                population_payload = self._object(context["mutation_prompt_population_sha256"])
+                from .agent_methods import MutationPromptPopulationV2
+                population = MutationPromptPopulationV2.from_payload(population_payload)
+                if fingerprint_payload(request["mutation_prompt"]) != context["mutation_prompt_sha256"]:
+                    raise NumericalQDStoreError("proposal mutation-prompt commitment mismatch")
+                if context["mutation_prompt_sha256"] not in {
+                    lineage.mutation_prompt.fingerprint() for lineage in population.lineages
+                }:
+                    raise NumericalQDStoreError("proposal mutation prompt is not in committed population")
                 if context["eligible_reusable_program_sha256s"] != request["eligible_reusable_program_sha256s"]:
                     raise NumericalQDStoreError("proposal reusable-program commitment mismatch")
                 target_shas = tuple(

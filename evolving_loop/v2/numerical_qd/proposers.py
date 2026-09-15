@@ -17,7 +17,8 @@ from ..budget import BudgetLedger, ResourceUse
 from ..contracts import _require_exact_schema, _strict_json_value, canonical_v2_bytes, fingerprint_payload
 from .agent_methods import CurriculumTargetV2, VerifiedReusableProgramV2
 from .contracts import (
-    MEMBER_FAMILIES, MUTATION_OPERATORS, MutationStateV2, NumericalGenomeV2, TrainMutationFeedbackV2,
+    MEMBER_FAMILIES, MUTATION_OPERATORS, MutationStateV2, NumericalGenomeV2,
+    NumericalProposerPromptV2, TrainMutationFeedbackV2,
     _sorted_strings,
 )
 from .mutation import OPERATION_KEYS, MutationProposalV2, _identifier, apply_mutation
@@ -25,10 +26,16 @@ from .mutation import OPERATION_KEYS, MutationProposalV2, _identifier, apply_mut
 REQUEST_KEYS = frozenset({
     "parent_genome", "parent_state", "selected_cells", "train_feedback",
     "curriculum_targets", "reusable_programs", "eligible_reusable_program_sha256s",
+    "mutation_prompt", "mutation_prompt_population_sha256",
     "remaining_budget", "allowed_mutation_operators", "counter_draw",
     "max_proposals", "max_response_bytes",
 })
-LEGACY_CONTEXT_REQUEST_KEYS = REQUEST_KEYS - {"eligible_reusable_program_sha256s"}
+LEGACY_CONTEXT_REQUEST_KEYS = REQUEST_KEYS - {
+    "mutation_prompt", "mutation_prompt_population_sha256",
+}
+LEGACY_CONTEXT_UNCOMMITTED_REQUEST_KEYS = LEGACY_CONTEXT_REQUEST_KEYS - {
+    "eligible_reusable_program_sha256s",
+}
 LEGACY_REQUEST_KEYS = LEGACY_CONTEXT_REQUEST_KEYS - {"curriculum_targets", "reusable_programs"}
 FAILURE_REASONS = frozenset({"unavailable", "timeout", "malformed", "empty", "budget_exhausted"})
 _MAX_CONTEXT_RECORDS = 32
@@ -74,8 +81,8 @@ def primitive_proposer_request(**payload) -> dict:
     supplied = set(payload)
     if supplied == LEGACY_REQUEST_KEYS:
         expected = LEGACY_REQUEST_KEYS
-    elif supplied == LEGACY_CONTEXT_REQUEST_KEYS:
-        expected = LEGACY_CONTEXT_REQUEST_KEYS
+    elif supplied in (LEGACY_CONTEXT_REQUEST_KEYS, LEGACY_CONTEXT_UNCOMMITTED_REQUEST_KEYS):
+        expected = supplied
     else:
         expected = REQUEST_KEYS
     values = _require_exact_schema(payload, expected, field="proposer request")
@@ -132,6 +139,12 @@ def primitive_proposer_request(**payload) -> dict:
         TrainMutationFeedbackV2.from_payload(feedback)
     if "curriculum_targets" in values:
         _validate_program_context(values, state, genome)
+    if "mutation_prompt" in values:
+        prompt = NumericalProposerPromptV2.from_payload(values["mutation_prompt"])
+        if prompt.allowed_mutation_operators != ("policy_tune",):
+            raise ValueError("mutation_prompt must authorize only policy_tune")
+        from ..contracts import require_sha256
+        require_sha256(values["mutation_prompt_population_sha256"], "mutation_prompt_population_sha256")
     return values
 
 
@@ -528,6 +541,8 @@ def _llm_limits(request):
     encoded = canonical_v2_bytes(dict(request=request,
         allowed_mutation_response_schema=_response_schema(request, state))).decode("utf-8")
     system = state.proposer_prompt.template
+    if "mutation_prompt" in request:
+        system += "\n\nMutation prompt:\n" + request["mutation_prompt"]["template"]
     cap = min(request["max_response_bytes"], state.proposer_prompt.max_response_bytes, remaining.output_tokens)
     # LLMClient exposes text only: UTF-8 byte counts conservatively bound tokens.
     input_bound = len(encoded.encode()) + len(system.encode())

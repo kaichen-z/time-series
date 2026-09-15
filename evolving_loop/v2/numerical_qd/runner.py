@@ -41,7 +41,7 @@ from .adapters import (
 from .agent_methods import (
     CurriculumTargetV2, MutationPromptPopulationV2, MutationPromptLineageV2,
     VerifiedReusableProgramV2, apply_prompt_train_credit, derive_curriculum_targets,
-    select_prompt_lineage,
+    insert_prompt_child, select_prompt_lineage,
     select_reusable_programs,
 )
 from .config import NumericalQDConfigV2
@@ -429,6 +429,17 @@ def _seed_prompt_population(prompt):
     )
 
 
+def _host_mutation_prompt_child(parent, task_template):
+    """Derive a bounded mutation prompt from a Host-accepted child prompt."""
+    if type(parent) is not NumericalProposerPromptV2 or type(task_template) is not str:
+        raise TypeError("Host mutation prompt child requires typed prompt inputs")
+    template = task_template.strip()
+    if not template:
+        raise ValueError("Host mutation prompt child requires a nonempty template")
+    return NumericalProposerPromptV2(
+        1, template[:65536], "numerical_mutation_batch_v1",
+        parent.max_response_bytes, ("policy_tune",), parent.fingerprint(),
+    )
 def _persist_prompt_population(store, population):
     """Persist control-only prompt population without widening material taxonomy."""
     writer = getattr(store, "material_writer", None)
@@ -972,6 +983,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         reusable, reusable_shas = _trusted_reusable_program_context(
             store, archive, targets, maximum_records=8,
         )
+        population_sha = _persist_prompt_population(store, population)
         draw = random.randbelow(2 ** 32)
         checkpoint_state()  # RNG authority is durable before any provider call.
         if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
@@ -995,6 +1007,8 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             curriculum_targets=[target.to_payload() for target in targets],
             reusable_programs=[program.to_payload() for program in reusable],
             eligible_reusable_program_sha256s=list(reusable_shas),
+            mutation_prompt=selected_prompt.mutation_prompt.to_payload(),
+            mutation_prompt_population_sha256=population_sha,
             allowed_mutation_operators=sorted(config.mutation["operators"]), counter_draw=draw,
             max_proposals=config.proposer["max_proposals_per_generation"], max_response_bytes=config.proposer["max_response_bytes"])
         request_sha = _persist(store, request, kind=ArtifactKind.PROPOSER_REQUEST)
@@ -1023,7 +1037,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         attempt_payload = {"context": {"generation": generation,
             "parent_genome_sha256": selected.fingerprint(), "request_sha256": request_sha,
             "mutation_prompt_sha256": selected_prompt.mutation_prompt.fingerprint(),
-            "mutation_prompt_population_sha256": _persist_prompt_population(store, population),
+            "mutation_prompt_population_sha256": population_sha,
             "curriculum_target_sha256s": [target.cell.fingerprint() for target in targets],
             "eligible_reusable_program_sha256s": list(reusable_shas),
             "counter": {"seed": random.seed, "stream": random.stream, "start": counter_start, "end": random.counter}},
@@ -1230,6 +1244,14 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             inserted = any(e.genome_sha256 == genome_sha for e in entries)
             feedback = TrainMutationFeedbackV2("train", operator,
                 feasible, promoted, inserted, ())
+            if operator == "policy_tune" and genome_sha in child_states:
+                child_prompt = child_states[genome_sha].proposer_prompt
+                mutation_child = _host_mutation_prompt_child(
+                    selected_prompt.mutation_prompt, child_prompt.template,
+                )
+                population = insert_prompt_child(
+                    population, selected_prompt.mutation_prompt.fingerprint(), mutation_child,
+                )
             updated = record_train_outcome(state, feedback.to_payload())
             if operator == "policy_tune":
                 population = apply_prompt_train_credit(
