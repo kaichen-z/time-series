@@ -40,6 +40,7 @@ def request_args(**updates):
     return dict(parent_genome=genome, parent_state=state.to_payload(),
         selected_cells=[dict(cell_sha256=CELL, member_ids=["a", "b"])],
         train_feedback=[feedback()], curriculum_targets=[], reusable_programs=[],
+        eligible_reusable_program_sha256s=[],
         remaining_budget=ResourceUse(wall_seconds=10.0,
             llm_calls=1, input_tokens=100000, output_tokens=16000).to_payload(),
         allowed_mutation_operators=sorted(state.mutation_policy.operators),
@@ -113,9 +114,11 @@ def contextual_request_args(*, status="active", source=CODE):
         proposer_prompt_sha256=state.proposer_prompt.fingerprint(),
     )
     genome_sha = NumericalGenomeV2.from_payload(args["parent_genome"]).fingerprint()
-    args["reusable_programs"] = [VerifiedReusableProgramV2(
+    program = VerifiedReusableProgramV2(
         1, "a", genome_sha, (cell_sha,), source_sha, source,
-    ).to_payload()]
+    )
+    args["reusable_programs"] = [program.to_payload()]
+    args["eligible_reusable_program_sha256s"] = [program.fingerprint()]
     return args
 
 
@@ -130,6 +133,7 @@ def test_actual_provider_boundary_is_closed_primitive_request(provider_kind):
     def inspected_propose(boundary_payload):
         assert set(boundary_payload) == {"parent_genome", "parent_state", "selected_cells", "train_feedback",
             "curriculum_targets", "reusable_programs", "remaining_budget",
+            "eligible_reusable_program_sha256s",
             "allowed_mutation_operators", "counter_draw", "max_proposals", "max_response_bytes"}
         assert_primitives(boundary_payload)
         return actual_propose(boundary_payload)
@@ -191,12 +195,49 @@ def test_context_rejects_quarantined_parent_program():
         primitive_proposer_request(**quarantined)
 
 
+def test_context_rejects_forged_non_parent_program_without_matching_host_commitment():
+    forged = contextual_request_args()
+    source = CODE.replace("forecast", "forged_forecast")
+    record = VerifiedReusableProgramV2(
+        1, "forged", "d" * 64, (CONTEXT_CELL.fingerprint(),),
+        hashlib.sha256(source.encode()).hexdigest(), source,
+    )
+    forged["reusable_programs"] = [record.to_payload()]
+
+    with pytest.raises(ValueError, match="Host eligibility"):
+        primitive_proposer_request(**forged)
+
+
+def test_context_accepts_host_committed_non_parent_program():
+    request = contextual_request_args()
+    source = CODE.replace("forecast", "reusable_forecast")
+    record = VerifiedReusableProgramV2(
+        1, "reusable", "d" * 64, (CONTEXT_CELL.fingerprint(),),
+        hashlib.sha256(source.encode()).hexdigest(), source,
+    )
+    request["reusable_programs"] = [record.to_payload()]
+    request["eligible_reusable_program_sha256s"] = [record.fingerprint()]
+
+    assert primitive_proposer_request(**request)["reusable_programs"] == [
+        record.to_payload()
+    ]
+
+
 def test_context_fields_are_jointly_required():
     for missing in ("curriculum_targets", "reusable_programs"):
         args = request_args()
         del args[missing]
         with pytest.raises(ValueError, match="exact schema"):
             primitive_proposer_request(**args)
+
+
+def test_legacy_parent_context_without_host_commitment_remains_readable():
+    legacy = contextual_request_args()
+    del legacy["eligible_reusable_program_sha256s"]
+
+    assert primitive_proposer_request(**legacy)["reusable_programs"] == legacy[
+        "reusable_programs"
+    ]
 
 
 def test_context_fields_are_bounded():

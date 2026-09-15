@@ -24,11 +24,12 @@ from .mutation import OPERATION_KEYS, MutationProposalV2, _identifier, apply_mut
 
 REQUEST_KEYS = frozenset({
     "parent_genome", "parent_state", "selected_cells", "train_feedback",
-    "curriculum_targets", "reusable_programs",
+    "curriculum_targets", "reusable_programs", "eligible_reusable_program_sha256s",
     "remaining_budget", "allowed_mutation_operators", "counter_draw",
     "max_proposals", "max_response_bytes",
 })
-LEGACY_REQUEST_KEYS = REQUEST_KEYS - {"curriculum_targets", "reusable_programs"}
+LEGACY_CONTEXT_REQUEST_KEYS = REQUEST_KEYS - {"eligible_reusable_program_sha256s"}
+LEGACY_REQUEST_KEYS = LEGACY_CONTEXT_REQUEST_KEYS - {"curriculum_targets", "reusable_programs"}
 FAILURE_REASONS = frozenset({"unavailable", "timeout", "malformed", "empty", "budget_exhausted"})
 _MAX_CONTEXT_RECORDS = 32
 _CURRICULUM_REASON_ORDER = {
@@ -67,9 +68,16 @@ def primitive_proposer_request(**payload) -> dict:
     Inputs are payloads, never live artifacts, paths, Store/Kernel handles or
     callbacks. Free-form evaluation text/forecasts are deliberately absent.
     """
-    # Legacy request artifacts remain readable. New callers opt into the V2
-    # context atomically by supplying both exact fields, including empty lists.
-    expected = LEGACY_REQUEST_KEYS if set(payload) == LEGACY_REQUEST_KEYS else REQUEST_KEYS
+    # Legacy request artifacts remain readable. New callers opt into the
+    # committed context atomically by supplying all exact fields, including
+    # empty lists.
+    supplied = set(payload)
+    if supplied == LEGACY_REQUEST_KEYS:
+        expected = LEGACY_REQUEST_KEYS
+    elif supplied == LEGACY_CONTEXT_REQUEST_KEYS:
+        expected = LEGACY_CONTEXT_REQUEST_KEYS
+    else:
+        expected = REQUEST_KEYS
     values = _require_exact_schema(payload, expected, field="proposer request")
     values = _strict_json_value(values)
     metadata = dict(values)
@@ -168,6 +176,24 @@ def _validate_program_context(values, state, genome):
         raise ValueError("reusable programs must be canonical with unique source identities")
 
     parent_sha = genome.fingerprint()
+    committed_payload = values.get("eligible_reusable_program_sha256s")
+    if committed_payload is None:
+        if any(program.genome_sha256 != parent_sha for program in programs):
+            raise ValueError("non-parent reusable program lacks Host eligibility commitment")
+    else:
+        committed = _sorted_strings(
+            committed_payload,
+            "eligible_reusable_program_sha256s",
+            sha=True,
+        )
+        if len(committed) > _MAX_CONTEXT_RECORDS:
+            raise ValueError(
+                f"eligible_reusable_program_sha256s may contain at most {_MAX_CONTEXT_RECORDS} records"
+            )
+        actual = tuple(sorted(program.fingerprint() for program in programs))
+        if committed != actual:
+            raise ValueError("reusable program lacks exact Host eligibility commitment")
+
     members = {member.member_id: member for member in state.inventory.members}
     for program in programs:
         if program.genome_sha256 != parent_sha:

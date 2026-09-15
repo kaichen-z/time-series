@@ -69,3 +69,35 @@ Host-supplied feasible genome set and deterministically ranks target matches.
 - The worktree briefly ran out of disk space during verification. Only
   regenerable `.pytest_cache` and `__pycache__` directories in this worktree
   were removed; no `runs/` artifact was touched.
+
+## Review round 1 fix
+
+Review found that the initial implementation authenticated records only when
+their `genome_sha256` named the current parent. A non-parent record therefore
+had source-byte integrity but no Host eligibility evidence.
+
+New exact requests now include a bounded, sorted
+`eligible_reusable_program_sha256s` commitment. It must equal the fingerprints
+of the complete reusable-program records, binding member ID, genome identity,
+applicability, source SHA, and exact source text to the Host's selection. The
+Host remains responsible for issuing this commitment only after archive/store
+verification of feasibility and non-quarantined membership. Proposer output
+cannot create or alter the incoming commitment.
+
+Legacy schemas remain readable. A legacy context may carry current-parent
+records because they are independently checked against the exact parent
+inventory; a legacy non-parent record is rejected because no Host eligibility
+commitment exists.
+
+RED command:
+
+`PYTHONDONTWRITEBYTECODE=1 TMPDIR=/private/tmp/codex-task2-pytest python -m pytest -q -p no:cacheprovider tests/test_evolution_v2_numerical_proposers.py::test_context_rejects_forged_non_parent_program_without_matching_host_commitment`
+
+Observed: 1 failed. The request schema had no Host commitment field, so the
+new test could not reach an eligibility check.
+
+GREEN command:
+
+`PYTHONDONTWRITEBYTECODE=1 TMPDIR=/private/tmp/codex-task2-pytest python -m pytest -q -p no:cacheprovider tests/test_evolution_v2_numerical_proposers.py tests/test_evolution_v2_numerical_agent_methods.py`
+
+Result: 140 passed in 0.65s.
