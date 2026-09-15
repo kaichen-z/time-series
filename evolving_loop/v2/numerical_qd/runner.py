@@ -450,6 +450,14 @@ def _persist_prompt_population(store, population):
         store.material_writer = writer
 
 
+def _latest_terminal_generation(steps):
+    """Restore post-generation state, independent of pending-marker SHA order."""
+    return max(
+        (step for step in steps if step.get("status") != "proposal_pending"),
+        key=lambda step: step["generation"], default=None,
+    )
+
+
 def _pending_generations_unresolved(steps, attempts):
     """Return pending generations lacking a matching terminal status."""
     terminal = {
@@ -844,9 +852,14 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                    if name.startswith("objects/")]
         steps = [value["numerical_qd_step"] for value in objects if "numerical_qd_step" in value]
         generation = max((step["generation"] for step in steps), default=0)
+        attempts = [store._read(name) for name in checkpoint.completed_operation_sha256s if name.startswith("proposals/")]
+        if any(attempt.get("context", {}).get("generation", 0) > generation for attempt in attempts):
+            raise NumericalQDStoreError("unfinished generation cannot be resampled; resume requires a closed generation or a new epoch")
+        if _pending_generations_unresolved(steps, attempts):
+            raise NumericalQDStoreError("unfinished generation cannot be resampled; resume requires a closed generation or a new epoch")
+        terminal = _latest_terminal_generation(steps)
         population_sha = (
-            max(steps, key=lambda step: step["generation"])
-            .get("mutation_prompt_population_sha256") if steps else None
+            terminal.get("mutation_prompt_population_sha256") if terminal else None
         )
         population = (
             MutationPromptPopulationV2.from_payload(store._object(population_sha))
@@ -856,12 +869,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 )
             )
         )
-        attempts = [store._read(name) for name in checkpoint.completed_operation_sha256s if name.startswith("proposals/")]
-        if any(attempt.get("context", {}).get("generation", 0) > generation for attempt in attempts):
-            raise NumericalQDStoreError("unfinished generation cannot be resampled; resume requires a closed generation or a new epoch")
-        if _pending_generations_unresolved(steps, attempts):
-            raise NumericalQDStoreError("unfinished generation cannot be resampled; resume requires a closed generation or a new epoch")
-        previous_feedback = (max(steps, key=lambda step: step["generation"])["train_feedback"] if steps else None)
+        previous_feedback = terminal["train_feedback"] if terminal else None
         pairs = [value for value in objects if set(value) == {"supply", "registry"}]
         pair = next(value for value in pairs if parse_numerical_supply_release(value["supply"]).fingerprint == active.numerical_release_sha256)
         parent_release = parse_numerical_supply_release(pair["supply"])

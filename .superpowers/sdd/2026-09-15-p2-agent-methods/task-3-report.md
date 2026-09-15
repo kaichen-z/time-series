@@ -31,3 +31,10 @@
 - RED: a proposal attempt alone incorrectly resolved `proposal_pending`, allowing resume to abandon a generation before terminal accounting.
 - GREEN: pending state now resolves only with a same-generation terminal status carrying both exact request and attempt commitments; otherwise resume fails closed.
 - Focused verification: pending/Host/legacy checks — 2 passed, 239 deselected.
+
+## Review-round 4/5 TDD evidence
+
+- RED: `test_resume_prompt_context_uses_terminal_generation_over_pending` failed in both enumeration orders because the terminal-only selector was absent (2 failed).
+- GREEN: resume validates pending resolution first, then selects the latest non-pending generation once for both mutation-prompt population and Train feedback. Pending markers cannot restore pre-child population or incoming feedback; no terminal record preserves the existing seed-population/empty-feedback fallback.
+- The focused regression covers pending-before-terminal and terminal-before-pending for the same generation, an older terminal record, and the empty seed case.
+- Verification: `PYTHONDONTWRITEBYTECODE=1 /Users/yyoraa/time-series/.venv/bin/python -m pytest -q -p no:cacheprovider tests/test_evolution_v2_numerical_runner.py::test_resume_prompt_context_uses_terminal_generation_over_pending` — 2 passed in 1.19s. Scoped `git diff --check` passed. No other tests were run and no run artifacts were modified.

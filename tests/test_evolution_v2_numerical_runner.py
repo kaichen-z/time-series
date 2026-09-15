@@ -175,6 +175,32 @@ def test_pending_proposal_requires_matching_terminal_status():
     assert _pending_generations_unresolved([pending, terminal], [attempt]) == ()
 
 
+@pytest.mark.parametrize("pending_first", [True, False])
+def test_resume_prompt_context_uses_terminal_generation_over_pending(pending_first):
+    from evolving_loop.v2.numerical_qd import runner
+
+    incoming = {"operator": "policy_tune", "child_feasible": False}
+    outcome = {"operator": "policy_tune", "child_feasible": True}
+    pending = {
+        "generation": 2, "status": "proposal_pending",
+        "mutation_prompt_population_sha256": "1" * 64,
+        "train_feedback": incoming,
+    }
+    terminal = {
+        "generation": 2, "status": "accepted",
+        "mutation_prompt_population_sha256": "2" * 64,
+        "train_feedback": outcome,
+    }
+    older = dict(terminal, generation=1,
+                 mutation_prompt_population_sha256="0" * 64)
+    steps = [older, pending, terminal] if pending_first else [older, terminal, pending]
+    latest = runner._latest_terminal_generation(steps)
+
+    assert latest["mutation_prompt_population_sha256"] == "2" * 64
+    assert latest["train_feedback"] == outcome
+    assert runner._latest_terminal_generation([]) is None
+
+
 def test_authenticated_fold_groups_pack_into_nested_label_free_rungs():
     from evolving_loop.v2.numerical_qd import hyperband
     from evolving_loop.v2.numerical_qd import runner
