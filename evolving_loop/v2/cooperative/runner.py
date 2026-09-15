@@ -13,6 +13,8 @@ from ..budget import BudgetLedger, BudgetPlan, ResourceUse
 from ..bundle import EvolutionBundleV2
 from ..contracts import SanitizedEvolutionFeedback, canonical_v2_bytes, fingerprint_payload
 from ..kernel import EvolutionKernel, KernelAuthorityError
+from ..numerical_qd.adapters import frozen_local_evidence_references
+from ..numerical_qd.artifacts import validate_artifact
 from ..store import V2RunStore, _atomic_write, append_jsonl, write_once_json
 from .adapters import (
     CooperativeArtifactCatalog,
@@ -120,6 +122,23 @@ def _read(path, identity=None):
         raise KernelAuthorityError("cooperative artifact must be canonical JSON")
     if identity is not None and fingerprint_payload(value) != identity:
         raise KernelAuthorityError("cooperative object digest mismatch")
+    return value
+
+
+def _read_frozen_evidence(path, identity, kind):
+    """Read only an envelope-bound Task-4 object in its exact serialization."""
+    raw = Path(path).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != identity:
+        raise KernelAuthorityError("cooperative evidence object digest mismatch")
+    try:
+        validate_artifact(kind, raw)
+        value = strict_json_loads(raw.decode("utf-8"), context=str(path))
+    except (UnicodeError, TypeError, ValueError) as error:
+        raise KernelAuthorityError(
+            "cooperative evidence object is not its exact typed serialization"
+        ) from error
+    if type(value) is not dict:
+        raise KernelAuthorityError("cooperative evidence object must be an object")
     return value
 
 
@@ -253,7 +272,8 @@ def _cache_key_sha(bundle_sha256, stage, task_universe_sha256):
 
 def _load_catalog_and_cache(root, catalog, numerical, retrieval, decision, adapters):
     catalog.add_numerical(numerical)
-    for item in getattr(adapters.get("numerical"), "_alternatives", ()):
+    alternatives = tuple(getattr(adapters.get("numerical"), "_alternatives", ()))
+    for item in alternatives:
         catalog.add_numerical(item)
     catalog.add_retrieval(retrieval)
     catalog.add_decision(decision)
@@ -261,7 +281,19 @@ def _load_catalog_and_cache(root, catalog, numerical, retrieval, decision, adapt
     objects = root / "objects"
     if not objects.exists():
         return cache
+    evidence_refs = {}
+    for pair in (numerical, *alternatives):
+        for identity, kind in frozen_local_evidence_references(pair.envelope).items():
+            previous = evidence_refs.get(identity)
+            if previous is not None and previous != kind:
+                raise KernelAuthorityError(
+                    "cooperative evidence object has conflicting typed bindings"
+                )
+            evidence_refs[identity] = kind
     for path in objects.glob("*.json"):
+        if path.stem in evidence_refs:
+            _read_frozen_evidence(path, path.stem, evidence_refs[path.stem])
+            continue
         value = _read(path, path.stem)
         if value.get("kind") == "cooperative_aggregate":
             aggregate = _Aggregate.from_payload(value)

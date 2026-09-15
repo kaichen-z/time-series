@@ -571,22 +571,37 @@ def test_projection_exports_every_feasible_archive_elite_including_same_family(w
     )
     schema2_world = (adapter, parent, registry, state, rows)
     base = materialize(schema2_world)
-    children = tuple(projection_child(world, base, i, family) for i, family in enumerate(
-        ("statistical", "statistical", "tsfm", "tsfm", "combined", "atlas_overlay")))
-    cells = tuple(MorphologyCellV2(trend, season, "low", "stable", "short", "statistical")
-                  for trend, season in (("low", "none"), ("medium", "none"), ("high", "none"), ("low", "short"), ("low", "long")))
-    rows = [projection_entry(children[0], cell, (9,) * 5) for cell in cells[:4]]
-    rows += [projection_entry(children[1], cells[0], (0.1,) * 5)]
-    rows += [projection_entry(child, cells[4], (1,) * 5) for child in children[2:]]
+    children = tuple(
+        projection_child(world, base, i, "statistical") for i in range(9)
+    )
+    cells = tuple(
+        MorphologyCellV2(
+            trend,
+            season,
+            "low",
+            "stable",
+            "short",
+            "statistical",
+        )
+        for trend in ("low", "medium", "high")
+        for season in ("none", "short", "long")
+    )
+    rows = [
+        projection_entry(child, cell, (index + 1,) * 5)
+        for index, (child, cell) in enumerate(zip(children, cells, strict=True))
+    ]
     archive = NumericalQDArchive().insert(rows)
     frozen = freeze_qd_supply(adapter, parent, registry, archive, children,
         descriptor_policy=descriptor_policy(), version="n002")
-    assert frozen.selected_genome_sha256s[0] == children[0].genome.fingerprint()
-    assert {spec.family for spec in frozen.release.alternatives} == {"statistical", "tsfm", "combined", "atlas_overlay"}
-    assert len(frozen.release.alternatives) == 6
+    assert {spec.family for spec in frozen.release.alternatives} == {"statistical"}
+    assert len(frozen.release.alternatives) == 9
     assert set(frozen.selected_genome_sha256s) == {
         child.genome.fingerprint() for child in children
     }
+    for task in adapter.tasks:
+        package = frozen.registry.package_for(task)
+        assert len(package.ranked_alternatives) == 10
+        assert len(package.selection_decision.considered_candidates) <= 8
     again = freeze_qd_supply(adapter, parent, registry, archive, reversed(children),
         descriptor_policy=descriptor_policy(), version="n002")
     assert frozen.envelope.canonical_bytes() == again.envelope.canonical_bytes()

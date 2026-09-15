@@ -9,12 +9,18 @@ from types import MappingProxyType
 from common.payload import strict_json_loads
 from evolving_loop.data import ContextTask
 from evolving_loop.package_numerical_supply import parse_numerical_supply_release
+from evolving_loop.package_registry import task_registry_fingerprint
 from evolving_loop.retrieval_agent.policy import RetrievalGenome
 
 from ..budget import BudgetPlan, ResourceUse
 from ..bundle import EvolutionBundleV2
 from ..cli import numerical_evolve_payload
-from ..contracts import canonical_v2_bytes, fingerprint_payload
+from ..contracts import (
+    _require_exact_schema,
+    canonical_v2_bytes,
+    fingerprint_payload,
+    require_sha256,
+)
 from ..cooperative import (
     CooperativeArtifactCatalog,
     CooperativeConfigV2,
@@ -22,6 +28,7 @@ from ..cooperative import (
     CooperativeRunResultV2,
     DecisionCoordinateAdapter,
     DecisionModuleV2,
+    DictionarySelectorGenomeV2,
     NumericalCoordinateAdapter,
     P3NumericalDictionaryV2,
     RetrievalCoordinateAdapter,
@@ -32,7 +39,12 @@ from ..cooperative import (
 )
 from ..cooperative.contracts import CooperativeCheckpointV2
 from ..kernel import AcceptanceEvidence, EvolutionKernel, KernelAuthorityError
-from ..numerical_qd.adapters import FrozenNumericalArtifactsV2
+from ..numerical_qd.adapters import (
+    FrozenNumericalArtifactsV2,
+    frozen_local_evidence_references,
+    validate_frozen_local_evidence,
+)
+from ..numerical_qd.artifacts import validate_artifact
 from ..numerical_qd.contracts import FrozenNumericalRegistryEnvelopeV2
 from ..store import V2RunStore, write_once_json
 from .contracts import P3_NUMERICAL_MODE, require_p3_numerical_mode
@@ -417,9 +429,88 @@ def _load_numerical_pair(
     )
     release = parse_numerical_supply_release(release_payload)
     envelope = FrozenNumericalRegistryEnvelopeV2.from_payload(envelope_payload)
+    support = {}
+    evidence_bytes = {}
+    try:
+        for identity, kind in frozen_local_evidence_references(envelope).items():
+            raw = (root / "objects" / f"{identity}.json").read_bytes()
+            validate_artifact(kind, raw)
+            evidence_bytes[identity] = raw
+            support[identity] = strict_json_loads(
+                raw.decode("utf-8"), context=f"Numerical evidence {identity}"
+            )
+        validate_frozen_local_evidence(
+            release,
+            envelope,
+            artifact_bytes_by_sha=evidence_bytes,
+            tasks=tasks,
+        )
+        dictionary_sha = require_sha256(
+            release.source_fingerprints["p3_dictionary"], "P3 Dictionary SHA"
+        )
+        selector_sha = require_sha256(
+            release.source_fingerprints["p3_selector"], "P3 Selector SHA"
+        )
+        dictionary_payload = _read_canonical(
+            root / "objects" / f"{dictionary_sha}.json", dictionary_sha
+        )
+        dictionary_value = _require_exact_schema(
+            dictionary_payload,
+            (
+                "schema_version",
+                "source_pair_sha256s",
+                "task_sha256s",
+                "anchor_name",
+                "anchor_release_sha256",
+                "alternatives",
+                "runtime_fingerprints",
+                "public_test_accessed",
+            ),
+            field="P3 Numerical Dictionary support",
+        )
+        task_sha256s = {
+            task.numeric.task_id: task_registry_fingerprint(task)
+            for task in sorted(tasks, key=lambda item: item.numeric.task_id)
+        }
+        source_pairs = dictionary_value["source_pair_sha256s"]
+        runtime_fingerprints = dictionary_value["runtime_fingerprints"]
+        if (
+            dictionary_value["schema_version"] != 1
+            or dictionary_value["public_test_accessed"] is not False
+            or type(dictionary_value["anchor_name"]) is not str
+            or not dictionary_value["anchor_name"].strip()
+            or type(source_pairs) is not list
+            or not source_pairs
+            or source_pairs != sorted(set(source_pairs))
+            or dictionary_value["task_sha256s"] != task_sha256s
+            or runtime_fingerprints != dict(release.runtime_fingerprints)
+            or dictionary_value["alternatives"]
+            != [item.to_payload() for item in release.alternatives]
+        ):
+            raise ValueError("P3 Numerical Dictionary support binding mismatch")
+        for identity in source_pairs:
+            require_sha256(identity, "P3 Dictionary source pair SHA")
+        for identity in runtime_fingerprints.values():
+            require_sha256(identity, "P3 Dictionary runtime SHA")
+        require_sha256(
+            dictionary_value["anchor_release_sha256"],
+            "P3 Dictionary Anchor SHA",
+        )
+        selector_payload = _read_canonical(
+            root / "objects" / f"{selector_sha}.json", selector_sha
+        )
+        DictionarySelectorGenomeV2.from_payload(selector_payload)
+        support[dictionary_sha] = dictionary_payload
+        support[selector_sha] = selector_payload
+    except (KeyError, OSError, UnicodeError, TypeError, ValueError) as error:
+        raise KernelAuthorityError(
+            "proposal-space Numerical support closure is invalid"
+        ) from error
     registry = envelope.restore(tasks)
     selected = tuple(row["selected_genome_sha256s"])
-    pair = FrozenNumericalArtifactsV2(release, registry, envelope, selected)
+    pair = FrozenNumericalArtifactsV2(
+        release, registry, envelope, selected, support
+    )
     if (
         release.fingerprint != row["release_sha256"]
         or registry.fingerprint != row["registry_sha256"]
@@ -551,7 +642,14 @@ def load_sealed_bundle_closure(
     )
     for pair in alternatives:
         catalog.add_numerical(pair)
+    support_identities = {
+        identity
+        for pair in (seed_pair, *alternatives)
+        for identity in pair.support_objects
+    }
     for path in (run_root / "objects").glob("*.json"):
+        if path.stem in support_identities:
+            continue
         payload = _read_canonical(path, path.stem)
         fields = set(payload)
         if fields == {

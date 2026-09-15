@@ -1593,8 +1593,9 @@ def _bind_evolved_task_local_bundle(source, release, available, evolved_names, *
         if name != anchor and name in ranked and name not in evolved
     )
     policy = TaskLocalTournamentPolicy(anchor_name=anchor)
-    room = policy.maximum_candidates - 1 - len(evolved)
-    candidate_names = (anchor, *evolved, *old_names[: max(0, room)])
+    bounded_evolved = evolved[: policy.maximum_candidates - 1]
+    room = policy.maximum_candidates - 1 - len(bounded_evolved)
+    candidate_names = (anchor, *bounded_evolved, *old_names[:room])
     result = execute_task_local_ensemble(
         policy,
         candidate_names=candidate_names,

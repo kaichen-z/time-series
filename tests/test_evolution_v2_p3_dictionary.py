@@ -282,6 +282,68 @@ def test_selector_pair_persists_schema2_dictionary_genome_and_local_evidence():
     assert set(pair.support_objects) <= set(written)
 
 
+def test_fresh_cooperative_catalog_load_accepts_only_bound_legacy_evidence(tmp_path):
+    from evolving_loop.retrieval_agent.policy import RetrievalGenome
+    from evolving_loop.v2.cooperative import DecisionModuleV2, RetrievalModuleV2
+    from evolving_loop.v2.cooperative.runner import (
+        _load_catalog_and_cache,
+        _write_legacy_object,
+        _write_object,
+    )
+
+    tasks = _registry_tasks()
+    dictionary = build_p3_numerical_dictionary((_wide_dictionary_pair(),), tasks)
+    pair = materialize_selector_pair(dictionary, seed_selector_genome(), tasks)
+    retrieval = RetrievalModuleV2(
+        1, "a" * 64, RetrievalGenome.seed().to_payload(), ()
+    )
+    decision = DecisionModuleV2(1, "seed prompt", (), True, 2, "last")
+    root = tmp_path / "fresh-p3"
+    catalog = CooperativeArtifactCatalog(
+        lambda identity, payload: _write_object(root, identity, payload),
+        lambda identity, payload: _write_legacy_object(root, identity, payload),
+    )
+
+    cache = _load_catalog_and_cache(
+        root,
+        catalog,
+        pair,
+        retrieval,
+        decision,
+        {"numerical": NumericalCoordinateAdapter(())},
+    )
+
+    assert cache == {}
+    assert catalog.resolve_numerical(
+        pair.release.fingerprint, pair.registry.fingerprint
+    ) is pair
+
+
+def test_sealed_numerical_pair_load_restores_authenticated_support_closure(tmp_path):
+    from evolving_loop.v2.cooperative.runner import (
+        _write_legacy_object,
+        _write_object,
+    )
+    from evolving_loop.v2.real.bridges import _load_numerical_pair, _pair_row
+
+    tasks = _registry_tasks()
+    dictionary = build_p3_numerical_dictionary((_wide_dictionary_pair(),), tasks)
+    pair = materialize_selector_pair(dictionary, seed_selector_genome(), tasks)
+    root = tmp_path / "sealed-p3"
+    catalog = CooperativeArtifactCatalog(
+        lambda identity, payload: _write_object(root, identity, payload),
+        lambda identity, payload: _write_legacy_object(root, identity, payload),
+    )
+    catalog.add_numerical(pair)
+
+    loaded = _load_numerical_pair(root, _pair_row(pair), tasks)
+
+    assert set(loaded.support_objects) == set(pair.support_objects)
+    CooperativeArtifactCatalog(lambda _identity, _payload: None).add_numerical(
+        loaded
+    )
+
+
 def test_numerical_coordinate_evolves_selector_instead_of_p2_pair():
     tasks = _registry_tasks()
     closure = build_p3_numerical_dictionary((_wide_dictionary_pair(),), tasks)
