@@ -613,22 +613,19 @@ def _derived_cooperative_config(context: RealStageContextV2, host: object) -> di
     return CooperativeConfigV2.from_payload(payload).to_payload()
 
 
-def _publish_p2_numerical_alternatives(host: object, output_dir: Path) -> None:
-    """Expose feasible, nonactive P2 pairs to the numerical P3 coordinate."""
+def _publish_p3_numerical_dictionary(host: object, output_dir: Path):
+    """Reconstruct and publish the complete executable P2 Dictionary for P3."""
+    from ..cooperative import build_p3_numerical_dictionary
     from ..numerical_qd.persistence import NumericalQDRunStore
 
     store = NumericalQDRunStore(output_dir)
-    active, _active_sha = store.load_active_frozen_pair(tasks=host.tasks)
-    active_identity = (active.release.fingerprint, active.registry.fingerprint)
-    alternatives = tuple(
-        pair for pair, _pair_sha in store.load_frozen_pairs(tasks=host.tasks)
-        if pair.selected_genome_sha256s
-        and (pair.release.fingerprint, pair.registry.fingerprint) != active_identity
-    )
-    host.numerical_alternatives = tuple(sorted(
-        alternatives,
-        key=lambda pair: (pair.release.fingerprint, pair.registry.fingerprint),
-    ))
+    pairs = tuple(pair for pair, _pair_sha in store.load_frozen_pairs(tasks=host.tasks))
+    dictionary = build_p3_numerical_dictionary(pairs, tuple(host.tasks))
+    published = getattr(host, "p3_dictionary", None)
+    if published is not None and published.fingerprint() != dictionary.fingerprint():
+        raise RealRunnerError("reconstructed P3 Dictionary differs from Host publication")
+    host.p3_dictionary = dictionary
+    return dictionary
 
 
 def build_real_stage_ports(
@@ -682,14 +679,9 @@ def build_real_stage_ports(
         }
         if p2_generations is not None:
             arguments["finalize_after"] = p2_generations
-        result = run_real_numerical(context, host, **arguments)
-        if isinstance(result, Mapping) and result.get("status") == "numerical_qd_complete":
-            _publish_p2_numerical_alternatives(host, context.output_dir)
-        return result
+        return run_real_numerical(context, host, **arguments)
 
     def seal_p2(context: RealStageContextV2, _result: object) -> SealedStageV2:
-        from ..numerical_qd.persistence import NumericalQDRunStore
-
         if (
             isinstance(_result, Mapping)
             and _result.get("status") == "p2_preparation_budget_exhausted"
@@ -714,24 +706,12 @@ def build_real_stage_ports(
         summary = completion.get("summary")
         if not isinstance(summary, Mapping) or type(summary.get("public_test_accessed")) is not bool:
             raise RealRunnerError("P2 completion lacks Public access evidence")
-        pair, pair_sha = NumericalQDRunStore(context.output_dir).load_active_frozen_pair(
-            tasks=host.tasks
-        )
-        # A process may resume after the native P2 completion was written but
-        # before the root P2 seal.  In that path run_p2 is not called again, so
-        # rehydrate feasible nonactive pairs here before P3 builds its proposal
-        # space.  Without this, a real evolved Numerical specialist silently
-        # disappears from cooperative evolution after a perfectly valid resume.
-        if not getattr(host, "numerical_alternatives", ()):
-            _publish_p2_numerical_alternatives(host, context.output_dir)
+        dictionary = _publish_p3_numerical_dictionary(host, context.output_dir)
         prepared = _load_prepared_real_p2(
             context.output_dir.parent / "prepared/p2", manifest=manifest
         )
         bindings = {
-            "pair_sha256": pair_sha,
-            "release_sha256": pair.release.fingerprint,
-            "registry_sha256": pair.registry.fingerprint,
-            "envelope_sha256": pair.envelope.fingerprint(),
+            "p3_dictionary_sha256": dictionary.fingerprint(),
             "champion_sha256": prepared.input_sha256s["champion_release"],
             "config_sha256": prepared.input_sha256s["config"],
             "task_manifest_sha256": prepared.input_sha256s["task_manifest"],
@@ -749,19 +729,17 @@ def build_real_stage_ports(
             summary["public_test_accessed"],
         )
 
-    def _p2_pair(context: RealStageContextV2):
-        from ..numerical_qd.persistence import NumericalQDRunStore
-
-        return NumericalQDRunStore(context.output_dir.parent / "p2").load_active_frozen_pair(
-            tasks=host.tasks
-        )[0]
-
     def run_p3(context: RealStageContextV2) -> object:
         from .bridges import run_real_cooperative
 
         bind_deadline(context)
+        dictionary = getattr(host, "p3_dictionary", None)
+        if dictionary is None:
+            dictionary = _publish_p3_numerical_dictionary(
+                host, context.output_dir.parent / "p2"
+            )
         return run_real_cooperative(
-            p2=_p2_pair(context),
+            dictionary=dictionary,
             host=host,
             config_payload=_derived_cooperative_config(context, host),
             output_dir=context.output_dir,

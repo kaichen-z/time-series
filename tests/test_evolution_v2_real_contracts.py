@@ -5,6 +5,7 @@ import pytest
 from common.payload import strict_json_loads
 from evolving_loop.v2.contracts import canonical_v2_bytes
 from evolving_loop.v2.real.contracts import (
+    P3_NUMERICAL_MODE,
     PROFILE_SCHEDULES,
     RealEvolutionCheckpointV2,
     RealEvolutionManifestV2,
@@ -12,6 +13,7 @@ from evolving_loop.v2.real.contracts import (
     RealModelBindingV2,
     RealRunResultV2,
     RealStageRecordV2,
+    require_p3_numerical_mode,
 )
 
 
@@ -122,3 +124,11 @@ def test_runtime_roles_are_known_and_canonically_ordered():
         RealEvolutionManifestV2.from_payload(manifest_payload() | {"runtime_locations": [unknown_a, unknown_b]})
     with pytest.raises(ValueError, match="canonical"):
         RealEvolutionManifestV2.from_payload(manifest_payload() | {"runtime_locations": [{"role": "codex_cli", "relative_path": "runs/cli", "identity_sha256": "d" * 64}, base]})
+
+
+def test_new_real_proposal_space_requires_dictionary_numerical_mode():
+    assert P3_NUMERICAL_MODE == "p3_dictionary"
+    assert require_p3_numerical_mode(P3_NUMERICAL_MODE) == P3_NUMERICAL_MODE
+    for value in ("legacy_frozen", "", None):
+        with pytest.raises(ValueError, match="p3_dictionary"):
+            require_p3_numerical_mode(value)

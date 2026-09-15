@@ -23,15 +23,19 @@ from ..cooperative import (
     DecisionCoordinateAdapter,
     DecisionModuleV2,
     NumericalCoordinateAdapter,
+    P3NumericalDictionaryV2,
     RetrievalCoordinateAdapter,
     RetrievalModuleV2,
+    materialize_selector_pair,
     run_cooperative_evolution,
+    seed_selector_genome,
 )
 from ..cooperative.contracts import CooperativeCheckpointV2
 from ..kernel import AcceptanceEvidence, EvolutionKernel, KernelAuthorityError
 from ..numerical_qd.adapters import FrozenNumericalArtifactsV2
 from ..numerical_qd.contracts import FrozenNumericalRegistryEnvelopeV2
 from ..store import V2RunStore, write_once_json
+from .contracts import P3_NUMERICAL_MODE, require_p3_numerical_mode
 from .host import RealHostRuntimeV2, select_real_task_projection
 
 
@@ -214,7 +218,7 @@ def _proposal_inputs(
 
 def _proposal_manifest(
     *,
-    p2: FrozenNumericalArtifactsV2,
+    numerical: FrozenNumericalArtifactsV2,
     retrieval: RetrievalModuleV2,
     decision: DecisionModuleV2,
     alternatives: tuple[FrozenNumericalArtifactsV2, ...],
@@ -228,7 +232,8 @@ def _proposal_manifest(
     return {
         "schema_version": 1,
         "kind": "real_cooperative_proposal_space",
-        "seed_numerical": _pair_row(p2),
+        "numerical_mode": P3_NUMERICAL_MODE,
+        "seed_numerical": _pair_row(numerical),
         "numerical_alternatives": [_pair_row(pair) for pair in alternatives],
         "seed_retrieval_sha256": retrieval.fingerprint(),
         "seed_decision_sha256": decision.fingerprint(),
@@ -250,23 +255,19 @@ def _proposal_manifest(
 
 def run_real_cooperative(
     *,
-    p2: FrozenNumericalArtifactsV2,
+    dictionary: P3NumericalDictionaryV2,
     host: RealHostRuntimeV2,
     config_payload: Mapping[str, object],
     output_dir: Path,
+    numerical_mode: str = P3_NUMERICAL_MODE,
 ) -> CooperativeRunResultV2:
-    """Run P3 over the real 4/1 projection with the exact P2 registry."""
-    if type(p2) is not FrozenNumericalArtifactsV2:
-        raise TypeError("real cooperative bridge requires exact P2 frozen artifacts")
+    """Run P3 over the real 4/1 projection from one immutable Dictionary."""
+    require_p3_numerical_mode(numerical_mode)
+    if type(dictionary) is not P3NumericalDictionaryV2:
+        raise TypeError("real cooperative bridge requires a P3 Dictionary closure")
     tasks = tuple(host.tasks)
     if len(tasks) != 100 or len(host.train_tasks) != 80 or len(host.dev_tasks) != 20:
         raise ValueError("real cooperative Host requires frozen Train80/Dev20 tasks")
-    restored = p2.envelope.restore(tasks)
-    if (
-        restored.fingerprint != p2.registry.fingerprint
-        or p2.release.fingerprint != p2.registry.release_sha256
-    ):
-        raise ValueError("real cooperative P2 registry does not bind all Host tasks")
     train, dev = select_real_task_projection(host.train_tasks, host.dev_tasks)
 
     config = CooperativeConfigV2.from_payload(config_payload)
@@ -274,17 +275,15 @@ def run_real_cooperative(
         raise ValueError("real cooperative bridge requires a pilot/formal profile")
     retrieval = _seed_retrieval(host)
     decision = _seed_decision()
-    alternatives = tuple(
-        sorted(
-            getattr(host, "numerical_alternatives", ()),
-            key=lambda pair: (pair.release.fingerprint, pair.registry.fingerprint),
-        )
+    selector = seed_selector_genome()
+    numerical = materialize_selector_pair(dictionary, selector, tasks)
+    numerical_adapter = NumericalCoordinateAdapter.for_dictionary(
+        dictionary,
+        tasks,
+        selector,
+        max_steps=config.max_steps,
     )
-    if any(type(pair) is not FrozenNumericalArtifactsV2 for pair in alternatives):
-        raise TypeError("real cooperative Numerical alternatives must be frozen pairs")
-    for pair in alternatives:
-        if pair.envelope.restore(tasks).fingerprint != pair.registry.fingerprint:
-            raise ValueError("real cooperative Numerical alternative task drift")
+    alternatives = numerical_adapter.proposal_pairs
 
     pipeline = CooperativePipelineAdapter(
         CooperativeArtifactCatalog(lambda _identity, _payload: None),
@@ -294,7 +293,7 @@ def run_real_cooperative(
         retrieval_skill_library=host.retrieval_skill_library,
     )
     adapters = {
-        "numerical": NumericalCoordinateAdapter(alternatives),
+        "numerical": numerical_adapter,
         "retrieval": RetrievalCoordinateAdapter(),
         "decision": DecisionCoordinateAdapter(_DECISION_PROMPTS),
         "pipeline": pipeline,
@@ -304,14 +303,14 @@ def run_real_cooperative(
     if monotonic is not None:
         adapters["monotonic"] = monotonic
     expected_inputs = _proposal_inputs(
-        p2, retrieval, decision, alternatives, train, dev
+        numerical, retrieval, decision, alternatives, train, dev
     )
     destination = Path(output_dir)
     resume = (destination / "run_manifest.json").is_file()
     result = run_cooperative_evolution(
         destination,
         config,
-        {"numerical": p2, "retrieval": retrieval, "decision": decision},
+        {"numerical": numerical, "retrieval": retrieval, "decision": decision},
         {"train": train, "dev": dev},
         adapters,
         resume=resume,
@@ -324,7 +323,7 @@ def run_real_cooperative(
             "cooperative checkpoint differs from proposal-space commitments"
         )
     manifest = _proposal_manifest(
-        p2=p2,
+        numerical=numerical,
         retrieval=retrieval,
         decision=decision,
         alternatives=alternatives,
@@ -433,6 +432,7 @@ def _validate_manifest_shape(payload: Mapping[str, object]) -> None:
     if set(payload) != {
         "schema_version",
         "kind",
+        "numerical_mode",
         "seed_numerical",
         "numerical_alternatives",
         "seed_retrieval_sha256",
@@ -448,6 +448,10 @@ def _validate_manifest_shape(payload: Mapping[str, object]) -> None:
         "real_cooperative_proposal_space"
     ):
         raise KernelAuthorityError("invalid cooperative proposal-space manifest")
+    try:
+        require_p3_numerical_mode(payload["numerical_mode"])
+    except ValueError as error:
+        raise KernelAuthorityError("invalid cooperative proposal-space numerical mode") from error
 
 
 def _p5_handoff_available(

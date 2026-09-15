@@ -23,7 +23,7 @@ from numerical_agent.evolution.screening import ScreeningPolicy
 
 from ..budget import ResourceUse
 from ..contracts import fingerprint_payload
-from ..numerical_qd.adapters import FrozenNumericalArtifactsV2, LegacyNumericalAdapter
+from ..numerical_qd.adapters import LegacyNumericalAdapter
 from .contracts import RealEvolutionManifestV2
 
 # The split validator is the existing fixed 80/20/99 Host admission boundary.
@@ -315,7 +315,7 @@ class RealHostRuntimeV2:
     screening_policy: ScreeningPolicy
     resource_reporter_sha256: str
     sources: Mapping[str, str] = field(default_factory=dict)
-    numerical_alternatives: tuple[FrozenNumericalArtifactsV2, ...] = ()
+    p3_dictionary: object | None = field(default=None, repr=False)
     resource_kinds: tuple[str, ...] = ()
     _closed: bool = field(default=False, init=False, repr=False)
 
@@ -333,13 +333,11 @@ class RealHostRuntimeV2:
         ):
             raise ValueError("real Host sources must be SHA-identified source text")
         object.__setattr__(self, "sources", MappingProxyType(sources))
-        if type(self.numerical_alternatives) is not tuple or any(
-            type(pair) is not FrozenNumericalArtifactsV2
-            for pair in self.numerical_alternatives
-        ):
-            raise TypeError(
-                "real Host numerical_alternatives must be frozen Numerical pairs"
-            )
+        if self.p3_dictionary is not None:
+            from ..cooperative import P3NumericalDictionaryV2
+
+            if type(self.p3_dictionary) is not P3NumericalDictionaryV2:
+                raise TypeError("real Host p3_dictionary must be a P3 Dictionary closure")
 
     def retrieval_factory(self, genome, skills=None) -> TwoStageRetrievalAgent:
         library = self.retrieval_skill_library if skills is None else skills

@@ -12,6 +12,10 @@ from evolving_loop.package_numerical_supply import build_package_registry
 from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
 from evolving_loop.v2.contracts import canonical_v2_bytes
 from evolving_loop.v2.cooperative import CooperativeCheckpointV2, CooperativeRunResultV2
+from evolving_loop.v2.cooperative.numerical_dictionary import (
+    build_p3_numerical_dictionary,
+    seed_selector_genome,
+)
 from evolving_loop.v2.numerical_qd.adapters import (
     FrozenNumericalArtifactsV2,
     import_numerical_seed,
@@ -110,7 +114,6 @@ def _p2_pair(tasks) -> FrozenNumericalArtifactsV2:
 def _host(
     tasks,
     shared_llm,
-    numerical_alternatives: tuple[FrozenNumericalArtifactsV2, ...] = (),
 ) -> RealHostRuntimeV2:
     return RealHostRuntimeV2(
         manifest=object(),
@@ -137,7 +140,6 @@ def _host(
             ("safe_anchor",),
         ),
         resource_reporter_sha256="9" * 64,
-        numerical_alternatives=numerical_alternatives,
     )
 
 
@@ -157,6 +159,7 @@ def test_real_bridge_projects_4_1_but_preserves_p2_100_task_registry(
 
     tasks = _tasks_100()
     p2 = _p2_pair(tasks)
+    dictionary = build_p3_numerical_dictionary((p2,), tasks)
     shared_llm = object()
     host = _host(tasks, shared_llm)
 
@@ -164,7 +167,13 @@ def test_real_bridge_projects_4_1_but_preserves_p2_100_task_registry(
         pass
 
     def observe(_output, _config, seed, projected, adapters, **_kwargs):
-        assert seed["numerical"] is p2
+        assert seed["numerical"].release.source_fingerprints["p3_dictionary"] == (
+            dictionary.fingerprint()
+        )
+        assert seed["numerical"].release.source_fingerprints["p3_selector"] == (
+            seed_selector_genome().fingerprint()
+        )
+        assert adapters["numerical"].mode == "p3_dictionary"
         assert tuple(p2.envelope.entries) == tuple(
             sorted(task.numeric.task_id for task in tasks)
         )
@@ -181,7 +190,7 @@ def test_real_bridge_projects_4_1_but_preserves_p2_100_task_registry(
 
     with pytest.raises(Observed):
         bridges.run_real_cooperative(
-            p2=p2,
+            dictionary=dictionary,
             host=host,
             config_payload=_real_config_payload(),
             output_dir=tmp_path / "p3",
@@ -195,6 +204,7 @@ def sealed_p3(tmp_path, monkeypatch, request):
 
     tasks = _tasks_100(entity_conflicts=request.param)
     p2 = _p2_pair(tasks)
+    dictionary = build_p3_numerical_dictionary((p2,), tasks)
     host = _host(tasks, object())
 
     def deterministic_evaluate(self, bundle, projected, stage):
@@ -211,7 +221,7 @@ def sealed_p3(tmp_path, monkeypatch, request):
     )
     output = tmp_path / "p3"
     result = run_real_cooperative(
-        p2=p2,
+        dictionary=dictionary,
         host=host,
         config_payload=_real_config_payload(),
         output_dir=output,
@@ -226,14 +236,19 @@ def test_real_bridge_persists_canonical_proposal_space_and_loads_exact_closure(
 
     output, tasks, host, p2, result = sealed_p3
     closure = load_sealed_bundle_closure(output, tasks=tasks, host=host)
+    dictionary_sha = build_p3_numerical_dictionary((p2,), tasks).fingerprint()
     raw_manifest = (output / "proposal_space_manifest.json").read_bytes()
     manifest = json.loads(raw_manifest)
 
     assert result.status == "cooperative_complete"
     assert raw_manifest == canonical_v2_bytes(manifest)
     assert closure.active_bundle.fingerprint() == result.active_bundle_sha256
-    assert closure.numerical.release.fingerprint == p2.release.fingerprint
-    assert closure.numerical.registry.fingerprint == p2.registry.fingerprint
+    assert closure.numerical.release.source_fingerprints["p3_dictionary"] == (
+        dictionary_sha
+    )
+    assert closure.numerical.release.source_fingerprints["p3_selector"] == (
+        seed_selector_genome().fingerprint()
+    )
     assert closure.catalog.resolve_retrieval(
         closure.active_bundle.retrieval_release_sha256
     ) == closure.retrieval
@@ -249,7 +264,12 @@ def test_real_bridge_persists_canonical_proposal_space_and_loads_exact_closure(
         assert closure.dev_tasks == tasks[80:81]
     assert closure.metric_cap == 5.0
     assert closure.config_sha256 == manifest["config_sha256"]
-    assert closure.numerical_alternatives == ()
+    assert closure.numerical_alternatives
+    assert all(
+        pair.release.source_fingerprints["p3_dictionary"]
+        == dictionary_sha
+        for pair in closure.numerical_alternatives
+    )
     assert closure.decision_prompts == (
         "Prefer the lowest finite complete-pipeline error.",
     )
@@ -319,28 +339,35 @@ def test_closure_rejects_proposal_space_or_archive_drift(sealed_p3):
         load_sealed_bundle_closure(output, tasks=tasks, host=host)
 
 
-def test_real_bridge_passes_typed_numerical_alternatives_to_p3(
+def test_real_bridge_materializes_only_dictionary_selector_pairs_for_p3(
     tmp_path, monkeypatch
 ):
     from evolving_loop.v2.real import bridges
 
     tasks = _tasks_100()
     p2 = _p2_pair(tasks)
-    alternative = _p2_pair(tasks)
-    host = _host(tasks, object(), (alternative,))
+    dictionary = build_p3_numerical_dictionary((p2,), tasks)
+    host = _host(tasks, object())
 
     class Observed(RuntimeError):
         pass
 
-    def observe(_output, _config, _seed, _projected, adapters, **_kwargs):
-        assert adapters["numerical"]._alternatives == (alternative,)
+    def observe(_output, config, seed, _projected, adapters, **_kwargs):
+        assert adapters["numerical"].mode == "p3_dictionary"
+        assert len(adapters["numerical"].materialized_pairs) >= config.max_steps
+        assert all(
+            pair.release.source_fingerprints["p3_dictionary"]
+            == dictionary.fingerprint()
+            for pair in adapters["numerical"].materialized_pairs
+        )
+        assert seed["numerical"] not in (p2,)
         raise Observed
 
     monkeypatch.setattr(bridges, "run_cooperative_evolution", observe)
 
     with pytest.raises(Observed):
         bridges.run_real_cooperative(
-            p2=p2,
+            dictionary=dictionary,
             host=host,
             config_payload=_real_config_payload(),
             output_dir=tmp_path / "p3",
@@ -360,6 +387,31 @@ def test_closure_rejects_metric_cap_unbound_from_committed_config(sealed_p3):
 
     with pytest.raises(KernelAuthorityError, match="config|metric_cap"):
         load_sealed_bundle_closure(output, tasks=tasks, host=host)
+
+
+def test_new_real_proposal_space_commits_dictionary_mode(sealed_p3):
+    output, _tasks, _host, _p2, _result = sealed_p3
+    manifest = json.loads((output / "proposal_space_manifest.json").read_bytes())
+
+    assert manifest["numerical_mode"] == "p3_dictionary"
+
+
+def test_real_bridge_rejects_legacy_numerical_mode_before_start(tmp_path):
+    from evolving_loop.v2.real import bridges
+
+    tasks = _tasks_100()
+    dictionary = build_p3_numerical_dictionary((_p2_pair(tasks),), tasks)
+
+    with pytest.raises(ValueError, match="p3_dictionary"):
+        bridges.run_real_cooperative(
+            dictionary=dictionary,
+            host=_host(tasks, object()),
+            config_payload=_real_config_payload(),
+            output_dir=tmp_path / "p3",
+            numerical_mode="legacy_frozen",
+        )
+
+    assert not (tmp_path / "p3").exists()
 
 
 @pytest.mark.parametrize(

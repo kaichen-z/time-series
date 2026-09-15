@@ -23,6 +23,12 @@ from ..contracts import SanitizedEvolutionFeedback, fingerprint_payload, require
 from ..numerical_qd.adapters import FrozenNumericalArtifactsV2
 from ..numerical_qd.contracts import FrozenNumericalRegistryEnvelopeV2
 from .contracts import DecisionModuleV2, RetrievalModuleV2
+from .numerical_dictionary import (
+    DictionarySelectorGenomeV2,
+    P3NumericalDictionaryV2,
+    materialize_selector_pair,
+    mutate_selector_genome,
+)
 
 
 ROUND1_NEXT = MappingProxyType({
@@ -164,7 +170,7 @@ class CooperativeArtifactCatalog:
 
 
 class NumericalCoordinateAdapter:
-    """Select the first canonical frozen pair that differs from the Parent."""
+    """Evolve a P3 Dictionary Selector; legacy pairs remain report-compatible."""
 
     def __init__(self, alternatives: Sequence[FrozenNumericalArtifactsV2]) -> None:
         values = tuple(alternatives)
@@ -179,12 +185,95 @@ class NumericalCoordinateAdapter:
                 ),
             )
         )
+        self._mode = "legacy_frozen"
+        self._dictionary: P3NumericalDictionaryV2 | None = None
+        self._tasks: tuple[ContextTask, ...] = ()
+        self._selectors: dict[str, DictionarySelectorGenomeV2] = {}
+
+    @classmethod
+    def for_dictionary(
+        cls,
+        dictionary: P3NumericalDictionaryV2,
+        tasks: Sequence[ContextTask],
+        seed_selector: DictionarySelectorGenomeV2,
+        *,
+        max_steps: int = 0,
+    ) -> "NumericalCoordinateAdapter":
+        if type(dictionary) is not P3NumericalDictionaryV2:
+            raise TypeError("P3 numerical adapter requires a Dictionary closure")
+        if type(seed_selector) is not DictionarySelectorGenomeV2:
+            raise TypeError("P3 numerical adapter requires a Selector seed")
+        if type(max_steps) is not int or max_steps < 0:
+            raise ValueError("P3 numerical adapter max_steps must be non-negative")
+        resolved = tuple(sorted(tuple(tasks), key=lambda task: task.numeric.task_id))
+        if tuple(task.numeric.task_id for task in resolved) != tuple(dictionary.task_sha256s):
+            raise ValueError("P3 numerical adapter task universe differs from Dictionary")
+        instance = cls(())
+        instance._mode = "p3_dictionary"
+        instance._dictionary = dictionary
+        instance._tasks = resolved
+        selectors = {seed_selector.fingerprint(): seed_selector}
+        for step in range(max_steps):
+            for parent in tuple(selectors.values()):
+                child = mutate_selector_genome(parent, step)
+                selectors[child.fingerprint()] = child
+        instance._selectors = selectors
+        instance._pairs_by_selector = {
+            identity: materialize_selector_pair(dictionary, selector, resolved)
+            for identity, selector in selectors.items()
+        }
+        instance._alternatives = tuple(
+            sorted(
+                (
+                    pair
+                    for identity, pair in instance._pairs_by_selector.items()
+                    if identity != seed_selector.fingerprint()
+                ),
+                key=lambda pair: (pair.release.fingerprint, pair.registry.fingerprint),
+            )
+        )
+        return instance
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    @property
+    def materialized_pairs(self) -> tuple[FrozenNumericalArtifactsV2, ...]:
+        if self._mode != "p3_dictionary":
+            return self._alternatives
+        return tuple(
+            self._pairs_by_selector[identity]
+            for identity in sorted(self._pairs_by_selector)
+        )
+
+    @property
+    def proposal_pairs(self) -> tuple[FrozenNumericalArtifactsV2, ...]:
+        return self._alternatives
 
     def propose(
-        self, parent: FrozenNumericalArtifactsV2
+        self, parent: FrozenNumericalArtifactsV2, step: int = 0
     ) -> FrozenNumericalArtifactsV2 | None:
         if type(parent) is not FrozenNumericalArtifactsV2:
             raise ValueError("Numerical Parent must be a frozen pair")
+        if type(step) is not int or step < 0:
+            raise ValueError("Numerical step must be a non-negative integer")
+        if self._mode == "p3_dictionary":
+            selector_sha = parent.release.source_fingerprints.get("p3_selector")
+            dictionary_sha = parent.release.source_fingerprints.get("p3_dictionary")
+            if self._dictionary is None or dictionary_sha != self._dictionary.fingerprint():
+                raise ValueError("Numerical Parent differs from the P3 Dictionary")
+            try:
+                selector = self._selectors[selector_sha]
+            except KeyError as error:
+                raise ValueError("Numerical Parent Selector is unavailable") from error
+            child = mutate_selector_genome(selector, step)
+            self._selectors[child.fingerprint()] = child
+            pair = self._pairs_by_selector.get(child.fingerprint())
+            if pair is None:
+                pair = materialize_selector_pair(self._dictionary, child, self._tasks)
+                self._pairs_by_selector[child.fingerprint()] = pair
+            return pair
         parent_identity = (parent.release.fingerprint, parent.registry.fingerprint)
         return next(
             (

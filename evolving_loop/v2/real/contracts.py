@@ -27,6 +27,14 @@ _ROLE_ORDER = (
     "source_seed",
 )
 _RUNTIME_ROLE_ORDER = ("python", "runtime", "task_loader", "forecast_store", "model_cache", "codex_cli")
+P3_NUMERICAL_MODE = "p3_dictionary"
+
+
+def require_p3_numerical_mode(value: object) -> Literal["p3_dictionary"]:
+    """Admit the sole Numerical proposal mode for new real P3 runs."""
+    if type(value) is not str or value != P3_NUMERICAL_MODE:
+        raise ValueError("numerical_mode must be exactly p3_dictionary")
+    return value
 
 
 def _contract_payload(value: object, cls):

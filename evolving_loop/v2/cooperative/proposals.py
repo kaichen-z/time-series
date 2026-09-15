@@ -79,7 +79,7 @@ def _one_change(
             parent.numerical_release_sha256,
             parent.numerical_registry_sha256,
         )
-        proposed = adapter.propose(current)
+        proposed = adapter.propose(current, step=step)
         if proposed is None:
             return None
         identity = catalog.add_numerical(proposed)

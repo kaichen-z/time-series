@@ -327,7 +327,8 @@ def test_real_numerical_bridge_projects_prepared_provenance_at_adapter_boundary(
     assert observed["finalize_after"] == 10
 
 
-def test_p2_publishes_nonactive_frozen_candidates_for_p3(tmp_path, monkeypatch):
+def test_p2_publishes_complete_dictionary_closure_for_p3(tmp_path, monkeypatch):
+    from evolving_loop.v2 import cooperative
     from evolving_loop.v2.numerical_qd.persistence import NumericalQDRunStore
     from evolving_loop.v2.real import runner
 
@@ -349,11 +350,21 @@ def test_p2_publishes_nonactive_frozen_candidates_for_p3(tmp_path, monkeypatch):
         NumericalQDRunStore, "load_frozen_pairs",
         lambda self, *, tasks: ((seed, "2" * 64), (active, "3" * 64), (exploratory, "4" * 64)),
     )
-    host = SimpleNamespace(tasks=(), numerical_alternatives=())
+    dictionary = SimpleNamespace(fingerprint=lambda: "5" * 64)
+    observed = {}
 
-    runner._publish_p2_numerical_alternatives(host, tmp_path / "p2")
+    def build(pairs, tasks):
+        observed.update(pairs=pairs, tasks=tasks)
+        return dictionary
 
-    assert host.numerical_alternatives == (exploratory,)
+    monkeypatch.setattr(cooperative, "build_p3_numerical_dictionary", build)
+    host = SimpleNamespace(tasks=(), p3_dictionary=None)
+
+    result = runner._publish_p3_numerical_dictionary(host, tmp_path / "p2")
+
+    assert result is dictionary
+    assert host.p3_dictionary is dictionary
+    assert observed == {"pairs": (seed, active, exploratory), "tasks": ()}
 
 
 def test_thirty_minute_p2_caps_llm_batch_and_task_timeout_for_a_real_rung():

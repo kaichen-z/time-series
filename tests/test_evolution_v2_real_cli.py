@@ -329,12 +329,6 @@ def test_production_ports_prepare_and_run_real_p2(tmp_path: Path, monkeypatch):
         return prepared
 
     monkeypatch.setattr(runner, "prepare_real_p2_inputs", prepare, raising=False)
-    monkeypatch.setattr(
-        runner,
-        "_publish_p2_numerical_alternatives",
-        lambda *_args, **_kwargs: None,
-    )
-
     def run_real_numerical(context_value, host_value, **kwargs):
         observed.update(context=context_value, host=host_value, **kwargs)
         return {"status": "numerical_qd_complete"}
@@ -420,7 +414,7 @@ def test_production_ports_complete_root_and_resume_byte_identically(
     tmp_path: Path, monkeypatch
 ):
     """Exercises the real port assembly while replacing only expensive children."""
-    from evolving_loop.v2 import protocol
+    from evolving_loop.v2 import cooperative, protocol
     from evolving_loop.v2.real import bridges, runner
     from evolving_loop.v2.source import archive as source_archive
     from evolving_loop.v2.source import authority as source_authority
@@ -495,6 +489,12 @@ def test_production_ports_complete_root_and_resume_byte_identically(
             return ((pair, "e" * 64), (alternative, "f" * 64))
 
     monkeypatch.setattr(persistence, "NumericalQDRunStore", PairStore)
+    dictionary = SimpleNamespace(fingerprint=lambda: "0" * 64)
+    monkeypatch.setattr(
+        cooperative,
+        "build_p3_numerical_dictionary",
+        lambda pairs, tasks: dictionary,
+    )
 
     def numerical(context, _host, **_kwargs):
         payload = {
@@ -599,7 +599,13 @@ def test_production_ports_complete_root_and_resume_byte_identically(
 
     assert first.status == second.status == "complete"
     assert first_bytes == (output / "evaluation_complete.json").read_bytes()
-    assert host.numerical_alternatives == (alternative,)
+    assert host.p3_dictionary is dictionary
+    p2_handoff = json.loads((output / "handoffs/p2.json").read_bytes())
+    p2_bindings = p2_handoff["handoff_payload"]
+    assert p2_bindings["p3_dictionary_sha256"] == dictionary.fingerprint()
+    assert not {"pair_sha256", "release_sha256", "registry_sha256"} & set(
+        p2_bindings
+    )
     assert [record.stage for record in first.stage_records] == ["p2", "p3", "p4", "p5"]
     assert all((output / stage / "root_stage_completion.json").is_file() for stage in ("p2", "p3", "p4", "p5"))
 

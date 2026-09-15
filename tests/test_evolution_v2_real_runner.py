@@ -356,3 +356,11 @@ def test_completed_resume_rejects_a_result_with_tampered_bound_fields(case: Runn
 
     with pytest.raises(ValueError, match="completed root result"):
         case.resume()
+
+
+def test_real_host_never_exposes_raw_p2_numerical_alternatives():
+    from tests.test_evolution_v2_real_cooperative import _host, _tasks_100
+
+    host = _host(_tasks_100(), object())
+
+    assert not hasattr(host, "numerical_alternatives")

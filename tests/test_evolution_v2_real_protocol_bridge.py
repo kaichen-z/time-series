@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from evolving_loop.v2.cooperative.adapters import CooperativePipelineAdapter
+from evolving_loop.v2.cooperative import build_p3_numerical_dictionary
 from evolving_loop.v2.protocol import ProtocolComponentV2
 from evolving_loop.v2.real.bridges import load_sealed_bundle_closure, run_real_cooperative
 from tests.test_evolution_v2_real_cooperative import (
@@ -33,7 +34,10 @@ def _sealed_p3(tmp_path, monkeypatch, *, entity_conflicts, candidate_score):
     monkeypatch.setattr(CooperativePipelineAdapter, "evaluate", deterministic_evaluate)
     root = tmp_path / "p3"
     run_real_cooperative(
-        p2=p2, host=host, config_payload=_real_config_payload(), output_dir=root
+        dictionary=build_p3_numerical_dictionary((p2,), tasks),
+        host=host,
+        config_payload=_real_config_payload(),
+        output_dir=root,
     )
     return load_sealed_bundle_closure(root, tasks=tasks, host=host), host
 
