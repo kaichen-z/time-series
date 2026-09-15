@@ -1,6 +1,7 @@
 """Real proposer boundaries, response ownership, and charged fallback."""
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,13 @@ import pytest
 from common.llm import LLMResponse
 from evolving_loop.v2.budget import BudgetLedger, BudgetPlan, ResourceUse
 from evolving_loop.v2.contracts import canonical_v2_bytes, fingerprint_payload
-from evolving_loop.v2.numerical_qd.contracts import MutationStateV2
+from evolving_loop.v2.numerical_qd.agent_methods import (
+    CurriculumTargetV2, VerifiedReusableProgramV2,
+)
+from evolving_loop.v2.numerical_qd.contracts import (
+    MorphologyCellV2, MutationStateV2, NumericalGenomeV2,
+    NumericalInventoryV2,
+)
 from evolving_loop.v2.numerical_qd.proposers import (
     DeterministicProposalProvider, HybridProposalProvider, LLMProposalProvider,
     _response_schema, primitive_proposer_request,
@@ -17,6 +24,9 @@ from evolving_loop.v2.numerical_qd.mutation import apply_mutation, record_train_
 from test_evolution_v2_numerical_mutation import CELL, SHA, feedback, member, parent_state
 
 CODE = 'def forecast(history, horizon, frequency):\n    """Use a constant baseline."""\n    return [history[-1]] * horizon\n'
+CONTEXT_CELL = MorphologyCellV2(
+    "low", "none", "low", "stable", "short", "program",
+)
 
 
 def request_args(**updates):
@@ -29,7 +39,8 @@ def request_args(**updates):
         runtime_fingerprints={"python": SHA}, protocol_fingerprint=SHA)
     return dict(parent_genome=genome, parent_state=state.to_payload(),
         selected_cells=[dict(cell_sha256=CELL, member_ids=["a", "b"])],
-        train_feedback=[feedback()], remaining_budget=ResourceUse(wall_seconds=10.0,
+        train_feedback=[feedback()], curriculum_targets=[], reusable_programs=[],
+        remaining_budget=ResourceUse(wall_seconds=10.0,
             llm_calls=1, input_tokens=100000, output_tokens=16000).to_payload(),
         allowed_mutation_operators=sorted(state.mutation_policy.operators),
         counter_draw=0, max_proposals=2, max_response_bytes=16000) | updates
@@ -76,6 +87,38 @@ def ledger(clock=lambda: 0.0):
         llm_calls=10, input_tokens=1000000, output_tokens=1000000)), monotonic=clock)
 
 
+def contextual_request_args(*, status="active", source=CODE):
+    cell_sha = CONTEXT_CELL.fingerprint()
+    source_sha = hashlib.sha256(source.encode()).hexdigest()
+    original = parent_state()
+    members = tuple(
+        replace(member, applicability_cells=(cell_sha,),
+                source_sha256=source_sha if member.member_id == "a" else member.source_sha256,
+                status=status if member.member_id == "a" else member.status)
+        for member in original.inventory.members
+    )
+    state = parent_state(
+        inventory=NumericalInventoryV2(1, members), declared_cells=(cell_sha,),
+    )
+    args = request_args(
+        parent_state=state.to_payload(),
+        selected_cells=[dict(cell_sha256=cell_sha, member_ids=["a", "b"])],
+        curriculum_targets=[CurriculumTargetV2(
+            1, CONTEXT_CELL, "unoccupied", 0, (),
+        ).to_payload()],
+    )
+    args["parent_genome"].update(
+        inventory_sha256=state.inventory.fingerprint(),
+        mutation_policy_sha256=state.mutation_policy.fingerprint(),
+        proposer_prompt_sha256=state.proposer_prompt.fingerprint(),
+    )
+    genome_sha = NumericalGenomeV2.from_payload(args["parent_genome"]).fingerprint()
+    args["reusable_programs"] = [VerifiedReusableProgramV2(
+        1, "a", genome_sha, (cell_sha,), source_sha, source,
+    ).to_payload()]
+    return args
+
+
 @pytest.mark.parametrize("provider_kind", ["deterministic", "llm", "hybrid"])
 def test_actual_provider_boundary_is_closed_primitive_request(provider_kind):
     client = ScriptedClient(json.dumps(raw_response()))
@@ -86,7 +129,8 @@ def test_actual_provider_boundary_is_closed_primitive_request(provider_kind):
     actual_propose = provider.propose
     def inspected_propose(boundary_payload):
         assert set(boundary_payload) == {"parent_genome", "parent_state", "selected_cells", "train_feedback",
-            "remaining_budget", "allowed_mutation_operators", "counter_draw", "max_proposals", "max_response_bytes"}
+            "curriculum_targets", "reusable_programs", "remaining_budget",
+            "allowed_mutation_operators", "counter_draw", "max_proposals", "max_response_bytes"}
         assert_primitives(boundary_payload)
         return actual_propose(boundary_payload)
     provider.propose = inspected_propose
@@ -101,6 +145,66 @@ def test_actual_provider_boundary_is_closed_primitive_request(provider_kind):
         assert wire["request"] == payload
         assert message["content"] == canonical_v2_bytes(wire).decode()
         assert client.calls[0]["system"] == parent_state().proposer_prompt.template
+
+
+def test_llm_wire_contains_exact_verified_program_source_and_curriculum_context():
+    source = CODE.replace("history[-1]", "history[-1] / 1")
+    args = contextual_request_args(source=source)
+    payload = primitive_proposer_request(**args)
+    client = ScriptedClient(json.dumps(raw_response(source_candidates=[], proposals=[])))
+
+    result = LLMProposalProvider(client).propose(payload)
+
+    assert result.failure_reason == "empty"
+    wire = json.loads(client.calls[0]["messages"][0]["content"])
+    assert wire["request"]["curriculum_targets"] == args["curriculum_targets"]
+    assert wire["request"]["reusable_programs"] == args["reusable_programs"]
+    assert wire["request"]["reusable_programs"][0]["source_text"] == args["reusable_programs"][0]["source_text"]
+    assert client.calls[0]["messages"][0]["content"] == canonical_v2_bytes(wire).decode()
+
+
+def test_context_rejects_source_text_that_does_not_match_sha():
+    changed = contextual_request_args()
+    changed["reusable_programs"][0]["source_text"] += "# changed\n"
+    with pytest.raises(ValueError, match="source SHA"):
+        primitive_proposer_request(**changed)
+
+
+def test_context_rejects_noncanonical_reusable_program_order():
+    unordered = contextual_request_args()
+    first = unordered["reusable_programs"][0]
+    other_source = CODE.replace("forecast", "other_forecast")
+    other = VerifiedReusableProgramV2(
+        1, "other", "d" * 64, (CONTEXT_CELL.fingerprint(),),
+        hashlib.sha256(other_source.encode()).hexdigest(), other_source,
+    ).to_payload()
+    unordered["reusable_programs"] = sorted(
+        (first, other), key=lambda row: row["source_sha256"], reverse=True,
+    )
+    with pytest.raises(ValueError, match="canonical"):
+        primitive_proposer_request(**unordered)
+
+
+def test_context_rejects_quarantined_parent_program():
+    quarantined = contextual_request_args(status="quarantined")
+    with pytest.raises(ValueError, match="quarantined"):
+        primitive_proposer_request(**quarantined)
+
+
+def test_context_fields_are_jointly_required():
+    for missing in ("curriculum_targets", "reusable_programs"):
+        args = request_args()
+        del args[missing]
+        with pytest.raises(ValueError, match="exact schema"):
+            primitive_proposer_request(**args)
+
+
+def test_context_fields_are_bounded():
+    args = request_args(curriculum_targets=[
+        CurriculumTargetV2(1, CONTEXT_CELL, "unoccupied", 0, ()).to_payload()
+    ] * 33)
+    with pytest.raises(ValueError, match="at most 32"):
+        primitive_proposer_request(**args)
 
 
 @pytest.mark.parametrize("key,value", [

@@ -240,6 +240,19 @@ def test_prompt_credit_updates_only_named_lineage_from_typed_train_feedback():
         apply_prompt_train_credit(population, "f" * 64, feedback)
 
 
+def test_prompt_credit_rejects_feedback_for_another_operator():
+    lineage = _lineage(_prompt("mutation prompt"))
+    population = MutationPromptPopulationV2(1, 1, (lineage,))
+    feedback = TrainMutationFeedbackV2(
+        "train", "repair", True, True, True, (),
+    )
+
+    with pytest.raises(ValueError, match="policy_tune"):
+        apply_prompt_train_credit(
+            population, lineage.mutation_prompt.fingerprint(), feedback,
+        )
+
+
 def test_prompt_lineage_contract_closes_authority_and_population_schema():
     prompt = _prompt("safe mutation prompt")
     lineage = _lineage(prompt)

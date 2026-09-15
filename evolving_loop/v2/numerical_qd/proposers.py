@@ -15,6 +15,7 @@ from numerical_agent.evolution.module import parse_method
 
 from ..budget import BudgetLedger, ResourceUse
 from ..contracts import _require_exact_schema, _strict_json_value, canonical_v2_bytes, fingerprint_payload
+from .agent_methods import CurriculumTargetV2, VerifiedReusableProgramV2
 from .contracts import (
     MEMBER_FAMILIES, MUTATION_OPERATORS, MutationStateV2, NumericalGenomeV2, TrainMutationFeedbackV2,
     _sorted_strings,
@@ -23,10 +24,18 @@ from .mutation import OPERATION_KEYS, MutationProposalV2, _identifier, apply_mut
 
 REQUEST_KEYS = frozenset({
     "parent_genome", "parent_state", "selected_cells", "train_feedback",
+    "curriculum_targets", "reusable_programs",
     "remaining_budget", "allowed_mutation_operators", "counter_draw",
     "max_proposals", "max_response_bytes",
 })
+LEGACY_REQUEST_KEYS = REQUEST_KEYS - {"curriculum_targets", "reusable_programs"}
 FAILURE_REASONS = frozenset({"unavailable", "timeout", "malformed", "empty", "budget_exhausted"})
+_MAX_CONTEXT_RECORDS = 32
+_CURRICULUM_REASON_ORDER = {
+    "unoccupied": 0,
+    "least_visited": 1,
+    "failure_matched": 2,
+}
 
 
 class HostSourceValidationError(ValueError):
@@ -58,9 +67,19 @@ def primitive_proposer_request(**payload) -> dict:
     Inputs are payloads, never live artifacts, paths, Store/Kernel handles or
     callbacks. Free-form evaluation text/forecasts are deliberately absent.
     """
-    values = _require_exact_schema(payload, REQUEST_KEYS, field="proposer request")
+    # Legacy request artifacts remain readable. New callers opt into the V2
+    # context atomically by supplying both exact fields, including empty lists.
+    expected = LEGACY_REQUEST_KEYS if set(payload) == LEGACY_REQUEST_KEYS else REQUEST_KEYS
+    values = _require_exact_schema(payload, expected, field="proposer request")
     values = _strict_json_value(values)
-    _reject_provider_paths(values)
+    metadata = dict(values)
+    if type(metadata.get("reusable_programs")) is list:
+        metadata["reusable_programs"] = [
+            {key: value for key, value in record.items() if key != "source_text"}
+            if type(record) is dict else record
+            for record in metadata["reusable_programs"]
+        ]
+    _reject_provider_paths(metadata)
     state = MutationStateV2.from_payload(values["parent_state"])
     genome = NumericalGenomeV2.from_payload(values["parent_genome"])
     for label in genome.runtime_fingerprints:
@@ -103,7 +122,64 @@ def primitive_proposer_request(**payload) -> dict:
         raise ValueError("train_feedback must be a list")
     for feedback in values["train_feedback"]:
         TrainMutationFeedbackV2.from_payload(feedback)
+    if "curriculum_targets" in values:
+        _validate_program_context(values, state, genome)
     return values
+
+
+def _validate_program_context(values, state, genome):
+    targets_payload = values["curriculum_targets"]
+    programs_payload = values["reusable_programs"]
+    if type(targets_payload) is not list or type(programs_payload) is not list:
+        raise ValueError("proposer context fields must be lists")
+    for name, records in (("curriculum_targets", targets_payload),
+                          ("reusable_programs", programs_payload)):
+        if len(records) > _MAX_CONTEXT_RECORDS:
+            raise ValueError(f"{name} may contain at most {_MAX_CONTEXT_RECORDS} records")
+
+    targets = tuple(CurriculumTargetV2.from_payload(item) for item in targets_payload)
+    target_cells = tuple(target.cell.fingerprint() for target in targets)
+    if not set(target_cells) <= set(state.declared_cells):
+        raise ValueError("curriculum target cell is undeclared")
+    target_order = tuple(
+        (_CURRICULUM_REASON_ORDER[target.reason], target.cell.fingerprint())
+        for target in targets
+    )
+    if target_order != tuple(sorted(target_order)) or len(target_cells) != len(set(target_cells)):
+        raise ValueError("curriculum targets must be canonical and cell-unique")
+
+    programs = tuple(
+        VerifiedReusableProgramV2.from_payload(item) for item in programs_payload
+    )
+    if programs and not targets:
+        raise ValueError("reusable programs require curriculum targets")
+    target_set = set(target_cells)
+    if any(not set(program.applicability_cells) <= set(state.declared_cells)
+           or not target_set.intersection(program.applicability_cells)
+           for program in programs):
+        raise ValueError("reusable program applicability must match declared targets")
+    program_order = tuple(
+        (-len(target_set.intersection(program.applicability_cells)),
+         program.source_sha256, program.fingerprint())
+        for program in programs
+    )
+    source_shas = tuple(program.source_sha256 for program in programs)
+    if program_order != tuple(sorted(program_order)) or len(source_shas) != len(set(source_shas)):
+        raise ValueError("reusable programs must be canonical with unique source identities")
+
+    parent_sha = genome.fingerprint()
+    members = {member.member_id: member for member in state.inventory.members}
+    for program in programs:
+        if program.genome_sha256 != parent_sha:
+            continue
+        member = members.get(program.member_id)
+        if member is None:
+            raise ValueError("parent program names an unknown member")
+        if member.status == "quarantined":
+            raise ValueError("quarantined parent program cannot cross proposer boundary")
+        if (program.source_sha256 != member.source_sha256
+                or program.applicability_cells != member.applicability_cells):
+            raise ValueError("parent program identity conflicts with inventory")
 
 
 @dataclass(frozen=True, slots=True)
