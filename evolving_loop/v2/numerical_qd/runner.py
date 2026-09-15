@@ -1279,7 +1279,10 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 population = insert_prompt_child(
                     population, selected_prompt.mutation_prompt.fingerprint(), mutation_child,
                 )
-            updated = record_train_outcome(state, feedback.to_payload())
+            # Credit belongs to the sampled genome's prompt lineage.  The
+            # shared policy state may supply operator authority, but must not
+            # receive feedback for a different prompt ancestry.
+            updated = record_train_outcome(parent_state, feedback.to_payload())
             if operator == "policy_tune":
                 population = apply_prompt_train_credit(
                     population, selected_prompt.mutation_prompt.fingerprint(), feedback,
