@@ -169,6 +169,18 @@ def test_runner_reusable_context_accepts_verified_non_program_family(monkeypatch
     assert values and shas == (values[0].fingerprint(),)
 
 
+def test_declared_curriculum_sha_universe_resolves_typed_cells():
+    from evolving_loop.v2.numerical_qd.contracts import MorphologyCellV2
+    from evolving_loop.v2.numerical_qd.runner import _declared_curriculum_cells
+    cell = MorphologyCellV2("low", "none", "low", "stable", "short", "program")
+    class Store:
+        def _object(self, sha):
+            assert sha == cell.fingerprint()
+            return cell.to_payload()
+    resolved = _declared_curriculum_cells(Store(), (cell.fingerprint(),))
+    assert resolved == (cell,)
+
+
 def test_runner_host_derives_and_inserts_policy_tune_prompt_child():
     from evolving_loop.v2.numerical_qd.runner import (
         _seed_prompt_population, _host_mutation_prompt_child,

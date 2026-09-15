@@ -52,7 +52,7 @@ from .contracts import (
     HyperbandTaskResultV2, MutationOperatorStatsV2, MutationStateV2,
     NumericalGenomeV2, NumericalInventoryV2, NumericalMemberV2,
     NumericalMutationPolicyV2, NumericalObjectiveVectorV2, NumericalProposerPromptV2,
-    NumericalQDEntryV2, TaskCacheRowV2, TrainMutationFeedbackV2, TrainTaskV2,
+    NumericalQDEntryV2, MorphologyCellV2, TaskCacheRowV2, TrainMutationFeedbackV2, TrainTaskV2,
 )
 from .descriptors import describe_history
 from .hyperband import (
@@ -448,6 +448,20 @@ def _persist_prompt_population(store, population):
         return _persist(store, population)
     finally:
         store.material_writer = writer
+
+
+def _declared_curriculum_cells(store, declared_cells):
+    """Resolve the authenticated declared-cell SHA universe to typed cells."""
+    if type(declared_cells) is not tuple:
+        raise TypeError("declared cells must be an immutable SHA tuple")
+    cells = []
+    for cell_sha in declared_cells:
+        require = store._object(cell_sha)
+        cell = MorphologyCellV2.from_payload(require)
+        if cell.fingerprint() != cell_sha:
+            raise ValueError("declared morphology cell identity mismatch")
+        cells.append(cell)
+    return tuple(cells)
 
 
 def _latest_terminal_generation(steps):
@@ -993,7 +1007,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         _persist_state(store, parent_state, selected)
         # Declared cells are the authenticated complete morphology universe;
         # never narrow it to whichever families happen to survive in a parent.
-        curriculum_cells = tuple(seed_state.declared_cells)
+        curriculum_cells = _declared_curriculum_cells(store, seed_state.declared_cells)
         targets = derive_curriculum_targets(
             tuple(sorted(curriculum_cells, key=lambda cell: cell.fingerprint())),
             archive, feedback, maximum_targets=8,

@@ -38,6 +38,12 @@
 - GREEN: all non-quarantined verified members with executable source are eligible, and curriculum targeting consumes the fixed declared cell universe.
 - Focused verification: reusable-context tests — 2 passed, 112 deselected.
 
+## Review-round 5 TDD evidence
+
+- RED: declared cells are SHA strings, so calling `.fingerprint()` on the fixed universe raised a type error.
+- GREEN: Host resolves each declared SHA to a verified `MorphologyCellV2` artifact and checks identity before curriculum targeting.
+- Focused verification: declared-cell and reusable-context tests — 3 passed, 112 deselected.
+
 ## Review-round 4/5 TDD evidence
 
 - RED: `test_resume_prompt_context_uses_terminal_generation_over_pending` failed in both enumeration orders because the terminal-only selector was absent (2 failed).
