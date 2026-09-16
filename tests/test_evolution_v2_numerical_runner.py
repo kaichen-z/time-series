@@ -1992,6 +1992,29 @@ def test_freeze_reserves_the_full_declared_task_timeout_envelope(tmp_path, monke
     assert observed == [len(adapter.tasks) * config.adapter["task_timeout_seconds"]]
 
 
+
+
+def test_freeze_advancing_clock_completes_with_ample_wall_budget(tmp_path, monkeypatch):
+    """Clock advancing within the task envelope must not abort freeze when wall budget is ample."""
+    from evolving_loop.v2.numerical_qd import runner
+    config, supply, manifest, adapter = fixture(task_budget=920)
+    payload = config.to_payload()
+    payload["budget"]["ceilings"]["wall_seconds"] = 9999.0
+    payload["budget"]["hard_limit_seconds"] = 9999
+    config = NumericalQDConfigV2.from_payload(payload)
+    task_envelope = config.adapter["task_timeout_seconds"] * len(adapter.tasks)
+    observed = []
+    original = runner._KernelWork.reserve_stage
+
+    def reserve_stage(work, stage, estimate):
+        if stage.startswith("freeze-"):
+            observed.append(estimate.wall_seconds)
+        return original(work, stage, estimate)
+
+    monkeypatch.setattr(runner._KernelWork, "reserve_stage", reserve_stage)
+    run_numerical_qd(tmp_path / "run", config, supply, manifest, adapter)
+    assert observed == [task_envelope]
+
 @pytest.mark.parametrize("after_output", [False, True])
 def test_freeze_failure_bills_only_material_already_produced(tmp_path, monkeypatch, after_output, material_catalog):
     from evolving_loop.v2.numerical_qd import runner

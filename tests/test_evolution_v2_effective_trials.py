@@ -108,7 +108,6 @@ def test_ineffective_then_effective_execution_resumes_and_stops_at_target(tmp_pa
     config = NumericalQDConfigV2.from_payload(payload)
     # Keep real sandbox execution, Train80 evaluation and persisted evidence.
     # Export/promotion is independent of whether a feasible trial is effective.
-    monkeypatch.setattr(runner, "_freeze_output", lambda *_args: (None, "freeze_failed"))
     args = (tmp_path / "run", config, supply, folds, adapter, Trials("legal"))
     paused = runner.run_numerical_qd(*args, finalize_after=3, min_effective_candidates=1, stop_after=1)
     assert paused.status == "numerical_qd_paused"

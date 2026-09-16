@@ -1724,7 +1724,10 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
     if required_genome_sha256 is not None:
         sources["train_winner"] = required_genome_sha256
     complete_specs = {}
-    if parent_release.schema_version == 2:
+    max_schema_version = max(
+        (parent_release.schema_version,) + tuple(child.candidate.release.schema_version for _, child, _ in selected)
+    )
+    if max_schema_version == 2:
         if not selected:
             complete_specs.update({spec.candidate_id: spec for spec in parent_release.alternatives})
         # Each verified child carries the deterministic cross-fit rebinding of
@@ -1742,8 +1745,8 @@ def freeze_qd_supply(adapter, parent_release, parent_registry, archive, children
             if _child.candidate.release.parent_sha256 != parent_release.fingerprint:
                 raise ValueError("complete supply catalog has conflicting candidate identity")
         complete_specs[spec.candidate_id] = spec
-    release = replace(parent_release, version=version, parent_sha256=parent_release.fingerprint,
-        alternatives=(tuple(complete_specs[name] for name in sorted(complete_specs)) if parent_release.schema_version == 2
+    release = replace(parent_release, schema_version=max_schema_version, version=version, parent_sha256=parent_release.fingerprint,
+        alternatives=(tuple(complete_specs[name] for name in sorted(complete_specs)) if max_schema_version == 2
                       else tuple(spec for _, _, spec in selected)), source_fingerprints=sources,
         anchor_release_payload=parent_release.to_payload()["anchor_release_payload"])
     selected_names = {spec.candidate_id for _, _, spec in selected}

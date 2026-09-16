@@ -781,9 +781,11 @@ def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry
     if available.artifact_bytes == 0:
         return None, "artifact_bytes_exhausted"
     # The P2-owned export may need to fill every previously-unshortlisted
-    # catalog member. Reserve the remaining governed capacity, then close with
-    # exact measured use so unused capacity is returned before Dev comparison.
-    estimate = available
+    # catalog member. Reserve the declared task-time envelope capped by available
+    # wall; close with exact measured use so unused capacity is returned before Dev comparison.
+    task_envelope = float(len(adapter.tasks) * config.adapter["task_timeout_seconds"])
+    estimate = (available if kernel.budget.plan.no_time_limit
+                else replace(available, wall_seconds=min(available.wall_seconds, task_envelope)))
     permit = work.reserve_stage("freeze-" + winner, estimate)
     if not permit.allowed:
         return None, permit.reason

@@ -723,6 +723,40 @@ def test_projection_includes_evaluated_train_winner_evicted_by_historical_occupa
                for task in world[0].tasks)
 
 
+
+
+def test_schema1_parent_with_schema2_required_child_emits_schema2_release(world):
+    """schema1 Parent + schema2 required child must produce a schema2 release with exact task presence."""
+    adapter, parent, registry, state, rows = world
+    assert parent.schema_version == 1
+    schema2_parent = replace(parent, schema_version=2,
+                             anchor_release_payload=parent.to_payload()["anchor_release_payload"])
+    schema2_registry = build_package_registry(
+        adapter.tasks,
+        schema2_parent,
+        lambda task, supplied: bound_numerical_package(
+            registry.package_for(task), supplied,
+            {item.name: item for item in registry.package_for(task).ranked_alternatives},
+        ),
+    )
+    schema2_world = (adapter, schema2_parent, schema2_registry, state, rows)
+    base = materialize(schema2_world)
+    child = projection_child(world, base, 0)
+    assert child.candidate.release.schema_version == 2
+    cell = MorphologyCellV2("low", "none", "low", "stable", "short", "statistical")
+    entry = projection_entry(child, cell, (1.0,) * 5)
+    archive = NumericalQDArchive().insert((entry,))
+    frozen = freeze_qd_supply(
+        adapter, parent, registry, archive, (child,),
+        descriptor_policy=descriptor_policy(), version="n002",
+        required_genome_sha256=child.genome.fingerprint(),
+    )
+    assert frozen.release.schema_version == 2
+    assert child.genome.fingerprint() in frozen.selected_genome_sha256s
+    for task in adapter.tasks:
+        pkg = frozen.registry.package_for(task)
+        assert any(item.name == child.fit.recipe.name for item in pkg.ranked_alternatives)
+
 def test_add_mutation_selects_new_executable_from_persisted_inventory_order(world):
     from evolving_loop.v2.numerical_qd.adapters import _canonical_member
     state = world[3]
