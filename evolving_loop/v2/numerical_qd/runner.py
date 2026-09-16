@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import math
 import statistics
 import time
 from dataclasses import dataclass, replace
@@ -36,7 +37,7 @@ from ..store import V2RunStore, write_once_json
 from .adapters import (
     ImportedNumericalSeedV2, LegacyNumericalAdapter, MaterializedNumericalChildV2, NumericalWorkStopped, _canonical_member,
     evaluate_numerical_child, freeze_qd_supply, import_numerical_seed,
-    materialize_dictionary_evidence,
+    materialize_dictionary_evidence, _applicable,
 )
 from .agent_methods import (
     CurriculumTargetV2, MutationPromptPopulationV2, MutationPromptLineageV2,
@@ -55,6 +56,7 @@ from .contracts import (
     NumericalQDEntryV2, MorphologyCellV2, TaskCacheRowV2, TrainMutationFeedbackV2, TrainTaskV2,
 )
 from .descriptors import describe_history
+from .effective_trials import effective_summary
 from .hyperband import (
     _read_cache, _task_evaluation, advance_hyperband, choose_bracket,
     evaluation_cache_key, fixed_rung_manifest, pack_fold_groups,
@@ -86,6 +88,53 @@ class NumericalQDRunResultV2:
     seed_proposer_prompt_sha256: str
     budget: dict
     public_test_accessed: bool = False
+    effective_trials: dict | None = None
+
+
+def _effective_forecast_evidence(child, evaluation, tasks, task_sha256s,
+                                 parent_registry, seen, *, applicable_task_ids):
+    """Read already executed recipe forecasts on fixed Train identities only.
+
+    Morphology-inactive tasks remain an explicit null mask; an absent active
+    recipe is a failure, never an Anchor forecast. Names/code do not enter the
+    behavioral hash. Parent Dictionary alternatives are compared on the same
+    covered identities (including alternatives that are not the winner).
+    """
+    row = {"status": "infeasible", "forecast_sha256": None, "covered_task_ids": []}
+    if (evaluation is None or not evaluation.constraints.feasible
+            or not set(task_sha256s) <= set(evaluation.task_ids)
+            or any(evaluation.task_statuses.get(name) != "passed" for name in task_sha256s)):
+        return row
+    forecasts, parents = {}, {}
+    for task in tasks:
+        name = task.numeric.task_id
+        if name not in applicable_task_ids:
+            forecasts[name] = None
+            continue
+        package = child.candidate.registry.package_for(task)
+        target = next((item for item in package.ranked_alternatives
+                       if item.name == child.fit.recipe.name), None)
+        if target is None:
+            return row | {"status": "missing_forecast"}
+        values = [float(value) for value in target.forecast]
+        if len(values) != task.numeric.prediction_length or not all(math.isfinite(value) for value in values):
+            return row | {"status": "invalid_forecast"}
+        # Canonicalize signed zero; it is not changed numerical behavior.
+        forecasts[name] = [value if value else 0.0 for value in values]
+        parent = parent_registry.package_for(task)
+        for item in (*parent.ranked_alternatives, parent.protected_baseline):
+            parents.setdefault(item.name, {})[name] = [float(value) if value else 0.0 for value in item.forecast]
+    covered = sorted(name for name, values in forecasts.items() if values is not None)
+    if not covered:
+        return row | {"status": "not_applicable"}
+    sha = fingerprint_payload({"train_task_sha256s": dict(task_sha256s), "forecasts": forecasts})
+    row.update(forecast_sha256=sha, covered_task_ids=covered)
+    # Any matching existing executable on its observed covered tasks is a
+    # conservative no-op, even if that Dictionary member is itself specialized.
+    if any(values and all(forecasts[name] == value for name, value in values.items())
+           for values in parents.values()):
+        return row | {"status": "unchanged"}
+    return row | {"status": "duplicate" if sha in seen else "effective"}
 
 
 def _packed_train_task_groups(
@@ -822,13 +871,16 @@ def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry
 
 
 def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, llm_client=None,
-                     resume=False, stop_after=None, finalize_after=None) -> NumericalQDRunResultV2:
+                     resume=False, stop_after=None, finalize_after=None,
+                     min_effective_candidates=None) -> NumericalQDRunResultV2:
     """Run to the committed resource/deadline limit, or pause after N generations.
 
     Stops are closed generation boundaries. A crash within an unpublished
     operation fails closed through Task 8; no partial operation is replayed.
     ``finalize_after`` is a hard generation cap. It bounds real provider calls
     even when every attempted child is infeasible.
+    ``min_effective_candidates`` optionally stops earlier after distinct feasible
+    Train behavior; it requires that finite cap and never implies promotion.
     """
     if type(config) is not NumericalQDConfigV2:
         config = NumericalQDConfigV2.from_payload(config)
@@ -842,6 +894,11 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         raise ValueError("finalize_after must be a positive generation count")
     if config.budget.no_time_limit and finalize_after is None:
         raise ValueError("unlimited wall time requires a finite finalize_after generation cap")
+    if min_effective_candidates is not None:
+        if type(min_effective_candidates) is not int or min_effective_candidates < 1:
+            raise ValueError("min_effective_candidates must be a positive integer")
+        if finalize_after is None:
+            raise ValueError("effective target requires a finite finalize_after generation cap")
     if not resume:
         NumericalQDRunStore.preflight_fresh(output_dir)
     adapter_fingerprint = adapter.fingerprint
@@ -867,6 +924,15 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         "config": config.fingerprint(), "runtimes": fingerprint_payload(dict(config.runtime_fingerprints))}
     inputs.update({f"operator_{name}": identity
                    for name, identity in operator_input_sha256s.items()})
+    effective_policy, effective_tasks, effective_seen = None, (), set()
+    if min_effective_candidates is not None:
+        effective_tasks = tuple(sorted((task for task in adapter.tasks
+            if task.numeric.task_id in adapter.fold_manifest.task_fold_map),
+            key=lambda task: task.numeric.task_id))
+        effective_policy = {"minimum_effective_candidates": min_effective_candidates,
+            "generation_cap": finalize_after, "train_task_sha256s": {
+                task.numeric.task_id: task_commitments[task.numeric.task_id] for task in effective_tasks}}
+        inputs["effective_trial_policy"] = fingerprint_payload(effective_policy)
     if adapter.fingerprint != adapter_fingerprint:
         raise ValueError("adapter identity changed after operator input binding")
     if imported:
@@ -897,6 +963,9 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         objects = [store._object(Path(name).stem) for name in checkpoint.completed_operation_sha256s
                    if name.startswith("objects/")]
         steps = [value["numerical_qd_step"] for value in objects if "numerical_qd_step" in value]
+        if effective_policy is not None:
+            effective_seen = {row["forecast_sha256"] for step in steps
+                for row in step.get("effective_trials", []) if row["status"] == "effective"}
         generation = max((step["generation"] for step in steps), default=0)
         attempts = [store._read(name) for name in checkpoint.completed_operation_sha256s if name.startswith("proposals/")]
         if any(attempt.get("context", {}).get("generation", 0) > generation for attempt in attempts):
@@ -966,6 +1035,8 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         for sha, source in adapter.sources.items():
             store.write_source(sha, source.encode())
         _persist(store, config)
+        if effective_policy is not None:
+            _persist(store, effective_policy, kind=ArtifactKind.EFFECTIVE_TRIAL_POLICY)
         _persist(store, screen, kind=ArtifactKind.SCREENING_POLICY)
         _persist(store, combined, kind=ArtifactKind.COMBINED_POLICY)
         for payload in seed_policies.values():
@@ -1000,10 +1071,15 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
     def result(status):
         current = _read(kernel.checkpoint_path)
         transitions = tuple(current["completed_transitions"].values())
+        trial_summary = (effective_summary(effective_policy, generation, effective_seen)
+                         if effective_policy is not None else None)
+        if trial_summary is not None and status == "numerical_qd_paused":
+            trial_summary["status"] = "paused"
         return NumericalQDRunResultV2(status, active, len(archive.cells),
             sum(row["decision"] == "accept" for row in transitions), sum(row["decision"] == "reject" for row in transitions),
             state.mutation_policy.fingerprint(), state.proposer_prompt.fingerprint(), seed_state.mutation_policy.fingerprint(),
-            seed_state.proposer_prompt.fingerprint(), current["budget"])
+            seed_state.proposer_prompt.fingerprint(), current["budget"],
+            effective_trials=trial_summary)
 
     if (root / "evaluation_complete.json").exists():
         return result("numerical_qd_complete")
@@ -1022,6 +1098,8 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
     feedback = (TrainMutationFeedbackV2.from_payload(previous_feedback) if previous_feedback else
                 TrainMutationFeedbackV2("train", sorted(config.mutation["operators"])[0], False, False, False, ()))
     while not kernel.budget.finalization_started:
+        if effective_policy is not None and len(effective_seen) >= min_effective_candidates:
+            break
         if finalize_after is not None and generation >= finalize_after:
             break
         if stop_after is not None and generation >= stop_after:
@@ -1303,6 +1381,21 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                     checkpoint_state()
                 if hyperband.complete:
                     evaluations = hyperband.rungs[-1].evaluations
+        effective_evidence = []
+        if effective_policy is not None:
+            by_genome = {value.genome_sha256: value for value in evaluations}
+            for genome_sha, child in sorted(children.items()):
+                evaluation = by_genome.get(genome_sha)
+                row = _effective_forecast_evidence(child, evaluation, effective_tasks,
+                    effective_policy["train_task_sha256s"], parent_registry, effective_seen,
+                    applicable_task_ids={task.numeric.task_id for task in effective_tasks
+                        if _applicable(child.member, task, config.descriptor_policy)})
+                row.update(child_sha256=fingerprint_payload(child.to_payload(adapter.tasks)),
+                    evaluation_sha256=evaluation.fingerprint() if evaluation is not None else None,
+                    parent_registry_sha256=parent_registry.fingerprint)
+                effective_evidence.append(row)
+                if row["status"] == "effective":
+                    effective_seen.add(row["forecast_sha256"])
         entries = []
         for evaluation in evaluations:
             if not evaluation.constraints.feasible:
@@ -1426,7 +1519,9 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             "proposal_request_sha256": request_sha,
             "mutation_prompt_population_sha256": _persist_prompt_population(store, population),
             "prompt_overrides": dict(sorted(prompt_overrides.items())),
-            "materialization_failures": materialization_failures}}, kind=ArtifactKind.GENERATION_STATUS)
+            "materialization_failures": materialization_failures,
+            **({"effective_trials": effective_evidence} if effective_policy is not None else {})}},
+            kind=ArtifactKind.GENERATION_STATUS)
         checkpoint_state()
         if budget_blocked:
             break

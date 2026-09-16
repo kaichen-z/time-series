@@ -112,6 +112,7 @@ def run_real_numerical(
     task_local_evidence_path: Path | None = None,
     task_local_dictionary: object | None = None,
     finalize_after: int | None = None,
+    min_effective_candidates: int | None = None,
 ) -> dict[str, object]:
     """Invoke P2 through the payload seam using a root stage context."""
     output_dir = getattr(context, "output_dir", None)
@@ -137,6 +138,8 @@ def run_real_numerical(
         ),
         task_local_evidence_path=task_local_evidence_path,
         task_local_dictionary=task_local_dictionary,
+        **({"min_effective_candidates": min_effective_candidates}
+           if min_effective_candidates is not None else {}),
     )
 
 

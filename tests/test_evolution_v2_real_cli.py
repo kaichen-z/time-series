@@ -72,8 +72,9 @@ def test_real_evolve_dispatches_canonical_manifest_and_closes_host(tmp_path: Pat
 
 
 @pytest.mark.parametrize("no_time_limit", [False, True])
+@pytest.mark.parametrize("effective_target", [None, 2])
 def test_real_evolve_forwards_explicit_p2_generation_target(
-    tmp_path: Path, monkeypatch, capsys, no_time_limit
+    tmp_path: Path, monkeypatch, capsys, no_time_limit, effective_target
 ):
     from evolving_loop.v2 import cli
 
@@ -105,12 +106,15 @@ def test_real_evolve_forwards_explicit_p2_generation_target(
         "--authority-root", str(data_root),
         "--output-dir", str(tmp_path / "output"),
         "--p2-generations", "10", *(["--no-time-limit"] if no_time_limit else []),
+        *(["--p2-min-effective-candidates", str(effective_target)] if effective_target else []),
     ]) == 0
 
     capsys.readouterr()
     assert observed["p2_generations"] == 10
     assert observed["run_p2_generations"] == 10
     assert observed.get("run_no_time_limit", False) is no_time_limit
+    assert observed.get("p2_min_effective_candidates") == effective_target
+    assert observed.get("run_p2_min_effective_candidates") == effective_target
 
 
 def test_real_evolve_rejects_output_inside_data_root_before_host_creation(tmp_path: Path, monkeypatch, capsys):

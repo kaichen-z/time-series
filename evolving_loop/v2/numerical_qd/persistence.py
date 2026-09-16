@@ -938,6 +938,37 @@ class NumericalQDRunStore:
         if any(getattr(proposal_use, name) > getattr(charged, name) for name in ResourceUse.field_names()):
             raise NumericalQDStoreError("completion proposal use exceeds Kernel-owned accounting")
         transitions = tuple(kernel["completed_transitions"].values())
+        effective = {}
+        if "effective_trial_policy" in checkpoint.input_sha256s:
+            from .effective_trials import effective_summary, validate_policy, validate_evidence
+            policy = self._object(checkpoint.input_sha256s["effective_trial_policy"])
+            validate_policy(policy)
+            steps = []
+            seen = set()
+            for name in checkpoint.completed_operation_sha256s:
+                if not name.startswith("objects/"):
+                    continue
+                value = self._read_object_if_first_key(name, "numerical_qd_step")
+                if value is not None:
+                    steps.append(value["numerical_qd_step"])
+            for step in sorted(steps, key=lambda row: row["generation"]):
+                rows = step.get("effective_trials", [])
+                validate_evidence(rows)
+                for row in rows:
+                    child = self._object(row["child_sha256"])["materialized_numerical_child"]
+                    if not set(row["covered_task_ids"]) <= set(policy["train_task_sha256s"]):
+                        raise NumericalQDStoreError("effective trial coverage differs from Train identities")
+                    if row["evaluation_sha256"] is not None:
+                        evaluation = NumericalEvaluationV2.from_payload(self._object(row["evaluation_sha256"]))
+                        if evaluation.genome_sha256 != fingerprint_payload(child["genome"]):
+                            raise NumericalQDStoreError("effective trial child/evaluation mismatch")
+                    if row["status"] == "effective":
+                        if (row["evaluation_sha256"] is None or not evaluation.constraints.feasible
+                                or row["forecast_sha256"] in seen):
+                            raise NumericalQDStoreError("effective trial lacks distinct feasible evidence")
+                        seen.add(row["forecast_sha256"])
+            effective = {"effective_trials": effective_summary(policy,
+                max((step["generation"] for step in steps), default=0), seen)}
         dev_accessed = False
         for transition in transitions:
             evidence_sha = require_sha256(transition["acceptance_evidence_sha256"], "acceptance evidence SHA")
@@ -971,6 +1002,7 @@ class NumericalQDRunStore:
                 "budget": kernel["budget"],
                 "dev_accessed": dev_accessed,
                 "public_test_accessed": False,
+                **effective,
             },
         }
 

@@ -162,6 +162,15 @@ def test_explicit_generation_target_expands_the_p2_grant(case: RunnerCase):
     assert case.grant("p2") == 4200
 
 
+def test_effective_target_is_bound_to_root_resume_identity(case: RunnerCase):
+    from evolving_loop.v2.real.runner import RealRunnerError
+    run_real_evolution(case.output, case.manifest, case.ports, monotonic=case.clock,
+                       p2_generations=3, p2_min_effective_candidates=1)
+    with pytest.raises(RealRunnerError, match="root manifest"):
+        run_real_evolution(case.output, case.manifest, case.ports, monotonic=case.clock,
+                           p2_generations=3, p2_min_effective_candidates=2)
+
+
 def test_unused_time_rolls_forward_without_touching_reserve(case: RunnerCase):
     case.stage_durations.update(p2=600, p3=400, p4=100, p5=100)
 

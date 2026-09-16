@@ -641,12 +641,14 @@ def build_real_stage_ports(
     manifest: RealEvolutionManifestV2,
     repo_root: Path,
     p2_generations: int | None = None,
+    p2_min_effective_candidates: int | None = None,
 ) -> RealStagePorts:
     """Assemble authenticated production P2→P5 child runs and seals."""
     if p2_generations is not None and (
         type(p2_generations) is not int or p2_generations < 1
     ):
         raise ValueError("p2_generations must be a positive integer")
+    _validate_effective_target(p2_min_effective_candidates, p2_generations)
     authority = Path(repo_root).resolve()
 
     def bind_deadline(context: RealStageContextV2) -> None:
@@ -686,6 +688,8 @@ def build_real_stage_ports(
         }
         if p2_generations is not None:
             arguments["finalize_after"] = p2_generations
+        if p2_min_effective_candidates is not None:
+            arguments["min_effective_candidates"] = p2_min_effective_candidates
         return run_real_numerical(context, host, **arguments)
 
     def seal_p2(context: RealStageContextV2, _result: object) -> SealedStageV2:
@@ -1005,6 +1009,7 @@ def _root_manifest(
     manifest: RealEvolutionManifestV2,
     plan: BudgetPlan,
     p2_generations: int | None,
+    p2_min_effective_candidates: int | None = None,
 ) -> dict[str, object]:
     return {
         "system": "evolution_v2",
@@ -1015,6 +1020,8 @@ def _root_manifest(
         "model_binding_sha256": manifest.model.fingerprint(),
         "budget_plan_sha256": plan.fingerprint(),
         "p2_generation_target": p2_generations,
+        **({"p2_min_effective_candidates": p2_min_effective_candidates}
+           if p2_min_effective_candidates is not None else {}),
         **({"no_time_limit": True} if plan.no_time_limit else {}),
     }
 
@@ -1025,9 +1032,10 @@ def _load_state(
     plan: BudgetPlan,
     monotonic: Callable[[], float],
     p2_generations: int | None,
+    p2_min_effective_candidates: int | None = None,
 ) -> tuple[V2RunStore, BudgetLedger, RealEvolutionCheckpointV2 | None]:
     store = V2RunStore.create(root)
-    expected_manifest = _root_manifest(manifest, plan, p2_generations)
+    expected_manifest = _root_manifest(manifest, plan, p2_generations, p2_min_effective_candidates)
     manifest_path = root / "run_manifest.json"
     if manifest_path.exists():
         if _read_canonical(manifest_path) != expected_manifest:
@@ -1363,6 +1371,14 @@ def _summary(
     }
 
 
+def _validate_effective_target(target, cap):
+    if target is not None:
+        if type(target) is not int or target < 1:
+            raise ValueError("p2_min_effective_candidates must be a positive integer")
+        if cap is None:
+            raise ValueError("effective target requires a finite positive p2_generations cap")
+
+
 def run_real_evolution(
     output_dir: str | Path,
     manifest: RealEvolutionManifestV2,
@@ -1371,6 +1387,7 @@ def run_real_evolution(
     monotonic: Callable[[], float] = time.monotonic,
     p2_generations: int | None = None,
     no_time_limit: bool = False,
+    p2_min_effective_candidates: int | None = None,
 ) -> RealRunResultV2:
     """Run or safely resume one immutable real P2→P5 root epoch."""
     if not isinstance(manifest, RealEvolutionManifestV2):
@@ -1383,12 +1400,13 @@ def run_real_evolution(
         raise TypeError("no_time_limit must be a boolean")
     if no_time_limit and p2_generations is None:
         raise ValueError("no_time_limit requires a finite positive p2_generations cap")
+    _validate_effective_target(p2_min_effective_candidates, p2_generations)
 
     root = Path(output_dir)
     allocations = _effective_allocations(manifest, p2_generations)
     plan = _plan(manifest, p2_generations, no_time_limit=no_time_limit)
     store, ledger, checkpoint = _load_state(
-        root, manifest, plan, monotonic, p2_generations
+        root, manifest, plan, monotonic, p2_generations, p2_min_effective_candidates
     )
     records = list(checkpoint.stage_records) if checkpoint is not None else []
     handoffs = dict(checkpoint.handoff_sha256s) if checkpoint is not None else {}

@@ -55,6 +55,7 @@ class ArtifactKindV2(str, Enum):
     RUNNER_CHECKPOINT = "runner_checkpoint"
     MANIFEST = "manifest"
     GENERATION_STATUS = "generation_status"
+    EFFECTIVE_TRIAL_POLICY = "effective_trial_policy"
     PARTIAL_RUNG = "partial_rung"
     BOOTSTRAP_PREFLIGHT = "bootstrap_preflight"
     BOOTSTRAP_ADMISSION = "bootstrap_admission"
@@ -111,6 +112,8 @@ ARTIFACT_KINDS = MappingProxyType({
     K.RUNNER_CHECKPOINT: ArtifactSpecV2(False, NumericalQDCheckpointV2),
     K.MANIFEST: ArtifactSpecV2(False, payload_fields=("schema_version", "system")),
     K.GENERATION_STATUS: ArtifactSpecV2(False, payload_fields=("numerical_qd_step",)),
+    K.EFFECTIVE_TRIAL_POLICY: ArtifactSpecV2(False, payload_fields=(
+        "minimum_effective_candidates", "generation_cap", "train_task_sha256s")),
     K.PARTIAL_RUNG: ArtifactSpecV2(False, payload_fields=("closed_partial_rung",)),
     K.BOOTSTRAP_PREFLIGHT: ArtifactSpecV2(False, payload_fields=("schema_version", "stage", "seed_supply_sha256",
         "protocol_sha256", "budget_plan_sha256", "input_sha256s", "estimate")),
@@ -338,6 +341,9 @@ def validate_artifact(kind, raw):
     elif kind is K.KERNEL_CHECKPOINT:
         from ..kernel import EvolutionKernel
         _require_exact_schema(payload, EvolutionKernel._CHECKPOINT_FIELDS, field=kind.value)
+    elif kind is K.EFFECTIVE_TRIAL_POLICY:
+        from .effective_trials import validate_policy
+        validate_policy(payload)
     elif kind is K.GENERATION_STATUS:
         from .contracts import TrainMutationFeedbackV2
         legacy_fields = ("generation", "status", "active_bundle_sha256",
@@ -353,8 +359,13 @@ def validate_artifact(kind, raw):
                 fields = (*fields, "proposal_request_sha256")
             if isinstance(raw_row, dict) and "prompt_overrides" in raw_row:
                 fields = (*fields, "prompt_overrides")
+            if isinstance(raw_row, dict) and "effective_trials" in raw_row:
+                fields = (*fields, "effective_trials")
         row = _require_exact_schema(raw_row, fields, field=kind.value)
         TrainMutationFeedbackV2.from_payload(row["train_feedback"])
+        if "effective_trials" in row:
+            from .effective_trials import validate_evidence
+            validate_evidence(row["effective_trials"])
         if type(row["generation"]) is not int or type(row["status"]) is not str:
             raise ValueError("generation control requires primitive status")
         failures = row.get("materialization_failures", [])

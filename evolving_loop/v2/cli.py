@@ -188,6 +188,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="formally finalize P2 after this many closed generations",
     )
+    real.add_argument("--p2-min-effective-candidates", type=int,
+        help="stop P2 after this many distinct feasible Train behaviors; requires --p2-generations cap")
     add_protocol_parsers(commands)
     return parser
 
@@ -275,12 +277,15 @@ def _real_evolve(
     authority_root: Path | None,
     p2_generations: int | None = None,
     no_time_limit: bool = False,
+    p2_min_effective_candidates: int | None = None,
 ) -> dict[str, object]:
     """Build and close the real Host around one immutable root invocation."""
     if p2_generations is not None and p2_generations < 1:
         raise ValueError("p2_generations must be a positive integer")
     if no_time_limit and p2_generations is None:
         raise ValueError("no_time_limit requires a finite positive p2_generations cap")
+    from .real.runner import _validate_effective_target
+    _validate_effective_target(p2_min_effective_candidates, p2_generations)
     manifest = RealEvolutionManifestV2.from_payload(_read_canonical(manifest_path))
     code_root = Path(__file__).resolve().parents[2]
     authority = (authority_root if authority_root is not None else _default_authority_root(code_root)).resolve(strict=True)
@@ -319,12 +324,16 @@ def _real_evolve(
             manifest=manifest,
             repo_root=authority,
             p2_generations=p2_generations,
+            **({"p2_min_effective_candidates": p2_min_effective_candidates}
+               if p2_min_effective_candidates is not None else {}),
         )
         run_arguments = {}
         if no_time_limit:
             run_arguments["no_time_limit"] = True
         if p2_generations is not None:
             run_arguments["p2_generations"] = p2_generations
+        if p2_min_effective_candidates is not None:
+            run_arguments["p2_min_effective_candidates"] = p2_min_effective_candidates
         return run_real_evolution(
             destination, manifest, ports, **run_arguments
         ).to_payload()
@@ -779,6 +788,7 @@ def _run_numerical_payloads(
     llm_client: LLMClient | None,
     resume: bool,
     finalize_after: int | None = None,
+    min_effective_candidates: int | None = None,
     task_local_evidence_path=None, task_local_dictionary=None, legacy_bootstrap=False,
 ) -> dict[str, object]:
     """Shared typed parsing and adapter construction for both input seams."""
@@ -809,6 +819,8 @@ def _run_numerical_payloads(
         ),
         resume=resume,
         finalize_after=finalize_after,
+        **({"min_effective_candidates": min_effective_candidates}
+           if min_effective_candidates is not None else {}),
     )
     return _read_canonical(output / "evaluation_complete.json")
 
@@ -823,6 +835,7 @@ def numerical_evolve_payload(
     host_runtime: object,
     llm_client: LLMClient,
     finalize_after: int | None = None,
+    min_effective_candidates: int | None = None,
     task_local_evidence_path=None, task_local_dictionary=None, legacy_bootstrap=False,
 ) -> dict[str, object]:
     """Run Numerical QD from Host-verified payloads without path overlap rules."""
@@ -837,6 +850,8 @@ def numerical_evolve_payload(
         llm_client=llm_client,
         resume=resume,
         finalize_after=finalize_after,
+        **({"min_effective_candidates": min_effective_candidates}
+           if min_effective_candidates is not None else {}),
         task_local_evidence_path=task_local_evidence_path, task_local_dictionary=task_local_dictionary,
         legacy_bootstrap=legacy_bootstrap,
     )
@@ -1233,6 +1248,7 @@ def main(argv: list[str] | None = None) -> int:
                 authority_root=args.authority_root,
                 p2_generations=args.p2_generations,
                 no_time_limit=args.no_time_limit,
+                p2_min_effective_candidates=args.p2_min_effective_candidates,
             )
         elif args.command in {"protocol-evolve", "protocol-make-smoke-inputs"}:
             summary = dispatch_protocol(args)

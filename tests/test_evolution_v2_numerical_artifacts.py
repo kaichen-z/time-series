@@ -26,7 +26,7 @@ def test_shortlist_artifacts_have_closed_payload_contracts():
 CONTROL_KINDS = {
     "bundle", "qd_archive", "hyperband_state", "rung_record", "budget_checkpoint", "kernel_checkpoint",
     "runner_checkpoint", "manifest", "generation_status", "partial_rung", "bootstrap_preflight",
-    "bootstrap_admission", "bootstrap_closure", "bootstrap_replay", "bootstrap_receipt",
+    "bootstrap_admission", "bootstrap_closure", "bootstrap_replay", "bootstrap_receipt", "effective_trial_policy",
 }
 
 
