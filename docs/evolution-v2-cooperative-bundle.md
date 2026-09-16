@@ -45,6 +45,40 @@ state, while `objects/` stores canonical module, scheduler, feedback, and
 aggregate-evaluation objects. Progress advances only at closed candidate
 boundaries.
 
+### Real cooperative task progress
+
+`run_real_cooperative` enables optional per-task persistence at
+`<output_dir>/task_evaluations/<identity_sha256>.json`. Each record has
+`identity`, `started_at`, `updated_at`, and `status` (`started`, `completed`,
+or `error`). Completed records contain a typed score, numeric diagnostics,
+original provisional/final Decision rejections, and Dictionary traces with
+phase responses and failed tool requests/errors. Error records retain the
+exception type and message. Rejected nonfinite tool inputs are stored as text;
+score validation remains unchanged.
+
+Only completed records are reused. The key binds the full task (including
+Host-only labels), Numerical package, Bundle, stage, Retrieval/Decision
+identities, Host runtime and model, metric policy/cap, and explicit execution
+contract version. Bump `TASK_EXECUTION_CONTRACT` in `package_task_store.py`
+when changing execution/scoring semantics not covered by another key field.
+Interrupted tasks rerun; invalid cached scores fail closed. This single-writer
+store is local diagnostic/evaluation state, not sealed promotion evidence.
+It does **not** reopen a root run terminalized by a transient failure.
+
+For a standalone, already-authorized canary using a configured adapter:
+
+```python
+from evolving_loop.package_task_store import PackageTaskStore
+
+pipeline.task_store = PackageTaskStore(output / "task_evaluations",
+                                      runtime_identity=runtime_identity)
+evaluation = pipeline.evaluate(bundle, (resolved_train_task,), stage="train")
+```
+
+Use an identity covering the actual runtime/model. Generic adapters leave
+this feature disabled; full-result `trace_sink` callbacks cannot be combined
+with score-only reuse. No records or evaluation labels are passed to agents.
+
 ## Scope and interpretation
 
 The active handoff is `P2 full executable Dictionary -> P3 Dictionary Selector

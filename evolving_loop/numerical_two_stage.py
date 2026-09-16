@@ -129,6 +129,7 @@ class NumericalTwoStageResult:
     fingerprints: Mapping[str, str]
     fallback_reason: str | None = None
     round2_failure_reason: str | None = None
+    dictionary_traces: tuple[Mapping[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.numerical, NumericalForecastPackage):
@@ -208,6 +209,7 @@ def run_numerical_two_stage(
     )
     fallback_reason = handoff_failure
     round2_failure_reason: str | None = None
+    dictionary_traces = []
 
     round1 = _run_round1(execution_retrieval, retrieval_task)
     if _fatal_round_failure(round1, "round1"):
@@ -224,6 +226,7 @@ def run_numerical_two_stage(
                                     frequency=retrieval_task.numeric.frequency),
             round1_card.to_legacy_result(),
         )
+        dictionary_traces.append(tool_trace)
         if selected is not None:
             candidates = candidates + (selected,)
             host_default = selected
@@ -314,6 +317,7 @@ def run_numerical_two_stage(
                                     frequency=retrieval_task.numeric.frequency),
             final_retrieval,
         )
+        dictionary_traces.append(tool_trace)
         if selected is not None:
             candidates = tuple(c for c in candidates if c.candidate_id != selected.candidate_id) + (selected,)
             host_default = selected
@@ -334,7 +338,10 @@ def run_numerical_two_stage(
     if final_failure is not None:
         fallback_reason = fallback_reason or final_failure
     if fallback_reason is not None:
-        final = _fallback_decision(host_default, fallback_reason)
+        final = _fallback_decision(
+            host_default,
+            final.rejection_reason or provisional.rejection_reason or fallback_reason,
+        )
 
     materialized = {item.candidate_id: item for item in candidates}
     selected = materialized.get(final.selected.candidate_id)
@@ -357,6 +364,7 @@ def run_numerical_two_stage(
         ),
         fallback_reason=fallback_reason,
         round2_failure_reason=round2_failure_reason,
+        dictionary_traces=tuple(dictionary_traces),
     )
 
 
@@ -857,7 +865,7 @@ def _run_decision(
         raise
     except Exception as error:
         reason = f"decision_failure:{type(error).__name__}"
-        return _fallback_decision(host_default, reason), reason
+        return _fallback_decision(host_default, f"{reason}:{error}"), reason
 
 
 def _validate_decision_result(
@@ -877,7 +885,7 @@ def _validate_decision_result(
         return _fallback_decision(host_default, reason), reason
     if result.rejection_reason is not None:
         reason = "decision_contract_rejected"
-        return _fallback_decision(host_default, reason), reason
+        return _fallback_decision(host_default, result.rejection_reason), reason
 
     by_id = {item.candidate_id: item for item in candidates}
     canonical = by_id.get(getattr(result.selected, "candidate_id", None))

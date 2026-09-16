@@ -22,6 +22,7 @@ from evolving_loop.package_coordinate_evolution import PackageCoordinateBundle
 from evolving_loop.package_metrics import PackageEvaluation, PackageTaskScore
 from evolving_loop.package_registry import FrozenNumericalPackageRegistry
 from evolving_loop.package_task_feedback import PackageTaskFeedbackLedger
+from evolving_loop.package_task_store import PackageTaskStore
 from evolving_loop.retrieval_agent.quality import score_retrieval_card_quality
 from evolving_loop.retrieval_agent.two_stage_agent import TwoStageRetrievalAgent
 
@@ -130,6 +131,7 @@ class PackagePipelineEvaluator:
         expected_retrieval_sha256: str | None = None,
         expected_decision_prompt_sha256: str | None = None,
         trace_sink: Callable[[ContextTask, NumericalTwoStageResult], None] | None = None,
+        task_store: PackageTaskStore | None = None,
     ) -> PackageEvaluation:
         """Shared compatibility boundary; callers supply already-bound factories."""
         if not isinstance(registry, FrozenNumericalPackageRegistry):
@@ -149,62 +151,42 @@ class PackagePipelineEvaluator:
             raise ValueError("package pipeline requires an evaluation stage")
         if not math.isfinite(metric_cap) or metric_cap <= 0.0:
             raise ValueError("package pipeline metric cap must be positive and finite")
+        if task_store is not None and trace_sink is not None:
+            raise ValueError("task score reuse cannot replay a full-result trace sink")
 
         scored: list[_ScoredTask] = []
         for task in resolved:
             package = registry.package_for(task)
-            retrieval = retrieval_factory()
-            decision = decision_factory()
-            if not isinstance(retrieval, TwoStageRetrievalAgent) or not isinstance(
-                decision, DecisionAgent
-            ):
-                raise TypeError("package pipeline factories returned invalid agents")
-            if (
-                expected_retrieval_sha256 is not None
-                and retrieval.genome.fingerprint() != expected_retrieval_sha256
-            ):
-                raise ValueError("package pipeline changed the bound Retrieval Genome")
-            if (
-                expected_decision_prompt_sha256 is not None
-                and hashlib.sha256(decision.prompt.encode("utf-8")).hexdigest()
-                != expected_decision_prompt_sha256
-            ):
-                raise ValueError("package pipeline changed the bound Decision prompt")
+            identity = None
+            if task_store is not None:
+                identity = task_store.identity(
+                    task=task, package=package, candidate_sha256=candidate_sha256,
+                    stage=stage, metric_cap=metric_cap,
+                    expected_retrieval_sha256=expected_retrieval_sha256,
+                    expected_decision_prompt_sha256=expected_decision_prompt_sha256,
+                )
+                cached = task_store.load(identity)
+                if cached is not None:
+                    scored.append(_ScoredTask(*cached))
+                    continue
+                task_store.write(identity, 'started')
             try:
-                result = run_numerical_two_stage(
-                    task,
-                    package,
-                    retrieval,
-                    decision,
-                    preserve_round1_on_round2_failure=True,
+                item, artifacts = cls._evaluate_task(
+                    task=task, package=package,
+                    retrieval_factory=retrieval_factory,
+                    decision_factory=decision_factory, metric_cap=metric_cap,
+                    expected_retrieval_sha256=expected_retrieval_sha256,
+                    expected_decision_prompt_sha256=expected_decision_prompt_sha256,
+                    trace_sink=trace_sink,
                 )
-            except TransientLLMError:
+                if task_store is not None:
+                    task_store.write(identity, 'completed', score=item.row,
+                                     diagnostics=item.diagnostics, artifacts=artifacts)
+                scored.append(item)
+            except BaseException as error:
+                if task_store is not None:
+                    task_store.write(identity, 'error', error=error)
                 raise
-            except (TypeError, ValueError) as error:
-                scored.append(
-                    cls._score_contract_fallback(
-                        task,
-                        package,
-                        error,
-                        metric_cap=metric_cap,
-                    )
-                )
-                continue
-            if (
-                expected_retrieval_sha256 is not None
-                and result.fingerprints.get("retrieval_genome")
-                != expected_retrieval_sha256
-            ):
-                raise ValueError("package pipeline changed the bound Retrieval Genome")
-            if (
-                expected_decision_prompt_sha256 is not None
-                and result.fingerprints.get("decision_prompt")
-                != expected_decision_prompt_sha256
-            ):
-                raise ValueError("package pipeline changed the bound Decision prompt")
-            if trace_sink is not None:
-                trace_sink(task, result)
-            scored.append(cls._score_result(task, package, result, metric_cap=metric_cap))
 
         diagnostic_names = tuple(
             sorted({name for item in scored for name in item.diagnostics})
@@ -219,6 +201,50 @@ class PackagePipelineEvaluator:
             expected_task_ids=task_ids,
             secondary_diagnostics=diagnostics,
         )
+
+    @classmethod
+    def _evaluate_task(cls, *, task, package, retrieval_factory, decision_factory,
+                       metric_cap, expected_retrieval_sha256,
+                       expected_decision_prompt_sha256, trace_sink):
+        retrieval = retrieval_factory()
+        decision = decision_factory()
+        if not isinstance(retrieval, TwoStageRetrievalAgent) or not isinstance(decision, DecisionAgent):
+            raise TypeError("package pipeline factories returned invalid agents")
+        if (expected_retrieval_sha256 is not None
+                and retrieval.genome.fingerprint() != expected_retrieval_sha256):
+            raise ValueError("package pipeline changed the bound Retrieval Genome")
+        if (expected_decision_prompt_sha256 is not None
+                and hashlib.sha256(decision.prompt.encode('utf-8')).hexdigest()
+                != expected_decision_prompt_sha256):
+            raise ValueError("package pipeline changed the bound Decision prompt")
+        try:
+            result = run_numerical_two_stage(
+                task, package, retrieval, decision,
+                preserve_round1_on_round2_failure=True,
+            )
+        except TransientLLMError:
+            raise
+        except (TypeError, ValueError) as error:
+            return cls._score_contract_fallback(task, package, error, metric_cap=metric_cap), {
+                'contract_error': {'type': type(error).__name__, 'message': str(error)},
+            }
+        if (expected_retrieval_sha256 is not None
+                and result.fingerprints.get('retrieval_genome') != expected_retrieval_sha256):
+            raise ValueError("package pipeline changed the bound Retrieval Genome")
+        if (expected_decision_prompt_sha256 is not None
+                and result.fingerprints.get('decision_prompt') != expected_decision_prompt_sha256):
+            raise ValueError("package pipeline changed the bound Decision prompt")
+        if trace_sink is not None:
+            trace_sink(task, result)
+        artifacts = {
+            'fallback_reason': result.fallback_reason,
+            'round2_failure_reason': result.round2_failure_reason,
+            'provisional_decision_rejection': result.provisional_decision.rejection_reason,
+            'final_decision_rejection': result.final_decision.rejection_reason,
+            'dictionary_traces': result.dictionary_traces,
+            'fingerprints': dict(result.fingerprints),
+        }
+        return cls._score_result(task, package, result, metric_cap=metric_cap), artifacts
 
     @staticmethod
     def _score_result(task, package, result, *, metric_cap: float) -> _ScoredTask:

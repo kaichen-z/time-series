@@ -1282,7 +1282,8 @@ def test_decision_rejection_preserves_materialized_host_default(tmp_path) -> Non
     result = run_numerical_two_stage(task, package, retrieval, decision)
 
     assert result.final_decision.selected.candidate_id == "safe_anchor"
-    assert result.final_decision.rejection_reason == "decision_contract_rejected"
+    assert result.fallback_reason == "decision_contract_rejected"
+    assert result.final_decision.rejection_reason == "override_requires_task_evidence"
     assert result.forecast == package.protected_baseline.forecast
 
 
@@ -2583,7 +2584,9 @@ def test_decision_execution_scope_is_frozen_before_round1_and_deeply_detached(
 
     assert decision.prompt == "Mutated caller Decision prompt."
     assert decision.library is late_library
-    assert [call["system"] for call in llm.calls] == [initial_prompt, initial_prompt]
+    assert llm.calls[0]["system"] == llm.calls[1]["system"]
+    assert llm.calls[0]["system"].startswith(initial_prompt + "\n")
+    assert "Mutated caller" not in llm.calls[0]["system"]
     for call in llm.calls:
         payload = json.loads(call["messages"][0]["content"])
         assert "Original frozen skill row." in payload["validated_decision_skills"]
@@ -2714,10 +2717,9 @@ def test_round1_callback_cannot_drift_frozen_decision_scope(tmp_path) -> None:
     assert decision.prompt == "Caller-controlled prompt after Round 1."
     assert decision.library is late_library
     assert decision.llm is late_decision_llm
-    assert [call["system"] for call in original_decision_llm.calls] == [
-        initial_prompt,
-        initial_prompt,
-    ]
+    assert original_decision_llm.calls[0]["system"] == original_decision_llm.calls[1]["system"]
+    assert original_decision_llm.calls[0]["system"].startswith(initial_prompt + "\n")
+    assert "Caller-controlled" not in original_decision_llm.calls[0]["system"]
     assert late_decision_llm.calls == []
     for call in original_decision_llm.calls:
         payload = json.loads(call["messages"][0]["content"])

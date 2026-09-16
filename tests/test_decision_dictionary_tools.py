@@ -172,7 +172,8 @@ def test_dictionary_provider_failure_returns_baseline_control(failure_call, erro
         SimpleNamespace(evidence=()),
     )
     assert result is None
-    assert trace['errors'] == [f'dictionary_provider_failure:{error_type.__name__}']
+    assert trace['errors'] == [f'dictionary_provider_failure:{error_type.__name__}:provider failed']
+    assert len(trace['evaluations']) == failure_call - 1
 
 
 def test_dictionary_transient_provider_failure_remains_retryable():

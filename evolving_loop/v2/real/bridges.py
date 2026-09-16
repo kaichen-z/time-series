@@ -9,6 +9,7 @@ from types import MappingProxyType
 from common.payload import strict_json_loads
 from evolving_loop.data import ContextTask
 from evolving_loop.decision_agent.agent import DECISION_PROMPT
+from evolving_loop.package_task_store import PackageTaskStore
 from evolving_loop.package_numerical_supply import parse_numerical_supply_release
 from evolving_loop.package_registry import task_registry_fingerprint
 from evolving_loop.retrieval_agent.policy import RetrievalGenome
@@ -308,6 +309,16 @@ def run_real_cooperative(
         host.decision_factory,
         metric_cap=config.metric_cap,
         retrieval_skill_library=host.retrieval_skill_library,
+        task_store=PackageTaskStore(
+            Path(output_dir) / 'task_evaluations',
+            runtime_identity=fingerprint_payload({
+                'host_runtime': _host_runtime_identity(host),
+                'model': (
+                    host.manifest.model.to_payload()
+                    if hasattr(host.manifest, 'model') else None
+                ),
+            }),
+        ),
     )
     adapters = {
         "numerical": numerical_adapter,

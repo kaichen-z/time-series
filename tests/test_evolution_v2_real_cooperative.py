@@ -182,6 +182,8 @@ def test_real_bridge_projects_4_1_but_preserves_p2_100_task_registry(
         decision = adapters["pipeline"].decision_factory(seed["decision"])
         assert retrieval.llm is shared_llm
         assert decision.llm is shared_llm
+        assert adapters["pipeline"].task_store.directory == tmp_path / "p3" / "task_evaluations"
+        assert adapters["pipeline"].task_store.runtime_identity
         raise Observed
 
     monkeypatch.setattr(bridges, "run_cooperative_evolution", observe)

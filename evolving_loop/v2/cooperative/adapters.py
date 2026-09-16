@@ -13,6 +13,7 @@ from evolving_loop.data import ContextTask
 from evolving_loop.package_numerical_supply import NumericalSupplyRelease
 from evolving_loop.package_metrics import PackageEvaluation
 from evolving_loop.package_pipeline_evaluator import PackagePipelineEvaluator
+from evolving_loop.package_task_store import PackageTaskStore
 from evolving_loop.package_registry import FrozenNumericalPackageRegistry, _digest
 from evolving_loop.retrieval_agent.policy import RetrievalGenome
 from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
@@ -421,6 +422,7 @@ class CooperativePipelineAdapter:
         metric_cap: float = 5.0,
         retrieval_skill_library: RetrievalSkillLibrary | None = None,
         empty_skill_path: str | Path = "unused-cooperative-retrieval-skills.json",
+        task_store: PackageTaskStore | None = None,
     ) -> None:
         if type(catalog) is not CooperativeArtifactCatalog:
             raise TypeError("pipeline catalog must be CooperativeArtifactCatalog")
@@ -443,6 +445,7 @@ class CooperativePipelineAdapter:
         self.metric_cap = float(metric_cap)
         self.retrieval_skill_library = retrieval_skill_library
         self.empty_skill_path = Path(empty_skill_path)
+        self.task_store = task_store
 
     def _skills_for(self, module: RetrievalModuleV2) -> RetrievalSkillLibrary:
         source = self.retrieval_skill_library
@@ -497,6 +500,7 @@ class CooperativePipelineAdapter:
             ),
             decision_factory=lambda: self.decision_factory(decision),
             metric_cap=self.metric_cap,
+            task_store=self.task_store,
             expected_retrieval_sha256=retrieval.genome.fingerprint(),
             expected_decision_prompt_sha256=hashlib.sha256(
                 decision.prompt.encode("utf-8")

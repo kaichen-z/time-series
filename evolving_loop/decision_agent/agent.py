@@ -15,8 +15,9 @@ from common.llm import JsonExtractionError, LLMClient, TransientLLMError, parse_
 
 DECISION_PROMPT = """You are the Decision Agent in a time-series forecasting harness.
 Choose among candidates that were already executed and historically hindcast. You cannot write
-new values or edit a trajectory. The safe host default is the candidate with the lowest historical
-hindcast sRMSE, with sMAE as the tie-breaker. Override it only when verified task evidence
+new values or edit a trajectory. The supplied host_default_id is authoritative, including a
+Dictionary-selected default. Without a supplied default, use the lowest historical hindcast sRMSE,
+with sMAE as the tie-breaker. Override the host default only when verified task evidence
 specifically falsifies its assumption or supports another candidate. An override must cite verified
 document IDs. If selecting an evidence-adjusted candidate, cite every document used to construct
 that candidate.
@@ -68,6 +69,15 @@ _DECISION_RESPONSE_FIELDS = frozenset(
         "gaps",
         "used_skill_names",
     }
+)
+_FINAL_OUTPUT_CONTRACT = '''Return exactly one JSON object:
+{"selected_candidate_id": "candidate_name", "supporting_document_ids": ["doc_1"],
+"rationale": "why verified evidence justifies this selection",
+"request_more_retrieval": false, "gaps": [], "used_skill_names": []}'''
+
+_HOST_DEFAULT_CONTRACT = (
+    '\nThe supplied host_default_id is authoritative, even when another candidate has '
+    'a lower hindcast error. Any override still requires verified citations and host validation.'
 )
 _DECISION_TEXT_FIELDS = frozenset({"selected_candidate_id", "rationale"})
 _DECISION_TEXT_LIST_FIELDS = frozenset(
@@ -125,29 +135,39 @@ class DecisionAgent:
 
     def select_dictionary(self, tool, retrieval):
         """Keep provider failures on the protected-baseline path; allow retries."""
+        trace = {'evaluations': [], 'errors': [], 'failed_evaluations': []}
         try:
-            return self._select_dictionary(tool, retrieval)
+            return self._select_dictionary(tool, retrieval, trace)
         except TransientLLMError:
             raise
         except Exception as error:
-            return None, {
-                'evaluations': [],
-                'errors': [f'dictionary_provider_failure:{type(error).__name__}'],
-            }
+            trace['errors'].append(f'dictionary_provider_failure:{type(error).__name__}:{error}')
+            return None, trace
 
-    def _select_dictionary(self, tool, retrieval):
+    def _dictionary_prompt(self, contract: str) -> str:
+        # Evolved prompts extend the seed; keep their strategy but remove its
+        # final-decision schema. The phase contract governs any custom strategy.
+        strategy = self.prompt.replace(_FINAL_OUTPUT_CONTRACT, '')
+        return (
+            'Use the following evolved strategy as guidance for numerical selection. '
+            'Its final-decision response, citation-field, gap and skill-reporting '
+            'instructions do not apply in this Dictionary phase.\n'
+            '<strategy>\n' + strategy + '\n</strategy>\n'
+            'The sole output contract for this phase follows.\n' + contract
+        )
+
+    def _select_dictionary(self, tool, retrieval, trace):
         """Choose tool evaluations, then choose an executed method or ensemble.
 
         The batch bound limits tool work, not Dictionary or ensemble size.
         The caller retains the protected baseline if no valid evaluation exists.
         """
-        trace = {'evaluations': [], 'errors': []}
         plan = self.llm.complete(
-            system=self.prompt + '\nPlan numerical tool evaluations over the complete Dictionary. '
+            system=self._dictionary_prompt('Plan numerical tool evaluations over the complete Dictionary. '
             'Return exactly {"evaluations":[{"method_ids":["name"],"weights":[1.0]}]}. '
             'Request 1 to 4 evaluations. Each may use any number of distinct methods. '
             'Weights must be finite, nonnegative and sum to one. Use verified evidence '
-            'and method descriptions; do not invent forecast values.',
+            'and method descriptions; do not invent forecast values.'),
             messages=[{'role': 'user', 'content': json.dumps({
                 'dictionary': tool.catalog(),
                 'history': list(tool.history),
@@ -155,6 +175,7 @@ class DecisionAgent:
                 'verified_evidence': [asdict(item) for item in retrieval.evidence],
             }, ensure_ascii=False)}], temperature=0.0,
         )
+        trace['plan_response'] = plan.text
         try:
             payload = parse_json_object(plan.text)
             requests = payload.get('evaluations')
@@ -171,17 +192,21 @@ class DecisionAgent:
                 trace['evaluations'].append({'request': request, 'result': asdict(candidate)})
             except (TypeError, ValueError) as error:
                 trace['errors'].append(str(error))
+                trace['failed_evaluations'].append({
+                    'request': request, 'error_type': type(error).__name__, 'message': str(error),
+                })
         if not evaluated:
             return None, trace
         choice = self.llm.complete(
-            system=self.prompt + '\nSelect one executed numerical tool result using its '
+            system=self._dictionary_prompt('Select one executed numerical tool result using its '
             'history-only hindcast and verified evidence. Return exactly '
-            '{"selected_candidate_id":"id"}.',
+            '{"selected_candidate_id":"id"}.'),
             messages=[{'role': 'user', 'content': json.dumps({
                 'evaluated': [asdict(item) for item in evaluated],
                 'verified_evidence': [asdict(item) for item in retrieval.evidence],
             }, ensure_ascii=False)}], temperature=0.0,
         )
+        trace['selection_response'] = choice.text
         try:
             payload = parse_json_object(choice.text)
             if set(payload) != {'selected_candidate_id'}:
@@ -249,7 +274,7 @@ class DecisionAgent:
             "morphology_assumptions": [item.to_payload() for item in assumptions],
         }
         response = self.llm.complete(
-            system=self.prompt,
+            system=self.prompt + _HOST_DEFAULT_CONTRACT,
             messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
             temperature=0.0,
         )
