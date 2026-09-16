@@ -71,8 +71,9 @@ def test_real_evolve_dispatches_canonical_manifest_and_closes_host(tmp_path: Pat
     assert calls[0][2] == data_root.resolve()
 
 
+@pytest.mark.parametrize("no_time_limit", [False, True])
 def test_real_evolve_forwards_explicit_p2_generation_target(
-    tmp_path: Path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch, capsys, no_time_limit
 ):
     from evolving_loop.v2 import cli
 
@@ -103,12 +104,13 @@ def test_real_evolve_forwards_explicit_p2_generation_target(
         "--manifest", str(manifest_path),
         "--authority-root", str(data_root),
         "--output-dir", str(tmp_path / "output"),
-        "--p2-generations", "10",
+        "--p2-generations", "10", *(["--no-time-limit"] if no_time_limit else []),
     ]) == 0
 
     capsys.readouterr()
     assert observed["p2_generations"] == 10
     assert observed["run_p2_generations"] == 10
+    assert observed.get("run_no_time_limit", False) is no_time_limit
 
 
 def test_real_evolve_rejects_output_inside_data_root_before_host_creation(tmp_path: Path, monkeypatch, capsys):
@@ -275,7 +277,8 @@ def test_real_p2_reads_sha_bound_noncanonical_champion(tmp_path: Path):
         _read_sha_bound_json(path, "0" * 64)
 
 
-def test_production_ports_prepare_and_run_real_p2(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("no_time_limit", [False, True])
+def test_production_ports_prepare_and_run_real_p2(tmp_path: Path, monkeypatch, no_time_limit):
     """Catches replacing the production P2 adapter with an unavailable stub."""
     from evolving_loop.v2.real import bridges, runner
 
@@ -297,12 +300,12 @@ def test_production_ports_prepare_and_run_real_p2(tmp_path: Path, monkeypatch):
     context = RealStageContextV2(
         "p2",
         tmp_path / "root/p2",
-        840,
+        0 if no_time_limit else 840,
         manifest,
         manifest.fingerprint(),
         manifest.model.fingerprint(),
         {},
-        deadline_monotonic=940.0,
+        deadline_monotonic=None if no_time_limit else 940.0,
         monotonic=lambda: now[0],
     )
     host = SimpleNamespace(llm_client=object())
@@ -323,6 +326,10 @@ def test_production_ports_prepare_and_run_real_p2(tmp_path: Path, monkeypatch):
     )
     observed = {}
     def prepare(*_args, **kwargs):
+        if no_time_limit:
+            assert kwargs["grant_seconds"] == 0
+            assert kwargs["remaining_seconds"] is None
+            return prepared
         assert kwargs["remaining_seconds"]() == 840
         now[0] += 275
         assert kwargs["remaining_seconds"]() == 565
@@ -410,8 +417,9 @@ def test_production_p2_finishes_incomplete_when_preparation_consumes_grant(
     assert sealed.handoff_payload["reason"] == "p2_preparation_budget_exhausted"
 
 
+@pytest.mark.parametrize("no_time_limit", [False, True])
 def test_production_ports_complete_root_and_resume_byte_identically(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, no_time_limit
 ):
     """Exercises the real port assembly while replacing only expensive children."""
     from evolving_loop.v2 import cooperative, protocol
@@ -462,6 +470,8 @@ def test_production_ports_complete_root_and_resume_byte_identically(
         tasks=(), train_tasks=(), dev_tasks=(), llm_client=object(),
         resource_reporter_sha256="36fdec41981b25e148d6bad23cbf2cef4926f9a49d98035830d24a32f55c9bcc",
     )
+    deadlines = []
+    host.llm_client = SimpleNamespace(bind_deadline=lambda *a, **k: deadlines.append(a[0]))
     release = SimpleNamespace(fingerprint="b" * 64)
     registry = SimpleNamespace(fingerprint="c" * 64)
     envelope = SimpleNamespace(fingerprint=lambda: "d" * 64)
@@ -497,6 +507,9 @@ def test_production_ports_complete_root_and_resume_byte_identically(
     )
 
     def numerical(context, _host, **_kwargs):
+        assert (context.grant_seconds == 0) is no_time_limit
+        if no_time_limit:
+            assert _kwargs["finalize_after"] == 2
         payload = {
             "schema_version": 1,
             "status": "numerical_qd_complete",
@@ -535,7 +548,10 @@ def test_production_ports_complete_root_and_resume_byte_identically(
 
     monkeypatch.setattr(bridges, "run_real_cooperative", cooperative)
     monkeypatch.setattr(bridges, "load_sealed_bundle_closure", lambda *_a, **_k: closure)
-    monkeypatch.setattr(runner, "_derived_cooperative_config", lambda *_a, **_k: {})
+    def cooperative_config(context, _host):
+        assert (context.grant_seconds == 0) is no_time_limit
+        return {}
+    monkeypatch.setattr(runner, "_derived_cooperative_config", cooperative_config)
 
     monkeypatch.setattr(source, "build_source_case_from_p3", lambda *_a, **_k: object())
     source_result = SourceRunResultV2(
@@ -544,6 +560,8 @@ def test_production_ports_complete_root_and_resume_byte_identically(
     )
 
     def source_run(output, *_args, **_kwargs):
+        assert (_args[0].hard_limit_seconds == 0) is no_time_limit
+        assert _args[0].max_candidates == 2
         output.mkdir(parents=True, exist_ok=True)
         (output / "authority/sealed").mkdir(parents=True)
         (output / "authority/active_source.json").write_bytes(
@@ -587,15 +605,19 @@ def test_production_ports_complete_root_and_resume_byte_identically(
             (output / "completion.json").write_bytes(canonical_v2_bytes(payload))
             return payload
 
-    monkeypatch.setattr(
-        protocol, "build_protocol_case_from_p3", lambda *_a, **_k: ProtocolCase()
-    )
+    def protocol_case(*_a, **kwargs):
+        assert (kwargs["hard_limit_seconds"] == 0) is no_time_limit
+        return ProtocolCase()
+    monkeypatch.setattr(protocol, "build_protocol_case_from_p3", protocol_case)
 
     output = tmp_path / "root"
-    ports = runner.build_real_stage_ports(host, manifest=manifest, repo_root=tmp_path)
-    first = runner.run_real_evolution(output, manifest, ports)
+    options = {"p2_generations": 2, "no_time_limit": True} if no_time_limit else {}
+    ports = runner.build_real_stage_ports(host, manifest=manifest, repo_root=tmp_path,
+        p2_generations=options.get("p2_generations"))
+    first = runner.run_real_evolution(output, manifest, ports, **options)
     first_bytes = (output / "evaluation_complete.json").read_bytes()
-    second = runner.run_real_evolution(output, manifest, ports)
+    second = runner.run_real_evolution(output, manifest, ports, **options)
+    assert len(deadlines) == (0 if no_time_limit else 4)
 
     assert first.status == second.status == "complete"
     assert first_bytes == (output / "evaluation_complete.json").read_bytes()
@@ -613,7 +635,7 @@ def test_production_ports_complete_root_and_resume_byte_identically(
     wrapper_bytes = wrapper.read_bytes()
     wrapper.unlink()
     with pytest.raises(ValueError, match="root stage wrapper"):
-        runner.run_real_evolution(output, manifest, ports)
+        runner.run_real_evolution(output, manifest, ports, **options)
     assert not wrapper.exists()
     wrapper.write_bytes(wrapper_bytes)
 
@@ -621,14 +643,14 @@ def test_production_ports_complete_root_and_resume_byte_identically(
     active_source_bytes = active_source.read_bytes()
     active_source.unlink()
     with pytest.raises(ValueError):
-        runner.run_real_evolution(output, manifest, ports)
+        runner.run_real_evolution(output, manifest, ports, **options)
     assert not active_source.exists()
     active_source.write_bytes(active_source_bytes)
 
     native_bytes = (output / "p5/completion.json").read_bytes()
     (output / "p5/completion.json").unlink()
     with pytest.raises(ValueError):
-        runner.run_real_evolution(output, manifest, ports)
+        runner.run_real_evolution(output, manifest, ports, **options)
     assert not (output / "p5/completion.json").exists()
     (output / "p5/completion.json").write_bytes(native_bytes)
 
@@ -637,7 +659,7 @@ def test_production_ports_complete_root_and_resume_byte_identically(
     tampered["active_protocol_sha256"] = "9" * 64
     native.write_bytes(canonical_v2_bytes(tampered))
     with pytest.raises(ValueError):
-        runner.run_real_evolution(output, manifest, ports)
+        runner.run_real_evolution(output, manifest, ports, **options)
 
 
 def test_production_p5_port_seals_missing_second_bundle_as_incomplete(tmp_path: Path):

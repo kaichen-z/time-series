@@ -173,10 +173,12 @@ def build_parser() -> argparse.ArgumentParser:
     numerical.add_argument("--task-local-dictionary", type=Path)
     numerical.add_argument("--legacy-bootstrap", action="store_true")
     real = commands.add_parser(
-        "real-evolve", help="execute or resume the bounded real P2→P5 evolution"
+        "real-evolve", help="execute or resume real P2→P5 evolution"
     )
     real.add_argument("--manifest", required=True, type=Path)
     real.add_argument("--output-dir", required=True, type=Path)
+    real.add_argument("--no-time-limit", action="store_true",
+        help="disable total/stage wall-time limits; requires --p2-generations")
     real.add_argument(
         "--authority-root", type=Path,
         help="read-only data authority root (defaults to the shared checkout)",
@@ -272,10 +274,13 @@ def _real_evolve(
     *,
     authority_root: Path | None,
     p2_generations: int | None = None,
+    no_time_limit: bool = False,
 ) -> dict[str, object]:
     """Build and close the real Host around one immutable root invocation."""
     if p2_generations is not None and p2_generations < 1:
         raise ValueError("p2_generations must be a positive integer")
+    if no_time_limit and p2_generations is None:
+        raise ValueError("no_time_limit requires a finite positive p2_generations cap")
     manifest = RealEvolutionManifestV2.from_payload(_read_canonical(manifest_path))
     code_root = Path(__file__).resolve().parents[2]
     authority = (authority_root if authority_root is not None else _default_authority_root(code_root)).resolve(strict=True)
@@ -316,6 +321,8 @@ def _real_evolve(
             p2_generations=p2_generations,
         )
         run_arguments = {}
+        if no_time_limit:
+            run_arguments["no_time_limit"] = True
         if p2_generations is not None:
             run_arguments["p2_generations"] = p2_generations
         return run_real_evolution(
@@ -1225,6 +1232,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.output_dir,
                 authority_root=args.authority_root,
                 p2_generations=args.p2_generations,
+                no_time_limit=args.no_time_limit,
             )
         elif args.command in {"protocol-evolve", "protocol-make-smoke-inputs"}:
             summary = dispatch_protocol(args)

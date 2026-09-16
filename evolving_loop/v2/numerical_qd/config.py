@@ -91,7 +91,9 @@ def _validate_runtime_fingerprints(value: object) -> Mapping[str, str]:
 
 def _validate_budget(value: object, profile: str) -> BudgetPlan:
     payload = _exact_mapping(value, _BUDGET_FIELDS, "budget")
-    hard_limit = _positive_int(payload["hard_limit_seconds"], "budget.hard_limit_seconds")
+    hard_limit = payload["hard_limit_seconds"]
+    if type(hard_limit) is not int or hard_limit < 0:
+        raise ValueError("budget.hard_limit_seconds must be non-negative (0 means unlimited)")
     reserve = payload["finalization_reserve_fraction"]
     if type(reserve) is not float or not math.isfinite(reserve) or not 0.0 <= reserve < 1.0:
         raise ValueError(

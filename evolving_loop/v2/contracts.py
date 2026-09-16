@@ -364,8 +364,10 @@ class EvolutionV2Config:
         if not isinstance(self.kernel_protocol, KernelProtocolCommitment):
             raise ValueError("kernel_protocol must be a KernelProtocolCommitment")
         hard_limit = _require_int(
-            self.hard_limit_seconds, "hard_limit_seconds", positive=True
+            self.hard_limit_seconds, "hard_limit_seconds", positive=False
         )
+        if hard_limit < 0:
+            raise ValueError("hard_limit_seconds must be non-negative (0 means unlimited)")
         reserve = self.finalization_reserve_fraction
         if type(reserve) is not float or not math.isfinite(reserve):
             raise ValueError("finalization_reserve_fraction must be a finite float")

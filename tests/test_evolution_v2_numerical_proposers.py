@@ -364,6 +364,28 @@ def test_host_schema_teaches_the_model_the_executable_source_subset():
     assert "def recent_mean(history, horizon, frequency):" in description
 
 
+def test_llm_repairs_inconsistent_add_lineage_when_budget_allows():
+    bad = raw_response()
+    bad['proposals'][0]['member']['parent_ids'] = ['a']
+
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def complete(self, **kwargs):
+            self.calls.append(kwargs)
+            return LLMResponse(json.dumps(bad if len(self.calls) == 1 else raw_response()))
+
+    client = Client()
+    batch = LLMProposalProvider(client, monotonic=lambda: 0.0).propose(request(
+        remaining_budget=ResourceUse(wall_seconds=10.0, llm_calls=2,
+                                     input_tokens=100000, output_tokens=32000).to_payload()))
+    assert batch.failure_reason is None
+    assert len(batch.proposals) == 1
+    assert batch.resource_use.llm_calls == 2
+    assert 'child lineage must exactly match owned parents' in client.calls[1]['messages'][-1]['content']
+
+
 def test_llm_repairs_one_host_rejected_source_when_budget_allows():
     invalid = CODE.replace("return [history[-1]] * horizon", "return [history[-1] % 2] * horizon")
     responses = iter((

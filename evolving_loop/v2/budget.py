@@ -135,7 +135,7 @@ def _coerce_resource_use(value: object, field_name: str) -> ResourceUse:
 
 @dataclass(frozen=True, slots=True)
 class BudgetPlan:
-    """Immutable time reserve and resource ceilings for one evolution run."""
+    """Immutable resource ceilings; a zero hard limit disables wall-time limits."""
 
     hard_limit_seconds: int
     finalization_reserve_fraction: float
@@ -144,8 +144,8 @@ class BudgetPlan:
     search_deadline_seconds: float = field(init=False)
 
     def __post_init__(self) -> None:
-        if type(self.hard_limit_seconds) is not int or self.hard_limit_seconds <= 0:
-            raise ValueError("hard_limit_seconds must be a positive integer")
+        if type(self.hard_limit_seconds) is not int or self.hard_limit_seconds < 0:
+            raise ValueError("hard_limit_seconds must be a non-negative integer (0 means unlimited)")
         reserve = self.finalization_reserve_fraction
         if type(reserve) is not float or not math.isfinite(reserve):
             raise ValueError("finalization_reserve_fraction must be a finite float")
@@ -158,6 +158,14 @@ class BudgetPlan:
             "search_deadline_seconds",
             self.hard_limit_seconds * (1.0 - reserve),
         )
+
+    @property
+    def no_time_limit(self) -> bool:
+        return self.hard_limit_seconds == 0
+
+    @property
+    def limited_resources(self) -> tuple[str, ...]:
+        return _RESOURCE_FIELDS[1:] if self.no_time_limit else _RESOURCE_FIELDS
 
     @classmethod
     def from_config(
@@ -264,6 +272,10 @@ class BudgetLedger:
     def finalization_started(self) -> bool:
         return self._finalization_started
 
+    @property
+    def search_time_exhausted(self) -> bool:
+        return not self.plan.no_time_limit and self.elapsed_wall_seconds >= self.plan.search_deadline_seconds
+
     def _pending_use(self) -> ResourceUse:
         total = ResourceUse()
         for reservation in self._open_by_stage.values():
@@ -276,16 +288,16 @@ class BudgetLedger:
         if self._finalization_started:
             return "finalization_started"
         elapsed = self.elapsed_wall_seconds
-        if elapsed >= self.plan.search_deadline_seconds:
+        if not self.plan.no_time_limit and elapsed >= self.plan.search_deadline_seconds:
             return "finalization_reserve"
         pending = self._pending_use()
         if (
-            elapsed + pending.wall_seconds + estimate.wall_seconds
+            not self.plan.no_time_limit and elapsed + pending.wall_seconds + estimate.wall_seconds
             > self.plan.search_deadline_seconds
         ):
             return "finalization_reserve"
         committed = self._charged_use + pending + estimate
-        for name in _RESOURCE_FIELDS:
+        for name in self.plan.limited_resources:
             if getattr(committed, name) > getattr(self.plan.ceilings, name):
                 return f"{name}_exhausted"
         return None
@@ -362,10 +374,10 @@ class BudgetLedger:
 
         overrun = any(
             getattr(consumed, name) > getattr(opened.estimate, name)
-            for name in _RESOURCE_FIELDS
+            for name in self.plan.limited_resources
         ) or any(
             getattr(self._charged_use, name) > getattr(self.plan.ceilings, name)
-            for name in _RESOURCE_FIELDS
+            for name in self.plan.limited_resources
         )
         if overrun:
             self._exhausted_reason = "budget_overrun"
@@ -376,7 +388,7 @@ class BudgetLedger:
         consumed = _coerce_resource_use(actual, "actual")
         self._charged_use = self._charged_use + consumed
         committed = self._charged_use + self._pending_use()
-        for name in _RESOURCE_FIELDS:
+        for name in self.plan.limited_resources:
             if getattr(committed, name) > getattr(self.plan.ceilings, name):
                 self._exhausted_reason = f"{name}_exhausted"
                 return StagePermit(False, self._exhausted_reason, None)
@@ -539,7 +551,7 @@ class BudgetLedger:
             committed = ledger._charged_use + ledger._pending_use()
             if any(
                 getattr(committed, name) > getattr(plan.ceilings, name)
-                for name in _RESOURCE_FIELDS
+                for name in plan.limited_resources
             ):
                 raise BudgetContractError(
                     "checkpoint resource use exceeds plan ceilings"

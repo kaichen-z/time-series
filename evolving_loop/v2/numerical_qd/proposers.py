@@ -80,13 +80,17 @@ def primitive_proposer_request(**payload) -> dict:
     # Legacy request artifacts remain readable. New callers opt into the
     # committed context atomically by supplying all exact fields, including
     # empty lists.
-    supplied = set(payload)
+    supplied = set(payload) - {"no_time_limit"}
+    if "no_time_limit" in payload and type(payload["no_time_limit"]) is not bool:
+        raise ValueError("no_time_limit must be a boolean")
     if supplied == LEGACY_REQUEST_KEYS:
         expected = LEGACY_REQUEST_KEYS
     elif supplied in (LEGACY_CONTEXT_REQUEST_KEYS, LEGACY_CONTEXT_UNCOMMITTED_REQUEST_KEYS):
         expected = supplied
     else:
         expected = REQUEST_KEYS
+    if "no_time_limit" in payload:
+        expected = set(expected) | {"no_time_limit"}
     values = _require_exact_schema(payload, expected, field="proposer request")
     values = _strict_json_value(values)
     metadata = dict(values)
@@ -397,7 +401,7 @@ class DeterministicProposalProvider:
 
     def propose(self, request) -> NormalizedProposalBatchV2:
         request = primitive_proposer_request(**request)
-        if request["remaining_budget"]["wall_seconds"] <= 0:
+        if not request.get("no_time_limit", False) and request["remaining_budget"]["wall_seconds"] <= 0:
             return _batch("deterministic", reason="budget_exhausted")
         started = self.monotonic()
         state = MutationStateV2.from_payload(request["parent_state"])
@@ -438,7 +442,7 @@ class DeterministicProposalProvider:
             feasible.append(proposal)
         feasible.sort(key=lambda proposal: (proposal.operator, proposal.canonical_bytes()))
         use = ResourceUse(wall_seconds=max(0.0, float(self.monotonic() - started)))
-        if use.wall_seconds >= request["remaining_budget"]["wall_seconds"]:
+        if not request.get("no_time_limit", False) and use.wall_seconds >= request["remaining_budget"]["wall_seconds"]:
             return _batch("deterministic", use=use, reason="budget_exhausted")
         if not feasible:
             return _batch("deterministic", use=use, reason="empty")
@@ -513,6 +517,17 @@ def _response_schema(request, state):
     for operator in request["allowed_mutation_operators"]:
         properties = {name: fields[name] for name in sorted(OPERATION_KEYS[operator] - {"operator"})}
         properties["operator"] = {"const": operator}
+        if operator == "add":
+            properties["member"] = _closed_object_schema({
+                **member["properties"], "parent_ids": {"const": []},
+            })
+        elif operator in {"fork", "repair"}:
+            key = "replacement" if operator == "repair" else "child"
+            properties[key] = _closed_object_schema({
+                **member["properties"],
+                "parent_ids": parents | {"minItems": 1, "maxItems": 1,
+                    "description": "Exactly [member_id] from this operation; must match the owned parent."},
+            })
         if operator == "crossover":
             properties["parent_ids"] = parents | {"minItems": 2, "maxItems": min(2, state.max_parents_per_child)}
         operations.append(_closed_object_schema(properties))
@@ -559,7 +574,8 @@ class LLMProposalProvider:
     def propose(self, request) -> NormalizedProposalBatchV2:
         request = primitive_proposer_request(**request)
         remaining, encoded, system, cap, input_bound = _llm_limits(request)
-        if remaining.llm_calls < 1 or remaining.wall_seconds <= 0 or remaining.input_tokens < input_bound or cap < 1:
+        unlimited = request.get("no_time_limit", False)
+        if remaining.llm_calls < 1 or (not unlimited and remaining.wall_seconds <= 0) or remaining.input_tokens < input_bound or cap < 1:
             return _batch("llm", reason="budget_exhausted")
         started = self.monotonic()
         proposals, artifacts, reason = (), (), None
@@ -591,15 +607,16 @@ class LLMProposalProvider:
                     output_bytes += response_bytes
                     if response_bytes > available_output:
                         raise ValueError("response byte limit exceeded")
-                    parsed = strict_json_loads(response.text, context="Numerical mutation batch")
                     try:
+                        parsed = strict_json_loads(response.text, context="Numerical mutation batch")
                         proposals, artifacts = _normalize_sources(parsed, request)
-                    except HostSourceValidationError as error:
+                    except (ValueError, TypeError, SyntaxError) as error:
                         if attempt or remaining.llm_calls < 2:
                             raise
                         repair = canonical_v2_bytes({
                             "instruction": "Return one complete corrected response using the same schema.",
                             "host_source_validation_error": str(error)[:2048],
+                            "proposal_validation_error": str(error)[:2048],
                         }).decode("utf-8")
                         messages = [
                             *messages,
@@ -618,8 +635,9 @@ class LLMProposalProvider:
             reason = "unavailable"
         use = ResourceUse(wall_seconds=max(0.0, float(self.monotonic() - started)), llm_calls=call_count,
             input_tokens=input_bytes, output_tokens=output_bytes)
-        if use.wall_seconds >= remaining.wall_seconds or any(
-                getattr(use, name) > getattr(remaining, name) for name in ResourceUse.field_names()):
+        if (not unlimited and use.wall_seconds >= remaining.wall_seconds) or any(
+                getattr(use, name) > getattr(remaining, name) for name in ResourceUse.field_names()
+                if name != "wall_seconds" or not unlimited):
             reason = "budget_exhausted"
         return _batch("llm", proposals if reason is None else (), artifacts if reason is None else (), use, reason)
 
@@ -657,7 +675,7 @@ class HybridProposalProvider:
                 for name, value in request["remaining_budget"].items()
             }
             request = primitive_proposer_request(**(request | {"remaining_budget": available}))
-        if request["remaining_budget"]["wall_seconds"] <= 0:
+        if not request.get("no_time_limit", False) and request["remaining_budget"]["wall_seconds"] <= 0:
             return self._result(attempts, reason="budget_exhausted")
         fallback = self.ledger.reserve_stage(stage + "-deterministic",
             ResourceUse(wall_seconds=request["remaining_budget"]["wall_seconds"]))

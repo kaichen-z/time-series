@@ -204,8 +204,8 @@ class RealStageRecordV2(_Canonical):
     def __post_init__(self):
         if type(self.stage) is not str or self.stage not in {"p2", "p3", "p4", "p5"}:
             raise ValueError("stage must be p2, p3, p4, or p5")
-        if type(self.grant_seconds) is not int or self.grant_seconds <= 0:
-            raise ValueError("grant_seconds must be positive")
+        if type(self.grant_seconds) is not int or self.grant_seconds < 0:
+            raise ValueError("grant_seconds must be non-negative (0 means unlimited)")
         if type(self.charged_seconds) is not int or self.charged_seconds < 0:
             raise ValueError("charged_seconds must be non-negative")
         if self.status not in {"complete", "incomplete", "failed"}:

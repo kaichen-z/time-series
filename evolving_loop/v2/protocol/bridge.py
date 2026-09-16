@@ -150,8 +150,8 @@ def build_protocol_case_from_p3(
         raise TypeError("protocol bridge requires a sealed P3 closure")
     if type(host) is not RealHostRuntimeV2:
         raise TypeError("protocol bridge requires a real Host runtime")
-    if type(hard_limit_seconds) is not int or hard_limit_seconds <= 0:
-        raise ValueError("protocol bridge hard_limit_seconds must be positive")
+    if type(hard_limit_seconds) is not int or hard_limit_seconds < 0:
+        raise ValueError("protocol bridge hard_limit_seconds must be non-negative (0 means unlimited)")
     if closure.runtime_identity != host.resource_reporter_sha256:
         raise ValueError("protocol bridge P3 runtime commitment does not match Host")
     second = _second_bundle_for_compatibility(closure)

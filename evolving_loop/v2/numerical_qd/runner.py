@@ -174,8 +174,9 @@ def _available(kernel):
     values = {name: max(0.0 if type(limit) is float else 0,
                         limit - getattr(kernel.budget.charged_use, name))
               for name, limit in kernel.budget.plan.ceilings.to_payload().items()}
-    values["wall_seconds"] = min(values["wall_seconds"], max(0.0,
-        kernel.budget.plan.search_deadline_seconds - kernel.budget.elapsed_wall_seconds))
+    values["wall_seconds"] = (0.0 if kernel.budget.plan.no_time_limit else
+        min(values["wall_seconds"], max(0.0,
+            kernel.budget.plan.search_deadline_seconds - kernel.budget.elapsed_wall_seconds)))
     return ResourceUse.from_payload(values)
 
 
@@ -594,7 +595,7 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
         if failure:
             raise ArtifactBytesExhausted("fixed manifest admission denied")
         for candidate, task, key, hit, local_evidence_sha256 in pending:
-            if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
+            if kernel.budget.search_time_exhausted:
                 failure = "finalization_reserve"
                 break
             if hit is not None:
@@ -668,7 +669,7 @@ def _rung(kernel, work, state, manifest, children, adapter, config, cache):
         closed = work.close_stage(permit, actual, status="passed" if succeeded and failure is None else "failed")
     if not closed.allowed:
         failure = closed.reason
-    if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
+    if kernel.budget.search_time_exhausted:
         failure = failure or "finalization_reserve"
     captured = _read(kernel.checkpoint_path)["budget"]
     if failure:
@@ -705,7 +706,7 @@ def _dev_compare(parent_registry, child_registry, adapter, kernel, account_work)
         if task.numeric.task_id in adapter.fold_manifest.task_fold_map:
             continue
         for index, _registry in enumerate((parent_registry, child_registry)):
-            if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
+            if kernel.budget.search_time_exhausted:
                 return _NO_DEV
             account_work()
             count += 1
@@ -749,12 +750,11 @@ def _freeze_output(kernel, work, store, adapter, parent_release, parent_registry
         if begun:
             actual = next_use
         if (
-            kernel.budget.elapsed_wall_seconds
-            >= kernel.budget.plan.search_deadline_seconds
-            or adapter.monotonic() - before >= estimate.wall_seconds
+            kernel.budget.search_time_exhausted
+            or (not kernel.budget.plan.no_time_limit and adapter.monotonic() - before >= estimate.wall_seconds)
             or any(
                 getattr(next_use, name) > getattr(estimate, name)
-                for name in ResourceUse.field_names()
+                for name in kernel.budget.plan.limited_resources
             )
         ):
             raise NumericalWorkStopped("Dictionary evidence resource boundary")
@@ -840,6 +840,8 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         type(finalize_after) is not int or finalize_after < 1
     ):
         raise ValueError("finalize_after must be a positive generation count")
+    if config.budget.no_time_limit and finalize_after is None:
+        raise ValueError("unlimited wall time requires a finite finalize_after generation cap")
     if not resume:
         NumericalQDRunStore.preflight_fresh(output_dir)
     adapter_fingerprint = adapter.fingerprint
@@ -1049,7 +1051,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         population_sha = _persist_prompt_population(store, population)
         draw = random.randbelow(2 ** 32)
         checkpoint_state()  # RNG authority is durable before any provider call.
-        if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
+        if kernel.budget.search_time_exhausted:
             _persist(store, {"numerical_qd_step": {
                 "generation": generation,
                 "status": "finalization_reserve",
@@ -1074,7 +1076,8 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             mutation_prompt=selected_prompt.mutation_prompt.to_payload(),
             mutation_prompt_population_sha256=population_sha,
             allowed_mutation_operators=sorted(config.mutation["operators"]), counter_draw=draw,
-            max_proposals=config.proposer["max_proposals_per_generation"], max_response_bytes=config.proposer["max_response_bytes"])
+            max_proposals=config.proposer["max_proposals_per_generation"], max_response_bytes=config.proposer["max_response_bytes"],
+            **({"no_time_limit": True} if kernel.budget.plan.no_time_limit else {}))
         request_sha = _persist(store, request, kind=ArtifactKind.PROPOSER_REQUEST)
         _persist(store, {"numerical_qd_step": {
             "generation": generation, "status": "proposal_pending",
@@ -1132,7 +1135,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             work.close_stage(artifact_permit, ResourceUse(artifact_bytes=sum(
                 path.stat().st_size for path in new_paths if path.is_file())), status="passed" if succeeded else "failed")
         batch = store._proposal(store._read(f"proposals/{batch_sha}.json"))
-        if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
+        if kernel.budget.search_time_exhausted:
             _persist(store, {"numerical_qd_step": {
                 "generation": generation,
                 "status": "finalization_reserve",
@@ -1152,7 +1155,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
         materialization_failures = []
         generation_stop_reason = None
         for proposal in batch.proposals:
-            if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
+            if kernel.budget.search_time_exhausted:
                 generation_stop_reason, budget_blocked = "finalization_reserve", True
                 break
             proposal_payload = proposal.to_payload()
@@ -1194,7 +1197,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 )
                 continue
             attempted.append((proposal.operator, None))
-            if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
+            if kernel.budget.search_time_exhausted:
                 generation_stop_reason, budget_blocked = "finalization_reserve", True
                 break
             genome = NumericalGenomeV2(1, generation, (selected.fingerprint(),), proposal.operator,
@@ -1232,10 +1235,10 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
                 next_use = actual + use
                 if begun:
                     actual = next_use
-                if (kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds
-                        or adapter.monotonic() - before >= estimate.wall_seconds
+                if (kernel.budget.search_time_exhausted
+                        or (not kernel.budget.plan.no_time_limit and adapter.monotonic() - before >= estimate.wall_seconds)
                         or any(getattr(next_use, name) > getattr(estimate, name)
-                               for name in ResourceUse.field_names())):
+                               for name in kernel.budget.plan.limited_resources)):
                     raise NumericalWorkStopped("materialization resource boundary")
                 actual = next_use
             try:
@@ -1258,7 +1261,7 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             finally:
                 closed = work.close_stage(permit, replace(actual, wall_seconds=float(adapter.monotonic() - before)),
                     status="failed" if failure else "passed")
-            if kernel.budget.elapsed_wall_seconds >= kernel.budget.plan.search_deadline_seconds:
+            if kernel.budget.search_time_exhausted:
                 child = None
                 generation_stop_reason, budget_blocked = "finalization_reserve", True
             if child is not None and closed.allowed:
@@ -1270,9 +1273,10 @@ def run_numerical_qd(output_dir, config, seed_supply, task_manifest, adapter, ll
             if budget_blocked:
                 break
         reason, evaluations = generation_stop_reason or "no_feasible_child", ()
-        if children and _available(kernel).wall_seconds > 0:
+        if children and (kernel.budget.plan.no_time_limit or _available(kernel).wall_seconds > 0):
             try:
-                bracket = choose_bracket(len(children), 0.0, _available(kernel).wall_seconds, config)
+                bracket = choose_bracket(len(children), 0.0,
+                    None if kernel.budget.plan.no_time_limit else _available(kernel).wall_seconds, config)
             except ValueError:
                 bracket = None
                 budget_blocked = True

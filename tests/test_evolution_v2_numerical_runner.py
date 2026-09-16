@@ -9,7 +9,7 @@ import pytest
 from common.llm import LLMResponse
 from evolving_loop.package_numerical_evolution import NumericalPackageMaterializer
 from evolving_loop.package_registry import task_registry_fingerprint
-from evolving_loop.v2.budget import ResourceUse
+from evolving_loop.v2.budget import BudgetLedger, ResourceUse
 from evolving_loop.v2.fakes import FakeClock
 from evolving_loop.v2.kernel import EvolutionKernel, KernelAuthorityError
 from evolving_loop.v2.numerical_qd.adapters import LegacyNumericalAdapter
@@ -528,7 +528,7 @@ def test_dev_rejects_a_registry_with_a_different_task_universe():
 
     config, supply, _, adapter = fixture()
     registry = supply.envelope.restore(adapter.tasks)
-    kernel = SimpleNamespace(budget=SimpleNamespace(elapsed_wall_seconds=0.0, plan=config.budget))
+    kernel = SimpleNamespace(budget=BudgetLedger(config.budget, monotonic=lambda: 0.0))
     incomplete = SimpleNamespace(task_ids=registry.task_ids[:-1], _packages=registry._packages)
     with pytest.raises(ValueError, match="task universe"):
         _dev_compare(registry, incomplete, adapter, kernel, lambda: None)
@@ -539,7 +539,7 @@ def test_dev_reads_the_already_verified_frozen_package_map(monkeypatch):
 
     config, supply, _, adapter = fixture()
     registry = supply.envelope.restore(adapter.tasks)
-    kernel = SimpleNamespace(budget=SimpleNamespace(elapsed_wall_seconds=0.0, plan=config.budget))
+    kernel = SimpleNamespace(budget=BudgetLedger(config.budget, monotonic=lambda: 0.0))
     monkeypatch.setattr(type(registry), "package_for",
         lambda *_args: pytest.fail("Dev rehashed an already frozen package"))
 
@@ -577,7 +577,7 @@ def test_dev_promotion_scores_the_frozen_task_local_bundle_not_a_standalone_memb
     parent_registry = SimpleNamespace(task_ids=task_ids, _packages=parent_packages)
     child_registry = SimpleNamespace(task_ids=task_ids, _packages=child_packages)
     kernel = SimpleNamespace(
-        budget=SimpleNamespace(elapsed_wall_seconds=0.0, plan=config.budget)
+        budget=BudgetLedger(config.budget, monotonic=lambda: 0.0)
     )
 
     comparison = _dev_compare(

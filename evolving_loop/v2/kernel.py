@@ -186,7 +186,8 @@ class SeedBootstrapAuthority:
         result.start_elapsed = result.budget.elapsed_wall_seconds
         remaining = {name: max(0.0 if type(limit) is float else 0, limit - getattr(result.budget.charged_use, name))
                      for name, limit in plan.ceilings.to_payload().items()}
-        remaining["wall_seconds"] = min(remaining["wall_seconds"], max(0.0, plan.search_deadline_seconds - result.start_elapsed) / 2.0)
+        remaining["wall_seconds"] = (0.0 if plan.no_time_limit else
+            min(remaining["wall_seconds"], max(0.0, plan.search_deadline_seconds - result.start_elapsed) / 2.0))
         result.estimate = ResourceUse.from_payload(remaining)
         if result.estimate.task_executions == 0 or not result.budget.can_open_stage(result.estimate).allowed:
             raise KernelAuthorityError("seed bootstrap remaining budget exhausted")
@@ -222,9 +223,10 @@ class SeedBootstrapAuthority:
         next_use = self.actual + use
         if begun:
             self.actual = next_use
-        if (self.budget.elapsed_wall_seconds >= self.budget.plan.search_deadline_seconds
-                or self.budget.elapsed_wall_seconds - self.start_elapsed >= self.estimate.wall_seconds
-                or any(getattr(next_use, name) > getattr(self.estimate, name) for name in ResourceUse.field_names())):
+        if (self.budget.search_time_exhausted
+                or (not self.budget.plan.no_time_limit and
+                    self.budget.elapsed_wall_seconds - self.start_elapsed >= self.estimate.wall_seconds)
+                or any(getattr(next_use, name) > getattr(self.estimate, name) for name in self.budget.plan.limited_resources)):
             raise SeedBootstrapStopped("seed bootstrap resource boundary")
         self.actual = next_use
 

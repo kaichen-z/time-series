@@ -151,6 +151,8 @@ def _resume_budget(plan: BudgetPlan, checkpoint: object) -> BudgetLedger:
         raise SourceRunnerError("source checkpoint budget is invalid") from error
     if verified.checkpoint()["open_reservations"]:
         raise SourceRunnerError("in-flight source budget reservations cannot resume")
+    if plan.no_time_limit:
+        return verified
     # Each closed-checkpoint invocation gets a new bounded wall-time window;
     # accumulated task/subprocess charges and closed stages remain authoritative.
     fresh = copy.deepcopy(dict(checkpoint))

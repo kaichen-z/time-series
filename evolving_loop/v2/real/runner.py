@@ -1,4 +1,4 @@
-"""Root-owned, resumable orchestration for bounded real V2 evolution."""
+"""Root-owned, resumable orchestration for real V2 evolution."""
 from __future__ import annotations
 
 import hashlib
@@ -10,6 +10,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from common.payload import strict_json_loads
+from common.llm import TransientLLMError
 
 from ..budget import BudgetLedger, BudgetPlan, ResourceUse
 from ..contracts import canonical_v2_bytes, fingerprint_payload, require_sha256
@@ -90,8 +91,10 @@ class RealStageContextV2:
     def __post_init__(self) -> None:
         if self.stage not in _STAGES:
             raise ValueError("stage must be p2, p3, p4, or p5")
-        if type(self.grant_seconds) is not int or self.grant_seconds <= 0:
-            raise ValueError("grant_seconds must be positive")
+        if type(self.grant_seconds) is not int or self.grant_seconds < 0:
+            raise ValueError("grant_seconds must be non-negative (0 means unlimited)")
+        if self.grant_seconds == 0 and self.deadline_monotonic is not None:
+            raise ValueError("unlimited stages cannot have a deadline")
         require_sha256(self.manifest_sha256, "manifest_sha256")
         require_sha256(self.model_binding_sha256, "model_binding_sha256")
         for stage, digest in self.handoffs.items():
@@ -109,6 +112,10 @@ class RealStageContextV2:
             raise ValueError("monotonic must be callable")
         if type(self.read_only) is not bool:
             raise ValueError("read_only must be a boolean")
+
+    @property
+    def no_time_limit(self) -> bool:
+        return self.grant_seconds == 0
 
     def remaining_seconds(self) -> int:
         if self.deadline_monotonic is None:
@@ -416,7 +423,7 @@ def prepare_real_p2_inputs(
     prepared.mkdir(parents=True, exist_ok=True)
 
     def check_deadline() -> None:
-        if remaining_seconds is None:
+        if grant_seconds == 0 or remaining_seconds is None:
             return
         remaining = remaining_seconds()
         if type(remaining) is not int or remaining <= 0:
@@ -543,7 +550,7 @@ def prepare_real_p2_inputs(
         "dev": [_context_task_payload(task) for task in host.dev_tasks],
     }
     remaining = grant_seconds if remaining_seconds is None else remaining_seconds()
-    if type(remaining) is not int or remaining <= 0:
+    if type(remaining) is not int or remaining < 0 or (remaining == 0 and grant_seconds != 0):
         raise _RealStageBudgetExhausted("P2 preparation consumed its bounded grant")
     config = _derived_numerical_config(
         grant_seconds=remaining,
@@ -658,7 +665,7 @@ def build_real_stage_ports(
                 repo_root=authority,
                 output_dir=context.output_dir.parent / "prepared/p2",
                 grant_seconds=context.grant_seconds,
-                remaining_seconds=context.remaining_seconds,
+                remaining_seconds=None if context.no_time_limit else context.remaining_seconds,
             )
         except _RealStageBudgetExhausted:
             return {
@@ -979,8 +986,11 @@ def _effective_allocations(
 
 
 def _plan(
-    manifest: RealEvolutionManifestV2, p2_generations: int | None = None
+    manifest: RealEvolutionManifestV2, p2_generations: int | None = None,
+    *, no_time_limit: bool = False,
 ) -> BudgetPlan:
+    if no_time_limit:
+        return BudgetPlan(0, 0.0, ResourceUse())
     schedule = PROFILE_SCHEDULES[manifest.profile]
     allocations = _effective_allocations(manifest, p2_generations)
     total_seconds = sum(allocations.values())
@@ -1005,6 +1015,7 @@ def _root_manifest(
         "model_binding_sha256": manifest.model.fingerprint(),
         "budget_plan_sha256": plan.fingerprint(),
         "p2_generation_target": p2_generations,
+        **({"no_time_limit": True} if plan.no_time_limit else {}),
     }
 
 
@@ -1277,6 +1288,8 @@ def _grant(
     stage: str,
     carry_seconds: int,
 ) -> int:
+    if ledger.plan.no_time_limit:
+        return 0
     index = _STAGES.index(stage)
     base = allocations[stage]
     later_base = sum(allocations[name] for name in _STAGES[index + 1 :])
@@ -1305,14 +1318,16 @@ def _terminal_active_failure(
     grant_seconds: int,
     records: list[RealStageRecordV2],
     handoffs: Mapping[str, str],
+    charged_seconds: int | None = None,
 ) -> None:
     """Conservatively close a returned-but-unverifiable child as failed."""
-    ledger.close_stage(reservation, ResourceUse(wall_seconds=float(grant_seconds)))
+    charged = grant_seconds if charged_seconds is None else charged_seconds
+    ledger.close_stage(reservation, ResourceUse(wall_seconds=float(charged)))
     records.append(
         RealStageRecordV2(
             stage,
             grant_seconds,
-            grant_seconds,
+            charged,
             "failed",
             None,
             _previous_progress_sha(root),
@@ -1355,6 +1370,7 @@ def run_real_evolution(
     *,
     monotonic: Callable[[], float] = time.monotonic,
     p2_generations: int | None = None,
+    no_time_limit: bool = False,
 ) -> RealRunResultV2:
     """Run or safely resume one immutable real P2→P5 root epoch."""
     if not isinstance(manifest, RealEvolutionManifestV2):
@@ -1363,10 +1379,14 @@ def run_real_evolution(
         raise TypeError("ports must be RealStagePorts")
     if not callable(monotonic):
         raise TypeError("monotonic must be callable")
+    if type(no_time_limit) is not bool:
+        raise TypeError("no_time_limit must be a boolean")
+    if no_time_limit and p2_generations is None:
+        raise ValueError("no_time_limit requires a finite positive p2_generations cap")
 
     root = Path(output_dir)
     allocations = _effective_allocations(manifest, p2_generations)
-    plan = _plan(manifest, p2_generations)
+    plan = _plan(manifest, p2_generations, no_time_limit=no_time_limit)
     store, ledger, checkpoint = _load_state(
         root, manifest, plan, monotonic, p2_generations
     )
@@ -1401,7 +1421,8 @@ def run_real_evolution(
         if not isinstance(active, Mapping):
             raise RealRunnerError("active root stage has no budget reservation")
         estimate = ResourceUse.from_payload(active["estimate"])
-        if estimate.wall_seconds <= 0.0 or not estimate.wall_seconds.is_integer():
+        if (estimate.wall_seconds < 0.0 or not estimate.wall_seconds.is_integer()
+                or (estimate.wall_seconds == 0.0 and not plan.no_time_limit)):
             raise RealRunnerError("active root stage grant must be a positive whole second")
         grant_seconds = int(estimate.wall_seconds)
         if stage != _STAGES[len(records)]:
@@ -1459,7 +1480,7 @@ def run_real_evolution(
 
     for stage in _STAGES[len(records) :]:
         grant_seconds = _grant(allocations, ledger, stage, carry)
-        if grant_seconds <= 0:
+        if grant_seconds <= 0 and not plan.no_time_limit:
             _checkpoint(store, ledger, phase="INCOMPLETE", records=records, active_stage=None, carry_seconds=0,
                         handoff_sha256s=handoffs, completion_sha256=None)
             return _result("incomplete", manifest, records)
@@ -1479,10 +1500,25 @@ def run_real_evolution(
             grant_seconds,
             manifest,
             handoffs,
-            deadline_monotonic=start + grant_seconds,
+            deadline_monotonic=None if plan.no_time_limit else start + grant_seconds,
             monotonic=monotonic,
         )
-        result = getattr(ports, f"run_{stage}")(context)
+        try:
+            result = getattr(ports, f"run_{stage}")(context)
+        except TransientLLMError as error:
+            charged_seconds = math.ceil(max(0.0, float(monotonic()) - start))
+            write_once_json(root / stage / "root_stage_error.json", {
+                "schema_version": 1, "stage": stage, "status": "failed",
+                "error_type": type(error).__name__, "message": str(error),
+                "charged_seconds": charged_seconds,
+                "public_test_accessed": False,
+            })
+            _terminal_active_failure(
+                root=root, store=store, ledger=ledger, reservation=permit,
+                stage=stage, grant_seconds=grant_seconds, records=records,
+                handoffs=handoffs, charged_seconds=charged_seconds,
+            )
+            raise
         end = float(monotonic())
         if not math.isfinite(start) or not math.isfinite(end) or end < start:
             raise RealRunnerError("stage monotonic interval is invalid")
@@ -1499,6 +1535,7 @@ def run_real_evolution(
             _terminal_active_failure(
                 root=root, store=store, ledger=ledger, reservation=permit,
                 stage=stage, grant_seconds=grant_seconds, records=records, handoffs=handoffs,
+                charged_seconds=charged_seconds if plan.no_time_limit else None,
             )
             raise
         if not closure.allowed:

@@ -35,8 +35,8 @@ def _write_mutable(path: Path, payload: Mapping[str, object]) -> None:
 def _validate_config(config: Mapping[str, object]) -> None:
     if set(config) != _CONFIG_FIELDS or config.get("schema_version") != 1 or type(config.get("seed")) is not int:
         raise ValueError("protocol config must use the exact schema")
-    if type(config.get("max_proposals")) is not int or config["max_proposals"] <= 0 or type(config.get("hard_limit_seconds")) is not int or config["hard_limit_seconds"] <= 0:
-        raise ValueError("protocol config limits must be positive integers")
+    if type(config.get("max_proposals")) is not int or config["max_proposals"] <= 0 or type(config.get("hard_limit_seconds")) is not int or config["hard_limit_seconds"] < 0:
+        raise ValueError("protocol proposal limit must be positive; time limit must be non-negative")
 
 
 def _validate_manifest(manifest: Mapping[str, object]) -> None:

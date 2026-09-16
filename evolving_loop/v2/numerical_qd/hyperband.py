@@ -112,9 +112,11 @@ def choose_bracket(candidate_count, cache_coverage, remaining_budget, config) ->
     if type(candidate_count) is not int or candidate_count < 1:
         raise ValueError("candidate_count must be positive")
     for name, value in (("cache_coverage", cache_coverage), ("remaining_budget", remaining_budget)):
+        if name == "remaining_budget" and value is None:
+            continue  # Explicit unlimited wall time; the ledger enforces other resources.
         if type(value) not in (float, int) or not math.isfinite(value):
             raise ValueError(f"{name} must be finite")
-    if not 0.0 <= cache_coverage <= 1.0 or remaining_budget <= 0.0:
+    if not 0.0 <= cache_coverage <= 1.0 or (remaining_budget is not None and remaining_budget <= 0.0):
         raise ValueError("invalid cache coverage or exhausted remaining budget")
     policy = _validate_hyperband(config.hyperband if isinstance(config, NumericalQDConfigV2) else config)
     task_seconds = config.adapter["task_timeout_seconds"] if isinstance(config, NumericalQDConfigV2) else 1.0
@@ -130,7 +132,7 @@ def choose_bracket(candidate_count, cache_coverage, remaining_budget, config) ->
         # first rung. For a prefix, use the worst-case overlap with Train80.
         guaranteed_hits = max(0.0, 80.0 * cache_coverage - (80 - first))
         seconds = candidate_count * (first - guaranteed_hits) * task_seconds
-        if seconds <= remaining_budget:
+        if remaining_budget is None or seconds <= remaining_budget:
             return HyperbandBracketV2.registered(name)
     raise ValueError("remaining budget cannot fit an initial rung")
 
@@ -293,7 +295,7 @@ def execute_hyperband_rung(
 
     try:
         for candidate, task, key, cached, local_evidence_sha256 in work:
-            if ledger.finalization_started or ledger.elapsed_wall_seconds >= ledger.plan.search_deadline_seconds:
+            if ledger.finalization_started or ledger.search_time_exhausted:
                 failure = "finalization_reserve"
                 break
             if cached is not None:
@@ -338,7 +340,7 @@ def execute_hyperband_rung(
     if not closed.allowed:
         failure = closed.reason
     # Check the final callback too: a deadline crossing cannot promote a rung.
-    if ledger.finalization_started or ledger.elapsed_wall_seconds >= ledger.plan.search_deadline_seconds:
+    if ledger.finalization_started or ledger.search_time_exhausted:
         failure = failure or "finalization_reserve"
     status = "failed" if failure else "completed"
     return HyperbandExecutionV2(tuple(results), tuple(rows),

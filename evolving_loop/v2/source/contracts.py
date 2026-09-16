@@ -243,8 +243,8 @@ class SourceConfigV2:
             raise ValueError("seed must be an integer")
         if self.max_candidates not in (1, 2):
             raise ValueError("max_candidates must be 1 or 2")
-        if type(self.hard_limit_seconds) is not int or self.hard_limit_seconds <= 0:
-            raise ValueError("hard_limit_seconds must be a positive integer")
+        if type(self.hard_limit_seconds) is not int or self.hard_limit_seconds < 0:
+            raise ValueError("hard_limit_seconds must be non-negative (0 means unlimited)")
         if type(self.subprocess_timeout_seconds) is not int or not 0 < self.subprocess_timeout_seconds <= 2:
             raise ValueError("subprocess_timeout_seconds must be an integer in 1..2")
         require_sha256(self.protocol_fingerprint, "protocol_fingerprint")
