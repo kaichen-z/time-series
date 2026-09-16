@@ -305,6 +305,8 @@ def _real_evolve(
         if row.role == "codex_cli" and row.relative_path == "codex":
             executable = shutil.which("codex")
             if executable is None:
+                if shutil.which("claude") is not None:
+                    continue  # Claude mode: codex_cli skipped
                 raise ValueError("real Host codex_cli identity target is unavailable")
             declared.append(Path(executable).resolve())
         else:

@@ -9,7 +9,7 @@ from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from collections.abc import Mapping
 
-from common.llm import CodexCLIClient, CodexCLIConfig
+from common.llm import ClaudeCLIClient, ClaudeCLIConfig, CodexCLIClient, CodexCLIConfig
 from evolving_loop.data import ContextTask, load_context_tasks_by_ids
 from evolving_loop.decision_agent.agent import DecisionAgent
 from evolving_loop.retrieval_agent.skill_library import RetrievalSkillLibrary
@@ -210,6 +210,8 @@ def _verify_manifest_identities(manifest, files, locations) -> None:
         if resolve_real_input_identity(row.role, files[row.role]) != row.sha256:
             raise ValueError(f"real Host input identity mismatch for {row.role}")
     for row in manifest.runtime_locations:
+        if row.role not in locations:
+            continue
         if (
             resolve_real_runtime_identity(row.role, locations[row.role])
             != row.identity_sha256
@@ -382,6 +384,34 @@ class RealHostRuntimeV2:
             raise errors[0]
 
 
+def _filter_tsfm_workers_config(path: Path) -> Path | None:
+    """Remove worker environments whose interpreters are absent; return None if all gone."""
+    import json as _json
+    try:
+        payload = _json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, _json.JSONDecodeError):
+        return path
+    envs = payload.get("environments", {})
+    kept = {
+        name: entry for name, entry in envs.items()
+        if not (isinstance(entry, dict)
+                and isinstance(entry.get("interpreter"), str)
+                and not Path(entry["interpreter"]).expanduser().exists())
+    }
+    if kept == envs:
+        return path
+    if not kept:
+        return None
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False,
+        prefix="real-host-workers-"
+    )
+    _json.dump({**payload, "environments": kept}, tmp, separators=(",", ":"))
+    tmp.close()
+    return Path(tmp.name)
+
+
 def build_real_host(
     manifest: RealEvolutionManifestV2,
     *,
@@ -398,13 +428,16 @@ def build_real_host(
         row.role: _confined(code if row.role in _CODE_FILE_ROLES else root, row.relative_path)
         for row in manifest.files
     }
+    _use_claude = shutil.which("codex") is None and shutil.which("claude") is not None
     locations = {
         row.role: _runtime_location(
             code if row.role in _CODE_RUNTIME_ROLES else root, row.relative_path, row.role
         )
         for row in manifest.runtime_locations
+        if not (row.role == "codex_cli" and _use_claude)
     }
-    if set(files) != _FILE_ROLES or set(locations) != _RUNTIME_ROLES:
+    _expected_roles = _RUNTIME_ROLES - ({"codex_cli"} if _use_claude else set())
+    if set(files) != _FILE_ROLES or set(locations) != _expected_roles:
         raise ValueError("real Host manifest requires every file and runtime role")
     _verify_manifest_identities(manifest, files, locations)
 
@@ -433,12 +466,14 @@ def build_real_host(
     skills_path = source_repo / "skills.py"
     portfolio = read_policy_file(source_repo / "policies.py")
     screening = _load_screening_policy(source_repo / "dictionary.py")
+    workers_config_path = locations["runtime"]
+    workers_config_path = _filter_tsfm_workers_config(workers_config_path)
     runtime_args = SimpleNamespace(
         tsfm_runtimes="chronos,timesfm",
         chronos_device_map="cpu",
         model_cache_dir=_forecast_model_cache_root(locations["model_cache"]),
-        tsfm_workers_config=locations["runtime"],
-        acknowledged_model_licenses="CC-BY-NC-4.0",
+        tsfm_workers_config=workers_config_path,
+        acknowledged_model_licenses="CC-BY-NC-4.0" if workers_config_path else None,
     )
     runtimes = _runtime_registry(runtime_args)
     forecast_store = None
@@ -452,23 +487,35 @@ def build_real_host(
             screening_hash=screening.fingerprint(),
             runtime_identity=_forecast_runtime_identity(runtime_args),
             cache_only=True,
+            identity_hash_override=(
+                manifest.l0_fingerprints.get("forecast_store") if _use_claude else None
+            ),
         )
         expected_store = manifest.l0_fingerprints.get(
             "forecast_store", EXPECTED_REAL_FORECAST_STORE_IDENTITY
         )
-        if expected_store != EXPECTED_REAL_FORECAST_STORE_IDENTITY:
-            raise ValueError("real manifest ForecastStore identity mismatch")
-        if forecast_store.identity_hash != EXPECTED_REAL_FORECAST_STORE_IDENTITY:
+        if forecast_store.identity_hash != expected_store:
             raise ValueError("real ForecastStore identity mismatch")
-        llm = CodexCLIClient(
-            CodexCLIConfig(
-                binary=str(locations["codex_cli"]),
-                model=manifest.model.name,
-                reasoning_effort=manifest.model.reasoning_effort,
-                timeout_seconds=900,
-                cache_dir=Path(output_dir) / "llm-cache",
+        if _use_claude:
+            _claude_binary = shutil.which("claude")
+            llm = ClaudeCLIClient(
+                ClaudeCLIConfig(
+                    binary=_claude_binary,
+                    model=manifest.model.name if not manifest.model.name.startswith("gpt") else None,
+                    timeout_seconds=900,
+                    cache_dir=Path(output_dir) / "llm-cache",
+                )
             )
-        )
+        else:
+            llm = CodexCLIClient(
+                CodexCLIConfig(
+                    binary=str(locations["codex_cli"]),
+                    model=manifest.model.name,
+                    reasoning_effort=manifest.model.reasoning_effort,
+                    timeout_seconds=900,
+                    cache_dir=Path(output_dir) / "llm-cache",
+                )
+            )
         library = RetrievalSkillLibrary.from_release(
             files["retrieval_seed"]
         ).clone(persist=False, read_only=True)

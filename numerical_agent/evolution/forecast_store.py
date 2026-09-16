@@ -55,6 +55,7 @@ class ForecastStore:
         statistical_time_budget_s: float = 20.0,
         statistical_failure_limit: int = 2,
         cache_only: bool = False,
+        identity_hash_override: str | None = None,
     ) -> None:
         if statistical_time_budget_s <= 0:
             raise ValueError("statistical_time_budget_s must be positive")
@@ -96,6 +97,10 @@ class ForecastStore:
                 "utf-8"
             )
         ).hexdigest()
+        if identity_hash_override is not None:
+            if not cache_only:
+                raise ValueError("identity_hash_override requires cache_only=True")
+            self.identity_hash = identity_hash_override
         self.hits = 0
         self.misses = 0
         self._materialized_leaf_outcomes: dict[str, Outcome] = {}
