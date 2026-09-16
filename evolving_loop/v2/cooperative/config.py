@@ -60,8 +60,8 @@ class CooperativeConfigV2:
             raise ValueError("cooperative control cannot use the Public profile")
         if self.control.runner != "production":
             raise ValueError("cooperative control runner must be production")
-        if type(self.max_steps) is not int or self.max_steps != 4:
-            raise ValueError("cooperative max_steps must be exactly 4")
+        if type(self.max_steps) is not int or self.max_steps < 1:
+            raise ValueError("cooperative max_steps must be a positive integer")
         if type(self.children_per_step) is not int or self.children_per_step != 1:
             raise ValueError("cooperative children_per_step must be exactly 1")
         discount = _finite_number(self.discount, "discount")

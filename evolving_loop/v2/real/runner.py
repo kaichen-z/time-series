@@ -602,7 +602,9 @@ def _stage_wrapper(
     return payload, fingerprint_payload(payload)
 
 
-def _derived_cooperative_config(context: RealStageContextV2, host: object) -> dict[str, object]:
+def _derived_cooperative_config(
+    context: RealStageContextV2, host: object, p3_steps: int | None = None
+) -> dict[str, object]:
     code_root = Path(__file__).resolve().parents[3]
     payload = _read_canonical(
         code_root / "configs/evolution_v2/cooperative/real-luna-medium.json"
@@ -615,6 +617,8 @@ def _derived_cooperative_config(context: RealStageContextV2, host: object) -> di
     ceilings = dict(payload["resource_ceilings"])
     ceilings["wall_seconds"] = float(context.grant_seconds)
     payload["resource_ceilings"] = ceilings
+    if p3_steps is not None:
+        payload["max_steps"] = p3_steps
     from ..cooperative import CooperativeConfigV2
 
     return CooperativeConfigV2.from_payload(payload).to_payload()
@@ -642,8 +646,16 @@ def build_real_stage_ports(
     repo_root: Path,
     p2_generations: int | None = None,
     p2_min_effective_candidates: int | None = None,
+    p3_steps: int | None = None,
+    p4_candidates: int | None = None,
 ) -> RealStagePorts:
     """Assemble authenticated production P2→P5 child runs and seals."""
+    if p3_steps is not None and (type(p3_steps) is not int or p3_steps < 1):
+        raise ValueError("p3_steps must be a positive integer")
+    if p4_candidates is not None and (
+        type(p4_candidates) is not int or not 1 <= p4_candidates <= 3
+    ):
+        raise ValueError("p4_candidates must be an integer in 1..3")
     if p2_generations is not None and (
         type(p2_generations) is not int or p2_generations < 1
     ):
@@ -752,7 +764,7 @@ def build_real_stage_ports(
         return run_real_cooperative(
             dictionary=dictionary,
             host=host,
-            config_payload=_derived_cooperative_config(context, host),
+            config_payload=_derived_cooperative_config(context, host, p3_steps),
             output_dir=context.output_dir,
         )
 
@@ -769,7 +781,9 @@ def build_real_stage_ports(
         public = completion.get("public_test_accessed")
         if type(public) is not bool:
             raise RealRunnerError("P3 completion lacks Public access evidence")
-        config_sha = fingerprint_payload(_derived_cooperative_config(context, host))
+        config_sha = fingerprint_payload(
+            _derived_cooperative_config(context, host, p3_steps)
+        )
         bindings = {
             "active_bundle_sha256": closure.active_bundle.fingerprint(),
             "completion_sha256": closure.completion_sha256,
@@ -823,7 +837,8 @@ def build_real_stage_ports(
             empty_skill_path=context.output_dir.parent / "prepared/p4-empty-skills.json",
         )
         config = SourceConfigV2(
-            1, 0, 2, context.grant_seconds, 2,
+            1, 0, p4_candidates if p4_candidates is not None else 2,
+            context.grant_seconds, 2,
             closure.active_bundle.protocol_fingerprint,
             host.resource_reporter_sha256,
             ResourceUse(

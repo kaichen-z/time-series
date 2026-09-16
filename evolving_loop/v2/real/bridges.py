@@ -292,7 +292,12 @@ def run_real_cooperative(
     tasks = tuple(host.tasks)
     if len(tasks) != 100 or len(host.train_tasks) != 80 or len(host.dev_tasks) != 20:
         raise ValueError("real cooperative Host requires frozen Train80/Dev20 tasks")
-    train, dev = select_real_task_projection(host.train_tasks, host.dev_tasks)
+    train, dev = select_real_task_projection(
+        host.train_tasks,
+        host.dev_tasks,
+        train_size=host.projection_train_size,
+        dev_size=host.projection_dev_size,
+    )
 
     config = CooperativeConfigV2.from_payload(config_payload)
     if config.control.profile not in {"pilot", "formal"}:
@@ -589,7 +594,12 @@ def load_sealed_bundle_closure(
     _validate_manifest_shape(manifest)
     if manifest["runtime_identity"] != _host_runtime_identity(host):
         raise KernelAuthorityError("cooperative proposal-space runtime mismatch")
-    train, dev = select_real_task_projection(host.train_tasks, host.dev_tasks)
+    train, dev = select_real_task_projection(
+        host.train_tasks,
+        host.dev_tasks,
+        train_size=host.projection_train_size,
+        dev_size=host.projection_dev_size,
+    )
     expected_projection = {
         "train_task_ids": [task.numeric.task_id for task in train],
         "dev_task_ids": [task.numeric.task_id for task in dev],

@@ -280,25 +280,57 @@ def _forecast_model_cache_root(location: Path) -> Path:
 
 
 def select_real_task_projection(
-    train_tasks: tuple[ContextTask, ...], dev_tasks: tuple[ContextTask, ...]
+    train_tasks: tuple[ContextTask, ...],
+    dev_tasks: tuple[ContextTask, ...],
+    *,
+    train_size: int = 4,
+    dev_size: int = 1,
 ) -> tuple[tuple[ContextTask, ...], tuple[ContextTask, ...]]:
-    """Choose the first feasible entity-disjoint Train4/Dev1 in Host order.
+    """Choose the first feasible entity-disjoint Train{N}/Dev{M} in Host order.
 
     Only entity identities participate in selection; task labels and metrics
     remain outside this projection boundary. Return the original Host tasks.
+    The default Train4/Dev1 preserves the frozen projection behavior.
     """
+    if type(train_size) is not int or train_size < 1:
+        raise ValueError("projection train_size must be a positive integer")
+    if type(dev_size) is not int or dev_size < 1:
+        raise ValueError("projection dev_size must be a positive integer")
+    train_entity_pool = {task.numeric.entity_name for task in train_tasks}
+    dev_selected: list[ContextTask] = []
+    dev_entities: set[str] = set()
     for dev_task in dev_tasks:
-        seen_entities = {dev_task.numeric.entity_name}
-        selected = []
-        for train_task in train_tasks:
-            entity = train_task.numeric.entity_name
-            if entity in seen_entities:
-                continue
-            seen_entities.add(entity)
-            selected.append(train_task)
-            if len(selected) == 4:
-                return tuple(selected), (dev_task,)
-    raise ValueError("real projection requires entity-disjoint Train4/Dev1")
+        entity = dev_task.numeric.entity_name
+        if entity in dev_entities:
+            continue
+        # Preserve "first feasible Dev in Host order": only commit a Dev task if
+        # enough entity-disjoint Train tasks still remain for it.
+        tentative = dev_entities | {entity}
+        if len(train_entity_pool - tentative) < train_size:
+            continue
+        dev_entities = tentative
+        dev_selected.append(dev_task)
+        if len(dev_selected) == dev_size:
+            break
+    if len(dev_selected) != dev_size:
+        raise ValueError(
+            f"real projection requires {dev_size} entity-disjoint Dev tasks"
+        )
+    seen_entities = set(dev_entities)
+    selected: list[ContextTask] = []
+    for train_task in train_tasks:
+        entity = train_task.numeric.entity_name
+        if entity in seen_entities:
+            continue
+        seen_entities.add(entity)
+        selected.append(train_task)
+        if len(selected) == train_size:
+            break
+    if len(selected) != train_size:
+        raise ValueError(
+            f"real projection requires {train_size} entity-disjoint Train tasks"
+        )
+    return tuple(selected), tuple(dev_selected)
 
 
 @dataclass(slots=True)
@@ -319,6 +351,9 @@ class RealHostRuntimeV2:
     sources: Mapping[str, str] = field(default_factory=dict)
     p3_dictionary: object | None = field(default=None, repr=False)
     resource_kinds: tuple[str, ...] = ()
+    projection_train_size: int = 4
+    projection_dev_size: int = 1
+    projection_fold_count: int = 2
     _closed: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -418,8 +453,23 @@ def build_real_host(
     repo_root: Path,
     output_dir: Path,
     code_root: Path | None = None,
+    projection_train_size: int = 4,
+    projection_dev_size: int = 1,
+    projection_fold_count: int = 2,
 ) -> RealHostRuntimeV2:
     """Build the fixed cache-only Host from one already verified manifest."""
+    if type(projection_train_size) is not int or projection_train_size < 1:
+        raise ValueError("projection_train_size must be a positive integer")
+    if type(projection_dev_size) is not int or projection_dev_size < 1:
+        raise ValueError("projection_dev_size must be a positive integer")
+    if (
+        type(projection_fold_count) is not int
+        or projection_fold_count < 1
+        or projection_train_size % projection_fold_count != 0
+    ):
+        raise ValueError(
+            "projection_fold_count must be a positive divisor of projection_train_size"
+        )
     if type(manifest) is not RealEvolutionManifestV2:
         raise TypeError("real Host requires a RealEvolutionManifestV2")
     root = Path(repo_root).resolve()
@@ -498,10 +548,17 @@ def build_real_host(
             raise ValueError("real ForecastStore identity mismatch")
         if _use_claude:
             _claude_binary = shutil.which("claude")
+            # The manifest model is contract-frozen to gpt-5.6-luna, which maps to
+            # the Claude CLI default. EVOLVE_CLAUDE_MODEL overrides the proposer model
+            # (e.g. "haiku") without touching the frozen manifest binding.
+            import os as _os
+            _claude_model = _os.environ.get("EVOLVE_CLAUDE_MODEL") or (
+                manifest.model.name if not manifest.model.name.startswith("gpt") else None
+            )
             llm = ClaudeCLIClient(
                 ClaudeCLIConfig(
                     binary=_claude_binary,
-                    model=manifest.model.name if not manifest.model.name.startswith("gpt") else None,
+                    model=_claude_model,
                     timeout_seconds=900,
                     cache_dir=Path(output_dir) / "llm-cache",
                 )
@@ -552,6 +609,9 @@ def build_real_host(
             resource_kinds=(
                 "input_tokens", "llm_calls", "output_tokens", "subprocesses"
             ),
+            projection_train_size=projection_train_size,
+            projection_dev_size=projection_dev_size,
+            projection_fold_count=projection_fold_count,
         )
     except BaseException:
         if forecast_store is not None:

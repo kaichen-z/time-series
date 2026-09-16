@@ -32,7 +32,23 @@ from .runtime import run_policy
 
 
 _TOLERANCE = 1e-12
-_FOLDS = ((0, 1), (2, 3))
+
+
+def _make_folds(train_size: int, fold_count: int) -> tuple[tuple[int, ...], ...]:
+    """Partition range(train_size) into fold_count contiguous held-out groups.
+
+    Default Train4/2-fold reproduces the frozen ((0, 1), (2, 3)) layout.
+    """
+    if type(train_size) is not int or type(fold_count) is not int:
+        raise ValueError("train_size and fold_count must be integers")
+    if fold_count < 1 or train_size < fold_count or train_size % fold_count != 0:
+        raise ValueError("train_size must be a positive multiple of fold_count")
+    held = train_size // fold_count
+    return tuple(
+        tuple(range(index * held, (index + 1) * held)) for index in range(fold_count)
+    )
+
+
 _CACHE_FIELDS = frozenset(
     {"schema_version", "aggregates", "episodes", "cache_sha256"}
 )
@@ -124,6 +140,8 @@ class SourceMetaEvaluatorV2:
         self.dev_tasks = tuple(getattr(case, "dev_tasks"))
         self.seed_bundle = getattr(case, "seed_bundle")
         self.enabled_arms = tuple(getattr(case, "enabled_arms", ARM_ORDER))
+        self._fold_count = int(getattr(case, "fold_count", 2))
+        self._folds = _make_folds(len(self.train_tasks), self._fold_count)
         self._episodes: dict[tuple[str, int], _TrainingEpisode] = {}
         self._aggregate_cache: dict[str, PackageEvaluation] = {}
         self._durable_train_cache_keys: set[str] = set()
@@ -134,8 +152,8 @@ class SourceMetaEvaluatorV2:
         self._validate_case()
 
     def _validate_case(self) -> None:
-        if len(self.train_tasks) != 4 or len(self.dev_tasks) != 1:
-            raise ValueError("source meta case requires exactly Train4 and Dev1")
+        if len(self.train_tasks) < 1 or len(self.dev_tasks) < 1:
+            raise ValueError("source meta case requires at least Train1 and Dev1")
         all_tasks = (*self.train_tasks, *self.dev_tasks)
         if any(type(task) is not ContextTask for task in all_tasks):
             raise TypeError("source meta case tasks must be ContextTask values")
@@ -188,14 +206,13 @@ class SourceMetaEvaluatorV2:
             "execution_fingerprint": result.execution_fingerprint,
         }
 
-    @classmethod
-    def _cached_train_result(cls, payload: object) -> SourceTrainResultV2:
+    def _cached_train_result(self, payload: object) -> SourceTrainResultV2:
         if not isinstance(payload, Mapping) or set(payload) != _TRAIN_RESULT_FIELDS:
             raise ValueError("source evaluator cache train result schema mismatch")
         fold_gains = payload["fold_gains"]
         if (
             not isinstance(fold_gains, list)
-            or len(fold_gains) != len(_FOLDS)
+            or len(fold_gains) != len(self._folds)
             or any(type(value) is not float or not math.isfinite(value) for value in fold_gains)
         ):
             raise ValueError("source evaluator cache fold gains are invalid")
@@ -243,7 +260,7 @@ class SourceMetaEvaluatorV2:
             payload["feasible"],
             payload["execution_fingerprint"],
         )
-        if canonical_v2_bytes(cls._train_result_payload(result)) != canonical_v2_bytes(payload):
+        if canonical_v2_bytes(self._train_result_payload(result)) != canonical_v2_bytes(payload):
             raise ValueError("source evaluator cache train result mismatch")
         return result
 
@@ -287,7 +304,7 @@ class SourceMetaEvaluatorV2:
             or type(selected_arm) is not str
             or selected_arm not in self.enabled_arms
             or type(selected_step) is not int
-            or selected_step not in range(len(_FOLDS))
+            or selected_step not in range(len(self._folds))
         ):
             raise ValueError("source evaluator cache episode identity is invalid")
         result = self._cached_train_result(payload["result"])
@@ -297,16 +314,16 @@ class SourceMetaEvaluatorV2:
             raise ValueError("source evaluator cache selected Bundle is invalid")
         selected_bundle = EvolutionBundleV2.from_payload(payload["selected_bundle"])
         evaluations_payload = payload["selected_evaluations"]
-        if not isinstance(evaluations_payload, list) or len(evaluations_payload) != 2 * len(_FOLDS):
+        if not isinstance(evaluations_payload, list) or len(evaluations_payload) != 2 * len(self._folds):
             raise ValueError("source evaluator cache selected evaluations are invalid")
         selected_evaluations = tuple(
             self._cached_evaluation(value) for value in evaluations_payload
         )
         for evaluation in selected_evaluations:
             self._require_train_evaluation(evaluation)
-        selected_seal = selected_evaluations[len(_FOLDS) + selected_step]
-        outcomes = selected_evaluations[:len(_FOLDS)]
-        sealed_outcomes = selected_evaluations[len(_FOLDS):]
+        selected_seal = selected_evaluations[len(self._folds) + selected_step]
+        outcomes = selected_evaluations[:len(self._folds)]
+        sealed_outcomes = selected_evaluations[len(self._folds):]
         expected_execution_fingerprint = fingerprint_payload(
             {
                 "source": source_sha256,
@@ -564,7 +581,7 @@ class SourceMetaEvaluatorV2:
         logical_task_cost = 0
         actual_task_cost = 0
         feasible = True
-        for fold_index, held_indices in enumerate(_FOLDS):
+        for fold_index, held_indices in enumerate(self._folds):
             complement = tuple(task for index, task in enumerate(self.train_tasks) if index not in held_indices)
             held_out = tuple(self.train_tasks[index] for index in held_indices)
             catalog, seed, adapters, pipeline = self._fresh_runtime()
@@ -636,7 +653,7 @@ class SourceMetaEvaluatorV2:
             variant.fingerprint(), tuple(fold_gains), sum(fold_gains) / len(fold_gains),
             sealed_eval.mean_smae, sealed_eval.mean_srmse,
             sealed_eval.invalid_count, sealed_eval.catastrophic_count,
-            logical_task_cost, len(_FOLDS), actual_task_cost, len(_FOLDS), feasible,
+            logical_task_cost, len(self._folds), actual_task_cost, len(self._folds), feasible,
             fingerprint_payload({"source": variant.fingerprint(), "epoch_seed": epoch_seed, "fold_gains": fold_gains,
                 "children": [child.fingerprint() for child in children], "evaluations": [value.fingerprint for value in outcomes],
                 "sealed_evaluations": [value.fingerprint for value in sealed_outcomes],

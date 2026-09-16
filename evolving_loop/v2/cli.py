@@ -190,6 +190,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     real.add_argument("--p2-min-effective-candidates", type=int,
         help="stop P2 after this many distinct feasible Train behaviors; requires --p2-generations cap")
+    real.add_argument("--p3-steps", type=int,
+        help="P3 cooperative co-evolution steps (default 4)")
+    real.add_argument("--p4-candidates", type=int,
+        help="P4 source routing candidates to evaluate, 1..3 (default 2)")
+    real.add_argument("--eval-train-size", type=int,
+        help="P3/P4/P5 projection Train task count (default 4)")
+    real.add_argument("--eval-dev-size", type=int,
+        help="P3/P4/P5 projection Dev task count (default 1)")
+    real.add_argument("--eval-folds", type=int,
+        help="P4 source meta-CV fold count; must divide --eval-train-size (default 2)")
     add_protocol_parsers(commands)
     return parser
 
@@ -278,6 +288,11 @@ def _real_evolve(
     p2_generations: int | None = None,
     no_time_limit: bool = False,
     p2_min_effective_candidates: int | None = None,
+    p3_steps: int | None = None,
+    p4_candidates: int | None = None,
+    eval_train_size: int | None = None,
+    eval_dev_size: int | None = None,
+    eval_folds: int | None = None,
 ) -> dict[str, object]:
     """Build and close the real Host around one immutable root invocation."""
     if p2_generations is not None and p2_generations < 1:
@@ -319,13 +334,28 @@ def _real_evolve(
         for path in declared
     ):
         raise ValueError("real output must not overlap a declared input or runtime")
-    host = build_real_host(manifest, repo_root=authority, code_root=code_root, output_dir=destination)
+    projection_kwargs = {}
+    if eval_train_size is not None:
+        projection_kwargs["projection_train_size"] = eval_train_size
+    if eval_dev_size is not None:
+        projection_kwargs["projection_dev_size"] = eval_dev_size
+    if eval_folds is not None:
+        projection_kwargs["projection_fold_count"] = eval_folds
+    host = build_real_host(
+        manifest,
+        repo_root=authority,
+        code_root=code_root,
+        output_dir=destination,
+        **projection_kwargs,
+    )
     try:
         ports = build_real_stage_ports(
             host,
             manifest=manifest,
             repo_root=authority,
             p2_generations=p2_generations,
+            p3_steps=p3_steps,
+            p4_candidates=p4_candidates,
             **({"p2_min_effective_candidates": p2_min_effective_candidates}
                if p2_min_effective_candidates is not None else {}),
         )
@@ -1251,6 +1281,11 @@ def main(argv: list[str] | None = None) -> int:
                 p2_generations=args.p2_generations,
                 no_time_limit=args.no_time_limit,
                 p2_min_effective_candidates=args.p2_min_effective_candidates,
+                p3_steps=args.p3_steps,
+                p4_candidates=args.p4_candidates,
+                eval_train_size=args.eval_train_size,
+                eval_dev_size=args.eval_dev_size,
+                eval_folds=args.eval_folds,
             )
         elif args.command in {"protocol-evolve", "protocol-make-smoke-inputs"}:
             summary = dispatch_protocol(args)

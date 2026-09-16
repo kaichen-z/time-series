@@ -61,7 +61,7 @@ def test_cooperative_config_is_a_strict_prototype_profile():
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("max_steps", 3),
+        ("max_steps", 0),
         ("children_per_step", 2),
         ("discount", 0.0),
         ("task_cost_weight", float("inf")),

@@ -241,8 +241,8 @@ class SourceConfigV2:
         _schema_version(self.schema_version, "SourceConfigV2")
         if type(self.seed) is not int:
             raise ValueError("seed must be an integer")
-        if self.max_candidates not in (1, 2):
-            raise ValueError("max_candidates must be 1 or 2")
+        if type(self.max_candidates) is not int or not 1 <= self.max_candidates <= 3:
+            raise ValueError("max_candidates must be an integer in 1..3")
         if type(self.hard_limit_seconds) is not int or self.hard_limit_seconds < 0:
             raise ValueError("hard_limit_seconds must be non-negative (0 means unlimited)")
         if type(self.subprocess_timeout_seconds) is not int or not 0 < self.subprocess_timeout_seconds <= 2:

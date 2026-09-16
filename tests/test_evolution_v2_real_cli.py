@@ -472,7 +472,7 @@ def test_production_ports_complete_root_and_resume_byte_identically(
 
     host = SimpleNamespace(
         tasks=(), train_tasks=(), dev_tasks=(), llm_client=object(),
-        resource_reporter_sha256="36fdec41981b25e148d6bad23cbf2cef4926f9a49d98035830d24a32f55c9bcc",
+        resource_reporter_sha256="d931fe672ea65d9d0d2cd5c52277227ead55b5c37d79effe2868604ef8fb9023",
     )
     deadlines = []
     host.llm_client = SimpleNamespace(bind_deadline=lambda *a, **k: deadlines.append(a[0]))
@@ -552,7 +552,7 @@ def test_production_ports_complete_root_and_resume_byte_identically(
 
     monkeypatch.setattr(bridges, "run_real_cooperative", cooperative)
     monkeypatch.setattr(bridges, "load_sealed_bundle_closure", lambda *_a, **_k: closure)
-    def cooperative_config(context, _host):
+    def cooperative_config(context, _host, _p3_steps=None):
         assert (context.grant_seconds == 0) is no_time_limit
         return {}
     monkeypatch.setattr(runner, "_derived_cooperative_config", cooperative_config)

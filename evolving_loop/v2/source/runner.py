@@ -167,9 +167,17 @@ def _resume_budget(plan: BudgetPlan, checkpoint: object) -> BudgetLedger:
 def _train_estimate(case: object) -> ResourceUse:
     train_count = len(tuple(getattr(case, "train_tasks", ())))
     arms = len(tuple(getattr(getattr(case, "evaluator", None), "enabled_arms", ())))
-    if train_count != 4 or arms <= 0:
-        raise SourceRunnerError("source budget estimator requires frozen Train4 inputs")
-    fold_count = 2
+    fold_count = int(
+        getattr(
+            getattr(case, "evaluator", None),
+            "_fold_count",
+            getattr(case, "fold_count", 2),
+        )
+    )
+    if train_count < 1 or arms <= 0 or fold_count < 1 or train_count % fold_count != 0:
+        raise SourceRunnerError(
+            "source budget estimator requires a positive Train multiple of fold_count"
+        )
     held_count = train_count // fold_count
     task_executions = fold_count * ((arms + 3) * held_count) + fold_count * train_count
     return ResourceUse(task_executions=task_executions, subprocesses=fold_count)

@@ -30,6 +30,7 @@ class SourceBundleCaseV2:
     adapters_factory: object
     pipeline_factory: object
     input_digest: str
+    fold_count: int = 2
     evaluator: SourceMetaEvaluatorV2 = field(init=False)
 
     def __post_init__(self) -> None:
@@ -70,7 +71,12 @@ def build_source_case_from_p3(
         or closure.runtime_identity != host.resource_reporter_sha256
     ):
         raise ValueError("source seed commitments do not match the sealed P3 closure")
-    train, dev = select_real_task_projection(host.train_tasks, host.dev_tasks)
+    train, dev = select_real_task_projection(
+        host.train_tasks,
+        host.dev_tasks,
+        train_size=host.projection_train_size,
+        dev_size=host.projection_dev_size,
+    )
     if tuple(closure.train_tasks) != train or tuple(closure.dev_tasks) != dev:
         raise ValueError("source bridge P3 task projection does not match Host")
 
@@ -109,6 +115,7 @@ def build_source_case_from_p3(
         adapters_factory=adapters_factory,
         pipeline_factory=pipeline_factory,
         input_digest=input_digest,
+        fold_count=getattr(host, "projection_fold_count", 2),
     )
 
 

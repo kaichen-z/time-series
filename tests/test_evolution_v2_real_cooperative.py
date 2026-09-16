@@ -96,7 +96,7 @@ def test_real_projection_fails_closed_when_no_disjoint_4_1_exists(train_entities
     dev = tuple(SimpleNamespace(numeric=SimpleNamespace(entity_name=name)) for name in dev_entities)
     select = getattr(module, "select_real_task_projection", None)
     assert callable(select), "the real stages need a shared entity-disjoint selector"
-    with pytest.raises(ValueError, match="entity-disjoint Train4/Dev1"):
+    with pytest.raises(ValueError, match="entity-disjoint (Train|Dev) tasks"):
         select(train, dev)
 
 

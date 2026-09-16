@@ -167,11 +167,21 @@ def build_protocol_case_from_p3(
         closure.catalog.resolve_retrieval(bundle.retrieval_release_sha256)
         closure.catalog.resolve_decision(bundle.decision_policy_sha256)
     tasks = tuple(closure.train_tasks) + tuple(closure.dev_tasks)
-    train, dev = select_real_task_projection(host.train_tasks, host.dev_tasks)
-    if len(tasks) != 5 or tuple(closure.train_tasks) != train or tuple(closure.dev_tasks) != dev:
-        raise ValueError("protocol bridge requires the sealed P3 Train4/Dev1 projection")
+    train, dev = select_real_task_projection(
+        host.train_tasks,
+        host.dev_tasks,
+        train_size=host.projection_train_size,
+        dev_size=host.projection_dev_size,
+    )
+    expected_total = host.projection_train_size + host.projection_dev_size
+    if (
+        len(tasks) != expected_total
+        or tuple(closure.train_tasks) != train
+        or tuple(closure.dev_tasks) != dev
+    ):
+        raise ValueError("protocol bridge requires the sealed P3 Train/Dev projection")
     task_shas = tuple(task_registry_fingerprint(task) for task in tasks)
-    if len(set(task_shas)) != 5:
+    if len(set(task_shas)) != expected_total:
         raise ValueError("protocol bridge task identities must be unique")
     evidence = _acceptance_evidence(closure)
     envelopes = {
