@@ -59,8 +59,10 @@ class CompatibilityCorpusV2:
         if type(self.schema_version) is not int or self.schema_version != 1:
             raise ValueError("schema_version must be 1")
         require_sha256(self.l0_commitment_sha256, "l0_commitment_sha256")
-        train = _sha_tuple(self.train_task_sha256s, "train_task_sha256s", exact=4)
-        dev = _sha_tuple(self.dev_task_sha256s, "dev_task_sha256s", exact=1)
+        train = _sha_tuple(self.train_task_sha256s, "train_task_sha256s")
+        dev = _sha_tuple(self.dev_task_sha256s, "dev_task_sha256s")
+        if not train or not dev:
+            raise ValueError("train and dev task SHA lists must be non-empty")
         bundles = _sha_tuple(self.archive_bundle_sha256s, "archive_bundle_sha256s", exact=2)
         artifacts = _sha_tuple(self.artifact_sha256s, "artifact_sha256s")
         if set(train) & set(dev):

@@ -240,16 +240,17 @@ def build_protocol_case_from_p3(
         empty_skill_path=Path("p5-empty-retrieval-skills.json"),
         fixture_scope="ordinary",
     )
+    train_n = len(tuple(closure.train_tasks))
     split = {
-        "train_task_sha256s": task_shas[:4],
-        "dev_task_sha256s": task_shas[4:],
+        "train_task_sha256s": task_shas[:train_n],
+        "dev_task_sha256s": task_shas[train_n:],
         "public_task_sha256s": (),
     }
     corpus = CompatibilityCorpusV2(
         1,
         closure.active_bundle.protocol_fingerprint,
-        task_shas[:4],
-        task_shas[4:],
+        task_shas[:train_n],
+        task_shas[train_n:],
         tuple(bundle.fingerprint() for bundle in bundles),
         tuple(bundle.fingerprint() for bundle in bundles) + tuple(envelopes),
         fingerprint_payload({"fixtures": list(fixtures)}),
