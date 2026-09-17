@@ -1460,14 +1460,28 @@ def run_real_evolution(
         grant_seconds = int(estimate.wall_seconds)
         if stage != _STAGES[len(records)]:
             raise RealRunnerError("active root stage does not follow sealed records")
-        context = _context(root, stage, grant_seconds, manifest, handoffs)
+        context = _context(
+            root,
+            stage,
+            grant_seconds,
+            manifest,
+            handoffs,
+            deadline_monotonic=None if plan.no_time_limit else float(monotonic()) + grant_seconds,
+            monotonic=monotonic,
+        )
         prior_result = _read_run_result(root, stage)
         if prior_result is None:
-            ledger.close_stage(active["reservation_sha256"], estimate)
-            records.append(RealStageRecordV2(stage, grant_seconds, grant_seconds, "incomplete", None, _previous_progress_sha(root)))
-            _checkpoint(store, ledger, phase="INCOMPLETE", records=records, active_stage=None,
-                        carry_seconds=0, handoff_sha256s=handoffs, completion_sha256=None)
-            return _result("incomplete", manifest, records)
+            # Mid-stage crash left no persisted result. Re-run the stage instead of
+            # failing closed: each stage runner resumes from its own internal
+            # checkpoint (numerical_qd / cooperative / source), so completed work
+            # within the stage is not repeated. Only stages that produced no
+            # verifiable result reach here; seal-verification failures below still
+            # fail closed for integrity.
+            result = getattr(ports, f"run_{stage}")(context)
+            _persist_run_result(root, stage, result)
+            prior_result = _read_run_result(root, stage)
+            if prior_result is None:
+                raise RealRunnerError("resumed stage re-run did not persist a result")
         seal = getattr(ports, f"seal_{stage}")
         try:
             sealed = seal(context, prior_result)
@@ -1539,6 +1553,15 @@ def run_real_evolution(
         try:
             result = getattr(ports, f"run_{stage}")(context)
         except TransientLLMError as error:
+            if plan.no_time_limit:
+                # With no wall-time deadline, a TransientLLMError is a rate limit /
+                # token-quota exhaustion, not a genuine deadline. Leave the stage
+                # resumable (last checkpoint already recorded active_stage=stage with
+                # an open reservation; the stage's internal checkpoint retains its
+                # progress) so a restart resumes it rather than failing closed.
+                raise
+            # Time-limited mode: a TransientLLMError here is a genuine stage-deadline
+            # exhaustion. Preserve the conservative fail-closed behavior + diagnostics.
             charged_seconds = math.ceil(max(0.0, float(monotonic()) - start))
             write_once_json(root / stage / "root_stage_error.json", {
                 "schema_version": 1, "stage": stage, "status": "failed",

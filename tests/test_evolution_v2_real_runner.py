@@ -15,6 +15,7 @@ from evolving_loop.v2.real.runner import (
     SealedStageV2,
     run_real_evolution,
 )
+from common.llm import TransientLLMError
 
 
 def digest(label: str) -> str:
@@ -54,6 +55,7 @@ class RunnerCase:
         self.calls: Counter[str] = Counter()
         self.order: list[str] = []
         self.crashing_stage: str | None = None
+        self.transient_stage: str | None = None
         self.finalization_started_at: float | None = None
         self.manifest = RealEvolutionManifestV2.from_payload(
             {
@@ -83,6 +85,8 @@ class RunnerCase:
         self.order.append(f"run_{stage}")
         self.grants[stage] = context.grant_seconds
         self.clock.advance(self.stage_durations[stage])
+        if self.transient_stage == stage:
+            raise TransientLLMError(stage)
         if self.crashing_stage == stage:
             raise SimulatedCrash(stage)
         payload = {"stage": stage, "status": self.stage_statuses[stage]}
@@ -302,16 +306,51 @@ def test_seal_failure_closes_the_active_stage_as_failed(case: RunnerCase):
     assert case.calls == Counter({"p2": 1})
 
 
-def test_unknown_inflight_work_is_fully_charged_and_not_replayed(case: RunnerCase):
+def test_inflight_stage_is_resumed_and_rerun_on_restart(case: RunnerCase):
+    # A crash mid-stage (no verifiable result produced) must leave the run
+    # resumable rather than failing closed: the stage keeps its active reservation
+    # and is re-run on restart (each real stage resumes from its own internal
+    # checkpoint, so completed work within the stage is not repeated).
     case.crash_during("p3")
     with pytest.raises(SimulatedCrash):
         case.run()
 
+    checkpoint = json.loads((case.output / "checkpoint.json").read_text())
+    assert checkpoint["active_stage"] == "p3"
+    assert checkpoint["phase"] != "FAILED"
+
+    case.crashing_stage = None  # transient condition clears
     resumed = case.resume()
 
-    assert resumed.status == "incomplete"
-    assert case.calls["p3"] == 1
+    assert resumed.status == "complete"
+    assert case.calls["p3"] == 2  # p3 was re-run on resume
     assert case.closed_charge("p3") == case.grant("p3")
+
+
+def test_transient_llm_failure_leaves_stage_resumable_under_no_time_limit(case: RunnerCase):
+    # In no-time-limit mode a TransientLLMError is token/quota exhaustion (not a
+    # deadline); it must not fail the run closed. The stage stays active so a later
+    # restart resumes it. (Time-limited deadline exhaustion stays terminal — see
+    # test_stage_deadline_exception_persists_terminal_failure_and_diagnostics.)
+    def go():
+        return run_real_evolution(
+            case.output, case.manifest, case.ports,
+            monotonic=case.clock, no_time_limit=True, p2_generations=1,
+        )
+
+    case.transient_stage = "p3"
+    with pytest.raises(TransientLLMError):
+        go()
+
+    checkpoint = json.loads((case.output / "checkpoint.json").read_text())
+    assert checkpoint["active_stage"] == "p3"
+    assert checkpoint["phase"] != "FAILED"
+
+    case.transient_stage = None  # quota restored
+    resumed = go()
+
+    assert resumed.status == "complete"
+    assert case.calls["p3"] == 2
 
 
 def test_completed_resume_is_read_only_and_returns_identical_result(case: RunnerCase):
