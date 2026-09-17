@@ -337,8 +337,10 @@ def propose_sources(
         raise TypeError("parent must be a SourceVariantV2")
     if type(draw_counter) is not int or draw_counter < 0:
         raise ValueError("draw_counter must be a non-negative integer")
-    if type(limit) is not int or not 0 <= limit <= 2:
-        raise ValueError("limit must be an integer from 0 through at most 2")
+    if type(limit) is not int or not 0 <= limit <= len(_TEMPLATES):
+        raise ValueError(
+            f"limit must be an integer from 0 through at most {len(_TEMPLATES)}"
+        )
     if limit == 0:
         return ()
     result: list[SourceVariantV2] = []
