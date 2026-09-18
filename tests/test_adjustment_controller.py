@@ -5,9 +5,10 @@ from types import SimpleNamespace
 
 from evolving_loop.adjustment import project_evidence
 from evolving_loop.adjustment.controller import (
-    CASCADE_CONTROLLER, IDENTITY_CONTROLLER, REGIME_CONTROLLER, Controller,
+    CASCADE_CONTROLLER, IDENTITY_CONTROLLER, REGIME_CONTROLLER, SEED_CONTROLLERS, Controller,
     DocAdjust, NoOp, RegimeAdjust, SelectBase,
     controller_to_text, crossover_controllers, mutate_controller, run_controller,
+    run_controller_evolution,
 )
 
 # synthetic weekend regime: weekdays=10, weekends=6
@@ -80,3 +81,14 @@ def test_mutation_and_crossover_stay_legal_and_runnable():
 def test_controller_to_text_is_readable():
     txt = controller_to_text(REGIME_CONTROLLER)
     assert "SelectBase" in txt and "RegimeAdjust" in txt
+
+
+def test_evolution_optimizes_a_toy_objective():
+    # reward controllers that end up shorter (a stand-in scalar fitness)
+    fit = lambda c: -len(c.steps)
+    best, score, hist = run_controller_evolution(SEED_CONTROLLERS, fit, generations=20, pop_size=24)
+    assert 1 <= len(best.steps) <= 2               # search shrank toward fewer steps
+    assert hist[-1][1] >= hist[0][1]               # non-decreasing best fitness
+    # deterministic given the seed
+    b2, s2, _ = run_controller_evolution(SEED_CONTROLLERS, fit, generations=20, pop_size=24)
+    assert s2 == score

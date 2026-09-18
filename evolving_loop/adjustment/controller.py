@@ -234,3 +234,39 @@ def crossover_controllers(a: Controller, b: Controller, rng: _random.Random) -> 
     cb = list(b.steps)[rng.randint(0, len(b.steps)):]
     child = (ca + cb)[:8] or [SelectBase()]
     return Controller(steps=tuple(child), name="evolved")
+
+
+def run_controller_evolution(seeds, fitness, *, generations: int = 30, pop_size: int = 40,
+                             elite: int = 8, seed: int = 20260918):
+    """(mu+lambda) evolution over controller instruction sequences.
+
+    `fitness` maps a Controller to a scalar (higher better; use the CVaR objective).
+    Ties break toward fewer instructions (simpler, more auditable controllers win).
+    Returns (best_controller, best_fitness, history).
+    """
+    rng = _random.Random(seed)
+    pop = list(seeds)
+    while len(pop) < pop_size:
+        base = rng.choice(seeds) if seeds else Controller(steps=(SelectBase(),))
+        pop.append(mutate_controller(base, rng))
+
+    def key(c):
+        return (fitness(c), -len(c.steps))
+
+    best = max(pop, key=key)
+    history = []
+    for gen in range(generations):
+        ranked = sorted(pop, key=key, reverse=True)
+        parents = ranked[:elite]
+        if key(ranked[0]) > key(best):
+            best = ranked[0]
+        history.append((gen, fitness(ranked[0])))
+        children = list(parents)
+        while len(children) < pop_size:
+            if rng.random() < 0.5 and len(parents) >= 2:
+                child = crossover_controllers(*rng.sample(parents, 2), rng)
+            else:
+                child = rng.choice(parents)
+            children.append(mutate_controller(child, rng))
+        pop = children
+    return best, fitness(best), history
