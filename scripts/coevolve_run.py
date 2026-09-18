@@ -18,6 +18,7 @@ from numerical_agent.evolution.portfolio import read_policy_file
 from numerical_agent.evolution.forecast_store import ForecastStore
 from common.metrics import drcik_point_metrics
 from evolving_loop.adjustment.post_adjust import EvidenceEffect, _canon_direction
+from evolving_loop.adjustment.fitness import cvar_downside_fitness
 from evolving_loop.adjustment.coevolve import (
     Interaction, FocusPolicy, QualifyPolicy, IntegratePolicy,
     run_pipeline, interaction_to_text, mutate_interaction, run_coevolution,
@@ -92,15 +93,14 @@ print(f"tasks with data: {len(DATA)}", flush=True)
 
 
 def eval_inter(inter, data=DATA):
-    total, per, fired = 0.0, {}, set()
+    per, fired, deltas = {}, set(), []
     for d in data:
         out, state = run_pipeline(inter, d["base"], d["effs"], d["fts"], d["hv"], d["hts"])
         jp = joint(out, d["truth"]); per[d["tid"]] = jp
         if state.fired:
             fired.add(d["tid"])
-        delta = d["toto_j"] - jp
-        total += delta if delta >= 0 else REG_PENALTY * delta
-    return total, per, fired
+        deltas.append(d["toto_j"] - jp)
+    return cvar_downside_fitness(deltas), per, fired   # robust (CVaR) objective
 
 
 fitness = lambda it: eval_inter(it)[0]
