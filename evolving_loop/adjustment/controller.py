@@ -126,17 +126,25 @@ def _reference_level(hv, hts, ref):
     return None
 
 
+_ALL_REFS = ("weekend", "weekday", "low_day", "high_day", "recent", "overall")
+
+
 @dataclass(frozen=True)
 class SemanticAdjust:
     """The proven primitive: scale grounded windowed effects toward the LLM-chosen
     historical regime. The reference (e.g. "weekend", cached in state.semantic_ref) is
     the LLM's semantic judgement of what the event resembles; the magnitude is read from
-    that regime's historical level (data). No cached ref / no level -> no-op."""
+    that regime's historical level (data). No cached ref / no level -> no-op.
+
+    ``trusted`` is the evolvable DATA GATE: only apply when the LLM's chosen regime is one
+    we trust. Stable periodic regimes (weekday/weekend) are reliable; single-day extremes
+    (low_day/high_day) and 'recent' tend to regress -- evolution learns which to trust."""
     cap: float = KERNEL_MAX_FRAC
+    trusted: tuple = _ALL_REFS
 
     def apply(self, s: ControllerState) -> ControllerState:
         ref = s.semantic_ref
-        if not ref or ref == "none":
+        if not ref or ref == "none" or ref not in self.trusted:
             return replace(s, trace=s.trace + ("semantic:none",))
         level = _reference_level(list(s.hv), list(s.hts), ref)
         if level is None:
@@ -239,7 +247,8 @@ CASCADE_CONTROLLER = Controller(
            DocAdjust(cap=0.3)),
     name="select+regime-cascade+doc")
 SEMANTIC_CONTROLLER = Controller(
-    steps=(SelectBase(), SemanticAdjust()), name="select+semantic")
+    steps=(SelectBase(), SemanticAdjust(trusted=("weekend", "weekday"))),
+    name="select+semantic-stable")
 
 SEED_CONTROLLERS = (IDENTITY_CONTROLLER, REGIME_CONTROLLER, CASCADE_CONTROLLER, SEMANTIC_CONTROLLER)
 
@@ -278,7 +287,12 @@ def _mutate_step(step, rng: _random.Random):
             return replace(step, cap=_clamp(step.cap + rng.uniform(-0.15, 0.15)))
         return replace(step, fill_unknown_direction=not step.fill_unknown_direction)
     if isinstance(step, SemanticAdjust):
-        return replace(step, cap=_clamp(step.cap + rng.uniform(-0.15, 0.15)))
+        if rng.random() < 0.5:
+            return replace(step, cap=_clamp(step.cap + rng.uniform(-0.15, 0.15)))
+        ref = rng.choice(_ALL_REFS)                       # toggle a ref in/out of trust
+        tset = set(step.trusted)
+        tset.symmetric_difference_update({ref})
+        return replace(step, trusted=tuple(r for r in _ALL_REFS if r in tset))
     if isinstance(step, DocAdjust):
         return replace(step, cap=_clamp(step.cap + rng.uniform(-0.1, 0.1), hi=0.5))
     return step
