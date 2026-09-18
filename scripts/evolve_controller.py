@@ -21,7 +21,7 @@ from evolving_loop.adjustment.post_adjust import EvidenceEffect, _canon_directio
 from evolving_loop.adjustment.fitness import cvar_downside_fitness, worst_case
 from evolving_loop.adjustment.controller import (
     SEED_CONTROLLERS, IDENTITY_CONTROLLER, run_controller, controller_to_text,
-    run_controller_evolution,
+    run_controller_evolution, build_event_effect_pool,
 )
 
 ROOT = Path(".").resolve(); CAP = 5.0
@@ -92,17 +92,22 @@ for tid in raw:
 print(f"tasks with data: {len(DATA)}", flush=True)
 
 
-def eval_ctrl(controller, data=DATA):
+def _pool(data):
+    return build_event_effect_pool([(d["hv"], d["hts"]) for d in data])
+
+
+def eval_ctrl(controller, data, pool):
     per, deltas = {}, []
     for d in data:
         out, _ = run_controller(controller, d["cands"], d["effs"], d["hv"], d["hts"], d["fts"],
-                                semantic_ref=d["semantic_ref"])
+                                semantic_ref=d["semantic_ref"], effect_pool=pool)
         jp = joint(out, d["truth"]); per[d["tid"]] = jp
         deltas.append(d["toto_j"] - jp)
     return cvar_downside_fitness(deltas), per, deltas
 
 
-fitness = lambda c: eval_ctrl(c)[0]
+POOL_ALL = _pool(DATA)                       # in-sample pool (all tasks)
+fitness = lambda c: eval_ctrl(c, DATA, POOL_ALL)[0]
 
 print("\n== evolving controller (CVaR fitness) ==", flush=True)
 best, best_fit, hist = run_controller_evolution(SEED_CONTROLLERS, fitness, generations=30, pop_size=48, elite=10)
@@ -110,7 +115,7 @@ print("gen best:", ", ".join(f"g{g}:{fv:.4f}" for g, fv in hist[::5]))
 print("\n-- evolved champion controller --")
 print(controller_to_text(best))
 
-_, champ_per, champ_deltas = eval_ctrl(best)
+_, champ_per, champ_deltas = eval_ctrl(best, DATA, POOL_ALL)
 toto_mean = statistics.mean([d["toto_j"] for d in DATA])
 our_mean = statistics.mean(champ_per.values())
 regress = [d["tid"] for d in DATA if champ_per[d["tid"]] > d["toto_j"] + 1e-6]
@@ -122,9 +127,10 @@ print("\n== leave-one-task-out ==", flush=True)
 lt, le = [], []
 for held in DATA:
     train = [x for x in DATA if x["tid"] != held["tid"]]
-    b, _, _ = run_controller_evolution(SEED_CONTROLLERS, lambda c: eval_ctrl(c, train)[0],
+    pool_tr = _pool(train)                    # LOO-safe: pool excludes the held-out task
+    b, _, _ = run_controller_evolution(SEED_CONTROLLERS, lambda c: eval_ctrl(c, train, pool_tr)[0],
                                        generations=20, pop_size=32, seed=20260918)
-    jp = eval_ctrl(b, [held])[1][held["tid"]]
+    jp = eval_ctrl(b, [held], pool_tr)[1][held["tid"]]
     lt.append(held["toto_j"]); le.append(jp)
 print(f"MEAN held-out: toto {statistics.mean(lt):.5f} -> controller {statistics.mean(le):.5f}")
 host.close(); fs.close()

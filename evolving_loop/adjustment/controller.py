@@ -35,6 +35,7 @@ class ControllerState:
     hts: tuple                # history timestamps
     fts: tuple                # future timestamps
     semantic_ref: str = ""    # cached LLM semantic mapping (e.g. "weekend"); "" = none
+    effect_pool: dict = None  # cross-task pooled relative effect per regime (ref -> (rel, n))
     trace: tuple = ()         # audit log of applied instructions
 
 
@@ -165,6 +166,76 @@ class SemanticAdjust:
         return replace(s, forecast=tuple(fc), trace=s.trace + (f"semantic[{ref}] x{fired}",))
 
 
+def build_event_effect_pool(items):
+    """Pool cross-task event effects: for each regime, the mean level RELATIVE to that
+    task's overall level, aggregated across tasks. `items` = iterable of (hv, hts).
+
+    Returns {ref: (mean_relative, n_tasks)} -- e.g. pool["weekend"]=(0.7, 40) means
+    "across 40 tasks, the weekend regime sits ~30% below normal". This is the cross-task
+    prior that lets a task with too little history borrow a stable magnitude estimate.
+    """
+    acc: dict = {r: [] for r in _ALL_REFS}
+    for hv, hts in items:
+        hv = list(hv)
+        if not hv:
+            continue
+        overall = mean(hv)
+        if overall == 0:
+            continue
+        for ref in _ALL_REFS:
+            lvl = _reference_level(hv, list(hts), ref)
+            if lvl is not None:
+                acc[ref].append(lvl / overall)
+    return {r: (mean(v), len(v)) for r, v in acc.items() if v}
+
+
+@dataclass(frozen=True)
+class PooledSemanticAdjust:
+    """SemanticAdjust with a CROSS-TASK prior. The magnitude for the LLM-chosen regime is
+    a shrinkage blend of this task's own estimate and the pooled cross-task estimate
+    (state.effect_pool), so a task with too little history borrows a stable magnitude from
+    all tasks sharing that regime. `local_weight` (evolvable) trades local vs prior."""
+    cap: float = KERNEL_MAX_FRAC
+    trusted: tuple = _ALL_REFS
+    local_weight: float = 0.5
+
+    def apply(self, s: ControllerState) -> ControllerState:
+        ref = s.semantic_ref
+        if not ref or ref == "none" or ref not in self.trusted:
+            return replace(s, trace=s.trace + ("pooled:none",))
+        overall = mean(s.hv) if s.hv else 0.0
+        if overall == 0:
+            return replace(s, trace=s.trace + ("pooled:no-overall",))
+        local = _reference_level(list(s.hv), list(s.hts), ref)
+        local_rel = (local / overall) if local is not None else None
+        pool = s.effect_pool or {}
+        pool_rel = pool[ref][0] if ref in pool else None
+        if local_rel is not None and pool_rel is not None:
+            rel = self.local_weight * local_rel + (1.0 - self.local_weight) * pool_rel
+        elif local_rel is not None:
+            rel = local_rel
+        elif pool_rel is not None:
+            rel = pool_rel
+        else:
+            return replace(s, trace=s.trace + ("pooled:no-estimate",))
+        target = rel * overall
+        fc = list(s.forecast)
+        fired = 0
+        for e, mask in _grounded_windows(s.effects, s.fts):
+            win = [s.base[i] for i, m in enumerate(mask) if m]
+            bw = mean(win) if win else 0.0
+            if bw <= 0:
+                continue
+            factor = target / bw
+            for i, m in enumerate(mask):
+                if m:
+                    dev = max(-self.cap, min(self.cap, factor - 1.0))
+                    fc[i] = s.base[i] * (1.0 + dev)
+            fired += 1
+        return replace(s, forecast=tuple(fc),
+                       trace=s.trace + (f"pooled[{ref},w={self.local_weight:.1f}] x{fired}",))
+
+
 @dataclass(frozen=True)
 class DocAdjust:
     """Scale grounded windowed effects by the document's own magnitude (capped)."""
@@ -200,7 +271,8 @@ class Regenerate:
         return replace(s, trace=s.trace + ("regenerate(stub:noop)",))
 
 
-INSTRUCTIONS = (SelectBase, RegimeAdjust, SemanticAdjust, DocAdjust, NoOp, Regenerate)
+INSTRUCTIONS = (SelectBase, RegimeAdjust, SemanticAdjust, PooledSemanticAdjust, DocAdjust,
+                NoOp, Regenerate)
 
 
 @dataclass(frozen=True)
@@ -210,7 +282,8 @@ class Controller:
 
 
 def run_controller(controller: Controller, candidates: dict, effects: Sequence,
-                   hv: Sequence, hts: Sequence, fts: Sequence, semantic_ref: str = ""):
+                   hv: Sequence, hts: Sequence, fts: Sequence, semantic_ref: str = "",
+                   effect_pool: dict = None):
     """Execute the instruction sequence; return (final_forecast, trace).
 
     Kernel: the result is always bounded against the selected base, so no orchestration
@@ -221,7 +294,7 @@ def run_controller(controller: Controller, candidates: dict, effects: Sequence,
                           or (next(iter(candidates.values())) if candidates else ())))
     s = ControllerState(candidates=dict(candidates), base=default_base, forecast=default_base,
                         effects=tuple(effects), hv=tuple(hv), hts=tuple(hts), fts=tuple(fts),
-                        semantic_ref=semantic_ref)
+                        semantic_ref=semantic_ref, effect_pool=effect_pool or {})
     for step in controller.steps:
         s = step.apply(s)
     out = apply_bounded_delta(list(s.base), list(s.forecast), max_frac=KERNEL_MAX_FRAC)
@@ -249,8 +322,12 @@ CASCADE_CONTROLLER = Controller(
 SEMANTIC_CONTROLLER = Controller(
     steps=(SelectBase(), SemanticAdjust(trusted=("weekend", "weekday"))),
     name="select+semantic-stable")
+POOLED_CONTROLLER = Controller(
+    steps=(SelectBase(), PooledSemanticAdjust(trusted=("weekend", "weekday"), local_weight=0.5)),
+    name="select+pooled-semantic")
 
-SEED_CONTROLLERS = (IDENTITY_CONTROLLER, REGIME_CONTROLLER, CASCADE_CONTROLLER, SEMANTIC_CONTROLLER)
+SEED_CONTROLLERS = (IDENTITY_CONTROLLER, REGIME_CONTROLLER, CASCADE_CONTROLLER,
+                    SEMANTIC_CONTROLLER, POOLED_CONTROLLER)
 
 
 # ---------------------------------------------------------------- evolution of control flow
@@ -271,6 +348,9 @@ def random_instruction(rng: _random.Random):
                             fill_unknown_direction=rng.random() < 0.7)
     if kind is SemanticAdjust:
         return SemanticAdjust(cap=_clamp(rng.uniform(0.2, KERNEL_MAX_FRAC)))
+    if kind is PooledSemanticAdjust:
+        return PooledSemanticAdjust(cap=_clamp(rng.uniform(0.2, KERNEL_MAX_FRAC)),
+                                    local_weight=rng.choice((0.3, 0.5, 0.7)))
     if kind is DocAdjust:
         return DocAdjust(cap=_clamp(rng.uniform(0.1, 0.4)))
     if kind is Regenerate:
@@ -290,6 +370,16 @@ def _mutate_step(step, rng: _random.Random):
         if rng.random() < 0.5:
             return replace(step, cap=_clamp(step.cap + rng.uniform(-0.15, 0.15)))
         ref = rng.choice(_ALL_REFS)                       # toggle a ref in/out of trust
+        tset = set(step.trusted)
+        tset.symmetric_difference_update({ref})
+        return replace(step, trusted=tuple(r for r in _ALL_REFS if r in tset))
+    if isinstance(step, PooledSemanticAdjust):
+        r = rng.random()
+        if r < 0.4:
+            return replace(step, cap=_clamp(step.cap + rng.uniform(-0.15, 0.15)))
+        if r < 0.7:
+            return replace(step, local_weight=max(0.0, min(1.0, step.local_weight + rng.uniform(-0.3, 0.3))))
+        ref = rng.choice(_ALL_REFS)
         tset = set(step.trusted)
         tset.symmetric_difference_update({ref})
         return replace(step, trusted=tuple(r for r in _ALL_REFS if r in tset))
