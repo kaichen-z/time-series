@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+import random
+from types import SimpleNamespace
+
+from evolving_loop.adjustment import project_evidence
+from evolving_loop.adjustment.controller import (
+    CASCADE_CONTROLLER, IDENTITY_CONTROLLER, REGIME_CONTROLLER, Controller,
+    DocAdjust, NoOp, RegimeAdjust, SelectBase,
+    controller_to_text, crossover_controllers, mutate_controller, run_controller,
+)
+
+# synthetic weekend regime: weekdays=10, weekends=6
+_HTS = tuple(f"2024-06-{d:02d}T00:00:00" for d in range(3, 17))
+_HV = tuple(10.0 if __import__("datetime").date(2024, 6, d).weekday() < 5 else 6.0
+            for d in range(3, 17))
+_FTS = ("2024-06-17T00:00:00", "2024-06-18T00:00:00")   # Mon, Tue
+
+
+def _effects(**kw):
+    base = dict(direction="down", magnitude_kind="explicit", magnitude_value=0.2,
+                start_timestamp="2024-06-17T00:00:00", end_timestamp="2024-06-17T00:00:00",
+                stance="challenges", numeric_eligible=False, entity_match=False,
+                target_match=False, citations=(SimpleNamespace(document_id="d", exact_quote="q"),))
+    base.update(kw)
+    return project_evidence(SimpleNamespace(chains=(SimpleNamespace(**base),)))
+
+
+CANDS = {"toto_2_0": (100.0, 100.0)}
+
+
+def test_identity_controller_returns_base():
+    out, trace = run_controller(IDENTITY_CONTROLLER, CANDS, _effects(), _HV, _HTS, _FTS)
+    assert out == (100.0, 100.0)
+    assert trace and trace[0].startswith("select")
+
+
+def test_regime_controller_scales_in_window_only_and_bounded():
+    out, trace = run_controller(REGIME_CONTROLLER, CANDS, _effects(), _HV, _HTS, _FTS)
+    assert out[0] == 100.0 * 0.6      # weekend regime applied in the effect window
+    assert out[1] == 100.0            # outside the window untouched
+    assert any("regime_adjust" in t for t in trace)
+    assert abs(out[0] - 100.0) <= 0.5 * 100.0 + 1e-9    # kernel bound
+
+
+def test_ungrounded_effect_is_never_adjusted():
+    ungrounded = _effects(citations=())
+    out, _ = run_controller(REGIME_CONTROLLER, CANDS, ungrounded, _HV, _HTS, _FTS)
+    assert out == (100.0, 100.0)
+
+
+def test_order_of_instructions_matters_and_is_free():
+    # a controller that does regime then a conflicting doc-adjust; both are just steps
+    c = Controller(steps=(SelectBase(), RegimeAdjust("weekend_weekday"), NoOp()))
+    out, trace = run_controller(c, CANDS, _effects(), _HV, _HTS, _FTS)
+    assert out[0] == 60.0 and "noop" in trace
+
+
+def test_kernel_bounds_even_an_extreme_controller():
+    # a doc adjust with a huge magnitude still can't exceed the kernel envelope
+    big = _effects(magnitude_value=9.9)
+    c = Controller(steps=(SelectBase(), DocAdjust(cap=0.5)))
+    out, _ = run_controller(c, CANDS, big, _HV, _HTS, _FTS)
+    assert abs(out[0] - 100.0) <= 0.5 * 100.0 + 1e-9
+
+
+def test_mutation_and_crossover_stay_legal_and_runnable():
+    rng = random.Random(0)
+    c = CASCADE_CONTROLLER
+    for _ in range(200):
+        c = mutate_controller(c, rng)
+        assert isinstance(c, Controller) and len(c.steps) <= 8
+        out, _ = run_controller(c, CANDS, _effects(), _HV, _HTS, _FTS)
+        for v in out:                                    # always finite + bounded
+            assert abs(v - 100.0) <= 0.5 * 100.0 + 1e-9
+    d = crossover_controllers(CASCADE_CONTROLLER, c, rng)
+    assert isinstance(d, Controller) and 1 <= len(d.steps) <= 8
+
+
+def test_controller_to_text_is_readable():
+    txt = controller_to_text(REGIME_CONTROLLER)
+    assert "SelectBase" in txt and "RegimeAdjust" in txt
