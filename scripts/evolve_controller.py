@@ -23,6 +23,7 @@ from evolving_loop.adjustment.controller import (
     SEED_CONTROLLERS, IDENTITY_CONTROLLER, run_controller, controller_to_text,
     run_controller_evolution, build_event_effect_pool,
 )
+from evolving_loop.adjustment.skill_memory import SkillMemory
 
 ROOT = Path(".").resolve(); CAP = 5.0
 IDH = "90a281166723e9ea43e58e9468c286675dbe1dab430a5a7d3e6b38526a4313c2"
@@ -109,8 +110,12 @@ def eval_ctrl(controller, data, pool):
 POOL_ALL = _pool(DATA)                       # in-sample pool (all tasks)
 fitness = lambda c: eval_ctrl(c, DATA, POOL_ALL)[0]
 
-print("\n== evolving controller (CVaR fitness) ==", flush=True)
-best, best_fit, hist = run_controller_evolution(SEED_CONTROLLERS, fitness, generations=30, pop_size=48, elite=10)
+# skill memory: accumulate good controllers across runs (extra seeds now, save champion after)
+MEM = SkillMemory(ROOT / ".scratch/skill_memory.json")
+seeds = tuple(SEED_CONTROLLERS) + tuple(MEM.seeds())
+print(f"\n== evolving controller (CVaR fitness) | seeds: {len(SEED_CONTROLLERS)} built + "
+      f"{len(MEM.seeds())} from skill memory ==", flush=True)
+best, best_fit, hist = run_controller_evolution(seeds, fitness, generations=30, pop_size=48, elite=10)
 print("gen best:", ", ".join(f"g{g}:{fv:.4f}" for g, fv in hist[::5]))
 print("\n-- evolved champion controller --")
 print(controller_to_text(best))
@@ -121,6 +126,11 @@ our_mean = statistics.mean(champ_per.values())
 regress = [d["tid"] for d in DATA if champ_per[d["tid"]] > d["toto_j"] + 1e-6]
 print(f"\nin-sample: toto mean {toto_mean:.5f} -> champion {our_mean:.5f} | "
       f"worst delta {worst_case(champ_deltas):+.4f} | regressions: {regress or 'NONE'}")
+
+# sediment the champion into skill memory for future runs
+MEM.add(best, best_fit, meta={"cards": CARDS.name, "tasks": len(DATA)})
+MEM.save()
+print(f"skill memory: {len(MEM.entries)} controllers stored -> .scratch/skill_memory.json")
 
 # leave-one-task-out generalization
 print("\n== leave-one-task-out ==", flush=True)
