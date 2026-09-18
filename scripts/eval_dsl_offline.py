@@ -20,7 +20,8 @@ from numerical_agent.evolution.forecast_store import ForecastStore
 from common.metrics import drcik_point_metrics
 from evolving_loop.adjustment.post_adjust import EvidenceEffect, _canon_direction
 from evolving_loop.adjustment.dsl import (
-    IDENTITY, EVENT_SCALE, EVENT_SCALE_RELAXED_ENTITY, GROUNDED_EVENT, apply_policy,
+    IDENTITY, GROUNDED_EVENT, GROUNDED_EVENT_CAL_WEEKEND, GROUNDED_EVENT_CAL_LOWQ,
+    GROUNDED_EVENT_CAL_HOUR, GROUNDED_EVENT_CAL_CASCADE, apply_policy,
 )
 
 ROOT = Path(".").resolve()
@@ -64,9 +65,14 @@ def joint(fc, truth):
 
 
 POLICIES = {
-    "identity": IDENTITY, "event_scale": EVENT_SCALE,
-    "relaxed_entity": EVENT_SCALE_RELAXED_ENTITY, "grounded_event": GROUNDED_EVENT,
+    "toto": IDENTITY,
+    "grounded_fixed": GROUNDED_EVENT,
+    "cal[weekend]": GROUNDED_EVENT_CAL_WEEKEND,
+    "cal[lowq]": GROUNDED_EVENT_CAL_LOWQ,
+    "cal[hour]": GROUNDED_EVENT_CAL_HOUR,
+    "cal[cascade]": GROUNDED_EVENT_CAL_CASCADE,
 }
+ORDER = list(POLICIES)
 
 rows, fired_tasks = [], []
 agg = {k: [] for k in POLICIES}
@@ -75,34 +81,36 @@ for tid, t in by_id.items():
     base = tuple(toto_fs.forecast("toto_2_0", tuple(n.history_values),
                                   n.prediction_length, n.frequency))
     truth, fts = n.future_values, t.future_timestamps
+    hv, hts = list(n.history_values), [str(x) for x in t.history_timestamps]
     effs = effects_for(tid)
     r = {"task": tid}
+    fired_any = False
     for name, pol in POLICIES.items():
-        out, fired = apply_policy(pol, base, effs, fts)
+        out, fired = apply_policy(pol, base, effs, fts,
+                                  history_values=hv, history_timestamps=hts)
         r[name] = joint(out, truth)
         agg[name].append(r[name])
-        if name == "grounded_event":
-            r["ge_fired"] = len(fired)
-            if fired:
-                fired_tasks.append(tid)
+        if name != "toto" and fired:
+            fired_any = True
+    if fired_any:
+        fired_tasks.append(tid)
     rows.append(r)
 
-hdr = f"{'task':10s} {'toto':>9s} {'event':>9s} {'relaxE':>9s} {'grounded':>9s} {'geFired':>7s}"
+w = 13
+hdr = f"{'task':10s}" + "".join(f"{k:>{w}s}" for k in ORDER)
 print("\n== offline DSL eval on dev (joint = (sMAE+sRMSE)/2, lower better) ==")
 print(hdr)
 for r in rows:
-    print(f"{r['task']:10s} {r['identity']:9.5f} {r['event_scale']:9.5f} "
-          f"{r['relaxed_entity']:9.5f} {r['grounded_event']:9.5f} {r['ge_fired']:7d}")
+    print(f"{r['task']:10s}" + "".join(f"{r[k]:{w}.5f}" for k in ORDER))
 print("-" * len(hdr))
-print(f"{'MEAN(all)':10s} " + " ".join(f"{statistics.mean(agg[k]):9.5f}"
-      for k in ["identity", "event_scale", "relaxed_entity", "grounded_event"]))
+print(f"{'MEAN(all)':10s}" + "".join(f"{statistics.mean(agg[k]):{w}.5f}" for k in ORDER))
 
 if fired_tasks:
-    print(f"\n-- stratum: tasks where grounded_event fires ({fired_tasks}) --")
+    print(f"\n-- stratum: tasks where any adjustment fires ({fired_tasks}) --")
     sub = [r for r in rows if r["task"] in fired_tasks]
-    for k in ["identity", "event_scale", "relaxed_entity", "grounded_event"]:
-        print(f"  {k:16s} mean joint = {statistics.mean([r[k] for r in sub]):.5f}")
+    for k in ORDER:
+        print(f"  {k:14s} mean joint = {statistics.mean([r[k] for r in sub]):.5f}")
 else:
-    print("\n-- grounded_event fired on NO task (nothing to compare in the fired stratum) --")
+    print("\n-- no adjustment fired on any task --")
 
 host.close(); toto_fs.close()

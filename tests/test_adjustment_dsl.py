@@ -7,16 +7,25 @@ from evolving_loop.adjustment.dsl import (
     EVENT_SCALE,
     EVENT_SCALE_RELAXED_ENTITY,
     GROUNDED_EVENT,
+    GROUNDED_EVENT_CAL_LOWQ,
+    GROUNDED_EVENT_CAL_WEEKEND,
     IDENTITY,
     Action,
     Policy,
     Predicate,
     Rule,
     apply_policy,
+    available_regimes,
     policy_to_text,
 )
 
 TS = ("2026-01-01T00:00:00", "2026-01-02T00:00:00", "2026-01-03T00:00:00")
+
+# Two synthetic weeks, daily points: weekdays=10, weekends=6 (a document-explained
+# regime: weekends are lower). 2024-06-03 is a Monday.
+_HTS = tuple(f"2024-06-{d:02d}T00:00:00" for d in range(3, 17))
+_HV = tuple(10.0 if __import__("datetime").date(2024, 6, d).weekday() < 5 else 6.0
+            for d in range(3, 17))
 
 
 def _chain(**kw):
@@ -121,7 +130,63 @@ def test_grounded_event_recovers_real_task152_shape():
     assert out[1] == 100.0 and out[2] == 100.0
 
 
+def test_available_regimes_are_switchable():
+    regs = available_regimes()
+    assert {"weekend_weekday", "low_quantile_day", "hour_of_day"} <= set(regs)
+
+
+def test_history_calibrated_weekend_regime_fires_and_is_bounded():
+    # a "holiday" on a future weekday, direction down; weekend/weekday = 0.6
+    fut = ("2024-06-17T00:00:00", "2024-06-18T00:00:00")  # Mon, Tue
+    base = [100.0, 100.0]
+    eff = _effects(direction="down", start_timestamp="2024-06-17T00:00:00",
+                   end_timestamp="2024-06-17T00:00:00", entity_match=False,
+                   target_match=False, numeric_eligible=False)
+    out, fired = apply_policy(GROUNDED_EVENT_CAL_WEEKEND, base, eff, fut,
+                              history_values=_HV, history_timestamps=_HTS)
+    assert len(fired) == 1
+    assert out[0] == 100.0 * 0.6      # calibrated to the weekend regime (within cap 0.5)
+    assert out[1] == 100.0            # outside the effect window, untouched
+
+
+def test_calibration_is_inert_without_history():
+    fut = ("2024-06-17T00:00:00", "2024-06-18T00:00:00")
+    base = [100.0, 100.0]
+    eff = _effects(direction="down", start_timestamp="2024-06-17T00:00:00",
+                   end_timestamp="2024-06-17T00:00:00", entity_match=False,
+                   target_match=False, numeric_eligible=False)
+    out, fired = apply_policy(GROUNDED_EVENT_CAL_WEEKEND, base, eff, fut)  # no history
+    assert out == tuple(base) and fired == []
+
+
+def test_calibration_dropped_when_direction_contradicts_history():
+    # history regime is DOWN (weekend lower) but the document claims an increase
+    fut = ("2024-06-17T00:00:00", "2024-06-18T00:00:00")
+    base = [100.0, 100.0]
+    eff = _effects(direction="up", start_timestamp="2024-06-17T00:00:00",
+                   end_timestamp="2024-06-17T00:00:00", entity_match=False,
+                   target_match=False, numeric_eligible=False)
+    out, fired = apply_policy(GROUNDED_EVENT_CAL_WEEKEND, base, eff, fut,
+                              history_values=_HV, history_timestamps=_HTS)
+    assert out == tuple(base) and fired == []
+
+
+def test_low_quantile_regime_also_fires():
+    fut = ("2024-06-17T00:00:00", "2024-06-18T00:00:00")
+    base = [100.0, 100.0]
+    eff = _effects(direction="down", start_timestamp="2024-06-17T00:00:00",
+                   end_timestamp="2024-06-17T00:00:00", entity_match=False,
+                   target_match=False, numeric_eligible=False)
+    out, fired = apply_policy(GROUNDED_EVENT_CAL_LOWQ, base, eff, fut,
+                              history_values=_HV, history_timestamps=_HTS)
+    assert len(fired) == 1
+    assert out[0] < 100.0 and out[1] == 100.0          # lowered in-window only
+    assert abs(out[0] - base[0]) <= 0.5 * base[0] + 1e-9  # kernel bound holds
+
+
 def test_policy_to_text_is_readable():
     assert "identity" in policy_to_text(IDENTITY)
     txt = policy_to_text(EVENT_SCALE)
     assert "grounded" in txt and "scale" in txt and "rule1" in txt
+    cal = policy_to_text(GROUNDED_EVENT_CAL_WEEKEND)
+    assert "weekend_weekday" in cal and "regime" in cal

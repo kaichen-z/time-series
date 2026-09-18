@@ -68,15 +68,35 @@ calibrated 2.29 → truth 2.08). This is genuine **bidirectional** coupling: the
 document says *which* future steps should behave like a low-activity regime; the
 history says *how much* that regime lowers the series.
 
-## 3. Implication for the evolution space
+## 3. Implemented: `history_calibrated` mode with switchable regime candidates
 
-- Add a `history_calibrated` magnitude mode to the Level-0 DSL: the action's size
-  comes from a **historical regime ratio** (weekend/weekday, low-quantile day,
-  matching hour-of-day, …) rather than a constant. Which regime estimator to use is
-  itself an evolvable, auditable rule kept only if it improves held-out accuracy.
-- This doubles as a **data-driven `qualify` gate**: if no document-explained regime is
-  observable in the history, the effect is not calibratable → drop it. That replaces
-  retrieval's over-strict `numeric_eligible`/`entity_match` text judgment with an
-  evidence-from-the-numbers test — using data, not literal string matching.
-- Still bounded + grounded by the kernel; still stratified evaluation (event-driven
-  vs no-signal) with nested holdout.
+Added to `evolving_loop/adjustment/dsl.py`. A rule's `Action` can set
+`magnitude="history_calibrated"` with a `regime` name; the move size then comes from a
+**document-explained historical regime**, not a constant. Estimators are a switchable
+registry (`available_regimes()`): `weekend_weekday`, `low_quantile_day`, `hour_of_day`.
+Each returns a per-step factor or **None**, where None is the **data-driven qualify
+gate** — no observable regime ⇒ drop the effect. There is also a `data↔text
+cross-check`: if the regime's direction contradicts the document's direction, drop it.
+Everything still passes the kernel (grounded + bounded).
+
+### Offline dev eval of the switchable candidates (`scripts/eval_dsl_offline.py`)
+
+joint = (sMAE+sRMSE)/2; base = cached toto_2_0; only task_152 carries actionable signal.
+
+| policy | task_152 | MEAN(all 8) | note |
+|--------|----------|-------------|------|
+| toto | 0.46357 | 0.68980 | base |
+| grounded_event (fixed −30%) | 0.32638 | 0.67265 | constant cap |
+| **cal[weekend_weekday]** | **0.30510** | **0.66999** | regime fits a holiday |
+| cal[low_quantile_day] | 0.46357 | 0.68980 | not fired (small-sample quantile ⇒ dir conflict) |
+| cal[hour_of_day] | 0.46357 | 0.68980 | not fired (intra-day regime N/A for an all-day drop) |
+| **cal[cascade]** | **0.30510** | **0.66999** | weekend→lowq→fixed fallback picks the best |
+
+Takeaways: (1) the weekend regime and the cascade beat both the fixed cap and toto;
+(2) **zero regression** — candidates that cannot observe a consistent regime simply do
+not fire (the qualify gate), and all 7 no-signal tasks stay identical to toto; (3) this
+is the intended shape — several auditable candidates, held-out picks the winner.
+
+Which regime to use (and the cascade order) is now an evolvable, auditable choice.
+Next: fold these into the co-evolution loop with stratified (event vs no-signal),
+downside-protected fitness and nested holdout; add more regime estimators as needed.
