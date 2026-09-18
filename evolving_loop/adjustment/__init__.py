@@ -16,6 +16,18 @@ from .post_adjust import (
     project_evidence,
     reference_future_event_adjust,
 )
+from .dsl import (
+    EVENT_SCALE,
+    EVENT_SCALE_RELAXED_ENTITY,
+    GROUNDED_EVENT,
+    IDENTITY,
+    Action,
+    Policy,
+    Predicate,
+    Rule,
+    apply_policy,
+    policy_to_text,
+)
 
 __all__ = [
     "EvidenceEffect",
@@ -24,4 +36,15 @@ __all__ = [
     "identity_adjust",
     "project_evidence",
     "reference_future_event_adjust",
+    # Level-0 interaction DSL (rules-as-data policy)
+    "Predicate",
+    "Action",
+    "Rule",
+    "Policy",
+    "apply_policy",
+    "policy_to_text",
+    "IDENTITY",
+    "EVENT_SCALE",
+    "EVENT_SCALE_RELAXED_ENTITY",
+    "GROUNDED_EVENT",
 ]

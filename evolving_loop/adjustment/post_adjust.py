@@ -52,6 +52,23 @@ class EvidenceEffect:
         )
 
 
+# Retrieval's direction vocabulary (schemas.py `_DIRECTIONS`) is up/down/stable/
+# unknown; the adjustment layer's canonical vocabulary is increase/decrease. Map at
+# the projection boundary so ``.actionable`` and the DSL see one vocabulary. Without
+# this, no real evidence ever fires (the direction gate matched 0/15 chains in the
+# headroom probe) — including task_152's genuine "down" holiday signal.
+_DIRECTION_CANON = {
+    "up": "increase", "increase": "increase",
+    "down": "decrease", "decrease": "decrease",
+    "stable": "stable", "unknown": "unknown", "none": "none",
+}
+
+
+def _canon_direction(raw: object) -> str:
+    key = str(raw).strip().lower()
+    return _DIRECTION_CANON.get(key, key)
+
+
 def project_evidence(card: object) -> tuple[EvidenceEffect, ...]:
     """Project a ``FinalRetrievalCard`` (or any object exposing ``.chains``).
 
@@ -63,7 +80,7 @@ def project_evidence(card: object) -> tuple[EvidenceEffect, ...]:
         citations = tuple(getattr(chain, "citations", ()) or ())
         effects.append(
             EvidenceEffect(
-                direction=str(getattr(chain, "direction", "unknown")),
+                direction=_canon_direction(getattr(chain, "direction", "unknown")),
                 magnitude_kind=str(getattr(chain, "magnitude_kind", "unknown")),
                 magnitude_value=getattr(chain, "magnitude_value", None),
                 start_timestamp=getattr(chain, "start_timestamp", None),
