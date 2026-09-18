@@ -147,11 +147,24 @@ class FocusPolicy:
 
 @dataclass(frozen=True)
 class QualifyPolicy:
-    """Gate raw evidence and choose its magnitude source (doc / regime-calibrated)."""
+    """Gate raw evidence and choose its magnitude source (doc / regime-calibrated).
+
+    Because retrieval's direction/magnitude are unreliable (they turn to `unknown` once
+    the LLM is grounded to the numbers), `fill_direction_from_regime` lets a grounded,
+    windowed event with an unknown/stable direction take BOTH its direction and its
+    magnitude from the strongest historical regime — i.e. the data, not the LLM, decides.
+    Whether to do this (and how strong the regime must be) is itself evolvable.
+    """
+    # accept any direction (unknown included, so the regime can fill it) and do not
+    # require the document to carry a magnitude (the regime supplies it); still grounded
+    # + windowed by the kernel / predicate.
     predicate: Predicate = Predicate(
-        require_entity_match=False, require_target_match=False, require_numeric_eligible=False)
+        directions=(), require_entity_match=False, require_target_match=False,
+        require_numeric_eligible=False, require_magnitude=False)
     magnitude_source: str = "cascade"     # "doc" | "calibrated" | "cascade"
     doc_cap: float = 0.3
+    fill_direction_from_regime: bool = True
+    min_fill_strength: float = 0.10       # a regime must be at least this pronounced to fill
 
     def apply(self, raw_effects, regimes, fts) -> tuple:
         out = []
@@ -169,14 +182,25 @@ class QualifyPolicy:
     def _one(self, e, regimes, mask) -> Optional[QualifiedEffect]:
         if self.magnitude_source in ("calibrated", "cascade"):
             for r in regimes:
-                if r.direction != e.direction:        # data↔text cross-check
+                if r.direction != e.direction:        # data↔text cross-check (explicit agreement)
                     continue
                 factors = tuple(r.factors[i] if m else 1.0 for i, m in enumerate(mask))
                 return QualifiedEffect(e.direction, mask, factors, f"calibrated:{r.kind}",
                                        e.grounded, f"regime {r.kind} agrees ({r.direction})")
+            # retrieval gave no usable direction: let the strongest regime supply it.
+            if (self.fill_direction_from_regime and e.grounded
+                    and e.direction in ("unknown", "stable", "none", "")):
+                strong = [r for r in regimes if r.strength >= self.min_fill_strength]
+                if strong:
+                    r = max(strong, key=lambda x: x.strength)
+                    factors = tuple(r.factors[i] if m else 1.0 for i, m in enumerate(mask))
+                    return QualifiedEffect(r.direction, mask, factors, f"calibrated_filled:{r.kind}",
+                                           e.grounded,
+                                           f"regime {r.kind} supplies direction ({r.direction}, "
+                                           f"strength {r.strength:.2f}) for an unknown-direction event")
         if self.magnitude_source in ("doc", "cascade"):
             mag = abs(e.magnitude_value) if e.magnitude_value is not None else 0.0
-            if mag <= 0:
+            if mag <= 0 or e.direction not in ("increase", "decrease"):
                 return None
             frac = min(mag, self.doc_cap)
             factors = tuple(1.0 + _sign(e.direction) * frac if m else 1.0 for m in mask)
@@ -259,11 +283,15 @@ def _mutate_focus(f: FocusPolicy, rng: random.Random) -> FocusPolicy:
 
 def _mutate_qualify(q: QualifyPolicy, rng: random.Random) -> QualifyPolicy:
     r = rng.random()
-    if r < 0.5:
+    if r < 0.35:
         return replace(q, predicate=_mutate_predicate(q.predicate, rng))
-    if r < 0.8:
+    if r < 0.55:
         return replace(q, magnitude_source=rng.choice(_SOURCES))
-    return replace(q, doc_cap=max(0.0, min(KERNEL_MAX_FRAC, q.doc_cap + rng.uniform(-0.1, 0.1))))
+    if r < 0.7:
+        return replace(q, doc_cap=max(0.0, min(KERNEL_MAX_FRAC, q.doc_cap + rng.uniform(-0.1, 0.1))))
+    if r < 0.85:
+        return replace(q, fill_direction_from_regime=not q.fill_direction_from_regime)
+    return replace(q, min_fill_strength=max(0.0, min(0.5, q.min_fill_strength + rng.uniform(-0.05, 0.05))))
 
 
 def _mutate_integrate(ig: IntegratePolicy, rng: random.Random) -> IntegratePolicy:

@@ -58,6 +58,24 @@ def test_ungrounded_never_fires():
     assert out == tuple(base) and state.fired == ()
 
 
+def test_regime_fills_direction_for_unknown_grounded_event():
+    # retrieval turned conservative: grounded, windowed, but direction=unknown.
+    # the weekend regime (decrease, strength ~0.37) should supply direction + magnitude.
+    base = [100.0, 100.0]
+    eff = _effect(direction="unknown", magnitude_value=None)
+    out, state = run_pipeline(Interaction(), base, eff, _FTS, _HV, _HTS)
+    assert len(state.fired) == 1
+    q = state.qualified[0]
+    assert q.source.startswith("calibrated_filled") and q.direction == "decrease"
+    assert out[0] == 100.0 * 0.6 and out[1] == 100.0
+
+    # with filling disabled, the same unknown event is dropped (no doc magnitude either)
+    from evolving_loop.adjustment.coevolve import QualifyPolicy
+    it2 = Interaction(qualify=QualifyPolicy(fill_direction_from_regime=False))
+    out2, state2 = run_pipeline(it2, base, eff, _FTS, _HV, _HTS)
+    assert out2 == tuple(base) and state2.fired == ()
+
+
 def test_mutation_and_crossover_are_legal():
     rng = random.Random(0)
     x = Interaction()
