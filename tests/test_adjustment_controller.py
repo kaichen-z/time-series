@@ -5,8 +5,9 @@ from types import SimpleNamespace
 
 from evolving_loop.adjustment import project_evidence
 from evolving_loop.adjustment.controller import (
-    CASCADE_CONTROLLER, IDENTITY_CONTROLLER, REGIME_CONTROLLER, SEED_CONTROLLERS, Controller,
-    DocAdjust, NoOp, RegimeAdjust, SelectBase,
+    CASCADE_CONTROLLER, IDENTITY_CONTROLLER, REGIME_CONTROLLER, SEED_CONTROLLERS,
+    SEMANTIC_CONTROLLER, Controller,
+    DocAdjust, NoOp, RegimeAdjust, SelectBase, SemanticAdjust,
     controller_to_text, crossover_controllers, mutate_controller, run_controller,
     run_controller_evolution,
 )
@@ -48,6 +49,19 @@ def test_ungrounded_effect_is_never_adjusted():
     ungrounded = _effects(citations=())
     out, _ = run_controller(REGIME_CONTROLLER, CANDS, ungrounded, _HV, _HTS, _FTS)
     assert out == (100.0, 100.0)
+
+
+def test_semantic_adjust_uses_cached_ref_and_history_level():
+    # ref="weekend" (cached LLM choice); weekend history level = 6, base window = 100
+    # -> scale toward 6/100, clamped by kernel to 50% -> 100*(1-0.5)=50
+    out, trace = run_controller(SEMANTIC_CONTROLLER, CANDS, _effects(), _HV, _HTS, _FTS,
+                                semantic_ref="weekend")
+    assert out[0] == 50.0                    # clamped to kernel floor (target 6 is far below)
+    assert out[1] == 100.0                   # outside the effect window
+    assert any("semantic[weekend]" in t for t in trace)
+    # no cached ref -> no-op
+    out2, _ = run_controller(SEMANTIC_CONTROLLER, CANDS, _effects(), _HV, _HTS, _FTS, semantic_ref="")
+    assert out2 == (100.0, 100.0)
 
 
 def test_order_of_instructions_matters_and_is_free():

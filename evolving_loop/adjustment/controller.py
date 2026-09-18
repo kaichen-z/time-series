@@ -22,7 +22,7 @@ from statistics import mean
 from typing import Optional, Sequence
 
 from .dsl import _REGIMES, _sign, KERNEL_MAX_FRAC, available_regimes
-from .post_adjust import EvidenceEffect, apply_bounded_delta, horizon_window_mask
+from .post_adjust import EvidenceEffect, _parse, apply_bounded_delta, horizon_window_mask
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,7 @@ class ControllerState:
     hv: tuple                 # history values
     hts: tuple                # history timestamps
     fts: tuple                # future timestamps
+    semantic_ref: str = ""    # cached LLM semantic mapping (e.g. "weekend"); "" = none
     trace: tuple = ()         # audit log of applied instructions
 
 
@@ -93,6 +94,69 @@ class RegimeAdjust:
         return replace(s, forecast=tuple(fc), trace=s.trace + (f"regime_adjust[{self.regime}] x{fired}",))
 
 
+def _reference_level(hv, hts, ref):
+    """Historical level for a named regime (weekend/weekday/low_day/high_day/recent/overall)."""
+    if not hv:
+        return None
+
+    def wd(t):
+        p = _parse(str(t))
+        return p.weekday() if p else -1
+
+    if ref == "overall":
+        return mean(hv)
+    if ref == "recent":
+        return mean(hv[-24:])
+    if ref == "weekday":
+        v = [x for x, t in zip(hv, hts) if 0 <= wd(t) < 5]
+        return mean(v) if v else None
+    if ref == "weekend":
+        v = [x for x, t in zip(hv, hts) if wd(t) >= 5]
+        return mean(v) if v else None
+    if ref in ("low_day", "high_day"):
+        byday: dict = {}
+        for x, t in zip(hv, hts):
+            p = _parse(str(t))
+            if p:
+                byday.setdefault(p.date(), []).append(x)
+        if not byday:
+            return None
+        dm = sorted(mean(z) for z in byday.values())
+        return dm[0] if ref == "low_day" else dm[-1]
+    return None
+
+
+@dataclass(frozen=True)
+class SemanticAdjust:
+    """The proven primitive: scale grounded windowed effects toward the LLM-chosen
+    historical regime. The reference (e.g. "weekend", cached in state.semantic_ref) is
+    the LLM's semantic judgement of what the event resembles; the magnitude is read from
+    that regime's historical level (data). No cached ref / no level -> no-op."""
+    cap: float = KERNEL_MAX_FRAC
+
+    def apply(self, s: ControllerState) -> ControllerState:
+        ref = s.semantic_ref
+        if not ref or ref == "none":
+            return replace(s, trace=s.trace + ("semantic:none",))
+        level = _reference_level(list(s.hv), list(s.hts), ref)
+        if level is None:
+            return replace(s, trace=s.trace + ("semantic:no-level",))
+        fc = list(s.forecast)
+        fired = 0
+        for e, mask in _grounded_windows(s.effects, s.fts):
+            win = [s.base[i] for i, m in enumerate(mask) if m]
+            bw = mean(win) if win else 0.0
+            if bw <= 0:
+                continue
+            factor = level / bw
+            for i, m in enumerate(mask):
+                if m:
+                    dev = max(-self.cap, min(self.cap, factor - 1.0))
+                    fc[i] = s.base[i] * (1.0 + dev)
+            fired += 1
+        return replace(s, forecast=tuple(fc), trace=s.trace + (f"semantic[{ref}] x{fired}",))
+
+
 @dataclass(frozen=True)
 class DocAdjust:
     """Scale grounded windowed effects by the document's own magnitude (capped)."""
@@ -128,7 +192,7 @@ class Regenerate:
         return replace(s, trace=s.trace + ("regenerate(stub:noop)",))
 
 
-INSTRUCTIONS = (SelectBase, RegimeAdjust, DocAdjust, NoOp, Regenerate)
+INSTRUCTIONS = (SelectBase, RegimeAdjust, SemanticAdjust, DocAdjust, NoOp, Regenerate)
 
 
 @dataclass(frozen=True)
@@ -138,16 +202,18 @@ class Controller:
 
 
 def run_controller(controller: Controller, candidates: dict, effects: Sequence,
-                   hv: Sequence, hts: Sequence, fts: Sequence):
+                   hv: Sequence, hts: Sequence, fts: Sequence, semantic_ref: str = ""):
     """Execute the instruction sequence; return (final_forecast, trace).
 
     Kernel: the result is always bounded against the selected base, so no orchestration
     can emit a catastrophic move; adjustment primitives only touch grounded effects.
+    ``semantic_ref`` is the cached LLM regime choice used by SemanticAdjust.
     """
     default_base = tuple(float(x) for x in (candidates.get("toto_2_0")
                           or (next(iter(candidates.values())) if candidates else ())))
     s = ControllerState(candidates=dict(candidates), base=default_base, forecast=default_base,
-                        effects=tuple(effects), hv=tuple(hv), hts=tuple(hts), fts=tuple(fts))
+                        effects=tuple(effects), hv=tuple(hv), hts=tuple(hts), fts=tuple(fts),
+                        semantic_ref=semantic_ref)
     for step in controller.steps:
         s = step.apply(s)
     out = apply_bounded_delta(list(s.base), list(s.forecast), max_frac=KERNEL_MAX_FRAC)
@@ -172,8 +238,10 @@ CASCADE_CONTROLLER = Controller(
     steps=(SelectBase(), RegimeAdjust("weekend_weekday"), RegimeAdjust("low_quantile_day"),
            DocAdjust(cap=0.3)),
     name="select+regime-cascade+doc")
+SEMANTIC_CONTROLLER = Controller(
+    steps=(SelectBase(), SemanticAdjust()), name="select+semantic")
 
-SEED_CONTROLLERS = (IDENTITY_CONTROLLER, REGIME_CONTROLLER, CASCADE_CONTROLLER)
+SEED_CONTROLLERS = (IDENTITY_CONTROLLER, REGIME_CONTROLLER, CASCADE_CONTROLLER, SEMANTIC_CONTROLLER)
 
 
 # ---------------------------------------------------------------- evolution of control flow
@@ -192,6 +260,8 @@ def random_instruction(rng: _random.Random):
         return RegimeAdjust(regime=rng.choice(available_regimes()),
                             cap=_clamp(rng.uniform(0.1, KERNEL_MAX_FRAC)),
                             fill_unknown_direction=rng.random() < 0.7)
+    if kind is SemanticAdjust:
+        return SemanticAdjust(cap=_clamp(rng.uniform(0.2, KERNEL_MAX_FRAC)))
     if kind is DocAdjust:
         return DocAdjust(cap=_clamp(rng.uniform(0.1, 0.4)))
     if kind is Regenerate:
@@ -207,6 +277,8 @@ def _mutate_step(step, rng: _random.Random):
         if r < 0.8:
             return replace(step, cap=_clamp(step.cap + rng.uniform(-0.15, 0.15)))
         return replace(step, fill_unknown_direction=not step.fill_unknown_direction)
+    if isinstance(step, SemanticAdjust):
+        return replace(step, cap=_clamp(step.cap + rng.uniform(-0.15, 0.15)))
     if isinstance(step, DocAdjust):
         return replace(step, cap=_clamp(step.cap + rng.uniform(-0.1, 0.1), hi=0.5))
     return step

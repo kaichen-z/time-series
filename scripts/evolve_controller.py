@@ -41,7 +41,8 @@ else:
     cands = list((ROOT / ".scratch").glob("effect_cards*.json"))
     CARDS = max(cands, key=lambda p: len(_load(p))) if cands else ROOT / ".scratch/effect_cards_f8d9d5862942.json"
 raw = _load(CARDS)
-print(f"cards: {CARDS.name} ({len(raw)} tasks)", flush=True)
+REFS = _load(ROOT / ".scratch/semantic_refs.json")   # cached LLM semantic mappings (per task)
+print(f"cards: {CARDS.name} ({len(raw)} tasks) | semantic refs: {len(REFS)}", flush=True)
 
 manifest = RealEvolutionManifestV2.from_payload(
     _read_canonical(ROOT / "configs/evolution_v2/real/real-30m-toto-claude-server.json"))
@@ -86,6 +87,7 @@ for tid in raw:
     DATA.append(dict(tid=tid, cands={"toto_2_0": base}, truth=n.future_values,
                      fts=[str(x) for x in t.future_timestamps], effs=effects_for(tid),
                      hv=list(n.history_values), hts=[str(x) for x in t.history_timestamps],
+                     semantic_ref=REFS.get(tid, "none"),
                      toto_j=joint(base, n.future_values)))
 print(f"tasks with data: {len(DATA)}", flush=True)
 
@@ -93,7 +95,8 @@ print(f"tasks with data: {len(DATA)}", flush=True)
 def eval_ctrl(controller, data=DATA):
     per, deltas = {}, []
     for d in data:
-        out, _ = run_controller(controller, d["cands"], d["effs"], d["hv"], d["hts"], d["fts"])
+        out, _ = run_controller(controller, d["cands"], d["effs"], d["hv"], d["hts"], d["fts"],
+                                semantic_ref=d["semantic_ref"])
         jp = joint(out, d["truth"]); per[d["tid"]] = jp
         deltas.append(d["toto_j"] - jp)
     return cvar_downside_fitness(deltas), per, deltas
