@@ -102,7 +102,32 @@ def make_regime_estimator(fn: Callable):
     return est
 
 
-def design_loop(proposer, evaluate, *, rounds: int = 8, keep: int = 4):
+def make_window_scaler(fn: Callable):
+    """Wrap an LLM `estimate(hv,hts,fts,window_mask)` into a defensive per-step scaler.
+
+    The function is told which future steps are the document-localized event window and
+    must estimate the multiplicative scale there. Any error / wrong length / non-finite
+    output collapses to None (drop). Downstream still bounds the result.
+    """
+    def scaler(hv, hts, fts, mask):
+        try:
+            out = fn(list(hv), [str(x) for x in hts], [str(x) for x in fts], tuple(bool(m) for m in mask))
+        except Exception:
+            return None
+        if not isinstance(out, (list, tuple)) or len(out) != len(fts):
+            return None
+        try:
+            vals = [float(x) for x in out]
+        except (TypeError, ValueError):
+            return None
+        if any(v != v or v in (float("inf"), float("-inf")) for v in vals):
+            return None
+        return tuple(vals)
+    return scaler
+
+
+def design_loop(proposer, evaluate, *, wrap: Callable = make_regime_estimator,
+                rounds: int = 8, keep: int = 4):
     """Run the propose→sandbox→score→archive loop.
 
     proposer(archive) -> source code string (archive = list of (score, code) best-first).
@@ -116,7 +141,7 @@ def design_loop(proposer, evaluate, *, rounds: int = 8, keep: int = 4):
         rec: dict = {"round": r}
         try:
             fn = safe_compile(code)
-            est = make_regime_estimator(fn)
+            est = wrap(fn)
             score = float(evaluate(est))
             rec.update(status="ok", score=score)
             archive.append((score, code))
