@@ -261,3 +261,4 @@ runs/method_evolution
 runs/baselines/
 runs/dictionary_curation_v007/
 baseline/
+.scratch/
