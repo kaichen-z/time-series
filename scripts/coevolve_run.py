@@ -35,9 +35,13 @@ def _load(p):
         return {}
 
 
-# use whichever cards file currently has MORE tasks (effect_cards grows as A runs)
-_cands = [ROOT / ".scratch/effect_cards.json", ROOT / ".scratch/dev_cards.json"]
-CARDS = max(_cands, key=lambda p: len(_load(p)))
+# CARDS_FILE env overrides; else use whichever cards file currently has MORE tasks
+import os
+if os.environ.get("CARDS_FILE"):
+    CARDS = ROOT / ".scratch" / os.environ["CARDS_FILE"]
+else:
+    _cands = [ROOT / ".scratch/effect_cards.json", ROOT / ".scratch/dev_cards.json"]
+    CARDS = max(_cands, key=lambda p: len(_load(p)))
 raw = _load(CARDS)
 print(f"using cards: {CARDS.name}  ({len(raw)} tasks)", flush=True)
 
