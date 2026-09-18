@@ -126,6 +126,32 @@ def make_window_scaler(fn: Callable):
     return scaler
 
 
+def make_gate_scaler(fn: Callable):
+    """Wrap an LLM `estimate(hv,hts,fts,mask,reference_level,base_level)` confidence gate.
+
+    The LLM is given a semantically-chosen reference level and the base window level, and
+    decides (via history backtest) HOW MUCH to trust the move -- returning per-step
+    factors, e.g. 1+(reference_level/base_level-1)*confidence in the window, 1.0 outside.
+    Defensive: any error / wrong length / non-finite output -> None (drop).
+    """
+    def scaler(hv, hts, fts, mask, reference_level, base_level):
+        try:
+            out = fn(list(hv), [str(x) for x in hts], [str(x) for x in fts],
+                     tuple(bool(m) for m in mask), float(reference_level), float(base_level))
+        except Exception:
+            return None
+        if not isinstance(out, (list, tuple)) or len(out) != len(fts):
+            return None
+        try:
+            vals = [float(x) for x in out]
+        except (TypeError, ValueError):
+            return None
+        if any(v != v or v in (float("inf"), float("-inf")) for v in vals):
+            return None
+        return tuple(vals)
+    return scaler
+
+
 def design_loop(proposer, evaluate, *, wrap: Callable = make_regime_estimator,
                 rounds: int = 8, keep: int = 4):
     """Run the propose→sandbox→score→archive loop.

@@ -37,8 +37,11 @@ SEED_SUPPLY = RUN / "prepared/p2/seed_supply.json"
 
 # perception config: default = full numeric context (the improvement). Cards are keyed
 # by the config fingerprint so different configs coexist for co-evolution.
+import os
+PART = os.environ.get("PARTITION", "dev")   # "dev" | "train" | "public_test"
 PERCEPTION = PerceptionConfig()
-OUT = ROOT / f".scratch/effect_cards_{PERCEPTION.fingerprint()}.json"
+_suffix = "" if PART == "dev" else f"{PART}_"
+OUT = ROOT / f".scratch/effect_cards_{_suffix}{PERCEPTION.fingerprint()}.json"
 print(f"perception={PERCEPTION}  -> {OUT.name}", flush=True)
 
 # --- runtime injection (no file edits, so the manifest identity check still passes) ---
@@ -75,7 +78,7 @@ _tsa.TwoStageRetrievalAgent._complete = (
 
 # Which tasks to generate for: all 20 dev (extend to train later if this proves fast).
 parts = json.loads(SPLIT.read_text())["partitions"]
-WANT = list(parts["dev"]["task_ids"])
+WANT = list(parts[PART]["task_ids"])
 
 manifest = RealEvolutionManifestV2.from_payload(_read_canonical(MANIFEST))
 host = build_real_host(manifest, repo_root=ROOT, output_dir=Path(tempfile.mkdtemp()),
