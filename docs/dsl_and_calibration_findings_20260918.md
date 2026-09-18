@@ -98,5 +98,41 @@ not fire (the qualify gate), and all 7 no-signal tasks stay identical to toto; (
 is the intended shape — several auditable candidates, held-out picks the winner.
 
 Which regime to use (and the cascade order) is now an evolvable, auditable choice.
-Next: fold these into the co-evolution loop with stratified (event vs no-signal),
-downside-protected fitness and nested holdout; add more regime estimators as needed.
+
+## 4. The evolution loop (implemented) + an honest generalization verdict
+
+`evolving_loop/adjustment/evolve.py`: a (mu+lambda) search where the **genome is a
+`dsl.Policy`** (rules-as-data). Variation = mutate (flip predicate flags, jitter cap,
+switch regime/magnitude/op, add/remove/reorder rules) + one-point crossover; selection
+= elitism with a parsimony tie-break. It cannot break the kernel — mutation only edits
+fields; grounding + bounding are enforced in `apply_policy`. Fitness is injected by the
+caller. `scripts/evolve_dsl.py` runs it on the cached dev data with a **stratified,
+downside-protected fitness** (reward improvement, 5× penalize any regression, small
+per-rule penalty).
+
+**Result — the search works:** starting from the hand seeds it automatically finds an
+auditable 2-rule champion that beats every hand seed, with **zero in-sample regression**:
+
+| | toto | grounded_fixed | cal[weekend] | cal[cascade] | **EVOLVED** |
+|---|------|------|------|------|------|
+| task_152 | 0.46357 | 0.32638 | 0.30510 | 0.30510 | **0.29358** |
+| MEAN(8) | 0.68980 | 0.67265 | 0.66999 | 0.66999 | **0.64783** |
+
+**Result — but it overfits this tiny slice (honest LOO):** only task_152 carries real
+signal, so leave-one-task-out re-evolves on the other 7 and scores the held-out one:
+
+| held-out task | toto | LOO-evolved | verdict |
+|---|------|------|---------|
+| task_152 (signal) | 0.46357 | 0.38853 | improved — real signal generalizes |
+| task_114 / 115 / 118 | — | lower | **overfit leak** (no-signal tasks "improved") |
+| task_163 | 0.23264 | 0.25632 | **regressed** — overfit hurt |
+| task_142 / 156 / 184 | — | = toto | correctly did nothing |
+| **MEAN held-out** | **0.68980** | **0.65759** | in-sample was 0.64783 → gap = overfit |
+
+**Conclusion:** the full methodology is now in place and validated end-to-end — DSL +
+switchable regime candidates + evolution engine + stratified downside fitness + LOO
+acceptance, all unit-tested (24/24). The remaining bottleneck is **data, not method**:
+with 8 dev tasks and a single signal task, in-sample search overfits and LOO cannot
+give a clean generalization verdict. Real acceptance needs more event-driven tasks
+(their retrieval effect cards must be generated once, offline) so the same loop can run
+with proper stratified group-CV + nested holdout. That is the next step.
