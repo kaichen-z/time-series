@@ -11,7 +11,9 @@ Run:  TMPDIR=$PWD/.scratch PYTHONPATH=$PWD .venv/bin/python scripts/gen_effect_c
 """
 from __future__ import annotations
 import hashlib, json, tempfile, traceback
+from dataclasses import replace
 from pathlib import Path
+from evolving_loop.adjustment.coevolve import PerceptionConfig
 
 from evolving_loop.data import load_context_tasks_by_ids
 from evolving_loop.v2.cli import _read_canonical
@@ -32,7 +34,44 @@ MANIFEST = ROOT / "configs/evolution_v2/real/real-30m-toto-claude-server.json"
 SPLIT = ROOT / "splits/drcik_public_80_20_99_v3.json"
 TASKS_DIR = ROOT / "external/Dr-CiK/full-download/Dr-CiK_public/tasks"
 SEED_SUPPLY = RUN / "prepared/p2/seed_supply.json"
-OUT = ROOT / ".scratch/effect_cards.json"
+
+# perception config: default = full numeric context (the improvement). Cards are keyed
+# by the config fingerprint so different configs coexist for co-evolution.
+PERCEPTION = PerceptionConfig()
+OUT = ROOT / f".scratch/effect_cards_{PERCEPTION.fingerprint()}.json"
+print(f"perception={PERCEPTION}  -> {OUT.name}", flush=True)
+
+# --- runtime injection (no file edits, so the manifest identity check still passes) ---
+# Add the evolvable numeric `series_context` to the retrieval payload, and a calibration
+# instruction to the prompt, so the LLM can size magnitudes and sanity-check direction.
+import evolving_loop.retrieval_agent.two_stage_agent as _tsa
+
+_orig_r1, _orig_r2 = _tsa.build_round1_payload, _tsa.build_round2_payload
+
+
+def _inject(task, p):
+    ctx = PERCEPTION.build_context(task.numeric.history_values)
+    return {**p, "series_context": ctx} if ctx else p
+
+
+_tsa.build_round1_payload = lambda task, **kw: _inject(task, _orig_r1(task, **kw))
+_tsa.build_round2_payload = lambda task, *a, **kw: _inject(task, _orig_r2(task, *a, **kw))
+
+_CALIB = (
+    "\n\nCALIBRATION (data-grounded): the request may include `series_context` (recent "
+    "target values, summary stats, typical_scale). If present, treat it as the ground "
+    "truth of scale and units. An `add` adjustment_value must be comparable to "
+    "typical_scale and within the recent range -- never emit a value orders of magnitude "
+    "larger (e.g. do not output 90 when recent values are ~2-3); an off-scale document "
+    "number refers to something else, so mark it irrelevant, not an edit. Use `multiply` "
+    "for percentages or 'N times'. Do not assert a `direction` that contradicts the recent "
+    "observed trend without strong, explicit, quoted evidence; otherwise use `unknown`. "
+    "Prefer preserve/none when the evidence cannot be reconciled with this scale."
+)
+_orig_complete = _tsa.TwoStageRetrievalAgent._complete
+_tsa.TwoStageRetrievalAgent._complete = (
+    lambda self, prompt, payload, *, stage: _orig_complete(self, prompt + _CALIB, payload, stage=stage)
+)
 
 # Which tasks to generate for: all 20 dev (extend to train later if this proves fast).
 parts = json.loads(SPLIT.read_text())["partitions"]

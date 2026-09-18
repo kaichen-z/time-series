@@ -26,6 +26,63 @@ from .dsl import (
 from .evolve import _mutate_predicate
 from .post_adjust import EvidenceEffect, apply_bounded_delta, horizon_window_mask
 
+# --------------------------------------------------------------------------- perception
+@dataclass(frozen=True)
+class PerceptionConfig:
+    """Evolvable knobs for HOW MUCH numeric context the retrieval LLM is shown.
+
+    This is the perception layer made evolvable: it shapes `series_context` in the
+    retrieval view so the LLM can calibrate magnitude scale/units and sanity-check
+    direction. Evaluating a config needs one LLM pass per task, so cards are generated
+    offline once per config and cached by `fingerprint()`; co-evolution then selects
+    among the configs whose cards exist (cache hits are free)."""
+    recent_window: int = 24
+    include_stats: bool = True
+    include_magnitude_hint: bool = True
+    strict_direction: bool = True
+
+    def build_context(self, history_values) -> Optional[dict]:
+        hv = [float(x) for x in history_values]
+        if not hv:
+            return None
+        recent = hv[-max(1, self.recent_window):]
+        ctx: dict = {"recent_values": [round(x, 4) for x in recent]}
+        if self.include_stats:
+            ctx["history_stats"] = {"min": round(min(hv), 4), "max": round(max(hv), 4),
+                                    "mean": round(mean(hv), 4), "count": len(hv)}
+        if self.include_magnitude_hint:
+            scale = mean(abs(x) for x in hv) or 1.0
+            ctx["typical_scale"] = round(scale, 4)
+            ctx["note"] = ("Any additive change must be comparable to typical_scale; "
+                           "reject document numbers far outside this range.")
+        if self.strict_direction:
+            ctx["direction_rule"] = ("Only assert a direction that agrees with the recent "
+                                     "values unless a document explicitly and strongly states otherwise.")
+        return ctx
+
+    def fingerprint(self) -> str:
+        import hashlib
+        import json as _json
+        return hashlib.sha256(_json.dumps(self.__dict__, sort_keys=True).encode()).hexdigest()[:12]
+
+
+# a "blind" config == the historic behaviour (no numeric context at all)
+PERCEPTION_BLIND = PerceptionConfig(recent_window=0, include_stats=False,
+                                    include_magnitude_hint=False, strict_direction=False)
+PERCEPTION_FULL = PerceptionConfig()
+
+
+def _mutate_perception(p: PerceptionConfig, rng: random.Random) -> PerceptionConfig:
+    r = rng.random()
+    if r < 0.4:
+        return replace(p, recent_window=max(0, p.recent_window + rng.choice((-12, -6, 6, 12))))
+    if r < 0.6:
+        return replace(p, include_stats=not p.include_stats)
+    if r < 0.8:
+        return replace(p, include_magnitude_hint=not p.include_magnitude_hint)
+    return replace(p, strict_direction=not p.strict_direction)
+
+
 # --------------------------------------------------------------------------- protocol
 @dataclass(frozen=True)
 class Regime:
