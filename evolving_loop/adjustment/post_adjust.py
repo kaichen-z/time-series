@@ -99,7 +99,8 @@ def _parse(ts: str | None) -> datetime | None:
     if not isinstance(ts, str) or not ts:
         return None
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        # normalize to tz-naive so mixed aware/naive timestamps never crash comparisons
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
     except (TypeError, ValueError):
         return None
 

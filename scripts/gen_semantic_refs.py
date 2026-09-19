@@ -99,7 +99,7 @@ def choose_reference(evidence, base_win, L):
         return str(parse_json_object(resp.text).get("reference", "none"))
     except Exception as exc:
         print(f"    llm error: {exc}", flush=True)
-        return "none"
+        return None      # sentinel: do NOT save (retry next run), unlike a real "none"
 
 
 out = dict(existing)
@@ -116,9 +116,14 @@ for i, tid in enumerate(todo, 1):
     else:
         hv, hts = list(n.history_values), [str(x) for x in t.history_timestamps]
         bw = statistics.mean([base[i] for i in range(len(base)) if mask[i]])
-        out[tid] = choose_reference(t.gt_evidence, bw, levels(hv, hts))
+        r = choose_reference(t.gt_evidence, bw, levels(hv, hts))
+        if r is None:                       # LLM error (e.g. quota) -> skip, retry next run
+            print(f"[{i}/{len(todo)}] {tid}: SKIPPED (llm unavailable)", flush=True)
+            continue
+        out[tid] = r
     OUT.write_text(json.dumps(out, indent=1))
     print(f"[{i}/{len(todo)}] {tid}: ref={out[tid]} (saved)", flush=True)
 
-print(f"done. total refs: {len(out)}", flush=True)
+n_missing = sum(1 for tid in raw if tid not in out)
+print(f"done. saved refs: {len(out)} | still missing (llm unavailable): {n_missing}", flush=True)
 host.close(); fs.close()
