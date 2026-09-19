@@ -74,16 +74,26 @@ def test_pooled_semantic_uses_cross_task_prior():
     assert any("pooled[weekend" in t for t in trace)
 
 
-def test_pooled_semantic_falls_back_to_prior_when_local_missing():
-    # a task whose OWN history has no weekends still gets a magnitude from the pool
+def test_significance_gate_blocks_unverifiable_regime():
+    # a task whose OWN history has no weekends can't verify the weekend regime -> no-op
     weekday_only_hts = tuple(f"2024-06-{d:02d}T00:00:00" for d in (3, 4, 5, 6, 7, 10, 11))  # Mon-Fri
     weekday_only_hv = tuple(10.0 for _ in weekday_only_hts)
-    pool = build_event_effect_pool([(_HV, _HTS)])          # prior: weekend ~0.68
     out, trace = run_controller(POOLED_CONTROLLER, CANDS, _effects(),
-                                weekday_only_hv, weekday_only_hts, _FTS,
+                                weekday_only_hv, weekday_only_hts, _FTS, semantic_ref="weekend")
+    assert out == (100.0, 100.0)                            # significance gate blocks it
+    assert any("insignificant" in t for t in trace)
+
+
+def test_pooled_falls_back_to_prior_when_gate_off():
+    # with the significance gate off, the pool prior supplies the magnitude
+    weekday_only_hts = tuple(f"2024-06-{d:02d}T00:00:00" for d in (3, 4, 5, 6, 7, 10, 11))
+    weekday_only_hv = tuple(10.0 for _ in weekday_only_hts)
+    pool = build_event_effect_pool([(_HV, _HTS)])          # prior: weekend ~0.68
+    c = Controller(steps=(SelectBase(),
+                          PooledSemanticAdjust(trusted=("weekend",), require_significant=False)))
+    out, trace = run_controller(c, CANDS, _effects(), weekday_only_hv, weekday_only_hts, _FTS,
                                 semantic_ref="weekend", effect_pool=pool)
-    assert out[0] < 100.0                                   # borrowed the weekend prior
-    assert any("pooled[weekend" in t for t in trace)
+    assert out[0] < 100.0 and any("pooled[weekend" in t for t in trace)
 
 
 def test_order_of_instructions_matters_and_is_free():

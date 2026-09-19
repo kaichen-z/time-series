@@ -18,7 +18,7 @@ pipeline. `re-generate numerical` is intentionally left as a future primitive st
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from statistics import mean
+from statistics import mean, pstdev
 from typing import Optional, Sequence
 
 from .dsl import _REGIMES, _sign, KERNEL_MAX_FRAC, available_regimes
@@ -130,6 +130,45 @@ def _reference_level(hv, hts, ref):
 _ALL_REFS = ("weekend", "weekday", "low_day", "high_day", "recent", "overall")
 
 
+def _regime_significant(hv, hts, ref, min_t=2.0, min_n=3):
+    """Per-task test: is this regime a STATISTICALLY significant, stable departure from
+    the rest of the history? Uses a Welch-style t between the regime's samples and the
+    complement (weekday/weekend), or day-mean extremity for low/high_day. This is
+    computed per task from its OWN history, so it generalizes (no learned global param);
+    single-day extremes and noise fail it automatically."""
+    if not hv or ref in ("overall", "recent"):
+        return False
+
+    def wd(t):
+        p = _parse(str(t)); return p.weekday() if p else -1
+
+    if ref in ("weekend", "weekday"):
+        grp = [v for v, t in zip(hv, hts) if (wd(t) >= 5) == (ref == "weekend") and wd(t) >= 0]
+        rest = [v for v, t in zip(hv, hts) if (wd(t) >= 5) != (ref == "weekend") and wd(t) >= 0]
+        if len(grp) < min_n or len(rest) < min_n:
+            return False
+        vg, vr = pstdev(grp), pstdev(rest)
+        se = (vg * vg / len(grp) + vr * vr / len(rest)) ** 0.5
+        if se <= 1e-9:
+            return abs(mean(grp) - mean(rest)) > 1e-9
+        return abs(mean(grp) - mean(rest)) / se >= min_t
+    if ref in ("low_day", "high_day"):
+        byday: dict = {}
+        for v, t in zip(hv, hts):
+            p = _parse(str(t))
+            if p:
+                byday.setdefault(p.date(), []).append(v)
+        dm = sorted(mean(z) for z in byday.values())
+        if len(dm) < 4:                        # too few days to call an extreme "stable"
+            return False
+        extreme, others = (dm[0], dm[1:]) if ref == "low_day" else (dm[-1], dm[:-1])
+        sd = pstdev(others) if len(others) >= 2 else 0.0
+        if sd <= 1e-9:
+            return False
+        return abs(extreme - mean(others)) / sd >= min_t
+    return False
+
+
 @dataclass(frozen=True)
 class SemanticAdjust:
     """The proven primitive: scale grounded windowed effects toward the LLM-chosen
@@ -142,11 +181,14 @@ class SemanticAdjust:
     (low_day/high_day) and 'recent' tend to regress -- evolution learns which to trust."""
     cap: float = KERNEL_MAX_FRAC
     trusted: tuple = _ALL_REFS
+    require_significant: bool = True     # per-task data gate: only act if regime is significant
 
     def apply(self, s: ControllerState) -> ControllerState:
         ref = s.semantic_ref
         if not ref or ref == "none" or ref not in self.trusted:
             return replace(s, trace=s.trace + ("semantic:none",))
+        if self.require_significant and not _regime_significant(list(s.hv), list(s.hts), ref):
+            return replace(s, trace=s.trace + (f"semantic:insignificant[{ref}]",))
         level = _reference_level(list(s.hv), list(s.hts), ref)
         if level is None:
             return replace(s, trace=s.trace + ("semantic:no-level",))
@@ -198,11 +240,14 @@ class PooledSemanticAdjust:
     cap: float = KERNEL_MAX_FRAC
     trusted: tuple = _ALL_REFS
     local_weight: float = 0.5
+    require_significant: bool = True     # per-task data gate: only act if regime is significant
 
     def apply(self, s: ControllerState) -> ControllerState:
         ref = s.semantic_ref
         if not ref or ref == "none" or ref not in self.trusted:
             return replace(s, trace=s.trace + ("pooled:none",))
+        if self.require_significant and not _regime_significant(list(s.hv), list(s.hts), ref):
+            return replace(s, trace=s.trace + (f"pooled:insignificant[{ref}]",))
         overall = mean(s.hv) if s.hv else 0.0
         if overall == 0:
             return replace(s, trace=s.trace + ("pooled:no-overall",))
@@ -367,22 +412,25 @@ def _mutate_step(step, rng: _random.Random):
             return replace(step, cap=_clamp(step.cap + rng.uniform(-0.15, 0.15)))
         return replace(step, fill_unknown_direction=not step.fill_unknown_direction)
     if isinstance(step, SemanticAdjust):
-        if rng.random() < 0.5:
-            return replace(step, cap=_clamp(step.cap + rng.uniform(-0.15, 0.15)))
-        ref = rng.choice(_ALL_REFS)                       # toggle a ref in/out of trust
-        tset = set(step.trusted)
-        tset.symmetric_difference_update({ref})
-        return replace(step, trusted=tuple(r for r in _ALL_REFS if r in tset))
-    if isinstance(step, PooledSemanticAdjust):
         r = rng.random()
         if r < 0.4:
             return replace(step, cap=_clamp(step.cap + rng.uniform(-0.15, 0.15)))
-        if r < 0.7:
+        if r < 0.75:
+            ref = rng.choice(_ALL_REFS)                   # toggle a ref in/out of trust
+            tset = set(step.trusted); tset.symmetric_difference_update({ref})
+            return replace(step, trusted=tuple(x for x in _ALL_REFS if x in tset))
+        return replace(step, require_significant=not step.require_significant)
+    if isinstance(step, PooledSemanticAdjust):
+        r = rng.random()
+        if r < 0.3:
+            return replace(step, cap=_clamp(step.cap + rng.uniform(-0.15, 0.15)))
+        if r < 0.5:
             return replace(step, local_weight=max(0.0, min(1.0, step.local_weight + rng.uniform(-0.3, 0.3))))
-        ref = rng.choice(_ALL_REFS)
-        tset = set(step.trusted)
-        tset.symmetric_difference_update({ref})
-        return replace(step, trusted=tuple(r for r in _ALL_REFS if r in tset))
+        if r < 0.75:
+            ref = rng.choice(_ALL_REFS)
+            tset = set(step.trusted); tset.symmetric_difference_update({ref})
+            return replace(step, trusted=tuple(x for x in _ALL_REFS if x in tset))
+        return replace(step, require_significant=not step.require_significant)
     if isinstance(step, DocAdjust):
         return replace(step, cap=_clamp(step.cap + rng.uniform(-0.1, 0.1), hi=0.5))
     return step
