@@ -145,6 +145,22 @@ def test_evolution_optimizes_a_toy_objective():
     assert s2 == score
 
 
+def test_evolution_held_out_selection_ignores_search_overfit():
+    # SEARCH fitness rewards LONG controllers (overfit signal); the held-out VAL
+    # fitness rewards SHORT ones. The returned champion must follow VAL, not SEARCH.
+    search_fit = lambda c: len(c.steps)
+    val_fit = lambda c: -len(c.steps)
+    best_h, bf_h, hist = run_controller_evolution(
+        SEED_CONTROLLERS, search_fit, generations=15, pop_size=24, elite=6,
+        seed=7, select_fitness=val_fit)
+    best_s, _, _ = run_controller_evolution(
+        SEED_CONTROLLERS, search_fit, generations=15, pop_size=24, elite=6, seed=7)
+    assert len(best_h.steps) <= len(best_s.steps)   # held-out avoids the long overfit
+    assert val_fit(best_h) >= val_fit(best_s)       # champion is >= on held-out fitness
+    assert bf_h == val_fit(best_h)                  # returned score is the SELECTION score
+    assert len(hist[0]) == 3                         # (gen, search-fit, select-fit)
+
+
 def _cordp_run(ctrl, conf, corrs):
     return run_controller(ctrl, _CANDS5, (), _HV, _HTS, _FTS5,
                           cordp_conf=conf, cordp_corrections=corrs)[0]

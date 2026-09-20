@@ -206,7 +206,7 @@ print(f"\n== evolving controller (CVaR fitness) | seeds: {len(SEED_CONTROLLERS)}
       f"{len(MEM.seeds())} from skill memory ==", flush=True)
 best, best_fit, hist = run_controller_evolution(seeds, fitness, generations=30, pop_size=48, elite=10)
 best = _clamp_caps(best)          # report/store the actually-evaluated (capped) controller
-print("gen best:", ", ".join(f"g{g}:{fv:.4f}" for g, fv in hist[::5]))
+print("gen best:", ", ".join(f"g{g}:{fv:.4f}" for g, fv, *_ in hist[::5]))
 print("\n-- evolved champion controller --")
 print(controller_to_text(best))
 

@@ -750,12 +750,22 @@ def crossover_controllers(a: Controller, b: Controller, rng: _random.Random) -> 
 
 
 def run_controller_evolution(seeds, fitness, *, generations: int = 30, pop_size: int = 40,
-                             elite: int = 8, seed: int = 20260918):
+                             elite: int = 8, seed: int = 20260918, select_fitness=None):
     """(mu+lambda) evolution over controller instruction sequences.
 
     `fitness` maps a Controller to a scalar (higher better; use the CVaR objective).
-    Ties break toward fewer instructions (simpler, more auditable controllers win).
-    Returns (best_controller, best_fitness, history).
+    It drives evolution: it ranks the parents each generation. Ties break toward fewer
+    instructions (simpler, more auditable controllers win).
+
+    `select_fitness` (optional) is a SEPARATE held-out fitness used ONLY to pick the
+    returned champion. When given, evolution still ranks/selects parents on `fitness`
+    (the search fold), but the controller returned is the best-ever on `select_fitness`
+    (the held-out fold) -- a global controller program can only be de-overfit by
+    selecting on held-out data, not by in-sample fit. This mirrors evolve_N's
+    rank-on-search / select-on-val protocol. When omitted, selection == `fitness`
+    (backward compatible).
+
+    Returns (best_controller, best_select_fitness, history).
     """
     rng = _random.Random(seed)
     pop = list(seeds)
@@ -766,14 +776,20 @@ def run_controller_evolution(seeds, fitness, *, generations: int = 30, pop_size:
     def key(c):
         return (fitness(c), -len(c.steps))
 
-    best = max(pop, key=key)
+    sel = select_fitness or fitness
+
+    def sel_key(c):
+        return (sel(c), -len(c.steps))
+
+    best = max(pop, key=sel_key)          # champion is best on the SELECTION fold
     history = []
     for gen in range(generations):
-        ranked = sorted(pop, key=key, reverse=True)
+        ranked = sorted(pop, key=key, reverse=True)   # evolution ranks on the SEARCH fold
         parents = ranked[:elite]
-        if key(ranked[0]) > key(best):
-            best = ranked[0]
-        history.append((gen, fitness(ranked[0])))
+        cur = max(pop, key=sel_key)                    # per-gen champion on held-out
+        if sel_key(cur) > sel_key(best):
+            best = cur
+        history.append((gen, fitness(ranked[0]), sel(cur)))
         children = list(parents)
         while len(children) < pop_size:
             if rng.random() < 0.5 and len(parents) >= 2:
@@ -782,4 +798,4 @@ def run_controller_evolution(seeds, fitness, *, generations: int = 30, pop_size:
                 child = rng.choice(parents)
             children.append(mutate_controller(child, rng))
         pop = children
-    return best, fitness(best), history
+    return best, sel(best), history
