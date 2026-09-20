@@ -52,6 +52,26 @@ class EvidenceEffect:
         )
 
 
+def effects_from_cordp(corrections):
+    """MERGE the two document-reading paths into one evidence source. Project cached CorDP
+    corrections (window, anchored multiplier) into grounded EvidenceEffect objects, so the
+    regime/doc/semantic primitives consume the SAME evidence as CorDPAdjust -- on ALL splits
+    (train/dev/test all have CorDP cards, unlike the retrieval effect cards which existed only
+    for train/dev). This removes the redundant second document read and the test-side gap."""
+    out = []
+    for corr in corrections or ():
+        try:
+            start, end, mult = corr[0], corr[1], float(corr[2])
+        except (TypeError, ValueError, IndexError):
+            continue
+        direction = "increase" if mult > 1.0 else "decrease" if mult < 1.0 else "none"
+        out.append(EvidenceEffect(
+            direction=direction, magnitude_kind="relative", magnitude_value=abs(mult - 1.0),
+            start_timestamp=str(start), end_timestamp=str(end), stance="supports",
+            numeric_eligible=True, grounded=True, entity_match=True, target_match=True))
+    return out
+
+
 # Retrieval's direction vocabulary (schemas.py `_DIRECTIONS`) is up/down/stable/
 # unknown; the adjustment layer's canonical vocabulary is increase/decrease. Map at
 # the projection boundary so ``.actionable`` and the DSL see one vocabulary. Without

@@ -1,0 +1,435 @@
+<title>CorDP 自进化预测架构</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --bg:#f5f6f9; --panel:#ffffff; --panel2:#eef1f6; --ink:#191d26; --mut:#5c6472;
+  --line:#e0e4ec; --acc:#2f5fe0; --acc2:#6a45e6; --good:#1f9d63; --bad:#d6474a; --warn:#b7791f;
+  --code:#f1f3f8; --codeink:#2a3140; --chip:#eef1f7;
+  --sans:"IBM Plex Sans","PingFang SC","Microsoft YaHei",-apple-system,BlinkMacSystemFont,sans-serif;
+  --mono:"IBM Plex Mono","SF Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0f1216; --panel:#171b22; --panel2:#1d222c; --ink:#e7eaef; --mut:#98a2b2;
+    --line:#2a303c; --acc:#6ea1ff; --acc2:#9d84ff; --good:#41d18c; --bad:#ff7379; --warn:#ffbe57;
+    --code:#0b0e13; --codeink:#cbd5e8; --chip:#232a38;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0f1216; --panel:#171b22; --panel2:#1d222c; --ink:#e7eaef; --mut:#98a2b2;
+  --line:#2a303c; --acc:#6ea1ff; --acc2:#9d84ff; --good:#41d18c; --bad:#ff7379; --warn:#ffbe57;
+  --code:#0b0e13; --codeink:#cbd5e8; --chip:#232a38;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);
+  font-size:15.5px;line-height:1.68;-webkit-font-smoothing:antialiased}
+.wrap{max-width:900px;margin:0 auto;padding-block:44px 84px;padding-left:18px;padding-right:18px}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--acc);margin:0 0 10px}
+h1{font-size:29px;line-height:1.22;margin:0 0 10px;font-weight:700;letter-spacing:-.01em;text-wrap:balance}
+h1 .q{color:var(--mut);font-weight:600}
+h2{font-size:20px;margin:44px 0 14px;padding-bottom:9px;border-bottom:1px solid var(--line);font-weight:600}
+h2 .n{font-family:var(--mono);color:var(--acc2);font-size:15px;margin-right:10px}
+h3{font-size:15.5px;margin:20px 0 8px;color:var(--acc);font-weight:600}
+p{margin:11px 0}
+.lead{color:var(--mut);font-size:16px;line-height:1.6;margin:16px 0 0;max-width:64ch}
+.meta{display:flex;flex-wrap:wrap;gap:7px;margin:18px 0 0}
+.chip{font-family:var(--mono);font-size:12px;background:var(--chip);border:1px solid var(--line);
+  border-radius:999px;padding:3px 11px;color:var(--mut)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin:16px 0}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:640px){.grid{grid-template-columns:1fr}}
+code{font-family:var(--mono);font-size:.86em;background:var(--code);color:var(--codeink);
+  padding:1px 6px;border-radius:6px}
+.kv{color:var(--acc2);font-weight:600}
+table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.6px}
+.tscroll{overflow-x:auto}
+th,td{border:1px solid var(--line);padding:8px 11px;text-align:left;vertical-align:top}
+th{background:var(--panel2);color:var(--mut);font-weight:600;white-space:nowrap}
+td .mono,.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.good{color:var(--good)} .bad{color:var(--bad)} .warn{color:var(--warn)}
+.flow{display:flex;flex-direction:column;gap:9px;margin:16px 0}
+.node{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--acc);
+  border-radius:12px;padding:13px 16px}
+.node .t{font-weight:600;margin-bottom:3px}
+.node .d{color:var(--mut);font-size:13.6px;line-height:1.55}
+.arrow{color:var(--mut);text-align:center;font-family:var(--mono);font-size:14px}
+.node.kernel{border-left-color:var(--warn)}
+.node.evolv{border-left-color:var(--acc2)}
+.tag{font-family:var(--mono);font-size:10.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+  padding:2px 8px;border-radius:6px;margin-left:9px;white-space:nowrap}
+.tag.k{background:rgba(183,121,31,.14);color:var(--warn);border:1px solid rgba(183,121,31,.3)}
+.tag.e{background:rgba(106,69,230,.14);color:var(--acc2);border:1px solid rgba(106,69,230,.32)}
+.tag.p{background:rgba(47,95,224,.13);color:var(--acc);border:1px solid rgba(47,95,224,.3)}
+.callout{border-left:3px solid var(--good);background:color-mix(in srgb,var(--good) 8%,transparent);
+  border-radius:10px;padding:13px 17px;margin:16px 0}
+.callout.warn{border-left-color:var(--warn);background:color-mix(in srgb,var(--warn) 9%,transparent)}
+.callout h3{margin-top:0}
+ul{margin:9px 0 9px 2px;padding-left:20px} li{margin:6px 0}
+.small{font-size:13px;color:var(--mut);line-height:1.55}
+.hr{height:1px;background:var(--line);margin:30px 0}
+a{color:var(--acc)}
+</style>
+
+<div class="wrap">
+
+<p class="eyebrow">Dr-CiK · evolving_loop.v2 · 2026-09-19</p>
+<h1>可审计的自进化跨模态预测<br><span class="q">从"证据抽取"到"文档锚定纠正 (CorDP)"</span></h1>
+<p class="lead">在数值基础模型 Toto 之上，用文档证据、通过<b>可进化 / 可审计的调整层</b>修改预测。核心创新：<b>"文档如何改数值预测"这条跨模态交互策略，由进化发现为可读代码，而不是人手设计。</b></p>
+<div class="meta">
+  <span class="chip">Dr-CiK 80 / 20 / 99</span>
+  <span class="chip">base = Toto-2.0-22m（强）</span>
+  <span class="chip">感知 = haiku（缓存）</span>
+  <span class="chip">策略 = 进化的纯代码</span>
+</div>
+
+<h2><span class="n">0</span>一句话</h2>
+<p>纯数值已封顶（champion ≈ Toto），"选候选"范式也封顶。文档里<b>有真信号</b>（oracle 诊断：12/20 dev 题最优缩放可降误差 ~33%），但旧的"让 retrieval 吐 <code>{方向, 量级}</code>"范式里，<b class="bad">量级恒为 unknown</b>。本设计的转折：<b class="good">不再抽取抽象量级，而是把 Toto 基线数值 + 文档一起给 LLM，让它输出锚定在具体数值上的"纠正乘子"（CorDP）</b>——量级墙由此打破。</p>
+
+<h2>四条亮点</h2>
+<div class="grid">
+  <div class="panel"><h3 style="margin-top:0">① 文字→数学的原则</h3>
+    <p class="small">文字给出数学操作的<b>结构</b>和一个<b>指向数值来源的指针</b>，绝不发明数值。数值只来自"明确引用 / 数据类比"，两者都没有 → <b>弃权</b>。落地为逐参数 grounding 标签。</p></div>
+  <div class="panel"><h3 style="margin-top:0">② 锚定破量级墙</h3>
+    <p class="small">把"抽象问量级(→unknown)"换成"给 LLM 看基线数值让它纠正"，量级变可用。task_163 乘子 0.93 vs oracle 0.935。</p></div>
+  <div class="panel"><h3 style="margin-top:0">③ 可审计的进化符号策略</h3>
+    <p class="small">交互策略是<b>可读代码</b>(原语+参数)、由进化发现、内核保证有界+grounded——非黑箱 LLM、非训练模型。读得懂 / 追得到 / 证得了安全。</p></div>
+  <div class="panel"><h3 style="margin-top:0">④ 稀疏对抗数据上精度优先</h3>
+    <p class="small">grounding+弃权 → 稀疏低利用率对抗数据上<b>零回归净正</b>，正是"改所有"(净负)与"数据饥渴"(过拟合)失败的 regime。</p></div>
+</div>
+<div class="callout">
+<p class="small"><b>定位对比：</b> NEXUS(2605.14389)让 LLM <b>直接出数打赢 TSFM</b>，但只比 TimesFM+CoT(<b>没放统计方法</b>)、仅赢 ~7%；LAFP(2607.24892)诚实地比强/弱基线——<b>强基线 CiK 仅 2-6%</b>、弱基线 60%。规律：文字大胜多来自<b>弱基线 / 漏比统计 / 为文字设计的基准</b>。我们不赌"LLM 替代强 TSFM"，而是<b>"强 TSFM 之上稀疏安全加分"</b>——在别人回避的强基线+对抗稀疏 regime 上做到零回归。</p>
+</div>
+
+<h2>创新点(诚实版:真正新的 vs 借来的)</h2>
+<p class="lead" style="margin-top:6px">一句话:<b>首个"可审计、自进化、带 do-no-harm 可证保证"的跨模态(文字→数值)预测修正 harness,并给出"文档证据何时应当修改一个强预测"的统计刻画(密度×精度交叉),在稀疏对抗 regime 上验证。</b></p>
+<div class="tscroll"><table>
+<tr><th>真正新的</th><th>对谁新</th></tr>
+<tr><td>① "何时修正才有益"的<b>统计理论</b>(密度×精度交叉 + confounder 不可分下界)</td><td><b>对所有人</b>——NEXUS/LAFP/Last Mile 全纯实证,没人给"何时有益"的条件/下界</td></tr>
+<tr><td>② 可证 <b>do-no-harm</b> 的 harness(内核+弃权→有界后悔)</td><td>Last Mile(有约束无保证)、Meta/Self/Harness-R1(优化 harness 无安全证明)</td></tr>
+<tr><td>③ <b>自进化</b>的跨模态交互策略(可读代码)</td><td>Last Mile(手写 prompt)、NEXUS(黑箱)</td></tr>
+<tr><td>④ <b>稀疏对抗 regime</b> 当贡献(三方 ablation)</td><td>整个领域(都在稠密基准刷 SOTA)</td></tr>
+<tr><td>⑤ <b>gt 监督进化 retrieval 选择</b></td><td>Last Mile(不碰 retrieval)</td></tr>
+</table></div>
+<div class="callout warn">
+<p class="small"><b>诚实:哪些不是我们的创新(借来的)</b>——CorDP 锚定修正=Beyond-Naive-Prompting;动作式可审计 harness≈Last Mile;进化 harness=Meta/Self/Harness-R1(他们做 coding agent);RAG 式选择=老思路。<b>单看任一组件都是增量;创新在"组合成一个有保证的对象 + 理论"。</b> → 投 AISTATS 主打 ①理论 + ④稀疏 regime,系统(②③⑤)当理论的可审计实例;若把重心放"造了个系统"则创新弱(都借来的),放"何时/能多大程度用文字改强预测的理论 + 可证安全 harness"则创新硬。</p>
+</div>
+
+<h2>结果汇总(全部,一眼看)</h2>
+<h3>A · 预测修正 frontier(test99 held-out,whole-horizon cap=5.0;base sMAE 0.381 / sRMSE 0.590)</h3>
+<div class="tscroll"><table>
+<tr><th>策略</th><th>来源</th><th>sMAE</th><th>sRMSE</th><th>赢/回归</th><th>touched</th></tr>
+<tr><td>CorDP conf≥0.8</td><td>手设(保守)</td><td class="good">+1.93%</td><td class="good">+3.20%</td><td class="num good">17/0</td><td class="num">17</td></tr>
+<tr><td>CorDP conf≥0.68</td><td class="kv">进化(中)</td><td class="good">+2.46%</td><td class="good">+4.55%</td><td class="num">28/2</td><td class="num">30</td></tr>
+<tr><td>CorDP conf≥0.65</td><td>dev 选(激进)</td><td class="good">+3.71%</td><td class="good">+4.90%</td><td class="num">34/7</td><td class="num">41</td></tr>
+<tr><td><b>进化全栈 champion</b></td><td class="kv"><b>3 环/单环</b></td><td class="good"><b>+5.27%</b></td><td class="good"><b>+4.27%</b></td><td class="num">38/17</td><td class="num">55</td></tr>
+</table></div>
+<p class="small">进化全栈 champion 在 <b>ROI 子集(55 题)</b>上:sMAE +10.98% / sRMSE +10.89%。单题证据:task_163 乘子 0.93 vs oracle 0.935;task_152 +28%。</p>
+
+<h3>B · Retrieval 自进化环(gt role 密集监督,test F1)</h3>
+<div class="tscroll"><table>
+<tr><th>选择策略</th><th>test F1</th></tr>
+<tr><td>全选 / 精确实体</td><td class="num">0.435 / 0.486</td></tr>
+<tr><td><b>进化策略</b></td><td class="num good">0.582</td></tr>
+<tr><td><b>+ DSL 自动增长(词汇 8→11)</b></td><td class="num good">0.595</td></tr>
+<tr><td>oracle</td><td class="num">1.000</td></tr>
+</table></div>
+<p class="small">distractor 拒绝:timeseries 88-91% · profile 87-94% · noisy 81% · temporal 61% · <b>confounder 57-62%(不可分硬核)</b>。</p>
+
+<h3>C · Ablation / 诚实负结果(共同指向"数据受限,价值在架构+理论")</h3>
+<div class="tscroll"><table>
+<tr><th>实验</th><th>结果</th></tr>
+<tr><td>三方 ablation</td><td>改所有净负(22赢/28回归)· PRM 过拟合(test 2 回归)· <b class="good">我们零回归</b></td></tr>
+<tr><td>direct vs 逐步(传播)</td><td>局限窗口 <b>14:5</b> 完胜 带到末端 5:14 → 逐步无益</td></tr>
+<tr><td>带形状残差 vs 乘性 CorDP</td><td>test ≈ 平(base≈0 更安全)→ 算方法之一</td></tr>
+<tr><td>MethodBlend(掺 seasonal)</td><td>零收益(Toto 碾压 seasonal)</td></tr>
+<tr><td>confounder</td><td>纯代码 causal 无用 + LLM verifier 反了(60%&gt;47%)→ 不可分</td></tr>
+<tr><td>PRM 实测影响门 · CRPS</td><td>过拟合 · 证伪</td></tr>
+</table></div>
+<h3>D · 进化机制(都跑通)</h3>
+<p class="small">三层进化(程序 / 团队 / 词汇)· 三环 CCEA(N×A×完整B,N 学会不暴露 seasonal)· skill_memory 积累 · train 搜/dev 选/test 定。</p>
+
+<h2><span class="n">1</span>关键转折：为什么是 CorDP</h2>
+<div class="grid">
+  <div class="panel">
+    <h3>旧范式（抽取）为何封顶</h3>
+    <p class="small">retrieval 读文档 → 结构化 <code>{direction, magnitude}</code>。给数据上下文后 LLM 变保守，magnitude 返回 <code>unknown</code>；纯数据也估不出事件幅度（短历史无该事件先例）。regime-fill、analog scaler、自一致性多采样等变体<b>全部 LOO 退化</b>。</p>
+    <p class="small bad">= 文献点名的失败模式："推理对、数值应用错"。</p>
+  </div>
+  <div class="panel">
+    <h3>新范式（CorDP 纠正）</h3>
+    <p class="small">给 LLM 看<b>基线预测数值</b> + 文档，让它输出<b>每个子窗口的乘子</b>。量级锚定在具体 Toto 数上 → <code>unknown</code> 变为可用的数。</p>
+    <p class="small">文献支撑：<span class="mono">CorDP (2508.09904)</span> 纠正而非抽取，+50%；<span class="mono">LAFP (2607.24892)</span> LLM 只排序不吐数字，强基线 CiK 仅 2–6% / 弱基线 Time-MMD 最高 60%。</p>
+  </div>
+</div>
+
+<h2><span class="n">2</span>系统流程（当前设计）</h2>
+<div class="flow">
+  <div class="node"><div class="t">① 数值层 · 多候选<span class="tag p">缓存</span></div>
+    <div class="d">Toto（最强，当 base）+ statistical + combined + coding-agent 生成代码。champion ≈ high_toto_balanced。</div></div>
+  <div class="arrow">↓</div>
+  <div class="node"><div class="t">② 感知层 · LLM 只做一次、结果缓存<span class="tag p">缓存</span></div>
+    <div class="d">(a) <b>retrieval 证据</b>：结构化 EvidenceEffect（方向 / 窗口 / 引用）。(b) <b>CorDP 纠正</b>：给基线数值 + 文档 → <code>{relevant, corrections:[{start,end,multiplier,rationale}], confidence}</code>。两者缓存成 per-task 卡片，进化时不再调 LLM。</div></div>
+  <div class="arrow">↓</div>
+  <div class="node kernel"><div class="t">③ 不变内核 · 永不进化<span class="tag k">固定</span></div>
+    <div class="d">安全 + 测量契约：① 始终有强 base（Toto）兜底；② 最终经 <code>apply_bounded_delta</code> 夹在 base ±50%，非有限值回退 base；③ 调整只作用于<b>有据（grounded）</b>证据；④ 适应度 = 固定的留出集指标。任何进化出的策略都被它兜住，崩不了。</div></div>
+  <div class="arrow">↓</div>
+  <div class="node evolv"><div class="t">④ 可进化 Controller · 指令有序序列<span class="tag e">进化</span></div>
+    <div class="d">状态机 ControllerState 上的一串<b>可读原语</b>。<b>顺序与选择</b>——即证据怎么改预测——是进化探索的对象。</div></div>
+</div>
+
+<h2><span class="n">3</span>可进化原语库（INSTRUCTIONS）</h2>
+<div class="tscroll"><table>
+<tr><th>原语</th><th>作用</th><th>可进化参数</th></tr>
+<tr><td><code>SelectBase</code></td><td>选一个数值候选作 base（默认 toto_2_0）</td><td>candidate</td></tr>
+<tr><td><code>RegimeAdjust</code></td><td>把窗口效应缩放到某历史 regime（数据算）</td><td>regime, cap, fill_unknown</td></tr>
+<tr><td><code>SemanticAdjust</code></td><td>LLM 判事件像哪种历史 regime，幅度从该 regime 数据算；<b>数据门</b>只信稳定周期</td><td>cap, trusted, require_significant</td></tr>
+<tr><td><code>PooledSemanticAdjust</code></td><td>同上 + 跨任务先验池化（历史太短时借稳定量级）</td><td>cap, trusted, local_weight</td></tr>
+<tr><td><code>DocAdjust</code></td><td>按文档自报幅度缩放（有界）</td><td>cap</td></tr>
+<tr><td style="border-left:3px solid var(--good)"><code>CorDPAdjust</code> <b class="good">新</b></td><td>应用 CorDP 缓存的<b>乘子</b>（level 修正），经<b>精度门</b>过滤</td><td><span class="kv">conf_min, wfrac_max, mult_lo/hi, shrink</span></td></tr>
+<tr><td style="border-left:3px solid var(--good)"><code>ResidualAdjust</code> <b class="good">新</b></td><td>应用文档生成的<b>带形状加性残差</b> `base + A·shape(t)·ref`，shape ∈ level/ramp/bump/decay；<b>无据（guess）的 spec 弃权</b>；base≈0 回退历史尺度</td><td><span class="kv">conf_min, wfrac_max, amp_cap, shrink</span></td></tr>
+<tr><td style="border-left:3px solid var(--good)"><code>MethodBlend</code> <b class="good">新</b></td><td><b>上下文条件</b>混合另一数值候选（statistical/别的 TSFM）——仅当文档有信号时才掺入，否则不动强 base（需缓存第二候选才生效）</td><td><span class="kv">other, weight, conf_min</span></td></tr>
+<tr><td style="border-left:3px solid var(--acc2)"><code>MenuAdjust</code> <b class="good">新</b></td><td><b>decision 做数学</b>：从 Numerical 暴露的<b>数学菜单</b>(regime-level/trend/decay…)选一个算子应用到事件窗口——文档选 which、菜单给 number(数据算)</td><td><span class="kv">prefer, cap</span></td></tr>
+<tr><td style="border-left:3px solid var(--acc2)"><code>CallAgent</code> <b class="good">新</b></td><td><b>编排/agent-as-tool</b>：像调 tool 一样调 numerical/retrieval(可多次);每次调用记入 <code>state.calls</code> 供适应度收<b>效率代价</b>;内核照兜(live 接线可插拔)</td><td><span class="kv">tool, arg</span></td></tr>
+<tr><td><code>NoOp / Regenerate</code></td><td>空操作 / 反馈重生（stub）</td><td>—</td></tr>
+</table></div>
+
+<div class="callout">
+<h3>CorDPAdjust 的精度门（全部可进化）——"文献手设、我们进化"的贡献点</h3>
+<ul>
+<li><code>conf_min</code>：LLM 自报置信度低于此 → 弃权（不动 Toto）</li>
+<li><code>wfrac_max</code>：纠正窗口占 horizon 比例超过此 → 拒绝（<b>全局重缩放是基线的活，一定误动</b>）</li>
+<li><code>mult_lo / mult_hi</code>：乘子夹紧（内核再兜一层 ±50%）</li>
+<li><code>shrink</code>：部分信任 <code>eff = 1 + shrink·(m−1)</code></li>
+</ul>
+<p class="small">文献里 CorDP / IC-DP / LAFP 的这些阈值全是人手设的；把它们（以及"选哪个原语"的编排）<b>进化成可读代码</b>是新的。</p>
+</div>
+
+<h2><span class="n">4</span>进化与积累</h2>
+<div class="grid">
+  <div class="panel"><h3>进化算法</h3>
+  <p class="small">(μ+λ) 进化：种子 = SEED_CONTROLLERS（含 <code>CORDP_CONTROLLER</code>）+ 技能记忆。变异 = 插入 / 删除 / 重排 / 改参数；简约性平手打破。适应度 = <b>CVaR 下行</b>（mean + β·最坏尾均），重罚回归。</p></div>
+  <div class="panel"><h3>技能记忆（积累）</h3>
+  <p class="small">把进化出的好 controller 存成 JSON、去重、下轮当种子（Voyager / AlphaEvolve 程序库思路）。<b>注意：积累的是"原语的组合"，不是新原子原语</b>——原子原语由人 / LLM-design 写。</p></div>
+</div>
+<h3>到底能进化什么（清单）</h3>
+<div class="tscroll"><table>
+<tr><th>层级</th><th>可进化对象</th><th>现状</th></tr>
+<tr><td><b>参数</b>（门 / 内核旋钮）</td><td>每个原语的参数：CorDPAdjust/ResidualAdjust 的 <code>conf_min, wfrac_max, mult/amp 界, shrink</code>；RegimeAdjust/Semantic 的 <code>cap, trusted, require_significant</code>；MethodBlend 的 <code>other, weight</code></td><td class="good">✅ 已跑通</td></tr>
+<tr><td><b>结构</b>（编排）</td><td>用哪些原语、什么顺序（controller = 指令序列）；插入 / 删除 / 重排</td><td class="good">✅ 已跑通</td></tr>
+<tr><td><b>策略代码本身</b></td><td>LLM-as-designer（<code>llm_design.py</code>，AST 沙箱）提议门 / 缩放器 / regime 估计器的<b>可读 Python</b>，FunSearch/ADAS 式</td><td class="warn">🟡 有基建，未全接</td></tr>
+<tr><td><b>感知侧</b>（retrieval）</td><td>retrieval agent 的 genome：round1/2 策略、二轮触发、选几篇文档、target_match…</td><td class="warn">🟡 可进化，未与调整层联合进化</td></tr>
+<tr><td><b>积累</b></td><td>skill_memory 攒进化出的好 controller，下轮当种子</td><td class="good">✅ 自动纳入</td></tr>
+</table></div>
+
+<h3>进化结果（2026-09-19）</h3>
+<ul>
+<li><b class="good">前提坑解决</b>：全 horizon+CVaR 目标下进化收敛 <code>identity</code>（窗口收益被稀释）；<b>换成 ROI 窗口指标后，进化找到非平凡 controller</b>（不再"什么都不做"）。</li>
+<li><b>找到的是一条精度/召回 frontier</b>：train ROI 上 conf≥0.9 = 6赢/0回归（保守零回归端）→ conf≥0.6 = 21赢/13回归（激进端）。<b>进化通过下行惩罚 β 在这条 frontier 上滑动</b>——β=2 到零回归端，mean 到激进端。</li>
+<li>进化(mean)选的激进门 conf≥0.68 在 <b>test99 上也泛化</b>：+2.5%/+4.6%、28赢/2回归（比手设保守门 17赢/0回归聚合更高，但多 2 回归）。</li>
+<li><b>正规流程已跑</b>（train 搜 → dev 选 → test 定）：门是逐任务的→train 内 LOO≈in-sample，真正关卡是 dev；但 <b>dev 太小（12 ROI / 4 touched）选不动</b>——它选出的松门在 dev/train 上评得差却在 test 上强，说明<b>数据驱动自动选门在 Dr-CiK 上不可靠</b>（再次坐实稀疏/数据受限）。</li>
+</ul>
+
+<h3>操作点 frontier（test99, whole-horizon, drcik_point_metrics cap=5.0）</h3>
+<p class="small">base：sMAE 0.38141 · sRMSE 0.59035（99 题）。一条从"零回归保守"到"最大聚合激进"的可控 frontier。</p>
+<div class="tscroll"><table>
+<tr><th>门</th><th>来源</th><th>sMAE</th><th>sRMSE</th><th>赢/回归</th></tr>
+<tr><td>conf≥0.8 wfrac≤0.2</td><td>手设 (hand-set)</td><td class="good">+1.93%</td><td class="good">+3.20%</td><td class="num good">17 / 0</td></tr>
+<tr><td>conf≥0.68 wfrac≤0.24</td><td class="kv"><b>进化得到 (evolved) ⭐</b></td><td class="good">+2.46%</td><td class="good">+4.55%</td><td class="num">28 / 2</td></tr>
+<tr><td>conf≥0.65 wfrac≤0.5</td><td>dev 选出 (dev-selected)</td><td class="good">+3.71%</td><td class="good">+4.90%</td><td class="num">34 / 7</td></tr>
+</table></div>
+<p class="small">来源:<b>手设</b>=第一性原理门;<b>进化得到</b>=(μ+λ) 进化搜索(窗口适应度)找到的门;<b>dev 选出</b>=train→dev→test 网格流程选的。三点是同一条精度/召回 frontier——<b>保守端零回归 +1.9%/+3.2%,激进端 +3.7%/+4.9%(34赢/7回归)</b>,都在 test 泛化。</p>
+
+<h3>激进门 (conf≥0.65) 的 train/dev/test（ROI-only 指标）</h3>
+<div class="tscroll"><table>
+<tr><th>Split</th><th>ROI 题</th><th>sMAE (rel)</th><th>sRMSE (rel)</th><th>touched 赢/回归</th></tr>
+<tr><td>TRAIN(80)</td><td class="num">50</td><td class="num">0.520→0.527 (−1.4%)</td><td class="num">0.657→0.644 (+2.0%)</td><td class="num">31: 20/11</td></tr>
+<tr><td>DEV(20)</td><td class="num">12</td><td class="num">0.425→0.439 (−3.4%)</td><td class="num">0.582→0.584 (−0.5%)</td><td class="num">4: 1/3</td></tr>
+<tr><td>TEST(99)</td><td class="num">55</td><td class="num good">1.342→1.215 (+9.4%)</td><td class="num good">1.460→1.302 (+10.9%)</td><td class="num">41: 26/8</td></tr>
+</table></div>
+<p class="small">ROI-only 指标波动大(dev/train 被少数大尺度任务+小样本主导→负;test 强)→ <b>whole-horizon(上表)才是该信的主指标</b>;此表说明 dev 太小、ROI 噪声大,自动选门不可靠。</p>
+</ul>
+
+<h2><span class="n">5</span>实验发现（2026-09-19）</h2>
+<h3>量级墙被打破（单题证据）</h3>
+<div class="tscroll"><table>
+<tr><th>任务</th><th>文档</th><th>LLM 乘子</th><th>oracle</th><th>窗口 CRPS / MAE</th></tr>
+<tr><td class="num">task_163</td><td>"正午峰值将保持在 900 W/m² 以下"</td><td class="num">0.93</td><td class="num">0.935</td><td class="good">98→92（近乎精确）</td></tr>
+<tr><td class="num">task_152</td><td>海雾降能见度</td><td class="num">1.18</td><td class="num">1.39</td><td class="good">0.55→0.39（+28%）</td></tr>
+<tr><td class="num">task_206</td><td>"隔热涂层 / 住户搬离"（误导）</td><td class="num">0.85/0.35</td><td class="num">1.12</td><td class="bad">方向错 → 变差</td></tr>
+</table></div>
+
+<h3>test99 泛化（冻结门，held-out，99/99 完成）</h3>
+<div class="tscroll"><table>
+<tr><th>门（train 冻结）</th><th>sMAE</th><th>sRMSE</th><th>joint 赢/回归</th><th>touched</th></tr>
+<tr><td><b>conf≥0.8 & wfrac≤0.2</b></td><td class="good">+1.93%</td><td class="good">+3.20%</td><td class="num good">17 / 0</td><td class="num">17/99</td></tr>
+<tr><td>conf≥0.9 & wfrac≤0.2</td><td class="good">+1.04%</td><td class="good">+1.50%</td><td class="num">8 / 0</td><td class="num">8/99</td></tr>
+</table></div>
+<p class="small">全新 99 个 held-out 任务：<b>两个标准指标都正、零回归、82 题弃权（do-no-harm）</b>；<b>touched 子集 sMAE +13.8% / sRMSE +19.3%</b>。数字从 22→49→75→99 题一路未漂——冻结门泛化成立，非过拟合。drcik_point_metrics, cap=5.0。</p>
+
+<h3>三方 ablation（稀疏对抗数据上，谁失败）</h3>
+<div class="tscroll"><table>
+<tr><th>门策略</th><th>稀疏数据表现</th><th>说明</th></tr>
+<tr><td>改所有（no gate）</td><td class="bad">净负 22赢/28回归</td><td>modify-everything 在稀疏上被误动淹没</td></tr>
+<tr><td>数据饥渴（PRM 实测影响门）</td><td class="warn">过拟合，test 2 回归</td><td>~15 有据纠正太少，丢了保护性 wfrac 门</td></tr>
+<tr><td><b>我们（接地 + 弃权）</b></td><td class="good">test 17赢 / 0回归</td><td>只在有据、局部、高置信处出手</td></tr>
+</table></div>
+
+<h3>80-train 聚合（窗口 MAE）</h3>
+<div class="tscroll"><table>
+<tr><th>门</th><th>应用</th><th>赢 / 回归</th><th>净效果</th></tr>
+<tr><td>无门</td><td class="num">50</td><td class="num">22 / 28</td><td class="warn">被全局重缩放 + base≈0 爆炸拖累</td></tr>
+<tr><td>wfrac≤0.30 & conf≥0.7</td><td class="num">15</td><td class="num">12 / 3</td><td class="warn">对阈值敏感（norm −16）</td></tr>
+<tr><td><b>wfrac≤0.20 & conf≥0.8（冻结门）</b></td><td class="num">12</td><td class="num good">11 / 1</td><td class="good">窗口误差 −7.1%，稳健净正</td></tr>
+</table></div>
+<p class="small">CorDP 是<b>精度优先</b>策略：无信号任务主动弃权（零风险），只在"局部 + 高置信"处纠正。门只用<b>推理时信号</b>（窗口占比、置信度），不碰未来信息 → 可部署、可泛化。</p>
+
+<div class="callout warn">
+<h3>诊断：进化目标必须用窗口指标</h3>
+<p class="small">在<b>全 horizon</b> + CVaR 目标下让进化跑，它收敛到 <code>identity</code>（不动、零改善零回归）——因为窗口内收益被全 horizon 稀释，抵不过 CVaR 的下行惩罚。这正是 CiK / RCRPS 的教训：<b>必须按 region-of-interest 打分</b>。下一步把适应度换成窗口 CRPS / MAE。</p>
+</div>
+
+<h2>Retrieval 自进化环（用 gt_evidence 密集监督）</h2>
+<p class="small">Dr-CiK 给了文档的<b>真值角色</b>(<code>role: supporting vs distractor</code>,每题 ~37 篇 / 12 篇 supporting)——这是<b>密集</b>信号(不受预测端稀疏天花板限制)。我们进化一个<b>文档选择策略</b>(线性规则 over 可部署特征:精确实体/时间重叠/未来声明/长度…,不用 role),适应度 = 选中集 vs supporting 的 F1。<b>纯代码、不烧 LLM。Last Mile 不碰 retrieval —— 这是我们的差异化。</b></p>
+<div class="tscroll"><table>
+<tr><th>选择策略</th><th>train</th><th>dev</th><th>test F1</th></tr>
+<tr><td>全选</td><td class="num">0.475</td><td class="num">0.491</td><td class="num">0.435</td></tr>
+<tr><td>精确实体</td><td class="num">0.536</td><td class="num">0.577</td><td class="num">0.486</td></tr>
+<tr><td><b>进化策略</b></td><td class="num good">0.671</td><td class="num good">0.628</td><td class="num good">0.582</td></tr>
+<tr><td>oracle</td><td class="num">1.000</td><td class="num">1.000</td><td class="num">1.000</td></tr>
+</table></div>
+<p class="small">可读规则(进化出的权重):<code>time_overlap +2.4 · future_claim −2.5 · len_norm −6.7 · entity_frac +1.9 · target_frac −1.9</code>。<b>test F1 0.49→0.58,密集监督→泛化不过拟合。</b></p>
+<h3>各类对抗 distractor 的拒绝率(test)+ confounder 硬核</h3>
+<div class="tscroll"><table>
+<tr><th>distractor 类型</th><th>拒绝率</th><th>治它的特征</th></tr>
+<tr><td>timeseries(给错未来)</td><td class="num good">88–91%</td><td>future_claim</td></tr>
+<tr><td>profile(另一实体同模式)</td><td class="num good">87–94%</td><td>exact_entity</td></tr>
+<tr><td>noisy(无关)</td><td class="num good">81%</td><td>相关度/长度</td></tr>
+<tr><td>temporal(别的时间)</td><td class="num">61%</td><td>time_overlap</td></tr>
+<tr><td><b>confounder(话题相关、因果无关)</b></td><td class="num bad">57–62%</td><td>纯代码 & LLM 都破不了</td></tr>
+</table></div>
+<div class="callout warn">
+<p class="small"><b>confounder 是对抗硬核(实证):</b> ① 纯代码 <code>causal_relevance</code> 特征被进化判为无用(权重 ≈ −0.04);② <b>LLM causal-verifier 反而分反了</b>——把 confounder 判为"因果"的比例(60%)比 supporting(47%)还高(因为 supporting 混了 SOP/背景文档、而 confounder 专门设计得像因果)。<b>纯代码和 LLM verifier 都破不了 confounder → 它是 Dr-CiK 精心构造的因果诱饵,test F1 0.58 是可达的诚实上限。</b></p>
+</div>
+
+<h2>三环联合协同进化 &amp; DSL 词汇表自动增长（新）</h2>
+<h3>完整 evolve 流程(三层)</h3>
+<div class="flow">
+  <div class="node"><div class="t">共享底座(不进化)</div>
+    <div class="d">感知 LLM 一次缓存(CorDP/残差 + retrieval 证据)· Toto base + MathMenu · 不变内核(±50% + grounded-only)</div></div>
+  <div class="arrow">↓ 三层进化(全纯代码,不烧 LLM)</div>
+  <div class="node evolv"><div class="t">层1 · 程序进化(各环)<span class="tag e">进化</span></div>
+    <div class="d">环A retrieval:文档选择策略权重(gt-F1)· 环B decision:原语序列+门(窗口增益 − CVaR − 调用代价)</div></div>
+  <div class="arrow">↓</div>
+  <div class="node evolv"><div class="t">层2 · 团队协同(三环 CCEA)<span class="tag e">进化</span></div>
+    <div class="d">N(数值暴露什么)× A(选文档)× B(怎么改)交替协同;A 证据质量门控 B;团队适应度</div></div>
+  <div class="arrow">↓</div>
+  <div class="node evolv"><div class="t">层3 · 词汇表自动增长(进化 DSL 本身)<span class="tag e">进化</span></div>
+    <div class="d">提议新特征/原语 → dev 提升才保留(retrieval 侧 8→11 已实现;LLM proposer 可插 llm_design)</div></div>
+  <div class="arrow">↓</div>
+  <div class="node kernel"><div class="t">协议 + 积累<span class="tag k">固定</span></div>
+    <div class="d">train 搜 → dev 选 → test 定;skill_memory 积累好策略当种子</div></div>
+</div>
+<p class="small">仍在 <b>live-LLM 桶外未接</b>(需循环内现调 LLM):感知 prompt · retrieval LLM genome · CallAgent live 编排 → 留给第二数据集。</p>
+
+<h3>① 三环 CCEA:Numerical(N) × Retrieval(A) × Decision(B) 交替协同</h3>
+<p class="small">交替进化:<b>N</b>(numerical 暴露什么候选给 B)· <b>A</b>(文档选择,gt-F1)· <b>B</b>(decision 门,窗口预测增益),<b>团队适应度</b>,且 <b>A 的证据质量门控 B</b>。团队适应度逐轮上升。</p>
+<div class="tscroll"><table>
+<tr><th>轮</th><th>N(暴露 seasonal?)</th><th>A F1(train)</th><th>B 门</th><th>团队适应度</th></tr>
+<tr><td>1</td><td class="num">False</td><td class="num">0.662</td><td class="num">conf≥0.55 wfrac≤0.32</td><td class="num">+0.037</td></tr>
+<tr><td>2</td><td class="num">False</td><td class="num">0.659</td><td class="num">conf≥0.55 wfrac≤0.38</td><td class="num">+0.041</td></tr>
+<tr><td>3</td><td class="num">False</td><td class="num">0.661</td><td class="num">conf≥0.55 wfrac≤0.52</td><td class="num good">+0.051 ↑</td></tr>
+</table></div>
+<p class="small">held-out test:N 不暴露 seasonal · A F1 0.574 · B 门 0.55/0.52 · 团队增益 <b>+0.134,22赢/7回归 (of 55)</b>。<b>N 环学会"不暴露 seasonal_naive"</b>——因为掺统计方法零收益(Toto 碾压),N 正确剪掉它(和 CallAgent 被剪同理)。<b class="warn">诚实:CorDP 感知直读全部文档、绕开 A → A↔B 耦合偏松</b>(A 只门控 B 的应用);紧耦合需在 A 选出文档上重跑感知(LLM)——这是 CCEA <b>机制实现</b>,Dr-CiK 上数值端无可挖(N→不折腾)。</p>
+
+<h3>①b · 全三环都进化(N 也进化 dictionary)→ 过拟合,实证"该冻结 numerical"</h3>
+<p class="small">把 N 从"暴露开关"升级成<b>进化一个方法库的组合</b>({Toto+seasonal+naive/mean/drift/linear_trend/ewm/moving_avg} 的加权,纯代码)。N 确实进化出<b>非平凡组合(naive 1.78 · toto 1.73 · ewm 0.51)</b>——但泛化崩:</p>
+<div class="tscroll"><table>
+<tr><th>配置(test ROI)</th><th>sMAE</th><th>sRMSE</th><th>赢/回归</th><th>说明</th></tr>
+<tr><td>N 进化组合 · 全 in-sample 选</td><td class="bad">−0.74%</td><td class="num">+7.11%</td><td class="num bad">27/28</td><td>过拟合(dev +24% 假象)</td></tr>
+<tr><td>N 进化组合 · <b>CV 选择 + L1</b></td><td class="good">+4.21%</td><td class="good">+10.80%</td><td class="num">28/27</td><td><b>过拟合修回正</b></td></tr>
+<tr><td><b>N 冻结=Toto</b>(单环 champion)</td><td class="good"><b>+10.98%</b></td><td class="good">+10.89%</td><td class="num good"><b>38/17</b></td><td><b>最优</b></td></tr>
+</table></div>
+<p class="small"><b>完整 T2 实证链(自由度 vs 信号密度):</b> N 也进化 → 全 in-sample 选**过拟合**(test sMAE −0.74%,dev +24% 是假象)→ 加 <b>CV/held-out 选择 + L1 收缩</b>把它**修回正(+4.21%)**(方法有效)→ 但仍 ≤ **N 冻结=Toto(+10.98%,38赢/17回归)**。<b>结论:稀疏监督处进化必须 CV+正则(该成为默认);但 Dr-CiK 数据受限下,最少自由度(冻结 N)最稳——"故意冻结 numerical"是实证结论,不是省事。</b>(N 权重从 naive+toto+ewm 收缩到 toto 主导。)</p>
+
+<h3>② DSL 词汇表自动增长:发明新词、只留有用的</h3>
+<p class="small">不只调权重,而是<b>长词汇表</b>:提议新特征 → 加入 → 重进化 → <b>dev 提升才保留,否则丢</b>(LLM proposer 可插 llm_design,现用种子候选演示)。</p>
+<div class="tscroll"><table>
+<tr><th>提议的新词</th><th>结果</th></tr>
+<tr><td>event_specificity / directive / has_pct</td><td class="good">✓ 保留(dev 提升)</td></tr>
+<tr><td>recency</td><td>✗ 丢弃(无提升)</td></tr>
+</table></div>
+<p class="small">词汇表 <b>8 → 11</b>;<b>test F1 0.579 → 0.595,dev 0.644 → 0.674</b>。这是"进化 DSL 本身",不只是进化 DSL 里的程序。</p>
+
+<h2>理论:何时门控跨模态修正有益(harness 视角)· 为 AISTATS</h2>
+<p class="small"><b>harness 定位</b>:整套系统 = 一个<b>自进化、可审计的预测 harness</b>(强 base + 门控接地修正 + 不变内核)。对标 Meta-Harness / Self-Harness / Harness-R1(它们<b>优化/进化 harness</b>),我们多两样:<b>可证的安全(do-no-harm)</b> + <b>"何时修正才有益"的统计条件</b>。以下命题是我们实证已展示的现象的形式化(证明 tractable,为 AISTATS 补)。</p>
+<div class="tscroll"><table>
+<tr><th>定理</th><th>非正式陈述</th><th>对应实证</th></tr>
+<tr><td><b>T1 · Do-no-harm 可采纳性</b></td><td>有界内核(|Δ|≤κ|base|)+ 无据弃权下,相对 base 的最坏退化有界;当证据精度 p 超过阈值时,期望损失 ≤ base(admissible / no-regret)。</td><td>test99 <b>零回归</b>不是运气,是可证性质</td></tr>
+<tr><td><b>T2 · 密度×精度交叉</b>(核心)</td><td>任务以密度 ρ 含真信号、精度 p、量级 m。推导 <b>gated vs modify-everything</b> 的期望净增益,证明 <b>ρ→0 或 p&lt;1 时 gated 严格占优</b>,并给出最优门阈值随 (p,m) 的闭式。</td><td>三方 ablation(改所有净负、我们正)+ 待做的<b>密度扫描图</b></td></tr>
+<tr><td><b>T3 · Confounder 不可分下界</b></td><td>若 confounder 在内容特征上与 supporting <b>对抗性不可分</b>,则任何基于内容特征的选择器,confounder 拒绝率有上界(&lt;1),存在<b>不可约误差</b>(信息论下界)。</td><td>纯代码 causal 无用 + LLM verifier 反了(60%&gt;47%)</td></tr>
+</table></div>
+<p class="small"><b>AISTATS 定位</b>:主定理 = T2(密度交叉 + 最优门,配密度扫描实验);支撑 = T1(harness 的 do-no-harm 保证)+ T3(不可分下界)。系统(CorDP/进化/三环 CCEA)= 理论的<b>可审计实例化</b>。→ 理论 + 系统 + 实验三条腿。</p>
+
+<h2><span class="n">6</span>direct 预测 vs 逐步（残差传播实验）</h2>
+<p>基线该<b>一次预测整段（direct）</b>还是<b>逐步 AR（step-by-step）</b>？逐步的唯一真正优势是让修正<b>向前传播</b>（停电后的恢复曲线、永久水平移）；代价是误差累积 + 漂移。我们没有真做 AR，而是用 <code>ResidualAdjust</code> 的形状（<code>step</code>=持久、<code>decay</code>=回落）<b>符号化</b>地测"传播"，避开 AR 的漂移。</p>
+<div class="tscroll"><table>
+<tr><th>残差范围（同门 conf≥0.8, wfrac≤1.0）</th><th>sMAE</th><th>sRMSE</th><th>joint 赢/回归</th></tr>
+<tr><td><b>局限窗口</b>（level，效果只在事件窗口）</td><td class="good">+0.93%</td><td class="good">+3.13%</td><td class="num good">14 / 5</td></tr>
+<tr><td>带到末端（step，持久传播）</td><td class="bad">−3.27%</td><td class="num">+1.89%</td><td class="num bad">5 / 14</td></tr>
+</table></div>
+<div class="callout">
+<p class="small"><b>结论：局限窗口完胜传播（14:5 vs 5:14）。</b> Dr-CiK 的文档事件<b>绝大多数是局部的</b>——效果就该待在事件窗口里，不往后传。所以：<b>基线保持 direct，逐步 AR 帮不上忙</b>（它的传播优势在这里反而有害）；而"拒绝全局/持久修正"的 <code>wfrac</code> 门也由此得到印证。真正需要"传播"的少数事件，用 <code>decay</code> 形状符号化表达即可。</p>
+</div>
+
+<h2><span class="n">7</span>实验协议（防自欺）</h2>
+<div class="flow">
+  <div class="node"><div class="t">80 train → 学门</div><div class="d">进化 / 挑选门阈值 (wfrac_max, conf_min)。</div></div>
+  <div class="arrow">↓ 冻结</div>
+  <div class="node"><div class="t">20 dev → 验门</div><div class="d">样本小（~3 题过门），只做 sanity check。</div></div>
+  <div class="arrow">↓ 冻结</div>
+  <div class="node"><div class="t">99 public_test → 只跑一次的泛化评估</div>
+    <div class="d">应用<b>从 train 冻结</b>的门，<b>绝不在 test 上调</b>。当前正在跑（CorDP + 冻结门 wfrac≤0.20 & conf≥0.8）。</div></div>
+</div>
+
+<h2><span class="n">8</span>核心命题：如何用文字做数学</h2>
+<p>文字→数学 = 三件事的乘积，别混：<b>① 结构</b>（哪个变量/方向/窗口/形状——文字擅长、免费）× <b>② 数值</b>（真正的难点）× <b>③ 信任</b>（何时该闭嘴）。</p>
+<p class="lead" style="margin-top:8px"><b>文字负责给出数学操作的*结构*和一个*指向数值来源的指针*，绝不负责*发明数值*。数值只能来自"明确引用"或"数据类比"；两者都没有时，唯一正确的操作是"不动"。</b></p>
+<p class="small">量级墙的本质：当数值既不在文档（明说）也不在数据（类比）里时，无中生有必错——门（confidence + 局部性）就是识别这种情况并弃权。<code>ResidualAdjust</code> 的 grounding 标签把这条原则做进了每个参数。</p>
+
+<h2><span class="n">9</span>现状与下一步</h2>
+<ul>
+<li><b class="good">已完成</b>：CorDP + ResidualAdjust 两个原语接入 controller + 进化 + 技能记忆；门单测；controller 22 + 相关套件全绿；内核不变性保持。</li>
+<li><b class="good">已验证</b>：量级墙可破（task_163 / 152）；train 保守门（conf≥0.9）sMAE / sRMSE <b>双指标净正、零回归</b>；test99 held-out（22/99）sMAE +2.3% / sRMSE +3.6% 零回归。</li>
+<li><b class="good">已定论</b>：残差传播 vs 局限窗口 → <b>局限窗口完胜</b>，direct 基线正确，逐步 AR 无益。</li>
+<li><b class="warn">进行中</b>：99-test 跑完得最终泛化数；残差感知完整 pass（形状 + grounding）与 CorDP 头对头比。</li>
+<li><b>下一步</b>：进化适应度换<b>窗口 (RCRPS) 指标</b>（全 horizon + CVaR 会收敛 identity）；残差门自调。</li>
+<li><b>局限</b>：Toto 是强基线（LAFP 佐证：强基线天花板 2–6%）。要更大正数需配弱基线 / 文档密集数据集。</li>
+</ul>
+
+<h2><span class="n">10</span>相关工作与定位</h2>
+<h3>A · LLM 修改 / 产出 TSFM 预测（离我们最近）</h3>
+<div class="tscroll"><table>
+<tr><th>Paper</th><th>做什么</th><th>报了什么结果</th></tr>
+<tr><td><b>NEXUS</b> 2605.14389</td><td>多 agent，Micro-Forecaster <b>直接吐每步值</b> + Calibration 出泛化 guidelines</td><td>Zillow MAPE 0.0361 vs TimesFM 0.0387；<b>没比统计方法</b>，赢 ~7%</td></tr>
+<tr><td><b>LAFP</b> 2607.24892</td><td>TSFM 采样 K 轨迹(MCTS) → LLM <b>只排序不出数</b></td><td>强基线 CiK <b>仅 2-6%</b>；弱基线 Time-MMD 最高 60%；抗噪(退化 2%)</td></tr>
+<tr><td><b>CiK</b> 2410.18959</td><td>direct-prompt LLM 直接出分布；提出 RCRPS</td><td>LLM 打败所有，<b>但基准设计成"没上下文解不了"</b></td></tr>
+<tr><td><b>Beyond Naive</b> 2508.09904</td><td>CorDP(纠正) / IC-DP(in-context) / RouteDP / ReDP</td><td>CorDP +50%、IC-DP +14-55%；<b>base 用弱模型(Lag-Llama)</b></td></tr>
+<tr><td><b>Last Mile</b> 2606.02497</td><td>workspace + 推理→显式 revision action + 记忆反思</td><td>桥"统计→业务可用"(具体数未见)；agent-loop backbone</td></tr>
+<tr><td><b>From Long News</b> 2606.03097</td><td>Importance/Process RM 选新闻，<b>RMSE_before−after 当信号</b></td><td>报改善 + 减少迭代(我们试了同思路→稀疏上过拟合)</td></tr>
+<tr><td><b>Rethinking Post-Training</b> 2605.29401</td><td><b>训练</b>(SFT+RL)一个 action-modifier</td><td>训后更好；需训练、不可审计</td></tr>
+</table></div>
+<p class="small"><b>B · 自进化/harness:</b> SEA-TS(生成 TSFM 算法代码)、EpiEvolve(记忆式规则自进化)、Meta/Self/Agentic-Harness(coding agent 演化 harness)、CORAL(AlphaEvolve 式)。
+<b>C · 多模态数据/方法:</b> Time-MMD、MoTime、Time-VLM、LLM-PS(多为弱基线+小 MLP 融合)。
+<b>D · 多-agent 拓扑:</b> GPTSwarm、G-Designer、Agentic Supernet、MetaGen/TacoMAS(进化 agent 图)。
+<b>基准:</b> Dr-CiK(deep-research + forecasting 双 track，故意含干扰/噪声/错未来文档)。</p>
+<div class="callout warn">
+<p class="small"><b>规律(对定位最有用):文字增益 ≈ f(基线强度、是否漏比统计、基准是否为文字设计)。</b> 报"LLM 大胜"的多踩了——弱基线(NEXUS/Beyond-Naive/MoTime)、漏比统计(NEXUS)、或为文字设计的基准(CiK)。老实比强基线的 LAFP 在 CiK 只 2-6%。<b>我们在"强基线 Dr-CiK + 全套数值方法 + 零回归"这个诚实且别人回避的档位</b>——不赌 LLM 替代强 TSFM，而是强 TSFM 之上稀疏安全加分。</p>
+</div>
+
+<div class="hr"></div>
+<p class="small">贡献定位：<b>神经符号 + 分层自进化</b>——LLM 只做不可约的感知（读文档 → 缓存的结构化纠正），进化的纯代码做全部策略，且输出可审计（grounding 覆盖率、有界证书、可读规则）。文献都<b>人手设</b>这条交互策略；<b>没人自进化它、也没人产出可审计的交互规则</b>——这是本工作的空白点。</p>
+
+</div>

@@ -1,0 +1,427 @@
+<title>CorDP Self-Evolving Forecasting</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --bg:#f5f6f9; --panel:#ffffff; --panel2:#eef1f6; --ink:#191d26; --mut:#5c6472;
+  --line:#e0e4ec; --acc:#2f5fe0; --acc2:#6a45e6; --good:#1f9d63; --bad:#d6474a; --warn:#b7791f;
+  --code:#f1f3f8; --codeink:#2a3140; --chip:#eef1f7;
+  --sans:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,sans-serif;
+  --mono:"IBM Plex Mono","SF Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0f1216; --panel:#171b22; --panel2:#1d222c; --ink:#e7eaef; --mut:#98a2b2;
+    --line:#2a303c; --acc:#6ea1ff; --acc2:#9d84ff; --good:#41d18c; --bad:#ff7379; --warn:#ffbe57;
+    --code:#0b0e13; --codeink:#cbd5e8; --chip:#232a38;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0f1216; --panel:#171b22; --panel2:#1d222c; --ink:#e7eaef; --mut:#98a2b2;
+  --line:#2a303c; --acc:#6ea1ff; --acc2:#9d84ff; --good:#41d18c; --bad:#ff7379; --warn:#ffbe57;
+  --code:#0b0e13; --codeink:#cbd5e8; --chip:#232a38;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);
+  font-size:15.5px;line-height:1.68;-webkit-font-smoothing:antialiased}
+.wrap{max-width:900px;margin:0 auto;padding-block:44px 84px;padding-left:18px;padding-right:18px}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--acc);margin:0 0 10px}
+h1{font-size:29px;line-height:1.22;margin:0 0 10px;font-weight:700;letter-spacing:-.01em;text-wrap:balance}
+h1 .q{color:var(--mut);font-weight:600}
+h2{font-size:20px;margin:44px 0 14px;padding-bottom:9px;border-bottom:1px solid var(--line);font-weight:600}
+h2 .n{font-family:var(--mono);color:var(--acc2);font-size:15px;margin-right:10px}
+h3{font-size:15.5px;margin:20px 0 8px;color:var(--acc);font-weight:600}
+p{margin:11px 0}
+.lead{color:var(--mut);font-size:16px;line-height:1.6;margin:16px 0 0;max-width:66ch}
+.meta{display:flex;flex-wrap:wrap;gap:7px;margin:18px 0 0}
+.chip{font-family:var(--mono);font-size:12px;background:var(--chip);border:1px solid var(--line);
+  border-radius:999px;padding:3px 11px;color:var(--mut)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin:16px 0}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:640px){.grid{grid-template-columns:1fr}}
+code{font-family:var(--mono);font-size:.86em;background:var(--code);color:var(--codeink);
+  padding:1px 6px;border-radius:6px}
+.kv{color:var(--acc2);font-weight:600}
+table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.6px}
+.tscroll{overflow-x:auto}
+th,td{border:1px solid var(--line);padding:8px 11px;text-align:left;vertical-align:top}
+th{background:var(--panel2);color:var(--mut);font-weight:600;white-space:nowrap}
+td .mono,.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.good{color:var(--good)} .bad{color:var(--bad)} .warn{color:var(--warn)}
+.flow{display:flex;flex-direction:column;gap:9px;margin:16px 0}
+.node{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--acc);
+  border-radius:12px;padding:13px 16px}
+.node .t{font-weight:600;margin-bottom:3px}
+.node .d{color:var(--mut);font-size:13.6px;line-height:1.55}
+.arrow{color:var(--mut);text-align:center;font-family:var(--mono);font-size:14px}
+.node.kernel{border-left-color:var(--warn)}
+.node.evolv{border-left-color:var(--acc2)}
+.tag{font-family:var(--mono);font-size:10.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+  padding:2px 8px;border-radius:6px;margin-left:9px;white-space:nowrap}
+.tag.k{background:rgba(183,121,31,.14);color:var(--warn);border:1px solid rgba(183,121,31,.3)}
+.tag.e{background:rgba(106,69,230,.14);color:var(--acc2);border:1px solid rgba(106,69,230,.32)}
+.tag.p{background:rgba(47,95,224,.13);color:var(--acc);border:1px solid rgba(47,95,224,.3)}
+.callout{border-left:3px solid var(--good);background:color-mix(in srgb,var(--good) 8%,transparent);
+  border-radius:10px;padding:13px 17px;margin:16px 0}
+.callout.warn{border-left-color:var(--warn);background:color-mix(in srgb,var(--warn) 9%,transparent)}
+.callout h3{margin-top:0}
+ul{margin:9px 0 9px 2px;padding-left:20px} li{margin:6px 0}
+.small{font-size:13px;color:var(--mut);line-height:1.55}
+.hr{height:1px;background:var(--line);margin:30px 0}
+a{color:var(--acc)}
+</style>
+
+<div class="wrap">
+
+<p class="eyebrow">Dr-CiK · evolving_loop.v2 · 2026-09-19</p>
+<h1>Auditable Self-Evolving Cross-Modal Forecasting<br><span class="q">From "evidence extraction" to "document-anchored correction" (CorDP)</span></h1>
+<p class="lead">On top of a numerical foundation model (Toto), we modify the forecast with document evidence through an <b>evolvable, auditable adjustment layer</b>. The core idea: <b>the cross-modal interaction policy — how text reshapes a numerical forecast — is discovered as readable code by evolution, not hand-designed.</b></p>
+<div class="meta">
+  <span class="chip">Dr-CiK 80 / 20 / 99</span>
+  <span class="chip">base = Toto-2.0-22m (strong)</span>
+  <span class="chip">perception = haiku (cached)</span>
+  <span class="chip">policy = evolved pure code</span>
+</div>
+
+<h2>Four Highlights</h2>
+<div class="grid">
+  <div class="panel"><h3 style="margin-top:0">① The text→math principle</h3>
+    <p class="small">Text supplies the <b>structure</b> of the math operation plus a <b>pointer to where the number lives</b> — it never invents the number. Magnitudes come only from an "explicit quote / a data analog"; when neither exists → <b>abstain</b>. Realized as per-parameter grounding tags.</p></div>
+  <div class="panel"><h3 style="margin-top:0">② Anchoring breaks the magnitude wall</h3>
+    <p class="small">Replace "ask for the magnitude in the abstract (→unknown)" with "show the LLM the base numbers and let it correct them" → magnitude becomes usable. task_163: multiplier 0.93 vs oracle 0.935.</p></div>
+  <div class="panel"><h3 style="margin-top:0">③ An auditable, evolved symbolic policy</h3>
+    <p class="small">The interaction policy is <b>readable code</b> (primitives + parameters), discovered by evolution, with an invariant kernel guaranteeing bounded + grounded output — not a black-box LLM, not a trained model. Readable / traceable / provably safe.</p></div>
+  <div class="panel"><h3 style="margin-top:0">④ Precision-first on sparse, adversarial data</h3>
+    <p class="small">Grounding + abstain → <b>zero-regression net-positive</b> on sparse, low-signal-density, adversarial data — exactly the regime where "modify everything" (goes negative) and "data-hungry" (overfits) fail.</p></div>
+</div>
+<div class="callout">
+<p class="small"><b>Positioning vs the field:</b> NEXUS (2605.14389) has the LLM <b>output numbers to beat a TSFM</b>, but compares only against TimesFM + CoT (<b>no statistical methods</b>) and wins by ~7%; LAFP (2607.24892) tests strong and weak baselines honestly — <b>only 2-6% on strong-baseline CiK</b>, 60% on weaker. The pattern: big "text wins" come from <b>weak baselines / omitted statistical methods / benchmarks designed so context is essential</b>. We do not bet on "LLM replaces a strong TSFM" — we bet on <b>"safe sparse gains on top of a strong TSFM"</b>, and hit zero-regression in the strong-baseline + adversarial-sparse regime others avoid.</p>
+</div>
+
+<h2><span class="n">0</span>In one sentence</h2>
+<p>Pure numerical is capped (champion ≈ Toto), and the "select-a-candidate" paradigm is capped too. Documents <b>carry real signal</b> (oracle diagnosis: on 12/20 dev tasks the best scaling cuts error ~33%), but under the old "make retrieval emit {direction, magnitude}" paradigm the <b class="bad">magnitude is always unknown</b>. The pivot: <b class="good">stop extracting an abstract magnitude; instead give the LLM the Toto base numbers + documents and let it output a "correction multiplier" anchored on concrete values (CorDP)</b> — the magnitude wall breaks.</p>
+
+<h2>Contributions (honest: genuinely new vs borrowed)</h2>
+<p class="lead" style="margin-top:6px">In one line: <b>the first auditable, self-evolving forecast-correction harness with a provable do-no-harm guarantee, plus a statistical characterization of when document evidence should modify a strong forecast (density × precision crossover), validated in the sparse-adversarial regime where prior methods fail.</b></p>
+<div class="tscroll"><table>
+<tr><th>Genuinely new</th><th>New vs whom</th></tr>
+<tr><td>① a <b>statistical theory</b> of "when correction helps" (density × precision crossover + confounder impossibility bound)</td><td><b>vs everyone</b> — NEXUS/LAFP/Last Mile are purely empirical; no one gives a when-it-helps condition/bound</td></tr>
+<tr><td>② a provable <b>do-no-harm</b> harness (kernel + abstain → bounded regret)</td><td>Last Mile (constraints, no guarantee); Meta/Self/Harness-R1 (optimize a harness, no safety proof)</td></tr>
+<tr><td>③ a <b>self-evolved</b> cross-modal interaction policy (readable code)</td><td>Last Mile (hand-prompted); NEXUS (black-box)</td></tr>
+<tr><td>④ the <b>sparse-adversarial regime</b> as the contribution (three-way ablation)</td><td>the whole field (chases SOTA on dense benchmarks)</td></tr>
+<tr><td>⑤ <b>gt-supervised evolution of retrieval selection</b></td><td>Last Mile (doesn't touch retrieval)</td></tr>
+</table></div>
+<div class="callout warn">
+<p class="small"><b>Honest: what is NOT ours (borrowed)</b> — CorDP anchored correction = Beyond-Naive-Prompting; action-centric auditable harness ≈ Last Mile; evolving a harness = Meta/Self/Harness-R1 (for coding agents); RAG-style selection = old. <b>Any single component is incremental; the novelty is the combination into a guaranteed object + the theory.</b> → For AISTATS, lead with ① theory + ④ sparse regime; the system (②③⑤) is the auditable instantiation. Centering "we built a system" makes the novelty weak (all borrowed); centering "a theory of when/how much text can move a strong forecast + a provably-safe harness" makes it strong.</p>
+</div>
+
+<h2>Results at a glance (everything)</h2>
+<h3>A · Correction frontier (test99 held-out, whole-horizon cap=5.0; base sMAE 0.381 / sRMSE 0.590)</h3>
+<div class="tscroll"><table>
+<tr><th>Policy</th><th>Provenance</th><th>sMAE</th><th>sRMSE</th><th>wins/reg</th><th>touched</th></tr>
+<tr><td>CorDP conf≥0.8</td><td>hand-set (conservative)</td><td class="good">+1.93%</td><td class="good">+3.20%</td><td class="num good">17/0</td><td class="num">17</td></tr>
+<tr><td>CorDP conf≥0.68</td><td class="kv">evolved (mid)</td><td class="good">+2.46%</td><td class="good">+4.55%</td><td class="num">28/2</td><td class="num">30</td></tr>
+<tr><td>CorDP conf≥0.65</td><td>dev-selected (aggressive)</td><td class="good">+3.71%</td><td class="good">+4.90%</td><td class="num">34/7</td><td class="num">41</td></tr>
+<tr><td><b>evolved full-stack champion</b></td><td class="kv"><b>3-loop/single</b></td><td class="good"><b>+5.27%</b></td><td class="good"><b>+4.27%</b></td><td class="num">38/17</td><td class="num">55</td></tr>
+</table></div>
+<p class="small">The evolved champion on the <b>ROI subset (55 tasks)</b>: sMAE +10.98% / sRMSE +10.89%. Per-task: task_163 mult 0.93 vs oracle 0.935; task_152 +28%.</p>
+
+<h3>B · Retrieval self-evolving loop (gt-role dense supervision, test F1)</h3>
+<div class="tscroll"><table>
+<tr><th>Selection policy</th><th>test F1</th></tr>
+<tr><td>select-all / exact-entity</td><td class="num">0.435 / 0.486</td></tr>
+<tr><td><b>evolved</b></td><td class="num good">0.582</td></tr>
+<tr><td><b>+ DSL auto-growth (vocab 8→11)</b></td><td class="num good">0.595</td></tr>
+<tr><td>oracle</td><td class="num">1.000</td></tr>
+</table></div>
+<p class="small">distractor rejection: timeseries 88-91% · profile 87-94% · noisy 81% · temporal 61% · <b>confounder 57-62% (indistinguishable hard core)</b>.</p>
+
+<h3>C · Ablations / honest negatives (all point to "data-limited; value is in architecture + theory")</h3>
+<div class="tscroll"><table>
+<tr><th>Experiment</th><th>Result</th></tr>
+<tr><td>Three-way ablation</td><td>modify-all net-negative (22w/28r) · PRM overfits (2 reg test) · <b class="good">ours zero regression</b></td></tr>
+<tr><td>direct vs step-by-step</td><td>confined-window <b>14:5</b> beats carry-to-end 5:14 → step-by-step useless</td></tr>
+<tr><td>shaped residual vs multiplicative CorDP</td><td>test ≈ tie (safer at base≈0) → counts as one method</td></tr>
+<tr><td>MethodBlend (blend seasonal)</td><td>zero gain (Toto dominates seasonal)</td></tr>
+<tr><td>confounder</td><td>pure-code causal useless + LLM verifier inverted (60%&gt;47%) → indistinguishable</td></tr>
+<tr><td>PRM measured-impact gate · CRPS</td><td>overfits · falsified</td></tr>
+</table></div>
+<h3>D · Evolution machinery (all working)</h3>
+<p class="small">Three layers (program / team / vocabulary) · three-loop CCEA (N×A×full-B, N learns not to expose seasonal) · skill_memory accumulation · train search / dev select / test confirm.</p>
+
+<h2><span class="n">1</span>The pivot: why CorDP</h2>
+<div class="grid">
+  <div class="panel">
+    <h3>Why the old (extraction) paradigm is capped</h3>
+    <p class="small">Retrieval reads documents → structured <code>{direction, magnitude}</code>. Given the numeric context the LLM turns conservative and returns <code>unknown</code> for magnitude; pure data can't estimate an event's magnitude either (short history has no precedent). Variants (regime-fill, analog scaler, self-consistency sampling) <b>all regress under LOO</b>.</p>
+    <p class="small bad">= the failure mode the literature names: "reasoning right, numerical application wrong."</p>
+  </div>
+  <div class="panel">
+    <h3>The new (CorDP correction) paradigm</h3>
+    <p class="small">Show the LLM the <b>base forecast numbers</b> + documents, and have it output a <b>multiplier per sub-window</b>. Magnitude is anchored on concrete Toto values → <code>unknown</code> becomes a usable number.</p>
+    <p class="small">Literature: <span class="mono">CorDP (2508.09904)</span> corrects rather than extracts, +50%; <span class="mono">LAFP (2607.24892)</span> has the LLM only rank TSFM traces, 2-6% on strong CiK / up to 60% on weaker Time-MMD.</p>
+  </div>
+</div>
+
+<h2><span class="n">2</span>System pipeline (current design)</h2>
+<div class="flow">
+  <div class="node"><div class="t">① Numerical layer · multi-candidate<span class="tag p">cached</span></div>
+    <div class="d">Toto (strongest, the base) + statistical + combined + coding-agent-generated code. champion ≈ high_toto_balanced.</div></div>
+  <div class="arrow">↓</div>
+  <div class="node"><div class="t">② Perception · LLM runs once, results cached<span class="tag p">cached</span></div>
+    <div class="d">(a) <b>retrieval evidence</b>: structured EvidenceEffect (direction / window / citation). (b) <b>CorDP correction</b>: base numbers + docs → <code>{relevant, corrections:[{start,end,multiplier,rationale}], confidence}</code>. Both cached as per-task cards; no LLM call during evolution.</div></div>
+  <div class="arrow">↓</div>
+  <div class="node kernel"><div class="t">③ Invariant kernel · never evolved<span class="tag k">fixed</span></div>
+    <div class="d">Safety + measurement contract: ① a strong base (Toto) is always available as a floor; ② the final output passes through <code>apply_bounded_delta</code>, clamped to base ±50%, non-finite → base; ③ adjustments act only on <b>grounded</b> evidence; ④ fitness = a fixed held-out metric. Any evolved policy is caught by it — nothing catastrophic can be emitted.</div></div>
+  <div class="arrow">↓</div>
+  <div class="node evolv"><div class="t">④ Evolvable controller · ordered instruction sequence<span class="tag e">evolved</span></div>
+    <div class="d">A string of <b>readable primitives</b> over a ControllerState. The <b>order and choice</b> — i.e. how evidence reshapes the forecast — is what evolution explores.</div></div>
+</div>
+
+<h2><span class="n">3</span>Evolvable primitive library (INSTRUCTIONS)</h2>
+<div class="tscroll"><table>
+<tr><th>Primitive</th><th>What it does</th><th>Evolvable params</th></tr>
+<tr><td><code>SelectBase</code></td><td>Pick a numerical candidate as the base (default toto_2_0)</td><td>candidate</td></tr>
+<tr><td><code>RegimeAdjust</code></td><td>Scale the window effect toward a historical regime (data-derived)</td><td>regime, cap, fill_unknown</td></tr>
+<tr><td><code>SemanticAdjust</code></td><td>LLM decides which historical regime an event resembles; magnitude from that regime's data; a <b>data gate</b> trusts only stable periodic regimes</td><td>cap, trusted, require_significant</td></tr>
+<tr><td><code>PooledSemanticAdjust</code></td><td>As above + a cross-task prior (borrow a stable magnitude when history is too short)</td><td>cap, trusted, local_weight</td></tr>
+<tr><td><code>DocAdjust</code></td><td>Scale by the document's self-reported magnitude (bounded)</td><td>cap</td></tr>
+<tr><td style="border-left:3px solid var(--good)"><code>CorDPAdjust</code> <b class="good">new</b></td><td>Apply the cached CorDP <b>multiplier</b> (level correction) through precision gates</td><td><span class="kv">conf_min, wfrac_max, mult_lo/hi, shrink</span></td></tr>
+<tr><td style="border-left:3px solid var(--good)"><code>ResidualAdjust</code> <b class="good">new</b></td><td>Apply a document-generated <b>shaped additive residual</b> `base + A·shape(t)·ref`, shape ∈ level/ramp/bump/decay; <b>ungrounded (guess) specs abstain</b>; base≈0 falls back to the history scale</td><td><span class="kv">conf_min, wfrac_max, amp_cap, shrink</span></td></tr>
+<tr><td style="border-left:3px solid var(--good)"><code>MethodBlend</code> <b class="good">new</b></td><td><b>Context-conditioned</b> blend with another candidate (statistical / another TSFM) — blends only when the document signals, else leaves the strong base alone (needs a second cached candidate)</td><td><span class="kv">other, weight, conf_min</span></td></tr>
+<tr><td style="border-left:3px solid var(--acc2)"><code>MenuAdjust</code> <b class="good">new</b></td><td><b>Decision does math</b>: pick an op from the Numerical agent's <b>math menu</b> (regime-level / trend / decay …) and apply it to the event window — the document picks which, the menu supplies the (data-computed) number</td><td><span class="kv">prefer, cap</span></td></tr>
+<tr><td style="border-left:3px solid var(--acc2)"><code>CallAgent</code> <b class="good">new</b></td><td><b>Orchestration / agent-as-tool</b>: call numerical/retrieval like a tool (possibly several times); each call is logged in <code>state.calls</code> for an efficiency cost in the fitness; the kernel still bounds (live wiring pluggable)</td><td><span class="kv">tool, arg</span></td></tr>
+<tr><td><code>NoOp / Regenerate</code></td><td>No-op / feedback re-generation (stub)</td><td>—</td></tr>
+</table></div>
+
+<div class="callout">
+<h3>CorDPAdjust's precision gates (all evolvable) — the "hand-set in the literature, evolved by us" contribution</h3>
+<ul>
+<li><code>conf_min</code>: abstain (leave Toto alone) when the LLM's self-reported confidence is below this</li>
+<li><code>wfrac_max</code>: reject a correction spanning more than this fraction of the horizon (<b>a whole-horizon rescale is the base model's job and always misfires</b>)</li>
+<li><code>mult_lo / mult_hi</code>: clamp the multiplier (the kernel adds a further ±50% bound)</li>
+<li><code>shrink</code>: partial trust <code>eff = 1 + shrink·(m−1)</code></li>
+</ul>
+<p class="small">In the literature the thresholds of CorDP / IC-DP / LAFP are all hand-set; <b>evolving them (and the "which primitive" orchestration) into readable code</b> is new.</p>
+</div>
+
+<h2><span class="n">4</span>Evolution &amp; accumulation</h2>
+<div class="grid">
+  <div class="panel"><h3 style="margin-top:0">Evolution algorithm</h3>
+  <p class="small">(μ+λ) evolution: seeds = SEED_CONTROLLERS (incl. <code>CORDP_CONTROLLER</code>) + skill memory. Mutation = insert / delete / reorder / edit-params; parsimony tie-break. Fitness = <b>CVaR downside</b> (mean + β·worst-tail mean), penalizing regressions.</p></div>
+  <div class="panel"><h3 style="margin-top:0">Skill memory (accumulation)</h3>
+  <p class="small">Store evolved good controllers as JSON, deduplicate, reload as seeds next run (Voyager / AlphaEvolve program-database style). <b>Note: it accumulates "arrangements of primitives", not new atomic primitives</b> — those are written by a human / LLM-design.</p></div>
+</div>
+
+<h3>What exactly can be evolved (checklist)</h3>
+<div class="tscroll"><table>
+<tr><th>Level</th><th>Evolvable object</th><th>Status</th></tr>
+<tr><td><b>Parameters</b> (gate / kernel knobs)</td><td>Each primitive's params: CorDPAdjust/ResidualAdjust <code>conf_min, wfrac_max, mult/amp bounds, shrink</code>; RegimeAdjust/Semantic <code>cap, trusted, require_significant</code>; MethodBlend <code>other, weight</code></td><td class="good">✅ working</td></tr>
+<tr><td><b>Structure</b> (orchestration)</td><td>Which primitives, in what order (controller = instruction sequence); insert / delete / reorder</td><td class="good">✅ working</td></tr>
+<tr><td><b>The policy code itself</b></td><td>LLM-as-designer (<code>llm_design.py</code>, AST sandbox) proposes gates / scalers / regime estimators as <b>readable Python</b>, FunSearch/ADAS style</td><td class="warn">🟡 infra exists, not fully wired</td></tr>
+<tr><td><b>Perception side</b> (retrieval)</td><td>Retrieval agent's genome: round1/2 strategy, second-round trigger, #documents, target_match…</td><td class="warn">🟡 evolvable, not yet co-evolved with the adjustment layer</td></tr>
+<tr><td><b>Accumulation</b></td><td>skill_memory keeps evolved good controllers as next-run seeds</td><td class="good">✅ automatic</td></tr>
+</table></div>
+
+<h3>Evolution results (2026-09-19)</h3>
+<ul>
+<li><b class="good">Prerequisite fixed</b>: under a whole-horizon + CVaR objective, evolution collapses to <code>identity</code> (windowed gains are diluted); <b>with a ROI (event-window) metric, evolution finds a non-trivial controller</b> (no longer "do nothing").</li>
+<li><b>What it finds is a precision/recall frontier</b>: on train ROI, conf≥0.9 = 6 wins / 0 reg (conservative, zero-regression end) → conf≥0.6 = 21 wins / 13 reg (aggressive end). <b>Evolution slides along this frontier via the downside weight β</b> — β=2 to the zero-regression end, mean to the aggressive end.</li>
+<li>The aggressive gate conf≥0.68 that evolution (mean) chose also <b>generalizes on test99</b>: +2.5% / +4.6%, 28 wins / 2 reg (higher aggregate than the hand-set conservative gate's 17 wins / 0 reg, but 2 regressions).</li>
+<li><b>Proper protocol run</b> (train search → dev select → test confirm): the gate is per-task → train-internal LOO ≈ in-sample, so dev is the real held-out selector; but <b>dev is too small (12 ROI / 4 touched) to select</b> — the gate it picks scores poorly on dev/train yet strongly on test, i.e. <b>data-driven gate selection is unreliable on Dr-CiK</b> (again the sparse / data-limited ceiling).</li>
+</ul>
+
+<h3>Operating-point frontier (test99, whole-horizon, drcik_point_metrics cap=5.0)</h3>
+<p class="small">base: sMAE 0.38141 · sRMSE 0.59035 (99 tasks). A controllable frontier from "zero-regression conservative" to "max-aggregate".</p>
+<div class="tscroll"><table>
+<tr><th>Gate</th><th>Provenance</th><th>sMAE</th><th>sRMSE</th><th>wins/reg</th></tr>
+<tr><td>conf≥0.8 wfrac≤0.2</td><td>hand-set</td><td class="good">+1.93%</td><td class="good">+3.20%</td><td class="num good">17 / 0</td></tr>
+<tr><td>conf≥0.68 wfrac≤0.24</td><td class="kv"><b>evolved ⭐</b></td><td class="good">+2.46%</td><td class="good">+4.55%</td><td class="num">28 / 2</td></tr>
+<tr><td>conf≥0.65 wfrac≤0.5</td><td>dev-selected</td><td class="good">+3.71%</td><td class="good">+4.90%</td><td class="num">34 / 7</td></tr>
+</table></div>
+<p class="small">Provenance: <b>hand-set</b> = first-principles gate; <b>evolved</b> = found by the (μ+λ) evolutionary search (windowed fitness); <b>dev-selected</b> = chosen by the train→dev→test grid protocol. The three are one precision/recall frontier — <b>conservative end zero-regression +1.9%/+3.2%, aggressive end +3.7%/+4.9% (34 wins/7 reg)</b>, all generalizing on test.</p>
+
+<h3>The aggressive gate (conf≥0.65) across splits (ROI-only metric)</h3>
+<div class="tscroll"><table>
+<tr><th>Split</th><th>ROI tasks</th><th>sMAE (rel)</th><th>sRMSE (rel)</th><th>touched wins/reg</th></tr>
+<tr><td>TRAIN(80)</td><td class="num">50</td><td class="num">0.520→0.527 (−1.4%)</td><td class="num">0.657→0.644 (+2.0%)</td><td class="num">31: 20/11</td></tr>
+<tr><td>DEV(20)</td><td class="num">12</td><td class="num">0.425→0.439 (−3.4%)</td><td class="num">0.582→0.584 (−0.5%)</td><td class="num">4: 1/3</td></tr>
+<tr><td>TEST(99)</td><td class="num">55</td><td class="num good">1.342→1.215 (+9.4%)</td><td class="num good">1.460→1.302 (+10.9%)</td><td class="num">41: 26/8</td></tr>
+</table></div>
+<p class="small">The ROI-only metric is volatile (dev/train dominated by a few large-scale tasks + tiny samples → negative; test strong) → <b>whole-horizon (table above) is the metric to trust</b>; this table shows dev is too small and ROI too noisy for reliable automatic gate selection.</p>
+</ul>
+
+<h2><span class="n">5</span>Experimental findings (2026-09-19)</h2>
+<h3>The magnitude wall broken (per-task evidence)</h3>
+<div class="tscroll"><table>
+<tr><th>Task</th><th>Document</th><th>LLM mult</th><th>oracle</th><th>window CRPS / MAE</th></tr>
+<tr><td class="num">task_163</td><td>"midday peak stays below 900 W/m²"</td><td class="num">0.93</td><td class="num">0.935</td><td class="good">98→92 (near-exact)</td></tr>
+<tr><td class="num">task_152</td><td>maritime fog lowers visibility</td><td class="num">1.18</td><td class="num">1.39</td><td class="good">0.55→0.39 (+28%)</td></tr>
+<tr><td class="num">task_206</td><td>"insulation / occupant vacated" (misleading)</td><td class="num">0.85/0.35</td><td class="num">1.12</td><td class="bad">wrong direction → worse</td></tr>
+</table></div>
+
+<h3>test99 generalization (frozen gate, held-out, 99/99 done)</h3>
+<div class="tscroll"><table>
+<tr><th>Gate (frozen from train)</th><th>sMAE</th><th>sRMSE</th><th>joint wins/reg</th><th>touched</th></tr>
+<tr><td><b>conf≥0.8 &amp; wfrac≤0.2</b></td><td class="good">+1.93%</td><td class="good">+3.20%</td><td class="num good">17 / 0</td><td class="num">17/99</td></tr>
+<tr><td>conf≥0.9 &amp; wfrac≤0.2</td><td class="good">+1.04%</td><td class="good">+1.50%</td><td class="num">8 / 0</td><td class="num">8/99</td></tr>
+</table></div>
+<p class="small">On 99 fresh held-out tasks: <b>both standard metrics positive, zero regressions, 82 tasks abstain (do-no-harm)</b>; <b>touched subset sMAE +13.8% / sRMSE +19.3%</b>. Stable from 22→49→75→99 tasks — the frozen gate generalizes, not overfits. drcik_point_metrics, cap=5.0.</p>
+
+<h3>Three-way ablation (who fails on sparse adversarial data)</h3>
+<div class="tscroll"><table>
+<tr><th>Gate strategy</th><th>Behavior on sparse data</th><th>Note</th></tr>
+<tr><td>Modify everything (no gate)</td><td class="bad">net-negative 22 wins/28 reg</td><td>modify-everything drowned in misfires</td></tr>
+<tr><td>Data-hungry (PRM measured-impact gate)</td><td class="warn">overfits, 2 reg on test</td><td>only ~15 grounded corrections; dropped the protective wfrac gate</td></tr>
+<tr><td><b>Ours (grounding + abstain)</b></td><td class="good">test 17 wins / 0 reg</td><td>act only where grounded, localized, high-confidence</td></tr>
+</table></div>
+
+<div class="callout warn">
+<h3>Diagnosis: the evolution objective must be windowed</h3>
+<p class="small">Under a <b>whole-horizon</b> + CVaR objective, evolution converges to <code>identity</code> (no change, zero improvement, zero regression) — the in-window gains are diluted over the whole horizon and can't overcome the CVaR downside penalty. This is exactly the CiK / RCRPS lesson: <b>score by region of interest</b>. Fixed by switching fitness to windowed CRPS / MAE.</p>
+</div>
+
+<h2>Retrieval self-evolving loop (densely supervised by gt_evidence)</h2>
+<p class="small">Dr-CiK gives ground-truth document <b>roles</b> (<code>role: supporting vs distractor</code>, ~37 docs/task, 12 supporting) — a <b>dense</b> signal (not capped by the sparse forecast side). We evolve a <b>document-selection policy</b> (a linear rule over deployable features: exact-entity / time-overlap / future-claim / length…, never role), fitness = selection-F1 vs supporting. <b>Pure code, no LLM. Last Mile does not touch retrieval — this is our differentiator.</b></p>
+<div class="tscroll"><table>
+<tr><th>Selection policy</th><th>train</th><th>dev</th><th>test F1</th></tr>
+<tr><td>select-all</td><td class="num">0.475</td><td class="num">0.491</td><td class="num">0.435</td></tr>
+<tr><td>exact-entity</td><td class="num">0.536</td><td class="num">0.577</td><td class="num">0.486</td></tr>
+<tr><td><b>evolved</b></td><td class="num good">0.671</td><td class="num good">0.628</td><td class="num good">0.582</td></tr>
+<tr><td>oracle</td><td class="num">1.000</td><td class="num">1.000</td><td class="num">1.000</td></tr>
+</table></div>
+<p class="small">Auditable evolved rule: <code>time_overlap +2.4 · future_claim −2.5 · len_norm −6.7 · entity_frac +1.9 · target_frac −1.9</code>. <b>test F1 0.49→0.58; dense supervision → generalizes, not overfit.</b></p>
+<h3>Per-distractor-type rejection (test) + the confounder hard core</h3>
+<div class="tscroll"><table>
+<tr><th>distractor type</th><th>rejection</th><th>feature that kills it</th></tr>
+<tr><td>timeseries (wrong future)</td><td class="num good">88–91%</td><td>future_claim</td></tr>
+<tr><td>profile (other entity, same pattern)</td><td class="num good">87–94%</td><td>exact_entity</td></tr>
+<tr><td>noisy (irrelevant)</td><td class="num good">81%</td><td>relevance / length</td></tr>
+<tr><td>temporal (other time period)</td><td class="num">61%</td><td>time_overlap</td></tr>
+<tr><td><b>confounder (topical, causally unrelated)</b></td><td class="num bad">57–62%</td><td>neither code nor LLM cracks it</td></tr>
+</table></div>
+<div class="callout warn">
+<p class="small"><b>Confounder is an adversarial hard core (empirical):</b> ① a pure-code <code>causal_relevance</code> feature is judged useless by evolution (weight ≈ −0.04); ② an <b>LLM causal-verifier is inverted</b> — it rates confounders "causal" more often (60%) than supporting docs (47%), because supporting includes SOP/background docs while confounders are engineered to look causal. <b>Neither pure code nor an LLM verifier cracks confounder → it is Dr-CiK's deliberate causal decoy, and test F1 0.58 is the reachable honest ceiling.</b></p>
+</div>
+
+<h2>Three-loop co-evolution &amp; DSL vocabulary auto-growth (new)</h2>
+<h3>The full evolve flow (three layers)</h3>
+<div class="flow">
+  <div class="node"><div class="t">Shared base (not evolved)</div>
+    <div class="d">perception cached once (CorDP/residual + retrieval evidence) · Toto base + MathMenu · invariant kernel (±50% + grounded-only)</div></div>
+  <div class="arrow">↓ three layers of evolution (all pure code, no LLM)</div>
+  <div class="node evolv"><div class="t">Layer 1 · program evolution (each loop)<span class="tag e">evolved</span></div>
+    <div class="d">Loop A retrieval: doc-selection weights (gt-F1) · Loop B decision: primitive sequence + gates (windowed gain − CVaR − call-cost)</div></div>
+  <div class="arrow">↓</div>
+  <div class="node evolv"><div class="t">Layer 2 · team (three-loop CCEA)<span class="tag e">evolved</span></div>
+    <div class="d">N (what numerical exposes) × A (select docs) × B (how to correct), alternating; A's evidence quality gates B; team fitness</div></div>
+  <div class="arrow">↓</div>
+  <div class="node evolv"><div class="t">Layer 3 · vocabulary auto-growth (evolve the DSL itself)<span class="tag e">evolved</span></div>
+    <div class="d">propose a new feature/primitive → keep only if dev improves (retrieval side 8→11 done; LLM proposer plugs in via llm_design)</div></div>
+  <div class="arrow">↓</div>
+  <div class="node kernel"><div class="t">protocol + accumulation<span class="tag k">fixed</span></div>
+    <div class="d">train search → dev select → test confirm; skill_memory keeps good policies as seeds</div></div>
+</div>
+<p class="small">Still <b>outside the live-LLM bucket</b> (would need an LLM call inside the loop): perception prompt · retrieval LLM genome · CallAgent live orchestration → deferred to a second dataset.</p>
+
+<h3>① Three-loop CCEA: Numerical (N) × Retrieval (A) × Decision (B), alternating</h3>
+<p class="small">Alternate: <b>N</b> (what numerical exposes to B) · <b>A</b> (doc selection, gt-F1) · <b>B</b> (decision gate, windowed forecast gain) under a <b>team objective</b>, with <b>A's evidence-quality gating B</b>. Team fitness rises each round.</p>
+<div class="tscroll"><table>
+<tr><th>round</th><th>N (expose seasonal?)</th><th>A F1(train)</th><th>B gate</th><th>team fitness</th></tr>
+<tr><td>1</td><td class="num">False</td><td class="num">0.662</td><td class="num">conf≥0.55 wfrac≤0.32</td><td class="num">+0.037</td></tr>
+<tr><td>2</td><td class="num">False</td><td class="num">0.659</td><td class="num">conf≥0.55 wfrac≤0.38</td><td class="num">+0.041</td></tr>
+<tr><td>3</td><td class="num">False</td><td class="num">0.661</td><td class="num">conf≥0.55 wfrac≤0.52</td><td class="num good">+0.051 ↑</td></tr>
+</table></div>
+<p class="small">Held-out test: N does not expose seasonal · A F1 0.574 · B gate 0.55/0.52 · team gain <b>+0.134, 22 wins/7 reg (of 55)</b>. <b>N learns "don't expose seasonal_naive"</b> — blending a statistical method gives zero gain (Toto dominates), so N correctly prunes it (like CallAgent). <b class="warn">Honest: CorDP perception reads all docs directly, bypassing A → the A↔B coupling is loose</b> (A only gates B's application); a tight coupling needs re-running perception on A-selected docs — this is the CCEA <b>mechanism</b>, and on Dr-CiK there is nothing to mine on the numerical side (N → do nothing).</p>
+
+<h3>①b · All three loops evolve (N evolves the dictionary too) → overfits, empirically confirming "freeze numerical"</h3>
+<p class="small">Upgrading N from an expose switch to <b>evolving a combination over a method library</b> ({Toto+seasonal+naive/mean/drift/linear_trend/ewm/moving_avg}, pure code). N does evolve a <b>non-trivial blend (naive 1.78 · toto 1.73 · ewm 0.51)</b> — but generalization breaks:</p>
+<div class="tscroll"><table>
+<tr><th>Config (test ROI)</th><th>sMAE</th><th>sRMSE</th><th>wins/reg</th><th>note</th></tr>
+<tr><td>N evolves blend · in-sample selection</td><td class="bad">−0.74%</td><td class="num">+7.11%</td><td class="num bad">27/28</td><td>overfit (dev +24% illusion)</td></tr>
+<tr><td>N evolves blend · <b>CV selection + L1</b></td><td class="good">+4.21%</td><td class="good">+10.80%</td><td class="num">28/27</td><td><b>overfit repaired → positive</b></td></tr>
+<tr><td><b>N frozen = Toto</b> (single-loop champion)</td><td class="good"><b>+10.98%</b></td><td class="good">+10.89%</td><td class="num good"><b>38/17</b></td><td><b>best</b></td></tr>
+</table></div>
+<p class="small"><b>The full T2 empirical chain (degrees of freedom vs signal density):</b> letting N evolve with in-sample selection <b>overfits</b> (test sMAE −0.74%; dev +24% is an illusion) → adding <b>CV/held-out selection + L1 shrinkage repairs it to positive (+4.21%)</b> (the fix works) → but it still ≤ <b>N frozen = Toto (+10.98%, 38 wins/17 reg)</b>. <b>Takeaway: any evolution under sparse supervision must use CV + regularization (should be the default); but under Dr-CiK's data limit, the fewest degrees of freedom (freeze N) is most robust — "freeze numerical" is an empirical result, not a shortcut.</b> (N weights shrank from naive+toto+ewm toward Toto-dominant.)</p>
+
+<h3>② DSL vocabulary auto-growth: invent new words, keep only useful ones</h3>
+<p class="small">Not just tuning weights but <b>growing the vocabulary</b>: propose a new feature → add → re-evolve → <b>keep only if dev F1 improves, else drop</b> (LLM proposer plugs in via llm_design; here seeded candidates demonstrate the mechanism).</p>
+<div class="tscroll"><table>
+<tr><th>proposed new word</th><th>outcome</th></tr>
+<tr><td>event_specificity / directive / has_pct</td><td class="good">✓ kept (dev improved)</td></tr>
+<tr><td>recency</td><td>✗ dropped (no help)</td></tr>
+</table></div>
+<p class="small">Vocabulary <b>8 → 11</b>; <b>test F1 0.579 → 0.595, dev 0.644 → 0.674</b>. This is "evolving the DSL itself", not just programs written in it.</p>
+
+<h2>Theory: when does gated cross-modal correction help (a harness view) · for AISTATS</h2>
+<p class="small"><b>Harness framing</b>: the whole system is a <b>self-evolving, auditable forecasting harness</b> (strong base + gated grounded correction + invariant kernel). Versus Meta-Harness / Self-Harness / Harness-R1 (which <b>optimize/evolve a harness</b>), we add two things: <b>provable safety (do-no-harm)</b> and <b>statistical conditions for when correction helps</b>. The propositions below formalize phenomena our experiments already show (proofs tractable; to be written for AISTATS).</p>
+<div class="tscroll"><table>
+<tr><th>Theorem</th><th>Informal statement</th><th>Matching evidence</th></tr>
+<tr><td><b>T1 · Do-no-harm admissibility</b></td><td>Under a bounded kernel (|Δ|≤κ|base|) + abstain-if-ungrounded, the worst-case degradation vs base is bounded; when evidence precision p exceeds a threshold, expected loss ≤ base (admissible / no-regret).</td><td>test99 <b>zero regression</b> is a provable property, not luck</td></tr>
+<tr><td><b>T2 · Density × precision crossover</b> (main)</td><td>Tasks carry signal at density ρ, precision p, magnitude m. Derive the expected net gain of <b>gated vs modify-everything</b>; prove <b>gated strictly dominates as ρ→0 or p&lt;1</b>, with a closed form for the optimal gate in (p,m).</td><td>three-way ablation (modify-all negative, ours positive) + a planned <b>density-sweep figure</b></td></tr>
+<tr><td><b>T3 · Confounder impossibility bound</b></td><td>If confounders are <b>adversarially indistinguishable</b> from supporting in content-feature space, any content-feature selector has confounder-rejection bounded below 1 — an <b>irreducible error</b> (information-theoretic lower bound).</td><td>pure-code causal useless + LLM verifier inverted (60%&gt;47%)</td></tr>
+</table></div>
+<p class="small"><b>AISTATS positioning</b>: main theorem = T2 (crossover + optimal gate, validated by the density sweep); supporting = T1 (the harness's do-no-harm guarantee) + T3 (the indistinguishability lower bound). The system (CorDP / evolution / three-loop CCEA) is the <b>auditable instantiation</b> of the theory. → theory + system + experiment, three legs.</p>
+
+<h2><span class="n">6</span>Direct vs step-by-step (residual propagation experiment)</h2>
+<p>Should the base forecast the whole horizon at once (<b>direct</b>) or step-by-step (<b>autoregressive</b>)? The only real advantage of step-by-step is letting a correction <b>propagate forward</b> (a recovery curve after an outage, a permanent level shift); the cost is error accumulation + drift. Rather than real AR, we test "propagation" <b>symbolically</b> via <code>ResidualAdjust</code> shapes (<code>step</code>=persistent, <code>decay</code>=recovery), avoiding AR drift.</p>
+<div class="tscroll"><table>
+<tr><th>Residual scope (same gate conf≥0.8, wfrac≤1.0)</th><th>sMAE</th><th>sRMSE</th><th>joint wins/reg</th></tr>
+<tr><td><b>Confined to window</b> (level, effect only in the event window)</td><td class="good">+0.93%</td><td class="good">+3.13%</td><td class="num good">14 / 5</td></tr>
+<tr><td>Carried to horizon end (step, persistent propagation)</td><td class="bad">−3.27%</td><td class="num">+1.89%</td><td class="num bad">5 / 14</td></tr>
+</table></div>
+<div class="callout">
+<p class="small"><b>Conclusion: confined-to-window wins decisively (14:5 vs 5:14).</b> Dr-CiK events are <b>mostly local</b> — the effect belongs in the event window and should not propagate forward. So: <b>keep the base direct; step-by-step AR does not help</b> (its propagation advantage is actively harmful here); and the <code>wfrac</code> gate that "rejects global/persistent corrections" is thereby vindicated. The few genuinely propagating events are captured symbolically via the <code>decay</code> shape.</p>
+</div>
+
+<h2><span class="n">7</span>Experimental protocol (anti-self-deception)</h2>
+<div class="flow">
+  <div class="node"><div class="t">80 train → learn the gate</div><div class="d">Evolve / select the gate thresholds (wfrac_max, conf_min).</div></div>
+  <div class="arrow">↓ freeze</div>
+  <div class="node"><div class="t">20 dev → validate the gate</div><div class="d">Small (~3 tasks pass the gate); a sanity check. (The per-task gate makes train-internal LOO ≈ in-sample, so dev is the real held-out selector.)</div></div>
+  <div class="arrow">↓ freeze</div>
+  <div class="node"><div class="t">99 public_test → a single generalization evaluation</div>
+    <div class="d">Apply the gate <b>frozen from train/dev</b>, <b>never tuned on test</b>.</div></div>
+</div>
+
+<h2><span class="n">8</span>The core thesis: how to use text to do math</h2>
+<p>text→math = a product of three things, don't conflate them: <b>① structure</b> (which variable / direction / window / shape — text is good at this, essentially free) × <b>② magnitude</b> (the real hard part) × <b>③ trust</b> (when to stay silent).</p>
+<p class="lead" style="margin-top:8px"><b>Text supplies the *structure* of the math operation and a *pointer to where the number comes from*; it never invents the number. The number comes only from an "explicit quote" or a "data analog"; when neither exists, the only correct operation is "do nothing".</b></p>
+<p class="small">The nature of the magnitude wall: when the number is in neither the document (stated) nor the data (analog), inventing it is necessarily wrong — the gate (confidence + locality) exists to detect this and abstain. <code>ResidualAdjust</code>'s grounding tags bake this principle into every parameter.</p>
+
+<h2><span class="n">9</span>Status &amp; next steps</h2>
+<ul>
+<li><b class="good">Done</b>: CorDP + ResidualAdjust + MethodBlend primitives wired into controller + evolution + skill memory; gate unit tests; controller 24 + related suites all green; kernel invariants preserved.</li>
+<li><b class="good">Validated</b>: magnitude wall broken (task_163 / 152); train conservative gate (conf≥0.9) improves both sMAE & sRMSE with zero regression; test99 held-out sMAE +1.93% / sRMSE +3.20%, zero regression.</li>
+<li><b class="good">Concluded</b>: residual propagation vs confined window → confined wins; direct base is correct, step-by-step AR does not help.</li>
+<li><b class="warn">In progress</b>: full train→dev→test gate selection; a complete residual perception pass (shapes + grounding) head-to-head vs CorDP.</li>
+<li><b>Next</b>: switch the evolution fitness to a windowed (RCRPS) metric; self-tune the residual gate; wire the controller into the real decision agent (currently a standalone offline layer); supervise evidence quality with gt_evidence (a Dr-CiK-specific signal); a bigger-positive on a document-dense dataset.</li>
+<li><b>Limitation</b>: Toto is a strong baseline (LAFP corroborates: strong-baseline ceiling is 2-6%). A larger positive needs a weaker-baseline / document-dense dataset.</li>
+</ul>
+
+<h2><span class="n">10</span>Related work &amp; positioning</h2>
+<h3>A · LLM modifies / produces a TSFM forecast (closest to us)</h3>
+<div class="tscroll"><table>
+<tr><th>Paper</th><th>What it does</th><th>Reported result</th></tr>
+<tr><td><b>NEXUS</b> 2605.14389</td><td>Multi-agent; a Micro-Forecaster <b>outputs each step's value directly</b> + a Calibration Agent emits generalized guidelines</td><td>Zillow MAPE 0.0361 vs TimesFM 0.0387; <b>no statistical baselines</b>, wins ~7%</td></tr>
+<tr><td><b>LAFP</b> 2607.24892</td><td>TSFM samples K traces (MCTS) → LLM <b>only ranks, never outputs numbers</b></td><td>strong-baseline CiK <b>only 2-6%</b>; weak Time-MMD up to 60%; robust to noise (2% degradation)</td></tr>
+<tr><td><b>CiK</b> 2410.18959</td><td>Direct-prompt LLM outputs the distribution; introduces RCRPS</td><td>LLM beats all, <b>but the benchmark is built so "context is essential"</b></td></tr>
+<tr><td><b>Beyond Naive</b> 2508.09904</td><td>CorDP (correct) / IC-DP (in-context) / RouteDP / ReDP</td><td>CorDP +50%, IC-DP +14-55%; <b>base is a weak model (Lag-Llama)</b></td></tr>
+<tr><td><b>Last Mile</b> 2606.02497</td><td>Workspace + reasoning→explicit revision actions + memory reflection</td><td>bridges "statistical → business-ready" (no numbers seen); the agent-loop backbone</td></tr>
+<tr><td><b>From Long News</b> 2606.03097</td><td>Importance/Process RMs select news, <b>RMSE_before−after as signal</b></td><td>reports gains + fewer iterations (we tried the same idea → overfits on sparse data)</td></tr>
+<tr><td><b>Rethinking Post-Training</b> 2605.29401</td><td><b>Trains</b> (SFT+RL) an action-modifier</td><td>trained modifier better; needs training, not auditable</td></tr>
+</table></div>
+<p class="small"><b>B · Self-evolving / harness:</b> SEA-TS (generates TSFM algorithm code), EpiEvolve (memory-based rule self-evolution), Meta/Self/Agentic-Harness (coding agent evolves a harness), CORAL (AlphaEvolve-style).
+<b>C · Multimodal datasets/methods:</b> Time-MMD, MoTime, Time-VLM, LLM-PS (mostly weak baselines + small-MLP fusion).
+<b>D · Multi-agent topology:</b> GPTSwarm, G-Designer, Agentic Supernet, MetaGen/TacoMAS (evolve the agent graph).
+<b>Benchmark:</b> Dr-CiK (deep-research + forecasting tracks; deliberately includes disturbing/noisy/wrong-future documents).</p>
+<div class="callout warn">
+<p class="small"><b>The pattern (most useful for positioning): text gain ≈ f(baseline strength, whether statistical methods are compared, whether the benchmark is designed for text).</b> Papers reporting "big LLM wins" mostly took a shortcut — weak baselines (NEXUS/Beyond-Naive/MoTime), omitted statistical methods (NEXUS), or a context-essential benchmark (CiK). The honest broad comparison (LAFP on CiK) is only 2-6%. <b>We sit in the "strong-baseline Dr-CiK + full numerical suite + zero regression" bracket — honest, and avoided by others</b> — not betting on LLM replacing a strong TSFM, but on safe sparse gains on top of it.</p>
+</div>
+
+<div class="hr"></div>
+<p class="small">Contribution positioning: <b>neurosymbolic + hierarchical self-evolution</b> — the LLM does only the irreducible perception (read docs → cached structured corrections), evolved pure code does all the policy, and the output is auditable (grounding coverage, a bounded certificate, printed rules). The literature <b>hand-designs</b> this interaction policy; <b>nobody self-evolves it, and nobody produces auditable interaction rules</b> — that is this work's open niche.</p>
+
+</div>

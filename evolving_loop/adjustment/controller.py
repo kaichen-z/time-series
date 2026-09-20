@@ -17,8 +17,9 @@ pipeline. `re-generate numerical` is intentionally left as a future primitive st
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
-from statistics import mean, pstdev
+from statistics import mean, median, pstdev
 from typing import Optional, Sequence
 
 from .dsl import _REGIMES, _sign, KERNEL_MAX_FRAC, available_regimes
@@ -36,6 +37,13 @@ class ControllerState:
     fts: tuple                # future timestamps
     semantic_ref: str = ""    # cached LLM semantic mapping (e.g. "weekend"); "" = none
     effect_pool: dict = None  # cross-task pooled relative effect per regime (ref -> (rel, n))
+    cordp_conf: float = 0.0   # cached CorDP self-reported confidence for this task
+    cordp_corrections: tuple = ()  # cached CorDP edits: (start_ts, end_ts, raw_multiplier)
+    residual_conf: float = 0.0     # cached confidence for the residual specs
+    residual_specs: tuple = ()     # cached ResidualSpec objects (text -> math residual)
+    menu: tuple = ()          # MathOp menu the Numerical agent exposed for this task
+    tools: dict = None        # name -> callable(state, arg) tool registry (agent-as-tool)
+    calls: tuple = ()         # log of CALL instructions issued (for the efficiency cost)
     trace: tuple = ()         # audit log of applied instructions
 
 
@@ -301,6 +309,218 @@ class DocAdjust:
 
 
 @dataclass(frozen=True)
+class CorDPAdjust:
+    """CorDP (document-anchored correction). Instead of extracting an abstract magnitude
+    (which the LLM answers 'unknown'), perception SHOWED the LLM the Toto base numbers +
+    documents and it returned per-window MULTIPLIERS anchored on that scale; those are cached
+    in state.cordp_corrections. This primitive is pure code applying them through evolvable
+    PRECISION GATES:
+      - conf_min : abstain unless the cached self-reported confidence clears this floor;
+      - wfrac_max: reject any correction spanning more than this fraction of the horizon --
+        a whole-horizon rescale is the base model's job, not an event edit, and those misfire;
+      - mult_lo/mult_hi: bound the multiplier (the invariant kernel still clamps the final);
+      - shrink   : partial trust toward no-change (eff = 1 + shrink*(m-1)).
+    Validated on 80-train: raw CorDP is net-negative, but (wfrac_max, conf_min) turn it into
+    ~10:1 wins using only inference-time signals -- and those thresholds are what evolves."""
+    conf_min: float = 0.7
+    wfrac_max: float = 0.3
+    mult_lo: float = 0.6
+    mult_hi: float = 1.6
+    shrink: float = 1.0
+
+    def apply(self, s: ControllerState) -> ControllerState:
+        if s.cordp_conf < self.conf_min or not s.cordp_corrections:
+            return replace(s, trace=s.trace + (f"cordp:abstain(conf={s.cordp_conf:.2f})",))
+        fc = list(s.forecast)
+        n = len(s.fts)
+        fired = 0
+        for corr in s.cordp_corrections:
+            try:
+                start, end, mult = corr[0], corr[1], float(corr[2])
+            except (TypeError, ValueError, IndexError):
+                continue
+            mask = horizon_window_mask(s.fts, str(start), str(end))
+            wsum = sum(1 for x in mask if x)
+            if wsum == 0 or (n and wsum / n > self.wfrac_max):     # reject global rescale
+                continue
+            eff = 1.0 + self.shrink * (mult - 1.0)
+            eff = max(self.mult_lo, min(self.mult_hi, eff))
+            for i, mk in enumerate(mask):
+                if mk:
+                    fc[i] = s.base[i] * eff
+            fired += 1
+        return replace(s, forecast=tuple(fc), trace=s.trace + (f"cordp x{fired}",))
+
+
+@dataclass(frozen=True)
+class ResidualSpec:
+    """One text-derived residual over a window. The DOCUMENT supplies the STRUCTURE (window +
+    shape + sign); the magnitude is a fraction of the window's base scale, and `grounded` marks
+    whether that magnitude came from an explicit quote / a data-analog (True) or was guessed
+    (False). Ungrounded specs are dropped -- "no source for the number => don't invent it"."""
+    start: str
+    end: str
+    shape: str = "level"      # level | step | ramp | bump | decay
+    amplitude: float = 0.0    # fractional PEAK change vs the window's base scale (signed)
+    grounded: bool = True     # False -> abstain this spec (magnitude has no source)
+    tau_frac: float = 0.5     # decay time-constant as a fraction of the window (shape=decay)
+
+
+def _residual_profile(shape: str, j: int, k: int, tau_frac: float) -> float:
+    """Unit shape in [0,1] across a k-step window at position j (the text's described form)."""
+    if k <= 1:
+        return 1.0
+    x = j / (k - 1)                       # 0..1 across the window
+    if shape == "ramp":
+        return x
+    if shape == "bump":
+        return 1.0 - abs(2.0 * x - 1.0)   # triangular: 0 at edges, 1 at centre
+    if shape == "decay":
+        tau = max(0.05, min(1.0, tau_frac))
+        return math.exp(-x / tau)         # 1 at start, decays
+    return 1.0                            # level / step / unknown -> flat
+
+
+@dataclass(frozen=True)
+class ResidualAdjust:
+    """Apply text-derived ADDITIVE residuals with a temporal SHAPE (the advisor's
+    'mathematical formulation of the residue'). Generalises CorDPAdjust: instead of one flat
+    multiplier, each cached ResidualSpec adds `amplitude * shape(t) * ref` to the base, where
+    `ref` = the window's base scale (floored by the history scale, so base~=0 can't blow up --
+    the multiplicative pathology). Grounding is enforced (ungrounded specs dropped), plus the
+    same evolvable precision gates as CorDP. The invariant kernel still bounds the final."""
+    conf_min: float = 0.7
+    wfrac_max: float = 0.3
+    amp_cap: float = 0.5          # |amplitude| clamp (kernel also bounds the final vs base)
+    shrink: float = 1.0
+    require_grounded: bool = True
+
+    def apply(self, s: ControllerState) -> ControllerState:
+        if s.residual_conf < self.conf_min or not s.residual_specs:
+            return replace(s, trace=s.trace + (f"residual:abstain(conf={s.residual_conf:.2f})",))
+        hist_scale = median([abs(x) for x in s.hv]) if s.hv else 1.0
+        hist_scale = hist_scale or 1.0
+        fc = list(s.forecast)
+        n = len(s.fts)
+        fired = 0
+        for spec in s.residual_specs:
+            if self.require_grounded and not getattr(spec, "grounded", True):
+                continue
+            mask = horizon_window_mask(s.fts, str(spec.start), str(spec.end))
+            widx = [i for i, m in enumerate(mask) if m]
+            if not widx or (n and len(widx) / n > self.wfrac_max):   # reject global rescale
+                continue
+            wb = mean([s.base[i] for i in widx])
+            ref = abs(wb) if abs(wb) > 1e-9 else hist_scale          # anchor; base~=0 -> hist scale
+            amp = max(-self.amp_cap, min(self.amp_cap, self.shrink * float(spec.amplitude)))
+            k = len(widx)
+            for j, i in enumerate(widx):
+                prof = _residual_profile(spec.shape, j, k, getattr(spec, "tau_frac", 0.5))
+                fc[i] = s.base[i] + amp * ref * prof
+            fired += 1
+        return replace(s, forecast=tuple(fc), trace=s.trace + (f"residual x{fired}",))
+
+
+def _select_menu_op(menu, semantic_ref, prefer):
+    """Pick a MathOp: prefer the regime the document points at (semantic_ref); else the first
+    op whose kind/name matches the evolvable `prefer` order."""
+    if semantic_ref and semantic_ref not in ("", "none"):
+        for op in menu:
+            if op.name == f"regime:{semantic_ref}":
+                return op
+    for key in prefer:
+        for op in menu:
+            if op.kind == key or op.name.startswith(key):
+                return op
+    return menu[0] if menu else None
+
+
+@dataclass(frozen=True)
+class MenuAdjust:
+    """Decision-DOES-MATH: pick a MathOp from the Numerical agent's per-task menu and APPLY it
+    to each event window. The document SELECTS which op (via the cached regime hint / prefer
+    order); the numerical menu SUPPLIES the data-computed number. Generalises RegimeAdjust /
+    SemanticAdjust: the op set is now explicit and evolvable (regime-level / trend / decay / ...),
+    magnitude is grounded in data (not an LLM guess), and the kernel still bounds the final."""
+    prefer: tuple = ("regime", "trend", "decay")   # evolvable op-kind/name preference order
+    cap: float = KERNEL_MAX_FRAC
+
+    def apply(self, s: ControllerState) -> ControllerState:
+        from .math_menu import op_window_values
+        if not s.menu:
+            return replace(s, trace=s.trace + ("menu:empty",))
+        windows = []
+        for corr in s.cordp_corrections:
+            wm = horizon_window_mask(s.fts, str(corr[0]), str(corr[1]))
+            if any(wm):
+                windows.append(wm)
+        for _e, mask in _grounded_windows(s.effects, s.fts):
+            windows.append(mask)
+        if not windows:
+            return replace(s, trace=s.trace + ("menu:no-window",))
+        op = _select_menu_op(s.menu, s.semantic_ref, self.prefer)
+        if op is None:
+            return replace(s, trace=s.trace + ("menu:no-op",))
+        ref_scale = median([abs(x) for x in s.hv]) if s.hv else 1.0
+        fc = list(s.forecast)
+        fired = 0
+        for wm in windows:
+            idx = [i for i, m in enumerate(wm) if m]
+            newv = op_window_values(op, [s.base[i] for i in idx], ref_scale or 1.0)
+            for j, i in enumerate(idx):
+                fc[i] = newv[j]
+            fired += 1
+        return replace(s, forecast=tuple(fc), trace=s.trace + (f"menu[{op.name}] x{fired}",))
+
+
+@dataclass(frozen=True)
+class CallAgent:
+    """Orchestration primitive (agent-as-tool): the Decision agent invokes another agent
+    (numerical / retrieval / ...) as a tool, possibly several times in a row. In evaluation the
+    tool is a cached/stub callable from `state.tools`; live wiring is pluggable. Every call is
+    logged in `state.calls` so the fitness can charge an EFFICIENCY cost (fewer, better-targeted
+    calls) -- the invariant kernel still bounds whatever forecast results."""
+    tool: str = "numerical"
+    arg: str = ""
+
+    def apply(self, s: ControllerState) -> ControllerState:
+        s = replace(s, calls=s.calls + ((self.tool, self.arg),))
+        fn = (s.tools or {}).get(self.tool)
+        if fn is None:
+            return replace(s, trace=s.trace + (f"call:{self.tool}(stub)",))
+        try:
+            s = fn(s, self.arg)            # tool returns an updated ControllerState
+        except Exception as exc:           # a bad tool call must never break the kernel contract
+            return replace(s, trace=s.trace + (f"call:{self.tool}(error:{type(exc).__name__})",))
+        return replace(s, trace=s.trace + (f"call:{self.tool}",))
+
+
+@dataclass(frozen=True)
+class MethodBlend:
+    """Context-conditioned blend of the base with ANOTHER numerical candidate (statistical or a
+    different TSFM). Static blending of a strong base with a weaker method usually hurts, so this
+    blends ONLY when a document signal is present -- i.e. the TEXT says something the base method
+    may not see (a regime break) -- and otherwise leaves the strong base alone. This is the
+    cross-modal 'let text decide which numerical method to trust' idea, kept coarse and gated;
+    the invariant kernel still bounds the final. blend = (1-w)*forecast + w*other."""
+    other: str = "seasonal_naive"
+    weight: float = 0.3
+    conf_min: float = 0.7           # only blend when the document signal clears this
+    require_signal: bool = True     # gate on a document (CorDP/residual) signal being present
+
+    def apply(self, s: ControllerState) -> ControllerState:
+        alt = s.candidates.get(self.other)
+        if not alt or len(alt) != len(s.forecast):
+            return replace(s, trace=s.trace + (f"blend:no-candidate[{self.other}]",))
+        signal = max(s.cordp_conf, s.residual_conf)
+        if self.require_signal and signal < self.conf_min:
+            return replace(s, trace=s.trace + ("blend:no-signal",))
+        w = max(0.0, min(1.0, self.weight))
+        fc = tuple((1.0 - w) * s.forecast[i] + w * float(alt[i]) for i in range(len(s.forecast)))
+        return replace(s, forecast=fc, trace=s.trace + (f"blend[{self.other},w={w:.2f}]",))
+
+
+@dataclass(frozen=True)
 class NoOp:
     def apply(self, s: ControllerState) -> ControllerState:
         return replace(s, trace=s.trace + ("noop",))
@@ -317,7 +537,7 @@ class Regenerate:
 
 
 INSTRUCTIONS = (SelectBase, RegimeAdjust, SemanticAdjust, PooledSemanticAdjust, DocAdjust,
-                NoOp, Regenerate)
+                CorDPAdjust, ResidualAdjust, MenuAdjust, MethodBlend, CallAgent, NoOp, Regenerate)
 
 
 @dataclass(frozen=True)
@@ -328,7 +548,9 @@ class Controller:
 
 def run_controller(controller: Controller, candidates: dict, effects: Sequence,
                    hv: Sequence, hts: Sequence, fts: Sequence, semantic_ref: str = "",
-                   effect_pool: dict = None):
+                   effect_pool: dict = None, cordp_conf: float = 0.0,
+                   cordp_corrections: Sequence = (), residual_conf: float = 0.0,
+                   residual_specs: Sequence = (), menu: Sequence = (), tools: dict = None):
     """Execute the instruction sequence; return (final_forecast, trace).
 
     Kernel: the result is always bounded against the selected base, so no orchestration
@@ -339,7 +561,10 @@ def run_controller(controller: Controller, candidates: dict, effects: Sequence,
                           or (next(iter(candidates.values())) if candidates else ())))
     s = ControllerState(candidates=dict(candidates), base=default_base, forecast=default_base,
                         effects=tuple(effects), hv=tuple(hv), hts=tuple(hts), fts=tuple(fts),
-                        semantic_ref=semantic_ref, effect_pool=effect_pool or {})
+                        semantic_ref=semantic_ref, effect_pool=effect_pool or {},
+                        cordp_conf=float(cordp_conf), cordp_corrections=tuple(cordp_corrections),
+                        residual_conf=float(residual_conf), residual_specs=tuple(residual_specs),
+                        menu=tuple(menu), tools=tools, calls=())
     for step in controller.steps:
         s = step.apply(s)
     out = apply_bounded_delta(list(s.base), list(s.forecast), max_frac=KERNEL_MAX_FRAC)
@@ -370,9 +595,16 @@ SEMANTIC_CONTROLLER = Controller(
 POOLED_CONTROLLER = Controller(
     steps=(SelectBase(), PooledSemanticAdjust(trusted=("weekend", "weekday"), local_weight=0.5)),
     name="select+pooled-semantic")
+CORDP_CONTROLLER = Controller(
+    steps=(SelectBase(), CorDPAdjust(conf_min=0.75, wfrac_max=0.3)),
+    name="select+cordp-gated")
+RESIDUAL_CONTROLLER = Controller(
+    steps=(SelectBase(), ResidualAdjust(conf_min=0.75, wfrac_max=0.3)),
+    name="select+residual-shaped")
 
 SEED_CONTROLLERS = (IDENTITY_CONTROLLER, REGIME_CONTROLLER, CASCADE_CONTROLLER,
-                    SEMANTIC_CONTROLLER, POOLED_CONTROLLER)
+                    SEMANTIC_CONTROLLER, POOLED_CONTROLLER, CORDP_CONTROLLER,
+                    RESIDUAL_CONTROLLER)
 
 
 # ---------------------------------------------------------------- evolution of control flow
@@ -398,6 +630,26 @@ def random_instruction(rng: _random.Random):
                                     local_weight=rng.choice((0.3, 0.5, 0.7)))
     if kind is DocAdjust:
         return DocAdjust(cap=_clamp(rng.uniform(0.1, 0.4)))
+    if kind is CorDPAdjust:
+        return CorDPAdjust(conf_min=rng.choice((0.6, 0.7, 0.75, 0.85)),
+                           wfrac_max=rng.choice((0.2, 0.3, 0.5)),
+                           shrink=rng.choice((0.5, 0.75, 1.0)))
+    if kind is ResidualAdjust:
+        return ResidualAdjust(conf_min=rng.choice((0.6, 0.7, 0.75, 0.85)),
+                              wfrac_max=rng.choice((0.2, 0.3, 0.5)),
+                              amp_cap=rng.choice((0.3, 0.5)),
+                              shrink=rng.choice((0.5, 0.75, 1.0)))
+    if kind is MethodBlend:
+        return MethodBlend(other=rng.choice(("seasonal_naive", "statistical", "combined")),
+                           weight=rng.choice((0.2, 0.3, 0.5)),
+                           conf_min=rng.choice((0.6, 0.7, 0.8)))
+    if kind is MenuAdjust:
+        order = ["regime", "trend", "decay"]
+        rng.shuffle(order)
+        return MenuAdjust(prefer=tuple(order), cap=_clamp(rng.uniform(0.2, KERNEL_MAX_FRAC)))
+    if kind is CallAgent:
+        return CallAgent(tool=rng.choice(("numerical", "retrieval")),
+                         arg=rng.choice(("", "refine", "round2")))
     if kind is Regenerate:
         return Regenerate()
     return NoOp()
@@ -433,6 +685,43 @@ def _mutate_step(step, rng: _random.Random):
         return replace(step, require_significant=not step.require_significant)
     if isinstance(step, DocAdjust):
         return replace(step, cap=_clamp(step.cap + rng.uniform(-0.1, 0.1), hi=0.5))
+    if isinstance(step, CorDPAdjust):
+        r = rng.random()
+        if r < 0.4:
+            return replace(step, conf_min=max(0.0, min(0.95, step.conf_min + rng.uniform(-0.15, 0.15))))
+        if r < 0.7:
+            return replace(step, wfrac_max=max(0.1, min(1.0, step.wfrac_max + rng.uniform(-0.15, 0.15))))
+        if r < 0.9:
+            return replace(step, shrink=max(0.2, min(1.0, step.shrink + rng.uniform(-0.25, 0.25))))
+        return replace(step, mult_hi=max(1.2, min(2.5, step.mult_hi + rng.uniform(-0.3, 0.3))))
+    if isinstance(step, MenuAdjust):
+        if rng.random() < 0.5:
+            order = list(step.prefer) or ["regime", "trend", "decay"]
+            rng.shuffle(order)
+            return replace(step, prefer=tuple(order))
+        return replace(step, cap=_clamp(step.cap + rng.uniform(-0.15, 0.15)))
+    if isinstance(step, CallAgent):
+        if rng.random() < 0.5:
+            return replace(step, tool="retrieval" if step.tool == "numerical" else "numerical")
+        return replace(step, arg=rng.choice(("", "refine", "round2")))
+    if isinstance(step, ResidualAdjust):
+        r = rng.random()
+        if r < 0.35:
+            return replace(step, conf_min=max(0.0, min(0.95, step.conf_min + rng.uniform(-0.15, 0.15))))
+        if r < 0.6:
+            return replace(step, wfrac_max=max(0.1, min(1.0, step.wfrac_max + rng.uniform(-0.15, 0.15))))
+        if r < 0.8:
+            return replace(step, shrink=max(0.2, min(1.0, step.shrink + rng.uniform(-0.25, 0.25))))
+        return replace(step, amp_cap=max(0.15, min(0.9, step.amp_cap + rng.uniform(-0.2, 0.2))))
+    if isinstance(step, MethodBlend):
+        r = rng.random()
+        if r < 0.4:
+            return replace(step, weight=max(0.0, min(1.0, step.weight + rng.uniform(-0.2, 0.2))))
+        if r < 0.7:
+            return replace(step, conf_min=max(0.0, min(0.95, step.conf_min + rng.uniform(-0.15, 0.15))))
+        if r < 0.85:
+            return replace(step, other=rng.choice(("seasonal_naive", "statistical", "combined")))
+        return replace(step, require_signal=not step.require_signal)
     return step
 
 

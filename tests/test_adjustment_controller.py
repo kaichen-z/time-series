@@ -5,12 +5,17 @@ from types import SimpleNamespace
 
 from evolving_loop.adjustment import project_evidence
 from evolving_loop.adjustment.controller import (
-    CASCADE_CONTROLLER, IDENTITY_CONTROLLER, POOLED_CONTROLLER, REGIME_CONTROLLER,
-    SEED_CONTROLLERS, SEMANTIC_CONTROLLER, Controller,
-    DocAdjust, NoOp, PooledSemanticAdjust, RegimeAdjust, SelectBase, SemanticAdjust,
+    CASCADE_CONTROLLER, CORDP_CONTROLLER, IDENTITY_CONTROLLER, POOLED_CONTROLLER,
+    REGIME_CONTROLLER, SEED_CONTROLLERS, SEMANTIC_CONTROLLER, Controller,
+    CallAgent, CorDPAdjust, DocAdjust, MenuAdjust, MethodBlend, NoOp, PooledSemanticAdjust, RegimeAdjust, ResidualAdjust,
+    ResidualSpec, RESIDUAL_CONTROLLER, SelectBase, SemanticAdjust,
     build_event_effect_pool, controller_to_text, crossover_controllers, mutate_controller,
     run_controller, run_controller_evolution,
 )
+from evolving_loop.adjustment.dsl import KERNEL_MAX_FRAC
+
+_FTS5 = tuple(f"2024-06-{d:02d}T00:00:00" for d in range(17, 22))   # 5 forecast steps
+_CANDS5 = {"toto_2_0": (100.0,) * 5}
 
 # synthetic weekend regime: weekdays=10, weekends=6
 _HTS = tuple(f"2024-06-{d:02d}T00:00:00" for d in range(3, 17))
@@ -138,3 +143,143 @@ def test_evolution_optimizes_a_toy_objective():
     # deterministic given the seed
     b2, s2, _ = run_controller_evolution(SEED_CONTROLLERS, fit, generations=20, pop_size=24)
     assert s2 == score
+
+
+def _cordp_run(ctrl, conf, corrs):
+    return run_controller(ctrl, _CANDS5, (), _HV, _HTS, _FTS5,
+                          cordp_conf=conf, cordp_corrections=corrs)[0]
+
+
+def test_cordp_abstains_below_confidence():
+    ctrl = Controller(steps=(SelectBase(), CorDPAdjust(conf_min=0.75)))
+    out = _cordp_run(ctrl, 0.60, ((_FTS5[0], _FTS5[0], 1.5),))   # conf below floor
+    assert out == (100.0,) * 5                                   # untouched -> base
+
+
+def test_cordp_applies_localized_and_bounded():
+    ctrl = Controller(steps=(SelectBase(), CorDPAdjust(conf_min=0.7, wfrac_max=0.3)))
+    out = _cordp_run(ctrl, 0.9, ((_FTS5[1], _FTS5[1], 1.6),))    # one step (wfrac 0.2)
+    assert out[0] == 100.0 and out[2] == 100.0                   # outside window unchanged
+    assert out[1] > 100.0                                        # raised in window
+    assert out[1] <= 100.0 * (1.0 + KERNEL_MAX_FRAC) + 1e-9      # kernel still bounds it
+
+
+def test_cordp_rejects_global_rescale():
+    ctrl = Controller(steps=(SelectBase(), CorDPAdjust(conf_min=0.7, wfrac_max=0.3)))
+    out = _cordp_run(ctrl, 0.9, ((_FTS5[0], _FTS5[4], 1.6),))    # whole horizon (wfrac 1.0)
+    assert out == (100.0,) * 5                                   # rejected -> base
+
+
+def test_cordp_controller_in_seed_set():
+    assert CORDP_CONTROLLER in SEED_CONTROLLERS
+    txt = controller_to_text(CORDP_CONTROLLER)
+    assert "CorDPAdjust" in txt
+
+
+def _resid_run(ctrl, conf, specs):
+    return run_controller(ctrl, _CANDS5, (), _HV, _HTS, _FTS5,
+                          residual_conf=conf, residual_specs=specs)[0]
+
+
+def test_residual_level_shape_adds_flat_in_window():
+    ctrl = Controller(steps=(SelectBase(), ResidualAdjust(conf_min=0.7, wfrac_max=0.8)))
+    spec = ResidualSpec(start=_FTS5[1], end=_FTS5[3], shape="level", amplitude=0.2, grounded=True)
+    out = _resid_run(ctrl, 0.9, (spec,))
+    assert out[0] == 100.0 and out[4] == 100.0                 # outside window untouched
+    assert abs(out[1] - 120.0) < 1e-6 and abs(out[2] - 120.0) < 1e-6   # +0.2*ref, flat
+
+
+def test_residual_bump_shape_peaks_at_centre():
+    ctrl = Controller(steps=(SelectBase(), ResidualAdjust(conf_min=0.7, wfrac_max=0.8)))
+    spec = ResidualSpec(start=_FTS5[1], end=_FTS5[3], shape="bump", amplitude=0.2, grounded=True)
+    out = _resid_run(ctrl, 0.9, (spec,))
+    assert abs(out[1] - 100.0) < 1e-6 and abs(out[3] - 100.0) < 1e-6   # zero at window edges
+    assert out[2] > out[1]                                            # peak at centre
+
+
+def test_residual_ungrounded_spec_is_dropped():
+    ctrl = Controller(steps=(SelectBase(), ResidualAdjust(conf_min=0.7, wfrac_max=0.8)))
+    spec = ResidualSpec(start=_FTS5[1], end=_FTS5[2], shape="level", amplitude=0.4, grounded=False)
+    out = _resid_run(ctrl, 0.9, (spec,))
+    assert out == (100.0,) * 5                                 # no source for the number -> abstain
+
+
+def test_residual_confidence_and_wfrac_gates():
+    ctrl = Controller(steps=(SelectBase(), ResidualAdjust(conf_min=0.8, wfrac_max=0.3)))
+    spec = ResidualSpec(start=_FTS5[1], end=_FTS5[1], shape="level", amplitude=0.2, grounded=True)
+    assert _resid_run(ctrl, 0.6, (spec,)) == (100.0,) * 5      # below confidence -> abstain
+    globalspec = ResidualSpec(start=_FTS5[0], end=_FTS5[4], shape="level", amplitude=0.2, grounded=True)
+    assert _resid_run(ctrl, 0.9, (globalspec,)) == (100.0,) * 5   # whole horizon -> rejected
+
+
+def test_residual_kernel_bounds_even_large_amplitude():
+    ctrl = Controller(steps=(SelectBase(), ResidualAdjust(conf_min=0.7, wfrac_max=0.8, amp_cap=0.9)))
+    spec = ResidualSpec(start=_FTS5[2], end=_FTS5[2], shape="level", amplitude=5.0, grounded=True)
+    out = _resid_run(ctrl, 0.9, (spec,))
+    assert abs(out[2] - 100.0) <= 0.5 * 100.0 + 1e-9           # invariant kernel still bounds it
+
+
+def test_residual_controller_in_seed_set():
+    assert RESIDUAL_CONTROLLER in SEED_CONTROLLERS
+    assert "ResidualAdjust" in controller_to_text(RESIDUAL_CONTROLLER)
+
+
+_CANDS2 = {"toto_2_0": (100.0,) * 5, "seasonal_naive": (60.0,) * 5}
+
+
+def test_method_blend_only_when_signal_present():
+    ctrl = Controller(steps=(SelectBase(), MethodBlend(other="seasonal_naive", weight=0.5, conf_min=0.7)))
+    # no document signal -> leaves the strong base alone
+    out0 = run_controller(ctrl, _CANDS2, (), _HV, _HTS, _FTS5)[0]
+    assert out0 == (100.0,) * 5
+    # document signal present (cordp_conf high) -> blends toward the other candidate, kernel-bounded
+    out1 = run_controller(ctrl, _CANDS2, (), _HV, _HTS, _FTS5, cordp_conf=0.9)[0]
+    assert all(v < 100.0 for v in out1)                       # moved toward 60
+    assert all(abs(v - 100.0) <= 0.5 * 100.0 + 1e-9 for v in out1)   # kernel bound
+
+
+def test_method_blend_noop_without_candidate():
+    ctrl = Controller(steps=(SelectBase(), MethodBlend(other="not_cached", weight=0.5, conf_min=0.5)))
+    out = run_controller(ctrl, _CANDS2, (), _HV, _HTS, _FTS5, cordp_conf=0.9)[0]
+    assert out == (100.0,) * 5                                # missing candidate -> no-op
+
+
+from evolving_loop.adjustment.math_menu import build_math_menu
+
+_MENU = build_math_menu(_HV, _HTS, _FTS5)   # regime:weekend=6, weekday=10, trend, decay
+
+
+def test_menu_adjust_does_math_from_the_menu():
+    # numerical menu supplies weekend level (6); document (semantic_ref) selects it;
+    # decision applies it to the event window, kernel-bounded (100 -> toward 6 -> clamped 50)
+    ctrl = Controller(steps=(SelectBase(), MenuAdjust(prefer=("regime",))))
+    corrs = ((_FTS5[1], _FTS5[1], 0.5),)     # an event window; mult unused by MenuAdjust
+    out, trace = run_controller(ctrl, _CANDS5, (), _HV, _HTS, _FTS5,
+                                cordp_corrections=corrs, menu=_MENU, semantic_ref="weekend")
+    assert out[0] == 100.0 and out[2] == 100.0            # outside window untouched
+    assert out[1] == 50.0                                 # moved toward weekend level, kernel-clamped
+    assert any("menu[regime:weekend]" in t for t in trace)
+
+
+def test_menu_adjust_noop_without_menu():
+    ctrl = Controller(steps=(SelectBase(), MenuAdjust()))
+    corrs = ((_FTS5[1], _FTS5[1], 0.5),)
+    out, _ = run_controller(ctrl, _CANDS5, (), _HV, _HTS, _FTS5, cordp_corrections=corrs, menu=())
+    assert out == (100.0,) * 5                            # empty menu -> no-op
+
+
+def test_call_agent_logs_call_and_is_safe_without_tools():
+    ctrl = Controller(steps=(SelectBase(), CallAgent(tool="numerical", arg="refine"),
+                             CallAgent(tool="retrieval")))
+    out, trace = run_controller(ctrl, _CANDS5, (), _HV, _HTS, _FTS5)
+    assert out == (100.0,) * 5                            # stub calls don't change the forecast
+    assert sum(1 for t in trace if t.startswith("call:")) == 2   # both calls logged (efficiency cost)
+
+
+def test_call_agent_invokes_a_registered_tool():
+    from dataclasses import replace as _rep
+    def bump(state, arg):                                 # a stub numerical tool that adds a candidate
+        return _rep(state, forecast=tuple(v + 1.0 for v in state.forecast))
+    ctrl = Controller(steps=(SelectBase(), CallAgent(tool="numerical")))
+    out, _ = run_controller(ctrl, _CANDS5, (), _HV, _HTS, _FTS5, tools={"numerical": bump})
+    assert all(abs(v - 101.0) <= 0.5 * 100.0 + 1e-9 for v in out)   # tool ran, kernel still bounds
