@@ -25,6 +25,7 @@ from evolving_loop.adjustment.post_adjust import apply_bounded_delta, horizon_wi
 
 ROOT = Path(".").resolve(); CAP = 5.0
 PROPOSER = os.environ.get("PROPOSER", "hand")   # hand | llm  (llm: let the LLM WRITE new clues)
+GATE = os.environ.get("GATE", "binary")         # binary | lambda  (lambda: continuous partial trust)
 IDH = "90a281166723e9ea43e58e9468c286675dbe1dab430a5a7d3e6b38526a4313c2"
 TASKS = "external/Dr-CiK/full-download/Dr-CiK_public/tasks"
 SPLIT = json.loads((ROOT / "splits/drcik_public_80_20_99_v3.json").read_text())["partitions"]
@@ -124,13 +125,37 @@ def helps(d):
     return _j(corrected(d), d["truth"]) < _j(d["toto"], d["truth"]) - 1e-9
 
 
-def fires(w, d):
+def _score(w, d):
     f = clues(d)
-    return sum(w.get(k, 0.0) * f.get(k, 0.0) for k in fkeys()) > 0
+    return sum(w.get(k, 0.0) * f.get(k, 0.0) for k in fkeys())
+
+
+def strength(w, d):
+    """Trust strength lambda in [0,1]. binary gate: {0,1}; lambda gate: sigmoid(score) -- a smooth,
+    learned PARTIAL trust that can down-weight (not just drop) a shaky correction."""
+    s = _score(w, d)
+    if GATE == "lambda":
+        return 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, s))))
+    return 1.0 if s > 0 else 0.0
+
+
+def apply_scaled(d, lam):
+    """Apply the correction scaled by lambda: out = base*(1 + lam*(mult-1)), then the kernel."""
+    if lam <= 1e-9 or not d["corr"]:
+        return d["toto"]
+    out = list(d["toto"])
+    for s, e, m in d["corr"]:
+        for i in range(s, min(e, len(out))):
+            out[i] = d["toto"][i] * (1.0 + lam * (m - 1.0))
+    return list(apply_bounded_delta(d["toto"], out))
+
+
+def fires(w, d):
+    return strength(w, d) > 0.5
 
 
 def gain(w, data):
-    ds = [_j(d["toto"], d["truth"]) - _j(corrected(d) if fires(w, d) else d["toto"], d["truth"]) for d in data]
+    ds = [_j(d["toto"], d["truth"]) - _j(apply_scaled(d, strength(w, d)), d["truth"]) for d in data]
     return statistics.mean(ds) - 0.5 * statistics.mean(min(0.0, x) for x in ds) if ds else 0.0
 
 
@@ -175,7 +200,7 @@ def report(w, data, tag):
     HELP = [d for d in data if helps(d)]
     for d in data:
         f = fires(w, d)
-        out = corrected(d) if f else d["toto"]
+        out = apply_scaled(d, strength(w, d))
         mb = drcik_point_metrics(d["truth"], d["toto"], cap=CAP)
         mo = drcik_point_metrics(d["truth"], out, cap=CAP)
         rows.append((mb["smae"], mb["srmse"], mo["smae"], mo["srmse"]))
@@ -196,7 +221,7 @@ CONF = lambda d: d["conf"] >= 0.8 and d["wfrac"] <= 0.2      # our current basel
 conf_w = {"conf": 1.0, "bias": -0.8}                          # linear-gate equivalent of conf>=0.8
 
 print(f"== recall gate: learned HELP-vs-HARM separator vs plain conf gate (test99) ==")
-print(f"train {len(TR)} | test {len(TE)} tasks with a correction | proposer={PROPOSER}\n")
+print(f"train {len(TR)} | test {len(TE)} tasks with a correction | proposer={PROPOSER} | gate={GATE}\n")
 
 if PROPOSER == "llm":
     # LLM WRITES new clues; keep each only if it improves grouped-CV gain on train (keep-if-CV-helps).
