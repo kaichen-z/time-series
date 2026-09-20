@@ -85,8 +85,10 @@ a{color:var(--acc)}
   <span class="chip">policy = evolved pure code</span>
 </div>
 
-<h2>Four Highlights</h2>
+<h2>Five Highlights</h2>
 <div class="grid">
+  <div class="panel" style="border-color:var(--acc2)"><h3 style="margin-top:0">⓪ On sparse data, "judging your own overfitting" matters more than "evolving a stronger policy"</h3>
+    <p class="small">Today's whole <b>honesty chain</b> (held-out → k-fold CV → <b>grouped / leave-domain-out CV</b> → significance gate → meta-validation) shows every "evolved complex policy" collapses under honest evaluation (whole-99 −1.2% / 28 reg). <b>The real capability is not a stronger policy but the system being able to tell whether a gain is real vs overfit-in-noise.</b> That self-assessment is exactly what keeps it from self-deceiving on sparse data, makes it converge to do-no-harm, and lets it precisely localize the true residual value (the text-side recall lever, +2.50% at zero regression). <b>On small data, a trustworthy evaluator &gt; a stronger optimizer.</b></p></div>
   <div class="panel"><h3 style="margin-top:0">① The text→math principle</h3>
     <p class="small">Text supplies the <b>structure</b> of the math operation plus a <b>pointer to where the number lives</b> — it never invents the number. Magnitudes come only from an "explicit quote / a data analog"; when neither exists → <b>abstain</b>. Realized as per-parameter grounding tags.</p></div>
   <div class="panel"><h3 style="margin-top:0">② Anchoring breaks the magnitude wall</h3>
@@ -136,7 +138,8 @@ a{color:var(--acc)}
 <div class="tscroll"><table>
 <tr><th>Policy</th><th>Provenance</th><th>sMAE</th><th>sRMSE</th><th>wins/reg</th><th>touched</th></tr>
 <tr><td>CorDP conf≥0.8</td><td>hand-set (conservative)</td><td class="good">+1.93%</td><td class="good">+3.20%</td><td class="num good">17/0</td><td class="num">17</td></tr>
-<tr><td><b>learned recall gate</b></td><td class="kv"><b>evolved + grouped-CV + sig-gate</b></td><td class="good"><b>+2.50%</b></td><td class="good"><b>+4.66%</b></td><td class="num good"><b>22/0</b></td><td class="num">22</td></tr>
+<tr><td>recall gate (7 hand clues)</td><td class="kv">evolved + grouped-CV</td><td class="good">+2.50%</td><td class="good">+4.66%</td><td class="num good">22/0</td><td class="num">22</td></tr>
+<tr><td><b>recall gate (+2 LLM-written clues)</b></td><td class="kv"><b>LLM writes clues + evolved + grouped-CV</b></td><td class="good"><b>+3.36%</b></td><td class="good"><b>+5.72%</b></td><td class="num good"><b>28/1</b></td><td class="num">28</td></tr>
 <tr><td>oracle ceiling (trust all)</td><td>perfect selection</td><td>+4.47%</td><td>+5.76%</td><td class="num">39/16</td><td class="num">55</td></tr>
 <tr><td class="mut">full 3-loop co-evolve</td><td class="mut">after honest eval</td><td class="warn">−1.20%</td><td>+2.73%</td><td class="num warn">36/28</td><td class="num">—</td></tr>
 </table></div>
@@ -145,7 +148,7 @@ a{color:var(--acc)}
 <h3>A2 · The recall lever &amp; the one real discovery (residual value is entirely text-side)</h3>
 <div class="callout">
 <p class="small"><b>oracle_gap localizes it:</b> of 55 tasks with a correction, trusting it HELPS 39 / HARMS 16 (harm = LLM read the wrong magnitude / fooled by a confounder). The numbers are exhausted (Toto is the numeric ceiling) → <b>the residual value AND difficulty are 100% text-side: separate the 39 HELP from the 16 HARM</b>. The hand-set conf gate is <b>100% precision / 44% recall</b> (zero-regression but leaves 22 HELP on the table, +2.2%).</p>
-<p class="small"><b>The learned recall gate (an evolved linear separator over text-side features) raises recall 44%→56%, zero-regression, cross-domain significant. Its weights give an interpretable discovery:</b></p>
+<p class="small"><b>The learned recall gate (an evolved linear separator over text-side features) raises recall 44%→56% (7 hand clues) →<b class="good">72% (+2 LLM-written clues)</b>, whole-99 +3.36%/+5.72%, cross-domain significant.</b> The surviving LLM-written clue <code>base_trend_correction_alignment</code> (does the correction direction agree with Toto's own trend) is a text↔numbers cross-check the LLM discovered itself. The 7 hand-clue weights also give an interpretable discovery:</p>
 <p class="small" style="font-family:var(--mono);background:color-mix(in srgb,var(--ink) 5%,transparent);border-radius:6px;padding:.4em .6em">mag:+3.00  magmax:+2.74  histcv:+1.55 &nbsp;|&nbsp; <b class="warn">conf:−2.09</b>  dir:−3.16  nwin:−2.04  wfrac:−0.88</p>
 <p class="small"><b>The trust signal is the correction MAGNITUDE, not the LLM's self-reported CONFIDENCE (which got a negative weight)</b> — i.e. the LLM's stated confidence is miscalibrated / even misleading; the bigger the claimed event, the more reliable. An evolved, interpretable, paper-worthy finding.</p>
 </div>

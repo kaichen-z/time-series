@@ -88,8 +88,10 @@ a{color:var(--acc)}
 <h2><span class="n">0</span>一句话</h2>
 <p>纯数值已封顶（champion ≈ Toto），"选候选"范式也封顶。文档里<b>有真信号</b>（oracle 诊断：12/20 dev 题最优缩放可降误差 ~33%），但旧的"让 retrieval 吐 <code>{方向, 量级}</code>"范式里，<b class="bad">量级恒为 unknown</b>。本设计的转折：<b class="good">不再抽取抽象量级，而是把 Toto 基线数值 + 文档一起给 LLM，让它输出锚定在具体数值上的"纠正乘子"（CorDP）</b>——量级墙由此打破。</p>
 
-<h2>四条亮点</h2>
+<h2>五条亮点</h2>
 <div class="grid">
+  <div class="panel" style="border-color:var(--acc2)"><h3 style="margin-top:0">⓪ 稀疏数据上:"判断自己是否过拟合"比"进化出更强策略"更重要</h3>
+    <p class="small">今天整条<b>诚实链</b>(held-out → k 折 CV → <b>跨域(leave-domain-out)CV</b> → 显著性门 → meta-验证)反复证明:任何"进化出的复杂策略"一诚实评估就露馅(whole-99 −1.2%/28 回归)。<b>真正的能力不是策略更强,而是系统能自己分清"这个提升是真的、还是噪声里的过拟合"。</b>正是这套"自我判断过拟合"的能力,让它在稀疏数据里<b>不自欺</b>、自动收敛到 do-no-harm,并把真实的残余价值(文字侧召回杠杆,+2.50% 零回归)精确定位出来。<b>在小数据上,可信的评估器 &gt; 更强的优化器。</b></p></div>
   <div class="panel"><h3 style="margin-top:0">① 文字→数学的原则</h3>
     <p class="small">文字给出数学操作的<b>结构</b>和一个<b>指向数值来源的指针</b>，绝不发明数值。数值只来自"明确引用 / 数据类比"，两者都没有 → <b>弃权</b>。落地为逐参数 grounding 标签。</p></div>
   <div class="panel"><h3 style="margin-top:0">② 锚定破量级墙</h3>
@@ -136,7 +138,8 @@ a{color:var(--acc)}
 <div class="tscroll"><table>
 <tr><th>策略</th><th>来源</th><th>sMAE</th><th>sRMSE</th><th>赢/回归</th><th>touched</th></tr>
 <tr><td>CorDP conf≥0.8</td><td>手设(保守)</td><td class="good">+1.93%</td><td class="good">+3.20%</td><td class="num good">17/0</td><td class="num">17</td></tr>
-<tr><td><b>学出来的召回门</b></td><td class="kv"><b>进化+跨域CV+显著性门</b></td><td class="good"><b>+2.50%</b></td><td class="good"><b>+4.66%</b></td><td class="num good"><b>22/0</b></td><td class="num">22</td></tr>
+<tr><td>召回门(7 手写线索)</td><td class="kv">进化+跨域CV</td><td class="good">+2.50%</td><td class="good">+4.66%</td><td class="num good">22/0</td><td class="num">22</td></tr>
+<tr><td><b>召回门(+2 LLM 写线索)</b></td><td class="kv"><b>LLM 写线索+进化+跨域CV</b></td><td class="good"><b>+3.36%</b></td><td class="good"><b>+5.72%</b></td><td class="num good"><b>28/1</b></td><td class="num">28</td></tr>
 <tr><td>oracle 上界(信全部)</td><td>完美选择</td><td>+4.47%</td><td>+5.76%</td><td class="num">39/16</td><td class="num">55</td></tr>
 <tr><td class="mut">完整 3 环 co-evolve</td><td class="mut">诚实评估后</td><td class="warn">−1.20%</td><td>+2.73%</td><td class="num warn">36/28</td><td class="num">—</td></tr>
 </table></div>
@@ -145,7 +148,7 @@ a{color:var(--acc)}
 <h3>A2 · 召回杠杆 &amp; 唯一真发现(残余价值全在文字侧)</h3>
 <div class="callout">
 <p class="small"><b>oracle_gap 定位:</b> 55 个有修正的任务里,信它 <b>帮忙 39 / 帮倒忙 16</b>(帮倒忙=LLM 乘子读错量级/被 confounder 带偏)。数字已耗尽(Toto 是数值天花板)→ <b>残余价值/难度 100% 在文字侧:把 39 HELP 和 16 HARM 分开</b>。手设 conf 门是 <b>100% 精度 / 44% 召回</b>(零回归但漏 22 个 HELP,+2.2% 留在桌上)。</p>
-<p class="small"><b>召回门(进化学出的线性分离器,文字侧特征)把召回 44%→56%、零回归、跨域显著。学出的权重给出一条可解释发现:</b></p>
+<p class="small"><b>召回门(进化学出的线性分离器,文字侧特征)把召回 44%→56%(7 手写线索)→<b class="good">72%(+2 个 LLM 写的线索)</b>,whole-99 +3.36%/+5.72%,跨域显著。</b> LLM 写的存活线索 <code>base_trend_correction_alignment</code>(修正方向 vs Toto 趋势是否一致)= 文字↔数字互相印证的信号,LLM 自己发现的。7 手写线索学出的权重还给出一条可解释发现:</p>
 <p class="small" style="font-family:var(--mono);background:color-mix(in srgb,var(--ink) 5%,transparent);border-radius:6px;padding:.4em .6em">mag:+3.00  magmax:+2.74  histcv:+1.55 &nbsp;|&nbsp; <b class="warn">conf:−2.09</b>  dir:−3.16  nwin:−2.04  wfrac:−0.88</p>
 <p class="small"><b>信任信号是"修正量级",不是 LLM 自报置信度(conf 拿到负权重)。</b> 即:LLM 的自报置信没校准、甚至误导;声称的事件越大越可靠。这是 evolve 学出的、可解释、可单独成文的洞见。</p>
 </div>

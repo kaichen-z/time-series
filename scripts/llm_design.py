@@ -164,6 +164,74 @@ def safe_compile_primitive(name: str, src: str):
     return wrapped
 
 
+def safe_compile_clue(name: str, src: str):
+    """Validate + compile a recall-gate CLUE (a scalar trust feature):
+        def <name>(base, history, corrections, conf) -> float
+      base/history : list[float]   corrections : list of [start_idx, end_idx, mult]   conf : float
+    Returns a sandboxed fn (own errors / non-finite -> 0.0)."""
+    _check_ast(name, src, expected_args=("base", "history", "corrections", "conf"))
+    ns: dict = {"__builtins__": _SAFE_BUILTINS, **_SAFE_GLOBALS}
+    try:
+        exec(compile(src, f"<clue:{name}>", "exec"), ns)          # noqa: S102 (sandboxed ns)
+    except Exception as e:                                          # pragma: no cover
+        raise UnsafeFeatureError(f"compile/exec failed: {e}")
+    raw = ns.get(name)
+    if not callable(raw):
+        raise UnsafeFeatureError("no function defined")
+
+    def wrapped(base, history, corrections, conf, _raw=raw):
+        try:
+            v = float(_raw(list(base), list(history), [list(c) for c in corrections], float(conf)))
+            return v if math.isfinite(v) else 0.0
+        except Exception:
+            return 0.0
+    wrapped.__name__ = name
+    wrapped.source = src
+    return wrapped
+
+
+_SYSTEM_CLUE = (
+    "You invent numeric CLUES that decide whether to TRUST a document-derived correction to a "
+    "time-series forecast. A strong base forecast exists; a document implied per-window multipliers; "
+    "sometimes trusting them helps, sometimes it harms (wrong magnitude / a confounding document). "
+    "Each clue is a scalar computed from what is visible at inference. Output ONE JSON object only, "
+    "no markdown fences, no prose. Keep each function short."
+)
+
+_CLUE_INTERFACE = """Each clue is EXACTLY:
+    def <name>(base, history, corrections, conf) -> float
+  base        : list[float]  the base forecast (length H)
+  history     : list[float]  past observed values (may be empty)
+  corrections : list of [start_idx, end_idx, mult]  (the document's per-window multipliers)
+  conf        : float        the LLM's self-reported confidence (known to be poorly calibrated)
+Return a single finite float (ideally roughly bounded, e.g. [-1,1] or [0,1]). Helpers: math.
+Allowed builtins: len,min,max,abs,sum,round,float,int,range,any,all,sorted,enumerate,zip,list.
+No imports, no eval/exec/getattr, no dunder. You cannot see the future or the truth. Think of signals
+like: correction magnitude vs history volatility, whether the correction direction agrees with the
+recent history slope, how localized the windows are, multi-window agreement, etc."""
+
+
+def propose_clues(client, existing_names, n: int = 6):
+    """Ask the LLM for n new recall-gate clues. Returns {name: fn} of the ones that safe_compile."""
+    user = (
+        f"{_CLUE_INTERFACE}\n\nExisting clues (do NOT duplicate): {sorted(existing_names)}\n\n"
+        f"Propose {n} NEW, structurally distinct clues for separating 'trusting the correction helps' "
+        f"from 'it harms'. Return JSON:\n"
+        '{"clues": [{"name": "snake_case", "source": "def snake_case(base, history, corrections, conf):\\n    ..."}]}'
+    )
+    resp = client.complete(system=_SYSTEM_CLUE, messages=[{"role": "user", "content": user}], temperature=0.5)
+    out = {}
+    for item in _extract_items(resp.text):
+        name, srcc = item.get("name"), item.get("source")
+        if not name or not srcc or name in existing_names or name in out:
+            continue
+        try:
+            out[name] = safe_compile_clue(name, srcc)
+        except UnsafeFeatureError:
+            continue
+    return out
+
+
 _SYSTEM_PRIM = (
     "You write a small, pure Python CORRECTION PRIMITIVE for a time-series forecasting harness. "
     "A strong base forecast already exists; documents have been read into per-window multipliers "
