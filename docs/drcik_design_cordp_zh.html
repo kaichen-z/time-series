@@ -475,6 +475,20 @@ a{color:var(--acc)}
 <div class="callout">
 <p class="small"><b>标准 baseline 套餐(CiK/LAFP 系):统计 + TSFM + LLM-direct(带/不带上下文)+ context on/off 消融。</b> 主张"文字有用"就必带一个"也吃了文字"的对手 + 一个"没吃文字"的自己。<b>Xuan 的 baseline = 统计 + TSFM + LLM-direct 无上下文</b>,对上了前半截(纯数值场)✅,但<b>缺后半截:LLM-direct 带文档(跨模态对手)+ docs on/off 消融</b> ❌。我们要补的正是这两个,并<b>加报 RCRPS</b> 以与 CiK/LAFP/Beyond-Naive 直接可比。</p>
 </div>
+
+<h3>A′ · 门控 / 信任决策(离我们召回门最近,GITCO 是直接对照)</h3>
+<div class="tscroll"><table>
+<tr><th>Paper</th><th>怎么决定"信不信文档"</th><th>门</th><th>do-no-harm</th><th>训练?</th></tr>
+<tr><td><b>GITCO</b> 2606.05332</td><td class="warn"><b>学出的门,用时序特征(数字侧 tsfeatures)</b></td><td>学(黑箱)</td><td>✅ 有界</td><td>训练</td></tr>
+<tr><td>Post-Training revisor 2605.29401</td><td>训练 revise-or-preserve 修正器</td><td>训练</td><td>—</td><td>训练</td></tr>
+<tr><td>Calibration-aggregation 系</td><td>聚合检索相关性+证据矛盾+样本一致+历史校准 + temperature/isotonic/conformal</td><td>手设聚合</td><td>—</td><td>部分</td></tr>
+<tr><td>Feature Steering 2606.27199</td><td>激活层 feature steering</td><td>学</td><td>—</td><td>部分</td></tr>
+<tr><td><b>我们(召回门)</b></td><td class="good"><b>门用文字侧信号(量级 / base-趋势对齐 / 校准置信)+ LLM 写线索 + 进化筛</b></td><td class="good"><b>进化·可读代码</b></td><td>✅ 内核±50%</td><td class="good"><b>免训练</b></td></tr>
+</table></div>
+<div class="callout">
+<p class="small"><b>"门"本身不新——GITCO 抢先了(学出的、有界的门)。但 GITCO 的门看<b>数字侧特征(tsfeatures)</b>决定信不信文档;我们(基于"文档要修的失败不在数字里"这条论证)门看<b>文字侧信号</b>。<b>GITCO 恰好是我们"文字侧 vs 数字侧门"的直接对照实验。</b> 我们真正独有的组合:①文字侧门 + ②<b>LLM 亲自写门的可审计线索</b>(GITCO 是训练黑箱)+ ③<b>诚实链/自评过拟合</b>(跨域CV+显著性门,别人不 foreground)+ ④<b>HELP/HARM oracle-gap 分析</b>(把残余定位到召回杠杆)+ ⑤免训练可审计。单拎门会被 GITCO 盖过;打包才立得住。</p>
+</div>
+
 <p class="small"><b>B · 自进化/harness:</b> SEA-TS(生成 TSFM 算法代码)、EpiEvolve(记忆式规则自进化)、Meta/Self/Agentic-Harness(coding agent 演化 harness)、CORAL(AlphaEvolve 式)。
 <b>C · 多模态数据/方法:</b> Time-MMD、MoTime、Time-VLM、LLM-PS(多为弱基线+小 MLP 融合)。
 <b>D · 多-agent 拓扑:</b> GPTSwarm、G-Designer、Agentic Supernet、MetaGen/TacoMAS(进化 agent 图)。

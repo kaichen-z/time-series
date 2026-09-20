@@ -454,6 +454,20 @@ a{color:var(--acc)}
 <div class="callout">
 <p class="small"><b>The field's standard baseline suite (CiK/LAFP): statistical + TSFM + LLM-direct (with/without context) + a context on/off ablation.</b> Any "text helps" claim must include one rival that <b>also read the text</b> and a version of <b>itself that did not</b>. <b>Xuan's baselines = statistical + TSFM + LLM-direct without context</b> — they cover the front half (the numeric field) ✅ but <b>miss the back half: LLM-direct with documents (the cross-modal rival) + a docs on/off ablation</b> ❌. Those two are exactly what we must add, plus <b>report RCRPS</b> to be directly comparable to CiK/LAFP/Beyond-Naive.</p>
 </div>
+
+<h3>A′ · Gating / trust decision (closest to our recall gate; GITCO is the direct control)</h3>
+<div class="tscroll"><table>
+<tr><th>Paper</th><th>How it decides "trust the document?"</th><th>Gate</th><th>do-no-harm</th><th>Trains?</th></tr>
+<tr><td><b>GITCO</b> 2606.05332</td><td class="warn"><b>learned gate over TIME-SERIES features (numbers-side, tsfeatures)</b></td><td>learned (black box)</td><td>✅ bounded</td><td>trains</td></tr>
+<tr><td>Post-Training revisor 2605.29401</td><td>trains a revise-or-preserve modifier</td><td>trained</td><td>—</td><td>trains</td></tr>
+<tr><td>Calibration-aggregation</td><td>aggregate retrieval relevance + evidence contradiction + sample consistency + historical calibration + temperature/isotonic/conformal</td><td>hand-set aggregation</td><td>—</td><td>partial</td></tr>
+<tr><td>Feature Steering 2606.27199</td><td>activation-space feature steering</td><td>learned</td><td>—</td><td>partial</td></tr>
+<tr><td><b>Us (recall gate)</b></td><td class="good"><b>gate over TEXT-side signals (magnitude / base-trend alignment / calibrated conf) + LLM-written clues + evolved</b></td><td class="good"><b>evolved · readable code</b></td><td>✅ kernel ±50%</td><td class="good"><b>training-free</b></td></tr>
+</table></div>
+<div class="callout">
+<p class="small"><b>The gate itself is NOT new — GITCO got there first (a learned, bounded gate). But GITCO's gate reads NUMBERS-side features (tsfeatures) to decide whether to trust the document; ours (grounded in "the failure the document fixes is not in the numbers") reads TEXT-side signals. GITCO is exactly our direct "text-side vs numbers-side gate" control.</b> What is genuinely ours is the combination: ① a text-side gate + ② <b>the LLM authoring the gate's auditable clues</b> (GITCO is a trained black box) + ③ <b>the honesty chain / self-assessment of overfitting</b> (grouped CV + significance gate, which others don't foreground) + ④ the <b>HELP/HARM oracle-gap analysis</b> (localizing the residual to a recall lever) + ⑤ training-free & auditable. The gate alone is dominated by GITCO; the package stands.</p>
+</div>
+
 <p class="small"><b>B · Self-evolving / harness:</b> SEA-TS (generates TSFM algorithm code), EpiEvolve (memory-based rule self-evolution), Meta/Self/Agentic-Harness (coding agent evolves a harness), CORAL (AlphaEvolve-style).
 <b>C · Multimodal datasets/methods:</b> Time-MMD, MoTime, Time-VLM, LLM-PS (mostly weak baselines + small-MLP fusion).
 <b>D · Multi-agent topology:</b> GPTSwarm, G-Designer, Agentic Supernet, MetaGen/TacoMAS (evolve the agent graph).
