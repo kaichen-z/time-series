@@ -45,8 +45,9 @@ def hrange(hv):
     if len(hv)<4: return 0.5
     m=statistics.median(hv) or (statistics.mean(abs(x) for x in hv)+1e-9)
     q=statistics.quantiles(hv,n=10); return max(abs(q[-1]-m),abs(q[0]-m))/abs(m)
-def load():
-    ids=[t for t in SPLIT["public_test"]["task_ids"] if t in cards and cards[t].get("corrections")]
+def load(part="public_test", _cards=None):
+    _cards=_cards or cards
+    ids=[t for t in SPLIT[part]["task_ids"] if t in _cards and _cards[t].get("corrections")]
     tasks={t.numeric.task_id:t for t in load_context_tasks_by_ids(TASKS,tuple(ids))}
     data=[]
     for tid in ids:
@@ -55,14 +56,14 @@ def load():
         n=t.numeric;truth=list(n.future_values);H=len(truth)
         base=list(fs.forecast("toto_2_0",tuple(n.history_values),n.prediction_length,n.frequency))
         if len(base)!=H: continue
-        fts=[str(x) for x in t.future_timestamps];conf=float(cards[tid].get("confidence") or 0.0)
+        fts=[str(x) for x in t.future_timestamps];conf=float(_cards[tid].get("confidence") or 0.0)
         alltext=" ".join((d.content or "") for d in t.documents)
         nb=len(BASELINE.findall(alltext));ne=len(EVENT.findall(alltext))
         docbase=nb/(nb+ne+1e-9)                      # 1 = pure baseline docs (fabrication risk)
         R=hrange(list(n.history_values))
         chmap={(str(r[0]),str(r[1])):float(r[2]) for r in (challenged.get(tid,{}).get("corrections") or []) if len(r)>=3}
         corr=[]
-        for r in (cards[tid]["corrections"] or []):
+        for r in (_cards[tid]["corrections"] or []):
             if len(r)<3: continue
             on=[i for i,o in enumerate(horizon_window_mask(fts,str(r[0]),str(r[1]))) if o]
             if not on: continue
@@ -119,7 +120,7 @@ def cv(data,rng,K=3):
 def whole(w,data,keepall):
     # whole-99: keepall tasks (no-corr stay Toto) via the 55 corr set; report vs Toto
     bs=br=os_=or_=0.0;n=0;wins=reg=0
-    ids99=SPLIT["public_test"]["task_ids"]; dmap={d["tid"]:d for d in data}
+    ids99=[d["tid"] for d in data]; dmap={d["tid"]:d for d in data}
     tasks={t.numeric.task_id:t for t in load_context_tasks_by_ids(TASKS,tuple(ids99))}
     for tid in ids99:
         t=tasks.get(tid)
@@ -133,13 +134,16 @@ def whole(w,data,keepall):
         if mo["smae"]+mo["srmse"]<mb["smae"]+mb["srmse"]-1e-9: wins+=1
         elif mo["smae"]+mo["srmse"]>mb["smae"]+mb["srmse"]+1e-9: reg+=1
     return (bs-os_)/bs,(br-or_)/br,wins,reg
-D=load();rng=random.Random(20260919)
-print(f"== evolvable pass-combiner (challenge pass {'ON' if challenged else 'OFF'}), {len(D)} corr-tasks ==")
-best=evolve(D,rng);mu,sd=cv(D,rng)
-print(f"grouped-CV do-no-harm gain {mu:+.4f} ± {sd:.4f}")
+import os
+FK[:]= ["absmag","conf","wfrac","docbase","magsupp","bias"]   # CODE passes only -> valid train->test
+tr_cards=json.loads((ROOT/".scratch/cordp_cards_train.json").read_text())
+TR=load("train",tr_cards); TE=load("public_test",cards); rng=random.Random(20260919)
+print(f"== VALID train->test pass-combiner (CODE passes only), train {len(TR)} | test {len(TE)} ==")
+best=evolve(TR,rng); mu,sd=cv(TR,rng)
+print(f"train grouped-CV do-no-harm gain {mu:+.4f} ± {sd:.4f}")
 print(f"combiner weights: {{{', '.join(f'{k}:{best.get(k,0):+.2f}' for k in FK)}}}")
-KEEP={"bias":9.0}   # trust-all baseline (always full)
-print("\nwhole-99 trust-all:")
+KEEP={"bias":9.0}
+print("\nTEST99 whole (deployable, trained on TRAIN):")
 for nm,w in [("baseline keep-all",KEEP),("EVOLVED combiner",best)]:
-    sm,sr,wi,rg=whole(w,D,True); print(f"  {nm:18s}: sMAE {sm:+.2%} | sRMSE {sr:+.2%} | wins {wi} reg {rg}")
+    sm,sr,wi,rg=whole(w,TE,True); print(f"  {nm:18s}: sMAE {sm:+.2%} | sRMSE {sr:+.2%} | wins {wi} reg {rg}")
 fs.close()

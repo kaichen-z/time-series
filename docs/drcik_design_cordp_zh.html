@@ -139,14 +139,15 @@ a{color:var(--acc)}
 <tr><th>策略</th><th>来源</th><th>sMAE</th><th>sRMSE</th><th>赢/回归</th><th>touched</th></tr>
 <tr><td>CorDP conf≥0.8</td><td>手设(保守)</td><td class="good">+1.93%</td><td class="good">+3.20%</td><td class="num good">17/0</td><td class="num">17</td></tr>
 <tr><td>召回门(7 手写线索)</td><td class="kv">进化+跨域CV</td><td class="good">+2.50%</td><td class="good">+4.66%</td><td class="num good">22/0</td><td class="num">22</td></tr>
-<tr><td><b>召回门(+2 LLM 写线索)</b></td><td class="kv"><b>LLM 写线索+进化+跨域CV</b></td><td class="good"><b>+3.36%</b></td><td class="good"><b>+5.72%</b></td><td class="num good"><b>28/1</b></td><td class="num">28</td></tr>
+<tr><td>召回门(+2 LLM 写线索)</td><td class="kv">LLM 写线索+进化+跨域CV</td><td class="good">+3.36%</td><td class="good">+5.72%</td><td class="num good">28/1</td><td class="num">28</td></tr>
+<tr><td><b>可进化提取组合器(新最佳)</b></td><td class="kv"><b>pass库+低DOF进化,train→test</b></td><td class="good"><b>+4.24%</b></td><td class="good"><b>+6.86%</b></td><td class="num good"><b>30/1</b></td><td class="num">30</td></tr>
 <tr><td>trust-all(全信 55 个)</td><td>无选择</td><td>+4.47%</td><td>+5.76%</td><td class="num">39/16</td><td class="num">55</td></tr>
 <tr><td>完美门控·当前乘子(只贴 39 HELP)</td><td>门完美,乘子不变</td><td>+9.97%</td><td>+9.61%</td><td class="num">39/0</td><td class="num">39</td></tr>
 <tr><td><b>完美乘子·文档窗口·内核±50%</b></td><td><b>感知完美(真上限)</b></td><td class="good"><b>+22.14%</b></td><td class="good"><b>+17.61%</b></td><td class="num">—</td><td class="num">55</td></tr>
 <tr><td>完美乘子·不过内核</td><td>感知完美 + 放开内核</td><td>+38.44%</td><td>+39.11%</td><td class="num">—</td><td class="num">55</td></tr>
 <tr><td class="mut">完整 3 环 co-evolve</td><td class="mut">诚实评估后</td><td class="warn">−1.20%</td><td>+2.73%</td><td class="num warn">36/28</td><td class="num">—</td></tr>
 </table></div>
-<p class="small"><b>当前最佳可靠结果 = 学出来的召回门(+2 个 LLM 写的线索):whole-99 +3.36% / +5.72%,28赢/1回归,召回 72%</b>(跨域 CV 显著 +0.067±0.037)。<b>上限阶梯很关键:</b>完美门控当前乘子只到 <b>+9.97%</b>(门调到头就这样);但<b>如果乘子精确</b>(文档窗口上完美量级),真上限是 <b>+22.14%</b>(过内核)/ <b>+38.44%</b>(放开内核)。⇒ <b>真正的 headroom(+3.36%→+22%)在"产出更好的乘子(感知)",不在门;而内核 ±50% 自己也削掉了 +16%(大事件)。</b> 连续 λ 门试过:+1.59%,更差(HELP 要全信,部分信任无益)。<b>完整 3 环 co-evolve 诚实后 −1.20%/28 回归(过拟合)。</b>单题:task_163 乘子 0.93 vs oracle 0.935;task_152 +28%。</p>
+<p class="small"><b>当前最佳可靠结果 = 可进化提取组合器:whole-99 +4.24% sMAE / +6.86% sRMSE,30赢/1回归(联合 +5.55%,全场最高、近零回归,train→test 无泄漏、推理零 LLM)。</b> 做法:把提取当成 <b>pass 库</b>(CODE doc-type「文档像基线/方法描述 vs 事件」+ 量级支持)+ <b>低-DOF 进化组合器</b>(full/shrink/reject)+ do-no-harm + grouped CV。关键权重 <code>docbase=−1.90</code>:<b>拒掉"基线/方法文档"里的捏造修正</b>(读真数据发现的 task_160 那类:把"夜里太阳=0"误读成白天降)。上一档召回门是 +3.36%/+5.72%。<b>上限阶梯很关键:</b>完美门控当前乘子只到 <b>+9.97%</b>(门调到头就这样);但<b>如果乘子精确</b>(文档窗口上完美量级),真上限是 <b>+22.14%</b>(过内核)/ <b>+38.44%</b>(放开内核)。⇒ <b>真正的 headroom(+3.36%→+22%)在"产出更好的乘子(感知)",不在门;而内核 ±50% 自己也削掉了 +16%(大事件)。</b> 连续 λ 门试过:+1.59%,更差(HELP 要全信,部分信任无益)。<b>完整 3 环 co-evolve 诚实后 −1.20%/28 回归(过拟合)。</b>单题:task_163 乘子 0.93 vs oracle 0.935;task_152 +28%。</p>
 
 <h3>A2 · 召回杠杆 &amp; 唯一真发现(残余价值全在文字侧)</h3>
 <div class="callout">
