@@ -19,7 +19,7 @@ import numpy as np
 import nrd_coevolve as C
 from common.metrics import drcik_point_metrics
 
-D = json.load(open(".scratch/self_evolving/nrd_cache.json"))
+D = json.load(open(__import__("os").environ.get("CACHE", ".scratch/self_evolving/nrd_cache_full.json")))
 _tr = [d for d in D if d["part"] == "train"]
 METHODS = sorted(m for m in set().union(*[set(d["fc"]) for d in _tr]) if sum(m in d["fc"] for d in _tr) >= 0.9 * len(_tr))   # missing -> Toto
 
@@ -45,7 +45,7 @@ def run(p, d):
     return f.tolist()
 
 
-PEN = float(__import__("os").environ.get("PEN", "3.0"))   # do-no-harm penalty on tasks made worse
+PEN = float(__import__("os").environ.get("PEN", "3.0"))   # do-no-harm penalty
 
 
 def fit(p, ds):
@@ -117,7 +117,7 @@ def main():
     for e in el: print(f"  fit {e['fitness']:+.4f}  {json.dumps(e['program'])}")
     best = el[0]["program"]
     print("train:", summ(best, train)); print("dev  :", summ(best, dev))
-    json.dump(dict(curve=curve, elites=el), open(".scratch/self_evolving/numerical_part1.json", "w"))
+    json.dump(dict(curve=curve, elites=el), open(__import__("os").environ.get("OUT", ".scratch/self_evolving/numerical_part1.json"), "w"))
 
 
 if __name__ == "__main__":

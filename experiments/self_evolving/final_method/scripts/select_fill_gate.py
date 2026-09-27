@@ -9,7 +9,7 @@ sys.path.insert(0, '.scratch/self_evolving')
 import nrd4 as N4, num_part1 as P1, nrd_coevolve as C
 from common.metrics import drcik_point_metrics
 TH = json.load(open('.scratch/self_evolving/toto_hindcast.json'))
-D = [N4.R3.prep_task(d, TH) for d in json.load(open('.scratch/self_evolving/nrd_cache.json'))]
+D = [N4.R3.prep_task(d, TH) for d in json.load(open('.scratch/self_evolving/nrd_cache_full.json'))]
 for d in D: d['_sig'] = {}; h = d['history']; d['_last'], d['_lo'], d['_hi'] = h[-1], min(h), max(h)
 prog = json.load(open('.scratch/self_evolving/numerical_part1.json'))['elites'][0]['program']
 FV = json.load(open('.scratch/self_evolving/fill_variants.json'))

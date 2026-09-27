@@ -2,48 +2,55 @@
 
 ## 0. Numerical part 1: combination-program dictionary (num_part1.py, PEN=3)
 
-- Generation 0 is the 31 single methods; the best of them at generation 0 is Toto, with fitness 0 relative to Toto.
+- Dictionary: the 31 original methods plus the statistical portfolio run by `stat_full.py`. Of the 93 statistical methods, 48 produce forecasts on Dr-CiK; the rest are intermittent-demand methods, methods that need long histories, or methods that do not support the task frequency. Together this gives 50 methods, and the **37 that cover at least 90% of Train tasks** are used (a missing forecast falls back to Toto).
+- Generation 0 is the 37 single methods; the best of them at generation 0 is Toto, with fitness 0 relative to Toto.
 - 12 parents and 24 children per generation, 30 generations.
 - Fitness = mean gain vs Toto + 3 × mean negative gain on Train. Diversity is kept by leading method.
 
-Best fitness per generation: 0.000 → 0.000 → 0.000 → 0.000 → 0.030 → 0.030 → 0.037 → 0.037 → 0.037 → 0.037 → 0.037 → 0.037 → 0.037 → 0.037 → 0.051 → 0.052 → 0.052 → 0.052 → 0.052 → 0.059 → 0.059 → 0.059 → 0.059 → 0.059 → 0.078 → 0.079 → 0.079 → 0.079 → 0.080 → 0.080 → 0.093
+Best fitness per generation: 0.000 → 0.021 → 0.021 → 0.033 → 0.033 → 0.033 → 0.033 → 0.033 → 0.033 → 0.033 → 0.033 → 0.033 → 0.034 → 0.034 → 0.034 → 0.034 → 0.049 → 0.049 → 0.049 → 0.049 → 0.049 → 0.088 → 0.088 → 0.088 → 0.088 → 0.088 → 0.088 → 0.088 → 0.088 → 0.099 → 0.099
+
+Best program after weight normalisation: **0.95·Toto + 0.05·arima_auto, shrunk 20% toward the last observation**, no difference term, no clipping.
 
 | Rank | Fitness | Program |
 |---|---|---|
-| 1 | +0.0930 | `{"terms": [["toto_2_0", 1.8813979122767783], ["arma", 0.115]], "diff": ["forecast_residual_bootstrap", "linear_trend_regression", 0.032], "shrink": 0.16659781596381323, "clip": 0.5}` |
-| 2 | -0.1257 | `{"terms": [["simple_moving_average", 0.5766445191269263], ["toto_2_0", 0.4340179826836823], ["patchtst", 0.0809020522353243], ["stl_ets", 0.068]], "diff": null, "shrink": 0.0, "clip": null}` |
-| 3 | -0.2679 | `{"terms": [["samformer", 1.0], ["toto_2_0", 0.7074940034192371], ["kernel_ridge_lag_regression", 0.129], ["naive_drift", 0.248]], "diff": null, "shrink": 0.13691249850335682, "clip": null}` |
-| 4 | -0.3112 | `{"terms": [["stl_ets", 1.0], ["arima_auto", 0.16524510219199762], ["toto_2_0", 0.489]], "diff": ["samformer", "forecast_residual_bootstrap", -0.023], "shrink": 0.24816431759587454, "clip": 0.0}` |
-| 5 | -0.3992 | `{"terms": [["naive_drift", 0.893338035162156], ["pelt_segment_then_forecast", 0.5404939350515546], ["forecast_residual_bootstrap", 0.13296136013531118], ["stl_ets", 0.48280233397961847]], "diff": null, "shrink": 0.0, "clip": 0.1}` |
-| 6 | -0.6035 | `{"terms": [["ses", 0.4165464564585716], ["samformer", 0.30832798827653757]], "diff": ["ma", "toto_2_0", -0.062], "shrink": 0.0, "clip": 0.25}` |
-| 7 | -0.7292 | `{"terms": [["arima_auto", 1.0], ["toto_2_0", 0.4340179826836823], ["patchtst", 0.0809020522353243], ["stl_ets", 0.068]], "diff": null, "shrink": 0.20292149650001215, "clip": 0.25}` |
-| 8 | -0.8291 | `{"terms": [["chronos_bolt", 2.3400529540985313]], "diff": null, "shrink": 0.2526964408861085, "clip": null}` |
+| 1 | +0.0987 | `{"terms": [["toto_2_0", 1.1005169383119369], ["arima_auto", 0.059]], "diff": null, "shrink": 0.20153008320833654, "clip": null}` |
+| 2 | -0.1426 | `{"terms": [["simple_moving_average", 0.29779519107337626], ["toto_2_0", 0.2236982709733526]], "diff": null, "shrink": 0.0, "clip": null}` |
+| 3 | -0.2564 | `{"terms": [["toto_2_0", 0.21629149933713063], ["bayesian_online_changepoint_forecast", 0.2751553601453943]], "diff": ["forecast_residual_bootstrap", "kernel_ridge_lag_regression", 0.002], "shrink": 0.18083088582877407, "clip": 0.25}` |
+| 4 | -0.4294 | `{"terms": [["stl_ets", 0.6289872537795519], ["samformer", 0.2323071530078904], ["bayesian_online_changepoint_forecast", 0.5313907251836608], ["pelt_segment_then_forecast", 0.4710073533139805]], "diff": null, "shrink": 0.08827201885195486, "clip": null}` |
+| 5 | -0.4324 | `{"terms": [["ses", 0.9434314586984685], ["patchtst", 0.095], ["chronos_bolt", 0.42135598167679916], ["robust_loess_trend", 0.09087707803452005]], "diff": ["polynomial_trend_regression", "ar", 0.037], "shrink": 0.0, "clip": 0.1}` |
+| 6 | -0.4534 | `{"terms": [["theta_optimized", 0.6289872537795519], ["samformer", 0.4682409345581937], ["bayesian_online_changepoint_forecast", 0.5157630283412165], ["stl_ets", 0.32207456259094736]], "diff": ["theta_optimized", "pelt_segment_then_forecast", -0.069], "shrink": 0.0, "clip": null}` |
+| 7 | -0.4644 | `{"terms": [["theta_optimized", 0.6289872537795519], ["samformer", 0.6894763706304862], ["bayesian_online_changepoint_forecast", 0.5157630283412165], ["stl_ets", 0.35808040328839585]], "diff": ["theta_optimized", "pelt_segment_then_forecast", -0.069], "shrink": 0.02019483131291253, "clip": null}` |
+| 8 | -0.5353 | `{"terms": [["naive_last", 0.9498975490719375], ["bayesian_online_changepoint_forecast", 0.14466993445659374], ["samformer", 0.432]], "diff": ["stl_ets", "simple_moving_average", 0.206], "shrink": 0.0, "clip": null}` |
 
-Nested stratified CV (evolve on 2 train folds, score the 3rd), held-out sMAE: +22.9%, +21.1%, −5.5% (fold 2).
+Nested stratified CV (evolve on 2 train folds, score the 3rd), held-out sMAE / sRMSE vs Toto:
+- fold 0: 0.3663 → 0.3147 / 0.5576 → 0.5006 (W/R 12/15);
+- fold 1: 0.2951 → 0.2633 / 0.4757 → 0.4334 (W/R 8/19);
+- fold 2: 0.5082 → 0.4893 / 0.7785 → 0.7634 (W/R 12/14).
 
+The previous 31-method dictionary reached fitness 0.093 with 0.94·Toto + 0.06·ARMA (shrink 17%, clip 0.5).
 
 ## 0b. Numerical part 2 fill method + Decision repair margin (select_fill_gate.py)
 
-- Search: 4 fill methods × 6 margins, evaluated with the full pipeline on Train.
+- Search: 4 fill methods × 6 margins, evaluated with the full pipeline on Train (with the part-1 program above).
 - Fitness: mean gain + 3 × mean negative gain.
 
-Nested stratified CV:
-- fold 0 chose linear / 0.2 → held-out +0.217 (W/R 16/11);
-- fold 1 chose phase_median / 0.1 → held-out +0.162 (14/13);
-- fold 2 chose phase_median / 0.3 → held-out +0.309 (18/8).
+Nested stratified CV (held-out joint-error reduction):
+- fold 0 chose linear / 0.2 → held-out +0.230 (W/R 18/9);
+- fold 1 chose phase_median / 0.1 → held-out +0.155 (13/14);
+- fold 2 chose phase_median / 0.3 → held-out +0.338 (18/8).
 
 | Rank | Train fitness | Fill | Margin |
 |---|---|---|---|
-| 1 | +0.1785 | phase_median | 0.3 |
-| 2 | +0.1758 | phase_median | 0.2 |
-| 3 | +0.1746 | snaive | 0.2 |
-| 4 | +0.1741 | truncate | 0.2 |
-| 5 | +0.1741 | linear | 0.2 |
-| 6 | +0.1732 | snaive | 0.3 |
-| 7 | +0.1731 | truncate | 0.3 |
-| 8 | +0.1731 | linear | 0.3 |
-| 9 | +0.1655 | truncate | None |
-| 10 | +0.1655 | snaive | None |
+| 1 | +0.1876 | phase_median | 0.3 |
+| 2 | +0.1840 | phase_median | 0.2 |
+| 3 | +0.1833 | snaive | 0.2 |
+| 4 | +0.1821 | truncate | 0.2 |
+| 5 | +0.1821 | linear | 0.2 |
+| 6 | +0.1820 | truncate | 0.3 |
+| 7 | +0.1820 | linear | 0.3 |
+| 8 | +0.1819 | snaive | 0.3 |
+| 9 | +0.1698 | truncate | None |
+| 10 | +0.1698 | snaive | None |
 
 ## 1. Retrieval extraction instructions (tl2_evolve.py)
 
