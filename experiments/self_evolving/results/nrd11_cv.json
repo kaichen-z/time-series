@@ -1,0 +1,487 @@
+{
+ "args": {
+  "out": ".scratch/self_evolving/nrd11_cv.json",
+  "gens": 15,
+  "children": 6,
+  "teams": 32,
+  "seeds": [
+   1,
+   2,
+   3
+  ],
+  "calib_gens": 3,
+  "calib_children": 12,
+  "roles": "numerical,retrieval,decision",
+  "open": "cv",
+  "cache": ".scratch/self_evolving/nrd_cache.json",
+  "dict_gens_stage1": 15
+ },
+ "cv": {
+  "1": [
+   {
+    "n": 27,
+    "smae_gain": 0.08857851284320911,
+    "srmse_gain": 0.11173834903017321,
+    "joint_gain": 0.10255552264206651,
+    "changed": 9,
+    "wins": 8,
+    "regressions": 1,
+    "team": {
+     "numerical": {
+      "calib": {
+       "win": 0,
+       "deseason": false,
+       "ref": "median",
+       "stat": "q90",
+       "mult": 1.027
+      },
+      "trust": {
+       "day|seas": 0.13100671496100175,
+       "day|flat": 1.772954571990282,
+       "hour|seas": 0.86619207647141,
+       "hour|flat": 0.3110194454309697,
+       "minute|seas": 0.22278281010084966,
+       "minute|flat": 0.5830775424120781,
+       "second|flat": 4.550960941430664
+      },
+      "dict_members": 6
+     },
+     "retrieval": {
+      "absmag": 3.1839676957562024,
+      "conf": 1.2470733005896328,
+      "wfrac": -0.02337818853463436,
+      "docbase": -2.3834761897524435,
+      "ratio": -0.16714031996079365,
+      "trust": 0.11109572954492875,
+      "dcell": 2.4234278701265244,
+      "dtask": 2.1865696661489618,
+      "bias": -3.421129639602291
+     },
+     "decision": {
+      "strength": 0.7723925439816544,
+      "trust_gate": 0.06806741266287782
+     }
+    },
+    "calib_curve": [
+     0.4369,
+     0.4369,
+     0.4369,
+     0.4369
+    ]
+   },
+   {
+    "n": 27,
+    "smae_gain": -0.03795875589224264,
+    "srmse_gain": 0.016580423612290007,
+    "joint_gain": -0.00429976599824069,
+    "changed": 9,
+    "wins": 6,
+    "regressions": 3,
+    "team": {
+     "numerical": {
+      "calib": {
+       "win": 0,
+       "deseason": false,
+       "ref": "median",
+       "stat": "q90",
+       "mult": 1.025
+      },
+      "trust": {
+       "day|seas": 0.15854290978064112,
+       "day|flat": 1.8529140598116065,
+       "hour|seas": 0.86619207647141,
+       "hour|flat": 0.5863519888388826,
+       "minute|flat": 0.5830775424120781,
+       "second|flat": 4.550960941430664,
+       "minute|seas": 0.22278281010084966
+      },
+      "dict_members": 7
+     },
+     "retrieval": {
+      "absmag": 1.556699675239806,
+      "conf": -1.8301859623946635,
+      "wfrac": -0.0645907517290559,
+      "docbase": -3.340618847226028,
+      "ratio": 0.696501554024453,
+      "trust": 0.05654874482045026,
+      "dcell": 2.2538588418141097,
+      "dtask": 0.9866029349138821,
+      "bias": 0.16648922467980903
+     },
+     "decision": {
+      "strength": 1.0,
+      "trust_gate": 0.0
+     }
+    },
+    "calib_curve": [
+     0.8582,
+     0.8582,
+     0.8582,
+     0.8582
+    ]
+   },
+   {
+    "n": 26,
+    "smae_gain": 0.102605866020055,
+    "srmse_gain": 0.11891995665720284,
+    "joint_gain": 0.1124763642554195,
+    "changed": 9,
+    "wins": 5,
+    "regressions": 4,
+    "team": {
+     "numerical": {
+      "calib": {
+       "win": 0,
+       "deseason": false,
+       "ref": "median",
+       "stat": "q90",
+       "mult": 1.022
+      },
+      "trust": {
+       "day|seas": 0.16333740950164538,
+       "day|flat": 1.6359533694436785,
+       "hour|seas": 0.5136234723137589,
+       "hour|flat": 0.5124967755487183,
+       "minute|flat": 0.5830775424120781,
+       "second|flat": 1.2091645622895615,
+       "minute|seas": 0.22278281010084966
+      },
+      "dict_members": 7
+     },
+     "retrieval": {
+      "absmag": 3.3800698683604082,
+      "conf": -1.8843223398767186,
+      "wfrac": 0.45463335985212244,
+      "docbase": -0.38846097580324984,
+      "ratio": -0.5708027357910651,
+      "trust": -1.097370480042126,
+      "dcell": 3.4818841333383896,
+      "dtask": -0.33694170384860667,
+      "bias": -0.3269383694210888
+     },
+     "decision": {
+      "strength": 0.8784535211184856,
+      "trust_gate": 0.07536711561970834
+     }
+    },
+    "calib_curve": [
+     0.708,
+     0.708,
+     0.708,
+     0.708
+    ]
+   }
+  ],
+  "2": [
+   {
+    "n": 27,
+    "smae_gain": 0.006523614942471571,
+    "srmse_gain": 0.02466572196708852,
+    "joint_gain": 0.017472414649341593,
+    "changed": 5,
+    "wins": 4,
+    "regressions": 1,
+    "team": {
+     "numerical": {
+      "calib": {
+       "win": 0,
+       "deseason": false,
+       "ref": "median",
+       "stat": "q90",
+       "mult": 1.025
+      },
+      "trust": {
+       "day|seas": 0.13100671496100175,
+       "day|flat": 1.772954571990282,
+       "hour|seas": 0.86619207647141,
+       "hour|flat": 0.3110194454309697,
+       "minute|seas": 0.22278281010084966,
+       "minute|flat": 0.5830775424120781,
+       "second|flat": 4.550960941430664
+      },
+      "dict_members": 6
+     },
+     "retrieval": {
+      "absmag": 3.7357267967604852,
+      "conf": -0.8486454788991864,
+      "wfrac": 1.3566734448321973,
+      "docbase": -1.8956976432719328,
+      "ratio": -0.10689008989712616,
+      "trust": -1.048654708691151,
+      "dcell": 0.7164283856180296,
+      "dtask": 3.1197698780676237,
+      "bias": -3.0499405223203992
+     },
+     "decision": {
+      "strength": 0.7544476797131057,
+      "trust_gate": 0.0
+     }
+    },
+    "calib_curve": [
+     0.4369,
+     0.4369,
+     0.4369,
+     0.4369
+    ]
+   },
+   {
+    "n": 27,
+    "smae_gain": -0.03412552981730634,
+    "srmse_gain": 0.018994995179541767,
+    "joint_gain": -0.0013420660711310414,
+    "changed": 11,
+    "wins": 6,
+    "regressions": 5,
+    "team": {
+     "numerical": {
+      "calib": {
+       "win": 0,
+       "deseason": false,
+       "ref": "median",
+       "stat": "q90",
+       "mult": 1.027
+      },
+      "trust": {
+       "day|seas": 0.15854290978064112,
+       "day|flat": 1.8529140598116065,
+       "hour|seas": 0.86619207647141,
+       "hour|flat": 0.5863519888388826,
+       "minute|flat": 0.5830775424120781,
+       "second|flat": 4.550960941430664,
+       "minute|seas": 0.22278281010084966
+      },
+      "dict_members": 7
+     },
+     "retrieval": {
+      "absmag": 1.0025294891830305,
+      "conf": -1.2979471776582967,
+      "wfrac": -0.8518899577561431,
+      "docbase": -1.2684016425381783,
+      "ratio": 0.5905696429426224,
+      "trust": 0.9007266314666896,
+      "dcell": 2.4206745173809536,
+      "dtask": 3.0373460342276055,
+      "bias": -0.945407441588825
+     },
+     "decision": {
+      "strength": 0.9017715346192555,
+      "trust_gate": 0.0316835783283118
+     }
+    },
+    "calib_curve": [
+     0.8582,
+     0.8582,
+     0.8582,
+     0.8582
+    ]
+   },
+   {
+    "n": 26,
+    "smae_gain": 0.11181469140347776,
+    "srmse_gain": 0.12560838135996436,
+    "joint_gain": 0.12016027409042476,
+    "changed": 7,
+    "wins": 5,
+    "regressions": 2,
+    "team": {
+     "numerical": {
+      "calib": {
+       "win": 0,
+       "deseason": false,
+       "ref": "median",
+       "stat": "q90",
+       "mult": 1.019
+      },
+      "trust": {
+       "day|seas": 0.16333740950164538,
+       "day|flat": 1.6359533694436785,
+       "hour|seas": 0.5136234723137589,
+       "hour|flat": 0.5124967755487183,
+       "minute|flat": 0.5830775424120781,
+       "second|flat": 1.2091645622895615,
+       "minute|seas": 0.22278281010084966
+      },
+      "dict_members": 7
+     },
+     "retrieval": {
+      "absmag": 2.483713154623562,
+      "conf": -0.9547004862910876,
+      "wfrac": 0.04223609003639636,
+      "docbase": -0.6869533866945838,
+      "ratio": -0.24641420325940705,
+      "trust": -0.1832263356413576,
+      "dcell": 0.5378706068168971,
+      "dtask": 0.9290196897370515,
+      "bias": -1.047801594302223
+     },
+     "decision": {
+      "strength": 0.8588657089437802,
+      "trust_gate": 0.0
+     }
+    },
+    "calib_curve": [
+     0.7081,
+     0.7081,
+     0.7081,
+     0.7081
+    ]
+   }
+  ],
+  "3": [
+   {
+    "n": 27,
+    "smae_gain": 0.07782277804384734,
+    "srmse_gain": 0.09742768947917035,
+    "joint_gain": 0.08965438328600703,
+    "changed": 7,
+    "wins": 5,
+    "regressions": 2,
+    "team": {
+     "numerical": {
+      "calib": {
+       "win": 0,
+       "deseason": false,
+       "ref": "median",
+       "stat": "q90",
+       "mult": 1.025
+      },
+      "trust": {
+       "day|seas": 0.13100671496100175,
+       "day|flat": 1.772954571990282,
+       "hour|seas": 0.86619207647141,
+       "hour|flat": 0.3110194454309697,
+       "minute|seas": 0.22278281010084966,
+       "minute|flat": 0.5830775424120781,
+       "second|flat": 4.550960941430664
+      },
+      "dict_members": 6
+     },
+     "retrieval": {
+      "absmag": 3.4476452429178024,
+      "conf": -0.20745001954577294,
+      "wfrac": 1.3273897408485615,
+      "docbase": -2.432622551396425,
+      "ratio": -0.5727300027731079,
+      "trust": 0.7360977733004692,
+      "dcell": 0.8130999907549799,
+      "dtask": 1.4005364246893246,
+      "bias": -2.720754820429721
+     },
+     "decision": {
+      "strength": 0.7711990496668781,
+      "trust_gate": 0.07545081053342921
+     }
+    },
+    "calib_curve": [
+     0.4368,
+     0.4368,
+     0.4368,
+     0.4368
+    ]
+   },
+   {
+    "n": 27,
+    "smae_gain": -0.00021409588785534068,
+    "srmse_gain": 0.03525761203067497,
+    "joint_gain": 0.02167735662755283,
+    "changed": 9,
+    "wins": 6,
+    "regressions": 3,
+    "team": {
+     "numerical": {
+      "calib": {
+       "win": 0,
+       "deseason": false,
+       "ref": "median",
+       "stat": "q90",
+       "mult": 1.022
+      },
+      "trust": {
+       "day|seas": 0.15854290978064112,
+       "day|flat": 1.8529140598116065,
+       "hour|seas": 0.86619207647141,
+       "hour|flat": 0.5863519888388826,
+       "minute|flat": 0.5830775424120781,
+       "second|flat": 4.550960941430664,
+       "minute|seas": 0.22278281010084966
+      },
+      "dict_members": 7
+     },
+     "retrieval": {
+      "absmag": 2.1875554488063185,
+      "conf": -2.070592084800085,
+      "wfrac": -0.9848402156844903,
+      "docbase": -1.0725890218956045,
+      "ratio": 0.2673339775710558,
+      "trust": 1.3984209726632597,
+      "dcell": 1.7739939024439761,
+      "dtask": 1.429322813982621,
+      "bias": -1.2557363258955756
+     },
+     "decision": {
+      "strength": 0.9371409693861434,
+      "trust_gate": 0.0
+     }
+    },
+    "calib_curve": [
+     0.8582,
+     0.8582,
+     0.8582,
+     0.8582
+    ]
+   },
+   {
+    "n": 26,
+    "smae_gain": 0.11433425539307017,
+    "srmse_gain": 0.1327879335887485,
+    "joint_gain": 0.12549926618758364,
+    "changed": 9,
+    "wins": 5,
+    "regressions": 4,
+    "team": {
+     "numerical": {
+      "calib": {
+       "win": 0,
+       "deseason": false,
+       "ref": "median",
+       "stat": "q90",
+       "mult": 1.021
+      },
+      "trust": {
+       "day|seas": 0.16333740950164538,
+       "day|flat": 1.6359533694436785,
+       "hour|seas": 0.5136234723137589,
+       "hour|flat": 0.5124967755487183,
+       "minute|flat": 0.5830775424120781,
+       "second|flat": 1.2091645622895615,
+       "minute|seas": 0.22278281010084966
+      },
+      "dict_members": 7
+     },
+     "retrieval": {
+      "absmag": 2.990954488341313,
+      "conf": -3.960911006479351,
+      "wfrac": 1.0022045139201399,
+      "docbase": 0.123619749860952,
+      "ratio": -0.3223612289279042,
+      "trust": -1.359768447147056,
+      "dcell": 3.9385891322380937,
+      "dtask": -0.5578460205596294,
+      "bias": 0.734850415465998
+     },
+     "decision": {
+      "strength": 0.8961443885413698,
+      "trust_gate": 0.0022499620666437303
+     }
+    },
+    "calib_curve": [
+     0.708,
+     0.708,
+     0.708,
+     0.708
+    ]
+   }
+  ]
+ },
+ "final": {}
+}

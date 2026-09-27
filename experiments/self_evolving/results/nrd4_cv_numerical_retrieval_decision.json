@@ -1,0 +1,458 @@
+{
+ "args": {
+  "out": ".scratch/self_evolving/nrd4_cv_numerical_retrieval_decision.json",
+  "gens": 15,
+  "children": 6,
+  "teams": 32,
+  "seeds": [
+   1,
+   2,
+   3
+  ],
+  "calib_gens": 3,
+  "calib_children": 12,
+  "roles": "numerical,retrieval,decision",
+  "open": "cv"
+ },
+ "cv": {
+  "1": [
+   {
+    "n": 27,
+    "smae_gain": 0.06947014589124913,
+    "srmse_gain": 0.09253910443561136,
+    "joint_gain": 0.08339231084185764,
+    "changed": 7,
+    "wins": 5,
+    "regressions": 2,
+    "team": {
+     "numerical": {
+      "calib": {
+       "win": 0,
+       "deseason": false,
+       "ref": "median",
+       "stat": "q90",
+       "mult": 1.02
+      },
+      "trust": {
+       "day|seas": 0.13100671496100175,
+       "day|flat": 1.772954571990282,
+       "hour|seas": 0.86619207647141,
+       "hour|flat": 0.3110194454309697,
+       "minute|seas": 0.22278281010084966,
+       "minute|flat": 0.5830775424120781,
+       "second|flat": 4.550960941430664
+      }
+     },
+     "retrieval": {
+      "absmag": 2.4367164075483516,
+      "conf": 1.4047082623319918,
+      "wfrac": 1.470954348423773,
+      "docbase": -1.3539703347881469,
+      "ratio": -0.22383222911348818,
+      "trust": 0.7863624561268967,
+      "bias": -3.902553677035316
+     },
+     "decision": {
+      "strength": 0.7747339896802825,
+      "trust_gate": 0.15176724927588764
+     }
+    },
+    "calib_curve": [
+     0.4368,
+     0.4368,
+     0.4368,
+     0.4368
+    ]
+   },
+   {
+    "n": 27,
+    "smae_gain": -0.04000313843645768,
+    "srmse_gain": 0.01585759556381305,
+    "joint_gain": -0.005528547907819695,
+    "changed": 8,
+    "wins": 5,
+    "regressions": 3,
+    "team": {
+     "numerical": {
+      "calib": {
+       "win": 0,
+       "deseason": false,
+       "ref": "median",
+       "stat": "q90",
+       "mult": 1.02
+      },
+      "trust": {
+       "day|seas": 0.15854290978064112,
+       "day|flat": 1.8529140598116065,
+       "hour|seas": 0.86619207647141,
+       "hour|flat": 0.5863519888388826,
+       "minute|flat": 0.5830775424120781,
+       "second|flat": 4.550960941430664,
+       "minute|seas": 0.22278281010084966
+      }
+     },
+     "retrieval": {
+      "absmag": 3.299802638574115,
+      "conf": -3.8657980029259744,
+      "wfrac": 3.257976377307379,
+      "docbase": 2.4217743547415287,
+      "ratio": 0.8346142310718818,
+      "trust": -0.9962378696670293,
+      "bias": -3.8607796491103654
+     },
+     "decision": {
+      "strength": 1.0,
+      "trust_gate": 0.0
+     }
+    },
+    "calib_curve": [
+     0.8583,
+     0.8583,
+     0.8583,
+     0.8583
+    ]
+   },
+   {
+    "n": 26,
+    "smae_gain": 0.09418687337568801,
+    "srmse_gain": 0.1120051464114716,
+    "joint_gain": 0.10496744561037136,
+    "changed": 10,
+    "wins": 5,
+    "regressions": 5,
+    "team": {
+     "numerical": {
+      "calib": {
+       "win": 0,
+       "deseason": false,
+       "ref": "median",
+       "stat": "q90",
+       "mult": 1.023
+      },
+      "trust": {
+       "day|seas": 0.16333740950164538,
+       "day|flat": 1.6359533694436785,
+       "hour|seas": 0.5136234723137589,
+       "hour|flat": 0.5124967755487183,
+       "minute|flat": 0.5830775424120781,
+       "second|flat": 1.2091645622895615,
+       "minute|seas": 0.22278281010084966
+      }
+     },
+     "retrieval": {
+      "absmag": 3.2539652835409787,
+      "conf": -0.3330986090684494,
+      "wfrac": 0.43564783425409864,
+      "docbase": -0.7329575058138919,
+      "ratio": -0.4626468851565009,
+      "trust": 0.22921339845262764,
+      "bias": -1.3427014570449018
+     },
+     "decision": {
+      "strength": 0.7512676914793658,
+      "trust_gate": 0.0
+     }
+    },
+    "calib_curve": [
+     0.708,
+     0.708,
+     0.708,
+     0.708
+    ]
+   }
+  ],
+  "2": [
+   {
+    "n": 27,
+    "smae_gain": 0.06756489979959658,
+    "srmse_gain": 0.09948624411855259,
+    "joint_gain": 0.08682949816449712,
+    "changed": 10,
+    "wins": 8,
+    "regressions": 2,
+    "team": {
+     "numerical": {
+      "calib": {
+       "win": 0,
+       "deseason": false,
+       "ref": "median",
+       "stat": "q90",
+       "mult": 1.023
+      },
+      "trust": {
+       "day|seas": 0.13100671496100175,
+       "day|flat": 1.772954571990282,
+       "hour|seas": 0.86619207647141,
+       "hour|flat": 0.3110194454309697,
+       "minute|seas": 0.22278281010084966,
+       "minute|flat": 0.5830775424120781,
+       "second|flat": 4.550960941430664
+      }
+     },
+     "retrieval": {
+      "absmag": 2.441580087743685,
+      "conf": -1.2975483623266533,
+      "wfrac": 0.2599862015542975,
+      "docbase": 1.2991869959009186,
+      "ratio": 0.017049544832048097,
+      "trust": 1.8410854642901593,
+      "bias": -3.335846167998434
+     },
+     "decision": {
+      "strength": 0.7429928411087408,
+      "trust_gate": 0.0
+     }
+    },
+    "calib_curve": [
+     0.4368,
+     0.4368,
+     0.4368,
+     0.4368
+    ]
+   },
+   {
+    "n": 27,
+    "smae_gain": -0.021600975631597855,
+    "srmse_gain": 0.026622912010425527,
+    "joint_gain": 0.008160516226882568,
+    "changed": 9,
+    "wins": 6,
+    "regressions": 3,
+    "team": {
+     "numerical": {
+      "calib": {
+       "win": 0,
+       "deseason": false,
+       "ref": "median",
+       "stat": "q90",
+       "mult": 1.018
+      },
+      "trust": {
+       "day|seas": 0.15854290978064112,
+       "day|flat": 1.8529140598116065,
+       "hour|seas": 0.86619207647141,
+       "hour|flat": 0.5863519888388826,
+       "minute|flat": 0.5830775424120781,
+       "second|flat": 4.550960941430664,
+       "minute|seas": 0.22278281010084966
+      }
+     },
+     "retrieval": {
+      "absmag": 1.3227854795706269,
+      "conf": 0.6240523857173332,
+      "wfrac": 0.9082113655051,
+      "docbase": -2.130781668971399,
+      "ratio": 0.14610770800144088,
+      "trust": 0.034830271561112805,
+      "bias": -1.5925990025091217
+     },
+     "decision": {
+      "strength": 1.0,
+      "trust_gate": 0.01155462771591818
+     }
+    },
+    "calib_curve": [
+     0.8582,
+     0.8582,
+     0.8582,
+     0.8582
+    ]
+   },
+   {
+    "n": 26,
+    "smae_gain": 0.10305123630073712,
+    "srmse_gain": 0.11993525280458439,
+    "joint_gain": 0.11326655622347995,
+    "changed": 9,
+    "wins": 5,
+    "regressions": 4,
+    "team": {
+     "numerical": {
+      "calib": {
+       "win": 0,
+       "deseason": false,
+       "ref": "median",
+       "stat": "q90",
+       "mult": 1.017
+      },
+      "trust": {
+       "day|seas": 0.16333740950164538,
+       "day|flat": 1.6359533694436785,
+       "hour|seas": 0.5136234723137589,
+       "hour|flat": 0.5124967755487183,
+       "minute|flat": 0.5830775424120781,
+       "second|flat": 1.2091645622895615,
+       "minute|seas": 0.22278281010084966
+      }
+     },
+     "retrieval": {
+      "absmag": 3.6397985120267724,
+      "conf": 0.0281815632637228,
+      "wfrac": 1.7092579343909802,
+      "docbase": -3.4527222160213267,
+      "ratio": -0.43843125354423673,
+      "trust": 0.009733504139925547,
+      "bias": -1.2753320734337983
+     },
+     "decision": {
+      "strength": 0.8745298559105767,
+      "trust_gate": 0.0
+     }
+    },
+    "calib_curve": [
+     0.7081,
+     0.7081,
+     0.7081,
+     0.7081
+    ]
+   }
+  ],
+  "3": [
+   {
+    "n": 27,
+    "smae_gain": 0.06348236849495614,
+    "srmse_gain": 0.09572543898651603,
+    "joint_gain": 0.0829411292809866,
+    "changed": 9,
+    "wins": 7,
+    "regressions": 2,
+    "team": {
+     "numerical": {
+      "calib": {
+       "win": 0,
+       "deseason": false,
+       "ref": "median",
+       "stat": "q90",
+       "mult": 1.021
+      },
+      "trust": {
+       "day|seas": 0.13100671496100175,
+       "day|flat": 1.772954571990282,
+       "hour|seas": 0.86619207647141,
+       "hour|flat": 0.3110194454309697,
+       "minute|seas": 0.22278281010084966,
+       "minute|flat": 0.5830775424120781,
+       "second|flat": 4.550960941430664
+      }
+     },
+     "retrieval": {
+      "absmag": 2.114209016026853,
+      "conf": -0.7469547398879599,
+      "wfrac": 0.5240336157944796,
+      "docbase": 0.07170658721957897,
+      "ratio": -0.13530869148071548,
+      "trust": 1.418883627976753,
+      "bias": -2.6687649082342304
+     },
+     "decision": {
+      "strength": 0.7809252034722931,
+      "trust_gate": 0.0854346101649427
+     }
+    },
+    "calib_curve": [
+     0.4368,
+     0.4368,
+     0.4368,
+     0.4368
+    ]
+   },
+   {
+    "n": 27,
+    "smae_gain": -0.03795875589224264,
+    "srmse_gain": 0.016580423612290007,
+    "joint_gain": -0.00429976599824069,
+    "changed": 9,
+    "wins": 6,
+    "regressions": 3,
+    "team": {
+     "numerical": {
+      "calib": {
+       "win": 0,
+       "deseason": false,
+       "ref": "median",
+       "stat": "q90",
+       "mult": 1.029
+      },
+      "trust": {
+       "day|seas": 0.15854290978064112,
+       "day|flat": 1.8529140598116065,
+       "hour|seas": 0.86619207647141,
+       "hour|flat": 0.5863519888388826,
+       "minute|flat": 0.5830775424120781,
+       "second|flat": 4.550960941430664,
+       "minute|seas": 0.22278281010084966
+      }
+     },
+     "retrieval": {
+      "absmag": 3.6756352990615215,
+      "conf": -0.6828009625253528,
+      "wfrac": 1.3947338382001604,
+      "docbase": -3.149352889252298,
+      "ratio": 0.8977805819811652,
+      "trust": 0.3149057484467921,
+      "bias": -2.8753906512367036
+     },
+     "decision": {
+      "strength": 1.0,
+      "trust_gate": 0.014027645519773558
+     }
+    },
+    "calib_curve": [
+     0.8583,
+     0.8583,
+     0.8583,
+     0.8583
+    ]
+   },
+   {
+    "n": 26,
+    "smae_gain": 0.09916230633058186,
+    "srmse_gain": 0.11447542415527912,
+    "joint_gain": 0.10842718696833134,
+    "changed": 9,
+    "wins": 5,
+    "regressions": 4,
+    "team": {
+     "numerical": {
+      "calib": {
+       "win": 0,
+       "deseason": false,
+       "ref": "median",
+       "stat": "q90",
+       "mult": 1.0
+      },
+      "trust": {
+       "day|seas": 0.16333740950164538,
+       "day|flat": 1.6359533694436785,
+       "hour|seas": 0.5136234723137589,
+       "hour|flat": 0.5124967755487183,
+       "minute|flat": 0.5830775424120781,
+       "second|flat": 1.2091645622895615,
+       "minute|seas": 0.22278281010084966
+      }
+     },
+     "retrieval": {
+      "absmag": 3.187593864173791,
+      "conf": -1.0099518856961514,
+      "wfrac": 0.11821028992970448,
+      "docbase": -0.35207029325333966,
+      "ratio": -0.3621189783158927,
+      "trust": 0.14747284839125008,
+      "bias": -0.9865098177673756
+     },
+     "decision": {
+      "strength": 0.7397496263937003,
+      "trust_gate": 0.0
+     }
+    },
+    "calib_curve": [
+     0.7082,
+     0.7082,
+     0.7082,
+     0.7082
+    ]
+   }
+  ]
+ },
+ "final": {}
+}
