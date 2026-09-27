@@ -26,6 +26,9 @@ The best configuration found so far. It has two complementary parts:
 
 ## How the pieces were evolved (scripts that produce `artifacts/`)
 
+Per-generation results and changes are in [`EVOLUTION_LOG.md`](EVOLUTION_LOG.md).
+
+
 | Artifact | Produced by | What the evolution does |
 |---|---|---|
 | [`artifacts/tl2_evolved_extraction_instructions.json`](artifacts/tl2_evolved_extraction_instructions.json) | [`scripts/tl2_evolve.py`](scripts/tl2_evolve.py) (uses [`scripts/tl2.py`](scripts/tl2.py)) | Retrieval extraction instructions (see below) |
