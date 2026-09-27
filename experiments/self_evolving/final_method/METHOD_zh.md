@@ -100,4 +100,5 @@ portfolio 里除了 93 个统计方法，还有 5 个基础模型（Toto-2.0、C
 分支 `self-evolving-nrd`，文件夹 `experiments/self_evolving/final_method/`：
 - 各步骤的脚本与进化产物的对应关系见 `README.md`；
 - 逐代记录见 `EVOLUTION_LOG.md`；
+- 每个进化部分的搜索空间、变异、fitness 和选择规则见 `EVOLVE_SPACE_zh.md`；
 - 完整流水线评估：`scripts/eval_full_pipeline.py`；93 个统计方法的预测：`scripts/stat_full.py`。

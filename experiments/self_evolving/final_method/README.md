@@ -75,7 +75,7 @@ Findings:
 
 ## Scripts that produce the evolved artifacts
 
-Per-generation results are in [`EVOLUTION_LOG.md`](EVOLUTION_LOG.md).
+Per-generation results are in [`EVOLUTION_LOG.md`](EVOLUTION_LOG.md); the design of every evolve space (genome, mutations, fitness, selection, data use) is in [`EVOLVE_SPACE_zh.md`](EVOLVE_SPACE_zh.md).
 
 | Artifact | Produced by | What evolves |
 |---|---|---|
