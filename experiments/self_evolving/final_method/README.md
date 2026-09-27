@@ -24,16 +24,33 @@ The best configuration found so far. It has two complementary parts:
 - Dev (20 tasks, 2–3 repaired): joint −0.10%. That is neutral, and it fails the strict "neither metric worse" gate by sMAE −0.3%.
 - The gate margin is insensitive: any margin from 0 to 0.2 gives identical test results.
 
-## How the pieces were evolved
+## How the pieces were evolved (scripts that produce `artifacts/`)
 
-- **Extraction instructions** (`artifacts/tl2_evolved_extraction_instructions.json`): evolved for 4 generations on a 30-task **train** minibatch.
-  - Fitness = F1 against `annotations.gt_evidence`, which is used only on train.
-  - GPT-6-sol rewrites the instructions from concrete missed and false-positive evidence.
-  - F1: 0.054 → 0.464; full train recall 5% → 48%, precision 9% → 67%.
-- **nrd4 team** (`artifacts/nrd4_final_teams.json`, 3 seeds): 15 generations of joint team selection on stratified train folds.
-  - Fitness = mean fold gain with a regression penalty, minus 0.25 × fold std.
-  - Full-round rollback.
-  - Generation 0 = exact Toto.
+| Artifact | Produced by | What the evolution does |
+|---|---|---|
+| [`artifacts/tl2_evolved_extraction_instructions.json`](artifacts/tl2_evolved_extraction_instructions.json) | [`scripts/tl2_evolve.py`](scripts/tl2_evolve.py) (uses [`scripts/tl2.py`](scripts/tl2.py)) | Retrieval extraction instructions (see below) |
+| [`artifacts/nrd4_final_teams.json`](artifacts/nrd4_final_teams.json) | [`scripts/nrd4.py`](scripts/nrd4.py) `--gens 15 --teams 32 --open test` (uses [`nrd_coevolve.py`](scripts/nrd_coevolve.py), [`nrd3.py`](scripts/nrd3.py), [`nrd_dict.py`](scripts/nrd_dict.py)) | three-agent co-evolution (see below) |
+
+**Retrieval extraction instructions (`tl2_evolve.py`):**
+- 4 generations on a 30-task **train** minibatch, starting from `tl2.INSTR0`.
+- Fitness = F1 against `annotations.gt_evidence`, computed by `tl2.evidence_f1`; the annotations are used only on train.
+- Mutation: GPT-6-sol rewrites the instructions from concrete missed and false-positive evidence (`tl2.mutate`).
+- Selection: 2 children per generation, accepted only if F1 improves.
+- F1: 0.054 → 0.464; full train recall 5% → 48%, precision 9% → 67%.
+
+**nrd4 team (`nrd4.py`, 3 seeds):** 15 generations of joint team selection on stratified train folds.
+- Numerical calibrator hill-climb (`evolve_calib`).
+- Retrieval validator evolution strategy on per-correction credit (`evolve_scorer`).
+- Decision variants (`mutate_decision`).
+- Team fitness = mean fold gain with a regression penalty, minus 0.25 × fold std (`nrd_coevolve.fitness`).
+- Full-round rollback; generation 0 = exact Toto.
+
+Re-evolve (instead of using the saved artifacts):
+
+```bash
+python .scratch/self_evolving/tl2_evolve.py      # writes .scratch/self_evolving/tl2_best.json (= evolved instructions)
+python .scratch/self_evolving/nrd4.py --gens 15 --teams 32 --open test --out .scratch/self_evolving/nrd4_final.json
+```
 
 ## Run (from repo root)
 
@@ -50,5 +67,4 @@ python .scratch/self_evolving/eval_repair_plus_nrd4.py --repair .scratch/self_ev
     --teams experiments/self_evolving/final_method/artifacts/nrd4_final_teams.json
 ```
 
-- To re-evolve instead of using the saved artifacts, run `../scripts/tl2_evolve.py` (extraction) and `nrd4.py --gens 15 --teams 32 --open dev` (team).
 - GPT calls go through the `codex` CLI (models `gpt-6-luna`, `gpt-6-sol`).
