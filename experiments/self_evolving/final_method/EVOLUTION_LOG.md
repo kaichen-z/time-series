@@ -1,5 +1,27 @@
 # Evolution log: per-generation results and changes
 
+## 0. Numerical part 1: combination-program dictionary (num_part1.py, PEN=3)
+
+- Generation 0 is the 31 single methods; the best of them at generation 0 is Toto, with fitness 0 relative to Toto.
+- 12 parents and 24 children per generation, 30 generations.
+- Fitness = mean gain vs Toto + 3 × mean negative gain on Train. Diversity is kept by leading method.
+
+Best fitness per generation: 0.000 → 0.000 → 0.000 → 0.000 → 0.030 → 0.030 → 0.037 → 0.037 → 0.037 → 0.037 → 0.037 → 0.037 → 0.037 → 0.037 → 0.051 → 0.052 → 0.052 → 0.052 → 0.052 → 0.059 → 0.059 → 0.059 → 0.059 → 0.059 → 0.078 → 0.079 → 0.079 → 0.079 → 0.080 → 0.080 → 0.093
+
+| Rank | Fitness | Program |
+|---|---|---|
+| 1 | +0.0930 | `{"terms": [["toto_2_0", 1.8813979122767783], ["arma", 0.115]], "diff": ["forecast_residual_bootstrap", "linear_trend_regression", 0.032], "shrink": 0.16659781596381323, "clip": 0.5}` |
+| 2 | -0.1257 | `{"terms": [["simple_moving_average", 0.5766445191269263], ["toto_2_0", 0.4340179826836823], ["patchtst", 0.0809020522353243], ["stl_ets", 0.068]], "diff": null, "shrink": 0.0, "clip": null}` |
+| 3 | -0.2679 | `{"terms": [["samformer", 1.0], ["toto_2_0", 0.7074940034192371], ["kernel_ridge_lag_regression", 0.129], ["naive_drift", 0.248]], "diff": null, "shrink": 0.13691249850335682, "clip": null}` |
+| 4 | -0.3112 | `{"terms": [["stl_ets", 1.0], ["arima_auto", 0.16524510219199762], ["toto_2_0", 0.489]], "diff": ["samformer", "forecast_residual_bootstrap", -0.023], "shrink": 0.24816431759587454, "clip": 0.0}` |
+| 5 | -0.3992 | `{"terms": [["naive_drift", 0.893338035162156], ["pelt_segment_then_forecast", 0.5404939350515546], ["forecast_residual_bootstrap", 0.13296136013531118], ["stl_ets", 0.48280233397961847]], "diff": null, "shrink": 0.0, "clip": 0.1}` |
+| 6 | -0.6035 | `{"terms": [["ses", 0.4165464564585716], ["samformer", 0.30832798827653757]], "diff": ["ma", "toto_2_0", -0.062], "shrink": 0.0, "clip": 0.25}` |
+| 7 | -0.7292 | `{"terms": [["arima_auto", 1.0], ["toto_2_0", 0.4340179826836823], ["patchtst", 0.0809020522353243], ["stl_ets", 0.068]], "diff": null, "shrink": 0.20292149650001215, "clip": 0.25}` |
+| 8 | -0.8291 | `{"terms": [["chronos_bolt", 2.3400529540985313]], "diff": null, "shrink": 0.2526964408861085, "clip": null}` |
+
+Nested stratified CV (evolve on 2 train folds, score the 3rd), held-out sMAE: +22.9%, +21.1%, −5.5% (fold 2).
+
+
 ## 1. Retrieval extraction instructions (tl2_evolve.py)
 
 - Fitness: evidence F1 against `gt_evidence` on a 30-task train minibatch.
