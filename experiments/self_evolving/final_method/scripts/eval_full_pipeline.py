@@ -10,9 +10,9 @@ import num_part1 as P1
 from common.metrics import drcik_point_metrics
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--part1", required=True); ap.add_argument("--repair", required=True); ap.add_argument("--forecasts", required=True)
+ap.add_argument("--part1", required=True); ap.add_argument("--repair", required=True); ap.add_argument("--forecasts", required=True, help="Toto forecasts on repaired history (fill = phase_median, learned)")
 ap.add_argument("--validation", required=True); ap.add_argument("--teams", required=True)
-ap.add_argument("--margin", type=float, default=0.1); ap.add_argument("--parts", default="train,dev,public_test")
+ap.add_argument("--margin", type=float, default=0.3)   # learned on Train (select_fill_gate.py); ap.add_argument("--parts", default="train,dev,public_test")
 a = ap.parse_args()
 TH = json.load(open(".scratch/self_evolving/toto_hindcast.json"))
 D = [N4.R3.prep_task(d, TH) for d in json.load(open(".scratch/self_evolving/nrd_cache.json"))]

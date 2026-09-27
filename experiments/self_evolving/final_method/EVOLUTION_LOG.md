@@ -22,6 +22,29 @@ Best fitness per generation: 0.000 → 0.000 → 0.000 → 0.000 → 0.030 → 0
 Nested stratified CV (evolve on 2 train folds, score the 3rd), held-out sMAE: +22.9%, +21.1%, −5.5% (fold 2).
 
 
+## 0b. Numerical part 2 fill method + Decision repair margin (select_fill_gate.py)
+
+- Search: 4 fill methods × 6 margins, evaluated with the full pipeline on Train.
+- Fitness: mean gain + 3 × mean negative gain.
+
+Nested stratified CV:
+- fold 0 chose linear / 0.2 → held-out +0.217 (W/R 16/11);
+- fold 1 chose phase_median / 0.1 → held-out +0.162 (14/13);
+- fold 2 chose phase_median / 0.3 → held-out +0.309 (18/8).
+
+| Rank | Train fitness | Fill | Margin |
+|---|---|---|---|
+| 1 | +0.1785 | phase_median | 0.3 |
+| 2 | +0.1758 | phase_median | 0.2 |
+| 3 | +0.1746 | snaive | 0.2 |
+| 4 | +0.1741 | truncate | 0.2 |
+| 5 | +0.1741 | linear | 0.2 |
+| 6 | +0.1732 | snaive | 0.3 |
+| 7 | +0.1731 | truncate | 0.3 |
+| 8 | +0.1731 | linear | 0.3 |
+| 9 | +0.1655 | truncate | None |
+| 10 | +0.1655 | snaive | None |
+
 ## 1. Retrieval extraction instructions (tl2_evolve.py)
 
 - Fitness: evidence F1 against `gt_evidence` on a 30-task train minibatch.
