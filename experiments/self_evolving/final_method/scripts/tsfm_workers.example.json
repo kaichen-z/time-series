@@ -1,0 +1,1 @@
+{"schema_version": 1, "environments": {"uni2ts": {"interpreter": "<uni2ts-env>/bin/python"}, "granite_tsfm": {"interpreter": "<granite_tsfm-env>/bin/python"}}}
