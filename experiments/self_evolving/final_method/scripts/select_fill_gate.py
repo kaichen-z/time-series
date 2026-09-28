@@ -4,16 +4,16 @@
 chosen by Train outcomes of the full pipeline (part-1 base + repair + nrd4 team) with the same do-no-harm
 fitness as part 1 (mean gain + 3 x mean negative gain).  Honest estimate: choose on 2 stratified folds,
 score the 3rd; then choose on all Train and open Dev once."""
-import json, sys, copy, itertools, statistics
+import os, json, sys, copy, itertools, statistics
 sys.path.insert(0, '.scratch/self_evolving')
 import nrd4 as N4, num_part1 as P1, nrd_coevolve as C
 from common.metrics import drcik_point_metrics
 TH = json.load(open('.scratch/self_evolving/toto_hindcast.json'))
-D = [N4.R3.prep_task(d, TH) for d in json.load(open('.scratch/self_evolving/nrd_cache_full.json'))]
+D = [N4.R3.prep_task(d, TH) for d in json.load(open(os.environ.get('CACHE', '.scratch/self_evolving/nrd_cache_full.json')))]
 for d in D: d['_sig'] = {}; h = d['history']; d['_last'], d['_lo'], d['_hi'] = h[-1], min(h), max(h)
-prog = json.load(open('.scratch/self_evolving/numerical_part1.json'))['elites'][0]['program']
-FV = json.load(open('.scratch/self_evolving/fill_variants.json'))
-team = json.load(open('.scratch/self_evolving/nrd4_final_numerical_retrieval_decision.json'))['final']['1']['team']
+prog = json.load(open(os.environ.get('PART1', '.scratch/self_evolving/numerical_part1.json')))['elites'][0]['program']
+FV = json.load(open(os.environ.get('FV', '.scratch/self_evolving/fill_variants.json')))
+team = json.load(open(os.environ.get('TEAMS', 'experiments/self_evolving/final_method/artifacts/nrd4_final_teams.json')))['final']['1']['team']
 FILLS = ["phase_median", "linear", "snaive", "truncate"]; MARGINS = [0.0, 0.05, 0.1, 0.2, 0.3, None]
 def out(d, fill, m):
     dd = copy.copy(d); dd['fc'] = dict(d['fc']); v = FV.get(d['tid'], {}).get(fill)
@@ -38,4 +38,4 @@ for part in ('train', 'dev'):
         b = drcik_point_metrics(d['truth'], d['fc']['toto_2_0'], cap=5.0); o = drcik_point_metrics(d['truth'], out(d, *best), cap=5.0)
         sb += b['smae']; so += o['smae']; rb += b['srmse']; ro += o['srmse']; dj = (b['smae'] + b['srmse']) - (o['smae'] + o['srmse']); w += dj > 1e-9; r += dj < -1e-9
     n = len(S); print(f"{part}: sMAE {sb/n:.4f}->{so/n:.4f} ({(sb-so)/sb:+.2%}) sRMSE {rb/n:.4f}->{ro/n:.4f} ({(rb-ro)/rb:+.2%}) W/R {w}/{r}")
-json.dump({"chosen": best, "ranking": [(f, c) for f, c in scores]}, open('.scratch/self_evolving/fill_gate_choice.json', 'w'))
+json.dump({"chosen": best, "ranking": [(f, c) for f, c in scores]}, open(os.environ.get('OUT', '.scratch/self_evolving/fill_gate_choice.json'), 'w'))

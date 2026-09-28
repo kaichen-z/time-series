@@ -85,6 +85,31 @@ Findings:
 - TimesFM's dev advantage does not hold on Train (51/80 tasks worse than Toto) or on test (≈ Toto). Selecting on Train correctly does not choose it.
 - The full pipeline with the Toto-free part 1 (0.5, ≤ 2) gives dev 0.3415 / 0.5106, slightly worse than the main method (0.3380 / 0.5064), so **the main method is unchanged**.
 
+## 0d. Co-evolution with one end-to-end score and agents (2026-09-28)
+
+Extraction instructions re-evolved on all 80 Train tasks, warm-started from the 30-task winner, 4 children per generation:
+- evidence F1: 0.477 → 0.482 → 0.531 → 0.531 → 0.553 → 0.553;
+- the downstream pipeline with these instructions: Train chose "never repair"; dev 0.3477 / 0.5180, test 0.3571 / 0.5418 (3 seeds) → not adopted.
+
+Step 1, cooperative co-evolution (nested CV, held-out fold mean gain, start → end):
+
+| Held-out fold | Start | Accept on mean | Accept only if no fold worse |
+|---|---|---|---|
+| 0 | +0.247 | +0.215 | +0.226 |
+| 1 | +0.172 | +0.132 | +0.145 |
+| 2 | +0.338 | +0.201 | +0.295 |
+
+Step 2, agents with a hidden fold (visible fitness of the seed config 0.1889):
+
+| Run | Submissions | Accepted | Visible fitness of best | Accepted change |
+|---|---|---|---|---|
+| A: 3 agents, shared memory | 23 | 2 | 0.1915 | +3%, then +5% Moirai |
+| B1: independent | 10 | 0 | 0.1889 | — |
+| B2: independent | 8 | 0 | 0.1889 | — |
+| B3: independent | 14 | 1 | 0.1948 | +10% TimesFM-2.5 |
+
+B3's config was adopted after a 3-seed check (dev 0.3285 / 0.4885; test 0.3253 / 0.5018). Full logs, notes and attempts: `artifacts/coevolution/`.
+
 ## 1. Retrieval extraction instructions (tl2_evolve.py)
 
 - Fitness: evidence F1 against `gt_evidence` on a 30-task train minibatch.

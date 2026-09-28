@@ -1,0 +1,44 @@
+{
+ "numerical": {
+  "program": {
+   "terms": [
+    [
+     "toto_2_0",
+     1.1005169383119369
+    ],
+    [
+     "arima_auto",
+     0.059
+    ]
+   ],
+   "diff": null,
+   "shrink": 0.20153008320833654,
+   "clip": null
+  },
+  "calib": {
+   "win": 0,
+   "deseason": false,
+   "ref": "median",
+   "stat": "q90",
+   "mult": 1.022
+  }
+ },
+ "retrieval": {
+  "instr": ".scratch/self_evolving/tl2_best.json",
+  "validator": {
+   "absmag": 3.249137824717486,
+   "conf": -0.07374584944017493,
+   "wfrac": 0.627510351704295,
+   "docbase": -2.770991342541899,
+   "ratio": -0.00696497857320566,
+   "trust": 1.0170099105097359,
+   "bias": -2.7466164191805733
+  }
+ },
+ "decision": {
+  "fill": "phase_median",
+  "margin": 0.3,
+  "strength": 1.0,
+  "trust_gate": 0.0
+ }
+}

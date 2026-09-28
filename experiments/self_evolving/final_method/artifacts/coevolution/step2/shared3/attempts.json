@@ -1,0 +1,1247 @@
+[
+ {
+  "attempt": 0,
+  "agent": "seed",
+  "visible_fitness": 0.18894373829122757,
+  "hidden_check": null,
+  "accepted": true,
+  "note": "current main method",
+  "config": null
+ },
+ {
+  "attempt": 1,
+  "agent": "s2",
+  "visible_fitness": 0.17871284056611245,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Decision: reduce repair back-test margin from 0.3 to 0.1 to admit moderate verified improvements",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.1,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 2,
+  "agent": "s0",
+  "visible_fitness": 0.18263850212995486,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Use linear interpolation for documented past anomalies; back-tests suggest it better reconstructs drifting measurement faults",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "linear",
+    "margin": 0.3,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 3,
+  "agent": "s2",
+  "visible_fitness": 0.1878037396206872,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Decision: conservative 0.25 repair margin, admitting only high relative back-test improvements beyond current 0.3",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.25,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 4,
+  "agent": "s1",
+  "visible_fitness": 0.1961408525743265,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Reduce shrink from 0.20 to 0.10: visible nonrepair forecasts favor weaker anchoring; test generalization",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.1,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.3,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 5,
+  "agent": "s2",
+  "visible_fitness": 0.1883519441264144,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Decision: increase correction strength to 1.2 for underforecast short event spikes",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.3,
+    "strength": 1.2,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 6,
+  "agent": "s0",
+  "visible_fitness": 0.14017009805875677,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Favor confident localized future events and reject extreme or broad corrections",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": -0.1,
+     "conf": 8.0,
+     "wfrac": -2.5,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 0.0,
+     "bias": -3.5
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.3,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 7,
+  "agent": "s1",
+  "visible_fitness": 0.19444072238065124,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Moderate shrink reduction to 0.15, within train-established 10-20 percent range; tests whether stronger trend continuation generalizes",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.15,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.3,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 8,
+  "agent": "s2",
+  "visible_fitness": 0.18877665284328127,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Decision: modestly attenuate full correction strength after 1.2 worsened accepted downward adjustments",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.3,
+    "strength": 0.8,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 9,
+  "agent": "s0",
+  "visible_fitness": 0.18756641034145727,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Give document confidence a modest positive role while retaining the established correction gate",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": 0.5,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.3,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 10,
+  "agent": "s1",
+  "visible_fitness": 0.19361458987058788,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Add 5 percent Chronos Bolt diversification to Toto plus ARIMA while retaining shrink and retrieval settings",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       0.8991
+      ],
+      [
+       "arima_auto",
+       0.0509
+      ],
+      [
+       "chronos_bolt",
+       0.05
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.3,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 11,
+  "agent": "s2",
+  "visible_fitness": 0.18263850212995486,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Decision: linear repair fill; task 193 repaired-history back-test falls from 0.278 to 0.001 versus phase median",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "linear",
+    "margin": 0.3,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 12,
+  "agent": "s0",
+  "visible_fitness": 0.1863406437488182,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Increase penalty for boilerplate-heavy documents in future correction validation",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -3.5,
+     "ratio": -0.00696497857320566,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.3,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 13,
+  "agent": "s0",
+  "visible_fitness": 0.18774909381008925,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Remove positive reward for long correction windows to reduce broad unsupported adjustments",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.0,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.3,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 14,
+  "agent": "s2",
+  "visible_fitness": 0.18763233902072463,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Episode 2: modest uncertainty-normalized ratio guard on future document corrections; retain established extraction, repair, and base forecast",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.05,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.3,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 15,
+  "agent": "s1",
+  "visible_fitness": 0.18893255173341278,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Raise repair back-test margin to 0.40: protect against tiny apparent gains while retaining the two large verified repairs",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.4,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 16,
+  "agent": "s2",
+  "visible_fitness": 0.19069461703325852,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Episode 2: diversify Toto/ARIMA base with 3 percent Moirai while retaining repair and document decisions",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ],
+      [
+       "moirai_2_0",
+       0.03586
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.3,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 17,
+  "agent": "s1",
+  "visible_fitness": 0.18606295474204482,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Test slightly lower ARIMA share (4 percent vs 5.1): bound the method's influence while preserving Toto and shrink",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       0.96
+      ],
+      [
+       "arima_auto",
+       0.04
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.3,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 18,
+  "agent": "s0",
+  "visible_fitness": 0.18936883727751835,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Penalize correction magnitude relative to series variability; test whether extreme event multipliers remain useful without admitting implausible effects",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ],
+      [
+       "moirai_2_0",
+       0.03586
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.05,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.3,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 19,
+  "agent": "s2",
+  "visible_fitness": 0.19151314392775864,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Episode 2: test a 5 percent Moirai diversification dose after the 3 percent blend passed both checks",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ],
+      [
+       "moirai_2_0",
+       0.06103
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.3,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 20,
+  "agent": "s0",
+  "visible_fitness": 0.19017772830960944,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Combine accepted 3 percent Moirai diversification with variability-normalized correction guard; independently hidden-passing changes",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ],
+      [
+       "moirai_2_0",
+       0.06103
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.05,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.3,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 21,
+  "agent": "s2",
+  "visible_fitness": 0.1902991531608581,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Episode 3: reduce validator trust weight to limit corrections in poorly back-tested cells while retaining strong short-event evidence",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ],
+      [
+       "moirai_2_0",
+       0.06103
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 0.75,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.3,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 22,
+  "agent": "s0",
+  "visible_fitness": 0.19213023019602202,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Episode 3: add 2 percent kernel ridge lag regression as a small local-pattern complement to Toto, ARIMA, and Moirai; visible replay improves both folds and remains positive without the three largest-gain tasks",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.1005169383119369
+      ],
+      [
+       "arima_auto",
+       0.059
+      ],
+      [
+       "moirai_2_0",
+       0.06103
+      ],
+      [
+       "kernel_ridge_lag_regression",
+       0.024909121190039525
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.3,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ },
+ {
+  "attempt": 23,
+  "agent": "s0",
+  "visible_fitness": 0.19349608393695142,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Episode 4: test a 2 percent Chronos Bolt diversification dose; 5 percent previously failed hidden, while the smaller dose has a broader visible replay benefit without changing retrieval",
+  "config": {
+   "numerical": {
+    "program": {
+     "terms": [
+      [
+       "toto_2_0",
+       1.0785065995456982
+      ],
+      [
+       "arima_auto",
+       0.057819999999999996
+      ],
+      [
+       "moirai_2_0",
+       0.0598094
+      ],
+      [
+       "chronos_bolt",
+       0.024410938766238736
+      ]
+     ],
+     "diff": null,
+     "shrink": 0.20153008320833654,
+     "clip": null
+    },
+    "calib": {
+     "win": 0,
+     "deseason": false,
+     "ref": "median",
+     "stat": "q90",
+     "mult": 1.022
+    }
+   },
+   "retrieval": {
+    "instr": ".scratch/self_evolving/tl2_best.json",
+    "validator": {
+     "absmag": 3.249137824717486,
+     "conf": -0.07374584944017493,
+     "wfrac": 0.627510351704295,
+     "docbase": -2.770991342541899,
+     "ratio": -0.00696497857320566,
+     "trust": 1.0170099105097359,
+     "bias": -2.7466164191805733
+    }
+   },
+   "decision": {
+    "fill": "phase_median",
+    "margin": 0.3,
+    "strength": 1.0,
+    "trust_gate": 0.0
+   }
+  }
+ }
+]

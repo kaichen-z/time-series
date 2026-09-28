@@ -1,0 +1,26 @@
+{
+ "elites": [
+  {
+   "program": {
+    "terms": [
+     [
+      "toto_2_0",
+      0.9904652444807432
+     ],
+     [
+      "arima_auto",
+      0.0531
+     ],
+     [
+      "timesfm_2_5",
+      0.11595169383119369
+     ]
+    ],
+    "diff": null,
+    "shrink": 0.20153008320833654,
+    "clip": null
+   }
+  }
+ ],
+ "origin": "Numerical part-1 program of the main method after agent co-evolution (independent agent i3, attempt 5): the evolved program (artifacts/numerical_part1_dictionary.json, elite 1) with a 10% TimesFM-2.5 term added; normalised weights 0.854 Toto + 0.046 arima_auto + 0.100 timesfm_2_5, shrink 0.20."
+}

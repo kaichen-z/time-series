@@ -8,11 +8,12 @@ import dict2 as B, tl2
 FILLS = ["phase_median", "linear", "snaive", "truncate"]
 C = json.load(open(".scratch/self_evolving/nrd_cache.json")); T = {d["tid"]: d for d in C}
 split = json.load(open("splits/drcik_public_80_20_99_v3.json"))["partitions"]
-instr = json.load(open(".scratch/self_evolving/tl2_best.json"))["instr"]; ivs = {}
-for part in ("train", "dev", "public_test"):
-    r, _ = tl2.extract(instr, split[part]["task_ids"]); ivs.update(r)
+import os; instr = json.load(open(os.environ.get("INSTR", ".scratch/self_evolving/tl2_best.json")))["instr"]; ivs = {}
+for part in os.environ.get("PARTS", "train,dev,public_test").split(","):
+    r, _ = tl2.extract(instr, split[part]["task_ids"], workers=16); ivs.update(r)
 out = {}
 for tid, d in T.items():
+    if tid not in ivs: continue
     if not B.retrieval_mask(tid, ivs[tid], len(d["history"])).any(): continue
     res = {}
     for f in FILLS:
@@ -29,4 +30,4 @@ for tid, d in T.items():
             va = err(B.toto(y[:-H], H), z[-H:]); vb = err(B.toto(z[:-H], H), z[-H:])
         res[f] = dict(forecast=B.toto(z, H), val_raw=va, val_rep=vb, frac=float(np.mean([a != b for a, b in zip(z, y)])) if len(z) == len(y) else None)
     out[tid] = res
-json.dump(out, open(".scratch/self_evolving/fill_variants.json", "w")); print("tasks", len(out))
+json.dump(out, open(os.environ.get("OUT", ".scratch/self_evolving/fill_variants.json"), "w")); print("tasks", len(out))

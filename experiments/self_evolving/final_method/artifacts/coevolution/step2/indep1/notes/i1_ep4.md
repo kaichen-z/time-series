@@ -1,0 +1,7 @@
+# i1, episode 4: reassessment and result
+
+I started from the unchanged seed and reviewed all prior attempts. Broadening document correction acceptance, changing repair fill or margin, and small numerical blends or shrink tuning had never produced an accepted improvement. Small visible gains repeatedly failed the hidden check. I therefore tested one targeted validator mechanism instead of searching nearby numerical weights.
+
+The seed has a positive `absmag` weight and a very small negative `ratio` weight. This can favor extremely large claimed multipliers, so I changed `ratio` from -0.006965 to -0.05 to penalize corrections large relative to normal series variation. Submission 10 passed the hidden check, but visible fitness fell from 0.18894 to 0.18763 (folds 0.23679, 0.15814). It removed a useful correction on task_158, reducing its gain from 0.1598 to 0.0654, while task_183's extreme multiplier case was unchanged. The config was rejected.
+
+What NEVER worked as an accepted improvement across four episodes: lower repair margin, linear fill, broad validator intercept changes, penalizing long correction windows, removing trust dependence, stronger future corrections, a larger ratio penalty, small STL-ETS or combined TimesFM additions, and lower shrink. The latest result shows that even a targeted ratio penalty can cross a decision threshold on a legitimate moderate correction before it affects the intended extreme case. I stopped after one submission rather than tuning against the same visible tasks. Shared best remains the seed.

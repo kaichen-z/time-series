@@ -16,9 +16,10 @@ ap.add_argument("--fill", default="phase_median")   # learned on Train (select_f
 ap.add_argument("--teams", required=True)
 ap.add_argument("--margin", type=float, default=0.3)   # learned on Train (select_fill_gate.py)
 ap.add_argument("--parts", default="train,dev,public_test")
+ap.add_argument("--cache", default=".scratch/self_evolving/nrd_cache_full2.json", help="task cache with all method forecasts (combined_full.py)")
 a = ap.parse_args()
 TH = json.load(open(".scratch/self_evolving/toto_hindcast.json"))
-D = [N4.R3.prep_task(d, TH) for d in json.load(open(".scratch/self_evolving/nrd_cache_full.json"))]
+D = [N4.R3.prep_task(d, TH) for d in json.load(open(a.cache))]
 for d in D: d["_sig"] = {}; h = d["history"]; d["_last"], d["_lo"], d["_hi"] = h[-1], min(h), max(h)
 prog = json.load(open(a.part1))["elites"][0]["program"]
 rep = json.load(open(a.repair)); R = json.load(open(a.teams))

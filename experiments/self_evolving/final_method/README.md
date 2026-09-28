@@ -10,6 +10,7 @@
 - Evolved with typed mutations on Train outcomes. Fitness = mean gain + 3 × mean negative gain, a do-no-harm penalty.
 - A diverse set of elites is kept as the dictionary; the best elite is the base forecaster.
 - Evolution picks Toto by itself as the main component: **0.95·Toto + 0.05·arima_auto**, **shrunk 20% toward the last observation** (no difference term, no clipping).
+- **Refined by agent co-evolution** (see *Co-evolution* below): a Codex research agent, checked by a hidden Train fold, added a 10% TimesFM-2.5 term. The main method's base forecast is therefore **0.854·Toto + 0.046·arima_auto + 0.100·timesfm_2_5, shrunk 20%** ([`artifacts/numerical_part1_main.json`](artifacts/numerical_part1_main.json)).
 
 **Numerical, part 2 + Retrieval + Decision: the effective evolution on top of that base**
 1. **History repair.** Retrieval (GPT with evolved extraction instructions) finds past anomalies that will not recur. Numerical imputes them and Toto re-forecasts. Decision accepts a repair only if a history-only back-test error drops by at least **30%**; both this margin and the fill method (**same-phase median**, chosen among phase median / linear / seasonal naive / truncate) are **learned on Train** by `select_fill_gate.py`. When accepted, the Toto term of the base program uses the repaired-history forecast.
@@ -27,10 +28,12 @@
 | Toto-anchored variant (no Numerical part 1) | −0.3% | +0.03% | 0.3291 (+13.7%) | 0.5208 (+11.8%) | 32–34 / 2–3 |
 | Previous version (hand-set 10% margin) | 0.3567 (+9.0%) | 0.5231 (+10.9%) | 0.3405 (+10.7%) | 0.5222 (+11.5%) | 64–65 / 34–35 |
 | Previous version (31-method dictionary) | 0.3451 (+12.0%) | 0.5110 (+13.0%) | 0.3326 (+12.8%) | 0.5102 (+13.6%) | 64–65 / 34–35 |
-| **This method (3-seed mean)** | **0.3380 (+13.8%)** | **0.5064 (+13.8%)** | **0.3281 (+14.0%)** | **0.5097 (+13.7%)** | **64–65 / 34–35** |
+| Previous main (evolved part 1 without the TimesFM term) | 0.3380 (+13.8%) | 0.5064 (+13.8%) | 0.3281 (+14.0%) | 0.5097 (+13.7%) | 64–65 / 34–35 |
+| **This method (3-seed mean)** | **0.3285 (+16.2%)** | **0.4885 (+16.8%)** | **0.3253 (+14.7%)** | **0.5018 (+15.0%)** | **63–64 / 35–36** |
 
-- Per seed, test sMAE: 0.3251 / 0.3309 / 0.3283; sRMSE: 0.5061 / 0.5139 / 0.5093.
-- On dev, the average error drops a lot but only 8 of 20 tasks improve (12 get worse, mostly slightly); the gain comes from a few badly forecast tasks.
+- Per seed, test sMAE: 0.3223 / 0.3281 / 0.3254 (previous main 0.3251 / 0.3309 / 0.3283); sRMSE: 0.4982 / 0.5059 / 0.5014 (previous 0.5061 / 0.5139 / 0.5093). Every seed improves on both metrics.
+- On dev, the average error drops a lot but only 9 of 20 tasks improve (11 get worse, mostly slightly); the gain comes from a few badly forecast tasks.
+- Dev alone favours TimesFM (TimesFM by itself: dev 0.3106 / 0.4502, but test 0.3829 / 0.6094, about Toto), so the dev gain of the TimesFM term overstates it; the test gain is smaller but consistent across seeds.
 - **The dev gate is passed on both metrics** (dev is used once, after all evolution on Train).
 
 Caveats:
@@ -40,7 +43,25 @@ Caveats:
 - Still hand-designed: the extraction schema (5 interval kinds) and the fixed CorDP cards that nrd4 corrects.
 - The shrink/clip transform applies to every task. It helps the few badly-forecast tasks a lot and slightly worsens many others, so about 35 test tasks get (mostly slightly) worse. The Toto-anchored variant is the "almost no harm" alternative.
 
-## Dictionary expansion: all 5 foundation models and 5 combined policies (ablation, main method unchanged)
+## Co-evolution: one end-to-end score, then agents (2026-09-28)
+
+Motivation: the parts above are evolved with their own scores (extraction with evidence F1, part 1 with base-forecast error), so an improvement of one part need not improve the final forecast. Evolving the extraction instructions on all 80 Train tasks raised evidence F1 from 0.477 to 0.553, yet the pipeline got worse (dev 0.3477 / 0.5180; Train then chose "never repair").
+
+**Step 1: cooperative co-evolution under one end-to-end score** ([`scripts/coevolution/e2e.py`](scripts/coevolution/e2e.py), [`coevo.py`](scripts/coevolution/coevo.py)).
+- Every role (Numerical: program, calibrator; Retrieval: validator, extraction instructions; Decision: fill, margin, strength, trust gate) mutates in turn; a change is kept only if the whole pipeline's error on the Train folds improves.
+- Nested CV (evolve on 2 folds, score the 3rd): Train fitness rises, but the held-out fold gets **worse in all three folds** (+0.247→+0.215, +0.172→+0.132, +0.338→+0.201; with a stricter "no fold worse" rule +0.226 / +0.145 / +0.295). Random search around the main method overfits 80 tasks. Logs: [`artifacts/coevolution/step1_logs/`](artifacts/coevolution/step1_logs/).
+
+**Step 2: agent proposers with a hidden fold (CORAL / Meta-Harness style)** ([`scripts/coevolution/`](scripts/coevolution/): `evald.py`, `submit.py`, `run_agent.py`, `TASK.md`).
+- Codex agents (gpt-6-sol) edit any part of the config. They never run the evaluator: they queue a config, and a separate daemon returns scores and per-task gains on two **visible** Train folds plus only pass/fail from a **hidden** third fold. A config becomes the shared best only if the visible score improves and the hidden fold does not get worse.
+- Shared memory: all attempts, notes, reusable scripts, and full traces of the visible tasks. Heartbeats: take notes every episode, consolidate every second episode, change direction after an episode without progress.
+- Setup: group A = 3 agents with shared memory; group B = 3 independent agents; budget 20 submissions each (agents used 5–14).
+- 17 submissions improved the visible folds but were stopped by the hidden fold. Accepted: A, 3% then 5% Moirai in the base forecast; B, **10% TimesFM-2.5**. Changes to extraction, validator and Decision never passed.
+- Dev (once, at the end) / test seed 1: main 0.3380 / 0.5064 and 0.3251 / 0.5061; A 0.3354 / 0.5014 and 0.3244 / 0.5035; **B 0.3285 / 0.4885 and 0.3223 / 0.4982**. B was confirmed over 3 seeds (table above) and adopted.
+- Shared memory did **not** beat the best independent agent here (small sample: 3 agents per group).
+- Audit: no agent read dev, test or hidden-fold label files. One group-A agent read the evaluator's state file (hidden-fold aggregate scores, no per-task labels) in episode 3, after its accepted changes in episode 2.
+- Notes, scripts, attempts and best configs of every run: [`artifacts/coevolution/step2/`](artifacts/coevolution/step2/).
+
+## Dictionary expansion: all 5 foundation models and 5 combined policies (ablation)
 
 The portfolio also contains 5 foundation models (Toto-2.0, Chronos-Bolt, TimesFM-2.5, Moirai-2.0, Granite-TTM-r2) and 5 combined policies. Each combined policy pairs one foundation model with one statistical method, either as a weighted mean or as a router switched by a series signal.
 - [`scripts/timesfm_full.py`](scripts/timesfm_full.py) runs TimesFM-2.5 with the repo adapter's settings (separate venv, `timesfm` ≥ 2.5).
@@ -82,6 +103,7 @@ Per-generation results are in [`EVOLUTION_LOG.md`](EVOLUTION_LOG.md); the design
 | [`artifacts/numerical_part1_dictionary.json`](artifacts/numerical_part1_dictionary.json) | [`scripts/stat_full.py`](scripts/stat_full.py) → [`scripts/num_part1.py`](scripts/num_part1.py) (PEN=3) | Numerical part 1: combination programs over 37 methods |
 | [`artifacts/tl2_evolved_extraction_instructions.json`](artifacts/tl2_evolved_extraction_instructions.json) | [`scripts/tl2_evolve.py`](scripts/tl2_evolve.py) (uses [`tl2.py`](scripts/tl2.py)) | Retrieval extraction instructions (GPT mutator, gt_evidence F1 on Train only) |
 | [`artifacts/fill_and_gate_choice.json`](artifacts/fill_and_gate_choice.json) | [`scripts/fill_variants.py`](scripts/fill_variants.py) → [`scripts/select_fill_gate.py`](scripts/select_fill_gate.py) | Numerical part-2 fill method + Decision repair margin (Train) |
+| [`artifacts/numerical_part1_main.json`](artifacts/numerical_part1_main.json) | agent co-evolution, [`scripts/coevolution/`](scripts/coevolution/) | final part-1 program (evolved elite + 10% TimesFM term found by an agent) |
 | [`artifacts/nrd4_final_teams.json`](artifacts/nrd4_final_teams.json) | [`scripts/nrd4.py`](scripts/nrd4.py) `--gens 15 --teams 32` (uses [`nrd_coevolve.py`](scripts/nrd_coevolve.py), [`nrd3.py`](scripts/nrd3.py), [`nrd_dict.py`](scripts/nrd_dict.py)) | three-agent co-evolution: calibrator, validator, Decision |
 
 ## Run (from repo root)
@@ -90,12 +112,14 @@ Per-generation results are in [`EVOLUTION_LOG.md`](EVOLUTION_LOG.md); the design
 export PYTHONPATH=$PWD; mkdir -p .scratch/self_evolving; cp experiments/self_evolving/final_method/scripts/*.py .scratch/self_evolving/
 python .scratch/self_evolving/nrd_precompute.py                          # task cache + 31 cached method forecasts
 python .scratch/self_evolving/stat_full.py                               # + 93-method statistical portfolio -> nrd_cache_full.json
+<timesfm-env>/python .scratch/self_evolving/timesfm_full.py; python .scratch/self_evolving/tsfm_full.py moirai_2_0,granite_ttm_r2
+python .scratch/self_evolving/combined_full.py                           # + foundation models and combined policies -> nrd_cache_full2.json
 <toto2-env>/python .scratch/self_evolving/toto_hindcast.py               # history-only Toto back-tests
 A=experiments/self_evolving/final_method/artifacts; cp $A/tl2_evolved_extraction_instructions.json .scratch/self_evolving/tl2_best.json
 python .scratch/self_evolving/extract_and_repair.py $A/tl2_evolved_extraction_instructions.json .scratch/self_evolving/repair.json
 <toto2-env>/python .scratch/self_evolving/fill_variants.py               # Toto on repaired history + history-only validation, per fill method
 # (to re-learn fill method + margin: select_fill_gate.py)
-python .scratch/self_evolving/eval_full_pipeline.py --part1 $A/numerical_part1_dictionary.json \
+python .scratch/self_evolving/eval_full_pipeline.py --part1 $A/numerical_part1_main.json \
     --repair .scratch/self_evolving/repair.json --fill-variants .scratch/self_evolving/fill_variants.json \
     --teams $A/nrd4_final_teams.json
 ```
