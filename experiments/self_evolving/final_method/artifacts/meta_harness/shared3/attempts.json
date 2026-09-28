@@ -1,0 +1,262 @@
+[
+ {
+  "attempt": 0,
+  "agent": "seed",
+  "visible_fitness": 0.19476756918907134,
+  "hidden_check": null,
+  "accepted": true,
+  "note": null,
+  "harness": "harness/0000_seed.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 1,
+  "agent": "s1",
+  "visible_fitness": 0.23231399073606104,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Allow localized positive corrections that dwarf the series normal deviation to exceed the seed 50 percent cap; keep other decisions unchanged.",
+  "harness": "harness/0001_s1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 2,
+  "agent": "s1",
+  "visible_fitness": 0.23880685671188392,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Shrink extreme positive multipliers toward one, allow up to 4x on localized seasonal events, and retain the seed cap for flat series.",
+  "harness": "harness/0002_s1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 3,
+  "agent": "s2",
+  "visible_fitness": 0.19720496405472632,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Accept focused short moderate upward events; average overlapping corrections; permit 65 percent reduction for short explicit zero events",
+  "harness": "harness/0003_s2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 4,
+  "agent": "s1",
+  "visible_fitness": 0.24557216196751835,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Apply sustained, moderate positive corrections when their implied shift is below one normal deviation; retain the seasonal spike rule.",
+  "harness": "harness/0004_s1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 5,
+  "agent": "s1",
+  "visible_fitness": 0.24753225633098708,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Partially apply modest first-day decreases in hourly seasonal series when documents have little boilerplate; preserve the accepted positive-event rules.",
+  "harness": "harness/0005_s1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 6,
+  "agent": "s0",
+  "visible_fitness": 0.21490981949400914,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Increase correction cap for short power-grid demand surges identified in documents; accept moderate surges that seed validator rejects",
+  "harness": "harness/0006_s0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 7,
+  "agent": "s2",
+  "visible_fitness": 0.24753225633098708,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "On shared best, use 68 percent rather than half of a short explicit zero correction; preserve broad zero event treatment",
+  "harness": "harness/0007_s2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 8,
+  "agent": "s0",
+  "visible_fitness": 0.20679607771431324,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Conservative 75% cap for brief grid-demand surges; let moderately sized grid surge through validator",
+  "harness": "harness/0008_s0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 9,
+  "agent": "s1",
+  "visible_fitness": 0.2456327678018316,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Calibrate extreme localized multiplier to at most three normal deviations on low-baseline seasonal series",
+  "harness": "harness/0009_s1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 10,
+  "agent": "s2",
+  "visible_fitness": 0.24753225633098708,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Combine current shared best with 68 percent weight for short explicit zero events; two visible ATM outage variants improve",
+  "harness": "harness/0010_s2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 11,
+  "agent": "s0",
+  "visible_fitness": 0.19720496405472632,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Accept short grid-demand surges with explicit document evidence, preserving original correction cap",
+  "harness": "harness/0011_s0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 12,
+  "agent": "s1",
+  "visible_fitness": 0.24755080968031978,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Allow 85 percent reduction for short high-confidence zero events; 50 percent cap underrepresents complete shutdowns",
+  "harness": "harness/0012_s1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 13,
+  "agent": "s2",
+  "visible_fitness": 0.24767276772746832,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Permit 68 percent reduction for short explicit zero events; previous attempt was nullified by later 50 percent cap",
+  "harness": "harness/0013_s2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 14,
+  "agent": "s0",
+  "visible_fitness": 0.20382505085294217,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Raise bound only for validated short grid surges when historical typical scale matches forecast; leave seed acceptance unchanged",
+  "harness": "harness/0014_s0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 15,
+  "agent": "s1",
+  "visible_fitness": 0.24905301575691474,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Use half-strength modest positive hourly corrections when task backtest error is high and document confidence is adequate",
+  "harness": "harness/0015_s1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 16,
+  "agent": "s0",
+  "visible_fitness": 0.19775005221192016,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Conservative bound increase for brief documented fivefold grid demand spikes with stable historical baseline",
+  "harness": "harness/0016_s0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 17,
+  "agent": "s2",
+  "visible_fitness": 0.24996073520803536,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Suppress an extracted >=4x spike on a long horizon when the base window is below one normal deviation; such a relative multiplier is unstable at a near-zero baseline.",
+  "harness": "harness/0017_s2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 18,
+  "agent": "s0",
+  "visible_fitness": 0.25910277156911066,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Floor negative predictions when all observed history is nonnegative, preserving document corrections and preventing impossible negative counts or levels",
+  "harness": "harness/0018_s0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 19,
+  "agent": "s2",
+  "visible_fitness": 0.26012108851832655,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Combine nonnegative floor with two base-preserving guards: suppress a 4x+ spike on a sub-sigma window over long horizons, and reject downward changes when the entire base forecast is already under 2% of recent active history.",
+  "harness": "harness/0019_s2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 20,
+  "agent": "s0",
+  "visible_fitness": 0.26017167720132756,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Suppress modest positive correction when source documents explicitly say sensor yields zero readings; preserve current best elsewhere",
+  "harness": "harness/0020_s0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 21,
+  "agent": "s2",
+  "visible_fitness": 0.2601499214392298,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Avoid amplifying document corrections in hourly seasonal slots that were exactly zero in every observed daily cycle; preserve the base there.",
+  "harness": "harness/0021_s2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 22,
+  "agent": "s0",
+  "visible_fitness": 0.26106765548929606,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Use explicit irradiance and sky clearing text to fully apply localized modest rise, while rejecting positive shifts when logs explicitly say zero readings",
+  "harness": "harness/0022_s0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 23,
+  "agent": "s2",
+  "visible_fitness": 0.2903556039287186,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Extrapolate an exceptionally smooth, positive convex decline from recent history, preventing the base forecast from flattening or crossing zero; retain all document correction rules otherwise.",
+  "harness": "harness/0023_s2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 24,
+  "agent": "s0",
+  "visible_fitness": 0.3020929808745152,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Honor explicit one-hour event duration when an hourly positive correction spans two bins; avoid scaling the extra hour",
+  "harness": "harness/0024_s0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 25,
+  "agent": "s0",
+  "visible_fitness": 0.30547213021473313,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Honor explicit four-day outage duration when a zero daily correction spans five bins",
+  "harness": "harness/0025_s0.py",
+  "n_runtime_errors": 0
+ }
+]

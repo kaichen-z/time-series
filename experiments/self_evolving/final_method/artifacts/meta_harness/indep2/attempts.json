@@ -1,0 +1,132 @@
+[
+ {
+  "attempt": 0,
+  "agent": "seed",
+  "visible_fitness": 0.19476756918907134,
+  "hidden_check": null,
+  "accepted": true,
+  "note": null,
+  "harness": "harness/0000_seed.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 1,
+  "agent": "i2",
+  "visible_fitness": 0.22444606882429144,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Raise upward correction cap to 3x for accepted corrections where base level is large relative to sigma; strong local events exceed seed 50 percent cap.",
+  "harness": "harness/0001_i2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 2,
+  "agent": "i2",
+  "visible_fitness": 0.23133957661923418,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Allow up to 4x base on accepted 5x or stronger high-level localized events; retain 3x cap for other high-level increases.",
+  "harness": "harness/0002_i2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 3,
+  "agent": "i2",
+  "visible_fitness": 0.23559022063562912,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Calibrate accepted 3x events to a 2.5x cap on high-level series; full 3x overshoots the moderate events in the visible traces.",
+  "harness": "harness/0003_i2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 4,
+  "agent": "i2",
+  "visible_fitness": 0.2313443538949193,
+  "hidden_check": "fail",
+  "accepted": false,
+  "note": "Use extracted 4x-5x event magnitude on high-level series instead of stopping at 3x-4x; preserve seed validator and low-level guard.",
+  "harness": "harness/0004_i2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 5,
+  "agent": "i2",
+  "visible_fitness": 0.23101355846414487,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Apply short zero-multiplier shutdowns fully; visible short shutdown windows reach near-zero truth while full-horizon zero remains capped.",
+  "harness": "harness/0005_i2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 6,
+  "agent": "i2",
+  "visible_fitness": 0.23137007545499763,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Ignore downward percentage corrections where the base value is below the series calibration scale; these changes have negligible raw effect and distort near-zero forecasts.",
+  "harness": "harness/0006_i2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 7,
+  "agent": "i2",
+  "visible_fitness": 0.2332585539944552,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "For short zero-multiplier events, use full shutdown inside the window and taper the final boundary step to the existing half-strength forecast.",
+  "harness": "harness/0007_i2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 8,
+  "agent": "i2",
+  "visible_fitness": 0.25069400942752995,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "For a zero target spanning the horizon of a steadily declining positive series, taper the base forecast smoothly toward zero; retain abrupt shutdown handling for short windows.",
+  "harness": "harness/0008_i2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 9,
+  "agent": "i2",
+  "visible_fitness": 0.25409155687207785,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Accept short documented increases of 30\u2013100 percent on stable high-level series even when the fixed validator rejects them; their small magnitude is a weak acceptance signal.",
+  "harness": "harness/0009_i2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 10,
+  "agent": "i2",
+  "visible_fitness": 0.25468850036209073,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Suppress per-step nonzero corrections whose full implied change is under five sigma_main_calib; multiplier changes within the local calibration scale are unreliable.",
+  "harness": "harness/0010_i2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 11,
+  "agent": "i2",
+  "visible_fitness": 0.2626246504613259,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Bound extreme event multipliers in calibration-scale absolute units when the local baseline is near zero and avoid already elevated steps.",
+  "harness": "harness/0011_i2.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 12,
+  "agent": "i2",
+  "visible_fitness": 0.2638455871044687,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Allow half-strength modest local uplifts with a large absolute implied effect when cell backtests show Toto is unreliable.",
+  "harness": "harness/0012_i2.py",
+  "n_runtime_errors": 0
+ }
+]

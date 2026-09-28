@@ -1,0 +1,7 @@
+# i3 episode 4 observations
+
+- Started from accepted fitness 0.3216, read all shared notes, the seed and accepted methods, and only the approved Train views and visible traces.
+- Five Train tasks have overlapping correction windows, four visible. The seed validator rejects nearly all their constituent corrections. Task_121's accepted downward correction is mildly harmful, but its base forecast is already near zero against a several-hundred-unit target; changing the overlap rule would barely help. No broad conflict rule had support.
+- A separate failure mode appeared in visible tasks 179 and 183: the base forecast repeats an outage-like near-zero dip, while a positive document correction identifies activity in that interval. Multiplying near-zero values leaves the forecast near zero. In both tasks, the base on either side of the dip is positive and close to the true level inside it.
+- Submitted one narrow rule: for a single positive 4–8-step hourly correction in a 24-step horizon, if the median base inside is under one-fifth of the surrounding median, bridge the interior from the base values on either side. Keep the last corrected step at base because it has already returned to baseline in the visible examples. This changed only tasks 179 and 183 among 80 Train inputs.
+- Submission 7 improved visible fitness from 0.3216 to 0.3317, with hidden check pass and zero runtime errors. It became `shared/best_harness.py`. No other submission was made this episode; the remaining ideas relied on one visible example or had no supported mechanism.

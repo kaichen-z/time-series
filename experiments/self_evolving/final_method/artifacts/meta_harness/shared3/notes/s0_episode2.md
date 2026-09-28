@@ -1,0 +1,7 @@
+# s0 episode 2: physical zero floor
+
+Read all shared notes, the current best harness, visible traces, and 80 unlabeled Train views. Reassessed episode 1's document keyword rules: all five attempts targeting grid surges failed the hidden check, even when narrowed to one visible task. **Do not repeat grid keyword acceptance or cap rules** without a new causal signal; the visible duplicate event families are not evidence of generalization.
+
+Looked for a different failure mode in the base forecast. Five of 80 Train views had negative forecast steps despite entirely nonnegative observed history. Three are visible: task_112 (one negative step), task_121 (ten), and task_61 (thirteen). A zero floor follows the physical support of counts and nonnegative level series and does not alter correction selection. On visible traces, local sMAE+sRMSE reductions were about 0.00002, 0.00131, and 0.43294 respectively. The improvement is concentrated in task_61, a second|flat series with all 206 historical values positive. Two unlabeled Train views also change.
+
+Submitted `ws_s0/my_harness.py` once. It copies the prior shared best and floors its finite output at zero only if every observed history value is nonnegative. The submission was accepted; hidden check passed, visible fitness rose from 0.2491 to 0.2591, and all 80 views returned H finite floats. Four episode-2 submissions remain unused. The floor's visible support is sparse, so there is no basis to loosen it to histories containing negative values or to add magnitude thresholds.

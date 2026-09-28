@@ -1,0 +1,182 @@
+[
+ {
+  "attempt": 0,
+  "agent": "seed",
+  "visible_fitness": 0.19476756918907134,
+  "hidden_check": null,
+  "accepted": true,
+  "note": null,
+  "harness": "harness/0000_seed.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 1,
+  "agent": "i1",
+  "visible_fitness": 0.22048758550394026,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Widen upward cap for short strong extracted events; reject holiday notices for this rule",
+  "harness": "harness/0001_i1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 2,
+  "agent": "i1",
+  "visible_fitness": 0.22502721356437644,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Limit wider spike cap to plausible extracted multipliers <=10; huge hardware correction hurt",
+  "harness": "harness/0002_i1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 3,
+  "agent": "i1",
+  "visible_fitness": 0.2380666145256648,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Allow up to +250% for multi-step extracted spikes of >=4x; shorter spikes retain +150%",
+  "harness": "harness/0003_i1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 4,
+  "agent": "i1",
+  "visible_fitness": 0.2415004867510424,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Test +300% cap for multi-step >=4x event corrections; extracted spikes can be much larger than base",
+  "harness": "harness/0004_i1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 5,
+  "agent": "i1",
+  "visible_fitness": 0.24275013782148808,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Test +350% ceiling for multi-step >=4x event corrections; below extracted multiplier and supported by visible spikes",
+  "harness": "harness/0005_i1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 6,
+  "agent": "i1",
+  "visible_fitness": 0.24702352972288605,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Use official holiday notices to apply modest first-day reductions and reject upward holiday corrections; limit reduction to 20 percent",
+  "harness": "harness/0006_i1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 7,
+  "agent": "i1",
+  "visible_fitness": 0.24702352972288605,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Allow complete shutdown for short zero-multiplier corrections; visible ATM outage windows have near-zero truth",
+  "harness": "harness/0007_i1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 8,
+  "agent": "i1",
+  "visible_fitness": 0.24702352972288605,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Allow downward correction to zero during brief extracted shutdowns; separate negative and positive clipping bounds",
+  "harness": "harness/0008_i1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 9,
+  "agent": "i1",
+  "visible_fitness": 0.24669751156779668,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Apply full zero multiplier for brief shutdowns; seed validator had halved the correction before clipping",
+  "harness": "harness/0009_i1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 10,
+  "agent": "i1",
+  "visible_fitness": 0.2470463087783371,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Model decaying post-holiday effects: at most 5 percent on day two and 2 percent on day three for full-day downward notices",
+  "harness": "harness/0010_i1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 11,
+  "agent": "i1",
+  "visible_fitness": 0.2581746268754029,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Fill historically zero maintenance hours from adjacent forecast level when documents indicate a changed shutdown schedule",
+  "harness": "harness/0011_i1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 12,
+  "agent": "i1",
+  "visible_fitness": 0.2728124519929201,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Use tempered one-day persistence when a solar forecast collapses near zero despite recent daylight and clearing-sky documents",
+  "harness": "harness/0012_i1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 13,
+  "agent": "i1",
+  "visible_fitness": 0.27814782977368635,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Mildly blend yesterday's irradiance when document context says sky or sun and base greatly underestimates recent daylight",
+  "harness": "harness/0013_i1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 14,
+  "agent": "i1",
+  "visible_fitness": 0.282378988147137,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Allow capped day-two post-holiday upward correction while retaining rejection of same-day holiday increases",
+  "harness": "harness/0014_i1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 15,
+  "agent": "i1",
+  "visible_fitness": 0.2826077195862559,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Temper partial-day holiday traffic reductions to 10% because closures affect only part of a daily cycle",
+  "harness": "harness/0015_i1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 16,
+  "agent": "i1",
+  "visible_fitness": 0.28638384869017497,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Honor explicit four-day shutdown duration when an extracted five-day zero window includes reopening day",
+  "harness": "harness/0016_i1.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 17,
+  "agent": "i1",
+  "visible_fitness": 0.3335595187530471,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Use stated event duration to exclude an extra trailing hour from short upward corrections",
+  "harness": "harness/0017_i1.py",
+  "n_runtime_errors": 0
+ }
+]

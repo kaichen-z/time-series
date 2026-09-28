@@ -110,6 +110,22 @@ Step 2, agents with a hidden fold (visible fitness of the seed config 0.1889):
 
 B3's config was adopted after a 3-seed check (dev 0.3285 / 0.4885; test 0.3253 / 0.5018). Full logs, notes and attempts: `artifacts/coevolution/`.
 
+## 0e. Correction-function code evolution (Meta-Harness + CORAL, 2026-09-28)
+
+Correction source (nested CV of the three-role team, held-out joint gain per fold, 3 seeds): old cards +8.8% / −0.4% / +10.5%; unified-extractor cards +1.7% / +3.0% / +1.2% (only 30 corrections, 14 train tasks, 0 dev tasks) → old cards kept.
+
+Code evolution (visible fitness of the seed function 0.1948):
+
+| Run | Submissions | Accepted | Best visible | Best hidden |
+|---|---|---|---|---|
+| Single agent (Meta-Harness) | 8 | 7 | 0.312 | 0.431 |
+| 3 agents, shared memory (CORAL) | 25 | 13 | 0.306 | 0.401 |
+| Independent 1 | 17 | 13 | 0.334 | 0.387 |
+| Independent 2 | 12 | 8 | 0.264 | 0.370 |
+| Independent 3 | 7 | 7 | 0.332 | 0.431 |
+
+Dev / test (seed 1) of the best function of each run: see METHOD_zh 6d. The CORAL function (dev 0.2822 / 0.4258, test 0.3071 / 0.4683) is the main method's correction step. Every submission with its visible result is in `artifacts/meta_harness/<run>/`.
+
 ## 1. Retrieval extraction instructions (tl2_evolve.py)
 
 - Fitness: evidence F1 against `gt_evidence` on a 30-task train minibatch.

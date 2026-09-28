@@ -1,0 +1,9 @@
+# s1 episode 2: normal-deviation calibration for sustained events
+
+Started from `0002_s1.py` (visible fitness 0.2388, hidden check passed). I read the existing shared notes and inspected the 54 permitted visible traces. The earlier rule already handled short, large positive seasonal spikes. Remaining missed cases included moderate multipliers on low-level hourly series: their absolute forecast shifts were below one `sigma_main_calib`, even when the multiplier looked large.
+
+Submission `s1_031643_092ba1` (`0004_s1.py`) accepts a positive multiplier from 1.5 to 3 for an hourly seasonal event covering at least 25% of the horizon when the implied shift is at most one normal deviation and `docbase < 0.55`. It lets the effect exceed the seed's +50% cap, up to +125%. Visible fitness increased to 0.2456; hidden check passed. Of the visible tasks, only task_159 improved materially (+0.249 gain); task_179 moved about -0.004. The narrow impact limits what this result says about generalization.
+
+Submission `s1_031721_bd077a` (`0005_s1.py`) partially applies a 0.75–0.90 multiplier for a first-day, localized hourly seasonal decrease when `docbase < 0.4`. It changed task_145 and task_153, improving their offline gains by about +0.040 and +0.054. Visible fitness increased to 0.2475; hidden check passed and it became shared best at submission time. I stopped after two submissions because further threshold tuning would mostly fit a few related visible cases.
+
+The final `my_harness.py` returned exactly `H` finite values for all 80 unlabeled views; 27 had at least one adjusted step. The two new rules are localized, and the seed validator remains the default. An important limitation: `sigma_main_calib` is tiny relative to level in some series, so a high level/sigma ratio alone is not a reliable reason to apply a broad correction.

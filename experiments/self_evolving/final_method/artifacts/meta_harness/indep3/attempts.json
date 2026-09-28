@@ -1,0 +1,82 @@
+[
+ {
+  "attempt": 0,
+  "agent": "seed",
+  "visible_fitness": 0.19476756918907134,
+  "hidden_check": null,
+  "accepted": true,
+  "note": null,
+  "harness": "harness/0000_seed.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 1,
+  "agent": "i3",
+  "visible_fitness": 0.21151227204946124,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Allow up to 100% lift for isolated short 2-5x events in one-day hourly horizon; generic 50% bound otherwise.",
+  "harness": "harness/0001_i3.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 2,
+  "agent": "i3",
+  "visible_fitness": 0.2256330649868201,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Scale the short-event upside cap with half the extracted multiplier, up to +200%; retain seed elsewhere.",
+  "harness": "harness/0002_i3.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 3,
+  "agent": "i3",
+  "visible_fitness": 0.23418874471186416,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "For isolated short 2-5x spikes, allow two-thirds of extracted relative lift (floor +100%); retain generic bounds elsewhere.",
+  "harness": "harness/0003_i3.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 4,
+  "agent": "i3",
+  "visible_fitness": 0.2484047863645238,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "For a documented full shutdown on an already smooth monotone decline, project the recent slope toward zero; retain existing correction logic otherwise.",
+  "harness": "harness/0004_i3.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 5,
+  "agent": "i3",
+  "visible_fitness": 0.2806516910373845,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Trim the final step of isolated short 2-5x spikes; visible traces show this step has returned to baseline while prior corrected steps retain the event.",
+  "harness": "harness/0005_i3.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 6,
+  "agent": "i3",
+  "visible_fitness": 0.32157390056217927,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "After trimming the return-to-baseline step, allow the full extracted 2-5x magnitude on the remaining brief spike steps.",
+  "harness": "harness/0006_i3.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 7,
+  "agent": "i3",
+  "visible_fitness": 0.331741934092338,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Bridge a documented positive event across a near-zero repeated outage in the base forecast, retaining the forecast outside the dip.",
+  "harness": "harness/0007_i3.py",
+  "n_runtime_errors": 0
+ }
+]

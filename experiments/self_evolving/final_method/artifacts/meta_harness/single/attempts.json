@@ -1,0 +1,92 @@
+[
+ {
+  "attempt": 0,
+  "agent": "seed",
+  "visible_fitness": 0.19476756918907134,
+  "hidden_check": null,
+  "accepted": true,
+  "note": null,
+  "harness": "harness/0000_seed.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 1,
+  "agent": "m0",
+  "visible_fitness": 0.22157395296007537,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Widen cap for isolated short hour surge corrections while retaining validator and other bounds",
+  "harness": "harness/0001_m0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 2,
+  "agent": "m0",
+  "visible_fitness": 0.23271703853908032,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Scale isolated short surge bound with documented multiplier, keeping scope guards",
+  "harness": "harness/0002_m0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 3,
+  "agent": "m0",
+  "visible_fitness": 0.23553450747587593,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Permit up to 4x base for isolated 5x documented surge, retaining 3x for 4x claims",
+  "harness": "harness/0003_m0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 4,
+  "agent": "m0",
+  "visible_fitness": 0.23520848932078658,
+  "hidden_check": "pass",
+  "accepted": false,
+  "note": "Apply full suppression for isolated short daily shutdown corrections with zero multiplier; retain prior guards elsewhere",
+  "harness": "harness/0004_m0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 5,
+  "agent": "m0",
+  "visible_fitness": 0.23931063657979496,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Treat final step of isolated short daily zero event as uncertain restoration boundary; fully suppress interior only",
+  "harness": "harness/0005_m0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 6,
+  "agent": "m0",
+  "visible_fitness": 0.27869782291344963,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Treat final extracted hour of isolated short surge as restoration boundary; retain established validator and magnitude cap",
+  "harness": "harness/0006_m0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 7,
+  "agent": "m0",
+  "visible_fitness": 0.31156027472372205,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Use documented multiplier on interior hours of validated isolated surge events; last extracted hour is restoration boundary",
+  "harness": "harness/0007_m0.py",
+  "n_runtime_errors": 0
+ },
+ {
+  "attempt": 8,
+  "agent": "m0",
+  "visible_fitness": 0.31190882866300557,
+  "hidden_check": "pass",
+  "accepted": true,
+  "note": "Treat final step of any validated short hourly upward event as restoration boundary; preserve amplitude caps",
+  "harness": "harness/0008_m0.py",
+  "n_runtime_errors": 0
+ }
+]

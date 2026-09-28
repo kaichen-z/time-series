@@ -14,10 +14,7 @@
 
 **Numerical, part 2 + Retrieval + Decision: the effective evolution on top of that base**
 1. **History repair.** Retrieval (GPT with evolved extraction instructions) finds past anomalies that will not recur. Numerical imputes them and Toto re-forecasts. Decision accepts a repair only if a history-only back-test error drops by at least **30%**; both this margin and the fill method (**same-phase median**, chosen among phase median / linear / seasonal naive / truncate) are **learned on Train** by `select_fill_gate.py`. When accepted, the Toto term of the base program uses the repaired-history forecast.
-2. **Future correction.** The evolved nrd4 team applies document corrections to future steps:
-   - Numerical: magnitude calibrator and per-cell Toto trust;
-   - Retrieval: per-correction validator;
-   - Decision: strength and trust gate.
+2. **Future correction.** A **code-evolved correction function** ([`artifacts/correction_function_main.py`](artifacts/correction_function_main.py)) applies the document corrections to future steps. It started as the evolved nrd4 team rewritten as code (Numerical: magnitude calibrator and per-cell Toto trust; Retrieval: per-correction validator; Decision: strength and trust gate) and was then rewritten by Codex agents (Meta-Harness + CORAL style, see below).
 
 ## Results
 
@@ -29,9 +26,10 @@
 | Previous version (hand-set 10% margin) | 0.3567 (+9.0%) | 0.5231 (+10.9%) | 0.3405 (+10.7%) | 0.5222 (+11.5%) | 64–65 / 34–35 |
 | Previous version (31-method dictionary) | 0.3451 (+12.0%) | 0.5110 (+13.0%) | 0.3326 (+12.8%) | 0.5102 (+13.6%) | 64–65 / 34–35 |
 | Previous main (evolved part 1 without the TimesFM term) | 0.3380 (+13.8%) | 0.5064 (+13.8%) | 0.3281 (+14.0%) | 0.5097 (+13.7%) | 64–65 / 34–35 |
-| **This method (3-seed mean)** | **0.3285 (+16.2%)** | **0.4885 (+16.8%)** | **0.3253 (+14.7%)** | **0.5018 (+15.0%)** | **63–64 / 35–36** |
+| Previous main (nrd4 team for future correction, 3-seed mean) | 0.3285 (+16.2%) | 0.4885 (+16.8%) | 0.3253 (+14.7%) | 0.5018 (+15.0%) | 63–64 / 35–36 |
+| **This method (code-evolved correction function)** | **0.2822 (+28.0%)** | **0.4258 (+27.5%)** | **0.3071 (+19.5%)** | **0.4683 (+20.7%)** | **64 / 35** |
 
-- Per seed, test sMAE: 0.3223 / 0.3281 / 0.3254 (previous main 0.3251 / 0.3309 / 0.3283); sRMSE: 0.4982 / 0.5059 / 0.5014 (previous 0.5061 / 0.5139 / 0.5093). Every seed improves on both metrics.
+- The correction function is deterministic (it replaces the seed-dependent nrd4 team), so its row is a single run; the previous main row is the 3-seed mean (per seed test sMAE 0.3223 / 0.3281 / 0.3254, sRMSE 0.4982 / 0.5059 / 0.5014).
 - On dev, the average error drops a lot but only 9 of 20 tasks improve (11 get worse, mostly slightly); the gain comes from a few badly forecast tasks.
 - Dev alone favours TimesFM (TimesFM by itself: dev 0.3106 / 0.4502, but test 0.3829 / 0.6094, about Toto), so the dev gain of the TimesFM term overstates it; the test gain is smaller but consistent across seeds.
 - **The dev gate is passed on both metrics** (dev is used once, after all evolution on Train).
@@ -42,6 +40,34 @@ Caveats:
 - The fill method and repair margin are chosen on Train only. Nested CV held-out gains (joint error reduction) are +0.230, +0.155 and +0.338.
 - Still hand-designed: the extraction schema (5 interval kinds) and the fixed CorDP cards that nrd4 corrects.
 - The shrink/clip transform applies to every task. It helps the few badly-forecast tasks a lot and slightly worsens many others, so about 35 test tasks get (mostly slightly) worse. The Toto-anchored variant is the "almost no harm" alternative.
+
+## Code evolution of the correction function: Meta-Harness + CORAL (2026-09-28)
+
+The future-correction step (how document corrections change the forecast) was the only part that had only been tuned as parameters. Here agents **rewrite its code**.
+
+- **Interface**: `adjust(view) -> list[H]`. `view` has the history, the base forecast, the documents, document statistics, cell / task Toto back-test errors, a normal-deviation scale, and the extracted corrections (start, end, multiplier). No labels.
+- **Seed**: the previous main method's nrd4 team (seed 1) rewritten as plain code ([`scripts/meta_harness/seed_harness.py`](scripts/meta_harness/seed_harness.py)); it reproduces the previous main method exactly (visible 0.1948, dev 0.3285 / 0.4885).
+- **Meta-Harness part**: the proposer edits code and can read every earlier version, its scores, and per-task traces of the visible tasks (truth, base-only gain, gain of each correction applied alone).
+- **CORAL part**: several agents with shared attempts / notes / skills, heartbeats (notes, consolidation, redirection), and a separated evaluator ([`hevald.py`](scripts/meta_harness/hevald.py)): scores and per-task gains on Train folds 0–1, only pass/fail on hidden fold 2.
+- **Runs** (Codex gpt-6-sol, 20 submissions per agent): single agent (plain Meta-Harness); 3 agents with shared memory (CORAL); 3 independent agents.
+- **Correction source**: before this, the old document cards were compared with cards from the unified extractor in nested CV (held-out joint gain ≈ +6% vs ≈ +2%); the old cards were kept.
+
+| Run | Visible fitness (seed 0.195) | Hidden fold (seed ≈ 0.35) | Dev sMAE / sRMSE | Test sMAE / sRMSE (exploratory) |
+|---|---|---|---|---|
+| Seed (previous main) | 0.195 | — | 0.3285 / 0.4885 | 0.3223 / 0.4982 |
+| Single agent (Meta-Harness) | 0.312 | 0.431 | 0.3288 / 0.4887 | 0.3046 / 0.4583 |
+| **3 agents, shared memory (CORAL)** | 0.306 | 0.401 | **0.2822 / 0.4258** | 0.3071 / 0.4683 |
+| Independent agent 1 | 0.334 | 0.387 | 0.3254 / 0.4843 | 0.3144 / 0.4713 |
+| Independent agent 2 | 0.264 | 0.370 | 0.3300 / 0.4893 | 0.3120 / 0.4800 |
+| Independent agent 3 | 0.332 | 0.431 | 0.3285 / 0.4885 | 0.3104 / 0.4630 |
+
+The shared-memory (CORAL) function was chosen by dev and is the main method's correction step. What the agents changed (readable in the code):
+1. **Event windows**: the extractor often includes the "back to normal" step; windows are shortened by one step, and window lengths are corrected from phrases such as "one-hour" or "four-day".
+2. **Bounds**: the ±50% per-step bound is lifted for outage / zero events and short hourly surges, so the documented multiplier is applied directly.
+3. **Physical constraints**: forecasts of non-negative series are floored at 0; a positive shift is not applied when the documents report zero readings.
+4. The CORAL function also extrapolates very smooth, monotonically declining series with a quadratic (a change of the base forecast, not a document correction).
+
+Caveats: some rules are triggered by document phrases and may be specific to how Dr-CiK documents are written; dev was used once for all five candidates, so picking the best by dev is slightly optimistic; only 12 dev tasks carry corrections. Agent logs show no access to dev, test or hidden-fold labels; the evaluator's private data directory was readable in principle, but was not accessed. Code, notes, skills, all submissions and results per run: [`artifacts/meta_harness/`](artifacts/meta_harness/).
 
 ## Co-evolution: one end-to-end score, then agents (2026-09-28)
 
@@ -121,7 +147,8 @@ python .scratch/self_evolving/extract_and_repair.py $A/tl2_evolved_extraction_in
 # (to re-learn fill method + margin: select_fill_gate.py)
 python .scratch/self_evolving/eval_full_pipeline.py --part1 $A/numerical_part1_main.json \
     --repair .scratch/self_evolving/repair.json --fill-variants .scratch/self_evolving/fill_variants.json \
-    --teams $A/nrd4_final_teams.json
+    --teams $A/nrd4_final_teams.json          # previous main (nrd4 team for future correction)
+python experiments/self_evolving/final_method/scripts/meta_harness/final_check.py dev,public_test main=$A/correction_function_main.py   # this method
 ```
 
 - Re-evolve instead of using the saved artifacts: `num_part1.py`, `tl2_evolve.py`, and `nrd4.py --gens 15 --teams 32 --open test`.

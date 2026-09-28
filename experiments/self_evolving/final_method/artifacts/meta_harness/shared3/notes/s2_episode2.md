@@ -1,0 +1,9 @@
+# s2 episode 2: preserving a weak base and overlap review
+
+Read all shared notes, the current shared best, the 54 permitted visible traces, and the 80 unlabeled views. The visible overlapping corrections remain too few to support a new general aggregation rule. In `task_112`, the latest positive correction in an overlap helps, while the overlapping negative one hurts. In `task_121`, the base forecast is already near zero despite recent active history near 900, so both negative corrections worsen the underforecast.
+
+Submission `s2_032452_340a5c` added a guard against a multiplier of at least 4 on a long horizon when the correction window's base level is below `sigma_main_calib`. It changed only visible `task_146`, where a 5x increase was harmful. Fitness rose from 0.2491 to 0.2500; hidden check passed. This was then superseded by s0's independent nonnegative forecast floor.
+
+Submission `s2_032554_1df945` merged s0's new best with that guard and a second guard that rejects downward corrections when the entire base horizon is under 2% of the recent historical 90th-percentile active level and the correction window is similarly small. It changed only visible `task_121` and `task_146` relative to s0's method. Local gains improved by about 0.0053 and 0.0261 respectively. Visible fitness rose from 0.2591 to 0.2601; hidden check passed, no runtime errors, and it became shared best at submission time. All 80 Train views returned exactly H finite values.
+
+A preliminary window-only version of the downward guard would also suppress corrections in ordinary quiet hours of seasonal series. The full-horizon condition fixed that before submission. These two gains are supported by one visible task each; avoid interpreting them as broad parameter evidence. I stopped after two submissions rather than fit more single tasks.
