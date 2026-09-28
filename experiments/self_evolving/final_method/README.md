@@ -14,7 +14,7 @@
 
 **Numerical, part 2 + Retrieval + Decision: the effective evolution on top of that base**
 1. **History repair.** Retrieval (GPT with evolved extraction instructions) finds past anomalies that will not recur. Numerical imputes them and Toto re-forecasts. Decision accepts a repair only if a history-only back-test error drops by at least **30%**; both this margin and the fill method (**same-phase median**, chosen among phase median / linear / seasonal naive / truncate) are **learned on Train** by `select_fill_gate.py`. When accepted, the Toto term of the base program uses the repaired-history forecast.
-2. **Future correction.** A **code-evolved correction function** ([`artifacts/correction_function_main.py`](artifacts/correction_function_main.py)) applies the document corrections to future steps. It started as the evolved nrd4 team rewritten as code (Numerical: magnitude calibrator and per-cell Toto trust; Retrieval: per-correction validator; Decision: strength and trust gate) and was then rewritten by Codex agents (Meta-Harness + CORAL style, see below).
+2. **Future correction.** **Code-evolved correction functions, routed by task type** ([`artifacts/correction_function_main.py`](artifacts/correction_function_main.py)) apply the document corrections to future steps. It started as the evolved nrd4 team rewritten as code (Numerical: magnitude calibrator and per-cell Toto trust; Retrieval: per-correction validator; Decision: strength and trust gate) and was then rewritten by Codex agents (Meta-Harness + CORAL style, see below).
 
 ## Results
 
@@ -27,7 +27,8 @@
 | Previous version (31-method dictionary) | 0.3451 (+12.0%) | 0.5110 (+13.0%) | 0.3326 (+12.8%) | 0.5102 (+13.6%) | 64–65 / 34–35 |
 | Previous main (evolved part 1 without the TimesFM term) | 0.3380 (+13.8%) | 0.5064 (+13.8%) | 0.3281 (+14.0%) | 0.5097 (+13.7%) | 64–65 / 34–35 |
 | Previous main (nrd4 team for future correction, 3-seed mean) | 0.3285 (+16.2%) | 0.4885 (+16.8%) | 0.3253 (+14.7%) | 0.5018 (+15.0%) | 63–64 / 35–36 |
-| **This method (code-evolved correction function)** | **0.2822 (+28.0%)** | **0.4258 (+27.5%)** | **0.3071 (+19.5%)** | **0.4683 (+20.7%)** | **64 / 35** |
+| Code-evolved correction function (CORAL group only) | 0.2822 (+28.0%) | 0.4258 (+27.5%) | 0.3071 (+19.5%) | 0.4683 (+20.7%) | 64 / 35 |
+| **This method (5 correction functions routed by task type)** | **0.2822 (+28.0%)** | **0.4258 (+27.5%)** | **0.2923 (+23.4%)** | **0.4412 (+25.3%)** | **65 / 34** |
 
 - The correction function is deterministic (it replaces the seed-dependent nrd4 team), so its row is a single run; the previous main row is the 3-seed mean (per seed test sMAE 0.3223 / 0.3281 / 0.3254, sRMSE 0.4982 / 0.5059 / 0.5014).
 - On dev, the average error drops a lot but only 9 of 20 tasks improve (11 get worse, mostly slightly); the gain comes from a few badly forecast tasks.
@@ -61,7 +62,18 @@ The future-correction step (how document corrections change the forecast) was th
 | Independent agent 2 | 0.264 | 0.370 | 0.3300 / 0.4893 | 0.3120 / 0.4800 |
 | Independent agent 3 | 0.332 | 0.431 | 0.3285 / 0.4885 | 0.3104 / 0.4630 |
 
-The shared-memory (CORAL) function was chosen by dev and is the main method's correction step. What the agents changed (readable in the code):
+**Routing the five functions** ([`scripts/meta_harness/ensemble.py`](scripts/meta_harness/ensemble.py)). The functions are good on different task types, so they were combined, choosing on Train only (visible folds, hidden fold as check):
+
+| Combination | Visible | Hidden |
+|---|---|---|
+| CORAL function alone | 0.306 | 0.401 |
+| Best single function (independent 1) | 0.334 | 0.387 |
+| Mean / median / rank-weighted mean | 0.325 / 0.333 / 0.336 | 0.411 / 0.408 / 0.413 |
+| **Route by cell** | **0.372** | **0.444** |
+
+Routing table (per cell, the function with the best mean gain on the visible folds): daily and minute-level → single agent; hourly non-seasonal → independent 1; hourly seasonal → independent 3; second-level → CORAL. Dev is identical to the CORAL function alone (0.2822 / 0.4258; the dev tasks with corrections all route to it), test (exploratory) improves from 0.3071 / 0.4683 to 0.2923 / 0.4412. The routed version is the main method's correction step.
+
+The shared-memory (CORAL) function was the best single function by dev. What the agents changed (readable in the code):
 1. **Event windows**: the extractor often includes the "back to normal" step; windows are shortened by one step, and window lengths are corrected from phrases such as "one-hour" or "four-day".
 2. **Bounds**: the ±50% per-step bound is lifted for outage / zero events and short hourly surges, so the documented multiplier is applied directly.
 3. **Physical constraints**: forecasts of non-negative series are floored at 0; a positive shift is not applied when the documents report zero readings.
