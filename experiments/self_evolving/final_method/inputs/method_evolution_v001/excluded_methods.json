@@ -1,0 +1,94 @@
+{
+  "methods": [
+    {
+      "category": "reconciliation",
+      "name": "statistical_ensemble_mean",
+      "reason": "needs a hierarchy of series, not one univariate history"
+    },
+    {
+      "category": "calibration",
+      "name": "split_conformal_residual_intervals",
+      "reason": "wraps a base forecaster and produces intervals, not a point forecast"
+    },
+    {
+      "category": "calibration",
+      "name": "adaptive_conformal_time_series",
+      "reason": "wraps a base forecaster and produces intervals, not a point forecast"
+    },
+    {
+      "category": "reconciliation",
+      "name": "bottom_up_reconciliation",
+      "reason": "needs a hierarchy of series, not one univariate history"
+    },
+    {
+      "category": "reconciliation",
+      "name": "top_down_historical_proportions",
+      "reason": "needs a hierarchy of series, not one univariate history"
+    },
+    {
+      "category": "reconciliation",
+      "name": "top_down_forecast_proportions",
+      "reason": "needs a hierarchy of series, not one univariate history"
+    },
+    {
+      "category": "reconciliation",
+      "name": "middle_out_reconciliation",
+      "reason": "needs a hierarchy of series, not one univariate history"
+    },
+    {
+      "category": "reconciliation",
+      "name": "ols_projection_reconciliation",
+      "reason": "needs a hierarchy of series, not one univariate history"
+    },
+    {
+      "category": "reconciliation",
+      "name": "wls_structural_reconciliation",
+      "reason": "needs a hierarchy of series, not one univariate history"
+    },
+    {
+      "category": "reconciliation",
+      "name": "mint_shrinkage_reconciliation",
+      "reason": "needs a hierarchy of series, not one univariate history"
+    },
+    {
+      "category": "reconciliation",
+      "name": "temporal_hierarchy_reconciliation",
+      "reason": "needs a hierarchy of series, not one univariate history"
+    },
+    {
+      "category": "volatility",
+      "name": "arch_volatility_forecast",
+      "reason": "forecasts conditional variance, not the level of the series"
+    },
+    {
+      "category": "volatility",
+      "name": "garch_volatility_forecast",
+      "reason": "forecasts conditional variance, not the level of the series"
+    },
+    {
+      "category": "multivariate",
+      "name": "vector_autoregression",
+      "reason": "needs several related series, not one univariate history"
+    },
+    {
+      "category": "multivariate",
+      "name": "vector_error_correction_model",
+      "reason": "needs several related series, not one univariate history"
+    },
+    {
+      "category": "multivariate",
+      "name": "varmax_state_space",
+      "reason": "needs several related series, not one univariate history"
+    },
+    {
+      "category": "multivariate",
+      "name": "dynamic_factor_forecast",
+      "reason": "needs several related series, not one univariate history"
+    },
+    {
+      "category": "calibration",
+      "name": "conformal_seasonal_pool",
+      "reason": "wraps a base forecaster and produces intervals, not a point forecast"
+    }
+  ]
+}
