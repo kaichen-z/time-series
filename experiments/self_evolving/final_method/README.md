@@ -42,6 +42,19 @@ Caveats:
 - Still hand-designed: the extraction schema (5 interval kinds) and the fixed CorDP cards that nrd4 corrects.
 - The shrink/clip transform applies to every task. It helps the few badly-forecast tasks a lot and slightly worsens many others, so about 35 test tasks get (mostly slightly) worse. The Toto-anchored variant is the "almost no harm" alternative.
 
+## Evidence extraction quality (all splits)
+
+Evidence extraction quality against the annotated `gt_evidence` on every split (the instructions were evolved on Train only; dev and test annotations were never used during evolution). Mean per task over tasks with annotations:
+
+| Split | Instructions | Tasks | F1 | Recall | Precision |
+|---|---|---|---|---|---|
+| Train | initial | 79 | 0.039 | 0.054 | 0.091 |
+| Train | evolved | 79 | 0.477 | 0.483 | 0.670 |
+| Dev | initial | 19 | 0.000 | 0.000 | 0.000 |
+| Dev | evolved | 19 | 0.335 | 0.316 | 0.667 |
+| Test (public 99) | initial | 95 | 0.019 | 0.026 | 0.050 |
+| Test (public 99) | evolved | 95 | 0.443 | 0.439 | 0.693 |
+
 ## Code evolution of the correction function: Meta-Harness + CORAL (2026-09-28)
 
 The future-correction step (how document corrections change the forecast) was the only part that had only been tuned as parameters. Here agents **rewrite its code**.

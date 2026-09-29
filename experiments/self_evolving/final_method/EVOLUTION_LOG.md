@@ -141,6 +141,18 @@ Dev / test (seed 1) of the best function of each run: see METHOD_zh 6d. Routing 
 
 Full training set with the final instructions: F1 0.039 → 0.477, recall 5.4% → 48.3%, precision 9.1% → 67.0%. Only the final instruction text is saved (`artifacts/tl2_evolved_extraction_instructions.json`); intermediate texts were not stored.
 
+Evidence extraction quality against the annotated `gt_evidence` on every split (the instructions were evolved on Train only; dev and test annotations were never used during evolution). Mean per task over tasks with annotations:
+
+| Split | Instructions | Tasks | F1 | Recall | Precision |
+|---|---|---|---|---|---|
+| Train | initial | 79 | 0.039 | 0.054 | 0.091 |
+| Train | evolved | 79 | 0.477 | 0.483 | 0.670 |
+| Dev | initial | 19 | 0.000 | 0.000 | 0.000 |
+| Dev | evolved | 19 | 0.335 | 0.316 | 0.667 |
+| Test (public 99) | initial | 95 | 0.019 | 0.026 | 0.050 |
+| Test (public 99) | evolved | 95 | 0.443 | 0.439 | 0.693 |
+
+
 ## 2. Three-agent co-evolution (nrd4.py, full train, 3 seeds)
 
 Team fitness = mean over 3 stratified train folds of (mean gain + 0.5 × mean negative gain) − 0.25 × fold std.
